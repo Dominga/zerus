@@ -33,6 +33,39 @@ Zerus Next Settings route. No console is attached, allocated or brought to
 the foreground to manufacture admission. Settings callsite integration and
 installed acceptance are separate from this native helper.
 
+On Windows the installed frontend is one of three images:
+- `%LOCALAPPDATA%\Programs\Zerus\hgs-tray.exe` from the per-user installer;
+- an `hgs-tray.exe` beside the checking CLI;
+- the portable zip's own `hgs-tray.exe`, bound to the stable CLI by that
+  app's own staging.
+
+The binding covers the documented portable route. Once local sessions are on,
+the zip's app relays through the stable CLI staged from that zip.
+- **Creation.** When the app starts `hgs session-host install` beside it, the
+  install records `frontend.json` in the host images folder. It does so only
+  when its direct parent is the app beside its own loaded image and no
+  ancestor is an agent. Under the install lock, after the CLI, the image and
+  the marker are complete, it pins the app's loaded image and the staged CLI
+  (deny-write and deny-delete, ancestors included). It records both exact
+  objects with the app's SHA-256, read through that pin.
+- **No other writer.** Every install removes the old binding first, so a
+  failure leaves none. Any other install records nothing: from a terminal,
+  from an agent, or with a copied CLI.
+- **Use.** Each process that admits frontends pins the recorded pair again
+  when it builds its frontend scope, before any request. The CLI must be that
+  process's own loaded image, and the app must still be the recorded object
+  with the recorded digest, read once through the new pin with a size and
+  time limit. The scope keeps both pins: neither file nor a folder above it
+  can be changed while frontend requests, Settings mode changes and the
+  notification launch use it. Admission itself never hashes, and the record
+  alone admits nothing.
+- **Refusals.** A record that is malformed, oversized, linked or stale
+  admits nothing. Neither does a replaced app or CLI, or an edit that keeps
+  the app's length and write time.
+- **Rebinding.** The app stages again at start when the binding does not
+  name it, so a moved or newly extracted copy binds itself. Same or newer
+  version only, never a downgrade, and an unchanged CLI is not copied again.
+
 As with the common frontend boundary, this prevents unintended agent descent.
 Deliberate same-user parent-process spoofing is outside its scope. Caller
 identities, images, ancestry and console facts are rechecked before effects.

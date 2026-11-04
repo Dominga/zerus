@@ -233,6 +233,10 @@ pub fn install_json(report: &InstallReport, layout: &Layout, version: &str) -> V
             "kept_aside": kept.iter().map(|path| shown(path)).collect::<Vec<_>>(),
         },
         "image": staged,
+        "frontend": report.frontend.as_ref().map(|binding| json!({
+            "path": shown(&binding.frontend.path),
+            "cli_current": true,
+        })),
     })
 }
 
@@ -300,6 +304,9 @@ pub struct Status {
     /// The image `current` names.
     pub image: Option<Image>,
     pub host: Host,
+    /// The app bound to the staged CLI, and whether the binding still names
+    /// that CLI. Informational only; admission proves the pair itself.
+    pub frontend: Option<(PathBuf, bool)>,
 }
 
 impl Status {
@@ -324,6 +331,7 @@ impl Status {
             },
             image,
             host: host.found(enabled),
+            frontend: crate::desktop::portable_frontend::status(layout),
         }
     }
 
@@ -340,6 +348,10 @@ impl Status {
             },
             "image": self.image.as_ref().map(image_json),
             "host": self.host.json(),
+            "frontend": self.frontend.as_ref().map(|(path, current)| json!({
+                "path": shown(path),
+                "cli_current": current,
+            })),
         })
     }
 
@@ -477,8 +489,15 @@ mod native {
 
     fn install(layout: &Layout, json: bool) -> Result<i32> {
         let source = std::env::current_exe()?;
-        let report = staging::install(layout, &source, VERSION)
-            .map_err(|error| Error::new(1, format!("cannot enable local sessions: {error}")))?;
+        // Only the app beside this hgs, starting it outside any agent tree,
+        // records itself as this CLI's portable frontend.
+        let report = staging::install_bound(
+            layout,
+            &source,
+            VERSION,
+            crate::desktop::portable_frontend::record,
+        )
+        .map_err(|error| Error::new(1, format!("cannot enable local sessions: {error}")))?;
         if json {
             print_json(&install_json(&report, layout, VERSION));
         } else {
@@ -656,6 +675,7 @@ mod tests {
         assert_eq!(value["cli"]["sha256"], Value::Null);
         assert_eq!(value["image"], Value::Null);
         assert_eq!(value["host"], json!({"state": "not-installed"}));
+        assert_eq!(value["frontend"], Value::Null);
         assert!(empty.text().contains("not enabled"));
 
         let source = dir.path().join("build").join(staging::EXECUTABLE);
@@ -670,6 +690,8 @@ mod tests {
         assert_eq!(value["image"]["pair"], "absent");
         assert_eq!(value["image"]["conpty"], "inbox");
         assert_eq!(value["image"]["name"], report.image.image.name);
+        // A plain install records no app binding.
+        assert_eq!(value["frontend"], Value::Null);
         assert!(install_text(&report, &layout, "1.2.3").starts_with("Local sessions are enabled"));
 
         let stopped = Status::gather(&layout, Host::Stopped);

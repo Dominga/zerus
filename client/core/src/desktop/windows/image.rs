@@ -186,6 +186,10 @@ impl PinnedImage {
     pub fn id(&self) -> FileId {
         self.id
     }
+    /// The pinned file's length, which the deny-write handle keeps fixed.
+    pub fn bytes(&self) -> u64 {
+        self.bytes
+    }
     pub fn try_clone(&self) -> io::Result<Self> {
         Ok(Self {
             file: self.file.try_clone()?,
@@ -198,6 +202,33 @@ impl PinnedImage {
                 .map(File::try_clone)
                 .collect::<io::Result<Vec<_>>>()?,
         })
+    }
+    /// The SHA-256 of the pinned bytes, read through this held handle, which
+    /// denies writing and deletion: no other path open can substitute. Refuses
+    /// a file larger than `limit` and stops at `until`.
+    pub fn sha256(&self, limit: u64, until: std::time::Instant) -> io::Result<String> {
+        use sha2::{Digest, Sha256};
+        use std::os::windows::fs::FileExt;
+        require(
+            self.bytes <= limit,
+            "pinned executable exceeds the read limit",
+        )?;
+        let mut hash = Sha256::new();
+        let mut buffer = vec![0u8; 64 * 1024];
+        let mut offset = 0u64;
+        while offset < self.bytes {
+            require(
+                std::time::Instant::now() < until,
+                "pinned executable read deadline",
+            )?;
+            let want = buffer.len().min((self.bytes - offset) as usize);
+            let read = self.file.seek_read(&mut buffer[..want], offset)?;
+            require(read > 0, "pinned executable ended early")?;
+            hash.update(&buffer[..read]);
+            offset += read as u64;
+        }
+        self.revalidate()?;
+        Ok(format!("{:x}", hash.finalize()))
     }
     pub fn revalidate(&self) -> io::Result<()> {
         require(

@@ -40,6 +40,10 @@ const ACTIVATION_PROOF_INTERVAL: Duration = Duration::from_millis(500);
 pub(super) struct Scope {
     location: Location,
     frontend_images: Vec<PathBuf>,
+    /// Windows: the portable zip's app and the stable CLI as the app's own
+    /// staging bound them, pinned and proven when this scope was made.
+    #[cfg_attr(not(windows), allow(dead_code))]
+    portable: Option<super::portable_frontend::Portable>,
 }
 impl std::ops::Deref for Scope {
     type Target = Location;
@@ -90,6 +94,7 @@ impl Scope {
                 configuration: location.configuration.clone(),
             },
             frontend_images,
+            portable: super::portable_frontend::materialize(&config.home),
         }
     }
     fn selected_frontend(&self, image: &Path) -> bool {
@@ -101,6 +106,19 @@ impl Scope {
             .iter()
             .find(|path| platform::file_identity(path) == Some(identity))
             .map(PathBuf::as_path)
+            .or_else(|| self.portable_frontend(identity))
+    }
+    /// The bound portable app, while its retained pins still hold. The pins
+    /// keep that object and every folder above it in place for this scope.
+    #[cfg(windows)]
+    fn portable_frontend(&self, identity: platform::FileIdentity) -> Option<&Path> {
+        let portable = self.portable.as_ref()?;
+        (portable.current() && platform::file_identity(portable.gui()) == Some(identity))
+            .then(|| portable.gui())
+    }
+    #[cfg(not(windows))]
+    fn portable_frontend(&self, _: platform::FileIdentity) -> Option<&Path> {
+        None
     }
     /// Bind an explicit maintained-image choice; this never discovers one from
     /// PATH or turns an inbound path check into a launch/worker permission.
@@ -2288,6 +2306,7 @@ mod tests {
                 configuration: "a".repeat(64),
             },
             frontend_images: vec![image.clone()],
+            portable: None,
         };
         // Synthetic catalog and private files, not an installed GUI claim.
         let selected = scope.select_frontend(&image).unwrap();
@@ -2320,6 +2339,7 @@ mod tests {
                 configuration: "a".repeat(64),
             },
             frontend_images: vec![installed.clone()],
+            portable: None,
         };
         assert!(scope.selected_frontend(&installed));
         assert!(!scope.selected_frontend(&other));

@@ -58,6 +58,11 @@ const NAME_LENGTH: usize = 16;
 /// How long an install waits for another one to finish.
 const LOCK_WAIT: Duration = Duration::from_secs(30);
 
+/// The host images folder below `home`, where `Layout` keeps them.
+pub fn images_below(home: &str) -> PathBuf {
+    PathBuf::from(platform::below(home, ".local/share/hgs/host"))
+}
+
 /// Where enablement keeps its files.
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct Layout {
@@ -73,7 +78,7 @@ impl Layout {
     pub fn new(home: &str, config_dir: &Path) -> Self {
         Self {
             cli: PathBuf::from(platform::below(home, ".local/bin")).join(EXECUTABLE),
-            images: PathBuf::from(platform::below(home, ".local/share/hgs/host")),
+            images: images_below(home),
             marker: config_dir.join(MARKER),
         }
     }
@@ -682,6 +687,8 @@ pub struct InstallReport {
     pub image: ImageReport,
     /// Whether the marker was created now (it may have existed).
     pub enabled: bool,
+    /// The app bound to the staged CLI, when the source folder holds one.
+    pub frontend: Option<FrontendBinding>,
 }
 
 /// Install just the maintained CLI for another hgs service. Use the same lock
@@ -695,18 +702,141 @@ pub fn install_cli(layout: &Layout, source: &Path) -> Result<CliReport, StageErr
 
 /// Enable local sessions (D2): stage `source`, the running hgs of version
 /// `version`, as the stable CLI and as a host image, then write the marker.
-/// Idempotent; installs of one user run one at a time.
+/// Idempotent; installs of one user run one at a time. Removes any app
+/// binding: only the app's own install (`install_bound`) records one.
 pub fn install(layout: &Layout, source: &Path, version: &str) -> Result<InstallReport, StageError> {
+    install_bound(layout, source, version, |_| None)
+}
+
+/// `install`, then `bind` may record the app staged with this CLI. The old
+/// binding goes first, so a failure anywhere leaves none; the new one is
+/// published only after the CLI, the image and the marker are complete.
+pub fn install_bound(
+    layout: &Layout,
+    source: &Path,
+    version: &str,
+    bind: impl FnOnce(&Layout) -> Option<FrontendBinding>,
+) -> Result<InstallReport, StageError> {
     fs::create_dir_all(&layout.images).map_err(at(&layout.images))?;
     let _lock = lock(&layout.images)?;
+    unbind_frontend(layout)?;
     let cli = stage_cli(source, &layout.cli)?;
     let image = stage_image(source, &layout.images, version)?;
     let enabled = enable(&layout.marker).map_err(at(&layout.marker))?;
+    let frontend = bind(layout);
+    if let Some(binding) = &frontend {
+        publish_frontend(layout, binding)?;
+    }
     Ok(InstallReport {
         cli,
         image,
         enabled,
+        frontend,
     })
+}
+
+/// Below the images folder: which app was staged together with the stable CLI
+/// (docs/desktop-windows-mode.md). Only an install by that app writes it.
+pub const FRONTEND_BINDING: &str = "frontend.json";
+/// The app a portable zip keeps beside its `hgs.exe`.
+pub const FRONTEND_IMAGE: &str = "hgs-tray.exe";
+/// The largest binding read; a recorded one is well under a kilobyte.
+const FRONTEND_BYTES: u64 = 4096;
+pub const FRONTEND_SCHEMA: u32 = 1;
+
+/// One pinned object of a binding: its final path, the volume serial and file
+/// ID of the exact object (FileIdInfo, the ID as 32 hex digits) and its length.
+#[derive(Clone, Debug, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct BoundObject {
+    pub path: PathBuf,
+    pub volume: u64,
+    pub file_id: String,
+    pub length: u64,
+}
+
+/// The maintained binding of a portable zip's app to the stable CLI staged
+/// from the same folder: both objects as the app's own staging pinned them,
+/// and the app's digest read through that pin. A copied CLI never creates one,
+/// and neither identity nor this digest alone admits anything: each admitting
+/// process pins the pair again and checks the digest once.
+#[derive(Clone, Debug, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct FrontendBinding {
+    pub schema: u32,
+    pub frontend: BoundObject,
+    pub frontend_sha256: String,
+    pub cli: BoundObject,
+}
+
+impl FrontendBinding {
+    pub fn valid(&self) -> bool {
+        let hex = |value: &str, digits: usize| {
+            value.len() == digits
+                && value
+                    .bytes()
+                    .all(|b| matches!(b, b'0'..=b'9' | b'a'..=b'f'))
+        };
+        let object = |object: &BoundObject| object.path.is_absolute() && hex(&object.file_id, 32);
+        self.schema == FRONTEND_SCHEMA
+            && object(&self.frontend)
+            && object(&self.cli)
+            && hex(&self.frontend_sha256, 64)
+            && self
+                .frontend
+                .path
+                .file_name()
+                .and_then(|name| name.to_str())
+                .is_some_and(|name| name.eq_ignore_ascii_case(FRONTEND_IMAGE))
+    }
+}
+
+fn unbind_frontend(layout: &Layout) -> Result<(), StageError> {
+    let path = layout.images.join(FRONTEND_BINDING);
+    match fs::remove_file(&path) {
+        Ok(()) => platform::sync_dir(&layout.images).map_err(at(&layout.images)),
+        Err(error) if error.kind() == io::ErrorKind::NotFound => Ok(()),
+        Err(error) => Err(StageError::Io(path, error)),
+    }
+}
+
+fn publish_frontend(layout: &Layout, binding: &FrontendBinding) -> Result<(), StageError> {
+    let path = layout.images.join(FRONTEND_BINDING);
+    let bytes = serde_json::to_vec(binding)
+        .map_err(|error| StageError::Io(path.clone(), io::Error::other(error)))?;
+    if !binding.valid() || bytes.len() as u64 > FRONTEND_BYTES {
+        return Err(StageError::Io(path, io::ErrorKind::InvalidData.into()));
+    }
+    write_replacing(&layout.images, &path, &bytes).map_err(at(&path))
+}
+
+/// The binding below `images`, read like the other private records: never
+/// through a link, a regular file of at most `FRONTEND_BYTES`, the exact
+/// schema with absolute paths. Anything else is no binding.
+pub fn read_frontend(images: &Path) -> Option<FrontendBinding> {
+    let mut options = fs::OpenOptions::new();
+    options.read(true);
+    platform::no_follow(&mut options);
+    let file = options.open(images.join(FRONTEND_BINDING)).ok()?;
+    let metadata = file.metadata().ok()?;
+    #[cfg(windows)]
+    let regular = {
+        use std::os::windows::fs::MetadataExt;
+        const FILE_ATTRIBUTE_REPARSE_POINT: u32 = 0x400;
+        metadata.is_file() && metadata.file_attributes() & FILE_ATTRIBUTE_REPARSE_POINT == 0
+    };
+    #[cfg(not(windows))]
+    let regular = metadata.is_file();
+    if !regular || metadata.len() > FRONTEND_BYTES {
+        return None;
+    }
+    let mut bytes = Vec::new();
+    file.take(FRONTEND_BYTES + 1).read_to_end(&mut bytes).ok()?;
+    if bytes.len() as u64 > FRONTEND_BYTES {
+        return None;
+    }
+    let binding: FrontendBinding = serde_json::from_slice(&bytes).ok()?;
+    binding.valid().then_some(binding)
 }
 
 #[cfg(test)]
@@ -989,6 +1119,153 @@ mod tests {
         assert!(install_cli(&layout, &two).unwrap().changed);
         assert_eq!(fs::read(&layout.marker).unwrap(), marker);
         assert!(layout.enabled());
+    }
+
+    fn sample_binding(root: &Path) -> FrontendBinding {
+        FrontendBinding {
+            schema: FRONTEND_SCHEMA,
+            frontend: BoundObject {
+                path: root.join("zip").join(FRONTEND_IMAGE),
+                volume: 7,
+                file_id: "0123456789abcdef0123456789abcdef".into(),
+                length: 42,
+            },
+            frontend_sha256: ABC.into(),
+            cli: BoundObject {
+                path: root.join("home/.local/bin").join(EXECUTABLE),
+                volume: 7,
+                file_id: "fedcba9876543210fedcba9876543210".into(),
+                length: 43,
+            },
+        }
+    }
+
+    #[test]
+    fn a_frontend_binding_is_read_only_in_its_exact_bounded_form() {
+        let dir = tempfile::tempdir().unwrap();
+        let images = dir.path().join("images");
+        fs::create_dir_all(&images).unwrap();
+        let path = images.join(FRONTEND_BINDING);
+        assert_eq!(read_frontend(&images), None);
+        let binding = sample_binding(dir.path());
+        let good = serde_json::to_value(&binding).unwrap();
+        fs::write(&path, serde_json::to_vec(&good).unwrap()).unwrap();
+        assert_eq!(read_frontend(&images), Some(binding.clone()));
+
+        let refused = |bytes: Vec<u8>, why: &str| {
+            fs::write(&path, bytes).unwrap();
+            assert_eq!(read_frontend(&images), None, "{why}");
+        };
+        refused(b"{\"schema\":1".to_vec(), "corrupt");
+        refused(vec![b' '; FRONTEND_BYTES as usize + 1], "oversize");
+        let mut padded = serde_json::to_vec(&good).unwrap();
+        padded.resize(FRONTEND_BYTES as usize + 1, b' ');
+        refused(padded, "a valid record padded past the cap");
+        let mutate = |change: &dyn Fn(&mut serde_json::Value)| {
+            let mut value = good.clone();
+            change(&mut value);
+            serde_json::to_vec(&value).unwrap()
+        };
+        refused(mutate(&|v| v["extra"] = true.into()), "unknown field");
+        refused(
+            mutate(&|v| v["frontend"]["extra"] = 1.into()),
+            "unknown object field",
+        );
+        refused(mutate(&|v| v["schema"] = 2.into()), "another schema");
+        refused(
+            mutate(&|v| v["frontend"]["path"] = "zip/hgs-tray.exe".into()),
+            "relative app",
+        );
+        refused(
+            mutate(&|v| v["cli"]["path"] = "hgs.exe".into()),
+            "relative CLI",
+        );
+        let other = dir.path().join("zip/other.exe");
+        refused(
+            mutate(&|v| v["frontend"]["path"] = other.to_string_lossy().into()),
+            "another app name",
+        );
+        refused(
+            mutate(&|v| v["frontend"]["file_id"] = "0123".into()),
+            "short file ID",
+        );
+        refused(
+            mutate(&|v| v["cli"]["file_id"] = "0123456789ABCDEF0123456789ABCDEF".into()),
+            "upper-case ID",
+        );
+        refused(
+            mutate(&|v| v["frontend_sha256"] = "zz".into()),
+            "bad digest",
+        );
+        refused(
+            mutate(&|v| {
+                v.as_object_mut().unwrap().remove("cli");
+            }),
+            "missing CLI",
+        );
+
+        // Never through a link.
+        #[cfg(unix)]
+        {
+            let real = dir.path().join("elsewhere.json");
+            fs::write(&real, serde_json::to_vec(&good).unwrap()).unwrap();
+            fs::remove_file(&path).unwrap();
+            std::os::unix::fs::symlink(&real, &path).unwrap();
+            assert_eq!(read_frontend(&images), None, "link");
+        }
+    }
+
+    #[test]
+    fn only_a_binder_records_the_app_after_staging_and_any_install_unbinds_first() {
+        let dir = tempfile::tempdir().unwrap();
+        let layout = Layout::new(
+            &dir.path().join("home").to_string_lossy(),
+            &dir.path().join("config"),
+        );
+        let one = source(dir.path(), "one", b"build one", &PAIR);
+        let binding = sample_binding(dir.path());
+        // The binder runs after the CLI, the image and the marker are complete.
+        let report = install_bound(&layout, &one, "1.0.0", |layout| {
+            assert_eq!(fs::read(&layout.cli).unwrap(), b"build one");
+            assert!(current_image_in(&layout.images).is_some());
+            assert!(layout.enabled());
+            Some(binding.clone())
+        })
+        .unwrap();
+        assert_eq!(report.frontend, Some(binding.clone()));
+        assert_eq!(read_frontend(&layout.images), Some(binding.clone()));
+
+        // A plain install, which no app started, removes it.
+        let report = install(&layout, &one, "1.0.0").unwrap();
+        assert_eq!(report.frontend, None);
+        assert_eq!(read_frontend(&layout.images), None);
+        assert!(!layout.images.join(FRONTEND_BINDING).exists());
+
+        // The old binding goes before staging: a failing install leaves none.
+        install_bound(&layout, &one, "1.0.0", |_| Some(binding.clone())).unwrap();
+        assert!(
+            install_bound(&layout, &dir.path().join("gone.exe"), "1.1.0", |_| {
+                Some(sample_binding(dir.path()))
+            })
+            .is_err()
+        );
+        assert_eq!(read_frontend(&layout.images), None);
+
+        // An invalid binding is never published.
+        let mut invalid = binding.clone();
+        invalid.frontend.file_id = "short".into();
+        assert!(install_bound(&layout, &one, "1.0.0", |_| Some(invalid)).is_err());
+        assert_eq!(read_frontend(&layout.images), None);
+
+        // A binder that declines records nothing.
+        install_bound(&layout, &one, "1.0.0", |_| Some(binding.clone())).unwrap();
+        let report = install_bound(&layout, &one, "1.0.0", |_| None).unwrap();
+        assert_eq!(report.frontend, None);
+        assert_eq!(read_frontend(&layout.images), None);
+        // A stray temporary binding from an interrupted publish is not a binding.
+        assert!(names(&layout.images)
+            .iter()
+            .all(|name| name != FRONTEND_BINDING));
     }
 
     #[test]

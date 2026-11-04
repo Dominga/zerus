@@ -956,3 +956,91 @@ CLI/connector/ConPTY and immutable published assets unchanged. Keep legacy updat
 feed fields and sealed-candidate retry templates while old clients require them.
 Remove each part only at its gate above; the coordinator owns merge and rollout. This document authorizes no install,
 service cutover, credential operation or deletion of user data.
+
+## Deletion gate matrix — 2026-11-04
+
+Owner: win-accept-cl, for the coordinator (`zerus-5wmh.66.8.1`). This matrix maps
+every applicable gate row to arch, Mac and va-kids at integrate `7d2b9b93`. It
+promotes no checkbox; a cell is complete only with a full per-platform record.
+
+Each cell has three parts:
+
+- **Have** is the evidence recorded so far, including today's runs: the Windows
+  installer cases on `0fca73f5` (setup 16/16, legacy 22/22, #1339); desktop-u's
+  Arch window on `0fca73f5` (`zerus-5wmh.66.8.3`); and macbundle-u's Mac window
+  on `b72dea32` (`zerus-5wmh.66.3.30.2.4`).
+- **Auto** is a route that needs only existing access, with no new grant, install,
+  security or settings change.
+- **Owner** marks what needs the owner's presence or a new grant. Those items are
+  batched into the owner questions below.
+
+Shared routes the cells refer to:
+
+- **Qt round trip (arch, Mac).** First check read-only that `desktop-previous`
+  is the verified complete Qt copy that `tray/update-installed.py` keeps after
+  the Next switch.
+  - Settle the desktop revoke, then run `update-installed.py --rollback` to start Qt.
+  - Check the exact agents, drafts and settings under Qt.
+  - Return through the maintained Next install.
+  - Record a native process-birth census, one open terminal session and one
+    unsent draft before and after.
+
+  One round trip gives the Qt rollback row, a recorded Qt→Next upgrade with live
+  agents, the no-second-import check and the owner-account half of the
+  clean-install exception. It interrupts the owner's GUI for minutes, so the
+  coordinator schedules it.
+- **Synthetic session.** A disposable target that the coordinator or the test
+  creates, as in the Arch and Mac windows today; never the owner's agents. On
+  va-kids it is a fixture agent in a private profile, because the owner's
+  Windows account has no agents.
+- **Windows UI driving.** A temporary SYSTEM task starts a helper in console
+  session 1 with the user's token. That helper uses UI Automation and SendInput at
+  the same integrity level, including on Toast buttons, with no new grant.
+- **Arch input.** The session user already has an ACL on `/dev/uinput`, so raw
+  uinput pointer events (no package install) and `spectacle -b` screenshots can
+  click a banner or menu in a scheduled display window. Injecting input into the
+  live Plasma session is listed as owner question 3. XTEST into XWayland stays
+  forbidden; a private Xvfb with XTEST remains available for fixture walks.
+- **Arch audio.** `espeak-ng` already exists and can speak into a temporary
+  PipeWire virtual source (`pw-cli`/`pw-loopback`), removed afterwards. Choose
+  that source explicitly in Zerus. `pw-record` on the sink monitor proves that
+  non-silent playback reached the output.
+
+| Gate row | arch | Mac | va-kids |
+|---|---|---|---|
+| Clean install / package (exception) | **Have:** source-install identity and no Qt/KF6/WebEngine in the dependency closure (11-02, `a1023d4`); today's `0fca73f5` source install has clean source identity. Neither is a package transaction or a clean-account install. **Auto:** the exact candidate's CI Arch package job, plus the Qt round trip for the owner-account upgrade half. **Owner:** none. | **Have:** clean frozen `b72dea32` pair/seal verified today. **Auto:** the exact candidate's CI signed/notarized bundle check, plus the Qt round trip. **Owner:** none. | **Have:** PASS. CI install/package checks plus setup 16/16 and legacy 22/22 on `0fca73f5`. The owner-account half is recorded under the exception: no Qt install exists. **Owner:** none. |
+| Upgrade with live agents | **Have:** today all 63 original native PID/births survived GUI Quit/restart; rollouts keep 63–64 agents. Both are Next→Next only. **Auto:** the Qt round trip. **Owner:** none. | **Have:** rollouts keep agents (Next→Next). **Auto:** the Qt round trip (macbundle-u; normal app Quit is authorized). **Owner:** none. | **Have:** legacy case, Qt ZIP→Next installer in its own folder, with seeded config, drafts and session files preserved; no agents. **Auto:** a private profile running a fixture-agent session and ConPTY job through the Qt ZIP's `hgs.exe`, upgraded to Next; verify the same session, run, conversation, job and draft. **Owner:** question 5. |
+| One-time import | **Have:** 9 handled preference families unchanged (11-02); retained-source warning `.66.5.11`. **Blocked:** G3 source work `.66.5.2.1/.66.5.2/.66.5.4` (migrate-u). **Auto after G3:** during the Qt round trip, check the handled families and source hashes, and that there is no reseed or second import. | **Blocked:** G3 as on arch. **Auto after G3:** during the Qt round trip, with the exported defaults snapshot. **Owner:** none. | **Have:** none. The owner account has no Qt registry or INI state (inventory 06:10Z). **Auto:** none on the main account; seeding a legacy source there would manufacture state. **Owner:** question 5. |
+| Service registration / readiness | **Have:** readiness PASS (`5c110055`); today a background no-op, with presence, reads and delivery continuing while the GUI was absent. Custom-unit refusal still PENDING. **Auto:** custom-unit refusal against a private unit directory; one exact-target delivered read with the UI closed, on a synthetic session. **Owner:** none. | **Have:** today the service and host were ready, drain and revoke settled, and wrapper `.4.11` failed closed (macbundle-u fix). **Auto:** inspect the `zerus-setup` LaunchAgent; foreign-definition refusal against a private directory; UI-closed duties on a synthetic session. **Owner:** none. | **Have:** passive registration [x] (11-02); today install/status/remove, cold activation refusal and no service start. **Auto:** start the registered task in session 1; check the pipe identity and readiness with the UI closed; remove it afterwards. **Owner:** the real logon trigger needs a sign-out/sign-in (question 6). |
+| Notifications / clicks | **Have:** today one Post Delivered, with its native ID in the history. The click FAILED to reopen the GUI (`.66.3.42`); banner appearance was not observed. **Auto after the `.42` fix:** one synthetic Post, then a uinput click on the banner (question 3), plus stale and withdrawn refusal. **Owner:** the click if question 3 is declined; lock/idle (question 6). | **Have:** a Post plus an owner click into the project (`f1833dec`; selection unqualified; drain FAILED). Today a Post was Delivered and drain settled; Withdraw is Unknown; no click. **Auto:** Post, drain and withdraw rerun after `.4.11`; selection readback (#1210). **Owner:** the click and selection (question 1); lock/idle (question 6). | **Have:** none. The GUI routes #1170/#1174/#1175 are merged. **Auto:** a service-owned Toast from a synthetic session, clicked through UI Automation, with stale and withdrawn refusal and a cold-GUI launch (win-notify-cl plan `.66.3.30.8`). **Owner:** lock/idle (question 6). |
+| Tray / menu bar / lifecycle | **Have:** today the panel tooltip, menu and primary reopen; normal Quit and maintained unit start; drafts byte-identical. **Auto:** second-instance routing, background start, Quit with a pending draft. **Owner:** none. | **Have:** none. **Auto:** reopen and second instance through `open`; maintained Quit. **Owner:** menu-bar clicks, Services, Hide and Show All (question 1). | **Have:** legacy case first-start window, own tray menu (Open Zerus / No remote machines / Open in / Quit) and native Quit (fixture). **Auto:** on the main install, second instance, background start, draft-safe exit, and setting/removing the login opt-in, all through UI Automation. **Owner:** the real login start (question 6). |
+| Terminal | **Have:** none. **Auto:** a synthetic session and a folder terminal on fixture paths with spaces and non-ASCII; exact argv from `/proc`; resize, paste and reattach after client exit. **Owner:** none. | **Have:** none. **Auto:** none; driving Terminal.app needs AX. **Owner:** the expected Apple Events consent and GUI driving (questions 1 and 2). | **Have:** none. **Auto:** a fixture session through Windows Terminal, PowerShell and ConPTY on paths with spaces and non-ASCII; exact selection through UI Automation; paste and resize through SendInput; continuity after GUI exit. **Owner:** none. |
+| Voice / video | **Have:** today microphone record, Escape to preview, playback state and discard PASS. Camera FAILED (`.66.3.41`; fix #1338 merged, awaiting rollout). Audible playback and transcription unqualified. **Auto:** real-camera preview and cancel after the rollout; espeak-ng speech into a virtual source, then transcription with the existing speech profile; playback proven by sink-monitor capture. **Owner:** question 4. A new speech-provider credential, if no profile exists. | **Have:** none. **Auto:** none; consent state is unknown, and synthetic input needs a virtual audio driver. **Owner:** question 2. | **Have:** none. Voice for local Windows sessions is unsupported by design (installation docs). **Auto:** check through UI Automation that the refusal is visible. **Owner:** none. |
+| UI / durable parity | **Have:** approvals OFF and generic-agent refusal (11-02); today 128 draft records byte-identical. **Auto:** a fixture walk of the installed build in a private Xvfb; on the owner account, read-only service queries plus a uinput-driven walk (question 3); one authenticated frontend request round trip. **Owner:** none if question 3 is approved. | **Have:** none. **Auto:** read-only service and catalog queries. **Owner:** the GUI walk (question 1). | **Have:** first-start window only. **Auto:** a UI Automation walk against a fixture profile with a synthetic session; one frontend request through a ready service to its durable result. **Owner:** none. |
+| Qt rollback / reimport | **Have:** none. **Auto:** the Qt round trip. **Owner:** none. | **Have:** none. **Auto:** the Qt round trip with the retained settings snapshot. **Owner:** none. | **Have:** none; the main account has no Qt. **Auto:** in a fixture, settle the revoke, start the Qt ZIP and return. **Owner:** question 5. |
+| Open failures | `.66.3.41`: rerun the real camera after the rollout (desktop-u). `.66.3.42`: rerun after macbundle-u's fix, with the click as above. | `.66.3.30.2.4`: click and navigation owner-pending (AX untrusted, loginwindow frontmost); wrapper `.4.11`. | `.66.8.1.11` (P2, installer refuses a non-owned folder), `.66.8.1.10` (CR CR LF), both win-accept-cl; `.66.8.1.12` (P4 log line). |
+
+### Batched owner questions
+
+1. **Mac clicks.** Either one window in which the owner unlocks the Mac and
+   performs the listed clicks (one banner, menu-bar items, a short UI walk), or
+   Accessibility for one dedicated, revocable test runner, so macbundle-u can
+   drive them.
+2. **Mac media and terminal consent.** Microphone, camera and Apple Events
+   consent for `com.hgdev.hgs-tray`, if not already granted. Then either one
+   spoken phrase with the owner confirming playback, or permission to install a
+   virtual audio driver for synthetic speech.
+3. **Arch input injection.** May tests inject uinput pointer events into the live
+   Plasma session during coordinator-scheduled display windows? This uses the
+   existing ACL; no new grant. If not, the owner performs one physical click per
+   window.
+4. **Audible playback.** Does a PipeWire (or WASAPI loopback) monitor capture of
+   non-silent output count as playback evidence, or must the owner listen once?
+5. **Windows main account.** It has no Qt install, Qt settings or agents. Accept
+   private-profile evidence (Qt ZIP plus a fixture-agent session) for the upgrade,
+   import and Qt rollback rows. Or authorize installing Qt 0.47.0 plus an agent
+   on that account; that needs the owner's agent login.
+6. **Logon and lock.** On all three machines, the lock/idle notification subcases
+   need a lock and an owner unlock. The va-kids logon-trigger rows need one
+   sign-out/sign-in. Either the owner does these once per machine, or they stay
+   recorded as owner-pending.

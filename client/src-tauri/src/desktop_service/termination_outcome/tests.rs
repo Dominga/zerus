@@ -7,11 +7,29 @@ use crate::desktop_service::{
 };
 use zerus_client_core::{Action, Outcome, Target};
 
+// These protocol/component fixtures explicitly bypass the production platform
+// gate. They supply fake actor/effect replies and do NOT qualify Linux native
+// relay authentication or enable the service submission.
+fn inspect_fixture(
+    service: Arc<Service>,
+    target: &zerus_client_core::Target,
+    machine: &str,
+    read: Arc<dyn Send + Sync>,
+) -> Result<(Option<Capture>, Selected), String> {
+    Selected::inspect_context(Context::new_supported(service, read)?, target, machine)
+}
+
 type RefusedObserver = Box<dyn FnOnce(&mut std::process::Child)>;
 thread_local! {
     // Observe only a REAL failed binding, before the SAME child is returned to
     // run_owned. A hook never substitutes a binding result or supplies consent.
+    static AFTER_SPAWN_CHECK: std::cell::RefCell<Option<Box<dyn FnOnce()>>> = const { std::cell::RefCell::new(None) };
     static REFUSED_OBSERVER: std::cell::RefCell<Option<RefusedObserver>> = const { std::cell::RefCell::new(None) };
+}
+pub(super) fn after_spawn_check() {
+    if let Some(observer) = AFTER_SPAWN_CHECK.with_borrow_mut(Option::take) {
+        observer();
+    }
 }
 pub(super) fn observe_refused_binding(child: &mut std::process::Child) {
     if let Some(observer) = REFUSED_OBSERVER.with_borrow_mut(Option::take) {
@@ -26,7 +44,7 @@ fn fixture(config: Value) -> Fixture {
         f.0.join("hgs"),
         format!(
             "#!/usr/bin/env python3\n{}\n{}",
-            include_str!("fixture.py"),
+            include_str!("fixture.py").replace("FIXTURE_SOURCE", &serde_json::to_string(&f.0.join("hgs")).unwrap()),
             include_str!("../fake_hgs.py").replacen(
                 "return {'abi': 'desktop-v1', 'configuration': 'a' * 64,",
                 "return {'running': True, 'abi': 'desktop-v1', 'configuration': ('b' * 64 if args[:2] == ['desktop', 'status'] and config.get('termination_wrong_scope') and (root / 'termination-retained').exists() else 'a' * 64),",
@@ -107,7 +125,7 @@ fn actions(f: &Fixture) -> crate::actions::Actions {
 fn selected(service: Arc<Service>) -> Selected {
     let original = capture();
     let (actual, selected) =
-        Selected::inspect(service, &original.target, &original.machine, Arc::new(())).unwrap();
+        inspect_fixture(service, &original.target, &original.machine, Arc::new(())).unwrap();
     assert_eq!(actual, Some(original));
     selected
 }
@@ -131,7 +149,7 @@ fn the_offer_selection_cannot_be_replaced_before_confirmation() {
             let old_read = Arc::downgrade(&read);
             let original = capture();
             let (actual, selected) =
-                Selected::inspect(service.clone(), &original.target, &original.machine, read)
+                inspect_fixture(service.clone(), &original.target, &original.machine, read)
                     .unwrap();
             assert_eq!(actual, Some(original.clone()));
             assert!(old_read.upgrade().is_none(), "offer I/O must actually join");
@@ -434,12 +452,12 @@ fn a_new_legacy_helper_is_probed_before_any_new_subcommand() {
             // image must prove its own ABI before any new desktop command.
             std::fs::rename(f.0.join("hgs"), f.0.join("original-hgs")).unwrap();
             std::fs::write(f.0.join("hgs"), format!(
-                "#!/usr/bin/python3\nimport sys,json,os\nfrom pathlib import Path\np=Path(os.path.realpath(__file__)).parent\nwith (p/'legacy-calls').open('a') as f:f.write(json.dumps(sys.argv[1:])+'\\n')\nif sys.argv[1:] != ['--help']:sys.exit(2)\nsys.stdout.buffer.write(bytes({help:?}))\n"
+                "#!/usr/bin/python3\nimport sys,json,os\nfrom pathlib import Path\np=Path({fixture_root}).parent\nwith (p/'legacy-calls').open('a') as f:f.write(json.dumps(sys.argv[1:])+'\\n')\nif sys.argv[1:] != ['--help']:sys.exit(2)\nsys.stdout.buffer.write(bytes({help:?}))\n", fixture_root=serde_json::to_string(&f.0.join("hgs")).unwrap()
             )).unwrap();
             use std::os::unix::fs::PermissionsExt;
             std::fs::set_permissions(f.0.join("hgs"), std::fs::Permissions::from_mode(0o700))
                 .unwrap();
-            assert!(Selected::inspect(
+            assert!(inspect_fixture(
                 service.clone(),
                 &capture().target,
                 &capture().machine,
@@ -659,5 +677,65 @@ fn overflow_keeps_original_dispatch_and_claim_until_the_actual_pipe_ends() {
         .await;
         service.join().await.unwrap();
         f.1.store(false, Ordering::Release);
+    });
+}
+
+#[test]
+fn an_in_place_rewrite_after_the_last_spawn_check_cannot_replace_native_code() {
+    let _process = crate::PROCESS_TREE.read().unwrap();
+    tauri::async_runtime::block_on(async {
+        let f = fixture(json!({}));
+        let (service, _cache) = connected(&f).await;
+        let mut controller = confirm(service.clone(), Arc::new(Pending::default()))
+            .bind(Arc::new(()))
+            .unwrap();
+        controller.retain().unwrap();
+        let invocation = controller.invocation().clone();
+        controller.begin_dispatch(&invocation).unwrap();
+        let path = f.0.join("hgs");
+        let marker = f.0.join("replacement-executed");
+        use std::os::unix::fs::MetadataExt;
+        let original_inode = std::fs::metadata(&path).unwrap().ino();
+        AFTER_SPAWN_CHECK.with_borrow_mut(|slot| {
+            *slot = Some(Box::new(move || {
+                std::fs::write(
+                    &path,
+                    format!(
+                        "#!/bin/sh\nprintf replacement > '{}'\nexit 0\n",
+                        marker.display()
+                    ),
+                )
+                .unwrap();
+                assert_eq!(std::fs::metadata(&path).unwrap().ino(), original_inode);
+            }))
+        });
+        let exit = controller.run_native(&invocation);
+        let replacement = f.0.join("replacement-executed").exists();
+        let native_calls = effects(&calls(&f)).len();
+        // Mutation failures must also settle the original watch/pipe resources.
+        service.join().await.unwrap();
+        assert!(matches!(exit, Exit::Code { code: 0, stdout, .. }
+            if serde_json::from_slice::<Value>(&stdout).unwrap()["status"] == "completed"));
+        assert!(!replacement);
+        assert_eq!(native_calls, 1);
+    });
+}
+
+#[test]
+fn linux_public_offer_refuses_before_a_new_helper_or_preparation() {
+    let _process = crate::PROCESS_TREE.read().unwrap();
+    tauri::async_runtime::block_on(async {
+        let f = fixture(json!({}));
+        let (service, _cache) = connected(&f).await;
+        let result = Selected::inspect(
+            service.clone(),
+            &capture().target,
+            &capture().machine,
+            Arc::new(()),
+        );
+        let unexpected_calls = calls(&f);
+        service.join().await.unwrap();
+        assert!(matches!(result, Err(code) if code == image::LINUX_UNAVAILABLE));
+        assert!(unexpected_calls.is_empty());
     });
 }

@@ -1,7 +1,7 @@
 //! Execution custody for this native producer, separate from audit freshness.
 //! Windows retains the maintained file/ancestor pins and checks the loaded
-//! section of the SAME Child. Linux executes the retained descriptor. macOS
-//! refuses before preparation: paired live-code observations are not exec fences.
+//! section of the SAME Child. Linux's shared snapshot is immutable; its new
+//! service submission refuses until native relay authentication is qualified.
 use std::{
     io,
     path::{Path, PathBuf},
@@ -9,10 +9,14 @@ use std::{
 };
 
 pub(super) const MAC_UNAVAILABLE: &str = "termination_native_image_unavailable";
+pub(super) const LINUX_UNAVAILABLE: &str = "termination_native_relay_unavailable";
 
 pub(super) fn prepare<T>(prepare: impl FnOnce() -> Result<T, String>) -> Result<T, String> {
     if cfg!(target_os = "macos") {
         return Err(MAC_UNAVAILABLE.into());
+    }
+    if cfg!(target_os = "linux") {
+        return Err(LINUX_UNAVAILABLE.into());
     }
     prepare()
 }
@@ -22,14 +26,14 @@ pub(super) struct Image {
     #[cfg(windows)]
     pin: zerus_client_core::desktop::windows::image::PinnedImage,
     #[cfg(target_os = "linux")]
-    pin: linux::Pin,
+    pin: zerus_client_core::image::linux::Pin,
 }
 impl Image {
     pub(super) fn capture(path: &Path) -> io::Result<Self> {
         #[cfg(windows)]
         let pin = zerus_client_core::desktop::windows::image::PinnedImage::open(path)?;
         #[cfg(target_os = "linux")]
-        let pin = linux::Pin::open(path)?;
+        let pin = zerus_client_core::image::linux::Pin::open(path)?;
         #[cfg(not(any(windows, target_os = "linux")))]
         {
             let _ = path;
@@ -97,7 +101,7 @@ impl Image {
         #[cfg(target_os = "linux")]
         {
             let _ = child;
-            true /* The kernel executed the retained descriptor. */
+            true /* The kernel executed the original sealed snapshot. */
         }
         #[cfg(not(any(windows, target_os = "linux")))]
         {
@@ -107,18 +111,21 @@ impl Image {
     }
 }
 
-#[cfg(target_os = "linux")]
-mod linux;
 #[cfg(all(test, any(windows, target_os = "linux")))]
 mod tests;
-#[cfg(all(test, target_os = "macos"))]
+#[cfg(all(test, any(target_os = "macos", target_os = "linux")))]
 #[test]
-fn mac_refuses_before_the_native_preparation_or_spawn_can_run() {
+fn unavailable_platform_refuses_before_native_preparation_or_spawn() {
     let called = std::cell::Cell::new(false);
     let result: Result<(), String> = prepare(|| {
         called.set(true);
         Ok(())
     });
-    assert_eq!(result, Err(MAC_UNAVAILABLE.into()));
+    let expected = if cfg!(target_os = "linux") {
+        LINUX_UNAVAILABLE
+    } else {
+        MAC_UNAVAILABLE
+    };
+    assert_eq!(result, Err(expected.into()));
     assert!(!called.get());
 }

@@ -48,6 +48,13 @@ impl Selected {
         read: Arc<dyn Send + Sync>,
     ) -> Result<(Option<Capture>, Self), String> {
         let context = Context::new(service, read)?;
+        Self::inspect_context(context, target, machine)
+    }
+    fn inspect_context(
+        context: Arc<Context>,
+        target: &zerus_client_core::Target,
+        machine: &str,
+    ) -> Result<(Option<Capture>, Self), String> {
         context.probe_abi()?;
         context.check_scope()?;
         let helper = context.helper.clone();
@@ -488,6 +495,8 @@ impl Context {
             return Err(std::io::ErrorKind::PermissionDenied.into());
         }
         self.image.before_spawn(command)?;
+        #[cfg(all(test, target_os = "linux"))]
+        tests::after_spawn_check();
         let mut child = command.spawn()?;
         if !self.image.matches_child(&child) {
             self.rejected.store(true, Ordering::Release);

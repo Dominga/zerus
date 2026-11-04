@@ -1052,15 +1052,22 @@ mod frozen_tests {
             return;
         }
         assert_eq!(mode, "environment");
-        assert!(std::env::var_os("PATH").is_none());
+        for key in ["PATH", "Path", "path"] {
+            assert!(
+                std::env::var_os(key).is_none(),
+                "fixture PATH alias remains"
+            );
+        }
         assert_eq!(std::env::var_os("ZERUS_FROZEN_EMPTY"), Some("".into()));
         assert_eq!(std::env::var_os("HGS_SESSION"), None);
         assert_eq!(std::env::var_os("HGS_RUN_ID"), None);
         let raw = std::env::var_os("ZERUS_FROZEN_RAW").unwrap();
         assert!(raw.to_str().is_none());
         assert_eq!(
-            std::env::current_dir().unwrap(),
+            std::env::current_dir().unwrap().canonicalize().unwrap(),
             std::path::PathBuf::from(std::env::var_os("ZERUS_FROZEN_DIR").unwrap())
+                .canonicalize()
+                .unwrap()
         );
         println!("frozen native environment preserved");
     }
@@ -1093,7 +1100,17 @@ mod frozen_tests {
     fn a_real_child_receives_exact_frozen_native_values_and_absence() {
         let mut environment = FrozenEnvironment::capture().unwrap();
         assert!(environment.current());
-        environment.values.retain(|(key, _)| key != "PATH");
+        // Windows environment keys are case insensitive. Exercise its usual
+        // mixed-case spelling on Unix too; the fixture must remove every alias.
+        environment
+            .values
+            .push(("Path".into(), "fixed fixture sentinel".into()));
+        environment
+            .values
+            .push(("path".into(), "fixed fixture sentinel".into()));
+        environment
+            .values
+            .retain(|(key, _)| !key.as_encoded_bytes().eq_ignore_ascii_case(b"PATH"));
         environment
             .values
             .push((MARKER.into(), "environment".into()));
@@ -1112,12 +1129,37 @@ mod frozen_tests {
         };
         environment.values.push(("ZERUS_FROZEN_RAW".into(), raw));
         environment.directory = std::env::temp_dir().canonicalize().unwrap();
+        #[cfg(unix)]
+        let _alias = {
+            use std::os::unix::fs::DirBuilderExt;
+            struct Remove(std::path::PathBuf);
+            impl Drop for Remove {
+                fn drop(&mut self) {
+                    let _ = std::fs::remove_dir_all(&self.0);
+                }
+            }
+            let root =
+                std::env::temp_dir().join(format!("zerus-frozen-cwd-{}", uuid::Uuid::new_v4()));
+            std::fs::DirBuilder::new()
+                .mode(0o700)
+                .create(&root)
+                .unwrap();
+            let owned = Remove(root);
+            let alias = owned.0.join("working-directory");
+            std::os::unix::fs::symlink(&environment.directory, &alias).unwrap();
+            environment.directory = alias;
+            owned
+        };
         environment.values.push((
             "ZERUS_FROZEN_DIR".into(),
             environment.directory.as_os_str().to_owned(),
         ));
-        assert!(matches!(call(&environment), Exit::Code {code:0, stdout, ..}
-            if String::from_utf8_lossy(&stdout).contains("frozen native environment preserved")));
+        let exit = call(&environment);
+        assert!(
+            matches!(&exit, Exit::Code {code:0, stdout, ..}
+            if String::from_utf8_lossy(stdout).contains("frozen native environment preserved")),
+            "bounded fixed-fixture child result: {exit:?}"
+        );
     }
     #[test]
     fn the_native_runner_still_allows_an_original_over_thirty_seconds() {

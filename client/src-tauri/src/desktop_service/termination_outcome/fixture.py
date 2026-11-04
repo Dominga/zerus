@@ -1,7 +1,7 @@
 # Synthetic CLI prefix. Real native cache children; fake actor/Terminate replies.
 import sys, os
-# Descriptor-bound execution keeps the original script source, not a new path.
-__file__ = os.path.realpath(__file__)
+# The private fixture source embeds its own data root; execution may be sealed.
+__file__ = FIXTURE_SOURCE
 from pathlib import Path
 root = Path(__file__).absolute().parent
 original_args = sys.argv[1:]

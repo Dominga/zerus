@@ -1,6 +1,6 @@
 use std::{
     fs::{File, OpenOptions},
-    io,
+    io::{self, Read, Write},
     os::{
         fd::{AsRawFd, FromRawFd},
         unix::{
@@ -10,7 +10,67 @@ use std::{
     },
     path::{Path, PathBuf},
     process::Command,
+    time::{Duration, Instant},
 };
+
+// A snapshot is prepared before any native proof is registered. These are
+// copy bounds, not an extension of a caller's proof or execution deadline.
+const MAX_IMAGE_BYTES: u64 = 256 << 20;
+const COPY_WAIT: Duration = Duration::from_secs(5);
+const SEALS: libc::c_int =
+    libc::F_SEAL_WRITE | libc::F_SEAL_SHRINK | libc::F_SEAL_GROW | libc::F_SEAL_SEAL;
+
+fn sealed(file: &File) -> bool {
+    // An ordinary file, unsupported kernel or incomplete seal set refuses.
+    let seals = unsafe { libc::fcntl(file.as_raw_fd(), libc::F_GET_SEALS) };
+    seals >= 0 && seals & SEALS == SEALS
+}
+
+fn snapshot(source: &mut File, expected: &Stamp) -> io::Result<File> {
+    if expected.bytes == 0 || expected.bytes > MAX_IMAGE_BYTES {
+        return Err(io::ErrorKind::InvalidData.into());
+    }
+    // Explicit executable intent also refuses when the kernel's memfd policy
+    // forbids executable snapshots. Never fall back to a pathname/ordinary fd.
+    // MFD_EXEC is Linux UAPI 0x0010 (since 6.3). Older kernels refuse this path.
+    const MFD_EXEC: libc::c_uint = 0x0010;
+    let fd = unsafe {
+        libc::memfd_create(
+            c"zerus-helper-image".as_ptr(),
+            libc::MFD_ALLOW_SEALING | libc::MFD_CLOEXEC | MFD_EXEC,
+        )
+    };
+    if fd < 0 {
+        return Err(io::Error::last_os_error());
+    }
+    // SAFETY: memfd_create returned one new owned fd, not a borrowed handle.
+    let mut image = unsafe { File::from_raw_fd(fd) };
+    let until = Instant::now() + COPY_WAIT;
+    let mut remaining = expected.bytes;
+    let mut buffer = [0; 64 << 10];
+    while remaining > 0 {
+        if Instant::now() >= until {
+            return Err(io::ErrorKind::TimedOut.into());
+        }
+        let n = remaining.min(buffer.len() as u64) as usize;
+        source.read_exact(&mut buffer[..n])?;
+        image.write_all(&buffer[..n])?;
+        remaining -= n as u64;
+    }
+    let mut tail = [0];
+    if source.read(&mut tail)? != 0 || stamp(source)? != *expected || Instant::now() >= until {
+        return Err(io::ErrorKind::PermissionDenied.into());
+    }
+    // No writable mappings or foreign handles are published before this seal.
+    // F_SEAL_WRITE (not merely FUTURE_WRITE) rules out existing writable maps.
+    if unsafe { libc::fcntl(image.as_raw_fd(), libc::F_ADD_SEALS, SEALS) } < 0 {
+        return Err(io::Error::last_os_error());
+    }
+    if !sealed(&image) || image.metadata()?.len() != expected.bytes || Instant::now() >= until {
+        return Err(io::ErrorKind::PermissionDenied.into());
+    }
+    Ok(image)
+}
 
 #[derive(PartialEq, Eq)]
 struct Stamp {
@@ -71,17 +131,22 @@ impl Folder {
             && Self::open(&self.path).is_ok_and(|now| now.id == self.id)
     }
 }
-pub(super) struct Pin {
+pub struct Pin {
     requested: PathBuf,
     resolved: PathBuf,
-    file: File,
+    source: File,
+    image: File,
     original: Stamp,
     program: PathBuf,
     script: bool,
     folders: Vec<Folder>,
 }
 impl Pin {
-    pub(super) fn open(path: &Path) -> io::Result<Self> {
+    /// Capture one immutable execution image. The fixed `/proc/self/exe` input
+    /// opens the kernel's running object itself, not a reopened installed name.
+    /// `current` also requires that the selected name still denotes that source.
+    /// This type supplies neither native relay authentication nor consent.
+    pub fn open(path: &Path) -> io::Result<Self> {
         if !path.is_absolute() {
             return Err(io::ErrorKind::InvalidInput.into());
         }
@@ -95,23 +160,30 @@ impl Pin {
             .rev()
             .map(Folder::open)
             .collect::<io::Result<Vec<_>>>()?;
-        let source = open(&resolved)?;
+        let mut source = if path == Path::new("/proc/self/exe") {
+            File::open("/proc/self/exe")?
+        } else {
+            open(&resolved)?
+        };
         let original = stamp(&source)?;
         use std::os::unix::fs::FileExt;
         let mut prefix = [0; 2];
         let script = source.read_at(&mut prefix, 0)? == 2 && &prefix == b"#!";
-        // One original descriptor, never 0-2 and never inherited by unrelated
-        // spawns. Only this child's pre-exec hook clears its own CLOEXEC copy.
-        let fd = unsafe { libc::fcntl(source.as_raw_fd(), libc::F_DUPFD_CLOEXEC, 3) };
+        let snapshot = snapshot(&mut source, &original)?;
+        // The immutable snapshot is created ONCE, before help/ABI probes. Its
+        // bytes, not the mutable selected inode, supply every later execution.
+        // One descriptor, never 0-2 and not inherited by unrelated spawns.
+        let fd = unsafe { libc::fcntl(snapshot.as_raw_fd(), libc::F_DUPFD_CLOEXEC, 3) };
         if fd < 0 {
             return Err(io::Error::last_os_error());
         }
         // SAFETY: fcntl returned a new owned descriptor.
-        let file = unsafe { File::from_raw_fd(fd) };
+        let image = unsafe { File::from_raw_fd(fd) };
         let pin = Self {
             requested: path.into(),
             resolved,
-            file,
+            source,
+            image,
             original,
             program: format!("/proc/self/fd/{fd}").into(),
             script,
@@ -122,19 +194,23 @@ impl Pin {
         }
         Ok(pin)
     }
-    pub(super) fn current(&self) -> bool {
+    pub fn current(&self) -> bool {
         self.requested
             .canonicalize()
             .is_ok_and(|p| p == self.resolved)
-            && stamp(&self.file).ok().as_ref() == Some(&self.original)
+            && stamp(&self.source).ok().as_ref() == Some(&self.original)
             && open(&self.resolved).and_then(|f| stamp(&f)).ok().as_ref() == Some(&self.original)
             && self.folders.iter().all(Folder::current)
+            && sealed(&self.image)
     }
-    pub(super) fn executable(&self) -> &Path {
+    pub fn executable(&self) -> &Path {
         &self.program
     }
-    pub(super) fn inherit(&self, command: &mut Command) -> io::Result<()> {
-        let fd = self.file.as_raw_fd();
+    pub fn inherit(&self, command: &mut Command) -> io::Result<()> {
+        if command.get_program() != self.executable() || !sealed(&self.image) {
+            return Err(io::ErrorKind::PermissionDenied.into());
+        }
+        let fd = self.image.as_raw_fd();
         command.arg0(&self.requested);
         if !self.script {
             // Native ELF resolves its executable descriptor before exec closes
@@ -157,3 +233,6 @@ impl Pin {
         Ok(())
     }
 }
+
+#[cfg(test)]
+mod tests;

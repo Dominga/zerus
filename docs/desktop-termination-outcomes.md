@@ -98,16 +98,28 @@ Windows uses the maintained read/execute PinnedImage, with write/delete sharing
 excluded for the file and its ancestor chain. Before releasing stdin it checks
 the same original Child against the retained loaded-image section. A rejected
 image withholds input, keeps that child in runner custody and cannot produce a
-successful receipt. Linux launches the retained executable descriptor; a leaf
-or ancestor replacement after the final check cannot select replacement code.
-Native ELF does not inherit the execution descriptor; a script retains its own
-source descriptor for the interpreter.
+successful receipt. The shared Linux Core primitive copies the selected image
+once (at most 256 MiB, with a five-second copy deadline), then applies and
+verifies all four write/shrink/grow/seal seals on an executable memfd. Help,
+ABI probes and subsequent executions use that same immutable snapshot. A leaf,
+ancestor or same-inode rewrite after the last check cannot change its bytes.
+New requests still check the original source and ancestor identities. Unsupported
+sealing or executable-memfd policy refuses; there is no mutable-fd fallback.
+Native ELF does not inherit the execution descriptor; a script retains only its
+own sealed source descriptor for the interpreter.
 
 The new service submission refuses on macOS with
 `termination_native_image_unavailable`, before preparation or any new child.
 Ordinary/native/replay paths are unchanged. The independent
 `zerus-5wmh.66.3.40.4` follow-up must qualify observation of the same unreaped
 helper's audit token and selected bundle requirement before this path is enabled.
+The new Linux submission similarly refuses with
+`termination_native_relay_unavailable` before preparation or any new child.
+The separate `zerus-5wmh.66.4.6.9` authentication work must qualify the sealed
+own-child relay against an immutable startup reference of the actual running
+service image. The existing inode-based authentication is unchanged here.
 Existing paired metadata and connected-peer code observations are not relabeled
 as an execution fence. Platform component tests do not establish installed,
-Root-authenticated or end-to-end controller qualification.
+Root-authenticated or end-to-end controller qualification. Linux fake-actor
+protocol tests explicitly construct their private fixture context rather than
+passing through the production platform gate; they cannot enable it.

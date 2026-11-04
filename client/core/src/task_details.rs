@@ -547,6 +547,13 @@ mod tests {
         let mut other_task_project = good.clone();
         other_task_project["task"]["project"] = json!("other");
         assert!(resolved(&other_task_project, "example", "T-ab12cd").is_err());
+        // Only the reply's own project differs: the task fields alone do not decide.
+        let mut other_reply_project = good.clone();
+        other_reply_project["project"]["id"] = json!("other");
+        assert!(resolved(&other_reply_project, "example", "T-ab12cd").is_err());
+        let mut no_reply_project = good.clone();
+        no_reply_project.remove("project");
+        assert!(resolved(&no_reply_project, "example", "T-ab12cd").is_err());
         assert!(resolved(&Map::new(), "example", "T-ab12cd").is_err());
     }
     /// A fake `hgs` in its own folder: `reply`, an optional `sleep` and the

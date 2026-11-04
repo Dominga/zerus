@@ -1,7 +1,7 @@
 import { createSignal, createEffect, createRoot } from "solid-js";
 import { orderedRows } from "./catalog";
 import { groupOf } from "./organization";
-import { page, selected, selectedKey, setPage, setSelectedKey, setDetailTab, setSubagentOpen } from "./ui";
+import { detailTab, page, selected, selectedKey, setPage, setSelectedKey, setDetailTab, setSubagentOpen, subagentOpen } from "./ui";
 import { tasks } from "./tasks";
 import { inspectorOpen, inspectorTab, openInspector } from "./inspector";
 import { notify } from "./actions";
@@ -27,6 +27,17 @@ export function openTasks(project?: string, sessionKey?: string, task?: string) 
 }
 export function openTask(project: string, uuid: string) { setSelectedTask({ project, uuid }); setDetailTab("taskview"); openInspector("tasks"); }
 
+/**
+ * Whether the board is still as a link left it. Any navigation meanwhile
+ * drops a late link result: another task, project, session, page, inspector
+ * panel, detail tab or subagent.
+ */
+export function linkBoard(): () => boolean {
+  const board = () => [selectedTask(), tasks.project(), selectedKey(), page(), inspectorOpen(), inspectorTab(), detailTab(), subagentOpen()];
+  const before = board();
+  return () => board().every((value, at) => value === before[at]);
+}
+
 const params = new URLSearchParams(location.search);
 if (params.has("task") || params.get("page") === "tasks") createRoot((dispose) => {
   let opened = false;
@@ -45,14 +56,7 @@ if (params.has("task") || params.get("page") === "tasks") createRoot((dispose) =
     else if (project && tasks.project() === project && tasks.windowed() && tasks.loaded()) {
       if (UUID.test(ref)) openTask(project, ref.toLowerCase());
       else if (SHORT_REFERENCE.test(ref)) {
-        // Any navigation meanwhile drops the late result: another task,
-        // project, session, page or inspector panel.
-        const board = () => [selectedTask(), tasks.project(), selectedKey(), page(), inspectorOpen(), inspectorTab()];
-        const before = board();
-        void openLinkedReference(project, ref, {
-          resolve: resolveTaskReference, open: openTask, notify,
-          unchanged: () => board().every((value, at) => value === before[at]),
-        });
+        void openLinkedReference(project, ref, { resolve: resolveTaskReference, open: openTask, notify, unchanged: linkBoard() });
       }
       dispose();
     }

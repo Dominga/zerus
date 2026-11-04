@@ -168,18 +168,14 @@ fn settings_reservation_survives_reopen_and_never_changes_other_families() {
     }
     let store = crate::settings::Settings::open(path.clone(), None);
     assert!(!store.prepare_legacy_project_import(&plan).unwrap());
-    assert!(
-        !store
-            .legacy_project_import(&binding.machine)
-            .unwrap()
-            .unwrap()
-            .complete()
-    );
-    assert!(
-        store
-            .observe_legacy_project_import(&binding, &observed(&snapshot, &plan))
-            .unwrap()
-    );
+    assert!(!store
+        .legacy_project_import(&binding.machine)
+        .unwrap()
+        .unwrap()
+        .complete());
+    assert!(store
+        .observe_legacy_project_import(&binding, &observed(&snapshot, &plan))
+        .unwrap());
     drop(store);
     let saved: Value = serde_json::from_slice(&std::fs::read(&path).unwrap()).unwrap();
     assert_eq!(saved["future"], json!({"keep":7}));
@@ -187,13 +183,11 @@ fn settings_reservation_survives_reopen_and_never_changes_other_families() {
     assert!(!saved.to_string().contains("Legacy fixture"));
     assert!(!saved.to_string().contains("/srv/legacy-fixture"));
     let store = crate::settings::Settings::open(path, None);
-    assert!(
-        store
-            .legacy_project_import(&binding.machine)
-            .unwrap()
-            .unwrap()
-            .complete()
-    );
+    assert!(store
+        .legacy_project_import(&binding.machine)
+        .unwrap()
+        .unwrap()
+        .complete());
 }
 
 #[test]
@@ -225,11 +219,9 @@ fn an_incomplete_family_never_becomes_complete_after_its_valid_prefix_arrives() 
 #[test]
 fn the_encoded_family_bound_refuses_the_whole_new_record() {
     let (snapshot, mut binding) = fixture();
-    let rows = json!(
-        (0..crate::swarm::FOLDERS)
-            .map(|i| json!({"name":"Next","dir":format!("/srv/fixture-{i}")}))
-            .collect::<Vec<_>>()
-    );
+    let rows = json!((0..crate::swarm::FOLDERS)
+        .map(|i| json!({"name":"Next","dir":format!("/srv/fixture-{i}")}))
+        .collect::<Vec<_>>());
     let mut extra = Map::new();
     let mut bounded = false;
     for n in 1..=MAX_MACHINES {

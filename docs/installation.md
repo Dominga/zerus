@@ -112,14 +112,16 @@ unless the prefix also contains a `gtk/` override. That override must contain
 both GTK3 and GDK3 libraries under `gtk/lib`; a partial override is rejected.
 To retain a private WebKit build with system GTK, select a separate prefix
 containing only its `lib/` and `libexec/` directories (symlinks are supported).
-The patch set, build commands and qualification checks for the private arch
-stack are in the
+WebKit still runs its helper processes and injected bundle from the directory
+it was installed to, so build each prefix for its final path and keep that
+installation in place. The patch set, build commands and qualification checks
+for the private arch stack are in the
 [WebKitGTK display pacing design](superpowers/specs/2026-10-28-webkitgtk-display-pacing.md#building-the-private-prefix).
 The installer saves the selection in `~/.local/share/hgs/local-webkit.json`
 (`$HGS_INSTALL_PREFIX/share/hgs/local-webkit.json` for an isolated install).
 Later preview installs retain it without the variable. The local service and
 desktop entry use `~/.local/libexec/hgs-tray-launch`; it selects these libraries
-and processes only for Zerus Next, leaving the real `hgs-tray` binary available
+only for Zerus Next, leaving the real `hgs-tray` binary available
 to the maintained updater and its rollback checks. If the stack disappears or
 is incomplete, the next launch uses system libraries. Qt and older Zerus Next
 rollback builds also use system libraries. Published packages continue using stock WebKitGTK.

@@ -5,6 +5,7 @@ import { catalog } from "../../store/catalog";
 import { toast } from "../../store/ui";
 import { tr } from "../../i18n";
 import { MigrationReportDialog } from "./MigrationReportDialog";
+import { TaskMessageInputsDialog } from "./TaskMessageInputsDialog";
 
 /** A connected passive service that lists no computers yet; the main area explains it. */
 export const servicePausedEmpty = () => !!servicePaused(desktopService.state()) && !Object.keys(catalog.computers).length;
@@ -37,13 +38,15 @@ export function PausedServiceDetail() {
 
 export function DesktopServiceStatus(props: { counts?: boolean }) {
   const [reviewOrigin, setReviewOrigin] = createSignal<HTMLElement>();
+  const [inputsOrigin, setInputsOrigin] = createSignal<HTMLElement>();
   const [focused, setFocused] = createSignal(false);
+  let summary: HTMLSpanElement | undefined;
   const status = createMemo(() => serviceStatus(desktopService.state()));
   const counts = () => desktopService.state()?.attention_counts?.aggregate;
   const details = () => [status()?.details, props.counts ? `${tr("Shared host attention (excludes this device's review marks)")}: ${counts()?.attention ?? tr("Unknown")}${counts()?.complete ? "" : `; ${tr("Incomplete")}`}` : ""].filter(Boolean).join("\n");
   return <Show when={status()}>{(view) => <>
     <div class="desktop-service-status" role="status" classList={{ healthy: view().healthy }}>
-      <span class="service-summary" title={details()} aria-label={details()} tabIndex={0}
+      <span ref={summary} class="service-summary" title={details()} aria-label={details()} tabIndex={0}
         aria-describedby={focused() ? "service-status-details" : undefined}
         onFocus={() => setFocused(true)} onBlur={() => setFocused(false)}
         onKeyDown={(event) => { if (event.key === "Escape") setFocused(false); }}>
@@ -51,6 +54,9 @@ export function DesktopServiceStatus(props: { counts?: boolean }) {
       </span>
       <Show when={view().review}>
         <button type="button" class="btn small ghost" aria-label={tr("Review migration report")} onClick={(event) => setReviewOrigin(event.currentTarget)}>{tr("Review")}</button>
+      </Show>
+      <Show when={view().inputsReview}>
+        <button type="button" class="btn small ghost" onClick={(event) => setInputsOrigin(event.currentTarget)}>{tr("Review message copies")}</button>
       </Show>
       <Show when={view().manualRefresh && !props.counts}>
         <button type="button" class="btn small ghost" onClick={openServiceSettings}>{tr("Review service update")}</button>
@@ -73,5 +79,6 @@ export function DesktopServiceStatus(props: { counts?: boolean }) {
     </div>
     <Show when={focused()}><Portal><div id="service-status-details" class="service-status-details" role="tooltip">{details()}</div></Portal></Show>
     <Show when={reviewOrigin()}>{(origin) => <MigrationReportDialog origin={origin()} close={() => setReviewOrigin(undefined)} />}</Show>
+    <Show when={inputsOrigin()}>{(origin) => <TaskMessageInputsDialog origin={origin()} fallback={() => summary} close={() => setInputsOrigin(undefined)} />}</Show>
   </>}</Show>;
 }

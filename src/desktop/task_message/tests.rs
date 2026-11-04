@@ -2350,6 +2350,54 @@ mod actor {
             }
 
             #[test]
+            fn status_counts_the_reviewable_copies_and_a_full_budget() {
+                let inputs_status = |f: &Fixture| {
+                    crate::desktop::task_message::summary(&f.store.db).unwrap()["inputs"].clone()
+                };
+                let mut f = Fixture::new(|_, _, _, _, _| panic!("nothing runs"));
+                assert_eq!(
+                    inputs_status(&f),
+                    json!({"charged": 0, "bytes": 0, "review": 0, "full": false})
+                );
+                let original = f.orphan(35, 1);
+                let other = f.orphan(37, 2);
+                let bytes = original.input_len().unwrap() + other.input_len().unwrap();
+                assert_eq!(
+                    inputs_status(&f),
+                    json!({"charged": 2, "bytes": bytes, "review": 2, "full": false})
+                );
+                // A held record is charged but not for review.
+                f.store
+                    .db
+                    .execute(
+                        "UPDATE desktop_task_message_inputs SET state='held',device=1,inode=1
+                         WHERE request_id=?1",
+                        [&other.plan.request_id],
+                    )
+                    .unwrap();
+                assert_eq!(inputs_status(&f)["review"], 1);
+                // Either cap reached pauses every further input.
+                for (rows, bytes) in [(inputs::ROWS, 1), (2, inputs::BYTES)] {
+                    f.store
+                        .db
+                        .execute(
+                            "UPDATE desktop_task_message_input_budget SET rows=?1,bytes=?2",
+                            [rows, bytes],
+                        )
+                        .unwrap();
+                    assert_eq!(inputs_status(&f)["full"], true, "{rows} {bytes}");
+                }
+                f.store
+                    .db
+                    .execute(
+                        "UPDATE desktop_task_message_input_budget SET rows=?1,bytes=?2",
+                        [inputs::ROWS - 1, inputs::BYTES - 1],
+                    )
+                    .unwrap();
+                assert_eq!(inputs_status(&f)["full"], false);
+            }
+
+            #[test]
             fn a_change_while_hashing_or_a_stop_before_the_unlink_removes_nothing() {
                 for case in ["in place", "stop", "revoke", "swapped"] {
                     let mut f = Fixture::new(|_, _, _, _, _| panic!("nothing runs"));
@@ -2861,11 +2909,12 @@ mod actor {
                 let cursor = (2000i64, a.plan.request_id.clone());
                 let first: [&dyn ToSql; 3] = [&None::<i64>, &"", &17];
                 let next: [&dyn ToSql; 3] = [&cursor.0, &cursor.1, &17];
-                let queries: [(&str, &str, &[&dyn ToSql]); 4] = [
+                let queries: [(&str, &str, &[&dyn ToSql]); 5] = [
                     ("first page", inputs::REVIEWABLE, &first),
                     ("cursor page", inputs::REVIEWABLE, &next),
                     ("in state", inputs::IN_STATE, &[&"reserved", &4]),
                     ("held drained", inputs::HELD_DRAINED, &[&4]),
+                    ("review count", inputs::REVIEW_COUNT, &[]),
                 ];
                 for (name, sql, params) in queries {
                     let mut plan = f

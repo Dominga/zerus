@@ -280,11 +280,14 @@ finally:
             self.assertEqual(db.execute('SELECT rows,bytes,active FROM desktop_task_message_budget').fetchone(), (0, 0, 0))
         status = self.cli('desktop', 'status', '--json')
         self.assertEqual(status['operation_queue']['kinds']['task_message']['undrained'], 0)
+        self.assertEqual(status['operation_queue']['kinds']['task_message']['inputs'],
+                         dict(charged=0, bytes=0, review=0, full=False))
         help_text = subprocess.run([str(HGS), '--help'], env=self.env, capture_output=True, text=True).stdout
         # macOS refuses every original until a qualified child seam exists.
         if sys.platform.startswith('linux'):
             self.assertIn('Desktop task message ABI: desktop-task-message-v1', help_text)
             self.assertIn('Desktop task message references: desktop-task-message-reference-v1', help_text)
+            self.assertIn('Desktop task message input review: desktop-task-message-input-review-v1', help_text)
         else:
             self.assertNotIn('desktop-task-message', help_text)
         # The staging path is read-only routing data for the exact scope.

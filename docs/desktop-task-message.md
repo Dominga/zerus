@@ -254,8 +254,13 @@ the form like every original.
   sent again, and a request ID with any input record never reserves or admits
   again. macOS answers with its fence; Windows has no inputs.
 - **Records.** `desktop_task_message_inputs` and its budget, added at Store
-  schema 27 by merge order, keep one record per input; status reports the
-  charged records and bytes.
+  schema 27 by merge order, keep one record per input. Status
+  (`operation_queue.kinds.task_message.inputs`) reports the charged records
+  and bytes, `review` (the `orphaned` and `failed` records, counted through
+  the open-state index) and `full` (no further input fits: 64 records or
+  64 MiB). The review marker is
+  `Desktop task message input review: desktop-task-message-input-review-v1`,
+  advertised only on Linux.
 
 ## Client
 
@@ -318,6 +323,26 @@ then only reads its result. The task editor is its only caller.
   A record too large even by reference is refused before staging
   (`TOO_LARGE_REFERENCE`); the inline-only text names the 48 KiB limit only
   for a service without reference support.
+- **Held copies review.** While status reports `review` above zero, the
+  service status (status bar and Settings > About) says that held copies need
+  review, or that large task messages are paused when `full`. Only a ready,
+  running service offers Review message copies: a paused, not-ready or
+  handoff-waiting one cannot list them, so its status names the copies in its
+  tooltip but offers no review. Its dialog reads one bounded page when it
+  opens and one more per Load more click, never on its own, through
+  `desktop_service/task_message_inputs.rs`, which first requires the review
+  marker. Each listing is numbered when it starts. The client remembers each
+  listed entry's exact observation with that number (at most 64; a read that
+  ends after a newer listing began never replaces it) and shows only the time,
+  size, request ID, state and observed file. A confirmation names a request ID
+  and its row's listing; the client takes exactly that observation and sends
+  it once, only on the native frontend lane, as a `TaskMessageInputRelease`
+  with a fresh release ID. Without it, for another listing, or after the
+  service changed, nothing is sent. Only the service's exact refusal before
+  any claim reads as nothing changed; a lost or any other reply is unknown,
+  and nothing is retried. Review again reads that page again from its own
+  cursor. When no copies are left while the dialog is open, closing it returns
+  focus to the service status summary.
 
 ## Wire
 

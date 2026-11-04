@@ -371,10 +371,16 @@ fn assign(store: &mut Store, request: &Request, _conversation: &str) -> Result<S
     catalog.set(
         &store.node_id,
         Key::Session {
-            machine: local,
+            machine: local.clone(),
             session: request.name.clone(),
         },
         json!(request.project_id),
+    )?;
+    super::session_ids::write(
+        &catalog,
+        &mut store.twins,
+        &store.node_id,
+        &[(local, request.name.clone())],
     )?;
     store.catalog = catalog;
     Ok(folder)
@@ -392,6 +398,7 @@ mod tests {
             imported: true,
             bindings: BTreeMap::new(),
             peers: BTreeMap::new(),
+            twins: Default::default(),
         };
         store
             .catalog

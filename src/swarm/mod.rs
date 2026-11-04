@@ -7,6 +7,7 @@ mod launch_project;
 mod infer_project;
 pub(crate) use infer_project::{directory_project, infer_new_session, inherit_fork_project};
 mod session_project;
+mod session_ids;
 #[cfg(unix)]
 pub(crate) use session_project::validate_payload as validate_session_project;
 mod model;
@@ -235,7 +236,9 @@ fn execute(config: &Config, args: &[String]) -> Result<Value> {
         "sync" => transport::sync(config),
         "get" | "initialize" | "apply" | "export" | "resolve" | "disconnect" => {
             // Read stdin before taking the lock: slow clients cannot monopolize it.
-            let request = if matches!(action,"initialize"|"apply"|"resolve") { input()? } else { Value::Null };
+            // `export --kinds` reads the kinds its requester parses.
+            let kinds_requested = action == "export" && args.iter().any(|arg| arg == "--kinds");
+            let request = if matches!(action,"initialize"|"apply"|"resolve") || kinds_requested { input()? } else { Value::Null };
             if action == "initialize" && args.iter().any(|arg|arg == "--g3-status") {
                 ensure!(args == ["initialize", "--g3-status", "--json"], "usage: hgs swarm initialize --g3-status --json");
                 return bootstrap::g3_status(config, request);
@@ -244,6 +247,7 @@ fn execute(config: &Config, args: &[String]) -> Result<Value> {
                 ensure!(args == ["initialize", "--g3", "--json"], "usage: hgs swarm initialize --g3 --json");
                 Some(bootstrap::G3Import::parse(request.clone())?)
             } else { None };
+            let export_kinds = request["kinds"].clone();
             let mut store = LockedStore::load(config)?;
             let previous: std::collections::BTreeSet<_> = store.data.catalog.operations.keys().cloned().collect();
             match action {
@@ -263,7 +267,10 @@ fn execute(config: &Config, args: &[String]) -> Result<Value> {
                 _ => {}
             }
             if action != "initialize" { store.save()?; }
-            if action == "export" { return Ok(json!({"schema":1,"node_id":store.data.node_id,"initialized":store.data.imported,"catalog":store.data.catalog})); }
+            if action == "export" {
+                return Ok(json!({"schema":1,"node_id":store.data.node_id,"initialized":store.data.imported,
+                    "catalog":catalog::exported(&store.data.catalog, &export_kinds)}));
+            }
             let mut snapshot = store.snapshot(config);
             if let Some(import) = &g3 { snapshot["g3_import"] = import.receipt(); }
             snapshot["worker"] = worker.unwrap_or_else(|| service::status(config)).json();

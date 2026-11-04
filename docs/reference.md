@@ -3349,7 +3349,25 @@ in that exchange's refusals, not kept for later. A person reviews it: moving
 both damaged files (`<uuid>.loro` and `<uuid>.updates`) away keeps it refused
 while the mark remains, and removing the mark as well accepts the next copy
 sent, which may lack attempts. Any
-entry at the mark's path counts as a mark, even one that cannot be read. The swarm worker
+entry at the mark's path counts as a mark, even one that cannot be read.
+
+What this recovery supports, alone or combined: running an older Zerus
+after a rollback (its importer may fold, append or rewrite the task files as
+it always did), a crash at any point, damaged or truncated files, and an
+unreadable or dangling mark; in each it stays correct or keeps the copy. It
+also supports restoring or copying the whole replica root as one consistent
+older state, an ordinary rollback of local data: other computers supply the
+newer changes again. It does not support replacing, restoring or copying
+individual files under the replica root (a task's snapshot, updates or mark)
+from a backup or another computer while the rest stays newer, by any means,
+including file-level backup and sync tools: such a partial restore can put
+back an older pair of files that agree with each other, which nothing here
+can tell from a genuine one, and recovery may then accept another copy and
+lose what was written after that backup. Restore the replica root only as a
+whole, never copy task files back one by one, and keep file-level sync tools
+away from it.
+
+The swarm worker
 replicates them with the catalog: after each catalog
 sync it compares every project's digest with the member's and exchanges only
 the changes each side lacks, in pages of at most 1 MiB, and a task changed

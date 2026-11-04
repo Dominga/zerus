@@ -3006,7 +3006,7 @@ hgs task attachment TASK_UUID --project orchard --file 1 [--entry ENTRY_ID]
 hgs task send orchard/T-a1b2c3 [--session codex/api [--host ALIAS]]
 hgs task handoff orchard/T-a1b2c3 --session codex/worker [--host ALIAS]
 hgs task start orchard/T-a1b2c3
-hgs task report orchard/T-a1b2c3 < summary.txt
+hgs task report orchard/T-a1b2c3 [--progress|--ready] [--considered REV] < summary.txt
 hgs task cancel orchard/T-a1b2c3 [--reason "Wrong approach"]
 hgs task stage orchard/T-a1b2c3 backlog|todo|done
 hgs task move orchard/T-a1b2c3 --top|--before REF|--after REF
@@ -3053,16 +3053,23 @@ about: its `id` and `generation`, `origin` (`send`, `start`, `handoff` or
 `progress_at` when known. History written before attempts were recorded reads
 as `legacy: true` with generation 0, from its latest boundary alone: a send,
 handoff, reopen or direct start. A start by that boundary's session before the
-execution ends (a report, cancellation or stage move) acknowledges it; any other
-start is a boundary of its own, and an earlier execution never lends its origin,
-time or receipt to a later one. When merged replicas leave the latest boundary
-with another session than the one holding the task, `conflict` is set. No start,
+execution ends (a result report that moved it, a cancellation or a stage move)
+acknowledges it; a stale report or progress ends nothing. Any other start is a
+boundary of its own, and an earlier execution never lends its origin,
+time or receipt to a later one. A boundary written for a name-only session
+(older history) names the session holding the task only through the binding
+Zerus records when it binds that exact key to the holder's verified run, on the
+same computer, before any change; the task keeps it until its next send or
+start. Only that run is then the executor: a name alone never names one, so
+another run that holds the name is not, and a holder an older build bound
+without recording it reads as a conflict. When merged replicas leave the latest boundary with another session
+than the one holding the task, `conflict` is set. No start,
 child or result is invented. A resume settles only the pauses it observed, so a
 pause that no resume observed keeps the attempt paused. A session's
 Stop, idle time, pause or elapsed time is never an attempt event and never
 moves a task. Attempts are kept beside the history under task schema 6, which a
-reader that does not know them shows read-only. This version reads attempts;
-recording them comes with the stale-report guard.
+reader that does not know them shows read-only. This version reads attempts and
+guards reports against the current execution; recording attempts comes later.
 
 Plain `task list` still returns every task for existing clients. With `--stage`
 and `--limit` (1–200) it returns one page of that stage in the same order and
@@ -3101,7 +3108,27 @@ check that the agent received it. The prompt asks the agent to report with
 `hgs task report`, which moves the task to In review. Cancel moves a task In
 progress to In review and pastes the cancel message without stopping the turn;
 its reason is kept as a comment and never pasted. A task this computer already
-shows In progress is not sent again. Run inside a session (`HGS_SESSION` and
+shows In progress is not sent again.
+
+`hgs task report` always adds the report to the history. A result (the default,
+or `--ready`) moves a task In progress to In review, with the report as its
+summary, only when the current execution's executor (`execution.current.executor`)
+or the person reports it; the person's result is an explicit action. A result
+from any other session, such as the previous executor after a handoff, is kept
+with `stale` naming why: `other_executor`, or `conflict` while two executions
+claim the task. `other_attempt` and `finished` are reserved for recorded
+attempts. `--progress` records an update as a `progress` entry and never moves
+the task; from outside the current execution it carries `stale` too.
+`--considered REV` records the requirement revision (from 1) that the report
+considered; nothing uses it yet. Outside In progress a report only adds to the
+history, as before, and a report by the task's pinned agent while it is To do or
+Backlog still starts it first. With `--json` the reply adds `moved_to_review`,
+`report` (`ready` or `progress`) and, for a stale report, `stale`. The desktop
+inspector labels progress entries and marks stale reports. The guard decides
+from this computer's copy of the task. `stale`, `considered` and the `progress`
+kind are additions to task schema 5 that older readers ignore: an older hgs
+elsewhere can still move a task on a stale report until it updates, and older
+views show a progress entry as its text. Run inside a session (`HGS_SESSION` and
 `HGS_RUN_ID`), `hgs task` acts as that session's agent: `add` files the task
 for that session, and the project settings can keep agents to their own
 session or limit how many tasks they start per hour. `settings --set` reads a

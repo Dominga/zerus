@@ -73,14 +73,49 @@ describe("overview selectors", () => {
       .toEqual(["run:5", "run:4", "run:2", "run:1"]);
   });
 
+  it("follow every catalog change once, and render live sessions as store rows", () => {
+    createRoot((dispose) => {
+      const { catalog, applyBatch, setDraftKeys, plainRows, plainComputers } = createCatalog();
+      applyBatch({ ...emptyBatch(), computers: [{ computer: "", status: "live", attempt: 0 }], replaces: [{ computer: "", rows: [0, 1, 2, 3].map((i) => rowOut("", i)) }] });
+      const compute = vi.fn(overviewStats);
+      const ov = createOverview(plainRows, plainComputers, () => ({}), compute, (s) => catalog.rows[s.key] ?? s);
+      expect(ov.stats()).toMatchObject({ all: 4, attention: 0, active: 0, offline: 0 });
+      expect(ov.live()).toEqual([]);
+      // A field change in place (an upsert reconciles the existing row).
+      applyBatch({ ...emptyBatch(), upserts: [rowOut("", 1, { status: "attention", phase: "approval" })] });
+      expect(ov.stats().attention).toBe(1);
+      expect(compute).toHaveBeenCalledTimes(2);
+      // A live card renders the store's row, so its fields stay reactive.
+      const [card] = ov.live();
+      expect(card).toBe(catalog.rows[card.key]);
+      expect(card.status).toBe("attention");
+      // A draft makes a ready session live: one recompute for the whole change.
+      setDraftKeys(["\nclaude/sample-project/t3"]);
+      expect(ov.live().map((s) => s.catalogKey)).toEqual(["run:1", "run:3"]);
+      expect(compute).toHaveBeenCalledTimes(3);
+      // A computer going offline changes the tiles too.
+      applyBatch({ ...emptyBatch(), computers: [{ computer: "", status: "reconnecting", attempt: 1 }] });
+      expect(ov.stats().offline).toBe(4);
+      expect(ov.stats()).toEqual(overviewStats(catalog.order.map((id) => catalog.rows[id]), catalog.computers));
+      expect(compute).toHaveBeenCalledTimes(4);
+      // A removal, and an empty batch that changes nothing.
+      applyBatch({ ...emptyBatch(), removes: [{ computer: "", key: "run:0" }] });
+      expect(ov.stats().all).toBe(3);
+      applyBatch(emptyBatch());
+      expect(compute).toHaveBeenCalledTimes(5);
+      dispose();
+    });
+  });
+
   it("update the tiles once per batch for 20,000 rows", () => {
     createRoot((dispose) => {
-      const { catalog, applyBatch } = createCatalog();
+      const { catalog, applyBatch, plainRows, plainComputers } = createCatalog();
       const rows = Array.from({ length: 20_000 }, (_, i) => rowOut(i % 2 ? "studio" : "", i));
       applyBatch({ ...emptyBatch(), computers: [live(""), { id: "studio", status: "reconnecting", attempt: 1 }].map((c) => ({ computer: c.id, status: c.status, attempt: c.attempt })),
         replaces: [{ computer: "", rows: rows.filter((r) => r.computer === "") }, { computer: "studio", rows: rows.filter((r) => r.computer === "studio") }] });
       const compute = vi.fn(overviewStats);
-      const ov = createOverview(() => catalog.order.map((id) => catalog.rows[id]), () => catalog.computers, () => ({}), compute);
+      // As the Overview does: the catalog's plain rows, one dependency per batch.
+      const ov = createOverview(plainRows, plainComputers, () => ({}), compute, (s) => catalog.rows[s.key] ?? s);
       expect(ov.stats()).toMatchObject({ all: 20_000, attention: 0, offline: 10_000 });
       expect(compute).toHaveBeenCalledTimes(1);
       applyBatch({ ...emptyBatch(), upserts: Array.from({ length: 100 }, (_, i) => rowOut("", i * 2, { status: "attention", phase: "approval" })) });

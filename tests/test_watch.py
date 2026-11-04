@@ -397,6 +397,49 @@ class WatchStream(unittest.TestCase):
         stream.quiet(lambda f: f['t'] == 'snapshot' and f['topic'] == 'tasks', 3)
         self.assertEqual(stream.close(), 0)
 
+    def test_a_windowed_task_subscription_carries_each_stage_s_first_rows(self):
+        catalog = {"projects": [{"id": "project-1", "name": "orchard", "color": "#123456", "folders": [], "sessions": []}]}
+        result = subprocess.run([str(HGS), 'swarm', 'initialize'], input=json.dumps(catalog), env=self.env,
+                                text=True, capture_output=True, timeout=30)
+        self.assertEqual(result.returncode, 0, result.stderr)
+        for n in range(5):
+            self.task('add', '--project', 'orchard', *(('--backlog',) if n % 2 else ()), text=f'Task {n}')
+        stream, hello, *_ = self.start()
+        self.assertEqual(hello['limits']['tasks_window'], 200)
+        stream.send(op='subscribe', topic='tasks', project='project-1', window=2)
+        key, items, value = self.tasks_snapshot(stream)
+        self.assertEqual(key, 'project-1')
+        expected = []
+        for stage in ('review', 'active', 'todo', 'backlog', 'done'):
+            expected += self.task('list', '--project', 'project-1', '--stage', stage, '--limit', '2')['tasks']
+        self.assertEqual(items, expected)
+        self.assertEqual(value['counts'], {'review': 0, 'active': 0, 'todo': 3, 'backlog': 2, 'done': 0})
+        window = value['window']
+        self.assertEqual((window['schema'], window['limit']), (1, 2))
+        self.assertEqual(window['stages']['todo']['total'], 3)
+        self.assertIsNone(window['stages']['backlog']['next'])
+        # The stage's next page comes from the paged list with that cursor.
+        more = self.task('list', '--project', 'project-1', '--stage', 'todo', '--limit', '2',
+                         '--after', window['stages']['todo']['next'])
+        all_todo = self.task('list', '--project', 'project-1', '--stage', 'todo')['tasks']
+        self.assertEqual([t['uuid'] for t in items if t['stage'] == 'todo'] + [t['uuid'] for t in more['tasks']],
+                         [t['uuid'] for t in all_todo])
+        self.assertRegex(value['revision'], '.+')
+        self.assertRegex(value['digest'], '^[0-9a-f]{64}$')
+        # A change sends the window again.
+        self.task('add', '--project', 'orchard', '--position', '1', text='At the top')
+        _, items, changed = self.tasks_snapshot(stream, lambda v: v['digest'] != value['digest'], timeout=10)
+        self.assertEqual(changed['counts']['todo'], 4)
+        self.assertEqual(items[0]['text'], 'At the top')
+        # Windows outside 1..200 are refused, without ending the stream.
+        for bad in (0, 201):
+            stream.send(op='subscribe', topic='tasks', project='project-1', window=bad)
+            error = stream.next(lambda f: f['t'] == 'error' and f.get('topic') == 'tasks' and f['code'] == 'bad_request')
+            self.assertFalse(error['fatal'])
+        stream.send(op='ping', id='alive')
+        stream.next(lambda f: f['t'] == 'pong' and f['id'] == 'alive')
+        self.assertEqual(stream.close(), 0)
+
     @staticmethod
     def organization_rebuilt(rows):
         """The `swarm get` snapshot (without `written`) the organization rows encode."""

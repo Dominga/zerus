@@ -184,18 +184,20 @@ The owner's answers to questions 1 and 3 and the coordinator's decision on quest
 
 ### Rollback
 
+The rollback floor for labels that repeat is P3a (coordinator, 2026-11-05). P3a reads sessions in the ID layout, writes and renames them in place, and archives and forgets them; it only never creates them. A computer rolled back from P3e to a P3a build or later therefore keeps every session that shares a label working, and never writes one to `sha256(label)`, where it would overwrite that label's first holder. Only a rollback below P3a after P3e is the "invisible but never deleted; archive first" case in the table.
+
 | Step | After a rollback of a computer, older builds see | What breaks |
 | --- | --- | --- |
 | P3a–P3c | Nothing new on disk except `terminal_name` and index entries, which they ignore. Every label is still unique and at its legacy path. | Nothing. A build older than P3b that rewrites a record drops `terminal_name`, which then equals the label anyway. |
 | P3d | References with `session` | A build older than P1c-1 cannot parse them. It also lacks the marker, so the gate stays closed until it is updated, and closes again on a rollback. |
-| P3e, labels in use more than once | Only the legacy holder of each label. Sessions in the ID layout are invisible to older builds but never deleted: they are not listed as saved, and a live one shows as an untracked terminal `label~<id>`. | Hooks of a session in the ID layout update nothing: v0.47.0's `read_run` takes the label's record only when its run matches, then scans only `sha256` paths. Such a session cannot be resumed until the computer moves forward again. Nothing is deleted, because no older build writes `sessions/` or `labels/`. To use such a session on the older build, archive it first: archives are keyed by ID, and the older build restores it under a free label. P3e states both rules in `docs/reference.md`. |
+| P3e, labels in use more than once, rolled back below P3a | Only the legacy holder of each label. Sessions in the ID layout are invisible to older builds but never deleted: they are not listed as saved, and a live one shows as an untracked terminal `label~<id>`. | Hooks of a session in the ID layout update nothing: v0.47.0's `read_run` takes the label's record only when its run matches, then scans only `sha256` paths. Such a session cannot be resumed until the computer moves forward again. Nothing is deleted, because no older build writes `sessions/` or `labels/`. To use such a session on the older build, archive it first: archives are keyed by ID, and the older build restores it under a free label. P3e states both rules in `docs/reference.md`. |
 | P3e, other computers | — | A peer or desktop on an older build that names a label held by several sessions gets exit 5 when it sends no expected IDs: a refusal, never another session. |
 | P3f | Older desktops and phones list every session; rows sharing a label are told apart only by folder and time. | Their actions without expected IDs refuse with exit 5. |
 
 ### PRs
 
-1. **P3a, readers.**
-   - The label resolver, the ID layout and the label index, read but not written.
+1. **P3a, readers and the rollback floor.**
+   - The label resolver, and sessions in the ID layout read, written and renamed in place, archived and forgotten, but never created. A write keeps such a record in place only when the record says `layout: "id"` and `sessions/<id>.json` exists, and it refuses when the two disagree. Every read path verifies the same session ID and label, no archive and no rename shadow, including hooks through `ids/`.
    - `ids/` entries for the ID layout, and `records()` over `sessions/`.
    - Files keyed by session ID for that layout.
    - Hooks and the `read_run` callers by session ID; the deferred-send check.
@@ -218,7 +220,7 @@ The owner's answers to questions 1 and 3 and the coordinator's decision on quest
 
    Live connector and gateway updates stay owner-gated.
 
-P3e merges only after P3a–P3d are installed on every computer of the swarm and on the gateway connector. The fleet gate then opens by itself, computer by computer.
+P3e merges only after P3a is installed on every computer, P3a being the rollback floor for labels that repeat, and after P3b–P3d are installed on every computer of the swarm and on the gateway connector. The fleet gate then opens by itself, computer by computer.
 
 ## Owner questions
 

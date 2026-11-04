@@ -10,7 +10,7 @@ use zerus_client_core::{
     tasks_write,
 };
 
-fn present(root: &std::path::Path, view: View) -> Value {
+pub(crate) fn present(root: &std::path::Path, view: View) -> Value {
     let mut value = json!(&view);
     let enabled =
         crate::desktop_service::mode() && cfg!(any(target_os = "linux", target_os = "macos"));
@@ -20,8 +20,15 @@ fn present(root: &std::path::Path, view: View) -> Value {
         use zerus_client_core::task_start::capture::journal::{Phase, Saved};
         match Saved::read(root, &view.project, &view.task) {
             Ok(saved) => {
-                value["unsent_check"] = json!(saved
-                    .is_some_and(|s| s.phase() == Phase::Prepared && s.original_id() == view.id))
+                if let Some(saved) = saved.filter(|s| s.phase() == Phase::Prepared) {
+                    value["unsent_check"] = json!(true);
+                    value["unsent_check_id"] = json!(saved.reconcile_id());
+                    if saved.original_id() != view.id {
+                        value["check_available"] = json!(false);
+                        value["check_problem"] =
+                            json!(crate::desktop_service::task_start_reconcile::STALE_CHECK);
+                    }
+                }
             }
             Err(_) => {
                 value["check_available"] = json!(false);
@@ -249,6 +256,7 @@ pub async fn task_start_discard_check(
     task: String,
     id: String,
     snapshot: String,
+    check_id: String,
 ) -> Result<Value, String> {
     if crate::actions::blocked() || !crate::desktop_service::mode() {
         return Err("Discarding the unsent check is unavailable.".into());
@@ -259,29 +267,44 @@ pub async fn task_start_discard_check(
         let _permit = permit;
         #[cfg(any(target_os = "linux", target_os = "macos"))]
         {
-            use zerus_client_core::task_start::capture::journal::Saved;
-            let view = task_start::open(&root, &project, &task, None)?;
-            if view.id != id || view.snapshot != snapshot {
-                return Err("The saved task start changed. Refresh the task.".into());
-            }
-            let saved = Saved::read(&root, &project, &task)
-                .map_err(|_| "The unsent check could not be verified.")?
-                .ok_or("The unsent check is unavailable.")?;
-            if saved.original_id() != id {
-                return Err("The unsent check changed. Refresh the task.".into());
-            }
-            let reconcile = saved.reconcile_id().to_owned();
-            saved
-                .discard_prepared(&reconcile)
-                .map_err(|_| "The unsent check could not be discarded.")?;
+            let view = discard_check(&root, &project, &task, &id, &snapshot, &check_id)?;
             Ok(present(&root, view))
         }
         #[cfg(not(any(target_os = "linux", target_os = "macos")))]
         {
-            let _ = (root, project, task, id, snapshot);
+            let _ = (root, project, task, id, snapshot, check_id);
             Err("Discarding the unsent check is unavailable on this computer.".into())
         }
     })
     .await
     .map_err(|e| e.to_string())?
+}
+
+/// Explicit confirmation binds the current task view AND the exact unsent check.
+/// Its older delivery may have been manually released; this changes metadata only.
+#[cfg(any(target_os = "linux", target_os = "macos"))]
+pub(crate) fn discard_check(
+    root: &std::path::Path,
+    project: &str,
+    task: &str,
+    id: &str,
+    snapshot: &str,
+    check_id: &str,
+) -> Result<View, String> {
+    use zerus_client_core::task_start::capture::journal::Saved;
+    let view = task_start::open(root, project, task, None)?;
+    if view.id != id || view.snapshot != snapshot {
+        return Err("The saved task start changed. Refresh the task.".into());
+    }
+    let saved = Saved::read(root, project, task)
+        .map_err(|_| "The unsent check could not be verified.")?
+        .ok_or("The unsent check is unavailable.")?;
+    if saved.reconcile_id() != check_id {
+        return Err("The unsent check changed. Refresh the task.".into());
+    }
+    let reconcile = saved.reconcile_id().to_owned();
+    saved
+        .discard_prepared(&reconcile)
+        .map_err(|_| "The unsent check could not be discarded.")?;
+    Ok(view)
 }

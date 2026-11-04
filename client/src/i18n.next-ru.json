@@ -75,6 +75,7 @@
   "Aggregate diagnostics": "Сводная диагностика",
   "All accounts": "Все учётные записи",
   "An unknown result is never retried automatically: the copy may have finished. Open the machine in Accounts to check it.": "Операции с неизвестным результатом не повторяются автоматически: копирование могло завершиться. Проверьте этот компьютер в разделе «Учётные записи».",
+  "An unsent receipt check belongs to an earlier start of this task. Discard it before checking this start.": "Неотправленная проверка подтверждения относится к предыдущему запуску этой задачи. Удалите её перед проверкой этого запуска.",
   "Another launch is allowed. Nothing was stopped or sent again.": "Повторный запуск разрешён. Ничего не остановлено и не отправлено повторно.",
   "Another program holds the Zerus activation channel, so Zerus did not start and sent it nothing. Close programs you do not trust, or sign out and sign in again, then start Zerus again.": "Канал активации Zerus занят другой программой, поэтому Zerus не запустился и ничего ей не отправил. Закройте программы, которым не доверяете, или выйдите из системы и войдите снова, затем снова запустите Zerus.",
   "Another session opened after Saved drafts. Open Saved drafts again to restore into it.": "После открытия «Сохранённых черновиков» была выбрана другая сессия. Откройте «Сохранённые черновики» снова, чтобы восстановить черновик в неё.",

@@ -24,6 +24,9 @@ pub(crate) const UNAVAILABLE: &str = zerus_client_core::source!(
 pub(crate) const UNSUPPORTED: &str = zerus_client_core::source!(
     "Update hgs to check the original delivery receipt from this desktop."
 );
+pub(crate) const STALE_CHECK: &str = zerus_client_core::source!(
+    "An unsent receipt check belongs to an earlier start of this task. Discard it before checking this start."
+);
 pub(crate) const CHANGED: &str = zerus_client_core::source!(
     "The saved task start changed. Refresh the task before reviewing it."
 );
@@ -206,6 +209,30 @@ impl Read {
         }
         Ok(result)
     }
+    fn settle(
+        &self,
+        saved: &mut Saved,
+        query: &wire::Query,
+        lookup: &wire::Lookup,
+    ) -> Result<Settlement, String> {
+        saved
+            .settle_submitted(query, lookup, || self.current())
+            .map_err(|_| UNAVAILABLE.into())
+    }
+    fn completed_view(
+        &self,
+        store: &Path,
+        project: &str,
+        task: &str,
+        id: &str,
+    ) -> Result<task_start::View, String> {
+        let mut view = task_start::open(store, project, task, None)?;
+        if view.id != id || view.phase != "started" || !self.current() {
+            return Err(CHANGED.into());
+        }
+        view.outcome = Some("submitted".into());
+        Ok(view)
+    }
     fn supported(self: &Arc<Self>, held: Arc<dyn Send + Sync>) -> Result<bool, String> {
         let bytes = self.exchange(None, Value::Null, true, held)?;
         let text = std::str::from_utf8(&bytes).map_err(|_| UNAVAILABLE)?;
@@ -239,6 +266,12 @@ pub(crate) fn check(
     if original.id != id || original.snapshot != snapshot || !original.pending && !finishing {
         return Err(CHANGED.into());
     }
+    if loaded
+        .as_ref()
+        .is_some_and(|s| s.phase() == Phase::Prepared && s.original_id() != id)
+    {
+        return Err(STALE_CHECK.into());
+    }
     let new_original = loaded
         .as_ref()
         .is_some_and(|s| s.phase() == Phase::Completed && s.original_id() != id);
@@ -254,13 +287,14 @@ pub(crate) fn check(
             .map_err(|_| UNAVAILABLE)?;
         let reconcile = loaded
             .as_ref()
-            .filter(|s| s.phase() == Phase::Prepared)
+            .filter(|s| s.phase() == Phase::Prepared && s.original_id() == id)
             .map(|s| s.reconcile_id().to_owned())
             .unwrap_or_else(|| uuid::Uuid::new_v4().to_string());
         let intent = source.intent(&reconcile).map_err(|_| UNAVAILABLE)?;
         let registration = read.prepare(intent.clone())?;
-        // A definitive oversized envelope stays unoffered. Do not widen the
-        // existing control line or turn this into an offered-unknown record.
+        // Defence in depth: today's bounded original cannot fill this envelope
+        // (reviewed quote-filled case: 64,938 bytes). Keep the complete frame
+        // check if fields grow; oversized input must remain unoffered.
         if serde_json::to_vec(registration.envelope())
             .map_err(|_| UNAVAILABLE)?
             .len()
@@ -319,20 +353,15 @@ pub(crate) fn check(
         }
         let attempt = lookup.attempt.as_ref().ok_or(UNAVAILABLE)?; // Missing NEVER offers again.
         if attempt.submitted(&query).is_some() {
-            let state = saved
-                .lock()
-                .unwrap_or_else(PoisonError::into_inner)
-                .settle_submitted(&query, &lookup, || read.current())
-                .map_err(|_| UNAVAILABLE)?;
+            let state = read.settle(
+                &mut saved.lock().unwrap_or_else(PoisonError::into_inner),
+                &query,
+                &lookup,
+            )?;
             if state == Settlement::ChangedOriginal {
                 return Err(CHANGED.into());
             }
-            let mut view = task_start::open(store, project, task, None)?;
-            if view.id != id || view.phase != "started" || !read.current() {
-                return Err(CHANGED.into());
-            }
-            view.outcome = Some("submitted".into());
-            return Ok(view);
+            return read.completed_view(store, project, task, id);
         }
         if attempt.phase != wire::Phase::Reserved && attempt.phase != wire::Phase::Submitted
             || Instant::now() >= until

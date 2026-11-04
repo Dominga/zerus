@@ -336,6 +336,7 @@
   "An answer to this session is already being sent.": "Ответ на эту сессию уже отправляется.",
   "An unknown result is never retried automatically: the copy may have finished. Open the machine in Accounts to check it.": "Операции с неизвестным результатом не повторяются автоматически: копирование могло завершиться. Проверьте этот компьютер в разделе «Учётные записи».",
   "An unknown result will not be retried.": "При неизвестном результате повторной попытки не будет.",
+  "An unsent receipt check belongs to an earlier start of this task. Discard it before checking this start.": "Неотправленная проверка подтверждения относится к предыдущему запуску этой задачи. Удалите её перед проверкой этого запуска.",
   "Animate working sessions": "Анимировать работающие сессии",
   "Another active or saved session uses this name. Restore becomes available when that name is free.": "Это имя используется другой активной или сохраненной сессией. Восстановление станет доступным, когда это имя станет свободным.",
   "Another draft already exists here. Recover the previous one from Saved drafts.": "Другой черновик уже существует здесь. Восстановите предыдущий из сохраненных черновиков.",

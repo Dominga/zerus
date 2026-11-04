@@ -26,7 +26,10 @@ fn private_case(case: &'static str) -> bool {
     match run::run_without(
         &std::env::current_exe().unwrap(),
         &invocation,
-        &[(MARKER, case)],
+        &[
+            (MARKER, case),
+            (zerus_client_core::desktop::service::MODE_ENV, "1"),
+        ],
         &["HGS_SESSION", "HGS_RUN_ID"],
         64 << 10,
     )
@@ -164,9 +167,25 @@ fn unknown_or_missing_reopened_result_never_offers_a_replacement() {
                 .unwrap()
                 .reconcile_id()
                 .to_owned();
-            assert!(invoke(service.clone(), root.clone(), view, Arc::new(()))
-                .await
-                .is_err());
+            assert!(
+                invoke(service.clone(), root.clone(), view.clone(), Arc::new(()))
+                    .await
+                    .is_err()
+            );
+            let current = task_start::open(&root, &view.project, &view.task, None).unwrap();
+            assert_ne!(
+                crate::task_start::present(&root, current.clone())["unsent_check"],
+                true
+            );
+            assert!(crate::task_start::discard_check(
+                &root,
+                &current.project,
+                &current.task,
+                &current.id,
+                &current.snapshot,
+                &original
+            )
+            .is_err());
             let log = calls(&f);
             assert_eq!(
                 log.iter()
@@ -310,6 +329,253 @@ fn larger_native_original_and_oversized_control_input_stay_unoffered() {
         assert!(
             calls(&f).is_empty(),
             "oversized input is refused before a helper receives it"
+        );
+        service.stop();
+        service.join().await.unwrap();
+    });
+}
+
+fn prepare_check(service: Arc<Service>, root: &Path, view: &task_start::View) -> String {
+    let read = Read::new(Some(service)).unwrap();
+    let source = Captured::read(
+        root,
+        &view.project,
+        &view.task,
+        &view.id,
+        &view.snapshot,
+        read.scope.clone(),
+    )
+    .unwrap();
+    let id = uuid::Uuid::new_v4().to_string();
+    let journal = Journal::prepare(source, &id).unwrap();
+    assert_eq!(journal.saved().phase(), Phase::Prepared);
+    id
+}
+fn later_start(root: &Path, view: &task_start::View) -> task_start::View {
+    let file = outbox::path(&root.join("task-start"), &view.project, &view.task);
+    let record: Value = serde_json::from_slice(&fs::read(&file).unwrap()).unwrap();
+    let released = task_start::release(root, &view.project, &view.task, &view.id, &view.snapshot, |call| {
+        assert!(call.args.iter().any(|s| s == "--recover-only"));
+        Ok(json!({"schema":1,"id":view.id,"project":view.project,"uuid":view.task,"state":"uncertain","task":{"uuid":view.task,"project":view.project}}).as_object().unwrap().clone())
+    }).unwrap();
+    assert_eq!(released.phase, "released");
+    let mut plan = record["intent"]["plan"].clone();
+    let id = uuid::Uuid::new_v4().to_string();
+    plan["id"] = json!(id);
+    plan["request"]["request_id"] = json!(id);
+    let selection = serde_json::from_value(plan["selection"].clone()).unwrap();
+    task_start::start(root, &view.project, &view.task, 123, &task_start::Assignment {
+        kind:"any".into(), machine:String::new(), session_id:String::new(), name:String::new(),
+    }, &selection, &id, |call| match call.args[0].as_str() {
+        "get" => Ok(json!({"project":{"id":view.project},"task":{"project":view.project,"uuid":view.task,"stage":"todo","stage_at":123,"writable":true,"target":{"kind":"any"},"history_schema":1,"log":[],"history_next":null}}).as_object().unwrap().clone()),
+        "start-plan" => Ok(json!({"plan":plan}).as_object().unwrap().clone()),
+        "start-deliver" => Err("fixture: delivery result unavailable".into()),
+        other => panic!("unexpected task call: {other}"),
+    }).unwrap()
+}
+#[test]
+fn earlier_prepared_check_can_be_confirmed_discarded_before_checking_a_later_start() {
+    if !private_case("desktop_service::task_start_reconcile::tests::earlier_prepared_check_can_be_confirmed_discarded_before_checking_a_later_start"){return;}
+    tauri::async_runtime::block_on(async {
+        let f = fixture(json!({}));
+        let (service, _cache) = connected(&f).await;
+        let (root, first) = source(&f);
+        let check_id = prepare_check(service.clone(), &root, &first);
+        // Actual native release and Start paths; no helper offer happened for A.
+        let later = later_start(&root, &first);
+        assert_ne!(later.id, first.id);
+        assert!(later.pending);
+        let file = outbox::path(&root.join("task-start"), &later.project, &later.task);
+        let bytes = fs::read(&file).unwrap();
+        for _ in 0..2 {
+            assert_eq!(
+                invoke(service.clone(), root.clone(), later.clone(), Arc::new(()))
+                    .await
+                    .err()
+                    .as_deref(),
+                Some(STALE_CHECK)
+            );
+        }
+        let displayed = crate::task_start::present(&root, later.clone());
+        assert_eq!(displayed["unsent_check"], true);
+        assert_eq!(displayed["unsent_check_id"], check_id);
+        assert_eq!(displayed["check_available"], false);
+        assert_eq!(displayed["check_problem"], STALE_CHECK);
+        assert!(crate::task_start::discard_check(
+            &root,
+            &later.project,
+            &later.task,
+            &later.id,
+            &later.snapshot,
+            &uuid::Uuid::new_v4().to_string()
+        )
+        .is_err());
+        assert!(crate::task_start::discard_check(
+            &root,
+            &later.project,
+            &later.task,
+            &later.id,
+            "stale",
+            &check_id
+        )
+        .is_err());
+        crate::task_start::discard_check(
+            &root,
+            &later.project,
+            &later.task,
+            &later.id,
+            &later.snapshot,
+            &check_id,
+        )
+        .unwrap();
+        let saved = Saved::read(&root, &later.project, &later.task)
+            .unwrap()
+            .unwrap();
+        assert_eq!(saved.phase(), Phase::CancelledBeforeOffer);
+        assert_eq!(saved.original_id(), first.id);
+        assert_eq!(saved.reconcile_id(), check_id);
+        assert_eq!(fs::read(&file).unwrap(), bytes);
+        assert!(calls(&f).is_empty());
+        assert_eq!(
+            crate::task_start::present(&root, later.clone())["check_available"],
+            true
+        );
+        let answer = invoke(service.clone(), root.clone(), later, Arc::new(()))
+            .await
+            .unwrap();
+        assert_eq!(answer.outcome.as_deref(), Some("submitted"));
+        let log = calls(&f);
+        assert_eq!(
+            log.iter()
+                .filter(|v| v["op"] == "task_start_reconcile")
+                .count(),
+            1
+        );
+        assert!(log.iter().all(|v| v["reconcile_id"] != check_id));
+        service.stop();
+        service.join().await.unwrap();
+    });
+}
+#[test]
+fn prepared_check_reuses_its_same_original_reconcile_id() {
+    if !private_case("desktop_service::task_start_reconcile::tests::prepared_check_reuses_its_same_original_reconcile_id"){return;}
+    tauri::async_runtime::block_on(async {
+        let f = fixture(json!({}));
+        let (service, _cache) = connected(&f).await;
+        let (root, view) = source(&f);
+        let id = prepare_check(service.clone(), &root, &view);
+        assert!(invoke(service.clone(), root, view, Arc::new(()))
+            .await
+            .is_ok());
+        let log = calls(&f);
+        assert_eq!(
+            log.iter()
+                .filter(|v| v["op"] == "task_start_reconcile")
+                .count(),
+            1
+        );
+        assert!(log.iter().all(|v| v["reconcile_id"] == id));
+        service.stop();
+        service.join().await.unwrap();
+    });
+}
+fn original_lookup(
+    read: &Arc<Read>,
+    root: &Path,
+    view: &task_start::View,
+) -> (Saved, wire::Query, wire::Lookup) {
+    let source = Captured::read(
+        root,
+        &view.project,
+        &view.task,
+        &view.id,
+        &view.snapshot,
+        read.scope.clone(),
+    )
+    .unwrap();
+    let intent = source.intent(&uuid::Uuid::new_v4().to_string()).unwrap();
+    let registration = read.prepare(intent.clone()).unwrap();
+    let mut journal = Journal::prepare(source, &intent.reconcile_id).unwrap();
+    journal.offer().unwrap();
+    let held: Arc<dyn Send + Sync> = Arc::new(Mutex::new(journal));
+    read.exchange(Some(registration), Value::Null, false, held)
+        .unwrap();
+    let saved = Saved::read(root, &view.project, &view.task)
+        .unwrap()
+        .unwrap();
+    let q = saved
+        .query(read.scope.clone(), &uuid::Uuid::new_v4().to_string())
+        .unwrap();
+    let bytes = read
+        .exchange(
+            None,
+            json!({"op":"task_start_reconcile_result","query":q}),
+            false,
+            Arc::new(()),
+        )
+        .unwrap();
+    let r: wire::Lookup = serde_json::from_slice(&bytes).unwrap();
+    assert!(r.matches(&q));
+    (saved, q, r)
+}
+#[test]
+fn native_connection_loss_before_settlement_cannot_change_the_source() {
+    if !private_case("desktop_service::task_start_reconcile::tests::native_connection_loss_before_settlement_cannot_change_the_source"){return;}
+    tauri::async_runtime::block_on(async {
+        let f = fixture(json!({}));
+        let (service, _cache) = connected(&f).await;
+        let (root, view) = source(&f);
+        let read = Read::new(Some(service.clone())).unwrap();
+        let (mut saved, q, r) = original_lookup(&read, &root, &view);
+        let file = outbox::path(&root.join("task-start"), &view.project, &view.task);
+        let bytes = fs::read(&file).unwrap();
+        read.cancel.store(true, Ordering::Release);
+        assert!(!read.current());
+        assert!(read.settle(&mut saved, &q, &r).is_err());
+        assert_eq!(fs::read(file).unwrap(), bytes);
+        assert_eq!(saved.phase(), Phase::OfferedUnknown);
+        service.stop();
+        service.join().await.unwrap();
+    });
+}
+#[test]
+fn completed_view_still_requires_the_original_native_connection() {
+    if !private_case("desktop_service::task_start_reconcile::tests::completed_view_still_requires_the_original_native_connection"){return;}
+    tauri::async_runtime::block_on(async {
+        let f = fixture(json!({}));
+        let (service, _cache) = connected(&f).await;
+        let (root, view) = source(&f);
+        let read = Read::new(Some(service.clone())).unwrap();
+        assert!(
+            invoke(service.clone(), root.clone(), view.clone(), Arc::new(()))
+                .await
+                .is_ok()
+        );
+        read.cancel.store(true, Ordering::Release);
+        assert!(!read.current());
+        assert!(read
+            .completed_view(&root, &view.project, &view.task, &view.id)
+            .is_err());
+        service.stop();
+        service.join().await.unwrap();
+    });
+}
+#[test]
+fn submitted_but_undrained_result_is_queried_until_actual_drain() {
+    if !private_case("desktop_service::task_start_reconcile::tests::submitted_but_undrained_result_is_queried_until_actual_drain"){return;}
+    tauri::async_runtime::block_on(async {
+        let f = fixture(json!({"task_undrained_reads":1}));
+        let (service, _cache) = connected(&f).await;
+        let (root, view) = source(&f);
+        assert!(invoke(service.clone(), root, view, Arc::new(()))
+            .await
+            .is_ok());
+        assert_eq!(
+            calls(&f)
+                .iter()
+                .filter(|v| v["op"] == "task_start_reconcile_result")
+                .count(),
+            2
         );
         service.stop();
         service.join().await.unwrap();

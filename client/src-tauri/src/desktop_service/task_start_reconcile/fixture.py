@@ -68,6 +68,11 @@ elif sys.argv[1:3] in [['desktop', 'frontend-request'], ['desktop', 'request']]:
         else:
             q = request['query']
             attempt = None if config.get('task_missing') else json.loads((root / 'task-attempt').read_text())
+            count_file = root / 'task-read-count'
+            count = int(count_file.read_text()) + 1 if count_file.exists() else 1
+            count_file.write_text(str(count))
+            if attempt is not None and count <= config.get('task_undrained_reads', 0):
+                attempt['drained'] = False
             print(json.dumps(dict(abi='desktop-task-start-result-v1', request_id=q['request_id'],
                                  scope=q['scope'], read_only=True, found=attempt is not None, attempt=attempt)))
         sys.exit(0)

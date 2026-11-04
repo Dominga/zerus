@@ -238,7 +238,10 @@ Before changing the journal, the native command probes the exact retained helper
 for `Desktop task start reconcile ABI: desktop-task-start-reconcile-v1` and the
 existing native frontend-request ABI. An older helper refuses with update guidance.
 Both the source field and the complete encoded request retain their existing
-32 KiB and 64 KiB bounds. A definitive oversized envelope stays unoffered.
+32 KiB and 64 KiB bounds. The complete-envelope preflight is defence in depth:
+with today's fixed fields the reviewed quote-filled source (32,722 bytes)
+produces a 64,938-byte envelope, below the control bound. It remains enforced if
+fields grow; direct oversized helper input is also refused before spawn.
 The actual cached Service configuration, epoch, generation, cancellation object,
 relay and helper image are retained and checked around every call. The helper's
 original Child is registered before its input is released. Refused registration
@@ -267,7 +270,14 @@ from the exact deterministic settled source without writing that source twice.
 A genuinely new native delivery is preserved and needs a separately explicit
 new Check after the previous completion; an unsettled offer cannot be replaced.
 
-Only an explicit confirmation can discard a prepared, unsent check. A lost
+Only an explicit confirmation can discard a prepared, unsent check. The
+confirmation binds the current task's delivery ID/snapshot and the exact native
+unsent check ID. A Prepared check for an earlier manually released delivery is
+shown with discard guidance even when a newer Start is pending. Check stays
+disabled until that confirmed metadata-only discard; it never silently rotates
+or offers the earlier check. A replaced check ID or changed current task view
+invalidates confirmation. Offered, settling and completed checks cannot be discarded.
+A lost
 return from its subsequent explicit preparation reopens the same new ID; invalid
 next records refuse before publication. Offered checks cannot be discarded.
 If the first prepare crashed after creating its metadata lock, or retained

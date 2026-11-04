@@ -9,7 +9,7 @@ export default function TaskStartReview() {
   const review = taskStartReview()!;
   const live = () => startReviewView(review);
   const [discard, setDiscard] = createSignal<ReturnType<typeof live>>();
-  createEffect(() => { const expected = discard(), current = live(); if (expected && (current.id !== expected.id || current.snapshot !== expected.snapshot || !current.unsent_check)) setDiscard(undefined); });
+  createEffect(() => { const expected = discard(), current = live(); if (expected && (current.id !== expected.id || current.snapshot !== expected.snapshot || current.unsent_check_id !== expected.unsent_check_id || !current.unsent_check)) setDiscard(undefined); });
   let dialog!: HTMLDialogElement, closeButton!: HTMLButtonElement;
   const close = () => { if (taskStartReview() === review) setTaskStartReview(undefined); };
   onMount(() => { dialog.showModal(); queueMicrotask(() => closeButton?.focus()); });

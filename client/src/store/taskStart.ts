@@ -13,7 +13,7 @@ import { sessionIdentity, sessionLabel, type Task } from "../ui/screens/tasks-ui
 import type { Session } from "../ui/sessions/types";
 import { tr } from "../i18n";
 
-export interface StartView { project: string; task: string; id: string; session: string; phase: string; snapshot: string; error: string; pending: boolean; outcome?: string | null; check_available?: boolean; unsent_check?: boolean; check_problem?: string }
+export interface StartView { project: string; task: string; id: string; session: string; phase: string; snapshot: string; error: string; pending: boolean; outcome?: string | null; check_available?: boolean; unsent_check?: boolean; unsent_check_id?: string; check_problem?: string }
 export interface StartInput { assignment: { kind: string; machine: string; session_id: string; name: string }; project: string; task: string; stage_at: number; target: { computer: string; name: string; run_id: string; conversation_id: string }; catalog_key: string; session_id: string }
 export interface StartPort { open(project: string, task: string): Promise<StartView>; start(input: StartInput): Promise<StartView>; release(view: StartView): Promise<StartView>; check?(view: StartView): Promise<StartView>; discardCheck?(view: StartView): Promise<StartView> }
 const scope = (v: { project: string; task: string } | undefined) => v ? `${v.project}\n${v.task}` : "";
@@ -114,7 +114,7 @@ export async function checkTaskStart(review: StartReview): Promise<boolean> {
 }
 export async function discardTaskStartCheck(review: StartReview, expected?: StartView): Promise<boolean> {
   const view = expected ?? startReviewView(review);
-  if (writingTask() || !view.unsent_check) return false;
+  if (writingTask() || !view.unsent_check || !view.unsent_check_id) return false;
   setWritingTask(review.task.uuid);
   try {
     await taskStarts.discardCheck(view); return true;

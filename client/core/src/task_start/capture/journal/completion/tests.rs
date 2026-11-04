@@ -234,3 +234,99 @@ fn source_change_or_native_connection_loss_at_the_cas_boundary_keeps_the_origina
         assert_eq!(saved.phase(), Phase::SettlementPrepared);
     }
 }
+
+#[test]
+fn changed_or_replaced_marker_refuses_original_and_post_cas_settlement() {
+    for after_cas in [false, true] {
+        for wrong_bytes in [false, true] {
+            let f = Fixture::new();
+            let mut saved = offered(&f);
+            let (q, r) = submitted(&f, &saved);
+            if after_cas {
+                assert!(saved
+                    .settle_submitted(&q, &r, || {
+                        let v: Value = serde_json::from_slice(&fs::read(&f.file).unwrap()).unwrap();
+                        v["phase"] != "started"
+                    })
+                    .is_err());
+                assert_eq!(saved.phase(), Phase::SettlementPrepared);
+            }
+            let marker = if wrong_bytes {
+                NEXT.as_bytes().to_vec()
+            } else {
+                fs::read(&f.marker).unwrap()
+            };
+            crate::fsx::write_private_atomic(&f.marker, &marker, true).unwrap();
+            let before = (fs::read(&f.file).unwrap(), saved.disk.bytes.clone());
+            assert!(saved.settle_submitted(&q, &r, || true).is_err());
+            assert_eq!(fs::read(&f.file).unwrap(), before.0);
+            assert_eq!(saved.disk.bytes, before.1);
+        }
+    }
+}
+#[test]
+fn serialized_marker_version_never_substitutes_for_exact_marker_bytes() {
+    let f = Fixture::new();
+    let mut saved = offered(&f);
+    let (q, r) = submitted(&f, &saved);
+    crate::fsx::write_private_atomic(&f.marker, NEXT.as_bytes(), true).unwrap();
+    // A frozen Version is serialized metadata, never authority for another marker.
+    let lock = saved.slot.lock(false).unwrap();
+    let mut record = saved.disk.record.clone();
+    record.version.marker = file_version(&File::open(&f.marker).unwrap(), 128).unwrap();
+    saved.disk = publish(
+        &saved.slot,
+        &saved.disk,
+        &record,
+        || lock_current(&saved.slot, &lock),
+        |f, _| f.sync_all(),
+    )
+    .unwrap();
+    drop(lock);
+    let before = fs::read(&f.file).unwrap();
+    assert!(saved.settle_submitted(&q, &r, || true).is_err());
+    assert_eq!(fs::read(&f.file).unwrap(), before);
+}
+#[test]
+fn completed_original_cannot_prepare_another_check_for_the_same_delivery_id() {
+    let mut f = Fixture::new();
+    let mut saved = offered(&f);
+    let (q, r) = submitted(&f, &saved);
+    saved.settle_submitted(&q, &r, || true).unwrap();
+    f.change(|v| {
+        v["phase"] = json!("review");
+        v["error"] = json!("fixture: same ID review");
+    });
+    let before = fs::read(f.file.with_extension("reconcile")).unwrap();
+    assert!(saved
+        .prepare_new_original(f.capture().unwrap(), READ)
+        .is_err());
+    assert_eq!(
+        fs::read(f.file.with_extension("reconcile")).unwrap(),
+        before
+    );
+}
+#[test]
+fn settlement_and_completed_phases_refuse_offer_before_any_publication_attempt() {
+    for phase in [Phase::SettlementPrepared, Phase::Completed] {
+        let f = Fixture::new();
+        let mut journal = Journal::prepare(f.capture().unwrap(), &f.intent.reconcile_id).unwrap();
+        journal.offer().unwrap();
+        let (_, r) = submitted(&f, journal.saved());
+        let mut record = journal.saved.disk.record.clone();
+        record.phase = phase;
+        record.completion = Some(r);
+        journal.saved.disk = publish(
+            &journal.saved.slot,
+            &journal.saved.disk,
+            &record,
+            || lock_current(&journal.saved.slot, &journal.lock),
+            |f, _| f.sync_all(),
+        )
+        .unwrap();
+        let before = journal.saved.disk.bytes.clone();
+        assert_eq!(journal.offer().err(), Some(Error::OfferedUnknown));
+        assert!(!journal.poisoned);
+        assert_eq!(journal.saved.disk.bytes, before);
+    }
+}

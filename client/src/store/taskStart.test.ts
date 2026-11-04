@@ -77,11 +77,23 @@ it("checks only an explicit original receipt and never releases or sends after a
   expect(toast).toHaveBeenCalledWith("Delivery receipt found", "The task reached its executor. Nothing was sent again.");
 });
 it("discard consumes the confirmed unsent snapshot and preserves refusal on changed identity", async () => {
-  const expected = view({ unsent_check: true }), review = { task, view: expected };
+  const expected = view({ unsent_check: true, unsent_check_id: "original-unsent-check" }), review = { task, view: expected };
   vi.mocked(taskStartDiscardCheck).mockResolvedValueOnce(view({ unsent_check: false }));
   expect(await discardTaskStartCheck(review, expected)).toBe(true);
   expect(taskStartDiscardCheck).toHaveBeenCalledExactlyOnceWith(expected);
   expect(taskStart).not.toHaveBeenCalled(); expect(taskStartRelease).not.toHaveBeenCalled(); expect(taskStartCheck).not.toHaveBeenCalled();
   vi.mocked(taskStartDiscardCheck).mockResolvedValueOnce(view({ id: "another-original" }));
   expect(await discardTaskStartCheck(review, expected)).toBe(false);
+});
+
+it("an earlier unsent check can be discarded without offering or releasing the current start", async () => {
+  const expected = view({ unsent_check: true, unsent_check_id: "earlier-check", check_available: false, check_problem: "Earlier unsent check" });
+  const review = { task, view: expected };
+  expect(await checkTaskStart(review)).toBe(false);
+  vi.mocked(taskStartDiscardCheck).mockResolvedValueOnce(view({ unsent_check: false, check_available: true }));
+  expect(await discardTaskStartCheck(review, expected)).toBe(true);
+  expect(taskStartDiscardCheck).toHaveBeenCalledExactlyOnceWith(expected);
+  expect(taskStartCheck).not.toHaveBeenCalled(); expect(taskStart).not.toHaveBeenCalled(); expect(taskStartRelease).not.toHaveBeenCalled();
+  expect(await discardTaskStartCheck({ task, view: view({ unsent_check: true }) })).toBe(false);
+  expect(taskStartDiscardCheck).toHaveBeenCalledTimes(1);
 });

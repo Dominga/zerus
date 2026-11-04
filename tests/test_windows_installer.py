@@ -85,6 +85,26 @@ class Payload(unittest.TestCase):
         self.assertIn("installation.json", lines)
         self.assertEqual(windows_installer.problems(self.stage, expected), [])
 
+    def test_the_payload_list_bytes_do_not_depend_on_the_build_host(self):
+        # Text mode on Windows turns every "\n" written without newline="" into "\r\n",
+        # so the list's own CR LF became CR CR LF in CI-built installers.
+        write_text = Path.write_text
+
+        def windows_text_mode(path, data, encoding=None, errors=None, newline=None):
+            if newline is None:
+                data, newline = data.replace("\n", "\r\n"), ""
+            return write_text(path, data, encoding=encoding, errors=errors, newline=newline)
+
+        with patch.object(Path, "write_text", windows_text_mode):
+            _, expected = windows_installer.stage(self.zip(), self.stage)
+        listing = (self.stage / "uninstall" / "payload.txt").read_bytes()
+        self.assertNotIn(b"\r\r\n", listing)
+        self.assertEqual(listing, "".join(name.replace("/", "\\") + "\r\n" for name in sorted(expected)
+                                          if name != windows_installer.PAYLOAD_LIST).encode("utf-8"))
+        self.assertEqual(expected[windows_installer.PAYLOAD_LIST], windows_installer.sha256(
+            self.stage / "uninstall" / "payload.txt"))
+        self.assertTrue((self.stage / "installation.json").read_bytes().endswith(b"}\n"))
+
     def test_a_nightly_installer_records_its_nightly_version(self):
         nightly = f"0.45.0.r812.g{COMMIT[:7]}.n42"
         record, _ = windows_installer.stage(self.zip(), self.stage, nightly)
@@ -337,7 +357,7 @@ class Script(unittest.TestCase):
         # FILE_ATTRIBUTE_REPARSE_POINT: junctions, symbolic links, mount points.
         self.assertRegex(self.text, r"(?m)^  ReparsePoint = \$400;")
         # The sweep and the scan test for a link before they treat an entry as a folder.
-        for name in ("RemoveStale", "FindLink"):
+        for name in ("RemoveStale", "FindLink", "HoldsFiles"):
             body = self.procedure(name)
             self.assertLess(body.index("(Find.Attributes and ReparsePoint) <> 0"),
                             body.index("(Find.Attributes and FILE_ATTRIBUTE_DIRECTORY) <> 0"), name)
@@ -353,6 +373,26 @@ class Script(unittest.TestCase):
         self.assertIn("IsLink(Current)", linked)
         self.assertIn("ExtractFileDir(Current)", linked)
         self.assertRegex(linked, r"refuse rather than guess\. }\s+Result := Path;\s+end;")
+
+    def test_setup_installs_only_into_an_empty_or_owned_folder(self):
+        # A non-empty folder the installer does not own, such as an extracted
+        # portable zip, would get the payload mixed into files it never cleans up.
+        code = self.text.split("[Code]", 1)[1]
+        # Pascal Script needs OwnedFolder declared before PrepareToInstall calls it.
+        self.assertLess(code.index("function OwnedFolder"), code.index("function PrepareToInstall"))
+        prepare = self.procedure("PrepareToInstall")
+        refusal = prepare.index("if not OwnedFolder() then")
+        # Links are refused first, with their own message, and stop there.
+        self.assertLess(prepare.index("Link := FindLink(ExpandConstant('{app}'));"), refusal)
+        self.assertRegex(prepare[:refusal], r"Log\(Result\);\s+Exit;\s+end;")
+        self.assertRegex(prepare[refusal:],
+                         r"if not OwnedFolder\(\) then\s+if HoldsFiles\(ExpandConstant\('\{app\}'\)\) then")
+        self.assertIn("is not empty and is not a Zerus installation folder", prepare)
+        self.assertIn("Nothing was changed.", prepare[refusal:])
+        # Only files make a folder non-empty: an uninstall can leave empty folders behind.
+        holds = self.procedure("HoldsFiles")
+        self.assertIn("Result := HoldsFiles(AddBackslash(Folder) + Find.Name)", holds)
+        self.assertNotRegex(holds, r"DeleteFile|RemoveDir|DelTree")
 
     def test_only_a_silent_self_update_relaunches_the_app(self):
         runs = re.findall(r"(?m)^Filename: (.*)$", self.text.split("[Run]", 1)[1].split("\n[", 1)[0])

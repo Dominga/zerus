@@ -198,6 +198,26 @@ fn asked(created: f64) -> (String, String) {
     )
 }
 
+/// Whose session an answer draft names, when that session is keyed by ID.
+#[derive(Clone, Copy)]
+struct Owner<'a> {
+    /// The session's name key.
+    legacy: Option<&'a str>,
+    /// Its label; empty for a session keyed by name.
+    session: &'a str,
+}
+
+impl<'a> Owner<'a> {
+    /// The answer's name key, and the label it carries.
+    fn of(self, question: &Question) -> (Option<String>, &'a str) {
+        (
+            self.legacy
+                .and_then(|legacy| rules::store_key(legacy, question)),
+            self.session,
+        )
+    }
+}
+
 impl Composers {
     /// The open session's cards as Qt chooses them, without side effects.
     fn selection(&self, hub: &Hub, ctx: &Context, navigation: i32) -> Option<(Selection, String)> {
@@ -286,7 +306,18 @@ impl Composers {
             hub.answers.shown = None;
             return false;
         };
-        let label = rules::label(&ctx.key);
+        // An answer keyed by session ID is named, and moved once from its
+        // name key, as its session's composer is (zerus-ucck P2c-2).
+        let legacy = super::legacy_draft_key(&ctx.session);
+        let label = rules::label(legacy.as_deref().unwrap_or(&ctx.key));
+        let owner = Owner {
+            legacy: legacy.as_deref(),
+            session: if legacy.is_some() {
+                &ctx.session.name
+            } else {
+                ""
+            },
+        };
         listed.extend(
             rules::pending(&details)
                 .iter()
@@ -300,7 +331,7 @@ impl Composers {
             let Some(key) = rules::store_key(&ctx.key, &q) else {
                 continue;
             };
-            self.ensure_answer(hub, &key, &label);
+            self.ensure_answer(hub, &key, &label, owner.of(&q));
             let Some(draft) = hub.answers.drafts.get_mut(&key) else {
                 continue;
             };
@@ -325,7 +356,7 @@ impl Composers {
         let Some(key) = rules::store_key(&ctx.key, &question) else {
             return false;
         };
-        self.ensure_answer(hub, &key, &label);
+        self.ensure_answer(hub, &key, &label, owner.of(&question));
         let mut seeded = false;
         if !hub.answers.loading.contains(&key) {
             if let Some(draft) = hub.answers.drafts.get_mut(&key) {
@@ -352,17 +383,21 @@ impl Composers {
     }
 
     /// Loads a card's draft that is not in memory (`ensureDraft`, 282-309).
-    fn ensure_answer(&self, hub: &mut Hub, key: &str, label: &str) {
+    /// `owner`: the answer's name key and its session's label, when it is
+    /// keyed by session ID.
+    fn ensure_answer(&self, hub: &mut Hub, key: &str, label: &str, owner: (Option<String>, &str)) {
         hub.answers.order.retain(|k| k != key);
         hub.answers.order.push_back(key.to_owned());
         // The app quits: the store takes no more work (`exit`, lib.rs).
         if hub.closed || hub.answers.drafts.contains_key(key) {
             return;
         }
+        let (legacy, session) = owner;
         hub.answers.drafts.insert(
             key.to_owned(),
             AnswerDraft {
                 label: label.to_owned(),
+                session_label: session.to_owned(),
                 ..AnswerDraft::default()
             },
         );
@@ -370,16 +405,38 @@ impl Composers {
         hub.answers.next_load += 1;
         let ticket = hub.answers.next_load;
         hub.answers.loads.insert(key.to_owned(), ticket);
+        if let Some(legacy) = legacy {
+            // A name-key answer still held here moves too when nothing is
+            // under way for it (#1418 review): its stored copy is then
+            // current, so it leaves memory and moves on disk before the ID
+            // key loads. One that is loading, saving, failed or sending
+            // stays, and moves once it is evicted.
+            let answers = &mut hub.answers;
+            let settled = answers.drafts.get(&legacy).is_some_and(|d| !d.sending)
+                && !answers.loading.contains(&legacy)
+                && !answers.unsaved.contains(&legacy)
+                && !answers.failed.contains(&legacy)
+                && !answers.in_flight.values().any(|card| *card == legacy);
+            if settled {
+                answers.drafts.remove(&legacy);
+                answers.order.retain(|k| *k != legacy);
+                answers.saves.remove(&legacy);
+                answers.loads.remove(&legacy);
+            }
+            if !hub.answers.drafts.contains_key(&legacy) {
+                self.0.store.adopt(&legacy, key, session, |_| {});
+            }
+        }
         let me = self.clone();
-        let (owned, label) = (key.to_owned(), label.to_owned());
+        let (owned, label, session) = (key.to_owned(), label.to_owned(), session.to_owned());
         self.0.store.load(key, move |loaded| {
-            me.answer_loaded(&owned, ticket, &label, &loaded)
+            me.answer_loaded(&owned, ticket, &label, &session, &loaded)
         });
     }
 
     /// The draft loaded: the shown card takes its answers. Qt rebuilds the
     /// form without restarting the review (289-301), so only the epoch moves.
-    fn answer_loaded(&self, key: &str, ticket: u64, label: &str, loaded: &Loaded) {
+    fn answer_loaded(&self, key: &str, ticket: u64, label: &str, session: &str, loaded: &Loaded) {
         let mut hub = self.lock();
         // A load whose mark a restore cleared, or that a later ensure of the
         // same key replaced, read an older store: it counts for nothing.
@@ -391,9 +448,11 @@ impl Composers {
         }
         hub.answers.loading.remove(key);
         hub.answers.loads.remove(key);
-        hub.answers
-            .drafts
-            .insert(key.to_owned(), AnswerDraft::from_loaded(loaded, label));
+        let mut draft = AnswerDraft::from_loaded(loaded, label);
+        if draft.session_label.is_empty() {
+            draft.session_label = session.to_owned();
+        }
+        hub.answers.drafts.insert(key.to_owned(), draft);
         if hub
             .answers
             .shown
@@ -1449,6 +1508,96 @@ pub(crate) mod tests {
         assert_eq!(
             (again.revision, again.epoch),
             (rebuilt.revision, rebuilt.epoch)
+        );
+    }
+
+    /// zerus-ucck P2c-2: an answer draft follows its session's composer to
+    /// the session ID key, once, labelled by the session's name.
+    #[test]
+    fn an_answer_draft_moves_once_to_its_session_id_key() {
+        let root = dir("q-adopt");
+        let store = drafts(&root);
+        saved_choice(&store, "opt_0_0");
+        let (c, _) = send_hub_on(&store);
+        let id = "3f2a9c1d-6b7e-4c2a-9d1f-0a1b2c3d4e5f";
+        c.open(Some(SessionRef {
+            session_id: Some(id.into()),
+            ..session()
+        }));
+        c.observe(&state(asking(vec![card_json("tool:t1")])));
+        let view = with_card(&c);
+        let id_key = store_key("tool:t1").replace(
+            "studio\\nclaude/sample-project/review",
+            &format!("studio\\nid:{id}"),
+        );
+        assert_eq!(view.question.as_ref().unwrap().card, id_key);
+        assert_eq!(checked(&view), [true, false]);
+        store.flush();
+        let saved = root.join("drafts");
+        assert!(read_draft(&saved, &store_key("tool:t1"))
+            .draft
+            .form_state
+            .is_empty());
+        let moved = read_draft(&saved, &id_key).draft;
+        assert_eq!(moved.session_label, "claude/sample-project/review");
+        // Its next save names the session, not its ID.
+        let held = c.lock().answers.drafts[&id_key].clone();
+        assert_eq!(
+            (held.label.as_str(), held.session_label.as_str()),
+            (
+                "studio / claude/sample-project/review (question answer)",
+                "claude/sample-project/review"
+            )
+        );
+    }
+
+    /// #1418 review: an answer chosen while its row had no ID, still held in
+    /// memory, moves to the ID key when the row gains one.
+    #[test]
+    fn a_held_answer_moves_when_its_row_gains_an_id() {
+        let root = dir("q-held");
+        let store = drafts(&root);
+        let (c, _) = send_hub_on(&store);
+        c.open(Some(session()));
+        c.observe(&state(asking(vec![card_json("tool:t1")])));
+        let (card, epoch) = shown(&c);
+        assert_eq!(card, store_key("tool:t1"));
+        c.question_edit(
+            &card,
+            epoch,
+            Edit::Option {
+                item: "q_0".into(),
+                option: "opt_0_1".into(),
+                checked: true,
+            },
+        );
+        until(&c, |v| checked(v) == [false, true]);
+        store.flush();
+        until(&c, |_| c.lock().answers.unsaved.is_empty());
+        assert!(
+            c.lock().answers.drafts.contains_key(&card),
+            "held in memory"
+        );
+        let id = "3f2a9c1d-6b7e-4c2a-9d1f-0a1b2c3d4e5f";
+        c.open(Some(SessionRef {
+            session_id: Some(id.into()),
+            ..session()
+        }));
+        let id_key = store_key("tool:t1").replace(
+            "studio\\nclaude/sample-project/review",
+            &format!("studio\\nid:{id}"),
+        );
+        let view = until(&c, |v| {
+            v.question.as_ref().is_some_and(|q| q.card == id_key) && checked(v) == [false, true]
+        });
+        assert_eq!(view.question.unwrap().card, id_key);
+        assert!(!c.lock().answers.drafts.contains_key(&card));
+        store.flush();
+        let saved = root.join("drafts");
+        assert!(read_draft(&saved, &card).draft.form_state.is_empty());
+        assert_eq!(
+            read_draft(&saved, &id_key).draft.session_label,
+            "claude/sample-project/review"
         );
     }
 

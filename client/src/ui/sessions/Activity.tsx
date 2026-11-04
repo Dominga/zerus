@@ -727,12 +727,13 @@ export function localRows(source: ActivitySource, s: Session | undefined): reado
   const v = composer.view(), child = subagentOpen();
   if (!v || !s) return [];
   if (child) {
-    const key = draftKey({ computer: s.computer, key: s.catalogKey, name: s.name, archive_id: null,
+    const key = draftKey({ computer: s.computer, key: s.catalogKey, name: s.name, archive_id: null, session_id: s.sessionId ?? null,
       subagent: { agent_id: child, parent_conversation_id: s.conversationId ?? "" } });
     return v.subagent?.agent_id === child && v.key === key ? v.local : [];
   }
   if (source.readOnly) return [];
-  const key = draftKey({ computer: s.computer, key: s.catalogKey, name: s.name, archive_id: s.state === "archived" ? s.archiveId ?? null : null });
+  const key = draftKey({ computer: s.computer, key: s.catalogKey, name: s.name, archive_id: s.state === "archived" ? s.archiveId ?? null : null,
+    session_id: s.sessionId ?? null });
   return v.key === key ? v.local : [];
 }
 

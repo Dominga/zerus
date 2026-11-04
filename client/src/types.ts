@@ -22,7 +22,8 @@ export interface ViewRow {
   /**
    * The listing's durable session ID, when canonical. The Rust dispatcher
    * reads it from its own copy of the row for explicit actions; the webview
-   * never passes it.
+   * never passes it for one. It passes it only in a composer's SessionRef,
+   * where it keys the drafts.
    */
   session_id?: string;
   title?: string;
@@ -823,7 +824,8 @@ export type Inspect = { kind: "native_ui" } | { kind: "terminal" } | { kind: "re
 /** One exact native child; sends still name the parent run and conversation. */
 export interface SubagentRef { agent_id: string; parent_conversation_id: string }
 /** The session or child a composer belongs to (src-tauri `SessionRef`): `key` is the parent catalog key. */
-export interface SessionRef { computer: ComputerId; key: string; name: string; archive_id: string | null; subagent?: SubagentRef }
+/** `session_id`: the row's durable ID, which keys its drafts (src-tauri `session_draft_key`). */
+export interface SessionRef { computer: ComputerId; key: string; name: string; archive_id: string | null; subagent?: SubagentRef; session_id?: string | null }
 /** The detail tab that shows, for the composer's inspect retry (Qt's poll interval). */
 export type ComposerTab = "activity" | "terminal" | "native" | "processes";
 /** A file of an Activity message, as the journal lists it. */
@@ -878,6 +880,8 @@ export interface SavedDraftItem {
   key: string; kind: DraftOwnerKind;
   /** The key's machine: a host alias, "" for this computer; a subagent key names the machine. */
   computer: string; session: string;
+  /** The durable ID of a draft keyed by it; "" for a key that names its session. */
+  session_id: string;
   /** The owner's parts joined by " / " (the row's accessible text). */
   title: string;
   /** What the row shows as its title. */

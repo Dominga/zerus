@@ -128,13 +128,14 @@ const emptySection = (): Section => ({ items: [], next: null, loading: false, lo
 /**
  * The catalog row a draft's session is (Qt's SessionsWindow::draftOwner):
  * none for an unknown or archived owner. The row of the key's host alias
- * wins; a subagent key names its machine instead.
+ * wins; a subagent key names its machine instead. A draft keyed by session
+ * ID belongs to the row with that ID, whatever its label is now.
  */
 export function draftOwnerRow(item: SavedDraftItem, rows: Iterable<Session>): Session | undefined {
   if (item.kind === "unknown" || item.archived || !item.session) return undefined;
   let named: Session | undefined;
   for (const s of rows) {
-    if (s.name !== item.session || s.state === "archived") continue;
+    if ((item.session_id ? s.sessionId !== item.session_id : s.name !== item.session) || s.state === "archived") continue;
     if (s.computer === item.computer) return s;
     if (item.computer && s.rawMachine === item.computer) named = s;
   }

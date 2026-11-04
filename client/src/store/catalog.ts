@@ -6,6 +6,7 @@ import type { AgentKind, Session, Status } from "../ui/sessions/types";
 import { marks as appMarks, type RowMarks } from "./marks";
 import { connectionOf } from "./overview";
 import { childRows } from "../ui/sessions/subagents";
+import { draftKey, nameDraftKey } from "./draftKeys";
 import { tr } from "../i18n";
 
 // The catalog: every live session row of every computer, keyed by
@@ -137,6 +138,7 @@ export function toSession(computer: ComputerId, key: string, v: ViewRow, marks: 
     turnStarted: typeof v.turn_started === "number" && v.turn_started > 0 ? v.turn_started : undefined,
     runId: optional(v.run_id),
     launchId: optional(v.launch_id),
+    sessionId: optional(v.session_id),
     conversationId: optional(v.conversation_id),
     compactKeys: v.compact_keys,
     cmd: text(v.agent),
@@ -255,9 +257,11 @@ export function createCatalog(given?: RowMarks, onMachines?: (b: Batch) => void)
   };
   /** The draft keys of the nonempty drafts (Rust's `draft_keys`): a row's `draft` mark. */
   let drafts = new Set<string>(), childDraftParents = new Set<string>();
-  const drafted = (row: Pick<Session, "computer" | "name">) => {
-    const owner = `${row.computer}\n${row.name}`;
-    return drafts.has(owner) || childDraftParents.has(owner);
+  // A row keyed by session ID also counts a draft still under its name key,
+  // which moves to the ID key when its composer opens.
+  const drafted = (row: Pick<Session, "computer" | "catalogKey" | "name" | "sessionId">) => {
+    const ref = { computer: row.computer, key: row.catalogKey, name: row.name, archive_id: null, session_id: row.sessionId ?? null };
+    return [draftKey(ref), nameDraftKey(ref)].some((owner) => drafts.has(owner) || childDraftParents.has(owner));
   };
 
   const put = (id: string, next: Session, fresh: string[], delta = true) => {
@@ -395,8 +399,9 @@ export function createCatalog(given?: RowMarks, onMachines?: (b: Batch) => void)
 
   /**
    * The sessions with a nonempty draft (Qt's SessionDelegate draft status):
-   * Rust's draft keys, `computer + "\n" + name` for a live session. Rows that
-   * arrive later take their mark from the same set.
+   * Rust's draft keys, `computer + "\n" + name` for a live session, or
+   * `computer + "\nid:" + session ID` once it has one. Rows that arrive later
+   * take their mark from the same set.
    */
   function setDraftKeys(keys: readonly string[]) {
     drafts = new Set(keys);

@@ -933,7 +933,7 @@ void TestTeamsUiWaiting::proposalsAreAcceptedOrRejectedOnce()
     // In the lead's conversation, above the composer.
     auto *conversation = workspace.findChild<QWidget *>("teamConversation");
     QVERIFY(conversation && conversation->isAncestorOf(cardOf("p1")));
-    QCOMPARE(cardOf("p1")->findChild<QLabel *>("teamProposalWhat")->text(), QStringLiteral("Add Designer (claude, sonnet)"));
+    QCOMPARE(cardOf("p1")->findChild<QLabel *>("teamProposalWhat")->text(), QStringLiteral("Add Designer (claude, sonnet, default account)"));
     QCOMPARE(cardOf("p2")->findChild<QLabel *>("teamProposalWhat")->text(), QStringLiteral("Swap Backend to codex, gpt-5.5"));
     QCOMPARE(cardOf("p3")->findChild<QLabel *>("teamProposalWhat")->text(), QStringLiteral("Remove Tester"));
     QCOMPARE(cardOf("p3")->property("hash").toString(), QStringLiteral("h3"));
@@ -1033,7 +1033,7 @@ void TestTeamsUiWaiting::proposalCardsNameTheChangeAndAStaleCardSendsNothing()
     };
     QTRY_VERIFY(cardOf("p1") && cardOf("p2") && cardOf("p3") && cardOf("p4"));
     QCOMPARE(cardOf("p1")->findChild<QLabel *>("teamProposalWhat")->text(), QStringLiteral("Add 2 members"));
-    QCOMPARE(linesOf("p1"), (QStringList{"Designer (claude, sonnet)", "Writer (codex)"}));
+    QCOMPARE(linesOf("p1"), (QStringList{"Designer (claude, sonnet, default account)", "Writer (codex, default account)"}));
     QCOMPARE(cardOf("p2")->findChild<QLabel *>("teamProposalWhat")->text(), QStringLiteral("Add 2 tasks to phase 2 (QA fixes)"));
     QCOMPARE(linesOf("p2"), (QStringList{"Saved card list, for Backend", "Empty state"}));
     QCOMPARE(cardOf("p3")->findChild<QLabel *>("teamProposalWhat")->text(), QStringLiteral("Cancel 1 task"));

@@ -937,6 +937,27 @@ pub(crate) fn validate(team: &Team, offline: &BTreeSet<String>) -> Validation {
             ));
         }
     }
+    // Owner feedback 2026-11-04 (13): a member with no account runs on its
+    // computer's default account for its agent; the preflight names them, so
+    // the plan, the draft and the approval show it before anything starts.
+    let defaults: Vec<String> = team
+        .members
+        .iter()
+        .filter(|member| member.state != MemberState::Removed && member.account.trim().is_empty() && member.session.is_none())
+        .map(|member| format!("{} ({})", team.name_of(&member.id), member.agent))
+        .collect();
+    if !defaults.is_empty() {
+        found.warnings.push(finding(
+            "account",
+            None,
+            None,
+            format!(
+                "{} start on their computer's default account; set \"account\" to choose another: {}",
+                if defaults.len() == 1 { "1 member".to_owned() } else { format!("{} members", defaults.len()) },
+                defaults.join(", ")
+            ),
+        ));
+    }
     let count = team.capped_members();
     if count > team.settings.max_members {
         found.warnings.push(finding(
@@ -1368,7 +1389,8 @@ mod tests {
         assert_eq!(kinds, vec!["assignee", "dependency", "cycle"]);
         assert_eq!(found.errors[2].tasks, vec![2, 3]);
         let warnings: Vec<&str> = found.warnings.iter().map(|f| f.kind).collect();
-        assert_eq!(warnings, vec!["offline", "members"]);
+        // Feedback 13: members without an account are named too.
+        assert_eq!(warnings, vec!["offline", "account", "members"]);
         // Cancelled tasks need no assignee.
         t.tasks[0].status = Cancelled;
         assert!(validate(&t, &BTreeSet::new()).errors.iter().all(|f| f.task != Some(1)));

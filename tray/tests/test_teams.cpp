@@ -1255,7 +1255,7 @@ void TestTeams::proposalsSwapsLimitsAndHostsRead()
     QCOMPARE(proposalText(team, team.proposals[0]), QStringLiteral("Swap %1 to codex, gpt-5.5").arg(role));
     QCOMPARE(proposalText(team, team.proposals[1]), QStringLiteral("Remove %1").arg(role));
     QCOMPARE(proposalText(team, team.proposals[2]), QStringLiteral("Next goal: Saved cards"));
-    QCOMPARE(proposalText(team, team.proposals[3]), QStringLiteral("Add Designer (claude)"));
+    QCOMPARE(proposalText(team, team.proposals[3]), QStringLiteral("Add Designer (claude, default account)"));
     QCOMPARE(proposalText(team, team.proposals[4]), QStringLiteral("Swap %1 to the session claude/x/spare").arg(role));
     QVERIFY(resetText(0).isEmpty());
     QVERIFY(resetText(4000).startsWith(QStringLiteral("resets ")));

@@ -1332,6 +1332,9 @@ QString proposedMember(const Team &team, const QJsonObject &object, const QStrin
     QStringList how;
     for (const auto *key : {"agent", "model", "effort", "account"})
         if (const auto value = object.value(QLatin1String(key)).toString(); !value.isEmpty()) how << value;
+    // Feedback 2026-11-04 (13): a member without an account runs on its
+    // computer's default one; the card says so instead of showing nothing.
+    if (object.value("account").toString().isEmpty() && !object.contains("session")) how << tr("default account");
     // #724: no dots as separators (the card shows on Waiting for you too).
     return how.isEmpty() ? role : QStringLiteral("%1 (%2)").arg(role, how.join(QStringLiteral(", ")));
 }

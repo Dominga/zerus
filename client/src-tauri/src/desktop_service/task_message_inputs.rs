@@ -6,7 +6,7 @@
 //! retries a release nor guesses its outcome.
 use super::creation_clone::Read;
 use super::*;
-use serde::Serialize;
+use serde::{Deserialize, Serialize};
 use zerus_client_core::desktop::{
     task_message::{
         review::{self, Cursor, Entry, List, Observation, Outcome, Page, Release, Released},
@@ -220,19 +220,62 @@ pub(crate) fn release(service: Option<Arc<Service>>, request_id: &str, listing: 
             false,
             None,
         )
-        .ok()
-        .and_then(|bytes| serde_json::from_slice::<Released>(&bytes).ok())
-        .filter(|released| released.matches(&release));
-    answer(reply.as_ref())
+        .ok();
+    answer(reply.as_deref(), &release)
 }
 
-fn answer(reply: Option<&Released>) -> Answer {
-    match reply.map(|released| (released.outcome, released.code.as_str())) {
-        Some((Outcome::Removed, _)) => Answer::Removed,
-        Some((Outcome::Released, _)) => Answer::Released,
-        Some((Outcome::Kept, review::CHANGED)) => Answer::Changed,
-        Some((Outcome::Kept, _)) => Answer::Kept,
-        Some((Outcome::Unknown, _)) | None => Answer::Unknown,
+/// The review's own refusal before any claim.
+#[derive(Deserialize)]
+#[serde(deny_unknown_fields)]
+struct ReviewRefusal {
+    abi: String,
+    read_only: bool,
+    #[allow(dead_code)]
+    code: String,
+}
+/// The native lane's refusal before the review saw the request.
+#[derive(Deserialize)]
+#[serde(deny_unknown_fields)]
+struct LaneRefusal {
+    request_id: Option<String>,
+    accepted: bool,
+    durable: bool,
+    #[allow(dead_code)]
+    code: String,
+}
+
+/// What `reply` says about `release`. Only this release's own reply or an
+/// exact refusal before any claim is definite; anything else, a lost reply
+/// included, is Unknown.
+fn answer(reply: Option<&[u8]>, release: &Release) -> Answer {
+    let Some(bytes) = reply else {
+        return Answer::Unknown;
+    };
+    if let Ok(released) = serde_json::from_slice::<Released>(bytes) {
+        if !released.matches(release) {
+            return Answer::Unknown;
+        }
+        return match (released.outcome, released.code.as_str()) {
+            (Outcome::Removed, _) => Answer::Removed,
+            (Outcome::Released, _) => Answer::Released,
+            (Outcome::Kept, review::CHANGED) => Answer::Changed,
+            (Outcome::Kept, _) => Answer::Kept,
+            (Outcome::Unknown, _) => Answer::Unknown,
+        };
+    }
+    let refused = serde_json::from_slice::<ReviewRefusal>(bytes)
+        .is_ok_and(|r| r.abi == zerus_client_core::desktop::task_message::ABI && !r.read_only)
+        || serde_json::from_slice::<LaneRefusal>(bytes).is_ok_and(|r| {
+            !r.accepted
+                && !r.durable
+                && r.request_id
+                    .as_deref()
+                    .is_none_or(|id| id == release.release_id)
+        });
+    if refused {
+        Answer::Kept
+    } else {
+        Answer::Unknown
     }
 }
 
@@ -362,36 +405,79 @@ mod tests {
     }
 
     #[test]
-    fn only_a_changed_code_reads_as_changed_and_no_reply_is_unknown() {
-        let reply = |outcome, code: &str| Released {
-            abi: "x".into(),
-            release_id: "r".into(),
-            request_id: "q".into(),
+    fn only_this_release_or_an_exact_refusal_is_definite() {
+        let release = Release {
             scope: scope(1),
-            outcome,
-            code: code.into(),
+            release_id: "00000000-0000-4000-8000-000000000003".into(),
+            request_id: "00000000-0000-4000-8000-000000000002".into(),
+            state: "orphaned".into(),
+            bytes: 10,
+            input_sha256: "a".repeat(64),
+            observed: None,
         };
-        assert_eq!(answer(Some(&reply(Outcome::Removed, ""))), Answer::Removed);
+        let reply = |outcome, code: &str| {
+            serde_json::to_vec(&Released {
+                abi: zerus_client_core::desktop::task_message::ABI.into(),
+                release_id: release.release_id.clone(),
+                request_id: release.request_id.clone(),
+                scope: scope(1),
+                outcome,
+                code: code.into(),
+            })
+            .unwrap()
+        };
+        let read = |bytes: &[u8]| answer(Some(bytes), &release);
+        assert_eq!(read(&reply(Outcome::Removed, "")), Answer::Removed);
+        assert_eq!(read(&reply(Outcome::Released, "")), Answer::Released);
         assert_eq!(
-            answer(Some(&reply(Outcome::Released, ""))),
-            Answer::Released
-        );
-        assert_eq!(
-            answer(Some(&reply(Outcome::Kept, review::CHANGED))),
+            read(&reply(Outcome::Kept, review::CHANGED)),
             Answer::Changed
         );
         assert_eq!(
-            answer(Some(&reply(
-                Outcome::Kept,
-                "task_message_input_review_busy"
-            ))),
+            read(&reply(Outcome::Kept, "task_message_input_review_busy")),
             Answer::Kept
         );
         assert_eq!(
-            answer(Some(&reply(Outcome::Unknown, review::CHANGED))),
+            read(&reply(Outcome::Unknown, review::CHANGED)),
             Answer::Unknown
         );
-        assert_eq!(answer(None), Answer::Unknown);
+        assert_eq!(answer(None, &release), Answer::Unknown);
+        // Another release's reply is never this one's.
+        let mut other: Value = serde_json::from_slice(&reply(Outcome::Removed, "")).unwrap();
+        other["release_id"] = json!("00000000-0000-4000-8000-000000000009");
+        assert_eq!(read(&serde_json::to_vec(&other).unwrap()), Answer::Unknown);
+        // Exact refusals before any claim: nothing changed.
+        for refusal in [
+            json!({"abi": zerus_client_core::desktop::task_message::ABI, "read_only": false,
+                "code": "task_message_input_review_refused"}),
+            json!({"request_id": null, "accepted": false, "durable": false,
+                "code": "frontend_authentication_required"}),
+            json!({"request_id": release.release_id, "accepted": false, "durable": false,
+                "code": "task_message_input_release_unsupported"}),
+        ] {
+            assert_eq!(
+                read(&serde_json::to_vec(&refusal).unwrap()),
+                Answer::Kept,
+                "{refusal}"
+            );
+        }
+        // Anything else stays unknown.
+        for unclear in [
+            json!({"abi": "desktop-task-message-v0", "read_only": false, "code": "x"}),
+            json!({"abi": zerus_client_core::desktop::task_message::ABI, "read_only": true, "code": "x"}),
+            json!({"request_id": "00000000-0000-4000-8000-000000000009", "accepted": false,
+                "durable": false, "code": "x"}),
+            json!({"request_id": null, "accepted": true, "durable": false, "code": "x"}),
+            json!({"request_id": null, "accepted": false, "durable": false, "code": "x", "extra": 1}),
+            json!({}),
+        ] {
+            assert_eq!(
+                read(&serde_json::to_vec(&unclear).unwrap()),
+                Answer::Unknown,
+                "{unclear}"
+            );
+        }
+        assert_eq!(read(b"not json"), Answer::Unknown);
     }
 
     #[test]

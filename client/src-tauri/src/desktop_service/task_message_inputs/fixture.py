@@ -28,7 +28,8 @@ elif sys.argv[1:3] in [['desktop', 'frontend-request'], ['desktop', 'request']]:
             sys.exit(0)
         if sys.argv[2] != 'frontend-request':
             # As the service does: a native release only on its own lane.
-            print(json.dumps(dict(accepted=False, code='frontend_authentication_required')))
+            print(json.dumps(dict(request_id=None, accepted=False, durable=False,
+                                  code='frontend_authentication_required')))
             sys.exit(0)
         if c.get('release_lost'):
             sys.exit(1)

@@ -1607,6 +1607,7 @@ mod actor {
         }
         /// A script image that records its stdin and answers with the exact
         /// reply of the call it was given.
+        #[cfg(target_os = "linux")]
         fn replying_image(dir: &std::path::Path) -> (PathBuf, PathBuf) {
             let path = dir.join("hgs");
             let seen = dir.join("stdin");

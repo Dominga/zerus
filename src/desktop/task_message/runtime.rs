@@ -1,9 +1,8 @@
 //! One fixed local task message executor, independent of the UI lifetime.
 //! Native admission, the message step and original resource drain are
 //! separate.
-#[cfg(target_os = "linux")]
-use super::child;
-use super::{child::Ended, consent::Consent, ledger, staging};
+use super::child::{self, Ended};
+use super::{consent::Consent, ledger, staging};
 
 mod reference;
 use crate::desktop::creation_clone::lease::{Lease, Machine};

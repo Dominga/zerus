@@ -139,6 +139,7 @@ fn read_limit(name: &str, limit: Option<u64>) -> Result<Value> {
     {
         return Err(format!("{name}: invalid saved binding"));
     }
+    session_id::verify(&record)?;
     journal::repair_kimi_main(&mut record);
     journal::repair_claude_internal(&mut record);
     claude_subagents::reconcile(&mut record);
@@ -175,18 +176,42 @@ pub(super) fn atomic_record(path: &Path, record: &mut Value) -> Result<()> {
 /// Names are mutable; provider hooks and already-running supervisors retain
 /// their original environment. The run token is the immutable binding identity.
 pub(super) fn read_run(name: &str, run_id: &str) -> Result<Option<Value>> {
+    read_session_run(name, run_id, None)
+}
+
+/// `read_run` for the agent's own hooks, which also know the session they were
+/// launched for (`HGS_SESSION_ID`, zerus-ucck P1). Only callers whose name and
+/// run come from that same environment use it; a command an agent runs for
+/// another session keeps `read_run`. It never depends on the ID surviving
+/// an older hgs.
+pub(super) fn read_own_run(name: &str, run_id: &str) -> Result<Option<Value>> {
+    read_session_run(name, run_id, nonempty_env("HGS_SESSION_ID").as_deref())
+}
+
+/// `session` is a hint, never a requirement: an older hgs can rebuild the
+/// record without its ID and the next write here assigns a new one, while the
+/// agent keeps the ID it was launched with. The record found by name is taken
+/// at once only when it carries `session`. Otherwise the run scan prefers the
+/// records launched for `session` and, when none is, the run alone decides, as
+/// before P1. Name-first is safe only while names are unique (P3 needs P2's ID
+/// layout first).
+fn read_session_run(name: &str, run_id: &str, session: Option<&str>) -> Result<Option<Value>> {
     if run_id.is_empty() {
         return Ok(None);
     }
+    let launched_for =
+        |record: &Value| session.is_none_or(|id| string(record, "session_id") == id);
     if record_path(name).exists() {
         let record = read(name)?;
-        if string(&record, "run_id") == run_id {
+        if string(&record, "run_id") == run_id && launched_for(&record) {
             return Ok(Some(record));
         }
     }
-    let mut matching = records()?
+    let (own, others): (Vec<Value>, Vec<Value>) = records()?
         .into_iter()
-        .filter(|record| string(record, "run_id") == run_id);
+        .filter(|record| string(record, "run_id") == run_id)
+        .partition(|record| launched_for(record));
+    let mut matching = if own.is_empty() { others } else { own }.into_iter();
     let record = matching.next();
     if matching.next().is_some() {
         return Err("ambiguous session run identity".into());

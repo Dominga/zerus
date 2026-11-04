@@ -49,6 +49,7 @@ mod provider_errors;
 mod recovery;
 mod service_worker;
 mod session_limits;
+pub(crate) mod session_id;
 mod provider_messages;
 mod processes;
 mod prompt_suggestion;

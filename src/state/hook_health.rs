@@ -233,7 +233,7 @@ fn request_id(input: &Value) -> Result<&str> {
     }
     Ok(id)
 }
-fn session_report(name: &str, input: &Value) -> Result<Value> {
+pub(super) fn session_report(name: &str, input: &Value) -> Result<Value> {
     exact_keys(
         input,
         &["request_id", "expected_run_id", "expected_conversation_id"],
@@ -257,6 +257,8 @@ fn session_report(name: &str, input: &Value) -> Result<Value> {
     let bytes = read_bounded(&path, CONFIG_MAX)?.ok_or("No saved hook health binding")?;
     let record: Value =
         serde_json::from_slice(&bytes).map_err(|_| "Invalid hook health binding")?;
+    // A `--session-id` selection must still be this record's (#1355 review).
+    session_id::verify(&record)?;
     if record["name"] != name
         || record["run_id"] != input["expected_run_id"]
         || record["conversation_id"] != input["expected_conversation_id"]

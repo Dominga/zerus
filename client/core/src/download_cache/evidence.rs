@@ -236,6 +236,27 @@ fn folder(root: &Path) -> io::Result<(PathBuf, String, Option<String>)> {
     Ok((canonical, object, birth))
 }
 
+/// A slot whose seed is verified absent: the writer made it and stopped
+/// before publishing anything, a prefix it recovers from. That is "no
+/// evidence" only if the receipt is verified absent too; anything else stays
+/// fenced as Unreadable.
+fn unpublished(slot: &Path) -> Evidence {
+    match missing(&slot.join("receipt.json")) {
+        Ok(true) => Evidence::None,
+        _ => Evidence::Unreadable,
+    }
+}
+
+/// Whether `path` is verified missing: only NotFound says so. Any other
+/// error (a permission, an unreadable parent) is an error, never "missing".
+fn missing(path: &Path) -> io::Result<bool> {
+    match fs::symlink_metadata(path) {
+        Ok(_) => Ok(false),
+        Err(error) if error.kind() == io::ErrorKind::NotFound => Ok(true),
+        Err(error) => Err(error),
+    }
+}
+
 fn slot(canonical: &Path, object: &str, birth: Option<&str>) -> PathBuf {
     let key = format!("{object}\0{}", birth.unwrap_or("-"));
     canonical
@@ -356,7 +377,7 @@ impl Pending {
         let slots = canonical.join(DIR);
         let slot = slot(&canonical, &object, birth.as_deref());
         let _parents = disk::Parents::open(&slots, true)?;
-        if !slot.exists() {
+        if missing(&slot)? {
             // Every raw entry counts, whatever it is, and an unreadable one
             // refuses: a bounded listing that may be incomplete never admits
             // another slot.
@@ -527,8 +548,14 @@ pub enum Evidence {
     Unreadable,
 }
 
-/// What the folder at `root` holds for its current directory object.
-pub fn evidence(root: &Path) -> Evidence {
+/// [`evidence`] by bounded stats only, for a status shown often: the seed
+/// and receipt (64 KiB each) and each part's stamp, never the original's
+/// bytes. A receipt it reports Captured still passes every check a change
+/// makes before relying on it.
+pub fn status(root: &Path) -> Evidence {
+    if fs::symlink_metadata(root).is_err_and(|error| error.kind() == io::ErrorKind::NotFound) {
+        return Evidence::None;
+    }
     let Ok(canonical) = fs::canonicalize(root) else {
         return Evidence::Unreadable;
     };
@@ -541,8 +568,51 @@ pub fn evidence(root: &Path) -> Evidence {
         return Evidence::Unreadable;
     };
     let slot = slot(&canonical, &object, birth.as_deref());
-    if !slot.exists() {
+    match missing(&slot) {
+        Ok(true) => return Evidence::None,
+        Ok(false) => {}
+        Err(_) => return Evidence::Unreadable,
+    }
+    let seed = match read_json::<Seed>(&slot.join("identity.json")) {
+        Ok(Some(seed)) if seed.binds(&object, birth.as_deref()) => seed,
+        Ok(None) => return unpublished(&slot),
+        _ => return Evidence::Unreadable,
+    };
+    match read_json::<Original>(&slot.join("receipt.json")) {
+        Ok(None) => Evidence::None,
+        Ok(Some(receipt)) if receipt.valid(&seed) && receipt.leaf_matches(&slot) => {
+            Evidence::Captured(Box::new(receipt))
+        }
+        _ => Evidence::Unreadable,
+    }
+}
+
+/// What the folder at `root` holds for its current directory object.
+pub fn evidence(root: &Path) -> Evidence {
+    if fs::symlink_metadata(root).is_err_and(|error| error.kind() == io::ErrorKind::NotFound) {
         return Evidence::None;
+    }
+    let Ok(canonical) = fs::canonicalize(root) else {
+        return Evidence::Unreadable;
+    };
+    match place(&canonical) {
+        Place::Local => {}
+        Place::Unsupported => return Evidence::Unsupported,
+        Place::Unknown => return Evidence::Unreadable,
+    }
+    let Ok((canonical, object, birth)) = folder(&canonical) else {
+        return Evidence::Unreadable;
+    };
+    let slot = slot(&canonical, &object, birth.as_deref());
+    match missing(&slot) {
+        Ok(true) => return Evidence::None,
+        Ok(false) => {}
+        Err(_) => return Evidence::Unreadable,
+    }
+    match read_json::<Seed>(&slot.join("identity.json")) {
+        Ok(Some(_)) => {}
+        Ok(None) => return unpublished(&slot),
+        Err(_) => return Evidence::Unreadable,
     }
     match Snapshot::open(&slot, &object, birth.as_deref()) {
         Ok(snapshot) => Evidence::Captured(Box::new(snapshot.receipt)),

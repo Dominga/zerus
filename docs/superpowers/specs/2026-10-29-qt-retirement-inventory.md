@@ -444,6 +444,20 @@ before loading the Qt seed, so prior Next choices still win. Window bounds
 restore within an available display and subsequent moves use Settings; this
 never writes Qt. `tasks/inspectorSplit` still has no equivalent Tasks splitter
 and remains private typed evidence; it never maps to another inspector panel.
+Qt's explicit sessions dock width (`workspace/sessionsWidth`, a 32-bit
+`toInt()` where 0 means Qt's default) has its own `sessions-width` family
+(`.66.5.3.12`), ordered before `session-splitter`. It imports when Next has no
+width, and the splitter then reports neither imported nor kept for that pass.
+It replaces only a width that the handled `session-splitter` family imported
+from these same Qt bytes: the record's hash matches, the value equals the
+splitter conversion and, when the splitter's outcome was recorded, that outcome
+lists `workspace/splitter` as imported. The replaced splitter outcome then
+lists nothing imported or kept, and a record from before outcomes gets that
+empty outcome, so the report shows no superseded splitter row. Any other Next
+width wins. A splitter record from
+before outcomes were recorded (#1243) leaves value equality as the only
+evidence: a width the person set in Next to exactly the splitter's value
+cannot be told apart and is replaced once by the dock width.
 The remembered
 `removeWorktreeAfterTermination` value is retained as private evidence and now
 prefills the `.10.17` Terminate checkbox through one `termination-default` G3

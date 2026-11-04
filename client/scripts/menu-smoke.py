@@ -7,6 +7,7 @@ For the Arch desktop, use flock -w 1800 /tmp/zerus-arch-display.lock and
 No CLI, native agent, installed app or owner data is opened.
 """
 import argparse
+from contextlib import ExitStack
 import json
 import os
 from pathlib import Path
@@ -21,6 +22,7 @@ parser.add_argument("--url", default="http://127.0.0.1:1437/scripts/menu-smoke.h
 parser.add_argument("--real-display", action="store_true")
 parser.add_argument("--title", default="Zerus menu regression (synthetic)")
 parser.add_argument("--probe-display", action="store_true", help="verify the isolated display without opening a window")
+parser.add_argument("--accessibility", action="store_true", help="check reported lists through AT-SPI on private buses")
 parser.add_argument("--xvfb-child", action="store_true", help=argparse.SUPPRESS)
 parser.add_argument("--paint-column", type=int, metavar="X",
                     help="check the presented frames of a page that reports `morphs` (a 4 px column at X through "
@@ -37,6 +39,8 @@ if not args.url.startswith("http://127.0.0.1:"):
     parser.error("use the local Vite server")
 if args.real_display and (args.xvfb_child or args.probe_display):
     parser.error("display probes are private virtual-display checks")
+if args.real_display and args.accessibility:
+    parser.error("accessibility checks require the private virtual display")
 
 if not args.real_display and not args.xvfb_child:
     # Own this server even when invoked from a Wayland desktop or an existing
@@ -51,6 +55,9 @@ if not args.real_display and not args.xvfb_child:
         command += ["--paint-row", str(args.paint_row)]
     if args.probe_display:
         command.append("--probe-display")
+    if args.accessibility:
+        env["ZERUS_MENU_A11Y_PARENT_BUS"] = os.environ.get("DBUS_SESSION_BUS_ADDRESS", "")
+        command = ["dbus-run-session", "--", *command, "--accessibility"]
     # Debian/Ubuntu xvfb-run runs its command with 2>&1. Hand the child this
     # stderr as an inherited descriptor, so its reasons (a missing GTK stack,
     # a refused display) stay on stderr and stdout carries only the result.
@@ -223,13 +230,17 @@ def painted_once(frames, opens, height):
             "paint_failures": failures}
 
 
-with tempfile.TemporaryDirectory(prefix="zerus-menu-") as scratch:
+with tempfile.TemporaryDirectory(prefix="zerus-menu-") as scratch, ExitStack() as cleanup:
     for variable, directory in [("HOME", "home"), ("XDG_CONFIG_HOME", "config"),
                                 ("XDG_DATA_HOME", "data"), ("XDG_CACHE_HOME", "cache")]:
         path = Path(scratch, directory)
         path.mkdir()
         os.environ[variable] = str(path)
     os.environ["GSETTINGS_BACKEND"] = "memory"
+    if args.accessibility:
+        from accessibility_smoke import check_lists, private_bus
+        import threading
+        cleanup.enter_context(private_bus(scratch))
     import gi
     gi.require_version("Gtk", "3.0")
     gi.require_version("Gdk", "3.0")
@@ -267,7 +278,22 @@ with tempfile.TemporaryDirectory(prefix="zerus-menu-") as scratch:
         Gtk.main_quit()
 
     def received(_manager, value):
-        finish(json.loads(value.get_js_value().to_string()))
+        report = json.loads(value.get_js_value().to_string())
+        if not args.accessibility:
+            finish(report)
+            return
+
+        def inspect():
+            try:
+                native = check_lists(report.get("accessibility_lists"), os.getpid())
+                report.update(native)
+                if native.get("accessibility_failure"):
+                    report.setdefault("failures", []).append(native["accessibility_failure"])
+            except Exception as error:
+                report.setdefault("failures", []).append(f"Accessibility read failed: {error}")
+            GLib.idle_add(lambda: finish(report))
+
+        threading.Thread(target=inspect, daemon=True).start()
 
     def deadline():
         finish({"failures": [f"{args.title} exceeded 30 seconds"]})

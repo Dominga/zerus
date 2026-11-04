@@ -28,6 +28,10 @@ _hold = importlib.util.module_from_spec(_spec)
 _spec.loader.exec_module(_hold)
 Refusal = _hold.Refusal
 
+_spec = importlib.util.spec_from_file_location("desktop_service_activation", Path(__file__).with_name("desktop-service-activation.py"))
+_activation = importlib.util.module_from_spec(_spec)
+_spec.loader.exec_module(_activation)
+
 
 class PendingRestart(Refusal):
     """Registration is durable; restarting needs the current graphical login."""
@@ -238,6 +242,10 @@ class Installer:
         self.configuration = self.registration["configuration"]
         self.binary = binary_digest(self.hgs)
         self.last_status = None
+        self.activation = None
+        self.activation_journal = None
+        self.activation_binding = None
+        self.activation_image = None
 
     def cli(self, *args, timeout=10):
         probe = self.registration["readiness"]
@@ -269,10 +277,15 @@ class Installer:
                 and all(valid_uuid(value.get(key)) for key in ("journal", "request_id", "owner_epoch"))
                 and type(value.get("revision")) is int and 0 < value["revision"] < 2 ** 53,
                 "open Zerus Next in service mode and complete Grant/Rearm first; a retained revoke is never cleared by this installer")
+        if self.activation_binding is not None:
+            require(_activation.binding(self.configuration, self.binary, digest(self.definition), value)
+                    == self.activation_binding, "Original activation Grant changed; check its original result.")
         return value
 
     def manager(self, *args):
         self.fence()
+        if args and args[0] in ("daemon-reload", "enable", "unset-environment", "import-environment", "start", "restart"):
+            self.enter_activation_effect()
         value = self.run(["systemctl", "--user", *args], self.env)
         self.fence()
         return value
@@ -280,6 +293,10 @@ class Installer:
     def fence(self):
         if self.rollback_hold is not None:
             self.rollback_hold.check()
+        if self.activation is not None:
+            self.caller()
+            self.grant()
+            self.activation_image.check()
 
     def state(self):
         raw = self.manager("show", UNIT, "--property=LoadState,ActiveState,MainPID,FragmentPath,DropInPaths", "--no-pager")
@@ -308,6 +325,9 @@ class Installer:
                         "invalid desktop registration record; kept")
                 require(record.get("mode", "passive") in ("passive", "background"),
                         "invalid desktop registration mode; kept")
+                require(record.get("mode_selection", "retained") in ("default", "explicit", "retained"),
+                        "invalid desktop mode selection provenance; kept")
+                _activation.checked_entries(record)
                 transition = record.get("transition")
                 if transition is not None:
                     require(isinstance(transition, dict) and set(transition) == {"target", "request_id"}
@@ -357,6 +377,25 @@ class Installer:
         write_file(self.record_path, (json.dumps(record, indent=2) + "\n").encode())
         self.fence()
 
+    def activation_result(self, request_id):
+        # Read-only, including after a different helper process lost its reply.
+        # A status observation never completes an unknown original.
+        journal = _activation.Journal(self.ownership, lambda _: None)
+        return journal.lookup(request_id, self.configuration)
+
+    def begin_activation(self, request_id):
+        self.activation_image = _activation.Image(self.hgs)
+        require(self.activation_image.digest == self.binary, "Original activation CLI changed; check its result.")
+        self.caller()
+        grant = self.grant()
+        self.activation_journal = _activation.Journal(self.ownership, self.save)
+        self.activation_binding = _activation.binding(self.configuration, self.binary, digest(self.definition), grant)
+        self.activation = self.activation_journal.reserve(request_id, self.activation_binding)
+
+    def enter_activation_effect(self):
+        if self.activation is not None and not self.activation.effect_started:
+            self.activation_journal.enter_effect(self.activation)
+
     def status(self):
         previous = self.ownership()
         state = self.state()
@@ -366,6 +405,8 @@ class Installer:
         return {"schema": 1, "operation": "status", "configuration": self.configuration,
                 "label": UNIT, "registered": previous is not None,
                 "selected_mode": previous.get("mode", "passive") if previous else "passive",
+                "mode_selection": previous.get("mode_selection", "retained") if previous else None,
+                "activation_pending": _activation.pending(previous) if previous else None,
                 "running_mode": lifecycle.get("mode"), "ipc_ready": lifecycle.get("ipc_ready", False),
                 "pending_restart": previous.get("pending_restart", False) if previous else False,
                 "last_revoke_request_id": previous.get("last_revoke_request_id") if previous else None,
@@ -442,7 +483,11 @@ class Installer:
                           f"--request-id {transition['request_id']} before choosing a new mode.") from error
         return transition
 
-    def install(self, *, check=False, no_start=False, session=False, refresh=False):
+    def install(self, *, check=False, no_start=False, session=False, refresh=False, activation_id=None, default_only=False):
+        require(not default_only or activation_id is not None, "default activation requires its original UUID")
+        require(activation_id is None or (_activation.canonical_uuid(activation_id)
+                and self.requested_mode == "background" and not (check or no_start or session or refresh)),
+                "activation requires install --mode background and its original UUID")
         require(self.requested_mode is None or not refresh, "refresh preserves mode; use install --mode for an explicit transition")
         previous = self.ownership()
         if refresh and previous is None:
@@ -463,6 +508,14 @@ class Installer:
                     "desktop installer lock is not a private owned file")
             fcntl.flock(fd, fcntl.LOCK_EX | fcntl.LOCK_NB)
             previous = self.ownership()
+            if activation_id is not None:
+                require(previous is not None, "Register the passive backend before activation.")
+                original = self.activation_result(activation_id)
+                if original["phase"] != "missing":
+                    return original
+                require(not default_only or (previous.get("mode_selection", "retained") == "default"
+                        and previous.get("mode", "passive") == "passive"),
+                        "Explicit or retained selection needs the owner's Resume action; kept.")
             state = self.state()
             require(self.requested_mode is not None or previous is None
                     or previous.get("mode", "passive") == self.mode,
@@ -495,11 +548,17 @@ class Installer:
                     previous.get("mode", "passive") == "background" or transition
                     or (active and current.get("mode") == "background")):
                 transition = self.rollback(previous)
+            if activation_id is not None:
+                self.begin_activation(activation_id)
+                previous = self.ownership()  # Includes the durable original reservation.
             context = None if no_start or (refresh and not active) else graphics(self.env)
             changed = previous is None or previous.get("binary_sha256") != self.binary or previous.get("definition_sha256") != digest(self.definition)
             record = {"schema": 1, "configuration": self.configuration, "definition_sha256": digest(self.definition),
                       "binary_sha256": self.binary, "pending_restart": bool(active and (changed or previous.get("pending_restart", False))),
-                      "session": previous.get("session") if previous else None, "mode": self.mode}
+                      "session": previous.get("session") if previous else None, "mode": self.mode,
+                      # Routing provenance only; native caller/current Grant checks remain independent.
+                      "mode_selection": "explicit" if explicit else (
+                          previous.get("mode_selection", "retained") if previous else "default")}
             if transition is not None:
                 record["transition"] = transition
             last_revoke = transition["request_id"] if transition else (previous or {}).get("last_revoke_request_id")
@@ -507,6 +566,8 @@ class Installer:
                 record["last_revoke_request_id"] = last_revoke
             if previous and previous.get("last_cancelled_rollback_request_id"):
                 record["last_cancelled_rollback_request_id"] = previous["last_cancelled_rollback_request_id"]
+            if previous and "activations" in previous:
+                record["activations"] = previous["activations"]
             if session:
                 require(previous is not None, "register the desktop service before starting its session")
             if explicit:
@@ -515,8 +576,10 @@ class Installer:
                     self.grant()
             if read_file(self.destination) != self.definition:
                 self.fence()
+                self.enter_activation_effect()
                 write_file(self.destination, self.definition)
                 self.fence()
+            self.enter_activation_effect()
             self.save(record)
             if explicit:
                 self.caller()
@@ -568,18 +631,26 @@ class Installer:
             record.update(session=context, pending_restart=False)
             record.pop("transition", None)
             self.save(record)
+            if self.activation is not None:
+                self.fence()
+                self.activation_journal.finish(self.activation, ready=True)
+                return self.activation_result(activation_id)
             return "Desktop service IPC ready. Background workers have their separate lifecycle status."
         finally:
             try:
                 if self.rollback_hold is not None:
                     self.rollback_hold.close()
             finally:
-                os.close(fd)  # Retain the installer lock through the original hold's join.
+                try:
+                    if self.activation_image is not None:
+                        self.activation_image.close()
+                finally:
+                    os.close(fd)  # Retain the installer lock through the original hold's join.
 
 
 def main():
-    parser = argparse.ArgumentParser(description=__doc__)
-    parser.add_argument("action", choices=("install", "session", "refresh", "status", "cancel-rollback"), nargs="?", default="install")
+    parser = argparse.ArgumentParser(description=__doc__, epilog="Desktop service activation ABI: " + _activation.ABI)
+    parser.add_argument("action", choices=("install", "session", "refresh", "status", "cancel-rollback", "activation-status"), nargs="?", default="install")
     parser.add_argument("--hgs", default=shutil.which("hgs"))
     parser.add_argument("--config-dir")
     parser.add_argument("--state-dir")
@@ -588,6 +659,8 @@ def main():
     parser.add_argument("--mode", choices=("passive", "background"), help="explicit owner selection; omitted preserves the registered mode")
     parser.add_argument("--json", action="store_true", help="stable configuration-scoped receipt for the native Settings action")
     parser.add_argument("--request-id", help="with cancel-rollback: the original pending rollback UUID to cancel")
+    parser.add_argument("--activation-id", help="original activation UUID; install --mode background or activation-status only")
+    parser.add_argument("--default-only", action="store_true", help="refuse unless the locked selection is still newly installed implicit passive")
     args = parser.parse_args()
     instance = None
     def failed(code, error):
@@ -628,13 +701,26 @@ def main():
             print("No managed desktop registration; CLI-only installation kept without a new service.")
             return 0
         require(args.action != "status" or args.mode is None, "status cannot select a mode")
+        require(args.activation_id is None or (_activation.canonical_uuid(args.activation_id)
+                and ((args.action == "install" and args.mode == "background" and not (args.check or args.no_start))
+                     or (args.action == "activation-status" and args.mode is None))),
+                "activation accepts only install --mode background or read-only activation-status")
+        require(args.action != "activation-status" or args.activation_id is not None,
+                "activation-status requires its original --activation-id")
+        require(not args.default_only or (args.action == "install" and args.activation_id is not None),
+                "default-only requires the original activation install")
         instance = Installer(args.hgs, env, mode=args.mode)
-        if args.action == "status":
+        if args.action == "activation-status":
+            print(json.dumps(instance.activation_result(args.activation_id)))
+        elif args.action == "status":
             print(json.dumps(instance.status()))
         else:
             result = instance.cancel_rollback(args.request_id) if args.action == "cancel-rollback" else instance.install(
-                check=args.check, no_start=args.no_start, session=args.action == "session", refresh=args.action == "refresh")
-            if args.json:
+                check=args.check, no_start=args.no_start, session=args.action == "session", refresh=args.action == "refresh",
+                activation_id=args.activation_id, default_only=args.default_only)
+            if isinstance(result, dict):
+                print(json.dumps(result))
+            elif args.json:
                 print(json.dumps(dict(instance.status(), operation=args.action, ok=True, message=result)))
             else:
                 print(result)
@@ -643,7 +729,7 @@ def main():
         failed("restart_pending", error)
         print(f"Desktop service refresh pending: {error}", file=sys.stderr)
         return 3
-    except (Refusal, OSError, ValueError, subprocess.SubprocessError) as error:
+    except (Refusal, _activation.Refusal, OSError, ValueError, subprocess.SubprocessError) as error:
         failed("registration_refused", error)
         print(f"Desktop service registration refused: {error}", file=sys.stderr)
         return 1

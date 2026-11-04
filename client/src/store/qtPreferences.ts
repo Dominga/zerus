@@ -31,6 +31,7 @@ const FAMILY_LABELS: Record<string, () => string> = {
   "termination-default": () => tr("Remove the worktree after Terminate"),
   "project-vivid": () => tr("Project colors"),
   "window-geometry": () => tr("Window size and position"),
+  "sessions-width": () => tr("Sessions list width"),
   "session-splitter": () => tr("Sessions list width"),
   "project-folder-splitter": () => tr("Project folders width"),
   "inspector-panel": () => tr("Side panel"),

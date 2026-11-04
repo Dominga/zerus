@@ -23,9 +23,38 @@ native Service mode and the exact configuration authenticate it. Generic
 `into_request` refuses it, and it has its own ordering lane. On Linux and
 macOS the service advertises `Desktop creation launch ABI:
 desktop-creation-launch-v1`, and the admitted desktop actor executes it.
-Windows answers `creation_launch_unsupported` and advertises nothing. The
-client keeps its direct launch until a separate default-off service path
-lands.
+Windows answers `creation_launch_unsupported` and advertises nothing.
+
+On Linux and macOS in desktop-service mode only (default-off), the native
+creation host sends a local detached launch of the closed agent set to the
+service (`client/src-tauri/src/desktop_service/creation_launch.rs`):
+- **Fresh intent.** Only native consent in the current host sends a fresh
+  intent, built from the exact durable launch checkpoint and consumed once,
+  separately from clone and worktree:
+  - a Submit, direct or from the task executor's Start (the same New session
+    button, with a reserved identity);
+  - an explicit Continue setup's consent for exactly its next service step
+    (zerus-5wmh.66.4.3.9), when that step is this launch with the launch ID
+    reserved before the Continue.
+- **Never sent.** The reducer dispatches a launch only with a launch ID it
+  reserved in this process. A launch without fresh consent, or one that stops
+  before its admission request is written, was never sent. `launch_unsent`
+  then retires the unused launch ID into the history, reserves a new one and
+  fails the creation. It stays resumable: an explicit Continue grants the
+  consent.
+- **Results.** A Launched original reports launch success, and the session
+  listing still binds it. A failed or Unknown original reports the launch as
+  unconfirmed, as the direct path's failure does today, and so does a lost
+  admission reply whose bounded read-only lookup does not settle. An
+  unconfirmed launch is never sent again and never falls back to the direct
+  launch.
+- **Older service.** When a completed capability probe shows that the
+  selected service lacks the kind, the launch takes the unchanged direct
+  path; nothing reached that service. A probe that fails is no such proof:
+  the launch was not sent and fails as above.
+
+External-terminal launches, remote hosts, DeepSeek hosts, OpenCode and every
+launch outside desktop-service mode keep the direct launch.
 
 ## Actor
 

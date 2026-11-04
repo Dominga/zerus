@@ -26,6 +26,7 @@ export function createDesktopService() {
 }
 export const desktopService = createDesktopService();
 export const retryDesktopService = () => invoke<void>("desktop_service_retry");
+export const checkDesktopServiceStatus = (epoch: string) => invoke<void>("desktop_service_check_status", { epoch });
 
 export function pendingReadNotice(state: DesktopService | undefined): string {
   const transfer = state?.pending_read_import;
@@ -47,6 +48,7 @@ export function retainedSourceNotice(state: DesktopService | undefined): string 
   const report = state?.retained_source_import;
   const drafts = report?.drafts_capture;
   if (drafts && !drafts.writes) return tr("Drafts are not being saved because their earlier versions could not be recorded. Check the Zerus data folder, then retry.");
+  if (report?.downloads_capture?.code === "download_capture_unreadable") return tr("Changes to the downloaded files folder are refused because its earlier index record could not be verified. Existing files are kept.");
   if (report?.local_read_capture?.paused) return tr("Local read marks are paused while their original file is preserved. Review the migration report and retry.");
   const captureNotice = creationCaptureNotice(report);
   if (captureNotice) return captureNotice;
@@ -64,6 +66,12 @@ export function retainedSourceNotice(state: DesktopService | undefined): string 
     if (["creations_import_waiting", "creations_import_source_resources_pending", "creations_import_handoff_busy", "creations_import_before_record"].includes(creations.code)) return tr("The saved creation report is deferred. Your sessions remain available; Retry keeps the original report identity.");
     return tr("The saved creation report needs review. An unconfirmed publication will only be looked up, never resent.");
   }
+  const cache = report?.worktree_cache_report;
+  if (cache?.required && !cache.complete) {
+    if (cache.running) return tr("Preparing the historical folder catalog report. Your sessions remain available.");
+    if (cache.phase !== "unknown" && ["worktree_cache_import_waiting", "worktree_cache_import_source_resources_pending", "worktree_cache_import_handoff_busy", "worktree_cache_import_before_record"].includes(cache.code)) return tr("The historical folder catalog report is deferred. Retry keeps the original report identity.");
+    return tr("The historical folder catalog report needs review. An unconfirmed publication will only be looked up, never resent.");
+  }
   if (!report?.required || !report.code || report.code === "retained_import_staged") return "";
   if (report.running) return tr("Preparing the migration report. Your sessions remain available.");
   if (report.code === "retained_import_handoff_busy") return tr("The migration report is deferred while background work is running.");
@@ -74,7 +82,7 @@ export function retainedSourceNotice(state: DesktopService | undefined): string 
 const DRAFTS_RECORDED = ["draft_capture_waiting", "draft_capture_captured", "draft_capture_not_applicable"];
 
 export interface MigrationReportDetail { reason: string; next: string; code: string; phase: string | null }
-export type MigrationReportDetails = Partial<Record<"settings" | "creations" | "capture" | "localReads" | "localReadsReport" | "drafts" | "worktreeCache", MigrationReportDetail>>;
+export type MigrationReportDetails = Partial<Record<"settings" | "creations" | "capture" | "localReads" | "localReadsReport" | "drafts" | "downloads" | "worktreeCache" | "worktreeCacheReport", MigrationReportDetail>>;
 
 /** Independent native report reasons. Reviewing never retries or publishes. */
 export function retainedSourceDetails(state: DesktopService | undefined): MigrationReportDetails | undefined {
@@ -119,6 +127,30 @@ export function retainedSourceDetails(state: DesktopService | undefined): Migrat
     }
     details.localReadsReport = { reason, next, code: local.code, phase: local.phase };
   }
+  const cache = report.worktree_cache_report;
+  if (cache?.required) {
+    let reason: string, next: string;
+    if (cache.phase === "unknown" || ["worktree_cache_import_original_result_unconfirmed", "worktree_cache_import_result_unavailable"].includes(cache.code)) {
+      reason = tr("The original migration report result is unconfirmed.");
+      next = tr("Retry checks the original report result. It does not publish another copy of an unconfirmed report.");
+    } else if (cache.running) {
+      reason = tr("Preparing the historical folder catalog report. Your sessions remain available.");
+      next = tr("Your sessions remain available while the report is prepared.");
+    } else if (cache.phase === "before_record" && cache.code === "worktree_cache_import_before_record") {
+      reason = tr("The historical folder catalog report was not sent because local preparation failed.");
+      next = tr("Check access to the original journal and the Zerus data folder, then use Retry. The original report identity is preserved.");
+    } else if (cache.complete) {
+      reason = tr("The migration report has been saved for review.");
+      next = tr("This historical folder catalog report does not verify today's checkouts or authorize worktree creation or cleanup.");
+    } else if (["worktree_cache_import_waiting", "worktree_cache_import_source_resources_pending", "worktree_cache_import_handoff_busy"].includes(cache.code)) {
+      reason = tr("The historical folder catalog report is deferred. Retry keeps the original report identity.");
+      next = tr("Wait for background work to finish, then retry.");
+    } else {
+      reason = tr("The historical folder catalog report needs review. An unconfirmed publication will only be looked up, never resent.");
+      next = tr("Keep the original settings and report for review before attempting another migration.");
+    }
+    details.worktreeCacheReport = { reason, next, code: cache.code, phase: cache.phase };
+  }
   const capture = report.creations_capture;
   if (capture?.paused) details.capture = {
     reason: creationCaptureNotice(report), next: tr("Check the original journal and archive access before retrying."),
@@ -141,6 +173,14 @@ export function retainedSourceDetails(state: DesktopService | undefined): Migrat
         ? tr("Retry imports the drafts from Qt. The earlier drafts stay unrecorded; Retry never records them later.")
         : tr("This part of the migration report stays incomplete. Retry never records the earlier drafts later."),
     code: drafts.code, phase: null,
+  };
+  // The download folder's evidence: shown only when it is incomplete. It is
+  // never consent to download, remove or clean up anything.
+  const downloads = report.downloads_capture;
+  if (downloads && ["download_capture_unsupported", "download_capture_unreadable"].includes(downloads.code)) details.downloads = {
+    reason: downloads.code === "download_capture_unsupported" ? tr("The downloaded files folder is in a location where its earlier index cannot be recorded, so it is not part of the migration report. Downloads keep working.") : tr("Changes to the downloaded files folder are refused because its earlier index record could not be verified. Existing files are kept."),
+    next: downloads.code === "download_capture_unsupported" ? tr("This part of the migration report stays incomplete.") : tr("Check that the folder and its .zerus-files-preload-v1 folder belong to your user and are private. Nothing is recaptured or overwritten."),
+    code: downloads.code, phase: null,
   };
   const code = report.code;
   let reason: string, next: string;
@@ -273,6 +313,12 @@ export const ownershipActions = createOwnershipActions(
 export function ownershipNotice(view: NotificationOwnership | undefined): string {
   if (!view) return "";
   if (view.pending) return tr("Background access is unconfirmed. Check the result before making another change.");
+  if (view.activation?.pending) return tr("Background activation is unconfirmed. Check the original result before making another change.");
+  if (view.activation?.needs_resume) {
+    if (["activation_helper_unavailable", "activation_helper_update_required", "activation_helper_changed"].includes(view.activation.code))
+      return tr("Background activation is unavailable. Update Zerus and its desktop service, then Resume to check again.");
+    return tr("Background work is paused. Resume to activate the service explicitly.");
+  }
   if (view.native_recovery) return tr("Background service is not ready. Some actions are unavailable.");
   if (view.status?.rearm_required) return tr("Background access was revoked. Resume it to let the service work while Zerus is closed.");
   if (view.code || view.status?.state !== "service" || !view.status.identity_current)
@@ -283,8 +329,12 @@ export function ownershipNotice(view: NotificationOwnership | undefined): string
 /** Compact footer presentation; full reasons stay in its accessible tooltip. */
 export function serviceStatus(state: DesktopService | undefined) {
   if (!state) return;
+  const manualRefresh = state.executable_upgrade?.state === "manual_refresh_required";
   let notice = "", label = tr("Background service");
-  if (!state.connected) {
+  if (manualRefresh) {
+    label = tr("Service refresh required");
+    notice = tr("The CLI was updated. The Windows background service needs a manual refresh. See Settings > About.");
+  } else if (!state.connected) {
     label = tr("Background service unavailable");
     notice = state.reconnecting
       ? tr("Background service unavailable. Reconnecting automatically; showing last known sessions.")
@@ -300,14 +350,15 @@ export function serviceStatus(state: DesktopService | undefined) {
     notice = tr("Activity, processes and project tasks are unavailable with this background service connection.");
   }
   const pending = pendingReadNotice(state), retained = retainedSourceNotice(state), owner = ownershipNotice(state.notification_ownership);
-  const ownership = state.notification_ownership?.pending ? "check"
-    : state.notification_ownership?.native_recovery || state.notification_ownership?.status?.rearm_required ? "rearm" : undefined;
+  const ownership = state.notification_ownership?.pending || state.notification_ownership?.activation?.pending ? "check"
+    : !manualRefresh && (state.notification_ownership?.native_recovery || state.notification_ownership?.status?.rearm_required
+      || state.notification_ownership?.activation?.needs_resume) ? "rearm" : undefined;
   if (!notice) {
     if (pending) label = state.pending_read_import?.running ? tr("Transferring read marks") : tr("Read marks need attention");
     else if (retained) label = tr("Migration report");
     else if (owner) label = ownership === "check" ? tr("Background access unconfirmed") : ownership === "rearm" ? tr("Background access paused") : tr("Background access unavailable");
   }
-  const reasons = [notice, pending, retained, owner].filter(Boolean);
+  const reasons = [notice, pending, retained, manualRefresh ? "" : owner].filter(Boolean);
   return { label, details: reasons.join("\n") || tr("Background service connected"), healthy: !reasons.length,
-    retry: !!(notice || pending || retained || (owner && !ownership)), review: !!retained, ownership };
+    retry: !manualRefresh && !!(notice || pending || retained || (owner && !ownership)), review: !!retained, ownership, manualRefresh };
 }

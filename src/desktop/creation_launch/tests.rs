@@ -68,7 +68,9 @@ fn exact_previous_store_upgrade_adds_only_the_independent_launch_leaf() {
             .unwrap(),
         crate::desktop::store::SCHEMA
     );
-    assert_eq!(tables(&store.db), before + 2 + 1);
+    // Its own two tables, then the termination outcome, task message, task
+    // message input and deferred send leaves.
+    assert_eq!(tables(&store.db), before + 2 + 1 + 2 + 2 + 2);
     assert_eq!(ledger::undrained(&store.db).unwrap(), 0);
 }
 
@@ -345,6 +347,23 @@ mod launch_child {
     fn python(script: &str) -> Vec<String> {
         vec!["-c".into(), script.into()]
     }
+    /// Reports whether the descriptor named by `argv[1]` is the file `argv[2]`
+    /// (`dev:ino`), on stdout unless `argv[3]` is `stderr`.
+    const CUSTODY_SCRIPT: &str = r#"import os, sys
+var = sys.argv[1]
+want = sys.argv[2]
+out = sys.stderr if sys.argv[3:] == ["stderr"] else sys.stdout
+named = os.environ.get(var, "")
+if not named.isdigit():
+    print("custody: no variable", end="", file=out)
+    sys.exit(3)
+try:
+    seen = os.fstat(int(named))
+except OSError:
+    print("custody: not inherited", end="", file=out)
+    sys.exit(3)
+print("custody: inherited" if f"{seen.st_dev}:{seen.st_ino}" == want else "custody: another file", end="", file=out)
+"#;
     /// Running, not merely an unreaped zombie of a killed process.
     fn alive(pid: i32) -> bool {
         let state = Command::new("ps")
@@ -386,6 +405,59 @@ mod launch_child {
             Ended::Exited {
                 code: 0,
                 stderr: String::new()
+            }
+        );
+    }
+
+    /// The runner's child holds the actor's exact custody descriptor, named
+    /// by this kind's variable.
+    #[test]
+    fn the_runner_child_inherits_exactly_the_named_custody() {
+        use std::os::fd::AsRawFd;
+        let (_temp, _location, _record, held) = lock();
+        // SAFETY: fstat into a zeroed struct on a descriptor `held` owns.
+        let mut stat: libc::stat = unsafe { std::mem::zeroed() };
+        assert_eq!(unsafe { libc::fstat(held.as_raw_fd(), &mut stat) }, 0);
+        let mut args = vec!["python3".to_string()];
+        args.extend(python(CUSTODY_SCRIPT));
+        args.push(child::CUSTODY_FD.into());
+        args.push(format!("{}:{}", stat.st_dev, stat.st_ino));
+        // This kind keeps stderr.
+        args.push("stderr".into());
+        assert_eq!(
+            child::run(
+                std::path::Path::new("/usr/bin/env"),
+                &args,
+                &held,
+                Instant::now() + Duration::from_secs(20)
+            ),
+            Ended::Exited {
+                code: 0,
+                stderr: "custody: inherited".into()
+            }
+        );
+    }
+
+    /// A launch child's input is closed: `/dev/null`, at its end at once.
+    #[test]
+    fn the_launch_child_reads_a_closed_input() {
+        let (_temp, _location, _record, held) = lock();
+        let mut args = vec!["python3".to_string()];
+        // Read to the end, then name the input by its identity, which works
+        // on macOS (no /proc) as on Linux.
+        args.extend(python(
+            "import os, sys\nd = sys.stdin.buffer.read()\ns, n = os.fstat(0), os.stat('/dev/null')\nname = '/dev/null' if (s.st_dev, s.st_ino) == (n.st_dev, n.st_ino) else 'other'\nsys.stderr.write(f'{name} eof:{len(d)}')",
+        ));
+        assert_eq!(
+            child::run(
+                std::path::Path::new("/usr/bin/env"),
+                &args,
+                &held,
+                Instant::now() + Duration::from_secs(20)
+            ),
+            Ended::Exited {
+                code: 0,
+                stderr: "/dev/null eof:0".into()
             }
         );
     }

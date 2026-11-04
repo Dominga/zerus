@@ -29,6 +29,10 @@ pub enum Operation {
     CreationLaunch,
     #[serde(skip)] // Native task message owner only; never generic policy dispatch or receipts.
     TaskMessage,
+    #[serde(skip)] // Native input review only; never generic policy dispatch or receipts.
+    TaskMessageInputRelease,
+    #[serde(skip)] // Native deferred send owner only; never generic policy dispatch or receipts.
+    DeferredSend,
     #[serde(skip)] // Native TaskStart boundary only, never generic renderer JSON.
     TaskStartReconcile,
     #[serde(skip)] // Separate native notification controller, never generic policy JSON.
@@ -51,6 +55,8 @@ impl Operation {
             Request::CreationWorktree { .. } => Self::CreationWorktree,
             Request::CreationLaunch { .. } => Self::CreationLaunch,
             Request::TaskMessage { .. } => Self::TaskMessage,
+            Request::TaskMessageInputRelease { .. } => Self::TaskMessageInputRelease,
+            Request::DeferredSend { .. } => Self::DeferredSend,
             Request::TaskStartReconcile { .. } => Self::TaskStartReconcile,
             Request::NotificationControl { .. } => Self::NotificationControl,
             Request::DesktopOwnership { .. } => Self::DesktopOwnership,
@@ -68,6 +74,8 @@ impl Operation {
             Self::CreationWorktree => "creation_worktree",
             Self::CreationLaunch => "creation_launch",
             Self::TaskMessage => "task_message",
+            Self::TaskMessageInputRelease => "task_message_input_release",
+            Self::DeferredSend => "deferred_send",
             Self::TaskStartReconcile => "task_start_reconcile",
             Self::NotificationControl => "notification_controls",
             Self::DesktopOwnership => "desktop_ownership",
@@ -569,6 +577,8 @@ fn submission_ready(snapshot: &Snapshot, request: &Request) -> bool {
             | Request::CreationWorktree { .. }
             | Request::CreationLaunch { .. }
             | Request::TaskMessage { .. }
+            | Request::TaskMessageInputRelease { .. }
+            | Request::DeferredSend { .. }
             | Request::TaskStartReconcile { .. }
             | Request::TerminationOutcome { .. }
     ) {
@@ -719,6 +729,8 @@ fn lookup(
             | Request::CreationWorktree { .. }
             | Request::CreationLaunch { .. }
             | Request::TaskMessage { .. }
+            | Request::TaskMessageInputRelease { .. }
+            | Request::DeferredSend { .. }
             | Request::TaskStartReconcile { .. }
             | Request::TerminationOutcome { .. }
     ) {
@@ -758,6 +770,8 @@ fn lookup_receipt(request: &Request, id: &str, value: Value) -> Result<Receipt, 
             | Request::CreationWorktree { .. }
             | Request::CreationLaunch { .. }
             | Request::TaskMessage { .. }
+            | Request::TaskMessageInputRelease { .. }
+            | Request::DeferredSend { .. }
             | Request::TaskStartReconcile { .. }
             | Request::TerminationOutcome { .. }
     ) {
@@ -821,6 +835,8 @@ fn checked(request: &Request, mut value: Value, lookup: bool) -> Option<(Value, 
             | Request::CreationWorktree { .. }
             | Request::CreationLaunch { .. }
             | Request::TaskMessage { .. }
+            | Request::TaskMessageInputRelease { .. }
+            | Request::DeferredSend { .. }
             | Request::TaskStartReconcile { .. }
             | Request::TerminationOutcome { .. }
     ) {
@@ -886,6 +902,8 @@ fn checked(request: &Request, mut value: Value, lookup: bool) -> Option<(Value, 
         | Request::CreationWorktree { .. }
         | Request::CreationLaunch { .. }
         | Request::TaskMessage { .. }
+        | Request::TaskMessageInputRelease { .. }
+        | Request::DeferredSend { .. }
         | Request::TaskStartReconcile { .. }
         | Request::TerminationOutcome { .. } => return None,
         Request::AutomaticApprovals { enabled, .. } => {

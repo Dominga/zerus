@@ -49,6 +49,8 @@ mod provider_errors;
 mod recovery;
 mod service_worker;
 mod session_limits;
+pub(crate) mod session_id;
+mod session_index;
 mod provider_messages;
 mod processes;
 mod prompt_suggestion;
@@ -76,6 +78,7 @@ mod storage;
 #[cfg(any(target_os = "linux", target_os = "macos"))]
 pub(crate) mod task_reconcile;
 mod subagents;
+pub(crate) mod subagent_lifecycle;
 mod native_subagents;
 mod supervisor;
 mod tasks;
@@ -695,26 +698,35 @@ pub(crate) fn reference_details(name: &str, archive: &str, agent: &str) -> Resul
     else { subagents::inspection(name, agent, archive) }
 }
 
-pub(crate) fn inspect_reference(reference: &crate::session_reference::Reference) -> Result<Value> {
+/// Whether `record` is the session a reference names: its provider, archive,
+/// conversation (or run, for a reference without one) and, when the
+/// reference carries one, its durable session ID.
+fn matches_reference(reference: &crate::session_reference::Reference, record: &Value) -> bool {
+    string(record, "name").split('/').next() == reference.name.split('/').next()
+        && string(record, "archive_id") == reference.archive
+        && (reference.session.is_empty() || string(record, "session_id") == reference.session)
+        && if reference.conversation.is_empty() {
+            string(record, "run_id") == reference.run && string(record, "conversation_id").is_empty()
+        } else { string(record, "conversation_id") == reference.conversation }
+}
+
+/// The current name of the one saved session a reference names, following
+/// renames: a resolution, never an authorisation (zerus-ucck P1c).
+pub(crate) fn resolve_reference(reference: &crate::session_reference::Reference) -> Result<String> {
     local_sessions()?;
-    let matches_reference = |record: &Value| {
-        string(record, "name").split('/').next() == reference.name.split('/').next()
-            && string(record, "archive_id") == reference.archive
-            && if reference.conversation.is_empty() {
-                string(record, "run_id") == reference.run && string(record, "conversation_id").is_empty()
-            } else { string(record, "conversation_id") == reference.conversation }
-    };
-    let name = {
-        let _guard = lock(None)?;
-        let mut candidates = if reference.archive.is_empty() { records()? } else { archive::records()? };
-        if reference.archive.is_empty() { candidates.extend(dsh::snapshots()?); candidates.extend(opencode::snapshots()?); }
-        let mut matching = candidates.iter().filter(|record| matches_reference(record));
-        let first = matching.next().ok_or("The referenced conversation is no longer bound to a saved session; it may have been cleared or forgotten")?;
-        if matching.next().is_some() { return Err("Ambiguous session reference: multiple saved bindings match this conversation".into()); }
-        string(first, "name").to_owned()
-    };
+    let _guard = lock(None)?;
+    let mut candidates = if reference.archive.is_empty() { records()? } else { archive::records()? };
+    if reference.archive.is_empty() { candidates.extend(dsh::snapshots()?); candidates.extend(opencode::snapshots()?); }
+    let mut matching = candidates.iter().filter(|record| matches_reference(reference, record));
+    let first = matching.next().ok_or("The referenced conversation is no longer bound to a saved session; it may have been cleared or forgotten")?;
+    if matching.next().is_some() { return Err("Ambiguous session reference: multiple saved bindings match this conversation".into()); }
+    Ok(string(first, "name").to_owned())
+}
+
+pub(crate) fn inspect_reference(reference: &crate::session_reference::Reference) -> Result<Value> {
+    let name = resolve_reference(reference)?;
     let parent = reference_details(&name, &reference.archive, "")?;
-    if !matches_reference(&parent) { return Err("Session identity changed while resolving its reference".into()); }
+    if !matches_reference(reference, &parent) { return Err("Session identity changed while resolving its reference".into()); }
     let mut output = if reference.agent.is_empty() { parent }
         else { reference_details(&name, &reference.archive, &reference.agent)? };
     if !reference.agent.is_empty() && output["parent_conversation_id"].as_str() != Some(reference.conversation.as_str()) {
@@ -752,8 +764,25 @@ pub(crate) fn task_bindings() -> Result<Vec<Value>> {
     task_bindings_in(&root())
 }
 
+/// The durable session ID of this computer's live or saved session `name`,
+/// from its record or provider binding (zerus-ucck P2c); None for an archive,
+/// an ID-less record or no session.
+// The swarm's tests resolve their own sessions, never the real state.
+#[cfg_attr(test, allow(dead_code))]
+pub(crate) fn session_id_of(name: &str) -> Option<String> {
+    let record = record_path(name)
+        .exists()
+        .then(|| read(name).ok())
+        .flatten()
+        .or_else(|| dsh::binding(name).ok())
+        .or_else(|| opencode::binding(name).ok())?;
+    let id = string(&record, "session_id");
+    (session_id::canonical(id) && string(&record, "archive_id").is_empty()).then(|| id.to_owned())
+}
+
 /// The record fields task routing reads (`tasks::sessions`).
-const TASK_BINDING_FIELDS: [&str; 6] = ["name", "run_id", "launch_id", "journal_name", "legacy_shadow", "rename_shadow"];
+const TASK_BINDING_FIELDS: [&str; 7] =
+    ["name", "run_id", "launch_id", "journal_name", "launch_label", "legacy_shadow", "rename_shadow"];
 
 /// A saved record reduced to [`TASK_BINDING_FIELDS`]. Every other field, such
 /// as up to 128 shell jobs with their full command texts, is skipped while
@@ -1030,13 +1059,17 @@ pub fn dispatch(args: &[String]) -> Result<i32> {
                 return Ok(0);
             }
             let _guard = lock(None)?;
-            if record_path(&args[0]).exists() {
-                rename::remove_legacy(&read(&args[0])?)?;
+            let forgotten = record_path(&args[0]).exists().then(|| read(&args[0])).transpose()?;
+            if let Some(record) = &forgotten {
+                rename::remove_legacy(record)?;
             }
             match std::fs::remove_file(record_path(args.first().ok_or("missing session name")?)) {
                 Ok(()) => {}
                 Err(error) if error.kind() == io::ErrorKind::NotFound => {}
                 Err(error) => return Err(error.to_string()),
+            }
+            if let Some(record) = &forgotten {
+                session_index::retire(record);
             }
         }
         _ => return Err(format!("unknown state operation: {command}")),

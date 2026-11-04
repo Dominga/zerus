@@ -820,8 +820,12 @@ class NativeWindowsClaude(NativeAgent, host.HostCase):
                            ("Escape", lambda: "What should Claude do instead?" in self.capture(name))):
             card = self.hook_card(name, api.BASH)
             worker = self.worker()
+            carded = time.monotonic()
             self.keys(name, {"named": key})
-            self.until(f"Terminal's {key}", check)
+            # zerus-dy5u: an intermittent Enter without effect; the failure
+            # must tell a key sent before the panel from one that was lost.
+            sent = f"panel_verified={card.get('panel_verified')}, sent {time.monotonic() - carded:.3f} s after the card"
+            self.until(f"Terminal's {key} ({sent})", check)
             self.until(f"the hook to end after {key}", lambda: not self.alive(*worker))
             self.until("no pending card", lambda: not self.inspect(name).get("pending_questions"))
             self.refused(name, card, self.choose(card, "No"))

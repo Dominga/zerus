@@ -11,6 +11,8 @@ vi.hoisted(() => {
   vi.stubGlobal("window", { document: { addEventListener: () => {} }, addEventListener: () => {} });
 });
 vi.mock("../../bridge", () => ({
+  // The task store reads further board pages through this bridge call.
+  readTaskPage: vi.fn(async () => ({ tasks: [], page: { next: null } })),
   // The native workspace store, loaded by the session entry points.
   nativeUiOpen: vi.fn(), nativeUiRetire: vi.fn(async () => {}), nativeUiVisible: vi.fn(async () => {}),
   nativeUiBounds: vi.fn(async () => {}), nativeUiBrowser: vi.fn(async () => {}), onNativeUi: vi.fn(async () => () => {}),
@@ -29,7 +31,7 @@ vi.mock("../../bridge", () => ({
   setNotifications: vi.fn(),
   // The composer and Saved drafts, loaded with the list's Saved drafts button.
   windowVisibility: { hidden: () => false, onChange: () => () => {} },
-  composerOpen: vi.fn(async () => null), composerEdit: vi.fn(async () => {}), composerPick: vi.fn(async () => {}), composerPasteImage: vi.fn(async () => {}),
+  composerOpen: vi.fn(async () => null), composerVisibility: vi.fn(async () => {}), composerEdit: vi.fn(async () => {}), composerPick: vi.fn(async () => {}), composerPasteImage: vi.fn(async () => {}),
   composerRemove: vi.fn(async () => {}), composerUndoRemove: vi.fn(async () => {}), composerAllowRetry: vi.fn(async () => {}), composerRefresh: vi.fn(async () => {}),
   composerTab: vi.fn(async () => {}), sendMessage: vi.fn(), sendAnswer: vi.fn(), sendCancel: vi.fn(async () => {}), sendInterrupted: vi.fn(async () => {}), clearContext: vi.fn(),
   localRetry: vi.fn(), localDelete: vi.fn(async () => {}), localInspect: vi.fn(async () => null),

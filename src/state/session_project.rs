@@ -196,6 +196,11 @@ mod tests {
         let provider = root().join("dsh/bindings.lock");
         assert_eq!(pinned(terminal, "run-1", &Value::Null), Pinned::Written("written"));
         assert_eq!(pinned(deepseek, "run-2", &json!("session-2")), Pinned::Written("written"));
+        // Both locks are held while `write` runs (Z6, Z7).
+        let held = with_pinned_session_binding(deepseek, "run-2", &json!("session-2"), soon(), || {
+            (free(&writer), free(&provider))
+        });
+        assert_eq!(held.unwrap(), Pinned::Written((false, false)));
         // A replaced run, another conversation or no binding: nothing is written.
         assert_eq!(pinned(terminal, "run-other", &Value::Null), Pinned::Changed);
         assert_eq!(pinned(terminal, "run-1", &json!("other")), Pinned::Changed);

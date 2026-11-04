@@ -37,6 +37,8 @@ pub(crate) fn infer_new_session(config: &Config, name: &str, directory: &Path) {
             };
             let actor = store.data.node_id.clone();
             store.data.catalog.set(&actor, key, json!(project))?;
+            let local = [(actor.clone(), name.to_owned())];
+            super::session_ids::write(&store.data.catalog, &mut store.data.twins, &actor, &local)?;
             store.save_catalog_only()?;
         }
         Ok(())
@@ -80,6 +82,8 @@ pub(crate) fn inherit_fork_project(
                 };
                 let actor = store.data.node_id.clone();
                 store.data.catalog.set(&actor, key, json!(project))?;
+                let local = [(actor.clone(), name.to_owned())];
+                super::session_ids::write(&store.data.catalog, &mut store.data.twins, &actor, &local)?;
                 store.save_catalog_only()?;
             }
             anyhow::Ok(true)
@@ -269,6 +273,7 @@ mod tests {
             imported: true,
             bindings: BTreeMap::new(),
             peers: BTreeMap::new(),
+            twins: Default::default(),
         }
     }
     fn folder(store: &mut Store, id: &str, project: &str, machine: &str, path: &Path) {

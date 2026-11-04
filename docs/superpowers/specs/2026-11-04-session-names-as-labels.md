@@ -29,7 +29,7 @@ Archives, launches, `hgs wait`, tasks with a `launch_id:` or `run_id:` reference
 
 ### 1. A durable session ID
 
-Every record gains `session_id`, a UUID assigned when the session is first created. It is kept across resume, clear, rename, pause, archive and restore. A fork gets its own. Records written by older CLIs get one the next time this CLI writes them. Until then they are found by name as today. `session_id` becomes the key for everything that must find one session. `run_id` and `conversation_id` stay what they are today: guards for one run and one conversation.
+Every record gains `session_id`, a UUID assigned when the session is first created. It is kept across resume, clear, rename, pause, archive and restore. A fork gets its own. Records written by older CLIs get one the next time this CLI writes them. Until then they are found by name as today. An older CLI that rebuilds a record (on resume, for example) drops the field, so the next write here assigns a new ID once; there is no recovery index (#1317 R5). `session_id` becomes the key for everything that must find one session. `run_id` and `conversation_id` stay what they are today: guards for one run and one conversation.
 
 New records are stored under `sessions/<session_id>.json`, with a label index (label → session IDs) that replaces the name hash for lookups. Existing `sha256(name)` records and `name_routes` stay readable, and a session moves to the new layout only when this CLI rewrites it. A new session's `journal_name` is `session:<session_id>`. Existing sessions keep theirs, so their history and read marks stay where they are.
 
@@ -69,7 +69,13 @@ The `--json` form is `{"error":"ambiguous_session","name":…,"candidates":[{ses
 
 - **Rows.** Rows already use `run:` keys. Labels that repeat in a visible list get a short suffix (folder or start time) so the person can tell the sessions apart. Identical labels never merge.
 - **Drafts and read marks.** Composer drafts and desktop read marks move from computer and name to computer and session ID, with a one-time fallback that reads the name key.
-- **Catalog membership.** It moves to `Key::Session { machine, session: "id:<session_id>" }`, the same pattern as today's `archive\n<id>`. Older peers would read an `id:` member as an unknown session and show it in the default project. For one release window the desktop therefore writes both keys and resolves a conflict in favour of the ID key. A swarm drops name keys only once every peer reports a version that reads ID keys.
+- **Catalog membership.** Decided in P2c-1 (coordinator, 2026-11-04; choice A, revised after the #1413 review). This replaces the earlier `id:<session_id>`-in-`Key::Session` wording.
+  - Every writer on the session's own computer dual-writes: the name membership, then its ID twin. `swarm apply` derives the twin for this computer's sessions.
+  - A twin names the session ID, its label and the ID of the exact name operation it mirrors. Twins form a last-writer-wins register per session ID, ordered by their own clock, actor and ID, and are never compared with catalog clocks.
+  - Twins live beside the catalog (`swarm/session-id-twins.json`), never in it. hgs v0.47.0 parses `catalog.json` with a closed key enum, so a rollback on the same computer, and v0.47.0 peers through sync, export, preview and join, keep working. No catalog floor is raised. Only members that list the `session_id` kind exchange twins; `swarm export` gives a requester only the kinds it lists, and one that lists none only the kinds v0.47.0 parses.
+  - A twin is readable only while the operation it mirrors is still the selected name membership of its label, with the same project. A member that never receives twins keeps Lamport clocks without them, so a comparison of clocks could let its later move tie with or trail a twin. Binding to the operation makes any later move by name, superseding or concurrent, hide the twin until its owner writes it again.
+  - `membership_by_id` is ready only when every machine of the catalog is this computer or a direct peer whose last sync listed the kind. Unknown machines fail closed.
+  - Desktops read the ID form only when it is ready. The name form is still written, and read everywhere else, until P3 decides the connector's capability and when to stop writing names, together with owner questions 1 and 3.
 - **Rename and restore.** Rename no longer refuses a label in use, and restore no longer needs a free name. Fork keeps its readable `-fork`, `-2`… suffixes, but a taken label stops being an error.
 
 ## Phasing
@@ -78,10 +84,26 @@ The `--json` form is `{"error":"ambiguous_session","name":…,"candidates":[{ses
 | --- | --- | --- |
 | P0 (done, #1223) | Archived sessions never hold a label; a fork suffixes a taken label | unique among live and saved |
 | P1 | `session_id` in records, `HGS_SESSION_ID`, hooks and machine clients resolve by ID, `--session-id` and references on every command, the ambiguity error | still unique, so nothing visible changes |
-| P2 | `terminal_name`, the `sessions/<id>` layout with a label index, `journal_name` for new sessions, catalog, drafts and read marks by ID (dual-written) | still unique |
+| P2 | The ID index (P2a), `journal_name` for new sessions (P2b), catalog membership, drafts and read marks by ID, dual-written (P2c). `terminal_name` and the `sessions/<id>` layout for a reused label moved to P3 (coordinator, 2026-11-04). | still unique |
 | P3 | Remove the uniqueness checks from launch, rename, restore and fork | labels may repeat |
 
-Each phase ships separately and keeps older CLIs, peers and records working. P3 is gated on P1 and P2 being deployed to every computer in the swarm, and the mobile connector, because an older peer can only report ambiguity, not resolve it.
+Each phase ships separately and keeps older CLIs, peers and records working.
+
+Constraints (coordinator, 2026-11-04):
+
+- P1b and every later phase must not depend on cross-version ID continuity. Hooks, `--session-id` and machine clients treat `session_id` as a hint and fall back to the run and conversation identities when an older CLI has changed it.
+- P3 must not ship before hooks resolve by `session_id` through P2's O(1) layout. In P1, hooks keep the O(1) name-first lookup and treat `HGS_SESSION_ID` as a hint. The record found by name is taken at once when it carries that ID. Otherwise the run scan prefers the records that carry it, and when none does, the run identity alone decides, as before P1. Name-first is only safe while names are unique.
+- P2a (coordinator, 2026-11-04) provides that O(1) index without moving records. `ids/<session_id>.json` names the label and record kind of the live or saved session with that ID. It is a verified cache, never a source of truth: every hit reads that record again and needs that session ID, no archive and no rename shadow. A miss or a stale entry falls back to one scan. `--session-id` resolution repairs the entry under the state writer lock when the lock is free; hooks never repair, so their poll loops never take the lock. A process that finds `ids/` or an entry it must not write, or fails to change one, changes no more entries. A broken index therefore costs each lookup one scan and never the lock. Archive and forget retire the entry under their lock. An older hgs ignores `ids/`, so a rollback loses nothing. Records stay at their `sha256(label)`, `bindings/` and provider binding paths; `sessions/<id>.json` is used only for a session that reuses a taken label, in P3. `--session-id` resolution and the agent's own hooks (`HGS_SESSION_ID`) read the index.
+- P1c must not move a machine client's hot path (polling, status, watch) onto `--session-id` until P2's O(1) index exists. Until then `--session-id` scans the bindings once per explicit call. P3 is gated on P1 and P2 being deployed to every computer in the swarm, and the mobile connector, because an older peer can only report ambiguity, not resolve it.
+- P2b (coordinator, 2026-11-04): rollback safety covers v0.47.0 and every later build. A session created by a launch gets `journal_name = session:<session_id>` and `launch_label`.
+  - Resume, rename, Start fresh, Clear and restore carry both; recovery only sends input.
+  - A `--fresh` launch over a saved, confirmed conversation of the label is a new session with its own journal and `launch_label`. Only a retry of an unconfirmed attempt continues that attempt's journal and label. Legacy name-only tasks also match `launch_label`.
+  - Every v0.47.0 path reads and keeps `journal_name`. It drops the unknown `launch_label` on resume, and a later rename here pins the label it leaves.
+  - On v0.47.0, an explicit `-r ID` relaunch that replaces a saved P2b record would continue under the label rather than the ID journal. That is the only rollback gap.
+  - A fork's lineage keeps its three-part `[journal, conversation, sequence]` entries, which earlier builds read. The labels its sources had go in a separate `fork_lineage_labels` map, carried on resume, so inherited rows still show the source's label. Where the map is missing, the direct source falls back to the `fork_source_name` the fork recorded.
+  - Fork rollback round trips:
+    - A P2b fork resumed by v0.47.0 loses `fork_lineage`. If its source is later renamed or archived, the derived lineage finds nothing and saves an empty lineage for good, so the inherited view stays empty.
+    - A fork resumed by an earlier lineage-era build keeps its lineage but drops the labels. Its direct source then shows its recorded label; older ancestors show their journal name.
 
 ## Owner questions
 
@@ -92,5 +114,11 @@ Each phase ships separately and keeps older CLIs, peers and records working. P3 
 
    The alternative is that a launch always creates a new session.
 2. **Terminal names.** Should a new session keep its label as the tmux name when free, which keeps `tmux attach -t LABEL` working? The alternative is always ID-based terminal names: simpler, but a visible change for anyone attaching by hand.
+
+   **Coordinator decision, 2026-11-04** (the owner asked for the release to run without these answers and may override it): keep the label as the tmux name while it is free, so `tmux attach -t LABEL` keeps working; use an ID-based terminal name only when the label is already taken.
 3. **Fork names.** Should forks keep the `-fork`/`-2` suffix once labels may repeat (proposed, for readability), or reuse the source label as-is?
 4. **Swarm rollout.** Is one release window of dual-written catalog membership acceptable, or should P2 wait for an explicit catalog version gate?
+
+   **Coordinator decision, 2026-11-04** (the owner may override it): dual-write catalog membership, both the name and `id:<session_id>`. Readers switch to ID membership, and the name form stops being written, only behind an explicit catalog version gate that every computer and the mobile connector advertise. There is no time-based release window.
+
+Questions 1 and 3 stay open for the owner. P3 does not start before they are answered.

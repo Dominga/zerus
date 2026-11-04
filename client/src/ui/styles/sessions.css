@@ -44,6 +44,7 @@
   .sp-foot { display: flex; align-items: center; gap: 2px; height: 30px; margin: 0 -4px; padding: 0 6px 0 12px; border-top: 1px solid var(--z-color-divider); font-size: 11px; color: var(--z-color-muted); }
   .sp-foot .icon-btn.small { width: 26px; height: 26px; }
   .sp-empty { flex: 1; }
+  .sp-paused { align-content: center; }
 
   /* Docked width handle (QSplitter handle, 8 px, transparent). */
   /* Width handle: an 8 px strip on the edge; only a centred grip (4×52) shows,

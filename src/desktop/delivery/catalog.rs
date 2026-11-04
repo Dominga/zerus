@@ -405,4 +405,20 @@ impl Sources {
         let stamp = self.stamp(&store.db, computer).unwrap().unwrap();
         self.native.insert(computer.into(), (stamp, Instant::now()));
     }
+    /// A live stream's heartbeat (`HEARTBEAT_MS`, within `FRESH`): every
+    /// registered source is observed again at its current stamp.
+    pub(super) fn heartbeat_fixture(&mut self, store: &Store) {
+        let computers: Vec<String> = self.native.keys().cloned().collect();
+        for computer in computers {
+            if let Some(stamp) = self.stamp(&store.db, &computer).unwrap() {
+                self.native.insert(computer, (stamp, Instant::now()));
+            }
+        }
+    }
+    /// A slow runner: every registered source was last observed `by` ago.
+    pub(super) fn age_fixture(&mut self, by: Duration) {
+        for (_, at) in self.native.values_mut() {
+            *at = at.checked_sub(by).unwrap_or(*at);
+        }
+    }
 }

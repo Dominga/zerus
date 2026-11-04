@@ -16,6 +16,8 @@ use zerus_client_core::desktop::ui_requests::{Envelope, Reply, Request};
 
 #[cfg(target_os = "linux")]
 mod linux_manager;
+#[cfg(target_os = "linux")]
+mod linux_image;
 #[cfg(any(target_os = "macos", test))]
 mod macos_ancestry;
 #[cfg(any(target_os = "linux", target_os = "macos"))]
@@ -40,6 +42,12 @@ const ACTIVATION_PROOF_INTERVAL: Duration = Duration::from_millis(500);
 pub(super) struct Scope {
     location: Location,
     frontend_images: Vec<PathBuf>,
+    /// Windows: the portable zip's app as its own staging bound it to this
+    /// process's CLI; each use proves the app again.
+    #[cfg_attr(not(windows), allow(dead_code))]
+    portable: Option<super::portable_frontend::PortableScope>,
+    #[cfg(target_os = "linux")]
+    sealed_reference: Option<std::sync::Arc<linux_image::Reference>>,
 }
 impl std::ops::Deref for Scope {
     type Target = Location;
@@ -90,7 +98,16 @@ impl Scope {
                 configuration: location.configuration.clone(),
             },
             frontend_images,
+            portable: super::portable_frontend::materialize(),
+            #[cfg(target_os = "linux")]
+            sealed_reference: None,
         }
+    }
+    /// The service calls this once under its actual owner before listening.
+    /// A failed/late snapshot is never replaced from an installed pathname.
+    #[cfg(target_os = "linux")]
+    pub(super) fn initialize_reference(&mut self, owner: &std::sync::Arc<platform::FileLock>) {
+        self.sealed_reference = linux_image::Reference::capture(owner);
     }
     fn selected_frontend(&self, image: &Path) -> bool {
         self.installed_frontend(image).is_some()
@@ -101,6 +118,25 @@ impl Scope {
             .iter()
             .find(|path| platform::file_identity(path) == Some(identity))
             .map(PathBuf::as_path)
+    }
+    /// A running GUI that is the portable zip's bound app: its proof, bound to
+    /// that process and its loaded image, within `until`.
+    #[cfg(windows)]
+    pub(super) fn portable_running(
+        &self,
+        original: &Original,
+        until: Instant,
+    ) -> Option<std::sync::Arc<super::portable_frontend::GuiProof>> {
+        self.portable.as_ref()?.running(original, until)
+    }
+    /// With the UI closed: the bound portable app pinned and proven for a launch.
+    #[cfg(windows)]
+    pub(super) fn portable_closed(
+        &self,
+        image: &Path,
+        until: Instant,
+    ) -> Option<zerus_client_core::desktop::windows::image::PinnedImage> {
+        self.portable.as_ref()?.closed(image, until)
     }
     /// Bind an explicit maintained-image choice; this never discovers one from
     /// PATH or turns an inbound path check into a launch/worker permission.
@@ -118,6 +154,8 @@ struct Process {
     pid: u32,
     identity: platform::ProcessIdentity,
     executable: String,
+    #[cfg(target_os = "linux")]
+    sealed_image: Option<std::sync::Arc<linux_image::Peer>>,
     #[cfg(windows)]
     original: Option<std::sync::Arc<Original>>,
 }
@@ -153,6 +191,8 @@ impl Process {
             pid,
             identity,
             executable,
+            #[cfg(target_os = "linux")]
+            sealed_image: None,
         })
     }
     #[cfg(windows)]
@@ -163,6 +203,14 @@ impl Process {
     }
     #[cfg(not(windows))]
     fn current(&self) -> bool {
+        #[cfg(target_os = "linux")]
+        if let Some(image) = &self.sealed_image {
+            // Exec retains PID/birth and can retain the SAME memfd display name.
+            // Reopen the kernel object at EVERY original freshness boundary.
+            return platform::process_identity(self.pid).as_ref() == Some(&self.identity)
+                && image.current(self.pid)
+                && platform::process_identity(self.pid).as_ref() == Some(&self.identity);
+        }
         platform::process_identity(self.pid).as_ref() == Some(&self.identity)
             && platform::describe(self.pid).is_some_and(|p| p.executable == self.executable)
     }
@@ -186,6 +234,8 @@ impl Process {
 struct WindowsFreshness {
     canonical: Peer,
     ancestry: Ancestry,
+    /// The portable app's proof for this exact frontend, held to the end.
+    portable: Option<std::sync::Arc<super::portable_frontend::GuiProof>>,
 }
 #[cfg(windows)]
 impl WindowsFreshness {
@@ -195,6 +245,10 @@ impl WindowsFreshness {
             "canonical frontend expired"
         );
         self.ancestry.validate(until)?;
+        ensure!(
+            self.portable.as_ref().is_none_or(|proof| proof.current()),
+            "portable frontend proof expired"
+        );
         ensure!(
             self.canonical.current() && Instant::now() < until,
             "canonical frontend expired"
@@ -287,6 +341,8 @@ impl Validated {
                     | Request::CreationWorktree { .. }
                     | Request::CreationLaunch { .. }
                     | Request::TaskMessage { .. }
+                    | Request::TaskMessageInputRelease { .. }
+                    | Request::DeferredSend { .. }
                     | Request::TaskStartReconcile { .. }
                     | Request::TerminationOutcome { .. }
             ),
@@ -313,6 +369,65 @@ impl Validated {
             anyhow::bail!("not a creation launch");
         };
         Ok(*intent)
+    }
+    /// Only the deferred send actor calls this, after BEGIN IMMEDIATE.
+    /// Cached native Service mode was bound to this exact original request
+    /// during admission.
+    #[cfg(any(target_os = "linux", target_os = "macos"))]
+    pub fn deferred_send(self) -> Result<zerus_client_core::desktop::deferred_send::Intent> {
+        self.check()?;
+        let Request::DeferredSend { intent } = self.0 else {
+            anyhow::bail!("not a deferred send");
+        };
+        Ok(*intent)
+    }
+    /// Only the task message actor calls this after BEGIN IMMEDIATE. Cached
+    /// native Service mode was bound to this exact original request during
+    /// admission.
+    #[cfg(any(target_os = "linux", target_os = "macos"))]
+    pub fn task_message(self) -> Result<zerus_client_core::desktop::task_message::Intent> {
+        self.check()?;
+        let Request::TaskMessage { intent } = self.0 else {
+            anyhow::bail!("not a task message");
+        };
+        Ok(*intent)
+    }
+    /// A read of the original before the actor's preparation. It grants
+    /// nothing: admission still consumes this permit through `task_message`
+    /// after BEGIN IMMEDIATE, and an expired permit refuses there.
+    #[cfg(any(target_os = "linux", target_os = "macos"))]
+    pub fn task_message_preview(
+        &self,
+    ) -> Result<&zerus_client_core::desktop::task_message::Intent> {
+        self.check()?;
+        let Request::TaskMessage { intent } = &self.0 else {
+            anyhow::bail!("not a task message");
+        };
+        Ok(intent)
+    }
+    /// Only the task message runtime calls this, after BEGIN IMMEDIATE, for
+    /// one exact claim of a reviewed custody input.
+    #[cfg(any(target_os = "linux", target_os = "macos"))]
+    pub fn task_message_input_release(
+        self,
+    ) -> Result<zerus_client_core::desktop::task_message::review::Release> {
+        self.check()?;
+        let Request::TaskMessageInputRelease { release } = self.0 else {
+            anyhow::bail!("not a task message input release");
+        };
+        Ok(*release)
+    }
+    /// A read of the reviewed release before its claim. It grants nothing:
+    /// the claim still consumes this permit after BEGIN IMMEDIATE.
+    #[cfg(any(target_os = "linux", target_os = "macos"))]
+    pub fn task_message_input_release_preview(
+        &self,
+    ) -> Result<&zerus_client_core::desktop::task_message::review::Release> {
+        self.check()?;
+        let Request::TaskMessageInputRelease { release } = &self.0 else {
+            anyhow::bail!("not a task message input release");
+        };
+        Ok(release)
     }
     /// Only the worktree actor calls this after BEGIN IMMEDIATE. Cached native
     /// Service mode was bound to this exact original request during admission.
@@ -669,13 +784,38 @@ pub(super) fn authenticate(location: &Scope, peer_pid: u32, value: &Value) -> Re
     ensure!(envelope.valid(), "invalid frontend envelope");
     let until = Instant::now() + WAIT;
     let caller = Process::read(peer_pid)?;
-    let own_image = platform::describe(std::process::id()).context("service image unavailable")?;
-    let selected = platform::file_identity(Path::new(&own_image.executable))
-        .context("service image identity unavailable")?;
-    ensure!(
-        platform::file_identity(Path::new(&caller.executable)) == Some(selected),
-        "frontend relay is not the selected hgs"
-    );
+    #[cfg(target_os = "linux")]
+    let caller = {
+        let mut caller = caller;
+        let selected = platform::describe(std::process::id())
+            .and_then(|own| platform::file_identity(Path::new(&own.executable)));
+        if !selected
+            .is_some_and(|id| platform::file_identity(Path::new(&caller.executable)) == Some(id))
+        {
+            // Only this old image predicate gains an immutable equivalence
+            // branch. All native child/argv/config/ancestry checks remain below.
+            caller.sealed_image = Some(
+                location
+                    .sealed_reference
+                    .as_ref()
+                    .context("sealed service relay unavailable")?
+                    .observe(&caller, until)?,
+            );
+            ensure!(caller.current(), "sealed frontend relay changed");
+        }
+        caller
+    };
+    #[cfg(not(target_os = "linux"))]
+    {
+        let own_image =
+            platform::describe(std::process::id()).context("service image unavailable")?;
+        let selected = platform::file_identity(Path::new(&own_image.executable))
+            .context("service image identity unavailable")?;
+        ensure!(
+            platform::file_identity(Path::new(&caller.executable)) == Some(selected),
+            "frontend relay is not the selected hgs"
+        );
+    }
     let argv = caller.arguments()?;
     ensure!(
         argv.get(1..)
@@ -690,6 +830,21 @@ pub(super) fn authenticate(location: &Scope, peer_pid: u32, value: &Value) -> Re
     } = probe(location, &envelope.attempt, until)
         .context("canonical frontend evidence unavailable")?;
     let frontend = Process::read(frontend_pid)?;
+    // The portable zip's bound app is proven for this exact process within the
+    // same original deadline; the installer and adjacent images are unchanged.
+    #[cfg(windows)]
+    let portable = if location.selected_frontend(Path::new(&frontend.executable)) {
+        None
+    } else {
+        Some(
+            frontend
+                .original
+                .as_deref()
+                .and_then(|original| location.portable_running(original, until))
+                .context("canonical frontend is not the installed application")?,
+        )
+    };
+    #[cfg(not(windows))]
     ensure!(
         location.selected_frontend(Path::new(&frontend.executable)),
         "canonical frontend is not the installed application"
@@ -712,6 +867,7 @@ pub(super) fn authenticate(location: &Scope, peer_pid: u32, value: &Value) -> Re
         let windows = WindowsFreshness {
             canonical: peer,
             ancestry: Ancestry::inspect(peer_pid, until)?,
+            portable,
         };
         windows.check(until)?;
         windows
@@ -843,6 +999,22 @@ fn validate(
             "task message does not match the native service frontend"
         );
     }
+    if let Request::TaskMessageInputRelease { release } = &envelope.request {
+        ensure!(
+            reply.request.ownership_mode
+                == Some(zerus_client_core::desktop::ownership::Mode::Service)
+                && release.scope.configuration == configuration,
+            "task message input release does not match the native service frontend"
+        );
+    }
+    if let Request::DeferredSend { intent } = &envelope.request {
+        ensure!(
+            reply.request.ownership_mode
+                == Some(zerus_client_core::desktop::ownership::Mode::Service)
+                && intent.scope.configuration == configuration,
+            "deferred send does not match the native service frontend"
+        );
+    }
     if let Request::TaskStartReconcile { intent } = &envelope.request {
         ensure!(
             reply.request.ownership_mode
@@ -924,6 +1096,8 @@ enum OrderedOperation {
     CreationWorktree,
     CreationLaunch,
     TaskMessage,
+    TaskMessageInputRelease,
+    DeferredSend,
     TaskStartReconcile,
     ActivationWait,
     AutomaticApprovals,
@@ -943,6 +1117,8 @@ impl From<&Request> for OrderedOperation {
             Request::CreationWorktree { .. } => Self::CreationWorktree,
             Request::CreationLaunch { .. } => Self::CreationLaunch,
             Request::TaskMessage { .. } => Self::TaskMessage,
+            Request::TaskMessageInputRelease { .. } => Self::TaskMessageInputRelease,
+            Request::DeferredSend { .. } => Self::DeferredSend,
             Request::TaskStartReconcile { .. } => Self::TaskStartReconcile,
             Request::ActivationWait { .. } => Self::ActivationWait,
             Request::AutomaticApprovals { .. } => Self::AutomaticApprovals,
@@ -1099,6 +1275,7 @@ fn marked(bytes: &[u8]) -> bool {
     bytes.split(|b| *b == 0).any(|entry| {
         [
             b"HGS_SESSION=".as_slice(),
+            b"HGS_SESSION_ID=",
             b"HGS_RUN_ID=",
             b"LD_PRELOAD=",
             b"LD_AUDIT=",
@@ -1235,6 +1412,8 @@ mod tests {
                 started: 100.0,
             },
             executable: "/opt/example/zerus-client".into(),
+            #[cfg(target_os = "linux")]
+            sealed_image: None,
             #[cfg(windows)]
             original: None,
         };
@@ -1247,6 +1426,8 @@ mod tests {
                 started: 101.0,
             },
             executable: "/opt/example/hgs".into(),
+            #[cfg(target_os = "linux")]
+            sealed_image: None,
             #[cfg(windows)]
             original: None,
         };
@@ -1490,6 +1671,7 @@ mod tests {
                 task_id: id(80),
                 request_id: id(2),
                 original: original.to_string(),
+                form: Default::default(),
             }),
         };
         assert_eq!(
@@ -1514,6 +1696,117 @@ mod tests {
             .into_request()
             .is_err());
         if let Request::TaskMessage { intent } = &mut envelope.request {
+            intent.scope.configuration = "b".repeat(64);
+        }
+        reply.request.fingerprint = envelope.request.fingerprint();
+        assert!(validate(&envelope, &caller, &frontend, &reply, &"a".repeat(64)).is_err());
+    }
+    #[test]
+    fn task_message_input_release_has_its_own_lane_and_never_passes_the_generic_boundary() {
+        use zerus_client_core::desktop::{
+            ownership::Mode,
+            task_message::{review::Release, Scope},
+        };
+        let (mut envelope, caller, frontend, mut reply) = fixture();
+        envelope.request = Request::TaskMessageInputRelease {
+            release: Box::new(Release {
+                scope: Scope {
+                    configuration: "a".repeat(64),
+                    service_epoch: id(91),
+                },
+                release_id: id(3),
+                request_id: id(2),
+                state: "orphaned".into(),
+                bytes: 10,
+                input_sha256: "e".repeat(64),
+                observed: None,
+            }),
+        };
+        assert_eq!(
+            OrderedOperation::from(&envelope.request),
+            OrderedOperation::TaskMessageInputRelease
+        );
+        assert_ne!(
+            OrderedOperation::TaskMessageInputRelease,
+            OrderedOperation::TaskMessage
+        );
+        assert_eq!(envelope.request.id(), id(3), "the release's own identity");
+        reply.request.request_id = id(3);
+        reply.request.fingerprint = envelope.request.fingerprint();
+        assert!(validate(&envelope, &caller, &frontend, &reply, &"a".repeat(64)).is_err());
+        reply.request.ownership_mode = Some(Mode::Native);
+        assert!(validate(&envelope, &caller, &frontend, &reply, &"a".repeat(64)).is_err());
+        reply.request.ownership_mode = Some(Mode::Service);
+        validate(&envelope, &caller, &frontend, &reply, &"a".repeat(64)).unwrap();
+        assert!(Validated::fixture(&serde_json::json!(envelope.request))
+            .into_request()
+            .is_err());
+        if let Request::TaskMessageInputRelease { release } = &mut envelope.request {
+            release.scope.configuration = "b".repeat(64);
+        }
+        reply.request.fingerprint = envelope.request.fingerprint();
+        assert!(validate(&envelope, &caller, &frontend, &reply, &"a".repeat(64)).is_err());
+    }
+    #[test]
+    fn deferred_send_has_its_own_lane_and_never_passes_the_generic_boundary() {
+        use zerus_client_core::{
+            desktop::{
+                deferred_send::{Intent, Scope},
+                ownership::Mode,
+            },
+            operation_recovery::deferred_input as checkpoint,
+        };
+        let (mut envelope, caller, frontend, mut reply) = fixture();
+        let reserved = checkpoint::Checkpoint::reserve(checkpoint::Intent {
+            kind: checkpoint::Kind::Send,
+            draft_revision: 1,
+            message_sha256: checkpoint::message_sha256("hello", std::iter::empty()),
+            run_id: "run-1".into(),
+            conversation_id: "conversation-1".into(),
+            question: None,
+            start: None,
+            retry_of: None,
+            consent: true,
+        });
+        let original = serde_json::json!({"request_id": reserved.request_id, "text": "hello",
+            "attachments": [], "expected_run_id": "run-1",
+            "expected_conversation_id": "conversation-1"});
+        envelope.request = Request::DeferredSend {
+            intent: Box::new(Intent {
+                scope: Scope {
+                    configuration: "a".repeat(64),
+                    service_epoch: id(91),
+                },
+                session: "claude/private-send".into(),
+                request_id: reserved.request_id.clone(),
+                checkpoint: serde_json::to_string(&reserved).unwrap(),
+                original: original.to_string(),
+            }),
+        };
+        assert_eq!(
+            OrderedOperation::from(&envelope.request),
+            OrderedOperation::DeferredSend
+        );
+        for other in [
+            OrderedOperation::TaskMessage,
+            OrderedOperation::TaskMessageInputRelease,
+            OrderedOperation::CreationLaunch,
+        ] {
+            assert_ne!(OrderedOperation::DeferredSend, other);
+        }
+        assert_eq!(envelope.request.id(), reserved.request_id);
+        reply.request.request_id = reserved.request_id.clone();
+        reply.request.fingerprint = envelope.request.fingerprint();
+        assert!(validate(&envelope, &caller, &frontend, &reply, &"a".repeat(64)).is_err());
+        reply.request.ownership_mode = Some(Mode::Native);
+        assert!(validate(&envelope, &caller, &frontend, &reply, &"a".repeat(64)).is_err());
+        reply.request.ownership_mode = Some(Mode::Service);
+        validate(&envelope, &caller, &frontend, &reply, &"a".repeat(64)).unwrap();
+        // Only a future typed actor accessor may consume it.
+        assert!(Validated::fixture(&serde_json::json!(envelope.request))
+            .into_request()
+            .is_err());
+        if let Request::DeferredSend { intent } = &mut envelope.request {
             intent.scope.configuration = "b".repeat(64);
         }
         reply.request.fingerprint = envelope.request.fingerprint();
@@ -2276,6 +2569,9 @@ mod tests {
                 configuration: "a".repeat(64),
             },
             frontend_images: vec![image.clone()],
+            portable: None,
+            #[cfg(target_os = "linux")]
+            sealed_reference: None,
         };
         // Synthetic catalog and private files, not an installed GUI claim.
         let selected = scope.select_frontend(&image).unwrap();
@@ -2308,6 +2604,9 @@ mod tests {
                 configuration: "a".repeat(64),
             },
             frontend_images: vec![installed.clone()],
+            portable: None,
+            #[cfg(target_os = "linux")]
+            sealed_reference: None,
         };
         assert!(scope.selected_frontend(&installed));
         assert!(!scope.selected_frontend(&other));

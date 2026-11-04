@@ -57,6 +57,27 @@ fn idle(task: &IRegisteredTask) -> Result<bool> {
     policy::running::idle(unsafe { task.State() }?.0)
 }
 
+/// Original-ID observation only. A filtered empty collection during activity,
+/// queued/unknown state, duplicates or unreadable GUIDs supply no absence proof.
+/// No later instance's PID, endpoint or capability is acquired here.
+pub(super) fn original_guid_absent(native: &Native, plan: &Plan, wanted: &Shape,
+    original: &policy::mode::ObservedInstance, until: Instant) -> Result<bool> {
+    original.validate()?;
+    let task = task(&native.folder, plan, wanted)?;
+    let state = unsafe { task.State() }?.0;
+    ensure!(matches!(state, 3 | 4), "Queued or unknown task activity requires review.");
+    let current = instances(native, &task, until)?;
+    ensure!((state == 3) == current.is_empty(), "Task activity cannot establish original GUID absence.");
+    for instance in current {
+        if uuid::Uuid::parse_str(&guid(&instance)?)? == uuid::Uuid::parse_str(&original.guid)? {
+            return Ok(false);
+        }
+    }
+    ensure!(unsafe { task.State() }?.0 == state && Instant::now() < until,
+        "Task activity changed during original observation.");
+    Ok(true)
+}
+
 fn session(pid: u32) -> Result<u32> {
     let mut session = 0;
     ensure!(
@@ -95,6 +116,7 @@ struct Service {
     image: crate::platform::FileIdentity,
     selected: PathBuf,
     epoch: String,
+    generation: u64,
 }
 impl Service {
     fn observe(
@@ -136,6 +158,8 @@ impl Service {
             uuid::Uuid::parse_str(epoch).is_ok_and(|id| id.to_string() == epoch),
             "Desktop epoch unavailable."
         );
+        let generation = lifecycle["generation"].as_u64().filter(|n|*n <= 9_007_199_254_740_991)
+            .context("Desktop generation unavailable.")?;
         let wanted_mode = if plan.argv.last().is_some_and(|v| v == "--background") {
             "background"
         } else {
@@ -168,6 +192,7 @@ impl Service {
             image: identity,
             selected,
             epoch: epoch.into(),
+            generation,
         };
         value.check()?;
         value.exchange(location, plan, until)?;
@@ -200,6 +225,7 @@ impl Service {
             reply["abi"] == crate::desktop::ABI
                 && life["configuration"] == location.configuration
                 && life["epoch"] == self.epoch
+                && life["generation"].as_u64() == Some(self.generation)
                 && life["pid"].as_u64() == Some(self.process.pid as u64)
                 && life["mode"] == mode
                 && life["ipc_ready"] == true
@@ -235,6 +261,9 @@ pub(super) struct Running {
     stopped: bool,
 }
 impl Running {
+    pub(super) fn scope(&self) -> (String, u64) {
+        (self.service.epoch.clone(), self.service.generation)
+    }
     pub(super) fn readiness(&self, location: &Location, plan: &Plan, until: Instant) -> Result<()> {
         self.check()?;
         self.service.exchange(location, plan, until)?;

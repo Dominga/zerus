@@ -393,8 +393,9 @@ fn update(
 }
 
 /// The raw binding only: never read_marks::current, archive reconciliation,
-/// native adoption, approval fitting, input, acknowledgement or lifecycle.
-fn current(name: &str) -> Result<Option<Value>> {
+/// native adoption, approval fitting, input, acknowledgement or lifecycle. A
+/// `--session-id` selection must still be the record's (#1355 review).
+pub(super) fn current(name: &str) -> Result<Option<Value>> {
     if opencode::exists(name) {
         return opencode::binding(name).map(Some);
     }
@@ -416,6 +417,7 @@ fn current(name: &str) -> Result<Option<Value>> {
     {
         return Err("invalid notification session binding".into());
     }
+    session_id::verify(&record)?;
     if !identity(string(&record, "run_id"))
         || string(&record, "run_id").len() > 128
         || !identity(string(&record, "conversation_id"))

@@ -7,6 +7,8 @@ import { invoke } from "@tauri-apps/api/core";
 import { inTauri } from "../../../bridge";
 import { Icon } from "../../lib/icons";
 import { SectionHead } from "./ui";
+import { ServiceModeReview } from "./ServiceModeReview";
+import { ServiceFirstChoice } from "./ServiceFirstChoice";
 import { installedVersion, type BuildInfo } from "./about-version";
 import { tr, trNoop } from "../../../i18n";
 
@@ -50,6 +52,8 @@ export function AboutSection() {
       <p class="selectable">{zerus()}</p>
       <p class="selectable">{cli()}</p>
       <DesktopServiceStatus counts />
+      <ServiceModeReview />
+      <ServiceFirstChoice />
       <Show when={desktopService.state()?.executable_upgrade?.state === "manual_refresh_required"}>
         <section aria-label={tr("Service refresh required")}>
           <h2>{tr("Service refresh required")}</h2>

@@ -20,6 +20,14 @@ pub(crate) fn present(root: &std::path::Path, view: View) -> Value {
         use zerus_client_core::task_start::capture::journal::{Phase, Saved};
         match Saved::read(root, &view.project, &view.task) {
             Ok(saved) => {
+                if let Some(problem) = saved
+                    .as_ref()
+                    .and_then(crate::desktop_service::task_start_reconcile::publication_problem)
+                {
+                    value["check_available"] = json!(false);
+                    value["check_problem"] = json!(problem);
+                    return value;
+                }
                 if let Some(saved) = saved.filter(|s| s.phase() == Phase::Prepared) {
                     value["unsent_check"] = json!(true);
                     value["unsent_check_id"] = json!(saved.reconcile_id());
@@ -304,9 +312,13 @@ pub(crate) fn discard_check(
     if saved.reconcile_id() != check_id {
         return Err("The unsent check changed. Refresh the task.".into());
     }
+    if let Some(problem) = crate::desktop_service::task_start_reconcile::publication_problem(&saved)
+    {
+        return Err(problem.into());
+    }
     let reconcile = saved.reconcile_id().to_owned();
     saved
         .discard_prepared(&reconcile)
-        .map_err(|_| "The unsent check could not be discarded.")?;
+        .map_err(crate::desktop_service::task_start_reconcile::journal_problem)?;
     Ok(view)
 }

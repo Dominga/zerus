@@ -10,7 +10,7 @@ import { computerOffline, orderedRows } from "../../store/catalog";
 import { groupOf, grouping, INBOX } from "../../store/organization";
 import { sessionIdentity, snapshotOf } from "./actions-ui";
 import { tasks } from "../../store/tasks";
-import { taskProject, projectTasks } from "../../store/taskContext";
+import { taskProject } from "../../store/taskContext";
 import "../styles/tasks.css";
 import { object, text } from "../screens/tasks-ui";
 import { homeShort, sessionAccount, sessionGoal, sessionPlan, usageRows } from "./inspector-data";
@@ -19,7 +19,8 @@ import { filterFolder, clearFolderFilter } from "../../store/folderFilter";
 import { of, sameKey, native } from "./paths";
 import type { BoundRow } from "./scope-filters";
 import type { Session } from "./types";
-import { captionText } from "./SessionCard";
+import { captionText, childStatus } from "./SessionCard";
+import { currentChildren, workingChildren } from "./subagents";
 import { tr, trNoop } from "../../i18n";
 import { accountsPage } from "../../store/accounts";
 import { openFilterAccounts } from "../../store/accountFilters";
@@ -31,7 +32,11 @@ import "../styles/inspector.css";
 
 // Keep the always-visible badge eager; load the board only when its tab opens.
 const TasksPanel = lazy(() => import("../screens/Tasks").then((module) => ({ default: module.TasksPanel })));
-function TaskTabBadge() { return <Show when={taskProject() && tasks.loaded()}><span class="tk-tabbadge"><Show when={projectTasks().filter((t) => t.stage === "review").length}>{(n) => <span class="tk-tb review">{n()}</span>}</Show><Show when={projectTasks().filter((t) => t.stage === "todo").length}>{(n) => <span class="tk-tb todo">{n()}</span>}</Show></span></Show>; }
+function TaskTabBadge() {
+  // Each stage's total: a windowed list loads only some of its rows.
+  const count = (stage: "review" | "todo") => tasks.project() === taskProject()?.id ? tasks.total(stage) : 0;
+  return <Show when={taskProject() && tasks.loaded()}><span class="tk-tabbadge"><Show when={count("review")}>{(n) => <span class="tk-tb review">{n()}</span>}</Show><Show when={count("todo")}>{(n) => <span class="tk-tb todo">{n()}</span>}</Show></span></Show>;
+}
 
 const LABEL: Record<InspectorTab, string> = { plan: trNoop("Plan & agents"), details: trNoop("Details"), worktrees: trNoop("Worktrees"), tasks: trNoop("Tasks") };
 const raw = () => selected() ? followedFor(selected()!.key).value : undefined;
@@ -50,12 +55,13 @@ function Row(props: { icon: string; label?: string; mono?: boolean; title?: stri
 }
 function PlanAgents() {
   const s = selected, plan = createMemo(() => sessionPlan(raw())), goal = createMemo(() => sessionGoal(raw()));
+  const online = () => !!s() && !computerOffline(s()!.computer);
   return <div class="insp-body">
     <Card id="plan-main" title={tr("Main agent")} aside={<span class="accent">{s() ? captionText(s()!.caption) : tr("Not reported")}</span>}><Row icon="activity" label={tr("status")}>{s() ? captionText(s()!.caption) : tr("Not reported")}</Row><Row icon="terminal" label={tr("action")} mono title={s()?.summary}>{s()?.summary || tr("Not reported")}</Row></Card>
     <Show when={goal().objective}><Card id="plan-goal" title={tr("Goal")} aside={<span class="muted">{goal().status === "active" ? tr("Pursuing goal") : goal().status}</span>}><p class="icard-text">{goal().objective}</p><Show when={goal().completion}><div class="hint">{tr("Reported by the agent. Completion: %1", goal().completion!)}</div></Show></Card></Show>
     <Show when={plan().length}><Card id="plan-tasks" title={tr("Tasks")} aside={<span class="dim">{tr("%1 of %2 completed (last recorded)", plan().filter((p) => p.status === "completed").length, plan().length)}</span>}><For each={plan()}>{(p) => <Row icon={p.status === "completed" ? "check" : "circle-dot"} label={p.status === "completed" ? tr("Done") : p.status === "in_progress" ? tr("In progress") : tr("To do")}>{p.title}</Row>}</For></Card></Show>
-    <Card id="plan-agents" title={tr("Subagents")} aside={<span class="dim">{tr("%1 active / %2 total", s()?.subagents?.filter((c) => c.state === "working").length ?? 0, s()?.subagents?.length ?? 0)}</span>}>
-      <For each={s()?.subagents?.slice(0, 100)} fallback={<div class="hint">{tr("No subagent activity has been reported yet.")}</div>}>{(child) => <Row icon="circle" label={child.state === "working" ? tr("Working") : child.state === "ready" ? tr("Ready") : tr("Needs input")} title={child.summary}><button class="link" onClick={() => { setSubagentOpen(child.id); setDetailTab("activity"); }}>{child.name} →</button><span class="dim"> {child.summary}</span></Row>}</For>
+    <Card id="plan-agents" title={tr("Subagents")} aside={<span class="dim">{tr("%1 active / %2 total", s() ? workingChildren(s()!, online()) : 0, s()?.subagents?.length ?? 0)}</span>}>
+      <For each={s()?.subagents?.slice(0, 100)} fallback={<div class="hint">{tr("No subagent activity has been reported yet.")}</div>}>{(child) => <Row icon="circle" label={childStatus(child, !!s() && currentChildren(s()!, online())).caption} title={child.summary}><button class="link" onClick={() => { setSubagentOpen(child.id); setDetailTab("activity"); }}>{child.name} →</button><span class="dim"> {child.summary}</span></Row>}</For>
     </Card>
   </div>;
 }

@@ -1,6 +1,6 @@
 import { createSignal } from "solid-js";
 import { invoke } from "@tauri-apps/api/core";
-import type { DesktopService, NotificationOwnership } from "../types";
+import type { DesktopService, NotificationOwnership, ModeReview, FirstChoiceOffer } from "../types";
 import { tr } from "../i18n";
 
 /** Presence of this projection is the startup mode. It never grants writer authority. */
@@ -398,12 +398,58 @@ export const ownershipActions = createOwnershipActions(
   () => invoke("desktop_service_ownership_rearm"),
   () => invoke("desktop_service_ownership_result"),
 );
+export type ModeReviewAction = "review" | "background" | "passive";
+/** Only a click invokes this command. Native confirmation and stale-selection
+ * checks happen in Rust; neither the view nor these arguments supply consent. */
+export function createModeReviewActions(
+  run: (display: ModeReview, action: ModeReviewAction) => Promise<unknown>,
+) {
+  const [busy, setBusy] = createSignal(false);
+  return { busy, async submit(display: ModeReview, action: ModeReviewAction) {
+    if (busy()) return;
+    const selected = { ...display };
+    setBusy(true);
+    try { return await run(selected, action); } finally { setBusy(false); }
+  } };
+}
+export const modeReviewActions = createModeReviewActions(
+  (display, action) => invoke("desktop_service_mode_action", { display, action }),
+);
+/** The first explicit background choice (Windows). Only a click invokes it; the
+ * native confirmation and every check happen in Rust. The returned original ID
+ * is kept only to show this choice's own pending or not-started outcome. */
+export function createFirstChoiceActions(
+  run: (display: FirstChoiceOffer) => Promise<{ request_id?: string } | null>,
+) {
+  const [busy, setBusy] = createSignal(false);
+  const [request, setRequest] = createSignal<string>();
+  return { busy, request, async submit(display: FirstChoiceOffer) {
+    if (busy()) return;
+    setBusy(true);
+    try {
+      const result = await run({ ...display });
+      if (result?.request_id) setRequest(result.request_id);
+      return result;
+    } finally { setBusy(false); }
+  } };
+}
+export const firstChoiceActions = createFirstChoiceActions(
+  (display) => invoke("desktop_service_first_choice", { display }),
+);
+const HELPER_UNAVAILABLE = ["activation_helper_unavailable", "activation_helper_update_required", "activation_helper_changed"];
+const COMPONENTS = ["fleet", "presence", "reads", "attention", "approvals"];
 export function ownershipNotice(view: NotificationOwnership | undefined): string {
   if (!view) return "";
   if (view.pending) return tr("Background access is unconfirmed. Check the result before making another change.");
+  if (view.activation?.review) {
+    if (view.activation.review.disposition !== "reviewed_unknown")
+      return tr("An earlier change of the background service mode needs review in Settings > About.");
+    if (!view.activation.business_ready || !view.activation.active || view.activation.pending || view.status?.state !== "service" || !view.status.identity_current || view.status.rearm_required)
+      return tr("The earlier mode change was reviewed. Choose how the service should work in Settings > About.");
+  }
   if (view.activation?.pending) return tr("Background activation is unconfirmed. Check the original result before making another change.");
   if (view.activation?.needs_resume) {
-    if (["activation_helper_unavailable", "activation_helper_update_required", "activation_helper_changed"].includes(view.activation.code))
+    if (HELPER_UNAVAILABLE.includes(view.activation.code))
       return tr("Background activation is unavailable. Update Zerus and its desktop service, then Resume to check again.");
     return tr("Background work is paused. Resume to activate the service explicitly.");
   }
@@ -414,10 +460,69 @@ export function ownershipNotice(view: NotificationOwnership | undefined): string
   return "";
 }
 
+/** Held task message copies the service reports for review; only a connected status counts. */
+export function heldInputsNotice(state: DesktopService | undefined): string {
+  const held = state?.connected ? state.task_message_inputs : undefined;
+  if (!held || !(held.review > 0)) return "";
+  return held.full
+    ? tr("Large task messages are paused: some held message copies need review.")
+    : tr("Some held task message copies need review.");
+}
+
+/**
+ * A connected service that runs passive: it reports none of its background work
+ * started. "resume": the native activation helper offers the explicit Resume
+ * (Linux, macOS). "settings": the platform has no native activation route
+ * (activation_platform_manual, Windows) and ownership needs nothing; Settings >
+ * About shows the service state. Presentation only; never authority.
+ */
+export type PausedAction = "resume" | "settings";
+export function servicePaused(state: DesktopService | undefined): PausedAction | undefined {
+  const ownership = state?.notification_ownership, activation = ownership?.activation;
+  if (!state?.connected || state.executable_upgrade?.state === "manual_refresh_required"
+    || !COMPONENTS.every((name) => state.background[name]?.code === "not_started")
+    || !activation || ownership?.pending || activation.pending
+    || activation.review || activation.automatic_blocked) return undefined;
+  if (activation.needs_resume) return HELPER_UNAVAILABLE.includes(activation.code) ? undefined : "resume";
+  return activation.code === "activation_platform_manual" && !ownershipNotice(ownership) ? "settings" : undefined;
+}
+
+/** THIS first background choice is unconfirmed: its own original ID is
+ * pending and no review or manual refresh has taken over. Presentation only. */
+export function firstChoicePending(state: DesktopService | undefined, request = firstChoiceActions.request()): boolean {
+  const activation = state?.notification_ownership?.activation;
+  return !!request && !!activation?.pending && activation.request_id === request && !activation.review
+    && state?.executable_upgrade?.state !== "manual_refresh_required";
+}
+
+/** The Windows paused body: it promises turning background mode on in
+ * Settings only while that first choice is actually offered. */
+export function pausedSettingsBody(state: DesktopService | undefined): string {
+  if (firstChoicePending(state)) return tr("Zerus is turning on background mode on this computer. Settings shows its progress.");
+  return state?.notification_ownership?.activation?.first
+    ? tr("Zerus runs your sessions through a background service, which stays paused until you turn it on in Settings.")
+    : tr("Zerus runs your sessions through a background service, which is paused on this computer. Settings shows its current state.");
+}
+
 /** Compact footer presentation; full reasons stay in its accessible tooltip. */
 export function serviceStatus(state: DesktopService | undefined) {
   if (!state) return;
+  // An explicit mode change in flight stays the headline with only its
+  // original-ID Check, never a reconnect Retry, even while the service
+  // restarts. Independent reasons keep their own text and review links.
+  if (firstChoicePending(state)) {
+    const ownership = state.notification_ownership;
+    const reads = pendingReadNotice(state), retained = retainedSourceNotice(state), inputs = heldInputsNotice(state);
+    const access = ownership?.pending ? ownershipNotice(ownership) : "";
+    // The same readiness rule as below: no held-copy Review while not ready.
+    const inputsReview = !!inputs && state.connected && !state.code && COMPONENTS.every((name) => state.background[name]?.ready);
+    return { label: tr("Turning on background mode"),
+      details: [tr("The new mode choice is unconfirmed. Check its original result; do not make another choice."), reads, retained, inputs, access]
+        .filter(Boolean).join("\n"),
+      healthy: false, retry: false, review: !!retained, inputsReview, ownership: "check" as const, manualRefresh: false, modeReview: false };
+  }
   const manualRefresh = state.executable_upgrade?.state === "manual_refresh_required";
+  const paused = servicePaused(state);
   let notice = "", label = tr("Background service");
   if (manualRefresh) {
     label = tr("Service refresh required");
@@ -430,23 +535,42 @@ export function serviceStatus(state: DesktopService | undefined) {
   } else if (state.code === "explicit_handoff_required") {
     label = tr("Background handoff required");
     notice = tr("Background service is waiting for an explicit handoff.");
-  } else if (state.code || !["fleet", "presence", "reads", "attention", "approvals"].every((name) => state.background[name]?.ready)) {
+  } else if (paused) {
+    // Passive by selection, not a fault. With "resume" the ownership notice
+    // explains it and offers Resume; with "settings" its own reason below.
+  } else if (state.code || !COMPONENTS.every((name) => state.background[name]?.ready)) {
     label = tr("Background service not ready");
     notice = tr("Background service is not ready. Some actions are unavailable.");
   } else if (!state.details_available) {
     label = tr("Service views unavailable");
     notice = tr("Activity, processes and project tasks are unavailable with this background service connection.");
   }
-  const pending = pendingReadNotice(state), retained = retainedSourceNotice(state), owner = ownershipNotice(state.notification_ownership);
-  const ownership = state.notification_ownership?.pending || state.notification_ownership?.activation?.pending ? "check"
-    : !manualRefresh && (state.notification_ownership?.native_recovery || state.notification_ownership?.status?.rearm_required
+  const pending = pendingReadNotice(state), retained = retainedSourceNotice(state), inputs = heldInputsNotice(state), owner = ownershipNotice(state.notification_ownership);
+  // Held copies are listed and released by the running background service:
+  // a paused, not-ready or handoff-waiting one cannot, so it offers no review.
+  // The notice still tells the user that copies are held.
+  const reviewable = !!inputs && !manualRefresh && !paused && state.connected && !state.code
+    && COMPONENTS.every((name) => state.background[name]?.ready);
+  const mode = state.notification_ownership?.activation, access = state.notification_ownership?.status;
+  const modeReview = !!mode?.review && !(mode.review.disposition === "reviewed_unknown" && mode.business_ready && mode.active
+    && !mode.pending && !state.notification_ownership?.pending && !state.notification_ownership?.native_recovery
+    && access?.state === "service" && access.identity_current && !access.rearm_required);
+  const modeBlocked = !!mode?.review || mode?.automatic_blocked;
+  const ownership = state.notification_ownership?.pending ? "check"
+    : !modeBlocked && state.notification_ownership?.activation?.pending ? "check"
+    : !manualRefresh && !modeBlocked && (state.notification_ownership?.native_recovery || state.notification_ownership?.status?.rearm_required
       || state.notification_ownership?.activation?.needs_resume) ? "rearm" : undefined;
   if (!notice) {
     if (pending) label = state.pending_read_import?.running ? tr("Transferring read marks") : tr("Read marks need attention");
     else if (retained) label = tr("Migration report");
+    else if (reviewable) label = tr("Held message copies");
     else if (owner) label = ownership === "check" ? tr("Background access unconfirmed") : ownership === "rearm" ? tr("Background access paused") : tr("Background access unavailable");
+    else if (paused === "settings") label = tr("Background access paused");
   }
-  const reasons = [notice, pending, retained, manualRefresh ? "" : owner].filter(Boolean);
+  // A reason without Retry or Resume: no in-app action turns background mode on
+  // here yet (zerus-5wmh.66.8.1.15); Settings shows the current state.
+  const settings = paused === "settings" ? pausedSettingsBody(state) : "";
+  const reasons = [notice, pending, retained, inputs, manualRefresh ? "" : owner, settings].filter(Boolean);
   return { label, details: reasons.join("\n") || tr("Background service connected"), healthy: !reasons.length,
-    retry: !manualRefresh && !!(notice || pending || retained || (owner && !ownership)), review: !!retained, ownership, manualRefresh };
+    retry: !manualRefresh && !!(notice || pending || retained || (owner && !ownership)), review: !!retained, inputsReview: reviewable, ownership, manualRefresh, modeReview };
 }

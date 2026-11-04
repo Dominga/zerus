@@ -82,8 +82,10 @@ fn exact_previous_store_upgrade_adds_only_the_independent_clone_leaf() {
                 |r| r.get(0)
             )
             .unwrap(),
-        // creation17, cache18, attention20, worktree23 and launch24 tables.
-        before + 2 + 4 + 2 + 2 + 2 + 1
+        // creation17, cache18, attention20, worktree23, launch24, termination
+        // outcome25, task message26, task message input27 and deferred
+        // send28 tables.
+        before + 2 + 4 + 2 + 2 + 2 + 1 + 2 + 2 + 2
     );
     assert_eq!(
         store

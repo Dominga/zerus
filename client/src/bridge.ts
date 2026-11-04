@@ -1,7 +1,7 @@
 import { desktopService } from "./store/desktopService";
 import { Channel, invoke } from "@tauri-apps/api/core";
 import { listen } from "@tauri-apps/api/event";
-import { emptyAccounts, emptyBatch, emptyMachines, emptyProjects, isEmptyBatch, type AccountsView, type MachinesView, type ProjectsView, type Screen, type Action, type ActivityEvent, type Batch, type ComputerId, type Details, type EditOutcome, type Outcome, type ReadMark, type Target, type TerminalConnected, type TerminalFacts, type TerminalEvent, type TerminalStatus, type TerminalTarget, type ArchivePage, type ArchivedActivity, type ProcessTarget, type Answer, type ComposerTab, type ComposerView, type Inspect, type SendReply, type SessionRef, type AttachmentRef, type Fetched, type ConflictsPage, type DraftSource, type SavedDraftDetail, type SavedDraftsPage, type QuestionEdit, type QuestionReply, type ClearControl, emptyUsage, type TerminalFinished, type SessionUsageRef, type Usage } from "./types";
+import { emptyAccounts, emptyBatch, emptyMachines, emptyProjects, isEmptyBatch, type AccountsView, type MachinesView, type ProjectsView, type Screen, type Action, type ActivityEvent, type Batch, type ComputerId, type Details, type EditOutcome, type Outcome, type ReadMark, type Target, type TerminalConnected, type TerminalFacts, type TerminalEvent, type TerminalStatus, type TerminalTarget, type ArchivePage, type ArchivedActivity, type ProcessTarget, type Answer, type ComposerTab, type ComposerView, type Inspect, type SendReply, type SessionRef, type AttachmentRef, type Fetched, type TaskFileSource, type ConflictsPage, type DraftSource, type SavedDraftDetail, type SavedDraftsPage, type QuestionEdit, type QuestionReply, type ClearControl, emptyUsage, type TerminalFinished, type SessionUsageRef, type Usage } from "./types";
 import type { CreatedWorktree, CreationAction, CreationAdmission, CreationCard, CreationEvent, FolderOut, LaunchAccounts, LaunchChoices, LaunchPlan, LaunchStart, MachineMeta, NewSessionContext, NewSessionFormInput, NewSessionFormView, PathStyle, RepositoryFields } from "./types";
 import type { ActivityPort, FollowRequest } from "./store/activity";
 import { documentVisibility, type PageVisibility } from "./store/visibility";
@@ -61,7 +61,14 @@ export const taskFormSubmit = (input: import("./store/taskForms").FormSubmit) =>
 export const taskFormCancel = (kind: import("./store/taskForms").FormKind, handle: number, rev: number) => desktop<import("./store/taskEditor").TaskEditorView<import("./store/taskForms").FormKind>>("task_form_cancel", { kind, handle, rev });
 export const assignTask = (project: string, task: string, target: { computer: string; name: string; run_id: string; conversation_id: string } | null, catalogKey: string | null, sessionId: string | null, mode?: "session" | "subagent" | "new_session") => desktop<void>("task_assign", { input: { project, task, target, catalog_key: catalogKey, session_id: sessionId, mode: mode ?? null } });
 export const readTaskDetails = (project: string, task: string, before: string | null) => desktop<unknown>("task_details", { project, task, before });
+/** The UUID of the task a deep link's short reference names, after one bounded read that checks it. */
+export const resolveTaskReference = (project: string, reference: string) => desktop<string>("task_reference", { project, reference });
+/** One further page of a board stage after a cursor (`task list --stage --limit --after`). */
+export const readTaskPage = (project: string, stage: string, limit: number, after: string | null) => desktop<unknown>("task_page", { project, stage, limit, after });
 export const openTaskAttachment = (path: string) => desktop<string | null>("task_attachment_open", { path });
+/** One file of a task, read when its card needs it, checked against its page and kept in the private cache. */
+export const readTaskAttachment = (project: string, task: string, source: TaskFileSource) =>
+  desktop<Fetched>("task_attachment_read", { project, task, entry: source.entry, file: source.file, meta: source.meta });
 
 /** `next_batch` answers with raw JSON bytes (`ipc::Response`), so large batches skip script evaluation. */
 function decodeBatch(reply: unknown): Batch {
@@ -844,6 +851,9 @@ const desktop = <T>(command: string, args: Record<string, unknown>): Promise<T> 
 /** Opens the selected session's composer (undefined: none is open); null outside the app. */
 export const composerOpen = (session: SessionRef | undefined) =>
   inTauri() ? invoke<ComposerView | null>("composer_open", { session: session ?? null }) : Promise.resolve(null);
+/** Whether the window is hidden: a hidden window checks no handed-over send. */
+export const composerVisibility = (hidden: boolean) =>
+  inTauri() ? invoke<void>("composer_visibility", { hidden }) : Promise.resolve();
 export const composerEdit = (handle: number, rev: number, epoch: number, text: string, position: number, anchor: number) =>
   desktop<void>("composer_edit", { handle, rev, epoch, text, position, anchor });
 /** The native file picker, then the reads; resolves once they ended. */

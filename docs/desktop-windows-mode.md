@@ -33,6 +33,76 @@ Zerus Next Settings route. No console is attached, allocated or brought to
 the foreground to manufacture admission. Settings callsite integration and
 installed acceptance are separate from this native helper.
 
+On Windows the installed frontend is one of three images:
+- `%LOCALAPPDATA%\Programs\Zerus\hgs-tray.exe` from the per-user installer;
+- an `hgs-tray.exe` beside the checking CLI;
+- the portable zip's own `hgs-tray.exe`, bound to the stable CLI by that
+  app's own staging.
+
+The binding covers the documented portable route. Once local sessions are on,
+the zip's app relays through the stable CLI staged from that zip.
+- **Creation.** When the app starts `hgs session-host install` beside it, the
+  install records `frontend.json` in the host images folder. It does so only
+  when its direct parent is the app beside its own loaded image and no
+  ancestor is an agent. One deadline covers the whole proof. Under the
+  install lock, after the CLI, the image and the marker are complete, the
+  install pins the app's loaded image and the staged CLI (deny-write and
+  deny-delete, ancestors included) and reads the app's SHA-256 through that
+  pin. Immediately before publishing, it checks the same ancestry, parent and
+  pins again against that deadline. It then records both exact objects and
+  the digest.
+- **No other writer.** Every install removes the old binding first, so a
+  failure leaves none. Any other install records nothing: from a terminal,
+  from an agent, or with a copied CLI.
+- **The record.** `frontend.json` and each folder from `.local` down to the
+  images folder must be private to this user: owner, access, a single link,
+  and no link or junction. They are held while the record is published or
+  read. An unsafe record or folder is refused, never repaired.
+- **The CLI.** A process that admits frontends establishes once, from its own
+  loaded image, that it is the bound CLI. It holds no pin on it afterwards,
+  so a newer zip can still restage the stable CLI while it runs.
+- **A running app.** A frontend request or a Settings mode change from the
+  app is proven for that exact process: its own handle and birth, and its
+  loaded image pinned. The image must be the recorded object, and its digest
+  is read through that pin within the request's original deadline, followed
+  by the final process and ancestry checks. The proof travels with the
+  request and is checked again where the request takes effect. A scope keeps
+  at most four such proofs and drops each one as soon as its process exits.
+  Requests still in flight keep their own pin until they finish.
+- **A notification launch.** With the UI closed, the launch pins the
+  recorded app, reads its digest through that pin, and keeps that pin
+  through the launch and its checks until release. A proof from a running
+  app never authorizes such a launch.
+- **Refusals.** A malformed, oversized, linked, foreign or stale record
+  admits nothing. Neither does a replaced app or CLI, or an edit that keeps
+  the app's length and write time.
+- **Rebinding.** The app stages again at start when the binding does not
+  name it, no longer names the staged CLI, or names its path while that path
+  now holds another file or other bytes. `session-host status` reports these
+  facts as `cli_current` and `frontend_current`. So a moved, newly extracted
+  or same-path replaced copy binds itself again. Same or newer version only,
+  never a downgrade, and an unchanged CLI is not copied again.
+- **Where the record is read.** A process that admits frontends finds the
+  record beside the CLI it is running, never through `HOME`, `USERPROFILE`
+  or another setting. Only when its own loaded image is exactly
+  `<dir>\.local\bin\hgs.exe` does it read
+  `<dir>\.local\share\hgs\host\frontend.json`, where the binding install
+  writes it. A service started by Task Scheduler without `HOME` therefore
+  reads the same record as the app's install. A CLI anywhere else, such as
+  the installer folder or a custom path, admits no portable app.
+- **Visibility.** A process that admits frontends records its own CLI when it
+  starts. Every admitting request, with a GUI running or a notification
+  launch, reads and checks the current private record first, with a read of
+  its own; these reads run one at a time. A cached proof is reused only when
+  that record names exactly its app. A failed or unsafe read refuses the
+  request, even when a proof is cached, and never falls back to the record
+  the process read earlier. A running service
+  therefore admits a rebinding at once while the stable CLI is unchanged, for
+  example a re-extracted or same-path replaced app; proofs made against the
+  older record no longer admit anything once it has changed. A record that
+  names another CLI, as after an upgrade, is refused until the service starts
+  again on that CLI. No service or manager is restarted automatically.
+
 As with the common frontend boundary, this prevents unintended agent descent.
 Deliberate same-user parent-process spoofing is outside its scope. Caller
 identities, images, ancestry and console facts are rechecked before effects.
@@ -235,6 +305,162 @@ requires no current Service grant and confers no authority. A later separately
 confirmed choice receives a new UUID; there is no automatic UUID rotation or
 unknown-effect replay.
 
+## Review an interrupted mode change
+
+Use a separate explicit review in Zerus Settings when available, or the updated
+maintained CLI from an admitted foreground classic console outside Zerus:
+
+```powershell
+hgs desktop registration review-mode --json --request-id UUID
+```
+
+Use the original `pending_transition.request_id` from `registration status`.
+Review cannot choose a mode. It performs no Stop, Update, RunEx, Grant, Rearm,
+revoke or rollback-hold acquisition. It does not consume a later instance or
+release an original operation, Owner, child or pipe charge. Retry, status and
+automatic reconnect never perform it.
+
+New attempts retain consumer PID/birth from the actual admitted native Caller,
+plus native machine and kernel boot identity, before effects. Ambiguous records
+from the current boot require an explicit reboot barrier. The first Review
+binds that barrier to the original UUID and full immutable record binding,
+machine and kernel boot; it returns `reboot_required` without acknowledgement.
+**Restart the computer, then use Review interrupted mode change again.**
+Use Windows **Restart**, not Shut down followed by power-on: Fast Startup can
+keep the previous kernel session. If the kernel boot identity is unchanged,
+Review still refuses acknowledgement. Confirming this distinction against
+the actual BootId on a Fast Startup PC remains part of native qualification.
+A genuinely different kernel boot on that same machine proves process death
+only. Wall-clock age, file dates, a free lock and a missing direct child never
+substitute for this proof. Native boot observation is read from the kernel's
+loader boot sequence, not a registry counter or timestamp.
+
+One narrow legacy `stop_offered` case can be reviewed without reboot: under the
+exclusive registration lock and unchanged owned task definition, the recorded
+old service PID/birth must be physically gone and its exact original GUID absent.
+A live/reused/unreadable PID, queued/unknown activity or a filtered empty active
+inventory supplies no such proof. An independently started later instance is
+left untouched and lends no identity or authority to the old request.
+
+Successful review archives the original phase, UUID and binding with a separate
+`reviewed_unknown` disposition. The manager outcome remains **Unknown**; review
+never claims that Stop succeeded. Status exposes the latest `reviewed_transition`
+and keeps `activation_automatic_blocked` latched. A later mode choice is a second
+explicit confirmation with a new request and complete fresh native caller,
+current Grant, manager, task, endpoint and resource preflight. Unknown or queued
+activity and unconfirmed cleanup must still refuse that choice.
+
+The old switch route stays blocked after any review, even with a valid Grant.
+For a separately explicit foreground choice, name the reviewed original and
+generate a new request before invoking the maintained helper:
+
+```powershell
+$freshModeRequest = [guid]::NewGuid().ToString()
+hgs desktop registration install --mode background --json --after-review UUID --request-id $freshModeRequest
+```
+
+Select `passive` instead when that is the separately chosen mode. These UUIDs
+are routing fences, not consent or native authority. Settings must show its
+second native confirmation first. Keep the new original UUID after a timeout;
+only its read-only observation is permitted, never another generated UUID.
+
+```powershell
+hgs desktop registration mode-result --json --request-id $freshModeRequest
+```
+
+This lookup reads the bounded private receipt for that original UUID. It never
+checks or adopts a current instance, retries an effect or infers readiness.
+An absent receipt remains Unknown. After a new explicit choice was offered,
+keep that UUID until its original physical cleanup is confirmed; a timeout or
+missing receipt alone never permits another choice. Completed, cancelled and
+same-mode no-op request IDs remain reserved after later mode changes. The
+receipt ledger has a ceiling of 48 IDs and never evicts an old ID to permit
+replay. Actual capacity is lower when archives or longer selected commands use
+the shared 8 KiB record. Admission reserves the worst-case consumer, original
+start identity, offered phase, reboot barrier and reviewed archive bytes before
+any effect, so the last admitted transition can still record both reviews.
+
+The original archive retains at most eight entries within the existing 8 KiB
+mode-record bound, with no eviction or silent reset. Exhaustion refuses a new
+intent before effects. Missing, inconsistent or changed original evidence fails
+closed. Exhaustion leaves the current task and selected mode untouched, with
+no new pending intent. Status and original `mode-result` lookups remain usable.
+There is currently **no maintained history rollover or reset route**. Ordinary
+registration install/remove does not clear these retained identities and is
+not an exhaustion workaround. Keep the original record and current mode and
+request a maintained migration before another mode change; do not delete the
+record, discard an archive or rotate a pending UUID. The dedicated capability marker is
+`Desktop registration mode review ABI: desktop-registration-mode-review-v1`.
+Native PC and installed Settings qualification remain outstanding.
+
+## First explicit background choice
+
+A plain passive registration has one more explicit form, for an in-app
+Settings choice (zerus-yfbd.1):
+
+```powershell
+$firstRequest = [guid]::NewGuid().ToString()
+hgs desktop registration install --mode background --json --request-id $firstRequest
+hgs desktop registration mode-result --json --request-id $firstRequest
+```
+
+The CLI advertises
+`Desktop registration first mode choice ABI: desktop-registration-mode-first-choice-v1`.
+The form admits only background, from a selected **and** actually running
+passive task. It is refused while any original transition is pending,
+interrupted, reviewed or archived: that history keeps its own Review route,
+whatever the caller asks for. The caller, current Service Grant, original
+instance, endpoint and selected image are checked as for any switch, again at
+every effect boundary; no automatic, default or passive request uses this form.
+
+The caller's UUID is reserved durably as the transition's original ID before
+the first manager effect, with byte headroom for its completion scope, a later
+review barrier and archive. Its receipt is distinct from a reviewed choice and
+names no reviewed original. A repeated UUID only reads the original result; it
+never stops, updates or starts again. A lost reply after a possible start stays
+Unknown and is looked up by that same UUID. Only a closed not-started boundary
+(an explicit pre-manager cancellation) records a refusal and allows a fresh
+choice. An interrupted first choice records consumer and boot evidence like any
+transition and takes the ordinary Review route above.
+
+The latest reserved first choice is also kept in an independent anchor,
+`<HGS_CONFIG_DIR>/windows-first-choice-<configuration>.json`, written durably
+before the mode record that reserves it. The anchor lives in the config tree,
+outside the desktop state folder that holds the mode record and the Service
+Grant. Every mode status, operation and result cross-checks the two: when the
+record no longer shows the anchored choice (missing, emptied or replaced
+journal, or a wiped state folder), has first-choice history without its anchor,
+or names another latest choice, the first choice is **lost**, never "never
+written". Status reports `first_choice_lost` and latches automatic activation,
+every mode operation refuses without a new ID, and `mode-result` stays Unknown.
+There is no maintained clear or reset for a lost first choice; keep both files
+and follow up manually. Registration install and remove keep the anchor exactly
+as they keep the mode record. Only wiping both the config and the state trees
+looks like a fresh profile.
+
+The anchor proves a loss only from outside that loss domain. The CLI, before
+it captures the caller or spawns the helper, and the mode helper again, resolve
+the config folder, the state folder and its desktop folder natively (junctions,
+symlinks, short names and drive aliases of existing folders) and compare them
+by path components with Windows case folding, never by string prefix. When the
+config folder equals or lies inside either one, status reports
+`first_choice_unavailable: "anchor_layout"`, the client offers no first choice,
+and the first-choice form is refused before any anchor, record reservation, UUID
+or manager effect. Nothing repairs or moves such a layout; the ordinary and
+reviewed routes are unchanged.
+
+Status and `mode-result` read the record and its anchor together under the
+registration lock, which every writer holds from anchor publication through its
+record save, so a reader never pairs one commit's anchor with another commit's
+record. While a writer holds the lock, both refuse after the lock's bounded wait
+rather than report a loss. A writer stopped between publishing its anchor and
+saving its record (a crash or power loss in that window) leaves the anchor ahead
+of the record. That is reported as lost: the files alone cannot tell it from a
+wiped journal, so it fails closed. A lost lookup keeps the original pending
+(Unknown) and never becomes NotStarted or a Resume. The client latches on a loss
+only while its latest read reports it; a later coherent healthy read lifts that
+latch, while the durable review latch stays.
+
 ## Private qualification
 
 The Windows unit suite runs the creation-owner regression in one bounded child,
@@ -276,3 +502,24 @@ agents or sessions.
 Microsoft API contracts: [RunEx](https://learn.microsoft.com/en-us/windows/win32/api/taskschd/nf-taskschd-iregisteredtask-runex),
 [instance Stop](https://learn.microsoft.com/en-us/windows/win32/api/taskschd/nf-taskschd-irunningtask-stop)
 and [EnginePID](https://learn.microsoft.com/en-us/windows/win32/api/taskschd/nf-taskschd-irunningtask-get_enginepid).
+
+
+### Service Settings review
+
+The Service consumer exposes **Settings > About > Review interrupted mode
+change** for the displayed original UUID and configuration. Its native dialog
+confirms metadata review only. A reboot barrier requires a real **Restart** and
+another explicit Review. Once reviewed, background or passive selection needs
+a SECOND native confirmation and one new retained choice UUID linked to that
+review. Lost replies remain original-ID lookup only. Retry and ordinary Resume
+cannot offer a mode choice after review.
+
+A background choice records its retained actual registration Grant incarnation
+and authenticated ready service epoch/generation. Only a fresh matching latest
+original result plus this frontend's current native Grant can make existing
+business work eligible. The permanent manager/default latch remains; current
+readiness alone never settles the old Unknown. Older choice receipts without
+this scope remain read-only and require another separately confirmed choice
+with the updated maintained CLI. None of these observations authorize refresh,
+Rearm, cleanup, or adoption of another task/process. Native dialogs, installed
+Settings and Fast Startup/Restart behavior still require PC qualification.

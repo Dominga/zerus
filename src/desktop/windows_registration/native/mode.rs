@@ -11,6 +11,10 @@ use crate::{
 };
 use policy::mode::{Budget, Mode, Phase, Record, RECORD_BYTES};
 mod recovery;
+mod boot;
+mod review;
+#[cfg(debug_assertions)]
+mod held_pause;
 use std::{
     path::Path,
     sync::{atomic::AtomicBool, Arc},
@@ -59,6 +63,8 @@ fn environment(config: &Config, binary: &str) -> Result<Vec<(String, String)>> {
     if let Ok(path) = std::env::var("LOCALAPPDATA") {
         values.push(("LOCALAPPDATA".into(), path));
     }
+    #[cfg(debug_assertions)]
+    held_pause::forward(&mut values);
     Ok(values)
 }
 
@@ -112,12 +118,12 @@ pub(in crate::desktop::windows_registration) fn command(
         reply["configuration"] = location.configuration.clone().into();
         reply["task_name"] = plan["task_name"].clone();
         reply["ok"] = false.into();
-        let record = pending_status(location, &plan)?;
+        let record = pending_status(config, location, &plan)?;
         reply["pending_transition"] = record["pending_transition"].clone();
         let pending = reply["pending_transition"].is_object();
-        reply["changed"] = if pending { Value::Null } else { false.into() };
+        reply["changed"] = if pending && request["operation"] != "review" { Value::Null } else { false.into() };
         reply["manager_changed"] = reply["changed"].clone();
-        reply["outcome"] = if pending { "unknown" } else { "refused" }.into();
+        reply["outcome"] = if pending || request["operation"] == "review" { "unknown" } else { "refused" }.into();
         return Ok(reply);
     }
     ensure!(
@@ -130,7 +136,7 @@ pub(in crate::desktop::windows_registration) fn command(
         .remove("pending")
         .unwrap_or(Value::Null);
     reply["ok"] = pending.is_null().into();
-    reply["outcome"] = if pending.is_null() {
+    reply["outcome"] = if request["operation"] == "review" { "unknown" } else if pending.is_null() {
         "settled"
     } else {
         "pending"
@@ -160,6 +166,114 @@ fn plans(config: &Config, location: &Location, sid: &str) -> Result<(Plan, Plan)
 fn wanted(plan: &Plan) -> Result<Shape> {
     Ok(plan.shape(crate::host::spawn::command_line(&plan.argv[1..])?))
 }
+const FIRST_ANCHOR_BYTES: usize = 1024;
+/// The independent first-choice anchor (zerus-yfbd.1): the latest reserved
+/// first-choice original, in the config folder, outside the desktop state
+/// folder that holds this mode record and the Service Grant. A missing,
+/// emptied or replaced journal or a wiped state folder is therefore "lost",
+/// never "never written". Only wiping both trees looks like a fresh profile.
+fn anchor_path(config: &Config, location: &Location) -> std::path::PathBuf {
+    config
+        .dir
+        .join(format!("windows-first-choice-{}.json", location.configuration))
+}
+fn read_anchor(config: &Config, location: &Location, plan: &Plan) -> Result<Option<String>> {
+    match crate::desktop::handoff::read_private(&anchor_path(config, location), FIRST_ANCHOR_BYTES) {
+        Ok(bytes) => {
+            let value: Value =
+                serde_json::from_slice(&bytes).context("First-choice anchor unavailable.")?;
+            let request = value["request"].as_str().unwrap_or("");
+            ensure!(
+                value["schema"] == 1
+                    && value["configuration"] == location.configuration
+                    && value["sid"] == plan.sid
+                    && value.as_object().is_some_and(|o| o.len() == 4)
+                    && uuid::Uuid::parse_str(request)
+                        .is_ok_and(|u| !u.is_nil() && u.to_string() == request),
+                "First-choice anchor unavailable; keep it and the mode record, and inspect status."
+            );
+            Ok(Some(request.into()))
+        }
+        Err(error)
+            if error
+                .downcast_ref::<std::io::Error>()
+                .is_some_and(|e| e.kind() == std::io::ErrorKind::NotFound) =>
+        {
+            Ok(None)
+        }
+        Err(error) => Err(error),
+    }
+}
+/// The anchor proves a lost journal only from outside the state tree that
+/// holds the journal and the Service Grant. Existing folders resolve natively
+/// (junctions, symlinks, short names and drive aliases); the policy compares
+/// the results by components with Windows case folding. An unresolvable or
+/// non-Unicode layout counts as overlapping. Nothing repairs or moves it.
+fn anchor_layout_separate(config: &Config, location: &Location) -> bool {
+    let canonical = |path: &std::path::Path| {
+        zerus_desktop_migration::canonical(path)
+            .ok()
+            .and_then(|path| path.to_str().map(str::to_owned))
+    };
+    match (
+        canonical(&config.dir),
+        canonical(&config.state),
+        canonical(&location.root),
+    ) {
+        (Some(anchor), Some(state), Some(root)) => {
+            policy::mode::first::anchor_separate(&anchor, &state, &root)
+        }
+        _ => false,
+    }
+}
+const ANCHOR_LAYOUT: &str = "The first background choice needs the config folder outside the desktop state folder; this layout keeps both in one loss domain. Nothing was reserved or changed.";
+pub(in crate::desktop::windows_registration) fn ensure_first_layout(
+    config: &Config,
+    location: &Location,
+) -> Result<()> {
+    ensure!(anchor_layout_separate(config, location), ANCHOR_LAYOUT);
+    Ok(())
+}
+/// The journal and its anchor as one generation: every writer holds the
+/// registration lock from anchor publication through its record save, so a
+/// reader under the same lock never pairs one commit's anchor with another's
+/// record. A busy writer is bounded unavailability (the lock wait), never loss.
+fn journal(
+    sid: &str,
+    config: &Config,
+    location: &Location,
+    plan: &Plan,
+) -> Result<(Record, Option<String>)> {
+    let _lock = Lock::acquire(sid)?;
+    let record = load(location, plan)?;
+    let lost = record.first_lost(read_anchor(config, location, plan)?.as_deref());
+    Ok((record, lost))
+}
+/// Durable before the record save that reserves this first choice.
+fn write_anchor(
+    config: &Config,
+    location: &Location,
+    plan: &Plan,
+    request: &str,
+    fence: &mut impl FnMut() -> Result<()>,
+) -> Result<()> {
+    ensure!(anchor_layout_separate(config, location), ANCHOR_LAYOUT);
+    fence()?;
+    let bytes = serde_json::to_vec(&json!({"schema":1,"configuration":location.configuration,
+        "sid":plan.sid,"request":request}))?;
+    let mut file = tempfile::NamedTempFile::new_in(&config.dir)?;
+    platform::make_private(file.as_file())?;
+    ensure!(
+        platform::verify_private_file(file.as_file())?,
+        "First-choice anchor is not private."
+    );
+    file.write_all(&bytes)?;
+    file.as_file().sync_all()?;
+    fence()?;
+    platform::persist(file, anchor_path(config, location)).map_err(|error| error.error)?;
+    platform::sync_dir(&config.dir)?;
+    fence()
+}
 fn load(location: &Location, plan: &Plan) -> Result<Record> {
     match crate::desktop::handoff::read_private(&location.root.join(RECORD), RECORD_BYTES) {
         Ok(bytes) => Record::decode(&bytes, plan),
@@ -173,7 +287,38 @@ fn load(location: &Location, plan: &Plan) -> Result<Record> {
         Err(error) => Err(error),
     }
 }
+/// Original-ID metadata only. No COM connection, caller admission, Grant,
+/// current-instance lookup or readiness inference belongs to this path.
+pub(in crate::desktop::windows_registration) fn result(
+    config: &Config, location: &Location, request: &str,
+) -> Result<Value> {
+    let sid = crate::host::token::user_sid()?;
+    let preview = registration::windows_plan(config, location)?;
+    let plan = Plan::parse(&json!({"schema":1,"operation":"status","plan":preview}), &sid)?;
+    let (record, lost) = journal(&sid, config, location, &plan)?;
+    // A journal that lost its anchored first choice answers nothing settled.
+    if let Some(lost) = lost {
+        return Ok(json!({"abi":MODE_ABI,"schema":1,"configuration":location.configuration,
+            "request_id":request,"read_only":true,"receipt":null,
+            "outcome":policy::mode::review::ChoicePhase::Unknown,"code":"first_choice_lost",
+            "first_choice_lost":lost,"manager_changed":false,"authority_changed":false,"changed":false}));
+    }
+    // A reviewed choice or a first choice: each answers only its own original ID.
+    let receipt = match record.choices.iter().find(|r|r.request == request) {
+        Some(r) => Some((serde_json::to_value(r)?, r.phase)),
+        None => match record.first_choices.iter().find(|r|r.request == request) {
+            Some(r) => Some((serde_json::to_value(r)?, r.phase)),
+            None => None,
+        },
+    };
+    Ok(json!({"abi":MODE_ABI,"schema":1,"configuration":location.configuration,
+        "request_id":request,"read_only":true,"receipt":receipt.as_ref().map(|r|&r.0),
+        "outcome":receipt.as_ref().map(|r|r.1).unwrap_or(policy::mode::review::ChoicePhase::Unknown),
+        "code":if receipt.is_some() {"original_choice_result"} else {"original_choice_unavailable"},
+        "manager_changed":false,"authority_changed":false,"changed":false}))
+}
 pub(in crate::desktop::windows_registration) fn pending_status(
+    config: &Config,
     location: &Location,
     preview: &Value,
 ) -> Result<Value> {
@@ -182,9 +327,18 @@ pub(in crate::desktop::windows_registration) fn pending_status(
         &json!({"schema":1,"operation":"status","plan":preview}),
         &sid,
     )?;
-    let record = load(location, &plan)?;
+    let (record, lost) = journal(&sid, config, location, &plan)?;
+    // An anchor inside the state loss domain could never prove a loss: no
+    // first choice is offered or admitted on that layout.
+    let unavailable = (!anchor_layout_separate(config, location)).then_some("anchor_layout");
     Ok(
-        json!({"pending_transition":record.pending,"cancelled_request_id":record.cancelled,"completed_request_id":record.completed}),
+        json!({"pending_transition":record.pending,"cancelled_request_id":record.cancelled,"completed_request_id":record.completed,
+            "reviewed_transition":record.reviewed.last(),
+            "mode_choice":record.choices.last(),
+            "first_choice":record.first_choices.last(),
+            "first_choice_lost":lost,
+            "first_choice_unavailable":unavailable,
+            "activation_automatic_blocked":lost.is_some() || !record.reviewed.is_empty() || record.pending.as_ref().is_some_and(|p|p.review.is_some())}),
     )
 }
 fn save(
@@ -228,6 +382,7 @@ struct Fence<'a> {
     admission: &'a Admission,
     location: &'a Location,
     background: bool,
+    grant: Option<ownership::RegistrationGrant>,
     exclusion: Option<Exclusion>,
     until: Instant,
     source: std::fs::File,
@@ -244,6 +399,7 @@ impl Fence<'_> {
             "Mode transition deadline reached; retain its original UUID."
         );
         self.admission.check()?;
+        if let Some(grant) = &self.grant { grant.check(self.location)?; }
         let held = platform::FileIdentity::of(&self.source)?;
         let (_, current) = instances::selected_image(self.image)?;
         ensure!(
@@ -344,7 +500,12 @@ struct Runtime<'a> {
     passive: &'a Plan,
     background: &'a Plan,
 }
-fn effect(runtime: Runtime<'_>, desired: Mode) -> Result<Value> {
+fn effect(
+    runtime: Runtime<'_>,
+    desired: Mode,
+    choice: Option<&policy::mode::review::Choice>,
+    first: Option<&policy::mode::first::First>,
+) -> Result<Value> {
     let until = Budget::Preflight.deadline(Instant::now());
     let Runtime {
         config,
@@ -367,9 +528,20 @@ fn effect(runtime: Runtime<'_>, desired: Mode) -> Result<Value> {
         background
     };
     let mut record = load(location, passive)?;
+    // A first choice never takes the reviewed route: any pending, interrupted
+    // or reviewed original refuses it here, under the owned lock.
+    let requested = match first {
+        Some(first) => {
+            ensure!(choice.is_none() && desired == Mode::Background && from == Mode::Passive,
+                "A first mode choice selects background from a passive registration only.");
+            Some(record.first_choice(first)?)
+        }
+        None => record.choice(choice)?,
+    };
     let resuming = record.pending.clone();
     if let Some(pending) = &resuming {
-        if pending.desired != desired || !pending.phase.pre_manager() {
+        ensure!(pending.review.is_none(), "Review interrupted mode change by its original UUID; a reboot barrier cannot resume or replay its effects.");
+        if requested.is_some() || pending.desired != desired || !pending.phase.pre_manager() {
             return recovery::observe(
                 recovery::Inputs {
                     config,
@@ -390,6 +562,9 @@ fn effect(runtime: Runtime<'_>, desired: Mode) -> Result<Value> {
         admission,
         location,
         background: desired == Mode::Background,
+        grant: if desired == Mode::Background && (choice.is_some() || first.is_some()) {
+            Some(ownership::RegistrationGrant::capture(location)?.context("Current Service Grant/Rearm required.")?)
+        } else { None },
         exclusion: None,
         until,
         source,
@@ -398,6 +573,8 @@ fn effect(runtime: Runtime<'_>, desired: Mode) -> Result<Value> {
     };
     fence.check()?;
     let mut original = instances::original(native, location, old, &wanted(old)?, until)?;
+    ensure!(first.is_none() || original.is_some(),
+        "A first background choice needs the selected passive service running.");
     let observation = original.as_ref().map(instances::Running::observation);
     if let Some(pending) = &resuming {
         ensure!(
@@ -405,9 +582,30 @@ fn effect(runtime: Runtime<'_>, desired: Mode) -> Result<Value> {
             "Original task or service changed; retain the pending UUID and inspect it."
         );
     }
+    let consumer = if resuming.is_none() {
+        admission.check()?;
+        let boot = boot::current()?;
+        ensure!(choice.is_none() || record.reviewed.last().is_some_and(|a|
+            a.original.review.as_ref().is_some_and(|r|r.barrier.machine == boot.machine)),
+            "The reviewed original belongs to another machine.");
+        let (pid, birth) = admission.caller.consumer();
+        admission.check()?;
+        Some(policy::mode::review::Consumer { pid, birth, boot })
+    } else { None };
     if resuming.is_none() && from == desired && original.is_some() {
+        if let Some(choice) = choice {
+            record.reserve_choice(choice, desired)?;
+            finish_choice(&mut record, &choice.request, desired,
+                original.as_ref().context("Original instance absent.")?, &fence)?;
+            save(location, passive, &record, &mut || {
+                fence.check()?;
+                original.as_ref().context("Original instance absent.")?.check()?;
+                ensure!(selected(native, passive, background)? == from, "Owned mode changed.");
+                Ok(())
+            })?;
+        }
         return Ok(
-            json!({"abi":MODE_ABI,"schema":1,"configuration":location.configuration,"task_name":passive.name,"selected_mode":desired.name(),"running_mode":desired.name(),"pending":null,"changed":false}),
+            json!({"abi":MODE_ABI,"schema":1,"configuration":location.configuration,"task_name":passive.name,"selected_mode":desired.name(),"running_mode":desired.name(),"pending":null,"changed":false,"request_id":requested}),
         );
     }
     marker(config, &new.argv[0])?;
@@ -442,7 +640,16 @@ fn effect(runtime: Runtime<'_>, desired: Mode) -> Result<Value> {
     let id = if let Some(pending) = &resuming {
         pending.request_id.clone()
     } else {
-        let id = record.begin(desired, observation)?.request_id.clone();
+        if let Some(choice) = choice { record.reserve_choice(choice, desired)?; }
+        if let Some(first) = first {
+            record.reserve_first(first)?;
+            write_anchor(config, location, passive, &first.request, &mut || fence.check())?;
+        }
+        let id = match requested {
+            Some(id) => record.begin_id(desired, observation, id)?,
+            None => record.begin(desired, observation)?,
+        }.request_id.clone();
+        record.pending.as_mut().expect("original").consumer = consumer;
         save(location, passive, &record, &mut || fence.check())?;
         id
     };
@@ -501,6 +708,13 @@ fn effect(runtime: Runtime<'_>, desired: Mode) -> Result<Value> {
     }
     save(location, passive, &record, &mut || fence.check())?;
     fence.phase(Budget::Stop);
+    // Debug builds only: the hosted fixture's bounded hold of an exact first
+    // choice at Held. It consumes the Stop deadline just started, so the
+    // unchanged StopOffered save below refuses an expired wait at Held.
+    #[cfg(debug_assertions)]
+    if first.is_some() {
+        held_pause::wait(config, &id);
+    }
     if let Some(original) = &mut original {
         record.advance(Phase::Held, Phase::StopOffered)?;
         save(location, passive, &record, &mut || fence.check())?;
@@ -569,12 +783,26 @@ fn effect(runtime: Runtime<'_>, desired: Mode) -> Result<Value> {
     }
     admission.check()?;
     ready.check()?;
-    record.completed = Some(id.clone());
-    record.pending = None;
-    save(location, passive, &record, &mut || admission.check())?;
+    finish_choice(&mut record, &id, desired, &ready, &fence)?;
+    save(location, passive, &record, &mut || {
+        admission.check()?; ready.check()?;
+        if let Some(grant) = &fence.grant { grant.check(location)?; }
+        Ok(())
+    })?;
     Ok(
         json!({"abi":MODE_ABI,"schema":1,"configuration":location.configuration,"task_name":passive.name,"selected_mode":desired.name(),"running_mode":desired.name(),"pending":null,"request_id":id,"changed":true,"instance":ready.observation()}),
     )
+}
+
+fn finish_choice(record: &mut Record, id: &str, desired: Mode, ready: &instances::Running, fence: &Fence<'_>) -> Result<()> {
+    if desired == Mode::Background && (record.choices.iter().any(|r|r.request == id)
+        || record.first_choices.iter().any(|r|r.request == id)) {
+        let grant = fence.grant.as_ref().context("Original background Grant unavailable.")?;
+        grant.check(fence.location)?;
+        let (journal, owner_epoch) = grant.incarnation();
+        let (service_epoch, generation) = ready.scope();
+        record.complete_in_scope(id, policy::mode::review::ChoiceScope { journal, owner_epoch, service_epoch, generation })
+    } else { record.complete(id) }
 }
 
 fn operation(args: &[String]) -> Result<Value> {
@@ -584,12 +812,17 @@ fn operation(args: &[String]) -> Result<Value> {
     let request = policy::read_frame(&mut std::io::stdin().lock(), length)?;
     let op = request["operation"].as_str().unwrap_or("");
     ensure!(
-        request["schema"] == 1 && matches!(op, "switch" | "cancel_rollback"),
+        request["schema"] == 1 && matches!(op, "switch" | "cancel_rollback" | "review"),
         "Unsupported mode request."
     );
     let keys = request.as_object().context("Invalid mode request.")?;
+    // The first-choice form: exactly a background switch with the caller's
+    // NEW request UUID, and no reviewed linkage.
+    let first_form = op == "switch" && keys.len() == 4 && request["mode"] == "background"
+        && request["request_id"].is_string() && !keys.contains_key("after_review");
     ensure!(
-        keys.len() == 3
+        (keys.len() == 3 || first_form || (op == "switch" && keys.len() == 5
+            && request["after_review"].is_string() && request["request_id"].is_string()))
             && if op == "switch" {
                 keys.contains_key("mode")
             } else {
@@ -599,6 +832,9 @@ fn operation(args: &[String]) -> Result<Value> {
     );
     let config = Config::load().map_err(|error| anyhow::anyhow!(error.to_string()))?;
     let location = Location::new(&config)?;
+    // Before admission, the lock, any anchor or record reservation and any
+    // manager effect: an overlapping layout never takes a first choice.
+    ensure!(!first_form || anchor_layout_separate(&config, &location), ANCHOR_LAYOUT);
     let scope = ui_authority::Scope::new(&config, &location);
     let caller = ui_authority::registration::Caller::capture(&scope)?;
     let admission = Admission { scope, caller };
@@ -609,6 +845,13 @@ fn operation(args: &[String]) -> Result<Value> {
     let sid = crate::host::token::user_sid()?;
     let (passive, background) = plans(&config, &location, &sid)?;
     let _lock = Lock::acquire(&sid)?;
+    // No mode operation runs while the journal and its independent
+    // first-choice anchor disagree: lost is never "never written".
+    if let Some(lost) = load(&location, &passive)?
+        .first_lost(read_anchor(&config, &location, &passive)?.as_deref())
+    {
+        anyhow::bail!("The desktop mode journal no longer shows first choice {lost}; keep both records and inspect status. No mode operation is admitted.");
+    }
     let mut offered_cancel = None;
     if op == "cancel_rollback" {
         admission.check()?;
@@ -656,6 +899,11 @@ fn operation(args: &[String]) -> Result<Value> {
         folder: unsafe { scheduler.GetFolder(&BSTR::from("\\")) }?,
         scheduler: scheduler.clone(),
     };
+    if op == "review" {
+        let id = request["request_id"].as_str().context("Original transition UUID required.")?;
+        return review::command(recovery::Inputs { config: &config, location: &location,
+            native: &mut native, admission: &admission, passive: &passive, background: &background }, id);
+    }
     if let Some((mut record, id)) = offered_cancel {
         // This read-only lane returns before the effect path. It cannot stop,
         // update, start, revoke or acquire a later runtime's rollback hold.
@@ -673,6 +921,12 @@ fn operation(args: &[String]) -> Result<Value> {
         );
     }
     let desired = Mode::parse(request["mode"].as_str().unwrap_or(""))?;
+    let choice = request["after_review"].as_str().map(|reviewed| policy::mode::review::Choice {
+        reviewed: reviewed.into(), request: request["request_id"].as_str().unwrap_or("").into(),
+    });
+    let first = first_form.then(|| policy::mode::first::First {
+        request: request["request_id"].as_str().unwrap_or("").into(),
+    });
     effect(
         Runtime {
             config: &config,
@@ -684,6 +938,8 @@ fn operation(args: &[String]) -> Result<Value> {
             background: &background,
         },
         desired,
+        choice.as_ref(),
+        first.as_ref(),
     )
 }
 
@@ -735,11 +991,107 @@ mod tests {
         for request in [
             json!({"schema":1,"operation":"switch","mode":"passive"}),
             json!({"schema":1,"operation":"cancel_rollback","request_id":"11111111-1111-4111-8111-111111111111"}),
+            json!({"schema":1,"operation":"review","request_id":"11111111-1111-4111-8111-111111111111"}),
+            json!({"schema":1,"operation":"switch","mode":"background","after_review":"11111111-1111-4111-8111-111111111111","request_id":"22222222-2222-4222-8222-222222222222"}),
+            json!({"schema":1,"operation":"switch","mode":"background","request_id":"33333333-3333-4333-8333-333333333333"}),
         ] {
             let error = command(&config, &location, request).unwrap_err();
             assert_eq!(error.to_string(), crate::self_exec::TEST_IMAGE);
         }
         // Refused before any record, plan or helper environment was touched.
         assert_eq!(std::fs::read_dir(root.path()).unwrap().count(), 0);
+    }
+
+    fn layout(root: &std::path::Path, dir: std::path::PathBuf) -> (Config, Location) {
+        let state = root.join("state");
+        std::fs::create_dir_all(state.join("desktop")).unwrap();
+        let config = Config {
+            home: root.to_str().unwrap().into(),
+            dir,
+            state: state.clone(),
+            selves: vec![],
+            peers: vec![],
+            base_peers: vec![],
+            peers_from_environment: false,
+            machines: Default::default(),
+            tab: false,
+            tab_colors: String::new(),
+        };
+        let location = Location::new(&config).unwrap();
+        (config, location)
+    }
+    fn plan() -> Plan {
+        Plan::parse(&json!({"schema":1,"operation":"status","plan":{"schema":1,"operation":"preview","label":"hgs-desktop","configuration":"a".repeat(64),"user_sid":"S-1-5-21-1001","task_name":"hgs-desktop-S-1-5-21-1001","definition":"synthetic definition","argv":["C:/Example/hgs.exe","desktop","serve","--config-dir","C:/Example/config","--state-dir","C:/Example/state"],"session":{"kind":"interactive_user","allow_session_zero":false}}}), "S-1-5-21-1001").unwrap()
+    }
+
+    #[test]
+    fn only_a_config_folder_outside_the_state_tree_takes_a_first_choice_anchor() {
+        let root = tempfile::tempdir().unwrap();
+        let root = zerus_desktop_migration::canonical(root.path()).unwrap();
+        let (disjoint, location) = layout(&root, root.join("config"));
+        std::fs::create_dir_all(&disjoint.dir).unwrap();
+        assert!(anchor_layout_separate(&disjoint, &location));
+        // A junction outside the state tree that resolves into it.
+        let junction = root.join("alias");
+        let made = std::process::Command::new("cmd")
+            .args(["/d", "/c", "mklink", "/J"])
+            .arg(&junction)
+            .arg(root.join("state"))
+            .output()
+            .unwrap();
+        assert!(made.status.success(), "{made:?}");
+        let upper = root.join("state").to_str().unwrap().to_uppercase();
+        for (case, dir) in [
+            ("inside the mode folder", root.join(r"state\desktop\config")),
+            ("the state tree itself", root.join("state")),
+            ("other case", std::path::PathBuf::from(format!(r"{upper}\cfg"))),
+            ("through a junction", junction.join("cfg")),
+        ] {
+            let (config, location) = layout(&root, dir);
+            assert!(!anchor_layout_separate(&config, &location), "{case}");
+            std::fs::create_dir_all(&config.dir).unwrap();
+            let request = uuid::Uuid::new_v4().to_string();
+            let error = write_anchor(&config, &location, &plan(), &request, &mut || Ok(()))
+                .unwrap_err();
+            assert_eq!(error.to_string(), ANCHOR_LAYOUT, "{case}");
+            assert!(!anchor_path(&config, &location).exists(), "{case}");
+        }
+    }
+
+    #[test]
+    fn a_journal_read_waits_out_a_writer_and_never_pairs_a_new_anchor_with_an_old_record() {
+        let root = tempfile::tempdir().unwrap();
+        let root = zerus_desktop_migration::canonical(root.path()).unwrap();
+        let (config, location) = layout(&root, root.join("config"));
+        std::fs::create_dir_all(&config.dir).unwrap();
+        let plan = plan();
+        // A writer's commit window: its new anchor is published under the
+        // lock and its record save has not happened yet.
+        let request = uuid::Uuid::new_v4().to_string();
+        write_anchor(&config, &location, &plan, &request, &mut || Ok(())).unwrap();
+        let lock = format!("test-{}", uuid::Uuid::new_v4());
+        let (held, wait) = std::sync::mpsc::channel();
+        let (release, done) = std::sync::mpsc::channel::<()>();
+        let writer = {
+            let lock = lock.clone();
+            std::thread::spawn(move || {
+                let _held = Lock::acquire(&lock).unwrap();
+                held.send(()).unwrap();
+                done.recv().unwrap();
+            })
+        };
+        wait.recv().unwrap();
+        let started = Instant::now();
+        let error = journal(&lock, &config, &location, &plan).unwrap_err();
+        assert!(
+            error.to_string().contains("Registration lock not confirmed"),
+            "{error:#}"
+        );
+        assert!(started.elapsed() < Duration::from_secs(5));
+        release.send(()).unwrap();
+        writer.join().unwrap();
+        // Outside any writer the same pair is a durable loss.
+        let (_, lost) = journal(&lock, &config, &location, &plan).unwrap();
+        assert_eq!(lost, Some(request));
     }
 }

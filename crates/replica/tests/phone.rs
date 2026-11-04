@@ -687,3 +687,111 @@ fn a_done_task_the_phone_asks_for_arrives_and_stays() {
     while step(&mut unknown, &phone, &computer, &mut nothing) {}
     settled(nothing);
 }
+
+/// The computer reserves `task`'s first attempt, so it records attempts.
+fn reserve_first_attempt(computer: &ProjectStore, uuid: &str) {
+    use zerus_replica::execution::{NativeRequest, Origin};
+    let executor = SessionKey {
+        machine: "m".into(),
+        session: "codex/api".into(),
+        session_id: "launch_id:api".into(),
+    };
+    let mut task = computer.load(uuid).unwrap();
+    task.reserve_attempt(
+        "11111111-1111-4111-8111-111111111111",
+        Origin::Send,
+        &executor,
+        NativeRequest {
+            machine: "m".into(),
+            name: "codex/api".into(),
+            run_id: "run-api".into(),
+            conversation_id: "conversation-api".into(),
+            digest: "ab".repeat(32),
+        },
+        &Actor::Person,
+        10,
+    )
+    .unwrap();
+    computer.save(&mut task).unwrap();
+}
+
+fn execution(store: &ProjectStore, uuid: &str) -> String {
+    serde_json::to_string(&store.load(uuid).unwrap().view().unwrap().execution).unwrap()
+}
+
+/// zerus-cg5h.4 S2b.2 leaf 3: a phone's offline edit concurrent with the
+/// first attempt comes back with the execution schema, and the phone's
+/// payload adds no attempt fact (phones have no attempt API).
+#[test]
+fn a_phone_edit_beside_the_first_attempt_comes_back_at_the_execution_schema() {
+    let (_a, _b, phone, computer) = pair();
+    let task = add(&computer, "Add rate limiting");
+    settled(run(&phone, &computer, Budget::default()));
+    reserve_first_attempt(&computer, task.uuid());
+    let facts = execution(&computer, task.uuid());
+    comment(&phone, task.uuid(), "Offline on the phone");
+    settled(run(&phone, &computer, Budget::default()));
+    for side in [&phone, &computer] {
+        let copy = side.load(task.uuid()).unwrap();
+        assert_eq!(copy.schema(), 6);
+        assert!(!copy.needs_schema_repair());
+        assert!(copy.held().unwrap().is_some());
+    }
+    assert_eq!(comments(&computer, task.uuid()), 1);
+    assert_eq!(execution(&computer, task.uuid()), facts);
+    assert_eq!(live_digest(&phone), live_digest(&computer));
+}
+
+/// The computer imports the phone's edit and answers, but the answer is
+/// lost; the phone edits again offline and reconnects.
+#[test]
+fn a_lost_answer_and_a_reconnect_still_bring_the_execution_schema() {
+    let (_a, _b, phone, computer) = pair();
+    let task = add(&computer, "Add rate limiting");
+    settled(run(&phone, &computer, Budget::default()));
+    reserve_first_attempt(&computer, task.uuid());
+    comment(&phone, task.uuid(), "Before the lost answer");
+    let mut exchange = Exchange::with_budget(Budget::default());
+    let request = exchange.next_request(&phone).unwrap().unwrap();
+    let _lost: Answer = answer(&computer, wire(&request)).unwrap();
+    comment(&phone, task.uuid(), "After it");
+    settled(run(&phone, &computer, Budget::default()));
+    let copy = phone.load(task.uuid()).unwrap();
+    assert!(!copy.needs_schema_repair() && copy.schema() == 6);
+    assert_eq!(comments(&computer, task.uuid()), 2);
+    assert_eq!(live_digest(&phone), live_digest(&computer));
+}
+
+/// Several ranges and pages: every held task reaches the phone with the
+/// execution schema, the others keep theirs.
+#[test]
+fn held_tasks_arrive_at_the_execution_schema_across_pages() {
+    let (_a, _b, phone, computer) = pair();
+    let tasks: Vec<TaskDoc> = (0..12)
+        .map(|n| add(&computer, &noise(&format!("task {n}"), 40_000)))
+        .collect();
+    settled(run(&phone, &computer, Budget::default()));
+    for task in [&tasks[2], &tasks[9]] {
+        reserve_first_attempt(&computer, task.uuid());
+    }
+    for task in &tasks {
+        comment(&phone, task.uuid(), "Offline");
+    }
+    let small = Budget {
+        inventory_bytes: 1024,
+        push_bytes: 96 * 1024,
+        ..Budget::default()
+    };
+    let run = settled(run(&phone, &computer, small));
+    assert!(
+        run.requests > 1 && run.ranges.len() > 1,
+        "{} requests",
+        run.requests
+    );
+    for (n, task) in tasks.iter().enumerate() {
+        let copy = phone.load(task.uuid()).unwrap();
+        assert_eq!(copy.schema() == 6, n == 2 || n == 9, "task {n}");
+        assert!(!copy.needs_schema_repair());
+    }
+    assert_eq!(live_digest(&phone), live_digest(&computer));
+}

@@ -185,7 +185,7 @@ pub(super) fn registration_status(location: &Location) -> Result<Status> {
 }
 
 #[cfg(any(windows, test))]
-fn registration_row(location: &Location) -> Result<(Row, std::fs::File)> {
+fn registration_row(location: &Location) -> Result<(Row, super::revoke::hold::Verification)> {
     let (db, verification) = super::revoke::hold::database(location)?;
     let version: i64 = db.query_row("PRAGMA user_version", [], |r| r.get(0))?;
     ensure!(
@@ -210,10 +210,16 @@ fn registration_row(location: &Location) -> Result<(Row, std::fs::File)> {
 #[cfg(any(windows, test))]
 pub(super) struct RegistrationGrant {
     original: Grant,
-    database: std::fs::File,
+    database: super::revoke::hold::Verification,
 }
 #[cfg(any(windows, test))]
 impl RegistrationGrant {
+    /// Routing observation from this retained actual database incarnation.
+    /// Copying it cannot reconstruct this guard or authorize any operation.
+    #[cfg(windows)]
+    pub(super) fn incarnation(&self) -> (String, String) {
+        (self.original.journal.clone(), self.original.owner_epoch.clone())
+    }
     pub(super) fn capture(location: &Location) -> Result<Option<Self>> {
         let (row, database) = registration_row(location)?;
         if row.status.state != State::Service
@@ -233,10 +239,10 @@ impl RegistrationGrant {
             "registration grant configuration changed"
         );
         let (current, database) = registration_row(location)?;
-        let held = platform::FileIdentity::of(&self.database)?;
-        let actual = platform::FileIdentity::of(&database)?;
+        let held = self.database.identity()?;
+        let actual = database.identity()?;
         ensure!(
-            held.inode != 0 && held.device == actual.device && held.inode == actual.inode,
+            held.1 != 0 && held == actual,
             "registration grant database changed"
         );
         ensure!(

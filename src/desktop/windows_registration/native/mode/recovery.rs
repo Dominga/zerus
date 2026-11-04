@@ -97,6 +97,7 @@ pub(super) fn cancel_ready(
         admission,
         location,
         background: false,
+        grant: None,
         exclusion: None,
         until,
         source,
@@ -220,6 +221,7 @@ pub(super) fn observe(
         admission,
         location,
         background: desired == Mode::Background,
+        grant: None,
         exclusion: None,
         until,
         source,
@@ -288,8 +290,7 @@ pub(super) fn observe(
         Ok(())
     };
     check()?;
-    record.completed = Some(saved.request_id.clone());
-    record.pending = None;
+    record.complete(&saved.request_id)?;
     save(location, passive, record, &mut check)?;
     Ok(
         json!({"abi":MODE_ABI,"schema":1,"configuration":location.configuration,"task_name":passive.name,

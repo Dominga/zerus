@@ -22,6 +22,7 @@ pub(super) fn read_archive(name: &str, id: &str) -> Result<Value> {
     {
         return Err(format!("{name}: invalid archive record {id}"));
     }
+    session_id::verify(&record)?;
     Ok(record)
 }
 
@@ -129,6 +130,7 @@ pub(super) fn save(record: &Value) -> Result<String> {
         {
             remove_synced(&record_path(string(record, "name")))?;
             rename::remove_legacy(&current)?;
+            session_index::retire(&current);
         }
     }
     Ok(id)

@@ -93,6 +93,12 @@ impl Fixture {
             launch: crate::desktop::creation_launch::Runtime::new(&config, &epoch, owner.clone())
                 .unwrap(),
             #[cfg(any(target_os = "linux", target_os = "macos"))]
+            message: crate::desktop::task_message::Runtime::new(&config, &epoch, owner.clone())
+                .unwrap(),
+            #[cfg(any(target_os = "linux", target_os = "macos"))]
+            send: crate::desktop::deferred_send::Runtime::new(&config, &epoch, owner.clone())
+                .unwrap(),
+            #[cfg(any(target_os = "linux", target_os = "macos"))]
             task_start: crate::desktop::task_start_reconcile::Runtime::new(
                 &config,
                 &epoch,
@@ -274,4 +280,70 @@ fn a_cache_stop_database_error_still_stops_every_other_component() {
         .drain(&mut f.store, Duration::from_secs(3))
         .unwrap();
     assert!(f.runtime.drained());
+}
+
+#[test]
+fn a_deferred_send_reaches_its_actor_which_refuses_without_a_lease() {
+    use zerus_client_core::{
+        desktop::{
+            deferred_send::{Intent, Scope},
+            ui_requests::Request,
+        },
+        operation_recovery::deferred_input as checkpoint,
+    };
+    let mut f = Fixture::new();
+    let reserved = checkpoint::Checkpoint::reserve(checkpoint::Intent {
+        kind: checkpoint::Kind::Send,
+        draft_revision: 1,
+        message_sha256: checkpoint::message_sha256("hello", std::iter::empty()),
+        run_id: "run-1".into(),
+        conversation_id: "conversation-1".into(),
+        question: None,
+        start: None,
+        retry_of: None,
+        consent: true,
+    });
+    let original = serde_json::json!({"request_id": reserved.request_id, "text": "hello",
+        "attachments": [], "expected_run_id": "run-1",
+        "expected_conversation_id": "conversation-1"});
+    let request = Request::DeferredSend {
+        intent: Box::new(Intent {
+            scope: Scope {
+                configuration: f.location.configuration.clone(),
+                service_epoch: uuid::Uuid::new_v4().to_string(),
+            },
+            session: "claude/private-send".into(),
+            request_id: reserved.request_id.clone(),
+            checkpoint: serde_json::to_string(&reserved).unwrap(),
+            original: original.to_string(),
+        }),
+    };
+    let authority = crate::desktop::ui_authority::Validated::fixture(&serde_json::json!(request));
+    let answer = f.runtime.frontend_request(&mut f.store, authority);
+    // The actor's own typed refusal: no fleet source, so no lease; nothing
+    // is admitted and no row exists.
+    #[cfg(any(target_os = "linux", target_os = "macos"))]
+    {
+        let admission: zerus_client_core::desktop::deferred_send::Admission =
+            serde_json::from_value(answer).unwrap();
+        assert_eq!(admission.request_id, reserved.request_id);
+        assert!(!admission.accepted && !admission.durable && admission.receipt.is_none());
+        #[cfg(target_os = "linux")]
+        assert_eq!(admission.code, "deferred_send_unavailable");
+        #[cfg(target_os = "macos")]
+        assert_eq!(admission.code, "deferred_send_native_image_unavailable");
+    }
+    // Windows has no executor.
+    #[cfg(windows)]
+    assert_eq!(
+        answer,
+        serde_json::json!({"request_id": reserved.request_id, "accepted": false,
+            "durable": false, "code": "deferred_send_unsupported"})
+    );
+    let rows: i64 = f
+        .store
+        .db
+        .query_row("SELECT count(*) FROM desktop_deferred_sends", [], |r| r.get(0))
+        .unwrap();
+    assert_eq!(rows, 0);
 }

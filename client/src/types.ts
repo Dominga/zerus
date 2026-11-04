@@ -13,11 +13,18 @@ export type ComputerId = string;
  * are null; times are seconds since the Unix epoch.
  */
 export interface ViewRow {
+  conversation_state?: string;
   /** This device's retained pre-cutover queue, not host acknowledgement. */
   local_read_reply?: boolean;
   local_read_attention?: boolean;
   name: string;
   launch_id?: string | null;
+  /**
+   * The listing's durable session ID, when canonical. The Rust dispatcher
+   * reads it from its own copy of the row for explicit actions; the webview
+   * never passes it.
+   */
+  session_id?: string;
   title?: string;
   agent?: string;
   status?: string;
@@ -158,11 +165,25 @@ export type EditOutcome = (
   | { outcome: "refused"; detail: string }) & { project?: string; folder?: string };
 
 /** Native ownership presentation only; this can never authorize a writer. */
+export interface ModeReview {
+  request_id: string;
+  configuration: string;
+  selection: string;
+  disposition: "required" | "reboot_required" | "reviewed_unknown";
+  passive_available: boolean;
+}
+/** A first explicit background choice offer (Windows). Routing only, never consent. */
+export interface FirstChoiceOffer {
+  configuration: string;
+  selection: string;
+}
 export interface NotificationOwnership {
   /** Local startup recovery presentation; never a service grant. */
   native_recovery?: boolean;
   /** Native helper observation only; never permission to start a writer. */
-  activation?: { pending: boolean; running: boolean; needs_resume: boolean; code: string };
+  activation?: { pending: boolean; running: boolean; needs_resume: boolean; code: string;
+    review?: ModeReview | null; automatic_blocked?: boolean; request_id?: string | null; active?: boolean; business_ready?: boolean;
+    first?: FirstChoiceOffer | null };
   status: null | { abi: string; configuration: string; journal: string | null; revision: number;
     state: "passive" | "preparing" | "service" | "draining" | "revoked" | "native" | "identity_changed" | "unavailable";
     rearm_required: boolean; request_id: string | null; owner_epoch: string | null; identity_current: boolean };
@@ -196,6 +217,8 @@ export interface DesktopService {
     computers: { computer: string; complete: boolean; online: boolean; total: number | null; attention: number | null }[];
   };
   automatic_approvals: boolean | null;
+  /** Held task message copies a person may review; display only, never a release. */
+  task_message_inputs?: null | { review: number; full: boolean };
   details_available: boolean;
   /** Native frozen-read transfer; completion is durable queueing, not host ACK. */
   pending_read_import?: null | { required: boolean; complete: boolean; running: boolean; code: string; through: number; superseded: number; delivered: false };
@@ -746,6 +769,8 @@ export interface QueueView { id: string; text: string; hint: string; can_send_no
 export interface ComposerView {
   handle: number; key: string; subagent?: { agent_id: string; send_supported: boolean; hint: string } | null; loaded: boolean; rev: number; text_epoch: number; text: string; position: number; anchor: number;
   attachments: AttachmentView[]; removed: string | null; attaching: boolean; sending: boolean; recording?: boolean; waiting: string | null; uncertain: boolean;
+  /** The desktop service still sends this draft's message: no Allow retry, and its status is not an error. */
+  delivery_pending?: boolean;
   status: string; status_error: boolean; can_send: boolean; send_label: Text; available: boolean; unavailable_reason: string; block_reason: string | null;
   attachments_available: boolean; attachments_reason: string; session_status: string; session_status_error: boolean; session_blocks_input: boolean;
   /** The open session's last read failed (Qt's m_inspectError). */
@@ -835,6 +860,13 @@ export interface Fetched {
   /** An image whose header gives its size, at most Qt's 64M pixels: a card may show its thumbnail. */
   thumbnail: boolean;
   image_size?: ImageSize | null;
+  /** A task's file: where `task_attachment_read` reads it. Its `path` is empty until it is read. */
+  source?: TaskFileSource;
+}
+/** A file a task page names: the entry (null for the task's own files), its number from 1 and its metadata. */
+export interface TaskFileSource {
+  entry: string | null; file: number;
+  meta: { name: string; mime: string; reference: string; size: number; sha256: string };
 }
 
 // Saved drafts (src-tauri `composer/saved.rs`).

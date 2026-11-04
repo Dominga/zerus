@@ -71,7 +71,8 @@ if agent == "kimi" and sys.argv[1:3] == ["session", "list"]:
     print(json.dumps([{"id": p.stem} for p in (home / "history").glob("*.jsonl")]))
     sys.exit(0)
 with open(home / "argv.jsonl", "a") as f:
-    f.write(json.dumps({"agent": agent, "argv": sys.argv[1:], "codex_home": os.environ.get("CODEX_HOME")}) + "\n")
+    f.write(json.dumps({"agent": agent, "argv": sys.argv[1:], "codex_home": os.environ.get("CODEX_HOME"),
+                        "hgs_session_id": os.environ.get("HGS_SESSION_ID")}) + "\n")
 args = sys.argv[1:]
 sid = str(uuid.uuid4())
 for flag in ("--resume", "--session", "resume"):
@@ -1011,6 +1012,514 @@ class Harness(unittest.TestCase):
         path = state / (hashlib.sha256(name.encode()).hexdigest() + ".json")
         path.write_text(json.dumps(record) + "\n")
         return record, path
+
+
+class SessionIdentity(Harness):
+    """zerus-ucck P1: the durable session ID. A class of its own keeps the
+    pinned Lifecycle bodies unchanged (test_pause_signal_trace_source)."""
+
+    # zerus-ucck P2b: a new session keeps its history under its durable ID
+    # and the label it was launched with. Rename, pause and resume, a fresh
+    # start, an older writer's re-minted ID, archive and restore all keep that
+    # one journal, and no event is ever keyed by a label.
+    def test_a_new_session_keeps_its_history_under_its_id(self):
+        name = self.start(tag="journal")
+        first = self.binding(name)
+        journal = "session:" + first["session_id"]
+        self.assertEqual((first["journal_name"], first["launch_label"]), (journal, name))
+
+        def keys():
+            db = sqlite3.connect(self.root / "state/events.sqlite3")
+            try:
+                return {row[0] for row in db.execute("SELECT DISTINCT name FROM events")}
+            finally:
+                db.close()
+
+        def seqs(label):
+            return {event["seq"] for event in json.loads(self.hgs("inspect", label))["events"]}
+
+        def kept(label):
+            record = self.binding(label)
+            self.assertEqual((record["journal_name"], record["launch_label"]), (journal, name), label)
+            self.assertLessEqual(before, seqs(label), label)
+
+        self.wait(lambda: journal in keys())
+        before = seqs(name)
+        self.assertTrue(before)
+        renamed = "claude/p/journal-renamed"
+        self.hgs("rename", name, renamed)
+        kept(renamed)
+        self.hgs("pause", renamed)
+        self.resume(renamed)
+        kept(renamed)
+        self.hgs("pause", renamed)
+        conversation, run = self.binding(renamed)["conversation_id"], self.binding(renamed)["run_id"]
+        self.hgs("resume", renamed, "--fresh", "--expected-run-id", run, "-d")
+        self.wait(lambda: self.binding(renamed).get("conversation_id") not in (None, conversation))
+        kept(renamed)
+        # An older writer drops the ID; the re-minted one keeps the journal.
+        path = self.root / "state" / (hashlib.sha256(renamed.encode()).hexdigest() + ".json")
+        older = json.loads(path.read_text()); older.pop("session_id"); path.write_text(json.dumps(older) + "\n")
+        self.hgs("pause", renamed)
+        self.assertNotEqual(self.binding(renamed)["session_id"], first["session_id"])
+        kept(renamed)
+        self.hgs("archive", renamed)
+        archived = next(json.loads(p.read_text()) for p in (self.root / "state" / "archives").glob("*.json")
+                        if json.loads(p.read_text())["name"] == renamed)
+        self.assertEqual((archived["journal_name"], archived["launch_label"]), (journal, name))
+        self.hgs("resume", renamed, "--archive", archived["archive_id"], "-d")
+        self.wait(lambda: self.binding(renamed).get("activity") == "idle")
+        kept(renamed)
+        self.assertNotIn(name, keys())
+        self.assertNotIn(renamed, keys())
+
+    # #1408 review: `--fresh` over a saved, confirmed conversation is a new
+    # session with its own ID journal and launch label, and a name-only task
+    # for the replaced session's launch label never routes to it.
+    def test_a_fresh_launch_over_a_confirmed_session_is_a_new_session(self):
+        first = self.start(tag="w")
+        launched = self.binding(first)
+        self.hgs("rename", first, "claude/p/one")
+        self.hgs("pause", "claude/p/one")
+        old = self.binding("claude/p/one")
+        self.assertEqual((old["journal_name"], old["launch_label"]), ("session:" + launched["session_id"], first))
+        self.hgs("claude", "p", "-n", "one", "-d", "--fresh")
+        self.wait(lambda: self.binding("claude/p/one").get("conversation_id") not in (None, old["conversation_id"]))
+        fresh = self.binding("claude/p/one")
+        self.assertNotEqual(fresh["session_id"], old["session_id"])
+        self.assertEqual((fresh["journal_name"], fresh["launch_label"]),
+                         ("session:" + fresh["session_id"], "claude/p/one"))
+        catalog = {"projects": [{"id": "project-1", "name": "orchard", "color": "#123456",
+                                 "folders": [], "sessions": []}]}
+        initialized = subprocess.run([str(HGS), "swarm", "initialize"], input=json.dumps(catalog), env=self.env,
+                                     text=True, capture_output=True, timeout=30)
+        self.assertEqual(initialized.returncode, 0, initialized.stderr)
+
+        def target(label):
+            added = subprocess.run([str(HGS), "task", "add", "--project", "orchard", "--target", label],
+                                   input="Route me", env=self.env, text=True, capture_output=True, timeout=30)
+            self.assertEqual(added.returncode, 0, added.stdout + added.stderr)
+            return json.loads(added.stdout)["task"]["target"]["session"]
+
+        self.assertEqual(target(first), first, "the replaced session's launch label routes nowhere new")
+        self.assertEqual(target("claude/p/one"), "claude/p/one")
+
+    # zerus-ucck P1: one durable session ID across pause and resume, a fresh
+    # conversation, rename, archive and restore (a fork gets its own: see
+    # test_fork); a record an older CLI wrote gains one when next written.
+    def test_a_session_keeps_one_durable_id(self):
+        name = self.start()
+        session = self.binding(name)["session_id"]
+        self.assertEqual(str(uuid.UUID(session)), session)
+        launched = lambda: json.loads((self.root / "argv.jsonl").read_text().splitlines()[-1])
+        self.assertEqual(launched()["hgs_session_id"], session)
+        row = next(s for s in json.loads(self.hgs("ls", "--local", "--json"))["sessions"] if s["name"] == name)
+        self.assertEqual(row["session_id"], session)
+        self.assertEqual(json.loads(self.hgs("inspect", name))["session_id"], session)
+        self.hgs("pause", name)
+        self.resume(name)
+        self.assertEqual(self.binding(name)["session_id"], session)
+        self.assertEqual(launched()["hgs_session_id"], session)
+        self.hgs("pause", name)
+        conversation, run = self.binding(name)["conversation_id"], self.binding(name)["run_id"]
+        self.hgs("resume", name, "--fresh", "--expected-run-id", run, "-d")
+        self.wait(lambda: self.binding(name).get("conversation_id") not in (None, conversation))
+        self.assertEqual(self.binding(name)["session_id"], session)
+        # Expected (#1317 R5): an older hgs rebuilds the record on resume
+        # without this field, and the next write here assigns a new ID once;
+        # it then stays through every later write.
+        path = self.root / "state" / (hashlib.sha256(name.encode()).hexdigest() + ".json")
+        older = json.loads(path.read_text()); older.pop("session_id"); path.write_text(json.dumps(older) + "\n")
+        self.hgs("pause", name)
+        reminted = self.binding(name)["session_id"]
+        self.assertNotEqual(reminted, session)
+        self.assertEqual(str(uuid.UUID(reminted)), reminted)
+        self.resume(name)
+        self.assertEqual(self.binding(name)["session_id"], reminted)
+        session = reminted
+        renamed = "claude/p/renamed"
+        self.hgs("rename", name, renamed)
+        self.assertEqual(self.binding(renamed)["session_id"], session)
+        self.hgs("pause", renamed)
+        self.hgs("archive", renamed)
+        archived = next(json.loads(p.read_text()) for p in (self.root / "state" / "archives").glob("*.json")
+                        if json.loads(p.read_text())["name"] == renamed)
+        self.assertEqual(archived["session_id"], session)
+        archive_id = archived["archive_id"]
+        self.hgs("resume", renamed, "--archive", archive_id, "-d")
+        self.wait(lambda: self.binding(renamed).get("activity") == "idle")
+        self.assertEqual(self.binding(renamed)["session_id"], session)
+        # Archiving a record an older hgs wrote gives the archive an ID, and
+        # restoring keeps it (#1317 R2).
+        old, _ = self.saved_v1(tag="legacy-archive")
+        self.hgs("archive", old["name"])
+        kept = next(json.loads(p.read_text()) for p in (self.root / "state" / "archives").glob("*.json")
+                    if json.loads(p.read_text())["name"] == old["name"])
+        self.assertEqual(str(uuid.UUID(kept["session_id"])), kept["session_id"])
+        self.hgs("resume", old["name"], "--archive", kept["archive_id"], "-d")
+        self.wait(lambda: self.binding(old["name"]).get("activity") == "idle")
+        self.assertEqual(self.binding(old["name"])["session_id"], kept["session_id"])
+        legacy, _ = self.saved_v1()
+        self.assertNotIn("session_id", legacy)
+        self.resume(legacy["name"])
+        gained = self.binding(legacy["name"])["session_id"]
+        self.assertEqual(str(uuid.UUID(gained)), gained)
+        self.hgs("pause", legacy["name"])
+        self.resume(legacy["name"])
+        self.assertEqual(self.binding(legacy["name"])["session_id"], gained)
+
+
+    # zerus-ucck P1b: --session-id selects the session a command names first,
+    # and a hook prefers the record that carries its HGS_SESSION_ID without
+    # depending on it: an older hgs can change a session's ID once.
+    def test_a_session_id_selects_the_session_and_hooks_check_it(self):
+        name = self.start()
+        record = self.binding(name)
+        session = record["session_id"]
+        def call(*args):
+            return subprocess.run([str(HGS), *args], env=self.env, capture_output=True, text=True, timeout=20)
+        by_name = json.loads(self.hgs("inspect", name))
+        by_id = json.loads(self.hgs("inspect", "--session-id", session))
+        self.assertEqual((by_id["session_id"], by_id["conversation_id"]), (session, by_name["conversation_id"]))
+        self.assertEqual(json.loads(self.hgs("inspect", name, "--session-id", session))["session_id"], session)
+        other = call("inspect", "claude/p/other", "--session-id", session)
+        self.assertEqual(other.returncode, 1)
+        self.assertIn(f"Session ID {session} is {name}, not claude/p/other", other.stderr)
+        unknown = call("inspect", "--session-id", str(uuid.uuid4()))
+        self.assertEqual(unknown.returncode, 1)
+        self.assertIn("No live or saved session has ID", unknown.stderr)
+        for invalid in ([], [""], ["not-a-uuid"], [session.upper()], [session, "--session-id", session]):
+            self.assertEqual(call("inspect", "--session-id", *invalid).returncode, 2, invalid)
+        # Hooks: HGS_SESSION_ID is a hint. The run still decides when no record
+        # carries it, and among records sharing the run the agent's own wins.
+        def hook(prompt, session_id, hook_name=name):
+            event = dict(session_id=record["conversation_id"], hook_event_name="UserPromptSubmit", prompt=prompt)
+            self.hook(event, dict(self.env, HGS_SESSION=hook_name, HGS_RUN_ID=record["run_id"], HGS_SESSION_ID=session_id))
+        prompts = lambda: [e["detail"] for e in json.loads(self.hgs("inspect", name))["events"] if e["type"] == "UserPromptSubmit"]
+        path = lambda who: self.root / "state" / (hashlib.sha256(who.encode()).hexdigest() + ".json")
+        hook("an ID this record no longer carries", str(uuid.uuid4()))
+        self.assertEqual(self.binding(name)["session_id"], session)
+        copy = dict(json.loads(path(name).read_text()), name="claude/p/copy", session_id=str(uuid.uuid4()))
+        path("claude/p/copy").write_text(json.dumps(copy) + "\n")
+        hook("from the name of a copy sharing the run", session, "claude/p/copy")
+        hook("from a name no record has", session, "claude/p/gone")
+        path("claude/p/copy").unlink()
+        stripped = json.loads(path(name).read_text()); stripped.pop("session_id"); path(name).write_text(json.dumps(stripped) + "\n")
+        hook("after an older hgs dropped the ID", session)
+        self.assertEqual(prompts(), ["an ID this record no longer carries", "from the name of a copy sharing the run",
+                                     "from a name no record has", "after an older hgs dropped the ID"])
+        reminted = self.binding(name)["session_id"]
+        self.assertNotEqual(reminted, session)
+        self.assertEqual(str(uuid.UUID(reminted)), reminted)
+        session = reminted
+        # Lifecycle by ID: pause, resume and rename.
+        self.send_event(name, "Stop", last_assistant_message="done")
+        self.hgs("pause", "--session-id", session)
+        self.assertTrue(self.binding(name)["paused"])
+        previous_run = self.binding(name)["run_id"]
+        self.hgs("resume", "--session-id", session, "-d")
+        self.wait(lambda: self.binding(name).get("run_id") != previous_run and self.binding(name).get("activity") == "idle")
+        # A name before the flag must match; arguments after it are the command's own.
+        self.hgs("rename", "--session-id", session, "claude/p/renamed")
+        self.assertEqual(self.binding("claude/p/renamed")["session_id"], session)
+        self.hgs("rename", "claude/p/renamed", "--session-id", session, "claude/p/again")
+        self.assertEqual(self.binding("claude/p/again")["session_id"], session)
+        stale = call("rename", "claude/p/renamed", "--session-id", session, "claude/p/third")
+        self.assertEqual(stale.returncode, 1)
+        self.assertIn(f"Session ID {session} is claude/p/again, not claude/p/renamed", stale.stderr)
+
+
+    # #1355 review: resolution only names the session. The command's own reads,
+    # under its lock and of archives too, must still find the selected ID.
+    @unittest.skipUnless(sys.platform.startswith("linux"), "lock waiters are read from /proc/locks")
+    def test_a_selected_id_is_checked_where_the_command_acts(self):
+        import fcntl
+        name = self.start()
+        session = self.binding(name)["session_id"]
+        # A saved session: no live pane stands in for its identity.
+        self.send_event(name, "Stop", last_assistant_message="done")
+        self.hgs("pause", name)
+        self.assertTrue(self.binding(name)["paused"])
+        state = self.root / "state"
+        path = lambda who: state / (hashlib.sha256(who.encode()).hexdigest() + ".json")
+        original = path(name).read_text()
+        other = dict(json.loads(original), session_id=str(uuid.uuid4()), run_id=str(uuid.uuid4()))
+        def call(*args):
+            return subprocess.run([str(HGS), *args], env=self.env, capture_output=True, text=True, timeout=30)
+        # The name passes to another session while the rename waits for the lock.
+        fd = os.open(state / ".lock", os.O_RDWR | os.O_CREAT, 0o600)
+        try:
+            fcntl.flock(fd, fcntl.LOCK_EX)
+            renaming = subprocess.Popen([str(HGS), "rename", "--session-id", session, "claude/p/moved"],
+                                        env=self.env, stdout=subprocess.PIPE, stderr=subprocess.PIPE, text=True)
+            inode = os.fstat(fd).st_ino
+            self.wait(lambda: any(line.split()[1] == "->" and f":{inode} " in line + " "
+                                  for line in Path("/proc/locks").read_text().splitlines()))
+            path(name).write_text(json.dumps(other) + "\n")
+        finally:
+            fcntl.flock(fd, fcntl.LOCK_UN)
+            os.close(fd)
+        out, err = renaming.communicate(timeout=30)
+        self.assertEqual(renaming.returncode, 1, out + err)
+        self.assertIn(f"Session ID {session} no longer names {name}", err)
+        self.assertEqual(json.loads(path(name).read_text())["session_id"], other["session_id"])
+        self.assertFalse(path("claude/p/moved").exists())
+        path(name).write_text(original)
+        # An archive under the selected name that carries another ID.
+        archive_id = str(uuid.uuid4())
+        (state / "archives").mkdir(exist_ok=True)
+        archived = state / "archives" / f"{archive_id}.json"
+        archived.write_text(json.dumps(dict(other, archive_id=archive_id, archived_at=1)) + "\n")
+        refused = call("rename", "--session-id", session, "claude/p/other", "--archive", archive_id)
+        self.assertEqual(refused.returncode, 1, refused.stdout + refused.stderr)
+        self.assertIn(f"Session ID {session} no longer names {name}", refused.stderr)
+        self.assertEqual(json.loads(archived.read_text())["name"], name)
+        archived.unlink()
+        # Every command of the table resolves the selector before it acts.
+        table = re.search(r"const SESSION_COMMANDS: &\[&str\] = &\[(.*?)\];", (REPO / "src/cli.rs").read_text(), re.S)
+        unknown = str(uuid.uuid4())
+        for command in re.findall(r'"([a-z_-]+)"', table.group(1)):
+            result = call(command, "--session-id", unknown)
+            self.assertEqual((result.returncode, f"No live or saved session has ID {unknown}" in result.stderr),
+                             (1, True), (command, result.stderr))
+        dry = call("--dry-run", "terminate", "--session-id", session)
+        self.assertEqual(dry.returncode, 0, dry.stderr)
+        self.assertIn(name, dry.stdout + dry.stderr)
+        self.assertEqual(self.binding(name)["session_id"], session)
+
+
+    # #1355 review R3: a terminal action binds its target to the selected run
+    # before its first effect; a name another run took is refused, never acted on.
+    @unittest.skipUnless(sys.platform.startswith("linux"), "lock waiters are read from /proc/locks")
+    def test_terminal_actions_bind_the_selected_run_before_acting(self):
+        import fcntl
+        name = self.start()
+        record = self.binding(name)
+        session = record["session_id"]
+        state = self.root / "state"
+        path = state / (hashlib.sha256(name.encode()).hexdigest() + ".json")
+        original = path.read_text()
+        def call(*args):
+            return subprocess.run([str(HGS), *args], env=self.env, capture_output=True, text=True, timeout=30)
+        def alive(target):
+            return subprocess.run([str(self.bin / "tmux"), "has-session", "-t", f"={target}"],
+                                  env=self.env, capture_output=True).returncode == 0
+        def take_name(run):
+            # Another run's terminal now has the name; the selected one moved away.
+            self.t("rename-session", "-t", f"={name}", "claude/p/moved-away")
+            self.t("new-session", "-d", "-s", name, "sleep", "300")
+            self.t("set-option", "-t", f"={name}:", "@hgs_run", run)
+        def give_back():
+            self.t("kill-session", "-t", f"={name}")
+            self.t("rename-session", "-t", "=claude/p/moved-away", name)
+            path.write_text(original)
+        refused = f"Session ID {session} no longer names {name}"
+        # The name runs another run while the record still carries the ID:
+        # kill and both attach forms refuse before their first effect.
+        take_name("another-run")
+        # R4: a supplied --run-id never stands in for the selected run, even
+        # when it names the run that now holds the name.
+        for args in (["kill"], ["a"], ["a", "--existing"], ["a", "--existing", "--run-id", "another-run"],
+                     ["a", "--existing", "--run-id", record["run_id"]]):
+            result = call(args[0], "--session-id", session, *args[1:])
+            self.assertEqual(result.returncode, 1, (args, result.stdout, result.stderr))
+            self.assertIn(refused, result.stderr, args)
+            self.assertTrue(alive(name), args)
+        give_back()
+        # The selected run holds the name, but the supplied run is another.
+        mismatch = call("a", "--session-id", session, "--existing", "--run-id", "another-run")
+        self.assertEqual(mismatch.returncode, 1, mismatch.stdout + mismatch.stderr)
+        self.assertIn("session run changed", mismatch.stderr)
+        # The reviewer's race: kill waits for the state lock after resolution,
+        # while another session takes the name, its terminal and its record.
+        fd = os.open(state / ".lock", os.O_RDWR | os.O_CREAT, 0o600)
+        try:
+            fcntl.flock(fd, fcntl.LOCK_EX)
+            killing = subprocess.Popen([str(HGS), "kill", "--session-id", session], env=self.env,
+                                       stdout=subprocess.PIPE, stderr=subprocess.PIPE, text=True)
+            inode = os.fstat(fd).st_ino
+            self.wait(lambda: any(line.split()[1] == "->" and f":{inode} " in line + " "
+                                  for line in Path("/proc/locks").read_text().splitlines()))
+            other = str(uuid.uuid4())
+            take_name(other)
+            path.write_text(json.dumps(dict(json.loads(original), session_id=str(uuid.uuid4()), run_id=other)) + "\n")
+        finally:
+            fcntl.flock(fd, fcntl.LOCK_UN)
+            os.close(fd)
+        out, err = killing.communicate(timeout=30)
+        self.assertEqual(killing.returncode, 1, out + err)
+        self.assertIn(refused, err)
+        self.assertTrue(alive(name), "the other session's terminal survives")
+        give_back()
+        self.assertTrue(alive(name))
+        self.assertEqual(self.binding(name)["session_id"], session)
+
+
+    # #1355 review R4: the notification reader reads the raw binding; after
+    # another session takes the name while it waits, it refuses, whatever
+    # identities the request carries, and persists nothing.
+    @unittest.skipUnless(sys.platform.startswith("linux"), "lock waiters are read from /proc/locks")
+    def test_the_notification_reader_checks_the_selected_id(self):
+        import fcntl
+        name = self.start()
+        session = self.binding(name)["session_id"]
+        state = self.root / "state"
+        path = state / (hashlib.sha256(name.encode()).hexdigest() + ".json")
+        original = path.read_text()
+        run, conversation = str(uuid.uuid4()), str(uuid.uuid4())
+        request = json.dumps(dict(run_id=run, conversation_id=conversation, muted=True, expected_revision=0))
+        preferences = state / "notifications.json"
+        before = preferences.read_bytes() if preferences.exists() else None
+        fd = os.open(state / ".lock", os.O_RDWR | os.O_CREAT, 0o600)
+        try:
+            fcntl.flock(fd, fcntl.LOCK_EX)
+            muting = subprocess.Popen([str(HGS), "notifications", "--session-id", session, "--json"], env=self.env,
+                                      stdin=subprocess.PIPE, stdout=subprocess.PIPE, stderr=subprocess.PIPE, text=True)
+            muting.stdin.write(request)
+            muting.stdin.close()
+            inode = os.fstat(fd).st_ino
+            self.wait(lambda: any(line.split()[1] == "->" and f":{inode} " in line + " "
+                                  for line in Path("/proc/locks").read_text().splitlines()))
+            path.write_text(json.dumps(dict(json.loads(original), session_id=str(uuid.uuid4()),
+                                            run_id=run, conversation_id=conversation)) + "\n")
+        finally:
+            fcntl.flock(fd, fcntl.LOCK_UN)
+            os.close(fd)
+        out, err = muting.stdout.read(), muting.stderr.read()
+        self.assertEqual(muting.wait(timeout=30), 1, out + err)
+        self.assertIn(f"Session ID {session} no longer names {name}", err)
+        self.assertNotIn("notification_preferences", json.loads(path.read_text()))
+        self.assertEqual(preferences.read_bytes() if preferences.exists() else None, before)
+        path.write_text(original)
+
+
+    # #1355 review R4: an OpenCode session has no terminal record; its attach by
+    # ID reaches the OpenCode adapter, which checks its own binding and run.
+    def test_an_opencode_attach_by_id_reaches_its_adapter(self):
+        name, session = "opencode/p/native", str(uuid.uuid4())
+        bindings = self.root / "state" / "opencode" / "bindings"
+        bindings.mkdir(parents=True, exist_ok=True)
+        binding = dict(version=1, backend="opencode", agent="opencode", name=name, run_id=str(uuid.uuid4()),
+                       conversation_id="ses_" + uuid.uuid4().hex, session_id=session)
+        (bindings / (hashlib.sha256(name.encode()).hexdigest() + ".json")).write_text(json.dumps(binding))
+        def call(*args):
+            return subprocess.run([str(HGS), *args], env=self.env, capture_output=True, text=True, timeout=30)
+        result = call("a", "--session-id", session, "--existing")
+        self.assertNotIn("no saved binding", result.stderr)
+        self.assertNotEqual(result.returncode, 0, result.stdout)
+        changed = call("a", "--session-id", session, "--existing", "--run-id", str(uuid.uuid4()))
+        self.assertEqual(changed.returncode, 1, changed.stdout + changed.stderr)
+        self.assertIn("session run changed", changed.stderr)
+        dry = call("--dry-run", "a", "--session-id", session, "--existing", "--run-id", binding["run_id"])
+        self.assertEqual(dry.returncode, 0, dry.stderr)
+        self.assertIn(f"would open the existing native OpenCode TUI for {name}", dry.stdout)
+
+
+    # zerus-ucck P1c: a session reference selects the session it names on every
+    # session command, through the same checks as --session-id.
+    def test_a_reference_selects_the_session_on_every_command(self):
+        name = self.start()
+        record = self.binding(name)
+        def call(*args):
+            return subprocess.run([str(HGS), *args], env=self.env, capture_output=True, text=True, timeout=30)
+        uri = json.loads(self.hgs("reference", name, "--json"))["uri"]
+        # Emission stays off until every reader parses the session field.
+        self.assertNotIn("session=", uri)
+        self.assertEqual(json.loads(self.hgs("reference", uri, "--json"))["uri"], uri)
+        self.assertEqual(json.loads(self.hgs("reference", f"{uri}&session={record['session_id']}", "--json"))["uri"], uri)
+        wrong = call("reference", f"{uri}&session={uuid.uuid4()}", "--json")
+        self.assertEqual(wrong.returncode, 1, wrong.stdout)
+        self.assertIn("no longer bound to a saved session", wrong.stderr)
+        # Every table command resolves a reference before it acts.
+        table = re.search(r"const SESSION_COMMANDS: &\[&str\] = &\[(.*?)\];", (REPO / "src/cli.rs").read_text(), re.S)
+        unknown = uri.replace(record["conversation_id"], str(uuid.uuid4()))
+        for command in re.findall(r'"([a-z_-]+)"', table.group(1)):
+            if command == "inspect":
+                continue
+            result = call(command, unknown)
+            self.assertEqual(result.returncode, 1, (command, result.stderr))
+            self.assertIn("no longer bound to a saved session", result.stderr, command)
+        # Refusals: a reference and --session-id together, and a child agent's reference.
+        both = call("send", uri, "--session-id", record["session_id"], "--json")
+        self.assertEqual(both.returncode, 2, both.stderr)
+        child = call("send", f"{uri}&agent=worker", "--json")
+        self.assertEqual(child.returncode, 1, child.stderr)
+        self.assertIn("child agent's reference is read-only", child.stderr)
+        # The terminal a reference reaches is bound to its verified run: another
+        # run's terminal under the name is refused and survives.
+        self.t("rename-session", "-t", f"={name}", "claude/p/moved-away")
+        self.t("new-session", "-d", "-s", name, "sleep", "300")
+        self.t("set-option", "-t", f"={name}:", "@hgs_run", "another-run")
+        killed = call("kill", uri)
+        self.assertEqual(killed.returncode, 1, killed.stdout + killed.stderr)
+        self.assertIn(f"The session reference no longer names {name}", killed.stderr)
+        self.assertEqual(subprocess.run([str(self.bin / "tmux"), "has-session", "-t", f"={name}"],
+                                        env=self.env, capture_output=True).returncode, 0)
+        self.t("kill-session", "-t", f"={name}")
+        self.t("rename-session", "-t", "=claude/p/moved-away", name)
+        # It follows a rename, and acts on the session it names.
+        self.hgs("rename", uri, "claude/p/by-reference")
+        self.assertEqual(self.binding("claude/p/by-reference")["session_id"], record["session_id"])
+        self.send_event("claude/p/by-reference", "Stop", last_assistant_message="done")
+        self.hgs("pause", uri)
+        self.assertTrue(self.binding("claude/p/by-reference")["paused"])
+        # An archived conversation's reference reaches commands that take --archive.
+        self.hgs("archive", "claude/p/by-reference")
+        archived = next(json.loads(p.read_text()) for p in (self.root / "state" / "archives").glob("*.json")
+                        if json.loads(p.read_text())["name"] == "claude/p/by-reference")
+        archive_uri = json.loads(self.hgs("reference", "claude/p/by-reference", "--json", "--archive",
+                                          archived["archive_id"]))["uri"]
+        processes = call("processes", archive_uri)
+        self.assertEqual(processes.returncode, 0, processes.stderr)
+        archived_send = call("send", archive_uri, "--json")
+        self.assertEqual(archived_send.returncode, 1, archived_send.stderr)
+        self.assertIn("names an archived conversation", archived_send.stderr)
+
+
+    # #1376 review (MX6): a reference that names no conversation selects by its
+    # run. Another session takes the name after resolution, before kill binds
+    # its terminal: kill refuses, and the other session's terminal survives.
+    @unittest.skipIf(LEGACY_STATE, "fix introduced by session references")
+    def test_a_run_reference_binds_its_run_before_kill(self):
+        name = self.start()
+        state = self.root / "state"
+        path = state / (hashlib.sha256(name.encode()).hexdigest() + ".json")
+        record = json.loads(path.read_text())
+        # A session whose first message is unconfirmed has no conversation yet.
+        record.pop("conversation_id", None)
+        path.write_text(json.dumps(record) + "\n")
+        uri = json.loads(self.hgs("reference", name, "--json"))["uri"]
+        self.assertNotIn("conversation=", uri)
+        self.assertIn(f"run={record['run_id']}", uri)
+        other = str(uuid.uuid4())
+        taken = self.root / "taken.json"
+        taken.write_text(json.dumps(dict(record, session_id=str(uuid.uuid4()), run_id=other)) + "\n")
+        armed = self.root / "take-the-name"
+        tmux = f"{shlex.quote(TMUX)} -S {shlex.quote(self.socket)} -f /dev/null"
+        original = (self.bin / "tmux").read_text()
+        # kill resolves the reference, then asks tmux whether the name exists:
+        # at that moment, once, another run takes the name and its record.
+        self.script("tmux", f'''#!/bin/sh
+if [ "$1" = has-session ] && rm {shlex.quote(str(armed))} 2>/dev/null; then
+    {tmux} rename-session -t {shlex.quote("=" + name)} claude/p/moved-away
+    {tmux} new-session -d -s {shlex.quote(name)} sleep 300
+    {tmux} set-option -t {shlex.quote("=" + name + ":")} @hgs_run {shlex.quote(other)}
+    cp {shlex.quote(str(taken))} {shlex.quote(str(path))}
+fi
+exec {tmux} "$@"
+''')
+        armed.touch()
+        killed = subprocess.run([str(HGS), "kill", uri], env=self.env, capture_output=True, text=True, timeout=30)
+        self.script("tmux", original)
+        self.assertFalse(armed.exists(), "the name was taken during kill")
+        self.assertEqual(killed.returncode, 1, killed.stdout + killed.stderr)
+        self.assertIn(f"The session reference no longer names {name}", killed.stderr)
+        self.assertEqual(subprocess.run([str(self.bin / "tmux"), "has-session", "-t", f"={name}"],
+                                        env=self.env, capture_output=True).returncode, 0,
+                         "the other session's terminal survives")
+        self.t("kill-session", "-t", f"={name}")
+        self.t("rename-session", "-t", "=claude/p/moved-away", name)
+        path.write_text(json.dumps(record) + "\n")
 
 
 class Lifecycle(Harness):

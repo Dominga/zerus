@@ -46,18 +46,14 @@ fn private_case(case: &'static str) -> bool {
 }
 fn fixture(config: Value) -> Fixture {
     let f = Fixture::new(config);
-    fs::remove_file(f.0.join("hgs")).unwrap();
-    fs::write(
-        f.0.join("hgs"),
+    crate::write_executable(
+        &f.0.join("hgs"),
         format!(
             "#!/usr/bin/env python3\n{}\n{}",
             include_str!("fixture.py"),
             include_str!("../fake_hgs.py")
         ),
-    )
-    .unwrap();
-    use std::os::unix::fs::PermissionsExt;
-    fs::set_permissions(f.0.join("hgs"), fs::Permissions::from_mode(0o700)).unwrap();
+    );
     f
 }
 async fn connected(f: &Fixture) -> (Arc<Service>, CacheServer) {
@@ -579,5 +575,91 @@ fn submitted_but_undrained_result_is_queried_until_actual_drain() {
         );
         service.stop();
         service.join().await.unwrap();
+    });
+}
+
+#[test]
+fn publication_review_and_oversize_are_visible_without_offering_or_discarding() {
+    if !private_case("desktop_service::task_start_reconcile::tests::publication_review_and_oversize_are_visible_without_offering_or_discarding") { return; }
+    tauri::async_runtime::block_on(async {
+        for (wal, problem) in [
+            (
+                b"{\"stage\":\"unrecognized\"}\n".to_vec(),
+                Some(PUBLICATION_REVIEW),
+            ),
+            (vec![0; 4097], Some(PUBLICATION_OVERSIZE)),
+            (b"garbage\0\xff".to_vec(), None),
+        ] {
+            let f = fixture(json!({}));
+            let (service, _cache) = connected(&f).await;
+            let (root, view) = source(&f);
+            let id = prepare_check(service.clone(), &root, &view);
+            let file = outbox::path(&root.join("task-start"), &view.project, &view.task);
+            let lock = file.with_extension("reconcile-lock");
+            fs::write(&lock, &wal).unwrap();
+            let source_bytes = fs::read(&file).unwrap();
+            let marker = fs::read(file.with_extension("marker")).unwrap();
+            let journal = fs::read(file.with_extension("reconcile")).unwrap();
+            let presented = crate::task_start::present(&root, view.clone());
+            if let Some(problem) = problem {
+                assert_eq!(presented["check_available"], false);
+                assert_eq!(presented["check_problem"], problem);
+                assert_eq!(
+                    invoke(service.clone(), root.clone(), view.clone(), Arc::new(()))
+                        .await
+                        .err()
+                        .unwrap(),
+                    problem
+                );
+                assert_eq!(
+                    crate::task_start::discard_check(
+                        &root,
+                        &view.project,
+                        &view.task,
+                        &view.id,
+                        &view.snapshot,
+                        &id
+                    )
+                    .err()
+                    .unwrap(),
+                    problem
+                );
+                assert!(calls(&f).is_empty());
+                assert_eq!(fs::read(&lock).unwrap(), wal);
+                assert_eq!(fs::read(file.with_extension("reconcile")).unwrap(), journal);
+                assert_eq!(fs::read(&file).unwrap(), source_bytes);
+                assert_eq!(fs::read(file.with_extension("marker")).unwrap(), marker);
+                let saved = Saved::read(&root, &view.project, &view.task)
+                    .unwrap()
+                    .unwrap();
+                assert_eq!(saved.phase(), Phase::Prepared);
+                assert_eq!(saved.reconcile_id(), id);
+            } else {
+                assert_eq!(presented["check_available"], true);
+                assert!(presented["check_problem"].is_null());
+                let settled = invoke(service.clone(), root.clone(), view, Arc::new(()))
+                    .await
+                    .unwrap();
+                assert_eq!(settled.outcome.as_deref(), Some("submitted"));
+                assert_eq!(
+                    calls(&f)
+                        .iter()
+                        .filter(|c| c["op"] == "task_start_reconcile")
+                        .count(),
+                    1
+                );
+                assert!(calls(&f).iter().all(|c| c["reconcile_id"] == id));
+            }
+            service.stop();
+            service.join().await.unwrap();
+        }
+        assert_eq!(
+            journal_problem(journal::Error::PublicationNeedsReview),
+            PUBLICATION_REVIEW
+        );
+        assert_eq!(
+            journal_problem(journal::Error::PublicationOversize),
+            PUBLICATION_OVERSIZE
+        );
     });
 }

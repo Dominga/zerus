@@ -3,7 +3,7 @@ import { taskItem } from "../ui/screens/tasks-ui";
 import type { Session } from "../ui/sessions/types";
 const fixture = vi.hoisted(() => ({ project: "example", rows: [] as ReturnType<typeof taskItem>[], selected: undefined as Session | undefined, offline: false }));
 vi.mock("../bridge", () => ({ taskStartOpen: vi.fn(), taskStart: vi.fn(), taskStartRelease: vi.fn(), taskStartCheck: vi.fn(), taskStartDiscardCheck: vi.fn() }));
-vi.mock("./tasks", () => ({ tasks: { project: () => fixture.project, tasks: () => fixture.rows } }));
+vi.mock("./tasks", () => ({ tasks: { project: () => fixture.project, tasks: () => fixture.rows, find: (uuid: string) => fixture.rows.find((t) => t.uuid === uuid) } }));
 vi.mock("./ui", () => ({ selected: () => fixture.selected }));
 vi.mock("./taskContext", () => ({ findTaskSession: () => (r: { id: string }) => fixture.selected && r.id === `run_id:${fixture.selected.runId}` ? fixture.selected : undefined }));
 vi.mock("./catalog", () => ({ computerOffline: () => fixture.offline }));

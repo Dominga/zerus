@@ -48,10 +48,15 @@ pub(super) fn binding(name: &str) -> Result<Value> {
     {
         return Err("Invalid DeepSeek binding".into());
     }
+    session_id::verify(&value)?;
     Ok(value)
 }
-fn save(value: &Value) -> Result<()> {
-    atomic(&binding_path(string(value, "name")), &value.to_string())
+/// Saves the binding, keeping its durable session ID on the caller's record.
+pub(super) fn save(value: &mut Value) -> Result<()> {
+    ensure_session_id(value);
+    atomic(&binding_path(string(value, "name")), &value.to_string())?;
+    session_index::note(value, session_index::Kind::DeepSeek);
+    Ok(())
 }
 fn native_home() -> PathBuf {
     nonempty_env("DSH_HOME")
@@ -406,7 +411,7 @@ pub(crate) fn launch(
         create_session(&mut record)?;
         record["paused"] = json!(false);
         record["run_id"] = json!(uuid::Uuid::new_v4().to_string());
-        save(&record)?;
+        save(&mut record)?;
         return Ok(());
     }
     let cwd = crate::platform::canonical(cwd).map_err(|e| e.to_string())?;
@@ -668,6 +673,9 @@ fn normalize(record: &Value, row: &Value, inspected: &Value) -> Value {
         "prompt":outline.map(|v|v["prompt"].clone()),"activity_detail":outline.map(|v|v["response"].clone()),
         "reply_id":reply.map(|v|format!("dsh-turn-{}",v["seq"].as_u64().unwrap_or(0))),"reply_at":if reply.is_some(){row["updatedAt"].as_f64().unwrap_or(0.0)/1000.0}else{0.0},
         "native_ui_available":true,"settings_change_supported":alive,"send_available":alive && !auth_required && record["permissions_pending"] != true});
+    if !string(record, "session_id").is_empty() {
+        value["session_id"] = record["session_id"].clone();
+    }
     if pending {
         // Native question IDs distinguish one request from the next for read
         // marks and notifications; their generation-bound hashes do not.
@@ -914,7 +922,7 @@ pub(super) fn fork(
         return Err("DeepSeek fork acknowledgement did not match; check Native UI".into());
     }
     let run = uuid::Uuid::new_v4().to_string();
-    save(&json!({"backend":"dsh","name":target,"agent":"dsh","agent_home":record["agent_home"],"cwd":record["cwd"],
+    save(&mut json!({"backend":"dsh","name":target,"agent":"dsh","agent_home":record["agent_home"],"cwd":record["cwd"],
         "conversation_id":child,"run_id":run,"created":now(),"launch_id":null,"paused":false,
         "fork_parent_id":record["conversation_id"],"fork_source_name":name}))?;
     let _ = fs::remove_file(&pending);
@@ -1296,7 +1304,7 @@ pub(super) fn session_action(name: &str, action: &str, new_name: Option<&str>, s
         "forget"=>{archive::remove_synced(&binding_path(name))?;return Ok(());},
         _=>unreachable!(),
     }
-    save(&record)?;
+    save(&mut record)?;
     if action=="rename" && new_name!=Some(name) {
         archive::remove_synced(&binding_path(name))?;
         // The rename is done; losing read marks only shows a reply as unread again.
@@ -1543,7 +1551,7 @@ pub(crate) fn dispatch(command: &str, args: &[String]) -> Result<i32> {
             if command == "resume" {
                 record["run_id"] = json!(uuid::Uuid::new_v4().to_string());
             }
-            save(&record)?;
+            save(&mut record)?;
         }
         "rename" => {
             let new = args.get(1).ok_or("Choose a new session name")?;
@@ -1568,7 +1576,7 @@ pub(crate) fn dispatch(command: &str, args: &[String]) -> Result<i32> {
             notifications::anchor(&mut record);
             record["name"] = json!(new);
             recovery::rename_job(name,new,string(&record,"run_id"))?;
-            save(&record)?;
+            save(&mut record)?;
             fs::remove_file(binding_path(name)).map_err(|e| e.to_string())?;
             // The rename is done; losing read marks only shows a reply as unread again.
             let _ = read_marks::rename_owner(name, new);

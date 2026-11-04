@@ -27,6 +27,8 @@ pub(super) const PROJECT_BYTES: usize = 128;
 pub(super) struct Job {
     pub token: u64,
     pub key: String,
+    /// The rows of each stage a windowed subscription reads, or the whole list.
+    pub window: Option<u32>,
     cancelled: Arc<AtomicBool>,
 }
 
@@ -39,13 +41,14 @@ pub(super) struct Done {
     pub value: Option<Result<Value, String>>,
 }
 
-/// Runs one read with `list` (`task list --project KEY --json`).
-pub(super) fn read(job: Job, list: impl Fn(&str) -> Result<Value, String>) -> Done {
-    let Job { token, key, cancelled } = job;
+/// Runs one read with `list` (`task list --project KEY --json`, or the
+/// window of each stage when the subscription asked for one).
+pub(super) fn read(job: Job, list: impl Fn(&str, Option<u32>) -> Result<Value, String>) -> Done {
+    let Job { token, key, window, cancelled } = job;
     if cancelled.load(Ordering::SeqCst) {
         return Done { token, key, value: None };
     }
-    let value = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| list(&key)))
+    let value = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| list(&key, window)))
         .unwrap_or_else(|_| Err("the task list failed".into()));
     Done { token, key, value: Some(value) }
 }
@@ -67,9 +70,12 @@ impl Pool {
                 .name(format!("hgs-watch-tasks-{index}"))
                 .spawn(move || {
                     let config = crate::config::Config::load().map_err(|error| error.to_string());
-                    let list = |project: &str| match &config {
-                        Ok(config) => crate::tasks::listing(config, project).map_err(|error| error.to_string()),
-                        Err(error) => Err(error.clone()),
+                    let list = |project: &str, window: Option<u32>| match (&config, window) {
+                        (Ok(config), None) => crate::tasks::listing(config, project).map_err(|error| error.to_string()),
+                        (Ok(config), Some(limit)) => {
+                            crate::tasks::window(config, project, limit as usize).map_err(|error| error.to_string())
+                        }
+                        (Err(error), _) => Err(error.clone()),
                     };
                     loop {
                         let job = queue.lock().unwrap_or_else(|poisoned| poisoned.into_inner()).recv();
@@ -91,6 +97,8 @@ impl Pool {
 /// One followed project.
 struct Project {
     token: u64,
+    /// The rows of each stage it asked for, or the whole list.
+    window: Option<u32>,
     cancelled: Arc<AtomicBool>,
     running: bool,
     /// Its store changed while a read ran: read again.
@@ -148,16 +156,18 @@ impl Tasks {
         if stamp.is_some() {
             project.stamp = stamp;
         }
-        Some(Job { token, key: key.to_owned(), cancelled: Arc::clone(&project.cancelled) })
+        Some(Job { token, key: key.to_owned(), window: project.window, cancelled: Arc::clone(&project.cancelled) })
     }
 
-    /// Follows a project; one already followed sends its list again.
-    pub(super) fn subscribe(&mut self, key: &str, now: Instant) -> Job {
+    /// Follows a project, whole or as a window of each stage; one already
+    /// followed sends its list again.
+    pub(super) fn subscribe(&mut self, key: &str, window: Option<u32>, now: Instant) -> Job {
         self.unsubscribe(key);
         self.projects.insert(
             key.to_owned(),
             Project {
                 token: 0,
+                window,
                 cancelled: Arc::new(AtomicBool::new(false)),
                 running: false,
                 again: false,
@@ -251,9 +261,17 @@ impl Tasks {
     }
 }
 
-/// The last page's value: the list without its tasks, and its digest.
+/// The last page's value: the list without its tasks, and its digest; a
+/// window adds its counts, damaged total, revision and each stage's total and
+/// next cursor.
 pub(super) fn summary(listing: &Value, digest: &str) -> Value {
-    json!({"project": listing["project"], "damaged": listing["damaged"], "digest": digest})
+    let mut value = json!({"project": listing["project"], "damaged": listing["damaged"], "digest": digest});
+    for key in ["damaged_total", "counts", "revision", "window"] {
+        if let Some(field) = listing.get(key) {
+            value[key] = field.clone();
+        }
+    }
+    value
 }
 
 #[cfg(test)]
@@ -272,11 +290,41 @@ mod tests {
     }
 
     #[test]
+    fn a_window_s_summary_adds_its_counts_revision_and_stages() {
+        let whole = listing("project", &["a"]);
+        assert_eq!(summary(&whole, "d").as_object().unwrap().len(), 3, "an unwindowed summary is unchanged");
+        let mut windowed = whole.clone();
+        windowed["counts"] = json!({"todo": 1});
+        windowed["damaged_total"] = json!(0);
+        windowed["revision"] = json!("r");
+        windowed["window"] = json!({"schema": 1, "limit": 2, "stages": {}});
+        let value = summary(&windowed, "d");
+        for key in ["project", "damaged", "digest", "counts", "damaged_total", "revision", "window"] {
+            assert!(value.get(key).is_some(), "{key}");
+        }
+        assert!(value.get("tasks").is_none());
+    }
+
+    #[test]
+    fn a_window_is_carried_into_every_read_of_its_subscription() {
+        let start = Instant::now();
+        let mut state = Tasks::new();
+        let job = state.subscribe("project", Some(7), start);
+        assert_eq!(job.window, Some(7));
+        let seen = read(job, |_, window| Ok(json!({"window": window})));
+        assert_eq!(seen.value, Some(Ok(json!({"window": 7}))));
+        assert_eq!(state.done(seen, |_| Vec::new()), None);
+        let again = state.pulse(start + SAFETY, |_| 0);
+        assert_eq!(again.iter().map(|job| job.window).collect::<Vec<_>>(), vec![Some(7)]);
+        assert_eq!(state.subscribe("project", None, start).window, None, "subscribing again replaces it");
+    }
+
+    #[test]
     fn unsubscribed_callback_cannot_cross_the_detail_fence() {
         let mut state = Tasks::new();
-        let old = state.subscribe("project", Instant::now());
+        let old = state.subscribe("project", None, Instant::now());
         state.unsubscribe("project");
-        let current = state.subscribe("project", Instant::now());
+        let current = state.subscribe("project", None, Instant::now());
         assert!(old.token < current.token);
         state.done(result(&old, listing("project", &["old"])), |_| Vec::new());
         assert!(!state.pending());
@@ -291,20 +339,20 @@ mod tests {
         let pool = Pool { jobs };
         let mut state = Tasks::new();
         for _ in 0..zerus_watch_protocol::TASKS_SUBSCRIPTIONS {
-            assert!(pool.run(state.subscribe("project", start)).is_ok());
+            assert!(pool.run(state.subscribe("project", None, start)).is_ok());
         }
-        let Err(mpsc::TrySendError::Full(job)) = pool.run(state.subscribe("project", start)) else { panic!("bounded queue is full") };
+        let Err(mpsc::TrySendError::Full(job)) = pool.run(state.subscribe("project", None, start)) else { panic!("bounded queue is full") };
         state.defer(job, start);
         assert!(state.pulse(start + GAP / 2, |_| 0).is_empty());
         for old in receiver.try_iter() {
-            let done = read(old, |_| panic!("a cancelled task must not read"));
+            let done = read(old, |_, _| panic!("a cancelled task must not read"));
             assert!(done.value.is_none());
             assert_eq!(state.done(done, |_| Vec::new()), None);
         }
         assert!(!state.pending());
         let retry = state.pulse(start + GAP, |_| 0).pop().expect("retry before the safety interval");
         assert!(pool.run(retry).is_ok());
-        assert_eq!(state.done(read(receiver.try_recv().unwrap(), |_| Ok(listing("project", &["latest"]))), |_| Vec::new()), None);
+        assert_eq!(state.done(read(receiver.try_recv().unwrap(), |_, _| Ok(listing("project", &["latest"]))), |_| Vec::new()), None);
         let mut rows = Vec::new();
         state.flush(|_, list, _| { rows = list["tasks"].as_array().unwrap().clone(); true });
         assert_eq!(rows, vec![json!({"text":"latest"})]);
@@ -315,7 +363,7 @@ mod tests {
         let start = Instant::now();
         let stamp = std::cell::Cell::new(1u64);
         let mut tasks = Tasks::new();
-        let first = tasks.subscribe("project-1", start);
+        let first = tasks.subscribe("project-1", None, start);
         assert_eq!(first.key, "project-1");
         let store = |id: &str| vec![PathBuf::from(format!("/state/replica/{id}"))];
         assert_eq!(tasks.done(result(&first, listing("project-1", &["a"])), store), None);
@@ -359,17 +407,17 @@ mod tests {
     fn errors_are_reported_and_ended_subscriptions_drop_late_results() {
         let start = Instant::now();
         let mut tasks = Tasks::new();
-        let job = tasks.subscribe("missing", start);
+        let job = tasks.subscribe("missing", None, start);
         let failed = Done { token: job.token, key: job.key.clone(), value: Some(Err("unknown project".into())) };
         assert_eq!(tasks.done(failed, |_| vec![]), Some("unknown project".into()));
-        let job = tasks.subscribe("project-2", start);
+        let job = tasks.subscribe("project-2", None, start);
         assert!(tasks.unsubscribe("project-2"));
         let late = result(&job, listing("project-2", &["x"]));
         assert_eq!(tasks.done(late, |_| vec![]), None);
         assert!(!tasks.pending());
-        assert!(read(job, |_| panic!("a cancelled read ran")).value.is_none());
-        let job = tasks.subscribe("project-3", start);
-        assert_eq!(read(job, |_| panic!("boom")).value, Some(Err("the task list failed".into())));
+        assert!(read(job, |_, _| panic!("a cancelled read ran")).value.is_none());
+        let job = tasks.subscribe("project-3", None, start);
+        assert_eq!(read(job, |_, _| panic!("boom")).value, Some(Err("the task list failed".into())));
         assert_eq!(summary(&listing("p", &["a"]), "d"), json!({"project":{"id":"p","name":"orchard"},"damaged":[],"digest":"d"}));
     }
 }

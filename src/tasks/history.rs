@@ -1,14 +1,12 @@
-//! Optional bounded reads beside the unchanged legacy `task get`. The index
-//! is disposable, local and limited to one task per project. Only a changed
-//! source is decoded in full; page reads use SQLite's chronological index.
+//! Optional bounded reads beside the unchanged legacy `task get`: one
+//! chronological page of a task's history. Pages come from the task index,
+//! which keeps the histories of the most recently read tasks, or from the
+//! task's document when the index cannot answer; both give the same page.
+//! Cursors bind the project, task and immutable history entry.
 use super::*;
-use crate::platform;
-use rusqlite::{params, Connection, OpenFlags, OptionalExtension};
 use sha2::{Digest, Sha256};
-use std::{fs, path::Path};
 
 const MAX_PAGE: usize = 80;
-const CACHE: &str = "task-history-v1.sqlite3";
 
 pub(super) fn limit(args: &[String]) -> Result<Option<usize>> {
     let limit = option(args, "--history-limit")?
@@ -22,200 +20,188 @@ pub(super) fn limit(args: &[String]) -> Result<Option<usize>> {
     if limit.is_none() && option(args, "--history-before")?.is_some() {
         return Err(fail("--history-before requires --history-limit"));
     }
+    if limit.is_none() && option(args, "--attachments")?.is_some() {
+        return Err(fail("--attachments requires --history-limit"));
+    }
     Ok(limit)
 }
 
-fn open(dir: &Path) -> Result<Connection> {
-    // The project store lock is held throughout. Never follow a replaced cache
-    // or a SQLite sidecar; all contain private task text.
-    for suffix in ["", "-journal", "-wal", "-shm"] {
-        match platform::verify_private(
-            &dir.join(format!("{CACHE}{suffix}")),
-            platform::Private::File,
-        ) {
-            Ok(true) => (),
-            Err(e) if e.kind() == std::io::ErrorKind::NotFound => (),
-            _ => {
-                return Err(fail(
-                    "task history cache must contain private regular files",
-                ))
-            }
-        }
+/// `--attachments metadata`: a page names each file (its name, type,
+/// reference, size and SHA-256) instead of carrying it, and names each entry;
+/// `hgs task attachment` returns one file.
+pub(super) fn summary(args: &[String]) -> Result<bool> {
+    match option(args, "--attachments")? {
+        None => Ok(false),
+        Some("metadata") => Ok(true),
+        Some(_) => Err(fail("--attachments takes metadata")),
     }
-    // SQLite NOFOLLOW rejects symlinks in every path component, including
-    // macOS's /var -> /private/var; resolve the verified directory only.
-    let path = platform::canonical(dir).map_err(fail)?.join(CACHE);
-    if !path.exists() {
-        platform::private_open(fs::OpenOptions::new().write(true).create_new(true))
-            .open(&path)
-            .map_err(fail)?;
-    }
-    let db = Connection::open_with_flags(
-        path,
-        OpenFlags::SQLITE_OPEN_READ_WRITE
-            | OpenFlags::SQLITE_OPEN_NO_MUTEX
-            | OpenFlags::SQLITE_OPEN_NOFOLLOW,
-    )
-    .map_err(fail)?;
-    db.execute_batch("PRAGMA journal_mode=DELETE; PRAGMA max_page_count=16384;
-        CREATE TABLE IF NOT EXISTS current(uuid TEXT NOT NULL, fingerprint TEXT NOT NULL, task TEXT NOT NULL, total INTEGER NOT NULL);
-        CREATE TABLE IF NOT EXISTS entries(id TEXT PRIMARY KEY, at INTEGER NOT NULL, ordinal INTEGER NOT NULL, payload TEXT NOT NULL);
-        CREATE UNIQUE INDEX IF NOT EXISTS entries_chronological ON entries(at,ordinal);")
-        .map_err(fail)?;
-    Ok(db)
 }
 
-fn fingerprint(dir: &Path, uuid: &str) -> Result<String> {
-    // Hash bytes under the project lock, rather than trusting mtime/size: an
-    // append, atomic compaction or same-tick replacement invalidates the index.
-    let mut hash = Sha256::new();
-    for ext in ["loro", "updates"] {
-        let path = dir.join("tasks").join(format!("{uuid}.{ext}"));
-        match fs::File::open(path) {
-            Ok(mut file) => {
-                hash.update([1]);
-                hash.update(file.metadata().map_err(fail)?.len().to_le_bytes());
-                let mut buf = [0; 65536];
-                loop {
-                    let n = file.read(&mut buf).map_err(fail)?;
-                    if n == 0 {
-                        break;
-                    }
-                    hash.update(&buf[..n]);
-                }
-            }
-            Err(e) if ext == "updates" && e.kind() == std::io::ErrorKind::NotFound => {
-                hash.update([0])
-            }
-            Err(e) => return Err(fail(e)),
-        }
-    }
-    Ok(format!("{:x}", hash.finalize()))
+/// One history entry, in full and as a summary.
+pub(super) struct Entry {
+    pub id: String,
+    pub at: i64,
+    pub payload: Value,
+    pub summary: Value,
 }
 
-fn scope(project: &str, uuid: &str) -> String {
-    format!("{:x}:", Sha256::digest(format!("{project}\n{uuid}")))
+/// A task's history as pages are built from it: the task without its log,
+/// in full and as a summary, and its entries in their canonical order.
+pub(super) struct Read {
+    pub header: Value,
+    pub summary: Value,
+    pub entries: Vec<Entry>,
 }
 
-pub(super) fn page(
-    store: &ProjectStore,
-    dir: &Path,
-    uuid: &str,
-    limit: usize,
-    before: Option<&str>,
-) -> Result<Value> {
-    if !zerus_replica::ids::is_uuid(uuid) || !(1..=MAX_PAGE).contains(&limit) {
-        return Err(fail("invalid task history request"));
-    }
-    let prefix = scope(store.project_id(), uuid);
-    let before = before
-        .map(|cursor| {
-            cursor
-                .strip_prefix(&prefix)
-                .filter(|id| !id.is_empty() && id.len() <= 256)
-                .ok_or_else(|| fail("task history cursor does not match this task"))
-        })
-        .transpose()?;
-    let fingerprint = fingerprint(dir, uuid)?;
-    let mut db = open(dir)?;
-    let cached = db
-        .query_row("SELECT uuid,fingerprint FROM current", [], |row| {
-            Ok((row.get::<_, String>(0)?, row.get::<_, String>(1)?))
-        })
-        .optional()
-        .map_err(fail)?;
-    if cached.as_ref() != Some(&(uuid.to_owned(), fingerprint.clone())) {
-        let (mut task, ids) = store
-            .load(uuid)
-            .map_err(fail)?
-            .view_with_history_ids()
+/// `value` with each attachment's metadata instead of its file.
+fn summarized(value: &Value) -> Result<Value> {
+    let mut out = value.clone();
+    if let Some(files) = value.get("attachments") {
+        let files: Vec<TaskAttachment> = serde_json::from_value(files.clone()).map_err(fail)?;
+        let described = files
+            .iter()
+            .map(TaskAttachment::metadata)
+            .collect::<std::result::Result<Vec<_>, _>>()
             .map_err(fail)?;
-        let dispatch = task.execution_id();
-        let mut started = false;
-        for entry in &task.log {
-            if entry.kind == "sent" {
-                started = false;
-            } else if entry.kind == "started" {
-                started = true;
-            }
-        }
-        let log = std::mem::take(&mut task.log);
-        let mut value = serde_json::to_value(task).map_err(fail)?;
-        value["dispatch_id"] = json!(dispatch);
-        value["start_confirmed"] = json!(started);
-        value.as_object_mut().expect("task").remove("log");
-        let tx = db.transaction().map_err(fail)?;
-        tx.execute_batch("DELETE FROM current; DELETE FROM entries;")
-            .map_err(fail)?;
-        {
-            let mut insert = tx
-                .prepare("INSERT INTO entries(id,at,ordinal,payload) VALUES(?1,?2,?3,?4)")
-                .map_err(fail)?;
-            for (ordinal, (id, entry)) in ids.into_iter().zip(&log).enumerate() {
-                insert
-                    .execute(params![
-                        id,
-                        entry.at,
-                        ordinal as i64,
-                        serde_json::to_string(entry).map_err(fail)?
-                    ])
-                    .map_err(fail)?;
-            }
-        }
-        tx.execute(
-            "INSERT INTO current VALUES(?1,?2,?3,?4)",
-            params![uuid, fingerprint, value.to_string(), log.len() as i64],
-        )
-        .map_err(fail)?;
-        tx.commit().map_err(fail)?;
+        out["attachments"] = json!(described);
     }
-    let (raw, total): (String, i64) = db
-        .query_row("SELECT task,total FROM current", [], |row| {
-            Ok((row.get(0)?, row.get(1)?))
-        })
-        .map_err(fail)?;
-    let boundary = match before {
-        Some(id) => db
-            .query_row("SELECT at,ordinal FROM entries WHERE id=?1", [id], |row| {
-                Ok((row.get::<_, i64>(0)?, row.get::<_, i64>(1)?))
-            })
-            .optional()
-            .map_err(fail)?
-            .ok_or_else(|| fail("History changed; return to Latest to refresh."))?,
-        None => (i64::MAX, i64::MAX),
-    };
-    let mut query = db.prepare("SELECT id,payload FROM entries WHERE (at,ordinal)<(?1,?2) ORDER BY at DESC,ordinal DESC LIMIT ?3").map_err(fail)?;
-    let mut rows = query
-        .query_map(params![boundary.0, boundary.1, (limit + 1) as i64], |row| {
-            Ok((row.get::<_, String>(0)?, row.get::<_, String>(1)?))
-        })
-        .map_err(fail)?
-        .collect::<std::result::Result<Vec<_>, _>>()
-        .map_err(fail)?;
-    let more = rows.len() > limit;
-    rows.truncate(limit);
-    rows.reverse();
-    let next = if more {
-        rows.first().map(|(id, _)| format!("{prefix}{id}"))
-    } else {
-        None
-    };
-    let entries = rows
+    Ok(out)
+}
+
+/// Reads a task's history from its document.
+pub(super) fn materialize(task: &TaskDoc) -> Result<Read> {
+    let (mut view, ids) = task.view_with_history_ids().map_err(fail)?;
+    let dispatch = view.execution_id();
+    let mut started = false;
+    for entry in &view.log {
+        if entry.kind == "sent" {
+            started = false;
+        } else if entry.kind == "started" {
+            started = true;
+        }
+    }
+    let log = std::mem::take(&mut view.log);
+    let mut header = serde_json::to_value(view).map_err(fail)?;
+    header["dispatch_id"] = json!(dispatch);
+    header["start_confirmed"] = json!(started);
+    header.as_object_mut().expect("task").remove("log");
+    let summary = summarized(&header)?;
+    let entries = ids
         .into_iter()
-        .map(|(_, raw)| serde_json::from_str::<Value>(&raw).map_err(fail))
+        .zip(log)
+        .map(|(id, entry)| {
+            let payload = serde_json::to_value(&entry).map_err(fail)?;
+            Ok(Entry { id, at: entry.at, summary: summarized(&payload)?, payload })
+        })
         .collect::<Result<Vec<_>>>()?;
-    let mut task: Value = serde_json::from_str(&raw).map_err(fail)?;
+    Ok(Read { header, summary, entries })
+}
+
+/// The page's reply: the task with one page of its log.
+pub(super) fn finish(mut task: Value, entries: Vec<Value>, total: usize, next: Option<String>) -> Value {
     task["log"] = json!(entries);
     task["log_total"] = json!(total);
     task["history_next"] = json!(next);
     task["history_schema"] = json!(1);
-    Ok(task)
+    task
+}
+
+pub(super) fn scope(project: &str, uuid: &str) -> String {
+    format!("{:x}:", Sha256::digest(format!("{project}\n{uuid}")))
+}
+
+/// The entry ID a cursor or entry reference names, for this task only.
+fn entry_id<'a>(prefix: &str, cursor: &'a str) -> Result<&'a str> {
+    cursor
+        .strip_prefix(prefix)
+        .filter(|id| !id.is_empty() && id.len() <= 256)
+        .ok_or_else(|| fail("task history cursor does not match this task"))
+}
+
+fn gone() -> Error {
+    fail("History changed; return to Latest to refresh.")
+}
+
+pub(super) fn page(store: &ProjectStore, uuid: &str, limit: usize, before: Option<&str>, summary: bool) -> Result<Value> {
+    if !zerus_replica::ids::is_uuid(uuid) || !(1..=MAX_PAGE).contains(&limit) {
+        return Err(fail("invalid task history request"));
+    }
+    let prefix = scope(store.project_id(), uuid);
+    let before = before.map(|cursor| entry_id(&prefix, cursor)).transpose()?;
+    if let Some(mut index) = index::Index::open(store) {
+        match index.history(uuid, limit, before, summary, &prefix) {
+            Ok(Some(page)) => return Ok(page),
+            Ok(None) => return Err(gone()),
+            Err(failure) => index.discard(&failure),
+        }
+    }
+    // The same page from the document, when the index cannot answer.
+    let read = materialize(&store.load(uuid).map_err(fail)?)?;
+    let end = match before {
+        Some(id) => read.entries.iter().position(|e| e.id == id).ok_or_else(gone)?,
+        None => read.entries.len(),
+    };
+    let start = end.saturating_sub(limit);
+    let next = (start > 0).then(|| format!("{prefix}{}", read.entries[start].id));
+    let entries = read.entries[start..end]
+        .iter()
+        .map(|entry| {
+            if summary {
+                let mut shown = entry.summary.clone();
+                shown["id"] = json!(format!("{prefix}{}", entry.id));
+                shown
+            } else {
+                entry.payload.clone()
+            }
+        })
+        .collect();
+    let total = read.entries.len();
+    Ok(finish(if summary { read.summary } else { read.header }, entries, total, next))
+}
+
+/// `hgs task attachment REF --file N [--entry ID]`: one file of a task, or of
+/// one of its history entries (an `id` from a summary page), with its bytes.
+pub(super) fn attachment(config: &Config, args: &[String]) -> Result<Value> {
+    let machines = machines(config)?;
+    let who = actor(&machines.here, args, false)?;
+    let r = reference(config, args, &who)?;
+    let number = option(args, "--file")?
+        .and_then(|n| n.parse::<usize>().ok())
+        .filter(|n| *n >= 1)
+        .ok_or_else(|| fail("--file is a number from 1"))?;
+    let entry = option(args, "--entry")?;
+    let store = store(config, &r.project.0)?;
+    let task = find(&store, &r.task)?;
+    let (view, ids) = task.view_with_history_ids().map_err(fail)?;
+    let files = match entry {
+        None => &view.attachments,
+        Some(cursor) => {
+            let id = entry_id(&scope(store.project_id(), task.uuid()), cursor)?;
+            let at = ids.iter().position(|known| known == id).ok_or_else(gone)?;
+            &view.log[at].attachments
+        }
+    };
+    let file = files.get(number - 1).ok_or_else(|| fail(format!("there is no file {number}")))?;
+    let bytes = file.bytes().map_err(fail)?;
+    Ok(json!({
+        "project": {"id": r.project.0, "name": r.project.1},
+        "task": task.uuid(),
+        "entry": entry,
+        "file": number,
+        "name": file.name,
+        "mime": file.mime,
+        "reference": file.reference,
+        "size": bytes.len(),
+        "sha256": format!("{:x}", Sha256::digest(&bytes)),
+        "data_base64": file.data_base64,
+    }))
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
-    use zerus_replica::NewTask;
+    use std::cell::Cell;
+    use zerus_replica::{NewTask, SessionKey};
 
     fn task() -> TaskDoc {
         TaskDoc::create(NewTask {
@@ -231,13 +217,38 @@ mod tests {
         .unwrap()
     }
 
+    fn file(name: &str, text: &str) -> TaskAttachment {
+        use base64::Engine;
+        TaskAttachment {
+            name: name.into(),
+            mime: "text/plain".into(),
+            data_base64: base64::engine::general_purpose::STANDARD.encode(text),
+            reference: String::new(),
+        }
+    }
+
+    /// Every page of `uuid`, oldest first.
+    fn all(store: &ProjectStore, uuid: &str, limit: usize, summary: bool) -> Vec<Value> {
+        let mut collected = Vec::new();
+        let mut before = None;
+        loop {
+            let p = page(store, uuid, limit, before.as_deref(), summary).unwrap();
+            assert!(p["log"].as_array().unwrap().len() <= limit);
+            assert_eq!(p["history_schema"], json!(1));
+            let mut older = p["log"].as_array().unwrap().clone();
+            older.extend(collected);
+            collected = older;
+            before = p["history_next"].as_str().map(str::to_owned);
+            if before.is_none() {
+                return collected;
+            }
+        }
+    }
+
     #[test]
-    fn pages_preserve_canonical_order_and_are_indexed() {
+    fn pages_preserve_canonical_order() {
         let temp = tempfile::tempdir().unwrap();
         let store = ProjectStore::open(temp.path(), "example").unwrap();
-        let dir = temp
-            .path()
-            .join(format!("{:x}", Sha256::digest(b"example")));
         let mut task = task();
         // Equal times retain the canonical Loro order; merged earlier times
         // need chronological order rather than raw append positions.
@@ -246,89 +257,196 @@ mod tests {
         }
         store.save(&mut task).unwrap();
         let expected = serde_json::to_value(task.view().unwrap().log).unwrap();
-        let mut collected = Vec::new();
-        let mut before = None;
-        loop {
-            let p = page(&store, &dir, task.uuid(), 2, before.as_deref()).unwrap();
-            assert!(p["log"].as_array().unwrap().len() <= 2);
-            let mut older = p["log"].as_array().unwrap().clone();
-            older.extend(collected);
-            collected = older;
-            before = p["history_next"].as_str().map(str::to_owned);
-            if before.is_none() {
-                break;
-            }
-        }
-        assert_eq!(json!(collected), expected);
-        let db = open(&dir).unwrap();
-        let plan: String = db.query_row("EXPLAIN QUERY PLAN SELECT id,payload FROM entries WHERE (at,ordinal)<(300,10) ORDER BY at DESC,ordinal DESC LIMIT 2", [], |r| r.get(3)).unwrap();
-        assert!(plan.contains("entries_chronological"), "{plan}");
+        assert_eq!(json!(all(&store, task.uuid(), 2, false)), expected);
     }
 
     #[test]
-    fn cursor_survives_append_compaction_and_cache_eviction() {
+    fn cursor_survives_append_compaction_and_eviction() {
         let temp = tempfile::tempdir().unwrap();
         let store = ProjectStore::open(temp.path(), "example").unwrap();
-        let dir = temp
-            .path()
-            .join(format!("{:x}", Sha256::digest(b"example")));
         let mut a = task();
         for n in 1..=6 {
-            a.comment(&format!("note {n}"), &Actor::Person, 100 + n)
-                .unwrap();
+            a.comment(&format!("note {n}"), &Actor::Person, 100 + n).unwrap();
         }
         store.save(&mut a).unwrap();
-        let latest = page(&store, &dir, a.uuid(), 2, None).unwrap();
-        let cursor = latest["history_next"].as_str().unwrap();
-        let old = page(&store, &dir, a.uuid(), 2, Some(cursor)).unwrap();
+        let latest = page(&store, a.uuid(), 2, None, false).unwrap();
+        let cursor = latest["history_next"].as_str().unwrap().to_owned();
+        let old = page(&store, a.uuid(), 2, Some(&cursor), false).unwrap();
         a.comment("new", &Actor::Person, 200).unwrap();
         store.save(&mut a).unwrap();
-        assert_eq!(
-            page(&store, &dir, a.uuid(), 2, Some(cursor)).unwrap()["log"],
-            old["log"]
-        );
+        assert_eq!(page(&store, a.uuid(), 2, Some(&cursor), false).unwrap()["log"], old["log"]);
         let executor = SessionKey {
             machine: "example-computer".into(),
             session: "codex/example/worker".into(),
             session_id: "run_id:example".into(),
         };
-        a.record_send(&executor, "dispatch", &Actor::Person, 201)
-            .unwrap();
-        a.record_report("Result", &Actor::Agent(executor), 202)
-            .unwrap();
+        a.record_send(&executor, "dispatch", &Actor::Person, 201).unwrap();
+        a.record_report("Result", &Actor::Agent(executor), 202).unwrap();
         a.set_stage(Stage::Done, &Actor::Person, 203).unwrap();
         store.save(&mut a).unwrap(); // Done folds the updates into the snapshot.
-        assert_eq!(
-            page(&store, &dir, a.uuid(), 2, Some(cursor)).unwrap()["log"],
-            old["log"]
-        );
-        // Another selected task evicts the projection, not the durable cursor.
-        let mut b = task();
+        assert_eq!(page(&store, a.uuid(), 2, Some(&cursor), false).unwrap()["log"], old["log"]);
+        // Reading sixteen other tasks evicts its history, not the cursor.
+        for _ in 0..16 {
+            let mut other = task();
+            store.save(&mut other).unwrap();
+            page(&store, other.uuid(), 1, None, false).unwrap();
+            assert!(page(&store, other.uuid(), 2, Some(&cursor), false).is_err());
+        }
+        index::MATERIALIZED.with(|n| n.set(0));
+        assert_eq!(page(&store, a.uuid(), 2, Some(&cursor), false).unwrap()["log"], old["log"]);
+        assert_eq!(index::MATERIALIZED.with(Cell::get), 1, "read again after eviction");
+    }
+
+    /// The inspector's page and a write guard's one-entry read alternate
+    /// between tasks without reading either document again.
+    #[test]
+    fn alternating_tasks_keep_their_histories() {
+        let temp = tempfile::tempdir().unwrap();
+        let store = ProjectStore::open(temp.path(), "example").unwrap();
+        let (mut a, mut b) = (task(), task());
+        store.save(&mut a).unwrap();
         store.save(&mut b).unwrap();
-        page(&store, &dir, b.uuid(), 1, None).unwrap();
-        assert!(page(&store, &dir, b.uuid(), 2, Some(cursor)).is_err());
-        assert_eq!(
-            page(&store, &dir, a.uuid(), 2, Some(cursor)).unwrap()["log"],
-            old["log"]
-        );
-        let db = open(&dir).unwrap();
-        assert_eq!(
-            db.query_row("SELECT COUNT(*) FROM current", [], |r| r.get::<_, i64>(0))
-                .unwrap(),
-            1
-        );
+        index::MATERIALIZED.with(|n| n.set(0));
+        for _ in 0..3 {
+            page(&store, a.uuid(), 80, None, false).unwrap();
+            page(&store, b.uuid(), 1, None, false).unwrap();
+        }
+        assert_eq!(index::MATERIALIZED.with(Cell::get), 2);
+        // A change reads that task again, once.
+        a.comment("note", &Actor::Person, 300).unwrap();
+        store.save(&mut a).unwrap();
+        page(&store, a.uuid(), 80, None, false).unwrap();
+        page(&store, a.uuid(), 80, None, false).unwrap();
+        page(&store, b.uuid(), 1, None, false).unwrap();
+        assert_eq!(index::MATERIALIZED.with(Cell::get), 3);
     }
 
     #[test]
-    fn invalid_limits_and_cursor_are_refused() {
+    fn summary_pages_name_files_and_entries() {
+        let temp = tempfile::tempdir().unwrap();
+        let store = ProjectStore::open(temp.path(), "example").unwrap();
+        let mut a = task();
+        a.set_attachments(&[file("spec.txt", "the spec")], &Actor::Person, 101).unwrap();
+        a.comment_with_attachments("see", &[file("log.txt", "a log")], &Actor::Person, 102).unwrap();
+        store.save(&mut a).unwrap();
+        let full = page(&store, a.uuid(), 80, None, false).unwrap();
+        let summary = page(&store, a.uuid(), 80, None, true).unwrap();
+        let sha = |text: &str| format!("{:x}", Sha256::digest(text.as_bytes()));
+        assert_eq!(summary["attachments"], json!([{"name":"spec.txt","mime":"text/plain","reference":"","size":8,"sha256":sha("the spec")}]));
+        assert!(full["attachments"][0]["data_base64"].is_string());
+        let log = summary["log"].as_array().unwrap();
+        let commented = log.iter().find(|e| e["text"] == json!("see")).unwrap();
+        assert_eq!(commented["attachments"], json!([{"name":"log.txt","mime":"text/plain","reference":"","size":5,"sha256":sha("a log")}]));
+        assert!(!summary.to_string().contains("data_base64"));
+        // Each summary entry names itself as a cursor would; full pages do not.
+        let prefix = scope("example", a.uuid());
+        assert!(log.iter().all(|e| e["id"].as_str().is_some_and(|id| id.starts_with(&prefix))));
+        assert!(full["log"].as_array().unwrap().iter().all(|e| e.get("id").is_none()));
+        // Apart from files and IDs the pages agree.
+        let strip = |mut v: Value| {
+            v.as_object_mut().unwrap().remove("attachments");
+            v.as_object_mut().unwrap().remove("id");
+            v
+        };
+        let entries = |p: &Value| p["log"].as_array().unwrap().iter().cloned().map(strip).collect::<Vec<_>>();
+        assert_eq!(entries(&full), entries(&summary));
+        assert_eq!(strip(full.clone()).get("log_total"), strip(summary.clone()).get("log_total"));
+    }
+
+    /// A read never fails because of the index: one that cannot be used
+    /// gives the same pages from the document.
+    #[cfg(unix)]
+    #[test]
+    fn the_document_gives_the_same_pages_as_the_index() {
+        use std::fs;
+        use std::os::unix::fs::PermissionsExt;
+        let temp = tempfile::tempdir().unwrap();
+        let store = ProjectStore::open(temp.path(), "example").unwrap();
+        let mut a = task();
+        a.set_attachments(&[file("spec.txt", "the spec")], &Actor::Person, 101).unwrap();
+        for n in 1..=7 {
+            a.comment(&format!("note {n}"), &Actor::Person, 100 + n).unwrap();
+        }
+        store.save(&mut a).unwrap();
+        let indexed: Vec<_> = [false, true].iter().map(|s| all(&store, a.uuid(), 3, *s)).collect();
+        let latest = page(&store, a.uuid(), 3, None, true).unwrap();
+        // The folder is not private: the index cannot be used at all.
+        fs::set_permissions(store.dir(), fs::Permissions::from_mode(0o755)).unwrap();
+        let read: Vec<_> = [false, true].iter().map(|s| all(&store, a.uuid(), 3, *s)).collect();
+        assert_eq!(read, indexed);
+        assert_eq!(page(&store, a.uuid(), 3, None, true).unwrap(), latest);
+        fs::set_permissions(store.dir(), fs::Permissions::from_mode(0o700)).unwrap();
+        assert_eq!(page(&store, a.uuid(), 3, None, true).unwrap(), latest);
+    }
+
+    /// A cached history of another shape is never served: the page comes
+    /// from the document instead.
+    #[test]
+    fn a_cached_history_of_another_shape_is_never_served() {
+        let temp = tempfile::tempdir().unwrap();
+        let store = ProjectStore::open(temp.path(), "example").unwrap();
+        let mut a = task();
+        a.comment("note", &Actor::Person, 101).unwrap();
+        store.save(&mut a).unwrap();
+        let good = page(&store, a.uuid(), 80, None, false).unwrap();
+        let path = store.dir().join("task-index-v1.sqlite3");
+        let header = |field: &str, value: Value| {
+            let mut h = good.clone();
+            for key in ["log", "log_total", "history_next", "history_schema", "ref"] {
+                h.as_object_mut().unwrap().remove(key);
+            }
+            h[field] = value;
+            h.to_string()
+        };
+        let entry = |value: Value| {
+            let mut e = good["log"][0].clone();
+            e["at"] = value;
+            e.to_string()
+        };
+        for (table, column, raw) in [
+            ("histories", "header", "true".to_owned()),
+            ("histories", "header", "[1]".to_owned()),
+            ("histories", "header", "{\"uuid\": \"another\"}".to_owned()),
+            ("histories", "header", header("id", json!("T-zzzzzz"))),
+            ("histories", "header", header("id", json!(7))),
+            ("histories", "header", header("uuid", json!(zerus_replica::ids::new_uuid()))),
+            ("entries", "payload", "\"text\"".to_owned()),
+            ("entries", "payload", "7".to_owned()),
+            ("entries", "payload", entry(json!(1))),
+            ("entries", "payload", entry(json!("later"))),
+        ] {
+            page(&store, a.uuid(), 80, None, false).unwrap();
+            {
+                let db = rusqlite::Connection::open(&path).unwrap();
+                db.execute(&format!("UPDATE {table} SET {column}=?1"), [&raw]).unwrap();
+            }
+            assert_eq!(page(&store, a.uuid(), 80, None, false).unwrap(), good, "{table}.{column} = {raw}");
+        }
+    }
+
+    #[test]
+    fn invalid_limits_cursors_and_modes_are_refused() {
         for raw in ["0", "81", "-1", "garbage"] {
             assert!(limit(&["--history-limit".into(), raw.into()]).is_err());
         }
         assert_eq!(limit(&[]).unwrap(), None);
-        assert_eq!(
-            limit(&["--history-limit".into(), "80".into()]).unwrap(),
-            Some(80)
-        );
+        assert_eq!(limit(&["--history-limit".into(), "80".into()]).unwrap(), Some(80));
         assert!(limit(&["--history-before".into(), "cursor".into()]).is_err());
+        assert!(limit(&["--attachments".into(), "metadata".into()]).is_err());
+        assert!(summary(&["--attachments".into(), "files".into()]).is_err());
+        assert!(summary(&["--attachments".into(), "metadata".into()]).unwrap());
+        let temp = tempfile::tempdir().unwrap();
+        let store = ProjectStore::open(temp.path(), "example").unwrap();
+        let (mut a, mut b) = (task(), task());
+        a.comment("note", &Actor::Person, 101).unwrap();
+        a.comment("note", &Actor::Person, 102).unwrap();
+        store.save(&mut a).unwrap();
+        store.save(&mut b).unwrap();
+        let cursor = page(&store, a.uuid(), 1, None, false).unwrap()["history_next"].as_str().unwrap().to_owned();
+        let refused = page(&store, b.uuid(), 1, Some(&cursor), false).unwrap_err().message;
+        assert!(refused.contains("cursor does not match this task"), "{refused}");
+        let gone = format!("{}{}", scope("example", a.uuid()), "999@1");
+        let refused = page(&store, a.uuid(), 1, Some(&gone), false).unwrap_err().message;
+        assert!(refused.contains("History changed"), "{refused}");
     }
 }

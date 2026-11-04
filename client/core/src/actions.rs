@@ -803,7 +803,9 @@ pub const ALREADY_ANSWERING: &str = "An answer to this session is already being 
 const MAXIMUM_ANSWER_BYTES: usize = 64 * 1024;
 
 /// `requestSendMessage`'s checks and standard input.
-fn send_input(
+/// The exact stdin of `hgs send <session> --json`: the direct call's, and
+/// the deferred send's original (zerus-5wmh.66.4.4).
+pub fn send_input(
     target: &Target,
     text: &str,
     files: &[Attachment],
@@ -1173,6 +1175,11 @@ pub fn recovery_preflight(target: &Target, action: &Action, exit: Exit) -> Resul
 }
 
 pub fn classify(target: &Target, action: &Action, invocation: &Invocation, exit: Exit) -> Outcome {
+    // A `--session-id` the CLI refused before any effect is a stale target
+    // (zerus-ucck P1c): the caller refreshes, and nothing retries it.
+    if crate::session_selector::refused(target, invocation, &exit) {
+        return failed(crate::termination_cleanup::STATE_CHANGED);
+    }
     match action {
         Action::Settings {
             model,

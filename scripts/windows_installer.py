@@ -114,7 +114,10 @@ def stage(zip_path, destination, version=None):
     listing = destination.joinpath(*PAYLOAD_LIST.split("/"))
     listing.parent.mkdir()
     # The installer compares these case-insensitively with the files it finds.
-    listing.write_text("".join(path.replace("/", "\\") + "\r\n" for path in sorted(expected)), encoding="utf-8")
+    # newline="": the explicit CR LF stays CR LF on every build host (text mode on
+    # Windows would otherwise write CR CR LF).
+    listing.write_text("".join(path.replace("/", "\\") + "\r\n" for path in sorted(expected)), encoding="utf-8",
+                       newline="")
     expected[PAYLOAD_LIST] = sha256(listing)
     return record, expected
 

@@ -4,6 +4,8 @@ use serde::{Deserialize, Serialize};
 use std::time::{Duration, Instant};
 
 pub(in crate::desktop) const RECORD_BYTES: usize = 8192;
+pub(in crate::desktop) mod first;
+pub(in crate::desktop) mod review;
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
@@ -120,6 +122,16 @@ pub(in crate::desktop) struct Pending {
     pub phase: Phase,
     pub original: Option<ObservedInstance>,
     pub started: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub consumer: Option<review::Consumer>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub review: Option<review::Disposition>,
+}
+impl Pending {
+    fn prepared(request_id: String, desired: Mode, original: Option<ObservedInstance>) -> Self {
+        Self { request_id, desired, phase: Phase::Prepared, original, started: None,
+            consumer: None, review: None }
+    }
 }
 
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
@@ -132,6 +144,12 @@ pub(in crate::desktop) struct Record {
     pub pending: Option<Pending>,
     pub cancelled: Option<String>,
     pub completed: Option<String>,
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub reviewed: Vec<review::Archive>,
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub choices: Vec<review::Receipt>,
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub first_choices: Vec<first::Receipt>,
 }
 impl Record {
     pub fn empty(plan: &Plan) -> Result<Self> {
@@ -147,6 +165,9 @@ impl Record {
             pending: None,
             cancelled: None,
             completed: None,
+            reviewed: Vec::new(),
+            choices: Vec::new(),
+            first_choices: Vec::new(),
         })
     }
     pub fn decode(bytes: &[u8], plan: &Plan) -> Result<Self> {
@@ -187,6 +208,8 @@ impl Record {
             value.completed.as_deref().is_none_or(canonical_id),
             "Invalid completed transition UUID."
         );
+        value.check_reviews()?;
+        value.check_first()?;
         Ok(value)
     }
     pub fn encode(&self, plan: &Plan) -> Result<Vec<u8>> {
@@ -195,17 +218,20 @@ impl Record {
         Ok(bytes)
     }
     pub fn begin(&mut self, desired: Mode, original: Option<ObservedInstance>) -> Result<&Pending> {
+        self.begin_id(desired, original, uuid::Uuid::new_v4().to_string())
+    }
+    pub fn begin_id(&mut self, desired: Mode, original: Option<ObservedInstance>, id: String) -> Result<&Pending> {
+        self.ensure_review_slot()?;
+        ensure!(canonical_id(&id) && self.completed.as_deref() != Some(id.as_str())
+            && self.cancelled.as_deref() != Some(id.as_str())
+            && !self.reviewed.iter().any(|a|a.original.request_id == id), "A NEW original request UUID is required.");
         ensure!(self.pending.is_none(), "An original transition is pending; inspect it or explicitly cancel its exact UUID before a new choice.");
         if let Some(original) = &original {
             original.validate()?;
         }
-        self.pending = Some(Pending {
-            request_id: uuid::Uuid::new_v4().to_string(),
-            desired,
-            phase: Phase::Prepared,
-            original,
-            started: None,
-        });
+        let pending = Pending::prepared(id, desired, original);
+        self.ensure_review_capacity(&pending)?;
+        self.pending = Some(pending);
         Ok(self.pending.as_ref().expect("inserted"))
     }
     pub fn advance(&mut self, expected: Phase, next: Phase) -> Result<()> {
@@ -214,7 +240,7 @@ impl Record {
             .as_mut()
             .context("Original transition is absent.")?;
         ensure!(
-            pending.phase == expected,
+            pending.review.is_none() && pending.phase == expected,
             "Original transition phase changed."
         );
         let allowed = matches!(
@@ -240,7 +266,7 @@ impl Record {
             .as_ref()
             .context("No original transition is pending.")?;
         ensure!(
-            canonical_id(request_id) && pending.request_id == request_id,
+            pending.review.is_none() && canonical_id(request_id) && pending.request_id == request_id,
             "Pending transition UUID changed."
         );
         ensure!(pending.phase.pre_manager(),
@@ -251,6 +277,7 @@ impl Record {
     /// Service-grant checks under the installer lock. No native side effect.
     pub fn cancel(&mut self, request_id: &str) -> Result<()> {
         self.cancellation_requires_grant(request_id)?;
+        self.choice_phase(request_id, review::ChoicePhase::Refused)?;
         self.cancelled = Some(request_id.into());
         self.pending = None;
         Ok(())
@@ -258,12 +285,15 @@ impl Record {
     /// Select metadata for a read-only native observation, never permission to
     /// discard it. The caller must bind this GUID to the ready requested mode.
     pub fn ready_cancellation(&self, request_id: &str) -> Result<&Pending> {
+        ensure!(!self.choices.iter().any(|c| c.request == request_id)
+            && !self.first_choices.iter().any(|c| c.request == request_id),
+            "Use Review interrupted mode change for this original; cancellation cannot discard its unknown custody.");
         let pending = self
             .pending
             .as_ref()
             .context("No original transition is pending.")?;
         ensure!(
-            canonical_id(request_id) && pending.request_id == request_id,
+            pending.review.is_none() && canonical_id(request_id) && pending.request_id == request_id,
             "Pending transition UUID changed."
         );
         ensure!(matches!(pending.phase, Phase::StartOffered | Phase::Ready)

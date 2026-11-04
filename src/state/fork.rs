@@ -101,6 +101,7 @@ fn kimi_fork(record: &Value) -> Result<String> {
     }
     for key in [
         "HGS_SESSION",
+        "HGS_SESSION_ID",
         "HGS_RUN_ID",
         "HGS_AGENT",
         "HGS_REQUESTED_ID",
@@ -246,6 +247,7 @@ pub(super) fn start_scoped(
     let hint_environment = crate::config::agent_hint_environment(agent);
     let launch = supervisor_command(&record, &executable, argv, &hint_environment);
     let new_run=uuid::Uuid::new_v4().to_string();
+    let lineage = journal::fork_lineage(&record);
     let mut environment = BTreeMap::from([
         ("HGS_SESSION", target.clone()),
         ("HGS_AGENT", agent.into()),
@@ -268,7 +270,12 @@ pub(super) fn start_scoped(
         // The archived source's own identity, so the fork can inherit its project.
         ("HGS_FORK_SOURCE_ARCHIVE", archive_id.unwrap_or_default().into()),
         // The source history the fork's Activity shows (zerus-b4qk).
-        ("HGS_FORK_LINEAGE", journal::fork_lineage(&record)),
+        ("HGS_FORK_LINEAGE", lineage.clone()),
+        // The labels its sources had, where a journal is not one (P2b).
+        (
+            "HGS_FORK_LINEAGE_LABELS",
+            journal::fork_lineage_labels(&record, &lineage),
+        ),
         (agent_hint::FORK_REVISION_ENV, agent_hint::fork_revision(&record)),
         ("HGS_TRACKING", "1".into()),
         (

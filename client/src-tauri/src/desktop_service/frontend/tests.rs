@@ -58,11 +58,12 @@ fn actual_root_status_controls_client_readiness_but_never_blocks_connected_disab
         "/../fixtures/desktop-delivery-status.json"
     )))
     .unwrap();
-    assert_eq!(cases.len(), 7);
+    assert_eq!(cases.len(), 8);
     for case in cases {
         let label = case["case"].as_str().unwrap();
         let status = &case["status"];
         let (reads, approvals, enabled) = match label {
+            "passive" => (false, false, Some(false)),
             "awaiting_handoff" => (false, false, None),
             "disabled_but_ready" | "read_degraded" => (label != "read_degraded", true, Some(false)),
             "enabled" => (true, true, Some(true)),
@@ -494,6 +495,10 @@ pub(crate) mod native {
     #[cfg(target_os = "linux")]
     #[test]
     fn degraded_root_status_still_uses_the_original_child_disable_route() {
+        #[cfg(unix)]
+        if crate::test_context::non_agent() {
+            return;
+        }
         let _process = crate::PROCESS_TREE.read().unwrap();
         tauri::async_runtime::block_on(async {
             let cases: Vec<Value> = serde_json::from_str(include_str!(concat!(
@@ -665,6 +670,10 @@ pub(crate) mod native {
     #[cfg(target_os = "linux")]
     #[test]
     fn original_child_registration_receipts_and_unknown_delivery_use_only_the_dedicated_route() {
+        #[cfg(unix)]
+        if crate::test_context::non_agent() {
+            return;
+        }
         const CHILD: &str = "ZERUS_FRONTEND_SENDER_FIXTURE";
         const TEST:&str="desktop_service::frontend::tests::native::original_child_registration_receipts_and_unknown_delivery_use_only_the_dedicated_route";
         if std::env::var_os(CHILD).is_none() {

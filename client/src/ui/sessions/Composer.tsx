@@ -18,7 +18,7 @@ import { ModelSettingsButton } from "./ModelSettings";
 import { AttachmentsChip } from "./Attachments";
 import { RecoveryChip } from "./RecoveryChip";
 import { SessionUsageChip, UsageLimitChip } from "./UsageChips";
-import { moveFocusOff } from "./composer-ui";
+import { allowRetryShown, moveFocusOff } from "./composer-ui";
 import { focusTranscript, following, jumpToLatest, unseen } from "./Activity";
 import type { ChipTone } from "../../types";
 import { tr } from "../../i18n";
@@ -326,7 +326,7 @@ export function Composer() {
           <button type="button" class="icon-btn cmp-attach" aria-label={tr("Refresh this session")} title={`${tr("Refresh this session")}\n${v()!.session_status}`}
             disabled={composer.operationLocked()} onClick={() => { void composer.refresh(); }}><Icon name="refresh-cw" size={17} /></button>
         </Show>
-        <Show when={v()?.uncertain && !composer.operationLocked()}>
+        <Show when={allowRetryShown(v(), composer.operationLocked())}>
           <button type="button" class="btn ghost" title={tr("Check the terminal before sending again to avoid a duplicate message")}
             onClick={() => { void composer.allowRetry(); editor.focus(); }}><Icon name="refresh-cw" size={13} />{tr("Allow retry")}</button>
         </Show>

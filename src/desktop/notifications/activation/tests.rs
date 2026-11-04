@@ -1,7 +1,7 @@
 use super::super::{
     ledger,
     wire::{Action, NativeId, Outcome, Platform},
-    Kind, Session,
+    Activation, Endpoint, Event, Kind, Session,
 };
 use super::*;
 use crate::desktop::store::Location;
@@ -12,6 +12,7 @@ struct Fixture {
     _temp: tempfile::TempDir,
     store: Store,
     outbox: Outbox,
+    endpoint: Endpoint,
     value: Activation,
     intent: String,
 }
@@ -103,6 +104,7 @@ impl Fixture {
             _temp: temp,
             store,
             outbox,
+            endpoint,
             value,
             intent,
         }
@@ -112,6 +114,15 @@ impl Fixture {
             &self.outbox.session.configuration,
             &self.outbox.session.service_epoch,
         )
+    }
+    fn offer(&mut self, router: &mut Router) -> Result<bool> {
+        assert!(self.endpoint.emit(Event::Clicked(self.value.clone())));
+        let click = self
+            .outbox
+            .poll(&mut self.store, Instant::now())
+            .pop()
+            .unwrap();
+        router.offer(&self.store, &self.outbox, click)
     }
     fn wait(&self, router: &mut Router) -> (String, Arc<Queue>) {
         let request_id = id();
@@ -133,7 +144,7 @@ fn only_current_service_mode_grant_can_spend_an_absence_bound_click() {
     let mut f = Fixture::new();
     let (_, grant) = f.grant();
     let mut router = f.router();
-    router.offer(&f.store, &f.outbox, f.value.clone()).unwrap();
+    f.offer(&mut router).unwrap();
     let until = router.pending[0].until;
     let id = router.pending[0].id.clone();
     let launch = router
@@ -166,7 +177,7 @@ fn revoked_native_takeover_configuration_and_image_change_keep_known_unsent_clic
         let mut f = Fixture::new();
         let (image, grant) = f.grant();
         let mut router = f.router();
-        router.offer(&f.store, &f.outbox, f.value.clone()).unwrap();
+        f.offer(&mut router).unwrap();
         let id = router.pending[0].id.clone();
         let until = router.pending[0].until;
         match change {
@@ -205,8 +216,9 @@ fn only_original_live_mapping_reaches_the_authenticated_wait_and_never_replays()
     let mut router = f.router();
     let mut forged = f.value.clone();
     forged.request_id = id();
-    assert!(!router.offer(&f.store, &f.outbox, forged).unwrap());
-    assert!(router.offer(&f.store, &f.outbox, f.value.clone()).unwrap());
+    assert!(f.endpoint.emit(Event::Clicked(forged)));
+    assert!(f.outbox.poll(&mut f.store, Instant::now()).is_empty());
+    assert!(f.offer(&mut router).unwrap());
     let (request, queue) = f.wait(&mut router);
     let mut seq = 0;
     router.poll(&f.store, Some(&f.outbox), &mut seq);
@@ -228,7 +240,7 @@ fn only_original_live_mapping_reaches_the_authenticated_wait_and_never_replays()
     let frame: Value = serde_json::from_slice(&second.take().unwrap()).unwrap();
     assert!(frame["value"]["activation"].is_null());
     // Recheck withdrawal at handoff, not only at callback admission.
-    router.offer(&f.store, &f.outbox, f.value.clone()).unwrap();
+    f.offer(&mut router).unwrap();
     ledger::withdraw(&mut f.store.db, &f.intent, 1).unwrap();
     let (_, withdrawn) = f.wait(&mut router);
     router.waiting.as_mut().unwrap().until = Instant::now();
@@ -238,9 +250,9 @@ fn only_original_live_mapping_reaches_the_authenticated_wait_and_never_replays()
 }
 #[test]
 fn canonical_absence_without_an_ownership_grant_never_switches_mode_or_spends_the_click() {
-    let f = Fixture::new();
+    let mut f = Fixture::new();
     let mut router = f.router();
-    router.offer(&f.store, &f.outbox, f.value.clone()).unwrap();
+    f.offer(&mut router).unwrap();
     for state in [
         desktop::Observation::Unknown,
         desktop::Observation::LiveLegacyOrUnknown,
@@ -275,12 +287,12 @@ fn canonical_absence_without_an_ownership_grant_never_switches_mode_or_spends_th
 }
 #[test]
 fn queue_wait_lifetime_stop_and_configuration_are_bounded() {
-    let f = Fixture::new();
+    let mut f = Fixture::new();
     let mut router = f.router();
     for _ in 0..wire::QUEUE {
-        assert!(router.offer(&f.store, &f.outbox, f.value.clone()).unwrap())
+        assert!(f.offer(&mut router).unwrap())
     }
-    assert!(!router.offer(&f.store, &f.outbox, f.value.clone()).unwrap());
+    assert!(!f.offer(&mut router).unwrap());
     let (_, queue) = f.wait(&mut router);
     assert!(router
         .wait(
@@ -300,18 +312,15 @@ fn queue_wait_lifetime_stop_and_configuration_are_bounded() {
     assert!(router.pending.is_empty());
     router.stop();
     assert!(queue.closed());
-    assert!(router.offer(&f.store, &f.outbox, f.value.clone()).is_err());
-    assert!(
-        Router::new(&"b".repeat(64), &f.outbox.session.service_epoch)
-            .offer(&f.store, &f.outbox, f.value.clone())
-            .is_err()
-    );
+    assert!(f.offer(&mut router).is_err());
+    let mut changed = Router::new(&"b".repeat(64), &f.outbox.session.service_epoch);
+    assert!(f.offer(&mut changed).is_err());
 }
 #[test]
 fn policy_permit_and_detached_receiver_do_not_consume_activation() {
-    let f = Fixture::new();
+    let mut f = Fixture::new();
     let mut router = f.router();
-    router.offer(&f.store, &f.outbox, f.value.clone()).unwrap();
+    f.offer(&mut router).unwrap();
     assert!(router
         .wait(
             ui_authority::Validated::fixture(
@@ -329,9 +338,9 @@ fn policy_permit_and_detached_receiver_do_not_consume_activation() {
 #[test]
 fn a_changed_full_proof_cannot_deliver_a_click_during_the_cache_interval() {
     use std::sync::atomic::Ordering;
-    let f = Fixture::new();
+    let mut f = Fixture::new();
     let mut router = f.router();
-    router.offer(&f.store, &f.outbox, f.value.clone()).unwrap();
+    f.offer(&mut router).unwrap();
     let (_, queue) = f.wait(&mut router);
     let probe = Arc::new(ui_authority::ActivationProbe::default());
     router.waiting.as_mut().unwrap().peer.set_probe(
@@ -367,7 +376,7 @@ fn a_changed_full_proof_cannot_deliver_a_click_during_the_cache_interval() {
 #[test]
 fn only_a_delivered_open_lends_foreground_to_its_exact_receiver() {
     use std::sync::atomic::Ordering;
-    let f = Fixture::new();
+    let mut f = Fixture::new();
     let mut router = f.router();
     let mut seq = 0;
     let probe = |router: &mut Router| {
@@ -387,7 +396,7 @@ fn only_a_delivered_open_lends_foreground_to_its_exact_receiver() {
     assert!(frame["value"]["activation"].is_null());
     assert_eq!(idle.foreground.load(Ordering::SeqCst), 0);
     // A refused handoff keeps the known-unsent click and lends nothing.
-    router.offer(&f.store, &f.outbox, f.value.clone()).unwrap();
+    f.offer(&mut router).unwrap();
     let (_, refused) = f.wait(&mut router);
     let changed = probe(&mut router);
     changed.valid.store(false, Ordering::SeqCst);
@@ -407,7 +416,7 @@ fn only_a_delivered_open_lends_foreground_to_its_exact_receiver() {
     assert_eq!(current.foreground.load(Ordering::SeqCst), 1);
     assert_eq!(router.status()["foreground"], json!({"lent":1,"refused":0}));
     // A receiver that cannot take the right still gets its click.
-    router.offer(&f.store, &f.outbox, f.value.clone()).unwrap();
+    f.offer(&mut router).unwrap();
     let (_, without) = f.wait(&mut router);
     let refusing = probe(&mut router);
     refusing.foreground_right.store(false, Ordering::SeqCst);
@@ -440,7 +449,7 @@ fn native_refused_frontend_keeps_the_original_launch_unspent() {
         let mut f = Fixture::new();
         let (_, grant) = f.grant();
         let mut router = f.router();
-        router.offer(&f.store, &f.outbox, f.value.clone()).unwrap();
+        f.offer(&mut router).unwrap();
         let original = router.pending[0].id.clone();
         let original_until = router.pending[0].until;
         assert!(router.needs_frontend());

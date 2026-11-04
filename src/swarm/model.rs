@@ -140,6 +140,7 @@ impl Store {
                 result
             });
         let keys: BTreeSet<_> = before.keys().chain(after.keys()).cloned().collect();
+        let mut labels = Vec::new();
         for key in keys {
             if before.get(&key) == after.get(&key) {
                 continue;
@@ -195,9 +196,13 @@ impl Store {
                 }
             }
             let parents = observed.get(&key).cloned().unwrap_or_default();
+            if let Key::Session { machine, session } = &key {
+                labels.push((machine.clone(), session.clone()));
+            }
             self.catalog.write(&self.node_id, key, value, parents)?;
         }
-        Ok(())
+        // This computer's sessions also move by ID (zerus-ucck P2c-1).
+        super::session_ids::write(&self.catalog, &mut self.twins, &self.node_id, &labels)
     }
 
     pub fn initialize(&mut self, organization: &Value) -> Result<()> {
@@ -301,6 +306,22 @@ impl Store {
                 p["accessible"] = json!(true);
             }
         }
+        // The same sessions by durable ID, where a desktop may read them
+        // (zerus-ucck P2c-1): only twins of the name operation now selected.
+        for (machine, session_id, project) in super::session_ids::readable(&self.catalog, &self.twins) {
+            if let Some(p) = projects.get_mut(&project) {
+                let machine = aliases.get(&machine).cloned().unwrap_or(machine);
+                let members = p
+                    .as_object_mut()
+                    .unwrap()
+                    .entry("session_ids")
+                    .or_insert_with(|| json!([]));
+                members
+                    .as_array_mut()
+                    .unwrap()
+                    .push(json!(format!("{machine}\n{session_id}")));
+            }
+        }
         let conflicts: Vec<_> = self
             .catalog
             .effective_heads()
@@ -361,6 +382,7 @@ mod tests {
                 },
             )]),
             peers: BTreeMap::new(),
+            twins: Default::default(),
         }
     }
     fn org(name: &str) -> Value {

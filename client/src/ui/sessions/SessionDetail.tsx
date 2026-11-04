@@ -38,6 +38,7 @@ import { Inspector } from "./Inspector";
 import { followProjectTasks } from "../../store/taskContext";
 import { inspectorOpen, setInspectorOpen, openInspector, inspectorHint } from "../../store/inspector";
 import { sessionGoal } from "./inspector-data";
+import { PausedServiceDetail, servicePausedEmpty } from "../components/DesktopServiceStatus";
 
 import { folderEntries, folderRequest } from "../../store/sessionFolders";
 
@@ -55,10 +56,12 @@ function headerCaption(): string {
 
 function EmptyDetail() {
   return (
-    <div class="detail-empty">
-      <h2>{tr("A little more focus.")}</h2>
-      <p>{tr("Select a session to see what your agent is doing.")}<br />{tr("New sessions appear here automatically.")}</p>
-    </div>
+    <Show when={!servicePausedEmpty()} fallback={<PausedServiceDetail />}>
+      <div class="detail-empty">
+        <h2>{tr("A little more focus.")}</h2>
+        <p>{tr("Select a session to see what your agent is doing.")}<br />{tr("New sessions appear here automatically.")}</p>
+      </div>
+    </Show>
   );
 }
 

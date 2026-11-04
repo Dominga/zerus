@@ -20,6 +20,7 @@ mod screen;
 mod self_exec;
 mod session_reference;
 mod speech;
+mod sqlite_file;
 mod state;
 mod status;
 mod swarm;
@@ -36,6 +37,18 @@ fn main() {
     // environment and starts nothing.
     #[cfg(any(target_os = "linux", target_os = "macos"))]
     if let Err(error) = desktop::creation_launch::adopt_custody() {
+        eprintln!("hgs: {error}");
+        std::process::exit(2);
+    }
+    // The same for a task message child, with its own descriptor.
+    #[cfg(any(target_os = "linux", target_os = "macos"))]
+    if let Err(error) = desktop::task_message::adopt_custody() {
+        eprintln!("hgs: {error}");
+        std::process::exit(2);
+    }
+    // The same for a deferred send child, with its own descriptor.
+    #[cfg(any(target_os = "linux", target_os = "macos"))]
+    if let Err(error) = desktop::deferred_send::adopt_custody() {
         eprintln!("hgs: {error}");
         std::process::exit(2);
     }

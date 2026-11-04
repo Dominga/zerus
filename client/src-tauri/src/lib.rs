@@ -184,6 +184,38 @@ fn drafts_root(data_dir: &std::path::Path, replay: bool) -> std::path::PathBuf {
 #[cfg(all(test, unix))]
 pub(crate) static PROCESS_TREE: std::sync::RwLock<()> = std::sync::RwLock::new(());
 
+#[cfg(all(test, unix, feature = "live"))]
+mod test_context;
+
+/// Writes an executable test fixture without this process ever holding it
+/// open for writing. A test thread that forks while such a descriptor is open
+/// passes it to a child that has not exec'd yet, and running the file then
+/// fails with ETXTBSY (zerus-0b9f). The bytes go to a side file that never
+/// runs; a short-lived `cp` creates the executable, so its only writer has
+/// exited before anything runs it. An existing entry is removed first, so a
+/// fixture symlink to a checked-in script is never written through.
+#[cfg(all(test, unix))]
+pub(crate) fn write_executable(path: &std::path::Path, contents: impl AsRef<[u8]>) {
+    use std::os::unix::fs::PermissionsExt;
+    let name = path.file_name().expect("executable name").to_string_lossy();
+    let source = path.with_file_name(format!(".{name}.source"));
+    std::fs::write(&source, contents).unwrap();
+    match std::fs::remove_file(path) {
+        Err(error) if error.kind() != std::io::ErrorKind::NotFound => {
+            panic!("cannot replace {}: {error}", path.display())
+        }
+        _ => {}
+    }
+    let status = std::process::Command::new("/bin/cp")
+        .arg(&source)
+        .arg(path)
+        .status()
+        .unwrap();
+    assert!(status.success(), "cannot write {}", path.display());
+    std::fs::remove_file(&source).unwrap();
+    std::fs::set_permissions(path, std::fs::Permissions::from_mode(0o700)).unwrap();
+}
+
 /// What `run` settled before the app starts.
 pub struct Startup {
     pub identity: identity::Identity,
@@ -966,6 +998,28 @@ fn launch(context: tauri::Context<tauri::Wry>, startup: Startup) {
                 app.manage(task_executor::TaskExecutors::start(app.handle()));
                 let composers = app.state::<composer::Composers>();
                 app.state::<actions::Actions>().on_writes(composers.changed_hook());
+                // Sends the desktop service takes (deferred_send) on Linux and
+                // macOS in desktop-service mode; every other Send stays direct.
+                #[cfg(any(target_os = "linux", target_os = "macos"))]
+                if desktop_service::mode() {
+                    let (sending, checking) = (app.handle().clone(), app.handle().clone());
+                    composers.set_deferred(composer::DeferredRoute {
+                        send: std::sync::Arc::new(move |session, checkpoint, stdin| {
+                            let service = sending.state::<commands::AppState>().desktop_service();
+                            desktop_service::deferred_send::call(
+                                service,
+                                session,
+                                checkpoint,
+                                stdin,
+                                &std::sync::atomic::AtomicBool::new(false),
+                            )
+                        }),
+                        check: std::sync::Arc::new(move |plan| {
+                            let service = checking.state::<commands::AppState>().desktop_service();
+                            desktop_service::deferred_send::check(service, plan)
+                        }),
+                    });
+                }
                 // The composer's session part once a second (the cache chip)
                 // and the inspect fallback; it sleeps while no composer is open.
                 composers.start_ticker();
@@ -1486,10 +1540,14 @@ fn handler() -> impl Fn(tauri::ipc::Invoke) -> bool + Send + Sync + 'static {
         desktop_service::desktop_service_check_status,
         desktop_service::desktop_service_ownership_rearm,
         desktop_service::desktop_service_ownership_result,
+        desktop_service::desktop_service_mode_action,
+        desktop_service::desktop_service_first_choice,
         desktop_service::notification_controls::desktop_notification_preferences_set,
         desktop_service::notification_controls::desktop_notification_preferences_check,
         desktop_service::desktop_service_read_marks,
         desktop_service::desktop_service_automatic_approvals,
+        desktop_service::task_message_inputs::desktop_service_task_message_inputs,
+        desktop_service::task_message_inputs::desktop_service_task_message_input_release,
         desktop_service::frontend::desktop_service_maintenance_configure,
         desktop_service::frontend::desktop_service_maintenance_configuration,
         desktop_service::frontend::desktop_service_frontend_result,
@@ -1579,6 +1637,9 @@ fn handler() -> impl Fn(tauri::ipc::Invoke) -> bool + Send + Sync + 'static {
         actions::inspect_subagent_activity,
         commands::tasks_follow,
         task_details::task_details,
+        task_details::task_reference,
+        task_details::task_page,
+        task_details::task_attachment_read,
         task_details::task_assign,
         task_details::task_board_action,
         task_details::task_cancel_execution,
@@ -1712,6 +1773,7 @@ fn handler() -> impl Fn(tauri::ipc::Invoke) -> bool + Send + Sync + 'static {
         terminal::terminal_drop,
         terminal::terminal_shown,
         composer::composer_open,
+        composer::composer_visibility,
         composer::composer_edit,
         composer::composer_pick,
         composer::composer_attach,

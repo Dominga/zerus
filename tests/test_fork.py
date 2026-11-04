@@ -59,6 +59,9 @@ class Forks(Base):
             transcript=Path(record['transcript']);body=json.loads(transcript.read_text());body['context']=['user request','agent reply'];transcript.write_text(json.dumps(body)+'\n')
             original=path.read_bytes();history=transcript.read_bytes()
             target=self.fork(source)
+            # zerus-ucck P1: a fork is another session with its own durable ID.
+            self.assertNotEqual(self.binding(target)['session_id'],record.get('session_id'))
+            import uuid;self.assertEqual(str(uuid.UUID(self.binding(target)['session_id'])),self.binding(target)['session_id'])
             forked=self.binding(target)
             self.assertNotEqual(forked['conversation_id'],record['conversation_id'])
             self.assertEqual(forked['fork_parent_id'],record['conversation_id'])
@@ -199,14 +202,22 @@ class Forks(Base):
             self.send_event(source,'Stop',last_assistant_message='source reply')
             time.sleep(1.1)
             fork=self.fork(source,f'{agent}-branch')
+            # Resume carries the labels with the lineage (#1408 review).
+            labels=self.binding(fork)['fork_lineage_labels']
+            self.assertEqual(labels,{self.binding(source)['journal_name']:source})
+            self.hgs('pause',fork);self.resume(fork)
+            self.assertEqual(self.binding(fork)['fork_lineage_labels'],labels)
             self.send_event(source,'UserPromptSubmit',prompt='source after the fork')
             self.send_event(fork,'UserPromptSubmit',prompt='fork request')
             inherited=[('source request',source),('source reply',source)]
             data=shown(fork)
             self.assertEqual(talk(data['events']),inherited+[('fork request',None)],agent)
             self.assertEqual(talk(data['message_events']),inherited+[('fork request',None)],agent)
+            # The lineage names the source's journal (its ID journal since zerus-ucck P2b);
+            # the rows above show the label it had.
             [[journal,conversation,seq]]=self.binding(fork)['fork_lineage']
-            self.assertEqual((journal,conversation),(source,self.binding(source)['conversation_id']))
+            source_journal=self.binding(source)['journal_name']
+            self.assertEqual((journal,conversation),(source_journal,self.binding(source)['conversation_id']))
             # The source itself is unchanged and inherits nothing.
             self.assertEqual(talk(shown(source)['events']),[('source request',None),('source reply',None),('source after the fork',None)])
             # A fork of the fork reaches back through both.
@@ -222,10 +233,10 @@ class Forks(Base):
             self.assertEqual(talk(shown(fork)['events']),inherited+[('fork request',None),('fork reply',None)],agent)
             # Found once and saved under the state lock, so later reads do not search.
             [[derived_journal,derived_conversation,derived]]=self.binding(fork)['fork_lineage']
-            self.assertEqual((derived_journal,derived_conversation),(source,conversation))
+            self.assertEqual((derived_journal,derived_conversation),(source_journal,conversation))
             self.assertLessEqual(derived,seq)
             self.assertEqual(talk(shown(fork)['events']),inherited+[('fork request',None),('fork reply',None)],agent)
-            self.assertEqual(self.binding(fork)['fork_lineage'],[[source,conversation,derived]])
+            self.assertEqual(self.binding(fork)['fork_lineage'],[[source_journal,conversation,derived]])
             # Search finds the source's words in the source, never again in its forks.
             hits=json.loads(self.hgs('search','--query','source request'))['results']
             self.assertIn(source,{h['name'] for h in hits},agent)
@@ -338,7 +349,7 @@ class Forks(Base):
         record=json.loads(path.read_text());record.pop('fork_lineage');path.write_text(json.dumps(record))
         history(fork)
         [[saved_source,saved_conversation,_]]=self.binding(fork)['fork_lineage']
-        self.assertEqual((saved_source,saved_conversation),(source,self.binding(source)['conversation_id']))
+        self.assertEqual((saved_source,saved_conversation),(self.binding(source)['journal_name'],self.binding(source)['conversation_id']))
 
     def test_provider_returning_source_id_is_not_confirmed_as_a_fork(self):
         source=self.start('claude');(self.root/'broken-fork').touch()

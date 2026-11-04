@@ -646,15 +646,17 @@ mod message_child {
             let (record, held) = running(&mut store, &location, &original, &epoch);
             let finish = location.root.join("descendant-finished");
             let release = location.root.join("descendant-release");
+            let spawned = location.root.join("descendant-spawned");
             // The descendant keeps the original stdout until the test releases
             // it, then records its end; it never inherits the custody lock.
             // Nothing here races the clock: the deadline only needs to cover
             // interpreter startup under load, and only the release (or, if
             // the test failed, 30 seconds) ends it.
             let script = format!(
-                "import subprocess,sys,time\nsubprocess.Popen([sys.executable,'-c',\"import pathlib,sys,time\\nr=pathlib.Path(sys.argv[2])\\nend=time.time()+30\\nwhile not r.exists() and time.time()<end: time.sleep(0.02)\\npathlib.Path(sys.argv[1]).write_text('finished')\",{},{}],stdout=sys.stdout,stderr=subprocess.DEVNULL)\nsys.stdout.write('descendant-ready')\nsys.stdout.flush()\ntime.sleep(60)",
+                "import subprocess,sys,time\nsubprocess.Popen([sys.executable,'-c',\"import pathlib,sys,time\\nr=pathlib.Path(sys.argv[2])\\nend=time.time()+30\\nwhile not r.exists() and time.time()<end: time.sleep(0.02)\\npathlib.Path(sys.argv[1]).write_text('finished')\",{},{}],stdout=sys.stdout,stderr=subprocess.DEVNULL)\nopen({},'w').write('spawned')\nsys.stdout.write('descendant-ready')\nsys.stdout.flush()\ntime.sleep(60)",
                 serde_json::to_string(&finish).unwrap(),
-                serde_json::to_string(&release).unwrap()
+                serde_json::to_string(&release).unwrap(),
+                serde_json::to_string(&spawned).unwrap()
             );
             child::WAIT_ERROR_AFTER_OUTPUT.with(|armed| armed.set(wait_error));
             let guard: Arc<dyn Send + Sync> = Arc::new(held.clone());
@@ -666,6 +668,12 @@ mod message_child {
                 &guard,
                 Instant::now() + Duration::from_secs(5),
                 |_| Ok(()),
+            );
+            // A child too slow to reach its descendant within the deadline
+            // reports itself here, never as a failure of the code under test.
+            assert!(
+                spawned.exists(),
+                "the original child never started its descendant within 5 s: a slow start, not this test's subject"
             );
             let expected = if wait_error {
                 "task_message_unobserved"

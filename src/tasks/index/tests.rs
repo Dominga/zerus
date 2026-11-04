@@ -597,7 +597,27 @@ fn a_cached_row_of_another_shape_is_damage() {
         "not json".to_owned(),
         json!({"uuid": other, "stage": "todo", "id": "T-aaaa00"}).to_string(),
         json!({"uuid": first, "stage": "backlog", "id": "T-aaaa00"}).to_string(),
-    ] {
+    ]
+    .into_iter()
+    .chain(
+        // The real row with one identity field changed: review-n's R4 probe.
+        [
+            ("id", None),
+            ("id", Some(json!(7))),
+            ("id", Some(good[1]["id"].clone())),
+            ("rank", Some(json!("zzz"))),
+            ("uuid", Some(json!(other))),
+        ]
+        .into_iter()
+        .map(|(field, value)| {
+            let mut row = Index::open(&store).unwrap().page(Stage::Todo, 200, &Anchor::Start).unwrap().rows[0].clone();
+            match value {
+                Some(value) => row[field] = value,
+                None => drop(row.as_object_mut().unwrap().remove(field)),
+            }
+            row.to_string()
+        }),
+    ) {
         let mut index = Index::open(&store).unwrap();
         index.db.execute("UPDATE tasks SET row=?1 WHERE uuid=?2", params![raw, first]).unwrap();
         assert!(matches!(index.page(Stage::Todo, 200, &Anchor::Start), Err(Failure::Damaged)), "{raw}");

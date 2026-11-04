@@ -1,6 +1,7 @@
 """Paged task lists from the disposable task index, beside the unchanged
 legacy `task list` (zerus-cg5h.2)."""
 import hashlib
+import json
 import os
 from test_tasks import Fixture
 
@@ -107,9 +108,18 @@ class TaskListPages(Fixture):
             os.utime(path, (hour_ago, hour_ago))
         good = self.page("todo", 10)
         good = self.page("todo", 10)
-        for raw in ["true", '"text"', "[1, 2]", "{}", "not json"]:
+        first, other = good["tasks"][0], good["tasks"][1]
+        def bound(field, value):
+            row = dict(self.page("todo", 10)["tasks"][0])
+            for key in ("ref", "host"):
+                row.pop(key, None)
+            row[field] = value
+            return json.dumps(row)
+        variants = ["true", '"text"', "[1, 2]", "{}", "not json",
+                    bound("id", other["id"]), bound("id", 7), bound("rank", "zzz")]
+        for raw in variants:
             db = sqlite3.connect(folder / "task-index-v1.sqlite3")
-            db.execute("UPDATE tasks SET row=? WHERE uuid=?", (raw, good["tasks"][0]["uuid"]))
+            db.execute("UPDATE tasks SET row=? WHERE uuid=?", (raw, first["uuid"]))
             db.commit()
             db.close()
             served = self.page("todo", 10)

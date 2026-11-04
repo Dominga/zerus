@@ -158,14 +158,16 @@ pub(super) fn capped(mut row: Value) -> Value {
     row
 }
 
-/// A cached row, only if it is the object the index wrote for this task in
-/// this stage: anything else is a damaged index, never served.
-fn cached_row(raw: &str, uuid: &str, stage: Stage) -> Outcome<Value> {
+/// A cached row, only if it is the object the index wrote for this task:
+/// its uuid, stage, short ID and rank equal the indexed ones the page was
+/// selected and ordered by. Anything else is a damaged index, never served.
+fn cached_row(raw: &str, listed: &Listed, stage: Stage) -> Outcome<Value> {
     let row: Value = serde_json::from_str(raw).map_err(|_| Failure::Damaged)?;
     let fits = row.is_object()
-        && row["uuid"].as_str() == Some(uuid)
+        && row["uuid"].as_str() == Some(listed.0.as_str())
         && row["stage"].as_str() == Some(stage.as_str())
-        && row["id"].is_string();
+        && row["id"].as_str() == Some(listed.6.as_str())
+        && row["rank"].as_str() == Some(listed.1.as_str());
     if fits {
         Ok(row)
     } else {
@@ -272,9 +274,9 @@ pub(super) fn parse_cursor(project: &str, stage: Stage, cursor: &str) -> Result<
     Ok((rank, uuid.to_owned()))
 }
 
-/// A listed row: UUID, rank, file stamps, row, when it was read and whether
-/// its files were settled then.
-type Listed = (String, String, String, String, i64, bool);
+/// A listed row: UUID, rank, file stamps, row, when it was read, whether its
+/// files were settled then, and its short ID.
+type Listed = (String, String, String, String, i64, bool, String);
 
 pub(super) struct Index<'a> {
     store: &'a ProjectStore,
@@ -629,7 +631,7 @@ impl<'a> Index<'a> {
             let floor = self.floor(at)?;
             let stale: BTreeSet<String> = rows
                 .iter()
-                .filter(|(uuid, _, stored, _, checked, trusted)| {
+                .filter(|(uuid, _, stored, _, checked, trusted, _)| {
                     ((!*trusted || *checked < floor || *checked > at) && !read.contains(uuid))
                         || files(&dir, uuid) != *stored
                 })
@@ -647,9 +649,9 @@ impl<'a> Index<'a> {
     }
 
     fn rows(&self, stage: Stage, limit: usize, from: &Anchor) -> Outcome<Vec<Listed>> {
-        const ASCENDING: &str = "SELECT uuid, rank, files, row, checked, trusted FROM tasks WHERE stage=?1 AND (rank, uuid) > (?2, ?3) ORDER BY rank, uuid LIMIT ?4";
-        const DESCENDING: &str = "SELECT uuid, rank, files, row, checked, trusted FROM tasks WHERE stage=?1 AND (rank, uuid) < (?2, ?3) ORDER BY rank DESC, uuid DESC LIMIT ?4";
-        const LAST: &str = "SELECT uuid, rank, files, row, checked, trusted FROM tasks WHERE stage=?1 AND ?2 = ?3 ORDER BY rank DESC, uuid DESC LIMIT ?4";
+        const ASCENDING: &str = "SELECT uuid, rank, files, row, checked, trusted, short_id FROM tasks WHERE stage=?1 AND (rank, uuid) > (?2, ?3) ORDER BY rank, uuid LIMIT ?4";
+        const DESCENDING: &str = "SELECT uuid, rank, files, row, checked, trusted, short_id FROM tasks WHERE stage=?1 AND (rank, uuid) < (?2, ?3) ORDER BY rank DESC, uuid DESC LIMIT ?4";
+        const LAST: &str = "SELECT uuid, rank, files, row, checked, trusted, short_id FROM tasks WHERE stage=?1 AND ?2 = ?3 ORDER BY rank DESC, uuid DESC LIMIT ?4";
         let (sql, rank, uuid) = match from {
             Anchor::Start => (ASCENDING, "", ""),
             Anchor::After(rank, uuid) => (ASCENDING, rank.as_str(), uuid.as_str()),
@@ -659,7 +661,7 @@ impl<'a> Index<'a> {
         let mut query = self.db.prepare_cached(sql)?;
         let mut rows = query
             .query_map(params![stage.as_str(), rank, uuid, limit as i64], |r| {
-                Ok((r.get(0)?, r.get(1)?, r.get(2)?, r.get(3)?, r.get(4)?, r.get(5)?))
+                Ok((r.get(0)?, r.get(1)?, r.get(2)?, r.get(3)?, r.get(4)?, r.get(5)?, r.get(6)?))
             })?
             .collect::<rusqlite::Result<Vec<Listed>>>()?;
         if matches!(from, Anchor::Before(..) | Anchor::End) {
@@ -700,7 +702,7 @@ impl<'a> Index<'a> {
         }
         let rows = rows
             .into_iter()
-            .map(|(uuid, _, _, row, _, _)| cached_row(&row, &uuid, stage))
+            .map(|listed| cached_row(&listed.3, &listed, stage))
             .collect::<Outcome<Vec<Value>>>()?;
         Ok(Page { rows, position, next, previous })
     }

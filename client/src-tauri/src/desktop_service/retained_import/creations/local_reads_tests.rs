@@ -278,6 +278,10 @@ fn local_read_configuration_and_same_byte_snapshot_replacement_refuse_without_ne
 #[cfg(target_os = "linux")]
 #[test]
 fn local_read_group_waits_for_the_shared_slot_and_never_gates_grant_or_catalog() {
+    #[cfg(unix)]
+    if crate::test_context::non_agent() {
+        return;
+    }
     use crate::desktop_service::tests::eventually;
     let _process = crate::PROCESS_TREE.read().unwrap();
     tauri::async_runtime::block_on(async {

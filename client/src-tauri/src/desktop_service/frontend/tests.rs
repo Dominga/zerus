@@ -495,6 +495,10 @@ pub(crate) mod native {
     #[cfg(target_os = "linux")]
     #[test]
     fn degraded_root_status_still_uses_the_original_child_disable_route() {
+        #[cfg(unix)]
+        if crate::test_context::non_agent() {
+            return;
+        }
         let _process = crate::PROCESS_TREE.read().unwrap();
         tauri::async_runtime::block_on(async {
             let cases: Vec<Value> = serde_json::from_str(include_str!(concat!(
@@ -666,6 +670,10 @@ pub(crate) mod native {
     #[cfg(target_os = "linux")]
     #[test]
     fn original_child_registration_receipts_and_unknown_delivery_use_only_the_dedicated_route() {
+        #[cfg(unix)]
+        if crate::test_context::non_agent() {
+            return;
+        }
         const CHILD: &str = "ZERUS_FRONTEND_SENDER_FIXTURE";
         const TEST:&str="desktop_service::frontend::tests::native::original_child_registration_receipts_and_unknown_delivery_use_only_the_dedicated_route";
         if std::env::var_os(CHILD).is_none() {

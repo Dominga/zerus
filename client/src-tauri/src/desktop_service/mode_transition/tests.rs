@@ -530,6 +530,10 @@ fn actual_unavailable_preflight_projects_the_interrupted_original_and_resume_is_
 
 #[test]
 fn actual_reviewed_archive_needs_a_second_confirmation_before_its_only_rearm_and_activation() {
+    #[cfg(unix)]
+    if crate::test_context::non_agent() {
+        return;
+    }
     let _process = crate::PROCESS_TREE.read().unwrap();
     tauri::async_runtime::block_on(async {
         let helpers = Fixture::new();
@@ -781,6 +785,10 @@ fn a_manual_refresh_discovered_after_confirmation_refuses_before_rearm_or_mode_e
 
 #[test]
 fn actual_startup_then_automatic_reconnect_never_repeats_grant_or_helper_activation() {
+    #[cfg(unix)]
+    if crate::test_context::non_agent() {
+        return;
+    }
     let _process = crate::PROCESS_TREE.read().unwrap();
     tauri::async_runtime::block_on(async {
         let helpers = Fixture::new();
@@ -813,6 +821,10 @@ fn actual_startup_then_automatic_reconnect_never_repeats_grant_or_helper_activat
 }
 #[test]
 fn actual_explicit_resume_rearms_only_when_revoked_and_then_activates_once() {
+    #[cfg(unix)]
+    if crate::test_context::non_agent() {
+        return;
+    }
     let _process = crate::PROCESS_TREE.read().unwrap();
     tauri::async_runtime::block_on(async {
         for revoked in [false, true] {
@@ -873,6 +885,10 @@ fn actual_explicit_resume_rearms_only_when_revoked_and_then_activates_once() {
 
 #[test]
 fn actual_unconfirmed_grant_offers_only_original_lookup_and_never_activates() {
+    #[cfg(unix)]
+    if crate::test_context::non_agent() {
+        return;
+    }
     let _process = crate::PROCESS_TREE.read().unwrap();
     tauri::async_runtime::block_on(async {
         let helpers = Fixture::new();

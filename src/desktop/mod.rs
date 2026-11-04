@@ -51,6 +51,7 @@ mod startup_stdio;
 mod store;
 #[cfg(windows)]
 mod swarm_windows;
+pub(crate) mod task_message;
 #[cfg(any(target_os = "linux", target_os = "macos"))]
 mod task_start_reconcile;
 mod termination_outcome;
@@ -545,6 +546,9 @@ impl Drop for Permit {
 }
 
 fn serve(config: &Config, location: Location, background_mode: bool) -> Result<()> {
+    // A logon-task start on Windows before 24H2 gets a console window of its own.
+    #[cfg(windows)]
+    platform::release_private_console();
     let mut upgrade = upgrade::Upgrade::new();
     #[cfg(all(test, target_os = "linux"))]
     upgrade::actor_tests::configure(&mut upgrade);
@@ -1100,6 +1104,12 @@ fn serve(config: &Config, location: Location, background_mode: bool) -> Result<(
                             .is_some_and(|v| v["op"] == "creation_launch_result")
                         {
                             creation_launch::query(&store, hello.request.as_ref().unwrap())
+                        } else if hello
+                            .request
+                            .as_ref()
+                            .is_some_and(|v| v["op"] == "task_message_result")
+                        {
+                            task_message::query(&store, hello.request.as_ref().unwrap())
                         } else if hello
                             .request
                             .as_ref()

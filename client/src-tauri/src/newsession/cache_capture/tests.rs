@@ -23,9 +23,7 @@ impl Fixture {
         .unwrap();
         #[cfg(unix)]
         {
-            use std::os::unix::fs::PermissionsExt;
-            fs::write(root.join("hgs"),"#!/usr/bin/env python3\nimport json\nprint(json.dumps({'state':'ok','path':'/srv/example','common_dir':'/srv/example/.git','worktrees':[]}))\n").unwrap();
-            fs::set_permissions(root.join("hgs"), fs::Permissions::from_mode(0o700)).unwrap();
+            crate::write_executable(&root.join("hgs"),"#!/usr/bin/env python3\nimport json\nprint(json.dumps({'state':'ok','path':'/srv/example','common_dir':'/srv/example/.git','worktrees':[]}))\n");
         }
         let capture = Capture::worktree_cache(root.clone());
         let jobs = Arc::new(Mutex::new(Vec::<Job>::new()));

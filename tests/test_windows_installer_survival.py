@@ -13,8 +13,9 @@ image. An upgrade must leave that host, its session, the staged CLI and the
 images alone, install the zip's files byte for byte and remove files an older
 version left; the uninstaller removes only the installed files. A junction
 inside the folder stops an upgrade before anything changes, and never leads
-its clean-up to files outside. Run it outside the CI step's job
-(scripts/ci/outside-job.py), as the host suites run.
+its clean-up to files outside. A folder that already holds files it does not
+own (an extracted portable zip) stops Setup too. Run it outside the CI step's
+job (scripts/ci/outside-job.py), as the host suites run.
 """
 import base64
 import json
@@ -317,6 +318,28 @@ class Installer(windows_host.HostCase):
         self.assertEqual(list(real.iterdir()), [])
         self.assertIsNone(registered())
 
+
+    def test_setup_refuses_a_non_empty_folder_it_does_not_own(self):
+        # An extracted portable zip is the likely case: Setup must not mix its
+        # payload into files it would neither own nor clean up.
+        sentinels = {self.app / "hgs-tray.exe": b"an extracted portable build",
+                     self.app / "translations" / "qt_lg.qm": b"an older Qt translation"}
+        for path, data in sentinels.items():
+            path.parent.mkdir(parents=True, exist_ok=True)
+            path.write_bytes(data)
+        code, log = self.setup()
+        self.assertEqual(code, 7, log[-4000:])
+        self.assertIn("is not empty and is not a Zerus installation folder", log)
+        self.assertEqual(sorted(path for path in self.app.rglob("*") if path.is_file()), sorted(sentinels))
+        for path, data in sentinels.items():
+            self.assertEqual(path.read_bytes(), data, path)
+        self.assertIsNone(registered())
+        # Folders alone, as an uninstall can leave them, do not stop Setup.
+        for path in sentinels:
+            path.unlink()
+        self.assertTrue((self.app / "translations").is_dir())
+        self.install()
+        self.assertEqual(windows_installer.problems(self.app, self.expected), [])
 
 if __name__ == "__main__":
     unittest.main()

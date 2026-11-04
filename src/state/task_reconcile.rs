@@ -401,10 +401,30 @@ mod tests {
     use super::*;
     use serde_json::json;
     use std::{
+        io::{Read, Write},
         os::unix::fs::{symlink, PermissionsExt},
-        process::{Child, Command},
+        process::{Child, Command, Stdio},
         time::Duration,
     };
+
+    /// A stand-in executor that has finished exec. `spawn` returns before the
+    /// kernel publishes the new image's environment, so /proc/PID/environ
+    /// reads empty for a moment (1972 of 2000 reads right after spawn), and
+    /// a loaded runner keeps it so past the fixture's setup (zerus-spum). Its
+    /// echo proves it runs; it lives until killed or its stdin closes.
+    fn executor(run: &str) -> Child {
+        let mut child = Command::new("/bin/cat")
+            .env("HGS_RUN_ID", run)
+            .stdin(Stdio::piped())
+            .stdout(Stdio::piped())
+            .spawn()
+            .unwrap();
+        child.stdin.as_mut().unwrap().write_all(b"ready\n").unwrap();
+        let mut echo = [0; 6];
+        child.stdout.as_mut().unwrap().read_exact(&mut echo).unwrap();
+        assert_eq!(&echo, b"ready\n");
+        child
+    }
 
     struct Fixture {
         root: tempfile::TempDir,
@@ -418,11 +438,7 @@ mod tests {
             let root = tempfile::tempdir().unwrap();
             fs::set_permissions(root.path(), fs::Permissions::from_mode(0o700)).unwrap();
             let run = uuid::Uuid::new_v4().to_string();
-            let child = Command::new("/bin/sleep")
-                .arg("20")
-                .env("HGS_RUN_ID", &run)
-                .spawn()
-                .unwrap();
+            let child = executor(&run);
             let conversation = uuid::Uuid::new_v4().to_string();
             let target = Executor {
                 machine: uuid::Uuid::new_v4().to_string(),
@@ -477,6 +493,17 @@ mod tests {
         Instant::now() + Duration::from_secs(2)
     }
 
+    #[test]
+    fn the_stand_in_executor_publishes_its_run_before_any_capture() {
+        // zerus-spum: read at once after a plain spawn, most are empty.
+        for _ in 0..200 {
+            let mut child = executor("stand-in-run");
+            let bytes = environment(child.id()).unwrap();
+            assert!(bytes.split(|b| *b == 0).any(|entry| entry == b"HGS_RUN_ID=stand-in-run"));
+            child.kill().unwrap();
+            child.wait().unwrap();
+        }
+    }
     #[test]
     fn original_current_executor_accepts_unrelated_record_updates_and_refuses_identity_change() {
         let mut f = Fixture::new();

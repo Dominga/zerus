@@ -110,13 +110,44 @@ sealing or executable-memfd policy refuses; there is no mutable-fd fallback.
 Native ELF does not inherit the execution descriptor; a script retains only its
 own sealed source descriptor for the interpreter.
 
-The new service submission refuses on macOS with
-`termination_native_image_unavailable`, before preparation or any new child.
-Ordinary/native/replay paths are unchanged. The independent
-`zerus-5wmh.66.3.40.4` follow-up must qualify observation of the same unreaped
-helper's audit token and selected bundle requirement before this path is enabled.
+The macOS exception is confined to this service-native caller:
+`Context::new` passes through `image::prepare` to `Image::selected`, which
+requires the **same retained** `Arc<relay::Connection>` and its genuine paired
+helper route. `Image::selected` reports `termination_native_image_unavailable`
+for missing native selection or stale generation, and path-only Mac capture
+remains unsupported. A broken pair can also refuse earlier at relay/preflight;
+those existing failures remain closed. No direct or PATH fallback is admitted.
+
+Every `Context::spawn`, including help/ABI, scope reads, retention and the final
+native call, observes the same owned unreaped child with
+`Connection::observe_original_helper` before any stdin is taken or written.
+The kernel audit token, birth, selected signature/CDHash and full bundle
+generation are checked by that primitive. Immediately after observation, and
+again after the retention RPC's original-child registration, the caller checks
+its **same** Service, configuration, epoch, generation, relay and cancellation.
+Only a passing observation plus these current checks releases input. A refusal
+closes stdin, permanently latches rejection and returns that same child to the
+existing stop/reap/pipe/worker custody. It cannot become a successful receipt or
+be cleared by another probe. The original resources survive outer timeouts.
+This is a point-in-time observation, with a remaining exec window after its
+last native check; it is not a constrained-spawn proof or new effect permission.
+Ordinary/native/replay paths and the old Service fallback refusal are unchanged.
+
+Actual installed-pair qualification remains separate under
+`zerus-5wmh.66.3.40.4`: macbundle-u's next coordinated Mac window must use the
+reviewed maintained signed pair and explicitly confirm Terminate with Remove
+worktree for one approved disposable generated checkout. The exact original
+confirmation/capture/run/conversation/request identity must correlate through
+retention, original-child binding, native Terminate, verified process exit and
+the actual Removed outcome. Retention alone, a primitive test or a protocol
+fixture is not this positive. Preserve the branch/archive identity, settle the
+original child and all pipe charges, and keep unknown outcomes original-ID
+lookup-only. This result contributes to #1340's actual-caller gate; source
+enablement does not flip the Service default or qualify the installed action.
+
 On Linux, the service captures its actual `/proc/self/exe` object once under
-its real owner, before publishing the listener. An owned setup worker copies
+its real owner, before publishing the listener. The retained sealed self-copy
+uses roughly 37 MiB of resident memory per shipped Linux service. An owned setup worker copies
 and seals that reference under the same 256 MiB/five-second bounds. Failure or
 setup timeout leaves the sealed-relay branch unavailable for that service;
 a late result is discarded only after the original copy worker joins, with
@@ -145,7 +176,7 @@ positive cases outside agent ancestry. Linux fake-actor
 protocol tests explicitly construct their private fixture context rather than
 passing through the production platform gate; they cannot enable it.
 
-### Temporary Linux/macOS removal availability
+### Refused removal availability
 
 G1 decision: the old Service `selected:None` path is not a safe fallback.
 It reselects `default_hgs` and does not retain the selected relay/image/config
@@ -154,8 +185,8 @@ is unavailable, Terminate visibly explains that automatic folder removal is
 unavailable in background mode. The ordinary guarded Terminate remains available;
 the separate manual folder review opens its existing native guard flow without
 implying termination success, cleanup consent or replay. All offer errors are
-visible. Linux authentication `.66.4.6.9` and the qualified macOS caller under
-`.66.3.40.4` block the default-Service flip in #1340.
+visible. Native caller/Terminate qualification remains a separate release gate;
+source enablement alone does not qualify the installed action.
 
 Design coordinator sign-off: the unavailable-removal notice and “Review working
 folder…” button are the interim Terminate-dialog variant, replacing the checkbox

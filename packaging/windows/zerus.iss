@@ -260,10 +260,50 @@ begin
   end;
 end;
 
+{ Whether Folder or any folder below it holds a file. Folders alone, such as an
+  uninstall can leave behind, do not count. A link counts, and is never followed. }
+function HoldsFiles(const Folder: String): Boolean;
+var
+  Find: TFindRec;
+begin
+  Result := False;
+  if not FindFirst(AddBackslash(Folder) + '*', Find) then
+    Exit;
+  try
+    repeat
+      if (Find.Name <> '.') and (Find.Name <> '..') then
+      begin
+        if (Find.Attributes and ReparsePoint) <> 0 then
+          Result := True
+        else if (Find.Attributes and FILE_ATTRIBUTE_DIRECTORY) <> 0 then
+          Result := HoldsFiles(AddBackslash(Folder) + Find.Name)
+        else
+          Result := True;
+      end;
+    until Result or not FindNext(Find);
+  finally
+    FindClose(Find);
+  end;
+end;
+
+{ The installer record scripts/windows_installer.py writes: only a folder an
+  earlier installer created, with no link on its path, is cleaned up. }
+function OwnedFolder(): Boolean;
+var
+  Contents: AnsiString;
+begin
+  Result := (LinkedPath(ExpandConstant('{app}')) = '') and
+    LoadStringFromFile(ExpandConstant('{app}\installation.json'), Contents) and
+    (Pos('"kind": "installer"', Contents) > 0) and (Pos('"product": "Zerus"', Contents) > 0);
+end;
+
 { A link on the folder's path or inside it could lead installed files and the
   stale-file sweep anywhere the user can write, such as configuration or state:
   refuse before anything changes. Setup exits with code 7. Windows 11's
-  redirection guard is no substitute: Zerus supports Windows 10 1903. }
+  redirection guard is no substitute: Zerus supports Windows 10 1903.
+  Setup installs only into a new or empty folder or the folder of an earlier
+  installation. It never mixes its files into another folder, such as an
+  extracted portable zip, whose files it would neither own nor clean up. }
 function PrepareToInstall(var NeedsRestart: Boolean): String;
 var
   Link: String;
@@ -287,18 +327,16 @@ begin
     Result := 'Setup stopped: ' + Link + ' is a link or junction on the path of the Zerus folder or inside it.' +
       ' Remove it or choose another location, then run Setup again. Nothing was changed.';
     Log(Result);
+    Exit;
   end;
-end;
-
-{ The installer record scripts/windows_installer.py writes: only a folder an
-  earlier installer created, with no link on its path, is cleaned up. }
-function OwnedFolder(): Boolean;
-var
-  Contents: AnsiString;
-begin
-  Result := (LinkedPath(ExpandConstant('{app}')) = '') and
-    LoadStringFromFile(ExpandConstant('{app}\installation.json'), Contents) and
-    (Pos('"kind": "installer"', Contents) > 0) and (Pos('"product": "Zerus"', Contents) > 0);
+  if not OwnedFolder() then
+    if HoldsFiles(ExpandConstant('{app}')) then
+    begin
+      Result := 'Setup stopped: ' + ExpandConstant('{app}') + ' is not empty and is not a Zerus installation folder,' +
+        ' for example an extracted portable zip. Choose an empty folder or move its files away, then run Setup again.' +
+        ' Nothing was changed.';
+      Log(Result);
+    end;
 end;
 
 { Removes files in Folder (relative path Relative) that the new payload does

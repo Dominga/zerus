@@ -25,6 +25,7 @@ mod phone;
 mod sessions;
 mod messages;
 mod history;
+mod index;
 
 /// A send that pasted the prompt but could not record it: its outcome is
 /// uncertain, and the phone's receipt says so.
@@ -37,7 +38,7 @@ fn paste_uncertain(message: &str) -> bool {
     message.starts_with(SENT_UNRECORDED) || message.starts_with("delivery uncertain")
 }
 
-const USAGE: &str = "usage: hgs task list --project P [--stage S] | get REF [--history-limit 1..80 [--history-before CURSOR]] | add --project P [--backlog] [--start] [--target SESSION|any [--host ALIAS]] [--title TITLE [--request-id UUID]] [--position N] | edit REF | rename REF | move REF --top|--before REF|--after REF|--position N | stage REF backlog|todo|done | target REF SESSION|any|new-session|subagent [--parent SESSION] [--host ALIAS] | send REF [--session SESSION [--host ALIAS]] | start-plan REF --json | start-deliver REF --json [--recover-only] | cancel REF [--reason TEXT] | cancel-execution REF --json (guard JSON on stdin) | handoff REF --session SESSION [--host ALIAS] | start REF | report REF | comment REF [--content-json] | message REF --request-id UUID --mode queue|send|reopen|note [--expect-dispatch ID] [--content-json] | worker REF --subagent ID --request-id REQUEST | settings --project P [--set] | digests --json | exchange --json | mobile-send|mobile-cancel|mobile-done --json
+const USAGE: &str = "usage: hgs task list --project P [--stage S] | list --project P --stage S --limit 1..200 [--after CURSOR|--before CURSOR] [--if-revision R] | get REF [--history-limit 1..80 [--history-before CURSOR] [--attachments metadata]] | attachment REF --file N [--entry ID] | add --project P [--backlog] [--start] [--target SESSION|any [--host ALIAS]] [--title TITLE [--request-id UUID]] [--position N] | edit REF | rename REF | move REF --top|--before REF|--after REF|--position N | stage REF backlog|todo|done | target REF SESSION|any|new-session|subagent [--parent SESSION] [--host ALIAS] | send REF [--session SESSION [--host ALIAS]] | start-plan REF --json | start-deliver REF --json [--recover-only] | cancel REF [--reason TEXT] | cancel-execution REF --json (guard JSON on stdin) | handoff REF --session SESSION [--host ALIAS] | start REF | report REF | comment REF [--content-json] | message REF --request-id UUID --mode queue|send|reopen|note [--expect-dispatch ID] [--content-json] | worker REF --subagent ID --request-id REQUEST | settings --project P [--set] | digests --json | exchange --json | mobile-send|mobile-cancel|mobile-done --json
   REF is T-xxxxxx with --project P, or PROJECT/T-xxxxxx; texts and --set settings are read from stdin;
   a change an agent makes prints one line, and --json prints the task";
 
@@ -289,21 +290,38 @@ fn actor(here: &str, args: &[String], forwardable: bool) -> Result<Actor> {
 }
 
 fn view(task: &TaskDoc, project_name: &str, with_log: bool, machines: &Machines) -> Result<Value> {
-    let mut task_view = task.view().map_err(fail)?;
-    let files = if with_log { Vec::new() } else {
-        std::mem::take(&mut task_view.attachments).iter().map(TaskAttachment::metadata)
-            .collect::<std::result::Result<Vec<_>, _>>().map_err(fail)?
-    };
+    let task_view = task.view().map_err(fail)?;
+    if !with_log {
+        return label_view(row(task_view, task.revision())?, project_name, false, &[], machines);
+    }
     let dispatch_id = task_view.execution_id();
     let mut value = serde_json::to_value(task_view).map_err(fail)?;
     value["dispatch_id"] = json!(dispatch_id);
+    label_view(value, project_name, true, &[], machines)
+}
+
+/// A task's list row before its session references are named: no history,
+/// attachment metadata only, its dispatch ID and its history revision. The
+/// task index keeps these rows, so a listed row is the same either way.
+fn row(mut task_view: zerus_replica::TaskView, history_revision: String) -> Result<Value> {
+    let files = std::mem::take(&mut task_view.attachments).iter().map(TaskAttachment::metadata)
+        .collect::<std::result::Result<Vec<_>, _>>().map_err(fail)?;
+    let dispatch_id = task_view.execution_id();
+    task_view.log = Vec::new();
+    let mut value = serde_json::to_value(task_view).map_err(fail)?;
+    value.as_object_mut().expect("a task view is an object").remove("log");
+    value["dispatch_id"] = json!(dispatch_id);
     // A note or receipt changes no other list field. Its clock must change
     // the tasks-topic digest so the selected inspector can refresh.
-    if !with_log { value["history_revision"] = json!(task.revision()); }
-    label_view(value, project_name, with_log, &files, machines)
+    value["history_revision"] = json!(history_revision);
+    if !files.is_empty() { value["attachments"] = json!(files); }
+    Ok(value)
 }
 
 fn label_view(mut value: Value, project_name: &str, with_log: bool, files: &[Value], machines: &Machines) -> Result<Value> {
+    if !value.is_object() {
+        return Err(fail("a task view is not an object"));
+    }
     value["ref"] = json!(format!("{project_name}/{}", value["id"].as_str().unwrap_or_default()));
     // Every session reference names its computer: the task's target, session and
     // author, and each history entry's session and actor.
@@ -339,6 +357,9 @@ fn label_view(mut value: Value, project_name: &str, with_log: bool, files: &[Val
 
 /// The place of `task` in its list, counting from 1.
 fn place(store: &ProjectStore, task: &TaskDoc) -> Result<usize> {
+    if let Some(Ok(Some(at))) = index::Index::open(store).map(|index| index.place(task.uuid())) {
+        return Ok(at);
+    }
     let stage = task.stage().map_err(fail)?;
     let (tasks, _) = store.listing().map_err(fail)?;
     Ok(tasks
@@ -354,6 +375,48 @@ fn with_answer(who: &Actor, action: &str, mut out: Value, place: usize, destinat
         out["answer"] = json!(answers::answer(action, &out, place, &own.session, destination));
     }
     out
+}
+
+/// A task by its UUID or short ID. A short ID is looked up in the task
+/// index rather than by reading every task; the messages are the store's.
+fn find(store: &ProjectStore, reference: &str) -> Result<TaskDoc> {
+    if zerus_replica::ids::is_short_id(reference) {
+        let found = index::Index::open(store).and_then(|index| {
+            let (uuids, _) = index.short_id(reference).ok()?;
+            let damaged = index.damaged().ok()?.1;
+            Some((uuids, damaged))
+        });
+        match found {
+            Some((uuids, _)) if uuids.len() > 1 => {
+                return Err(fail(format!("{reference} names more than one task; use its UUID")))
+            }
+            Some((uuids, damaged)) if uuids.is_empty() => {
+                return Err(fail(match damaged {
+                    0 => format!("no task {reference} in this project"),
+                    1 => format!("no task {reference} in this project; 1 task file could not be read"),
+                    n => format!("no task {reference} in this project; {n} task files could not be read"),
+                }))
+            }
+            Some((uuids, _)) => {
+                if let Ok(task) = store.load(&uuids[0]) {
+                    if task.id() == reference {
+                        return Ok(task);
+                    }
+                }
+            }
+            None => (),
+        }
+    }
+    store.find(reference).map_err(fail)
+}
+
+/// How many tasks agents started since `since` (Unix milliseconds), from the
+/// task index when it can answer.
+pub(super) fn agent_starts_since(store: &ProjectStore, since: i64) -> Result<usize> {
+    if let Some(Ok(count)) = index::Index::open(store).map(|index| index.agent_starts_since(since)) {
+        return Ok(count);
+    }
+    store.agent_starts_since(since).map_err(fail)
 }
 
 pub fn dispatch(config: &Config, args: &[String], dry: bool) -> Result<i32> {
@@ -420,16 +483,17 @@ fn execute(config: &Config, args: &[String]) -> Result<Value> {
             let store = store(config, &r.project.0)?;
             let value = if let Some(limit) = limit {
                 let uuid = if zerus_replica::ids::is_uuid(&r.task) { r.task.clone() }
-                    else { store.find(&r.task).map_err(fail)?.uuid().to_owned() };
-                let task = history::page(&store, &store_dir(config, &r.project.0), &uuid,
-                    limit, option(args, "--history-before")?)?;
+                    else { find(&store, &r.task)?.uuid().to_owned() };
+                let task = history::page(&store, &uuid, limit, option(args, "--history-before")?,
+                    history::summary(args)?)?;
                 label_view(task, &r.project.1, true, &[], &machines)?
             } else {
-                view(&store.find(&r.task).map_err(fail)?, &r.project.1, true, &machines)?
+                view(&find(&store, &r.task)?, &r.project.1, true, &machines)?
             };
             Ok(json!({"project": {"id": r.project.0, "name": r.project.1}, "task": value}))
         }
         "add" => add(config, args),
+        "attachment" => history::attachment(config, args),
         "message" => messages::execute(config, args),
         "cancel-execution" => {
             let guard = cancellation::read()?;
@@ -468,6 +532,15 @@ fn list(config: &Config, args: &[String]) -> Result<Value> {
         .map(Stage::parse)
         .transpose()
         .map_err(fail)?;
+    if let Some(limit) = option(args, "--limit")? {
+        let stage = only.ok_or_else(|| fail("--limit needs --stage"))?;
+        return paged(config, args, (&id, &name), stage, limit, &machines);
+    }
+    for paging in ["--after", "--before", "--if-revision"] {
+        if option(args, paging)?.is_some() {
+            return Err(fail(format!("{paging} needs --stage and --limit")));
+        }
+    }
     // One load of the project; each stage is then a filter of the sorted list.
     let (tasks, damaged) = store(config, &id)?.listing().map_err(fail)?;
     let mut out = Vec::new();
@@ -486,6 +559,151 @@ fn list(config: &Config, args: &[String]) -> Result<Value> {
         }
     }
     Ok(json!({"project": {"id": id, "name": name}, "tasks": out, "damaged": damaged}))
+}
+
+/// `task list --stage S --limit N`: one page of a stage, from the task index
+/// or, when it cannot answer, from the documents, in the same form.
+fn paged(config: &Config, args: &[String], project: (&str, &str), stage: Stage, limit: &str, machines: &Machines) -> Result<Value> {
+    let (id, name) = project;
+    let limit = limit
+        .parse::<usize>()
+        .ok()
+        .filter(|n| (1..=index::MAX_LIMIT).contains(n))
+        .ok_or_else(|| fail(format!("--limit must be between 1 and {}", index::MAX_LIMIT)))?;
+    let anchor = match (option(args, "--after")?, option(args, "--before")?) {
+        (Some(_), Some(_)) => return Err(fail("use --after or --before, not both")),
+        (Some(cursor), None) => {
+            let (rank, uuid) = index::parse_cursor(id, stage, cursor)?;
+            index::Anchor::After(rank, uuid)
+        }
+        (None, Some(cursor)) => {
+            let (rank, uuid) = index::parse_cursor(id, stage, cursor)?;
+            index::Anchor::Before(rank, uuid)
+        }
+        (None, None) => index::Anchor::Start,
+    };
+    let wanted = option(args, "--if-revision")?;
+    let store = store(config, id)?;
+    let indexed = index::Index::open(&store).and_then(|mut index| {
+        match indexed_page(&mut index, stage, limit, &anchor, wanted) {
+            Ok(out) => Some(out),
+            Err(failure) => {
+                index.discard(&failure);
+                None
+            }
+        }
+    });
+    let mut out = match indexed {
+        Some(out) => out,
+        None => documents_page(&store, stage, limit, &anchor, wanted)?,
+    };
+    if let Some(rows) = out.get_mut("tasks").and_then(Value::as_array_mut) {
+        for row in rows {
+            *row = label_view(std::mem::take(row), name, false, &[], machines)?;
+        }
+    }
+    out["project"] = json!({"id": id, "name": name});
+    Ok(out)
+}
+
+const LIST_STAGES: [Stage; 5] = [Stage::Review, Stage::Active, Stage::Todo, Stage::Backlog, Stage::Done];
+
+/// A page reply: the rows, the first damaged tasks, every stage's count and
+/// the revision a later `--if-revision` compares.
+#[allow(clippy::too_many_arguments)]
+fn page_reply(stage: Stage, limit: usize, rows: Vec<Value>, position: usize, next: Option<String>, previous: Option<String>,
+    counts: &BTreeMap<String, usize>, damaged: (Vec<Value>, usize), revision: String) -> Value {
+    let counts: serde_json::Map<String, Value> = LIST_STAGES
+        .iter()
+        .map(|s| (s.as_str().to_owned(), json!(counts.get(s.as_str()).copied().unwrap_or(0))))
+        .collect();
+    let total = counts[stage.as_str()].clone();
+    json!({
+        "tasks": rows,
+        "damaged": damaged.0,
+        "damaged_total": damaged.1,
+        "counts": counts,
+        "revision": revision,
+        "page": {"schema": 1, "stage": stage.as_str(), "limit": limit, "position": position,
+                 "total": total, "next": next, "previous": previous},
+    })
+}
+
+fn indexed_page(index: &mut index::Index, stage: Stage, limit: usize, anchor: &index::Anchor, wanted: Option<&str>) -> std::result::Result<Value, index::Failure> {
+    // The page's rows are checked against their files first, so an unchanged
+    // revision means this page is unchanged too.
+    let page = index.page(stage, limit, anchor)?;
+    let revision = index.revision()?;
+    if wanted == Some(revision.as_str()) {
+        return Ok(json!({"unchanged": true, "revision": revision}));
+    }
+    Ok(page_reply(stage, limit, page.rows, page.position, page.next, page.previous,
+        &index.counts()?, index.damaged()?, revision))
+}
+
+/// The same page read from every document, for when the index cannot answer.
+fn documents_page(store: &ProjectStore, stage: Stage, limit: usize, anchor: &index::Anchor, wanted: Option<&str>) -> Result<Value> {
+    use sha2::Digest;
+    let (tasks, damaged) = store.listing().map_err(fail)?;
+    let mut hash = sha2::Sha256::new();
+    let mut counts = BTreeMap::new();
+    let mut rows = Vec::new();
+    for task in &tasks {
+        let view = task.view().map_err(fail)?;
+        let (this, rank, uuid) = (view.stage, view.rank.clone(), view.uuid.clone());
+        let listed = index::capped(row(view, task.revision())?);
+        hash.update(listed.to_string());
+        *counts.entry(this.as_str().to_owned()).or_insert(0) += 1;
+        if this == stage {
+            rows.push((rank, uuid, listed));
+        }
+    }
+    for damaged in &damaged {
+        hash.update(format!("{}\n{}", damaged.uuid, damaged.error));
+    }
+    let revision = format!("documents-{:x}", hash.finalize());
+    if wanted == Some(revision.as_str()) {
+        return Ok(json!({"unchanged": true, "revision": revision}));
+    }
+    let project = store.project_id();
+    let below = |rank: &str, uuid: &str| rows.partition_point(|r| (r.0.as_str(), r.1.as_str()) < (rank, uuid));
+    let through = |rank: &str, uuid: &str| rows.partition_point(|r| (r.0.as_str(), r.1.as_str()) <= (rank, uuid));
+    let (mut start, mut end) = match anchor {
+        index::Anchor::Start => (0, limit.min(rows.len())),
+        index::Anchor::After(rank, uuid) => {
+            let start = through(rank, uuid);
+            (start, (start + limit).min(rows.len()))
+        }
+        index::Anchor::Before(rank, uuid) => {
+            let end = below(rank, uuid);
+            (end.saturating_sub(limit), end)
+        }
+        index::Anchor::End => (rows.len().saturating_sub(limit), rows.len()),
+    };
+    // A page past either end is the nearest whole page, as from the index.
+    if start == end && !rows.is_empty() {
+        (start, end) = match anchor {
+            index::Anchor::Before(..) => (0, limit.min(rows.len())),
+            _ => (rows.len().saturating_sub(limit), rows.len()),
+        };
+    }
+    let (next, previous) = if start < end {
+        let (first, last) = (&rows[start], &rows[end - 1]);
+        (
+            (end < rows.len()).then(|| index::cursor(project, stage, &last.0, &last.1)),
+            (start > 0).then(|| index::cursor(project, stage, &first.0, &first.1)),
+        )
+    } else {
+        (None, None)
+    };
+    let position = start;
+    let page: Vec<Value> = rows.drain(start..end).map(|r| r.2).collect();
+    let shown = damaged
+        .iter()
+        .take(index::DAMAGED_SHOWN)
+        .map(|d| json!({"uuid": d.uuid, "error": index::capped_error(&d.error)}))
+        .collect();
+    Ok(page_reply(stage, limit, page, position, next, previous, &counts, (shown, damaged.len()), revision))
 }
 
 /// `--position N`, counting from 1, as a list index.
@@ -605,7 +823,7 @@ fn change_guarded(config: &Config, action: &str, args: &[String], wait: Option<s
             .map_err(fail)?
             .ok_or_else(|| fail("the project's tasks are busy; try again"))?,
     };
-    let mut task = store.find(&r.task).map_err(fail)?;
+    let mut task = find(&store, &r.task)?;
     if let Some(guard) = guard { guard.check(&task)?; }
     if action == "edit" && text.as_deref() == Some("") && task.title().is_empty() { agent_text("", action, &who)?; }
     if task.view().map_err(fail)?.writable {
@@ -869,7 +1087,7 @@ fn cancel_here(
     guard: Option<&cancellation::Guard>,
 ) -> Result<Value> {
     let store = store(config, &project.0)?;
-    let mut task = store.find(uuid).map_err(fail)?;
+    let mut task = find(&store, uuid)?;
     if let Some(guard) = guard { guard.check(&task)?; }
     let extra = cancel(&store, machines, &mut task, &project.1, cancellation::reason(args, guard)?, who, Some(reason))?;
     store.save(&mut task).map_err(fail)?;
@@ -893,9 +1111,7 @@ fn send(
     if handoff { task.check_handoff(who).map_err(fail)?; } else { task.check_send().map_err(fail)?; }
     let view = task.view().map_err(fail)?;
     let settings = store.project().map_err(fail)?.settings();
-    let starts = store
-        .agent_starts_since(now() - 3_600_000)
-        .map_err(fail)?;
+    let starts = agent_starts_since(store, now() - 3_600_000)?;
     settings
         .check_agent(who, &session, true, starts)
         .map_err(fail)?;

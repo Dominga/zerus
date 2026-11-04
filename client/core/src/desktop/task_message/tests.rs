@@ -19,6 +19,9 @@ fn record(mode: &str, dispatch: &str) -> Value {
     let intent = message_intent("hello", &[], mode, dispatch);
     json!({"id": REQUEST, "intent": intent, "input_sha256": input_digest(&message_input(&intent))})
 }
+pub(super) fn frozen() -> Intent {
+    intent(record("queue", "").to_string())
+}
 fn intent(original: String) -> Intent {
     Intent {
         scope: scope(),
@@ -168,6 +171,37 @@ fn the_complete_service_line_bounds_the_inline_original() {
     })
     .unwrap();
     assert!(envelope.len() < zerus_watch_protocol::CONTROL_LINE_BYTES);
+}
+
+#[test]
+fn only_the_exact_drained_not_started_original_counts_as_never_sent() {
+    let verified = intent(record("queue", "").to_string()).verify().unwrap();
+    let plan = &verified.plan;
+    let receipt = Receipt {
+        binding: verified.binding.clone(),
+        admission_epoch: EPOCH.into(),
+        revision: 3,
+        phase: Phase::Failed,
+        drained: true,
+        code: NOT_STARTED.into(),
+        outcome: None,
+    };
+    assert!(receipt.valid() && receipt.not_started(plan));
+    // A started child's exit, an Unknown or an undrained original with the
+    // same code, or another original's plan, never counts.
+    let mut exited = receipt.clone();
+    exited.code = EXITED.into();
+    assert!(exited.valid() && !exited.not_started(plan));
+    let mut unknown = receipt.clone();
+    unknown.phase = Phase::Unknown;
+    assert!(unknown.valid() && !unknown.not_started(plan));
+    let mut undrained = receipt.clone();
+    undrained.drained = false;
+    assert!(!undrained.not_started(plan));
+    let other = intent(record("note", DISPATCH).to_string())
+        .verify()
+        .unwrap();
+    assert!(!receipt.not_started(&other.plan));
 }
 
 #[test]

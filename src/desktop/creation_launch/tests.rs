@@ -68,7 +68,8 @@ fn exact_previous_store_upgrade_adds_only_the_independent_launch_leaf() {
             .unwrap(),
         crate::desktop::store::SCHEMA
     );
-    assert_eq!(tables(&store.db), before + 2 + 1);
+    // Its own two tables, then the termination outcome and task message leaves.
+    assert_eq!(tables(&store.db), before + 2 + 1 + 2);
     assert_eq!(ledger::undrained(&store.db).unwrap(), 0);
 }
 

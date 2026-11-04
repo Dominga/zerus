@@ -338,6 +338,17 @@ impl Validated {
         };
         Ok(*intent)
     }
+    /// Only the task message actor calls this after BEGIN IMMEDIATE. Cached
+    /// native Service mode was bound to this exact original request during
+    /// admission.
+    #[cfg(any(target_os = "linux", target_os = "macos"))]
+    pub fn task_message(self) -> Result<zerus_client_core::desktop::task_message::Intent> {
+        self.check()?;
+        let Request::TaskMessage { intent } = self.0 else {
+            anyhow::bail!("not a task message");
+        };
+        Ok(*intent)
+    }
     /// Only the worktree actor calls this after BEGIN IMMEDIATE. Cached native
     /// Service mode was bound to this exact original request during admission.
     #[cfg(any(target_os = "linux", target_os = "macos"))]

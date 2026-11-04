@@ -10,6 +10,7 @@ import { convertFileSrc } from "@tauri-apps/api/core";
 import { attachmentPin, attachmentUnpin, inTauri, openTaskAttachment } from "../../bridge";
 import { notify } from "../../store/actions";
 import { taskDetails, type TaskEntry } from "../../store/taskDetails";
+import { taskFiles } from "../../store/taskFiles";
 import type { Fetched } from "../../types";
 import { TaskWorkflow } from "./TaskWorkflow";
 import { TaskTitle } from "./TaskTitle";
@@ -23,21 +24,47 @@ import { assignmentText, assignmentLabel, STAGE_LABEL, stageLabel, type Stage, t
 import { deliveryError, deliveryText, historyAction } from "./task-history-ui";
 import { tr } from "../../i18n";
 
-function TaskFiles(props: { files: Fetched[] }) {
-  return <div class="tasks-files"><For each={props.files}>{(file) => {
-    attachmentPin(file.path); onCleanup(() => attachmentUnpin(file.path));
-    const open = async () => {
-      try { const notice = await openTaskAttachment(file.path); if (notice) notify("info", notice); }
-      catch (error) { notify("error", String(error)); }
-    };
-    return <button class="att-card" onClick={() => void open()} title={`Open ${file.name}`}>
-      <Show when={file.thumbnail && inTauri()}><img class="tasks-file-preview" src={convertFileSrc(file.path, "zerus-file")} alt="" /></Show>
-      <span>{file.name}</span><span class="muted">{Math.max(1, Math.ceil(file.bytes / 1024))} KiB</span><span>{tr("Open →")}</span>
-    </button>;
-  }}</For></div>;
+/**
+ * One file of a task. A page names it; a copy already in the cache shows at
+ * once, an image is read for its preview, and any other file is read when it
+ * is opened.
+ */
+function TaskFile(props: { file: Fetched; project: string; task: string }) {
+  const file = props.file, source = file.source;
+  const [copy, setCopy] = createSignal<Fetched | undefined>(file.path ? file : undefined);
+  const [reading, setReading] = createSignal(false);
+  let shown = true;
+  onCleanup(() => { shown = false; });
+  createEffect(() => { const path = copy()?.path; if (path) { attachmentPin(path); onCleanup(() => attachmentUnpin(path)); } });
+  if (!copy() && source && file.mime.startsWith("image/")) {
+    void taskFiles.preview(props.project, props.task, source, () => shown).then((read) => { if (read && shown) setCopy(read); }, () => {});
+  }
+  const open = async () => {
+    if (reading()) return;
+    try {
+      let read = copy();
+      if (!read) {
+        if (!source) return;
+        setReading(true);
+        read = await taskFiles.read(props.project, props.task, source);
+        if (!shown) return;
+        setCopy(read);
+      }
+      const notice = await openTaskAttachment(read.path); if (notice) notify("info", notice);
+    } catch (error) { notify("error", String(error)); }
+    finally { setReading(false); }
+  };
+  return <button class="att-card" onClick={() => void open()} title={`Open ${file.name}`} aria-busy={reading()}>
+    <Show when={copy()?.thumbnail && inTauri()}><img class="tasks-file-preview" src={convertFileSrc(copy()!.path, "zerus-file")} alt="" /></Show>
+    <span>{file.name}</span><span class="muted">{Math.max(1, Math.ceil(file.bytes / 1024))} KiB</span><span>{reading() ? tr("Reading…") : tr("Open →")}</span>
+  </button>;
 }
 
-function JournalEntry(props: { entry: TaskEntry; discussion?: boolean; worker: string }) {
+function TaskFiles(props: { files: Fetched[]; project: string; task: string }) {
+  return <div class="tasks-files"><For each={props.files}>{(file) => <TaskFile file={file} project={props.project} task={props.task} />}</For></div>;
+}
+
+function JournalEntry(props: { entry: TaskEntry; discussion?: boolean; worker: string; project: string; task: string }) {
   const message = () => ["comment", "message", "report"].includes(props.entry.kind);
   const label = () => props.entry.kind === "report" ? tr("Report") : !message() ? "" : !props.discussion ? tr("Comment") : props.entry.kind === "message" ? tr("Message") : tr("Note");
   const date = () => { const d = new Date(props.entry.at); return props.entry.at > 0 && Number.isFinite(d.getTime()) ? d : undefined; };
@@ -46,7 +73,7 @@ function JournalEntry(props: { entry: TaskEntry; discussion?: boolean; worker: s
     <header><b>{props.entry.actor}</b><Show when={date()}>{(d) => <time datetime={d().toISOString()}>{messageTimeOf(d())}</time>}</Show>
       <span class="chip">{label()}</span></header>
     <div class="act-body"><Body text={message() ? props.entry.text : historyAction(props.entry)} /></div>
-    <TaskFiles files={props.entry.files} />
+    <TaskFiles files={props.entry.files} project={props.project} task={props.task} />
     <Show when={props.discussion}><span class="tv-delivery">{deliveryText(props.entry, props.worker)}</span><Show when={deliveryError(props.entry)}><p class="notice">{deliveryError(props.entry)}</p></Show></Show>
   </article>;
 }
@@ -88,9 +115,9 @@ export function TaskInspector(props: { project: string; task: Task; presentation
       <Show when={d().stage === "active" && !d().started}><p class="notice">Dispatched to {assignmentLabel(d())} — start unconfirmed</p></Show>
       <Show when={tab() === "Task"}>
         <Show when={(d().stage === "review" || d().stage === "done") && (d().summary || d().cancelReason)}><article class="act-msg tv-entry tv-result k-agent"><header><b>{item().worker || "Agent"}</b><span class="chip">{d().cancelledAt ? tr("Cancelled") : tr("Result")}</span></header><div class="act-body"><Body text={d().cancelReason || d().summary} /></div></article></Show>
-        <section class="tv-doc" classList={{ editing: describing() }} aria-label={tr("Description")}><header><span class="eyebrow">{tr("Description")}</span><span class="grow" /><Show when={d().writable && ["todo", "backlog"].includes(d().stage)}><Show when={describing()} fallback={<button class="btn small ghost" onClick={() => setDescribing(true)}><Icon name="pencil" size={12} />{tr("Edit description")}</button>}><span class="tv-doc-state"><Icon name="pencil" size={11} />{tr("Being edited below")}</span></Show></Show></header><div class="act-body"><Body text={d().text || tr("No description yet.")} /><TaskFiles files={d().files} /></div></section>
+        <section class="tv-doc" classList={{ editing: describing() }} aria-label={tr("Description")}><header><span class="eyebrow">{tr("Description")}</span><span class="grow" /><Show when={d().writable && ["todo", "backlog"].includes(d().stage)}><Show when={describing()} fallback={<button class="btn small ghost" onClick={() => setDescribing(true)}><Icon name="pencil" size={12} />{tr("Edit description")}</button>}><span class="tv-doc-state"><Icon name="pencil" size={11} />{tr("Being edited below")}</span></Show></Show></header><div class="act-body"><Body text={d().text || tr("No description yet.")} /><TaskFiles files={d().files} project={props.project} task={props.task.uuid} /></div></section>
         <div class="tv-section"><span class="eyebrow">{tr("Discussion")}</span></div>
-        <For each={discussion()}>{(entry) => <JournalEntry entry={entry} worker={d().worker} discussion />}</For>
+        <For each={discussion()}>{(entry) => <JournalEntry entry={entry} worker={d().worker} project={props.project} task={props.task.uuid} discussion />}</For>
         <Show when={!discussion().length}><div class="tv-placeholder">{tr("Messages and notes appear here.")}</div></Show>
         <Show when={d().total > d().log.length}><p class="muted">{tr("Showing recent discussion. Earlier records are available in History.")}</p></Show>
       </Show>
@@ -100,7 +127,7 @@ export function TaskInspector(props: { project: string; task: Task; presentation
           if (count() < d().log.length) setCount(count() + 8); else { setCount(8); taskDetails.older(); }
         }}>{count() < d().log.length ? tr("Earlier events (%1)", Math.max(0, d().log.length - count())) : tr("Earlier events…")}</button></Show>
           <span class="grow" /><Show when={taskDetails.before()}><button class="btn small" disabled={taskDetails.loading()} onClick={() => { setCount(8); taskDetails.latest(); }}>{tr("Latest")}</button></Show></div>
-        <For each={shown()}>{(entry) => <JournalEntry entry={entry} worker={d().worker} />}</For>
+        <For each={shown()}>{(entry) => <JournalEntry entry={entry} worker={d().worker} project={props.project} task={props.task.uuid} />}</For>
         <Show when={!d().log.length}><p class="tasks-empty">{tr("No history yet.")}</p></Show>
       </Show>
     </>}</Show>

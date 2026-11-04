@@ -4,6 +4,7 @@ import { createCatalog, toSession } from "./catalog";
 import { connectionOf, createOverview, fleetCards, liveSessions, overviewStats } from "./overview";
 import { machineMeta, rowOut } from "./testing";
 import { emptyBatch } from "../types";
+import type { RowMarks, RowsPort } from "./marks";
 
 const live = (id: string) => ({ id, status: "live", attempt: 0 });
 
@@ -103,6 +104,37 @@ describe("overview selectors", () => {
       expect(ov.stats().all).toBe(3);
       applyBatch(emptyBatch());
       expect(compute).toHaveBeenCalledTimes(5);
+      dispose();
+    });
+  });
+
+  // review-q's probes on #1299: the two catalog paths no other test pins.
+  it("a marks overlay patch reaches the tiles and the live order", () => {
+    createRoot((dispose) => {
+      let port: RowsPort | undefined;
+      const fake = { overlay: () => ({}), attach: (p: RowsPort) => { port = p; } } as unknown as RowMarks;
+      const { catalog, applyBatch, plainRows, plainComputers } = createCatalog(fake);
+      applyBatch({ ...emptyBatch(), computers: [{ computer: "", status: "live", attempt: 0 }], replaces: [{ computer: "", rows: [0, 1, 2].map((i) => rowOut("", i)) }] });
+      const compute = vi.fn(overviewStats);
+      const ov = createOverview(plainRows, plainComputers, () => ({}), compute, (s) => catalog.rows[s.key] ?? s);
+      const id = catalog.order[1];
+      const row = catalog.rows[id];
+      port!.patch(id, { status: row.status, summary: row.summary, unread: row.unread, caption: row.caption, attentionNeeded: true });
+      expect(ov.stats().attention).toBe(1);
+      expect(ov.live()[0]).toBe(catalog.rows[id]);
+      expect(compute).toHaveBeenCalledTimes(2);
+      dispose();
+    });
+  });
+
+  it("the machine cards follow a computer going offline", () => {
+    createRoot((dispose) => {
+      const { applyBatch, plainRows, plainComputers } = createCatalog();
+      applyBatch({ ...emptyBatch(), computers: [{ computer: "", status: "live", attempt: 0 }], replaces: [{ computer: "", rows: [rowOut("", 0)] }] });
+      const ov = createOverview(plainRows, plainComputers, () => ({}));
+      expect(ov.cards()[0].connection.fresh).toBe(true);
+      applyBatch({ ...emptyBatch(), computers: [{ computer: "", status: "reconnecting", attempt: 1 }] });
+      expect(ov.cards()[0].connection.fresh).toBe(false);
       dispose();
     });
   });

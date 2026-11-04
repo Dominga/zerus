@@ -412,15 +412,16 @@ export function createCatalog(given?: RowMarks, onMachines?: (b: Batch) => void)
    * The ordered rows as plain objects, for whole-catalog aggregates such as
    * the Overview's tiles: they track only the catalog's revision, never each
    * field of every row, which would be ten subscriptions per row and batch at
-   * tens of thousands of sessions. Their fields are not reactive: render a
-   * row through `catalog.rows[row.key]`.
+   * tens of thousands of sessions. They are the store's own objects: never
+   * mutate them. Their fields are not reactive: render a row through
+   * `catalog.rows[row.key]`.
    */
   const plainRows = (): Session[] => {
     revision();
     const state = unwrap(catalog);
     return state.order.map((id) => state.rows[id]).filter(Boolean);
   };
-  /** The computers as plain objects, tracking only the catalog's revision. */
+  /** The computers as plain objects, tracking only the catalog's revision; never mutate them. */
   const plainComputers = (): CatalogState["computers"] => {
     revision();
     return unwrap(catalog).computers;

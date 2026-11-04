@@ -78,6 +78,12 @@ if args in [['desktop', 'ownership-status', '--json'], ['desktop', 'ownership-re
         log.write(json.dumps(dict(args=args, value=value, pid=os.getpid())) + '\n')
 
 if args == ['--help']:
+    if config.get('observation_help_pipe') and (root / 'observation-help-armed').exists() and os.fork() == 0:
+        (root / 'observation-help-pipe-held').touch()
+        until = time.monotonic() + 15
+        while not (root / 'observation-pipe-release').exists() and time.monotonic() < until:
+            time.sleep(.005)
+        os._exit(0)
     print('Desktop service ABI: desktop-v1\nDesktop catalog changes ABI: desktop-catalog-changes-v1\n'
           'Desktop catalog relay ABI: desktop-catalog-relay-v1\nDesktop pending read import ABI: desktop-pending-reads-v1')
     if config.get('frontend_abi', True):
@@ -99,6 +105,8 @@ elif args == ['desktop', 'ownership-status', '--json']:
             if time.monotonic() > until:
                 raise SystemExit('private fixture barrier deadline')
             time.sleep(.005)
+    if config.get('observation_help_pipe'):
+        (root / 'observation-help-armed').touch()
     print(json.dumps(status()))
 elif args == ['desktop', 'frontend-request', '--json']:
     request = value['request']

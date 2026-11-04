@@ -347,46 +347,56 @@ fn unsupported_unscoped_rearm_and_manual_states_never_reconstruct_a_receipt() {
 fn uncertain_read_retains_the_actual_last_pipe_and_never_publishes_eligibility_late() {
     let _process = crate::PROCESS_TREE.read().unwrap();
     tauri::async_runtime::block_on(async {
-        let helpers = settled().await;
-        let mut config = configuration();
-        config["observation_pipe"] = true.into();
-        let running = start_native(&helpers, config);
-        let release = Release(running.source.0.join("observation-pipe-release"));
-        eventually("the read's own descendant retains its writers", || {
-            running.source.0.join("observation-pipe-held").exists()
-        })
-        .await;
-        eventually("the bounded read returned without eligibility", || {
-            watches(&running) > 0
-        })
-        .await;
-        assert!(!ready(&running));
-        assert!(running
-            .service
-            .shared
-            .mode_transition
-            .gate
-            .admit(Role::Fleet)
-            .is_err());
-        assert!(effects(&running).is_empty());
-        drop(release);
-        eventually("physical EOF releases the original read charges", || {
-            running
+        for stage in ["observation_pipe", "observation_help_pipe"] {
+            let helpers = settled().await;
+            let mut config = configuration();
+            config[stage] = true.into();
+            let running = start_native(&helpers, config);
+            let release = Release(running.source.0.join("observation-pipe-release"));
+            eventually("the read's own descendant retains its writers", || {
+                running
+                    .source
+                    .0
+                    .join(if stage == "observation_pipe" {
+                        "observation-pipe-held"
+                    } else {
+                        "observation-help-pipe-held"
+                    })
+                    .exists()
+            })
+            .await;
+            eventually("the bounded read returned without eligibility", || {
+                watches(&running) > 0
+            })
+            .await;
+            assert!(!ready(&running));
+            assert!(running
                 .service
                 .shared
                 .mode_transition
                 .gate
-                .snapshot()
-                .unwrap()
-                .admitted
-                == 0
-        })
-        .await;
-        assert!(
-            !ready(&running),
-            "drain alone never publishes a late success"
-        );
-        running.service.join().await.unwrap();
+                .admit(Role::Fleet)
+                .is_err());
+            assert!(effects(&running).is_empty());
+            drop(release);
+            eventually("physical EOF releases the original read charges", || {
+                running
+                    .service
+                    .shared
+                    .mode_transition
+                    .gate
+                    .snapshot()
+                    .unwrap()
+                    .admitted
+                    == 0
+            })
+            .await;
+            assert!(
+                !ready(&running),
+                "drain alone never publishes a late success"
+            );
+            running.service.join().await.unwrap();
+        }
     });
 }
 

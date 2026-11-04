@@ -58,6 +58,22 @@ impl Controller {
             .ok_or("ownership_observation_unavailable")?;
         job.deadline = Some(Instant::now() + Duration::from_secs(3));
         let route = Arc::new(relay::Connection::select(&self.hgs)?);
+        let helper = route.executable()?.to_owned();
+        #[cfg(windows)]
+        let image = Arc::new(
+            zerus_client_core::desktop::windows::image::PinnedImage::open(&helper)
+                .map_err(|_| "ownership_identity_unavailable")?,
+        );
+        #[cfg(windows)]
+        let image_id = image.id();
+        // The help probe is also an original read. Its incomplete child/pipe
+        // lane must retain the parent's mode charge and image pins too.
+        job.resources = Arc::new((
+            job.resources.clone(),
+            resources.clone(),
+            #[cfg(windows)]
+            image.clone(),
+        ));
         let help = job.call(&route, &["--help"], vec![])?;
         if !std::str::from_utf8(&help).ok().is_some_and(|s| {
             [wire::HELP_MARKER, ui_requests::HELP_MARKER]
@@ -83,14 +99,6 @@ impl Controller {
             .map_err(|_| "ownership_identity_unavailable")?;
         let input = serde_json::to_vec(registration.envelope())
             .map_err(|_| "invalid_ownership_observation")?;
-        let helper = route.executable()?.to_owned();
-        #[cfg(windows)]
-        let image = Arc::new(
-            zerus_client_core::desktop::windows::image::PinnedImage::open(&helper)
-                .map_err(|_| "ownership_identity_unavailable")?,
-        );
-        #[cfg(windows)]
-        let image_id = image.id();
         let held: Resources = Arc::new((
             resources,
             job.resources.clone(),

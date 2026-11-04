@@ -2932,16 +2932,21 @@ binds the project and stage and names a row, so tasks added or moved elsewhere
 never shift the page after it. A page past either end returns the nearest whole
 page, and only an empty stage has no rows. `--if-revision` with the last
 `revision` answers `{"unchanged": true, "revision": ...}` without rows when
-nothing changed.
+nothing changed, after checking that page's rows against their files.
 
 Pages come from a local index of task headers in the project's replica folder
 (`task-index-v1.sqlite3`): a disposable cache, never replicated, rebuilt
 silently from the task documents when it is missing, damaged or of another
 version, and never a reason for a read to fail. Each save notes the task in the
-project's change journal, so a read decodes only changed tasks; every task
-file's stamp is also checked at least every 30 seconds for writers without the
-journal, and a page's rows are checked before they are returned. Short-ID
-lookups, list places and the agent start limit use the same index.
+project's change journal (`changes`, a bounded hint that is only ever replaced,
+never written through), so a read decodes only changed tasks. Every task
+file's stamp (length, modification time, inode) is also checked at least every
+30 seconds for writers without the journal. A row is suspect when its files
+changed within the last 2 seconds, when it was read before the journal last
+became unknown, or when it was read more than 10 minutes ago: a page reads its
+suspect rows from their documents again before it returns them, and each read
+of the index reads up to 256 others again, oldest first. Short-ID lookups,
+list places and the agent start limit use the same index.
 
 Send pastes the task prompt into its session through the same input path as
 `hgs send`; the task becomes In progress, and Zerus does not

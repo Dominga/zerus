@@ -626,13 +626,13 @@ fn page_reply(stage: Stage, limit: usize, rows: Vec<Value>, position: usize, nex
 }
 
 fn indexed_page(index: &mut index::Index, stage: Stage, limit: usize, anchor: &index::Anchor, wanted: Option<&str>) -> std::result::Result<Value, index::Failure> {
+    // The page's rows are checked against their files first, so an unchanged
+    // revision means this page is unchanged too.
+    let page = index.page(stage, limit, anchor)?;
     let revision = index.revision()?;
     if wanted == Some(revision.as_str()) {
         return Ok(json!({"unchanged": true, "revision": revision}));
     }
-    let page = index.page(stage, limit, anchor)?;
-    // Checking the page's rows may have indexed a task again.
-    let revision = index.revision()?;
     Ok(page_reply(stage, limit, page.rows, page.position, page.next, page.previous,
         &index.counts()?, index.damaged()?, revision))
 }

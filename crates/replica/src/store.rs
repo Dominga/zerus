@@ -25,13 +25,103 @@ const FOLD_BYTES: u64 = 256 * 1024;
 /// A block: little-endian `u32` length, the first four bytes of the SHA-256
 /// of the payload, then the payload (Loro updates).
 const HEADER: usize = 8;
-/// The change journal: a `gen <UUID>` line, then one changed document per
-/// line (a task UUID, or `project`). A derived index reads it instead of
-/// every task file. It is a hint only: never synced, rewritten under a new
-/// generation once it reaches `CHANGES_LIMIT`, and a reader that meets
-/// another generation or a line it does not expect reads every task file.
+/// The change journal: a `gen <UUID> <BASE>` line, then one changed document
+/// per line (a task UUID, or `project`). BASE is the place, in the journal's
+/// whole history, of its first line here, so dropping its oldest lines keeps
+/// every later place valid. A derived index reads it instead of every task
+/// file. It is a hint only: never synced and never written in place. Each
+/// change replaces it under its name, so a link there carries no write into
+/// another file. A reader that finds it missing, oversized, not a regular
+/// file, of another generation, past its place or with a line it does not
+/// expect reads every task file instead.
 const CHANGES: &str = "changes";
-const CHANGES_LIMIT: u64 = 64 * 1024;
+/// Past this the journal drops its oldest lines, keeping the newest half.
+const CHANGES_LIMIT: usize = 64 * 1024;
+/// The most of it ever read.
+const CHANGES_READ: u64 = CHANGES_LIMIT as u64 + 4096;
+
+/// The change journal as read: its generation, the place of its first line
+/// and its whole lines.
+struct Journal {
+    generation: String,
+    base: u64,
+    body: Vec<u8>,
+}
+
+enum Hint {
+    Missing,
+    Unusable,
+    Found(Journal),
+}
+
+/// Reads the change journal: bounded, never through a link and never
+/// waiting on a special file.
+fn read_journal(path: &Path) -> Hint {
+    use std::io::Read;
+    match fs::symlink_metadata(path) {
+        Err(error) if error.kind() == ErrorKind::NotFound => return Hint::Missing,
+        Ok(meta) if meta.file_type().is_file() && meta.len() <= CHANGES_READ => (),
+        _ => return Hint::Unusable,
+    }
+    let mut options = OpenOptions::new();
+    options.read(true);
+    #[cfg(unix)]
+    std::os::unix::fs::OpenOptionsExt::custom_flags(
+        &mut options,
+        libc::O_NOFOLLOW | libc::O_NONBLOCK,
+    );
+    let Ok(file) = options.open(path) else {
+        return Hint::Unusable;
+    };
+    if !file.metadata().is_ok_and(|meta| meta.is_file()) {
+        return Hint::Unusable;
+    }
+    let mut bytes = Vec::new();
+    if file.take(CHANGES_READ + 1).read_to_end(&mut bytes).is_err()
+        || bytes.len() as u64 > CHANGES_READ
+    {
+        return Hint::Unusable;
+    }
+    // Whole lines only: a line cut short ends the journal.
+    let whole = bytes
+        .iter()
+        .rposition(|&b| b == b'\n')
+        .map_or(0, |end| end + 1);
+    let Some(header) = bytes[..whole].split_inclusive(|&b| b == b'\n').next() else {
+        return Hint::Unusable;
+    };
+    let parsed = std::str::from_utf8(header)
+        .ok()
+        .and_then(|line| line.strip_suffix('\n')?.strip_prefix("gen "))
+        .and_then(|rest| rest.split_once(' '))
+        .filter(|(generation, _)| ids::is_uuid(generation))
+        .and_then(|(generation, base)| Some((generation.to_owned(), base.parse::<u64>().ok()?)));
+    match parsed {
+        Some((generation, base)) => Hint::Found(Journal {
+            generation,
+            base,
+            body: bytes[header.len()..whole].to_vec(),
+        }),
+        None => Hint::Unusable,
+    }
+}
+
+/// Replaces the change journal under its name, never writing through it.
+fn write_journal(path: &Path, generation: &str, base: u64, body: &[u8]) -> bool {
+    let mut bytes = format!("gen {generation} {base}\n").into_bytes();
+    bytes.extend_from_slice(body);
+    let temp = path.with_extension(format!("tmp-{}", ids::new_uuid()));
+    let written = private_options()
+        .create_new(true)
+        .write(true)
+        .open(&temp)
+        .and_then(|mut file| file.write_all(&bytes));
+    if written.is_err() || fs::rename(&temp, path).is_err() {
+        let _ = fs::remove_file(&temp);
+        return false;
+    }
+    true
+}
 
 /// What changed since a reader's place in the change journal.
 #[derive(Clone, Debug, PartialEq, Eq)]
@@ -224,69 +314,60 @@ impl ProjectStore {
         Ok(())
     }
 
-    /// Appends `document` to the change journal, starting a new generation
-    /// when the journal is missing or full. Best effort: a lost line is
-    /// found by a reader's periodic check of every task file.
+    /// Notes `document` in the change journal by replacing it, never writing
+    /// through its name; an unusable one starts a new generation. Best
+    /// effort: a lost line is found by a reader's periodic check of every
+    /// task file.
     pub(crate) fn note_change(&self, document: &str) {
         let path = self.dir.join(CHANGES);
-        let line = format!("{document}\n");
-        let appended = match fs::symlink_metadata(&path) {
-            Ok(meta) if meta.is_file() && meta.len() < CHANGES_LIMIT => private_options()
-                .append(true)
-                .open(&path)
-                .and_then(|mut file| file.write_all(line.as_bytes()))
-                .is_ok(),
-            _ => false,
+        let (generation, mut base, mut body) = match read_journal(&path) {
+            Hint::Found(journal) => (journal.generation, journal.base, journal.body),
+            Hint::Missing | Hint::Unusable => (ids::new_uuid(), 0, Vec::new()),
         };
-        if !appended {
-            let fresh = format!("gen {}\n{line}", ids::new_uuid());
-            let _ = write_atomic(&path, fresh.as_bytes());
+        body.extend_from_slice(document.as_bytes());
+        body.push(b'\n');
+        if body.len() > CHANGES_LIMIT {
+            let from = body.len() - CHANGES_LIMIT / 2;
+            let cut = body[from..]
+                .iter()
+                .position(|&b| b == b'\n')
+                .map_or(body.len(), |at| from + at + 1);
+            base += cut as u64;
+            body.drain(..cut);
         }
+        write_journal(&path, &generation, base, &body);
     }
 
-    /// The documents changed since `offset` of journal `generation` (both as
-    /// returned last time; an empty generation the first time).
+    /// The documents changed since place `offset` of journal `generation`
+    /// (both as returned last time; an empty generation the first time). A
+    /// missing or unusable journal cannot say: it is started again, empty, so
+    /// later reads can, and this one reports every document as unknown.
     pub fn changes_since(&self, generation: &str, offset: u64) -> Result<Changes> {
-        let bytes = match fs::read(self.dir.join(CHANGES)) {
-            Ok(bytes) => bytes,
-            // No journal and none known: nothing to report since.
-            Err(error) if error.kind() == ErrorKind::NotFound => {
+        let path = self.dir.join(CHANGES);
+        let journal = match read_journal(&path) {
+            Hint::Found(journal) => journal,
+            Hint::Missing | Hint::Unusable => {
+                let fresh = ids::new_uuid();
+                let started = write_journal(&path, &fresh, 0, &[]);
                 return Ok(Changes {
-                    generation: String::new(),
+                    generation: if started { fresh } else { String::new() },
                     offset: 0,
-                    documents: generation.is_empty().then(BTreeSet::new),
+                    documents: None,
                 });
             }
-            Err(error) => return Err(error.into()),
         };
-        // Whole lines only: a line cut short ends the journal for now.
-        let whole = bytes
-            .iter()
-            .rposition(|&b| b == b'\n')
-            .map_or(0, |end| end + 1);
-        let mut lines = bytes[..whole].split_inclusive(|&b| b == b'\n');
-        let header = lines.next().unwrap_or_default();
-        let found = std::str::from_utf8(header)
-            .ok()
-            .and_then(|line| line.strip_suffix('\n')?.strip_prefix("gen "))
-            .filter(|id| ids::is_uuid(id))
-            .unwrap_or_default()
-            .to_owned();
+        let end = journal.base + journal.body.len() as u64;
         let mut changes = Changes {
-            generation: found,
-            offset: whole as u64,
+            generation: journal.generation,
+            offset: end,
             documents: None,
         };
-        let start = header.len() as u64;
-        if changes.generation.is_empty()
-            || changes.generation != generation
-            || offset < start
-            || offset > changes.offset
-        {
+        if changes.generation != generation || offset < journal.base || offset > end {
             return Ok(changes);
         }
         let mut documents = BTreeSet::new();
-        for line in bytes[offset as usize..whole].split_inclusive(|&b| b == b'\n') {
+        let unread = &journal.body[(offset - journal.base) as usize..];
+        for line in unread.split_inclusive(|&b| b == b'\n') {
             match std::str::from_utf8(line)
                 .ok()
                 .and_then(|l| l.strip_suffix('\n'))
@@ -883,20 +964,28 @@ mod tests {
     fn the_change_journal_names_saved_tasks_and_otherwise_says_read_all() {
         let temp = tempfile::tempdir().unwrap();
         let store = ProjectStore::open(temp.path(), "example").unwrap();
-        // No journal and none known: nothing changed since.
-        assert_eq!(
-            store.changes_since("", 0).unwrap().documents,
-            Some(BTreeSet::new())
-        );
+        // No journal: it is started, and this read cannot say.
+        let started = store.changes_since("", 0).unwrap();
+        assert!(started.documents.is_none() && !started.generation.is_empty());
+        let place = |c: &Changes| {
+            store
+                .changes_since(&c.generation, c.offset)
+                .unwrap()
+                .documents
+        };
+        assert_eq!(place(&started), Some(BTreeSet::new()));
         let mut a = new_task(&store, "U");
         store.save(&mut a).unwrap();
         // A reader that does not know this generation cannot tell.
         let first = store.changes_since("", 0).unwrap();
         assert!(first.documents.is_none() && !first.generation.is_empty());
-        let quiet = store
-            .changes_since(&first.generation, first.offset)
-            .unwrap();
-        assert_eq!(quiet.documents, Some(BTreeSet::new()));
+        let place = |c: &Changes| {
+            store
+                .changes_since(&c.generation, c.offset)
+                .unwrap()
+                .documents
+        };
+        assert_eq!(place(&first), Some(BTreeSet::new()));
         let mut b = new_task(&store, "V");
         store.save(&mut b).unwrap();
         a.comment("note", &Actor::Person, 2).unwrap();
@@ -908,21 +997,8 @@ mod tests {
         assert_eq!(next.documents, Some(both));
         // A save that writes nothing notes nothing.
         store.save(&mut a).unwrap();
-        let place = |c: &Changes| {
-            store
-                .changes_since(&c.generation, c.offset)
-                .unwrap()
-                .documents
-        };
         assert_eq!(place(&next), Some(BTreeSet::new()));
-        // A cut line is not read yet; once ended, an unexpected line means read all.
-        let path = store.dir().join(CHANGES);
-        let mut file = OpenOptions::new().append(true).open(&path).unwrap();
-        file.write_all(b"not-a-document").unwrap();
-        assert_eq!(place(&next), Some(BTreeSet::new()));
-        file.write_all(b"\n").unwrap();
-        assert!(place(&next).is_none());
-        // Another generation or a place beyond the end means read all.
+        // Another generation or a place past the end means read all.
         let other = Changes {
             generation: ids::new_uuid(),
             ..next.clone()
@@ -933,18 +1009,140 @@ mod tests {
             ..next.clone()
         };
         assert!(place(&beyond).is_none());
-        // A full journal starts a new generation; so does a removed one.
+        // An unexpected line means read all, once: from the place returned
+        // then, later notes read normally.
+        let path = store.dir().join(CHANGES);
+        let mut text = fs::read_to_string(&path).unwrap();
+        text.push_str("not-a-document\n");
+        fs::write(&path, &text).unwrap();
+        let damaged = store.changes_since(&next.generation, next.offset).unwrap();
+        assert!(damaged.documents.is_none());
+        store.save_project(&ProjectDoc::new()).unwrap();
+        let fresh = place(&damaged);
+        assert_eq!(fresh, Some(BTreeSet::from(["project".to_owned()])));
+        // A removed journal means read all.
+        fs::remove_file(&path).unwrap();
+        assert!(place(&damaged).is_none());
+    }
+
+    /// A growing journal keeps its generation and drops its oldest lines: a
+    /// reader that keeps up never misses a change; one left behind reads all.
+    #[test]
+    fn a_full_journal_drops_its_oldest_lines_under_the_same_generation() {
+        let temp = tempfile::tempdir().unwrap();
+        let store = ProjectStore::open(temp.path(), "example").unwrap();
+        store.save_project(&ProjectDoc::new()).unwrap();
+        let start = store.changes_since("", 0).unwrap();
+        let mut behind = start.clone();
+        let mut keeping_up = start.clone();
+        let mut task = new_task(&store, "U");
+        store.save(&mut task).unwrap();
+        for n in 0..3000 {
+            task.comment("note", &Actor::Person, 10 + n).unwrap();
+            store.save(&mut task).unwrap();
+            if n % 500 == 0 {
+                let read = store
+                    .changes_since(&keeping_up.generation, keeping_up.offset)
+                    .unwrap();
+                assert_eq!(
+                    read.documents,
+                    Some(BTreeSet::from([task.uuid().to_owned()])),
+                    "{n}"
+                );
+                keeping_up = read;
+            }
+        }
+        let read = store
+            .changes_since(&keeping_up.generation, keeping_up.offset)
+            .unwrap();
+        assert_eq!(read.generation, start.generation, "the generation is kept");
+        assert!(read.documents.is_some());
+        assert!(fs::metadata(store.dir().join(CHANGES)).unwrap().len() <= CHANGES_READ);
+        behind = store
+            .changes_since(&behind.generation, behind.offset)
+            .unwrap();
+        assert!(behind.documents.is_none(), "its place was dropped");
+    }
+
+    /// review-n on #1350: the hint never writes through a link, never reads
+    /// more than its budget and never waits on a special file.
+    #[test]
+    fn an_unsafe_or_oversized_hint_is_unknown_and_never_written_through() {
+        let temp = tempfile::tempdir().unwrap();
+        let store = ProjectStore::open(temp.path(), "example").unwrap();
+        store.save_project(&ProjectDoc::new()).unwrap();
+        let path = store.dir().join(CHANGES);
+        let project = store.dir().join("project.loro");
+        let before = fs::read(&project).unwrap();
+        // A hard link to the project document: a save replaces the name.
+        fs::remove_file(&path).unwrap();
+        fs::hard_link(&project, &path).unwrap();
+        assert!(store.changes_since("", 0).unwrap().documents.is_none());
+        let mut task = new_task(&store, "U");
+        store.save(&mut task).unwrap();
+        assert_eq!(
+            fs::read(&project).unwrap(),
+            before,
+            "the project is untouched"
+        );
+        store.project().unwrap();
+        let known = store.changes_since("", 0).unwrap();
+        assert!(!known.generation.is_empty());
+        // A symbolic link: likewise, and what it names is never touched.
+        #[cfg(unix)]
+        {
+            let outside = temp.path().join("outside");
+            fs::write(&outside, b"kept").unwrap();
+            fs::remove_file(&path).unwrap();
+            std::os::unix::fs::symlink(&outside, &path).unwrap();
+            assert!(store
+                .changes_since(&known.generation, known.offset)
+                .unwrap()
+                .documents
+                .is_none());
+            task.comment("note", &Actor::Person, 2).unwrap();
+            store.save(&mut task).unwrap();
+            assert_eq!(fs::read(&outside).unwrap(), b"kept");
+            assert!(!fs::symlink_metadata(&path)
+                .unwrap()
+                .file_type()
+                .is_symlink());
+        }
+        // Oversized: unknown, not read and trusted.
+        let line = format!("{}\n", task.uuid());
         fs::write(
             &path,
-            format!("gen {}\n{}", next.generation, "project\n".repeat(9000)),
+            format!("gen {} 0\n{}", known.generation, line.repeat(30_000)),
         )
         .unwrap();
-        store.save_project(&ProjectDoc::new()).unwrap();
-        let rotated = store.changes_since(&next.generation, next.offset).unwrap();
-        assert!(rotated.generation != next.generation && rotated.documents.is_none());
+        let read = store.changes_since(&known.generation, 0).unwrap();
+        assert!(read.documents.is_none() && read.generation != known.generation);
+        // ... and it was started again, small.
         assert!(fs::metadata(&path).unwrap().len() < 128);
-        assert_eq!(place(&rotated), Some(BTreeSet::new()));
-        fs::remove_file(&path).unwrap();
-        assert!(place(&rotated).is_none());
+        assert_eq!(
+            store
+                .changes_since(&read.generation, read.offset)
+                .unwrap()
+                .documents,
+            Some(BTreeSet::new())
+        );
+        // A special file is never opened to wait on.
+        #[cfg(unix)]
+        {
+            fs::remove_file(&path).unwrap();
+            let made = std::process::Command::new("mkfifo")
+                .arg(&path)
+                .status()
+                .unwrap();
+            assert!(made.success());
+            assert!(store
+                .changes_since(&known.generation, known.offset)
+                .unwrap()
+                .documents
+                .is_none());
+            task.comment("again", &Actor::Person, 3).unwrap();
+            store.save(&mut task).unwrap();
+            assert!(fs::symlink_metadata(&path).unwrap().file_type().is_file());
+        }
     }
 }

@@ -33,11 +33,30 @@ fn agent() -> SessionKey {
     }
 }
 
+/// Dates a task's files an hour back, so they are settled: the bounded-work
+/// tests count reads without waiting for `SETTLE_MS`.
+fn age(store: &ProjectStore, uuid: &str) {
+    let past = std::time::SystemTime::now() - Duration::from_secs(3600);
+    for ext in ["loro", "updates"] {
+        let path = store.dir().join("tasks").join(format!("{uuid}.{ext}"));
+        if let Ok(file) = fs::File::options().write(true).open(path) {
+            file.set_modified(past).unwrap();
+        }
+    }
+}
+
+/// Saves `task` through the store, then dates its files back.
+fn aged_save(store: &ProjectStore, task: &mut TaskDoc) {
+    store.save(task).unwrap();
+    age(store, task.uuid());
+}
+
 /// Writes `task` as a whole snapshot, as an older hgs could, without the
-/// change journal and without syncing.
+/// change journal and without syncing; its file is dated back.
 fn write_plain(store: &ProjectStore, task: &TaskDoc) {
     let path = store.dir().join("tasks").join(format!("{}.loro", task.uuid()));
     fs::write(path, task.snapshot().unwrap()).unwrap();
+    age(store, task.uuid());
 }
 
 /// A project in every stage: equal ranks, a long multi-byte text, files,
@@ -228,14 +247,13 @@ fn reads_decode_only_what_changed() {
     // Nothing changed: no task is decoded or stamped.
     let (_, decoded, stamped) = counted(|| Index::open(&store).unwrap());
     assert_eq!((decoded, stamped), (0, 1), "only the task folder is stamped");
-    // The first journaled save starts a generation the index does not know:
-    // one full check. After that a saved change is found through the journal.
-    store.save(&mut tasks[7]).unwrap();
+    // The index started the journal: a saved change is found through it,
+    // stamping only the folder and that task's two files.
+    aged_save(&store, &mut tasks[7]);
     let (_, decoded, stamped) = counted(|| Index::open(&store).unwrap());
-    assert_eq!(decoded, 1);
-    assert!(stamped > 600, "{stamped}");
+    assert_eq!((decoded, stamped), (1, 3));
     tasks[7].comment("note", &Actor::Person, 5).unwrap();
-    store.save(&mut tasks[7]).unwrap();
+    aged_save(&store, &mut tasks[7]);
     let (index, decoded, stamped) = counted(|| Index::open(&store).unwrap());
     assert_eq!((decoded, stamped), (1, 3), "the folder and the changed task's two files");
     let revision = index.revision().unwrap();
@@ -273,12 +291,12 @@ fn a_task_the_journal_names_is_indexed_again_even_with_an_unchanged_stamp() {
     let temp = tempfile::tempdir().unwrap();
     let store = ProjectStore::open(temp.path(), "example").unwrap();
     let mut task = new_task(&store, "T-aaaaaa", Stage::Todo, "V", "Plain");
-    store.save(&mut task).unwrap();
+    aged_save(&store, &mut task);
     let mut other = new_task(&store, "T-bbbbbb", Stage::Todo, "W", "Other");
-    store.save(&mut other).unwrap();
+    aged_save(&store, &mut other);
     drop(Index::open(&store).unwrap());
     task.set_title("Retitled", &Actor::Person, 5).unwrap();
-    store.save(&mut task).unwrap();
+    aged_save(&store, &mut task);
     // As if the rewritten files kept their stamps: the index already holds
     // the new stamps beside the old row. No index connection is open here.
     {
@@ -294,6 +312,158 @@ fn a_task_the_journal_names_is_indexed_again_even_with_an_unchanged_stamp() {
     let page = index.page(Stage::Todo, 10, &Anchor::Start).unwrap();
     let row = page.rows.iter().find(|r| r["uuid"] == json!(task.uuid())).unwrap();
     assert_eq!(row["title"], json!("Retitled"));
+}
+
+/// review-n on #1350: when the journal can no longer say what changed, a
+/// current writer's change whose files kept their stamps is still found:
+/// every row read before then is suspect, a page never serves one unread,
+/// and each read reads a bounded batch of them again.
+#[test]
+fn an_unknown_journal_makes_every_earlier_row_suspect() {
+    let temp = tempfile::tempdir().unwrap();
+    let store = ProjectStore::open(temp.path(), "example").unwrap();
+    let mut tasks: Vec<TaskDoc> = (0..300)
+        .map(|n| new_task(&store, &format!("T-{n:06}"), Stage::Todo, "V", "Plain"))
+        .collect();
+    for task in &mut tasks {
+        aged_save(&store, task);
+    }
+    drop(Index::open(&store).unwrap());
+    let (index, decoded, _) = counted(|| Index::open(&store).unwrap());
+    assert_eq!(decoded, 0);
+    let before = index.revision().unwrap();
+    drop(index);
+    // Nothing changed, but the journal is unknown: rows are read again in
+    // batches, and the revision stays.
+    fs::write(store.dir().join("changes"), b"damaged").unwrap();
+    let (index, decoded, _) = counted(|| Index::open(&store).unwrap());
+    assert_eq!(decoded, BATCH as usize);
+    assert_eq!(index.revision().unwrap(), before, "the rows read the same");
+    drop(index);
+    let (index, decoded, _) = counted(|| Index::open(&store).unwrap());
+    assert_eq!(decoded, 300 - BATCH as usize);
+    assert_eq!(index.revision().unwrap(), before);
+    drop(index);
+    // Now a change whose files keep their stamps, then the journal is lost.
+    tasks[250].set_title("Retitled", &Actor::Person, 9).unwrap();
+    aged_save(&store, &mut tasks[250]);
+    {
+        let db = Connection::open(store.dir().join(FILE)).unwrap();
+        db.execute(
+            "UPDATE tasks SET files=?1 WHERE uuid=?2",
+            params![files(store.dir(), tasks[250].uuid()), tasks[250].uuid()],
+        )
+        .unwrap();
+    }
+    fs::remove_file(store.dir().join("changes")).unwrap();
+    let (mut index, decoded, _) = counted(|| Index::open(&store).unwrap());
+    assert!(decoded <= BATCH as usize, "{decoded}");
+    let page = index.page(Stage::Todo, 200, &Anchor::Start).unwrap();
+    let all = index.page(Stage::Todo, 200, &Anchor::End).unwrap();
+    let found = page.rows.iter().chain(&all.rows).find(|r| r["uuid"] == json!(tasks[250].uuid())).unwrap();
+    assert_eq!(found["title"], json!("Retitled"));
+    drop(index);
+    let index = Index::open(&store).unwrap();
+    let floor = index.floor(now()).unwrap();
+    let suspect: i64 = index.db.query_row("SELECT count(*) FROM tasks WHERE decoded < ?1", [floor], |r| r.get(0)).unwrap();
+    assert_eq!(suspect, 0, "every row was read again");
+}
+
+/// A row read longer ago than the maximum age is read again before a page
+/// serves it, whatever its stamps; one that reads the same keeps the revision.
+#[test]
+fn rows_past_the_maximum_age_are_read_again() {
+    let temp = tempfile::tempdir().unwrap();
+    let store = ProjectStore::open(temp.path(), "example").unwrap();
+    let tasks: Vec<TaskDoc> = (0..20)
+        .map(|n| new_task(&store, &format!("T-{n:06}"), Stage::Todo, "V", "Plain"))
+        .collect();
+    for task in &tasks {
+        write_plain(&store, task);
+    }
+    let revision = Index::open(&store).unwrap().revision().unwrap();
+    let aged = |sql: &str| {
+        let db = Connection::open(store.dir().join(FILE)).unwrap();
+        db.execute(sql, params![now() - MAX_AGE_MS - 1000]).unwrap();
+    };
+    aged("UPDATE tasks SET decoded=?1");
+    let (index, decoded, _) = counted(|| Index::open(&store).unwrap());
+    assert_eq!(decoded, 20);
+    assert_eq!(index.revision().unwrap(), revision);
+    drop(index);
+    // An unnoticed change on an aged row: the page reads it first.
+    {
+        let db = Connection::open(store.dir().join(FILE)).unwrap();
+        db.execute("UPDATE tasks SET row=json_set(row, '$.text', 'Stale') WHERE uuid=?1", [tasks[5].uuid()]).unwrap();
+    }
+    let mut index = Index::open(&store).unwrap();
+    {
+        let db = Connection::open(store.dir().join(FILE)).unwrap();
+        db.execute("UPDATE tasks SET decoded=?1 WHERE uuid=?2", params![now() - MAX_AGE_MS - 1000, tasks[5].uuid()]).unwrap();
+    }
+    let (page, decoded, _) = counted(|| index.page(Stage::Todo, 50, &Anchor::Start).unwrap());
+    assert_eq!(decoded, 1);
+    let row = page.rows.iter().find(|r| r["uuid"] == json!(tasks[5].uuid())).unwrap();
+    assert_eq!(row["text"], json!("Plain"));
+}
+
+/// A file modified within `SETTLE_MS` could change again in the same clock
+/// tick: its row stays suspect and is read again.
+#[test]
+fn an_unsettled_row_is_read_again() {
+    let temp = tempfile::tempdir().unwrap();
+    let store = ProjectStore::open(temp.path(), "example").unwrap();
+    let mut task = new_task(&store, "T-aaaaaa", Stage::Todo, "V", "Plain");
+    store.save(&mut task).unwrap();
+    let (_, settled) = stamped(store.dir(), task.uuid(), now());
+    assert!(!settled);
+    assert!(stamped(store.dir(), task.uuid(), now() + SETTLE_MS + 1000).1);
+    let index = Index::open(&store).unwrap();
+    let decoded: i64 = index.db.query_row("SELECT decoded FROM tasks WHERE uuid=?1", [task.uuid()], |r| r.get(0)).unwrap();
+    assert_eq!(decoded, 0, "kept suspect");
+    drop(index);
+    let (_, decoded, _) = counted(|| Index::open(&store).unwrap());
+    assert_eq!(decoded, 1, "read again");
+}
+
+/// review-n on #1350: `--if-revision` answers only after the page's rows
+/// were checked against their files.
+#[test]
+fn an_unchanged_revision_is_only_answered_after_the_page_check() {
+    let temp = tempfile::tempdir().unwrap();
+    let store = ProjectStore::open(temp.path(), "example").unwrap();
+    let mut tasks: Vec<TaskDoc> = (0..5)
+        .map(|n| new_task(&store, &format!("T-{n:06}"), Stage::Todo, "V", "Plain"))
+        .collect();
+    for task in &tasks {
+        write_plain(&store, task);
+    }
+    let mut index = Index::open(&store).unwrap();
+    let first = super::super::indexed_page(&mut index, Stage::Todo, 10, &Anchor::Start, None).unwrap();
+    let revision = first["revision"].as_str().unwrap().to_owned();
+    let unchanged = super::super::indexed_page(&mut index, Stage::Todo, 10, &Anchor::Start, Some(&revision)).unwrap();
+    assert_eq!(unchanged["unchanged"], json!(true));
+    drop(index);
+    // An older writer changes a task in place, without the journal.
+    tasks[0].set_title("Retitled", &Actor::Person, 5).unwrap();
+    write_plain(&store, &tasks[0]);
+    let mut index = Index::open(&store).unwrap();
+    let polled = super::super::indexed_page(&mut index, Stage::Todo, 10, &Anchor::Start, Some(&revision)).unwrap();
+    assert!(polled.get("unchanged").is_none(), "{polled}");
+    let row = polled["tasks"].as_array().unwrap().iter().find(|r| r["uuid"] == json!(tasks[0].uuid())).unwrap();
+    assert_eq!(row["title"], json!("Retitled"));
+}
+
+/// review-n on #1350: a cursor's rank must be ASCII hex before it is cut.
+#[test]
+fn a_cursor_with_a_non_hex_rank_is_refused_without_panicking() {
+    let uuid = ids::new_uuid();
+    for rank in ["aéa", "zz", "4", "é0"] {
+        let cursor = format!("t1.{}.{rank}.{uuid}", scope("example", Stage::Todo));
+        assert!(parse_cursor("example", Stage::Todo, &cursor).is_err(), "{rank}");
+    }
+    let good = cursor("example", Stage::Todo, "V", &uuid);
+    assert_eq!(parse_cursor("example", Stage::Todo, &good).unwrap(), ("V".to_owned(), uuid));
 }
 
 #[test]
@@ -439,14 +609,24 @@ fn twenty_thousand_tasks_scale_smoke() {
     let (_, decoded, _) = counted(|| Index::open(&store).unwrap());
     let build = started.elapsed();
     assert_eq!(decoded, 20_000);
+    let revision = {
+        let mut index = Index::open(&store).unwrap();
+        super::super::indexed_page(&mut index, Stage::Todo, 50, &Anchor::Start, None).unwrap()["revision"]
+            .as_str()
+            .unwrap()
+            .to_owned()
+    };
     let mut polls = Vec::new();
     for _ in 0..20 {
+        // `--if-revision`: open, check the page's rows, answer unchanged.
         let started = Instant::now();
-        let (index, decoded, stamped) = counted(|| Index::open(&store).unwrap());
-        let revision = index.revision().unwrap();
+        let (answer, decoded, stamped) = counted(|| {
+            let mut index = Index::open(&store).unwrap();
+            super::super::indexed_page(&mut index, Stage::Todo, 50, &Anchor::Start, Some(&revision)).unwrap()
+        });
         polls.push(started.elapsed());
-        assert_eq!((decoded, stamped), (0, 1), "the poll stays O(1)");
-        assert!(!revision.is_empty());
+        assert_eq!(answer["unchanged"], json!(true));
+        assert_eq!((decoded, stamped), (0, 101), "the poll stamps the folder and its page");
     }
     let started = Instant::now();
     let mut index = Index::open(&store).unwrap();

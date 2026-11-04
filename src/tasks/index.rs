@@ -29,6 +29,13 @@ const SCHEMA: i64 = 1;
 const FULL_CHECK_MS: i64 = 30_000;
 /// Tasks decoded per transaction, so no transaction is long.
 const CHUNK: usize = 256;
+/// A row whose document was read longer ago than this is suspect.
+const MAX_AGE_MS: i64 = 10 * 60_000;
+/// A file modified more recently than this is not settled: a later write in
+/// the same clock tick could keep its stamp, so the row is read again.
+const SETTLE_MS: i64 = 2_000;
+/// Suspect rows read again at each read of the index, oldest first.
+const BATCH: i64 = 256;
 /// The longest damage text kept for a task that does not load.
 const ERROR_BYTES: usize = 512;
 /// The longest prompt text a paged row carries; `get` returns all of it.
@@ -80,12 +87,13 @@ thread_local! {
     pub(super) static STAMPED: std::cell::Cell<usize> = const { std::cell::Cell::new(0) };
 }
 
-/// A file's length, modification time and inode, or `-` when it is missing.
-fn stamp(path: &Path) -> String {
+/// A file's length, modification time and inode, or `-` when it is missing,
+/// and whether it is settled: modified at least `SETTLE_MS` before `now`.
+fn stamp_at(path: &Path, now: i64) -> (String, bool) {
     #[cfg(test)]
     STAMPED.with(|n| n.set(n.get() + 1));
     let Ok(meta) = fs::metadata(path) else {
-        return "-".into();
+        return ("-".into(), true);
     };
     let modified = meta
         .modified()
@@ -96,17 +104,25 @@ fn stamp(path: &Path) -> String {
     let inode = std::os::unix::fs::MetadataExt::ino(&meta);
     #[cfg(not(unix))]
     let inode = 0;
-    format!("{}:{modified}:{inode}", meta.len())
+    let millis = (modified / 1_000_000) as i64;
+    (format!("{}:{modified}:{inode}", meta.len()), millis <= now - SETTLE_MS)
 }
 
-/// The stamps of a task's snapshot and appended updates.
-fn files(dir: &Path, uuid: &str) -> String {
+fn stamp(path: &Path) -> String {
+    stamp_at(path, 0).0
+}
+
+/// The stamps of a task's snapshot and appended updates, and whether both
+/// are settled.
+fn stamped(dir: &Path, uuid: &str, now: i64) -> (String, bool) {
     let tasks = dir.join("tasks");
-    format!(
-        "{}|{}",
-        stamp(&tasks.join(format!("{uuid}.loro"))),
-        stamp(&tasks.join(format!("{uuid}.updates")))
-    )
+    let (snapshot, a) = stamp_at(&tasks.join(format!("{uuid}.loro")), now);
+    let (updates, b) = stamp_at(&tasks.join(format!("{uuid}.updates")), now);
+    (format!("{snapshot}|{updates}"), a && b)
+}
+
+fn files(dir: &Path, uuid: &str) -> String {
+    stamped(dir, uuid, 0).0
 }
 
 /// `text` cut to at most `bytes` at a character boundary.
@@ -215,7 +231,13 @@ pub(super) fn parse_cursor(project: &str, stage: Stage, cursor: &str) -> Result<
     let [version, found, rank, uuid] = parts[..] else {
         return Err(refused());
     };
-    if version != "t1" || found != scope(project, stage) || rank.len() > 256 || rank.len() % 2 != 0 || !ids::is_uuid(uuid) {
+    if version != "t1"
+        || found != scope(project, stage)
+        || rank.len() > 256
+        || rank.len() % 2 != 0
+        || !rank.bytes().all(|b| b.is_ascii_hexdigit())
+        || !ids::is_uuid(uuid)
+    {
         return Err(refused());
     }
     let bytes = (0..rank.len())
@@ -226,6 +248,9 @@ pub(super) fn parse_cursor(project: &str, stage: Stage, cursor: &str) -> Result<
     let rank = String::from_utf8(bytes).map_err(|_| refused())?;
     Ok((rank, uuid.to_owned()))
 }
+
+/// A listed row: UUID, rank, file stamps, row and when it was read.
+type Listed = (String, String, String, String, i64);
 
 pub(super) struct Index<'a> {
     store: &'a ProjectStore,
@@ -290,20 +315,21 @@ fn connect(dir: &Path) -> Outcome<Connection> {
     let version: i64 = db.query_row("PRAGMA user_version", [], |r| r.get(0))?;
     let objects: i64 = db.query_row(
         "SELECT count(*) FROM sqlite_schema WHERE name IN
-            ('meta', 'tasks', 'sends', 'tasks_order', 'tasks_short', 'sends_at', 'sends_uuid')",
+            ('meta', 'tasks', 'sends', 'tasks_order', 'tasks_short', 'tasks_decoded', 'sends_at', 'sends_uuid')",
         [],
         |r| r.get(0),
     )?;
-    if version != SCHEMA || objects != 7 {
+    if version != SCHEMA || objects != 8 {
         // New, or not this schema: start again from the documents.
         db.execute_batch(&format!(
             "BEGIN IMMEDIATE;
             DROP TABLE IF EXISTS meta; DROP TABLE IF EXISTS tasks; DROP TABLE IF EXISTS sends;
             CREATE TABLE meta(key TEXT PRIMARY KEY, value TEXT NOT NULL);
             CREATE TABLE tasks(uuid TEXT NOT NULL UNIQUE, files TEXT NOT NULL, stage TEXT, rank TEXT,
-                short_id TEXT, row TEXT, error TEXT);
+                short_id TEXT, row TEXT, error TEXT, decoded INTEGER NOT NULL);
             CREATE INDEX tasks_order ON tasks(stage, rank, uuid);
             CREATE INDEX tasks_short ON tasks(short_id);
+            CREATE INDEX tasks_decoded ON tasks(decoded);
             CREATE TABLE sends(uuid TEXT NOT NULL, at INTEGER NOT NULL);
             CREATE INDEX sends_at ON sends(at);
             CREATE INDEX sends_uuid ON sends(uuid);
@@ -363,13 +389,20 @@ impl<'a> Index<'a> {
         let changes = self.store.changes_since(&generation, offset)?;
         let now = now();
         let quiet = changes.documents.as_ref().is_some_and(BTreeSet::is_empty);
+        let periodic = now < checked || now - checked >= FULL_CHECK_MS;
         let full = !built
             || changes.documents.is_none()
             // The folder changed while the journal says nothing did: a
             // writer that does not keep the journal.
             || (quiet && self.meta("folder")?.as_deref() != Some(folder.as_str()))
-            || now < checked
-            || now - checked >= FULL_CHECK_MS;
+            || periodic;
+        let moved = changes.generation != generation || changes.offset != offset;
+        if built && changes.documents.is_none() && moved {
+            // The journal cannot say what changed (another generation, left
+            // behind, damaged or missing; it is started again): every row
+            // read before now is suspect, whatever its stamps.
+            self.db.execute("INSERT OR REPLACE INTO meta VALUES('suspect', ?1)", [now.to_string()])?;
+        }
         if full {
             let mut known: HashMap<String, String> = HashMap::new();
             {
@@ -388,6 +421,19 @@ impl<'a> Index<'a> {
             let uuids: Vec<String> = documents.iter().filter(|d| ids::is_uuid(d)).cloned().collect();
             self.refresh(&uuids, None, Some(documents))?;
         }
+        // Suspect rows are read again, a bounded batch at a time.
+        let floor = self.floor(now)?;
+        let suspect: BTreeSet<String> = {
+            let mut query = self
+                .db
+                .prepare("SELECT uuid FROM tasks WHERE decoded < ?1 ORDER BY decoded LIMIT ?2")?;
+            let rows = query.query_map(params![floor, BATCH], |r| r.get::<_, String>(0))?;
+            rows.collect::<rusqlite::Result<_>>()?
+        };
+        if !suspect.is_empty() {
+            let list: Vec<String> = suspect.iter().cloned().collect();
+            self.refresh(&list, None, Some(&suspect))?;
+        }
         let tx = self.db.transaction()?;
         {
             let mut set = tx.prepare("INSERT OR REPLACE INTO meta VALUES(?1, ?2)")?;
@@ -403,6 +449,13 @@ impl<'a> Index<'a> {
         Ok(())
     }
 
+    /// Rows whose documents were read before this are suspect: read before
+    /// the journal last became unknown, or longer than `MAX_AGE_MS` ago.
+    fn floor(&self, now: i64) -> Outcome<i64> {
+        let suspect = self.meta("suspect")?.and_then(|v| v.parse().ok()).unwrap_or(0);
+        Ok(suspect.max(now - MAX_AGE_MS))
+    }
+
     /// Indexes again each of `uuids` whose files changed (`known` holds the
     /// stamps already read, for a full check), and every one the journal
     /// names (`noted`) whatever its stamps: Windows has no inode and coarse
@@ -415,43 +468,65 @@ impl<'a> Index<'a> {
         noted: Option<&BTreeSet<String>>,
     ) -> Outcome<()> {
         let dir = self.store.dir().to_owned();
+        let read_at = now();
         for chunk in uuids.chunks(CHUNK) {
             let mut work = Vec::new();
             for uuid in chunk {
-                let now = files(&dir, uuid);
-                let stored = match known {
+                let (now, settled) = stamped(&dir, uuid, read_at);
+                // An unsettled row stays suspect, to be read again.
+                let decoded = if settled { read_at } else { 0 };
+                let stored: Option<(String, Option<String>, Option<String>)> = self
+                    .db
+                    .query_row("SELECT files, row, error FROM tasks WHERE uuid=?1", [uuid], |r| {
+                        Ok((r.get(0)?, r.get(1)?, r.get(2)?))
+                    })
+                    .optional()?;
+                let stamps = match known {
                     Some(known) => known.get(uuid).cloned(),
-                    None => self
-                        .db
-                        .query_row("SELECT files FROM tasks WHERE uuid=?1", [uuid], |r| r.get(0))
-                        .optional()?,
+                    None => stored.as_ref().map(|s| s.0.clone()),
                 };
-                let unchanged = stored.as_deref() == Some(now.as_str()) || (stored.is_none() && now == "-|-");
+                let unchanged = stamps.as_deref() == Some(now.as_str()) || (stamps.is_none() && now == "-|-");
                 if unchanged && !noted.is_some_and(|noted| noted.contains(uuid)) {
                     continue;
                 }
                 let derived = (now != "-|-").then(|| derive(self.store, uuid));
-                work.push((uuid, now, derived));
+                // Read again to the same row: only its stamps and time change.
+                let same = match (&derived, &stored) {
+                    (Some(Derived::Row { row, .. }), Some((_, Some(old), None))) => row == old,
+                    (Some(Derived::Damaged(error)), Some((_, None, Some(old)))) => error == old,
+                    _ => false,
+                };
+                work.push((uuid, now, derived, same, decoded));
             }
             if work.is_empty() {
                 continue;
             }
             let tx = self.db.transaction()?;
-            for (uuid, files, derived) in work {
+            let mut changed = false;
+            for (uuid, files, derived, same, decoded) in work {
+                if same {
+                    tx.execute(
+                        "UPDATE tasks SET files=?1, decoded=?2 WHERE uuid=?3",
+                        params![files, decoded, uuid],
+                    )?;
+                    continue;
+                }
+                changed = true;
                 tx.execute("DELETE FROM tasks WHERE uuid=?1", [uuid])?;
                 tx.execute("DELETE FROM sends WHERE uuid=?1", [uuid])?;
                 match derived {
                     None => (),
                     Some(Derived::Damaged(error)) => {
                         tx.execute(
-                            "INSERT INTO tasks(uuid, files, error) VALUES(?1, ?2, ?3)",
-                            params![uuid, files, error],
+                            "INSERT INTO tasks(uuid, files, error, decoded) VALUES(?1, ?2, ?3, ?4)",
+                            params![uuid, files, error, decoded],
                         )?;
                     }
                     Some(Derived::Row { stage, rank, id, row, sends }) => {
                         tx.execute(
-                            "INSERT INTO tasks(uuid, files, stage, rank, short_id, row) VALUES(?1, ?2, ?3, ?4, ?5, ?6)",
-                            params![uuid, files, stage, rank, id, row],
+                            "INSERT INTO tasks(uuid, files, stage, rank, short_id, row, decoded)
+                             VALUES(?1, ?2, ?3, ?4, ?5, ?6, ?7)",
+                            params![uuid, files, stage, rank, id, row, decoded],
                         )?;
                         for at in sends {
                             tx.execute("INSERT INTO sends VALUES(?1, ?2)", params![uuid, at])?;
@@ -459,7 +534,9 @@ impl<'a> Index<'a> {
                     }
                 }
             }
-            tx.execute("INSERT OR REPLACE INTO meta VALUES('revision', ?1)", [ids::new_uuid()])?;
+            if changed {
+                tx.execute("INSERT OR REPLACE INTO meta VALUES('revision', ?1)", [ids::new_uuid()])?;
+            }
             tx.commit()?;
         }
         Ok(())
@@ -476,6 +553,9 @@ impl<'a> Index<'a> {
     /// again and the page read again.
     pub(super) fn page(&mut self, stage: Stage, limit: usize, from: &Anchor) -> Outcome<Page> {
         let mut from = from.clone();
+        // Rows read from their documents in this call are current even when
+        // their files are not yet settled.
+        let mut read = BTreeSet::new();
         for _ in 0..4 {
             let rows = self.rows(stage, limit, &from)?;
             if rows.is_empty() {
@@ -491,14 +571,21 @@ impl<'a> Index<'a> {
                     Anchor::Start | Anchor::End => (),
                 }
             }
+            // A row is served only when its files are as read and it is not
+            // suspect; any other is read again from its document first.
             let dir = self.store.dir().to_owned();
-            let stale: Vec<String> = rows
+            let floor = self.floor(now())?;
+            let stale: BTreeSet<String> = rows
                 .iter()
-                .filter(|(uuid, _, stored, _)| files(&dir, uuid) != *stored)
+                .filter(|(uuid, _, stored, _, decoded)| {
+                    (*decoded < floor && !read.contains(uuid)) || files(&dir, uuid) != *stored
+                })
                 .map(|(uuid, ..)| uuid.clone())
                 .collect();
             if !stale.is_empty() {
-                self.refresh(&stale, None, None)?;
+                let list: Vec<String> = stale.iter().cloned().collect();
+                self.refresh(&list, None, Some(&stale))?;
+                read.extend(stale);
                 continue;
             }
             return self.finish(stage, rows);
@@ -506,11 +593,10 @@ impl<'a> Index<'a> {
         Err(Failure::Other)
     }
 
-    #[allow(clippy::type_complexity)]
-    fn rows(&self, stage: Stage, limit: usize, from: &Anchor) -> Outcome<Vec<(String, String, String, String)>> {
-        const ASCENDING: &str = "SELECT uuid, rank, files, row FROM tasks WHERE stage=?1 AND (rank, uuid) > (?2, ?3) ORDER BY rank, uuid LIMIT ?4";
-        const DESCENDING: &str = "SELECT uuid, rank, files, row FROM tasks WHERE stage=?1 AND (rank, uuid) < (?2, ?3) ORDER BY rank DESC, uuid DESC LIMIT ?4";
-        const LAST: &str = "SELECT uuid, rank, files, row FROM tasks WHERE stage=?1 AND ?2 = ?3 ORDER BY rank DESC, uuid DESC LIMIT ?4";
+    fn rows(&self, stage: Stage, limit: usize, from: &Anchor) -> Outcome<Vec<Listed>> {
+        const ASCENDING: &str = "SELECT uuid, rank, files, row, decoded FROM tasks WHERE stage=?1 AND (rank, uuid) > (?2, ?3) ORDER BY rank, uuid LIMIT ?4";
+        const DESCENDING: &str = "SELECT uuid, rank, files, row, decoded FROM tasks WHERE stage=?1 AND (rank, uuid) < (?2, ?3) ORDER BY rank DESC, uuid DESC LIMIT ?4";
+        const LAST: &str = "SELECT uuid, rank, files, row, decoded FROM tasks WHERE stage=?1 AND ?2 = ?3 ORDER BY rank DESC, uuid DESC LIMIT ?4";
         let (sql, rank, uuid) = match from {
             Anchor::Start => (ASCENDING, "", ""),
             Anchor::After(rank, uuid) => (ASCENDING, rank.as_str(), uuid.as_str()),
@@ -520,9 +606,9 @@ impl<'a> Index<'a> {
         let mut query = self.db.prepare_cached(sql)?;
         let mut rows = query
             .query_map(params![stage.as_str(), rank, uuid, limit as i64], |r| {
-                Ok((r.get(0)?, r.get(1)?, r.get(2)?, r.get(3)?))
+                Ok((r.get(0)?, r.get(1)?, r.get(2)?, r.get(3)?, r.get(4)?))
             })?
-            .collect::<rusqlite::Result<Vec<(String, String, String, String)>>>()?;
+            .collect::<rusqlite::Result<Vec<Listed>>>()?;
         if matches!(from, Anchor::Before(..) | Anchor::End) {
             rows.reverse();
         }
@@ -547,7 +633,7 @@ impl<'a> Index<'a> {
         Ok(count as usize)
     }
 
-    fn finish(&self, stage: Stage, rows: Vec<(String, String, String, String)>) -> Outcome<Page> {
+    fn finish(&self, stage: Stage, rows: Vec<Listed>) -> Outcome<Page> {
         let project = self.store.project_id();
         let (mut next, mut previous, mut position) = (None, None, 0);
         if let (Some(first), Some(last)) = (rows.first(), rows.last()) {
@@ -561,7 +647,7 @@ impl<'a> Index<'a> {
         }
         let rows = rows
             .into_iter()
-            .map(|(_, _, _, row)| serde_json::from_str(&row).map_err(|_| Failure::Damaged))
+            .map(|(_, _, _, row, _)| serde_json::from_str(&row).map_err(|_| Failure::Damaged))
             .collect::<Outcome<Vec<Value>>>()?;
         Ok(Page { rows, position, next, previous })
     }

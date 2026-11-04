@@ -646,6 +646,11 @@ never releases it. Separate desktops have separate reservations, as Qt did;
 concurrent imports can add copies before sync, and the location rule prevents
 further additions once those copies are visible.
 
+A computer whose catalog, configuration or route changed during its import
+(`legacy_projects_changed`) is not retried in the same session: its list is
+checked again the next time Zerus starts, and the Migration report says so.
+The worker adds no in-session retry for it.
+
 ## Retained Qt shared organization
 
 On the production switch only, the existing local organization topic queues a

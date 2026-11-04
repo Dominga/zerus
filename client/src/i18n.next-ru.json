@@ -647,7 +647,7 @@
   "The branch %1 is kept.": "Ветка %1 сохраняется.",
   "The clipboard is unavailable": "Буфер обмена недоступен",
   "The comment stays in the task; nothing was cancelled or sent again.": "Комментарий остаётся в задаче; ничего не отменено и не отправлено повторно.",
-  "The computer or project catalog changed. The original import is kept for review.": "Компьютер или каталог проектов изменился. Исходный импорт сохранён для проверки.",
+  "The computer or project catalog changed. It is checked again the next time Zerus starts.": "Компьютер или каталог проектов изменился. Проверка повторится при следующем запуске Zerus.",
   "The current draft cannot be replaced while it is loading, sending or waiting to send.": "Текущий черновик нельзя заменить, пока он загружается, отправляется или ждёт отправки.",
   "The current filters hide every session. Filters change only this list, never the open conversation.": "Текущие фильтры скрывают все сессии. Фильтры меняют только этот список, а не открытый разговор.",
   "The desktop service did not confirm the message. Its original was kept for review and will not be sent again.": "Служба рабочего стола не подтвердила сообщение. Оригинал сохранён для проверки и не будет отправлен повторно.",

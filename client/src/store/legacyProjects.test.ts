@@ -36,3 +36,8 @@ it("explains blocked read recovery without adding a retry-apply action", () => {
   expect(legacyProjectStatus("Project import verification is blocked. Retrying reads automatically.")).toContain("Retrying reads");
   expect(legacyProjectStatus("Unrelated status")).toBe("Unrelated status");
 });
+
+it("says a changed computer is checked again at the next start, keeping its fixed code (N1)", () => {
+  const row = legacyProjectRow(report("blocked", ["legacy_projects_changed"]))!;
+  expect(row.reasons).toEqual([{ code: "legacy_projects_changed", text: "The computer or project catalog changed. It is checked again the next time Zerus starts." }]);
+});

@@ -2611,7 +2611,7 @@
   "The complete new checkout path. Edit its folder name or choose a parent folder with Browse.": "Полный путь новой рабочей копии. Измените имя папки или выберите родительскую папку кнопкой «Обзор…».",
   "The computer connector uses this private configuration. Saving does not restart it or change the active connection.": "Коннектор компьютера использует эти локальные настройки. Сохранение не перезапускает его и не меняет текущее соединение.",
   "The computer did not confirm this folder. Try again.": "Компьютер не подтвердил эту папку. Попробуйте еще раз.",
-  "The computer or project catalog changed. The original import is kept for review.": "Компьютер или каталог проектов изменился. Исходный импорт сохранён для проверки.",
+  "The computer or project catalog changed. It is checked again the next time Zerus starts.": "Компьютер или каталог проектов изменился. Проверка повторится при следующем запуске Zerus.",
   "The configured computer credential stays hidden. Leave replacement blank to retain it for this relay.": "Текущие учётные данные компьютера скрыты. Оставьте поле замены пустым, чтобы сохранить их для этого ретранслятора.",
   "The connection changed. Review it before removing.": "Подключение изменилось. Проверьте его перед удалением.",
   "The connector is draining its current request. Refresh status to confirm it has stopped.": "Коннектор завершает текущий запрос. Обновите состояние, чтобы убедиться, что он остановлен.",

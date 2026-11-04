@@ -5,7 +5,7 @@ import { tr } from "../i18n";
 const REASONS = {
   legacy_projects_invalid: () => tr("The legacy project list could not be verified. The source is kept."),
   legacy_projects_capacity: () => tr("The project import exceeds its safety limit. Review the existing projects manually."),
-  legacy_projects_changed: () => tr("The computer or project catalog changed. The original import is kept for review."),
+  legacy_projects_changed: () => tr("The computer or project catalog changed. It is checked again the next time Zerus starts."),
   legacy_projects_history: () => tr("Earlier project changes prevent automatic import. Review the existing projects manually."),
   legacy_projects_invalid_folders: () => tr("Some legacy folders are invalid. Existing projects and the source are kept."),
   legacy_projects_windows_unsupported: () => tr("Legacy Windows folders require device-local import and were not shared."),

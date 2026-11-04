@@ -358,7 +358,9 @@ fn collect(record: &Value, live: bool) -> (Jobs, Vec<String>) {
             let stale = !live
                 || job["run_id"] != record["run_id"]
                 || job["observed"] != true
-                || lost_foreground;
+                || lost_foreground
+                || (subagent_lifecycle::owner_unknown(record, string(job,"owner")) && !subagent_lifecycle::own_process_live(job))
+                || subagent_lifecycle::recorded_process_unknown(job);
             job["stale"] = json!(stale);
             if stale {
                 job["last_status"] = job["status"].clone();

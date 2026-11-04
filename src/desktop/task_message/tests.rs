@@ -386,6 +386,7 @@ mod message_child {
     use super::super::child::{self, Ended};
     use super::*;
     use std::path::Path;
+    use std::sync::Arc;
     use std::time::{Duration, Instant};
 
     fn lock() -> (
@@ -402,6 +403,9 @@ mod message_child {
     fn python(script: &str) -> Vec<String> {
         vec!["python3".into(), "-c".into(), script.into()]
     }
+    fn guard() -> Arc<dyn Send + Sync> {
+        Arc::new(())
+    }
     fn soon() -> Instant {
         Instant::now() + Duration::from_secs(20)
     }
@@ -416,7 +420,9 @@ mod message_child {
                 &python("import sys\nsys.stdout.buffer.write(sys.stdin.buffer.read()[::-1])"),
                 &input,
                 &held,
-                soon()
+                &guard(),
+                soon(),
+                |_| Ok(())
             ),
             Ended::Exited {
                 code: 0,
@@ -430,7 +436,9 @@ mod message_child {
                 &["-c".into(), "cat >/dev/null; printf no; exit 3".into()],
                 b"x",
                 &held,
-                soon()
+                &guard(),
+                soon(),
+                |_| Ok(())
             ),
             Ended::Exited {
                 code: 3,
@@ -449,7 +457,9 @@ mod message_child {
                 &["-c".into(), "exit 0".into()],
                 &vec![b'x'; 1 << 20],
                 &held,
-                soon()
+                &guard(),
+                soon(),
+                |_| Ok(())
             ),
             Ended::Unknown("task_message_input_unwritten")
         );
@@ -463,7 +473,9 @@ mod message_child {
                 )),
                 b"",
                 &held,
-                soon()
+                &guard(),
+                soon(),
+                |_| Ok(())
             ),
             Ended::Unknown("task_message_reply_too_large")
         );
@@ -475,7 +487,9 @@ mod message_child {
                 &["30".into()],
                 b"",
                 &held,
-                Instant::now() + Duration::from_millis(300)
+                &guard(),
+                Instant::now() + Duration::from_millis(300),
+                |_| Ok(())
             ),
             Ended::Unknown("task_message_timed_out")
         );
@@ -487,7 +501,9 @@ mod message_child {
                 &["-c".into(), "kill -9 $$".into()],
                 b"",
                 &held,
-                soon()
+                &guard(),
+                soon(),
+                |_| Ok(())
             ),
             Ended::Unknown("task_message_signalled")
         );
@@ -497,7 +513,15 @@ mod message_child {
     fn only_a_child_that_never_existed_is_not_started() {
         let (_temp, _location, _record, held) = lock();
         assert_eq!(
-            child::run(Path::new("/nonexistent/zerus-hgs"), &[], b"", &held, soon()),
+            child::run(
+                Path::new("/nonexistent/zerus-hgs"),
+                &[],
+                b"",
+                &held,
+                &guard(),
+                soon(),
+                |_| Ok(())
+            ),
             Ended::NotStarted
         );
         child::REFUSE_PRE_EXEC.with(|refuse| refuse.set(true));
@@ -507,7 +531,9 @@ mod message_child {
                 &["true".into()],
                 b"",
                 &held,
-                soon()
+                &guard(),
+                soon(),
+                |_| Ok(())
             ),
             Ended::NotStarted
         );
@@ -527,6 +553,9 @@ mod message_child {
             }
             // The wait-fault helper exits on its own in two seconds, even
             // under mutation; nothing is signalled by name.
+            let resources = Arc::new(());
+            let weak = Arc::downgrade(&resources);
+            let guard: Arc<dyn Send + Sync> = resources;
             let ended = child::run(
                 Path::new("/usr/bin/env"),
                 &python(if read {
@@ -536,8 +565,11 @@ mod message_child {
                 }),
                 b"",
                 &held,
+                &guard,
                 soon(),
+                |_| Ok(()),
             );
+            drop(guard);
             assert_eq!(ended, Ended::Unknown(expected));
             assert!(
                 child::READ_ERROR.with(|v| !v.get()) && child::WAIT_ERROR.with(|v| !v.get()),
@@ -557,7 +589,318 @@ mod message_child {
                 }
             }
             assert!(reaped, "the original child was waited for");
+            if read {
+                // That pipe's end can never be observed: its guard stays.
+                std::thread::sleep(Duration::from_millis(50));
+                assert!(weak.strong_count() > 0, "an unreadable pipe pins the guard");
+            } else {
+                // A confirmed exit and real pipe ends release every copy.
+                let until = Instant::now() + Duration::from_secs(10);
+                while weak.strong_count() > 0 {
+                    assert!(Instant::now() < until, "the guard outlived the pipes");
+                    std::thread::sleep(Duration::from_millis(5));
+                }
+            }
         }
+    }
+
+    /// review-n's probe at f5791071: after a timeout or an unobserved exit, the
+    /// recovery drained the row while a descendant still held the original
+    /// stdout. Now the pipe's guard keeps the SAME lock until that pipe ends.
+    #[test]
+    fn a_timed_out_or_unobserved_original_keeps_custody_until_its_descendant_pipe_ends() {
+        for wait_error in [false, true] {
+            let (_temp, location, mut store, epoch) = fixture();
+            let original = original(&location.configuration, &epoch);
+            let (record, held) = running(&mut store, &location, &original, &epoch);
+            let finish = location.root.join("descendant-finished");
+            // The descendant keeps the original stdout for two seconds, then
+            // records its end; it never inherits the custody lock.
+            let script = format!(
+                "import subprocess,sys,time\nsubprocess.Popen([sys.executable,'-c',\"import pathlib,sys,time\\ntime.sleep(2)\\npathlib.Path(sys.argv[1]).write_text('finished')\",{}],stdout=sys.stdout,stderr=subprocess.DEVNULL)\nsys.stdout.write('descendant-ready')\nsys.stdout.flush()\ntime.sleep(5)",
+                serde_json::to_string(&finish).unwrap()
+            );
+            child::WAIT_ERROR_AFTER_OUTPUT.with(|armed| armed.set(wait_error));
+            let guard: Arc<dyn Send + Sync> = Arc::new(held.clone());
+            let ended = child::run(
+                Path::new("/usr/bin/env"),
+                &python(&script),
+                b"frozen",
+                &held,
+                &guard,
+                Instant::now() + Duration::from_millis(200),
+                |_| Ok(()),
+            );
+            let expected = if wait_error {
+                "task_message_unobserved"
+            } else {
+                "task_message_timed_out"
+            };
+            assert_eq!(ended, Ended::Unknown(expected));
+            let row = ledger::load(&store.db, &original.plan.request_id)
+                .unwrap()
+                .unwrap();
+            let tx = store
+                .db
+                .transaction_with_behavior(TransactionBehavior::Immediate)
+                .unwrap();
+            ledger::result(&tx, &row, None, expected).unwrap();
+            tx.commit().unwrap();
+            drop((guard, held));
+            let drained = |store: &mut Store| {
+                store.recover_operation_custody(&location);
+                ledger::load(&store.db, &original.plan.request_id)
+                    .unwrap()
+                    .unwrap()
+                    .receipt
+                    .drained
+            };
+            let until = Instant::now() + Duration::from_millis(800);
+            while Instant::now() < until {
+                assert!(
+                    !drained(&mut store) || finish.exists(),
+                    "drained before the descendant's pipe ended ({expected})"
+                );
+                std::thread::sleep(Duration::from_millis(5));
+            }
+            assert!(matches!(
+                crate::desktop::custody::probe(&location, &record),
+                crate::desktop::custody::Observation::Held
+            ));
+            let until = Instant::now() + Duration::from_secs(10);
+            while !drained(&mut store) {
+                assert!(Instant::now() < until, "never drained after the real end");
+                std::thread::sleep(Duration::from_millis(10));
+            }
+            assert!(finish.exists());
+        }
+    }
+
+    /// The original child prints a reply, starts a descendant that keeps its
+    /// stdout open and exits. Like `hgs` (adopt_custody), it never lets the
+    /// descendant inherit the custody lock. Only an EOF on the test's accepted
+    /// socket ends the descendant; a panic or crash closes it too.
+    pub(super) const RETAINING: &str = r#"import os,subprocess,sys
+sys.stdin.buffer.read()
+sys.stdout.buffer.write(b'{}')
+sys.stdout.flush()
+subprocess.Popen([sys.executable,'-c',"import socket,sys\nc=socket.socket(socket.AF_UNIX,socket.SOCK_STREAM)\nc.connect(sys.argv[1])\nassert c.recv(1)==b''",sys.argv[1]],stdin=subprocess.DEVNULL,close_fds=True)
+os._exit(0)"#;
+
+    /// The one connection of the descendant, accepted within a bound.
+    pub(super) fn accept(
+        listener: &std::os::unix::net::UnixListener,
+        mut turn: impl FnMut(),
+    ) -> std::os::unix::net::UnixStream {
+        let until = Instant::now() + Duration::from_secs(10);
+        loop {
+            match listener.accept() {
+                Ok((stream, _)) => return stream,
+                Err(e) if e.kind() == std::io::ErrorKind::WouldBlock => {
+                    assert!(Instant::now() < until, "the descendant never connected");
+                    turn();
+                    std::thread::sleep(Duration::from_millis(5));
+                }
+                Err(e) => panic!("{e}"),
+            }
+        }
+    }
+
+    #[test]
+    fn an_original_pipe_held_by_a_descendant_keeps_the_guard_until_its_real_end() {
+        let (_temp, _location, _record, held) = lock();
+        let control = tempfile::tempdir().unwrap();
+        let socket = control.path().join("c");
+        let listener = std::os::unix::net::UnixListener::bind(&socket).unwrap();
+        listener.set_nonblocking(true).unwrap();
+        let resources = Arc::new(());
+        let weak = Arc::downgrade(&resources);
+        let guard: Arc<dyn Send + Sync> = resources;
+        let mut args = python(RETAINING);
+        args.push(socket.to_str().unwrap().into());
+        assert_eq!(
+            child::run(
+                Path::new("/usr/bin/env"),
+                &args,
+                b"",
+                &held,
+                &guard,
+                Instant::now() + Duration::from_millis(500),
+                |_| Ok(())
+            ),
+            Ended::Unknown("task_message_output_retained")
+        );
+        let release = accept(&listener, || ());
+        drop(guard);
+        std::thread::sleep(Duration::from_millis(50));
+        assert!(
+            weak.strong_count() > 0,
+            "the still-open original pipe keeps its own guard copy"
+        );
+        drop(release); // EOF is the one explicit release of the descendant.
+        let until = Instant::now() + Duration::from_secs(10);
+        while weak.strong_count() > 0 {
+            assert!(Instant::now() < until, "the guard outlived the pipe's end");
+            std::thread::sleep(Duration::from_millis(5));
+        }
+    }
+
+    /// A script image: the original reads its input and answers `original`;
+    /// a replacement records that it ran and echoes the private input.
+    #[cfg(target_os = "linux")]
+    fn image(dir: &Path) -> (std::path::PathBuf, std::path::PathBuf) {
+        use std::os::unix::fs::PermissionsExt;
+        let path = dir.join("hgs");
+        std::fs::write(
+            &path,
+            "#!/usr/bin/env python3\nimport sys\nsys.stdin.buffer.read()\nsys.stdout.write('original')\n",
+        )
+        .unwrap();
+        std::fs::set_permissions(&path, std::fs::Permissions::from_mode(0o700)).unwrap();
+        (path, dir.join("replacement-ran"))
+    }
+    #[cfg(target_os = "linux")]
+    fn replace(path: &Path, ran: &Path) {
+        use std::os::unix::fs::PermissionsExt;
+        let next = path.with_extension("next");
+        std::fs::write(
+            &next,
+            format!(
+                "#!/usr/bin/env python3\nimport pathlib,sys\npathlib.Path({:?}).write_text('ran')\nsys.stdout.buffer.write(b'replacement received: '+sys.stdin.buffer.read())\n",
+                ran.to_str().unwrap()
+            ),
+        )
+        .unwrap();
+        std::fs::set_permissions(&next, std::fs::Permissions::from_mode(0o700)).unwrap();
+        std::fs::rename(&next, path).unwrap();
+    }
+
+    /// The same inode rewritten in place, as another writer of the selected
+    /// image could.
+    #[cfg(target_os = "linux")]
+    fn rewrite(path: &Path, ran: &Path) {
+        use std::io::Write;
+        let mut file = std::fs::OpenOptions::new()
+            .write(true)
+            .truncate(true)
+            .open(path)
+            .unwrap();
+        write!(
+            file,
+            "#!/usr/bin/env python3\nimport pathlib,sys\npathlib.Path({:?}).write_text('ran')\nsys.stdout.buffer.write(b'rewrite received: '+sys.stdin.buffer.read())\n",
+            ran.to_str().unwrap()
+        )
+        .unwrap();
+    }
+
+    #[test]
+    #[cfg(target_os = "linux")]
+    fn an_image_rewritten_in_place_before_the_final_check_starts_no_child() {
+        let (_temp, _location, _record, held) = lock();
+        let dir = tempfile::tempdir().unwrap();
+        let (path, ran) = image(dir.path());
+        let pin = zerus_client_core::image::linux::Pin::open(&path).unwrap();
+        let inode = std::os::unix::fs::MetadataExt::ino(&std::fs::metadata(&path).unwrap());
+        rewrite(&path, &ran);
+        assert_eq!(
+            std::os::unix::fs::MetadataExt::ino(&std::fs::metadata(&path).unwrap()),
+            inode,
+            "the same inode"
+        );
+        assert_eq!(
+            super::super::runtime::pinned(
+                &pin,
+                &[],
+                b"private frozen input",
+                &held,
+                &guard(),
+                soon()
+            ),
+            Ended::NotStarted
+        );
+        assert!(!ran.exists(), "the rewrite never ran");
+    }
+
+    /// review-win2-c's same-inode probe on #1307: after the final check, an
+    /// in-place rewrite must never run. The child executes the sealed snapshot.
+    #[test]
+    #[cfg(target_os = "linux")]
+    fn an_image_rewritten_in_place_after_the_final_check_never_runs_or_receives_the_input() {
+        let (_temp, _location, _record, held) = lock();
+        let dir = tempfile::tempdir().unwrap();
+        let (path, ran) = image(dir.path());
+        let pin = zerus_client_core::image::linux::Pin::open(&path).unwrap();
+        let (late, marker) = (path.clone(), ran.clone());
+        child::AFTER_FINAL_CHECK
+            .with(|hook| *hook.borrow_mut() = Some(Box::new(move || rewrite(&late, &marker))));
+        assert_eq!(
+            super::super::runtime::pinned(
+                &pin,
+                &[],
+                b"private frozen input",
+                &held,
+                &guard(),
+                soon()
+            ),
+            Ended::Exited {
+                code: 0,
+                stdout: b"original".to_vec()
+            }
+        );
+        assert!(child::AFTER_FINAL_CHECK.with(|hook| hook.borrow().is_none()));
+        assert!(!ran.exists(), "the rewrite never ran");
+    }
+
+    #[test]
+    #[cfg(target_os = "linux")]
+    fn an_image_replaced_before_the_final_check_starts_no_child() {
+        let (_temp, _location, _record, held) = lock();
+        let dir = tempfile::tempdir().unwrap();
+        let (path, ran) = image(dir.path());
+        let pin = zerus_client_core::image::linux::Pin::open(&path).unwrap();
+        replace(&path, &ran);
+        assert_eq!(
+            super::super::runtime::pinned(
+                &pin,
+                &[],
+                b"private frozen input",
+                &held,
+                &guard(),
+                soon()
+            ),
+            Ended::NotStarted
+        );
+        assert!(!ran.exists(), "the replacement never ran");
+    }
+
+    /// review-n's late-swap probe at f5791071: the replacement ran and echoed
+    /// the private frozen input. Now the child executes the pinned descriptor.
+    #[test]
+    #[cfg(target_os = "linux")]
+    fn an_image_replaced_after_the_final_check_never_runs_or_receives_the_input() {
+        let (_temp, _location, _record, held) = lock();
+        let dir = tempfile::tempdir().unwrap();
+        let (path, ran) = image(dir.path());
+        let pin = zerus_client_core::image::linux::Pin::open(&path).unwrap();
+        let (late, marker) = (path.clone(), ran.clone());
+        child::AFTER_FINAL_CHECK
+            .with(|hook| *hook.borrow_mut() = Some(Box::new(move || replace(&late, &marker))));
+        assert_eq!(
+            super::super::runtime::pinned(
+                &pin,
+                &[],
+                b"private frozen input",
+                &held,
+                &guard(),
+                soon()
+            ),
+            Ended::Exited {
+                code: 0,
+                stdout: b"original".to_vec()
+            }
+        );
+        assert!(child::AFTER_FINAL_CHECK.with(|hook| hook.borrow().is_none()));
+        assert!(!ran.exists(), "the replacement never ran");
     }
 
     #[test]
@@ -569,8 +912,8 @@ mod message_child {
                 &python("import os,sys\nsys.stdout.write('own' if os.getpgid(0)==os.getpid() else 'shared')"),
                 b"",
                 &held,
-                soon()
-            ),
+                &guard(),
+                soon(), |_| Ok(())),
             Ended::Exited {
                 code: 0,
                 stdout: b"own".to_vec()
@@ -607,6 +950,7 @@ mod actor {
                     &[String],
                     &[u8],
                     &Arc<zerus_client_core::run::custody::InheritedLock>,
+                    &Arc<dyn Send + Sync>,
                 ) -> Ended
                 + Send
                 + Sync
@@ -628,6 +972,7 @@ mod actor {
                             &[String],
                             &[u8],
                             &Arc<zerus_client_core::run::custody::InheritedLock>,
+                            &Arc<dyn Send + Sync>,
                         ) -> Ended
                         + Send
                         + Sync,
@@ -668,6 +1013,9 @@ mod actor {
                 Some(execute) => runtime.fixture_executor(MACHINE, execute),
                 None => runtime.fixture_machine(MACHINE),
             }
+            // The shared actor logic is tested on every platform; the macOS
+            // fence has its own test.
+            runtime.fixture_mac_fence(false);
             runtime.poll(&mut store, Some(exclusion.clone()));
             Self {
                 _temp: temp,
@@ -718,7 +1066,7 @@ mod actor {
     fn an_admitted_message_runs_once_and_settles_only_from_its_exact_reply() {
         let sent = Arc::new(AtomicUsize::new(0));
         let count = sent.clone();
-        let mut f = Fixture::new(move |plan, args, input, _| {
+        let mut f = Fixture::new(move |plan, args, input, _, _| {
             count.fetch_add(1, Ordering::SeqCst);
             // The one `hgs task message` call, with the record's frozen stdin.
             assert_eq!(
@@ -793,7 +1141,7 @@ mod actor {
             ),
         ] {
             let result = std::sync::Mutex::new(Some(ended));
-            let mut f = Fixture::new(move |_, _, _, _| result.lock().unwrap().take().unwrap());
+            let mut f = Fixture::new(move |_, _, _, _, _| result.lock().unwrap().take().unwrap());
             let original = f.original();
             assert!(f.admit(&original).accepted);
             f.until("settled", |f| f.row(&original).receipt.drained);
@@ -816,8 +1164,232 @@ mod actor {
     }
 
     #[test]
+    fn a_descendant_pipe_keeps_custody_charge_and_takeover_until_its_eof() {
+        use super::message_child::{accept, RETAINING};
+        use crate::desktop::custody::{self, Observation};
+        let control = tempfile::tempdir().unwrap();
+        let socket = control.path().join("c");
+        let listener = std::os::unix::net::UnixListener::bind(&socket).unwrap();
+        listener.set_nonblocking(true).unwrap();
+        let path = socket.to_str().unwrap().to_owned();
+        // A real original child; its descendant keeps the original stdout
+        // open past the deadline and holds no custody lock of its own.
+        let mut f = Fixture::new(move |_, _, input, lock, resources| {
+            child::run(
+                std::path::Path::new("/usr/bin/env"),
+                &[
+                    "python3".into(),
+                    "-c".into(),
+                    RETAINING.into(),
+                    path.clone(),
+                ],
+                input,
+                lock,
+                resources,
+                Instant::now() + Duration::from_millis(500),
+                |_| Ok(()),
+            )
+        });
+        let original = f.original();
+        assert!(f.admit(&original).accepted);
+        // Keep the SAME accepted endpoint through the logical outcome.
+        let release = accept(&listener, || {
+            f.runtime.poll(&mut f.store, Some(f.exclusion.clone()));
+        });
+        f.until("logical Unknown", |f| {
+            f.row(&original).receipt.code == "task_message_output_retained"
+        });
+        let row = f.row(&original);
+        assert_eq!(row.receipt.phase, Phase::Unknown);
+        assert!(!row.receipt.drained);
+        let record = row.custody.clone().unwrap();
+        assert!(matches!(
+            custody::probe(&f.location, &record),
+            Observation::Held
+        ));
+        // Neither revoke nor a stop request releases the original resources.
+        f.store
+            .db
+            .execute("UPDATE desktop_writer SET revoked=1 WHERE id=1", [])
+            .unwrap();
+        f.runtime.request_stop();
+        for _ in 0..40 {
+            f.runtime.poll(&mut f.store, Some(f.exclusion.clone()));
+            std::thread::sleep(Duration::from_millis(5));
+        }
+        assert!(!f.runtime.drained(), "takeover stays blocked");
+        assert_eq!(ledger::undrained(&f.store.db).unwrap(), 1, "charged");
+        assert!(matches!(
+            custody::probe(&f.location, &record),
+            Observation::Held
+        ));
+        drop(release); // EOF is the one explicit release of the descendant.
+        f.until("drained", |f| {
+            f.runtime.drained()
+                && matches!(
+                    custody::probe(&f.location, &record),
+                    Observation::Released { .. }
+                )
+        });
+        assert_eq!(ledger::undrained(&f.store.db).unwrap(), 0);
+        let row = f.row(&original);
+        assert!(row.receipt.drained);
+        assert_eq!(
+            (row.receipt.phase, row.receipt.code.as_str()),
+            (Phase::Unknown, "task_message_output_retained")
+        );
+    }
+
+    #[test]
+    fn the_macos_fence_refuses_before_any_row_lease_or_child() {
+        let mut f = Fixture::new(|_, _, _, _, _| panic!("no fenced child"));
+        f.runtime.fixture_mac_fence(true);
+        let original = f.original();
+        let admission = f.admit(&original);
+        assert!(!admission.accepted && !admission.durable);
+        assert_eq!(admission.code, runtime::MAC_UNAVAILABLE);
+        assert!(admission.receipt.is_none());
+        assert!(ledger::load(&f.store.db, &original.plan.request_id)
+            .unwrap()
+            .is_none());
+        assert_eq!(ledger::undrained(&f.store.db).unwrap(), 0);
+        for _ in 0..20 {
+            f.runtime.poll(&mut f.store, Some(f.exclusion.clone()));
+        }
+        assert!(!f.runtime.status()["working"].as_bool().unwrap());
+    }
+
+    /// review-n's probes at f5791071, kept as regressions.
+    #[test]
+    #[cfg(target_os = "linux")]
+    fn a_native_permit_that_expires_while_begin_waits_admits_nothing() {
+        let mut f = Fixture::new(|_, _, _, _, _| panic!("expired permit must not execute"));
+        let original = f.original();
+        let request = zerus_client_core::desktop::ui_requests::Request::TaskMessage {
+            intent: Box::new(original.intent.clone()),
+        };
+        let authority = ui_authority::Validated::fixture_expiring(
+            &json!(request),
+            Instant::now() + Duration::from_millis(150),
+        );
+        let database = f.location.root.join("state.sqlite3");
+        let (ready_tx, ready_rx) = std::sync::mpsc::channel();
+        let writer = std::thread::spawn(move || {
+            let mut db = rusqlite::Connection::open(database).unwrap();
+            let tx = db
+                .transaction_with_behavior(TransactionBehavior::Immediate)
+                .unwrap();
+            ready_tx.send(()).unwrap();
+            std::thread::sleep(Duration::from_millis(300));
+            tx.commit().unwrap();
+        });
+        ready_rx.recv_timeout(Duration::from_secs(2)).unwrap();
+        let answer = f
+            .runtime
+            .frontend(&mut f.store, authority, Some(f.exclusion.clone()));
+        writer.join().unwrap();
+        assert_eq!(answer["accepted"], false, "consumed after it expired");
+        assert!(ledger::load(&f.store.db, &original.plan.request_id)
+            .unwrap()
+            .is_none());
+    }
+
+    #[test]
+    fn a_revoke_after_reservation_prevents_the_message_step() {
+        let calls = Arc::new(AtomicUsize::new(0));
+        let called = calls.clone();
+        let mut f = Fixture::new(move |_, _, _, _, _| {
+            called.fetch_add(1, Ordering::SeqCst);
+            Ended::Unknown("lost")
+        });
+        let original = f.original();
+        assert!(f.admit(&original).accepted);
+        f.until("reserved before the step", |f| {
+            f.row(&original).receipt.phase == Phase::Running
+        });
+        f.store
+            .db
+            .execute("UPDATE desktop_writer SET revoked=1 WHERE id=1", [])
+            .unwrap();
+        f.until("refused and drained", |f| f.row(&original).receipt.drained);
+        assert_eq!(calls.load(Ordering::SeqCst), 0);
+        assert_eq!(f.row(&original).receipt.phase, Phase::Unknown);
+    }
+
+    #[test]
+    fn duplicates_while_running_and_after_a_lost_result_never_dispatch_again() {
+        let calls = Arc::new(AtomicUsize::new(0));
+        let called = calls.clone();
+        let (release_tx, release_rx) = std::sync::mpsc::channel::<()>();
+        let release_rx = std::sync::Mutex::new(release_rx);
+        let mut f = Fixture::new(move |_, _, _, _, _| {
+            called.fetch_add(1, Ordering::SeqCst);
+            release_rx
+                .lock()
+                .unwrap()
+                .recv_timeout(Duration::from_secs(5))
+                .unwrap();
+            Ended::Unknown("task_message_reply_lost")
+        });
+        let original = f.original();
+        assert!(f.admit(&original).accepted);
+        f.until("running child", |_| calls.load(Ordering::SeqCst) == 1);
+        for _ in 0..3 {
+            assert!(f.admit(&original).accepted);
+        }
+        release_tx.send(()).unwrap();
+        f.until("Unknown drained", |f| f.row(&original).receipt.drained);
+        assert_eq!(f.row(&original).receipt.phase, Phase::Unknown);
+        for _ in 0..3 {
+            assert!(f.admit(&original).accepted);
+            f.runtime.poll(&mut f.store, Some(f.exclusion.clone()));
+        }
+        f.runtime.request_stop();
+        f.until("drained", |f| f.runtime.drained());
+        assert_eq!(
+            calls.load(Ordering::SeqCst),
+            1,
+            "only the original dispatch"
+        );
+    }
+
+    /// The real original path, without an executor: the runtime's pinned
+    /// image (a script here) receives the exact call and frozen stdin.
+    #[test]
+    #[cfg(target_os = "linux")]
+    fn the_pinned_image_runs_the_original_call_and_its_exact_reply_settles() {
+        use std::os::unix::fs::PermissionsExt;
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("hgs");
+        let seen = dir.path().join("stdin");
+        std::fs::write(
+            &path,
+            format!(
+                "#!/usr/bin/env python3\nimport json,pathlib,sys\npathlib.Path({:?}).write_bytes(sys.stdin.buffer.read())\na=sys.argv\nprint(json.dumps({{'task':{{'uuid':a[a.index('message')+1],'project':a[a.index('--project')+1]}},'message':{{'kind':'message','request_id':a[a.index('--request-id')+1],'session':None,'delivery':{{'mode':a[a.index('--mode')+1],'state':'queued','stage':'todo','stage_at':7}}}}}}))\n",
+                seen.to_str().unwrap()
+            ),
+        )
+        .unwrap();
+        std::fs::set_permissions(&path, std::fs::Permissions::from_mode(0o700)).unwrap();
+        let mut f = Fixture::unexecuted();
+        f.runtime.fixture_image(&path);
+        let original = f.original();
+        assert!(f.admit(&original).accepted);
+        f.until("settled", |f| f.row(&original).receipt.drained);
+        let receipt = f.row(&original).receipt;
+        assert_eq!(
+            (receipt.phase, receipt.code.as_str()),
+            (Phase::Recorded, "")
+        );
+        assert_eq!(
+            std::fs::read_to_string(&seen).unwrap(),
+            message_input(&message_intent("hello", &[], "queue", ""))
+        );
+    }
+
+    #[test]
     fn a_reference_form_original_is_refused_before_any_row_until_it_can_be_prepared() {
-        let mut f = Fixture::new(|_, _, _, _| panic!("no reference child"));
+        let mut f = Fixture::new(|_, _, _, _, _| panic!("no reference child"));
         let intent = zerus_client_core::tasks_write::message_intent(
             "see this",
             &[zerus_client_core::attachments::Attachment {
@@ -856,7 +1428,7 @@ mod actor {
     fn a_revoked_writer_refuses_the_step_and_no_child_starts() {
         let sent = Arc::new(AtomicUsize::new(0));
         let count = sent.clone();
-        let mut f = Fixture::new(move |_, _, _, _| {
+        let mut f = Fixture::new(move |_, _, _, _, _| {
             count.fetch_add(1, Ordering::SeqCst);
             Ended::Exited {
                 code: 0,
@@ -879,13 +1451,13 @@ mod actor {
 
     #[test]
     fn restart_retires_a_queued_message_and_never_reconstructs_execution_consent() {
-        let mut f = Fixture::new(|_, _, _, _| panic!("recovered message must not execute"));
+        let mut f = Fixture::new(|_, _, _, _, _| panic!("recovered message must not execute"));
         let original = f.original();
         assert!(f.admit(&original).accepted);
         f.runtime = runtime::Runtime::new(&f.config, &f.epoch, f.owner.clone()).unwrap();
         f.runtime.fixture_executor(
             MACHINE,
-            Arc::new(|_, _, _, _| panic!("restart must not execute")),
+            Arc::new(|_, _, _, _, _| panic!("restart must not execute")),
         );
         f.store = Store::open(&f.location, &f.epoch).unwrap();
         zerus_desktop_ledger::authorize(

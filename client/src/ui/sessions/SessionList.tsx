@@ -14,6 +14,7 @@ import {
 import { agentKind, catalog, computerFresh, computerOffline } from "../../store/catalog";
 import { visibleUnreadReply } from "../../store/attention";
 import { optionalQuestionCount } from "./optional-questions";
+import { currentChildren } from "./subagents";
 import { runningCommandsEntry } from "../../store/processes";
 import { flag } from "../../store/settings";
 import { archiveCount, archiveTip } from "../../store/archive";
@@ -887,6 +888,10 @@ function Strip(props: { onEnter: () => void; onToggle: () => void }) {
   );
 }
 
+/** Both the strip tooltip and badge use this parent's current-state evidence. */
+export const stripChildStatus = (row: Extract<Row, { type: "child" }>) =>
+  childStatus(row.child, currentChildren(row.parent, !computerOffline(row.parent.computer)));
+
 function StripRow(props: { id: string; list: RowSource }) {
   const row = () => props.list.byId().get(props.id);
   const top = () => props.list.startOf().get(props.id) ?? 0;
@@ -895,9 +900,9 @@ function StripRow(props: { id: string; list: RowSource }) {
       <Show when={row()?.type === "header" ? (row() as Extract<Row, { type: "header" }>) : undefined}>{(h) => <StripBand row={h()} />}</Show>
       <Show when={row()?.type === "child" ? (row() as Extract<Row, { type: "child" }>) : undefined}>
         {(c) => (
-          <button class="strip-child" title={`${c().child.name}\n${childStatus(c().child).caption}`}
+          <button class="strip-child" title={`${c().child.name}\n${stripChildStatus(c()).caption}`}
             onClick={() => { setSelectedKey(c().parent.key); setSubagentOpen(c().child.id); }}>
-            <StatusBadge kind={childStatus(c().child).kind} caption="" iconOnly />
+            <StatusBadge kind={stripChildStatus(c()).kind} caption="" iconOnly />
             <span class="ell">{c().child.name}</span>
           </button>
         )}

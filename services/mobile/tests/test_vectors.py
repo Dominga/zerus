@@ -113,7 +113,7 @@ class GoldenVectorTests(unittest.TestCase):
     def test_operation_tables_have_the_reviewed_sizes(self):
         counts = json.loads(self.files["operations.json"])["counts"]
         self.assertEqual((counts["OPERATIONS"], counts["READ_OPERATIONS"], counts["MUTATIONS"], counts["CONTEXT_KEYS"]),
-                         (53, 22, 31, 23))
+                         (53, 22, 31, 24))  # + HGS_SESSION_ID (zerus-ucck P1)
         operations = set(json.loads(self.files["operations.json"])["sets"]["OPERATIONS"])
         self.assertTrue({"hooks_status", "analytics_read", "history_projection", "project_assignment", "project_assign"} <= operations)
         self.assertNotIn("remove_queued", operations)  # Rust-only table, never Python's.

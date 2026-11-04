@@ -7,6 +7,16 @@
 //! before anything else, marks it close-on-exec ([`adopt_custody`]): the lock
 //! lives exactly as long as the child, and nothing it starts inherits it. Only
 //! that child is ever signalled, and only at the deadline.
+//!
+//! The caller's resources guard (the same custody lock and the original's
+//! consent, with its lease and serve-owner loan) outlives every original pipe:
+//! an output pipe still open when this returns keeps a guard copy in its own
+//! reader until its real end, whatever result was recorded. Nothing is
+//! signalled for it. An end that can never be observed (a failed read or an
+//! unverified wait) pins a guard copy until this process exits.
+// macOS admission refuses every original until a qualified child seam attests
+// the code its child runs, so only tests start this runner there.
+#![cfg_attr(target_os = "macos", allow(dead_code))]
 use crate::platform;
 use std::io::{Read, Write};
 use std::os::fd::AsRawFd;
@@ -75,16 +85,74 @@ thread_local! {
     // interfere with other test children.
     pub(super) static READ_ERROR: std::cell::Cell<bool> = const { std::cell::Cell::new(false) };
     pub(super) static WAIT_ERROR: std::cell::Cell<bool> = const { std::cell::Cell::new(false) };
+    // The same wait fault, once the child's first output was read.
+    pub(super) static WAIT_ERROR_AFTER_OUTPUT: std::cell::Cell<bool> = const { std::cell::Cell::new(false) };
     pub(super) static SPAWNED: std::cell::Cell<Option<u32>> = const { std::cell::Cell::new(None) };
+    /// Runs once on this thread after the final check, right before spawn.
+    pub(super) static AFTER_FINAL_CHECK: std::cell::RefCell<Option<Box<dyn FnOnce()>>> = const { std::cell::RefCell::new(None) };
 }
 
-/// Runs the original child to its end, or to the deadline.
+/// An original output pipe.
+trait Pipe: Read + AsRawFd + Send {}
+impl<T: Read + AsRawFd + Send> Pipe for T {}
+
+/// Keeps `guard` as long as this process lives: the end it waits for can
+/// never be observed.
+fn pin(guard: &Arc<dyn Send + Sync>) {
+    std::mem::forget(guard.clone());
+}
+
+/// Keeps an original output pipe, and with it a copy of `guard`, until the
+/// pipe's real end. What it reads is discarded and nothing is signalled.
+fn retain(mut pipe: Box<dyn Pipe>, guard: &Arc<dyn Send + Sync>) {
+    let fd = pipe.as_raw_fd();
+    // SAFETY: fcntl on a descriptor this reader now owns; reads block from here.
+    unsafe {
+        libc::fcntl(
+            fd,
+            libc::F_SETFL,
+            libc::fcntl(fd, libc::F_GETFL) & !libc::O_NONBLOCK,
+        );
+    }
+    let held = guard.clone();
+    let reader = std::thread::Builder::new()
+        .name("task-message-output".into())
+        .spawn(move || {
+            let mut chunk = [0u8; 8192];
+            loop {
+                match pipe.read(&mut chunk) {
+                    Ok(0) => break,
+                    Ok(_) => {}
+                    Err(e) if e.kind() == std::io::ErrorKind::Interrupted => {}
+                    Err(e) if e.kind() == std::io::ErrorKind::WouldBlock => {
+                        std::thread::sleep(Duration::from_millis(10))
+                    }
+                    Err(_) => {
+                        pin(&held);
+                        return;
+                    }
+                }
+            }
+            // The real end: only now does this copy of the guard go.
+            drop(held);
+        });
+    if reader.is_err() {
+        pin(guard);
+    }
+}
+
+/// Runs the original child to its end, or to the deadline. `resources` is the
+/// guard that every still-open original pipe keeps until its real end.
+/// `final_check` runs inside the spawn turn, last before the spawn: its
+/// refusal means that no child ever existed.
 pub(super) fn run(
     program: &Path,
     args: &[String],
     input: &[u8],
     custody: &Arc<InheritedLock>,
+    resources: &Arc<dyn Send + Sync>,
     deadline: Instant,
+    final_check: impl FnOnce(&mut Command) -> std::io::Result<()>,
 ) -> Ended {
     let mut command = Command::new(program);
     command
@@ -96,16 +164,23 @@ pub(super) fn run(
         .env(CUSTODY_FD, custody.as_raw_fd().to_string());
     let spawned = {
         let _turn = platform::spawn_turn();
-        custody.inherit(&mut command).and_then(|()| {
-            #[cfg(test)]
-            if REFUSE_PRE_EXEC.with(|refuse| refuse.replace(false)) {
-                // SAFETY: returns an error only; nothing else runs after fork.
-                unsafe {
-                    command.pre_exec(|| Err(std::io::Error::from_raw_os_error(libc::EPERM)));
+        custody
+            .inherit(&mut command)
+            .and_then(|()| final_check(&mut command))
+            .and_then(|()| {
+                #[cfg(test)]
+                if REFUSE_PRE_EXEC.with(|refuse| refuse.replace(false)) {
+                    // SAFETY: returns an error only; nothing else runs after fork.
+                    unsafe {
+                        command.pre_exec(|| Err(std::io::Error::from_raw_os_error(libc::EPERM)));
+                    }
                 }
-            }
-            command.spawn()
-        })
+                #[cfg(test)]
+                if let Some(hook) = AFTER_FINAL_CHECK.with(|hook| hook.borrow_mut().take()) {
+                    hook();
+                }
+                command.spawn()
+            })
     };
     // Only these pre-child branches mean "not started"; once a child exists,
     // every outcome is its exit or Unknown.
@@ -138,9 +213,9 @@ pub(super) fn run(
             );
         }
     }
-    let mut pipes: [Option<Box<dyn Read>>; 2] = [
-        stdout.map(|pipe| Box::new(pipe) as Box<dyn Read>),
-        stderr_pipe.map(|pipe| Box::new(pipe) as Box<dyn Read>),
+    let mut pipes: [Option<Box<dyn Pipe>>; 2] = [
+        stdout.map(|pipe| Box::new(pipe) as Box<dyn Pipe>),
+        stderr_pipe.map(|pipe| Box::new(pipe) as Box<dyn Pipe>),
     ];
     let mut reply = Vec::new();
     let mut overflow = false;
@@ -200,6 +275,8 @@ pub(super) fn run(
                     Err(e) if e.kind() == std::io::ErrorKind::WouldBlock => break,
                     Err(e) if e.kind() == std::io::ErrorKind::Interrupted => continue,
                     Err(_) => {
+                        // Its real end can never be observed now.
+                        pin(resources);
                         *slot = None;
                         unreadable = true;
                         break;
@@ -211,7 +288,10 @@ pub(super) fn run(
             let observed = child.try_wait();
             #[cfg(test)]
             let observed = WAIT_ERROR.with(|fault| {
-                if fault.replace(false) {
+                if fault.replace(false)
+                    || WAIT_ERROR_AFTER_OUTPUT
+                        .with(|armed| !reply.is_empty() && armed.replace(false))
+                {
                     Err(std::io::Error::other("private task message wait fault"))
                 } else {
                     observed
@@ -221,7 +301,9 @@ pub(super) fn run(
                 Ok(found) => status = found,
                 Err(_) => {
                     let _ = child.kill();
-                    let _ = child.wait();
+                    if child.wait().is_err() {
+                        pin(resources);
+                    }
                     break Ended::Unknown("task_message_unobserved");
                 }
             }
@@ -247,7 +329,9 @@ pub(super) fn run(
             if status.is_none() {
                 // The original child alone; never its group or anything else.
                 let _ = child.kill();
-                let _ = child.wait();
+                if child.wait().is_err() {
+                    pin(resources);
+                }
                 break Ended::Unknown("task_message_timed_out");
             }
             break Ended::Unknown("task_message_output_retained");
@@ -255,6 +339,11 @@ pub(super) fn run(
         std::thread::sleep(Duration::from_millis(5));
     };
     drop(stdin);
+    // A descendant may still hold an original output pipe: it keeps the guard
+    // until that pipe's real end, separately from the result returned here.
+    for pipe in pipes.into_iter().flatten() {
+        retain(pipe, resources);
+    }
     match ended {
         Ended::Exited { .. } if written < input.len() => {
             Ended::Unknown("task_message_input_unwritten")

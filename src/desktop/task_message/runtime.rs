@@ -1,11 +1,9 @@
 //! One fixed local task message executor, independent of the UI lifetime.
 //! Native admission, the message step and original resource drain are
 //! separate.
-use super::{
-    child::{self, Ended},
-    consent::Consent,
-    ledger,
-};
+#[cfg(target_os = "linux")]
+use super::child;
+use super::{child::Ended, consent::Consent, ledger};
 use crate::desktop::creation_clone::lease::{Lease, Machine};
 use crate::{
     config::Config,
@@ -19,12 +17,16 @@ use crate::{
 use anyhow::{ensure, Context, Result};
 use rusqlite::TransactionBehavior;
 use serde_json::{json, Value};
+#[cfg(target_os = "linux")]
+use std::time::Instant;
 use std::{
     collections::BTreeMap,
     sync::{atomic::Ordering, mpsc, Arc},
     thread::{self, JoinHandle},
-    time::{Duration, Instant},
+    time::Duration,
 };
+#[cfg(target_os = "linux")]
+use zerus_client_core::image::linux::Pin;
 use zerus_client_core::{
     desktop::task_message::{self as wire, Phase, Scope},
     run::custody::InheritedLock,
@@ -33,6 +35,9 @@ use zerus_desktop_ledger::operations::{
     custody::{Prepared, Record},
     Ticket,
 };
+
+/// The refusal of every macOS original until a qualified child seam exists.
+pub(super) const MAC_UNAVAILABLE: &str = "task_message_native_image_unavailable";
 
 /// The checked steps of a task message: the original child only.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -51,11 +56,23 @@ struct StepRequest {
     step: Step,
     reply: mpsc::SyncSender<std::result::Result<(), String>>,
 }
-/// Stands in for the one child in tests: it receives the plan and the exact
-/// arguments and stdin that `child::run` would have been given.
+/// Stands in for the one child in tests: it receives the plan, exactly the
+/// arguments and stdin that `child::run` would have been given, the custody
+/// lock and the original's resources guard.
 #[cfg(test)]
-type Executor =
-    Arc<dyn Fn(&wire::Plan, &[String], &[u8], &Arc<InheritedLock>) -> Ended + Send + Sync>;
+type Executor = Arc<
+    dyn Fn(&wire::Plan, &[String], &[u8], &Arc<InheritedLock>, &Arc<dyn Send + Sync>) -> Ended
+        + Send
+        + Sync,
+>;
+/// The original's physical resources: the SAME custody lock and its consent,
+/// which holds the lease and with it the serve-owner loan. Every original pipe
+/// keeps a copy until its real end, so neither the custody drain nor a
+/// takeover can pass while a descendant still holds one.
+struct Original {
+    _custody: Arc<InheritedLock>,
+    _consent: Arc<Consent>,
+}
 enum Work {
     Preparing {
         ticket: Ticket,
@@ -69,7 +86,7 @@ enum Work {
         worker: JoinHandle<()>,
         steps: mpsc::Receiver<StepRequest>,
         result: mpsc::Receiver<Ended>,
-        _custody: Arc<InheritedLock>,
+        resources: Arc<Original>,
     },
     Draining {
         id: String,
@@ -91,6 +108,15 @@ pub(in crate::desktop) struct Runtime {
     stopping: bool,
     failed: bool,
     charges: Option<u64>,
+    /// macOS refuses every original (see [`MAC_UNAVAILABLE`]).
+    mac_fence: bool,
+    /// This service's own running image, pinned once when it started from the
+    /// kernel's `/proc/self/exe`. Each child executes that pinned image, never
+    /// a reopened pathname, and it is never refreshed from the installed path
+    /// or same-version metadata; without it (a test image, or an image already
+    /// gone) no child starts.
+    #[cfg(target_os = "linux")]
+    image: Option<Arc<Pin>>,
 }
 impl Runtime {
     pub fn new(config: &Config, epoch: &str, owner: Arc<platform::FileLock>) -> Result<Self> {
@@ -112,6 +138,12 @@ impl Runtime {
             stopping: false,
             failed: false,
             charges: None,
+            mac_fence: cfg!(target_os = "macos"),
+            #[cfg(target_os = "linux")]
+            image: crate::self_exec::ensure()
+                .and_then(|()| Pin::open(std::path::Path::new("/proc/self/exe")))
+                .ok()
+                .map(Arc::new),
         })
     }
     pub fn observe(&mut self, event: &fleet::FleetEvent) {
@@ -179,6 +211,19 @@ impl Runtime {
         exclusion: Option<Arc<HandoffLock>>,
     ) -> Value {
         let id = authority.id().to_owned();
+        // No qualified seam yet attests the code a macOS child runs before it
+        // receives private input: refuse before any preparation, row or child.
+        if self.mac_fence {
+            return json!(wire::Admission {
+                abi: wire::ABI.into(),
+                request_id: id,
+                scope: self.scope.clone(),
+                accepted: false,
+                durable: false,
+                code: MAC_UNAVAILABLE.into(),
+                receipt: None
+            });
+        }
         self.refresh(store, exclusion);
         let result = (|| -> Result<wire::Admission> {
             ensure!(
@@ -364,9 +409,16 @@ impl Runtime {
                     let (done_send, result) = mpsc::sync_channel(1);
                     let selected = consent.clone();
                     let lock = held.clone();
+                    let resources = Arc::new(Original {
+                        _custody: held,
+                        _consent: consent.clone(),
+                    });
+                    let guard: Arc<dyn Send + Sync> = resources.clone();
                     let original = ticket.fingerprint()?;
                     #[cfg(test)]
                     let executor = self.executor.clone();
+                    #[cfg(target_os = "linux")]
+                    let image = self.image.clone();
                     let spawned =
                         thread::Builder::new()
                             .name("task-message".into())
@@ -397,6 +449,9 @@ impl Runtime {
                                     Ok(()) => message(
                                         &selected.original,
                                         &lock,
+                                        &guard,
+                                        #[cfg(target_os = "linux")]
+                                        image,
                                         #[cfg(test)]
                                         executor,
                                     ),
@@ -411,11 +466,11 @@ impl Runtime {
                                 worker,
                                 steps,
                                 result,
-                                _custody: held,
+                                resources,
                             })
                         }
                         Err(_) => {
-                            drop(held);
+                            drop(resources);
                             self.retire(store, &ticket.admission_id)?;
                         }
                     }
@@ -426,7 +481,7 @@ impl Runtime {
                     worker,
                     steps,
                     result,
-                    _custody,
+                    resources,
                 } => {
                     // The worker requests one step at a time; do not drain an
                     // unbounded channel or accept an arbitrary executor string.
@@ -440,7 +495,7 @@ impl Runtime {
                             worker,
                             steps,
                             result,
-                            _custody,
+                            resources,
                         });
                         return Ok(());
                     }
@@ -494,9 +549,12 @@ impl Runtime {
                         Ended::Unknown(code) => ledger::result(&tx, &row, None, code)?,
                     }
                     tx.commit()?;
-                    // Release only after the original worker joined. Exact
-                    // kernel recovery still waits for the child's own copy.
-                    drop(_custody);
+                    // The logical result is durable. Release this copy only
+                    // after the worker joined: an original pipe that is still
+                    // open keeps its own copy until its real end. Every copy
+                    // holds the custody lock, so the kernel recovery that
+                    // drains the row also waits for all of them.
+                    drop(resources);
                     self.work = Some(Work::Draining {
                         id: ticket.admission_id,
                         consent,
@@ -615,6 +673,18 @@ impl Runtime {
         self.machine = Some(Machine::fixture(machine));
         self.executor = Some(executor);
     }
+    /// Sets the macOS fence, so the actor's shared logic is tested everywhere
+    /// and the fence itself on every platform.
+    #[cfg(test)]
+    pub(super) fn fixture_mac_fence(&mut self, on: bool) {
+        self.mac_fence = on;
+    }
+    /// Pins `path` as this runtime's own image, so the original path runs a
+    /// real child without an executor.
+    #[cfg(all(test, target_os = "linux"))]
+    pub(super) fn fixture_image(&mut self, path: &std::path::Path) {
+        self.image = Some(Arc::new(Pin::open(path).unwrap()));
+    }
     /// The fixture source without an executor: the original path runs, and a
     /// test image's own-image refusal stops it before any child.
     #[cfg(test)]
@@ -627,6 +697,8 @@ impl Runtime {
 fn message(
     original: &wire::Verified,
     lock: &Arc<InheritedLock>,
+    resources: &Arc<dyn Send + Sync>,
+    #[cfg(target_os = "linux")] image: Option<Arc<Pin>>,
     #[cfg(test)] executor: Option<Executor>,
 ) -> Ended {
     let Some(call) = original.call(false) else {
@@ -637,18 +709,45 @@ fn message(
     let (args, input) = (&invocation.args, call.input.as_bytes());
     #[cfg(test)]
     if let Some(executor) = executor {
-        return executor(&original.plan, args, input, lock);
+        return executor(&original.plan, args, input, lock, resources);
     }
-    match crate::self_exec::current() {
-        Ok(program) => child::run(
-            &program,
-            args,
-            input,
-            lock,
-            Instant::now() + invocation.timeout,
-        ),
-        Err(_) => Ended::NotStarted,
+    #[cfg(target_os = "linux")]
+    if let Some(image) = image {
+        let deadline = Instant::now() + invocation.timeout;
+        return pinned(&image, args, input, lock, resources, deadline);
     }
+    // No pinned image (a unit-test image, or one already gone), and macOS,
+    // whose admission refuses first: nothing starts.
+    let _ = (args, input, lock, resources, invocation.timeout);
+    Ended::NotStarted
+}
+/// One original child of the pinned image. The final check, last before the
+/// spawn, requires the image still at its path; the child then executes the
+/// retained descriptor, so a replacement after that check never runs and
+/// never receives the input. A refused check means no child ever existed.
+#[cfg(target_os = "linux")]
+pub(super) fn pinned(
+    image: &Pin,
+    args: &[String],
+    input: &[u8],
+    lock: &Arc<InheritedLock>,
+    resources: &Arc<dyn Send + Sync>,
+    deadline: Instant,
+) -> Ended {
+    child::run(
+        image.executable(),
+        args,
+        input,
+        lock,
+        resources,
+        deadline,
+        |command| {
+            if !image.current() {
+                return Err(std::io::ErrorKind::PermissionDenied.into());
+            }
+            image.inherit(command)
+        },
+    )
 }
 impl Drop for Runtime {
     fn drop(&mut self) {

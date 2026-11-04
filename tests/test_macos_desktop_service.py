@@ -10,6 +10,7 @@ import sys
 import tempfile
 import unittest
 import uuid
+from desktop_activation_review import ReviewControls
 
 ROOT = Path(__file__).resolve().parents[1]
 spec = importlib.util.spec_from_file_location("mac_desktop_installer", ROOT / "scripts/install-macos-desktop-service.py")
@@ -56,6 +57,8 @@ class Commands:
         self.before_hold = None
         self.after_revoke_check = None
         self.after_action = None
+        self.consumer = {"machine": str(uuid.uuid4()), "boot": str(uuid.uuid4()),
+                         "pid": os.getpid(), "birth": "fixture-native-birth"}
         self.during_probe = None
         self.release_failure = False
         self.hold_marker = True
@@ -114,7 +117,8 @@ class Commands:
                     callback, self.after_revoke_check = self.after_revoke_check, None
                     callback()
                 code = 1 if self.refuse_caller else 0
-                output = json.dumps({"schema": 1, "configuration": self.config, "admitted": True, "source": "interactive_terminal"})
+                output = json.dumps({"schema": 1, "configuration": self.config, "admitted": True,
+                                     "source": "interactive_terminal", "consumer": self.consumer})
             else:
                 value = copy.deepcopy(self.plan)
                 if argv[-1] == "--background":
@@ -174,7 +178,7 @@ class Commands:
         return [argv for argv, _ in self.calls if argv[0] == "launchctl" and argv[1] != "print"]
 
 
-class MacDesktopService(unittest.TestCase):
+class MacDesktopService(ReviewControls, unittest.TestCase):
     def setUp(self):
         temporary = tempfile.TemporaryDirectory(prefix="zerus-mac-desktop-")
         self.addCleanup(temporary.cleanup)
@@ -683,6 +687,47 @@ class MacDesktopService(unittest.TestCase):
     def test_gui_only_install_retains_an_unchanged_active_backend(self):
         self.existing(); self.command.loaded = True
         self.assertEqual(self.install(), "ready")
+        self.assertEqual(self.command.mutations(), [])
+
+    def test_second_install_keeps_all_registration_files_and_the_running_service(self):
+        self.assertEqual(self.install(), "ready")
+        directory = self.command.destination.parent
+        for path in directory.iterdir():
+            # Make a rewrite visible even on filesystems with coarse timestamps.
+            os.utime(path, ns=(1_000_000_000, 1_000_000_000))
+
+        def snapshot():
+            result = {}
+            for path in directory.iterdir():
+                info = path.stat()
+                result[path.name] = (path.read_bytes(), info.st_dev, info.st_ino,
+                                     info.st_mode, info.st_mtime_ns)
+            return result
+
+        before = snapshot()
+        self.command.calls.clear()
+        self.assertEqual(self.install(), "ready")
+        after = snapshot()
+        self.assertEqual(before.keys(), after.keys())
+        for name in before:
+            with self.subTest(path=name):
+                self.assertEqual(after[name], before[name])
+        self.assertEqual(self.command.mutations(), [])
+        self.assertTrue(any(argv[1:3] == ["desktop", "status"] for argv, _ in self.command.calls))
+
+    def test_unchanged_install_refuses_a_mode_record_changed_during_readiness(self):
+        self.install()
+        replacement = json.loads(self.mode_record().read_bytes())
+        replacement["mode_selection"] = "retained"
+
+        def replace_record():
+            self.mode_record().write_text(json.dumps(replacement))
+
+        self.command.calls.clear()
+        self.command.during_probe = replace_record
+        with self.assertRaisesRegex(installer.Refusal, "mode record changed during the transition"):
+            self.install()
+        self.assertEqual(json.loads(self.mode_record().read_bytes()), replacement)
         self.assertEqual(self.command.mutations(), [])
 
     def test_separate_runner_never_changes_the_selected_service_registration(self):

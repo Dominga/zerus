@@ -309,8 +309,26 @@ impl Store {
                 "desktop state requires a newer hgs version"
             );
         }
-        let _file = private_file(&path, true)?;
+        // On Unix, closing any descriptor of this file drops this process's
+        // POSIX locks on it, including those of every live SQLite connection
+        // to it. So the file is created and checked through its path only, and
+        // the connection is bound to that file after the open (zerus-hpat).
+        #[cfg(unix)]
+        let identity = {
+            crate::sqlite_file::create(&path)?;
+            crate::sqlite_file::private(&path)
+                .map_err(|_| anyhow::anyhow!("desktop state must be private single-link regular files"))?
+        };
+        // Windows locks belong to the handle that took them.
+        #[cfg(not(unix))]
+        drop(private_file(&path, true)?);
+        #[cfg(all(test, unix))]
+        around_open(&path, false);
         let mut db = Connection::open_with_flags(&path, flags | OpenFlags::SQLITE_OPEN_READ_WRITE)?;
+        #[cfg(all(test, unix))]
+        around_open(&path, true);
+        #[cfg(unix)]
+        crate::sqlite_file::bind_private(&db, &path, identity).context("desktop state changed")?;
         super::counts::register(&db)?;
         db.busy_timeout(Duration::from_secs(2))?;
         let version: i64 = db.query_row("PRAGMA user_version", [], |row| row.get(0))?;
@@ -735,10 +753,99 @@ impl Store {
     }
 }
 
+/// The swap test's hook: runs after the private check (`false`) and after
+/// SQLite's open (`true`).
+#[cfg(all(test, unix))]
+type AroundOpen = Box<dyn FnMut(&Path, bool)>;
+
+#[cfg(all(test, unix))]
+thread_local! {
+    static AROUND_OPEN: std::cell::RefCell<Option<AroundOpen>> = const { std::cell::RefCell::new(None) };
+}
+
+#[cfg(all(test, unix))]
+fn around_open(path: &Path, opened: bool) {
+    AROUND_OPEN.with(|hook| {
+        if let Some(hook) = hook.borrow_mut().as_mut() {
+            hook(path, opened);
+        }
+    });
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
     use rusqlite::params;
+
+    /// review-q's S2 on #1349, the A-B-A swap: the path names the checked
+    /// database A at the private check and again at the bind, but SQLite
+    /// opened B in between. Only `bind_private` (SQLite's HAS_MOVED) can tell.
+    #[cfg(unix)]
+    #[test]
+    fn opening_refuses_a_database_swapped_in_during_the_open() {
+        let temp = tempfile::tempdir().unwrap();
+        let location = Location {
+            root: canonical(&temp.path().join("state/desktop")).unwrap(),
+            configuration: "a".repeat(64),
+        };
+        location.prepare().unwrap();
+        let _owner = location.lock().unwrap();
+        let epoch = uuid::Uuid::new_v4().to_string();
+        drop(Store::open(&location, &epoch).unwrap());
+        let aside = |name: &str| temp.path().join(name);
+        AROUND_OPEN.with(|hook| {
+            *hook.borrow_mut() = Some(Box::new(move |path: &Path, opened: bool| {
+                let aside = |name: &str| path.parent().unwrap().parent().unwrap().parent().unwrap().join(name);
+                if opened {
+                    std::fs::rename(path, aside("b.sqlite3")).unwrap();
+                    std::fs::rename(aside("a.sqlite3"), path).unwrap();
+                } else {
+                    std::fs::rename(path, aside("a.sqlite3")).unwrap();
+                    crate::sqlite_file::create(path).unwrap();
+                }
+            }));
+        });
+        let swapped = Store::open(&location, &epoch);
+        AROUND_OPEN.with(|hook| hook.borrow_mut().take());
+        let error = format!("{:#}", swapped.err().expect("the swapped-in database is refused"));
+        assert!(error.contains("desktop state changed"), "{error}");
+        // A is back at its path, unchanged, and opens again.
+        assert!(aside("b.sqlite3").exists());
+        Store::open(&location, &epoch).unwrap();
+    }
+    /// zerus-hpat: opening the store again keeps the SQLite locks of a store
+    /// already open in this process, also after a restart: no raw descriptor
+    /// of the live database is closed.
+    #[cfg(unix)]
+    #[test]
+    fn opening_the_store_again_keeps_a_live_store_s_locks() {
+        use crate::sqlite_file::foreign_lock_refused;
+        let temp = tempfile::tempdir().unwrap();
+        let location = Location {
+            root: canonical(&temp.path().join("state/desktop")).unwrap(),
+            configuration: "a".repeat(64),
+        };
+        location.prepare().unwrap();
+        let _owner = location.lock().unwrap();
+        let path = location.root.join("state.sqlite3");
+        let epoch = uuid::Uuid::new_v4().to_string();
+        // The second round is a restart: every earlier store is gone.
+        for round in 0..2 {
+            let live = Store::open(&location, &epoch).unwrap();
+            live.db.execute_batch("BEGIN").unwrap();
+            let _: i64 = live
+                .db
+                .query_row("SELECT count(*) FROM sqlite_master", [], |r| r.get(0))
+                .unwrap();
+            assert!(foreign_lock_refused(&path), "round {round}: the store holds its lock");
+            drop(Store::open(&location, &epoch));
+            assert!(foreign_lock_refused(&path), "round {round}: another open kept the lock");
+            live.db.execute_batch("COMMIT").unwrap();
+            drop(live);
+            assert!(!foreign_lock_refused(&path), "round {round}: the lock went with the store");
+        }
+    }
+
     #[test]
     fn catalog_collection_yields_and_failure_is_local_and_recoverable() {
         let temp = tempfile::tempdir().unwrap();

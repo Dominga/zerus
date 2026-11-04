@@ -19,10 +19,16 @@ The closed `TaskMessage` frontend request and its wire types live in
 `client/core/src/desktop/task_message.rs`. As for the creation kinds, native
 Service mode and the exact configuration authenticate it, both in the
 service and in the GUI's responder before it answers for the request. Generic
-`into_request` refuses it, and it has its own ordering lane. On Linux and
-macOS the service advertises `Desktop task message ABI:
-desktop-task-message-v1`, and the admitted desktop actor executes it (below).
-Windows answers `task_message_unsupported` and advertises nothing.
+`into_request` refuses it, and it has its own ordering lane. On Linux the
+service advertises `Desktop task message ABI: desktop-task-message-v1`, and
+the admitted desktop actor executes it (below). The leaf admits only queue and
+note originals and verifies only their queued or note canonical metadata; send,
+reopen and native delivery or consumption stay unavailable.
+
+macOS advertises nothing and answers `task_message_native_image_unavailable`
+before any preparation, row or child: no qualified seam yet attests the code a
+macOS child runs before it receives the private input. Windows answers
+`task_message_unsupported` and advertises nothing.
 
 No client sends the kind yet: the editor still sends every message through its
 direct path. The client path, in desktop-service mode only, is a separate
@@ -54,6 +60,14 @@ result are its own.
   direct path's 90-second deadline. An exit counts only after the child read
   all of its stdin, exited and both of its output pipes ended within the
   deadline.
+- **Image.** On Linux the service pins its own executable when it starts
+  (`zerus_client_core::image::linux::Pin`), and the child executes that
+  retained descriptor, never a reopened pathname. The final check, last
+  before the spawn, requires the pinned image still at its path: a
+  replacement before it starts no child (Failed, never started), and one
+  after it never runs or receives the input. The pinned image is one sealed
+  in-memory snapshot of at most 256 MiB: a larger image, such as a debug
+  build, is refused, and without a pinned image nothing starts.
 - **Custody.** The child inherits the effect's close-only custody lock, and its
   `main` first marks that descriptor close-on-exec
   (`HGS_TASK_MESSAGE_CUSTODY_FD`, then removed). The lock lives exactly as long
@@ -61,9 +75,19 @@ result are its own.
 - **Timeout, revoke, exit.** At the deadline only the original child is killed,
   never its process group, and the result is Unknown. Revoke or a service stop
   never kills the child: a step check before the child refuses to start it,
-  and a running child finishes on its own while custody keeps its charge. After a service
-  exit the child keeps its lock; recovery waits for the exact lock's release
-  and then drains the row as Unknown.
+  and a running child finishes on its own while custody keeps its charge.
+  After a service exit the child keeps its lock; recovery waits for the exact
+  lock's release and then drains the row as Unknown.
+- **Physical drain.** The original's resources outlive every original pipe.
+  They are the same custody lock and the original's consent, which holds the
+  lease and the serve-owner loan. A pipe that is still open when the result is
+  recorded, for example because a descendant holds it, keeps a copy in its own
+  reader until its real end; what it reads is discarded and nothing is
+  signalled. The recovery therefore drains the row, and the charge and a
+  takeover are released, only after that end of file and the kernel release
+  of the lock. A revoke or stop changes neither. An end that can never be
+  observed (a failed read or an unverified wait) keeps the resources until the
+  service exits.
 - **Result.** Exit 0 is recorded only with the closed outcome that the exact
   reply proves, read by the recovery policy's own `reply_state` (the same task,
   project, request, mode, dispatch and a `queued` or `note` state, with no

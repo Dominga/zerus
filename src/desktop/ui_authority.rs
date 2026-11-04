@@ -1110,6 +1110,7 @@ fn marked(bytes: &[u8]) -> bool {
     bytes.split(|b| *b == 0).any(|entry| {
         [
             b"HGS_SESSION=".as_slice(),
+            b"HGS_SESSION_ID=",
             b"HGS_RUN_ID=",
             b"LD_PRELOAD=",
             b"LD_AUDIT=",

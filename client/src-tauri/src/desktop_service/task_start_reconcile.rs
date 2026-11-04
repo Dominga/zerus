@@ -11,7 +11,7 @@ use zerus_client_core::{
     task_start::{
         self,
         capture::{
-            journal::{Journal, Phase, Saved, Settlement},
+            journal::{self, Journal, Phase, PublicationStatus, Saved, Settlement},
             Captured,
         },
     },
@@ -30,6 +30,27 @@ pub(crate) const STALE_CHECK: &str = zerus_client_core::source!(
 pub(crate) const CHANGED: &str = zerus_client_core::source!(
     "The saved task start changed. Refresh the task before reviewing it."
 );
+
+pub(crate) const PUBLICATION_REVIEW: &str = zerus_client_core::source!(
+    "Receipt-check recovery data needs manual review. Keep the files and follow the Task Start recovery runbook."
+);
+pub(crate) const PUBLICATION_OVERSIZE: &str = zerus_client_core::source!(
+    "Receipt-check recovery tracking exceeds its size limit. Keep the files and follow the Task Start recovery runbook."
+);
+pub(crate) fn publication_problem(saved: &Saved) -> Option<&'static str> {
+    match saved.publication_status() {
+        PublicationStatus::NeedsReview => Some(PUBLICATION_REVIEW),
+        PublicationStatus::Oversize => Some(PUBLICATION_OVERSIZE),
+        PublicationStatus::Clear | PublicationStatus::Recoverable => None,
+    }
+}
+pub(crate) fn journal_problem(error: journal::Error) -> &'static str {
+    match error {
+        journal::Error::PublicationNeedsReview => PUBLICATION_REVIEW,
+        journal::Error::PublicationOversize => PUBLICATION_OVERSIZE,
+        _ => UNAVAILABLE,
+    }
+}
 
 struct Read {
     service: Arc<Service>,
@@ -217,7 +238,7 @@ impl Read {
     ) -> Result<Settlement, String> {
         saved
             .settle_submitted(query, lookup, || self.current())
-            .map_err(|_| UNAVAILABLE.into())
+            .map_err(|error| journal_problem(error).into())
     }
     fn completed_view(
         &self,
@@ -272,6 +293,9 @@ pub(crate) fn check(
     {
         return Err(STALE_CHECK.into());
     }
+    if let Some(problem) = loaded.as_ref().and_then(publication_problem) {
+        return Err(problem.into());
+    }
     let new_original = loaded
         .as_ref()
         .is_some_and(|s| s.phase() == Phase::Completed && s.original_id() != id);
@@ -309,14 +333,14 @@ pub(crate) fn check(
             Some(saved) if new_original => saved.prepare_new_original(source, &reconcile),
             _ => Journal::prepare(source, &reconcile),
         }
-        .map_err(|_| UNAVAILABLE)?;
+        .map_err(journal_problem)?;
         let journal = Arc::new(Mutex::new(journal));
         {
             let mut value = journal.lock().unwrap_or_else(PoisonError::into_inner);
             if !read.current() || value.saved().reconcile_id() != reconcile {
                 return Err(UNAVAILABLE.into());
             }
-            let exact = value.offer().map_err(|_| UNAVAILABLE)?;
+            let exact = value.offer().map_err(journal_problem)?;
             if exact != intent {
                 return Err(UNAVAILABLE.into());
             }

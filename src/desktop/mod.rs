@@ -234,11 +234,18 @@ pub fn dispatch(config: &Config, target: &str, args: &[String], dry: bool) -> cl
                 #[cfg(any(target_os = "linux", target_os = "macos", windows))]
                 {
                     let scope = ui_authority::Scope::new(config, &location);
-                    let source = ui_authority::registration::caller(&scope)?;
-                    println!(
-                        "{}",
+                    #[cfg(not(windows))]
+                    let reply = {
+                        let (source, consumer) = ui_authority::registration::observation(&scope)?;
+                        json!({"schema":1,"configuration":location.configuration,"admitted":true,
+                            "source":source,"consumer":consumer})
+                    };
+                    #[cfg(windows)]
+                    let reply = {
+                        let source = ui_authority::registration::caller(&scope)?;
                         json!({"schema":1,"configuration":location.configuration,"admitted":true,"source":source})
-                    );
+                    };
+                    println!("{reply}");
                     Ok(())
                 }
                 #[cfg(not(any(target_os = "linux", target_os = "macos", windows)))]

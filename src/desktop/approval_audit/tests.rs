@@ -4,6 +4,76 @@ struct Fixture {
     _temp: tempfile::TempDir,
     reader: Reader,
 }
+
+#[cfg(unix)]
+#[test]
+fn reader_drop_keeps_the_live_writer_lock_on_fresh_open_and_restart() {
+    let mut f = Fixture::new();
+    drop(f.rows(1));
+    let path = f.reader.root.join("journal.sqlite3");
+    for _ in 0..2 {
+        let writer = Connection::open(&path).unwrap();
+        writer
+            .query_row("SELECT count(*) FROM attempts", [], |r| r.get::<_, i64>(0))
+            .unwrap();
+        crate::approval_log::lock_tests::assert_lock(&path, true);
+        assert_eq!(f.send(&f.query())["accepted"], true);
+        crate::approval_log::lock_tests::assert_lock(&path, true);
+        drop(f.reader.journal.take());
+        crate::approval_log::lock_tests::assert_lock(&path, true);
+        drop(writer);
+        crate::approval_log::lock_tests::assert_lock(&path, false);
+    }
+}
+
+#[cfg(unix)]
+#[test]
+fn a_failed_reader_check_keeps_the_live_writer_lock_after_restart() {
+    let mut f = Fixture::new();
+    drop(f.rows(1));
+    let path = f.reader.root.join("journal.sqlite3");
+    for _ in 0..2 {
+        let writer = Connection::open(&path).unwrap();
+        let first = f.send(&f.query());
+        assert_eq!(first["accepted"], true);
+        writer.pragma_update(None, "user_version", 0).unwrap();
+        let mut stale = f.query();
+        stale["journal"] = first["journal"].clone();
+        stale["through"] = first["result"]["through"].clone();
+        assert!(serde_json::from_value::<Request>(stale.clone())
+            .unwrap()
+            .valid());
+        let refused = f.send(&stale);
+        assert_eq!(refused["accepted"], false);
+        assert_eq!(refused["code"], "approval_audit_unavailable");
+        assert!(
+            f.reader.journal.is_none(),
+            "failed check must drop the original reader"
+        );
+        crate::approval_log::lock_tests::assert_lock(&path, true);
+        writer.pragma_update(None, "user_version", 1).unwrap();
+        drop(writer);
+        crate::approval_log::lock_tests::assert_lock(&path, false);
+    }
+}
+
+#[cfg(unix)]
+#[test]
+fn opening_the_writer_preserves_an_already_cached_reader_lock() {
+    let mut f = Fixture::new();
+    drop(f.rows(1));
+    let path = f.reader.root.join("journal.sqlite3");
+    for _ in 0..2 {
+        assert_eq!(f.send(&f.query())["accepted"], true);
+        crate::approval_log::lock_tests::assert_lock(&path, true);
+        let writer = crate::approval_log::open(&f.reader.root).unwrap();
+        crate::approval_log::lock_tests::assert_lock(&path, true);
+        drop(writer);
+        crate::approval_log::lock_tests::assert_lock(&path, true);
+        drop(f.reader.journal.take());
+        crate::approval_log::lock_tests::assert_lock(&path, false);
+    }
+}
 impl Fixture {
     fn new() -> Self {
         let temp = tempfile::tempdir().unwrap();
@@ -192,6 +262,86 @@ fn sqlite_connection_must_match_the_original_guard_even_if_its_path_is_unchanged
         "configuration":f.reader.configuration,"epoch":f.reader.epoch,"journal":first["journal"],"id":1});
     assert_eq!(f.send(&detail)["accepted"], false);
 }
+#[cfg(unix)]
+#[test]
+fn reader_allows_symlinked_ancestors_but_not_the_journal_leaf() {
+    use std::os::unix::fs::symlink;
+    let mut f = Fixture::new();
+    let real = f._temp.path().join("real");
+    f.reader.root = real.join("approval-audit");
+    drop(f.rows(1));
+    let link = f._temp.path().join("link");
+    symlink(&real, &link).unwrap();
+    f.reader.root = link.join("approval-audit");
+    let path = f.reader.root.join("journal.sqlite3");
+    for _ in 0..2 {
+        assert_eq!(f.send(&f.query())["accepted"], true);
+        crate::approval_log::lock_tests::assert_lock(&path, true);
+        drop(f.reader.journal.take());
+        crate::approval_log::lock_tests::assert_lock(&path, false);
+    }
+    let target = real.join("retained.sqlite3");
+    fs::rename(&path, &target).unwrap();
+    let original = fs::read(&target).unwrap();
+    symlink(&target, &path).unwrap();
+    let refused = f.send(&f.query());
+    assert_eq!(refused["accepted"], false);
+    assert_eq!(refused["code"], "approval_audit_unavailable");
+    assert!(f.reader.journal.is_none());
+    assert_eq!(fs::read(&target).unwrap(), original);
+}
+
+#[cfg(unix)]
+#[test]
+fn restoring_the_checked_path_cannot_hide_a_different_sqlite_file() {
+    let f = Fixture::new();
+    let other = Fixture::new();
+    for (fixture, count) in [(&f, 1), (&other, 2)] {
+        let db = fixture.rows(count);
+        db.execute_batch("PRAGMA wal_checkpoint(TRUNCATE); PRAGMA journal_mode=DELETE;")
+            .unwrap();
+    }
+    let root = platform::canonical(&f.reader.root).unwrap();
+    let path = root.join("journal.sqlite3");
+    let original = root.join("original.sqlite3");
+    let replacement = platform::canonical(&other.reader.root)
+        .unwrap()
+        .join("journal.sqlite3");
+    let checked = platform::file_identity(&path).unwrap();
+    // A is checked, B is opened at the SAME filename, then A is restored.
+    // Both stat checks see A; only SQLite can identify its retained B.
+    fs::rename(&path, &original).unwrap();
+    fs::rename(&replacement, &path).unwrap();
+    let db = Connection::open_with_flags(
+        &path,
+        OpenFlags::SQLITE_OPEN_READ_ONLY
+            | OpenFlags::SQLITE_OPEN_NO_MUTEX
+            | OpenFlags::SQLITE_OPEN_NOFOLLOW,
+    )
+    .unwrap();
+    assert_eq!(
+        db.query_row("SELECT count(*) FROM attempts", [], |r| r.get::<_, i64>(0))
+            .unwrap(),
+        2
+    );
+    fs::rename(&path, &replacement).unwrap();
+    fs::rename(&original, &path).unwrap();
+    let restored = platform::file_identity(&path).unwrap();
+    assert_eq!(
+        (restored.device, restored.inode),
+        (checked.device, checked.inode)
+    );
+    let journal = Journal {
+        identity: (checked.device, checked.inode),
+        token: uuid::Uuid::new_v4().to_string(),
+        db,
+    };
+    assert_eq!(
+        journal.check(&f.reader.root).unwrap_err().to_string(),
+        "audit SQLite file changed"
+    );
+}
+
 #[cfg(unix)]
 #[test]
 fn replacement_cannot_rebind_an_old_detail_id_or_cursor() {

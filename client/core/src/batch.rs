@@ -401,10 +401,11 @@ impl Coalescer {
                     damaged,
                     digest,
                     truncated,
+                    window,
                 } => (
                     "list",
                     json!({"tasks": tasks, "project": project, "damaged": damaged,
-                           "digest": digest, "truncated": truncated}),
+                           "digest": digest, "truncated": truncated, "window": window}),
                 ),
                 TasksUpdate::Failed { code, message } => {
                     ("failed", json!({"code": code, "message": message}))
@@ -1039,6 +1040,7 @@ mod tests {
             damaged: json!([]),
             digest: digest.into(),
             truncated: false,
+            window: Value::Null,
         };
         let failed = TasksUpdate::Failed {
             code: "tasks_failed".into(),

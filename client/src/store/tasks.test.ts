@@ -1,5 +1,5 @@
 import { describe, expect, it, vi } from "vitest";
-import { createTasks } from "./tasks";
+import { createTasks, WINDOW } from "./tasks";
 import { TASK_LIMIT } from "../ui/screens/tasks-ui";
 import { emptyBatch, isEmptyBatch, type TasksOut } from "../types";
 
@@ -54,4 +54,91 @@ describe("project task stream", () => {
     store.apply([list("p1", [{ ...row(), history_revision: "after-note" }])]);
     expect(store.tasks()[0].historyRevision).toBe("after-note");
   });
+
 });
+
+const windowed = (tasks: unknown[], stages: Record<string, { total: number; next: string | null }>, revision = "r1"): TasksOut =>
+  list("p1", tasks, { window: { counts: {}, damaged_total: 0, revision, window: { schema: 1, limit: WINDOW, stages } } });
+const stagesOf = (todo: { total: number; next: string | null }) => ({
+  review: { total: 0, next: null }, active: { total: 0, next: null }, todo, backlog: { total: 1, next: null }, done: { total: 0, next: null },
+});
+
+describe("windowed project tasks", () => {
+  it("publishes each stage's window in board order with totals and what remains", () => {
+    const store = createTasks(vi.fn().mockResolvedValue(undefined), vi.fn()); store.follow("p1");
+    store.apply([windowed([row("b1", "backlog"), row("t1"), row("t2")], stagesOf({ total: 120, next: "c1" }))]);
+    expect(store.windowed()).toBe(true);
+    expect(store.tasks().map((t) => [t.uuid, t.queue])).toEqual([["t1", 1], ["t2", 2], ["b1", 0]]);
+    expect([store.total("todo"), store.remaining("todo"), store.remaining("backlog")]).toEqual([120, 118, 0]);
+  });
+  it("Show more appends the next page once, after the window's cursor", async () => {
+    const read = vi.fn().mockResolvedValue({ tasks: [row("t2"), row("t3")], page: { next: "c2" } });
+    const store = createTasks(vi.fn().mockResolvedValue(undefined), read); store.follow("p1");
+    store.apply([windowed([row("t1"), row("t2")], stagesOf({ total: 5, next: "c1" }))]);
+    const first = store.more("todo"), second = store.more("todo");
+    expect(store.loading().todo).toBe(true);
+    await first; await second;
+    expect(read).toHaveBeenCalledExactlyOnceWith("p1", "todo", WINDOW, "c1");
+    expect(store.tasks().map((t) => t.uuid)).toEqual(["t1", "t2", "t3"]);
+    expect(store.remaining("todo")).toBe(2); expect(store.loading().todo).toBe(false);
+  });
+  it("a new window reads an extended stage again to its extent, keeping its rows meanwhile", async () => {
+    let finish!: (page: unknown) => void;
+    const read = vi.fn()
+      .mockResolvedValueOnce({ tasks: [row("t3"), row("t4")], page: { next: "c2" } })
+      .mockImplementationOnce(() => new Promise((r) => { finish = r; }));
+    const store = createTasks(vi.fn().mockResolvedValue(undefined), read); store.follow("p1");
+    store.apply([windowed([row("t1"), row("t2")], stagesOf({ total: 6, next: "c1" }))]);
+    await store.more("todo");
+    store.apply([windowed([row("t0"), row("t1")], stagesOf({ total: 7, next: "c9" }), "r2")]);
+    // No collapse while the stage is read again: the window first, then the rows loaded before.
+    expect(store.tasks().filter((t) => t.stage === "todo").map((t) => t.uuid)).toEqual(["t0", "t1", "t2", "t3", "t4"]);
+    expect(read).toHaveBeenLastCalledWith("p1", "todo", 4, null);
+    finish({ tasks: [row("t0"), row("t1"), row("t2"), row("t3")], page: { next: "c3" } }); await tick();
+    expect(store.tasks().filter((t) => t.stage === "todo").map((t) => t.uuid)).toEqual(["t0", "t1", "t2", "t3"]);
+    expect(store.remaining("todo")).toBe(3);
+  });
+  it("ends a re-read whose cursor does not advance instead of looping on it", async () => {
+    const read = vi.fn()
+      .mockResolvedValueOnce({ tasks: [row("t3"), row("t4")], page: { next: "c2" } })
+      .mockResolvedValue({ tasks: [row("t0")], page: { next: "stuck" } });
+    const store = createTasks(vi.fn().mockResolvedValue(undefined), read); store.follow("p1");
+    store.apply([windowed([row("t1"), row("t2")], stagesOf({ total: 6, next: "c1" }))]);
+    await store.more("todo");
+    store.apply([windowed([row("t0"), row("t1")], stagesOf({ total: 7, next: "c9" }), "r2")]);
+    await tick(); await tick();
+    expect(read).toHaveBeenCalledTimes(3);
+    expect(read).toHaveBeenLastCalledWith("p1", "todo", 3, "stuck");
+    expect(store.loading().todo).toBe(false);
+  });
+  it("drops a page that arrives after another project was chosen, and reports a failed read", async () => {
+    let finish!: (page: unknown) => void;
+    const read = vi.fn().mockImplementationOnce(() => new Promise((r) => { finish = r; })).mockRejectedValueOnce(new Error("hgs too old"));
+    const store = createTasks(vi.fn().mockResolvedValue(undefined), read); store.follow("p1");
+    store.apply([windowed([row("t1")], stagesOf({ total: 3, next: "c1" }))]);
+    const pending = store.more("todo"); store.follow("p2");
+    finish({ tasks: [row("late")], page: { next: null } }); await pending;
+    expect(store.tasks()).toEqual([]);
+    store.apply([{ ...windowed([row("t1")], stagesOf({ total: 3, next: "c1" })), key: "p2", payload: { ...windowed([row("t1")], stagesOf({ total: 3, next: "c1" })).payload as object, project: { id: "p2" } } }]);
+    await store.more("todo");
+    expect(store.pageError()).toContain("hgs too old"); expect(store.tasks().map((t) => t.uuid)).toEqual(["t1"]);
+  });
+  it("a whole list from an older hgs has no window and nothing more to load", () => {
+    const store = createTasks(vi.fn().mockResolvedValue(undefined), vi.fn()); store.follow("p1");
+    store.apply([list("p1", [row("a"), row("b", "done")])]);
+    expect(store.windowed()).toBe(false); expect(store.remaining("todo")).toBe(0); expect(store.total("done")).toBe(1);
+  });
+
+  it("finds loaded rows first and keeps a bounded set of tasks read on their own", async () => {
+    const { ADOPTED } = await import("./tasks");
+    const store = createTasks(vi.fn().mockResolvedValue(undefined), vi.fn()); store.follow("p1");
+    store.apply([windowed([row("t1")], stagesOf({ total: 9, next: "c1" }))]);
+    const far = { ...store.tasks()[0], uuid: "far", stage: "done" };
+    store.adopt(far);
+    expect(store.find("t1")?.uuid).toBe("t1"); expect(store.find("far")).toEqual(far);
+    for (let i = 0; i < ADOPTED; i++) store.adopt({ ...far, uuid: `x${i}` });
+    expect(store.find("far")).toBeUndefined();
+    store.follow("p2"); expect(store.find("x1")).toBeUndefined();
+  });
+});
+

@@ -61,6 +61,8 @@ export const taskFormSubmit = (input: import("./store/taskForms").FormSubmit) =>
 export const taskFormCancel = (kind: import("./store/taskForms").FormKind, handle: number, rev: number) => desktop<import("./store/taskEditor").TaskEditorView<import("./store/taskForms").FormKind>>("task_form_cancel", { kind, handle, rev });
 export const assignTask = (project: string, task: string, target: { computer: string; name: string; run_id: string; conversation_id: string } | null, catalogKey: string | null, sessionId: string | null, mode?: "session" | "subagent" | "new_session") => desktop<void>("task_assign", { input: { project, task, target, catalog_key: catalogKey, session_id: sessionId, mode: mode ?? null } });
 export const readTaskDetails = (project: string, task: string, before: string | null) => desktop<unknown>("task_details", { project, task, before });
+/** One further page of a board stage after a cursor (`task list --stage --limit --after`). */
+export const readTaskPage = (project: string, stage: string, limit: number, after: string | null) => desktop<unknown>("task_page", { project, stage, limit, after });
 export const openTaskAttachment = (path: string) => desktop<string | null>("task_attachment_open", { path });
 
 /** `next_batch` answers with raw JSON bytes (`ipc::Response`), so large batches skip script evaluation. */

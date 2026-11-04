@@ -168,6 +168,16 @@ impl TaskCall {
         TaskCall::new(with_project(words(&["get", task]), project), "")
     }
 
+    /// One page of a stage: `task list --stage S --limit N [--after CURSOR]`.
+    pub fn list_page(project: &str, stage: &str, limit: usize, after: Option<&str>) -> TaskCall {
+        let mut args = words(&["list", "--stage", stage, "--limit"]);
+        args.push(limit.to_string());
+        if let Some(after) = after {
+            args.extend(["--after".to_owned(), after.to_owned()]);
+        }
+        TaskCall::new(with_project(args, project), "")
+    }
+
     /// To the top of its list.
     pub fn move_top(project: &str, task: &str) -> TaskCall {
         TaskCall::new(with_project(words(&["move", task, "--top"]), project), "")

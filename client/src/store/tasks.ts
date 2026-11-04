@@ -1,25 +1,125 @@
 import { createSignal } from "solid-js";
-import { followTasks } from "../bridge";
+import { followTasks, readTaskPage } from "../bridge";
 import type { TasksOut } from "../types";
-import { TASK_LIMIT, object, taskItem, text, type Task } from "../ui/screens/tasks-ui";
+import { STAGES, TASK_LIMIT, object, taskItem, text, type Stage, type Task } from "../ui/screens/tasks-ui";
 import { tr } from "../i18n";
 
-/** One project list, replaced atomically by the existing event stream. */
-export function createTasks(follow: (project: string | null) => Promise<void>) {
+/** Rows of each stage the board follows (the core's window) and asks for per further page. */
+export const WINDOW = 50;
+/** The most rows one further page reads (`task list --limit`). */
+export const PAGE_LIMIT = 200;
+/** Tasks read on their own that the store keeps for the write guards. */
+export const ADOPTED = 16;
+/** The most pages one re-read of an extended stage requests; Show more continues past it. */
+const MAX_REREAD_PAGES = 64;
+
+export type Page = { tasks: unknown[]; page: { next: unknown } };
+type ReadPage = (project: string, stage: Stage, limit: number, after: string | null) => Promise<unknown>;
+
+const none = <T,>(value: T) => Object.fromEntries(STAGES.map((s) => [s, value])) as Record<Stage, T>;
+
+/**
+ * One project's tasks, replaced atomically by the event stream. A server that
+ * windows the list sends the first rows of each stage with each stage's total
+ * and next cursor; Show more reads further pages, and a stage the user
+ * extended is read again to that extent when the window changes, keeping its
+ * rows meanwhile. An older server sends the whole list, as before.
+ */
+export function createTasks(follow: (project: string | null) => Promise<void>, readPage: ReadPage = readTaskPage) {
   const [project, setProject] = createSignal<string>();
   const [tasks, setTasks] = createSignal<Task[]>([]);
   const [loaded, setLoaded] = createSignal(false);
   const [error, setError] = createSignal("");
   const [truncated, setTruncated] = createSignal(false);
   const [damaged, setDamaged] = createSignal(0);
+  const [windowed, setWindowed] = createSignal(false);
+  const [totals, setTotals] = createSignal(none(0));
+  const [loading, setLoading] = createSignal(none(false));
+  const [pageError, setPageError] = createSignal("");
+  /** Tasks read on their own (a selected task beyond the loaded rows), at most `ADOPTED`. */
+  const [adopted, setAdopted] = createSignal<Map<string, Task>>(new Map());
+  let rows = none<Task[]>([]), next = none<string | null>(null), extent = none(0), reads = none(0);
+  /** A whole list, published in the order the server sent it. */
+  let whole: Task[] | null = null;
   let sent = Promise.resolve(), generation = 0;
+
+  /** The stages in board order, To do numbered by its position. */
+  const publish = () => {
+    let queue = 0;
+    const ordered = whole ?? STAGES.flatMap((s) => rows[s]);
+    setTasks(ordered.map((t) => t.stage === "todo" ? { ...t, queue: ++queue } : t));
+  };
+  const unique = (values: unknown[], stage?: Stage) => {
+    const seen = new Set<string>();
+    return values.flatMap((value) => {
+      const t = taskItem(value); if (!t.uuid || seen.has(t.uuid) || (stage && t.stage !== stage)) return [];
+      seen.add(t.uuid); return [t];
+    });
+  };
+  const busy = (stage: Stage, on: boolean) => setLoading({ ...loading(), [stage]: on });
+
+  /** Reads `stage` from its start up to `want` rows, replacing its rows when this is still the latest read. */
+  async function reread(stage: Stage, want: number) {
+    const mine = ++reads[stage], owner = project(), at = generation;
+    busy(stage, true);
+    try {
+      let found: Task[] = [], after: string | null = null, pages = 0;
+      do {
+        const page = await readPage(owner!, stage, Math.min(PAGE_LIMIT, want - found.length), after) as Page;
+        const cursor = text(page.page.next) || null;
+        found = unique([...found, ...page.tasks], stage);
+        // A cursor that does not advance ends the read rather than looping on it.
+        after = cursor && cursor !== after ? cursor : null;
+      } while (after && found.length < want && ++pages < MAX_REREAD_PAGES);
+      if (at !== generation || mine !== reads[stage]) return;
+      rows = { ...rows, [stage]: found }; next = { ...next, [stage]: after }; publish(); setPageError("");
+    } catch (e) {
+      if (at === generation && mine === reads[stage]) setPageError(String(e));
+    } finally {
+      if (at === generation && mine === reads[stage]) busy(stage, false);
+    }
+  }
+
   return {
-    project, tasks, loaded, error, truncated, damaged,
-    follow(next: string | undefined) {
-      if (next === project()) return;
+    project, tasks, loaded, error, truncated, damaged, windowed, loading, pageError,
+    /** A task by UUID: a loaded row, else one read on its own. */
+    find: (uuid: string) => tasks().find((t) => t.uuid === uuid) ?? adopted().get(uuid),
+    /** Keeps a task read on its own for the write guards; the oldest goes first. */
+    adopt(task: Task) {
+      const next = new Map(adopted()); next.delete(task.uuid); next.set(task.uuid, task);
+      while (next.size > ADOPTED) next.delete(next.keys().next().value!);
+      setAdopted(next);
+    },
+    /** Every task of a stage, or only those loaded when the list is not windowed. */
+    total: (stage: Stage) => windowed() ? totals()[stage] : rows[stage].length,
+    /** Rows of a stage not loaded yet. */
+    remaining: (stage: Stage) => windowed() ? Math.max(0, totals()[stage] - rows[stage].length) : 0,
+    follow(nextProject: string | undefined) {
+      if (nextProject === project()) return;
       const mine = ++generation;
-      setProject(next); setTasks([]); setLoaded(false); setError(""); setTruncated(false); setDamaged(0);
-      sent = sent.then(() => follow(next ?? null)).catch((e) => { if (mine === generation) { setError(String(e)); setLoaded(true); } });
+      setProject(nextProject); setTasks([]); setLoaded(false); setError(""); setTruncated(false); setDamaged(0);
+      setWindowed(false); setTotals(none(0)); setLoading(none(false)); setPageError(""); setAdopted(new Map());
+      rows = none([]); next = none(null); extent = none(0); whole = null;
+      sent = sent.then(() => follow(nextProject ?? null)).catch((e) => { if (mine === generation) { setError(String(e)); setLoaded(true); } });
+    },
+    /** The next page of `stage`; one read at a time per stage. */
+    async more(stage: Stage) {
+      const after = next[stage], owner = project(), at = generation;
+      if (!windowed() || !after || !owner || loading()[stage]) return;
+      const mine = ++reads[stage];
+      busy(stage, true);
+      try {
+        const page = await readPage(owner, stage, WINDOW, after) as Page;
+        if (at !== generation || mine !== reads[stage]) return;
+        rows = { ...rows, [stage]: unique([...rows[stage], ...page.tasks], stage) };
+        next = { ...next, [stage]: text(page.page.next) || null };
+        extent = { ...extent, [stage]: rows[stage].length };
+        publish(); setPageError("");
+      } catch (e) {
+        if (at === generation && mine === reads[stage]) setPageError(String(e));
+      } finally {
+        if (at === generation && mine === reads[stage]) busy(stage, false);
+      }
     },
     apply(updates: TasksOut[]) {
       for (const update of updates) {
@@ -27,15 +127,35 @@ export function createTasks(follow: (project: string | null) => Promise<void>) {
         const p = object(update.payload);
         if (update.kind === "list") {
           if (text(object(p.project).id) !== project() || !Array.isArray(p.tasks)) continue;
-          const seen = new Set<string>(); let queue = 0;
-          const rows = p.tasks.slice(0, TASK_LIMIT).flatMap((value) => {
-            const t = taskItem(value); if (!t.uuid || seen.has(t.uuid)) return [];
-            seen.add(t.uuid); if (t.stage === "todo") t.queue = ++queue;
-            return [t];
-          });
-          setTasks(rows); setError(""); setLoaded(true);
-          setTruncated(p.truncated === true || p.tasks.length > TASK_LIMIT);
-          setDamaged(Array.isArray(p.damaged) ? p.damaged.length : 0);
+          const summary = object(p.window), stages = object(object(summary.window).stages);
+          if (Object.keys(stages).length) {
+            // A window: each stage's first rows; extended stages keep their
+            // rows and are read again to the extent the user loaded.
+            const first = unique(p.tasks);
+            whole = null; setWindowed(true);
+            setTotals(Object.fromEntries(STAGES.map((s) => [s, Number(object(stages[s]).total) || 0])) as Record<Stage, number>);
+            for (const s of STAGES) {
+              const head = first.filter((t) => t.stage === s), cursor = text(object(stages[s]).next) || null;
+              if (extent[s] > head.length && cursor) {
+                const kept = rows[s].filter((t) => !head.some((h) => h.uuid === t.uuid));
+                rows = { ...rows, [s]: [...head, ...kept] };
+                void reread(s, extent[s]);
+              } else {
+                rows = { ...rows, [s]: head }; next = { ...next, [s]: cursor }; extent = { ...extent, [s]: 0 };
+              }
+            }
+            setTruncated(false);
+            setDamaged(Number(summary.damaged_total) || (Array.isArray(p.damaged) ? p.damaged.length : 0));
+          } else {
+            setWindowed(false);
+            const all = unique(p.tasks.slice(0, TASK_LIMIT));
+            whole = all;
+            rows = Object.fromEntries(STAGES.map((s) => [s, all.filter((t) => t.stage === s)])) as Record<Stage, Task[]>;
+            next = none(null); extent = none(0);
+            setTruncated(p.truncated === true || p.tasks.length > TASK_LIMIT);
+            setDamaged(Array.isArray(p.damaged) ? p.damaged.length : 0);
+          }
+          publish(); setError(""); setLoaded(true);
         } else if (update.kind === "failed") { setError(text(p.message) || tr("Tasks could not be read.")); setLoaded(true); }
         else if (update.kind === "ended") { setError(tr("The task subscription ended. Reopen Tasks to reconnect.")); setLoaded(true); }
       }

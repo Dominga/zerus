@@ -2072,9 +2072,12 @@ impl Supervisor {
             }
             return;
         }
+        // A window of each stage; an older server ignores it and sends the
+        // whole list.
         self.write(&Control::Subscribe(Subscription {
             topic: topic::TASKS.into(),
             project: Some(key.to_owned()),
+            window: Some(crate::tasks::WINDOW),
             ..Subscription::default()
         }));
     }

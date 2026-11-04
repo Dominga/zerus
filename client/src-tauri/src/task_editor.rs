@@ -630,11 +630,13 @@ fn submitted_with_delivery(
                 return Err("The task reply did not match the selected task.".into());
             }
         } else {
-            let record = if let Some(record) = original {
+            let (record, message) = if let Some(record) = original {
                 let content = &record["intent"]["content"];
                 expected.text = content["text"].as_str().unwrap_or("").into();
                 expected.attachments = tasks_write::decode_files(&content["attachments"]);
-                record
+                let message =
+                    tasks_write::message_call(&slot.project, &slot.task, &record, recover);
+                (record, message)
             } else {
                 let intent = tasks_write::message_intent(
                     &expected.text,
@@ -642,24 +644,29 @@ fn submitted_with_delivery(
                     message_mode,
                     detail["dispatch_id"].as_str().unwrap_or(""),
                 );
-                let reservation = outbox::reserve(
+                let id = uuid::Uuid::new_v4().to_string();
+                // The one actual call, its stdin frozen into the checkpoint
+                // before anything is sent; this same call is sent after it.
+                let message = tasks_write::message_call(
+                    &slot.project,
+                    &slot.task,
+                    &serde_json::json!({"id": id, "intent": intent}),
+                    recover,
+                );
+                let reservation = outbox::reserve_message(
                     store.root(),
                     &slot.project,
                     &slot.task,
                     &intent,
-                    &uuid::Uuid::new_v4().to_string(),
+                    &message.input,
+                    &id,
                 )?;
                 if reservation.recovering {
                     return Err("This task already has a message operation in progress.".into());
                 }
-                reservation.record
+                (reservation.record, message)
             };
-            let reply = call(&tasks_write::message_call(
-                &slot.project,
-                &slot.task,
-                &record,
-                recover,
-            ))?;
+            let reply = call(&message)?;
             tasks_write::message_delivered(
                 &reply,
                 &slot.task,
@@ -930,6 +937,8 @@ mod tests {
                     let record = outbox::pending(store.root(), "example", ID)?.unwrap();
                     assert_eq!(record["intent"]["mode"], mode);
                     assert_eq!(record["intent"]["dispatch"], "original-dispatch");
+                    // The stdin was frozen into the checkpoint before this call.
+                    assert_eq!(record["input"], call.input.as_str());
                     assert!(call.args.windows(2).any(|p| p == ["--mode", mode]));
                     assert!(!call.args.iter().any(|s| s == "--recover-only"));
                     Err("reply lost".into())
@@ -960,6 +969,7 @@ mod tests {
                         .windows(2)
                         .any(|p| p == ["--expect-dispatch", "original-dispatch"]));
                     assert!(call.args.iter().any(|s| s == "--recover-only"));
+                    assert_eq!(original["input"], call.input.as_str(), "the same bytes");
                     Ok(receipt(original["id"].as_str().unwrap()))
                 }
             )

@@ -394,7 +394,10 @@ pub fn message_intent(text: &str, files: &[Attachment], mode: &str, dispatch: &s
 }
 
 /// `hgs task message` for a reserved record; a recovery only checks whether
-/// the original was delivered (`--recover-only`) and sends nothing new.
+/// the original was delivered (`--recover-only`) and sends nothing new. Its
+/// stdin is the record's frozen `input`, byte for byte (see
+/// [`outbox::reserve_message`]). Only a legacy record without one serializes
+/// its content again; such a record never qualifies for an admitted actor.
 pub fn message_call(project: &str, task: &str, record: &Value, recovery: bool) -> TaskCall {
     let intent = &record["intent"];
     let mut args = words(&[
@@ -413,7 +416,11 @@ pub fn message_call(project: &str, task: &str, record: &Value, recovery: bool) -
     if recovery {
         args.push("--recover-only".into());
     }
-    TaskCall::new(args, intent["content"].to_string())
+    let input = match record["input"].as_str() {
+        Some(frozen) => frozen.to_owned(),
+        None => intent["content"].to_string(),
+    };
+    TaskCall::new(args, input)
 }
 
 /// Whether a message reply names the same task and request.
@@ -628,6 +635,34 @@ pub mod outbox {
         intent: &Value,
         new_id: &str,
     ) -> Result<Reserved, String> {
+        reserve_record(root, project, task, intent, None, new_id)
+    }
+
+    /// Reserves a task message with the one actual `hgs task message` stdin,
+    /// frozen before this checkpoint and saved in the same record write as
+    /// `input`, so every later call sends exactly those bytes. An earlier
+    /// attempt is reused as [`reserve`] does, with whatever it retained: a
+    /// legacy record has no frozen input. A reservation is durable data about
+    /// the original, not consent to execute it.
+    pub fn reserve_message(
+        root: &Path,
+        project: &str,
+        task: &str,
+        intent: &Value,
+        input: &str,
+        new_id: &str,
+    ) -> Result<Reserved, String> {
+        reserve_record(root, project, task, intent, Some(input), new_id)
+    }
+
+    fn reserve_record(
+        root: &Path,
+        project: &str,
+        task: &str,
+        intent: &Value,
+        input: Option<&str>,
+        new_id: &str,
+    ) -> Result<Reserved, String> {
         let file = path(root, project, task);
         let folder = file.parent().expect("a task-delivery folder").to_path_buf();
         if fs::create_dir_all(&folder).is_err()
@@ -662,7 +697,10 @@ pub mod outbox {
                 different_intent,
             }
         } else {
-            let record = json!({"id": new_id, "intent": intent});
+            let mut record = json!({"id": new_id, "intent": intent});
+            if let Some(input) = input {
+                record["input"] = Value::from(input);
+            }
             write(&file, record.to_string().as_bytes()).map_err(|_| {
                 "Could not save the original message. Nothing was submitted.".to_owned()
             })?;
@@ -1044,6 +1082,32 @@ mod outbox_tests {
         )
         .unwrap();
         assert!(outbox::pending(&root.0, "example", "task").is_err());
+    }
+
+    #[test]
+    fn a_reserved_message_sends_its_frozen_stdin_byte_for_byte() {
+        let root = scratch("frozen");
+        let intent = message_intent("hello", &[], "comment", "none");
+        // Bytes that serializing the content again would not reproduce.
+        let frozen = "{\n  \"text\": \"hello\",\n  \"attachments\": []\n}";
+        let reserved =
+            outbox::reserve_message(&root.0, "alpha", "t-1", &intent, frozen, ID).unwrap();
+        assert!(!reserved.recovering);
+        let saved = outbox::read(&outbox::path(&root.0, "alpha", "t-1")).unwrap();
+        assert_eq!(saved["input"], frozen, "saved with the checkpoint");
+        assert_eq!(message_call("alpha", "t-1", &saved, false).input, frozen);
+        assert_eq!(message_call("alpha", "t-1", &saved, true).input, frozen);
+        // Reopening keeps the original's frozen input, never this caller's.
+        let again = outbox::reserve_message(&root.0, "alpha", "t-1", &intent, "{}", OTHER).unwrap();
+        assert!(again.recovering);
+        assert_eq!(again.record["id"], ID);
+        assert_eq!(again.record["input"], frozen);
+        // A legacy record has none: only the direct path serializes it.
+        let legacy = json!({"id": ID, "intent": intent});
+        assert_eq!(
+            message_call("alpha", "t-1", &legacy, false).input,
+            intent["content"].to_string()
+        );
     }
 
     #[test]

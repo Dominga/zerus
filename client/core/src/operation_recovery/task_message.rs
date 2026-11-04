@@ -233,8 +233,17 @@ impl Original {
         if sha256(input) != binding.input_sha256 {
             return Err(Review::InputChanged);
         }
-        let fields = raw_fields(raw, &["id", "intent", "schema", "version"])
+        let fields = raw_fields(raw, &["id", "intent", "input", "schema", "version"])
             .map_err(|_| Review::InvalidRecord)?;
+        // A record that froze its stdin before its checkpoint must carry
+        // exactly the retained input.
+        if let Some(frozen) = fields.get("input") {
+            let frozen: String =
+                serde_json::from_str(frozen.get()).map_err(|_| Review::InvalidRecord)?;
+            if frozen.as_bytes() != input {
+                return Err(Review::InputChanged);
+            }
+        }
         let intent = raw_fields(
             required(&fields, "intent")
                 .map_err(|_| Review::InvalidRecord)?
@@ -552,6 +561,27 @@ mod tests {
         assert!(matches!(
             o.step(Input::LookupRequested, false, false),
             Decision::NeedsReview(Review::Spent)
+        ));
+    }
+    #[test]
+    fn a_record_with_frozen_input_must_carry_exactly_the_retained_input() {
+        let (_, _, input) = fixture(record("queue", ""));
+        let frozen = std::str::from_utf8(&input).unwrap();
+        let mut value = record("queue", "");
+        value["input"] = json!(frozen);
+        let (b, raw, retained) = fixture(value.clone());
+        // The fixture's retained input is the same exact bytes.
+        assert_eq!(retained, input);
+        let o = original(b.clone(), &raw, &retained);
+        assert_eq!(o._input, input);
+        // Any other retained input is refused against the frozen one.
+        let mut changed = input.clone();
+        changed.pop();
+        let mut other = b.clone();
+        other.input_sha256 = sha256(&changed);
+        assert!(matches!(
+            Original::verify(other, &raw, &changed, b.marker_id.as_bytes()),
+            Err(Review::InputChanged)
         ));
     }
     #[test]

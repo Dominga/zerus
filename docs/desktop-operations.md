@@ -226,6 +226,15 @@ only proposes the original queue/note call once, with the existing 90-second
 timeout, exact original marker and frozen stdin. It never reconstructs missing
 input. Send/reopen and deferred native input remain review-only.
 
+A new task message freezes its one actual `hgs task message` stdin before its
+outbox checkpoint: `outbox::reserve_message` saves it as the record's `input`
+in the same write, and the editor sends that same call. `message_call` sends a
+record's frozen `input` byte for byte, recovery included, and the policy
+requires it to equal the retained input. A legacy record without `input` never
+qualifies for an admitted actor; only the direct path still serializes its
+content. A reservation, reopened or new, is durable data about the original,
+never consent to execute it.
+
 Configuration/project/task are independently retained expected data, not fields
 observed in an outbox record. Raw record and input each stay at most 1 MiB;
 known duplicate fields are refused at every inspected level before projection.

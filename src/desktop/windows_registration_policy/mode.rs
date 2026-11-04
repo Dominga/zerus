@@ -4,6 +4,7 @@ use serde::{Deserialize, Serialize};
 use std::time::{Duration, Instant};
 
 pub(in crate::desktop) const RECORD_BYTES: usize = 8192;
+pub(in crate::desktop) mod first;
 pub(in crate::desktop) mod review;
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]
@@ -147,6 +148,8 @@ pub(in crate::desktop) struct Record {
     pub reviewed: Vec<review::Archive>,
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub choices: Vec<review::Receipt>,
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub first_choices: Vec<first::Receipt>,
 }
 impl Record {
     pub fn empty(plan: &Plan) -> Result<Self> {
@@ -164,6 +167,7 @@ impl Record {
             completed: None,
             reviewed: Vec::new(),
             choices: Vec::new(),
+            first_choices: Vec::new(),
         })
     }
     pub fn decode(bytes: &[u8], plan: &Plan) -> Result<Self> {
@@ -205,6 +209,7 @@ impl Record {
             "Invalid completed transition UUID."
         );
         value.check_reviews()?;
+        value.check_first()?;
         Ok(value)
     }
     pub fn encode(&self, plan: &Plan) -> Result<Vec<u8>> {
@@ -280,7 +285,8 @@ impl Record {
     /// Select metadata for a read-only native observation, never permission to
     /// discard it. The caller must bind this GUID to the ready requested mode.
     pub fn ready_cancellation(&self, request_id: &str) -> Result<&Pending> {
-        ensure!(!self.choices.iter().any(|c| c.request == request_id),
+        ensure!(!self.choices.iter().any(|c| c.request == request_id)
+            && !self.first_choices.iter().any(|c| c.request == request_id),
             "Use Review interrupted mode change for this original; cancellation cannot discard its unknown custody.");
         let pending = self
             .pending

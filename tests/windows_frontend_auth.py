@@ -446,6 +446,98 @@ class WindowsTaskMode(unittest.TestCase):
         self.assertEqual(value['request_id'], request)
         return value
 
+    def first_call(self, desired, request_id):
+        return self.frontend_call(dict(case='mode_switch', desired=desired, request_id=request_id),
+                                  'MODE_CALLER_RESULT ')
+
+    def refused_first_choice(self, request_id, reason):
+        """A refused first choice writes no record and changes no task."""
+        path = self.state / 'desktop' / 'windows-registration-mode.json'
+        before, record_before = self.observe()['instances'], path.read_bytes()
+        grant = self.cli('desktop', 'ownership-status', '--json')
+        result = self.first_call('background', request_id)
+        self.assertEqual(result['code'], 0, result)
+        value = json.loads(result['stdout'])
+        self.assertFalse(value['ok'], value)
+        self.assertIn(reason, value['error'])
+        self.assertEqual(path.read_bytes(), record_before)
+        self.assertEqual(self.observe()['instances'], before)
+        self.assertEqual(self.cli('desktop', 'ownership-status', '--json'), grant)
+        return value
+
+    def first_background_choice_from_plain_passive(self):
+        """zerus-yfbd.1: the first explicit background choice, with the
+        caller's retained UUID, through the actual installed-frontend caller."""
+        path = self.state / 'desktop' / 'windows-registration-mode.json'
+        status = self.cli('desktop', 'registration', 'status', '--json')
+        self.assertIsNone(status['pending_transition'])
+        self.assertIsNone(status['reviewed_transition'])
+        self.assertFalse(status['activation_automatic_blocked'])
+        granted = self.cli('desktop', 'ownership-status', '--json')
+        before, record_before = self.observe()['instances'], path.read_bytes()
+        # The closed form: a passive request or a malformed UUID never reaches
+        # the mode helper.
+        for desired, request in (('passive', str(uuid.uuid4())), ('background', 'not-a-uuid')):
+            self.assertNotEqual(self.first_call(desired, request)['code'], 0)
+        self.assertEqual(path.read_bytes(), record_before)
+        self.assertEqual(self.observe()['instances'], before)
+        request = str(uuid.uuid4())
+        result = self.first_call('background', request)
+        self.assertEqual(result['code'], 0, result)
+        first = json.loads(result['stdout'])
+        self.assertTrue(first['ok'], first)
+        self.assertEqual((first['request_id'], first['running_mode']), (request, 'background'))
+        current = self.cli('desktop', 'status', '--json')['lifecycle']
+        receipt = self.cli('desktop', 'registration', 'mode-result', '--json',
+                           '--request-id', request)['receipt']
+        self.assertNotIn('reviewed', receipt)
+        self.assertEqual((receipt['request'], receipt['desired'], receipt['phase']),
+                         (request, 'background', 'settled'))
+        self.assertEqual(receipt['scope'], dict(journal=granted['journal'], owner_epoch=granted['owner_epoch'],
+                                               service_epoch=current['epoch'], generation=current['generation']))
+        registration = self.cli('desktop', 'registration', 'status', '--json')
+        self.assertEqual(registration['first_choice'], receipt)
+        self.assertIsNone(registration['mode_choice'])
+        # From background the form refuses before any effect.
+        self.refused_first_choice(str(uuid.uuid4()), 'from a passive registration only')
+        return first
+
+    def pending_first_choice_refuses_the_old_frame(self, current):
+        """A reserved FIRST choice whose helper died at Prepared or Held: the
+        OLD no-request-ID switch never adopts or continues it."""
+        path = self.state / 'desktop' / 'windows-registration-mode.json'
+        for phase in ('prepared', 'held'):
+            record = json.loads(path.read_text(encoding='utf-8'))
+            request = str(uuid.uuid4())
+            # Arrange lost reply metadata only, around the actual running
+            # passive instance; no synthetic native authentication.
+            record['pending'] = dict(request_id=request, desired='background', phase=phase,
+                                     original=current, started=None)
+            record.setdefault('first_choices', []).append(
+                dict(request=request, desired='background', phase='unknown'))
+            path.write_text(json.dumps(record), encoding='utf-8')
+            arranged = path.read_bytes()
+            before = self.observe()['instances']
+            grant = self.cli('desktop', 'ownership-status', '--json')
+            service = self.cli('desktop', 'status', '--json')['lifecycle']['pid']
+            refused = self.mode('background')
+            self.assertFalse(refused['ok'], refused)
+            self.assertIn('first mode choice is pending', refused['error'])
+            # Zero Stop/Update/RunEx, ownership or record change; no new ID.
+            self.assertEqual(path.read_bytes(), arranged)
+            self.assertEqual(self.observe()['instances'], before)
+            self.assertEqual(self.cli('desktop', 'ownership-status', '--json'), grant)
+            self.assertEqual(self.cli('desktop', 'status', '--json')['lifecycle']['pid'], service)
+            result = self.cli('desktop', 'registration', 'mode-result', '--json', '--request-id', request)
+            self.assertEqual((result['outcome'], result['receipt']['phase']), ('unknown', 'unknown'), result)
+            # Closed only through the supported pre-manager cancellation.
+            cancelled = self.cancel(request)
+            self.assertEqual(cancelled['cancelled_request_id'], request, cancelled)
+            self.assertFalse(cancelled['manager_changed'], cancelled)
+            self.assertEqual(self.observe()['instances'], before)
+            result = self.cli('desktop', 'registration', 'mode-result', '--json', '--request-id', request)
+            self.assertEqual(result['receipt']['phase'], 'refused', result)
+
     def review_old_stop_without_adopting_the_later_passive(self, original, current):
         path = self.state / 'desktop' / 'windows-registration-mode.json'
         record = json.loads(path.read_text(encoding='utf-8'))
@@ -471,6 +563,9 @@ class WindowsTaskMode(unittest.TestCase):
         self.assertEqual(archived['original']['original'], original)
         self.assertEqual(archived['original']['phase'], 'stop_offered')
         self.assertEqual(archived['outcome'], 'unknown')
+        # Review history closes the first-choice form, even with a passive
+        # registration; the reviewed route is the only choice left.
+        self.refused_first_choice(str(uuid.uuid4()), 'Review it')
         # A fresh explicit Rearm is a separate fixture action, not a capability
         # obtained from Review. With a valid Grant, an OLD automatic switch
         # frame must still refuse specifically at the durable review latch.
@@ -917,7 +1012,9 @@ if(@(Get-OwnInstances $s $t).Count-ne 0) {throw 'fixture instance remains'};
             self.metadata_refusals(passive)
             self.busy_exclusion_does_not_reserve(passive)
             cancelled = self.cancel_unsent_private_rollback(passive)
-            background = self.mode('background')
+            # The first passive-to-background switch uses the first-choice
+            # form; the ordinary form stays covered by next_background below.
+            background = self.first_background_choice_from_plain_passive()
             self.assertTrue(background['ok'], background)
             self.assertNotEqual(background['request_id'], cancelled)
             self.assertEqual(background['running_mode'], 'background')
@@ -943,6 +1040,11 @@ if(@(Get-OwnInstances $s $t).Count-ne 0) {throw 'fixture instance remains'};
             self.assertEqual(status['running_mode'], 'passive')
             self.assertIsNone(status['pending_transition'])
             self.assertEqual(status['completed_request_id'], rollback['request_id'])
+            # Passive again, ownership revoked: the old first-choice UUID only
+            # reads, and a NEW one still needs a current Service Grant.
+            self.refused_first_choice(background['request_id'], 'already offered')
+            self.refused_first_choice(str(uuid.uuid4()), 'Grant')
+            self.pending_first_choice_refuses_the_old_frame(self.latest)
             self.cancel_ready_rollback_after_authority_moves(background, rollback)
             # A separately explicit new choice is admitted after cancellation;
             # the original manager effects and revoke are never replayed.

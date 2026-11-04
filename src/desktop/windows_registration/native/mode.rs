@@ -184,10 +184,17 @@ pub(in crate::desktop::windows_registration) fn result(
     let preview = registration::windows_plan(config, location)?;
     let plan = Plan::parse(&json!({"schema":1,"operation":"status","plan":preview}), &sid)?;
     let record = load(location, &plan)?;
-    let receipt = record.choices.iter().find(|r|r.request == request);
+    // A reviewed choice or a first choice: each answers only its own original ID.
+    let receipt = match record.choices.iter().find(|r|r.request == request) {
+        Some(r) => Some((serde_json::to_value(r)?, r.phase)),
+        None => match record.first_choices.iter().find(|r|r.request == request) {
+            Some(r) => Some((serde_json::to_value(r)?, r.phase)),
+            None => None,
+        },
+    };
     Ok(json!({"abi":MODE_ABI,"schema":1,"configuration":location.configuration,
-        "request_id":request,"read_only":true,"receipt":receipt,
-        "outcome":receipt.map(|r|r.phase).unwrap_or(policy::mode::review::ChoicePhase::Unknown),
+        "request_id":request,"read_only":true,"receipt":receipt.as_ref().map(|r|&r.0),
+        "outcome":receipt.as_ref().map(|r|r.1).unwrap_or(policy::mode::review::ChoicePhase::Unknown),
         "code":if receipt.is_some() {"original_choice_result"} else {"original_choice_unavailable"},
         "manager_changed":false,"authority_changed":false,"changed":false}))
 }
@@ -205,6 +212,7 @@ pub(in crate::desktop::windows_registration) fn pending_status(
         json!({"pending_transition":record.pending,"cancelled_request_id":record.cancelled,"completed_request_id":record.completed,
             "reviewed_transition":record.reviewed.last(),
             "mode_choice":record.choices.last(),
+            "first_choice":record.first_choices.last(),
             "activation_automatic_blocked":!record.reviewed.is_empty() || record.pending.as_ref().is_some_and(|p|p.review.is_some())}),
     )
 }
@@ -367,7 +375,12 @@ struct Runtime<'a> {
     passive: &'a Plan,
     background: &'a Plan,
 }
-fn effect(runtime: Runtime<'_>, desired: Mode, choice: Option<&policy::mode::review::Choice>) -> Result<Value> {
+fn effect(
+    runtime: Runtime<'_>,
+    desired: Mode,
+    choice: Option<&policy::mode::review::Choice>,
+    first: Option<&policy::mode::first::First>,
+) -> Result<Value> {
     let until = Budget::Preflight.deadline(Instant::now());
     let Runtime {
         config,
@@ -390,7 +403,16 @@ fn effect(runtime: Runtime<'_>, desired: Mode, choice: Option<&policy::mode::rev
         background
     };
     let mut record = load(location, passive)?;
-    let requested = record.choice(choice)?;
+    // A first choice never takes the reviewed route: any pending, interrupted
+    // or reviewed original refuses it here, under the owned lock.
+    let requested = match first {
+        Some(first) => {
+            ensure!(choice.is_none() && desired == Mode::Background && from == Mode::Passive,
+                "A first mode choice selects background from a passive registration only.");
+            Some(record.first_choice(first)?)
+        }
+        None => record.choice(choice)?,
+    };
     let resuming = record.pending.clone();
     if let Some(pending) = &resuming {
         ensure!(pending.review.is_none(), "Review interrupted mode change by its original UUID; a reboot barrier cannot resume or replay its effects.");
@@ -415,7 +437,7 @@ fn effect(runtime: Runtime<'_>, desired: Mode, choice: Option<&policy::mode::rev
         admission,
         location,
         background: desired == Mode::Background,
-        grant: if desired == Mode::Background && choice.is_some() {
+        grant: if desired == Mode::Background && (choice.is_some() || first.is_some()) {
             Some(ownership::RegistrationGrant::capture(location)?.context("Current Service Grant/Rearm required.")?)
         } else { None },
         exclusion: None,
@@ -426,6 +448,8 @@ fn effect(runtime: Runtime<'_>, desired: Mode, choice: Option<&policy::mode::rev
     };
     fence.check()?;
     let mut original = instances::original(native, location, old, &wanted(old)?, until)?;
+    ensure!(first.is_none() || original.is_some(),
+        "A first background choice needs the selected passive service running.");
     let observation = original.as_ref().map(instances::Running::observation);
     if let Some(pending) = &resuming {
         ensure!(
@@ -436,7 +460,7 @@ fn effect(runtime: Runtime<'_>, desired: Mode, choice: Option<&policy::mode::rev
     let consumer = if resuming.is_none() {
         admission.check()?;
         let boot = boot::current()?;
-        ensure!(requested.is_none() || record.reviewed.last().is_some_and(|a|
+        ensure!(choice.is_none() || record.reviewed.last().is_some_and(|a|
             a.original.review.as_ref().is_some_and(|r|r.barrier.machine == boot.machine)),
             "The reviewed original belongs to another machine.");
         let (pid, birth) = admission.caller.consumer();
@@ -492,6 +516,7 @@ fn effect(runtime: Runtime<'_>, desired: Mode, choice: Option<&policy::mode::rev
         pending.request_id.clone()
     } else {
         if let Some(choice) = choice { record.reserve_choice(choice, desired)?; }
+        if let Some(first) = first { record.reserve_first(first)?; }
         let id = match requested {
             Some(id) => record.begin_id(desired, observation, id)?,
             None => record.begin(desired, observation)?,
@@ -635,7 +660,8 @@ fn effect(runtime: Runtime<'_>, desired: Mode, choice: Option<&policy::mode::rev
 }
 
 fn finish_choice(record: &mut Record, id: &str, desired: Mode, ready: &instances::Running, fence: &Fence<'_>) -> Result<()> {
-    if desired == Mode::Background && record.choices.iter().any(|r|r.request == id) {
+    if desired == Mode::Background && (record.choices.iter().any(|r|r.request == id)
+        || record.first_choices.iter().any(|r|r.request == id)) {
         let grant = fence.grant.as_ref().context("Original background Grant unavailable.")?;
         grant.check(fence.location)?;
         let (journal, owner_epoch) = grant.incarnation();
@@ -655,8 +681,12 @@ fn operation(args: &[String]) -> Result<Value> {
         "Unsupported mode request."
     );
     let keys = request.as_object().context("Invalid mode request.")?;
+    // The first-choice form: exactly a background switch with the caller's
+    // NEW request UUID, and no reviewed linkage.
+    let first_form = op == "switch" && keys.len() == 4 && request["mode"] == "background"
+        && request["request_id"].is_string() && !keys.contains_key("after_review");
     ensure!(
-        (keys.len() == 3 || (op == "switch" && keys.len() == 5
+        (keys.len() == 3 || first_form || (op == "switch" && keys.len() == 5
             && request["after_review"].is_string() && request["request_id"].is_string()))
             && if op == "switch" {
                 keys.contains_key("mode")
@@ -749,6 +779,9 @@ fn operation(args: &[String]) -> Result<Value> {
     let choice = request["after_review"].as_str().map(|reviewed| policy::mode::review::Choice {
         reviewed: reviewed.into(), request: request["request_id"].as_str().unwrap_or("").into(),
     });
+    let first = first_form.then(|| policy::mode::first::First {
+        request: request["request_id"].as_str().unwrap_or("").into(),
+    });
     effect(
         Runtime {
             config: &config,
@@ -761,6 +794,7 @@ fn operation(args: &[String]) -> Result<Value> {
         },
         desired,
         choice.as_ref(),
+        first.as_ref(),
     )
 }
 
@@ -814,6 +848,7 @@ mod tests {
             json!({"schema":1,"operation":"cancel_rollback","request_id":"11111111-1111-4111-8111-111111111111"}),
             json!({"schema":1,"operation":"review","request_id":"11111111-1111-4111-8111-111111111111"}),
             json!({"schema":1,"operation":"switch","mode":"background","after_review":"11111111-1111-4111-8111-111111111111","request_id":"22222222-2222-4222-8222-222222222222"}),
+            json!({"schema":1,"operation":"switch","mode":"background","request_id":"33333333-3333-4333-8333-333333333333"}),
         ] {
             let error = command(&config, &location, request).unwrap_err();
             assert_eq!(error.to_string(), crate::self_exec::TEST_IMAGE);

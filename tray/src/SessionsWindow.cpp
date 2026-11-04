@@ -2000,28 +2000,39 @@ SessionsWindow::SessionsWindow(const QString &hgsPath, QWidget *parent)
         if(folder.isEmpty())return;
         if(QMessageBox::question(this,tr("Fix folder rights"),
             tr("Give your Windows user full control of\n%1\n\nThe DeepSeek sandbox needs it to start a session there. Only your own access to this folder changes.").arg(folder))!=QMessageBox::Yes)return;
-        m_creationFixAccess->setEnabled(false);m_creationFixAccess->setText(tr("Fixing folder rights…"));
-        auto *process=new QProcess(this);
-        ChildProcess::inheritStdioOnly(*process);
-        connect(process,&QProcess::finished,this,[this,process,id](int code,QProcess::ExitStatus status){
-            process->deleteLater();
-            const auto error=QString::fromUtf8(process->readAllStandardError()).trimmed();
-            if(status!=QProcess::NormalExit||code!=0){
-                m_creationFixAccess->setEnabled(true);m_creationFixAccess->setText(tr("Fix folder rights"));
-                showNotice(tr("The folder rights were not changed: %1").arg(error.isEmpty()?tr("unknown error"):error),true);return;
-            }
-            m_creationFixAccess->setText(tr("Folder rights fixed"));
-            showNotice(tr("Folder rights fixed; starting the session again."),false);
-            // The sandbox check refuses before hgs writes or starts anything
-            // (dsh.rs, ensure_sandbox_folder), so this "unknown" launch started
-            // nothing: it ends as refused and starts again, under a new launch id.
-            const auto op=m_creations->operation(id);
-            if(op["state"]=="unknown"&&op["failed_stage"]=="launching"&&!sandboxFolderOf(op["error"].toString()).isEmpty())
-                m_creations->ended(id,op["launch_id"].toString(),op["error"].toString());
-            if(SessionCreationController::canResume(m_creations->operation(id)))m_creations->resume(id);else m_creations->check(id);
-        });
-        ChildProcess::inheritStdioOnly(*process);
-        process->start(m_client.executable(),{QStringLiteral("sandbox-folder"),QStringLiteral("grant"),folder,QStringLiteral("--json")});
+        // T-o8dps1: a folder another account owns refuses the ordinary grant;
+        // the second try asks Windows for an administrator's approval.
+        const auto grant=[this,id,folder](const auto &self,bool elevated)->void{
+            m_creationFixAccess->setEnabled(false);m_creationFixAccess->setText(elevated?tr("Waiting for the administrator prompt…"):tr("Fixing folder rights…"));
+            auto *process=new QProcess(this);
+            connect(process,&QProcess::finished,this,[this,process,id,folder,elevated,self](int code,QProcess::ExitStatus status){
+                process->deleteLater();
+                const auto error=QString::fromUtf8(process->readAllStandardError()).trimmed();
+                if(status!=QProcess::NormalExit||code!=0){
+                    m_creationFixAccess->setEnabled(true);m_creationFixAccess->setText(tr("Fix folder rights"));
+                    const bool owned=error.contains(QStringLiteral("os error 5"))||error.contains(QStringLiteral("another account owns it"));
+                    if(!elevated&&owned&&QMessageBox::question(this,tr("Grant as administrator"),
+                        tr("Another account owns\n%1\nso your user cannot change its rights.\n\nWindows will ask an administrator to approve adding full control for your user to this folder. Nothing else changes and no ownership is taken.").arg(folder))==QMessageBox::Yes){
+                        self(self,true);return;
+                    }
+                    showNotice(tr("The folder rights were not changed: %1").arg(error.isEmpty()?tr("unknown error"):error),true);return;
+                }
+                m_creationFixAccess->setText(tr("Folder rights fixed"));
+                showNotice(tr("Folder rights fixed; starting the session again."),false);
+                // The sandbox check refuses before hgs writes or starts anything
+                // (dsh.rs, ensure_sandbox_folder), so this launch started
+                // nothing: it ends as refused and starts again, under a new launch id.
+                const auto op=m_creations->operation(id);
+                if(op["state"]=="unknown"&&op["failed_stage"]=="launching"&&!sandboxFolderOf(op["error"].toString()).isEmpty())
+                    m_creations->ended(id,op["launch_id"].toString(),op["error"].toString());
+                if(SessionCreationController::canResume(m_creations->operation(id)))m_creations->resume(id);else m_creations->check(id);
+            });
+            ChildProcess::inheritStdioOnly(*process);
+            QStringList args{QStringLiteral("sandbox-folder"),QStringLiteral("grant"),folder,QStringLiteral("--json")};
+            if(elevated)args.insert(3,QStringLiteral("--elevated"));
+            process->start(m_client.executable(),args);
+        };
+        grant(grant,false);
     });
     connect(m_creationCheck,&QPushButton::clicked,this,[this]{m_creations->check(m_selectedCreation);emit refreshRequested();});
     connect(m_creationStop,&QPushButton::clicked,this,[this]{m_creations->stop(m_selectedCreation);});

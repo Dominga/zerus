@@ -1166,6 +1166,61 @@ pub fn owner_only_file(path: &Path) -> io::Result<()> {
     Ok(())
 }
 
+/// T-o8dps1: when another account owns the folder (no WRITE_DAC to change it
+/// with), only an administrator can add this user's entry. On the owner's
+/// explicit click this runs `icacls DIR /grant *<this user's SID>:(OI)(CI)F`
+/// through the UAC prompt and waits for it. The SID is this process's own, so
+/// an administrator account that approves the prompt never grants itself.
+/// Nothing takes ownership. The caller checks the rights again as this user.
+pub fn grant_full_control_elevated(path: &Path) -> io::Result<()> {
+    use windows_sys::Win32::System::Threading::GetExitCodeProcess;
+    use windows_sys::Win32::UI::Shell::{ShellExecuteExW, SEE_MASK_NOASYNC, SEE_MASK_NOCLOSEPROCESS, SHELLEXECUTEINFOW};
+    use windows_sys::Win32::UI::WindowsAndMessaging::SW_HIDE;
+    let sid = user_sid_string().ok_or_else(|| io::Error::other("this user's identity is unavailable"))?;
+    // A quoted argument may not end in a backslash: "D:\" would escape the quote.
+    let folder = path.display().to_string();
+    let folder = folder.trim_end_matches('\\');
+    let folder = if folder.ends_with(':') { format!("{folder}\\.") } else { folder.to_owned() };
+    let system = std::env::var_os("SystemRoot").map(PathBuf::from).unwrap_or_else(|| PathBuf::from(r"C:\Windows"));
+    let icacls = system.join("System32").join("icacls.exe");
+    let verb: Vec<u16> = "runas".encode_utf16().chain(Some(0)).collect();
+    let file = wide_path(&icacls);
+    let parameters: Vec<u16> = format!("\"{folder}\" /grant *{sid}:(OI)(CI)F").encode_utf16().chain(Some(0)).collect();
+    let mut info: SHELLEXECUTEINFOW = unsafe { std::mem::zeroed() };
+    info.cbSize = std::mem::size_of::<SHELLEXECUTEINFOW>() as u32;
+    info.fMask = SEE_MASK_NOCLOSEPROCESS | SEE_MASK_NOASYNC;
+    info.lpVerb = verb.as_ptr();
+    info.lpFile = file.as_ptr();
+    info.lpParameters = parameters.as_ptr();
+    info.nShow = SW_HIDE;
+    if unsafe { ShellExecuteExW(&mut info) } == 0 {
+        let error = io::Error::last_os_error();
+        // ERROR_CANCELLED: the person declined the administrator prompt.
+        return Err(if error.raw_os_error() == Some(1223) {
+            io::Error::other("the administrator prompt was declined; nothing changed")
+        } else {
+            error
+        });
+    }
+    if info.hProcess.is_null() {
+        return Err(io::Error::other("Windows did not start icacls as administrator"));
+    }
+    let waited = unsafe { WaitForSingleObject(info.hProcess, 300_000) };
+    let mut code = 0u32;
+    let read = unsafe { GetExitCodeProcess(info.hProcess, &mut code) };
+    unsafe { CloseHandle(info.hProcess) };
+    if waited != WAIT_OBJECT_0 || read == 0 {
+        return Err(io::Error::other("icacls as administrator did not finish within five minutes"));
+    }
+    if code != 0 {
+        return Err(io::Error::other(format!(
+            "icacls as administrator could not change the folder (exit {code}); its rights may exclude administrators: \
+             take ownership in an administrator terminal (takeown /f \"{folder}\") only if that is your folder"
+        )));
+    }
+    Ok(())
+}
+
 /// U34: the one-line fix the owner gets when the sandbox cannot use a folder;
 /// None when this process already has both rights.
 pub fn sandbox_folder_problem(path: &Path) -> io::Result<Option<String>> {
@@ -1174,9 +1229,16 @@ pub fn sandbox_folder_problem(path: &Path) -> io::Result<Option<String>> {
         return Ok(None);
     }
     let sid = user_sid_string().ok_or_else(|| io::Error::other("this user's identity is unavailable"))?;
+    // Without WRITE_DAC another account owns the folder, and only an
+    // administrator can add this user's entry (T-o8dps1).
+    let owner = if missing.contains(&"WRITE_DAC") {
+        "; another account owns it, so run this in an administrator terminal or choose Grant as administrator"
+    } else {
+        ""
+    };
     Ok(Some(format!(
         "the DeepSeek sandbox needs full control of {} (missing {}); fix it for this folder with:\n  \
-         icacls \"{}\" /grant *{}:(OI)(CI)F",
+         icacls \"{}\" /grant *{}:(OI)(CI)F{owner}",
         path.display(),
         missing.join(" and "),
         path.display(),

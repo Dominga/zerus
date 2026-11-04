@@ -305,7 +305,7 @@ fn setting_command(local: bool, command: &str, args: &[String], dry: bool) -> Re
 /// says the sandbox lacks them; the result is checked again before it is told.
 fn sandbox_folder(args: &[String]) -> Result<i32> {
     if args.first().map(String::as_str) != Some("grant") {
-        return Err(Error::new(1, "usage: hgs sandbox-folder grant DIRECTORY --json"));
+        return Err(Error::new(1, "usage: hgs sandbox-folder grant DIRECTORY [--elevated] --json"));
     }
     let path = require(args, 1, "Missing folder")?;
     let folder = Path::new(path);
@@ -319,7 +319,13 @@ fn sandbox_folder(args: &[String]) -> Result<i32> {
             println!("{}", serde_json::json!({"status":"ok","path":path}));
             return Ok(0);
         }
-        crate::platform::grant_full_control(folder).map_err(fail)?;
+        // T-o8dps1: --elevated asks Windows for an administrator's approval
+        // first; the rights are checked again as this user either way.
+        if has(args, "--elevated") {
+            crate::platform::grant_full_control_elevated(folder).map_err(fail)?;
+        } else {
+            crate::platform::grant_full_control(folder).map_err(fail)?;
+        }
         if let Some(problem) = crate::platform::sandbox_folder_problem(folder).map_err(fail)? {
             return Err(Error::new(1, format!("The grant did not take: {problem}")));
         }

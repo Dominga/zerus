@@ -167,8 +167,20 @@ impl Fixture {
         self.runtime.sources.native_fixture(&self.store, computer);
     }
     fn tick_until(&mut self, predicate: impl Fn(&Runtime) -> bool) {
+        self.poll_until(predicate, false);
+    }
+    /// Collect only the original jobs. Fairness fixtures advance discovery in
+    /// explicit scans; a loaded runner must not sneak in another scan during
+    /// collection and replace the completed jobs before the predicate sees it.
+    fn collect_until(&mut self, predicate: impl Fn(&Runtime) -> bool) {
+        self.poll_until(predicate, true);
+    }
+    fn poll_until(&mut self, predicate: impl Fn(&Runtime) -> bool, collect_only: bool) {
         let end = Instant::now() + Duration::from_secs(5);
         loop {
+            if collect_only {
+                self.runtime.scan_at = end;
+            }
             self.runtime.poll(&mut self.store);
             if predicate(&self.runtime) {
                 break;
@@ -1302,7 +1314,7 @@ impl Held {
             sequence: AtomicUsize::new(0),
         });
         let record = held.clone();
-        let run: Runner = Arc::new(move |inv, _, _, _| {
+        let run: Runner = Arc::new(move |inv, _, cancel, _| {
             assert!(inv.args.iter().any(|a| a == "inspect"));
             if let Some(name) = inv.args.iter().find(|a| a.starts_with("claude/example/")) {
                 record.names.lock().unwrap().push(name.clone());
@@ -1314,7 +1326,14 @@ impl Held {
                 sequence,
                 release,
             ));
-            let _ = wait.recv_timeout(Duration::from_secs(30));
+            // This fixture holds by scan count, not wall time. Slow scheduling
+            // must not release a slot early; panic/drop still cancels it.
+            while !cancel.load(Ordering::Acquire) {
+                match wait.recv_timeout(Duration::from_millis(10)) {
+                    Err(mpsc::RecvTimeoutError::Timeout) => (),
+                    _ => break,
+                }
+            }
             Exit::TimedOut
         });
         (run, held)
@@ -1337,7 +1356,8 @@ impl Held {
                     }
                 });
             let held = self.calls.lock().unwrap().len();
-            f.tick_until(|r| r.jobs.len() == held);
+            f.collect_until(|r| r.jobs.len() == held);
+            f.runtime.sources.heartbeat_fixture(&f.store);
             f.scan();
             // Every inspection the scan started has reached the runner.
             let launched = f.runtime.jobs.len();
@@ -1353,7 +1373,7 @@ impl Held {
         for (_, _, release) in self.calls.lock().unwrap().drain(..) {
             let _ = release.send(());
         }
-        f.tick_until(|r| r.jobs.is_empty());
+        f.collect_until(|r| r.jobs.is_empty());
     }
 }
 
@@ -1363,6 +1383,46 @@ fn slow_rows(f: &mut Fixture) {
             .map(|n| named(&format!("slow-{n}"), "approval", true))
             .collect(),
     );
+}
+
+#[test]
+fn collecting_released_inspections_never_performs_a_scheduled_scan() {
+    let (run, held) = Held::runner();
+    let mut f = Fixture::new(run);
+    f.active();
+    f.enabled(true);
+    slow_rows(&mut f);
+    f.scan();
+    let launched = f.runtime.jobs.len();
+    assert_eq!(launched, APPROVALS);
+    let until = Instant::now() + Duration::from_secs(5);
+    while held.calls.lock().unwrap().len() < launched {
+        assert!(Instant::now() < until, "the original inspections never ran");
+        thread::sleep(Duration::from_millis(1));
+    }
+    for (_, _, release) in held.calls.lock().unwrap().drain(..) {
+        release.send(()).unwrap();
+    }
+    // Make the interleaving exact: both original threads have returned before
+    // the actor's next turn. The regression must not depend on a lucky race
+    // between releasing a worker and its thread actually finishing.
+    let until = Instant::now() + Duration::from_secs(5);
+    while f.runtime.jobs.iter().any(|job| {
+        job.thread
+            .as_ref()
+            .is_none_or(|thread| !thread.is_finished())
+    }) {
+        assert!(
+            Instant::now() < until,
+            "the original threads never finished"
+        );
+        thread::sleep(Duration::from_millis(1));
+    }
+    // The same scheduling point reached after a loaded runner spends one
+    // second between explicit scans, without a machine-speed-dependent sleep.
+    f.runtime.scan_at = Instant::now();
+    f.collect_until(|r| r.jobs.is_empty());
+    assert_eq!(held.sequence.load(Ordering::SeqCst), launched);
 }
 
 #[test]

@@ -2,7 +2,10 @@
 //! service-mode load/normalization. Each source has a separate fixed historical
 //! boundary and private slot. These are not live checkpoints or effect authority;
 //! Qt/Settings keep their existing current-source leases.
-use super::{sources, SourceError, SourceResult, SourceStream};
+use super::{
+    lineage::{create_json, read_json, unreadable, Seed, META},
+    sources, SourceError, SourceResult, SourceStream,
+};
 use crate::fsx::preload::{self as disk, Stamp};
 use serde::{Deserialize, Serialize};
 use std::{
@@ -13,7 +16,6 @@ use std::{
     },
 };
 use zerus_desktop_migration::{canonical_uuid, sha256};
-const META: usize = 64 << 10;
 const RAW: usize = crate::creation::JOURNAL_LIMIT;
 const BOUNDARY: &str = "next-creations-before-first-load-v1";
 
@@ -119,18 +121,6 @@ impl Kind {
     }
 }
 
-#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
-#[serde(deny_unknown_fields)]
-struct Seed {
-    version: u32,
-    boundary: String,
-    capture_id: String,
-}
-impl Seed {
-    fn valid(&self, kind: Kind) -> bool {
-        self.version == 1 && self.boundary == kind.boundary() && canonical_uuid(&self.capture_id)
-    }
-}
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
 struct Plan {
@@ -281,7 +271,7 @@ impl Capture {
         let root = self.data_path()?.join(self.kind.slot());
         let (seed, _) =
             read_json::<Seed>(&root.join("identity.json"))?.ok_or(SourceError::SourceUnreadable)?;
-        if !seed.valid(self.kind) || seed.capture_id != expected {
+        if !seed.valid(self.kind.boundary()) || seed.capture_id != expected {
             return Err(SourceError::SourceChanged);
         }
         let (receipt, _) = read_json::<Receipt>(&root.join("receipt.json"))?
@@ -376,16 +366,12 @@ impl Capture {
         let seed: Seed = match read_json(&root.join("identity.json"))? {
             Some((value, _)) => value,
             None => {
-                let value = Seed {
-                    version: 1,
-                    boundary: self.kind.boundary().into(),
-                    capture_id: uuid::Uuid::new_v4().to_string(),
-                };
+                let value = Seed::new(self.kind.boundary());
                 create_json(&root.join("identity.json"), &value)?;
                 value
             }
         };
-        if !seed.valid(self.kind) {
+        if !seed.valid(self.kind.boundary()) {
             return Err(SourceError::InvalidMetadata.into());
         }
         self.state
@@ -469,31 +455,6 @@ impl Capture {
         Snapshot::open(root, receipt, &seed, true).map_err(Into::into)
     }
 }
-fn unreadable(error: std::io::Error) -> SourceError {
-    if error.kind() == std::io::ErrorKind::FileTooLarge {
-        SourceError::TooLarge
-    } else {
-        SourceError::SourceUnreadable
-    }
-}
-fn read_json<T: serde::de::DeserializeOwned>(path: &Path) -> SourceResult<Option<(T, Stamp)>> {
-    disk::read(path, META)
-        .map_err(unreadable)?
-        .map(|(b, s)| {
-            serde_json::from_slice(&b)
-                .map(|v| (v, s))
-                .map_err(|_| SourceError::InvalidMetadata)
-        })
-        .transpose()
-}
-fn create_json(path: &Path, value: &impl Serialize) -> SourceResult<()> {
-    let bytes = serde_json::to_vec(value).map_err(|_| SourceError::InvalidMetadata)?;
-    if bytes.len() > META {
-        return Err(SourceError::TooLarge);
-    }
-    disk::create(path, &bytes).map_err(unreadable)?;
-    Ok(())
-}
 pub enum Prepared {
     Missing { capture_id: String },
     Snapshot(Arc<Snapshot>),
@@ -531,7 +492,10 @@ pub struct Snapshot {
 impl Snapshot {
     fn open(root: PathBuf, receipt: Receipt, seed: &Seed, decode: bool) -> SourceResult<Prepared> {
         let kind = Kind::from_boundary(&seed.boundary).ok_or(SourceError::InvalidMetadata)?;
-        if !seed.valid(kind) || receipt.plan.seed != *seed || receipt.plan.bytes > kind.limit() {
+        if !seed.valid(kind.boundary())
+            || receipt.plan.seed != *seed
+            || receipt.plan.bytes > kind.limit()
+        {
             return Err(SourceError::InvalidMetadata);
         }
         let (actual, receipt_stamp) = read_json::<Receipt>(&root.join("receipt.json"))?
@@ -698,6 +662,15 @@ mod tests {
     }
     fn raw() -> Vec<u8> {
         br#"{ "schema":1, "operations":{}, "opaque":"kept byte for byte" }"#.to_vec()
+    }
+    /// The shared seed keeps the exact bytes of a plan written before it was
+    /// shared, nested inside the plan (zerus-0ht0).
+    #[test]
+    fn a_plan_keeps_its_exact_nested_seed_bytes() {
+        let earlier = r#"{"seed":{"version":1,"boundary":"next-creations-before-first-load-v1","capture_id":"8b0c0bd4-6b1f-4bb1-9d8e-0d3a3f2b9a51"},"source":null,"bytes":0,"sha256":"e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855"}"#;
+        let plan: Plan = serde_json::from_str(earlier).unwrap();
+        assert!(plan.seed.valid(Kind::Creations.boundary()));
+        assert_eq!(serde_json::to_string(&plan).unwrap(), earlier);
     }
     #[test]
     fn original_bytes_and_stable_identity_survive_later_live_recovery_and_restart() {

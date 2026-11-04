@@ -32,7 +32,9 @@ pub(crate) fn present(root: &std::path::Path, view: View) -> Value {
             }
             Err(_) => {
                 value["check_available"] = json!(false);
-                value["check_problem"]=json!("Receipt checking is unavailable. Review the original task history before allowing another start.");
+                value["check_problem"] = json!(zerus_client_core::source!(
+                    "Receipt checking is unavailable. Review the original task history before allowing another start."
+                ));
             }
         }
     }

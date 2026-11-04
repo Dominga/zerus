@@ -46,42 +46,47 @@ pub(crate) fn infer_new_session(config: &Config, name: &str, directory: &Path) {
 }
 
 /// A fork's initial grouping, written once by this computer's catalog owner
-/// right after the fork's binding exists: the project of its source session
-/// (or of the archived source), or Inbox when that project no longer exists.
-/// Never initializes a catalog or replaces an explicit membership (including a
-/// tombstone); waits at most 3 s for the catalog lock, and a failure never
-/// fails the fork.
+/// after the fork's binding exists and its launch released the state lock:
+/// the project of its source session (or of the archived source), or Inbox
+/// when that project no longer exists. Never initializes a catalog or replaces
+/// an explicit membership (including a tombstone). Each attempt holds the state
+/// lock only to confirm that `name` is still run `run_id` with `conversation`
+/// and to try the catalog lock once, so a busy catalog never holds the state
+/// lock (zerus-wx3k). Attempts share one 3 s cap; a failure never fails the fork.
 pub(crate) fn inherit_fork_project(
     config: &Config,
     name: &str,
     source: &str,
     archive: Option<&str>,
+    run_id: &str,
+    conversation: &Value,
 ) {
     if !config.dir.join("swarm/catalog.json").is_file() {
         return;
     }
     let end = Instant::now() + Duration::from_secs(3);
-    let attempt = (|| -> anyhow::Result<()> {
-        let mut store = loop {
-            match LockedStore::try_load_scoped(config) {
-                Ok(store) => break store,
-                Err(_) if Instant::now() < end => std::thread::sleep(Duration::from_millis(50)),
-                Err(error) => return Err(error),
+    loop {
+        let attempt = crate::state::with_pinned_session_binding(name, run_id, conversation, end, || {
+            let Ok(mut store) = LockedStore::try_load_scoped(config) else {
+                return Ok(false);
+            };
+            if let Some(project) = inherited(&store.data, name, source, archive) {
+                let key = Key::Session {
+                    machine: store.data.catalog.machine(&store.data.node_id),
+                    session: name.into(),
+                };
+                let actor = store.data.node_id.clone();
+                store.data.catalog.set(&actor, key, json!(project))?;
+                store.save_catalog_only()?;
             }
-        };
-        let Some(project) = inherited(&store.data, name, source, archive) else {
-            return Ok(());
-        };
-        let key = Key::Session {
-            machine: store.data.catalog.machine(&store.data.node_id),
-            session: name.into(),
-        };
-        let actor = store.data.node_id.clone();
-        store.data.catalog.set(&actor, key, json!(project))?;
-        store.save_catalog_only()?;
-        Ok(())
-    })();
-    let _ = attempt;
+            anyhow::Ok(true)
+        });
+        // Done, the binding changed, the state lock stayed busy, or a failure.
+        if !matches!(attempt, Ok(Some(Ok(false)))) || Instant::now() >= end {
+            return;
+        }
+        std::thread::sleep(Duration::from_millis(50));
+    }
 }
 /// The fork's membership, or `None` to write nothing. A source without a
 /// membership (or explicitly unassigned) leaves the fork without one, so both

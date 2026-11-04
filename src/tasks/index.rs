@@ -814,6 +814,20 @@ impl<'a> Index<'a> {
         summary: bool,
         prefix: &str,
     ) -> Outcome<Option<Value>> {
+        // The task's row is held to the rules a page holds its rows to: one
+        // that is untrusted, read before the floor or dated after now is read
+        // again first. A row read again with other content drops the cached
+        // history, so the stamps check below never trusts a stale history.
+        let at = now();
+        let floor = self.floor(at)?;
+        let row: Option<(i64, bool)> = self
+            .db
+            .query_row("SELECT checked, trusted FROM tasks WHERE uuid=?1", [uuid], |r| Ok((r.get(0)?, r.get(1)?)))
+            .optional()?;
+        if !row.is_some_and(|(checked, trusted)| trusted && checked >= floor && checked <= at) {
+            let only = BTreeSet::from([uuid.to_owned()]);
+            self.refresh(&[uuid.to_owned()], None, Some(&only))?;
+        }
         let dir = self.store.dir().to_owned();
         let now = files(&dir, uuid);
         let cached: Option<String> = self

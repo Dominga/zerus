@@ -2974,8 +2974,10 @@ a project-wide short-ID lookup. Cursors bind the project, task and immutable
 history entry, so new records and receipt refinements preserve an older page.
 Omit the cursor to return to the latest page. Pages come from the project's
 local task index, which keeps the histories of the 16 most recently read tasks
-and reads a task's history again only after that task changes; it is never
-replicated and does not change the task document format. A task whose history
+and reads a task's history again only after that task changes. The requested
+task is held to the same rules as a page's rows: a suspect one is read from its
+document first. The index is never replicated and does not change the task
+document format. A task whose history
 the index cannot give is read from its document, with the same page.
 `--attachments metadata` returns each attachment of the task and of its entries
 as `name`, `mime`, `reference`, `size` and the `sha256` of its bytes instead of

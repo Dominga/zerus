@@ -653,6 +653,47 @@ fn a_changed_task_s_history_is_read_again_even_with_an_unchanged_stamp() {
     assert!(page["log"].as_array().unwrap().iter().any(|e| e["text"] == json!("later")), "{page}");
 }
 
+/// review-n on #1360: a cached history is held to the same trust rules as a
+/// page's rows. With other suspect rows ahead in the background queue, an
+/// expired or future-dated requested task is read again before its history
+/// is served, even when an older writer's change kept its stamps.
+#[test]
+fn a_requested_history_is_revalidated_like_a_page_row() {
+    for future in [false, true] {
+        let temp = tempfile::tempdir().unwrap();
+        let store = ProjectStore::open(temp.path(), "example").unwrap();
+        let mut tasks: Vec<TaskDoc> = (0..300)
+            .map(|n| new_task(&store, &format!("T-{n:06}"), Stage::Todo, "V", "Plain"))
+            .collect();
+        for task in &tasks {
+            write_plain(&store, task);
+        }
+        let target = 299;
+        let history = |store: &ProjectStore, uuid: &str| super::super::history::page(store, uuid, 80, None, false).unwrap();
+        history(&store, tasks[target].uuid());
+        // An older writer comments without the journal; its files keep the
+        // stamps the index holds, for the row and for the cached history.
+        tasks[target].comment("newer", &Actor::Person, 9).unwrap();
+        write_plain(&store, &tasks[target]);
+        let new_files = files(store.dir(), tasks[target].uuid());
+        {
+            let db = Connection::open(store.dir().join(FILE)).unwrap();
+            db.execute("UPDATE tasks SET files=?1 WHERE uuid=?2", params![new_files, tasks[target].uuid()]).unwrap();
+            db.execute("UPDATE histories SET files=?1 WHERE uuid=?2", params![new_files, tasks[target].uuid()]).unwrap();
+            // 256 other rows wait ahead of it in the suspect queue.
+            let long_ago = now() - 5 * MAX_AGE_MS;
+            for task in &tasks[..256] {
+                db.execute("UPDATE tasks SET checked=?1 WHERE uuid=?2", params![long_ago, task.uuid()]).unwrap();
+            }
+            let requested = if future { now() + 3_600_000 } else { now() - MAX_AGE_MS - 60_000 };
+            db.execute("UPDATE tasks SET checked=?1 WHERE uuid=?2", params![requested, tasks[target].uuid()]).unwrap();
+        }
+        let page = history(&store, tasks[target].uuid());
+        let texts: Vec<&str> = page["log"].as_array().unwrap().iter().filter_map(|e| e["text"].as_str()).collect();
+        assert!(texts.contains(&"newer"), "future={future}: {texts:?}");
+    }
+}
+
 #[test]
 fn a_damaged_foreign_or_shared_index_is_built_again() {
     let temp = tempfile::tempdir().unwrap();

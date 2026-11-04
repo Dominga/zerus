@@ -19,6 +19,9 @@ fn record(mode: &str, dispatch: &str) -> Value {
     let intent = message_intent("hello", &[], mode, dispatch);
     json!({"id": REQUEST, "intent": intent, "input_sha256": input_digest(&message_input(&intent))})
 }
+pub(super) fn frozen() -> Intent {
+    intent(record("queue", "").to_string())
+}
 fn intent(original: String) -> Intent {
     Intent {
         scope: scope(),

@@ -320,7 +320,35 @@ pub struct Outcome {
     /// `queued` for a queued message, `note` for a note.
     pub state: String,
 }
+/// The closed code of an original task message child that never started:
+/// refused before any child existed. After the custody drain its receipt is
+/// Failed with this code and no outcome.
+pub const NOT_STARTED: &str = "task_message_not_started";
+/// The closed code of an original that exited non-zero. It proves nothing about
+/// the message; the original stays for the client's own recovery.
+pub const EXITED: &str = "task_message_exited";
+
 impl Outcome {
+    /// The exact metadata outcome that `plan`'s original call proves through
+    /// its whole stdout (exit 0), checked by the same rules as the recovery
+    /// policy. Text, files, session and executor fields are never kept.
+    pub fn from_reply(plan: &Plan, stdout: &[u8]) -> Option<Self> {
+        let state = crate::operation_recovery::task_message::reply_state(
+            &plan.project,
+            &plan.task_id,
+            &plan.request_id,
+            &plan.mode,
+            &plan.dispatch_id,
+            stdout,
+        )
+        .ok()?;
+        Some(Self {
+            request_id: plan.request_id.clone(),
+            mode: plan.mode.clone(),
+            dispatch_id: plan.dispatch_id.clone(),
+            state: state.into(),
+        })
+    }
     pub fn matches(&self, plan: &Plan) -> bool {
         self.request_id == plan.request_id
             && self.mode == plan.mode
@@ -454,6 +482,11 @@ impl Lookup {
                     && receipt.binding.plan_sha256 == query.plan_sha256
             })
     }
+}
+
+#[cfg(test)]
+pub(super) fn test_intent() -> Intent {
+    tests::frozen()
 }
 
 #[cfg(test)]

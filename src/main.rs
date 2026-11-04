@@ -39,6 +39,12 @@ fn main() {
         eprintln!("hgs: {error}");
         std::process::exit(2);
     }
+    // The same for a task message child, with its own descriptor.
+    #[cfg(any(target_os = "linux", target_os = "macos"))]
+    if let Err(error) = desktop::task_message::adopt_custody() {
+        eprintln!("hgs: {error}");
+        std::process::exit(2);
+    }
     // COM cold activation cannot load config, create jobs or acquire ownership.
     #[cfg(windows)]
     if let Some(code) = desktop::windows_notification_activation(std::env::args().nth(1).as_deref())

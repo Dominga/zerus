@@ -961,6 +961,86 @@ mod tests {
     }
 
     #[test]
+    fn task_message_responder_requires_cached_service_mode_and_the_same_configuration() {
+        const CASE: &str = "desktop::ui_requests::tests::task_message_responder_requires_cached_service_mode_and_the_same_configuration";
+        if std::env::var_os("ZERUS_TASK_MESSAGE_RESPONDER_TEST_CHILD").is_none() {
+            let output = std::process::Command::new(std::env::current_exe().unwrap())
+                .args(["--exact", CASE, "--test-threads=1", "--nocapture"])
+                .env_remove("HGS_SESSION")
+                .env_remove("HGS_RUN_ID")
+                .env("ZERUS_TASK_MESSAGE_RESPONDER_TEST_CHILD", "1")
+                .output()
+                .unwrap();
+            assert!(
+                output.status.success(),
+                "{}",
+                String::from_utf8_lossy(&output.stderr)
+            );
+            assert!(String::from_utf8_lossy(&output.stdout).contains("1 passed; 0 failed"));
+            return;
+        }
+        use crate::desktop::{ownership::Mode, Build};
+        let intent = crate::desktop::task_message::test_intent();
+        let request = Request::TaskMessage {
+            intent: Box::new(intent.clone()),
+        };
+        assert_eq!(request.operation(), "task_message");
+        assert_eq!(request.id(), intent.request_id);
+        // The slot itself binds only the Service mode.
+        let cache = Cache::default();
+        let value = Envelope {
+            abi: ABI.into(),
+            attempt: id(1),
+            request: request.clone(),
+        };
+        assert!(cache.prepare(value.clone()).is_err());
+        assert!(cache
+            .prepare_with_mode(value.clone(), Some(Mode::Native))
+            .is_err());
+        // The responder admits only its own cached Service mode and exactly
+        // the configuration the original was scoped to.
+        for (configuration, mode, accepted) in [
+            (intent.scope.configuration.clone(), None, false),
+            (
+                intent.scope.configuration.clone(),
+                Some(Mode::Native),
+                false,
+            ),
+            ("f".repeat(64), Some(Mode::Service), false),
+            (
+                intent.scope.configuration.clone(),
+                Some(Mode::Service),
+                true,
+            ),
+        ] {
+            let responder = Responder::new(
+                "com.hgdev.hgs-tray".into(),
+                Build {
+                    version: "1.2.3".into(),
+                    source_commit: "a".repeat(40),
+                    source_dirty: Some(false),
+                },
+                id(80),
+                true,
+                false,
+            );
+            assert!(responder.configure_once(configuration));
+            if let Some(mode) = mode {
+                assert!(responder.configure_ownership_mode_once(mode));
+            }
+            let prepared = responder.prepare_ui_request(id(1), request.clone());
+            assert_eq!(prepared.is_ok(), accepted);
+            if let Ok(slot) = prepared {
+                *slot.0.child.lock().unwrap() = Some((27, "synthetic-birth".into()));
+                let evidence = responder.ui_requests.evidence(&id(1)).unwrap();
+                assert_eq!(evidence.ownership_mode, Some(Mode::Service));
+                assert_eq!(evidence.request_id, intent.request_id);
+                assert_eq!(evidence.fingerprint, request.fingerprint());
+            }
+        }
+    }
+
+    #[test]
     fn task_start_native_responder_uses_its_cached_configuration_and_mode() {
         const CASE: &str = "desktop::ui_requests::tests::task_start_native_responder_uses_its_cached_configuration_and_mode";
         if std::env::var_os("ZERUS_TASK_START_RESPONDER_TEST_CHILD").is_none() {

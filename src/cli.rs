@@ -68,6 +68,7 @@ pub(crate) const USAGE: &str = r#"usage: hgs [@host] <cmd> [project] [-c [ID]] [
        Desktop creation clone ABI: desktop-creation-clone-v1
        Desktop creation worktree ABI: desktop-creation-worktree-v1
        Desktop creation launch ABI: desktop-creation-launch-v1
+       Desktop task message ABI: desktop-task-message-v1
        Desktop task start reconcile ABI: desktop-task-start-reconcile-v1
        Desktop pending read import ABI: desktop-pending-reads-v1
        Desktop activation ABI: desktop-activation-v1
@@ -426,6 +427,7 @@ fn unix_only_usage(line: &str) -> bool {
         zerus_client_core::desktop::creation_clone::HELP_MARKER,
         zerus_client_core::desktop::creation_worktree::HELP_MARKER,
         zerus_client_core::desktop::creation_launch::HELP_MARKER,
+        zerus_client_core::desktop::task_message::HELP_MARKER,
         zerus_client_core::desktop::task_start_reconcile::HELP_MARKER,
     ]
     .contains(&line.trim())
@@ -2705,6 +2707,8 @@ mod tests {
         assert!(USAGE.lines().any(|line| line.trim() == worktree_marker));
         let launch_marker = zerus_client_core::desktop::creation_launch::HELP_MARKER;
         assert!(USAGE.lines().any(|line| line.trim() == launch_marker));
+        let message_marker = zerus_client_core::desktop::task_message::HELP_MARKER;
+        assert!(USAGE.lines().any(|line| line.trim() == message_marker));
         let task_marker = zerus_client_core::desktop::task_start_reconcile::HELP_MARKER;
         assert!(USAGE.lines().any(|line| line.trim() == task_marker));
         // Windows has no `hgs paste`, `hgs clip` or `hgs notify`, no Ctrl+V
@@ -2741,6 +2745,10 @@ mod tests {
                 )
                 .replace(
                     "       Desktop creation launch ABI: desktop-creation-launch-v1\n",
+                    ""
+                )
+                .replace(
+                    "       Desktop task message ABI: desktop-task-message-v1\n",
                     ""
                 )
                 .replace(

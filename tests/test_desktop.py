@@ -240,22 +240,42 @@ finally:
             self.assertEqual(db.execute('SELECT count(*) FROM desktop_operations').fetchone()[0], 0)
             self.assertEqual(db.execute('SELECT count(*) FROM desktop_operation_attempts').fetchone()[0], 0)
 
-    def test_task_message_is_a_closed_native_intent_refused_without_its_actor(self):
+    def test_task_message_is_a_closed_native_intent_with_scoped_read_only_lookup(self):
         self.serve()
         status = self.cli('desktop', 'status', '--json')
         scope = dict(configuration=status['configuration'], service_epoch=status['epoch'])
         request = str(uuid.uuid4())
+        task = str(uuid.uuid4())
         content = dict(text='hello', attachments=[])
         record = dict(id=request, intent=dict(content=content, mode='queue', dispatch=''),
                       input_sha256=hashlib.sha256(json.dumps(content, separators=(',', ':'), sort_keys=True).encode()).hexdigest())
-        intent = dict(scope=scope, project='example', task_id=str(uuid.uuid4()), request_id=request,
+        intent = dict(scope=scope, project='example', task_id=task, request_id=request,
                       original=json.dumps(record, separators=(',', ':')))
-        # Only the native frontend lane carries it, and no actor admits it yet.
+        # Only the native frontend lane carries it.
         refused = self.cli('desktop', 'request', '--json', data=dict(op='task_message', intent=intent))
         self.assertFalse(refused['accepted'])
         self.assertEqual(refused['code'], 'frontend_authentication_required')
+        query = dict(scope=scope, project='example', task_id=task, request_id=request, plan_sha256='a' * 64)
+        result = self.cli('desktop', 'request', '--json', data=dict(op='task_message_result', query=query))
+        self.assertEqual(result['abi'], 'desktop-task-message-v1')
+        self.assertEqual(result['scope'], scope)
+        self.assertEqual(result['request_id'], request)
+        self.assertTrue(result['read_only'])
+        self.assertFalse(result['found'])
+        self.assertIsNone(result['receipt'])
+        bad = dict(query, scope=dict(scope, service_epoch=str(uuid.uuid4())))
+        self.assertEqual(self.cli('desktop', 'request', '--json', data=dict(op='task_message_result', query=bad))['code'],
+                         'task_message_result_unavailable')
+        with closing(sqlite3.connect(self.desktop / 'state.sqlite3')) as db:
+            self.assertEqual(db.execute('SELECT count(*) FROM desktop_task_messages').fetchone()[0], 0)
+            self.assertEqual(db.execute('SELECT rows,bytes,active FROM desktop_task_message_budget').fetchone(), (0, 0, 0))
+        status = self.cli('desktop', 'status', '--json')
+        self.assertEqual(status['operation_queue']['kinds']['task_message']['undrained'], 0)
         help_text = subprocess.run([str(HGS), '--help'], env=self.env, capture_output=True, text=True).stdout
-        self.assertNotIn('Desktop task message ABI', help_text, 'nothing advertises the kind yet')
+        if sys.platform.startswith('linux') or sys.platform == 'darwin':
+            self.assertIn('Desktop task message ABI: desktop-task-message-v1', help_text)
+        else:
+            self.assertNotIn('desktop-task-message', help_text)
 
     def test_creation_launch_is_a_closed_native_intent_with_scoped_read_only_lookup(self):
         self.serve()
@@ -292,15 +312,21 @@ finally:
         else:
             self.assertNotIn('desktop-creation-launch', help_text)
 
-    @unittest.skipUnless(sys.platform.startswith('linux') or sys.platform == 'darwin', 'POSIX launch custody')
-    def test_a_launch_child_holds_custody_but_no_program_it_starts_inherits_it(self):
+    @unittest.skipUnless(sys.platform.startswith('linux') or sys.platform == 'darwin', 'POSIX actor custody')
+    def test_a_launch_or_message_child_holds_custody_but_no_program_it_starts_inherits_it(self):
         # The real binary's main() marks the inherited custody descriptor
         # close-on-exec before anything else: the Git (or tmux) it starts, and
-        # their own children, never hold the creation's custody lock.
+        # their own children, never hold the actor's custody lock.
+        for variable, name in (('HGS_CREATION_LAUNCH_CUSTODY_FD', 'creation launch'),
+                               ('HGS_TASK_MESSAGE_CUSTODY_FD', 'task message')):
+            with self.subTest(variable=variable):
+                self.check_custody_adoption(variable, name)
+
+    def check_custody_adoption(self, variable, name):
         import fcntl
-        fake = self.root / 'custody-bin'
+        fake = self.root / f'custody-bin-{variable}'
         fake.mkdir(mode=0o700)
-        record = self.root / 'custody-record'
+        record = self.root / f'custody-record-{variable}'
         git = fake / 'git'
         git.write_text('#!/bin/sh\n'
                        'python3 -c "import os,sys\ntry:\n os.fstat(int(sys.argv[1]))\n print(\'open\')\n'
@@ -309,15 +335,15 @@ finally:
                        'sleep 3 </dev/null >/dev/null 2>&1 &\n'
                        'exit 128\n')
         git.chmod(0o700)
-        lock_path = self.root / 'custody.lock'
+        lock_path = self.root / f'custody-{variable}.lock'
         held = os.open(lock_path, os.O_RDWR | os.O_CREAT, 0o600)
         fcntl.flock(held, fcntl.LOCK_EX)
         os.set_inheritable(held, True)
-        repo = self.root / 'not-a-repository'
+        repo = self.root / f'not-a-repository-{variable}'
         repo.mkdir()
         env = dict(self.env, PATH=f"{fake}{os.pathsep}{self.env.get('PATH', '')}",
-                   HGS_CREATION_LAUNCH_CUSTODY_FD=str(held), CUSTODY_PROBE_FD=str(held),
-                   CUSTODY_RECORD=str(record))
+                   CUSTODY_PROBE_FD=str(held), CUSTODY_RECORD=str(record))
+        env[variable] = str(held)
         try:
             result = subprocess.run([str(HGS), 'worktrees', '--path', str(repo), '--json'], env=env,
                                     pass_fds=(held,), capture_output=True, text=True, timeout=20)
@@ -333,10 +359,11 @@ finally:
         finally:
             os.close(probe)
         # A malformed descriptor refuses before anything starts.
-        bad = dict(self.env, HGS_CREATION_LAUNCH_CUSTODY_FD='not-a-descriptor')
+        bad = dict(self.env)
+        bad[variable] = 'not-a-descriptor'
         refused = subprocess.run([str(HGS), '--help'], env=bad, capture_output=True, text=True, timeout=10)
         self.assertEqual(refused.returncode, 2)
-        self.assertIn('Invalid creation launch custody', refused.stderr)
+        self.assertIn(f'Invalid {name} custody', refused.stderr)
 
     @unittest.skipUnless(sys.platform.startswith('linux') or sys.platform == 'darwin', 'Unix registration mode')
     def test_registration_variant_is_read_only_and_service_reports_its_requested_mode(self):
@@ -1423,8 +1450,10 @@ finally:
     @staticmethod
     def remove_catalog_reason_schema(db):
         # Rewind the later leaves too, never leaving one labelled older: the
-        # schema-25 termination retention, creation launch/worktree, then
-        # the schema-22 catalog approval.
+        # schema-26 task message, schema-25 termination retention, creation
+        # launch/worktree, then the schema-22 catalog approval.
+        db.execute('DROP TABLE desktop_task_messages')
+        db.execute('DROP TABLE desktop_task_message_budget')
         db.execute('DROP TABLE desktop_termination_outcomes')
         db.execute('DROP TABLE desktop_creation_launches')
         db.execute('DROP TABLE desktop_creation_launch_budget')

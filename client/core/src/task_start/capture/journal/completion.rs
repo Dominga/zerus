@@ -112,7 +112,7 @@ impl Saved {
         }
         let outcome = match observe_source(self, &name, &next_bytes)? {
             Observed::Original => {
-                replace_source(self, &name, &next_bytes, || current())?;
+                replace_source(self, &name, &next_bytes, &mut current)?;
                 Settlement::Applied
             }
             Observed::Next => Settlement::AlreadyApplied,

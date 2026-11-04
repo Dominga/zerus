@@ -61,8 +61,10 @@ export function retainedSourceNotice(state: DesktopService | undefined): string 
     return tr("The historical downloaded files report needs review. An unconfirmed publication will only be looked up, never resent.");
   }
   // A not-captured or partial drafts report is permanent and shown in the
-  // Migration report; it needs no banner of its own.
-  const draftsReport = report?.drafts_report;
+  // Migration report; it needs no banner of its own. Before the capture's
+  // outcome is final the report has not started, and the Drafts notices
+  // above already explain a refused capture.
+  const draftsReport = draftsReportStarted(report) ? report?.drafts_report : undefined;
   if (draftsReport?.required && !draftsReport.complete) {
     if (draftsReport.running) return tr("Preparing the historical drafts report. Your sessions remain available.");
     if (draftsReport.phase !== "unknown" && DRAFTS_REPORT_DEFERRED.includes(draftsReport.code)) return tr("The historical drafts report is deferred. Retry keeps the original report identity.");
@@ -94,6 +96,14 @@ export function retainedSourceNotice(state: DesktopService | undefined): string 
 
 /** Draft capture outcomes that recorded the earlier drafts (or found none). */
 const DRAFTS_RECORDED = ["draft_capture_waiting", "draft_capture_captured", "draft_capture_not_applicable"];
+/** Draft capture states before a final outcome: the drafts report waits. */
+const DRAFTS_PENDING = ["draft_capture_waiting", "draft_capture_private_slot"];
+
+/** The drafts report runs only once the drafts capture's outcome is final. */
+function draftsReportStarted(report: DesktopService["retained_source_import"]): boolean {
+  return !DRAFTS_PENDING.includes(report?.drafts_capture?.code ?? "");
+}
+
 /** Drafts report codes that wait for background work. */
 const DRAFTS_REPORT_DEFERRED = ["drafts_import_waiting", "drafts_import_source_resources_pending", "drafts_import_handoff_busy", "drafts_import_before_record"];
 
@@ -143,7 +153,7 @@ export function retainedSourceDetails(state: DesktopService | undefined): Migrat
     }
     details.downloadsReport = { reason, next, code: downloadsReport.code, phase: downloadsReport.phase };
   }
-  const draftsReport = report.drafts_report;
+  const draftsReport = draftsReportStarted(report) ? report.drafts_report : undefined;
   if (draftsReport?.required) {
     let reason: string, next: string;
     if (draftsReport.phase === "unknown" || ["drafts_import_original_result_unconfirmed", "drafts_import_result_unavailable"].includes(draftsReport.code)) {

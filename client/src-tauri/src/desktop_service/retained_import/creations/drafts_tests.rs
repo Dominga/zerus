@@ -74,6 +74,10 @@ fn the_committed_drafts_publish_as_their_own_group() {
         families,
         ["next-drafts-preload", "next-drafts-preload-provenance"]
     );
+    // The published body is the captured original, never the later typing.
+    let published = fs::read_to_string(f.root.join(format!("snapshots-{id}.jsonl"))).unwrap();
+    assert!(published.contains("before the first job"));
+    assert!(!published.contains("typed later"));
     // A restart looks the original ID up; it never publishes again.
     let attempts = f.attempts();
     assert_eq!(run(&f, false), Ok(()));
@@ -183,5 +187,41 @@ fn a_receipt_changed_before_the_record_is_kept_never_committed() {
     assert_eq!(status["phase"], "quarantined");
     assert_eq!(status["complete"], false);
     let id = status["import_id"].as_str().unwrap();
+    assert!(!f.root.join(format!("committed-{id}.json")).exists());
+}
+
+/// The size edge is intended: an entry that cannot fit one report page keeps
+/// the whole report for review, never a prefix and never complete.
+#[test]
+fn an_entry_that_cannot_fit_one_page_keeps_the_report_for_review() {
+    let _process = crate::PROCESS_TREE.read().unwrap();
+    let f = Fixture::new("success");
+    draft(&f, "codex/sample/a", "small");
+    // A manifest whose checkpoint body (the manifest object under the
+    // decoder's fixed fields) is 100 bytes under the 1 MiB page: it is
+    // supported, but its entry cannot fit one page.
+    let key = "codex/sample/big";
+    let manifest = |text: usize| json!({"version": 1, "key": key, "text": "x".repeat(text)});
+    let body = |manifest: &Value| {
+        serde_json::to_vec(&json!({"kind": "draft-checkpoint", "key": key,
+            "record": manifest, "attachment_bytes_included": false}))
+        .unwrap()
+        .len()
+    };
+    let target = (1 << 20) - 100;
+    let big = manifest(target - body(&manifest(0)));
+    assert_eq!(body(&big), target);
+    let folder = store(&f).join(digest(key.as_bytes()));
+    fs::create_dir_all(&folder).unwrap();
+    fs::write(folder.join("draft.json"), big.to_string()).unwrap();
+    assert_eq!(capture(&f), "draft_capture_captured");
+    assert_eq!(run(&f, false), Err("drafts_import_source_kept_for_review"));
+    let status = f.report.group_status(GROUP);
+    assert_eq!(status["phase"], "quarantined");
+    assert_eq!(status["complete"], false);
+    let id = status["import_id"].as_str().unwrap();
+    assert!(!f.root.join(format!("committed-{id}.json")).exists());
+    // Deterministic: a Retry keeps it for review and publishes nothing.
+    assert_eq!(run(&f, true), Err("drafts_import_source_kept_for_review"));
     assert!(!f.root.join(format!("committed-{id}.json")).exists());
 }

@@ -27,6 +27,7 @@ use std::{
 enum Case {
     OwnerLoan,
     LaterShutdown,
+    RefreshDrain,
 }
 struct Control {
     root: PathBuf,
@@ -64,7 +65,7 @@ pub(in crate::desktop) fn started(location: &Location, owner: &Arc<platform::Fil
         let Some(control) = control.as_mut() else {
             return;
         };
-        if control.case == Case::OwnerLoan {
+        if matches!(control.case, Case::OwnerLoan | Case::RefreshDrain) {
             let (release, waiting) = mpsc::channel();
             let mut original = Preparation::blocked_for_test(owner.clone(), location, waiting);
             let root = control.root.clone();
@@ -81,8 +82,8 @@ pub(in crate::desktop) fn started(location: &Location, owner: &Arc<platform::Fil
                     thread::sleep(Duration::from_millis(2));
                 }
                 assert!(original.drained());
-                // A stopped poll can release the owner itself. Keep the loan
-                // through the marker so serve's return is ordered after it.
+                // Poll/join has completed. stop() only sets a flag; publish the
+                // witness before drop(original) releases the retained owner.
                 original.stop();
                 mark(&root, "loan-releasing");
                 drop(original);
@@ -112,6 +113,9 @@ pub(in crate::desktop) fn replacement_error(
             }
             control.injected = true;
             mark(&control.root, "replacement-observed");
+            if control.case == Case::RefreshDrain {
+                return;
+            }
             assert!(send
                 .as_ref()
                 .expect("selected actor fault channel")
@@ -156,6 +160,7 @@ fn original_actor_child() {
     let case = match std::env::var("ZERUS_UPGRADE_ACTOR_CASE").unwrap().as_str() {
         "owner-loan" => Case::OwnerLoan,
         "later-shutdown" => Case::LaterShutdown,
+        "refresh-drain" => Case::RefreshDrain,
         _ => panic!("unknown private actor control"),
     };
     if case == Case::LaterShutdown {
@@ -205,6 +210,11 @@ fn original_actor_child() {
     let control = CONTROL.with(|selected| selected.borrow_mut().take().unwrap());
     if let Some(worker) = control.worker {
         worker.join().unwrap();
+    }
+    if case == Case::RefreshDrain {
+        result.unwrap();
+        mark(&root, "actor-returned");
+        std::process::exit(0);
     }
     let error = result.expect_err("faulted original actor must report its error");
     assert_eq!(error.to_string(), "desktop listener failed");
@@ -494,4 +504,126 @@ fn later_shutdown_interrupts_the_actual_replacement_connection_cleanup() {
     original.pinned.as_ref().unwrap().terminate().unwrap();
     let status = original.exit("later shutdown failed to interrupt the replacing connection wait");
     original.assert_error_and_release(status);
+}
+
+#[test]
+fn refresh_observes_the_original_owner_and_last_pipe_draining_before_stop() {
+    use serde_json::{json, Value};
+    use std::io::BufReader;
+    let mut original = Original::start("refresh-drain");
+    original.wait_marker("actor-ready");
+    // Read only the isolated actor's real canonical configuration.
+    let db = rusqlite::Connection::open_with_flags(
+        original.root().join("state/desktop/state.sqlite3"),
+        rusqlite::OpenFlags::SQLITE_OPEN_READ_ONLY,
+    )
+    .unwrap();
+    let configuration: String = db
+        .query_row("SELECT configuration FROM service WHERE id=1", [], |r| {
+            r.get(0)
+        })
+        .unwrap();
+    drop(db);
+    let observe = |root: &Path| -> Value {
+        let mut stream = UnixStream::connect(root.join("state/desktop/service.sock")).unwrap();
+        stream
+            .set_read_timeout(Some(Duration::from_secs(2)))
+            .unwrap();
+        stream
+            .set_write_timeout(Some(Duration::from_secs(2)))
+            .unwrap();
+        stream
+            .write_all(
+                &desktop::protocol::encode(
+                    &json!({"abi":desktop::ABI,"configuration":configuration,"op":"status"}),
+                )
+                .unwrap(),
+            )
+            .unwrap();
+        let bytes =
+            desktop::protocol::line(&mut BufReader::new(stream), desktop::protocol::FRAME_BYTES)
+                .unwrap()
+                .unwrap();
+        let reply: Value = serde_json::from_slice(&bytes).unwrap();
+        assert_eq!(reply["t"], "status", "{reply}");
+        reply["value"].clone()
+    };
+    let initial = observe(original.root());
+    assert!(initial["executable_upgrade"].is_null());
+    let epoch = initial["lifecycle"]["epoch"].clone();
+    original.replace();
+    original.wait_marker("replacement-observed");
+    let blocked = observe(original.root());
+    assert_eq!(blocked["lifecycle"]["epoch"], epoch);
+    assert_eq!(
+        blocked["executable_upgrade"]["state"],
+        "manual_refresh_required"
+    );
+    let refresh = &blocked["executable_upgrade"]["refresh"];
+    assert_eq!(refresh["abi"], "desktop-retirement-drain-v1");
+    assert_eq!(refresh["runtime_drained"], true);
+    assert_eq!(refresh["owner_loans_released"], false);
+    assert_eq!(refresh["drained"], false);
+    original.held("owner.lock");
+    original.held("handoff.lock");
+    let connection =
+        UnixStream::connect(original.root().join("state/desktop/service.sock")).unwrap();
+    connection
+        .set_write_timeout(Some(Duration::from_millis(100)))
+        .unwrap();
+    original.client = Some(connection);
+    original.keep_connection_active();
+    original
+        .child()
+        .stdin
+        .as_mut()
+        .unwrap()
+        .write_all(b"release")
+        .unwrap();
+    original.wait_marker("loan-released");
+    let until = Instant::now() + Duration::from_secs(3);
+    loop {
+        let value = observe(original.root());
+        let refresh = &value["executable_upgrade"]["refresh"];
+        if refresh["owner_loans_released"] == true && refresh["connections_drained"] == false {
+            assert_eq!(value["lifecycle"]["epoch"], epoch);
+            assert_eq!(refresh["operations_drained"], true);
+            assert_eq!(refresh["drained"], false);
+            break;
+        }
+        assert!(
+            Instant::now() < until,
+            "last original pipe was not retained: {value}"
+        );
+        original.keep_connection_active();
+        thread::sleep(Duration::from_millis(10));
+    }
+    drop(original.client.take());
+    loop {
+        let value = observe(original.root());
+        if value["executable_upgrade"]["refresh"]["drained"] == true {
+            assert_eq!(value["lifecycle"]["epoch"], epoch);
+            break;
+        }
+        assert!(
+            Instant::now() < until,
+            "original resources failed to drain: {value}"
+        );
+        thread::sleep(Duration::from_millis(10));
+    }
+    // A drain observation still retains the kernel owner and starts nothing.
+    original.held("owner.lock");
+    assert!(original.child().try_wait().unwrap().is_none());
+    original.pinned.as_ref().unwrap().terminate().unwrap();
+    let status = original.exit("drained fixture did not exit after its explicit shutdown");
+    assert_eq!(status.code(), Some(0));
+    assert!(original.root().join("actor-returned").is_file());
+    for name in ["owner.lock", "handoff.lock"] {
+        let file = fs::OpenOptions::new()
+            .read(true)
+            .write(true)
+            .open(original.root().join("state/desktop").join(name))
+            .unwrap();
+        file.try_lock_exclusive().unwrap();
+    }
 }

@@ -45,6 +45,30 @@ configuration and installed identity permits the background selection. Starting
 with `--background`, refreshing a task or reading status cannot create or clear
 that grant. A retained revoke always requires a fresh explicit frontend Rearm.
 
+## Refresh source prerequisites
+
+The Windows actor adds a bounded read-only retirement observation to its
+`status` response under `executable_upgrade.refresh`, with ABI
+`desktop-retirement-drain-v1`. It reports runtime, original serve-owner loan,
+connection and durable operation drain independently. The status connection
+itself accounts for one connection; another partial or active pipe prevents a
+complete drain observation. This data neither releases the owner nor grants
+permission to stop or start anything. An original-instance controller must also
+retain and verify its native task/process/pipe, caller and handoff exclusion.
+An older actor without this observation cannot establish these prerequisites.
+
+The private registration Grant guard captures the checked database object and
+its actual configuration, journal, owner epoch and frontend origin. It reads
+again at effect boundaries and rejects a revoke, Rearm, replacement origin or
+database, or a stale frontend image. A same-origin Grant reconnect that keeps
+the ownership incarnation is allowed. This guard cannot be reconstructed from
+status or a receipt, cannot Grant/Rearm, and is not runtime launch authority.
+
+These are source prerequisites for an explicit refresh control, not that control
+itself. Ordinary same-mode selection still does nothing. Native Windows PC
+qualification remains outstanding; portable tests and Linux actor models do not
+qualify the Task Scheduler or installed Settings path.
+
 ## Original task and rollback custody
 
 Each transition checks the actual owned Task Scheduler definition, principal,

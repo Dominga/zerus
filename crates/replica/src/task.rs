@@ -43,8 +43,6 @@ pub struct TaskDoc {
     pub(crate) needs_fold: bool,
     /// The stage when the store last read or wrote the task.
     pub(crate) saved_stage: Option<Stage>,
-    /// The version of the snapshot the store last read or wrote.
-    pub(crate) folded: Option<VersionVector>,
 }
 
 fn string(map: &LoroMap, key: &str) -> Option<String> {
@@ -177,7 +175,6 @@ impl TaskDoc {
             saved_len: 0,
             needs_fold: false,
             saved_stage: None,
-            folded: None,
         };
         this.log("created", &task.author, task.now, "", None)?;
         this.doc.commit();
@@ -200,7 +197,6 @@ impl TaskDoc {
             saved_len: 0,
             needs_fold: false,
             saved_stage: None,
-            folded: None,
         })
     }
 

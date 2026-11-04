@@ -3332,14 +3332,18 @@ project; a task file that fails to load is listed under `damaged` and left in
 place until another computer of the swarm sends its copy, which replaces it;
 a copy of the damaged file stays beside it as `<file>.damaged-<time>`. A task
 this computer saved with attempts or a floor gets a mark, `<uuid>.managed`,
-naming the version its snapshot holds and the exact first block of the
-updates file that follows it; the mark is written before the files it
-describes, and every fold of such a task opens a new updates file with the
-operations at the document's frontiers, which every copy already holds, so it
-adds no change and differs from fold to fold. Its damaged copy is replaced
-only when the mark is readable and still describes the files (an older Zerus
-that folded or rewrote them, or a mark restored from before a later fold,
-leaves it stale), every
+naming the version this computer last saved and the exact first block of
+the updates file after the snapshot. The mark is rewritten before every save
+of such a task makes it durable (one small extra write per save), and every
+fold opens a new updates file with the operations at the document's
+frontiers, which every copy already holds, so it adds no change and differs
+from fold to fold. A copy whose files hold less than its mark records (they
+were cut short, a save did not finish, or an older Zerus wrote them so), or
+whose mark cannot be read, is damaged, not read without those changes:
+nothing sends, writes or folds it until a person reviews it or a copy that
+covers the mark arrives. Its damaged copy is replaced only when the mark is readable and
+still describes the files (an older Zerus that folded or rewrote them, or a
+mark restored from before a later fold, leaves it stale), every
 update saved here applies, and the other copy merged with them holds that
 version, so no attempt fact is lost. A copy without a mark is replaced only
 when every update saved here applies and the result shows no attempts or

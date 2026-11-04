@@ -216,28 +216,30 @@ fn block(payload: &[u8]) -> Vec<u8> {
 }
 
 /// The managed mark: what this store last saved of a task cut over to the
-/// execution schema. `snapshot` is the version vector its snapshot holds, by
-/// decimal peer; `opening` is the SHA-256 of the first block of the updates
-/// file that follows that snapshot, header and payload. Every fold of such a task opens that file with the
-/// operations at the document's frontiers: a block every copy already
-/// holds, so it imports as nothing in this build and older ones, and one
-/// that differs whenever the version does. A writer that folds or rewrites
-/// the files without this mark (an older build), or a mark restored from
-/// before a later fold, leaves the mark apart from the files.
+/// execution schema, written before each save makes it durable. `saved` is
+/// the version vector the task's files then hold, by decimal peer; `opening`
+/// is the SHA-256 of the first block of the updates file that follows the
+/// snapshot, header and payload. Every fold of such a task opens that file
+/// with the operations at the document's frontiers: a block every copy
+/// already holds, so it imports as nothing in this build and older ones,
+/// and one that differs whenever the version does. A writer that folds or
+/// rewrites the files without this mark (an older build), or a mark restored
+/// from before a later fold, leaves the opening apart from the files; files
+/// cut short leave them holding less than `saved`.
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
 pub(crate) struct Mark {
-    pub(crate) snapshot: Option<BTreeMap<String, i32>>,
+    pub(crate) saved: Option<BTreeMap<String, i32>>,
     #[serde(default)]
     pub(crate) opening: Option<String>,
 }
 
 impl Mark {
-    /// The mark for a snapshot at `snapshot` and the updates file whose
-    /// first block is `first` (header and payload).
-    pub(crate) fn new(snapshot: &VersionVector, first: &[u8]) -> Self {
+    /// The mark for files that hold `saved`, whose updates file opens with
+    /// `first` (header and payload).
+    pub(crate) fn new(saved: &VersionVector, first: &[u8]) -> Self {
         Self {
-            snapshot: Some(
-                snapshot
+            saved: Some(
+                saved
                     .iter()
                     .map(|(peer, counter)| (peer.to_string(), *counter))
                     .collect(),
@@ -246,12 +248,12 @@ impl Mark {
         }
     }
 
-    /// The snapshot version it records, when it records a possible one: a
-    /// snapshot holds the task's creation, so an empty version or a peer
-    /// counted at zero or below is unreadable.
+    /// The saved version it records, when it records a possible one: the
+    /// files hold the task's creation, so an empty version or a peer counted
+    /// at zero or below is unreadable.
     pub(crate) fn version(&self) -> Option<VersionVector> {
-        let snapshot = self.snapshot.as_ref().filter(|s| !s.is_empty())?;
-        snapshot
+        let saved = self.saved.as_ref().filter(|s| !s.is_empty())?;
+        saved
             .iter()
             .map(|(peer, counter)| Some((peer.parse().ok()?, (*counter > 0).then_some(*counter)?)))
             .collect()
@@ -290,6 +292,13 @@ fn first_block(path: &Path) -> Result<Option<Vec<u8>>> {
     block.resize(HEADER + length as usize, 0);
     std::io::Read::read_exact(&mut file, &mut block[HEADER..])?;
     Ok(Some(block))
+}
+
+/// What a load knows of a task's mark.
+enum Marked {
+    No,
+    Unreadable,
+    Saved(VersionVector),
 }
 
 /// The intact blocks with their end offsets, and whether the whole input was
@@ -522,15 +531,35 @@ impl ProjectStore {
         serde_json::from_slice(&fs::read(self.managed_path(uuid)).ok()?).ok()
     }
 
+    /// Whether the task is marked, and the version its mark says this store
+    /// saved: a single read of the mark, then a check of its path only
+    /// when there is nothing to read.
+    fn marked(&self, uuid: &str) -> Marked {
+        let path = self.managed_path(uuid);
+        match fs::read(&path) {
+            Ok(bytes) => serde_json::from_slice::<Mark>(&bytes)
+                .ok()
+                .and_then(|mark| mark.version())
+                .map_or(Marked::Unreadable, Marked::Saved),
+            Err(error) if error.kind() == ErrorKind::NotFound => {
+                match fs::symlink_metadata(&path) {
+                    Err(error) if error.kind() == ErrorKind::NotFound => Marked::No,
+                    _ => Marked::Unreadable,
+                }
+            }
+            Err(_) => Marked::Unreadable,
+        }
+    }
+
     pub(crate) fn write_mark(&self, uuid: &str, mark: &Mark) -> Result<()> {
         write_atomic(&self.managed_path(uuid), &serde_json::to_vec(mark)?)
     }
 
-    /// The snapshot version the mark records, only while the updates file
-    /// still opens with the exact block the mark names: no other writer
-    /// folded or rewrote the files, and no later fold of this store
-    /// replaced them, since the mark was written.
-    pub(crate) fn fresh_snapshot(&self, uuid: &str) -> Option<VersionVector> {
+    /// The version this store last saved, as the mark records it, only while
+    /// the updates file still opens with the exact block the mark names: no
+    /// other writer folded or rewrote the files, and no later fold of this
+    /// store replaced them, since the mark was written.
+    pub(crate) fn fresh_version(&self, uuid: &str) -> Option<VersionVector> {
         let mark = self.mark(uuid)?;
         let first = first_block(&self.updates_path(uuid)).ok()??;
         mark.opens_with(&first).then(|| mark.version()).flatten()
@@ -559,7 +588,6 @@ impl ProjectStore {
         if task.uuid() != uuid {
             return Err(Error::failed("the task file does not match its name"));
         }
-        task.folded = Some(task.current_vv());
         match fs::read(self.updates_path(uuid)) {
             Ok(bytes) => {
                 let (found, intact) = blocks(&bytes);
@@ -574,6 +602,27 @@ impl ProjectStore {
             }
             Err(error) if error.kind() == ErrorKind::NotFound => {}
             Err(error) => return Err(error.into()),
+        }
+        // A copy this store cut over holds at least what its mark says was
+        // saved (one small read); less is files cut short, a save that never
+        // finished, or an older build that wrote them so, and the copy is
+        // damaged rather than read without those changes. A mark that cannot
+        // be read proves nothing, so it keeps the copy too.
+        match self.marked(uuid) {
+            Marked::No => {}
+            Marked::Unreadable => {
+                return Err(Error::failed(
+                    "the copy here was cut over to execution attempts and its mark cannot be read",
+                ))
+            }
+            Marked::Saved(saved) => {
+                if !task.current_vv().includes_vv(&saved) {
+                    return Err(Error::failed(
+                        "the copy here holds less than this computer saved: its files were cut \
+                         short or a save did not finish",
+                    ));
+                }
+            }
         }
         // A task that cannot be shown is damaged: listed apart, never blocking the rest.
         task.view()?;
@@ -593,7 +642,6 @@ impl ProjectStore {
             Err(error) => return Err(error.into()),
         };
         let fold = task.saved.is_none()
-            || task.folded.is_none()
             || !snapshot.exists()
             || task.needs_fold
             // Bytes past the valid blocks: a cut append, or another writer.
@@ -614,20 +662,14 @@ impl ProjectStore {
             let saved = task.saved.as_ref().expect("checked above");
             Some(block(&task.export_since_vv(saved)?))
         };
-        // The mark precedes the files it describes: after a crash between
+        // The mark precedes the files it describes, on every save of a
+        // cut-over task (one small durable write each): after a crash between
         // them it names a version or a block they do not hold, which only
         // keeps a later recovery from going ahead.
         if managed {
             let ours = next.as_deref().expect("a cut-over save writes a block");
-            let mark = if fold {
-                Mark::new(&current, ours)
-            } else {
-                let existing = first_block(&updates)?;
-                Mark::new(
-                    task.folded.as_ref().expect("checked above"),
-                    existing.as_deref().unwrap_or(ours),
-                )
-            };
+            let existing = if fold { None } else { first_block(&updates)? };
+            let mark = Mark::new(&current, existing.as_deref().unwrap_or(ours));
             if self.mark(task.uuid()).as_ref() != Some(&mark) {
                 self.write_mark(task.uuid(), &mark)?;
             }
@@ -646,7 +688,6 @@ impl ProjectStore {
             }
             task.saved_len = next.as_ref().map_or(0, |first| first.len() as u64);
             task.needs_fold = false;
-            task.folded = Some(current.clone());
         } else {
             let bytes = next.expect("an append writes a block");
             let mut file = private_options().create(true).append(true).open(&updates)?;

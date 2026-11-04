@@ -566,8 +566,10 @@ impl ProjectStore {
     /// from local proof: its mark is readable and fresh (the updates file
     /// still opens with the block it names, so no other writer folded or
     /// rewrote the files since), every block applies, and the result holds
-    /// the snapshot version it records. The snapshot and every block are then
-    /// inside the result. Anything less keeps it for a person's review.
+    /// the version the mark says this store last saved. Everything this
+    /// store saved is then inside the result, whatever was lost or cut from
+    /// the files; an older build's later appends are blocks applied here.
+    /// Anything less keeps it for a person's review.
     ///
     /// A copy saved without a mark gives way only when every local block
     /// applies and the result shows no attempts or floor; a block that does
@@ -593,10 +595,8 @@ impl ProjectStore {
                 Recovery::Kept
             };
         }
-        match self.fresh_snapshot(uuid) {
-            Some(snapshot) if whole && task.current_vv().includes_vv(&snapshot) => {
-                Recovery::Whole(task)
-            }
+        match self.fresh_version(uuid) {
+            Some(saved) if whole && task.current_vv().includes_vv(&saved) => Recovery::Whole(task),
             _ => Recovery::Kept,
         }
     }
@@ -1049,23 +1049,25 @@ mod tests {
     }
 
     #[test]
-    fn the_managed_mark_names_the_snapshot_and_the_block_that_follows_it() {
+    fn the_managed_mark_names_the_saved_version_and_the_block_that_opens_the_updates() {
         let dir = tempfile::tempdir().unwrap();
         let store = ProjectStore::open(dir.path(), "project-1").unwrap();
         let mut task = created();
         store.save(&mut task).unwrap();
         assert!(!store.was_managed(task.uuid()));
         let snapshot = task.current_vv();
-        // The cutover saved as an update block: the mark names the snapshot
-        // below it and that block, the first of the updates file.
+        // The cutover saved as an update block: the mark names everything
+        // saved, and that block, the first of the updates file.
         reserve(&mut task);
         store.save(&mut task).unwrap();
-        assert_eq!(mark_version(&store, task.uuid()), Some(snapshot.clone()));
-        assert_eq!(store.fresh_snapshot(task.uuid()), Some(snapshot.clone()));
-        let mark = store.mark(task.uuid());
+        assert_eq!(mark_version(&store, task.uuid()), Some(task.current_vv()));
+        assert_eq!(store.fresh_version(task.uuid()), Some(task.current_vv()));
+        let opening = store.mark(task.uuid()).unwrap().opening;
+        // Every later save moves the version; the opening stays.
         task.comment("Appended", &Actor::Person, 11).unwrap();
         store.save(&mut task).unwrap();
-        assert_eq!(store.mark(task.uuid()), mark);
+        assert_eq!(store.fresh_version(task.uuid()), Some(task.current_vv()));
+        assert_eq!(store.mark(task.uuid()).unwrap().opening, opening);
         // A fold moves the mark with the snapshot and opens a new updates
         // file with a block of no changes, which this build and older ones
         // read as nothing.
@@ -1073,17 +1075,20 @@ mod tests {
         task.comment("Folded", &Actor::Person, 12).unwrap();
         store.save(&mut task).unwrap();
         only_the_opening_block(&store, task.uuid());
-        assert_eq!(store.fresh_snapshot(task.uuid()), Some(task.current_vv()));
+        assert_eq!(store.fresh_version(task.uuid()), Some(task.current_vv()));
         assert_ne!(mark_version(&store, task.uuid()), Some(snapshot));
         // A stale mark beside readable files is corrected by the next save.
         store
             .write_mark(task.uuid(), &Mark::new(&created().current_vv(), b"stale"))
             .unwrap();
-        assert!(store.fresh_snapshot(task.uuid()).is_none());
+        assert!(store.fresh_version(task.uuid()).is_none());
         task.comment("Corrected", &Actor::Person, 13).unwrap();
         store.save(&mut task).unwrap();
         let reloaded = store.load(task.uuid()).unwrap();
-        assert_eq!(store.fresh_snapshot(task.uuid()), reloaded.folded);
+        assert_eq!(
+            store.fresh_version(task.uuid()),
+            Some(reloaded.current_vv())
+        );
         // A task that never cut over still folds to no updates file.
         let mut plain = created();
         store.save(&mut plain).unwrap();
@@ -1119,7 +1124,7 @@ mod tests {
             .count();
         assert_eq!(comments, 1, "the peer's comment is merged in");
         assert_eq!(set_aside_files(&store, &uuid).len(), 2);
-        assert_eq!(store.fresh_snapshot(&uuid), rebuilt.folded);
+        assert_eq!(store.fresh_version(&uuid), Some(rebuilt.current_vv()));
         only_the_opening_block(&store, &uuid);
     }
 
@@ -1198,7 +1203,7 @@ mod tests {
             assert_eq!(fs::read(store.managed_path(&uuid)).unwrap(), mark);
             let folded = store.load(&uuid).unwrap();
             assert!(folded.held().unwrap().is_some(), "floored={floored}");
-            assert!(store.fresh_snapshot(&uuid).is_none());
+            assert!(store.fresh_version(&uuid).is_none());
             damage(&store, &uuid);
             kept(&store, &uuid, &peer);
             // And after that build appends again.
@@ -1293,7 +1298,7 @@ mod tests {
         damage(&store, &uuid);
         for (earlier, copy) in marks.iter().zip(&copies).take(marks.len() - 1) {
             fs::write(store.managed_path(&uuid), earlier).unwrap();
-            assert!(store.fresh_snapshot(&uuid).is_none());
+            assert!(store.fresh_version(&uuid).is_none());
             kept(&store, &uuid, copy);
         }
         // The current mark is fresh: an earlier copy is refused by the
@@ -1309,18 +1314,18 @@ mod tests {
         // The mark names the whole first block: another digest, or none, no
         // longer describes it.
         let mut forged = store.mark(&uuid).unwrap();
-        assert!(store.fresh_snapshot(&uuid).is_some());
+        assert!(store.fresh_version(&uuid).is_some());
         forged.opening = Some("00".repeat(32));
         store.write_mark(&uuid, &forged).unwrap();
-        assert!(store.fresh_snapshot(&uuid).is_none());
+        assert!(store.fresh_version(&uuid).is_none());
         forged.opening = None;
         store.write_mark(&uuid, &forged).unwrap();
-        assert!(store.fresh_snapshot(&uuid).is_none());
+        assert!(store.fresh_version(&uuid).is_none());
         let mut task = store.load(&uuid).unwrap();
         task.comment("The next save corrects the mark", &Actor::Person, 30)
             .unwrap();
         store.save(&mut task).unwrap();
-        assert!(store.fresh_snapshot(&uuid).is_some());
+        assert!(store.fresh_version(&uuid).is_some());
         // A fold with no change since the last one opens with the same block
         // and writes the same mark: the two describe the same version.
         let mut folded = store.load(&uuid).unwrap();
@@ -1333,6 +1338,250 @@ mod tests {
         store.save(&mut again).unwrap();
         assert_eq!(fs::read(store.updates_path(&uuid)).unwrap(), opening);
         assert_eq!(fs::read(store.managed_path(&uuid)).unwrap(), mark);
+    }
+
+    /// The end of each block of the task's updates file.
+    fn block_ends(store: &ProjectStore, uuid: &str) -> Vec<u64> {
+        let bytes = fs::read(store.updates_path(uuid)).unwrap();
+        let (found, intact) = crate::store::blocks(&bytes);
+        assert!(intact);
+        found.iter().map(|(_, end)| *end as u64).collect()
+    }
+
+    fn second_attempt(task: &mut TaskDoc) {
+        let executor = SessionKey {
+            machine: "m1".into(),
+            session: "codex/api".into(),
+            session_id: "launch_id:api".into(),
+        };
+        let native = NativeRequest {
+            machine: "m1".into(),
+            name: "codex/api".into(),
+            run_id: "run-api".into(),
+            conversation_id: "conversation-api".into(),
+            digest: "cd".repeat(32),
+        };
+        task.reserve_attempt(
+            "22222222-2222-4222-8222-222222222222",
+            Origin::Send,
+            &executor,
+            native,
+            &Actor::Person,
+            12,
+        )
+        .unwrap();
+    }
+
+    /// review-n on #1415 (R4): every save of a cut-over task moves the mark
+    /// to the version it saves, so updates cut short at any block boundary
+    /// leave the files holding less than the mark records and keep the copy.
+    #[test]
+    fn updates_cut_short_at_any_block_keep_what_was_saved() {
+        let (_dir, store, uuid, _) = damaged_beside_a_pre_attempt_peer();
+        let mut task = store.load(&uuid).unwrap();
+        task.cancel_attempt(ID, "Settled before the fold", &Actor::Person, 11)
+            .unwrap();
+        task.needs_fold = true;
+        store.save(&mut task).unwrap();
+        let peer = store.load(&uuid).unwrap().snapshot().unwrap();
+        // review-n's case: the second Unknown is saved as an append.
+        let mut task = store.load(&uuid).unwrap();
+        second_attempt(&mut task);
+        store.save(&mut task).unwrap();
+        for n in 0..3 {
+            task.comment(&format!("Append {n}"), &Actor::Person, 20 + n)
+                .unwrap();
+            store.save(&mut task).unwrap();
+        }
+        let full = fs::read(store.updates_path(&uuid)).unwrap();
+        let ends = block_ends(&store, &uuid);
+        assert_eq!(ends.len(), 5, "the opening block and four appends");
+        // Cut after the opening block (review-n's case) and after each later
+        // block: complete blocks, so the file still reads as whole. Even
+        // with its snapshot intact the copy no longer loads without them.
+        let snapshot = fs::read(store.snapshot_path(&uuid)).unwrap();
+        for end in &ends[..ends.len() - 1] {
+            let file = fs::File::options()
+                .write(true)
+                .open(store.updates_path(&uuid))
+                .unwrap();
+            file.set_len(*end).unwrap();
+            let error = store.load(&uuid).err().unwrap().to_string();
+            assert!(
+                error.contains("holds less than this computer saved"),
+                "{error}"
+            );
+            assert!(store.tasks().unwrap().1.iter().any(|d| d.uuid == uuid));
+            damage(&store, &uuid);
+            kept(&store, &uuid, &peer);
+            fs::write(store.updates_path(&uuid), &full).unwrap();
+            fs::write(store.snapshot_path(&uuid), &snapshot).unwrap();
+            assert!(store.load(&uuid).is_ok());
+        }
+        damage(&store, &uuid);
+        // Whole, the same peer copy rebuilds it with the second Unknown held.
+        assert!(refused(&store, &uuid, peer).is_empty());
+        let rebuilt = store.load(&uuid).unwrap();
+        assert!(rebuilt.held().unwrap().is_some());
+        assert!(rebuilt
+            .view()
+            .unwrap()
+            .log
+            .iter()
+            .any(|e| e.text == "Append 2"));
+    }
+
+    /// review-n on #1415 (R4): an ordinary load is fenced by the same mark.
+    /// A readable copy that holds less than the mark records is damaged, not
+    /// loaded without those changes, whoever wrote its files; a mark that
+    /// cannot be read keeps it too. A task never cut over is untouched.
+    #[test]
+    fn a_readable_copy_is_fenced_by_its_mark() {
+        // review-n's case: the second Unknown's block cut away, snapshot intact.
+        let (_dir, store, uuid, _) = damaged_beside_a_pre_attempt_peer();
+        let mut task = store.load(&uuid).unwrap();
+        task.cancel_attempt(ID, "Settled before the fold", &Actor::Person, 11)
+            .unwrap();
+        task.needs_fold = true;
+        store.save(&mut task).unwrap();
+        let opening = block_ends(&store, &uuid)[0];
+        let mut task = store.load(&uuid).unwrap();
+        second_attempt(&mut task);
+        store.save(&mut task).unwrap();
+        let full = fs::read(store.updates_path(&uuid)).unwrap();
+        fs::File::options()
+            .write(true)
+            .open(store.updates_path(&uuid))
+            .unwrap()
+            .set_len(opening)
+            .unwrap();
+        let error = store.load(&uuid).err().unwrap().to_string();
+        assert!(
+            error.contains("holds less than this computer saved"),
+            "{error}"
+        );
+        assert!(store.find(&uuid).is_err());
+        assert!(store.tasks().unwrap().1.iter().any(|d| d.uuid == uuid));
+        // An older build that read the cut files and folded them leaves a
+        // snapshot without the Unknown and no opening the mark names.
+        let mut older =
+            TaskDoc::from_bytes(&fs::read(store.snapshot_path(&uuid)).unwrap()).unwrap();
+        let cut = fs::read(store.updates_path(&uuid)).unwrap();
+        for (payload, _) in crate::store::blocks(&cut).0 {
+            assert!(older.import_block(payload));
+        }
+        assert!(older.held().unwrap().is_none());
+        write_atomic(&store.snapshot_path(&uuid), &older.snapshot().unwrap()).unwrap();
+        fs::remove_file(store.updates_path(&uuid)).unwrap();
+        assert!(store.fresh_version(&uuid).is_none());
+        assert!(store.load(&uuid).is_err());
+        // Whole again, it loads; a mark that cannot be read keeps it.
+        let (_dir, store, uuid, _) = damaged_beside_a_pre_attempt_peer();
+        fs::write(store.updates_path(&uuid), &full[..0]).unwrap();
+        assert!(store.load(&uuid).is_err());
+        let (_dir, store, uuid, _) = damaged_beside_a_pre_attempt_peer();
+        assert!(store.load(&uuid).is_ok());
+        let mark = fs::read(store.managed_path(&uuid)).unwrap();
+        fs::write(store.managed_path(&uuid), b"unreadable mark").unwrap();
+        assert!(store.load(&uuid).is_err());
+        #[cfg(unix)]
+        {
+            fs::remove_file(store.managed_path(&uuid)).unwrap();
+            std::os::unix::fs::symlink("absent-mark-target", store.managed_path(&uuid)).unwrap();
+            assert!(store.load(&uuid).is_err());
+            fs::remove_file(store.managed_path(&uuid)).unwrap();
+        }
+        fs::write(store.managed_path(&uuid), mark).unwrap();
+        assert!(store.load(&uuid).is_ok());
+        // A task that never cut over loads as before, with no mark read.
+        let mut plain = created();
+        store.save(&mut plain).unwrap();
+        assert!(!store.was_managed(plain.uuid()));
+        assert!(store.load(plain.uuid()).is_ok());
+    }
+
+    /// The mark is written before the append it describes: a crash between
+    /// them leaves it ahead, which keeps the copy unless a peer holds the
+    /// change that never landed. An older build's appends after a rollback
+    /// only make the file longer than the mark records: still accepted.
+    #[test]
+    fn a_mark_moved_before_its_append_and_an_older_append_after_it() {
+        let (_dir, store, uuid, peer) = damaged_beside_a_pre_attempt_peer();
+        let mut task = store.load(&uuid).unwrap();
+        task.comment("Saved", &Actor::Person, 11).unwrap();
+        store.save(&mut task).unwrap();
+        let saved = task.snapshot().unwrap();
+        task.comment("Never appended", &Actor::Person, 12).unwrap();
+        let first = fs::read(store.updates_path(&uuid)).unwrap();
+        let first = &first[..block_ends(&store, &uuid)[0] as usize];
+        store
+            .write_mark(&uuid, &Mark::new(&task.current_vv(), first))
+            .unwrap();
+        // The copy is kept even before its snapshot is damaged.
+        assert!(store.load(&uuid).is_err());
+        // A fold that crashed after its mark is ahead the same way, whatever
+        // opening it names: the readable copy is kept too.
+        let landed = fs::read(store.managed_path(&uuid)).unwrap();
+        store
+            .write_mark(
+                &uuid,
+                &Mark::new(&task.current_vv(), b"a fold that never landed"),
+            )
+            .unwrap();
+        assert!(store.load(&uuid).is_err());
+        // A mark that cannot be read, or a dangling one, keeps it as well.
+        fs::write(store.managed_path(&uuid), b"unreadable mark").unwrap();
+        assert!(store.load(&uuid).is_err());
+        // The mark of what was saved lets it load again.
+        let mut saved_mark = Mark::new(&task.current_vv(), first);
+        saved_mark.saved =
+            Mark::new(&TaskDoc::from_bytes(&saved).unwrap().current_vv(), first).saved;
+        store.write_mark(&uuid, &saved_mark).unwrap();
+        assert!(store.load(&uuid).is_ok());
+        fs::write(store.managed_path(&uuid), landed).unwrap();
+        damage(&store, &uuid);
+        kept(&store, &uuid, &saved);
+        assert!(refused(&store, &uuid, task.snapshot().unwrap()).is_empty());
+        assert!(store
+            .load(&uuid)
+            .unwrap()
+            .view()
+            .unwrap()
+            .log
+            .iter()
+            .any(|e| e.text == "Never appended"));
+
+        // An older build appends a peer's change after this store's save.
+        let (_dir, store, uuid, peer_bytes) = damaged_beside_a_pre_attempt_peer();
+        let _ = peer;
+        let task = store.load(&uuid).unwrap();
+        let version = task.current_vv();
+        let mut older = TaskDoc::from_bytes(&task.snapshot().unwrap()).unwrap();
+        older.import_unrepaired_for_test(&peer_bytes);
+        older
+            .note("Appended by an older build", &Actor::Person, 30)
+            .unwrap();
+        let mut file = fs::File::options()
+            .append(true)
+            .open(store.updates_path(&uuid))
+            .unwrap();
+        std::io::Write::write_all(
+            &mut file,
+            &crate::store::block_for_test(&older.export_since_vv(&version).unwrap()),
+        )
+        .unwrap();
+        drop(file);
+        damage(&store, &uuid);
+        let covering = task.snapshot().unwrap();
+        assert!(refused(&store, &uuid, covering).is_empty());
+        let rebuilt = store.load(&uuid).unwrap();
+        assert!(rebuilt.held().unwrap().is_some());
+        assert!(rebuilt
+            .view()
+            .unwrap()
+            .log
+            .iter()
+            .any(|e| e.text == "Appended by an older build"));
     }
 
     /// review-n on #1415 (R2): without a mark, the valid prefix of the local
@@ -1401,10 +1650,10 @@ mod tests {
     fn an_impossible_or_unreadable_mark_keeps_the_copy() {
         type Spoil = Box<dyn Fn(&Path)>;
         let spoils: Vec<Spoil> = vec![
-            Box::new(|p| fs::write(p, br#"{"snapshot":{}}"#).unwrap()),
-            Box::new(|p| fs::write(p, br#"{"snapshot":{"1":0}}"#).unwrap()),
-            Box::new(|p| fs::write(p, br#"{"snapshot":{"1":-1}}"#).unwrap()),
-            Box::new(|p| fs::write(p, br#"{"snapshot":{"peer":3}}"#).unwrap()),
+            Box::new(|p| fs::write(p, br#"{"saved":{}}"#).unwrap()),
+            Box::new(|p| fs::write(p, br#"{"saved":{"1":0}}"#).unwrap()),
+            Box::new(|p| fs::write(p, br#"{"saved":{"1":-1}}"#).unwrap()),
+            Box::new(|p| fs::write(p, br#"{"saved":{"peer":3}}"#).unwrap()),
             Box::new(|p| {
                 fs::remove_file(p).unwrap();
                 fs::create_dir(p).unwrap();
@@ -1416,11 +1665,11 @@ mod tests {
             spoil(&store.managed_path(&uuid));
             // An impossible version beside the right block is still refused.
             if let Some(mark) = store.mark(&uuid) {
-                fresh.snapshot = mark.snapshot;
+                fresh.saved = mark.saved;
                 store.write_mark(&uuid, &fresh).unwrap();
             }
             assert!(store.was_managed(&uuid));
-            assert!(store.fresh_snapshot(&uuid).is_none());
+            assert!(store.fresh_version(&uuid).is_none());
             damage(&store, &uuid);
             kept(&store, &uuid, &peer);
         }

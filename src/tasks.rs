@@ -643,29 +643,45 @@ fn indexed_page(index: &mut index::Index, stage: Stage, limit: usize, anchor: &i
 
 /// The same page read from every document, for when the index cannot answer.
 fn documents_page(store: &ProjectStore, stage: Stage, limit: usize, anchor: &index::Anchor, wanted: Option<&str>) -> Result<Value> {
+    Ok(page_of(&documents(store)?, store.project_id(), stage, limit, anchor, wanted))
+}
+
+/// Every task document read once, for pages built without the index: each
+/// stage's rows in order, the counts, the damaged tasks and a revision.
+struct Documents {
+    rows: BTreeMap<&'static str, Vec<(String, String, Value)>>,
+    counts: BTreeMap<String, usize>,
+    damaged: Vec<zerus_replica::Damaged>,
+    revision: String,
+}
+
+fn documents(store: &ProjectStore) -> Result<Documents> {
     use sha2::Digest;
     let (tasks, damaged) = store.listing().map_err(fail)?;
     let mut hash = sha2::Sha256::new();
     let mut counts = BTreeMap::new();
-    let mut rows = Vec::new();
+    let mut rows: BTreeMap<&'static str, Vec<(String, String, Value)>> = BTreeMap::new();
     for task in &tasks {
         let view = task.view().map_err(fail)?;
         let (this, rank, uuid) = (view.stage, view.rank.clone(), view.uuid.clone());
         let listed = index::capped(row(view, task.revision())?);
         hash.update(listed.to_string());
         *counts.entry(this.as_str().to_owned()).or_insert(0) += 1;
-        if this == stage {
-            rows.push((rank, uuid, listed));
-        }
+        rows.entry(this.as_str()).or_default().push((rank, uuid, listed));
     }
     for damaged in &damaged {
         hash.update(format!("{}\n{}", damaged.uuid, damaged.error));
     }
     let revision = format!("documents-{:x}", hash.finalize());
-    if wanted == Some(revision.as_str()) {
-        return Ok(json!({"unchanged": true, "revision": revision}));
+    Ok(Documents { rows, counts, damaged, revision })
+}
+
+/// One page of `stage` from documents read once, in the index's form.
+fn page_of(docs: &Documents, project: &str, stage: Stage, limit: usize, anchor: &index::Anchor, wanted: Option<&str>) -> Value {
+    if wanted == Some(docs.revision.as_str()) {
+        return json!({"unchanged": true, "revision": docs.revision});
     }
-    let project = store.project_id();
+    let rows: &[(String, String, Value)] = docs.rows.get(stage.as_str()).map_or(&[], Vec::as_slice);
     let below = |rank: &str, uuid: &str| rows.partition_point(|r| (r.0.as_str(), r.1.as_str()) < (rank, uuid));
     let through = |rank: &str, uuid: &str| rows.partition_point(|r| (r.0.as_str(), r.1.as_str()) <= (rank, uuid));
     let (mut start, mut end) = match anchor {
@@ -696,14 +712,75 @@ fn documents_page(store: &ProjectStore, stage: Stage, limit: usize, anchor: &ind
     } else {
         (None, None)
     };
-    let position = start;
-    let page: Vec<Value> = rows.drain(start..end).map(|r| r.2).collect();
-    let shown = damaged
+    let page: Vec<Value> = rows[start..end].iter().map(|r| r.2.clone()).collect();
+    let shown = docs
+        .damaged
         .iter()
         .take(index::DAMAGED_SHOWN)
         .map(|d| json!({"uuid": d.uuid, "error": index::capped_error(&d.error)}))
         .collect();
-    Ok(page_reply(stage, limit, page, position, next, previous, &counts, (shown, damaged.len()), revision))
+    page_reply(stage, limit, page, start, next, previous, &docs.counts, (shown, docs.damaged.len()), docs.revision.clone())
+}
+
+/// The first page of each stage in `LIST_STAGES` order, from the task index,
+/// or from the documents read once when the index cannot answer.
+fn window_pages(store: &ProjectStore, limit: usize) -> Result<Vec<Value>> {
+    let indexed = index::Index::open(store).and_then(|mut index| {
+        let mut pages = Vec::new();
+        for stage in LIST_STAGES {
+            match indexed_page(&mut index, stage, limit, &index::Anchor::Start, None) {
+                Ok(page) => pages.push(page),
+                Err(failure) => {
+                    index.discard(&failure);
+                    return None;
+                }
+            }
+        }
+        Some(pages)
+    });
+    match indexed {
+        Some(pages) => Ok(pages),
+        None => {
+            let docs = documents(store)?;
+            let project = store.project_id();
+            Ok(LIST_STAGES.iter().map(|stage| page_of(&docs, project, *stage, limit, &index::Anchor::Start, None)).collect())
+        }
+    }
+}
+
+/// The first `limit` rows of every stage, for the `hgs watch` tasks window:
+/// the rows in stage order, each stage's total and the cursor of its next
+/// page, the counts, the first damaged tasks and the revision. From the task
+/// index, or from the documents read once when it cannot answer.
+pub(crate) fn window(config: &Config, wanted: &str, limit: usize) -> Result<Value> {
+    if !(1..=index::MAX_LIMIT).contains(&limit) {
+        return Err(fail(format!("a tasks window is between 1 and {}", index::MAX_LIMIT)));
+    }
+    let machines = machines(config)?;
+    let (id, name) = project(config, wanted)?;
+    let pages = window_pages(&store(config, &id)?, limit)?;
+    // The last page read is the latest: its counts, damaged tasks and revision.
+    let last = pages.last().cloned().unwrap_or_default();
+    let mut tasks = Vec::new();
+    let mut stages = serde_json::Map::new();
+    for (stage, page) in LIST_STAGES.iter().zip(&pages) {
+        for row in page["tasks"].as_array().cloned().unwrap_or_default() {
+            tasks.push(label_view(row, &name, false, &[], &machines)?);
+        }
+        stages.insert(
+            stage.as_str().to_owned(),
+            json!({"total": last["counts"][stage.as_str()], "next": page["page"]["next"]}),
+        );
+    }
+    Ok(json!({
+        "project": {"id": id, "name": name},
+        "tasks": tasks,
+        "damaged": last["damaged"],
+        "damaged_total": last["damaged_total"],
+        "counts": last["counts"],
+        "revision": last["revision"],
+        "window": {"schema": 1, "limit": limit, "stages": stages},
+    }))
 }
 
 /// `--position N`, counting from 1, as a list index.

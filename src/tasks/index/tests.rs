@@ -694,6 +694,34 @@ fn a_requested_history_is_revalidated_like_a_page_row() {
     }
 }
 
+/// The tasks window (zerus-cg5h.2 slice C): the first page of every stage,
+/// the same from the index and from the documents read once.
+#[cfg(unix)]
+#[test]
+fn a_window_is_the_first_page_of_every_stage_from_the_index_or_the_documents() {
+    use std::os::unix::fs::PermissionsExt;
+    let temp = tempfile::tempdir().unwrap();
+    let store = project(temp.path());
+    let indexed = super::super::window_pages(&store, 2).unwrap();
+    assert_eq!(indexed.len(), 5);
+    for (stage, page) in super::super::LIST_STAGES.iter().zip(&indexed) {
+        let expected = super::super::documents_page(&store, *stage, 2, &Anchor::Start, None).unwrap();
+        assert_eq!(page["tasks"], expected["tasks"], "{stage:?}");
+        assert_eq!(page["page"]["total"], expected["page"]["total"], "{stage:?}");
+        assert_eq!(page["page"]["next"], expected["page"]["next"], "{stage:?}");
+    }
+    // The folder is not private: the index cannot be used, the documents can.
+    fs::set_permissions(store.dir(), fs::Permissions::from_mode(0o755)).unwrap();
+    let read = super::super::window_pages(&store, 2).unwrap();
+    fs::set_permissions(store.dir(), fs::Permissions::from_mode(0o700)).unwrap();
+    for (page, from_documents) in indexed.iter().zip(&read) {
+        assert_eq!(page["tasks"], from_documents["tasks"]);
+        assert_eq!(page["page"], from_documents["page"]);
+        assert_eq!(page["counts"], from_documents["counts"]);
+    }
+    assert!(read[0]["revision"].as_str().unwrap().starts_with("documents-"));
+}
+
 #[test]
 fn a_damaged_foreign_or_shared_index_is_built_again() {
     let temp = tempfile::tempdir().unwrap();

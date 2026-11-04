@@ -5172,6 +5172,16 @@ changed. A list that cannot be read, such as an unknown project, sends a
 non-fatal `tasks_failed`. A stream follows at most 8 projects
 (`limits.tasks_subscriptions`).
 
+A subscription may add `"window": N` (1 to `limits.tasks_window`, 200; a server
+that announces 0 or omits it always sends the whole list). It then carries only
+the first N rows of each stage, read from the task index, in stage order (In
+review, In progress, To do, Backlog, Done), never the whole list. The last
+page's `value` adds the `counts` of every stage, `damaged_total`, the
+`revision` and `window: {schema: 1, limit, stages: {STAGE: {total, next}}}`;
+each `next` is the cursor of that stage's next page for `hgs task list --stage
+STAGE --limit N --after CURSOR`, or null when the stage has no more rows. A
+window that is not 1 to 200 is a non-fatal `bad_request`.
+
 The `organization` topic follows the shared project catalog as `hgs swarm get`
 prints it: `{"op":"subscribe","topic":"organization"}`, one per stream. A
 worker thread reads the stored catalog without its lock, never saving it and

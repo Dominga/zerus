@@ -753,6 +753,9 @@ mod tests {
                             "--request-id".into(),
                             control["request_id"].as_str().unwrap().into(),
                         ]);
+                    } else if let Some(request) = control["request_id"].as_str() {
+                        // The first-choice form: the caller's NEW UUID only.
+                        args.extend(["--request-id".into(), request.into()]);
                     }
                 } else if matches!(mode.as_str(), "mode_cancel" | "mode_review") {
                     let id = control["request_id"].as_str().unwrap();

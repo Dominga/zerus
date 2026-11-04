@@ -615,7 +615,7 @@ finally:
                 program.chmod(0o700)
 
     def cli(self, *args, data=None, ok=True, env=None):
-        result = subprocess.run([str(HGS), *args], input=None if data is None else json.dumps(data),
+        result = subprocess.run([str(getattr(self, 'hgs', HGS)), *args], input=None if data is None else json.dumps(data),
                                 env=env or self.env, capture_output=True, text=True, timeout=10)
         if ok:
             self.assertEqual(result.returncode, 0, result.stderr)
@@ -634,7 +634,7 @@ finally:
         # The service must create a private endpoint even when its launcher
         # supplies a permissive mask; probing readiness races socket creation.
         options = {'umask': 0} if os.name != 'nt' else {}
-        args = [str(HGS), 'desktop', 'serve'] + (['--background'] if background else [])
+        args = [str(getattr(self, 'hgs', HGS)), 'desktop', 'serve'] + (['--background'] if background else [])
         process = subprocess.Popen(args, env=self.env,
                                    stdin=subprocess.DEVNULL, stdout=subprocess.PIPE, stderr=subprocess.PIPE, text=True, **options)
         self.addCleanup(self.stop, process)

@@ -457,7 +457,7 @@ fn a_new_legacy_helper_is_probed_before_any_new_subcommand() {
             use std::os::unix::fs::PermissionsExt;
             std::fs::set_permissions(f.0.join("hgs"), std::fs::Permissions::from_mode(0o700))
                 .unwrap();
-            assert!(inspect_fixture(
+            assert!(Selected::inspect(
                 service.clone(),
                 &capture().target,
                 &capture().machine,
@@ -718,24 +718,5 @@ fn an_in_place_rewrite_after_the_last_spawn_check_cannot_replace_native_code() {
             if serde_json::from_slice::<Value>(&stdout).unwrap()["status"] == "completed"));
         assert!(!replacement);
         assert_eq!(native_calls, 1);
-    });
-}
-
-#[test]
-fn linux_public_offer_refuses_before_a_new_helper_or_preparation() {
-    let _process = crate::PROCESS_TREE.read().unwrap();
-    tauri::async_runtime::block_on(async {
-        let f = fixture(json!({}));
-        let (service, _cache) = connected(&f).await;
-        let result = Selected::inspect(
-            service.clone(),
-            &capture().target,
-            &capture().machine,
-            Arc::new(()),
-        );
-        let unexpected_calls = calls(&f);
-        service.join().await.unwrap();
-        assert!(matches!(result, Err(code) if code == image::LINUX_UNAVAILABLE));
-        assert!(unexpected_calls.is_empty());
     });
 }

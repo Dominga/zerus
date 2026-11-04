@@ -115,20 +115,39 @@ The new service submission refuses on macOS with
 Ordinary/native/replay paths are unchanged. The independent
 `zerus-5wmh.66.3.40.4` follow-up must qualify observation of the same unreaped
 helper's audit token and selected bundle requirement before this path is enabled.
-The new Linux submission similarly refuses with
-`termination_native_relay_unavailable` before preparation or any new child.
-The separate `zerus-5wmh.66.4.6.9` authentication work must qualify the sealed
-own-child relay against an immutable startup reference of the actual running
-service image. The existing inode-based authentication is unchanged here.
+On Linux, the service captures its actual `/proc/self/exe` object once under
+its real owner, before publishing the listener. An owned setup worker copies
+and seals that reference under the same 256 MiB/five-second bounds. Failure or
+setup timeout leaves the sealed-relay branch unavailable for that service;
+a late result is discarded only after the original copy worker joins, with
+its owner loan retained until then. The installed pathname never refreshes
+the reference. The existing inode-based authentication route is unchanged.
+
+A sealed relay gains only an alternative image predicate. The kernel peer PID,
+UID, original birth/direct parent, exact argv, selected native frontend,
+configuration/mode, original request/attempt/fingerprint and ancestry/tracer
+checks remain independent. The bounded client worker opens the peer's actual
+`/proc/PID/exe`, requires a finite native image with all four seals and exact
+length, and compares every byte against the immutable startup reference within
+the original two-second proof deadline. A name, digest or supplied descriptor
+cannot substitute. The acquired original object and owner loan stay with the
+opaque native proof. Every subsequent freshness check, including the typed
+after-BEGIN check, reopens the peer's kernel executable and verifies that SAME
+sealed object and unchanged birth/parent. Exec to another memfd refuses even
+when its bytes and displayed name match. These final checks do no full-image
+I/O on the SQL actor. No equal image grants a role, consent or native effect.
 Existing paired metadata and connected-peer code observations are not relabeled
-as an execution fence. Platform component tests do not establish installed,
-Root-authenticated or end-to-end controller qualification. Linux fake-actor
+as an execution fence. Platform component tests do not establish installed or end-to-end controller
+qualification. The Linux CLI contract uses an original native fixture parent,
+actual kernel peer/child/birth and the real typed actor; cached frontend proof
+data is synthetic, and it is not an installed GUI/Terminate acceptance. Run its
+positive cases outside agent ancestry. Linux fake-actor
 protocol tests explicitly construct their private fixture context rather than
 passing through the production platform gate; they cannot enable it.
 
 ### Temporary Linux/macOS removal availability
 
-G1 decision for R4: the old Service `selected:None` path is not a safe fallback.
+G1 decision: the old Service `selected:None` path is not a safe fallback.
 It reselects `default_hgs` and does not retain the selected relay/image/config
 through the original effect. Its refusal remains intact. While the new submission
 is unavailable, Terminate visibly explains that automatic folder removal is

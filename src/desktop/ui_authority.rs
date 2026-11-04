@@ -16,6 +16,8 @@ use zerus_client_core::desktop::ui_requests::{Envelope, Reply, Request};
 
 #[cfg(target_os = "linux")]
 mod linux_manager;
+#[cfg(target_os = "linux")]
+mod linux_image;
 #[cfg(any(target_os = "macos", test))]
 mod macos_ancestry;
 #[cfg(any(target_os = "linux", target_os = "macos"))]
@@ -40,6 +42,8 @@ const ACTIVATION_PROOF_INTERVAL: Duration = Duration::from_millis(500);
 pub(super) struct Scope {
     location: Location,
     frontend_images: Vec<PathBuf>,
+    #[cfg(target_os = "linux")]
+    sealed_reference: Option<std::sync::Arc<linux_image::Reference>>,
 }
 impl std::ops::Deref for Scope {
     type Target = Location;
@@ -90,7 +94,15 @@ impl Scope {
                 configuration: location.configuration.clone(),
             },
             frontend_images,
+            #[cfg(target_os = "linux")]
+            sealed_reference: None,
         }
+    }
+    /// The service calls this once under its actual owner before listening.
+    /// A failed/late snapshot is never replaced from an installed pathname.
+    #[cfg(target_os = "linux")]
+    pub(super) fn initialize_reference(&mut self, owner: &std::sync::Arc<platform::FileLock>) {
+        self.sealed_reference = linux_image::Reference::capture(owner);
     }
     fn selected_frontend(&self, image: &Path) -> bool {
         self.installed_frontend(image).is_some()
@@ -118,6 +130,8 @@ struct Process {
     pid: u32,
     identity: platform::ProcessIdentity,
     executable: String,
+    #[cfg(target_os = "linux")]
+    sealed_image: Option<std::sync::Arc<linux_image::Peer>>,
     #[cfg(windows)]
     original: Option<std::sync::Arc<Original>>,
 }
@@ -153,6 +167,8 @@ impl Process {
             pid,
             identity,
             executable,
+            #[cfg(target_os = "linux")]
+            sealed_image: None,
         })
     }
     #[cfg(windows)]
@@ -163,6 +179,14 @@ impl Process {
     }
     #[cfg(not(windows))]
     fn current(&self) -> bool {
+        #[cfg(target_os = "linux")]
+        if let Some(image) = &self.sealed_image {
+            // Exec retains PID/birth and can retain the SAME memfd display name.
+            // Reopen the kernel object at EVERY original freshness boundary.
+            return platform::process_identity(self.pid).as_ref() == Some(&self.identity)
+                && image.current(self.pid)
+                && platform::process_identity(self.pid).as_ref() == Some(&self.identity);
+        }
         platform::process_identity(self.pid).as_ref() == Some(&self.identity)
             && platform::describe(self.pid).is_some_and(|p| p.executable == self.executable)
     }
@@ -669,13 +693,38 @@ pub(super) fn authenticate(location: &Scope, peer_pid: u32, value: &Value) -> Re
     ensure!(envelope.valid(), "invalid frontend envelope");
     let until = Instant::now() + WAIT;
     let caller = Process::read(peer_pid)?;
-    let own_image = platform::describe(std::process::id()).context("service image unavailable")?;
-    let selected = platform::file_identity(Path::new(&own_image.executable))
-        .context("service image identity unavailable")?;
-    ensure!(
-        platform::file_identity(Path::new(&caller.executable)) == Some(selected),
-        "frontend relay is not the selected hgs"
-    );
+    #[cfg(target_os = "linux")]
+    let caller = {
+        let mut caller = caller;
+        let selected = platform::describe(std::process::id())
+            .and_then(|own| platform::file_identity(Path::new(&own.executable)));
+        if !selected
+            .is_some_and(|id| platform::file_identity(Path::new(&caller.executable)) == Some(id))
+        {
+            // Only this old image predicate gains an immutable equivalence
+            // branch. All native child/argv/config/ancestry checks remain below.
+            caller.sealed_image = Some(
+                location
+                    .sealed_reference
+                    .as_ref()
+                    .context("sealed service relay unavailable")?
+                    .observe(&caller, until)?,
+            );
+            ensure!(caller.current(), "sealed frontend relay changed");
+        }
+        caller
+    };
+    #[cfg(not(target_os = "linux"))]
+    {
+        let own_image =
+            platform::describe(std::process::id()).context("service image unavailable")?;
+        let selected = platform::file_identity(Path::new(&own_image.executable))
+            .context("service image identity unavailable")?;
+        ensure!(
+            platform::file_identity(Path::new(&caller.executable)) == Some(selected),
+            "frontend relay is not the selected hgs"
+        );
+    }
     let argv = caller.arguments()?;
     ensure!(
         argv.get(1..)
@@ -1236,6 +1285,8 @@ mod tests {
                 started: 100.0,
             },
             executable: "/opt/example/zerus-client".into(),
+            #[cfg(target_os = "linux")]
+            sealed_image: None,
             #[cfg(windows)]
             original: None,
         };
@@ -1248,6 +1299,8 @@ mod tests {
                 started: 101.0,
             },
             executable: "/opt/example/hgs".into(),
+            #[cfg(target_os = "linux")]
+            sealed_image: None,
             #[cfg(windows)]
             original: None,
         };
@@ -2277,6 +2330,8 @@ mod tests {
                 configuration: "a".repeat(64),
             },
             frontend_images: vec![image.clone()],
+            #[cfg(target_os = "linux")]
+            sealed_reference: None,
         };
         // Synthetic catalog and private files, not an installed GUI claim.
         let selected = scope.select_frontend(&image).unwrap();
@@ -2309,6 +2364,8 @@ mod tests {
                 configuration: "a".repeat(64),
             },
             frontend_images: vec![installed.clone()],
+            #[cfg(target_os = "linux")]
+            sealed_reference: None,
         };
         assert!(scope.selected_frontend(&installed));
         assert!(!scope.selected_frontend(&other));

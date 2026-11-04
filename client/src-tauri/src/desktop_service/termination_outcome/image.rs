@@ -1,7 +1,7 @@
 //! Execution custody for this native producer, separate from audit freshness.
 //! Windows retains the maintained file/ancestor pins and checks the loaded
-//! section of the SAME Child. Linux's shared snapshot is immutable; its new
-//! service submission refuses until native relay authentication is qualified.
+//! section of the SAME Child. Linux executes its immutable Core snapshot;
+//! the service authenticates that original relay against its startup snapshot.
 use std::{
     io,
     path::{Path, PathBuf},
@@ -9,14 +9,10 @@ use std::{
 };
 
 pub(super) const MAC_UNAVAILABLE: &str = "termination_native_image_unavailable";
-pub(super) const LINUX_UNAVAILABLE: &str = "termination_native_relay_unavailable";
 
 pub(super) fn prepare<T>(prepare: impl FnOnce() -> Result<T, String>) -> Result<T, String> {
     if cfg!(target_os = "macos") {
         return Err(MAC_UNAVAILABLE.into());
-    }
-    if cfg!(target_os = "linux") {
-        return Err(LINUX_UNAVAILABLE.into());
     }
     prepare()
 }
@@ -113,7 +109,7 @@ impl Image {
 
 #[cfg(all(test, any(windows, target_os = "linux")))]
 mod tests;
-#[cfg(all(test, any(target_os = "macos", target_os = "linux")))]
+#[cfg(all(test, target_os = "macos"))]
 #[test]
 fn unavailable_platform_refuses_before_native_preparation_or_spawn() {
     let called = std::cell::Cell::new(false);
@@ -121,11 +117,18 @@ fn unavailable_platform_refuses_before_native_preparation_or_spawn() {
         called.set(true);
         Ok(())
     });
-    let expected = if cfg!(target_os = "linux") {
-        LINUX_UNAVAILABLE
-    } else {
-        MAC_UNAVAILABLE
-    };
-    assert_eq!(result, Err(expected.into()));
+    assert_eq!(result, Err(MAC_UNAVAILABLE.into()));
     assert!(!called.get());
+}
+
+#[cfg(all(test, target_os = "linux"))]
+#[test]
+fn linux_preparation_is_not_a_relay_permission_or_a_renewable_fallback() {
+    let called = std::cell::Cell::new(0);
+    let result: Result<(), String> = prepare(|| {
+        called.set(called.get() + 1);
+        Err("original preparation refused".into())
+    });
+    assert_eq!(result, Err("original preparation refused".into()));
+    assert_eq!(called.get(), 1);
 }

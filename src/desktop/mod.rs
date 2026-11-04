@@ -548,7 +548,7 @@ fn serve(config: &Config, location: Location, background_mode: bool) -> Result<(
     let mut upgrade = upgrade::Upgrade::new();
     #[cfg(all(test, target_os = "linux"))]
     upgrade::actor_tests::configure(&mut upgrade);
-    let (_signals, owner, listener, epoch, mut store) = (|| -> Result<_> {
+    let (_signals, owner, listener, epoch, mut store, ui_scope) = (|| -> Result<_> {
         #[cfg(windows)]
         crate::host::token::private_creation::prepare()
             .context("select exact-user desktop creation owner")?;
@@ -568,8 +568,12 @@ fn serve(config: &Config, location: Location, background_mode: bool) -> Result<(
         let store = Store::open(&location, &epoch).context("open desktop store")?;
         // A status deadline must not start while startup still owns the actor
         // for migrations/recovery. Publish only once that work has completed.
+        #[allow(unused_mut)]
+        let mut ui_scope = ui_authority::Scope::new(config, &location);
+        #[cfg(target_os = "linux")]
+        ui_scope.initialize_reference(&lock);
         let listener = Arc::new(Listener::bind(&location).context("bind desktop listener")?);
-        Ok((signals, lock, listener, epoch, store))
+        Ok((signals, lock, listener, epoch, store, Arc::new(ui_scope)))
     })()
     .context(StartupRefused)?;
     let stopped = Arc::new(AtomicBool::new(false));
@@ -587,7 +591,6 @@ fn serve(config: &Config, location: Location, background_mode: bool) -> Result<(
     let mut frontend = frontend::Cache::default();
     let mut background: Option<background::Runtime> = None;
     let mut frontend_order = ui_authority::Order::default();
-    let ui_scope = Arc::new(ui_authority::Scope::new(config, &location));
     // At most16 queued controls/data, thirteen bounded parsers and one passive
     // producer. Background mode owns the only internal source producer.
     let (send, receive) = mpsc::sync_channel(protocol::PENDING);

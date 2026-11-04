@@ -72,6 +72,19 @@ pub struct Attempt {
     pub frontier: Option<Vec<String>>,
 }
 
+/// The cutover a task took before its first attempt: the execution schema it
+/// was raised to, and the exact operation that raised it (the writing peer
+/// and that operation's counter), which a replica holds once its version of
+/// the task counts beyond it. Older builds never write it, so it survives a
+/// lower schema value winning a merge.
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+pub struct Floor {
+    pub schema: i64,
+    /// The writing peer, in decimal: a Loro peer ID does not fit a JSON number.
+    pub peer: String,
+    pub counter: i32,
+}
+
 /// The most history entries one attempt's frontier names.
 pub const MAX_FRONTIER: usize = 1024;
 

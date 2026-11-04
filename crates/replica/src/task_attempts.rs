@@ -113,6 +113,12 @@ impl TaskDoc {
                 "this task records execution attempts; reserve its next attempt to start it",
             ));
         }
+        if self.execution_managed() {
+            return Err(Error::new(
+                "this task is cutting over to execution attempts; nothing is sent until every \
+                 computer holding it has the cutover",
+            ));
+        }
         Ok(())
     }
 
@@ -2148,6 +2154,203 @@ mod tests {
             &[],
         );
         assert!(task.unexplained_entries().unwrap().is_empty());
+    }
+
+    #[test]
+    fn a_floor_cuts_a_task_over_with_no_other_effect() {
+        // zerus-cg5h.4 S2b.2 C1: the floor before a task's first attempt.
+        let mut task = task();
+        task.set_target(&Target::Session(run("api")), &Actor::Person, 2)
+            .unwrap();
+        let before = task.view().unwrap();
+        let peer = task.doc.peer_id();
+        let next = task.doc.oplog_vv().get(&peer).copied().unwrap_or(0);
+        assert!(task.floor().unwrap());
+        let floor = task.floor_record().unwrap();
+        assert_eq!(
+            (floor.schema, floor.peer.as_str(), floor.counter),
+            (
+                execution::EXECUTION_TASK_SCHEMA,
+                peer.to_string().as_str(),
+                next
+            )
+        );
+        let after = task.view().unwrap();
+        assert_eq!((after.schema, after.writable), (6, true));
+        // Only the floor and the schema changed: no history, stage, target,
+        // attempt or execution.
+        assert_eq!(
+            (
+                after.log.len(),
+                after.stage,
+                after.target.clone(),
+                after.execution.clone()
+            ),
+            (
+                before.log.len(),
+                before.stage,
+                before.target.clone(),
+                before.execution.clone()
+            )
+        );
+        assert!(!task.executes_attempts() && task.execution_managed());
+        // A second floor writes nothing.
+        let revision = task.revision();
+        assert!(!task.floor().unwrap());
+        assert_eq!(task.revision(), revision);
+        // A replica holds the floor once its version counts beyond its operation.
+        let other = TaskDoc::from_bytes(&before_snapshot(&before, &task)).unwrap();
+        let holds = |doc: &TaskDoc| {
+            doc.doc
+                .oplog_vv()
+                .get(&floor.peer.parse::<u64>().unwrap())
+                .is_some_and(|count| *count > floor.counter)
+        };
+        assert!(holds(&task));
+        assert!(!holds(&other));
+        let mut other = other;
+        other.import(&task.snapshot().unwrap()).unwrap();
+        assert!(holds(&other));
+    }
+
+    #[test]
+    fn a_floor_this_build_cannot_read_still_cuts_the_task_over() {
+        let unreadable: [loro::LoroValue; 6] = [
+            "".into(),
+            "not a floor".into(),
+            r#"{"schema":5,"peer":"1","counter":0}"#.into(),
+            r#"{"schema":6,"peer":"peer","counter":0}"#.into(),
+            r#"{"schema":6,"peer":"1","counter":-1}"#.into(),
+            7.into(),
+        ];
+        for value in unreadable {
+            let mut task = task();
+            task.set_target(&Target::Session(run("api")), &Actor::Person, 2)
+                .unwrap();
+            task.set_floor_value_for_test(value.clone());
+            assert!(task.floor_record().is_none(), "{value:?}");
+            assert!(task.execution_managed(), "{value:?}");
+            assert_eq!(task.schema(), execution::EXECUTION_TASK_SCHEMA);
+            assert!(task.needs_schema_repair(), "{value:?}");
+            assert!(task
+                .check_send()
+                .is_err_and(|e| e.to_string().contains("cutting over")));
+            // The floor writes a readable record over it.
+            assert!(task.floor().unwrap(), "{value:?}");
+            assert!(task.floor_record().is_some(), "{value:?}");
+        }
+    }
+
+    /// The task as it was before the floor: a fresh copy of its snapshot
+    /// without the floor's change.
+    fn before_snapshot(_view: &TaskView, task: &TaskDoc) -> Vec<u8> {
+        let floor = task.floor_record().unwrap();
+        let peer: u64 = floor.peer.parse().unwrap();
+        let mut version = task.doc.oplog_vv();
+        version.insert(peer, floor.counter);
+        let frontiers = task.doc.vv_to_frontiers(&version);
+        task.doc
+            .export(loro::ExportMode::snapshot_at(&frontiers))
+            .unwrap()
+    }
+
+    #[test]
+    fn a_floored_task_keeps_the_execution_schema_without_attempts() {
+        let base = task();
+        let bytes = base.snapshot().unwrap();
+        let mut floored = TaskDoc::from_bytes(&bytes).unwrap();
+        floored.floor().unwrap();
+        // An older replica's concurrent upgrade wins the merged value.
+        let mut older = TaskDoc::from_bytes(&bytes).unwrap();
+        for n in 0..8 {
+            older
+                .comment(&format!("older {n}"), &Actor::Person, 2)
+                .unwrap();
+        }
+        older.set_stored_schema_for_test(5);
+        let mut merged = TaskDoc::from_bytes(&floored.snapshot().unwrap()).unwrap();
+        merged.import_unrepaired_for_test(&older.snapshot().unwrap());
+        assert_eq!(merged.stored_schema(), 5, "the older value wins this merge");
+        assert!(merged.floor_record().is_some() && !merged.executes_attempts());
+        // The floor still holds here, and every repair route restores it.
+        assert_eq!(merged.schema(), execution::EXECUTION_TASK_SCHEMA);
+        assert!(merged.needs_schema_repair());
+        let mut repaired = TaskDoc::from_bytes(&merged.snapshot().unwrap()).unwrap();
+        assert!(repaired.repair_schema().unwrap());
+        assert_eq!(repaired.stored_schema(), execution::EXECUTION_TASK_SCHEMA);
+        let mut imported = TaskDoc::from_bytes(&floored.snapshot().unwrap()).unwrap();
+        imported.import(&older.snapshot().unwrap()).unwrap();
+        assert_eq!(imported.stored_schema(), execution::EXECUTION_TASK_SCHEMA);
+        let mut written = TaskDoc::from_bytes(&merged.snapshot().unwrap()).unwrap();
+        written
+            .comment("A newer comment", &Actor::Person, 30)
+            .unwrap();
+        assert_eq!(written.stored_schema(), execution::EXECUTION_TASK_SCHEMA);
+        // A newer schema than this build's is never lowered.
+        let mut newer = TaskDoc::from_bytes(&bytes).unwrap();
+        newer.set_stored_schema_for_test(execution::EXECUTION_TASK_SCHEMA + 1);
+        assert!(newer.floor().is_err());
+    }
+
+    #[test]
+    fn a_floored_task_takes_no_legacy_start_and_its_first_attempt_proceeds() {
+        let mut task = task();
+        task.set_target(&Target::Session(run("api")), &Actor::Person, 2)
+            .unwrap();
+        task.floor().unwrap();
+        // Before any input, the legacy paths refuse: it is cutting over.
+        let refused = task.check_send().unwrap_err().to_string();
+        assert!(refused.contains("cutting over"), "{refused}");
+        assert!(task
+            .record_send(&run("api"), "legacy", &Actor::Person, 3)
+            .is_err());
+        // A pinned agent's report starts nothing implicitly.
+        task.report("Done already", ReportKind::Ready, None, &agent("api"), 4)
+            .unwrap();
+        assert_eq!(task.stage().unwrap(), Stage::Todo);
+        // Its first attempt is reserved and settled as usual.
+        task.sendable().unwrap();
+        assert_eq!(send(&mut task, ONE, "api").generation, 1);
+        assert!(settle(&mut task, ONE).advanced);
+        // A direct start of a floored task is an attempt of its own.
+        let mut direct = super::tests::task();
+        direct.floor().unwrap();
+        direct.record_start(&agent("web"), 5).unwrap();
+        assert_eq!(current(&direct).origin, Origin::Start);
+        assert!(direct.executes_attempts() && !current(&direct).legacy);
+        // A legacy task in Review that took the floor reopens only through an
+        // attempt, never through a legacy reopen.
+        let mut legacy = super::tests::task();
+        legacy
+            .record_send(&run("api"), "dispatch", &Actor::Person, 2)
+            .unwrap();
+        legacy.record_report("Review", &agent("api"), 3).unwrap();
+        assert_eq!(legacy.stage().unwrap(), Stage::Review);
+        legacy.floor().unwrap();
+        let reopen = crate::TaskDelivery {
+            mode: "reopen".into(),
+            state: "reserved".into(),
+            stage: "review".into(),
+            stage_at: 3,
+            dispatch_id: "dispatch".into(),
+            submitted_id: String::new(),
+            run_id: "run-api".into(),
+            conversation_id: "conversation-api".into(),
+            prompt: "[Task feedback]".into(),
+            error: String::new(),
+        };
+        let refused = legacy
+            .reserve_message(
+                ONE,
+                "Revise",
+                &[],
+                &reopen,
+                Some(&run("api")),
+                (&Actor::Person, 4),
+            )
+            .unwrap_err()
+            .to_string();
+        assert!(refused.contains("next attempt"), "{refused}");
     }
 
     #[test]

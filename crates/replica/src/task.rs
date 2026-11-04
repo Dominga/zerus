@@ -43,6 +43,8 @@ pub struct TaskDoc {
     pub(crate) needs_fold: bool,
     /// The stage when the store last read or wrote the task.
     pub(crate) saved_stage: Option<Stage>,
+    /// The version of the snapshot the store last read or wrote.
+    pub(crate) folded: Option<VersionVector>,
 }
 
 fn string(map: &LoroMap, key: &str) -> Option<String> {
@@ -175,6 +177,7 @@ impl TaskDoc {
             saved_len: 0,
             needs_fold: false,
             saved_stage: None,
+            folded: None,
         };
         this.log("created", &task.author, task.now, "", None)?;
         this.doc.commit();
@@ -197,6 +200,7 @@ impl TaskDoc {
             saved_len: 0,
             needs_fold: false,
             saved_stage: None,
+            folded: None,
         })
     }
 
@@ -316,7 +320,7 @@ impl TaskDoc {
     /// upgrade by an older replica won the merged `meta.schema` value.
     pub fn schema(&self) -> i64 {
         let stored = self.stored_schema();
-        if self.executes_attempts() {
+        if self.execution_managed() {
             stored.max(execution::EXECUTION_TASK_SCHEMA)
         } else {
             stored
@@ -325,6 +329,53 @@ impl TaskDoc {
 
     pub(crate) fn stored_schema(&self) -> i64 {
         integer(&self.meta(), "schema").unwrap_or(0)
+    }
+
+    /// Whether the task was cut over to the execution schema: it records
+    /// attempts, or took its floor before the first one. A floor this build
+    /// cannot read still counts, so it never reopens the legacy path.
+    pub fn execution_managed(&self) -> bool {
+        self.executes_attempts() || self.meta().get("floor").is_some()
+    }
+
+    /// The task's cutover floor, when it took one (`floor`).
+    pub fn floor_record(&self) -> Option<execution::Floor> {
+        string(&self.meta(), "floor")
+            .and_then(|raw| serde_json::from_str::<execution::Floor>(&raw).ok())
+            .filter(|floor| {
+                floor.schema >= execution::EXECUTION_TASK_SCHEMA
+                    && floor.counter >= 0
+                    && floor.peer.parse::<u64>().is_ok()
+            })
+    }
+
+    /// Cuts the task over to the execution schema before its first attempt:
+    /// a floor record, then the stored schema raised to it, in one commit.
+    /// It changes no stage, history, attempt or receipt; true when it wrote.
+    /// An older replica refuses every guarded write once its copy holds it.
+    pub fn floor(&mut self) -> Result<bool> {
+        self.writable()?;
+        if self.floor_record().is_some() {
+            self.repair_schema()?;
+            return Ok(false);
+        }
+        let peer = self.doc.peer_id();
+        let counter = self.doc.oplog_vv().get(&peer).copied().unwrap_or(0);
+        // The floor record is this commit's first operation: its counter is
+        // the one a replica must hold to hold the floor.
+        let floor = execution::Floor {
+            schema: execution::EXECUTION_TASK_SCHEMA,
+            peer: peer.to_string(),
+            counter,
+        };
+        self.meta()
+            .insert("floor", serde_json::to_string(&floor)?)?;
+        self.meta().insert(
+            "schema",
+            execution::EXECUTION_TASK_SCHEMA.max(self.stored_schema()),
+        )?;
+        self.doc.commit();
+        Ok(true)
     }
 
     /// Whether the task records execution attempts (`execution` module).
@@ -643,7 +694,7 @@ impl TaskDoc {
     /// schema in every commit: a lower value an older replica's concurrent
     /// upgrade left in the merge is raised again here, never lowered.
     fn commit(&self) -> Result<()> {
-        if self.executes_attempts() {
+        if self.execution_managed() {
             self.upgrade_schema(execution::EXECUTION_TASK_SCHEMA)?;
         }
         self.doc.commit();
@@ -653,7 +704,7 @@ impl TaskDoc {
     /// Whether the stored schema is below the execution schema its attempts
     /// need: a lower upgrade by an older replica won the merge.
     pub fn needs_schema_repair(&self) -> bool {
-        self.executes_attempts() && self.stored_schema() < execution::EXECUTION_TASK_SCHEMA
+        self.execution_managed() && self.stored_schema() < execution::EXECUTION_TASK_SCHEMA
     }
 
     /// Raises the stored schema of a task with attempts to the execution
@@ -1036,7 +1087,7 @@ impl TaskDoc {
         // A report by the exact pinned agent is explicit work evidence even
         // when it filed the task during an already-running turn. A task that
         // records attempts never begins one implicitly: its executor starts it.
-        if !self.executes_attempts()
+        if !self.execution_managed()
             && matches!(self.stage()?, Stage::Todo | Stage::Backlog)
             && matches!((&self.view()?.target, actor), (Target::Session(target), Actor::Agent(own)) if target == own)
         {
@@ -1122,7 +1173,7 @@ impl TaskDoc {
         }
         // A task that records attempts begins a direct-start attempt in the
         // same commit as its history entry.
-        if self.executes_attempts() {
+        if self.execution_managed() {
             self.begin_start_attempt(&view, own, actor, now)?;
         }
         let fields = self.fields();
@@ -1296,7 +1347,7 @@ impl TaskDoc {
             "send" | "reopen" if delivery.state == "reserved" => {
                 // A reopen begins an attempt (S2b.3), and nothing more goes to
                 // an attempt whose delivery is unknown.
-                if delivery.mode == "reopen" && self.executes_attempts() {
+                if delivery.mode == "reopen" && self.execution_managed() {
                     return Err(Error::new(
                         "this task records execution attempts; reopen it through its next attempt",
                     ));
@@ -1435,6 +1486,12 @@ impl TaskDoc {
     /// Writes the stored schema as an older replica's upgrade does.
     pub(crate) fn set_stored_schema_for_test(&mut self, value: i64) {
         self.meta().insert("schema", value).unwrap();
+        self.doc.commit();
+    }
+
+    /// Stores a floor value as written, readable or not.
+    pub(crate) fn set_floor_value_for_test(&mut self, value: impl Into<LoroValue>) {
+        self.meta().insert("floor", value).unwrap();
         self.doc.commit();
     }
 

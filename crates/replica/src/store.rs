@@ -10,9 +10,10 @@ use crate::schema::{Actor, Stage};
 use crate::task::TaskDoc;
 use crate::{ids, rank, Error, Result};
 use fs2::FileExt;
+use loro::VersionVector;
 use serde::{Deserialize, Serialize};
 use sha2::{Digest, Sha256};
-use std::collections::BTreeSet;
+use std::collections::{BTreeMap, BTreeSet};
 use std::fs::{self, File, OpenOptions};
 use std::io::{ErrorKind, Write};
 use std::path::{Path, PathBuf};
@@ -208,9 +209,15 @@ fn block(payload: &[u8]) -> Vec<u8> {
     out
 }
 
+/// The managed mark: the version vector of the task's snapshot, by decimal peer.
+#[derive(Serialize, Deserialize)]
+struct Mark {
+    snapshot: BTreeMap<String, i32>,
+}
+
 /// The intact blocks with their end offsets, and whether the whole input was
 /// intact. A short, empty or mismatched block ends the list.
-fn blocks(bytes: &[u8]) -> (Vec<(&[u8], usize)>, bool) {
+pub(crate) fn blocks(bytes: &[u8]) -> (Vec<(&[u8], usize)>, bool) {
     let mut out = Vec::new();
     let mut at = 0;
     while at < bytes.len() {
@@ -415,6 +422,38 @@ impl ProjectStore {
         self.dir.join("tasks").join(format!("{uuid}.updates"))
     }
 
+    /// Beside a task's files: present once this store saved it cut over to the
+    /// execution schema (attempts or a floor), recording the version its
+    /// snapshot holds. It outlives a damaged copy, so that copy is never
+    /// replaced by another replica's whole document that lacks part of it.
+    pub(crate) fn managed_path(&self, uuid: &str) -> PathBuf {
+        self.dir.join("tasks").join(format!("{uuid}.managed"))
+    }
+
+    /// Whether this store ever saved the task cut over to the execution schema.
+    pub fn was_managed(&self, uuid: &str) -> bool {
+        self.managed_path(uuid).exists()
+    }
+
+    /// The snapshot version the mark records; none when it cannot be read.
+    pub(crate) fn managed_snapshot(&self, uuid: &str) -> Option<VersionVector> {
+        let mark: Mark = serde_json::from_slice(&fs::read(self.managed_path(uuid)).ok()?).ok()?;
+        mark.snapshot
+            .into_iter()
+            .map(|(peer, counter)| Some((peer.parse().ok()?, counter)))
+            .collect()
+    }
+
+    pub(crate) fn mark_managed(&self, uuid: &str, snapshot: &VersionVector) -> Result<()> {
+        let mark = Mark {
+            snapshot: snapshot
+                .iter()
+                .map(|(peer, counter)| (peer.to_string(), *counter))
+                .collect(),
+        };
+        write_atomic(&self.managed_path(uuid), &serde_json::to_vec(&mark)?)
+    }
+
     pub fn uuids(&self) -> Result<Vec<String>> {
         let mut uuids = BTreeSet::new();
         for entry in fs::read_dir(self.dir.join("tasks"))? {
@@ -438,6 +477,7 @@ impl ProjectStore {
         if task.uuid() != uuid {
             return Err(Error::failed("the task file does not match its name"));
         }
+        task.folded = Some(task.current_vv());
         match fs::read(self.updates_path(uuid)) {
             Ok(bytes) => {
                 let (found, intact) = blocks(&bytes);
@@ -471,6 +511,7 @@ impl ProjectStore {
             Err(error) => return Err(error.into()),
         };
         let fold = task.saved.is_none()
+            || task.folded.is_none()
             || !snapshot.exists()
             || task.needs_fold
             // Bytes past the valid blocks: a cut append, or another writer.
@@ -479,6 +520,22 @@ impl ProjectStore {
             || (stage == Stage::Done && task.saved_stage != Some(Stage::Done));
         if !fold && task.saved.as_ref() == Some(&current) {
             return Ok(());
+        }
+        // The mark precedes the snapshot it describes: after a crash between
+        // them it records a version past the snapshot, which only makes a
+        // later recovery more cautious.
+        let managed = task.execution_managed();
+        if managed {
+            let snapshot = if fold {
+                Some(&current)
+            } else {
+                task.folded.as_ref()
+            };
+            if let Some(snapshot) =
+                snapshot.filter(|v| self.managed_snapshot(task.uuid()).as_ref() != Some(*v))
+            {
+                self.mark_managed(task.uuid(), snapshot)?;
+            }
         }
         if fold {
             // The snapshot first: a crash before the removal leaves updates
@@ -491,6 +548,7 @@ impl ProjectStore {
             }
             task.saved_len = 0;
             task.needs_fold = false;
+            task.folded = Some(current.clone());
         } else {
             let saved = task.saved.clone().expect("checked above");
             let bytes = block(&task.export_since_vv(&saved)?);

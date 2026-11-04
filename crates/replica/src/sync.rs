@@ -10,6 +10,7 @@ use serde::{Deserialize, Serialize};
 use sha2::{Digest, Sha256};
 use std::collections::BTreeMap;
 use std::fs;
+use std::io::ErrorKind;
 use std::path::Path;
 use std::time::{Duration, SystemTime, UNIX_EPOCH};
 
@@ -516,8 +517,30 @@ impl ProjectStore {
                 }
                 // A copy here that does not load gives way to a whole document
                 // from another replica; its files are set aside, not removed.
-                Err(damaged) => (TaskDoc::from_bytes(bytes).map_err(|_| damaged)?, true),
+                // A task this store cut over to the execution schema gives way
+                // only to a document that provably holds all of this copy, and
+                // one whose surviving updates show the cutover never does:
+                // another replica's copy could lack attempts or the floor.
+                // Such a copy stays damaged and closed for a person's review.
+                Err(damaged) => match self.recovered(uuid, bytes) {
+                    Recovery::Whole(task) => (task, true),
+                    Recovery::Replaced => (TaskDoc::from_bytes(bytes).map_err(|_| damaged)?, true),
+                    Recovery::Kept => {
+                        return Err(Error::new(format!(
+                            "the copy here does not load ({damaged}) and it records execution \
+                             attempts; it is kept for a person's review and nothing is sent for it"
+                        )))
+                    }
+                },
             }
+        } else if self.was_managed(uuid) {
+            // Its files are gone, but the mark says this store cut it over:
+            // nothing here can show that another replica's copy holds all of
+            // it. Removing the mark is the person's decision to accept one.
+            return Err(Error::new(
+                "the copy here is missing and it recorded execution attempts; it is kept for a \
+                 person's review and nothing is sent for it",
+            ));
         } else {
             (TaskDoc::from_bytes(bytes)?, false)
         };
@@ -536,23 +559,80 @@ impl ProjectStore {
         Ok(true)
     }
 
-    /// Renames a task's files that do not load to `<name>.damaged-<ms>`, kept on disk.
+    /// How a copy here that does not load meets another replica's whole
+    /// document. A copy this store cut over to the execution schema is
+    /// rebuilt from that document and every update block saved here, and only
+    /// when the result holds the snapshot version the mark records: the
+    /// snapshot and its blocks are then all inside it, whatever was lost.
+    /// A copy saved without the mark gives way to the document as before,
+    /// unless its surviving blocks show attempts or a floor once applied.
+    fn recovered(&self, uuid: &str, bytes: &[u8]) -> Recovery {
+        let Ok(mut task) = TaskDoc::from_bytes(bytes) else {
+            return Recovery::Replaced;
+        };
+        let local = match fs::read(self.updates_path(uuid)) {
+            Ok(local) => Some(local),
+            Err(error) if error.kind() == ErrorKind::NotFound => None,
+            Err(_) if self.was_managed(uuid) => return Recovery::Kept,
+            Err(_) => return Recovery::Replaced,
+        };
+        let (found, intact) = local
+            .as_deref()
+            .map_or((Vec::new(), true), crate::store::blocks);
+        let applied = intact
+            && found
+                .into_iter()
+                .all(|(payload, _)| task.import_block(payload));
+        if !self.was_managed(uuid) {
+            return if applied && task.execution_managed() {
+                Recovery::Kept
+            } else {
+                Recovery::Replaced
+            };
+        }
+        let whole = applied
+            && self
+                .managed_snapshot(uuid)
+                .is_some_and(|snapshot| task.current_vv().includes_vv(&snapshot));
+        if whole {
+            Recovery::Whole(task)
+        } else {
+            Recovery::Kept
+        }
+    }
+
+    /// Copies a task's files that do not load to `<name>.damaged-<ms>`, kept
+    /// on disk. The files themselves stay until the save that follows
+    /// replaces them, so a crash before it leaves them to be read again.
     fn set_aside(&self, uuid: &str) -> Result<()> {
         let stamp = SystemTime::now()
             .duration_since(UNIX_EPOCH)
             .map_or(0, |d| d.as_millis());
         for path in [self.snapshot_path(uuid), self.updates_path(uuid)] {
-            if path.exists() {
-                let name = path.file_name().unwrap_or_default().to_string_lossy();
-                fs::rename(
-                    &path,
-                    path.with_file_name(format!("{name}.damaged-{stamp}")),
-                )?;
+            match fs::read(&path) {
+                Ok(bytes) => {
+                    let name = path.file_name().unwrap_or_default().to_string_lossy();
+                    write_atomic(
+                        &path.with_file_name(format!("{name}.damaged-{stamp}")),
+                        &bytes,
+                    )?;
+                }
+                Err(error) if error.kind() == ErrorKind::NotFound => {}
+                Err(error) => return Err(error.into()),
             }
         }
         self.note_change(uuid);
         Ok(())
     }
+}
+
+enum Recovery {
+    /// This copy's whole state with the other document merged in.
+    Whole(TaskDoc),
+    /// The other document replaces this copy, as for any task.
+    Replaced,
+    /// This copy stays damaged for a person's review.
+    Kept,
 }
 
 #[cfg(test)]
@@ -769,6 +849,61 @@ mod tests {
     }
 
     #[test]
+    fn a_floored_task_without_attempts_is_repaired_by_imports_and_inventories() {
+        // zerus-cg5h.4 S2b.2 C1: the floor before a first attempt is kept at 6
+        // just like attempts are.
+        let base = created();
+        let bytes = base.snapshot().unwrap();
+        let version = base.version();
+        let mut floored = TaskDoc::from_bytes(&bytes).unwrap();
+        assert!(floored.floor().unwrap());
+        let mut older = TaskDoc::from_bytes(&bytes).unwrap();
+        for n in 0..8 {
+            older
+                .comment(&format!("older {n}"), &Actor::Person, 2)
+                .unwrap();
+        }
+        older.set_stored_schema_for_test(5);
+        let older_update = older.export_since(&version).unwrap();
+        // A live import saves it at 6.
+        let dir = tempfile::tempdir().unwrap();
+        let store = ProjectStore::open(dir.path(), "project-1").unwrap();
+        store.save(&mut floored).unwrap();
+        store
+            .import_updates(vec![update(&floored, older_update.clone())])
+            .unwrap();
+        let saved = store.load(floored.uuid()).unwrap();
+        assert_eq!(saved.stored_schema(), EXECUTION_TASK_SCHEMA);
+        assert!(!saved.executes_attempts());
+        // A copy an older importer persisted at 5 is repaired by the inventory
+        // and exported at 6.
+        let mut stale = TaskDoc::from_bytes(&floored.snapshot().unwrap()).unwrap();
+        stale.import_unrepaired_for_test(&older_update);
+        assert_eq!(stale.stored_schema(), 5);
+        let dir = tempfile::tempdir().unwrap();
+        let store = ProjectStore::open(dir.path(), "project-1").unwrap();
+        store.save(&mut stale).unwrap();
+        let (inventory, _) = store.inventory().unwrap();
+        assert_eq!(
+            store.load(stale.uuid()).unwrap().stored_schema(),
+            EXECUTION_TASK_SCHEMA
+        );
+        let (page, _) = store
+            .updates_for(&inventory, &Inventory::default(), 1 << 20)
+            .unwrap();
+        let exported = page
+            .iter()
+            .find(|u| u.document == Document::Task(stale.uuid().to_owned()))
+            .unwrap();
+        assert_eq!(
+            TaskDoc::from_bytes(&exported.bytes)
+                .unwrap()
+                .stored_schema(),
+            EXECUTION_TASK_SCHEMA
+        );
+    }
+
+    #[test]
     fn every_write_keeps_the_schema_and_a_future_one_is_never_lowered() {
         let mut stale = merged_unrepaired();
         stale
@@ -788,5 +923,284 @@ mod tests {
         let mut plain = created();
         assert!(!plain.repair_schema().unwrap());
         assert!(plain.stored_schema() < EXECUTION_TASK_SCHEMA);
+    }
+
+    /// A store copy of `created()` beside a peer's copy forked before the
+    /// first attempt: the store's copy reserves it as an update block after
+    /// its snapshot. Returns the store, its directory, the task's UUID and
+    /// the peer's whole document with an offline comment.
+    fn damaged_beside_a_pre_attempt_peer() -> (tempfile::TempDir, ProjectStore, String, Vec<u8>) {
+        let dir = tempfile::tempdir().unwrap();
+        let store = ProjectStore::open(dir.path(), "project-1").unwrap();
+        let mut task = created();
+        store.save(&mut task).unwrap();
+        let mut peer = TaskDoc::from_bytes(&task.snapshot().unwrap()).unwrap();
+        peer.comment("Offline on the peer", &Actor::Person, 5)
+            .unwrap();
+        let mut here = store.load(task.uuid()).unwrap();
+        reserve(&mut here);
+        store.save(&mut here).unwrap();
+        assert!(store.updates_path(task.uuid()).exists());
+        let uuid = task.uuid().to_owned();
+        (dir, store, uuid, peer.snapshot().unwrap())
+    }
+
+    fn set_aside_files(store: &ProjectStore, uuid: &str) -> Vec<String> {
+        let mut names: Vec<String> = fs::read_dir(store.snapshot_path(uuid).parent().unwrap())
+            .unwrap()
+            .map(|e| e.unwrap().file_name().to_string_lossy().into_owned())
+            .filter(|name| name.starts_with(uuid) && name.contains(".damaged-"))
+            .collect();
+        names.sort();
+        names
+    }
+
+    fn refused(store: &ProjectStore, uuid: &str, bytes: Vec<u8>) -> Vec<Damaged> {
+        let update = Update {
+            document: Document::Task(uuid.to_owned()),
+            bytes,
+        };
+        store.import_updates(vec![update]).unwrap().refused
+    }
+
+    #[test]
+    fn the_managed_mark_records_the_snapshot_version_it_guards() {
+        let dir = tempfile::tempdir().unwrap();
+        let store = ProjectStore::open(dir.path(), "project-1").unwrap();
+        let mut task = created();
+        store.save(&mut task).unwrap();
+        assert!(!store.was_managed(task.uuid()));
+        let snapshot = task.current_vv();
+        // The cutover saved as an update block: the mark names the snapshot
+        // below it, not the block.
+        reserve(&mut task);
+        store.save(&mut task).unwrap();
+        assert!(store.updates_path(task.uuid()).exists());
+        assert_eq!(store.managed_snapshot(task.uuid()), Some(snapshot.clone()));
+        task.comment("Appended", &Actor::Person, 11).unwrap();
+        store.save(&mut task).unwrap();
+        assert_eq!(store.managed_snapshot(task.uuid()), Some(snapshot.clone()));
+        // A fold moves the mark with the snapshot.
+        task.needs_fold = true;
+        task.comment("Folded", &Actor::Person, 12).unwrap();
+        store.save(&mut task).unwrap();
+        assert!(!store.updates_path(task.uuid()).exists());
+        assert_eq!(store.managed_snapshot(task.uuid()), Some(task.current_vv()));
+        assert_ne!(store.managed_snapshot(task.uuid()), Some(snapshot));
+        // A mark left stale beside the snapshot is corrected by the next save.
+        store
+            .mark_managed(task.uuid(), &VersionVector::new())
+            .unwrap();
+        task.comment("Corrected", &Actor::Person, 13).unwrap();
+        store.save(&mut task).unwrap();
+        let reloaded = store.load(task.uuid()).unwrap();
+        assert_eq!(store.managed_snapshot(task.uuid()), reloaded.folded);
+    }
+
+    /// review-n's control on #1409: a damaged snapshot beside valid update
+    /// blocks is rebuilt from the peer's document and those blocks, keeping
+    /// every attempt fact, and the damaged files are set aside.
+    #[test]
+    fn a_damaged_managed_copy_is_rebuilt_from_its_own_updates() {
+        let (_dir, store, uuid, peer) = damaged_beside_a_pre_attempt_peer();
+        let before = store.load(&uuid).unwrap();
+        let facts = before.execution_records().unwrap();
+        fs::write(store.snapshot_path(&uuid), b"unreadable snapshot fixture").unwrap();
+        assert!(store.load(&uuid).is_err());
+        assert!(refused(&store, &uuid, peer).is_empty());
+        let rebuilt = store.load(&uuid).unwrap();
+        assert_eq!(rebuilt.execution_records().unwrap(), facts);
+        assert!(rebuilt.held().unwrap().is_some());
+        assert_eq!(rebuilt.stored_schema(), EXECUTION_TASK_SCHEMA);
+        assert!(rebuilt.check_send().is_err());
+        let comments = rebuilt
+            .view()
+            .unwrap()
+            .log
+            .iter()
+            .filter(|e| e.kind == "comment")
+            .count();
+        assert_eq!(comments, 1, "the peer's comment is merged in");
+        assert_eq!(set_aside_files(&store, &uuid).len(), 2);
+        assert_eq!(store.managed_snapshot(&uuid), rebuilt.folded);
+    }
+
+    #[test]
+    fn a_damaged_managed_copy_the_peer_cannot_cover_is_kept_for_review() {
+        // The attempt only the lost snapshot held: a fold took it in.
+        let (_dir, store, uuid, peer) = damaged_beside_a_pre_attempt_peer();
+        let mut folded = store.load(&uuid).unwrap();
+        folded.needs_fold = true;
+        store.save(&mut folded).unwrap();
+        assert!(!store.updates_path(&uuid).exists());
+        fs::write(store.snapshot_path(&uuid), b"unreadable snapshot fixture").unwrap();
+        let refusals = refused(&store, &uuid, peer.clone());
+        assert_eq!(refusals.len(), 1);
+        assert!(
+            refusals[0].error.contains("person's review"),
+            "{}",
+            refusals[0].error
+        );
+        assert_eq!(
+            fs::read(store.snapshot_path(&uuid)).unwrap(),
+            b"unreadable snapshot fixture"
+        );
+        assert!(set_aside_files(&store, &uuid).is_empty());
+        assert!(store.load(&uuid).is_err());
+        assert!(store.tasks().unwrap().1.iter().any(|d| d.uuid == uuid));
+
+        // A peer that holds the attempt but not what a later fold took in
+        // (here the settlement of its delivery) cannot cover it either.
+        let (_dir, store, uuid, _) = damaged_beside_a_pre_attempt_peer();
+        let mut here = store.load(&uuid).unwrap();
+        let cut_over = here.snapshot().unwrap();
+        here.cancel_attempt(ID, "Settled only here", &Actor::Person, 11)
+            .unwrap();
+        here.needs_fold = true;
+        store.save(&mut here).unwrap();
+        assert!(!store.updates_path(&uuid).exists());
+        fs::write(store.snapshot_path(&uuid), b"unreadable snapshot fixture").unwrap();
+        assert_eq!(refused(&store, &uuid, cut_over).len(), 1);
+        assert!(set_aside_files(&store, &uuid).is_empty());
+
+        // Update blocks whose base the peer lacks cannot rebuild it either.
+        let (_dir, store, uuid, peer) = damaged_beside_a_pre_attempt_peer();
+        let mut here = store.load(&uuid).unwrap();
+        here.comment("Only here", &Actor::Person, 11).unwrap();
+        here.needs_fold = true;
+        store.save(&mut here).unwrap();
+        here.comment("After the fold", &Actor::Person, 12).unwrap();
+        store.save(&mut here).unwrap();
+        assert!(store.updates_path(&uuid).exists());
+        fs::write(store.snapshot_path(&uuid), b"unreadable snapshot fixture").unwrap();
+        assert_eq!(refused(&store, &uuid, peer).len(), 1);
+        assert!(set_aside_files(&store, &uuid).is_empty());
+
+        // A torn block or an unreadable mark keeps the copy too.
+        let (_dir, store, uuid, peer) = damaged_beside_a_pre_attempt_peer();
+        fs::write(store.snapshot_path(&uuid), b"unreadable snapshot fixture").unwrap();
+        let mut updates = fs::read(store.updates_path(&uuid)).unwrap();
+        updates.push(7);
+        fs::write(store.updates_path(&uuid), &updates).unwrap();
+        assert_eq!(refused(&store, &uuid, peer.clone()).len(), 1);
+        updates.pop();
+        fs::write(store.updates_path(&uuid), &updates).unwrap();
+        fs::write(store.managed_path(&uuid), b"unreadable mark").unwrap();
+        assert_eq!(refused(&store, &uuid, peer).len(), 1);
+        assert!(set_aside_files(&store, &uuid).is_empty());
+    }
+
+    #[test]
+    fn an_unmarked_damaged_copy_gives_way_unless_its_updates_show_attempts() {
+        // Saved without the mark, as a store before it: surviving blocks
+        // that show the cutover keep the copy.
+        let (_dir, store, uuid, peer) = damaged_beside_a_pre_attempt_peer();
+        fs::remove_file(store.managed_path(&uuid)).unwrap();
+        fs::write(store.snapshot_path(&uuid), b"unreadable snapshot fixture").unwrap();
+        assert_eq!(refused(&store, &uuid, peer.clone()).len(), 1);
+        assert!(set_aside_files(&store, &uuid).is_empty());
+        // A copy that never cut over gives way to the peer's document as before.
+        let dir = tempfile::tempdir().unwrap();
+        let plain = ProjectStore::open(dir.path(), "project-1").unwrap();
+        let mut task = created();
+        plain.save(&mut task).unwrap();
+        let other = task.snapshot().unwrap();
+        task.comment("Only here", &Actor::Person, 11).unwrap();
+        plain.save(&mut task).unwrap();
+        fs::write(
+            plain.snapshot_path(task.uuid()),
+            b"unreadable snapshot fixture",
+        )
+        .unwrap();
+        assert!(refused(&plain, task.uuid(), other).is_empty());
+        assert_eq!(set_aside_files(&plain, task.uuid()).len(), 2);
+        let replaced = plain.load(task.uuid()).unwrap();
+        assert!(replaced.execution_records().unwrap().0.is_empty());
+        assert!(!plain.was_managed(task.uuid()));
+    }
+
+    #[test]
+    fn only_a_person_who_also_removes_the_mark_accepts_another_copy() {
+        let (_dir, store, uuid, peer) = damaged_beside_a_pre_attempt_peer();
+        fs::write(store.snapshot_path(&uuid), b"unreadable snapshot fixture").unwrap();
+        assert_eq!(
+            refused(&store, &uuid, created().snapshot().unwrap()).len(),
+            1
+        );
+        // Moving the damaged files away is not enough: the mark keeps it.
+        for path in [store.snapshot_path(&uuid), store.updates_path(&uuid)] {
+            let name = path.file_name().unwrap().to_string_lossy().into_owned();
+            fs::rename(&path, path.with_file_name(format!("{name}.reviewed"))).unwrap();
+        }
+        let refusals = refused(&store, &uuid, peer.clone());
+        assert_eq!(refusals.len(), 1);
+        assert!(
+            refusals[0].error.contains("missing"),
+            "{}",
+            refusals[0].error
+        );
+        assert!(!store.snapshot_path(&uuid).exists());
+        // Removing the mark too is the person's decision to accept it.
+        fs::remove_file(store.managed_path(&uuid)).unwrap();
+        assert!(refused(&store, &uuid, peer).is_empty());
+        let accepted = store.load(&uuid).unwrap();
+        assert!(accepted.execution_records().unwrap().0.is_empty());
+        assert!(!store.was_managed(&uuid));
+    }
+
+    /// The mark is written before the snapshot it describes. A crash between
+    /// them leaves a mark ahead of the snapshot, or a first mark beside a
+    /// copy whose cutover block never landed: each only asks more of a
+    /// recovery, and a recovery never loses what the copy held.
+    #[test]
+    fn a_mark_ahead_of_its_files_only_makes_recovery_more_cautious() {
+        // Ahead: the mark names a fold whose snapshot never landed.
+        let (_dir, store, uuid, peer) = damaged_beside_a_pre_attempt_peer();
+        let mut ahead = store.load(&uuid).unwrap();
+        ahead.comment("Never saved", &Actor::Person, 11).unwrap();
+        store.mark_managed(&uuid, &ahead.current_vv()).unwrap();
+        fs::write(store.snapshot_path(&uuid), b"unreadable snapshot fixture").unwrap();
+        assert_eq!(refused(&store, &uuid, peer.clone()).len(), 1);
+        // The peer that holds it too rebuilds the copy.
+        let mut covering = TaskDoc::from_bytes(&peer).unwrap();
+        covering.import(&ahead.snapshot().unwrap()).unwrap();
+        assert!(refused(&store, &uuid, covering.snapshot().unwrap()).is_empty());
+        assert!(store.load(&uuid).unwrap().held().unwrap().is_some());
+
+        // First mark, then a crash before the block that cut the task over:
+        // the copy here held no attempt, and the peer's document covers it.
+        let dir = tempfile::tempdir().unwrap();
+        let store = ProjectStore::open(dir.path(), "project-1").unwrap();
+        let mut task = created();
+        store.save(&mut task).unwrap();
+        store.mark_managed(task.uuid(), &task.current_vv()).unwrap();
+        let peer = task.snapshot().unwrap();
+        fs::write(
+            store.snapshot_path(task.uuid()),
+            b"unreadable snapshot fixture",
+        )
+        .unwrap();
+        assert!(refused(&store, task.uuid(), peer).is_empty());
+        assert!(store.load(task.uuid()).is_ok());
+    }
+
+    #[test]
+    fn a_recovery_keeps_the_damaged_files_in_place_until_its_save_replaces_them() {
+        let (_dir, store, uuid, peer) = damaged_beside_a_pre_attempt_peer();
+        let updates = fs::read(store.updates_path(&uuid)).unwrap();
+        fs::write(store.snapshot_path(&uuid), b"unreadable snapshot fixture").unwrap();
+        // The copies come first; the files stay until the save replaces them.
+        store.set_aside(&uuid).unwrap();
+        assert_eq!(
+            fs::read(store.snapshot_path(&uuid)).unwrap(),
+            b"unreadable snapshot fixture"
+        );
+        assert_eq!(fs::read(store.updates_path(&uuid)).unwrap(), updates);
+        // A crash here leaves the same recovery to run again.
+        assert!(refused(&store, &uuid, peer).is_empty());
+        assert!(!store.updates_path(&uuid).exists());
+        let kept = set_aside_files(&store, &uuid);
+        assert!(kept.len() >= 2, "{kept:?}");
+        assert!(store.load(&uuid).unwrap().held().unwrap().is_some());
     }
 }

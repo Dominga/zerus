@@ -3109,8 +3109,12 @@ value, so an older replica's concurrent upgrade can leave a lower one; this
 version raises it again for a task with attempts in every write and every live
 import, and before a task is read for an inventory, so the raised value is what
 other replicas receive. That repair is a new change, not proof that an older
-replica did nothing before it. This version reads attempts and guards reports
-against the current execution; recording attempts comes later.
+replica did nothing before it. A task can also take a floor before its first
+attempt: a cutover record that keeps schema 6 the same way, so a reader that
+does not know attempts refuses to write it, while every path that would start
+it without an attempt refuses it as cutting over. A floor this version cannot
+read still counts. This version reads attempts and guards reports against the
+current execution; recording attempts and floors comes later.
 
 Plain `task list` still returns every task for existing clients. With `--stage`
 and `--limit` (1–200) it returns one page of that stage in the same order and
@@ -3326,7 +3330,16 @@ bindings yet, so there `--host` is refused and other computers read null.
 Tasks are Loro documents below `HGS_STATE_DIR/replica`, one directory per
 project; a task file that fails to load is listed under `damaged` and left in
 place until another computer of the swarm sends its copy, which replaces it;
-the damaged file stays beside it as `<file>.damaged-<time>`. The swarm worker
+a copy of the damaged file stays beside it as `<file>.damaged-<time>`. A task
+this computer saved with attempts or a floor gets a mark, `<uuid>.managed`,
+naming the version its snapshot holds; the mark is written before each
+snapshot. Its damaged copy is replaced only when the other copy, merged with
+every update saved here, holds that version, so no attempt fact is lost.
+Otherwise the copy is kept: it stays under `damaged`, nothing is sent for it,
+and each copy another computer or a phone sends is refused and named in that
+exchange's refusals, not kept for later. A person reviews it: moving the
+damaged files away keeps it refused while the mark remains, and removing the
+mark as well accepts the next copy sent, which may lack attempts. The swarm worker
 replicates them with the catalog: after each catalog
 sync it compares every project's digest with the member's and exchanges only
 the changes each side lacks, in pages of at most 1 MiB, and a task changed

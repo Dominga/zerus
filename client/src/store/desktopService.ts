@@ -1,6 +1,6 @@
 import { createSignal } from "solid-js";
 import { invoke } from "@tauri-apps/api/core";
-import type { DesktopService, NotificationOwnership } from "../types";
+import type { DesktopService, NotificationOwnership, ModeReview } from "../types";
 import { tr } from "../i18n";
 
 /** Presence of this projection is the startup mode. It never grants writer authority. */
@@ -398,9 +398,32 @@ export const ownershipActions = createOwnershipActions(
   () => invoke("desktop_service_ownership_rearm"),
   () => invoke("desktop_service_ownership_result"),
 );
+export type ModeReviewAction = "review" | "background" | "passive";
+/** Only a click invokes this command. Native confirmation and stale-selection
+ * checks happen in Rust; neither the view nor these arguments supply consent. */
+export function createModeReviewActions(
+  run: (display: ModeReview, action: ModeReviewAction) => Promise<unknown>,
+) {
+  const [busy, setBusy] = createSignal(false);
+  return { busy, async submit(display: ModeReview, action: ModeReviewAction) {
+    if (busy()) return;
+    const selected = { ...display };
+    setBusy(true);
+    try { return await run(selected, action); } finally { setBusy(false); }
+  } };
+}
+export const modeReviewActions = createModeReviewActions(
+  (display, action) => invoke("desktop_service_mode_action", { display, action }),
+);
 export function ownershipNotice(view: NotificationOwnership | undefined): string {
   if (!view) return "";
   if (view.pending) return tr("Background access is unconfirmed. Check the result before making another change.");
+  if (view.activation?.review) {
+    if (view.activation.review.disposition !== "reviewed_unknown")
+      return tr("An interrupted service mode change needs review in Settings > About. Its original result stays Unknown.");
+    if (!view.activation.business_ready || !view.activation.active || view.activation.pending || view.status?.state !== "service" || !view.status.identity_current || view.status.rearm_required)
+      return tr("The interrupted change was reviewed. Choose a service mode explicitly in Settings > About.");
+  }
   if (view.activation?.pending) return tr("Background activation is unconfirmed. Check the original result before making another change.");
   if (view.activation?.needs_resume) {
     if (["activation_helper_unavailable", "activation_helper_update_required", "activation_helper_changed"].includes(view.activation.code))
@@ -438,8 +461,14 @@ export function serviceStatus(state: DesktopService | undefined) {
     notice = tr("Activity, processes and project tasks are unavailable with this background service connection.");
   }
   const pending = pendingReadNotice(state), retained = retainedSourceNotice(state), owner = ownershipNotice(state.notification_ownership);
-  const ownership = state.notification_ownership?.pending || state.notification_ownership?.activation?.pending ? "check"
-    : !manualRefresh && (state.notification_ownership?.native_recovery || state.notification_ownership?.status?.rearm_required
+  const mode = state.notification_ownership?.activation, access = state.notification_ownership?.status;
+  const modeReview = !!mode?.review && !(mode.review.disposition === "reviewed_unknown" && mode.business_ready && mode.active
+    && !mode.pending && !state.notification_ownership?.pending && !state.notification_ownership?.native_recovery
+    && access?.state === "service" && access.identity_current && !access.rearm_required);
+  const modeBlocked = !!mode?.review || mode?.automatic_blocked;
+  const ownership = state.notification_ownership?.pending ? "check"
+    : !modeBlocked && state.notification_ownership?.activation?.pending ? "check"
+    : !manualRefresh && !modeBlocked && (state.notification_ownership?.native_recovery || state.notification_ownership?.status?.rearm_required
       || state.notification_ownership?.activation?.needs_resume) ? "rearm" : undefined;
   if (!notice) {
     if (pending) label = state.pending_read_import?.running ? tr("Transferring read marks") : tr("Read marks need attention");
@@ -448,5 +477,5 @@ export function serviceStatus(state: DesktopService | undefined) {
   }
   const reasons = [notice, pending, retained, manualRefresh ? "" : owner].filter(Boolean);
   return { label, details: reasons.join("\n") || tr("Background service connected"), healthy: !reasons.length,
-    retry: !manualRefresh && !!(notice || pending || retained || (owner && !ownership)), review: !!retained, ownership, manualRefresh };
+    retry: !manualRefresh && !!(notice || pending || retained || (owner && !ownership)), review: !!retained, ownership, manualRefresh, modeReview };
 }

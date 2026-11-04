@@ -83,6 +83,13 @@ struct State {
     // local codes are kept, never child output, IDs, paths or configuration.
     diagnostic: Option<(&'static str, &'static str)>,
 }
+/// Captured only after a fresh actor read matches this controller's OWN
+/// native Grant receipt. Read-only scope, never constructible from JSON.
+pub(crate) struct CurrentGrant(Status);
+impl CurrentGrant {
+    pub(crate) fn status(&self) -> &Status { &self.0 }
+}
+
 pub(crate) struct Controller {
     hgs: PathBuf,
     responder: Option<Arc<Responder>>,
@@ -357,16 +364,62 @@ impl Controller {
             deadline: None,
             refresh_absent_native: false,
             basis,
+            keep_epoch: None,
         })
     }
-    pub(crate) fn granted(&self) -> bool {
-        let state = self.state();
+    fn granted_state(state: &State) -> bool {
         state
             .intent
             .as_ref()
             .and_then(|i| i.receipt.as_ref())
             .is_some_and(|r| r.service_granted() && state.status.as_ref() == Some(&r.current))
     }
+    pub(crate) fn granted(&self) -> bool {
+        Self::granted_state(&self.state())
+    }
+
+    /// A busy, failed or original-result-only read cannot return a cached token.
+    pub(crate) async fn current_grant(
+        self: &Arc<Self>,
+        configuration: String,
+        cancel: Arc<AtomicBool>,
+    ) -> Option<CurrentGrant> {
+        let job = self.admit_with(None, Some(configuration), Some(cancel), |s| {
+            (!s.intent.as_ref().is_some_and(|i| !i.complete) && s.retired_native.is_none())
+                .then_some(None)
+        })?;
+        let owner = self.clone();
+        tauri::async_runtime::spawn_blocking(move || {
+            job.execute().ok()?;
+            let state = owner.state();
+            Self::granted_state(&state)
+                .then(|| CurrentGrant(state.status.clone().expect("Grant status")))
+        })
+        .await
+        .ok()
+        .flatten()
+    }
+    /// Recheck exactly this already granted origin/revision before reserving a
+    /// single ordinary Grant. The actor still compares journal/revision under
+    /// its lock and authenticates the original frontend. No recovery/new origin.
+    pub(crate) async fn keep_epoch_refresh(
+        self: &Arc<Self>,
+        grant: CurrentGrant,
+        cancel: Arc<AtomicBool>,
+    ) -> View {
+        let Some(mut job) = self.admit_with(
+            Some(Action::Grant),
+            Some(grant.0.configuration.clone()),
+            Some(cancel),
+            |s| (Self::granted_state(s) && s.status.as_ref() == Some(&grant.0)).then_some(None),
+        ) else {
+            return self.view();
+        };
+        job.keep_epoch = Some(grant);
+        let _ = tauri::async_runtime::spawn_blocking(move || job.run()).await;
+        self.view()
+    }
+
 }
 
 struct Job {
@@ -378,6 +431,7 @@ struct Job {
     deadline: Option<Instant>,
     refresh_absent_native: bool,
     basis: Option<Basis>,
+    keep_epoch: Option<CurrentGrant>,
 }
 impl Drop for Job {
     fn drop(&mut self) {
@@ -615,6 +669,10 @@ impl Job {
             .is_some_and(|basis| !basis.holds(&status))
         {
             // The definitive negative no longer describes the authority.
+            self.owner.state().code = "ownership_changed".into();
+            return Ok(());
+        }
+        if self.keep_epoch.as_ref().is_some_and(|g| g.0 != status) {
             self.owner.state().code = "ownership_changed".into();
             return Ok(());
         }

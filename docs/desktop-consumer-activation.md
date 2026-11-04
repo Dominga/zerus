@@ -34,7 +34,11 @@ keeps the original child and both pipes charged through actual exit and EOF.
 The same immutable record survives GUI/helper restart; an uncertain attempt is
 looked up by its original UUID and is never offered again or upgraded from a
 current readiness observation. The fixed journal retains at most 64 entries
-within the existing 64 KiB registration-record bound.
+within the existing 64 KiB registration-record bound. Byte admission may refuse
+earlier: every admitted intent reserves room for its largest later review and
+scoped completion. Exhaustion preserves all originals and the current mode;
+status and original-ID lookup remain available. There is no journal reset or
+identity eviction route.
 
 - A helper refusal leaves the consumer usable. **Check result** looks up the
   original. A verified missing/not-started result offers Resume again; a missing
@@ -96,8 +100,37 @@ restart. Automatic/default activation remains suppressed. Any later mode choice
 is a separate explicit confirmation with a new request and complete fresh
 native caller, current Grant, registration/manager and endpoint preflight.
 Acknowledgement supplies no permission to replay or adopt the old operation.
-The Settings review control and Windows disposition are separate source slices;
-native installed acceptance remains outstanding.
+In the Service consumer, open **Settings > About** and use **Review interrupted
+mode change**. It displays the original UUID and configuration and asks for a
+native confirmation. The first confirmation changes metadata only. If a reboot
+barrier is needed, use **Restart**, then explicitly Review again. Shutdown with
+Fast Startup may retain the same kernel boot and does not qualify.
+
+After `reviewed_unknown`, Settings offers a separately confirmed background
+choice (and a passive choice on Windows). Each choice retains one NEW request
+UUID plus the exact reviewed UUID. A lost reply queries only that new original;
+it never substitutes another request. Changed selection, configuration, helper
+or original during either confirmation refuses. Generic Resume, Check result,
+Retry, reconnect and GUI restart cannot confirm either action. Older maintained
+helpers need an update before they can publish the scoped choice receipt.
+
+The permanent default/manager latch stays set. Ordinary Service work becomes
+eligible only after the new choice's native original-ID result is durably
+settled to background and is still the latest applicable choice. Its retained
+linkage must match the reviewed UUID, configuration, actual current service
+epoch/generation and current ownership journal/epoch. A fresh ownership read
+must also match this consumer's own native Grant receipt, with current identity
+and no revoke or rearm requirement. This history never supplies per-kind import,
+cleanup or manager authority. Existing source capture, native admission and
+original child/pipe/Owner custody still apply. Only that second confirmed
+continuation can arm existing imports or refresh the SAME-origin Grant while
+keeping its epoch. Status, Retry, backoff and read-only reconnect do not queue
+those operations. Passive, unknown, changed-origin or changed-epoch evidence
+closes eligibility; missing authority needs its explicit action again.
+
+Component controls model the confirmation response and manager/native caller
+outcomes. The actual OS dialogs, installed Settings path, Windows Fast Startup
+versus Restart BootId behavior and native PC qualification remain outstanding.
 
 ## Qt rollback
 

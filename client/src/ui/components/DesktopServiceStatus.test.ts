@@ -130,7 +130,7 @@ describe("Windows first background choice (zerus-yfbd.1)", () => {
     const fs = (await import(/* @vite-ignore */ ["node", "fs"].join(":"))) as { readFileSync(path: URL, encoding: "utf8"): string };
     const read = (path: string) => fs.readFileSync(new URL(path, import.meta.url), "utf8");
     const group = read("../screens/settings/ServiceFirstChoice.tsx");
-    expect(group).toContain('(activation()?.first && !ownershipNotice(ownership())) ? activation()!.first! : undefined');
+    expect(group).toContain('(!manual() && activation()?.first && !ownershipNotice(ownership())) ? activation()!.first! : undefined');
     expect(group).toContain("const visible = () => !activation()?.review && (!!offer() || pending() || notStarted());");
     expect(group).toContain("const own = () => { const id = firstChoiceActions.request(); return !!id && activation()?.request_id === id; };");
     expect(group).toContain('<Group title={tr("Background service")}>');
@@ -165,13 +165,14 @@ describe("Windows first background choice in flight", () => {
     const fs = (await import(/* @vite-ignore */ ["node", "fs"].join(":"))) as { readFileSync(path: URL, encoding: "utf8"): string };
     const read = (path: string) => fs.readFileSync(new URL(path, import.meta.url), "utf8");
     const store = read("../../store/desktopService.ts");
-    expect(store).toContain('if (firstChoicePending(state)) return { label: tr("Turning on background mode"),');
-    expect(store).toContain('healthy: false, retry: false, review: false, ownership: "check" as const, manualRefresh: false, modeReview: false };');
+    expect(store).toContain('return { label: tr("Turning on background mode"),');
+    expect(store).toContain('healthy: false, retry: false, review: !!retained, ownership: "check" as const, manualRefresh: false, modeReview: false };');
     expect(store).toContain(`if (firstChoicePending(state)) return tr("${PENDING_BODY}");`);
     expect(read("./DesktopServiceStatus.tsx")).toContain('servicePaused(desktopService.state()) === "settings" || firstChoicePending(desktopService.state());');
     expect(read("./DesktopServiceStatus.tsx")).toContain('<h2>{firstChoicePending(desktopService.state()) ? tr("Turning on background mode") : tr("Background work is paused")}</h2>');
     const group = read("../screens/settings/ServiceFirstChoice.tsx");
-    expect(group).toContain("const pending = () => firstChoicePending(desktopService.state());");
+    expect(group).toContain("const pending = () => own() && !!activation()?.pending;");
+    expect(group).toContain("const offer = () => (!manual() && activation()?.first && !ownershipNotice(ownership())) ? activation()!.first! : undefined;");
     expect(group).toContain('<Status kind="busy">{tr("Turning on background mode…")}</Status>');
     expect(group.indexOf('<Status kind="busy">')).toBeLessThan(group.indexOf('tr("The new mode choice is unconfirmed.'));
   });

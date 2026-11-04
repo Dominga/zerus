@@ -507,11 +507,18 @@ export function pausedSettingsBody(state: DesktopService | undefined): string {
 /** Compact footer presentation; full reasons stay in its accessible tooltip. */
 export function serviceStatus(state: DesktopService | undefined) {
   if (!state) return;
-  // An explicit mode change in flight: only its original-ID Check, never a
-  // reconnect Retry, even while the service restarts into background mode.
-  if (firstChoicePending(state)) return { label: tr("Turning on background mode"),
-    details: tr("The new mode choice is unconfirmed. Check its original result; do not make another choice."),
-    healthy: false, retry: false, review: false, ownership: "check" as const, manualRefresh: false, modeReview: false };
+  // An explicit mode change in flight stays the headline with only its
+  // original-ID Check, never a reconnect Retry, even while the service
+  // restarts. Independent reasons keep their own text and review links.
+  if (firstChoicePending(state)) {
+    const ownership = state.notification_ownership;
+    const reads = pendingReadNotice(state), retained = retainedSourceNotice(state);
+    const access = ownership?.pending ? ownershipNotice(ownership) : "";
+    return { label: tr("Turning on background mode"),
+      details: [tr("The new mode choice is unconfirmed. Check its original result; do not make another choice."), reads, retained, access]
+        .filter(Boolean).join("\n"),
+      healthy: false, retry: false, review: !!retained, ownership: "check" as const, manualRefresh: false, modeReview: false };
+  }
   const manualRefresh = state.executable_upgrade?.state === "manual_refresh_required";
   const paused = servicePaused(state);
   let notice = "", label = tr("Background service");

@@ -1,5 +1,5 @@
 import { Show } from "solid-js";
-import { desktopService, firstChoiceActions, firstChoicePending, ownershipActions, ownershipNotice } from "../../../store/desktopService";
+import { desktopService, firstChoiceActions, ownershipActions, ownershipNotice } from "../../../store/desktopService";
 import { toast } from "../../../store/ui";
 import { tr } from "../../../i18n";
 import { Actions, Group, Status } from "./ui";
@@ -14,9 +14,12 @@ export function ServiceFirstChoice() {
   const ownership = () => desktopService.state()?.notification_ownership;
   const activation = () => ownership()?.activation;
   const own = () => { const id = firstChoiceActions.request(); return !!id && activation()?.request_id === id; };
-  const pending = () => firstChoicePending(desktopService.state());
+  // This choice's own unconfirmed original: its Check stays available even
+  // while manual-refresh guidance takes precedence elsewhere.
+  const pending = () => own() && !!activation()?.pending;
+  const manual = () => desktopService.state()?.executable_upgrade?.state === "manual_refresh_required";
   const notStarted = () => own() && activation()?.code === "activation_not_started";
-  const offer = () => (activation()?.first && !ownershipNotice(ownership())) ? activation()!.first! : undefined;
+  const offer = () => (!manual() && activation()?.first && !ownershipNotice(ownership())) ? activation()!.first! : undefined;
   const visible = () => !activation()?.review && (!!offer() || pending() || notStarted());
   const busy = () => firstChoiceActions.busy() || !!activation()?.running || !!ownership()?.running;
   const choose = () => {

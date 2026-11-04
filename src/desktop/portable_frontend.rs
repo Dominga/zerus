@@ -174,6 +174,9 @@ fn alive(process: &impl std::os::windows::io::AsRawHandle) -> bool {
 struct Cache {
     state: std::sync::Mutex<CacheState>,
     wake: std::os::windows::io::OwnedHandle,
+    /// Tests: make the watcher's next wake a wait failure.
+    #[cfg(test)]
+    fail: std::sync::atomic::AtomicBool,
 }
 
 #[cfg(windows)]
@@ -201,6 +204,8 @@ impl Cache {
             }),
             // SAFETY: the new event is owned here.
             wake: unsafe { std::os::windows::io::OwnedHandle::from_raw_handle(event) },
+            #[cfg(test)]
+            fail: std::sync::atomic::AtomicBool::new(false),
         }))
     }
     fn lock(&self) -> std::sync::MutexGuard<'_, CacheState> {
@@ -292,7 +297,7 @@ fn watch(cache: std::sync::Weak<Cache>) {
         };
         drop(strong);
         let Some(handles) = handles.into_iter().collect::<Option<Vec<_>>>() else {
-            return;
+            return fail(&cache);
         };
         let raw: Vec<_> = handles
             .iter()
@@ -300,13 +305,32 @@ fn watch(cache: std::sync::Weak<Cache>) {
             .collect();
         // SAFETY: at most 1 + PROOFS live handles, all held through the wait.
         let woke = unsafe { WaitForMultipleObjects(raw.len() as u32, raw.as_ptr(), 0, INFINITE) };
-        if woke == WAIT_FAILED {
-            return;
-        }
         let Some(strong) = cache.upgrade() else {
             return;
         };
+        #[cfg(test)]
+        let woke = if strong.fail.swap(false, std::sync::atomic::Ordering::SeqCst) {
+            WAIT_FAILED
+        } else {
+            woke
+        };
+        if woke == WAIT_FAILED {
+            drop(strong);
+            return fail(&cache);
+        }
         strong.lock().proofs.retain(|proof| alive(&proof.process));
+    }
+}
+
+/// Without a watcher nothing may stay cached past its process: drop every
+/// proof the cache owns (holders keep their own) and let the next insertion
+/// start a new watcher.
+#[cfg(windows)]
+fn fail(cache: &std::sync::Weak<Cache>) {
+    if let Some(cache) = cache.upgrade() {
+        let mut state = cache.lock();
+        state.proofs.clear();
+        state.watching = false;
     }
 }
 
@@ -368,9 +392,10 @@ impl PortableScope {
 /// direct child of the native app beside its own loaded image, outside any
 /// agent tree, pin that app's loaded image and the staged CLI and record both,
 /// with the app's digest read through its pin. One original deadline covers
-/// the whole proof. Immediately before `publish`, the same ancestry, parent and
-/// pins are checked again against that deadline, and they stay held while the
-/// record is published. Anything else records nothing.
+/// the whole proof. `publish` prepares and verifies the record first and then
+/// runs this proof's last check (the same ancestry, parent and pins against
+/// that deadline) immediately before committing the name, while all of them
+/// are still held. Anything else records nothing.
 #[cfg(windows)]
 pub(crate) fn record(
     layout: &Layout,
@@ -389,19 +414,22 @@ pub(crate) fn record(
         frontend_sha256: digest,
         cli: object(&cli),
     };
-    #[cfg(test)]
-    tests::barrier();
-    let parent = ancestry.ancestors().next();
-    let current = ancestry.validate(until).is_ok()
-        && parent.is_some_and(|parent| parent.current())
-        && gui.revalidate().is_ok()
-        && cli.revalidate().is_ok()
-        && Instant::now() < until;
-    if !current {
-        return Ok(None);
-    }
-    publish(&binding)?;
-    Ok(Some(binding))
+    // The same original evidence, checked against the same deadline as the
+    // last step before the record's name is committed; held until then.
+    let commit = || {
+        #[cfg(test)]
+        tests::barrier();
+        ancestry.validate(until).is_ok()
+            && ancestry
+                .ancestors()
+                .next()
+                .is_some_and(|parent| parent.current())
+            && gui.revalidate().is_ok()
+            && cli.revalidate().is_ok()
+            && Instant::now() < until
+    };
+    let published = publish(&binding, &commit)?;
+    Ok(published.then_some(binding))
 }
 
 /// The app that started this process and the staged CLI, both pinned, with the

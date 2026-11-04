@@ -133,7 +133,7 @@ fn a_process_not_started_by_the_app_beside_it_records_nothing() {
     fs::create_dir_all(layout.cli.parent().unwrap()).unwrap();
     fs::write(&layout.cli, b"staged CLI fixture").unwrap();
     // This test runs under the test harness, not under an hgs-tray.exe beside it.
-    let outcome = record(&layout, &mut |_| panic!("nothing may be published"));
+    let outcome = record(&layout, &mut |_, _| panic!("nothing may be published"));
     assert!(matches!(outcome, Ok(None)));
 }
 
@@ -266,7 +266,7 @@ fn maintained_staging_proceeds_while_old_portable_work_remains() {
     fs::write(&new_gui, ORIGINAL).unwrap();
     let report = staging::install_bound(&layout, &new_source, "9.9.9", |layout, publish| {
         let binding = binding_with(&new_gui, &PinnedImage::open(&layout.cli).unwrap());
-        publish(&binding)?;
+        assert!(publish(&binding, &|| true)?);
         Ok(Some(binding))
     })
     .expect("maintained staging is not blocked by a scope or by old work");
@@ -398,19 +398,19 @@ fn creation_role() {
             }
             drop(scope);
         }
+        // The app's own staging step: the real install with its binder.
         "install" => {
             let home = std::env::var(HOME).unwrap();
             let report = PathBuf::from(std::env::var(REPORT).unwrap());
             let layout = Layout::new(&home, &Path::new(&home).join("config"));
-            let outcome = record(&layout, &mut |binding| {
-                fs::write(&report, serde_json::to_string(binding).unwrap())
-                    .map_err(|error| staging::StageError::Io(report.clone(), error))
-            });
-            match outcome {
-                Ok(Some(_)) => {}
-                Ok(None) => fs::write(&report, "none").unwrap(),
-                Err(error) => fs::write(&report, format!("error: {error}")).unwrap(),
-            }
+            let outcome = match staging::install_bound(&layout, &own, "1.0.0", record) {
+                Ok(_) => match staging::read_frontend(&layout.images) {
+                    Some(binding) => serde_json::to_string(&binding).unwrap(),
+                    None => "none".into(),
+                },
+                Err(error) => format!("error: {error}"),
+            };
+            fs::write(&report, outcome).unwrap();
         }
         other => panic!("unknown role {other}"),
     }
@@ -427,8 +427,6 @@ fn only_the_app_s_own_install_outside_an_agent_tree_records_a_binding() {
     fs::copy(&own, zip.join(staging::EXECUTABLE)).unwrap();
     let home = dir.path().join("home");
     let layout = Layout::new(&home.to_string_lossy(), &home.join("config"));
-    fs::create_dir_all(layout.cli.parent().unwrap()).unwrap();
-    fs::write(&layout.cli, b"staged CLI fixture").unwrap();
     for (mode, expected) in [
         ("plain", true),
         ("agent", false),
@@ -462,6 +460,12 @@ fn only_the_app_s_own_install_outside_an_agent_tree_records_a_binding() {
         } else {
             assert_eq!(outcome, "none", "{mode}: nothing may be published");
         }
+        // A refused or completed publication leaves no candidate behind.
+        assert!(fs::read_dir(&layout.images).unwrap().all(|entry| !entry
+            .unwrap()
+            .file_name()
+            .to_string_lossy()
+            .contains("frontend-")));
     }
 }
 
@@ -478,7 +482,7 @@ fn published(dir: &Path) -> (Layout, PathBuf) {
     fs::write(&gui, ORIGINAL).unwrap();
     let binding = binding_for(&gui);
     staging::install_bound(&layout, &source, "1.0.0", |_, publish| {
-        publish(&binding)?;
+        assert!(publish(&binding, &|| true)?);
         Ok(Some(binding.clone()))
     })
     .unwrap();
@@ -566,4 +570,70 @@ fn a_binding_that_is_not_a_private_record_of_this_user_is_refused() {
         staging::read_frontend(&layout.images).is_none(),
         "foreign owner"
     );
+}
+
+#[test]
+fn an_inherited_untrusted_ace_refuses_the_candidate_before_the_record_exists() {
+    let dir = tempfile::tempdir().unwrap();
+    let (layout, record) = published(dir.path());
+    fs::remove_file(&record).unwrap();
+    // Inherit-only: the folder's own access stays private, new files inherit it.
+    icacls(&[
+        layout.images.as_os_str(),
+        "/grant".as_ref(),
+        "*S-1-1-0:(OI)(IO)(R)".as_ref(),
+    ]);
+    assert!(staging::read_frontend(&layout.images).is_none());
+    let gui = dir.path().join("zip").join(staging::FRONTEND_IMAGE);
+    let binding = binding_for(&gui);
+    let source = dir.path().join("source").join(staging::EXECUTABLE);
+    let outcome = staging::install_bound(&layout, &source, "1.0.0", |_, publish| {
+        publish(&binding, &|| true)?;
+        Ok(Some(binding.clone()))
+    });
+    assert!(outcome.is_err(), "an unsafe candidate must be refused");
+    assert!(
+        !record.exists(),
+        "nothing was published under the record's name"
+    );
+    assert!(fs::read_dir(&layout.images).unwrap().all(|entry| !entry
+        .unwrap()
+        .file_name()
+        .to_string_lossy()
+        .contains("frontend-")));
+}
+
+#[test]
+fn a_failed_watcher_drops_the_cache_s_proofs_and_a_new_one_takes_over() {
+    let dir = tempfile::tempdir().unwrap();
+    let gui = FixtureGui::start(&dir.path().join("zip"));
+    let scope = scope_for(&gui.image);
+    let original = gui.original();
+    let borrower = scope.running(&original, until()).unwrap();
+    assert_eq!(scope.cache.len(), 1);
+    // The watcher fails: the cache gives up what it owns at once.
+    scope
+        .cache
+        .fail
+        .store(true, std::sync::atomic::Ordering::SeqCst);
+    scope.cache.signal();
+    wait_until("a failed watcher leaves nothing cached", || {
+        scope.cache.len() == 0 && !scope.cache.lock().watching
+    });
+    // The next insertion starts a valid watcher again.
+    let again = scope.running(&original, until()).unwrap();
+    assert!(!Arc::ptr_eq(&borrower, &again));
+    assert!(scope.cache.lock().watching);
+    drop(again);
+    // A normal quit with no further request: the new watcher lets go.
+    let image = gui.image.clone();
+    gui.quit();
+    wait_until("the new watcher drops the exited GUI's proof", || {
+        scope.cache.len() == 0
+    });
+    // The active borrower still blocks replacement until it settles.
+    assert!(fs::copy(std::env::current_exe().unwrap(), &image).is_err());
+    drop(borrower);
+    fs::remove_file(&image).unwrap();
+    fs::write(&image, ORIGINAL).unwrap();
 }

@@ -789,8 +789,11 @@ fn private_record(path: &Path) -> io::Result<fs::File> {
     Ok(file)
 }
 
-/// Publishes a binding while its creator still holds the evidence for it.
-pub type Publish<'a> = dyn FnMut(&FrontendBinding) -> Result<(), StageError> + 'a;
+/// Publishes a binding: the candidate is prepared and verified first, then
+/// `commit`, the creator's own last check of the evidence it still holds, runs
+/// immediately before the namespace commit. `Ok(false)`: nothing was published.
+pub type Publish<'a> =
+    dyn FnMut(&FrontendBinding, &dyn Fn() -> bool) -> Result<bool, StageError> + 'a;
 
 /// `install`, then `bind` may record the app staged with this CLI. The old
 /// binding goes first, so a failure anywhere leaves none. `bind` runs only
@@ -809,7 +812,9 @@ pub fn install_bound(
     let cli = stage_cli(source, &layout.cli)?;
     let image = stage_image(source, &layout.images, version)?;
     let enabled = enable(&layout.marker).map_err(at(&layout.marker))?;
-    let frontend = bind(layout, &mut |binding| publish_frontend(layout, binding))?;
+    let frontend = bind(layout, &mut |binding, commit| {
+        publish_frontend(layout, binding, commit)
+    })?;
     Ok(InstallReport {
         cli,
         image,
@@ -883,21 +888,58 @@ fn unbind_frontend(layout: &Layout) -> Result<(), StageError> {
     }
 }
 
-fn publish_frontend(layout: &Layout, binding: &FrontendBinding) -> Result<(), StageError> {
+/// Publish `binding` as a private record. The candidate is written, synced and
+/// verified private (owner, access, single link, no reparse point) through its
+/// own handle, with the folder chain held private, before anything is visible
+/// at the record's name. `commit` runs last, immediately before the rename;
+/// afterwards the published name must be that same private object.
+fn publish_frontend(
+    layout: &Layout,
+    binding: &FrontendBinding,
+    commit: &dyn Fn() -> bool,
+) -> Result<bool, StageError> {
     let path = layout.images.join(FRONTEND_BINDING);
+    let invalid = |path: &Path| StageError::Io(path.to_owned(), io::ErrorKind::InvalidData.into());
     let bytes = serde_json::to_vec(binding)
         .map_err(|error| StageError::Io(path.clone(), io::Error::other(error)))?;
     if !binding.valid() || bytes.len() as u64 > FRONTEND_BYTES {
-        return Err(StageError::Io(path, io::ErrorKind::InvalidData.into()));
+        return Err(invalid(&path));
     }
     let _chain = private_chain(&layout.images).map_err(at(&layout.images))?;
-    write_replacing(&layout.images, &path, &bytes).map_err(at(&path))?;
-    // What was published must read back as a private record of this user.
-    if let Err(error) = private_record(&path) {
-        let _ = fs::remove_file(&path);
-        return Err(StageError::Io(path, error));
+    let mut candidate = tempfile::Builder::new()
+        .prefix(&format!("{STAGING_PREFIX}frontend-"))
+        .tempfile_in(&layout.images)
+        .map_err(at(&layout.images))?;
+    let staged = candidate.path().to_owned();
+    candidate.write_all(&bytes).map_err(at(&staged))?;
+    candidate.as_file().sync_all().map_err(at(&staged))?;
+    // Refused, never repaired: an inherited ACE the folder check cannot see
+    // shows here, before the record's name exists.
+    if !platform::verify_private_file(candidate.as_file()).map_err(at(&staged))? {
+        return Err(StageError::Io(
+            staged,
+            io::Error::new(
+                io::ErrorKind::PermissionDenied,
+                "the binding candidate is not a private file of this user",
+            ),
+        ));
     }
-    Ok(())
+    let object = platform::FileIdentity::of(candidate.as_file()).map_err(at(&staged))?;
+    if !commit() {
+        return Ok(false);
+    }
+    platform::persist(candidate, &path)
+        .map_err(|error| StageError::Io(path.clone(), error.error))?;
+    platform::sync_dir(&layout.images).map_err(at(&layout.images))?;
+    // The published name is the verified candidate, still private.
+    let same = private_record(&path)
+        .and_then(|file| platform::FileIdentity::of(&file))
+        .is_ok_and(|published| published == object);
+    if !same {
+        let _ = fs::remove_file(&path);
+        return Err(invalid(&path));
+    }
+    Ok(true)
 }
 
 /// The binding below `images`, read like the other private records: every
@@ -1360,10 +1402,10 @@ mod tests {
             &dir.path().join("config"),
         );
         mode(&images, 0o755);
-        assert!(publish_frontend(&layout, &sample_binding(dir.path())).is_err());
+        assert!(publish_frontend(&layout, &sample_binding(dir.path()), &|| true).is_err());
         assert!(!path.exists());
         mode(&images, 0o700);
-        publish_frontend(&layout, &sample_binding(dir.path())).unwrap();
+        assert!(publish_frontend(&layout, &sample_binding(dir.path()), &|| true).unwrap());
         assert!(read_frontend(&images).is_some());
     }
 
@@ -1381,7 +1423,7 @@ mod tests {
             assert_eq!(fs::read(&layout.cli).unwrap(), b"build one");
             assert!(current_image_in(&layout.images).is_some());
             assert!(layout.enabled());
-            publish(&binding)?;
+            publish(&binding, &|| true)?;
             Ok(Some(binding.clone()))
         })
         .unwrap();
@@ -1396,7 +1438,7 @@ mod tests {
 
         // The old binding goes before staging: a failing install leaves none.
         install_bound(&layout, &one, "1.0.0", |_, publish| {
-            publish(&binding)?;
+            publish(&binding, &|| true)?;
             Ok(Some(binding.clone()))
         })
         .unwrap();
@@ -1405,7 +1447,7 @@ mod tests {
             &dir.path().join("gone.exe"),
             "1.1.0",
             |_, publish| {
-                publish(&sample_binding(dir.path()))?;
+                publish(&sample_binding(dir.path()), &|| true)?;
                 Ok(None)
             }
         )
@@ -1416,7 +1458,7 @@ mod tests {
         let mut invalid = binding.clone();
         invalid.frontend.file_id = "short".into();
         assert!(install_bound(&layout, &one, "1.0.0", |_, publish| {
-            publish(&invalid)?;
+            publish(&invalid, &|| true)?;
             Ok(Some(invalid.clone()))
         })
         .is_err());
@@ -1424,7 +1466,7 @@ mod tests {
 
         // A binder that declines records nothing.
         install_bound(&layout, &one, "1.0.0", |_, publish| {
-            publish(&binding)?;
+            publish(&binding, &|| true)?;
             Ok(Some(binding.clone()))
         })
         .unwrap();
@@ -1435,6 +1477,34 @@ mod tests {
         assert!(names(&layout.images)
             .iter()
             .all(|name| name != FRONTEND_BINDING));
+    }
+
+    #[test]
+    fn a_refused_commit_publishes_nothing_and_leaves_no_candidate() {
+        let dir = tempfile::tempdir().unwrap();
+        let images = private_images(dir.path());
+        let layout = Layout::new(
+            &dir.path().join("home").to_string_lossy(),
+            &dir.path().join("config"),
+        );
+        let checked = std::cell::Cell::new(false);
+        let published = publish_frontend(&layout, &sample_binding(dir.path()), &|| {
+            // The candidate is complete and verified when the guard runs.
+            let candidate = names(&images)
+                .into_iter()
+                .find(|name| name.starts_with(&format!("{STAGING_PREFIX}frontend-")))
+                .expect("a prepared candidate");
+            assert!(
+                platform::verify_private(&images.join(candidate), platform::Private::File).unwrap()
+            );
+            assert!(!images.join(FRONTEND_BINDING).exists());
+            checked.set(true);
+            false
+        })
+        .unwrap();
+        assert!(checked.get() && !published);
+        assert_eq!(names(&images), Vec::<String>::new());
+        assert_eq!(read_frontend(&images), None);
     }
 
     #[test]

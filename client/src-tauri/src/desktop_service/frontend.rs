@@ -17,6 +17,8 @@ const MAINTENANCE_UNAVAILABLE: &str =
 #[derive(Clone, Copy, Debug, Deserialize, PartialEq, Eq, PartialOrd, Ord)]
 #[serde(rename_all = "snake_case")]
 pub enum Operation {
+    #[serde(skip)] // Original native Terminate capture only, never renderer JSON.
+    TerminationOutcome,
     #[serde(skip)] // Native Files controller only, never caller-chosen paths.
     CacheMaintenance,
     #[serde(skip)] // Native creation owner only; never generic policy dispatch or receipts.
@@ -42,6 +44,7 @@ impl Operation {
     fn of(request: &Request) -> Self {
         match request {
             Request::CacheMaintenance { .. } => Self::CacheMaintenance,
+            Request::TerminationOutcome { .. } => Self::TerminationOutcome,
             Request::CreationClone { .. } => Self::CreationClone,
             Request::CreationWorktree { .. } => Self::CreationWorktree,
             Request::CreationLaunch { .. } => Self::CreationLaunch,
@@ -57,6 +60,7 @@ impl Operation {
     fn name(self) -> &'static str {
         match self {
             Self::CacheMaintenance => "cache_maintenance",
+            Self::TerminationOutcome => "termination_outcome",
             Self::CreationClone => "creation_clone",
             Self::CreationWorktree => "creation_worktree",
             Self::CreationLaunch => "creation_launch",
@@ -561,6 +565,7 @@ fn submission_ready(snapshot: &Snapshot, request: &Request) -> bool {
             | Request::CreationWorktree { .. }
             | Request::CreationLaunch { .. }
             | Request::TaskStartReconcile { .. }
+            | Request::TerminationOutcome { .. }
     ) {
         return false;
     }
@@ -709,6 +714,7 @@ fn lookup(
             | Request::CreationWorktree { .. }
             | Request::CreationLaunch { .. }
             | Request::TaskStartReconcile { .. }
+            | Request::TerminationOutcome { .. }
     ) {
         return Err("frontend_receipt_unconfirmed");
     }
@@ -746,6 +752,7 @@ fn lookup_receipt(request: &Request, id: &str, value: Value) -> Result<Receipt, 
             | Request::CreationWorktree { .. }
             | Request::CreationLaunch { .. }
             | Request::TaskStartReconcile { .. }
+            | Request::TerminationOutcome { .. }
     ) {
         return Err("frontend_receipt_unconfirmed");
     }
@@ -807,6 +814,7 @@ fn checked(request: &Request, mut value: Value, lookup: bool) -> Option<(Value, 
             | Request::CreationWorktree { .. }
             | Request::CreationLaunch { .. }
             | Request::TaskStartReconcile { .. }
+            | Request::TerminationOutcome { .. }
     ) {
         // Their separate consumers validate different receipts and completion rules.
         return None;
@@ -869,7 +877,8 @@ fn checked(request: &Request, mut value: Value, lookup: bool) -> Option<(Value, 
         | Request::CreationClone { .. }
         | Request::CreationWorktree { .. }
         | Request::CreationLaunch { .. }
-        | Request::TaskStartReconcile { .. } => return None,
+        | Request::TaskStartReconcile { .. }
+        | Request::TerminationOutcome { .. } => return None,
         Request::AutomaticApprovals { enabled, .. } => {
             if value["op"] != "automatic_approvals" || value["enabled"] != *enabled {
                 return None;

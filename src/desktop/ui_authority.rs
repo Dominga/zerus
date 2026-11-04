@@ -287,6 +287,7 @@ impl Validated {
                     | Request::CreationWorktree { .. }
                     | Request::CreationLaunch { .. }
                     | Request::TaskStartReconcile { .. }
+                    | Request::TerminationOutcome { .. }
             ),
             "native controls require their typed boundary"
         );
@@ -364,6 +365,20 @@ impl Validated {
     }
     pub fn check_ownership(self) -> Result<()> {
         self.ownership_parts().map(|_| ())
+    }
+    /// Only original-outcome retention consumes this, after BEGIN IMMEDIATE.
+    pub fn termination_outcome_parts(
+        &self,
+    ) -> Result<&zerus_client_core::desktop::termination_outcome::Intent> {
+        self.check()?;
+        let Request::TerminationOutcome { intent } = &self.0 else {
+            anyhow::bail!("not termination outcome retention");
+        };
+        ensure!(intent.valid(), "invalid original termination capture/plan");
+        Ok(intent)
+    }
+    pub fn check_termination_outcome(self) -> Result<()> {
+        self.termination_outcome_parts().map(|_| ())
     }
     pub fn cache_parts(
         &self,
@@ -827,6 +842,14 @@ fn validate(
             "task reconciliation does not match the native service frontend"
         );
     }
+    if let Request::TerminationOutcome { intent } = &envelope.request {
+        ensure!(
+            reply.request.ownership_mode
+                == Some(zerus_client_core::desktop::ownership::Mode::Service)
+                && intent.scope.configuration == configuration,
+            "termination outcome does not match the native service frontend"
+        );
+    }
     if let Request::NotificationControl { scope, control } = &envelope.request {
         let native = reply
             .request
@@ -886,6 +909,7 @@ fn dev_number(version: &str) -> Option<u64> {
 // string allowlist that can silently reject an otherwise authenticated read.
 #[derive(Clone, Copy, Debug, Eq, Ord, PartialEq, PartialOrd)]
 enum OrderedOperation {
+    TerminationOutcome,
     CacheMaintenance,
     CreationClone,
     CreationWorktree,
@@ -904,6 +928,7 @@ impl From<&Request> for OrderedOperation {
         use zerus_client_core::desktop::notification_control::Command;
         match request {
             Request::CacheMaintenance { .. } => Self::CacheMaintenance,
+            Request::TerminationOutcome { .. } => Self::TerminationOutcome,
             Request::CreationClone { .. } => Self::CreationClone,
             Request::CreationWorktree { .. } => Self::CreationWorktree,
             Request::CreationLaunch { .. } => Self::CreationLaunch,
@@ -1937,6 +1962,56 @@ mod tests {
         order
             .observe(a, OrderedOperation::AutomaticApprovals, 5, now + WAIT)
             .unwrap();
+    }
+
+    #[test]
+    fn termination_outcome_has_an_isolated_exhaustive_native_lane() {
+        use zerus_client_core::{
+            desktop::termination_outcome::{Choice, Intent, Scope},
+            termination_cleanup::Capture,
+            Target,
+        };
+        let capture = Capture {
+            target: Target {
+                computer: String::new(),
+                name: "codex/example/source".into(),
+                run_id: "run".into(),
+                conversation_id: "conversation".into(),
+            },
+            machine: id(7),
+            root: "/srv/example/work".into(),
+            common_dir: "/srv/example/main/.git".into(),
+            owner_id: "original-owner".into(),
+        };
+        let original =
+            String::from_utf8(capture.invocation(&id(92)).unwrap().stdin.unwrap()).unwrap();
+        let request = Request::TerminationOutcome {
+            intent: Box::new(Intent {
+                scope: Scope {
+                    configuration: "a".repeat(64),
+                    service_epoch: id(93),
+                },
+                confirmation_id: id(94),
+                choice: Choice::RemoveAfterTerminate,
+                request_id: id(92),
+                capture,
+                original,
+            }),
+        };
+        let lane = OrderedOperation::from(&request);
+        assert_eq!(lane, OrderedOperation::TerminationOutcome);
+        let instance = (7, "100".into(), id(1));
+        let mut order = Order::default();
+        let now = Instant::now();
+        order
+            .observe(instance.clone(), OrderedOperation::CreationLaunch, 99, now)
+            .unwrap();
+        order.observe(instance.clone(), lane, 1, now).unwrap();
+        assert!(order.observe(instance.clone(), lane, 1, now).is_err());
+        order.observe(instance, lane, 2, now).unwrap();
+        assert!(Validated::fixture(&serde_json::to_value(request).unwrap())
+            .into_request()
+            .is_err());
     }
 
     #[test]

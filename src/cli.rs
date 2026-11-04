@@ -72,6 +72,7 @@ pub(crate) const USAGE: &str = r#"usage: hgs [@host] <cmd> [project] [-c [ID]] [
        Desktop activation ABI: desktop-activation-v1
        Desktop maintenance ABI: desktop-maintenance-v1
        Desktop cache maintenance ABI: desktop-cache-maintenance-v1
+       Desktop termination outcome ABI: desktop-termination-outcome-v1
        Desktop startup ABI: desktop-startup-v1
        Desktop logon registration ABI: desktop-logon-task-v1
        Desktop registration mode ABI: desktop-registration-mode-v1

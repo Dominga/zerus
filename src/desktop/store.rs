@@ -12,7 +12,7 @@ use zerus_desktop_migration::{canonical, configuration, HANDOFF_LOCK};
 #[path = "maintenance.rs"]
 pub(crate) mod maintenance;
 
-pub const SCHEMA: i64 = super::creation_launch::SCHEMA;
+pub const SCHEMA: i64 = super::termination_outcome::SCHEMA;
 pub struct HandoffLock {
     _lock: platform::FileLock,
     root: PathBuf,
@@ -474,6 +474,12 @@ impl Store {
             let tx = db.transaction()?;
             super::creation_launch::migrate(&tx)?;
             tx.pragma_update(None, "user_version", super::creation_launch::SCHEMA)?;
+            tx.commit()?;
+        }
+        if version < super::termination_outcome::SCHEMA {
+            let tx = db.transaction()?;
+            super::termination_outcome::migrate(&tx)?;
+            tx.pragma_update(None, "user_version", super::termination_outcome::SCHEMA)?;
             tx.commit()?;
         }
         // Opening Store follows acquisition of the real exclusive serve owner.

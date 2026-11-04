@@ -307,10 +307,15 @@ fn worktree_cache_group_waits_for_the_shared_slot_and_never_gates_grant_or_catal
         )
         .await;
         assert_eq!(f.attempts(), 2);
-        assert_eq!(
-            service.snapshot().retained_source_import.unwrap()["worktree_cache_report"]["phase"],
-            "published"
-        );
+        // The service republishes its snapshot after the run; the report's
+        // own status can lead it.
+        eventually("the service snapshot carries the published report", || {
+            service
+                .snapshot()
+                .retained_source_import
+                .is_some_and(|report| report["worktree_cache_report"]["phase"] == "published")
+        })
+        .await;
         service.stop();
         service.join().await.unwrap();
     });

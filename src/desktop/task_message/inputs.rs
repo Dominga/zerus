@@ -59,13 +59,14 @@ pub(super) fn migrate(tx: &Transaction<'_>) -> Result<()> {
 pub(super) struct Record {
     pub(super) state: String,
     pub(super) bytes: u64,
+    pub(super) input_sha256: String,
     pub(super) identity: Option<(u64, u64)>,
 }
 
 pub(super) fn load(db: &rusqlite::Connection, request: &str) -> Result<Option<Record>> {
     Ok(db
         .query_row(
-            "SELECT state,bytes,device,inode FROM desktop_task_message_inputs WHERE request_id=?1",
+            "SELECT state,bytes,device,inode,input_sha256 FROM desktop_task_message_inputs WHERE request_id=?1",
             [request],
             |r| {
                 let identity: Option<(i64, i64)> = match (r.get(2)?, r.get(3)?) {
@@ -75,6 +76,7 @@ pub(super) fn load(db: &rusqlite::Connection, request: &str) -> Result<Option<Re
                 Ok(Record {
                     state: r.get(0)?,
                     bytes: r.get::<_, i64>(1)? as u64,
+                    input_sha256: r.get(4)?,
                     identity: identity.map(|(d, i)| (d as u64, i as u64)),
                 })
             },
@@ -170,24 +172,156 @@ pub(super) fn recover_reserved(tx: &Transaction<'_>, request: &str, published: b
     }
 }
 
+// Every open-record query states the open index's own predicate: SQLite uses
+// a partial index only for a WHERE clause that contains its terms, and
+// without it each read would scan the retained terminal history.
+
+/// Up to `?2` records in state `?1`, oldest first.
+pub(super) const IN_STATE: &str = "SELECT request_id FROM desktop_task_message_inputs
+     WHERE state NOT IN('removed','released') AND state=?1
+     ORDER BY created,request_id LIMIT ?2";
+/// Up to `?1` held records whose original drained, oldest first.
+pub(super) const HELD_DRAINED: &str = "SELECT i.request_id FROM desktop_task_message_inputs i
+     JOIN desktop_task_messages m ON m.request_id=i.request_id
+     WHERE i.state NOT IN('removed','released') AND i.state='held' AND m.drained=1
+     ORDER BY i.created,i.request_id LIMIT ?1";
+/// Up to `?3` reviewable records after the cursor `(?1, ?2)`.
+pub(super) const REVIEWABLE: &str =
+    "SELECT request_id,state,bytes,input_sha256,created,device,inode
+     FROM desktop_task_message_inputs
+     WHERE state NOT IN('removed','released') AND state IN('orphaned','failed')
+       AND (?1 IS NULL OR created>?1 OR (created=?1 AND request_id>?2))
+     ORDER BY created,request_id LIMIT ?3";
+
 /// Up to `limit` records in `state`, oldest first.
 pub(super) fn in_state(db: &rusqlite::Connection, state: &str, limit: u32) -> Result<Vec<String>> {
-    let mut query = db.prepare(
-        "SELECT request_id FROM desktop_task_message_inputs WHERE state=?1 ORDER BY created,request_id LIMIT ?2",
-    )?;
+    let mut query = db.prepare(IN_STATE)?;
     let rows = query.query_map(params![state, limit], |r| r.get(0))?;
     Ok(rows.collect::<std::result::Result<_, _>>()?)
 }
 
 /// Up to `limit` held records whose original drained, oldest first.
 pub(super) fn held_drained(db: &rusqlite::Connection, limit: u32) -> Result<Vec<String>> {
-    let mut query = db.prepare(
-        "SELECT i.request_id FROM desktop_task_message_inputs i
-         JOIN desktop_task_messages m ON m.request_id=i.request_id
-         WHERE i.state='held' AND m.drained=1 ORDER BY i.created,i.request_id LIMIT ?1",
-    )?;
+    let mut query = db.prepare(HELD_DRAINED)?;
     let rows = query.query_map(params![limit], |r| r.get(0))?;
     Ok(rows.collect::<std::result::Result<_, _>>()?)
+}
+
+/// One record a person may review (zerus-pi2k9): `orphaned` or `failed`.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub(super) struct Reviewable {
+    pub(super) request_id: String,
+    pub(super) state: String,
+    pub(super) bytes: u64,
+    pub(super) input_sha256: String,
+    pub(super) created: i64,
+    pub(super) identity: Option<(u64, u64)>,
+}
+
+/// Up to `limit` reviewable records after `after` (creation time, then
+/// request ID). The search uses the open-state index; at most the budget's
+/// 64 charged records are sorted.
+pub(super) fn reviewable(
+    db: &rusqlite::Connection,
+    after: Option<(i64, &str)>,
+    limit: u32,
+) -> Result<Vec<Reviewable>> {
+    let (created, request) = after.map_or((None, ""), |(c, r)| (Some(c), r));
+    let mut query = db.prepare(REVIEWABLE)?;
+    let rows = query.query_map(params![created, request, limit], |r| {
+        let identity: Option<(i64, i64)> = match (r.get(5)?, r.get(6)?) {
+            (Some(d), Some(i)) => Some((d, i)),
+            _ => None,
+        };
+        Ok(Reviewable {
+            request_id: r.get(0)?,
+            state: r.get(1)?,
+            bytes: r.get::<_, i64>(2)? as u64,
+            input_sha256: r.get(3)?,
+            created: r.get(4)?,
+            identity: identity.map(|(d, i)| (d as u64, i as u64)),
+        })
+    })?;
+    Ok(rows.collect::<std::result::Result<_, _>>()?)
+}
+
+/// One exact reviewable record, by request ID.
+pub(super) fn reviewable_one(
+    db: &rusqlite::Connection,
+    request: &str,
+) -> Result<Option<Reviewable>> {
+    Ok(db
+        .query_row(
+            "SELECT request_id,state,bytes,input_sha256,created,device,inode
+             FROM desktop_task_message_inputs WHERE request_id=?1",
+            [request],
+            |r| {
+                let identity: Option<(i64, i64)> = match (r.get(5)?, r.get(6)?) {
+                    (Some(d), Some(i)) => Some((d, i)),
+                    _ => None,
+                };
+                Ok(Reviewable {
+                    request_id: r.get(0)?,
+                    state: r.get(1)?,
+                    bytes: r.get::<_, i64>(2)? as u64,
+                    input_sha256: r.get(3)?,
+                    created: r.get(4)?,
+                    identity: identity.map(|(d, i)| (d as u64, i as u64)),
+                })
+            },
+        )
+        .optional()?)
+}
+
+/// A review removed this record's exact observed object: `removed`,
+/// uncharged. An orphaned record had no identity, and records the object
+/// this review observed and removed, never a recovered original identity.
+pub(super) fn reviewed_removed(
+    tx: &Transaction<'_>,
+    request: &str,
+    from: &str,
+    observed: (u64, u64),
+) -> Result<()> {
+    let record = load(tx, request)?.ok_or_else(|| anyhow::anyhow!("task message input missing"))?;
+    ensure!(
+        record.state == from && ["orphaned", "failed"].contains(&from),
+        "task message input state changed"
+    );
+    match record.identity {
+        Some(identity) => {
+            ensure!(identity == observed, "task message input identity changed");
+            ensure!(
+                tx.execute(
+                    "UPDATE desktop_task_message_inputs SET state='removed' WHERE request_id=?1 AND state=?2",
+                    params![request, from],
+                )? == 1,
+                "task message input state changed"
+            );
+        }
+        None => {
+            ensure!(
+                tx.execute(
+                    "UPDATE desktop_task_message_inputs SET state='removed',device=?3,inode=?4
+                     WHERE request_id=?1 AND state=?2 AND device IS NULL",
+                    params![request, from, observed.0 as i64, observed.1 as i64],
+                )? == 1,
+                "task message input state changed"
+            );
+        }
+    }
+    charge(tx, -1, -(record.bytes as i64))
+}
+
+/// A review found this record's slot absent and no copy elsewhere: an
+/// accounting release, `released` and uncharged. A failed record keeps its
+/// recorded identity.
+pub(super) fn reviewed_released(tx: &Transaction<'_>, request: &str, from: &str) -> Result<()> {
+    ensure!(
+        ["orphaned", "failed"].contains(&from),
+        "task message input state changed"
+    );
+    let record = transition(tx, request, &[from], "released")?;
+    charge(tx, -1, -(record.bytes as i64))
 }
 
 /// The charged records and bytes, for status.

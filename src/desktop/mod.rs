@@ -27,6 +27,9 @@ mod notification_controls;
 mod notifications;
 #[allow(dead_code)]
 mod operations;
+// One bounded original-child runner for the launch and task message leaves.
+#[cfg(any(target_os = "linux", target_os = "macos"))]
+mod original_child;
 mod owner;
 mod ownership;
 mod pending_reads;
@@ -1026,6 +1029,22 @@ fn serve(config: &Config, location: Location, background_mode: bool) -> Result<(
                                         activation_waiting = true;
                                         Value::Null
                                     }
+                                    // A reviewed input release answers once its
+                                    // worker joined, on this same connection.
+                                    #[cfg(any(target_os = "linux", target_os = "macos"))]
+                                    Ok(request)
+                                        if request.operation() == "task_message_input_release" =>
+                                    {
+                                        runtime.task_message_input_release(
+                                            &mut store,
+                                            request,
+                                            queue.clone(),
+                                            seq,
+                                        );
+                                        streaming = true;
+                                        activation_waiting = true;
+                                        Value::Null
+                                    }
                                     #[cfg(any(target_os = "linux", target_os = "macos"))]
                                     Ok(request)
                                         if request.operation() == "task_start_reconcile" =>
@@ -1164,6 +1183,34 @@ fn serve(config: &Config, location: Location, background_mode: bool) -> Result<(
                         } else if hello
                             .request
                             .as_ref()
+                            .is_some_and(|v| v["op"] == "task_message_inputs")
+                        {
+                            // Read-only: one bounded page, observed off the
+                            // actor, answered on this same connection.
+                            #[cfg(any(target_os = "linux", target_os = "macos"))]
+                            match &mut background {
+                                Some(runtime) => {
+                                    runtime.task_message_inputs(
+                                        &store,
+                                        hello.request.as_ref().unwrap(),
+                                        queue.clone(),
+                                        seq,
+                                    );
+                                    streaming = true;
+                                    activation_waiting = true;
+                                    Value::Null
+                                }
+                                None => {
+                                    json!({"read_only":true,"code":"task_message_inputs_unavailable"})
+                                }
+                            }
+                            #[cfg(not(any(target_os = "linux", target_os = "macos")))]
+                            {
+                                json!({"read_only":true,"code":"task_message_inputs_unavailable"})
+                            }
+                        } else if hello
+                            .request
+                            .as_ref()
                             .is_some_and(|v| v["op"] == "task_start_reconcile_result")
                         {
                             #[cfg(any(target_os = "linux", target_os = "macos"))]
@@ -1182,6 +1229,7 @@ fn serve(config: &Config, location: Location, background_mode: bool) -> Result<(
                                         | "creation_worktree"
                                         | "creation_launch"
                                         | "task_message"
+                                        | "task_message_input_release"
                                         | "task_start_reconcile"
                                 )
                             )

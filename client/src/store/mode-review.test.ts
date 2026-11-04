@@ -1,5 +1,5 @@
 import { describe, expect, it, vi } from "vitest";
-import { createDesktopService, createModeReviewActions, serviceStatus } from "./desktopService";
+import { createDesktopService, createModeReviewActions, servicePaused, serviceStatus } from "./desktopService";
 import type { DesktopService, ModeReview, NotificationOwnership } from "../types";
 
 const serviceView = (patch: Partial<DesktopService>): DesktopService => ({ connected: true, epoch: "epoch", generation: 1, background: {}, attention_counts: null, automatic_approvals: null, details_available: false, code: "background_unready", ...patch });
@@ -64,6 +64,20 @@ describe("mode review is an explicit action on one displayed original", () => {
     expect(serviceStatus(state)?.modeReview).toBe(false);
     owner.activation.business_ready = false;
     expect(serviceStatus(state)?.modeReview).toBe(true);
+  });
+
+  it("keeps the interrupted-review latch ahead of the passive Resume presentation", () => {
+    const owner = ownership({ ...original(), disposition: "reviewed_unknown" });
+    owner.activation = { ...owner.activation!, pending: false, needs_resume: true, code: "activation_not_started" };
+    const state = serviceView({ notification_ownership: owner,
+      background: Object.fromEntries(["fleet", "presence", "reads", "attention", "approvals"].map(name => [name, { ready: false, code: "not_started" }])) });
+    expect(servicePaused(state)).toBeUndefined();
+    expect(serviceStatus(state)?.ownership).not.toBe("rearm");
+    owner.activation.review = null;
+    owner.activation.automatic_blocked = true;
+    expect(servicePaused(state)).toBeUndefined();
+    owner.activation.automatic_blocked = false;
+    expect(servicePaused(state)).toBe("resume");
   });
 
 });

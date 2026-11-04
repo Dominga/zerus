@@ -1,0 +1,69 @@
+{
+  "attention_counts": null,
+  "automatic_approvals": false,
+  "background": {
+    "approvals": {
+      "code": "not_started",
+      "ready": false
+    },
+    "attention": {
+      "code": "not_started",
+      "ready": false
+    },
+    "cache_maintenance": {
+      "code": "unknown",
+      "ready": false
+    },
+    "fleet": {
+      "code": "not_started",
+      "ready": false
+    },
+    "presence": {
+      "code": "not_started",
+      "ready": false
+    },
+    "reads": {
+      "code": "not_started",
+      "ready": false
+    }
+  },
+  "code": "background_unready",
+  "connected": true,
+  "details_available": false,
+  "epoch": "00000000-0000-4000-8000-000000000001",
+  "executable_upgrade": null,
+  "generation": 1,
+  "notification_ownership": {
+    "activation": {
+      "active": false,
+      "automatic_blocked": false,
+      "business_ready": true,
+      "code": "activation_platform_manual",
+      "needs_resume": false,
+      "pending": false,
+      "request_id": null,
+      "review": null,
+      "running": false
+    },
+    "code": "",
+    "native_recovery": false,
+    "pending": false,
+    "request_id": null,
+    "running": false,
+    "status": {
+      "abi": "desktop-ownership-v1",
+      "configuration": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+      "identity_current": true,
+      "journal": "00000000-0000-4000-8000-000000000002",
+      "owner_epoch": "00000000-0000-4000-8000-000000000003",
+      "rearm_required": false,
+      "request_id": null,
+      "revision": 1,
+      "state": "service"
+    }
+  },
+  "notification_preferences": null,
+  "pending_read_import": null,
+  "reconnecting": false,
+  "retained_source_import": null
+}

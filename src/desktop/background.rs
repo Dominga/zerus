@@ -271,6 +271,11 @@ impl Runtime {
             #[cfg(not(any(target_os = "linux", target_os = "macos")))]
             return json!({"request_id":authority.id(),"accepted":false,"durable":false,"code":"task_message_unsupported"});
         }
+        // Linux and macOS answer it on its own streaming route; elsewhere
+        // there are no custody inputs.
+        if authority.operation() == "task_message_input_release" {
+            return json!({"request_id":authority.id(),"accepted":false,"durable":false,"code":"task_message_input_release_unsupported"});
+        }
         // A recognized native request is still not executing-kind admission.
         if authority.operation() == "task_start_reconcile" {
             return json!({"request_id":authority.id(),"accepted":false,"durable":false,"code":"task_start_reconcile_unsupported"});
@@ -295,6 +300,36 @@ impl Runtime {
     ) {
         self.message
             .frontend_reference(store, authority, self.notifications.handoff(), queue, seq)
+    }
+    /// The read-only listing of charged custody inputs; its page follows on
+    /// `queue`.
+    #[cfg(any(target_os = "linux", target_os = "macos"))]
+    pub fn task_message_inputs(
+        &mut self,
+        store: &Store,
+        request: &Value,
+        queue: Arc<Queue>,
+        seq: u64,
+    ) {
+        self.message.task_message_inputs(store, request, queue, seq)
+    }
+    /// One explicit release of a reviewed custody input; its reply follows
+    /// on `queue`.
+    #[cfg(any(target_os = "linux", target_os = "macos"))]
+    pub fn task_message_input_release(
+        &mut self,
+        store: &mut Store,
+        authority: super::ui_authority::Validated,
+        queue: Arc<Queue>,
+        seq: u64,
+    ) {
+        self.message.task_message_input_release(
+            store,
+            authority,
+            self.notifications.handoff(),
+            queue,
+            seq,
+        )
     }
     #[cfg(any(target_os = "linux", target_os = "macos"))]
     pub fn task_start_request(

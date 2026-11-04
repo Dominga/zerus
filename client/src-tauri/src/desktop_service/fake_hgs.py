@@ -540,6 +540,17 @@ elif args == ['desktop', 'frontend-request', '--json']:
         wait(root / 'release-frontend')
     if request['op'] == 'activation_wait':
         n = counter('activation-waits')
+        # A passive service refuses activation waits with its own static code
+        # (src/desktop/delivery.rs passive_frontend_request).
+        passive = config.get('activation_passive', 0)
+        if n <= passive:
+            if n == 1 and config.get('activation_passive_hold'):
+                # A barrier: the test installs its seams before the first refusal.
+                wait(root / 'release-first-passive')
+            print(json.dumps({'request_id': request['request_id'], 'accepted': False, 'durable': False,
+                              'code': 'desktop_background_unavailable'}), flush=True)
+            raise SystemExit(0)
+        n -= passive
         first_failure = config.get('activation_fail_first')
         if n > (2 if config.get('activation_idle_first') or first_failure else 1):
             wait(root / 'release-activation')
@@ -647,6 +658,16 @@ elif args == ['desktop', 'watch', '--json']:
             sys.stdin.read()
         else:
             frame(1, 'error', {'code': 'hgs_replaced', 'fatal': True})
+        raise SystemExit(0)
+    if config.get('ready_later'):
+        # Passive first, then a status in which background work is ready.
+        wait(root / 'background-ready')
+        later = status()
+        for component in later['lifecycle']['background'].values():
+            component['ready'] = True
+        later['generation'] = later['lifecycle']['generation'] = 2
+        frame(1, 'status', later)
+        sys.stdin.read()
         raise SystemExit(0)
     if config.get('silent_watch'):
         # Keep the original watch alive, but send no further frame at all.

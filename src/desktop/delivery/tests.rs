@@ -318,6 +318,19 @@ fn actual_root_projection_is_consumed_by_the_client_without_ready_json_fixtures(
     let mut f = Fixture::new(quiet());
     let mut client = State::new(f.location.configuration.clone()).unwrap();
     let mut output = Vec::new();
+    // A passive service: no background runtime decorates its lifecycle, so
+    // all five components stay not_started (the Windows passive GUI state).
+    let passive = f.passive_projection();
+    client.status(&passive).unwrap();
+    assert!(client.snapshot().connected);
+    assert!(!client.snapshot().background_ready());
+    for component in ["fleet", "presence", "reads", "attention", "approvals"] {
+        assert_eq!(
+            passive["lifecycle"]["background"][component]["code"], "not_started",
+            "{component}"
+        );
+    }
+    output.push(json!({"case":"passive","status":passive}));
     let mut check = |case: &str, f: &Fixture, reads: bool, approvals: bool| {
         let value = f.projection();
         client.status(&value).unwrap();

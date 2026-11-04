@@ -404,10 +404,22 @@ impl Controller {
         }
         .into();
     }
+    /// The view the platform-manual route leaves (Windows), for projection
+    /// tests on other platforms.
+    #[cfg(all(test, not(windows)))]
+    pub(super) fn platform_manual_for_test(&self) {
+        self.failed("activation_platform_manual");
+    }
     fn failed(&self, code: &str) {
         let mut state = self.state.lock().unwrap_or_else(PoisonError::into_inner);
         if code == "activation_platform_manual" {
-            state.view = View::default();
+            // No native activation route on this platform: nothing to resume
+            // here. The code stays visible so the client can say where the
+            // mode is chosen (Settings); it is presentation, never authority.
+            state.view = View {
+                code: code.into(),
+                ..View::default()
+            };
             return;
         }
         state.business = None;

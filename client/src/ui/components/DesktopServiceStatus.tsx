@@ -1,9 +1,39 @@
 import { Show, createMemo, createSignal } from "solid-js";
 import { Portal } from "solid-js/web";
-import { desktopService, serviceStatus, retryDesktopService, ownershipActions } from "../../store/desktopService";
+import { desktopService, serviceStatus, servicePaused, retryDesktopService, ownershipActions } from "../../store/desktopService";
+import { catalog } from "../../store/catalog";
 import { toast } from "../../store/ui";
 import { tr } from "../../i18n";
 import { MigrationReportDialog } from "./MigrationReportDialog";
+
+/** A connected passive service that lists no computers yet; the main area explains it. */
+export const servicePausedEmpty = () => !!servicePaused(desktopService.state()) && !Object.keys(catalog.computers).length;
+
+const resume = () => void ownershipActions.rearm().catch(error => toast(tr("Background service"), String(error), "error", true));
+const resumeBlocked = () => ownershipActions.busy() || !!desktopService.state()?.notification_ownership?.running;
+/** Settings > About shows the service state (and, after an interrupted change, its review). */
+const openServiceSettings = () => void import("../screens/settings/sections").then(({ openSettings }) => openSettings("about"));
+
+/**
+ * The empty main area while background work is paused. Its one action is
+ * Resume where the native helper offers it, otherwise the Settings page that
+ * shows the service state (Windows).
+ */
+export function PausedServiceDetail() {
+  const settings = () => servicePaused(desktopService.state()) === "settings";
+  return (
+    <div class="detail-empty paused-service">
+      <h2>{tr("Background work is paused")}</h2>
+      <Show when={settings()} fallback={<>
+        <p>{tr("Zerus runs your sessions through a background service, which stays paused until you resume it.")}</p>
+        <button type="button" class="btn primary" disabled={resumeBlocked()} onClick={resume}>{tr("Resume background work")}</button>
+      </>}>
+        <p>{tr("Zerus runs your sessions through a background service, which is paused on this computer. Settings shows its current state.")}</p>
+        <button type="button" class="btn primary" onClick={openServiceSettings}>{tr("Open background service settings")}</button>
+      </Show>
+    </div>
+  );
+}
 
 export function DesktopServiceStatus(props: { counts?: boolean }) {
   const [reviewOrigin, setReviewOrigin] = createSignal<HTMLElement>();
@@ -23,9 +53,7 @@ export function DesktopServiceStatus(props: { counts?: boolean }) {
         <button type="button" class="btn small ghost" aria-label={tr("Review migration report")} onClick={(event) => setReviewOrigin(event.currentTarget)}>{tr("Review")}</button>
       </Show>
       <Show when={view().manualRefresh && !props.counts}>
-        <button type="button" class="btn small ghost" onClick={() => {
-          void import("../screens/settings/sections").then(({ openSettings }) => openSettings("about"));
-        }}>{tr("Review service update")}</button>
+        <button type="button" class="btn small ghost" onClick={openServiceSettings}>{tr("Review service update")}</button>
       </Show>
       <Show when={view().modeReview && !props.counts}>
         <button type="button" class="btn small ghost" onClick={() => {
@@ -35,9 +63,7 @@ export function DesktopServiceStatus(props: { counts?: boolean }) {
       <Show when={view().retry}><button type="button" class="btn small ghost" onClick={() => void retryDesktopService().catch(error => toast(tr("Background service"), String(error), "error", true))}>{tr("Retry now")}</button></Show>
       <Show when={view().ownership === "check"} fallback={
         <Show when={view().ownership === "rearm"}>
-          <button type="button" class="btn small ghost"
-            disabled={ownershipActions.busy() || desktopService.state()?.notification_ownership?.running}
-            onClick={() => void ownershipActions.rearm().catch(error => toast(tr("Background service"), String(error), "error", true))}>{tr("Resume background work")}</button>
+          <button type="button" class="btn small ghost" disabled={resumeBlocked()} onClick={resume}>{tr("Resume background work")}</button>
         </Show>
       }>
         <button type="button" class="btn small ghost"

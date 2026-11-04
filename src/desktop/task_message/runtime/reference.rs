@@ -123,6 +123,12 @@ impl Runtime {
             return Ok(Some(self.refusal(&id, PREPARING)));
         }
         ensure!(self.admitting.is_none(), "task message preparation busy");
+        // A review's folder scan must not see a new input appear: no
+        // preparation starts while one holds its claim, through its record.
+        ensure!(
+            !matches!(self.removal, Some(Slot::Review(_))),
+            "task message input review busy"
+        );
         ensure!(
             self.known_charges(&store.db)?,
             "task message original resources retained"
@@ -262,9 +268,20 @@ impl Runtime {
             }
         };
         let identity = prepared.input.identity;
-        let staged = prepared.staged.clone();
+        let expected = staging::Expected {
+            identity,
+            bytes: prepared.input.bytes,
+            sha256: prepared.input.sha256.clone(),
+        };
+        let mut prepared = prepared;
+        let staged = std::mem::take(&mut prepared.staged);
+        // The original object, kept for its exact removal later.
+        let original = prepared.input.file.try_clone().ok();
         match self.admit_reference(store, authority, verified, &lease, prepared.input) {
             Ok(value) => {
+                if let Some(original) = original {
+                    self.retained.insert(id.clone(), original);
+                }
                 self.answer(&queue, seq, value);
                 // Exactly the staged copies it read; they are disposable.
                 if let Some(roots) = self.roots.clone() {
@@ -279,7 +296,7 @@ impl Runtime {
             Err(_) => {
                 // Nothing was admitted. The exact published input is removed
                 // before the reservation is released.
-                self.refused.push((id.clone(), identity));
+                self.refused.push((id.clone(), expected, original));
                 let value = self.refusal(&id, "task_message_unavailable");
                 self.answer(&queue, seq, value);
             }
@@ -347,9 +364,13 @@ impl Runtime {
 
     /// One removal or recovery at a time, off the actor.
     fn poll_removal(&mut self, store: &mut Store) -> Result<()> {
-        if let Some(removal) = self.removal.take() {
+        if let Some(slot) = self.removal.take() {
+            let removal = match slot {
+                Slot::Removal(removal) => removal,
+                Slot::Review(review) => return self.poll_review(store, review),
+            };
             if !removal.worker.is_finished() {
-                self.removal = Some(removal);
+                self.removal = Some(Slot::Removal(removal));
                 return Ok(());
             }
             let ok = removal.worker.join().is_ok() && removal.done.try_recv().unwrap_or(false);
@@ -373,59 +394,94 @@ impl Runtime {
         let Some(roots) = self.roots.clone() else {
             return Ok(());
         };
-        let next = if let Some((id, identity)) = self.refused.pop() {
-            Some((id, Job::Refused, Some(identity)))
+        let next = if let Some((id, expected, original)) = self.refused.pop() {
+            match original {
+                Some(original) => Some((id, Job::Refused, Some((expected, original)))),
+                // Without its original object it is never removed: it stays
+                // reserved, and the reservation sweep keeps it as an orphan.
+                None => return Ok(()),
+            }
+        } else if let Some((id, expected)) = self.next_drained(store)? {
+            match self.retained.remove(&id) {
+                Some(original) => Some((id, Job::Drained, Some((expected, original)))),
+                None => {
+                    // Its original object is gone (a restart, or a handle
+                    // this process never kept): a reopened name could be a
+                    // replacement, so the input stays charged for explicit
+                    // review. The execution outcome is untouched.
+                    let tx = store
+                        .db
+                        .transaction_with_behavior(TransactionBehavior::Immediate)?;
+                    super::super::inputs::failed(&tx, &id)?;
+                    tx.commit()?;
+                    return Ok(());
+                }
+            }
         } else {
-            self.next_drained(store)?
-                .map(|(id, identity)| (id, Job::Drained, Some(identity)))
-                .or(self
-                    .next_reserved(store)?
-                    .map(|id| (id, Job::Reserved, None)))
+            self.next_reserved(store)?
+                .map(|id| (id, Job::Reserved, None))
         };
-        let Some((id, job, identity)) = next else {
+        let Some((id, job, expected)) = next else {
             return Ok(());
         };
         let (send, done) = mpsc::sync_channel(1);
         let request = id.clone();
+        // The worker keeps this service's own exclusion until it finished,
+        // its folder sync included: an actor error or a dropped runtime never
+        // releases it while a removal still reads or unlinks.
+        let owner = self.owner.clone();
         let worker = thread::Builder::new()
             .name("task-message-input".into())
             .spawn(move || {
-                let ok = match identity {
-                    Some(identity) => staging::remove_input(&roots, &request, identity).is_ok(),
+                let _owner = owner;
+                let ok = match expected {
+                    Some((expected, original)) => {
+                        let deadline = staging::removal_deadline(&request);
+                        staging::remove_input(&roots, &request, &expected, &original, deadline)
+                            .is_ok()
+                    }
                     None => staging::input_exists(&roots, &request).unwrap_or(true),
                 };
                 let _ = send.send(ok);
             })?;
-        self.removal = Some(Removal {
+        self.removal = Some(Slot::Removal(Removal {
             id,
             job,
             worker,
             done,
-        });
+        }));
         Ok(())
     }
 
     /// Whether this process still holds `id` in any form.
-    fn holds(&self, id: &str) -> bool {
+    pub(super) fn holds(&self, id: &str) -> bool {
         self.admitted.contains_key(id)
+            || matches!(&self.removal, Some(Slot::Review(review)) if review.request_id() == id)
             || self
                 .admitting
                 .as_ref()
                 .is_some_and(|a| a.verified.plan.request_id == id)
-            || self.refused.iter().any(|(refused, _)| refused == id)
+            || self.refused.iter().any(|(refused, _, _)| refused == id)
     }
 
     /// A held input whose original drained physically and that nothing here
     /// holds any more. Only drained originals are considered, so running ones
     /// never hide a newer drained one.
-    fn next_drained(&self, store: &Store) -> Result<Option<(String, staging::Identity)>> {
+    fn next_drained(&self, store: &Store) -> Result<Option<(String, staging::Expected)>> {
         for id in super::super::inputs::held_drained(&store.db, SWEEP)? {
             if self.holds(&id) {
                 continue;
             }
             let record = super::super::inputs::load(&store.db, &id)?;
-            if let Some(identity) = record.and_then(|r| r.identity) {
-                return Ok(Some((id, identity)));
+            if let Some(record) = record {
+                if let Some(identity) = record.identity {
+                    let expected = staging::Expected {
+                        identity,
+                        bytes: record.bytes,
+                        sha256: record.input_sha256,
+                    };
+                    return Ok(Some((id, expected)));
+                }
             }
         }
         Ok(None)

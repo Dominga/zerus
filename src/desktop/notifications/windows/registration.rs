@@ -50,7 +50,8 @@ pub(in crate::desktop) fn expected_command(
 }
 
 /// Diagnostic only: the registered command carries exactly the expected
-/// arguments for ANOTHER quoted image. Never a selection, permission or repair.
+/// arguments for ANOTHER quoted image that is itself a valid absolute path.
+/// Anything malformed stays unavailable. Never a selection, permission or repair.
 pub(in crate::desktop) fn names_other_image(registered: &str, expected: &str, image: &str) -> bool {
     let Some(arguments) = expected.strip_prefix(&format!("\"{image}\"")) else {
         return false;
@@ -58,7 +59,12 @@ pub(in crate::desktop) fn names_other_image(registered: &str, expected: &str, im
     registered
         .strip_prefix('"')
         .and_then(|rest| rest.split_once('"'))
-        .is_some_and(|(other, rest)| !other.is_empty() && other != image && rest == arguments)
+        .is_some_and(|(other, rest)| {
+            absolute(other)
+                && !other.chars().any(char::is_control)
+                && other != image
+                && rest == arguments
+        })
 }
 
 /// An absolute Windows path: a drive root, or a UNC or verbatim prefix.

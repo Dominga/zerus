@@ -321,6 +321,14 @@ fn only_exact_arguments_under_another_quoted_image_name_another_image() {
             other.replacen(r"C:\Other copy\hgs.exe", "", 1),
         ),
         ("nothing", String::new()),
+        (
+            "quoted relative image",
+            other.replacen(r"C:\Other copy\hgs.exe", r"Other copy\hgs.exe", 1),
+        ),
+        (
+            "control character in the image",
+            other.replacen(r"C:\Other copy\hgs.exe", "C:\\Other\tcopy\\hgs.exe", 1),
+        ),
     ] {
         assert!(!names_other_image(&registered, &expected, image), "{case}");
     }

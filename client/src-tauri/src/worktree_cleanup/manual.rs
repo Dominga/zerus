@@ -59,12 +59,9 @@ pub struct View {
     unknown: usize,
     required: Consents,
 }
+/// The folders core cleanup would remove, shown as ready (zerus-k2ga).
 fn eligible(e: &Entry) -> bool {
-    e.verified
-        && !matches!(e.status, Some(Status::Removed | Status::Unconfirmed))
-        && (review::removable(&e.row)
-            || review::process_reviewable(&e.row)
-            || (e.row["discardable"] == true && !text(&e.row, "discard_fingerprint").is_empty()))
+    e.eligible()
 }
 impl Dialog {
     fn view(&self) -> View {
@@ -683,6 +680,73 @@ mod tests {
             assert!(!r.preserve_archive_restore);
             assert!(r.discard_fingerprint.is_empty());
         }
+    }
+    /// zerus-k2ga: the manual cleanup asks for the discard and the process
+    /// consent together for a dirty checkout beside hidden programs, and
+    /// sends both fingerprints only when both were given.
+    #[test]
+    fn a_dirty_checkout_beside_hidden_programs_needs_both_explicit_consents() {
+        let state = WorktreeCleanup::default();
+        let mut ops = calls();
+        ops.review = Arc::new(|t| {
+            let mut v = checked(t);
+            let r = &mut v["worktrees"][0];
+            r["verdict"] = json!("blocked");
+            r["changes"] = json!(1);
+            r["reasons"] = json!([{"code":"changes"},{"code":"processes_unavailable"}]);
+            r["discardable"] = json!(false);
+            r["discardable_with_process_consent"] = json!(true);
+            r["discard_fingerprint"] = json!("original-discard");
+            r["process_fingerprint"] = json!("original-process");
+            Ok(v)
+        });
+        let issued = Arc::new(Mutex::new(Vec::new()));
+        let seen = issued.clone();
+        ops.remove = Arc::new(move |t, r| {
+            seen.lock().unwrap().push(r.clone());
+            review::Removed::Done {
+                reply: json!({"status":"removed","path":t.path,"common_dir":t.common}),
+            }
+        });
+        let view = open(&state, 1, ops.clone());
+        assert!(view.rows[0].ready, "shown as removable with both consents");
+        assert!(view.required.discard_changes && view.required.unchecked_processes);
+        for partial in [
+            Consents {
+                discard_changes: true,
+                ..Default::default()
+            },
+            Consents {
+                unchecked_processes: true,
+                ..Default::default()
+            },
+        ] {
+            assert!(state
+                .manual_remove(&view.id, view.revision, partial)
+                .is_err());
+        }
+        assert!(issued.lock().unwrap().is_empty());
+        let (_, step) = state
+            .manual_remove(
+                &view.id,
+                view.revision,
+                Consents {
+                    discard_changes: true,
+                    unchecked_processes: true,
+                    ..Default::default()
+                },
+            )
+            .unwrap();
+        state.drive_manual(view.id.clone(), step, ops);
+        let issued = issued.lock().unwrap();
+        assert_eq!(issued.len(), 1);
+        assert_eq!(
+            (
+                issued[0].discard_fingerprint.as_str(),
+                issued[0].process_fingerprint.as_str()
+            ),
+            ("original-discard", "original-process")
+        );
     }
     #[test]
     fn replaced_owner_duplicate_or_large_rows_cannot_become_removal_targets() {

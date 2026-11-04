@@ -622,16 +622,24 @@ class WindowsTaskMode(unittest.TestCase):
         """A reserved FIRST choice whose helper died at Prepared or Held: the
         OLD no-request-ID switch never adopts or continues it."""
         path = self.state / 'desktop' / 'windows-registration-mode.json'
+        configuration = self.cli('desktop', 'status', '--json')['configuration']
+        anchor = self.config / f'windows-first-choice-{configuration}.json'
         for phase in ('prepared', 'held'):
             record = json.loads(path.read_text(encoding='utf-8'))
             request = str(uuid.uuid4())
             # Arrange lost reply metadata only, around the actual running
-            # passive instance; no synthetic native authentication.
+            # passive instance; no synthetic native authentication. As the
+            # helper does, the anchor names the new request before the record
+            # reserves it; otherwise this is a lost journal, not a pending one.
+            published = json.loads(anchor.read_bytes())
+            published['request'] = request
+            anchor.write_bytes(json.dumps(published).encode('utf-8'))
             record['pending'] = dict(request_id=request, desired='background', phase=phase,
                                      original=current, started=None)
             record.setdefault('first_choices', []).append(
                 dict(request=request, desired='background', phase='unknown'))
             path.write_text(json.dumps(record), encoding='utf-8')
+            self.assertIsNone(self.cli('desktop', 'registration', 'status', '--json')['first_choice_lost'])
             arranged = path.read_bytes()
             before = self.observe()['instances']
             grant = self.cli('desktop', 'ownership-status', '--json')
@@ -653,6 +661,7 @@ class WindowsTaskMode(unittest.TestCase):
             self.assertEqual(self.observe()['instances'], before)
             result = self.cli('desktop', 'registration', 'mode-result', '--json', '--request-id', request)
             self.assertEqual(result['receipt']['phase'], 'refused', result)
+        self.assertIsNone(self.cli('desktop', 'registration', 'status', '--json')['first_choice_lost'])
 
     def review_old_stop_without_adopting_the_later_passive(self, original, current):
         path = self.state / 'desktop' / 'windows-registration-mode.json'

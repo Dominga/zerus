@@ -39,6 +39,26 @@ pub(super) fn cancel_rollback(config: &Config, location: &Location, id: &str) ->
     )
 }
 
+pub(super) fn review_mode(config: &Config, location: &Location, id: &str) -> Result<Value> {
+    ensure!(uuid::Uuid::parse_str(id).is_ok_and(|u| !u.is_nil() && u.to_string() == id),
+        "Pass the exact original transition UUID.");
+    native::mode::command(config, location, json!({"schema":1,"operation":"review","request_id":id}))
+}
+
+pub(super) fn mode_after_review(config: &Config, location: &Location, mode: &str, reviewed: &str, request: &str) -> Result<Value> {
+    ensure!(matches!(mode, "background" | "passive") && [reviewed, request].iter().all(|s|
+        uuid::Uuid::parse_str(s).is_ok_and(|u| !u.is_nil() && u.to_string() == *s)) && reviewed != request,
+        "Select the exact reviewed UUID and a NEW canonical request UUID.");
+    native::mode::command(config, location,
+        json!({"schema":1,"operation":"switch","mode":mode,"after_review":reviewed,"request_id":request}))
+}
+
+pub(super) fn mode_result(config: &Config, location: &Location, request: &str) -> Result<Value> {
+    ensure!(uuid::Uuid::parse_str(request).is_ok_and(|u| !u.is_nil() && u.to_string() == request),
+        "Pass the exact original choice UUID.");
+    native::mode::result(config, location, request)
+}
+
 fn helper_environment(trace_path: &str) -> Result<Vec<(String, String)>> {
     let mut path = [0u16; 32768];
     let length = unsafe {
@@ -166,6 +186,8 @@ pub(super) fn command(config: &Config, location: &Location, operation: &str) -> 
         checked["pending_transition"] = record["pending_transition"].clone();
         checked["cancelled_request_id"] = record["cancelled_request_id"].clone();
         checked["completed_request_id"] = record["completed_request_id"].clone();
+        checked["reviewed_transition"] = record["reviewed_transition"].clone();
+        checked["activation_automatic_blocked"] = record["activation_automatic_blocked"].clone();
         let status = super::status(location)?;
         let lifecycle = &status["lifecycle"];
         checked["running_mode"] = if lifecycle["configuration"] == location.configuration

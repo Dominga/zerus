@@ -91,7 +91,7 @@ pub(crate) mod creation_test {
     }
 }
 
-const USAGE: &str = "usage: hgs desktop serve [--config-dir DIR --state-dir DIR] [--background] | status [--json] | startup --json | owner-status --json | ownership-status --json | ownership-result --json | swarm-restart --json (Windows) | watch --json | feed --json | request --json | catalog-relay --json | registration --json [--background] | registration install|remove|status --json (Windows) | registration install --mode background|passive --json (Windows) | registration cancel-rollback --json --request-id UUID (Windows) | notification-registration install|status --json | notification-registration remove --json --request-id UUID (Windows) | revoke --json [--request-id UUID] [--reason rollback] | import-evidence --json | import-status --json --import-id UUID";
+const USAGE: &str = "usage: hgs desktop serve [--config-dir DIR --state-dir DIR] [--background] | status [--json] | startup --json | owner-status --json | ownership-status --json | ownership-result --json | swarm-restart --json (Windows) | watch --json | feed --json | request --json | catalog-relay --json | registration --json [--background] | registration install|remove|status --json (Windows) | registration install --mode background|passive --json [--after-review UUID --request-id NEW_UUID] (Windows) | registration cancel-rollback --json --request-id UUID (Windows) | registration review-mode --json --request-id UUID (Windows) | registration mode-result --json --request-id UUID (Windows) | notification-registration install|status --json | notification-registration remove --json --request-id UUID (Windows) | revoke --json [--request-id UUID] [--reason rollback] | import-evidence --json | import-status --json --import-id UUID";
 const HEARTBEAT: Duration = Duration::from_secs(10);
 pub const STARTUP_REFUSED: i32 = 78;
 
@@ -301,6 +301,24 @@ pub fn dispatch(config: &Config, target: &str, args: &[String], dry: bool) -> cl
                         "Use the maintained platform installer to cancel rollback metadata."
                     )
                 }
+            }
+            ["registration", "review-mode", "--json", "--request-id", id] => {
+                #[cfg(windows)]
+                { println!("{}", windows_registration::review_mode(config, &location, id)?); Ok(()) }
+                #[cfg(not(windows))]
+                { let _ = id; anyhow::bail!("Use the maintained Unix helper to review its original activation.") }
+            }
+            ["registration", "mode-result", "--json", "--request-id", id] => {
+                #[cfg(windows)]
+                { println!("{}", windows_registration::mode_result(config, &location, id)?); Ok(()) }
+                #[cfg(not(windows))]
+                { let _ = id; anyhow::bail!("Use the maintained Unix helper to read its original activation.") }
+            }
+            ["registration", "install", "--mode", mode, "--json", "--after-review", reviewed, "--request-id", request] => {
+                #[cfg(windows)]
+                { println!("{}", windows_registration::mode_after_review(config, &location, mode, reviewed, request)?); Ok(()) }
+                #[cfg(not(windows))]
+                { let _ = (mode, reviewed, request); anyhow::bail!("Use the maintained Unix helper for an explicit mode choice.") }
             }
             ["notification-registration", rest @ ..] => {
                 let (operation, request_id) = match rest {

@@ -574,6 +574,7 @@
   "The CLI was updated. The Windows background service needs a manual refresh. See Settings > About.": "CLI обновлён. Фоновую службу Windows нужно обновить вручную. Откройте «Настройки > О программе».",
   "The Qt settings file could not be read safely.": "Не удалось безопасно прочитать файл настроек Qt.",
   "The agent ID is on the clipboard": "ID агента скопирован в буфер обмена",
+  "The agent was not started: the desktop service could not start its launch. Continue setup to try again.": "Агент не запущен: служба рабочего стола не смогла начать его запуск. Продолжите настройку, чтобы повторить попытку.",
   "The agent was not started: the launch was not sent to the desktop service. Continue setup to start it.": "Агент не запущен: запуск не был отправлен в службу рабочего стола. Продолжите настройку, чтобы запустить его.",
   "The approval journal changed. Refresh to read it again.": "Журнал разрешений изменился. Обновите, чтобы прочитать его заново.",
   "The approval journal is unavailable. Refresh to try again.": "Журнал разрешений недоступен. Обновите, чтобы повторить попытку.",

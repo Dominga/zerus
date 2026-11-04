@@ -359,6 +359,7 @@ struct Shared {
     notification_supported: AtomicBool,
     ownership: Arc<crate::desktop_ownership::Controller>,
     ownership_supported: AtomicBool,
+    ownership_observation_supported: AtomicBool,
     mode_transition: Arc<mode_transition::Controller>,
     hgs: PathBuf,
     configuration: Mutex<Option<String>>,
@@ -549,6 +550,7 @@ impl Service {
             notification_supported: AtomicBool::new(false),
             ownership,
             ownership_supported: AtomicBool::new(false),
+            ownership_observation_supported: AtomicBool::new(false),
             mode_transition: {
                 let owner = mode_transition::Controller::new();
                 #[cfg(all(test, target_os = "linux"))]
@@ -1313,11 +1315,17 @@ impl Shared {
         if !self.mode_transition.blocks_resume() {
             return true;
         }
-        self.ownership.granted()
-            && self.ownership.view().code.is_empty()
-            && self
-                .mode_transition
-                .business_permitted(snapshot, self.ownership.view().status.as_ref())
+        self.ownership.view().code.is_empty()
+            && self.mode_transition.business_permitted(
+                snapshot,
+                self.ownership.view().status.as_ref(),
+                self.ownership.granted(),
+            )
+    }
+    fn business_scheduling_permitted(&self) -> bool {
+        self.business_permitted()
+            && (!self.mode_transition.blocks_resume()
+                || self.mode_transition.scheduling_permitted())
     }
     fn publish_retained_import(&self) {
         let report = self.retained_import.as_ref().map(|report| report.status());
@@ -1661,6 +1669,14 @@ async fn preflight(shared: &Arc<Shared>, stop: Arc<AtomicBool>) -> Result<String
         }),
         Ordering::Release,
     );
+    shared.ownership_observation_supported.store(
+        std::str::from_utf8(&help).ok().is_some_and(|text| {
+            text.lines().any(|line| {
+                line.trim() == zerus_client_core::desktop::ownership::observation::HELP_MARKER
+            })
+        }),
+        Ordering::Release,
+    );
     if !std::str::from_utf8(&help).ok().is_some_and(|help| {
         help.lines().any(|line| line.trim() == HELP)
             && help
@@ -1726,6 +1742,15 @@ async fn preflight(shared: &Arc<Shared>, stop: Arc<AtomicBool>) -> Result<String
         .mode_transition
         .observe(shared.hgs.clone(), configuration.into())
         .await;
+    if shared
+        .ownership_observation_supported
+        .load(Ordering::Acquire)
+        && !shared.mode_transition.observed_selection()
+    {
+        // A modern cold start must not mistake an unreadable review journal
+        // for an unreviewed host and enter startup Grant/import paths.
+        return Err("activation_status_unavailable");
+    }
     shared.publish(state.snapshot().clone());
     Ok(configuration.into())
 }
@@ -1864,7 +1889,8 @@ async fn connection(
     // Preflight observed the journal even when the actor was unavailable.
     // Review never lends authority to the positive import or Grant paths.
     // Retry/backoff and all reviewed-history reconnects remain read-only.
-    // Only the separate confirmed choice may open existing business eligibility.
+    // A separate confirmed choice or its checked cold read may make business
+    // eligible. Only the explicit continuation may schedule startup work.
     let business = !automatic
         && !startup_recovery()
         && !shared.read_checks_only()
@@ -1899,6 +1925,16 @@ async fn connection(
         }
     } else {
         shared.ownership.unsupported();
+    }
+    if shared.mode_transition.blocks_resume() && !shared.read_checks_only() && !startup_recovery() {
+        shared
+            .mode_transition
+            .restore_business(
+                shared.ownership.clone(),
+                shared.snapshot.copy(),
+                stop.clone(),
+            )
+            .await;
     }
     mode_transition::startup(&shared, automatic, &configuration).await;
     shared

@@ -455,3 +455,36 @@ this scope remain read-only and require another separately confirmed choice
 with the updated maintained CLI. None of these observations authorize refresh,
 Rearm, cleanup, or adoption of another task/process. Native dialogs, installed
 Settings and Fast Startup/Restart behavior still require PC qualification.
+
+
+## Eligibility after a settled reviewed background choice
+
+A later Service consumer start or reconnect can restore business eligibility
+without another mode dialog. It reads the exact durable new choice UUID and
+reviewed original UUID, verifies that this is still the latest applicable
+settled background choice, and obtains a separate current native ownership
+observation. The old completion's service epoch and generation remain historical;
+a restarted service must authenticate its current endpoint independently while
+retaining the same Grant journal and owner epoch.
+
+The closed `desktop-ownership-observation-v1` exchange compares the requesting
+frontend's authenticated native Origin with the existing actor's granted row in
+one read transaction. It checks the actual database object and current service
+epoch and generation. A display status, receipt or supplied identity cannot
+construct the native observation. An old helper without this read capability,
+a different frontend Origin, a later passive or interrupted choice, revoke,
+Rearm, replaced registration/image/database, cancellation or unavailable proof
+leaves the consumer read-only. No service is installed or started to obtain
+that proof. Read workers keep their original child, image and pipe resources
+through physical settlement, including an uncertain or timed-out exchange.
+
+Restoration changes eligibility only. It creates no Grant, Rearm, import or
+manager operation, including from the first watch frame, Retry, backoff and
+scheduler wakes. A separately authorized normal action still needs its existing
+native admission. The original unknown result and permanent automatic mode
+activation latch remain unchanged. The interrupted-change section disappears
+only while both the applicable settled choice and current native observation
+validate; a newer interruption brings its guidance back.
+
+Portable/Linux transport controls and hosted Windows tests are source evidence.
+Installed Settings and native PC qualification remain separate.

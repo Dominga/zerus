@@ -398,9 +398,9 @@ class WindowsTaskMode(unittest.TestCase):
         self.assertLessEqual(len(result.stdout.encode('utf-8')), 65536)
         return json.loads(result.stdout)
 
-    def frontend_call(self, control, prefix):
+    def frontend_call(self, control, prefix, *, frontend=None):
         self.control.write_text(json.dumps(dict(control, cli=str(self.cli_image))), encoding='utf-8')
-        result = subprocess.run([str(self.frontend), '--exact',
+        result = subprocess.run([str(frontend or self.frontend), '--exact',
                                  'instance::tests::evidence::native_frontend_request_fixture', '--nocapture'],
                                 env=dict(self.env, HGS_FRONTEND_TEST_CONTROL=str(self.control)),
                                 capture_output=True, text=True, timeout=40,
@@ -425,6 +425,47 @@ class WindowsTaskMode(unittest.TestCase):
         self.assertTrue(result['accepted'], result)
         self.assertTrue(result['durable'], result)
         self.assertEqual(result['outcome']['state'], 'granted', result)
+
+    def requester_bound_ownership_is_a_native_read(self):
+        """Real current requester + existing actor row; no synthetic auth positive."""
+        lifecycle = self.cli('desktop', 'status', '--json')['lifecycle']
+        ownership = self.cli('desktop', 'ownership-status', '--json')
+        self.assertEqual(ownership['state'], 'service')
+        self.assertTrue(ownership['identity_current'])
+        self.assertFalse(ownership['rearm_required'])
+        path = self.state / 'desktop' / 'windows-registration-mode.json'
+        record = path.read_bytes()
+        instances = self.observe()['instances']
+        def rows():
+            with closing(sqlite3.connect(self.state / 'desktop' / 'state.sqlite3')) as db:
+                return tuple(db.execute('SELECT * FROM desktop_ownership')), tuple(db.execute(
+                    'SELECT request_id,revision,fingerprint,origin,receipt,final FROM desktop_ownership_requests ORDER BY revision'))
+        before = rows()
+        query = dict(request_id=str(uuid.uuid4()), configuration=ownership['configuration'],
+                     journal=ownership['journal'], owner_epoch=ownership['owner_epoch'],
+                     service_epoch=lifecycle['epoch'], generation=lifecycle['generation'])
+        control = dict(case='ownership_observe', configuration=ownership['configuration'], query=query)
+        positive = self.frontend_call(control, 'OWNERSHIP_OBSERVATION ')
+        self.assertTrue(positive['checked'], positive)
+        self.assertEqual(positive['current'], ownership)
+        # A different real portable frontend file is still admitted natively,
+        # but it is not the original granted Origin even with identical bytes.
+        other = self.cli_image.with_name('hgs-tray.exe')
+        shutil.copy2(self.frontend_source, other)
+        try:
+            refused = self.frontend_call(control, 'OWNERSHIP_OBSERVATION ', frontend=other)
+            self.assertFalse(refused['checked'], refused)
+        finally:
+            other.unlink()
+        for key, value in [('service_epoch', str(uuid.uuid4())),
+                           ('generation', lifecycle['generation'] + 1),
+                           ('owner_epoch', str(uuid.uuid4())), ('journal', str(uuid.uuid4()))]:
+            stale = dict(control, query=dict(query, **{key: value}))
+            self.assertFalse(self.frontend_call(stale, 'OWNERSHIP_OBSERVATION ')['checked'], key)
+        self.assertEqual(rows(), before)
+        self.assertEqual(path.read_bytes(), record)
+        self.assertEqual(self.observe()['instances'], instances)
+        self.assertEqual(self.cli('desktop', 'ownership-status', '--json'), ownership)
 
     def cancel(self, request_id):
         result = self.frontend_call(dict(case='mode_cancel', request_id=request_id), 'MODE_CALLER_RESULT ')
@@ -908,6 +949,7 @@ if(@(Get-OwnInstances $s $t).Count-ne 0) {throw 'fixture instance remains'};
             self.assertIsNone(shell.poll())
             passive = self.recover_initial_start_and_cancel_background_before_a_grant(passive)
             self.grant()
+            self.requester_bound_ownership_is_a_native_read()
             granted = self.cli('desktop', 'ownership-status', '--json')
             no_op = self.mode('passive')
             self.assertTrue(no_op['ok'], no_op)

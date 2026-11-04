@@ -53,6 +53,9 @@ pub enum Request {
         journal: Option<String>,
         revision: u64,
     },
+    DesktopOwnershipObserve {
+        query: Box<super::ownership::observation::Query>,
+    },
     ImportPendingReads {
         request_id: String,
         page: Box<super::pending_reads::Page>,
@@ -102,6 +105,7 @@ impl Request {
             Self::TaskStartReconcile { intent } => &intent.reconcile_id,
             Self::TerminationOutcome { intent } => &intent.request_id,
             Self::NotificationControl { control, .. } => control.request_id(),
+            Self::DesktopOwnershipObserve { query } => &query.request_id,
             Self::ActivationWait { request_id }
             | Self::DesktopOwnership { request_id, .. }
             | Self::ImportPendingReads { request_id, .. }
@@ -121,6 +125,7 @@ impl Request {
             Self::TerminationOutcome { .. } => "termination_outcome",
             Self::NotificationControl { control, .. } => control.operation(),
             Self::DesktopOwnership { .. } => "desktop_ownership",
+            Self::DesktopOwnershipObserve { .. } => "desktop_ownership_observe",
             Self::ImportPendingReads { .. } => "import_pending_reads",
             Self::ActivationWait { .. } => "activation_wait",
             Self::AutomaticApprovals { .. } => "automatic_approvals",
@@ -145,6 +150,7 @@ impl Request {
                     && *revision <= super::ownership::MAX_REVISION
                     && (journal.is_some() || *revision == 0)
             }
+            Self::DesktopOwnershipObserve { query } => query.valid(),
             Self::ImportPendingReads { page, .. } => page.valid(),
             Self::ActivationWait { .. } | Self::AutomaticApprovals { .. } => true,
             Self::CacheMaintenance {
@@ -293,6 +299,7 @@ impl Cache {
         } else if matches!(
             envelope.request,
             Request::CacheMaintenance { .. }
+                | Request::DesktopOwnershipObserve { .. }
                 | Request::CreationClone { .. }
                 | Request::CreationWorktree { .. }
                 | Request::CreationLaunch { .. }
@@ -488,6 +495,14 @@ impl Responder {
                     return Err(io::ErrorKind::PermissionDenied.into());
                 }
                 mode
+            }
+            Request::DesktopOwnershipObserve { query } => {
+                if self.ownership_mode.get() != Some(&super::ownership::Mode::Service)
+                    || self.configuration.get() != Some(&query.configuration)
+                {
+                    return Err(io::ErrorKind::PermissionDenied.into());
+                }
+                Some(super::ownership::Mode::Service)
             }
             _ => None,
         };

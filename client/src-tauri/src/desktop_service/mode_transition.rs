@@ -85,6 +85,13 @@ impl Controller {
             .view
             .clone()
     }
+    pub(super) fn observed_selection(&self) -> bool {
+        self.state
+            .lock()
+            .unwrap_or_else(PoisonError::into_inner)
+            .selection
+            .is_some()
+    }
     pub fn close(&self) -> zerus_client_core::desktop::drain::Closed {
         self.stop.store(true, Ordering::Release);
         self.gate.close()
@@ -427,6 +434,7 @@ impl Controller {
             return;
         }
         state.business = None;
+        state.selection = None;
         state.view.code = code.into();
         state.view.needs_resume = true;
     }

@@ -1066,3 +1066,29 @@ fn cache_is_native_only_and_a_recorded_preparation_is_not_effect_admission() {
     };
     assert!(lookup.lookup); // original child/request is NEVER re-sent
 }
+
+#[test]
+fn a_native_ownership_read_is_not_generic_policy_or_a_durable_receipt() {
+    assert!(serde_json::from_value::<Operation>(json!("desktop_ownership_observe")).is_err());
+    let request = Request::DesktopOwnershipObserve {
+        query: Box::new(zerus_client_core::desktop::ownership::observation::Query {
+            request_id: uuid::Uuid::new_v4().to_string(),
+            configuration: "a".repeat(64),
+            journal: uuid::Uuid::new_v4().to_string(),
+            owner_epoch: uuid::Uuid::new_v4().to_string(),
+            service_epoch: uuid::Uuid::new_v4().to_string(),
+            generation: 1,
+        }),
+    };
+    let frontend = Frontend::default();
+    assert!(
+        matches!(frontend.begin(Operation::DesktopOwnershipObserve, Some(request.clone())), Begin::Immediate(value) if value["code"] == "native_observation_required")
+    );
+    assert!(frontend.state.lock().unwrap().operations.is_empty());
+    assert!(checked(
+        &request,
+        json!({"request_id":request.id(),"accepted":true,"durable":true}),
+        false
+    )
+    .is_none());
+}

@@ -4,6 +4,8 @@
 use super::*;
 use std::fs;
 
+mod recovery;
+
 const CONFIG: &str = "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa";
 struct Fixture {
     root: PathBuf,
@@ -399,16 +401,31 @@ impl Drop for Running {
 }
 fn start_native(helpers: &Fixture, config: Value) -> Running {
     use crate::desktop_service::frontend::tests::native::{responder, CacheServer};
+    let current_epoch = config
+        .get("runtime_epoch")
+        .and_then(Value::as_str)
+        .unwrap_or("00000000-0000-4000-8000-000000000001")
+        .to_owned();
+    let generation = config
+        .get("status_generation")
+        .and_then(Value::as_u64)
+        .unwrap_or(1);
+    let hold_preflight = config["hold_mode_preflight"] == true;
+    let hold_observation = config["hold_observation"] == true;
     let source = crate::desktop_service::tests::Fixture::new(config);
+    fs::write(source.0.join("runtime-epoch"), &current_epoch).unwrap();
+    if hold_preflight {
+        fs::write(source.0.join("mode-preflight-hold"), []).unwrap();
+    }
+    if hold_observation {
+        fs::write(source.0.join("observation-hold"), []).unwrap();
+    }
     // Native protocol models agree on the same current incarnation. These
     // constants do not establish a production/native manager positive.
     helpers.patch("journal", json!("00000000-0000-4000-8000-000000000005"));
     helpers.patch("owner_epoch", json!("00000000-0000-4000-8000-000000000006"));
-    helpers.patch(
-        "service_epoch",
-        json!("00000000-0000-4000-8000-000000000001"),
-    );
-    helpers.patch("service_generation", json!(1));
+    helpers.patch("service_epoch", json!(current_epoch));
+    helpers.patch("service_generation", json!(generation));
     fs::remove_file(source.0.join("hgs")).unwrap();
     let code = PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("src");
     for (leaf, target) in [

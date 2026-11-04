@@ -2392,6 +2392,58 @@ pub(crate) mod tests {
         );
     }
 
+    /// A downgrade to a GUI that reads only name keys (simulated by a run
+    /// whose rows list no session ID): its composer opens empty, nothing it
+    /// does touches the ID-keyed draft, and the next run of this build finds
+    /// that draft again. What the older GUI typed stays under the name key,
+    /// for Saved drafts, because the move never overwrites.
+    #[test]
+    fn a_downgrade_leaves_the_id_keyed_draft_for_the_next_upgrade() {
+        let root = dir("downgrade");
+        let store = drafts(&root);
+        store.save_durable(KEY, stored("typed before the upgrade"), |_| {});
+        let (upgraded, _) = hub_on(&store);
+        upgraded.open(Some(with_id()));
+        until(&upgraded, |v| {
+            v.loaded && v.text == "typed before the upgrade"
+        });
+        upgraded.flush();
+        drop(upgraded);
+        let (older, _) = hub_on(&store);
+        older.open(Some(session()));
+        let view = until(&older, |v| v.loaded);
+        assert_eq!((view.key.as_str(), view.text.as_str()), (KEY, ""));
+        older.edit(
+            view.handle,
+            1,
+            view.text_epoch,
+            "typed on the older GUI".into(),
+            0,
+            0,
+        );
+        until(&older, |v| v.text == "typed on the older GUI");
+        older.flush();
+        drop(older);
+        store.flush();
+        let saved = root.join("drafts");
+        assert_eq!(
+            read_draft(&saved, ID_KEY).draft.draft.text,
+            "typed before the upgrade"
+        );
+        let (again, _) = hub_on(&store);
+        again.open(Some(with_id()));
+        let view = until(&again, |v| v.loaded);
+        assert_eq!(
+            (view.key.as_str(), view.text.as_str()),
+            (ID_KEY, "typed before the upgrade")
+        );
+        store.flush();
+        assert_eq!(
+            read_draft(&saved, KEY).draft.draft.text,
+            "typed on the older GUI"
+        );
+    }
+
     #[test]
     fn a_row_that_gains_its_session_id_moves_its_open_draft() {
         let root = dir("adopt-open");

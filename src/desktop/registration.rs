@@ -145,22 +145,28 @@ pub(super) fn windows_plan_mode(
     preview_for_binary_mode(config, location, path, background)
 }
 
+/// The configuration and state directories a service definition names:
+/// absolute as given, otherwise joined to the current directory. The one
+/// normalisation for registration writers and the Windows notification
+/// selector, so both format the same arguments.
+pub(in crate::desktop) fn definition_directories(config: &Config) -> Result<(PathBuf, PathBuf)> {
+    let absolute = |path: &std::path::Path| -> Result<PathBuf> {
+        Ok(if path.is_absolute() {
+            path.to_path_buf()
+        } else {
+            std::env::current_dir()?.join(path)
+        })
+    };
+    Ok((absolute(&config.dir)?, absolute(&config.state)?))
+}
+
 fn preview_for_binary_mode(
     config: &Config,
     location: &Location,
     binary: PathBuf,
     background: bool,
 ) -> Result<Value> {
-    let config_dir = if config.dir.is_absolute() {
-        config.dir.clone()
-    } else {
-        std::env::current_dir()?.join(&config.dir)
-    };
-    let state_dir = if config.state.is_absolute() {
-        config.state.clone()
-    } else {
-        std::env::current_dir()?.join(&config.state)
-    };
+    let (config_dir, state_dir) = definition_directories(config)?;
     let spec = Spec {
         binary: binary
             .to_str()

@@ -174,19 +174,22 @@ impl Installation {
 }
 
 /// The expected Toast command, self-anchored (zerus-mgw2v): this service's own
-/// native canonical image and its actual config and state arguments. No HOME,
-/// USERPROFILE, HGS_EXECUTABLE, registry-derived image, sibling search or
-/// fallback selector takes part. It matches the registered command path and
-/// arguments; it is not a content or Grant proof.
+/// native canonical image and its actual config and state directories,
+/// normalised by the registration writers' own definition_directories. No
+/// HOME, USERPROFILE, HGS_EXECUTABLE, registry-derived image, sibling search
+/// or fallback selector takes part. It matches the registered command path
+/// and arguments; it is not a content or Grant proof.
 fn selected_command(config: &Config) -> Result<(String, String), &'static str> {
     let image =
         platform::canonical(std::env::current_exe().map_err(|_| "selected_cli_unavailable")?)
             .map_err(|_| "selected_cli_unavailable")?;
     let image = image.to_str().ok_or("selected_cli_unavailable")?.to_owned();
+    let (config_dir, state_dir) = crate::desktop::registration::definition_directories(config)
+        .map_err(|_| "configuration_unavailable")?;
     let command = super::registration::expected_command(
         &image,
-        config.dir.to_str().ok_or("configuration_unavailable")?,
-        config.state.to_str().ok_or("configuration_unavailable")?,
+        config_dir.to_str().ok_or("configuration_unavailable")?,
+        state_dir.to_str().ok_or("configuration_unavailable")?,
     )?;
     Ok((image, command))
 }

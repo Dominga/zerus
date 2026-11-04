@@ -292,3 +292,46 @@ fn the_selected_command_is_this_image_and_configuration_whatever_home_or_executa
         String::from_utf8_lossy(&output.stderr)
     );
 }
+
+#[test]
+fn relative_configuration_formats_exactly_as_the_registration_writer() {
+    // Config::load keeps a relative HGS_CONFIG_DIR; the writer makes the
+    // definition directories absolute, and the selector must match it.
+    let config = Config {
+        home: std::env::temp_dir()
+            .join("selection home")
+            .to_str()
+            .unwrap()
+            .into(),
+        dir: "relative config dir ü".into(),
+        state: "relative state dir".into(),
+        selves: vec![],
+        peers: vec![],
+        base_peers: vec![],
+        peers_from_environment: false,
+        machines: Default::default(),
+        tab: false,
+        tab_colors: String::new(),
+    };
+    let location = Location::new(&config).unwrap();
+    let plan = crate::desktop::registration::windows_plan(&config, &location).unwrap();
+    let (image, command) = selected_command(&config).unwrap();
+    assert_eq!(
+        command,
+        super::super::registration::expected_command(
+            &image,
+            plan["argv"][4].as_str().unwrap(),
+            plan["argv"][6].as_str().unwrap()
+        )
+        .unwrap()
+    );
+    let here = std::env::current_dir().unwrap();
+    assert_eq!(
+        plan["argv"][4],
+        here.join("relative config dir ü").to_str().unwrap()
+    );
+    assert_eq!(
+        plan["argv"][6],
+        here.join("relative state dir").to_str().unwrap()
+    );
+}

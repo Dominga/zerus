@@ -143,6 +143,7 @@ struct Hub {
     legacy: Option<legacy_projects::Context>,
     legacy_report: Option<legacy_projects::Report>,
     legacy_epochs: HashMap<String, u64>,
+    legacy_read_blocked: bool,
     source_generation: u64,
     /// Only an adopted current source observation can qualify local metadata.
     /// Kept out of Controller: it is never shared state or apply input.
@@ -657,6 +658,11 @@ impl Organization {
     fn view(&self, hub: &Hub) -> SyncView {
         let mut view = hub.sync.view();
         view.notice = hub.notice.clone();
+        if hub.legacy_read_blocked {
+            view.reason = Some(legacy_projects::READ_BLOCKED.into());
+            view.status = legacy_projects::READ_BLOCKED.into();
+            view.status_error = true;
+        }
         view.layout_save_paused = !self.0.layout_writable;
         if !self.0.allowed {
             view.ready = false;
@@ -1127,6 +1133,9 @@ impl Organization {
         let wait = hub
             .sync
             .next_due()
+            .into_iter()
+            .chain(hub.legacy.as_ref().and_then(legacy_projects::Context::next_due))
+            .min()
             .map_or(IDLE_MS, |at| at.saturating_sub(now))
             .clamp(1, IDLE_MS);
         drop(

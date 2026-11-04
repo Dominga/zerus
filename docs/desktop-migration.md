@@ -637,6 +637,15 @@ original child and its pipes have drained. The Migration report shows key names
 and fixed reasons only. Ambiguous retained history and the 2 MiB whole-input cap
 are explicit blocked outcomes requiring review; neither silently drops data.
 
+If a post-import catalog/configuration read fails, the same worker retries only
+those reads, backing off from 250 ms to a 30 s cap. The reservation remains pending
+and Apply is never dispatched again. After three failures, Projects and the
+Migration report show a blocked verification state while reads continue; a fresh
+verified read clears that state and releases the catalog fence. A failure alone
+never releases it. Separate desktops have separate reservations, as Qt did;
+concurrent imports can add copies before sync, and the location rule prevents
+further additions once those copies are visible.
+
 ## Retained Qt shared organization
 
 On the production switch only, the existing local organization topic queues a

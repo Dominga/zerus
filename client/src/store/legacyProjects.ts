@@ -9,6 +9,7 @@ const REASONS = {
   legacy_projects_history: () => tr("Earlier project changes prevent automatic import. Review the existing projects manually."),
   legacy_projects_invalid_folders: () => tr("Some legacy folders are invalid. Existing projects and the source are kept."),
   legacy_projects_windows_unsupported: () => tr("Legacy Windows folders require device-local import and were not shared."),
+  legacy_projects_read_blocked: () => tr("The fresh project catalog or computer configuration could not be verified. Reads retry automatically; the original import will not be applied again."),
   legacy_projects_pending: () => tr("The original import has not been confirmed. It will not be applied again."),
 };
 export interface LegacyProjectRow { status: string; keys: string[]; reasons: { code: string; text: string }[] }
@@ -30,4 +31,10 @@ export function legacyProjectRow(value: unknown): LegacyProjectRow | undefined {
   if (report.keys.length !== 2) return;
   const status = report.state === "imported" ? tr("Imported") : report.state === "waiting" ? tr("Waiting for confirmation") : tr("Needs review");
   return { status, keys: report.keys as string[], reasons: (report.reasons as (keyof typeof REASONS)[]).map(code => ({ code, text: REASONS[code]() })) };
+}
+
+/** Translate the one fixed native recovery status, preserving other statuses. */
+export function legacyProjectStatus(status: string): string {
+  return status === "Project import verification is blocked. Retrying reads automatically."
+    ? tr("Project import verification is blocked. Retrying reads automatically.") : status;
 }

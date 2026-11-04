@@ -5,7 +5,7 @@ use super::*;
 use serde_json::json;
 use sha2::{Digest, Sha256};
 use std::collections::BTreeSet;
-use std::sync::atomic::AtomicBool;
+use std::sync::atomic::{AtomicBool, Ordering};
 use zerus_client_core::reads;
 use zerus_client_core::settings::{CapturedQt, QtStore, Settings};
 use zerus_client_core::swarm::legacy_projects::{self as model, Binding, Code, Plan};
@@ -13,11 +13,21 @@ use zerus_client_core::swarm::sync::{self, ExternalTicket};
 use zerus_client_core::{ComputerId, Invocation};
 
 const MACHINES: usize = 256;
+const READ_BACKOFF_MS: [u64; 5] = [250, 1_000, 3_000, 10_000, 30_000];
+const READ_BLOCKED_AFTER: u8 = 3;
+const READ_BLOCKED_CODE: &str = "legacy_projects_read_blocked";
+pub(super) const READ_BLOCKED: &str = zerus_client_core::source!(
+    "Project import verification is blocked. Retrying reads automatically."
+);
+fn read_delay(failures: u8) -> u64 {
+    READ_BACKOFF_MS[usize::from(failures.saturating_sub(1)).min(READ_BACKOFF_MS.len() - 1)]
+}
 
 #[derive(Clone)]
 pub(super) struct Report {
     settings: Settings,
     codes: Arc<Mutex<Vec<Code>>>,
+    read_blocked: Arc<AtomicBool>,
 }
 impl Report {
     fn problem(&self, code: Code) {
@@ -29,13 +39,17 @@ impl Report {
     pub(super) fn value(&self) -> Value {
         let mut value = self.settings.legacy_project_report();
         let codes = self.codes.lock().unwrap_or_else(PoisonError::into_inner);
-        if !codes.is_empty() {
+        let read_blocked = self.read_blocked.load(Ordering::Acquire);
+        if !codes.is_empty() || read_blocked {
             let reasons = value["reasons"].as_array_mut().unwrap();
             for code in codes.iter() {
                 let reason = json!(code.as_str());
                 if !reasons.contains(&reason) {
                     reasons.push(reason);
                 }
+            }
+            if read_blocked {
+                reasons.push(json!(READ_BLOCKED_CODE));
             }
             value["state"] = json!("blocked");
             value["keys"] = json!(["projects", "folders"]);
@@ -79,6 +93,7 @@ struct Job {
     /// Latches before the original call; no error path queues Apply again.
     sent: bool,
     last_read_digest: String,
+    read_failures: u8,
 }
 #[derive(Clone, Copy)]
 enum Step {
@@ -99,8 +114,10 @@ enum Stage {
         resources: Weak<Resources>,
     },
     Source(Value),
-    /// Retry a failed *read* only after the source publishes another digest.
-    ReadAfterSource((u64, u64, String, bool)),
+    /// Only fresh read/confirmation is retried, never preparation or Apply.
+    RetryRead {
+        at: u64,
+    },
     Done,
 }
 struct Resources(Weak<Shared>);
@@ -126,6 +143,7 @@ impl Organization {
         let report = Report {
             settings,
             codes: Arc::new(Mutex::new(Vec::new())),
+            read_blocked: Arc::new(AtomicBool::new(false)),
         };
         hub.legacy_epochs.insert(String::new(), 0);
         hub.legacy_report = Some(report.clone());
@@ -269,21 +287,6 @@ fn cache(org: &Organization) -> Option<OrganizationSnapshot> {
     let source = org.lock().source.clone()?;
     source()
 }
-fn read_stamp(org: &Organization, target: &Target) -> (u64, u64, String, bool) {
-    let (generation, epoch) = {
-        let hub = org.lock();
-        (
-            hub.source_generation,
-            hub.legacy_epochs.get("").copied().unwrap_or_default(),
-        )
-    };
-    (
-        generation,
-        epoch,
-        cache(org).map_or(String::new(), |s| s.digest),
-        target.root_current(org),
-    )
-}
 fn same_source(source: &OrganizationSnapshot, value: &Value) -> bool {
     source.node_id == value["node_id"].as_str().unwrap_or_default()
         && source.swarm_id == value["swarm_id"].as_str().unwrap_or_default()
@@ -424,15 +427,20 @@ impl Context {
                     };
                     false
                 } else {
-                    if let Err(code) = self.result(org, &mut job, step, result) {
-                        self.report.problem(code);
-                        if job.ticket.is_some() {
-                            job.stage = if matches!(step, Step::After | Step::Confirm) {
-                                Stage::ReadAfterSource(read_stamp(org, &job.target))
-                            } else {
-                                job.command(Step::After, Read::Swarm)
-                            };
+                    match self.result(org, &mut job, step, result) {
+                        Err(_) if matches!(step, Step::After | Step::Confirm) => {
+                            self.retry_read(org, &mut job);
                         }
+                        Err(code) => {
+                            self.report.problem(code);
+                            if job.ticket.is_some() {
+                                job.queue(Step::After, Read::Swarm);
+                            }
+                        }
+                        Ok(()) if matches!(job.stage, Stage::Done) => {
+                            self.read_status(org, false, false)
+                        }
+                        Ok(()) => {}
                     }
                     true
                 }
@@ -445,9 +453,10 @@ impl Context {
                     job.queue(Step::Confirm, Read::Machines);
                     true
                 } else if !job.target.root_current(org) {
-                    self.report.problem(Code::Changed);
                     if job.ticket.is_some() {
-                        job.stage = Stage::ReadAfterSource(read_stamp(org, &job.target));
+                        self.retry_read(org, &mut job);
+                    } else {
+                        self.report.problem(Code::Changed);
                     }
                     false
                 } else if let Some(source) = cache(org).filter(|s| s.digest != job.last_read_digest)
@@ -462,12 +471,12 @@ impl Context {
                     false
                 }
             }
-            Stage::ReadAfterSource(stamp) => {
-                if read_stamp(org, &job.target) != stamp {
+            Stage::RetryRead { at } => {
+                if org.now() >= at {
                     job.queue(Step::After, Read::Swarm);
                     true
                 } else {
-                    job.stage = Stage::ReadAfterSource(stamp);
+                    job.stage = Stage::RetryRead { at };
                     false
                 }
             }
@@ -477,6 +486,35 @@ impl Context {
             self.job = Some(job);
         }
         progress
+    }
+    fn read_status(&self, org: &Organization, blocked: bool, fenced: bool) {
+        self.report.read_blocked.store(blocked, Ordering::Release);
+        let mut hub = org.lock();
+        if hub.legacy_read_blocked != (blocked && fenced) {
+            hub.legacy_read_blocked = blocked && fenced;
+            org.publish(&mut hub);
+            org.release(hub);
+        }
+    }
+    fn retry_read(&self, org: &Organization, job: &mut Job) {
+        job.read_failures = job.read_failures.saturating_add(1);
+        job.stage = Stage::RetryRead {
+            at: org.now().saturating_add(read_delay(job.read_failures)),
+        };
+        // A transient transport error is not a permanent import refusal.
+        // Keep retrying only the read lane, with a 30 s delay cap; after three
+        // failures, Projects and the report explain why the fence is held.
+        self.read_status(
+            org,
+            job.read_failures >= READ_BLOCKED_AFTER,
+            job.ticket.is_some(),
+        );
+    }
+    pub(super) fn next_due(&self) -> Option<u64> {
+        match self.job.as_ref()?.stage {
+            Stage::RetryRead { at } => Some(at),
+            _ => None,
+        }
     }
     fn discover(&mut self, org: &Organization) -> bool {
         let hub = org.lock();
@@ -574,6 +612,7 @@ impl Context {
                 pending: existing.is_some(),
                 sent: false,
                 last_read_digest: snapshot["digest"].as_str().unwrap_or_default().into(),
+                read_failures: 0,
             });
             return true;
         }
@@ -785,6 +824,7 @@ impl Context {
                         .map_err(|_| Code::Changed)?;
                     hub.source_generation =
                         hub.source_generation.checked_add(1).ok_or(Code::Changed)?;
+                    hub.legacy_read_blocked = false;
                     hub.shown = None;
                     org.publish(&mut hub);
                     org.release(hub);
@@ -823,5 +863,18 @@ impl Context {
     }
     pub(super) fn idle_for_test(&self) -> bool {
         self.imported.is_some() && self.job.is_none() && !self.seen.is_empty()
+    }
+}
+
+#[cfg(all(test, unix))]
+mod retry_tests {
+    use super::*;
+    #[test]
+    fn fresh_read_retries_back_off_and_stay_capped_without_overflow() {
+        assert_eq!(
+            (1..=6).map(read_delay).collect::<Vec<_>>(),
+            vec![250, 1_000, 3_000, 10_000, 30_000, 30_000]
+        );
+        assert_eq!(read_delay(u8::MAX), 30_000);
     }
 }

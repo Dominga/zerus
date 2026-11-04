@@ -163,13 +163,11 @@ fn the_actual_worker_imports_once_and_waits_for_the_post_apply_source() {
         assert_eq!(folder["machine_id"], machine);
         assert_eq!(request["desired"]["projects"].as_array().unwrap().len(), 2);
         let project_call = calls(&fake, "project")[0].clone();
-        assert!(
-            project_call["argv"]
-                .as_array()
-                .unwrap()
-                .iter()
-                .any(|a| a == machine)
-        );
+        assert!(project_call["argv"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .any(|a| a == machine));
         let report = org.legacy_project_report();
         assert_eq!(report["state"], "imported");
         assert!(!report.to_string().contains("Legacy fixture"));
@@ -228,11 +226,10 @@ fn a_lost_apply_is_never_replayed_even_after_reopening_the_actual_worker() {
     assert_eq!(calls(&fake, "apply").len(), 1);
     assert_eq!(calls(&fake, "project").len(), 1);
     assert!(!complete(&reopened, OWNER));
-    assert!(
-        !org.legacy_project_report()
-            .to_string()
-            .contains("/srv/retained-source")
-    );
+    assert!(!org
+        .legacy_project_report()
+        .to_string()
+        .contains("/srv/retained-source"));
     fake.finish(org);
 }
 
@@ -258,13 +255,11 @@ fn changed_identity_or_source_after_the_read_prevents_any_reservation_or_apply()
         wait_until("late read refused", || settled(&org));
         assert!(calls(&fake, "apply").is_empty());
         assert!(settings.legacy_project_import(OWNER).unwrap().is_none());
-        assert!(
-            org.legacy_project_report()["reasons"]
-                .as_array()
-                .unwrap()
-                .iter()
-                .any(|v| v == "legacy_projects_changed")
-        );
+        assert!(org.legacy_project_report()["reasons"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .any(|v| v == "legacy_projects_changed"));
         fake.finish(org);
     }
 }
@@ -446,10 +441,12 @@ fn a_failed_follow_before_pump_publication_invalidates_the_reserved_source() {
 
 #[test]
 fn a_newer_catalog_after_apply_is_read_again_without_replaying_the_import() {
-    let (fake, _pump, org, settings, cache) = setup(config(), false);
+    let mut configuration = config();
+    configuration["gates"] = json!({"get-2":"release-snapshot"});
+    let (fake, _pump, org, settings, cache) = setup(configuration, false);
     start(&fake, &org, &settings);
-    wait_until("the original fresh post-apply read", || {
-        calls(&fake, "get").len() >= 2
+    wait_until("the captured original post-apply snapshot", || {
+        fake.dir.join("get-2-read").exists()
     });
     let mut latest: Value =
         serde_json::from_slice(&std::fs::read(fake.dir.join("legacy-state.json")).unwrap())
@@ -458,6 +455,7 @@ fn a_newer_catalog_after_apply_is_read_again_without_replaying_the_import() {
     latest["organization"]["next_choice"] = json!("kept");
     write(fake.dir.join("legacy-state.json"), &latest);
     advance(&fake, &org, &cache);
+    std::fs::write(fake.dir.join("release-snapshot"), b"").unwrap();
     wait_until(
         "newer checked catalog confirms the original witnesses",
         || complete(&settings, OWNER) && settled(&org),
@@ -470,4 +468,144 @@ fn a_newer_catalog_after_apply_is_read_again_without_replaying_the_import() {
         "kept"
     );
     fake.finish(org);
+}
+
+#[test]
+fn a_failed_fresh_read_of_a_qt_completed_computer_recovers_without_a_catalog_change() {
+    let mut configuration = config();
+    configuration["failures"] = json!({"get":[2]});
+    let (fake, _pump, org, settings, cache) = setup(configuration, true);
+    let mut local = initial()["organization"].clone();
+    local["imported_machines"] = json!(["fixture-peer"]);
+    std::fs::write(
+        fake.dir.join("qt.ini"),
+        format!(
+            "[workspace]\norganization={}\n",
+            serde_json::to_string(&local.to_string()).unwrap()
+        ),
+    )
+    .unwrap();
+    start(&fake, &org, &settings);
+    wait_until(
+        "fresh read retry releases the quiet Qt completion fence",
+        || complete(&settings, PEER) && settled(&org) && org.lock().sync.ready(),
+    );
+    assert_eq!(calls(&fake, "get").len(), 3);
+    assert!(calls(&fake, "project").is_empty());
+    assert!(calls(&fake, "apply").is_empty());
+    assert_eq!(cache.lock().unwrap()["digest"], initial()["digest"]);
+    assert!(!org.lock().sync.busy());
+    assert_eq!(org.legacy_project_report()["state"], "imported");
+    fake.finish(org);
+}
+
+#[test]
+fn failed_post_apply_catalog_and_config_reads_retry_without_reapplying() {
+    for read in ["get", "machines"] {
+        let mut configuration = config();
+        configuration["failures"] = if read == "get" {
+            json!({"get":[2]})
+        } else {
+            json!({"machines":[3]})
+        };
+        configuration["gates"] = json!({"get-2":"release-fresh"});
+        let (fake, _pump, org, settings, cache) = setup(configuration, false);
+        start(&fake, &org, &settings);
+        wait_until("apply landed before the held fresh read", || {
+            calls(&fake, "get").len() == 2
+        });
+        // Publish before the failing read finishes. No source event follows
+        // that failure, so a source-change-only retry cannot pass this case.
+        advance(&fake, &org, &cache);
+        assert!(org.lock().sync.busy());
+        assert!(!complete(&settings, OWNER));
+        assert_eq!(calls(&fake, "apply").len(), 1);
+        std::fs::write(fake.dir.join("release-fresh"), b"").unwrap();
+        wait_until("a later checked read releases the original fence", || {
+            complete(&settings, OWNER) && settled(&org) && org.lock().sync.ready()
+        });
+        assert_eq!(calls(&fake, "apply").len(), 1);
+        assert_eq!(calls(&fake, "project").len(), 1);
+        assert_eq!(calls(&fake, "get").len(), 3);
+        assert!(!org.lock().sync.busy());
+        assert_eq!(org.legacy_project_report()["state"], "imported");
+        fake.finish(org);
+    }
+}
+
+#[test]
+fn repeated_read_failures_explain_the_held_fence_and_clear_after_later_success() {
+    use crate::organization::legacy_projects::READ_BLOCKED;
+    for read in ["get", "machines"] {
+        let mut configuration = config();
+        configuration["failures"] = if read == "get" {
+            json!({"get":[2,3,4]})
+        } else {
+            json!({"machines":[3,4,5]})
+        };
+        configuration["gates"] = if read == "get" {
+            json!({"get-2":"release-fresh", "get-5":"release-later"})
+        } else {
+            json!({"get-2":"release-fresh", "machines-6":"release-later"})
+        };
+        let (fake, _pump, org, settings, cache) = setup(configuration, false);
+        struct Release(PathBuf);
+        impl Drop for Release {
+            fn drop(&mut self) {
+                let _ = std::fs::write(self.0.join("release-fresh"), b"");
+                let _ = std::fs::write(self.0.join("release-later"), b"");
+            }
+        }
+        let _release = Release(fake.dir.clone());
+        let projects = Arc::new(Mutex::new((String::new(), false)));
+        let shown = projects.clone();
+        org.set_presented(Arc::new(move |_, _, status| {
+            *shown.lock().unwrap() = status;
+        }));
+        start(&fake, &org, &settings);
+        wait_until("original apply's held post-read", || {
+            calls(&fake, "get").len() == 2
+        });
+        advance(&fake, &org, &cache);
+        std::fs::write(fake.dir.join("release-fresh"), b"").unwrap();
+        wait_until(
+            "repeated read failure reaches Projects and the report",
+            || {
+                let status = projects.lock().unwrap().clone();
+                status == (READ_BLOCKED.into(), true)
+                    && org.legacy_project_report()["reasons"]
+                        .as_array()
+                        .unwrap()
+                        .iter()
+                        .any(|c| c == "legacy_projects_read_blocked")
+            },
+        );
+        {
+            let hub = org.lock();
+            assert!(hub.sync.busy());
+            assert!(!hub.sync.ready());
+            assert_eq!(org.view(&hub).reason.as_deref(), Some(READ_BLOCKED));
+        }
+        assert!(!complete(&settings, OWNER));
+        assert_eq!(calls(&fake, "apply").len(), 1);
+        assert_eq!(calls(&fake, "project").len(), 1);
+        assert_eq!(org.legacy_project_report()["state"], "blocked");
+        assert!(!org
+            .legacy_project_report()
+            .to_string()
+            .contains("/srv/retained-source"));
+        std::fs::write(fake.dir.join("release-later"), b"").unwrap();
+        wait_until(
+            "later successful read clears the fence and transient notices",
+            || complete(&settings, OWNER) && settled(&org) && org.lock().sync.ready(),
+        );
+        assert!(!org.lock().sync.busy());
+        assert_ne!(projects.lock().unwrap().0, READ_BLOCKED);
+        assert!(!projects.lock().unwrap().1);
+        assert_eq!(org.legacy_project_report()["state"], "imported");
+        assert_eq!(org.legacy_project_report()["reasons"], json!([]));
+        assert_eq!(calls(&fake, "apply").len(), 1);
+        assert_eq!(calls(&fake, "project").len(), 1);
+        fake.finish(org);
+    }
 }

@@ -28,11 +28,18 @@ counts = json.loads(counts_file.read_text()) if counts_file.exists() else {}
 action = "projects" if words == ["project", "ls", "--json"] else "machines" if words == ["machine", "ls"] else words[1] if words[:1] == ["swarm"] else "invalid"
 counts[action] = counts.get(action, 0) + 1
 counts_file.write_text(json.dumps(counts))
+snapshot = None
+if action == "get":
+    snapshot = (here / "legacy-state.json").read_text()
+    (here / f"get-{counts[action]}-read").touch()
 gate = config.get("gates", {}).get(f"{action}-{counts[action]}")
 if gate:
     deadline = time.monotonic() + 20
     while not (here / gate).exists() and time.monotonic() < deadline:
         time.sleep(.01)
+if counts[action] in config.get("failures", {}).get(action, []):
+    sys.stderr.write("private read failure /srv/retained-source must not enter report\n")
+    sys.exit(2)
 if action == "machines":
     revision = "b" if config.get("changed_config") and counts.get("projects") else "a"
     print(json.dumps({"local": "fixture", "revision": revision * 64,
@@ -51,7 +58,7 @@ while not (p/'release-pipes').exists() and time.monotonic()<deadline: time.sleep
     else:
         print(json.dumps(config["rows"]))
 elif action == "get":
-    print((here / "legacy-state.json").read_text())
+    print(snapshot)
 elif action == "apply":
     original = json.loads((here / "legacy-state.json").read_text())
     request = json.loads(data)

@@ -1,5 +1,5 @@
 import { describe, expect, it } from "vitest";
-import { legacyProjectRow } from "./legacyProjects";
+import { legacyProjectRow, legacyProjectStatus } from "./legacyProjects";
 
 const report = (state: string, reasons: string[] = []) => ({ family: "legacy-projects", state, keys: ["projects", "folders"], reasons });
 describe("legacy project migration report", () => {
@@ -21,9 +21,18 @@ describe("legacy project migration report", () => {
     for (const bad of [undefined, null, [], {}, report("future"),
       { ...report("blocked"), keys: ["/srv/private-fixture", "folders"] },
       { ...report("blocked"), reasons: ["private-project-name"] },
-      { ...report("blocked"), reasons: Array(8).fill("legacy_projects_pending") },
+      { ...report("blocked"), reasons: Array(9).fill("legacy_projects_pending") },
       { ...report("blocked"), keys: ["projects", "projects"] },
       { ...report("blocked"), reasons: ["legacy_projects_history", "legacy_projects_history"] },
     ]) expect(legacyProjectRow(bad)).toBeUndefined();
   });
+});
+
+it("explains blocked read recovery without adding a retry-apply action", () => {
+  const row = legacyProjectRow(report("blocked", ["legacy_projects_pending", "legacy_projects_read_blocked"]))!;
+  expect(row.status).toBe("Needs review");
+  expect(row.reasons[1].text).toContain("Reads retry automatically");
+  expect(row.reasons[1].text).toContain("will not be applied again");
+  expect(legacyProjectStatus("Project import verification is blocked. Retrying reads automatically.")).toContain("Retrying reads");
+  expect(legacyProjectStatus("Unrelated status")).toBe("Unrelated status");
 });

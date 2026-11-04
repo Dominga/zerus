@@ -301,16 +301,23 @@ Consumers therefore treat `session_id` as a hint and fall back to the run and
 conversation identities.
 The agent's environment carries it as `HGS_SESSION_ID`, beside `HGS_SESSION`
 (the name at launch) and `HGS_RUN_ID`, and `hgs ls --json` rows and
-inspections include it. A hook prefers the record that carries the agent's
-`HGS_SESSION_ID`; when none does, for example after an older hgs rewrote the
-record, the run identity alone decides, as before.
+inspections include it. A hook first resolves the agent's `HGS_SESSION_ID`
+through the ID index, under whatever label the session carries now. Failing
+that, it prefers the record that carries the ID; when none does, for example
+after an older hgs rewrote the record, the run identity alone decides, as
+before.
 
 A command whose first argument is a session also accepts `--session-id ID`
 instead, for example `hgs inspect --session-id ID` or `hgs rename --session-id
 ID NEW-NAME`. A name given before the flag must be that session's current
 name; arguments after it are the command's own. The value must be the
-lowercase UUID shown by `hgs ls --json`, given once. Resolution only finds the
-session's name: every record the command then reads under that name, live or
+lowercase UUID shown by `hgs ls --json`, given once. Resolution reads the
+verified index `ids/<session_id>.json` under the state directory, which names
+the session's current label. A missing or stale entry costs one scan of the
+records, which repairs it when the state lock is free. Hooks never repair, and
+an index this process cannot write is left alone. An older hgs ignores the
+index. Resolution only
+finds the session's name: every record the command then reads under that name, live or
 archived, must still carry the ID, so a name another session took meanwhile
 fails with "Session ID ID no longer names NAME" instead of acting on it. `kill`
 and `a` bind the terminal before their first effect: the name's immutable

@@ -130,6 +130,7 @@ pub(super) fn save(record: &Value) -> Result<String> {
         {
             remove_synced(&record_path(string(record, "name")))?;
             rename::remove_legacy(&current)?;
+            session_index::retire(&current);
         }
     }
     Ok(id)

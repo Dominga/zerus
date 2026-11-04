@@ -87,6 +87,7 @@ Constraints (coordinator, 2026-11-04):
 
 - P1b and every later phase must not depend on cross-version ID continuity. Hooks, `--session-id` and machine clients treat `session_id` as a hint and fall back to the run and conversation identities when an older CLI has changed it.
 - P3 must not ship before hooks resolve by `session_id` through P2's O(1) layout. In P1, hooks keep the O(1) name-first lookup and treat `HGS_SESSION_ID` as a hint. The record found by name is taken at once when it carries that ID. Otherwise the run scan prefers the records that carry it, and when none does, the run identity alone decides, as before P1. Name-first is only safe while names are unique.
+- P2a (coordinator, 2026-11-04) provides that O(1) index without moving records. `ids/<session_id>.json` names the label and record kind of the live or saved session with that ID. It is a verified cache, never a source of truth: every hit reads that record again and needs that session ID, no archive and no rename shadow. A miss or a stale entry falls back to one scan. `--session-id` resolution repairs the entry under the state writer lock when the lock is free; hooks never repair, so their poll loops never take the lock. A process that finds `ids/` or an entry it must not write, or fails to change one, changes no more entries. A broken index therefore costs each lookup one scan and never the lock. Archive and forget retire the entry under their lock. An older hgs ignores `ids/`, so a rollback loses nothing. Records stay at their `sha256(label)`, `bindings/` and provider binding paths; `sessions/<id>.json` is used only for a session that reuses a taken label, in P3. `--session-id` resolution and the agent's own hooks (`HGS_SESSION_ID`) read the index.
 - P1c must not move a machine client's hot path (polling, status, watch) onto `--session-id` until P2's O(1) index exists. Until then `--session-id` scans the bindings once per explicit call. P3 is gated on P1 and P2 being deployed to every computer in the swarm, and the mobile connector, because an older peer can only report ambiguity, not resolve it.
 
 ## Owner questions
@@ -98,5 +99,11 @@ Constraints (coordinator, 2026-11-04):
 
    The alternative is that a launch always creates a new session.
 2. **Terminal names.** Should a new session keep its label as the tmux name when free, which keeps `tmux attach -t LABEL` working? The alternative is always ID-based terminal names: simpler, but a visible change for anyone attaching by hand.
+
+   **Coordinator decision, 2026-11-04** (the owner asked for the release to run without these answers and may override it): keep the label as the tmux name while it is free, so `tmux attach -t LABEL` keeps working; use an ID-based terminal name only when the label is already taken.
 3. **Fork names.** Should forks keep the `-fork`/`-2` suffix once labels may repeat (proposed, for readability), or reuse the source label as-is?
 4. **Swarm rollout.** Is one release window of dual-written catalog membership acceptable, or should P2 wait for an explicit catalog version gate?
+
+   **Coordinator decision, 2026-11-04** (the owner may override it): dual-write catalog membership, both the name and `id:<session_id>`. Readers switch to ID membership, and the name form stops being written, only behind an explicit catalog version gate that every computer and the mobile connector advertise. There is no time-based release window.
+
+Questions 1 and 3 stay open for the owner. P3 does not start before they are answered.

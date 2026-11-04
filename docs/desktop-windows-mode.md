@@ -235,6 +235,94 @@ requires no current Service grant and confers no authority. A later separately
 confirmed choice receives a new UUID; there is no automatic UUID rotation or
 unknown-effect replay.
 
+## Review an interrupted mode change
+
+Use a separate explicit review in Zerus Settings when available, or the updated
+maintained CLI from an admitted foreground classic console outside Zerus:
+
+```powershell
+hgs desktop registration review-mode --json --request-id UUID
+```
+
+Use the original `pending_transition.request_id` from `registration status`.
+Review cannot choose a mode. It performs no Stop, Update, RunEx, Grant, Rearm,
+revoke or rollback-hold acquisition. It does not consume a later instance or
+release an original operation, Owner, child or pipe charge. Retry, status and
+automatic reconnect never perform it.
+
+New attempts retain consumer PID/birth from the actual admitted native Caller,
+plus native machine and kernel boot identity, before effects. Ambiguous records
+from the current boot require an explicit reboot barrier. The first Review
+binds that barrier to the original UUID and full immutable record binding,
+machine and kernel boot; it returns `reboot_required` without acknowledgement.
+**Restart the computer, then use Review interrupted mode change again.**
+Use Windows **Restart**, not Shut down followed by power-on: Fast Startup can
+keep the previous kernel session. If the kernel boot identity is unchanged,
+Review still refuses acknowledgement. Confirming this distinction against
+the actual BootId on a Fast Startup PC remains part of native qualification.
+A genuinely different kernel boot on that same machine proves process death
+only. Wall-clock age, file dates, a free lock and a missing direct child never
+substitute for this proof. Native boot observation is read from the kernel's
+loader boot sequence, not a registry counter or timestamp.
+
+One narrow legacy `stop_offered` case can be reviewed without reboot: under the
+exclusive registration lock and unchanged owned task definition, the recorded
+old service PID/birth must be physically gone and its exact original GUID absent.
+A live/reused/unreadable PID, queued/unknown activity or a filtered empty active
+inventory supplies no such proof. An independently started later instance is
+left untouched and lends no identity or authority to the old request.
+
+Successful review archives the original phase, UUID and binding with a separate
+`reviewed_unknown` disposition. The manager outcome remains **Unknown**; review
+never claims that Stop succeeded. Status exposes the latest `reviewed_transition`
+and keeps `activation_automatic_blocked` latched. A later mode choice is a second
+explicit confirmation with a new request and complete fresh native caller,
+current Grant, manager, task, endpoint and resource preflight. Unknown or queued
+activity and unconfirmed cleanup must still refuse that choice.
+
+The old switch route stays blocked after any review, even with a valid Grant.
+For a separately explicit foreground choice, name the reviewed original and
+generate a new request before invoking the maintained helper:
+
+```powershell
+$freshModeRequest = [guid]::NewGuid().ToString()
+hgs desktop registration install --mode background --json --after-review UUID --request-id $freshModeRequest
+```
+
+Select `passive` instead when that is the separately chosen mode. These UUIDs
+are routing fences, not consent or native authority. Settings must show its
+second native confirmation first. Keep the new original UUID after a timeout;
+only its read-only observation is permitted, never another generated UUID.
+
+```powershell
+hgs desktop registration mode-result --json --request-id $freshModeRequest
+```
+
+This lookup reads the bounded private receipt for that original UUID. It never
+checks or adopts a current instance, retries an effect or infers readiness.
+An absent receipt remains Unknown. After a new explicit choice was offered,
+keep that UUID until its original physical cleanup is confirmed; a timeout or
+missing receipt alone never permits another choice. Completed, cancelled and
+same-mode no-op request IDs remain reserved after later mode changes. The
+receipt ledger has a ceiling of 48 IDs and never evicts an old ID to permit
+replay. Actual capacity is lower when archives or longer selected commands use
+the shared 8 KiB record. Admission reserves the worst-case consumer, original
+start identity, offered phase, reboot barrier and reviewed archive bytes before
+any effect, so the last admitted transition can still record both reviews.
+
+The original archive retains at most eight entries within the existing 8 KiB
+mode-record bound, with no eviction or silent reset. Exhaustion refuses a new
+intent before effects. Missing, inconsistent or changed original evidence fails
+closed. Exhaustion leaves the current task and selected mode untouched, with
+no new pending intent. Status and original `mode-result` lookups remain usable.
+There is currently **no maintained history rollover or reset route**. Ordinary
+registration install/remove does not clear these retained identities and is
+not an exhaustion workaround. Keep the original record and current mode and
+request a maintained migration before another mode change; do not delete the
+record, discard an archive or rotate a pending UUID. The dedicated capability marker is
+`Desktop registration mode review ABI: desktop-registration-mode-review-v1`.
+Native PC and installed Settings qualification remain outstanding.
+
 ## Private qualification
 
 The Windows unit suite runs the creation-owner regression in one bounded child,

@@ -52,6 +52,61 @@ def installer_environment(isolated, original):
     return result
 
 
+def set_privileges(states):
+    """Enable or disable this process token's privileges ({name: enabled}).
+
+    Returns the prior state of each privilege that changed, to pass back later.
+    A child process starts with a copy of this token, so Setup inherits the
+    result. A privilege the token does not hold is left alone.
+    """
+    import ctypes
+    from ctypes import wintypes
+
+    class LUID(ctypes.Structure):
+        _fields_ = [("LowPart", wintypes.DWORD), ("HighPart", wintypes.LONG)]
+
+    class LUID_AND_ATTRIBUTES(ctypes.Structure):
+        _fields_ = [("Luid", LUID), ("Attributes", wintypes.DWORD)]
+
+    class TOKEN_PRIVILEGES(ctypes.Structure):
+        _fields_ = [("PrivilegeCount", wintypes.DWORD), ("Privileges", LUID_AND_ATTRIBUTES * 1)]
+
+    kernel32 = ctypes.WinDLL("kernel32", use_last_error=True)
+    advapi32 = ctypes.WinDLL("advapi32", use_last_error=True)
+    kernel32.GetCurrentProcess.restype = wintypes.HANDLE
+    kernel32.CloseHandle.argtypes = [wintypes.HANDLE]
+    advapi32.OpenProcessToken.argtypes = [wintypes.HANDLE, wintypes.DWORD, ctypes.POINTER(wintypes.HANDLE)]
+    advapi32.LookupPrivilegeValueW.argtypes = [wintypes.LPCWSTR, wintypes.LPCWSTR, ctypes.POINTER(LUID)]
+    advapi32.AdjustTokenPrivileges.argtypes = [
+        wintypes.HANDLE, wintypes.BOOL, ctypes.POINTER(TOKEN_PRIVILEGES), wintypes.DWORD,
+        ctypes.POINTER(TOKEN_PRIVILEGES), ctypes.POINTER(wintypes.DWORD)]
+    enabled_flag, adjust, query, not_all_assigned = 0x2, 0x20, 0x8, 1300
+    token = wintypes.HANDLE()
+    if not advapi32.OpenProcessToken(kernel32.GetCurrentProcess(), adjust | query, ctypes.byref(token)):
+        raise ctypes.WinError(ctypes.get_last_error())
+    prior = {}
+    try:
+        for name, enabled in states.items():
+            luid = LUID()
+            if not advapi32.LookupPrivilegeValueW(None, name, ctypes.byref(luid)):
+                raise ctypes.WinError(ctypes.get_last_error())
+            wanted = TOKEN_PRIVILEGES(1, (LUID_AND_ATTRIBUTES * 1)(
+                LUID_AND_ATTRIBUTES(luid, enabled_flag if enabled else 0)))
+            before = TOKEN_PRIVILEGES()
+            size = wintypes.DWORD()
+            if not advapi32.AdjustTokenPrivileges(token, False, ctypes.byref(wanted), ctypes.sizeof(before),
+                                                  ctypes.byref(before), ctypes.byref(size)):
+                raise ctypes.WinError(ctypes.get_last_error())
+            error = ctypes.get_last_error()
+            if error not in (0, not_all_assigned):
+                raise ctypes.WinError(error)
+            if error == 0 and before.PrivilegeCount:
+                prior[name] = bool(before.Privileges[0].Attributes & enabled_flag)
+    finally:
+        kernel32.CloseHandle(token)
+    return prior
+
+
 def registered():
     """DisplayVersion and InstallLocation of the HKCU uninstall entry, or None."""
     import winreg
@@ -346,6 +401,12 @@ class Installer(windows_host.HostCase):
         # never treat it as empty.
         locked = self.app / "locked"
         locked.mkdir(parents=True)
+        # FindFirstFile opens a folder with backup intent, so a token whose
+        # backup or restore privilege is enabled lists it whatever its ACL says.
+        # The CI suite runs elevated through WMI with both enabled. Disable them
+        # for this process; Setup, started from it, inherits that state.
+        prior = set_privileges({"SeBackupPrivilege": False, "SeRestorePrivilege": False})
+        self.addCleanup(set_privileges, prior)
         user = subprocess.run(["whoami"], capture_output=True, text=True, timeout=LIMIT,
                               creationflags=HIDDEN).stdout.strip()
         icacls = str(Path(os.environ["SystemRoot"]) / "System32" / "icacls.exe")
@@ -355,8 +416,14 @@ class Installer(windows_host.HostCase):
         # Runs before the case's own clean-up removes its folder.
         self.addCleanup(lambda: subprocess.run([icacls, str(locked), "/remove:d", user], stdin=subprocess.DEVNULL,
                                                capture_output=True, timeout=LIMIT, creationflags=HIDDEN))
-        with self.assertRaises(PermissionError):
+        try:
             os.listdir(locked)
+        except PermissionError:
+            pass
+        else:
+            privileges = subprocess.run(["whoami", "/priv"], capture_output=True, text=True, timeout=LIMIT,
+                                        creationflags=HIDDEN).stdout
+            self.fail("This token still lists a folder that denies it List:\n" + privileges)
         code, log = self.setup()
         self.assertEqual(code, 7, log[-4000:])
         self.assertIn("cannot be listed", log)

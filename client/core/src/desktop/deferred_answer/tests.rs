@@ -332,6 +332,7 @@ fn only_the_v1_allowlisted_sources_are_offered() {
         "codex_async",
         "hook",
         "claude_tool_approval",
+        "codex_goal_resume",
         "claude_new_kind",
         "",
     ] {

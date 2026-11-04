@@ -70,7 +70,9 @@ pub use crate::questions::CONSENT_FIELDS;
 /// listed, a new one included, stays on the direct path. Left out in v1:
 /// `codex_async` (a Skip key or pending settings keys can precede a plain
 /// error), Claude's `hook` questions and `claude_tool_approval` (a hook
-/// offer can be visible before a plain error).
+/// offer can be visible before a plain error), and `codex_goal_resume`
+/// (its question is read from a SQLite file that even a read-only open can
+/// write to, so the actor cannot observe it without an effect).
 pub const SOURCES: &[&str] = &[
     "claude_permission_mode",
     "claude_resume",
@@ -79,7 +81,6 @@ pub const SOURCES: &[&str] = &[
     "codex_hooks_trust",
     "codex_update",
     "codex_rate_limit",
-    "codex_goal_resume",
     "codex_folder_trust",
     "kimi_folder_trust",
     "kimi_cache_hint",

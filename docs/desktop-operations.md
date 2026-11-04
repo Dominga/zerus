@@ -266,9 +266,9 @@ The second kind, `deferred_answer` (`desktop::deferred_answer`, ABI
   any `@` or other-machine session and any session but a terminal agent's,
   and offers only the sources whose `rejected` receipt proves that nothing
   was delivered: Claude permission mode, resume, usage limit and folder
-  trust, Codex hooks trust, update, rate limit, goal resume and folder
-  trust, and Kimi folder trust, cache hint, plan review, tool approval and
-  wire questions. Codex asynchronous questions, Claude hook questions and
+  trust, Codex hooks trust, update, rate limit and folder trust, and Kimi
+  folder trust, cache hint, plan review, tool approval and wire questions.
+  Codex asynchronous questions and goal resume, Claude hook questions and
   Claude tool approvals stay on the direct path
   (`deferred_answer_source_refused`), as do OpenCode and DeepSeek
   (`deferred_answer_agent_refused`), decided before any offer.

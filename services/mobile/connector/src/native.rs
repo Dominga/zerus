@@ -19,10 +19,11 @@ use zerus_relay::json;
 /// The calling agent's identity, which native hgs never receives
 /// (`connector.py:46-52`). Everything else, HGS_CONFIG_DIR and HGS_PEERS
 /// included, passes on.
-pub const CONTEXT_KEYS: [&str; 23] = [
+pub const CONTEXT_KEYS: [&str; 24] = [
     "TMUX",
     "TMUX_PANE",
     "HGS_SESSION",
+    "HGS_SESSION_ID",
     "HGS_RUN_ID",
     "HGS_EXPECTED_ID",
     "HGS_EXECUTABLE",

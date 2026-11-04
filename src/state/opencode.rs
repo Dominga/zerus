@@ -102,10 +102,10 @@ pub(super) fn native_id(id: &str, prefix: &str) -> bool {
             .bytes()
             .all(|c| c.is_ascii_alphanumeric() || c == b'_' || c == b'-')
 }
-fn save(record: &Value) -> Result<()> {
-    let mut record = record.clone();
-    ensure_session_id(&mut record);
-    atomic(&binding_path(string(&record, "name")), &record.to_string())
+/// Saves the binding, keeping its durable session ID on the caller's record.
+pub(super) fn save(record: &mut Value) -> Result<()> {
+    ensure_session_id(record);
+    atomic(&binding_path(string(record, "name")), &record.to_string())
 }
 pub(crate) fn config_home() -> PathBuf {
     nonempty_env("OPENCODE_CONFIG_DIR")
@@ -333,7 +333,7 @@ fn adopt_binding(name: &str, conversation_id: &str) {
     if let Ok(mut record) = binding(name) {
         if record["conversation_id"] == conversation_id {
             modernize(&mut record);
-            let _ = save(&record);
+            let _ = save(&mut record);
         }
     }
 }
@@ -454,7 +454,7 @@ pub(crate) fn launch(
         verify_session(&service, &record)?;
         if adopted {
             modernize(&mut record);
-            save(&record)?;
+            save(&mut record)?;
         }
         return Ok(());
     }
@@ -470,7 +470,7 @@ pub(crate) fn launch(
     // Persist the chosen native ID and exact body before the first creation
     // attempt so one launch never has two identities.
     record["creation_body"] = body;
-    save(&record)?;
+    save(&mut record)?;
     finish_creation(&service, record, true)?;
     if let Ok(config) = crate::config::Config::load() {
         crate::swarm::infer_new_session(&config, name, &cwd);
@@ -515,7 +515,7 @@ fn finish_creation(service: &service::Service, mut record: Value, first: bool) -
             let map = record.as_object_mut().unwrap();
             map.remove("creation_pending");
             map.remove("creation_body");
-            save(&record)
+            save(&mut record)
         }
         Err(Refusal::Definite(reason)) => {
             let _ = fs::remove_file(binding_path(string(&record, "name")));
@@ -1903,7 +1903,7 @@ fn rename_with<N: Native>(
     new: &str,
     scope: Option<&session_action::Scope>,
     connect: impl FnOnce() -> Result<N>,
-    save: impl FnOnce(&Value) -> Result<()>,
+    save: impl FnOnce(&mut Value) -> Result<()>,
     marks: impl FnOnce(&str, &str) -> Result<()>,
     retire: impl FnOnce(&str) -> Result<()>,
 ) -> Result<()> {

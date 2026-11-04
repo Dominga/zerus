@@ -131,17 +131,81 @@ pub(super) fn read(name: &str) -> Result<Value> {
 }
 
 /// A session's durable identity (zerus-ucck P1): assigned when the session is
-/// first created and kept across resume, clear, rename, pause, archive and
-/// restore; a fork gets its own. A record an older CLI wrote gains one the
-/// next time this CLI writes it.
+/// first created and kept across resume, Clear, rename, pause, archive and
+/// restore; a fork gets its own. Every record write keeps it.
+///
+/// An older hgs rebuilds a record on resume or a fresh start from the fields
+/// it knows, dropping this one. A private index keyed by the provider's
+/// conversation, which older versions never touch, therefore restores it: the
+/// current conversation is indexed on every write, and a record without an
+/// ID looks up its current, expected, replaced and cleared conversations
+/// (which older writers keep) before a new ID is minted. Rename, archive and
+/// restore keep the conversation, so the index follows them.
 pub(super) fn ensure_session_id(record: &mut Value) {
     if string(record, "session_id").is_empty() {
-        record["session_id"] = json!(uuid::Uuid::new_v4().to_string());
+        let found = conversations(record)
+            .into_iter()
+            .find_map(|conversation| indexed_session(record, &conversation));
+        record["session_id"] =
+            json!(found.unwrap_or_else(|| uuid::Uuid::new_v4().to_string()));
+    }
+    let conversation = string(record, "conversation_id").to_owned();
+    if !conversation.is_empty()
+        && indexed_session(record, &conversation).as_deref() != Some(string(record, "session_id"))
+    {
+        // Best effort: the record itself stays the source of truth.
+        let path = session_index(record, &conversation);
+        let entry = json!({"session_id":record["session_id"],"conversation_id":conversation,
+            "provider":provider(record)});
+        let _ = private_dir(path.parent().unwrap()).and_then(|()| atomic(&path, &entry.to_string()));
     }
 }
 
+/// The provider whose conversation IDs key the index.
+fn provider(record: &Value) -> &str {
+    Some(string(record, "agent"))
+        .filter(|agent| !agent.is_empty())
+        .unwrap_or_else(|| string(record, "backend"))
+}
+
+fn session_index(record: &Value, conversation: &str) -> PathBuf {
+    let key = format!("{}\n{conversation}", provider(record));
+    root()
+        .join("session_ids")
+        .join(format!("{:x}.json", Sha256::digest(key.as_bytes())))
+}
+
+fn indexed_session(record: &Value, conversation: &str) -> Option<String> {
+    let bytes = fs::read(session_index(record, conversation)).ok()?;
+    if bytes.len() > 4096 {
+        return None;
+    }
+    let entry: Value = serde_json::from_slice(&bytes).ok()?;
+    let id = string(&entry, "session_id");
+    (entry["conversation_id"] == conversation
+        && string(&entry, "provider") == provider(record)
+        && uuid::Uuid::parse_str(id).is_ok_and(|uuid| uuid.hyphenated().to_string() == id))
+    .then(|| id.to_owned())
+}
+
+/// The conversations this session's ID may be indexed under, newest first:
+/// its current and expected ones, the one a fresh start replaced, and the
+/// cleared ones. A fork's source is never among them.
+fn conversations(record: &Value) -> Vec<String> {
+    let mut ids = vec![
+        string(record, "conversation_id").to_owned(),
+        string(record, "expected_id").to_owned(),
+        string(&record["fresh_from"], "conversation_id").to_owned(),
+    ];
+    if let Some(cleared) = record["cleared_conversations"].as_array() {
+        ids.extend(cleared.iter().rev().filter_map(Value::as_str).map(str::to_owned));
+    }
+    ids.retain(|id| !id.is_empty());
+    ids.dedup();
+    ids
+}
+
 pub(super) fn write(record: &mut Value) -> Result<()> {
-    ensure_session_id(record);
     record["updated"] = json!(now());
     atomic_record(&record_path(string(record, "name")), record)?;
     rename::mirror_legacy(record)
@@ -149,6 +213,7 @@ pub(super) fn write(record: &mut Value) -> Result<()> {
 
 /// Every saved live/archive record write also migrates legacy command text.
 pub(super) fn atomic_record(path: &Path, record: &mut Value) -> Result<()> {
+    ensure_session_id(record);
     processes::compact(record);
     atomic(path, &format!("{record}\n"))
 }
@@ -419,5 +484,103 @@ mod agent_hint_tests {
             #[cfg(windows)]
             assert_eq!(&command[..3], &["/stable/hgs", "--run", "0"]);
         }
+    }
+}
+
+#[cfg(test)]
+mod session_id_tests {
+    use super::*;
+    /// zerus-ucck P1, #1317 R2: one durable session ID through every write
+    /// boundary, both provider saves and an older hgs that drops the field.
+    /// The fixture runs in a child process with a private state directory.
+    #[test]
+    fn a_session_keeps_one_id_through_every_writer() {
+        let state = tempfile::tempdir().unwrap();
+        let output = std::process::Command::new(std::env::current_exe().unwrap())
+            .args([
+                "--exact",
+                "state::storage::session_id_tests::session_id_writers_fixture",
+                "--ignored",
+                "--test-threads=1",
+            ])
+            .env("HGS_STATE_DIR", state.path())
+            .env("ZERUS_SESSION_ID_WRITERS_FIXTURE", "1")
+            .env_remove("HGS_SESSION")
+            .env_remove("HGS_SESSION_ID")
+            .env_remove("HGS_RUN_ID")
+            .output()
+            .unwrap();
+        let stdout = String::from_utf8_lossy(&output.stdout);
+        assert!(
+            output.status.success() && stdout.contains("test result: ok. 1 passed"),
+            "{stdout}{}",
+            String::from_utf8_lossy(&output.stderr)
+        );
+    }
+    #[test]
+    #[ignore = "run by a_session_keeps_one_id_through_every_writer"]
+    fn session_id_writers_fixture() {
+        if std::env::var_os("ZERUS_SESSION_ID_WRITERS_FIXTURE").is_none() {
+            return;
+        }
+        std::fs::create_dir_all(root()).unwrap();
+        let on_disk = |path: &Path| -> Value { serde_json::from_slice(&std::fs::read(path).unwrap()).unwrap() };
+        // Provider saves keep the ID on the caller's record: creation saves
+        // the same record before and after the native call (item 1).
+        let mut deepseek = json!({"backend":"dsh","agent":"dsh","name":"dsh/example/one","conversation_id":"session-1","run_id":"run-1"});
+        super::super::dsh::save(&mut deepseek).unwrap();
+        let first = string(&deepseek, "session_id").to_owned();
+        let binding = root().join("dsh/bindings").join(format!("{:x}.json", Sha256::digest(b"dsh/example/one")));
+        assert_eq!(string(&on_disk(&binding), "session_id"), first, "kept on the caller's record");
+        deepseek["paused"] = json!(false);
+        super::super::dsh::save(&mut deepseek).unwrap();
+        assert_eq!(string(&deepseek, "session_id"), first);
+        let mut opencode = json!({"backend":"opencode","agent":"opencode","name":"opencode/example/one","conversation_id":"ses_1","run_id":"run-2"});
+        super::super::opencode::save(&mut opencode).unwrap();
+        let first_opencode = string(&opencode, "session_id").to_owned();
+        let binding = root().join("opencode/bindings").join(format!("{:x}.json", Sha256::digest(b"opencode/example/one")));
+        assert_eq!(string(&on_disk(&binding), "session_id"), first_opencode, "kept on the caller's record");
+        opencode["creation_pending"] = json!(true);
+        super::super::opencode::save(&mut opencode).unwrap();
+        assert_eq!(string(&opencode, "session_id"), first_opencode);
+        assert_ne!(first, first_opencode);
+        // An archive write gains an ID like any record write (item 4).
+        let archive = root().join("archives").join("archive-1.json");
+        std::fs::create_dir_all(archive.parent().unwrap()).unwrap();
+        let mut archived = json!({"version":1,"agent":"claude","name":"claude/example/old","archive_id":"archive-1",
+            "conversation_id":"conversation-archived","run_id":"run-3"});
+        atomic_record(&archive, &mut archived).unwrap();
+        assert!(!string(&on_disk(&archive), "session_id").is_empty());
+        // An older hgs rebuilds the record without the field (item 3): the
+        // conversation index restores it on resume and after a fresh start.
+        let mut live = json!({"version":1,"agent":"claude","name":"claude/example/live","conversation_id":"conversation-1","run_id":"run-4"});
+        write(&mut live).unwrap();
+        let session = string(&live, "session_id").to_owned();
+        let mut resumed = json!({"version":1,"agent":"claude","name":"claude/example/live","conversation_id":"conversation-1","run_id":"run-5"});
+        write(&mut resumed).unwrap();
+        assert_eq!(string(&resumed, "session_id"), session, "an older resume");
+        let mut fresh = json!({"version":1,"agent":"claude","name":"claude/example/live","conversation_id":"conversation-2",
+            "run_id":"run-6","cleared_conversations":["conversation-1"]});
+        write(&mut fresh).unwrap();
+        assert_eq!(string(&fresh, "session_id"), session, "an older fresh start");
+        let mut renamed = json!({"version":1,"agent":"claude","name":"claude/example/renamed","conversation_id":"conversation-2","run_id":"run-6"});
+        write(&mut renamed).unwrap();
+        assert_eq!(string(&renamed, "session_id"), session, "the newer conversation is indexed too");
+        // A fork, another provider's equal conversation ID: another ID.
+        let mut fork = json!({"version":1,"agent":"claude","name":"claude/example/fork","conversation_id":"conversation-3",
+            "run_id":"run-7","fork_parent_id":"conversation-2"});
+        write(&mut fork).unwrap();
+        assert_ne!(string(&fork, "session_id"), session);
+        let mut other = json!({"version":1,"agent":"codex","name":"codex/example/live","conversation_id":"conversation-1","run_id":"run-8"});
+        write(&mut other).unwrap();
+        assert_ne!(string(&other, "session_id"), session);
+        let mut again = json!({"version":1,"agent":"claude","name":"claude/example/live","conversation_id":"conversation-1","run_id":"run-10"});
+        write(&mut again).unwrap();
+        assert_eq!(string(&again, "session_id"), session, "each provider keeps its own entry");
+        // A record's own ID always wins over the index.
+        let mut own = json!({"version":1,"agent":"claude","name":"claude/example/own","conversation_id":"conversation-1",
+            "run_id":"run-9","session_id":"7d0f6a3e-3c1b-4b8e-9a52-1f2e3d4c5b6a"});
+        write(&mut own).unwrap();
+        assert_eq!(string(&own, "session_id"), "7d0f6a3e-3c1b-4b8e-9a52-1f2e3d4c5b6a");
     }
 }

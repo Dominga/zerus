@@ -1692,17 +1692,36 @@ exit $status
         self.hgs("resume", name, "--fresh", "--expected-run-id", run, "-d")
         self.wait(lambda: self.binding(name).get("conversation_id") not in (None, conversation))
         self.assertEqual(self.binding(name)["session_id"], session)
+        # An older hgs rebuilds the record on resume without this field (#1317
+        # R2): the conversation index restores the same ID on the next write.
+        path = self.root / "state" / (hashlib.sha256(name.encode()).hexdigest() + ".json")
+        older = json.loads(path.read_text()); older.pop("session_id"); path.write_text(json.dumps(older) + "\n")
+        self.hgs("pause", name)
+        self.assertEqual(self.binding(name)["session_id"], session)
+        self.resume(name)
+        self.assertEqual(self.binding(name)["session_id"], session)
         renamed = "claude/p/renamed"
         self.hgs("rename", name, renamed)
         self.assertEqual(self.binding(renamed)["session_id"], session)
         self.hgs("pause", renamed)
         self.hgs("archive", renamed)
-        archived = json.loads(next((self.root / "state" / "archives").glob("*.json")).read_text())
+        archived = next(json.loads(p.read_text()) for p in (self.root / "state" / "archives").glob("*.json")
+                        if json.loads(p.read_text())["name"] == renamed)
         self.assertEqual(archived["session_id"], session)
         archive_id = archived["archive_id"]
         self.hgs("resume", renamed, "--archive", archive_id, "-d")
         self.wait(lambda: self.binding(renamed).get("activity") == "idle")
         self.assertEqual(self.binding(renamed)["session_id"], session)
+        # Archiving a record an older hgs wrote gives the archive an ID, and
+        # restoring keeps it (#1317 R2).
+        old, _ = self.saved_v1(tag="legacy-archive")
+        self.hgs("archive", old["name"])
+        kept = next(json.loads(p.read_text()) for p in (self.root / "state" / "archives").glob("*.json")
+                    if json.loads(p.read_text())["name"] == old["name"])
+        self.assertEqual(str(uuid.UUID(kept["session_id"])), kept["session_id"])
+        self.hgs("resume", old["name"], "--archive", kept["archive_id"], "-d")
+        self.wait(lambda: self.binding(old["name"]).get("activity") == "idle")
+        self.assertEqual(self.binding(old["name"])["session_id"], kept["session_id"])
         legacy, _ = self.saved_v1()
         self.assertNotIn("session_id", legacy)
         self.resume(legacy["name"])

@@ -960,6 +960,7 @@ mod version {
         command
             .env_remove("HGS_RUN_ID")
             .env_remove("HGS_SESSION")
+            .env_remove("HGS_SESSION_ID")
             .stdin(Stdio::null())
             .stderr(Stdio::null())
             .stdout(output.try_clone().map_err(|e| fail(e.to_string()))?);

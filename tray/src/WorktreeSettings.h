@@ -55,7 +55,7 @@ private:
         ProcessRunner::Request r;r.program=m_executable.isEmpty()?QStringLiteral("hgs"):m_executable;
         const auto route=m_computer->currentData().toString();if(!route.isEmpty())args.prepend('@'+route);
         r.arguments=args;r.input=QByteArray();r.timeoutMs=15000;r.maximumOutputBytes=128*1024;
-        auto env=QProcessEnvironment::systemEnvironment();env.remove("HGS_SESSION");env.remove("HGS_RUN_ID");r.environment=env;return r;
+        auto env=QProcessEnvironment::systemEnvironment();env.remove("HGS_SESSION");env.remove("HGS_SESSION_ID");env.remove("HGS_RUN_ID");r.environment=env;return r;
     }
     void controls(){
         const bool ready=!m_busy&&!m_policy.isEmpty();m_computer->setEnabled(!m_busy);m_refresh->setEnabled(!m_busy);m_apply->setEnabled(ready);m_enabled->setEnabled(ready);

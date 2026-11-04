@@ -400,7 +400,7 @@ impl Responder {
         attempt: String,
         request: Request,
     ) -> io::Result<Registration> {
-        let agent = ["HGS_SESSION", "HGS_RUN_ID"]
+        let agent = ["HGS_SESSION", "HGS_SESSION_ID", "HGS_RUN_ID"]
             .iter()
             .any(|key| std::env::var_os(key).is_some_and(|v| !v.is_empty()));
         if agent

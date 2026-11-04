@@ -265,7 +265,11 @@ paused: launch the intended conversation with its explicit native ID to bind it.
 Every session record has a durable `session_id`, a UUID assigned when the
 session is first created. It is kept across resume, Clear and fresh starts,
 rename, pause, archive and restore; a fork is another session with its own.
-A record written by an older hgs gains one the next time this hgs writes it.
+A record written by an older hgs gains one the next time this hgs writes any
+of its records, including archives. An older hgs rebuilds a record on resume
+or a fresh start without this field. The next write then restores the same ID
+from a private index under the state directory (`session_ids/`), keyed by the
+provider's conversation, which older versions never touch.
 The agent's environment carries it as `HGS_SESSION_ID`, beside `HGS_SESSION`
 (the name at launch) and `HGS_RUN_ID`, and `hgs ls --json` rows and
 inspections include it. Nothing resolves sessions by it yet, and names stay

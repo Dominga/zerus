@@ -32,7 +32,7 @@ pub fn run(hgs: &Path, inv: &Invocation) -> Exit {
 }
 
 /// [`run`] with extra environment variables for the child. The agent's
-/// attribution (`HGS_SESSION`, `HGS_RUN_ID`) is never passed on: the client
+/// attribution (`HGS_SESSION`, `HGS_SESSION_ID`, `HGS_RUN_ID`) is never passed on: the client
 /// acts for the person even when it was started from an agent's shell.
 ///
 /// A failed stdin write is a failure to deliver only while the child keeps
@@ -619,6 +619,7 @@ fn run_inner(
     }
     command
         .env_remove("HGS_SESSION")
+        .env_remove("HGS_SESSION_ID")
         .env_remove("HGS_RUN_ID")
         .stdin(
             if consumed && pipes.input.is_none() && inv.stdin.is_none() {
@@ -1029,11 +1030,15 @@ mod stream_tests {
 
     #[test]
     fn streamed_eof_and_both_exact_output_limits_are_preserved() {
-        let code = "import sys,os; assert sys.stdin.buffer.read() == b'bounded input'; assert 'HGS_SESSION' not in os.environ; sys.stdout.write('x'*16384); sys.stderr.write('y'*16384)";
+        let code = "import sys,os; assert sys.stdin.buffer.read() == b'bounded input'; assert not {'HGS_SESSION', 'HGS_SESSION_ID', 'HGS_RUN_ID'} & set(os.environ); sys.stdout.write('x'*16384); sys.stderr.write('y'*16384)";
         let exit = run_streamed(
             Path::new("python3"),
             &python(code, Duration::from_secs(5)),
-            &[("HGS_SESSION", "discard")],
+            &[
+                ("HGS_SESSION", "discard"),
+                ("HGS_SESSION_ID", "discard"),
+                ("HGS_RUN_ID", "discard"),
+            ],
             16384,
             |mut pipe| pipe.write_all(b"bounded input").is_ok(),
         )

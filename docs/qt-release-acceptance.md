@@ -56,9 +56,11 @@ restarting agents, tmux or a live DeepSeek host.
 This guidance applies after [#1217](https://github.com/ufna/zerus/pull/1217)
 lands; its source approval is not an installed acceptance result. Each displaced
 Qt or unclassified rollback image can add a separate `qt-*` entry under
-`~/.local/share/hgs/desktop-qt-legacy/`. With an updater staging prefix, the
-corresponding root is `<HGS_INSTALL_PREFIX>/share/hgs/desktop-qt-legacy/`.
-There is no automatic expiry or size quota. On Linux, a replaced Next image whose
+`~/.local/share/hgs/desktop-qt-legacy/`. On Linux, an updater staging prefix
+uses `<HGS_INSTALL_PREFIX>/share/hgs/desktop-qt-legacy/`; the macOS updater ignores
+that prefix and uses the normal root above. These entries are manual recovery
+copies, never candidates offered by `--rollback`. Retained images have no
+automatic expiry or size quota. On Linux, a replaced Next image whose
 `--build-info` fails is conservatively retained too: the folder name does not
 establish that its contents are Qt.
 
@@ -69,10 +71,11 @@ uncertain update remains unresolved. A failed archive move can leave an image in
 its named `desktop-previous/.replaced-*` location or the named archive entry;
 inspect both before treating either as disposable.
 
-Once an entry is verified as an obsolete, unused recovery copy, it may be removed
-manually. There is no bulk or age-based cleanup: an unclassified image needs
-individual review. Preserve the installed image and the usable
-`desktop-previous` rollback, Qt settings exports, original migration snapshots,
+Once an entry is verified as an obsolete recovery copy that no running GUI or
+process uses, it may be removed manually. Keep it if ownership, image identity
+or recovery needs remain uncertain. There is no bulk or age-based cleanup: an
+unclassified image needs individual review. Preserve the installed image and the
+usable `desktop-previous` rollback, Qt settings exports, original migration snapshots,
 drafts and journals. Removing an image is not permission to clear owner state,
 reseed an import or start a legacy GUI alongside service-owned background duties.
 

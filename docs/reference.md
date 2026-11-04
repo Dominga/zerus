@@ -341,7 +341,9 @@ answer is kept for ten minutes. Reads, polls, history, status, watch, terminal
 input and read marks keep the name until a label index exists. Confirmed
 delayed and worktree-cleanup end actions keep their scoped envelope, which
 already names the exact run and conversation. A refused ID shows as a changed
-session.
+session, but only when the CLI refused it while resolving it: another name, no
+session or several sessions. A later read's "no longer names", which can
+follow an effect, keeps the action's own result.
 
 `hgs session-action-status SESSION --json` reads one original lifecycle receipt.
 Supply the original `session-action` JSON unchanged, including its `request_id`,

@@ -112,9 +112,21 @@ pub fn selected_id<'a>(target: &Target, call: &'a Invocation) -> Option<&'a str>
     .flatten()
 }
 
-/// Whether the CLI refused the call's `--session-id` before any effect: the
-/// ID now names another session, no session or several. The caller treats it
-/// as a stale target; nothing retries it.
+/// Whether the CLI refused the call's `--session-id` before any effect, while
+/// it resolved the ID to a name and before the command ran
+/// (`select_session`): the ID now names another session, no session or
+/// several. The caller treats it as a stale target; nothing retries it.
+///
+/// Only the whole standard error `hgs: MESSAGE` with one line end, naming
+/// this ID and the target's name, with this exit status, counts:
+/// - 1: `Session ID ID is OTHER, not NAME`;
+/// - 1: `No live or saved session has ID ID`;
+/// - 5: `Several sessions carry ID ID: NAMES`.
+///
+/// `Session ID ID no longer names NAME; refresh and retry` keeps the action's
+/// own classification: a command's later read can report it after its effect
+/// (`kill` forgets after it ends the terminal). So does a refusal a command
+/// wrapped, such as Settings' "settings change not confirmed: ...".
 pub fn refused(target: &Target, call: &Invocation, exit: &Exit) -> bool {
     let Some(id) = selected_id(target, call) else {
         return false;
@@ -122,16 +134,30 @@ pub fn refused(target: &Target, call: &Invocation, exit: &Exit) -> bool {
     let Exit::Code { code, stderr, .. } = exit else {
         return false;
     };
-    (*code == 1 || *code == AMBIGUOUS)
-        && !stderr.to_lowercase().contains("delivery uncertain")
-        && [
-            format!("Session ID {id} is "),
-            format!("Session ID {id} no longer names "),
-            format!("No live or saved session has ID {id}"),
-            format!("Several sessions carry ID {id}"),
-        ]
-        .iter()
-        .any(|refusal| stderr.contains(refusal.as_str()))
+    let Some(message) = stderr
+        .strip_suffix('\n')
+        .map(|line| line.strip_suffix('\r').unwrap_or(line))
+        .and_then(|line| line.strip_prefix("hgs: "))
+    else {
+        return false;
+    };
+    if message.contains(['\n', '\r']) || message.to_lowercase().contains("uncertain") {
+        return false;
+    }
+    let name = target.name.as_str();
+    match *code {
+        1 => {
+            message == format!("No live or saved session has ID {id}")
+                || message
+                    .strip_prefix(&format!("Session ID {id} is "))
+                    .and_then(|rest| rest.strip_suffix(&format!(", not {name}")))
+                    .is_some_and(|other| !other.is_empty() && other != name)
+        }
+        AMBIGUOUS => message
+            .strip_prefix(&format!("Several sessions carry ID {id}: "))
+            .is_some_and(|names| !names.trim().is_empty()),
+        _ => false,
+    }
 }
 
 /// Whether a call that selected by ID met a peer whose `hgs` no longer
@@ -399,13 +425,6 @@ mod tests {
                             t.name
                         ),
                     ),
-                    (
-                        1,
-                        format!(
-                            "hgs: Session ID {ID} no longer names {}; refresh and retry\n",
-                            t.name
-                        ),
-                    ),
                     (1, format!("hgs: No live or saved session has ID {ID}\n")),
                     (5, format!("hgs: Several sessions carry ID {ID}: a, b\n")),
                 ] {
@@ -418,14 +437,51 @@ mod tests {
                 for (code, stderr) in [
                     (1, format!("hgs: No live or saved session has ID {other}\n")),
                     (2, format!("hgs: No live or saved session has ID {ID}\n")),
+                    (5, format!("hgs: No live or saved session has ID {ID}\n")),
+                    (1, format!("hgs: Several sessions carry ID {ID}: a, b\n")),
+                    (2, format!("hgs: Several sessions carry ID {ID}: a, b\n")),
+                    (3, format!("hgs: Several sessions carry ID {ID}: a, b\n")),
+                    (5, "hgs: Ambiguous session name\n".to_owned()),
                     (
                         1,
                         format!("hgs: delivery uncertain; Session ID {ID} is x, not y\n"),
                     ),
+                    (
+                        1,
+                        format!("hgs: Session ID {ID} is x, not claude/sample-project/other\n"),
+                    ),
+                    // The read-time refusal, which a command's later read can
+                    // report after its effect (kill, then forget).
+                    (
+                        1,
+                        format!(
+                            "hgs: Session ID {ID} no longer names {}; refresh and retry\n",
+                            t.name
+                        ),
+                    ),
+                    // A refusal a command wrapped, such as Settings.
+                    (
+                        1,
+                        format!(
+                            "hgs: settings change not confirmed: No live or saved session has ID {ID}\n"
+                        ),
+                    ),
+                    // More than the one refusal line, or no line end.
+                    (
+                        1,
+                        format!("note: x\nhgs: No live or saved session has ID {ID}\n"),
+                    ),
+                    (1, format!("hgs: No live or saved session has ID {ID}")),
+                    (1, format!("No live or saved session has ID {ID}\n")),
                     (1, "hgs: the agent is busy\n".to_owned()),
                 ] {
-                    assert!(
-                        !refused(&t, &call, &exit(code, b"", &stderr)),
+                    let near = exit(code, b"", &stderr);
+                    assert!(!refused(&t, &call, &near), "{action:?} {stderr}");
+                    // The action keeps its own classification.
+                    let plain = invocation(&t, &action, "req-1").unwrap();
+                    assert_eq!(
+                        classify(&t, &action, &call, near.clone()),
+                        classify(&t, &action, &plain, near),
                         "{action:?} {stderr}"
                     );
                 }

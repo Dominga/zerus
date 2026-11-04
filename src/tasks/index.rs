@@ -116,11 +116,14 @@ fn link_stamp_at(path: &Path, now: i64) -> (String, bool) {
     entry_stamp(fs::symlink_metadata(path), now)
 }
 
+/// A file's stamp when it is not there.
+const MISSING: &str = "-";
+
 fn entry_stamp(meta: std::io::Result<fs::Metadata>, now: i64) -> (String, bool) {
     #[cfg(test)]
     STAMPED.with(|n| n.set(n.get() + 1));
     let Ok(meta) = meta else {
-        return ("-".into(), true);
+        return (MISSING.into(), true);
     };
     let modified = meta
         .modified()
@@ -151,6 +154,11 @@ fn stamped(dir: &Path, uuid: &str, now: i64) -> (String, bool) {
 
 fn files(dir: &Path, uuid: &str) -> String {
     stamped(dir, uuid, 0).0
+}
+
+/// Whether stamps from `stamped` say every file of the task is gone.
+fn gone(stamps: &str) -> bool {
+    stamps.split('|').all(|part| part == MISSING)
 }
 
 /// `text` cut to at most `bytes` at a character boundary.
@@ -570,11 +578,11 @@ impl<'a> Index<'a> {
                     Some(known) => known.get(uuid).cloned(),
                     None => stored.as_ref().map(|s| s.0.clone()),
                 };
-                let unchanged = stamps.as_deref() == Some(now.as_str()) || (stamps.is_none() && now == "-|-");
+                let unchanged = stamps.as_deref() == Some(now.as_str()) || (stamps.is_none() && gone(&now));
                 if unchanged && !noted.is_some_and(|noted| noted.contains(uuid)) {
                     continue;
                 }
-                let derived = (now != "-|-").then(|| derive(self.store, uuid));
+                let derived = (!gone(&now)).then(|| derive(self.store, uuid));
                 // Read again to the same row: only its stamps and time change.
                 let same = match (&derived, &stored) {
                     (Some(Derived::Row { row, .. }), Some((_, Some(old), None))) => row == old,

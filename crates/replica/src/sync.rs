@@ -352,10 +352,12 @@ impl ProjectStore {
             });
             let cached = match remembered {
                 Some(cached) => cached.clone(),
-                // A load may raise the mark: the entry keeps the stamps after it.
-                None => match self.load(&uuid).and_then(|task| self.repaired(task)) {
-                    Ok((task, _)) => Cached {
-                        files: self.stamps(&uuid),
+                // The version and its stamps are one observation: no save of
+                // this store comes between them (a load may raise the mark,
+                // a repair may save; the stamps follow both).
+                None => match self.observe(&uuid, || self.stamps(&uuid)) {
+                    (Ok(task), files) => Cached {
+                        files,
                         version: version(&task.current_vv()),
                         error: None,
                         stage: Some(task.stage()?),
@@ -364,8 +366,8 @@ impl ProjectStore {
                             session: task.session(),
                         }),
                     },
-                    Err(error) => Cached {
-                        files: self.stamps(&uuid),
+                    (Err(error), files) => Cached {
+                        files,
                         version: Version::new(),
                         error: Some(error.to_string()),
                         stage: None,
@@ -451,20 +453,6 @@ impl ProjectStore {
             }
         }
         Ok((page, false))
-    }
-
-    /// A loaded task whose execution schema a merged lower value replaced is
-    /// repaired and saved under this store's lock before its version is used,
-    /// so the repair itself is what other replicas receive. Returns the task
-    /// and, when it was saved, its files' new stamps.
-    #[allow(clippy::type_complexity)]
-    fn repaired(&self, mut task: TaskDoc) -> Result<(TaskDoc, Option<Vec<Option<Stamp>>>)> {
-        if !task.repair_schema()? {
-            return Ok((task, None));
-        }
-        self.save(&mut task)?;
-        let uuid = task.uuid().to_owned();
-        Ok((task, Some(self.stamps(&uuid))))
     }
 
     /// A task's files as the inventory cache compares them: its snapshot,
@@ -1593,6 +1581,268 @@ mod tests {
             // The saving document now holds the merged state.
             assert_eq!(stale.current_vv(), merged.current_vv());
         }
+    }
+
+    fn age_files(store: &ProjectStore, uuid: &str) {
+        let old_time = SystemTime::now() - Duration::from_secs(60);
+        for path in [
+            store.snapshot_path(uuid),
+            store.updates_path(uuid),
+            store.managed_path(uuid),
+        ] {
+            if let Ok(file) = fs::File::options().write(true).open(&path) {
+                file.set_times(fs::FileTimes::new().set_modified(old_time))
+                    .unwrap();
+            }
+        }
+    }
+
+    /// review-n on #1415 (R6): an inventory's version of a task and the
+    /// stamps it caches with it are one observation. A same-store save that
+    /// tries to come between them waits, so the cache never pairs an older
+    /// version with the newer files' stamps.
+    #[test]
+    fn an_inventory_version_and_its_stamps_are_one_observation() {
+        let dir = tempfile::tempdir().unwrap();
+        let store = ProjectStore::open(dir.path(), "project-1").unwrap();
+        let mut task = created();
+        assert!(task.floor().unwrap());
+        store.save(&mut task).unwrap();
+        let uuid = task.uuid().to_owned();
+        age_files(&store, &uuid);
+        let mut other = store.load(&uuid).unwrap();
+        let started = std::sync::Arc::new(std::sync::Barrier::new(2));
+        let done = std::sync::Arc::new(std::sync::atomic::AtomicBool::new(false));
+        std::thread::scope(|scope| {
+            let (started_there, done_there) = (started.clone(), done.clone());
+            let (store, uuid, other) = (&store, &uuid, &mut other);
+            scope.spawn(move || {
+                started_there.wait();
+                reserve(other);
+                store.save(other).unwrap();
+                age_files(store, uuid);
+                done_there.store(true, std::sync::atomic::Ordering::SeqCst);
+            });
+            let (started_here, done_here) = (started.clone(), done.clone());
+            crate::store::OBSERVING.with(|hook| {
+                *hook.borrow_mut() = Some(Box::new(move || {
+                    started_here.wait();
+                    // The save either waits for this observation or, were it
+                    // let in, would finish here.
+                    let until = std::time::Instant::now() + Duration::from_millis(300);
+                    while !done_here.load(std::sync::atomic::Ordering::SeqCst)
+                        && std::time::Instant::now() < until
+                    {
+                        std::thread::sleep(Duration::from_millis(5));
+                    }
+                }))
+            });
+            let (first, _) = store.inventory().unwrap();
+            crate::store::OBSERVING.with(|hook| *hook.borrow_mut() = None);
+            assert_eq!(first.tasks[uuid], version(&task.current_vv()));
+        });
+        assert!(done.load(std::sync::atomic::Ordering::SeqCst));
+        let held = store.load(&uuid).unwrap();
+        assert!(held.held().unwrap().is_some());
+        let (warm, _) = store.inventory().unwrap();
+        assert_eq!(warm.tasks[&uuid], version(&held.current_vv()));
+    }
+
+    /// review-n on #1415 (R6): a document read through an earlier store,
+    /// saved through a cold one after a newer save and with the mark spoiled,
+    /// is refused: nothing writes over an unreadable mark, and a readable
+    /// one is never lowered.
+    #[test]
+    fn a_cold_store_does_not_write_over_an_unreadable_mark() {
+        let dir = tempfile::tempdir().unwrap();
+        let (uuid, mut older) = {
+            let store = ProjectStore::open(dir.path(), "project-1").unwrap();
+            let mut task = created();
+            assert!(task.floor().unwrap());
+            store.save(&mut task).unwrap();
+            (task.uuid().to_owned(), store.load(task.uuid()).unwrap())
+        };
+        {
+            let store = ProjectStore::open(dir.path(), "project-1").unwrap();
+            let mut newer = store.load(&uuid).unwrap();
+            reserve(&mut newer);
+            store.save(&mut newer).unwrap();
+        }
+        let store = ProjectStore::open(dir.path(), "project-1").unwrap();
+        let mark = fs::read(store.managed_path(&uuid)).unwrap();
+        older.note("A harmless note", &Actor::Person, 30).unwrap();
+        for unreadable in [true, false] {
+            if unreadable {
+                fs::write(store.managed_path(&uuid), b"unreadable mark").unwrap();
+            } else {
+                fs::write(store.managed_path(&uuid), &mark).unwrap();
+            }
+            let before = files(&store, &uuid);
+            assert!(store.save(&mut older).is_err(), "unreadable={unreadable}");
+            assert_eq!(files(&store, &uuid), before, "unreadable={unreadable}");
+        }
+        assert!(store.load(&uuid).unwrap().held().unwrap().is_some());
+    }
+
+    /// review-n on #1415 (R6): the mark is sealed over its whole content. One
+    /// document across the floor, its fold and the reservation; after the
+    /// Unknown is saved, one bit flips in place in a field of the mark and
+    /// the saved tail is cut. The copy is kept by a load and by a recovery.
+    #[test]
+    fn a_flipped_bit_in_any_field_of_the_mark_keeps_the_copy() {
+        for field in ["counter", "peer", "opening", "seal"] {
+            let dir = tempfile::tempdir().unwrap();
+            let store = ProjectStore::open(dir.path(), "project-1").unwrap();
+            let mut task = created();
+            assert!(task.floor().unwrap());
+            store.save(&mut task).unwrap();
+            let peer = task.snapshot().unwrap();
+            let uuid = task.uuid().to_owned();
+            let before = task.current_vv();
+            reserve(&mut task);
+            store.save(&mut task).unwrap();
+            assert!(store.load(&uuid).unwrap().held().unwrap().is_some());
+            let path = store.managed_path(&uuid);
+            let mut bytes = fs::read(&path).unwrap();
+            let text = String::from_utf8(bytes.clone()).unwrap();
+            let json: serde_json::Value = serde_json::from_str(&text).unwrap();
+            let (peer_id, counter) = json["saved"].as_object().unwrap().iter().next().unwrap();
+            let entry = format!("\"{peer_id}\":{counter}");
+            let at = text.find(&entry).unwrap();
+            // A digit whose lowest bit flips stays a digit: the JSON stays valid.
+            let digit_in = |bytes: &[u8], from: usize, to: usize| {
+                (from..to).find(|&i| bytes[i].is_ascii_digit()).unwrap()
+            };
+            // The counter is lowered to exactly what the cut files will hold
+            // (review-n's 56 -> 54), so only the seal can tell.
+            if field == "counter" {
+                let lowered = before
+                    .get(&peer_id.parse::<u64>().unwrap())
+                    .copied()
+                    .unwrap();
+                let text = text.replace(&entry, &format!("\"{peer_id}\":{lowered}"));
+                assert_ne!(text.as_bytes(), bytes.as_slice());
+                bytes = text.into_bytes();
+            }
+            let flip = match field {
+                "counter" => None,
+                "peer" => Some(digit_in(&bytes, at + 1, at + 1 + peer_id.len())),
+                name => {
+                    let value = json[name].as_str().unwrap();
+                    let start = text.find(value).unwrap();
+                    Some(digit_in(&bytes, start, start + value.len()))
+                }
+            };
+            if let Some(flip) = flip {
+                bytes[flip] ^= 1;
+            }
+            fs::write(&path, &bytes).unwrap();
+            assert!(
+                serde_json::from_slice::<serde_json::Value>(&bytes).is_ok(),
+                "{field}"
+            );
+            // The complete saved tail is cut: only the opening block remains.
+            let opening = block_ends(&store, &uuid)[0];
+            fs::File::options()
+                .write(true)
+                .open(store.updates_path(&uuid))
+                .unwrap()
+                .set_len(opening)
+                .unwrap();
+            assert!(store.mark(&uuid).is_none(), "{field}");
+            assert!(
+                store.load(&uuid).is_err(),
+                "{field}: the load dropped the Unknown"
+            );
+            assert!(store.tasks().unwrap().1.iter().any(|d| d.uuid == uuid));
+            damage(&store, &uuid);
+            kept(&store, &uuid, &peer);
+        }
+    }
+
+    /// desktop-u G1 on #1415 (R6): a document read before its mark became
+    /// unreadable (corrupt, a directory, a dangling link, no permission) is
+    /// refused when it is saved, its base current or not, and every file and
+    /// the mark stay exactly as they were.
+    #[test]
+    fn a_cached_document_never_writes_over_an_unreadable_mark() {
+        type Spoiled = (&'static str, Box<dyn Fn(&Path)>);
+        let spoils: Vec<Spoiled> = vec![
+            (
+                "corrupt",
+                Box::new(|p| fs::write(p, b"unreadable mark").unwrap()),
+            ),
+            (
+                "impossible",
+                Box::new(|p| fs::write(p, br#"{"saved":{}}"#).unwrap()),
+            ),
+            (
+                "directory",
+                Box::new(|p| {
+                    fs::remove_file(p).unwrap();
+                    fs::create_dir(p).unwrap();
+                }),
+            ),
+            #[cfg(unix)]
+            (
+                "dangling",
+                Box::new(|p| {
+                    fs::remove_file(p).unwrap();
+                    std::os::unix::fs::symlink("absent-mark-target", p).unwrap();
+                }),
+            ),
+            #[cfg(unix)]
+            (
+                "no permission",
+                Box::new(|p| {
+                    use std::os::unix::fs::PermissionsExt;
+                    fs::set_permissions(p, fs::Permissions::from_mode(0o000)).unwrap();
+                }),
+            ),
+        ];
+        for (name, spoil) in &spoils {
+            for stale in [false, true] {
+                let (_dir, store, uuid, _) = damaged_beside_a_pre_attempt_peer();
+                let mut cached = store.load(&uuid).unwrap();
+                if stale {
+                    // Another document's save moved the base on first.
+                    let mut other = store.load(&uuid).unwrap();
+                    other.comment("Saved first", &Actor::Person, 11).unwrap();
+                    store.save(&mut other).unwrap();
+                }
+                cached.note("A harmless note", &Actor::Person, 12).unwrap();
+                let path = store.managed_path(&uuid);
+                spoil(&path);
+                // A reader that ignores permissions cannot show that case.
+                if *name == "no permission" && fs::read(&path).is_ok() {
+                    continue;
+                }
+                assert!(store.load(&uuid).is_err(), "{name}");
+                let before = files(&store, &uuid);
+                let error = store.save(&mut cached).err().map(|e| e.to_string());
+                assert!(
+                    error.is_some(),
+                    "{name} stale={stale}: a cached document overwrote it"
+                );
+                assert_eq!(files(&store, &uuid), before, "{name} stale={stale}");
+                #[cfg(unix)]
+                if *name == "no permission" {
+                    use std::os::unix::fs::PermissionsExt;
+                    fs::set_permissions(&path, fs::Permissions::from_mode(0o600)).unwrap();
+                }
+            }
+        }
+        // A task that never cut over, and one whose mark reads, save as before.
+        let (_dir, store, uuid, _) = damaged_beside_a_pre_attempt_peer();
+        let mut cached = store.load(&uuid).unwrap();
+        cached.note("A harmless note", &Actor::Person, 12).unwrap();
+        store.save(&mut cached).unwrap();
+        let dir = tempfile::tempdir().unwrap();
+        let plain = ProjectStore::open(dir.path(), "project-1").unwrap();
+        let mut task = created();
+        plain.save(&mut task).unwrap();
+        task.note("Plain", &Actor::Person, 2).unwrap();
+        plain.save(&mut task).unwrap();
     }
 
     /// review-n's barrier control: two documents of one floored task each

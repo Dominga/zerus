@@ -3334,15 +3334,16 @@ place until another computer of the swarm sends its copy, which replaces it;
 a copy of the damaged file stays beside it as `<file>.damaged-<time>`. A task
 this computer saved with attempts or a floor gets a mark, `<uuid>.managed`,
 naming the version this computer last saved and the exact first block of
-the updates file after the snapshot. The mark is rewritten before every save
+the updates file after the snapshot, sealed by a digest of its whole content
+so that a mark changed in any way cannot be read. The mark is rewritten before every save
 of such a task makes it durable (one small extra write per save), and every
 fold opens a new updates file with the operations at the document's
 frontiers, which every copy already holds, so it adds no change and differs
 from fold to fold. A copy whose files hold less than its mark records (they
 were cut short, a save did not finish, or an older Zerus wrote them so), or
 whose mark cannot be read, is damaged, not read without those changes:
-nothing sends, writes or folds it until a person reviews it or a copy that
-covers the mark arrives. Files that hold more than the mark records (an older
+nothing sends, writes or folds it, not even a copy read before, until a person
+reviews it or a copy that covers the mark arrives. Files that hold more than the mark records (an older
 Zerus folded or appended) raise the mark to what they hold when the task is
 read, before anything lists, inventories or sends it. A task with only its
 mark left is still listed under `damaged`. Saves of a task go through one

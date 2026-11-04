@@ -233,7 +233,9 @@ fn block(payload: &[u8]) -> Vec<u8> {
 /// and one that differs whenever the version does. A writer that folds or
 /// rewrites the files without this mark (an older build), or a mark restored
 /// from before a later fold, leaves the opening apart from the files; files
-/// cut short leave them holding less than `saved`.
+/// cut short leave them holding less than `saved`. On disk it carries a
+/// `seal`, the SHA-256 of its whole canonical content, so a change to any
+/// field (a flipped bit included) makes it unreadable and keeps the copy.
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
 pub(crate) struct Mark {
     pub(crate) saved: Option<BTreeMap<String, i32>>,
@@ -241,7 +243,44 @@ pub(crate) struct Mark {
     pub(crate) opening: Option<String>,
 }
 
+/// The mark as written: its fields and their seal.
+#[derive(Serialize, Deserialize)]
+struct SealedMark {
+    saved: Option<BTreeMap<String, i32>>,
+    #[serde(default)]
+    opening: Option<String>,
+    #[serde(default)]
+    seal: Option<String>,
+}
+
 impl Mark {
+    /// The digest over the mark's canonical content (its fields in order,
+    /// the peers sorted).
+    fn seal(&self) -> Result<String> {
+        let mut hasher = Sha256::new();
+        hasher.update(b"zerus-task-mark-1\n");
+        hasher.update(serde_json::to_vec(self)?);
+        Ok(format!("{:x}", hasher.finalize()))
+    }
+
+    fn sealed(&self) -> Result<Vec<u8>> {
+        Ok(serde_json::to_vec(&SealedMark {
+            saved: self.saved.clone(),
+            opening: self.opening.clone(),
+            seal: Some(self.seal()?),
+        })?)
+    }
+
+    /// A mark read back; none unless its seal matches its content.
+    fn unsealed(bytes: &[u8]) -> Option<Mark> {
+        let sealed: SealedMark = serde_json::from_slice(bytes).ok()?;
+        let mark = Mark {
+            saved: sealed.saved,
+            opening: sealed.opening,
+        };
+        (sealed.seal? == mark.seal().ok()?).then_some(mark)
+    }
+
     /// The mark for files that hold `saved`, whose updates file opens with
     /// `first` (header and payload).
     pub(crate) fn new(saved: &VersionVector, first: &[u8]) -> Self {
@@ -307,6 +346,13 @@ enum Marked {
     No,
     Unreadable,
     Saved(VersionVector),
+}
+
+#[cfg(test)]
+thread_local! {
+    /// Runs inside an observation, between its read and its stamps.
+    pub(crate) static OBSERVING: std::cell::RefCell<Option<Box<dyn FnMut()>>> =
+        const { std::cell::RefCell::new(None) };
 }
 
 /// The intact blocks with their end offsets, and whether the whole input was
@@ -538,7 +584,7 @@ impl ProjectStore {
 
     /// The task's mark; none when it is missing or cannot be read.
     pub(crate) fn mark(&self, uuid: &str) -> Option<Mark> {
-        serde_json::from_slice(&fs::read(self.managed_path(uuid)).ok()?).ok()
+        Mark::unsealed(&fs::read(self.managed_path(uuid)).ok()?)
     }
 
     /// Whether the task is marked, and the version its mark says this store
@@ -547,8 +593,7 @@ impl ProjectStore {
     fn marked(&self, uuid: &str) -> Marked {
         let path = self.managed_path(uuid);
         match fs::read(&path) {
-            Ok(bytes) => serde_json::from_slice::<Mark>(&bytes)
-                .ok()
+            Ok(bytes) => Mark::unsealed(&bytes)
                 .and_then(|mark| mark.version())
                 .map_or(Marked::Unreadable, Marked::Saved),
             Err(error) if error.kind() == ErrorKind::NotFound => {
@@ -564,7 +609,7 @@ impl ProjectStore {
     /// Writes the mark. Every listing stamps it with the task's files, so
     /// a save that fails after its mark still reaches them.
     pub(crate) fn write_mark(&self, uuid: &str, mark: &Mark) -> Result<()> {
-        write_atomic(&self.managed_path(uuid), &serde_json::to_vec(mark)?)
+        write_atomic(&self.managed_path(uuid), &mark.sealed()?)
     }
 
     /// The version this store last saved, as the mark records it, only while
@@ -687,6 +732,34 @@ impl ProjectStore {
             .admission
             .lock()
             .unwrap_or_else(|poisoned| poisoned.into_inner());
+        self.save_locked(task)
+    }
+
+    /// Reads a task, saves it when its execution schema needs the repair, and
+    /// stamps its files with `stamp`, all in one admission: the version read
+    /// and the stamps taken are one observation, which no save of this store
+    /// comes between.
+    pub(crate) fn observe<S>(&self, uuid: &str, stamp: impl FnOnce() -> S) -> (Result<TaskDoc>, S) {
+        let _admitted = self
+            .admission
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner());
+        let loaded = self.load_admitted(uuid).and_then(|mut task| {
+            if task.repair_schema()? {
+                self.save_locked(&mut task)?;
+            }
+            Ok(task)
+        });
+        #[cfg(test)]
+        OBSERVING.with(|hook| {
+            if let Some(hook) = hook.borrow_mut().as_mut() {
+                hook();
+            }
+        });
+        (loaded, stamp())
+    }
+
+    fn save_locked(&self, task: &mut TaskDoc) -> Result<()> {
         let durable = self
             .durable
             .lock()
@@ -707,12 +780,24 @@ impl ProjectStore {
                 *task = current;
             }
         }
-        if let Marked::Saved(saved) = self.marked(task.uuid()) {
-            if !task.current_vv().includes_vv(&saved) {
+        // Classified under this admission, whatever the document's base: a
+        // mark that is present but cannot be read keeps the copy for a
+        // person's review, and nothing here rewrites it.
+        match self.marked(task.uuid()) {
+            Marked::No => {}
+            Marked::Unreadable => {
                 return Err(Error::new(
-                    "this copy holds less than this computer already saved of the task; read it \
-                     again",
-                ));
+                    "this task was cut over to execution attempts here and its mark cannot be \
+                     read; it is kept for a person's review and nothing is written for it",
+                ))
+            }
+            Marked::Saved(saved) => {
+                if !task.current_vv().includes_vv(&saved) {
+                    return Err(Error::new(
+                        "this copy holds less than this computer already saved of the task; \
+                         read it again",
+                    ));
+                }
             }
         }
         self.save_admitted(task)?;

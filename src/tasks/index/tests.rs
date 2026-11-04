@@ -1027,3 +1027,32 @@ fn a_mark_changed_outside_the_journal_is_found_by_its_stamp() {
     assert!(page.rows.iter().all(|r| r["uuid"] != json!(uuid)), "{:?}", page.rows);
     assert_eq!(index.damaged().unwrap().1, 1);
 }
+
+/// review-n on #1415 (R6): a task never cut over whose files are removed
+/// after the index was warm drops its row; one with only its mark left
+/// stays listed as damaged.
+#[test]
+fn a_removed_task_drops_its_cache_row_and_a_mark_alone_stays_damaged() {
+    let temp = tempfile::tempdir().unwrap();
+    let store = ProjectStore::open(temp.path(), "example").unwrap();
+    let mut plain = new_task(&store, "T-aaaaaa", Stage::Todo, "V", "Plain");
+    aged_save(&store, &mut plain);
+    let mut floored = new_task(&store, "T-bbbbbb", Stage::Todo, "W", "Floored");
+    assert!(floored.floor().unwrap());
+    aged_save(&store, &mut floored);
+    drop(Index::open(&store).unwrap());
+    assert!(gone(&files(store.dir(), "no-such-task")));
+    assert!(!gone(&files(store.dir(), plain.uuid())));
+    for task in [&plain, &floored] {
+        for ext in ["loro", "updates"] {
+            let _ = fs::remove_file(store.dir().join("tasks").join(format!("{}.{ext}", task.uuid())));
+        }
+    }
+    assert!(store.tasks().unwrap().1.iter().all(|d| d.uuid != plain.uuid()));
+    let mut index = Index::open(&store).unwrap();
+    let (shown, total) = index.damaged().unwrap();
+    assert_eq!(total, 1, "{shown:?}");
+    assert_eq!(shown[0]["uuid"], json!(floored.uuid()));
+    let page = index.page(Stage::Todo, 10, &Anchor::Start).unwrap();
+    assert!(page.rows.is_empty(), "{:?}", page.rows);
+}

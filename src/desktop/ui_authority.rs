@@ -1502,6 +1502,7 @@ mod tests {
                 task_id: id(80),
                 request_id: id(2),
                 original: original.to_string(),
+                form: Default::default(),
             }),
         };
         assert_eq!(

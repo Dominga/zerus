@@ -67,6 +67,7 @@ fn intent(scope: &wire::Scope, project: &str, task: &str, record: &Value) -> wir
         task_id: task.into(),
         request_id: record["id"].as_str().unwrap_or_default().into(),
         original: record.to_string(),
+        form: Default::default(),
     }
 }
 

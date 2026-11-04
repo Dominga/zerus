@@ -25,6 +25,7 @@ fn original(configuration: &str, epoch: &str) -> Verified {
         task_id: TASK.into(),
         request_id: request.clone(),
         original: record(&request).to_string(),
+        form: Default::default(),
     }
     .verify()
     .unwrap()
@@ -1384,6 +1385,43 @@ mod actor {
             std::fs::read_to_string(&seen).unwrap(),
             message_input(&message_intent("hello", &[], "queue", ""))
         );
+    }
+
+    #[test]
+    fn a_reference_form_original_is_refused_before_any_row_until_it_can_be_prepared() {
+        let mut f = Fixture::new(|_, _, _, _, _| panic!("no reference child"));
+        let intent = zerus_client_core::tasks_write::message_intent(
+            "see this",
+            &[zerus_client_core::attachments::Attachment {
+                name: "screen.png".into(),
+                mime: "image/png".into(),
+                bytes: vec![7; 3000].into(),
+                reference: "[screen.png]".into(),
+            }],
+            "queue",
+            "",
+        );
+        let request = uuid::Uuid::new_v4().to_string();
+        let record = json!({"id": request, "intent": intent,
+            "input_sha256": input_digest(&message_input(&intent))});
+        let (projection, _) = zerus_client_core::tasks_write::references::project(&record).unwrap();
+        let referenced = Intent {
+            scope: wire::Scope {
+                configuration: f.location.configuration.clone(),
+                service_epoch: f.epoch.clone(),
+            },
+            project: "example".into(),
+            task_id: TASK.into(),
+            request_id: request.clone(),
+            original: projection.to_string(),
+            form: wire::Form::ReferenceV1,
+        }
+        .verify()
+        .unwrap();
+        let admission = f.admit(&referenced);
+        assert!(!admission.accepted);
+        assert_eq!(admission.code, "task_message_unavailable");
+        assert!(ledger::load(&f.store.db, &request).unwrap().is_none());
     }
 
     #[test]

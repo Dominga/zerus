@@ -123,6 +123,8 @@ pub(super) fn load(db: &Connection, id: &str) -> Result<Option<Row>> {
         task_id: receipt.binding.task_id.clone(),
         request_id: id.into(),
         original: source,
+        // The row's own binding names its form; it is never reinterpreted.
+        form: receipt.binding.form,
     };
     let verified = intent.verify().map_err(anyhow::Error::msg)?;
     let plan: Plan = serde_json::from_str(&plan)?;

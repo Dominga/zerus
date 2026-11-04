@@ -468,7 +468,8 @@
   .draft-message { font-size: var(--fs-xs); color: var(--z-color-text-2); }
   .draft-message.error { color: var(--z-color-danger); }
   .draft-capture-notice { display: flex; align-items: center; gap: 8px; }
-  .draft-capture-notice .draft-message { flex: 1; margin: 0; }
+  .draft-capture-text { flex: 1; min-width: 0; }
+  .draft-capture-text p { margin: 0; }
   .confirm-body { font-size: var(--fs-sm); line-height: 1.5; margin-bottom: 12px; color: var(--z-color-text-2); }
   .confirm-body p { line-height: 1.5; }
 

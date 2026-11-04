@@ -329,7 +329,11 @@ describe("drafts capture notice", () => {
     expect(draftCaptureNotice(status())).toBeUndefined();
     // Not captured but the import already ran: nothing waits for Retry.
     expect(draftCaptureNotice(status({ code: "draft_capture_too_large" }))).toBeUndefined();
-    expect(draftCaptureNotice(status({ code: "draft_capture_private_slot", writes: false }))).toContain("Drafts are not being saved");
-    expect(draftCaptureNotice(status({ code: "draft_capture_unreadable", paused: true }))).toContain("Importing drafts from Qt is paused");
+    const refused = draftCaptureNotice(status({ code: "draft_capture_private_slot", writes: false }))!;
+    expect(refused.text).toContain("Drafts are not being saved");
+    expect(refused.hint).toContain("Retry records the earlier drafts before any draft is saved");
+    const paused = draftCaptureNotice(status({ code: "draft_capture_unreadable", paused: true }))!;
+    expect(paused.text).toContain("Importing drafts from Qt is paused");
+    expect(paused.hint).toContain("Retry never records them later");
   });
 });

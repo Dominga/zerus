@@ -221,6 +221,7 @@
   "Draft text": "Текст черновика",
   "Drafts": "Черновики",
   "Drafts are not being saved because their earlier versions could not be recorded. Check the Zerus data folder, then retry.": "Черновики не сохраняются: не удалось записать их прежние версии. Проверьте папку данных Zerus и повторите попытку.",
+  "Drafts are not being saved: their earlier versions could not be recorded. Check access to the Zerus data folder, then use Retry in Saved drafts.": "Черновики не сохраняются: их более ранние версии не удалось записать. Проверьте доступ к папке данных Zerus, затем нажмите «Повторить попытку» в окне «Сохраненные черновики».",
   "Drag to reorder, or use Alt+Up / Alt+Down.": "Перетащите, чтобы изменить порядок, или используйте Alt+Up/Alt+Down.",
   "Drop onto a session in the list to assign it; onto the project header for Any session.": "Перетащите на сессию в списке, чтобы назначить её; на заголовок проекта — для «Любой сессии».",
   "Each theme uses one skin. Follow system appearance switches between your dark and light skin.": "Каждая тема использует одно оформление. «Как в системе» переключается между вашим тёмным и светлым оформлением.",

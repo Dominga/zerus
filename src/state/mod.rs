@@ -1031,10 +1031,7 @@ pub fn dispatch(args: &[String]) -> Result<i32> {
             }
             let _guard = lock(None)?;
             if record_path(&args[0]).exists() {
-                let record = read(&args[0])?;
-                // Retired first: a stale entry never authorises a recovery.
-                retire_session_id(&record)?;
-                rename::remove_legacy(&record)?;
+                rename::remove_legacy(&read(&args[0])?)?;
             }
             match std::fs::remove_file(record_path(args.first().ok_or("missing session name")?)) {
                 Ok(()) => {}

@@ -822,26 +822,6 @@ class NativeHarness(unittest.TestCase):
         self.assertEqual(self.cli('inspect', b)['model'], 'test-a')
         self.assertEqual(self.rpc('catalog')['default'], before)
 
-    def test_forgetting_a_session_retires_its_identity_entry_first(self):
-        # zerus-ucck P1 (#1317 R4): forget retires the session's private index
-        # entry before the binding goes; when it cannot, the binding stays.
-        binding = self.create()
-        self.cli('pause', binding)
-        saved = self.bindings()[binding['name']]
-        index = self.state / 'session_ids' / (hashlib.sha256(f"dsh\n{binding['name']}".encode()).hexdigest() + '.json')
-        self.assertEqual(json.loads(index.read_text())['sessions'][0]['session_id'], saved['session_id'])
-        index.parent.chmod(0o500)
-        try:
-            refused = self.hgs('kill', binding['name'])
-        finally:
-            index.parent.chmod(0o700)
-        self.assertNotEqual(refused.returncode, 0)
-        self.assertEqual(self.bindings()[binding['name']]['session_id'], saved['session_id'])
-        removed = self.hgs('kill', binding['name'])
-        self.assertEqual(removed.returncode, 0, removed.stderr)
-        self.assertNotIn(binding['name'], self.bindings())
-        self.assertFalse(index.exists())
-
     def test_pause_resume_preserves_identity_and_other_agent(self):
         a, b = self.create(), self.create()
         self.cli('pause', a)

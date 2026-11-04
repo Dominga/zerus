@@ -1298,7 +1298,7 @@ pub(super) fn session_action(name: &str, action: &str, new_name: Option<&str>, s
         "pause"=>record["paused"]=json!(true),
         "resume"=>{record["paused"]=json!(false);record["run_id"]=json!(uuid::Uuid::new_v4().to_string());record.as_object_mut().unwrap().remove("permissions_pending");},
         "rename"=>{notifications::anchor(&mut record);record["name"]=json!(new_name.unwrap());recovery::rename_job(name,new_name.unwrap(),string(&record,"run_id"))?;},
-        "forget"=>{retire_session_id(&record)?;archive::remove_synced(&binding_path(name))?;return Ok(());},
+        "forget"=>{archive::remove_synced(&binding_path(name))?;return Ok(());},
         _=>unreachable!(),
     }
     save(&mut record)?;
@@ -1591,7 +1591,6 @@ pub(crate) fn dispatch(command: &str, args: &[String]) -> Result<i32> {
                 "pause",
                 json!({"sessionId":record["conversation_id"]}),
             )?;
-            retire_session_id(&record)?;
             fs::remove_file(binding_path(name)).map_err(|e| e.to_string())?;
         }
         "exists" => return Ok(0),

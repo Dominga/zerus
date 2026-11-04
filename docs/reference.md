@@ -263,27 +263,16 @@ paused: launch the intended conversation with its explicit native ID to bind it.
 ### Tracking and durable state
 
 Every session record has a durable `session_id`, a UUID assigned when the
-session is first created. It is kept across resume, Clear and fresh starts,
-rename, pause, archive and restore; a fork is another session with its own.
-A record written by an older hgs gains one the next time this hgs writes any
-of its records, including archives. An older hgs rebuilds a record on resume
-or a fresh start without this field. The next write then restores the same ID
-from a private index under the state directory (`session_ids/`), which older
-versions never touch.
-- Each file covers one provider and original name (the name a rename pins),
-  with at most 16 sessions. Each session lists the conversations its record
-  still names (current, expected, replaced and cleared) and its creation
-  time.
-- A record without an ID takes the ID of the one entry that shares a
-  conversation with it and has the same creation time, the evidence that it
-  is the same incarnation. Resume, restore and rename keep that time.
-- In every other case the ID stays unset rather than guessed. That covers a
-  fresh start by an older hgs, a reused name, a reopened conversation, an
-  evicted entry, a conflicting claim (which contests both entries) and an
-  unreadable, linked or malformed index. An unset ID is safe while nothing
-  resolves sessions by ID.
-- Forgetting a session retires its entry before the binding is removed. If
-  that fails, nothing is forgotten.
+session is first created. Every write of this hgs keeps it: resume, Clear and
+fresh starts, rename, pause, archive and restore. A fork is another session
+with its own. A record written by an older hgs gains one the next time this
+hgs writes any of its records, including archives.
+
+The ID is stable across writes of this hgs version and later ones. An older
+hgs, after a rollback or in a mixed fleet, rebuilds a record on resume
+without this field; the next write here then assigns a new ID, once.
+Consumers therefore treat `session_id` as a hint and fall back to the run and
+conversation identities.
 The agent's environment carries it as `HGS_SESSION_ID`, beside `HGS_SESSION`
 (the name at launch) and `HGS_RUN_ID`, and `hgs ls --json` rows and
 inspections include it. Nothing resolves sessions by it yet, and names stay

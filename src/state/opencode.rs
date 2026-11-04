@@ -2011,7 +2011,6 @@ fn action_in<N: Native>(
         scope.changing();
     }
     if action == "forget" {
-        retire_session_id(record)?;
         archive::remove_synced(&binding_path(&old))?;
         history::forget(record);
         return Ok(());

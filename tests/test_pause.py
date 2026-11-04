@@ -1039,14 +1039,18 @@ class SessionIdentity(Harness):
         self.hgs("resume", name, "--fresh", "--expected-run-id", run, "-d")
         self.wait(lambda: self.binding(name).get("conversation_id") not in (None, conversation))
         self.assertEqual(self.binding(name)["session_id"], session)
-        # An older hgs rebuilds the record on resume without this field (#1317
-        # R2): the conversation index restores the same ID on the next write.
+        # Expected (#1317 R5): an older hgs rebuilds the record on resume
+        # without this field, and the next write here assigns a new ID once;
+        # it then stays through every later write.
         path = self.root / "state" / (hashlib.sha256(name.encode()).hexdigest() + ".json")
         older = json.loads(path.read_text()); older.pop("session_id"); path.write_text(json.dumps(older) + "\n")
         self.hgs("pause", name)
-        self.assertEqual(self.binding(name)["session_id"], session)
+        reminted = self.binding(name)["session_id"]
+        self.assertNotEqual(reminted, session)
+        self.assertEqual(str(uuid.UUID(reminted)), reminted)
         self.resume(name)
-        self.assertEqual(self.binding(name)["session_id"], session)
+        self.assertEqual(self.binding(name)["session_id"], reminted)
+        session = reminted
         renamed = "claude/p/renamed"
         self.hgs("rename", name, renamed)
         self.assertEqual(self.binding(renamed)["session_id"], session)
@@ -1077,21 +1081,6 @@ class SessionIdentity(Harness):
         self.hgs("pause", legacy["name"])
         self.resume(legacy["name"])
         self.assertEqual(self.binding(legacy["name"])["session_id"], gained)
-        # Forgetting the session retires its private index entry first; when
-        # that cannot be done the binding stays (#1317 R3, R4).
-        index = self.root / "state" / "session_ids" / (hashlib.sha256(f"claude\n{legacy['name']}".encode()).hexdigest() + ".json")
-        self.assertEqual(json.loads(index.read_text())["sessions"][0]["session_id"], gained)
-        self.hgs("pause", legacy["name"])
-        index.parent.chmod(0o500)
-        try:
-            self.hgs("kill", legacy["name"], rc=1)
-        finally:
-            index.parent.chmod(0o700)
-        self.assertEqual(self.binding(legacy["name"])["session_id"], gained)
-        self.assertTrue(index.exists())
-        self.hgs("kill", legacy["name"])
-        self.assertFalse(index.exists())
-        self.assertFalse(self.binding(legacy["name"]))
 
 
 class Lifecycle(Harness):

@@ -1020,6 +1020,11 @@ pub mod references {
         let mut projection = record.clone();
         let mut blobs = Vec::with_capacity(items.len());
         for (index, item) in items.iter().enumerate() {
+            // A field already named `data_ref`, even null, would be replaced:
+            // that record has no projection that keeps every other field.
+            if item.get("data_ref").is_some() {
+                return Err(INVALID);
+            }
             let encoded = item["data_base64"].as_str().ok_or(INVALID)?;
             if encoded.len() > MAX_ATTACHMENT_BYTES.div_ceil(3) * 4 {
                 return Err(INVALID);
@@ -1434,7 +1439,23 @@ mod references_tests {
         });
         let mut changed = record.clone();
         changed["input_sha256"] = json!("0".repeat(64));
-        for refused in [exact, legacy, plain, changed].into_iter().chain(loose) {
+        // An attachment that already has a `data_ref` field, null or not:
+        // projecting it would overwrite that field (review-n on #1324).
+        let named = [json!(null), json!({"sha256": "0".repeat(64), "size": 4})].map(|value| {
+            let mut named = record.clone();
+            named["intent"]["content"]["attachments"][2]["data_ref"] = value;
+            named["input_sha256"] = json!(input_digest(&message_input(&named["intent"])));
+            assert!(
+                outbox::decode(named.to_string().as_bytes()).is_ok(),
+                "a valid record"
+            );
+            named
+        });
+        for refused in [exact, legacy, plain, changed]
+            .into_iter()
+            .chain(loose)
+            .chain(named)
+        {
             assert!(references::project(&refused).is_err(), "{refused}");
         }
     }

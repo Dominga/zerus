@@ -55,6 +55,15 @@ def windows_process_metadata(pid, handle=None):
             dll.CloseHandle(handle)
 
 
+def same_replacement(arranged, observed):
+    """The drift arrangement's replacement engine as the worker proved it
+    before the release (GUID, PID and native birth), never a process adopted
+    afterwards: a complete identity that matches exactly."""
+    keys = ('guid', 'pid', 'birth')
+    return all(arranged.get(key) for key in keys) and {key: observed.get(key) for key in keys} == {
+        key: arranged[key] for key in keys}
+
+
 def windows_process_parents():
     """Read-only pid -> parent pid from one Toolhelp snapshot."""
     import ctypes as c
@@ -367,6 +376,19 @@ class WindowsFrontend(unittest.TestCase):
                 os.environ.pop(key, None)
             else:
                 os.environ[key] = previous
+
+
+class DriftReplacementIdentity(unittest.TestCase):
+    """Pure control for the hosted drift arrangement; no Windows API."""
+
+    def test_only_the_engine_proven_before_the_release_counts(self):
+        arranged = dict(guid='{4B27B893-B923-49A9-B9E0-3C8C90DCFA73}', pid=2, birth=222)
+        self.assertTrue(same_replacement(arranged, dict(arranged)))
+        for observed in (dict(arranged, pid=3, birth=333), dict(arranged, birth=333), dict(arranged, pid=3),
+                         dict(arranged, guid='{85CE29DB-DBE8-4634-8E4B-E5CB3A107FD6}'), {}):
+            self.assertFalse(same_replacement(arranged, observed), observed)
+        for partial in ({}, dict(arranged, pid=0), dict(arranged, guid=''), dict(guid=arranged['guid'], pid=2)):
+            self.assertFalse(same_replacement(partial, dict(partial)), partial)
 
 
 @unittest.skipUnless(os.name == 'nt' and os.environ.get('GITHUB_ACTIONS') == 'true'
@@ -1291,9 +1313,10 @@ if(@(Get-OwnInstances $s $t).Count-ne 0) {throw 'fixture instance remains'};
 
     def armed_instance_restart(self, request_id, original):
         """A COM worker armed BEFORE the call: it pins the exact original
-        instance, waits for the helper's own held marker, then stops exactly
-        that instance, starts the task once and releases the hold, within the
-        Stop deadline the hold consumes. Never retried."""
+        instance, waits for the helper's own held marker, stops exactly that
+        instance, starts the task once, proves the replacement engine (GUID,
+        PID, native birth, selected image) and only then releases the hold,
+        all within the Stop deadline the hold consumes. Never retried."""
         plan = self.cli('desktop', 'registration', '--json')
         armed = self.root / f'armed-{request_id}'
         worker = subprocess.Popen(self.powershell_command(r"""
@@ -1311,9 +1334,22 @@ $seen=$clock.ElapsedMilliseconds;
 $i.Refresh();if($i.InstanceGuid-cne $x.guid -or $i.EnginePID-ne $p.Id) {throw 'fixture instance changed before stop'};
 $i.Stop();if(-not $p.WaitForExit(5000)) {throw 'fixture original process exit unconfirmed'};
 if(@(Get-OwnInstances $s $t).Count-ne 0) {throw 'fixture instance remains'};
-$r=$t.Run($null);
+$r=$t.Run($null);$guid=[string]$r.InstanceGuid;
+# The replacement engine, proven BEFORE the release and inside the Stop
+# budget the hold consumes; otherwise the arrangement fails unreleased.
+$limit=$clock.ElapsedMilliseconds+1000;$q=$null;
+while($null-eq $q) {
+ if($clock.ElapsedMilliseconds-ge $limit) {throw 'replacement engine not proven within the Stop budget'};
+ $values=@(Get-OwnInstances $s $t);
+ if($values.Count-eq 1 -and [string]$values[0].InstanceGuid-ceq $guid -and $values[0].EnginePID-gt 0) {
+  $q=[Diagnostics.Process]::GetProcessById($values[0].EnginePID)
+ } else {Start-Sleep -Milliseconds 10}
+};
+$qh=$q.Handle;
+if($q.HasExited -or $q.MainModule.FileName-cne $x.image) {throw 'replacement engine is not the selected CLI'};
+$later=@{guid=$guid;pid=$q.Id;birth=$q.StartTime.ToFileTimeUtc()};
 [IO.File]::WriteAllText($x.release,$x.request,[Text.ASCIIEncoding]::new());
-@{stopped=$true;later=[string]$r.InstanceGuid;restart_ms=$clock.ElapsedMilliseconds-$seen}|ConvertTo-Json -Compress
+@{stopped=$true;later=$later;restart_ms=$clock.ElapsedMilliseconds-$seen}|ConvertTo-Json -Compress
 """, dict(task=self.task, task_image=plan['argv'][0], guid=original['guid'], pid=original['pid'],
           birth=original['birth'], image=str(self.cli_image), armed=str(armed),
           marker=str(self.config / f'held-pause-{request_id}.json'),
@@ -1387,7 +1423,9 @@ $r=$t.Run($null);
             self.assertFalse(refused['ok'], refused)
             # The instance check refused, not the deadline the hold consumed.
             self.assertIn('Original task selection changed before stop', refused['error'])
-            replacement = self.exact_later_instance(later['later'])
+            arranged = later['later']
+            self.assertTrue(same_replacement(arranged, self.exact_later_instance(arranged['guid'])),
+                            (arranged, self.observe()))
             (self.config / f'held-release-{request}').unlink()
             marker.unlink()
             record = json.loads(path.read_text(encoding='utf-8'))
@@ -1398,9 +1436,9 @@ $r=$t.Run($null);
             self.assertEqual((status['first_choice']['request'], status['first_choice']['phase']),
                              (request, 'unknown'), status)
             self.assertEqual(self.cli('desktop', 'ownership-status', '--json'), granted)
-            # The one later instance the fixture started was neither stopped
-            # nor replaced by the helper: same GUID, PID and birth, still live.
-            self.assertEqual(self.exact_later_instance(later['later'], wait=0), replacement)
+            # The one replacement the worker proved before the release was
+            # neither stopped nor replaced: same GUID, PID and birth, still live.
+            self.assertTrue(same_replacement(arranged, self.exact_later_instance(arranged['guid'], wait=0)))
             result = self.cli('desktop', 'registration', 'mode-result', '--json', '--request-id', request)
             self.assertEqual((result['outcome'], result['receipt']['phase']), ('unknown', 'unknown'), result)
             # The arranged later instance is live on the same boot: Review
@@ -1410,10 +1448,10 @@ $r=$t.Run($null);
             self.assertEqual(reviewed['outcome'], 'unknown', reviewed)
             self.assertFalse(reviewed['manager_changed'], reviewed)
             self.assertFalse(reviewed['authority_changed'], reviewed)
-            self.assertEqual(self.exact_later_instance(later['later'], wait=0), replacement)
-            # Teardown: stop exactly that later passive instance, then remove.
-            stopped = self.stop_exact_passive(dict(guid=replacement['guid'], pid=replacement['pid'],
-                                                   birth=replacement['birth']))
+            self.assertTrue(same_replacement(arranged, self.exact_later_instance(arranged['guid'], wait=0)))
+            # Teardown: stop exactly the proven replacement, then remove.
+            stopped = self.stop_exact_passive(dict(guid=arranged['guid'], pid=arranged['pid'],
+                                                   birth=arranged['birth']))
             self.assertTrue(stopped['stopped'], stopped)
             # Evidence for zerus-aucth: Review once nothing of the task runs.
             again = self.review_mode(request)

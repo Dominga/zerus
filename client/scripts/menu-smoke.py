@@ -22,7 +22,7 @@ parser.add_argument("--url", default="http://127.0.0.1:1437/scripts/menu-smoke.h
 parser.add_argument("--real-display", action="store_true")
 parser.add_argument("--title", default="Zerus menu regression (synthetic)")
 parser.add_argument("--probe-display", action="store_true", help="verify the isolated display without opening a window")
-parser.add_argument("--accessibility", action="store_true", help="check reported lists through AT-SPI on private buses")
+parser.add_argument("--accessibility", action="store_true", help="check reported semantics through AT-SPI on private buses")
 parser.add_argument("--xvfb-child", action="store_true", help=argparse.SUPPRESS)
 parser.add_argument("--paint-column", type=int, metavar="X",
                     help="check the presented frames of a page that reports `morphs` (a 4 px column at X through "
@@ -285,7 +285,7 @@ with tempfile.TemporaryDirectory(prefix="zerus-menu-") as scratch, ExitStack() a
 
         def inspect():
             try:
-                native = check_lists(report.get("accessibility_lists"), os.getpid())
+                native = check_lists(report.get("accessibility_lists"), os.getpid(), report.get("accessibility_descriptions"))
                 report.update(native)
                 if native.get("accessibility_failure"):
                     report.setdefault("failures", []).append(native["accessibility_failure"])

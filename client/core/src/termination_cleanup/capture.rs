@@ -5,14 +5,38 @@ use super::{Entry, STATE_CHANGED};
 use crate::{actions, paths, Exit, Invocation, Outcome, Target, WorktreeCleanup};
 use serde_json::Value;
 
-#[derive(Clone, Debug, PartialEq)]
+#[derive(Clone, Debug, PartialEq, serde::Deserialize, serde::Serialize)]
+#[serde(deny_unknown_fields)]
 pub struct Capture {
+    #[serde(deserialize_with = "closed_target")]
     pub target: Target,
     pub machine: String,
     pub root: String,
     pub common_dir: String,
     /// The nonce recorded in this run at launch; never inferred from a path.
     pub owner_id: String,
+}
+fn closed_target<'de, D: serde::Deserializer<'de>>(d: D) -> Result<Target, D::Error> {
+    #[derive(serde::Deserialize)]
+    #[serde(deny_unknown_fields)]
+    struct Fields {
+        computer: String,
+        name: String,
+        run_id: String,
+        conversation_id: String,
+    }
+    let Fields {
+        computer,
+        name,
+        run_id,
+        conversation_id,
+    } = serde::Deserialize::deserialize(d)?;
+    Ok(Target {
+        computer,
+        name,
+        run_id,
+        conversation_id,
+    })
 }
 fn text<'a>(value: &'a Value, key: &str) -> &'a str {
     value[key].as_str().unwrap_or("")

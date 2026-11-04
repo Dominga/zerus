@@ -615,6 +615,32 @@ finally:
     def failed_serve(self, env=None):
         return self.cli('desktop', 'serve', ok=False, env=env)
 
+    def test_termination_retention_requires_native_proof_and_status_is_original_id_only(self):
+        _, service = self.serve()
+        original_id = str(uuid.uuid4())
+        capture = dict(target=dict(computer='', name='codex/example/source', run_id='run', conversation_id='conversation'),
+                       machine=str(uuid.uuid4()), root='/srv/example/work', common_dir='/srv/example/main/.git', owner_id='original-owner')
+        original = dict(request_id=original_id, action='terminate', expected_run_id='run', expected_conversation_id='conversation')
+        intent = dict(scope=dict(configuration=service['configuration'], service_epoch=service['epoch']),
+                      confirmation_id=str(uuid.uuid4()), choice='remove_after_terminate', request_id=original_id,
+                      capture=capture, original=json.dumps(original))
+        refused = self.cli('desktop', 'request', '--json', data=dict(op='termination_outcome', intent=intent, confirmed=True, role='frontend'))
+        self.assertFalse(refused['accepted'])
+        self.assertFalse(refused['durable'])
+        self.assertEqual(refused['code'], 'frontend_authentication_required')
+        query = dict(op='termination_outcome_status', request_id=str(uuid.uuid4()), original_request_id=original_id, configuration=service['configuration'])
+        result = self.cli('desktop', 'request', '--json', data=query)
+        self.assertTrue(result['accepted'])
+        self.assertFalse(result['durable'])
+        self.assertFalse(result['found'])
+        self.assertIsNone(result['status'])
+        self.assertFalse(result['cleanup_authorized'])
+        query['allow_retry'] = True
+        self.assertFalse(self.cli('desktop', 'request', '--json', data=query)['accepted'])
+        status = self.cli('desktop', 'status', '--json')
+        self.assertFalse(status['writers_enabled'])
+        self.assertFalse(status['automatic_approvals'])
+
     def test_pending_read_import_requires_native_frontend_and_lookup_stays_read_only(self):
         self.serve()
         mark = dict(computer='example', name='agent/project/test', run_id='run',
@@ -1377,8 +1403,9 @@ finally:
     @staticmethod
     def remove_catalog_reason_schema(db):
         # Rewind the later leaves too, never leaving one labelled older: the
-        # schema-24 creation launch, the schema-23 creation worktree, then the
-        # schema-22 catalog approval.
+        # schema-25 termination retention, creation launch/worktree, then
+        # the schema-22 catalog approval.
+        db.execute('DROP TABLE desktop_termination_outcomes')
         db.execute('DROP TABLE desktop_creation_launches')
         db.execute('DROP TABLE desktop_creation_launch_budget')
         db.execute('DROP TABLE desktop_creation_worktrees')

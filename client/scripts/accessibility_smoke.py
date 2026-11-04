@@ -72,29 +72,52 @@ def private_bus(scratch):
                 child.wait(timeout=3)
 
 
-def check_lists(expected, process_id):
+def check_lists(expected, process_id, descriptions=None):
     """Call off the GTK thread: AT-SPI requests must be served by that thread."""
     import gi
     gi.require_version("Atspi", "2.0")
     from gi.repository import Atspi
-    if not isinstance(expected, list) or not 1 <= len(expected) <= 8:
-        raise ValueError("Expected 1-8 named accessibility lists")
+    expected = [] if expected is None else expected
+    descriptions = [] if descriptions is None else descriptions
+    if (not isinstance(expected, list) or len(expected) > 8
+            or not isinstance(descriptions, list) or len(descriptions) > 16 or not (expected or descriptions)):
+        raise ValueError("Expected bounded accessibility lists or descriptions")
     for entry in expected:
         if (not isinstance(entry, dict) or not isinstance(entry.get("name"), str) or len(entry["name"]) > 160
                 or not isinstance(entry.get("buttons"), list) or len(entry["buttons"]) > 100
                 or not all(isinstance(label, str) and len(label) <= 160 for label in entry["buttons"])):
             raise ValueError("Malformed accessibility list expectation")
+    for entry in descriptions:
+        if (not isinstance(entry, dict) or not isinstance(entry.get("name"), str) or len(entry["name"]) > 160
+                or not isinstance(entry.get("description"), str) or len(entry["description"]) > 2000):
+            raise ValueError("Malformed accessibility description expectation")
+    described_names = {entry["name"] for entry in descriptions}
     Atspi.set_timeout(250, 500)
     end = time.monotonic() + 5
     observed = []
+    observed_descriptions = []
     error = ""
     while time.monotonic() < end:
         nodes = []
 
+        def description(node):
+            pieces = []
+            for relation in node.get_relation_set()[:16]:
+                if relation.get_relation_type() != Atspi.RelationType.DESCRIBED_BY:
+                    continue
+                for index in range(min(relation.get_n_targets(), 8)):
+                    if time.monotonic() >= end:
+                        break
+                    target = relation.get_target(index)
+                    text = target.get_text_iface()
+                    pieces.append(Atspi.Text.get_text(text, 0, min(Atspi.Text.get_character_count(text), 2000)) if text else target.get_name())
+            return " ".join(piece for piece in pieces if piece) or node.get_description()
+
         def visit(node, depth):
             if node is None or depth > 24 or len(nodes) >= 512 or time.monotonic() >= end:
                 return
-            nodes.append((depth, node.get_role(), node.get_name() or ""))
+            name = node.get_name() or ""
+            nodes.append((depth, node.get_role(), name, description(node) if name in described_names else ""))
             for index in range(min(node.get_child_count(), 512 - len(nodes))):
                 if len(nodes) >= 512 or time.monotonic() >= end:
                     break
@@ -107,12 +130,12 @@ def check_lists(expected, process_id):
                 if app is not None and app.get_process_id() == process_id:
                     visit(app, 0)
             observed = []
-            for index, (depth, role, name) in enumerate(nodes):
+            for index, (depth, role, name, _) in enumerate(nodes):
                 if role != Atspi.Role.LIST:
                     continue
                 items = []
                 for child in range(index + 1, len(nodes)):
-                    child_depth, child_role, _ = nodes[child]
+                    child_depth, child_role = nodes[child][:2]
                     if child_depth <= depth:
                         break
                     if child_depth == depth + 1 and child_role == Atspi.Role.LIST_ITEM:
@@ -124,12 +147,15 @@ def check_lists(expected, process_id):
                                 buttons.append(nested[2][:160])
                         items.append(buttons)
                 observed.append({"name": name, "items": items})
-            if all(any(row["name"] == entry["name"] and len(row["items"]) == len(entry["buttons"])
+            observed_descriptions = [{"name": name, "description": description} for _, _, name, description in nodes if name in described_names]
+            if (all(any(row["name"] == entry["name"] and len(row["items"]) == len(entry["buttons"])
                        and all(len(buttons) == 1 and buttons[0].startswith(label)
                                for buttons, label in zip(row["items"], entry["buttons"]))
-                       for row in observed) for entry in expected):
-                return {"accessibility": observed, "accessibility_nodes": len(nodes)}
+                       for row in observed) for entry in expected)
+                    and all(entry in observed_descriptions for entry in descriptions)):
+                return {"accessibility": observed, "native_descriptions": observed_descriptions, "accessibility_nodes": len(nodes)}
         except Exception as failure:
             error = str(failure)
         time.sleep(.1)
-    return {"accessibility": observed, "accessibility_failure": error or "Native list/item/button structure did not match"}
+    mismatch = "Native accessibility description did not match" if descriptions else "Native list/item/button structure did not match"
+    return {"accessibility": observed, "native_descriptions": observed_descriptions, "accessibility_failure": error or mismatch}

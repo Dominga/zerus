@@ -56,6 +56,9 @@ use tauri::State;
 use zerus_client_core::attachments::{self, Attachment, StoredFile};
 use zerus_client_core::cache::{self, Chip, ColdAction, ColdPrompt};
 use zerus_client_core::local_messages::{self, Inspect, LocalMessage, LocalMessages, Status};
+use zerus_client_core::operation_recovery::deferred_input::{
+    message_sha256, Checkpoint, Intent, Kind, Start,
+};
 use zerus_client_core::send::{
     self as rules, block_reason, BlockFacts, CompactSend, DraftMark, Session, StartChoice,
     StartQuestion, StartSend, Step,
@@ -867,6 +870,9 @@ pub(crate) struct Pending {
     pub(crate) evidence: Option<Arc<Value>>,
     /// Its poll's inspect runs: one at a time.
     pub(crate) polling: bool,
+    /// The request id of its start or compaction call, reserved with the
+    /// checkpoint of its waiting save (zerus-5wmh.66.4.4); set by `wait`.
+    pub(crate) request_id: String,
 }
 
 /// One delivery: what is sent, to which run, with which consent.
@@ -893,6 +899,9 @@ pub(crate) struct Delivery {
     pub(crate) preserve: bool,
     /// The revision of its "sending" save, set by `deliver`.
     pub(crate) revision: u64,
+    /// Its one request id, reserved by `deliver` with the checkpoint saved
+    /// in that "sending" save (zerus-5wmh.66.4.4); the dispatch uses it.
+    pub(crate) request_id: String,
 }
 
 fn text<'a>(value: &'a Value, key: &str) -> &'a str {
@@ -1143,6 +1152,7 @@ impl Composers {
             consent,
             preserve,
             revision: 0,
+            request_id: String::new(),
         }
     }
 
@@ -1282,6 +1292,22 @@ impl Composers {
         let (key, handle, revision) = (composer.key.clone(), composer.handle, composer.saves);
         composer.delivering = Some(revision);
         delivery.revision = revision;
+        // The send's request id is reserved now and saved with the draft in
+        // this "sending" save, before any call: the original intent and
+        // identity, never a permission.
+        let checkpoint = Checkpoint::reserve(Intent {
+            kind: Kind::Send,
+            draft_revision: revision,
+            message_sha256: message_digest(&delivery.text, &delivery.attachments),
+            run_id: delivery.run.clone(),
+            conversation_id: delivery.conversation.clone(),
+            question: None,
+            start: None,
+            retry_of: delivery.retry_id.clone(),
+            consent: delivery.consent,
+        });
+        delivery.request_id = checkpoint.request_id.clone();
+        composer.checkpoint = Some(checkpoint);
         self.0.store.save_durable(&key, composer.stored(), {
             let me = self.clone();
             move |saved| me.prepared(delivery, handle, revision, saved)
@@ -1305,6 +1331,8 @@ impl Composers {
         if let Err(error) = saved {
             composer.sending = false;
             composer.delivering = None;
+            // Nothing was sent: its reserved identity goes with the save.
+            composer.checkpoint = None;
             composer.kept = None;
             composer.notice.clear();
             composer.save_failed = true;
@@ -1358,10 +1386,13 @@ impl Composers {
         if !self.still_valid(&delivery) {
             return self.ended(&delivery, false, CHANGED, false);
         }
-        // One request id per delivery, made here for its one dispatch: the
-        // local row, the CLI request and the receipt check carry it, and no
-        // other delivery reuses it.
-        let request_id = uuid::Uuid::new_v4().to_string();
+        // One request id per delivery, reserved by `deliver` and saved with
+        // the draft before this dispatch: the local row, the CLI request and
+        // the receipt check carry it, and no other delivery reuses it.
+        let request_id = delivery.request_id.clone();
+        if request_id.is_empty() {
+            return self.ended(&delivery, false, CHANGED, false);
+        }
         let now = self.now();
         {
             let mut hub = self.lock();
@@ -1571,6 +1602,11 @@ impl Composers {
             composer.sending = false;
             composer.waiting = None;
             composer.gave_up = None;
+            // A definite end sent nothing more; an uncertain one keeps the
+            // original identity for its receipt.
+            if !uncertain {
+                composer.checkpoint = None;
+            }
             let kept = composer.kept.take();
             if preserve {
                 if let Some((error, notice)) = kept {
@@ -1899,6 +1935,21 @@ const CLEARED: &str = "Context cleared. Your draft is ready to send.";
 const CLEAR_SENT: &str =
     "Clear command sent. Waiting for the agent to confirm the new conversation…";
 
+/// The exact message a dispatch carries, as its checkpoint binds it.
+pub(crate) fn message_digest(text: &str, attachments: &[Attachment]) -> String {
+    message_sha256(
+        text,
+        attachments.iter().map(|a| {
+            (
+                a.name.as_str(),
+                a.mime.as_str(),
+                a.reference.as_str(),
+                a.bytes.as_ref(),
+            )
+        }),
+    )
+}
+
 /// A call's outcome: a lane already taken (`actions::BUSY`) is a definite
 /// refusal with `refused` as its text; any other `Err` (the call's thread
 /// died) and a panic are uncertain.
@@ -2193,6 +2244,7 @@ impl Composers {
             revision: 0,
             evidence: ctx.details.clone(),
             polling: false,
+            request_id: String::new(),
         };
         hub.start = Some((pending, start));
         if self.wait(hub, &prompt.key, waiting, true) {
@@ -2251,6 +2303,7 @@ impl Composers {
             revision: 0,
             evidence: ctx.details.clone(),
             polling: false,
+            request_id: String::new(),
         };
         hub.compacts.insert(key.clone(), (pending, compact));
         if self.wait(hub, &key, waiting, false) {
@@ -2270,6 +2323,16 @@ impl Composers {
         if hub.closed {
             return false;
         }
+        // What the start or compaction call names: its run and conversation,
+        // the message waiting to be sent and, for a start, how it starts.
+        let named = if start {
+            hub.start
+                .as_ref()
+                .filter(|(p, _)| p.key == key)
+                .map(|(p, s)| (p.clone(), Some(s.choice())))
+        } else {
+            hub.compacts.get(key).map(|(p, _)| (p.clone(), None))
+        };
         let Some(composer) = hub.composers.get_mut(key) else {
             return false;
         };
@@ -2286,6 +2349,43 @@ impl Composers {
         composer.saving = true;
         let (handle, revision) = (composer.handle, composer.saves);
         composer.delivering = Some(revision);
+        // The call's request id is reserved now and saved with the waiting
+        // draft before it is asked for (zerus-5wmh.66.4.4): intent and
+        // identity only. A reload never continues it.
+        let (run_id, conversation_id, retry, choice) = match &named {
+            Some((pending, choice)) => (
+                pending.run.clone(),
+                pending.conversation.clone(),
+                pending.retry.clone(),
+                *choice,
+            ),
+            None => Default::default(),
+        };
+        let message_sha256 = match &retry {
+            Some(retry) => message_digest(&retry.text, &retry.attachments),
+            None => message_digest(&composer.draft.text, &composer.draft.attachments),
+        };
+        let checkpoint = Checkpoint::reserve(Intent {
+            kind: if start {
+                Kind::ResumeToSend
+            } else {
+                Kind::CompactToSend
+            },
+            draft_revision: revision,
+            message_sha256,
+            run_id,
+            conversation_id,
+            question: None,
+            start: start.then_some(match choice {
+                Some(StartChoice::ResumeCompact) => Start::ResumeCompact,
+                Some(StartChoice::Fresh) => Start::Fresh,
+                Some(StartChoice::Resume) | None => Start::Resume,
+            }),
+            retry_of: retry.map(|r| r.id),
+            consent: false,
+        });
+        let request_id = checkpoint.request_id.clone();
+        composer.checkpoint = Some(checkpoint);
         let stored = composer.stored();
         let pending = if start {
             hub.start.as_mut().map(|(p, _)| p).filter(|p| p.key == key)
@@ -2294,6 +2394,7 @@ impl Composers {
         };
         if let Some(pending) = pending {
             pending.revision = revision;
+            pending.request_id = request_id;
         }
         // Like a delivery, a waiting send drops its key's open questions.
         hub.prompts.retain(|_, prompt| prompt.key != key);
@@ -2410,7 +2511,7 @@ impl Composers {
     /// other `Err` or a panic is uncertain. Either way S3 ends the
     /// continuation, and its message is never sent.
     fn request(&self, key: &str, start: bool, revision: u64, action: Action) {
-        let target = {
+        let (target, id) = {
             let mut hub = self.lock();
             if hub.closed {
                 return;
@@ -2418,12 +2519,16 @@ impl Composers {
             let Some(pending) = pending_mut(&mut hub, key, start, revision) else {
                 return;
             };
-            Target {
-                computer: pending.session.computer.clone(),
-                name: pending.session.name.clone(),
-                run_id: pending.run.clone(),
-                conversation_id: pending.conversation.clone(),
-            }
+            (
+                Target {
+                    computer: pending.session.computer.clone(),
+                    name: pending.session.name.clone(),
+                    run_id: pending.run.clone(),
+                    conversation_id: pending.conversation.clone(),
+                },
+                // Reserved with the waiting save's checkpoint.
+                pending.request_id.clone(),
+            )
         };
         let me = self.clone();
         let owned = key.to_owned();
@@ -2436,11 +2541,15 @@ impl Composers {
                     return;
                 }
             }
-            let id = uuid::Uuid::new_v4().to_string();
             let dispatch = &me.0.deps.dispatch;
-            let called = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
-                dispatch(target, action, id)
-            }));
+            // Without its reserved id nothing is called: a definite refusal.
+            let called = if id.is_empty() {
+                Ok(Err(crate::actions::BUSY.to_owned()))
+            } else {
+                std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+                    dispatch(target, action, id)
+                }))
+            };
             // A taken lane refused before anything ran: Qt's cancel text
             // (4756, 4559), never an uncertain end.
             let refused = if start {
@@ -2575,6 +2684,7 @@ impl Composers {
             consent: true,
             preserve,
             revision: 0,
+            request_id: String::new(),
         };
         if !self.deliver(&mut hub, delivery) {
             drop(hub);
@@ -5958,6 +6068,192 @@ mod continuations {
             },
             _ => receipt(action, request),
         });
+    }
+
+    /// Every call, with the checkpoint the session's draft held on disk at
+    /// that moment (zerus-5wmh.66.4.4). Calls are then answered as before.
+    type Seen = std::sync::Arc<Mutex<Vec<(Action, String, Option<Checkpoint>)>>>;
+    fn record_checkpoints(fake: &Fake, root: &crate::composer::tests::Scratch) -> Seen {
+        let seen = Seen::default();
+        let previous = std::mem::replace(&mut *lock(&fake.outcome), Box::new(receipt));
+        let (record, store) = (seen.clone(), root.join("drafts"));
+        *lock(&fake.outcome) = Box::new(move |action, id| {
+            let saved = zerus_client_core::drafts::read_draft(&store, KEY)
+                .draft
+                .checkpoint
+                .map(|saved| *saved);
+            lock(&record).push((action.clone(), id.to_owned(), saved));
+            previous(action, id)
+        });
+        seen
+    }
+
+    fn on_disk(root: &crate::composer::tests::Scratch) -> Option<Checkpoint> {
+        zerus_client_core::drafts::read_draft(&root.join("drafts"), KEY)
+            .draft
+            .checkpoint
+            .map(|saved| *saved)
+    }
+
+    #[test]
+    fn a_send_saves_its_reserved_request_id_with_the_draft_before_the_call() {
+        let root = dir("checkpoint-send");
+        let (c, fake) = send_hub(&root);
+        let seen = record_checkpoints(&fake, &root);
+        let view = opened(&c, ready());
+        assert_eq!(
+            c.send_message(view.handle, 1, view.text_epoch, "hello".into(), 5, 5),
+            SendReply::Sending
+        );
+        until(&c, |v| !v.sending && v.text.is_empty());
+        let seen = lock(&seen).clone();
+        assert_eq!(seen.len(), 1);
+        let (action, id, saved) = &seen[0];
+        assert!(matches!(action, Action::Send { .. }));
+        let saved = saved.as_ref().expect("saved before the call");
+        assert!(saved.valid());
+        assert_eq!(&saved.request_id, id, "the call uses the reserved id");
+        assert_eq!(saved.kind, Kind::Send);
+        assert_eq!(saved.receipts, "input_receipts");
+        assert_eq!(
+            (saved.run_id.as_str(), saved.conversation_id.as_str()),
+            ("run-1", "conv-1")
+        );
+        assert_eq!(saved.message_sha256, message_digest("hello", &[]));
+        // A definite end sent the message: its identity goes with the draft.
+        eventually(|| on_disk(&root).is_none());
+    }
+
+    #[test]
+    fn an_uncertain_send_keeps_its_identity_and_a_restart_never_sends_it() {
+        let root = dir("checkpoint-uncertain");
+        let store = drafts(&root);
+        let (c, fake) = send_hub_on(&store);
+        *lock(&fake.outcome) = Box::new(|action, id| match action {
+            Action::Send { .. } => Outcome::Uncertain {
+                detail: "connection lost".into(),
+            },
+            _ => receipt(action, id),
+        });
+        let view = opened(&c, ready());
+        c.send_message(view.handle, 1, view.text_epoch, "maybe sent".into(), 0, 0);
+        until(&c, |v| !v.sending && v.uncertain);
+        let id = sent_ids(&fake);
+        assert_eq!(id.len(), 1);
+        let kept = on_disk(&root).expect("an uncertain outcome keeps the identity");
+        assert_eq!(kept.request_id, id[0]);
+        // A restart loads it as data: nothing is sent from it.
+        let (again, fresh) = send_hub_on(&store);
+        let view = opened(&again, ready());
+        assert!(view.uncertain && !view.can_send);
+        again.observe(&state(ready()));
+        eventually(|| on_disk(&root).is_some_and(|saved| saved == kept));
+        assert!(lock(&fresh.calls).is_empty(), "nothing is re-sent");
+    }
+
+    #[test]
+    fn a_definite_failure_ends_the_identity() {
+        let root = dir("checkpoint-failed");
+        let (c, fake) = send_hub(&root);
+        *lock(&fake.outcome) = Box::new(|action, id| match action {
+            Action::Send { .. } => Outcome::Failed {
+                detail: "refused".into(),
+            },
+            _ => receipt(action, id),
+        });
+        let view = opened(&c, ready());
+        c.send_message(view.handle, 1, view.text_epoch, "refused".into(), 0, 0);
+        let view = until(&c, |v| !v.sending && v.status_error);
+        assert!(!view.uncertain);
+        // The draft's next save carries no identity: nothing was sent.
+        eventually(|| on_disk(&root).is_none());
+    }
+
+    #[test]
+    fn a_compaction_and_the_send_after_it_each_reserve_their_own_id() {
+        let root = dir("checkpoint-compact");
+        let (c, fake) = send_hub(&root);
+        compacts_as(&fake, "cmp-1");
+        let seen = record_checkpoints(&fake, &root);
+        let mut details = cold();
+        let view = opened(&c, details.clone());
+        let SendReply::Cold { token, .. } =
+            c.send_message(view.handle, 1, view.text_epoch, "compact me".into(), 0, 0)
+        else {
+            panic!()
+        };
+        c.answer(
+            token,
+            Answer::Cold {
+                action: ColdAction::Compact,
+            },
+        );
+        until(&c, |_| called(&fake, &Action::CompactContext));
+        details["compact_context_request"] = json!({"request_id": "cmp-1", "status": "completed"});
+        c.observe(&state(details.clone()));
+        c.observe(&state(details));
+        until(&c, |v| !v.sending && !v.compacting);
+        let seen = lock(&seen).clone();
+        assert_eq!(seen.len(), 2);
+        let (compact, compact_id, compact_saved) = &seen[0];
+        assert_eq!(compact, &Action::CompactContext);
+        let compact_saved = compact_saved.as_ref().expect("saved before the compaction");
+        assert_eq!(&compact_saved.request_id, compact_id);
+        assert_eq!(compact_saved.kind, Kind::CompactToSend);
+        assert_eq!(compact_saved.receipts, "compact_receipts");
+        assert_eq!(
+            compact_saved.message_sha256,
+            message_digest("compact me", &[])
+        );
+        let (send, send_id, send_saved) = &seen[1];
+        assert!(matches!(send, Action::Send { .. }));
+        let send_saved = send_saved.as_ref().expect("saved before the send");
+        assert_eq!(&send_saved.request_id, send_id);
+        assert_eq!(send_saved.kind, Kind::Send);
+        assert_ne!(compact_id, send_id, "one id per dispatch");
+        eventually(|| on_disk(&root).is_none());
+    }
+
+    #[test]
+    fn a_resume_reserves_its_id_with_the_waiting_draft_before_the_call() {
+        let root = dir("checkpoint-resume");
+        let (c, fake) = send_hub(&root);
+        stopped(&fake);
+        let seen = record_checkpoints(&fake, &root);
+        let mut details = ready();
+        details["runtime_state"] = json!("stopped");
+        details["process_state"] = json!("exited");
+        let view = opened(&c, details);
+        let SendReply::Start { token, .. } =
+            c.send_message(view.handle, 1, view.text_epoch, "after start".into(), 0, 0)
+        else {
+            panic!("no question")
+        };
+        c.answer(
+            token,
+            Answer::Start {
+                choice: StartChoice::Resume,
+            },
+        );
+        until(&c, |_| called(&fake, &Action::Resume));
+        let seen = lock(&seen).clone();
+        let (action, id, saved) = &seen[0];
+        assert_eq!(action, &Action::Resume);
+        let saved = saved.as_ref().expect("saved before the resume");
+        assert!(saved.valid());
+        assert_eq!(&saved.request_id, id);
+        assert_eq!(saved.kind, Kind::ResumeToSend);
+        assert_eq!(saved.receipts, "resume_input");
+        assert_eq!(saved.start, Some(Start::Resume));
+        assert_eq!(saved.run_id, "run-1", "the stopped run it names");
+    }
+
+    fn sent_ids(fake: &Fake) -> Vec<String> {
+        lock(&fake.calls)
+            .iter()
+            .filter(|(_, action, _)| matches!(action, Action::Send { .. }))
+            .map(|(_, _, id)| id.clone())
+            .collect()
     }
 
     fn cold() -> Value {

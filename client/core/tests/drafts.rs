@@ -923,3 +923,131 @@ fn form_checkpoint_compares_reserved_identity_and_preserves_unknown_fields() {
     );
     assert_eq!(wait(|done| store.load(KEY, done)).draft, newer);
 }
+
+// zerus-5wmh.66.4.4: the deferred-input checkpoint saved with a draft.
+
+use zerus_client_core::drafts::NOT_SAVED_CHECKPOINT;
+use zerus_client_core::operation_recovery::deferred_input::{
+    message_sha256, Checkpoint, Intent, Kind,
+};
+
+fn checkpoint(revision: u64) -> Checkpoint {
+    Checkpoint::reserve(Intent {
+        kind: Kind::Send,
+        draft_revision: revision,
+        message_sha256: message_sha256("was being sent", []),
+        run_id: "run-1".into(),
+        conversation_id: "conv-1".into(),
+        question: None,
+        start: None,
+        retry_of: None,
+        consent: false,
+    })
+}
+
+fn manifest(root: &Path) -> Value {
+    serde_json::from_slice(&fs::read(folder(root, KEY).join("draft.json")).unwrap()).unwrap()
+}
+
+#[test]
+fn a_checkpoint_round_trips_and_only_its_drafts_carry_the_field() {
+    let scratch = Scratch::new("checkpoint-round-trip");
+    let store = DraftStore::open(scratch.0.clone());
+    save(&store, KEY, draft("plain", &[])).unwrap();
+    assert!(
+        manifest(&scratch.0).get("deferred_input").is_none(),
+        "a draft without one keeps its earlier bytes"
+    );
+    let mut sending = draft("was being sent", &[]);
+    sending.sending = true;
+    sending.checkpoint = Some(Box::new(checkpoint(2)));
+    save(&store, KEY, sending.clone()).unwrap();
+    assert_eq!(
+        manifest(&scratch.0)["deferred_input"]["request_id"],
+        json!(sending.checkpoint.as_ref().unwrap().request_id)
+    );
+    let loaded = load(&store, KEY);
+    assert_eq!(
+        loaded.draft.checkpoint, sending.checkpoint,
+        "loaded as data"
+    );
+    assert!(
+        loaded.draft.uncertain,
+        "a send saved as sending reloads uncertain"
+    );
+    assert!(loaded.storage_error.is_none());
+}
+
+#[test]
+fn a_present_but_invalid_checkpoint_is_never_read_as_absent() {
+    let scratch = Scratch::new("checkpoint-invalid");
+    let store = DraftStore::open(scratch.0.clone());
+    save(&store, KEY, draft("kept", &[])).unwrap();
+    store.flush();
+    let path = folder(&scratch.0, KEY).join("draft.json");
+    let good = serde_json::to_value(checkpoint(1)).unwrap();
+    let mut wrong_family = good.clone();
+    wrong_family["receipts"] = json!("question_receipts");
+    for (case, value) in [
+        ("malformed", json!({"request_id": 7})),
+        ("unknown field", {
+            let mut v = good.clone();
+            v["permission"] = json!(true);
+            v
+        }),
+        ("inconsistent", wrong_family),
+        ("null", Value::Null),
+    ] {
+        let mut manifest = manifest(&scratch.0);
+        manifest["deferred_input"] = value;
+        fs::write(&path, manifest.to_string()).unwrap();
+        let loaded = read_draft(&scratch.0, KEY);
+        assert_eq!(
+            loaded.storage_error.as_deref(),
+            Some(NOT_RESTORED),
+            "{case}"
+        );
+        assert!(loaded.draft.checkpoint.is_none(), "{case}");
+        assert!(path.exists(), "{case}: the files stay");
+    }
+}
+
+#[test]
+fn an_invalid_checkpoint_is_never_saved() {
+    let scratch = Scratch::new("checkpoint-refused");
+    let store = DraftStore::open(scratch.0.clone());
+    save(&store, KEY, draft("before", &[])).unwrap();
+    let mut bad = draft("after", &[]);
+    let mut invalid = checkpoint(1);
+    invalid.request_id = "not-a-uuid".into();
+    bad.checkpoint = Some(Box::new(invalid));
+    assert_eq!(save(&store, KEY, bad), Err(NOT_SAVED_CHECKPOINT.to_owned()));
+    assert_eq!(load(&store, KEY).draft.draft.text, "before");
+}
+
+#[test]
+fn imported_and_recovered_drafts_never_carry_a_checkpoint() {
+    let scratch = Scratch::new("checkpoint-import");
+    let (source_root, here, recovered) = (
+        scratch.0.join("dev"),
+        scratch.0.join("here"),
+        scratch.0.join("recovered"),
+    );
+    let mut sending = draft("was being sent", &[]);
+    sending.sending = true;
+    sending.checkpoint = Some(Box::new(checkpoint(3)));
+    seed(&source_root, &[(KEY, sending)]);
+    assert!(read_draft(&source_root, KEY).draft.checkpoint.is_some());
+    assert_eq!(
+        import_once(&here, &[source("dev", &source_root)]).imported,
+        1
+    );
+    let imported = load(&DraftStore::open(here.clone()), KEY);
+    assert_eq!(imported.draft.draft.text, "was being sent");
+    assert!(imported.draft.uncertain, "still interrupted, never re-sent");
+    assert!(imported.draft.checkpoint.is_none());
+    let store = DraftStore::open(recovered);
+    let copy = wait(|done| store.recover(&source_root, KEY, done)).unwrap();
+    assert!(copy.draft.checkpoint.is_none());
+    assert!(load(&store, KEY).draft.checkpoint.is_none());
+}

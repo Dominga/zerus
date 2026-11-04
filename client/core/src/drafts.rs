@@ -15,6 +15,7 @@ use crate::attachments::{
     Attachment, Draft, MAX_ATTACHMENTS, MAX_ATTACHMENT_BYTES, MAX_TOTAL_BYTES,
 };
 use crate::migration::draft_preload;
+use crate::operation_recovery::deferred_input::Checkpoint;
 use serde::{Deserialize, Serialize};
 use serde_json::{json, Map, Value};
 use sha2::{Digest, Sha256};
@@ -52,6 +53,12 @@ pub const ALREADY_EXISTS: &str =
 /// A write refused for this run: the store's earlier drafts could not be
 /// recorded first (zerus-5wmh.66.5.2.1.2), so nothing is overwritten.
 pub const NOT_RECORDED: &str = "Drafts are not being saved: their earlier versions could not be recorded. Check access to the Zerus data folder, then use Retry in Saved drafts.";
+/// A draft whose deferred-input checkpoint is inconsistent is never written:
+/// no dispatch may follow a save that did not record its identity.
+pub const NOT_SAVED_CHECKPOINT: &str =
+    "Draft not saved: its delivery identity is invalid. Nothing was sent.";
+/// The manifest field of a reserved deferred input ([`StoredDraft::checkpoint`]).
+const CHECKPOINT: &str = "deferred_input";
 /// Saved drafts skips larger manifests.
 pub(crate) const MAX_MANIFEST: u64 = 1024 * 1024;
 const PREVIEW_CHARS: usize = 200;
@@ -71,6 +78,11 @@ pub struct StoredDraft {
     /// Saved while the message was being sent.
     pub sending: bool,
     pub uncertain: bool,
+    /// The deferred input reserved before its dispatch (zerus-5wmh.66.4.4):
+    /// its request identity and consent checkpoint, saved with the draft.
+    /// Data only: nothing sends from it, and an imported or recovered draft
+    /// never carries one.
+    pub checkpoint: Option<Box<Checkpoint>>,
 }
 
 impl StoredDraft {
@@ -317,7 +329,7 @@ fn save_direct(root: &Path, key: &str, draft: &StoredDraft) -> Result<(), String
             "sha256": digest, "bytes": attachment.bytes.len(),
         }));
     }
-    let manifest = json!({
+    let mut manifest = json!({
         "version": 1, "key": key, "text": draft.draft.text,
         "position": draft.position, "anchor": draft.anchor, "label": draft.label,
         "form_state": draft.form_state,
@@ -325,6 +337,15 @@ fn save_direct(root: &Path, key: &str, draft: &StoredDraft) -> Result<(), String
         "sending": draft.sending, "uncertain": draft.uncertain,
         "attachments": attachments,
     });
+    // Only a reserved deferred input adds its field: every other manifest
+    // keeps its exact earlier bytes.
+    if let Some(checkpoint) = &draft.checkpoint {
+        if !checkpoint.valid() {
+            return Err(NOT_SAVED_CHECKPOINT.into());
+        }
+        manifest[CHECKPOINT] =
+            serde_json::to_value(checkpoint).map_err(|_| NOT_SAVED_CHECKPOINT.to_owned())?;
+    }
     atomic_write(&path.join("draft.json"), manifest.to_string().as_bytes())?;
     // The committed manifest is authoritative: a crash during this cleanup
     // cannot bring sent attachments back.
@@ -396,8 +417,18 @@ fn load_once(root: &Path, key: &str) -> (StoredDraft, bool) {
             .unwrap_or_default(),
         sending: flag("sending"),
         uncertain: flag("uncertain"),
+        checkpoint: None,
     };
     let mut valid = true;
+    // Only an absent field is a draft without a deferred input. A present
+    // one that does not parse or is inconsistent is never dropped as absent:
+    // the draft is not restored, and its files stay.
+    if let Some(value) = object.get(CHECKPOINT) {
+        match serde_json::from_value::<Checkpoint>(value.clone()) {
+            Ok(checkpoint) if checkpoint.valid() => draft.checkpoint = Some(Box::new(checkpoint)),
+            _ => valid = false,
+        }
+    }
     let mut total = 0;
     let listed = object
         .get("attachments")
@@ -936,10 +967,12 @@ impl DraftStore {
                 if !here.draft.is_empty() || here.storage_error.is_some() {
                     return done(Err(ALREADY_EXISTS.into()));
                 }
-                let copy = read_draft(&qt_root, &owned);
+                let mut copy = read_draft(&qt_root, &owned);
                 if copy.storage_error.is_some() {
                     return done(Ok(copy));
                 }
+                // A recovered draft never carries a deferred input either.
+                copy.draft.checkpoint = None;
                 done(save_fenced(&fence, &root, &owned, &copy.draft).map(|()| copy))
             }),
         );
@@ -1308,7 +1341,16 @@ pub fn import_once(root: &Path, sources: &[ImportSource]) -> ImportReport {
                     key: key.clone(),
                     source: source.name.clone(),
                 }),
-                None => match save_direct(root, key, &found.draft) {
+                // An imported draft never carries another app's deferred
+                // input: its original belongs there, never re-sent here.
+                None => match save_direct(
+                    root,
+                    key,
+                    &StoredDraft {
+                        checkpoint: None,
+                        ..found.draft.clone()
+                    },
+                ) {
                     Ok(()) => {
                         report.imported += 1;
                         kept = Some(hash);

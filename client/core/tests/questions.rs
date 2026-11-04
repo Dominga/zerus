@@ -1147,3 +1147,63 @@ fn card_previews_read_answers() {
         "rm -rf scratch"
     );
 }
+
+/// zerus-5wmh.66.4.4: the answer's reserved identity follows its outcome.
+#[test]
+fn an_answer_checkpoint_lives_until_a_definite_outcome() {
+    use zerus_client_core::drafts::Loaded;
+    use zerus_client_core::operation_recovery::deferred_input::{
+        identity_sha256, message_sha256, Checkpoint, Intent, Kind, Question as Asked,
+    };
+    use zerus_client_core::questions::AnswerDraft;
+    let reserve = || {
+        Checkpoint::reserve(Intent {
+            kind: Kind::Answer,
+            draft_revision: 1,
+            message_sha256: message_sha256("[]", []),
+            run_id: "run-1".into(),
+            conversation_id: "conv-1".into(),
+            question: Some(Asked {
+                id: "tool:t1".into(),
+                identity_sha256: identity_sha256(&serde_json::json!({"id": "tool:t1"})),
+            }),
+            start: None,
+            retry_of: None,
+            consent: false,
+        })
+    };
+    let begun = || {
+        let mut draft = AnswerDraft::default();
+        draft.begin_sending();
+        draft.checkpoint = Some(reserve());
+        draft
+    };
+    // Saved with the draft, and loaded back as data.
+    let draft = begun();
+    let stored = draft.stored();
+    assert_eq!(stored.checkpoint.as_deref(), draft.checkpoint.as_ref());
+    let back = AnswerDraft::from_loaded(
+        &Loaded {
+            draft: stored,
+            ..Loaded::default()
+        },
+        "",
+    );
+    assert_eq!(back.checkpoint, draft.checkpoint);
+    // Uncertain keeps it; every definite end, or a failed save, drops it.
+    let mut uncertain = begun();
+    uncertain.set_error("lost", true);
+    assert!(uncertain.checkpoint.is_some());
+    let mut failed = begun();
+    failed.set_error("refused", false);
+    assert!(failed.checkpoint.is_none());
+    let mut answered = begun();
+    answered.set_answered(false);
+    assert!(answered.checkpoint.is_none());
+    let mut submitted = begun();
+    submitted.set_submitted();
+    assert!(submitted.checkpoint.is_none());
+    let mut unsaved = begun();
+    unsaved.sending_failed();
+    assert!(unsaved.checkpoint.is_none());
+}

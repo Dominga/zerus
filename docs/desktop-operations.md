@@ -160,6 +160,21 @@ This remains true if G3 has added an adapter that this consumer does not yet
 understand. `ManifestEnd` means only the end of this immutable manifest; it
 never claims complete source discovery, drain or G2 coverage.
 
+Each deferred input reserves its client request UUID and a consent checkpoint
+before its dispatch, and saves them with its draft in the existing durable save
+(`operation_recovery::deferred_input`, draft manifest field `deferred_input`).
+The deferred inputs are a send, an answer, the compaction of a compact-to-send
+and the start of a resume-then-send. The dispatch uses that request id. The
+checkpoint records the original intent and identity only: the kind, the draft
+save revision and the exact message digest, the run and conversation, the
+question for an answer, a resume's start choice, and the CLI receipt family
+(`input_receipts`, `question_receipts`, `compact_receipts` or `resume_input`).
+An uncertain outcome keeps it; a definite one removes it. Restart, import or
+reconnect never rebuild executable consent from it, and nothing sends from it:
+a reload shows the draft as before, and imported and recovered drafts never
+carry one. A present but invalid field leaves the draft not restored, never
+read as absent. Executing kinds that reconcile its receipt remain a later slice.
+
 ## Executing kinds and the exit boundary
 
 The termination-outcome prerequisite shares the maintained CLI's exact

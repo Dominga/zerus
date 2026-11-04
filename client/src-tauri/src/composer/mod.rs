@@ -44,6 +44,7 @@ use zerus_client_core::attachments::{self, Attachment, Draft, FileRead, Selectio
 use zerus_client_core::cache::Chip;
 use zerus_client_core::drafts::{DraftStore, IndexPage, Loaded, StoredDraft, ALREADY_EXISTS};
 use zerus_client_core::local_messages::{LocalMessage, LocalMessages};
+use zerus_client_core::operation_recovery::deferred_input::Checkpoint;
 use zerus_client_core::send::{CompactSend, StartSend};
 use zerus_client_core::session_usage::ContextChip;
 use zerus_client_core::{Action, Batch, Outcome, Target, ViewRow};
@@ -387,6 +388,11 @@ pub(crate) struct Composer {
     /// The SHA-256 digests of one attachment list (`attachments_rev`), for
     /// the continuations' draft marks: each list is hashed once.
     pub(crate) digests: Option<(u64, Vec<String>)>,
+    /// The deferred input reserved before its dispatch, saved with this
+    /// draft (zerus-5wmh.66.4.4): a send, or a continuation's start or
+    /// compaction. Kept while its outcome is uncertain and loaded back as
+    /// data; nothing sends from it.
+    pub(crate) checkpoint: Option<Checkpoint>,
 }
 
 impl Composer {
@@ -420,6 +426,7 @@ impl Composer {
             kept: None,
             delivering: None,
             digests: None,
+            checkpoint: None,
         }
     }
 
@@ -450,6 +457,7 @@ impl Composer {
             form_state: self.form_state.clone(),
             sending: self.sending,
             uncertain: self.uncertain,
+            checkpoint: self.checkpoint.clone().map(Box::new),
         }
     }
 
@@ -810,6 +818,8 @@ impl Composers {
         composer.label = stored.label;
         composer.form_state = stored.form_state;
         composer.uncertain = stored.uncertain || stored.sending || loaded.notice.is_some();
+        // Its original identity, as data: a reload never continues it.
+        composer.checkpoint = stored.checkpoint.map(|checkpoint| *checkpoint);
         if let Some(notice) = loaded.notice {
             composer.show_error(notice);
         }

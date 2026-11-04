@@ -81,17 +81,37 @@ async function run() {
     state(3, 5, false); radios()[3].focus(); key("ArrowLeft", 2);
     check(radios()[3].textContent?.includes("workstation-3"), "leaving hidden selection restores the visible window");
     const more = document.querySelector<HTMLButtonElement>(".acct-more-anchor > button")!;
-    more.click(); await frame();
+    const search = () => document.querySelector<HTMLInputElement>(".acct-more input")!;
+    const openMore = async () => {
+      more.focus(); more.click(); await frame();
+      check(more.getAttribute("aria-expanded") === "true" && !!search(), "more trigger exposes its open state");
+      check(document.activeElement === search(), "opening more focuses its search");
+      check(search().value === "", "reopening more resets the search");
+    };
+    const closedMore = (why: string) => {
+      check(!search() && more.getAttribute("aria-expanded") === "false", `${why}: more closed`);
+      check(document.activeElement === more, `${why}: focus returns to more trigger`);
+    };
+    await openMore();
+    search().value = "no match"; search().dispatchEvent(new InputEvent("input", { bubbles: true }));
+    check(!document.querySelector(".acct-more-row"), "search can show no results");
+    const escape = new KeyboardEvent("keydown", { key: "Escape", bubbles: true, cancelable: true });
+    search().dispatchEvent(escape); await frame();
+    check(escape.defaultPrevented, "Escape is consumed by the open popover"); closedMore("Escape");
+    await openMore();
     const hidden = document.querySelectorAll<HTMLButtonElement>(".acct-more-row")[4];
-    hidden.click(); await frame(); state(3, 4, false);
+    hidden.focus(); hidden.click(); await frame(); state(3, 4, false); closedMore("profile choice");
+    await openMore(); more.click(); await frame(); closedMore("trigger toggle");
     radios()[3].focus(); key("ArrowRight", 0);
 
     const accountRows = document.querySelectorAll<HTMLButtonElement>(".acct-row");
-    accountRows[1].click(); await frame(); state(0, 7, false);
+    // Dispose a just-opened popup before its queued focus callback can run.
+    more.click(); accountRows[1].focus(); accountRows[1].click(); await frame(); state(0, 7, false);
+    check(document.activeElement === accountRows[1] && !search(), "obsolete popup never takes focus after an account switch");
     radios()[0].focus(); key("ArrowDown", 0, 7); key("End", 0, 7);
     accountRows[0].click(); await frame(); state(0, 0, false);
     check(calls.every((command) => startupReads.has(command)), `profile navigation submitted IPC: ${calls.filter((command) => !startupReads.has(command)).join(", ")}`);
   } finally { dispose(); }
-  report({ failures, cases: ["roving Tab entry", "arrows wrap and Home/End", "exact profile and offline selection", "separate default action", "hidden profile and account reset", "no management IPC"] });
+  report({ failures, cases: ["roving Tab entry", "arrows wrap and Home/End", "exact profile and offline selection", "separate default action", "hidden profile and account reset", "popover search and focus return", "no management IPC"] });
 }
 void run().catch((error) => report({ failures: [String(error)] }));

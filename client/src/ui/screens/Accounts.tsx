@@ -121,6 +121,16 @@ function Detail(props: { a: Account }) {
   const m = () => memberOf(props.a, selectedProfile(), accountMachine())!;
   const [moreOpen, setMoreOpen] = createSignal(false);
   const [moreQuery, setMoreQuery] = createSignal("");
+  let moreButton: HTMLButtonElement | undefined, moreInput: HTMLInputElement | undefined;
+  const closeMore = () => { setMoreOpen(false); if (moreButton?.isConnected) moreButton.focus(); };
+  const toggleMore = () => {
+    if (moreOpen()) { closeMore(); return; }
+    setMoreQuery(""); setMoreOpen(true);
+    queueMicrotask(() => {
+      // Switching accounts can remove this popup before its opening settles.
+      if (moreOpen() && moreInput?.isConnected) moreInput.focus();
+    });
+  };
   const shown = () => visibleMembers(props.a, m().key);
   const nativeConfig = () => props.a.provider === "opencode";
   const defaultable = () => props.a.provider !== "dsh" && !nativeConfig();
@@ -186,18 +196,18 @@ function Detail(props: { a: Account }) {
         <div class="row acct-mfoot">
           <Show when={props.a.members.length > shown().length}>
             <span class="acct-more-anchor">
-              <button class="btn small" aria-haspopup="dialog" aria-expanded={moreOpen()} onClick={() => { setMoreQuery(""); setMoreOpen(!moreOpen()); }}>
+              <button class="btn small" ref={moreButton} aria-haspopup="dialog" aria-expanded={moreOpen()} onClick={toggleMore}>
                 {tr("+%1 more", props.a.members.length - shown().length)}
               </button>
               <Show when={moreOpen()}>
                 <div class="acct-more" role="dialog" aria-label={tr("Machines with %1", props.a.label)}
-                  onKeyDown={(e) => { if (e.key === "Escape") { e.stopPropagation(); setMoreOpen(false); } }}>
-                  <input class="field" type="search" placeholder={tr("Search %1 machines", props.a.members.length)} value={moreQuery()}
-                    onInput={(e) => setMoreQuery(e.currentTarget.value)} autofocus aria-label={tr("Search machines")} />
+                  onKeyDown={(e) => { if (e.key === "Escape") { e.preventDefault(); e.stopPropagation(); closeMore(); } }}>
+                  <input class="field" ref={moreInput} type="search" placeholder={tr("Search %1 machines", props.a.members.length)} value={moreQuery()}
+                    onInput={(e) => setMoreQuery(e.currentTarget.value)} aria-label={tr("Search machines")} />
                   <div class="acct-more-list">
                     <For each={matches()} fallback={<div class="dim acct-more-empty">{tr("No machine matches.")}</div>}>
                       {(x) => (
-                        <button class="acct-more-row" classList={{ on: x.key === m().key }} onClick={() => { choose(x.key); setMoreOpen(false); }}>
+                        <button class="acct-more-row" classList={{ on: x.key === m().key }} onClick={() => { choose(x.key); closeMore(); }}>
                           <MachineTile os={osOf(machineCards[x.host]?.platform)} state={x.online ? connectionOf(catalog.computers[x.host]?.status).tile : "offline"} size={22} />
                           <MachineLabel alias={x.machine} />
                           <ProfileTag tag={tags().get(x.key)} id={x.id} />

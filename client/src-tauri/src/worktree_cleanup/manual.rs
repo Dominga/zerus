@@ -59,13 +59,9 @@ pub struct View {
     unknown: usize,
     required: Consents,
 }
+/// The folders core cleanup would remove, shown as ready (zerus-k2ga).
 fn eligible(e: &Entry) -> bool {
-    e.verified
-        && !matches!(e.status, Some(Status::Removed | Status::Unconfirmed))
-        && (review::removable(&e.row)
-            || review::process_reviewable(&e.row)
-            || review::discardable_with_processes(&e.row)
-            || (e.row["discardable"] == true && !text(&e.row, "discard_fingerprint").is_empty()))
+    e.eligible()
 }
 impl Dialog {
     fn view(&self) -> View {

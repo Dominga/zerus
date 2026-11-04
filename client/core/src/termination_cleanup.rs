@@ -168,7 +168,10 @@ impl Entry {
             || discardable_with_processes(&self.row)
     }
 
-    fn eligible(&self) -> bool {
+    /// Whether an explicit removal may target this folder now. Every desktop
+    /// dialog shows exactly these folders as ready, so what it counts and what
+    /// [`Cleanup::remove`] removes cannot drift apart.
+    pub fn eligible(&self) -> bool {
         !self.terminal()
             && self.verified
             && (removable(&self.row) || self.discardable() || process_reviewable(&self.row))
@@ -1026,6 +1029,14 @@ mod tests {
             ),
             ("d1", "p1")
         );
+        // Local files outside Git need their own reviewed fingerprint (V2).
+        let mut local = row.clone();
+        local["ignored_count"] = json!(1);
+        local["ignored_fingerprint"] = json!("");
+        assert_eq!(reviewed(&local).required(), Consents::default());
+        local["ignored_fingerprint"] = json!("i1");
+        let required = reviewed(&local).required();
+        assert!(required.local_files && required.discard_changes && required.unchecked_processes);
         // Another blocker is never accepted with them.
         row["reasons"]
             .as_array_mut()

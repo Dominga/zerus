@@ -64,8 +64,12 @@ elif action == "apply":
     request = json.loads(data)
     if config.get("land", True):
         order = original["organization"]["project_order"]
+        # As Root: a side without `sessions` writes no assignment (#1426).
+        kept = {p["id"]: p.get("sessions", []) for p in original["organization"]["projects"]}
         original["organization"] = request["desired"]
         original["organization"]["project_order"] = order
+        for project in original["organization"]["projects"]:
+            project.setdefault("sessions", kept.get(project["id"], []))
         original["digest"] = "c" * 64
         path = here / "legacy-state.new"
         path.write_text(json.dumps(original))

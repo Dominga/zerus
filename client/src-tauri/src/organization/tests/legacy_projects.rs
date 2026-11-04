@@ -155,8 +155,22 @@ fn the_actual_worker_imports_once_and_waits_for_the_post_apply_source() {
         let request: Value =
             serde_json::from_str(calls(&fake, "apply")[0]["stdin"].as_str().unwrap()).unwrap();
         assert!(request["desired"].get("project_order").is_none());
+        // Assignments are never part of the proposal (#1426), so Root keeps them.
+        for side in ["base", "desired"] {
+            assert!(
+                request[side]["projects"]
+                    .as_array()
+                    .unwrap()
+                    .iter()
+                    .all(|p| p.get("sessions").is_none()),
+                "{side}"
+            );
+        }
+        let landed: Value =
+            serde_json::from_slice(&std::fs::read(fake.dir.join("legacy-state.json")).unwrap())
+                .unwrap();
         assert_eq!(
-            request["desired"]["projects"][0]["sessions"],
+            landed["organization"]["projects"][0]["sessions"],
             initial()["organization"]["projects"][0]["sessions"]
         );
         let folder = &request["desired"]["projects"][1]["folders"][0];

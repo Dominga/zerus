@@ -12,23 +12,24 @@ export interface HeldRow {
   state: "orphaned" | "failed";
   file: "present" | "missing" | "unsafe";
 }
-export interface HeldPage { rows: HeldRow[]; next: HeldCursor | null }
+/** One page and the native listing that observed it; a release names that listing. */
+export interface HeldPage { listing: number; rows: HeldRow[]; next: HeldCursor | null }
 /** What one confirmed release did; nothing is ever retried. */
 export type HeldAnswer = "removed" | "released" | "changed" | "kept" | "unknown" | "not_sent";
 
 export interface HeldInputsSource {
   /** One bounded read-only page, only ever on an explicit click. */
   page(after: HeldCursor | null): Promise<HeldPage>;
-  /** Sends exactly the native review's observation of this record, once. */
-  release(requestId: string): Promise<HeldAnswer>;
+  /** Sends exactly what `listing` observed of this record, once. */
+  release(requestId: string, listing: number): Promise<HeldAnswer>;
 }
 
 export const heldInputs: HeldInputsSource = {
   page: (after) => invoke<HeldPage>("desktop_service_task_message_inputs", { after }),
-  release: (request_id) => invoke<HeldAnswer>("desktop_service_task_message_input_release", { request_id }),
+  release: (request_id, listing) => invoke<HeldAnswer>("desktop_service_task_message_input_release", { request_id, listing }),
 };
 
-export type HeldReviewPage = { after: HeldCursor | null; rows: HeldRow[]; next: HeldCursor | null };
+export type HeldReviewPage = { after: HeldCursor | null; listing: number; rows: HeldRow[]; next: HeldCursor | null };
 
 /** The review dialog's state: pages read one per click and one release per
  * confirmation. `alive` is false once the dialog closed. */
@@ -46,7 +47,7 @@ export function createHeldReview(source: HeldInputsSource, alive: () => boolean 
     const replaced = pages().slice(index).flatMap((page) => page.rows.map((row) => row.request_id));
     return source.page(after).then((page) => {
       if (!alive()) return;
-      setPages([...pages().slice(0, index), { after, rows: page.rows, next: page.next }]);
+      setPages([...pages().slice(0, index), { after, listing: page.listing, rows: page.rows, next: page.next }]);
       setOutcomes((all) => {
         const next = { ...all };
         for (const id of replaced) if (next[id] !== "sending") delete next[id];
@@ -58,11 +59,12 @@ export function createHeldReview(source: HeldInputsSource, alive: () => boolean 
       setFailed({ index, after });
     }).finally(() => { if (alive()) setLoading(undefined); });
   };
-  /** One confirmed release of `row`: sent once and never retried. */
-  const release = (row: HeldRow): Promise<void> => {
+  /** One confirmed release of `row` as `listing` observed it: sent once and
+   * never retried. */
+  const release = (row: HeldRow, listing: number): Promise<void> => {
     if (outcomes()[row.request_id]) return Promise.resolve();
     setOutcomes((all) => ({ ...all, [row.request_id]: "sending" }));
-    return source.release(row.request_id).catch((): HeldAnswer => "unknown").then((answer) => {
+    return source.release(row.request_id, listing).catch((): HeldAnswer => "unknown").then((answer) => {
       if (alive()) setOutcomes((all) => ({ ...all, [row.request_id]: answer }));
     });
   };

@@ -18,42 +18,67 @@ use zerus_client_core::desktop::{
 /// The most reviewed records remembered: the service charges at most 64.
 const REVIEWED: usize = 64;
 
-/// Each remembered review: its listing order, the scope that listed it and
-/// the entry, by request ID.
-type Reviews = BTreeMap<String, (u64, Scope, Entry)>;
+/// One remembered review: the listing that observed it, the scope that
+/// listed it and the entry.
+struct Review {
+    listing: u64,
+    scope: Scope,
+    entry: Entry,
+}
 
-/// The latest reviewed entry of each listed record, with the scope that
-/// listed it, in listing order for eviction.
+/// The newest listing's entry of each listed record. Listings are numbered
+/// when they start, so a read that ends after a newer one began (a dialog
+/// closed mid-read, then reopened) never replaces it, and a confirmation
+/// names the listing whose row it confirms.
 #[derive(Default)]
-pub(super) struct Reviewed(Mutex<(u64, Reviews)>);
+pub(super) struct Reviewed {
+    listings: std::sync::atomic::AtomicU64,
+    reviews: Mutex<BTreeMap<String, Review>>,
+}
 impl Reviewed {
-    fn remember(&self, scope: &Scope, entries: &[Entry]) {
-        let mut guard = self.0.lock().unwrap_or_else(PoisonError::into_inner);
-        let (order, map) = &mut *guard;
+    /// Numbers one listing as it starts.
+    fn begin(&self) -> u64 {
+        self.listings.fetch_add(1, Ordering::AcqRel) + 1
+    }
+    fn remember(&self, listing: u64, scope: &Scope, entries: &[Entry]) {
+        let mut map = self.reviews.lock().unwrap_or_else(PoisonError::into_inner);
         for entry in entries {
-            *order += 1;
+            if map
+                .get(&entry.request_id)
+                .is_some_and(|known| known.listing > listing)
+            {
+                continue;
+            }
             map.insert(
                 entry.request_id.clone(),
-                (*order, scope.clone(), entry.clone()),
+                Review {
+                    listing,
+                    scope: scope.clone(),
+                    entry: entry.clone(),
+                },
             );
         }
         while map.len() > REVIEWED {
             let oldest = map
                 .iter()
-                .min_by_key(|(_, (order, _, _))| *order)
+                .min_by_key(|(_, review)| review.listing)
                 .map(|(id, _)| id.clone())
                 .expect("a non-empty map");
             map.remove(&oldest);
         }
     }
-    /// Takes the reviewed entry: one confirmation sends it once.
-    fn take(&self, request_id: &str) -> Option<(Scope, Entry)> {
-        self.0
-            .lock()
-            .unwrap_or_else(PoisonError::into_inner)
-            .1
-            .remove(request_id)
-            .map(|(_, scope, entry)| (scope, entry))
+    /// Takes the entry `listing` observed: one confirmation sends it once,
+    /// and a confirmation of any other listing sends nothing.
+    fn take(&self, request_id: &str, listing: u64) -> Option<(Scope, Entry)> {
+        let mut map = self.reviews.lock().unwrap_or_else(PoisonError::into_inner);
+        if !map
+            .get(request_id)
+            .is_some_and(|review| review.listing == listing)
+        {
+            return None;
+        }
+        map.remove(request_id)
+            .map(|review| (review.scope, review.entry))
     }
 }
 
@@ -70,9 +95,10 @@ pub struct Row {
     pub file: &'static str,
 }
 
-/// One page, and where the next continues.
+/// One page, the listing that observed it, and where the next continues.
 #[derive(Debug, Serialize, PartialEq, Eq)]
 pub struct PageView {
+    pub listing: u64,
     pub rows: Vec<Row>,
     pub next: Option<Cursor>,
 }
@@ -113,6 +139,7 @@ pub(crate) fn list(
     if !list.valid() {
         return Err("task_message_inputs_unavailable".into());
     }
+    let listing = read.service.shared.held_inputs.begin();
     let bytes = read.exchange(None, json!(list), false, None)?;
     let page: Page =
         serde_json::from_slice(&bytes).map_err(|_| "task_message_inputs_unavailable")?;
@@ -125,8 +152,9 @@ pub(crate) fn list(
     read.service
         .shared
         .held_inputs
-        .remember(&page.scope, &page.entries);
+        .remember(listing, &page.scope, &page.entries);
     Ok(PageView {
+        listing,
         rows: page.entries.iter().map(row).collect(),
         next: page.next,
     })
@@ -151,11 +179,11 @@ pub enum Answer {
     NotSent,
 }
 
-/// The one release of exactly the reviewed observation of `request_id`.
-pub(crate) fn release(service: Option<Arc<Service>>, request_id: &str) -> Answer {
+/// The one release of exactly what `listing` observed of `request_id`.
+pub(crate) fn release(service: Option<Arc<Service>>, request_id: &str, listing: u64) -> Answer {
     let Some((scope, entry)) = service
         .as_ref()
-        .and_then(|service| service.shared.held_inputs.take(request_id))
+        .and_then(|service| service.shared.held_inputs.take(request_id, listing))
     else {
         return Answer::NotSent;
     };
@@ -225,10 +253,11 @@ pub async fn desktop_service_task_message_inputs(
 pub async fn desktop_service_task_message_input_release(
     source: tauri::State<'_, crate::commands::AppState>,
     request_id: String,
+    listing: u64,
 ) -> Result<Answer, String> {
     let service = source.desktop_service().filter(|_| mode());
     Ok(
-        tauri::async_runtime::spawn_blocking(move || release(service, &request_id))
+        tauri::async_runtime::spawn_blocking(move || release(service, &request_id, listing))
             .await
             // The worker may have written the request before it stopped.
             .unwrap_or(Answer::Unknown),
@@ -285,14 +314,35 @@ mod tests {
     }
 
     #[test]
-    fn a_reviewed_entry_is_taken_once_and_the_newest_review_wins() {
+    fn a_reviewed_entry_is_taken_once_and_only_by_its_own_listing() {
         let reviewed = Reviewed::default();
-        reviewed.remember(&scope(1), &[entry(1, Observation::Absent)]);
+        let (first, second) = (reviewed.begin(), reviewed.begin());
+        assert!(first < second);
+        reviewed.remember(first, &scope(1), &[entry(1, Observation::Absent)]);
         let fresh = entry(1, Observation::Present { version: version() });
-        reviewed.remember(&scope(2), std::slice::from_ref(&fresh));
+        reviewed.remember(second, &scope(2), std::slice::from_ref(&fresh));
         let id = fresh.request_id.clone();
-        assert_eq!(reviewed.take(&id), Some((scope(2), fresh)));
-        assert_eq!(reviewed.take(&id), None, "sent at most once");
+        assert_eq!(
+            reviewed.take(&id, first),
+            None,
+            "an older row sends nothing"
+        );
+        assert_eq!(reviewed.take(&id, second), Some((scope(2), fresh)));
+        assert_eq!(reviewed.take(&id, second), None, "sent at most once");
+    }
+
+    #[test]
+    fn a_read_that_ends_late_never_replaces_a_newer_listing() {
+        let reviewed = Reviewed::default();
+        // Closed mid-read, then reopened: the reopened dialog's read starts
+        // later and ends first.
+        let (stale, newer) = (reviewed.begin(), reviewed.begin());
+        let fresh = entry(1, Observation::Present { version: version() });
+        reviewed.remember(newer, &scope(1), std::slice::from_ref(&fresh));
+        reviewed.remember(stale, &scope(1), &[entry(1, Observation::Absent)]);
+        let id = fresh.request_id.clone();
+        assert_eq!(reviewed.take(&id, stale), None);
+        assert_eq!(reviewed.take(&id, newer), Some((scope(1), fresh)));
     }
 
     #[test]
@@ -301,10 +351,13 @@ mod tests {
         let entries: Vec<Entry> = (0..=REVIEWED as u8)
             .map(|n| entry(n, Observation::Absent))
             .collect();
-        reviewed.remember(&scope(1), &entries);
-        assert!(reviewed.take(&entries[0].request_id).is_none());
+        let old = reviewed.begin();
+        reviewed.remember(old, &scope(1), &entries[..1]);
+        let new = reviewed.begin();
+        reviewed.remember(new, &scope(1), &entries[1..]);
+        assert!(reviewed.take(&entries[0].request_id, old).is_none());
         for entry in &entries[1..] {
-            assert!(reviewed.take(&entry.request_id).is_some());
+            assert!(reviewed.take(&entry.request_id, new).is_some());
         }
     }
 
@@ -343,6 +396,6 @@ mod tests {
 
     #[test]
     fn nothing_is_sent_without_a_reviewed_observation_or_a_service() {
-        assert_eq!(release(None, "x"), Answer::NotSent);
+        assert_eq!(release(None, "x", 1), Answer::NotSent);
     }
 }

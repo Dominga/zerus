@@ -33,10 +33,19 @@ fn calls(root: &std::path::Path) -> Vec<Value> {
         .filter_map(|s| serde_json::from_str(s).ok())
         .collect()
 }
+/// Every release the fake saw, each only on the native frontend lane.
 fn releases(root: &std::path::Path) -> Vec<Value> {
-    calls(root)
+    let sent: Vec<Value> = calls(root)
         .into_iter()
         .filter(|c| c["value"]["request"]["op"] == "task_message_input_release")
+        .collect();
+    for call in &sent {
+        assert_eq!(
+            call["args"][1], "frontend-request",
+            "only the native frontend lane"
+        );
+    }
+    sent.into_iter()
         .map(|c| c["value"]["request"]["release"].clone())
         .collect()
 }
@@ -59,9 +68,9 @@ async fn list_page(service: &Arc<Service>, after: Option<Cursor>) -> Result<Page
         .await
         .unwrap()
 }
-async fn release_one(service: &Arc<Service>, id: &str) -> Answer {
+async fn release_one(service: &Arc<Service>, id: &str, listing: u64) -> Answer {
     let (service, id) = (service.clone(), id.to_owned());
-    tauri::async_runtime::spawn_blocking(move || release(Some(service), &id))
+    tauri::async_runtime::spawn_blocking(move || release(Some(service), &id, listing))
         .await
         .unwrap()
 }
@@ -76,8 +85,9 @@ fn a_release_names_exactly_the_listed_observation_once() {
         let f = fixture(json!({"review_help": true, "entries": entries(), "next": next}));
         let (service, _cache) = connected(&f).await;
         // Nothing to release before a listing.
-        assert_eq!(release_one(&service, PRESENT).await, Answer::NotSent);
+        assert_eq!(release_one(&service, PRESENT, 1).await, Answer::NotSent);
         let page = list_page(&service, None).await.unwrap();
+        let listing = page.listing;
         assert_eq!(
             page.rows,
             [
@@ -107,10 +117,23 @@ fn a_release_names_exactly_the_listed_observation_once() {
             "read-only, not a native request"
         );
         // The present copy: exactly its listed version, once.
-        assert_eq!(release_one(&service, PRESENT).await, Answer::Removed);
-        assert_eq!(release_one(&service, PRESENT).await, Answer::NotSent);
-        // The absent slot: no version.
-        assert_eq!(release_one(&service, ABSENT).await, Answer::Removed);
+        assert_eq!(
+            release_one(&service, PRESENT, listing).await,
+            Answer::Removed
+        );
+        assert_eq!(
+            release_one(&service, PRESENT, listing).await,
+            Answer::NotSent
+        );
+        // The absent slot: no version; another listing's row sends nothing.
+        assert_eq!(
+            release_one(&service, ABSENT, listing + 1).await,
+            Answer::NotSent
+        );
+        assert_eq!(
+            release_one(&service, ABSENT, listing).await,
+            Answer::Removed
+        );
         let sent = releases(&f.0);
         assert_eq!(sent.len(), 2, "{sent:?}");
         assert_eq!(sent[0]["request_id"], PRESENT);
@@ -158,7 +181,7 @@ fn a_service_without_the_review_or_a_refused_page_lists_and_sends_nothing() {
             list_page(&service, None).await,
             Err("task_message_input_review_busy".into())
         );
-        assert_eq!(release_one(&service, PRESENT).await, Answer::NotSent);
+        assert_eq!(release_one(&service, PRESENT, 1).await, Answer::NotSent);
         assert!(
             releases(&f.0).is_empty(),
             "a refused page remembers nothing"
@@ -175,21 +198,63 @@ fn a_lost_or_kept_release_is_reported_and_never_sent_again() {
     tauri::async_runtime::block_on(async {
         let f = fixture(json!({"review_help": true, "entries": entries(), "release_lost": true}));
         let (service, _cache) = connected(&f).await;
-        list_page(&service, None).await.unwrap();
-        assert_eq!(release_one(&service, PRESENT).await, Answer::Unknown);
-        assert_eq!(release_one(&service, PRESENT).await, Answer::NotSent);
+        let listing = list_page(&service, None).await.unwrap().listing;
+        assert_eq!(
+            release_one(&service, PRESENT, listing).await,
+            Answer::Unknown
+        );
+        assert_eq!(
+            release_one(&service, PRESENT, listing).await,
+            Answer::NotSent
+        );
         assert_eq!(releases(&f.0).len(), 1, "one request, never retried");
         service.join().await.unwrap();
 
         let f = fixture(json!({"review_help": true, "entries": entries(),
             "outcome": "kept", "code": review::CHANGED}));
         let (service, _cache) = connected(&f).await;
-        list_page(&service, None).await.unwrap();
-        assert_eq!(release_one(&service, PRESENT).await, Answer::Changed);
+        let listing = list_page(&service, None).await.unwrap().listing;
+        assert_eq!(
+            release_one(&service, PRESENT, listing).await,
+            Answer::Changed
+        );
         // A fresh review may confirm again: its new observation is sent.
-        list_page(&service, None).await.unwrap();
-        assert_eq!(release_one(&service, PRESENT).await, Answer::Changed);
+        let again = list_page(&service, None).await.unwrap().listing;
+        assert!(again > listing);
+        assert_eq!(release_one(&service, PRESENT, again).await, Answer::Changed);
         assert_eq!(releases(&f.0).len(), 2);
+        service.join().await.unwrap();
+    });
+}
+
+#[test]
+fn a_review_from_another_service_scope_is_never_sent() {
+    if !private_case("desktop_service::task_message_inputs::fixture_tests::a_review_from_another_service_scope_is_never_sent") {
+        return;
+    }
+    tauri::async_runtime::block_on(async {
+        let f = fixture(json!({"review_help": true, "entries": entries()}));
+        let (service, _cache) = connected(&f).await;
+        let page = list_page(&service, None).await.unwrap();
+        // The same record as an earlier service epoch observed it.
+        let mut scope = calls(&f.0)[0]["value"]["scope"].clone();
+        scope["service_epoch"] = json!("00000000-0000-4000-8000-0000000000ff");
+        let foreign: Scope = serde_json::from_value(scope).unwrap();
+        let listed: Vec<Entry> = serde_json::from_value(entries()).unwrap();
+        let listing = service.shared.held_inputs.begin();
+        service
+            .shared
+            .held_inputs
+            .remember(listing, &foreign, &listed[..1]);
+        assert_eq!(
+            release_one(&service, PRESENT, listing).await,
+            Answer::NotSent
+        );
+        assert_eq!(
+            release_one(&service, PRESENT, page.listing).await,
+            Answer::NotSent
+        );
+        assert!(releases(&f.0).is_empty(), "nothing reached the service");
         service.join().await.unwrap();
     });
 }

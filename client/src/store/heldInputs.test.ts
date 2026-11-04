@@ -9,16 +9,19 @@ const row = (n: number, file: HeldRow["file"] = "present"): HeldRow => ({
   bytes: 70_000 + n, state: n % 2 ? "failed" : "orphaned", file,
 });
 const cursor = (r: HeldRow): HeldCursor => ({ created: r.created, request_id: r.request_id });
-function source(pages: HeldPage[][], answers: (HeldAnswer | Error)[] = []) {
-  const page = vi.fn(async (after: HeldCursor | null) => {
+/** Pages answered in order, each numbered as the native listing would be. */
+function source(pages: Omit<HeldPage, "listing">[][], answers: (HeldAnswer | Error)[] = []) {
+  let listings = 0;
+  const page = vi.fn(async (after: HeldCursor | null): Promise<HeldPage> => {
+    const listing = ++listings;
     const next = pages.shift();
     if (!next) throw new Error("unexpected read");
     const [value] = next;
     if (!value) throw new Error("read failed");
     void after;
-    return value;
+    return { listing, ...value };
   });
-  const release = vi.fn(async (_id: string) => {
+  const release = vi.fn(async (_id: string, _listing: number) => {
     const answer = answers.shift();
     if (!answer || answer instanceof Error) throw answer ?? new Error("unexpected release");
     return answer;
@@ -57,14 +60,16 @@ describe("held message copy review", () => {
     const s = source([[{ rows: [row(1), row(2)], next: null }]], [new Error("lost"), "changed"]);
     const r = review(s);
     await r.read(0, null);
-    const sending = r.release(row(1));
+    const listing = r.pages()[0].listing;
+    const sending = r.release(row(1), listing);
     expect(r.outcomes()[row(1).request_id]).toBe("sending");
-    await r.release(row(1));
+    await r.release(row(1), listing);
     await sending;
     expect(r.outcomes()[row(1).request_id]).toBe("unknown");
-    await r.release(row(1));
+    await r.release(row(1), listing);
     expect(s.release).toHaveBeenCalledTimes(1);
-    await r.release(row(2));
+    expect(s.release).toHaveBeenCalledWith(row(1).request_id, listing);
+    await r.release(row(2), listing);
     expect(r.outcomes()[row(2).request_id]).toBe("changed");
     expect(s.release).toHaveBeenCalledTimes(2);
   });
@@ -80,9 +85,11 @@ describe("held message copy review", () => {
     await r.read(0, null);
     await r.read(1, cursor(row(1)));
     await r.read(2, cursor(row(2)));
-    await r.release(row(2));
+    await r.release(row(2), r.pages()[1].listing);
+    expect(s.release).toHaveBeenLastCalledWith(row(2).request_id, 2);
     expect(r.outcomes()[row(2).request_id]).toBe("kept");
     await r.read(1, r.pages()[1].after);
+    expect(r.pages()[1].listing).toBe(4);
     expect(s.page).toHaveBeenLastCalledWith(cursor(row(1)));
     expect(r.pages().map((p) => p.rows.map((x) => x.request_id))).toEqual([[row(1).request_id], [row(3).request_id]]);
     expect(r.outcomes()).toEqual({});

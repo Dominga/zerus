@@ -309,13 +309,17 @@ desktop-service mode lands together with attachments by reference.
   Review message copies. Its dialog reads one bounded page when it opens and
   one more per Load more click, never on its own, through
   `desktop_service/task_message_inputs.rs`, which first requires the review
-  marker. The client remembers each listed entry's exact observation (at most
-  64, the newest review of a record winning) and shows only the time, size,
-  request ID, state and observed file. A confirmation names a request ID; the
-  client takes that record's remembered observation and sends it once as a
-  `TaskMessageInputRelease` with a fresh release ID. Without one, or after the
-  service changed, nothing is sent. A lost reply is unknown, and nothing is
-  retried; Review again reads that page again from its own cursor.
+  marker. Each listing is numbered when it starts. The client remembers each
+  listed entry's exact observation with that number (at most 64; a read
+  that ends after a newer listing began never replaces it) and shows only
+  the time, size, request ID, state and observed file. A confirmation names
+  a request ID and its row's listing; the client takes exactly that
+  observation and sends it once, only on the native frontend lane, as a
+  `TaskMessageInputRelease` with a fresh release ID. Without it, for another
+  listing, or after the service changed, nothing is sent. A lost reply is
+  unknown, and nothing is retried; Review again reads that page again from
+  its own cursor. When no copies are left while the dialog is open, closing
+  it returns focus to the service status summary.
 
 ## Wire
 

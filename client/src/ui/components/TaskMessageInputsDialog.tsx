@@ -16,19 +16,20 @@ const outcomeText = (answer: HeldAnswer) => answer === "removed" ? tr("Copy remo
 
 /** The background service's held task message copies: one bounded page per
  * click, each release confirmed and sent once, never retried. */
-export function TaskMessageInputsDialog(props: { origin: HTMLElement; close(): void; source?: HeldInputsSource }) {
+export function TaskMessageInputsDialog(props: { origin: HTMLElement; fallback?: () => HTMLElement | undefined; close(): void; source?: HeldInputsSource }) {
   const source = props.source ?? heldInputs;
-  const origin = props.origin;
-  const [confirming, setConfirming] = createSignal<{ row: HeldRow; origin: HTMLElement }>();
+  const origin = props.origin, fallback = props.fallback;
+  const [confirming, setConfirming] = createSignal<{ row: HeldRow; listing: number; origin: HTMLElement }>();
   let dialog!: HTMLDialogElement, closeButton!: HTMLButtonElement, alive = true;
   const { pages, loading, failed, outcomes, read, release: send } = createHeldReview(source, () => alive);
-  const release = (row: HeldRow) => { setConfirming(undefined); void send(row); };
+  const release = (row: HeldRow, listing: number) => { setConfirming(undefined); void send(row, listing); };
 
   onMount(() => { dialog.showModal(); closeButton.focus(); void read(0, null); });
   onCleanup(() => {
     alive = false;
     if (dialog.open) dialog.close();
-    queueMicrotask(() => { if (origin.isConnected) origin.focus(); });
+    // The opener goes when no copies are left; the status summary stays.
+    queueMicrotask(() => { if (origin.isConnected) origin.focus(); else fallback?.()?.focus(); });
   });
   const rows = () => pages().flatMap((page) => page.rows);
   const last = () => pages().at(-1);
@@ -59,7 +60,7 @@ export function TaskMessageInputsDialog(props: { origin: HTMLElement; close(): v
                     </Match>
                     <Match when={!outcome() || outcome() === "sending"}>
                       <button type="button" class="btn small ghost" disabled={outcome() === "sending" || loading() !== undefined}
-                        onClick={(event) => setConfirming({ row, origin: event.currentTarget })}>{row.file === "present" ? tr("Remove copy…") : tr("Release record…")}</button>
+                        onClick={(event) => setConfirming({ row, listing: page.listing, origin: event.currentTarget })}>{row.file === "present" ? tr("Remove copy…") : tr("Release record…")}</button>
                     </Match>
                     <Match when={outcome() === "removed" || outcome() === "released"}>
                       <span>{outcomeText(outcome() as HeldAnswer)}</span>
@@ -85,7 +86,7 @@ export function TaskMessageInputsDialog(props: { origin: HTMLElement; close(): v
       <div class="dlg-foot"><span class="spacer" /><button ref={closeButton} type="button" class="btn primary" onClick={props.close}>{tr("Close")}</button></div>
     </dialog>
     <Show when={confirming()}>{(item) => <HeldCopyConfirm row={item().row} origin={item().origin} fallback={() => closeButton}
-      cancel={() => setConfirming(undefined)} confirm={() => release(item().row)} />}</Show>
+      cancel={() => setConfirming(undefined)} confirm={() => release(item().row, item().listing)} />}</Show>
   </>;
 }
 

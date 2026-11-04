@@ -190,10 +190,7 @@ fn a_never_started_send_releases_its_identity_and_an_unknown_one_waits_for_allow
             "{text}: Allow retry rules as before"
         );
         if uncertain {
-            assert_eq!(
-                row.error,
-                zerus_client_core::local_messages::uncertain_detail(UNCONFIRMED)
-            );
+            assert_eq!(row.error, UNCONFIRMED);
             assert!(view.uncertain && !view.can_send);
             assert!(held(&c).is_some(), "an unknown end keeps the identity");
         } else {
@@ -300,10 +297,7 @@ fn an_unreadable_service_ends_the_hold_with_allow_retry_and_allow_retry_ends_it_
     let view = ticks(&c, &fake, FIRST, |v| !v.delivery_pending);
     // State 5: uncertain, Allow retry, the identity kept.
     assert!(view.uncertain && view.status_error && !view.can_send);
-    assert_eq!(
-        view.status,
-        zerus_client_core::local_messages::uncertain_detail(UNCONFIRMED)
-    );
+    assert_eq!(view.status, UNCONFIRMED);
     assert!(view.local[0].uncertain);
     assert!(held(&c).is_some());
     // Allow retry ends a hold as well, and a late check changes nothing.

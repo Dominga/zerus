@@ -17,10 +17,10 @@ use zerus_client_core::desktop::{deferred_send as wire, ui_requests::Request};
 use zerus_client_core::operation_recovery::deferred_input::Checkpoint;
 
 pub(crate) use super::task_message::{NOT_SENT, NOT_STARTED};
-/// A sent original whose result the service could not confirm. It stays
-/// uncertain and is never sent again.
+/// A sent original whose result the service could not confirm: the whole
+/// uncertain line, shown as is. It stays uncertain and is never sent again.
 pub(crate) const UNCONFIRMED: &str = zerus_client_core::source!(
-    "The desktop service could not confirm this message. It may have reached the agent; check Terminal before retrying."
+    "Delivery is not confirmed by the desktop service. Check Terminal before retrying."
 );
 /// The service still sends the original: neither its result nor an error.
 pub(crate) const STILL_SENDING: &str = zerus_client_core::source!(

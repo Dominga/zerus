@@ -1508,6 +1508,8 @@ impl Composers {
         // offered, its answer stands and nothing falls back.
         let offered =
             std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| self.offer(&delivery)));
+        // The service's own uncertain line replaces the direct path's prefix.
+        let service = matches!(offered, Ok(Some(_)));
         let called = match offered {
             Ok(Some(answer)) => match self.offered(&delivery, answer) {
                 Some(outcome) => Ok(Ok(outcome)),
@@ -1536,7 +1538,13 @@ impl Composers {
                 detail: "The send ended abnormally.".into(),
             },
         };
-        let detail = self.lock().local.finished(&key, &request_id, &outcome);
+        let detail = if service {
+            self.lock()
+                .local
+                .finished_as_is(&key, &request_id, &outcome)
+        } else {
+            self.lock().local.finished(&key, &request_id, &outcome)
+        };
         let ok = matches!(outcome, Outcome::Done { .. });
         let uncertain = matches!(outcome, Outcome::Uncertain { .. });
         self.push_finished(&request_id, ok, uncertain);

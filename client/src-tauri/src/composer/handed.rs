@@ -331,7 +331,7 @@ impl Composers {
                 detail: deferred_send::UNCONFIRMED.into(),
             },
         };
-        let detail = hub.local.finished(key, &plan.request_id, &outcome);
+        let detail = hub.local.finished_as_is(key, &plan.request_id, &outcome);
         if let Some(composer) = hub.composers.get_mut(key) {
             composer.handed = None;
             match outcome {

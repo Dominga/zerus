@@ -16,7 +16,7 @@ import "../ui/styles/app.css";
 import "../ui/styles/detail.css";
 import "../ui/styles/client.css";
 
-const UNCONFIRMED = "The desktop service could not confirm this message. It may have reached the agent; check Terminal before retrying.";
+const UNCONFIRMED = "Delivery is not confirmed by the desktop service. Check Terminal before retrying.";
 const STILL = "The desktop service is still sending this message. Its result appears here when it finishes.";
 const state = new URLSearchParams(location.search).get("state") === "6" ? 6 : 5;
 const report = (value: unknown) => (window as unknown as { webkit?: { messageHandlers?: { result?: { postMessage(text: string): void } } } })
@@ -28,7 +28,7 @@ const view: ComposerView = {
   text: "Please rerun the failing integration test and summarise the cause.", position: 0, anchor: 0,
   question: null, input_visible: true, queue: null, attachments: [], removed: null, attaching: false, sending: false, waiting: null,
   uncertain: true, delivery_pending: state === 6,
-  status: state === 6 ? STILL : `Delivery is not confirmed. Check Terminal before retrying. ${UNCONFIRMED}`,
+  status: state === 6 ? STILL : UNCONFIRMED,
   status_error: state === 5, can_send: false, send_label: { source: "Send" }, available: true, unavailable_reason: "", block_reason: null,
   attachments_available: true, attachments_reason: "", session_status: "", session_status_error: false, session_blocks_input: false,
   inspect_error: false, cache: { visible: false, tone: "quiet", label: "", short_label: "" }, cache_warning: "", cache_details: "",

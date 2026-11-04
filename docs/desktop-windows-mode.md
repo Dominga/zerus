@@ -393,6 +393,36 @@ record, discard an archive or rotate a pending UUID. The dedicated capability ma
 `Desktop registration mode review ABI: desktop-registration-mode-review-v1`.
 Native PC and installed Settings qualification remain outstanding.
 
+## First explicit background choice
+
+A plain passive registration has one more explicit form, for an in-app
+Settings choice (zerus-yfbd.1):
+
+```powershell
+$firstRequest = [guid]::NewGuid().ToString()
+hgs desktop registration install --mode background --json --request-id $firstRequest
+hgs desktop registration mode-result --json --request-id $firstRequest
+```
+
+The CLI advertises
+`Desktop registration first mode choice ABI: desktop-registration-mode-first-choice-v1`.
+The form admits only background, from a selected **and** actually running
+passive task. It is refused while any original transition is pending,
+interrupted, reviewed or archived: that history keeps its own Review route,
+whatever the caller asks for. The caller, current Service Grant, original
+instance, endpoint and selected image are checked as for any switch, again at
+every effect boundary; no automatic, default or passive request uses this form.
+
+The caller's UUID is reserved durably as the transition's original ID before
+the first manager effect, with byte headroom for its completion scope, a later
+review barrier and archive. Its receipt is distinct from a reviewed choice and
+names no reviewed original. A repeated UUID only reads the original result; it
+never stops, updates or starts again. A lost reply after a possible start stays
+Unknown and is looked up by that same UUID. Only a closed not-started boundary
+(an explicit pre-manager cancellation) records a refusal and allows a fresh
+choice. An interrupted first choice records consumer and boot evidence like any
+transition and takes the ordinary Review route above.
+
 ## Private qualification
 
 The Windows unit suite runs the creation-owner regression in one bounded child,

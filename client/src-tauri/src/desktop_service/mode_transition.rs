@@ -333,6 +333,13 @@ impl Controller {
                 return None;
             }
         }
+        self.project(&status, route.windows);
+        Some(status)
+    }
+    /// The view one checked registration status leaves. Every path that reads
+    /// it (observe, Check result, reconnect, before an activation) projects the
+    /// same state, so a later read never undoes an earlier one.
+    fn project(&self, status: &Value, windows: bool) {
         let mut state = self.state.lock().unwrap_or_else(PoisonError::into_inner);
         state.view.automatic_blocked |= status["activation_automatic_blocked"] == true;
         state.selection = Some(status.clone());
@@ -340,19 +347,37 @@ impl Controller {
             && status["running_mode"] == "background"
             && status["ipc_ready"] == true
             && status["pending_restart"] == false;
-        state.view.needs_resume = !route.windows
+        state.view.needs_resume = !windows
             && state.view.review.is_none()
             && !state.view.automatic_blocked
             && status["selected_mode"] == "passive";
         if state.intent.is_none() {
+            // Windows ordinary activation is the maintained manual route: an
+            // activation attempt reaches the same code before any effect. Only
+            // a plain passive selection says so; an interrupted record, a latch
+            // or any transition keeps its own presentation.
+            let manual = windows
+                && state.view.review.is_none()
+                && !state.view.automatic_blocked
+                && status["selected_mode"] == "passive"
+                && status["running_mode"] == "passive"
+                && status["pending_restart"] == false
+                && status["transition"].is_null()
+                && status["activation_pending"].is_null();
             state.view.code = if state.view.needs_resume {
                 "activation_required"
+            } else if manual {
+                "activation_platform_manual"
             } else {
                 ""
             }
             .into();
         }
-        Some(status)
+    }
+    /// One checked status, as `status()` projects it after its native read.
+    #[cfg(test)]
+    pub(super) fn project_for_test(&self, status: &Value, windows: bool) {
+        self.project(status, windows);
     }
     fn lookup(
         self: &Arc<Self>,
@@ -415,9 +440,8 @@ impl Controller {
         }
         .into();
     }
-    /// The view the platform-manual route leaves (Windows), for projection
-    /// tests on other platforms.
-    #[cfg(all(test, not(windows)))]
+    /// The code a Windows activation attempt leaves before any effect.
+    #[cfg(test)]
     pub(super) fn platform_manual_for_test(&self) {
         self.failed("activation_platform_manual");
     }
@@ -933,6 +957,8 @@ pub(super) async fn startup(shared: &Arc<Shared>, automatic: bool, configuration
     }
 }
 
+#[cfg(test)]
+mod projection_tests;
 #[cfg(all(test, target_os = "linux"))]
 mod tests;
 

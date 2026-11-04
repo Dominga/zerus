@@ -157,6 +157,16 @@ impl Binding {
         self.valid()
             .then(|| hash(&serde_json::to_vec(self).expect("fixed message binding")))
     }
+    /// Whether this binding names exactly `plan`: the project, task, request and input digest it repeats,
+    /// and the plan's own fingerprint. A declared digest never overrides a
+    /// conflicting original field.
+    pub fn agrees(&self, plan: &Plan) -> bool {
+        self.project == plan.project
+            && self.task_id == plan.task_id
+            && self.request_id == plan.request_id
+            && self.input_sha256 == plan.input_sha256
+            && plan.fingerprint().as_deref() == Some(self.plan_sha256.as_str())
+    }
 }
 
 pub struct Verified {
@@ -518,9 +528,7 @@ impl Receipt {
     pub fn not_started(&self, plan: &Plan) -> bool {
         self.valid()
             && self.drained
-            && plan
-                .fingerprint()
-                .is_some_and(|fingerprint| fingerprint == self.binding.plan_sha256)
+            && self.binding.agrees(plan)
             && self.phase == Phase::Failed
             && self.outcome.is_none()
             && self.code == NOT_STARTED
@@ -529,10 +537,7 @@ impl Receipt {
     /// CLI's metadata outcome, Failed a definite refusal. Queued, Running and
     /// Unknown never settle, and nothing here is native delivery.
     pub fn result(&self, plan: &Plan) -> Option<Result<(), String>> {
-        if !self.valid()
-            || !self.drained
-            || plan.fingerprint().as_deref() != Some(self.binding.plan_sha256.as_str())
-        {
+        if !self.valid() || !self.drained || !self.binding.agrees(plan) {
             return None;
         }
         match self.phase {
@@ -594,7 +599,10 @@ impl Lookup {
             && self.scope == query.scope
             && self.found == self.receipt.is_some()
             && self.receipt.as_ref().is_none_or(|receipt| {
+                // The receipt's own immutable configuration is the queried
+                // one; its admission epoch stays its own.
                 receipt.valid()
+                    && receipt.binding.configuration == query.scope.configuration
                     && receipt.binding.project == query.project
                     && receipt.binding.task_id == query.task_id
                     && receipt.binding.request_id == query.request_id

@@ -53,6 +53,16 @@ pub(super) fn mode_after_review(config: &Config, location: &Location, mode: &str
         json!({"schema":1,"operation":"switch","mode":mode,"after_review":reviewed,"request_id":request}))
 }
 
+/// A FIRST explicit background choice from a plain passive registration, with
+/// the caller's retained NEW request UUID. The native helper refuses it while
+/// any original is pending, interrupted or reviewed.
+pub(super) fn first_choice(config: &Config, location: &Location, request: &str) -> Result<Value> {
+    ensure!(uuid::Uuid::parse_str(request).is_ok_and(|u| !u.is_nil() && u.to_string() == request),
+        "Select a NEW canonical request UUID.");
+    native::mode::command(config, location,
+        json!({"schema":1,"operation":"switch","mode":"background","request_id":request}))
+}
+
 pub(super) fn mode_result(config: &Config, location: &Location, request: &str) -> Result<Value> {
     ensure!(uuid::Uuid::parse_str(request).is_ok_and(|u| !u.is_nil() && u.to_string() == request),
         "Pass the exact original choice UUID.");
@@ -189,6 +199,7 @@ pub(super) fn command(config: &Config, location: &Location, operation: &str) -> 
         checked["reviewed_transition"] = record["reviewed_transition"].clone();
         checked["activation_automatic_blocked"] = record["activation_automatic_blocked"].clone();
         checked["mode_choice"] = record["mode_choice"].clone();
+        checked["first_choice"] = record["first_choice"].clone();
         let status = super::status(location)?;
         let lifecycle = &status["lifecycle"];
         checked["running_mode"] = if lifecycle["configuration"] == location.configuration

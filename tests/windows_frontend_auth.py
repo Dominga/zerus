@@ -1347,7 +1347,7 @@ $r=$t.Run($null);
         self.assertEqual(Path(metadata['image']).resolve(strict=True), self.cli_image)
         return dict(guid=guid, pid=instances[0]['engine_pid'], birth=metadata['birth'])
 
-    def test_first_choice_instance_drift_at_held_is_refused_before_any_stop(self):
+    def test_first_choice_instance_drift_stays_unknown_at_stop_offered_with_no_stop(self):
         """Debug held seam (zerus-yfbd.1), in its own fixture because it ends
         at a reboot-gated Review. The passive instance changes while a first
         choice is held after its durable reservation: an armed worker restarts
@@ -1355,8 +1355,9 @@ $r=$t.Run($null);
         so expiry cannot mask the instance check (expired_hold_refuses_at_held
         covers expiry). Production order: the StopOffered save passes its fence
         (caller, Grant, image, handoff, deadline), then stop_original refuses
-        the changed task selection. No Stop, update or start is sent, the same
-        original stays pending, and its same-boot Review is reboot_required."""
+        the changed task selection before any stop. The same original stays
+        Unknown at StopOffered with zero Stop/Update/Start, and its same-boot
+        Review is reboot-gated."""
         initial = self.cli('desktop', 'registration', 'status', '--json')
         self.assertFalse(initial['registered'], 'Task-mode fixture requires an unused disposable runner')
         self.task = initial['task_name']

@@ -772,6 +772,11 @@ fn dispatch_normal(mut args: Vec<String>) -> Result<i32> {
         }
         let reference = crate::session_reference::Reference::parse(&args[0])?;
         let local_id = crate::swarm::local_node_id(&config).map_err(|e| Error::new(1,e.to_string()))?;
+        // Like every other session command, a guarded inspect reads only the
+        // computer it verified (#1376 review).
+        if guarded && local_id != reference.machine {
+            return Err(Error::new(1, "Session reference belongs to another computer; a guarded call acts only on this computer"));
+        }
         if local_only && local_id != reference.machine {
             return Err(Error::new(1,"Session reference belongs to another computer; the selected SSH alias does not match"));
         }

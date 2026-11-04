@@ -19,6 +19,12 @@ export interface ViewRow {
   local_read_attention?: boolean;
   name: string;
   launch_id?: string | null;
+  /**
+   * The listing's durable session ID, when canonical. The Rust dispatcher
+   * reads it from its own copy of the row for explicit actions; the webview
+   * never passes it.
+   */
+  session_id?: string;
   title?: string;
   agent?: string;
   status?: string;

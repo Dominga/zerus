@@ -231,7 +231,8 @@ class RemoteLoginShells(unittest.TestCase):
         # A guarded call that verified this computer refuses another one's reference.
         for call in (['--expect-machine', local, 'send', reference, '--json'],
                      ['--expect-machine', local, '--client', 'peer', 'pause', reference],
-                     ['@test-local', '--expect-machine', local, 'kill', reference]):
+                     ['@test-local', '--expect-machine', local, 'kill', reference],
+                     ['--expect-machine', local, 'inspect', reference]):
             with self.subTest(call=call):
                 refused = self.hgs('/bin/sh', *call)
                 self.assertEqual(refused.returncode, 1, refused.stdout + refused.stderr)

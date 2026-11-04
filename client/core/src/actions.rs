@@ -1173,6 +1173,11 @@ pub fn recovery_preflight(target: &Target, action: &Action, exit: Exit) -> Resul
 }
 
 pub fn classify(target: &Target, action: &Action, invocation: &Invocation, exit: Exit) -> Outcome {
+    // A `--session-id` the CLI refused before any effect is a stale target
+    // (zerus-ucck P1c): the caller refreshes, and nothing retries it.
+    if crate::session_selector::refused(target, invocation, &exit) {
+        return failed(crate::termination_cleanup::STATE_CHANGED);
+    }
     match action {
         Action::Settings {
             model,

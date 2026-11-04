@@ -85,6 +85,29 @@ async fn connected(f: &Fixture) -> (Arc<Service>, CacheServer) {
     .await;
     (service, cache)
 }
+/// A canonical record with one attachment of `size` raw bytes.
+fn with_attachment(size: usize) -> Value {
+    let shot = zerus_client_core::attachments::Attachment {
+        name: "screen.png".into(),
+        mime: "image/png".into(),
+        bytes: (0..size)
+            .map(|n| (n % 251) as u8)
+            .collect::<Vec<_>>()
+            .into(),
+        reference: "[screen.png]".into(),
+    };
+    let intent = message_intent("see this", &[shot], "queue", "");
+    json!({"id": uuid::Uuid::new_v4().to_string(), "intent": intent,
+        "input_sha256": input_digest(&message_input(&intent))})
+}
+/// The staging folder the fake service names, private like the real one.
+fn staging(root: &std::path::Path) -> std::path::PathBuf {
+    use std::os::unix::fs::PermissionsExt;
+    let dir = root.join("staging");
+    std::fs::create_dir_all(&dir).unwrap();
+    std::fs::set_permissions(&dir, std::fs::Permissions::from_mode(0o700)).unwrap();
+    dir
+}
 /// A canonical record as the editor reserves it, with `padding` bytes of
 /// text.
 fn record(padding: usize) -> Value {
@@ -183,6 +206,142 @@ fn a_lost_reply_is_handed_off_before_its_one_request_and_stays_unconfirmed() {
         assert_eq!(count(&f.0, "task_message_result"), 1);
         assert_eq!(sent.answer, MessageAnswer::Unconfirmed(UNCONFIRMED.into()));
         assert_eq!(sent.released, 0, "a sent original is never released");
+        service.join().await.unwrap();
+    });
+}
+
+/// The staged copies of `record` that exist right now.
+fn copies(root: &std::path::Path, record: &Value) -> usize {
+    std::fs::read_dir(root.join("staging").join(record["id"].as_str().unwrap()))
+        .map(|dir| dir.count())
+        .unwrap_or(0)
+}
+
+#[test]
+fn an_oversize_original_is_staged_handed_off_and_offered_by_reference() {
+    if !private_case("desktop_service::task_message::fixture_tests::an_oversize_original_is_staged_handed_off_and_offered_by_reference") {
+        return;
+    }
+    tauri::async_runtime::block_on(async {
+        let f = fixture(json!({"message_references": true, "message_staging": true}));
+        staging(&f.0);
+        let (service, _cache) = connected(&f).await;
+        let record = with_attachment(70 << 10);
+        let id = record["id"].as_str().unwrap().to_owned();
+        let sent = send(service.clone(), &f.0, record.clone(), true, true).await;
+        // Staged and handed off before the one request, which names the form.
+        assert_eq!(sent.handoff, Some(0));
+        assert_eq!(copies(&f.0, &record), 1, "the copy stays for the service");
+        let requests: Vec<Value> = calls(&f.0)
+            .into_iter()
+            .filter(|c| c["value"]["request"]["op"] == "task_message")
+            .collect();
+        assert_eq!(requests.len(), 1);
+        let intent = &requests[0]["value"]["request"]["intent"];
+        assert_eq!(intent["form"], "reference-v1");
+        assert_eq!(intent["request_id"], id.as_str());
+        assert!(!intent["original"].as_str().unwrap().contains("data_base64"));
+        assert_eq!(count(&f.0, "task_message_result"), 1);
+        assert_eq!(sent.answer, MessageAnswer::Unconfirmed(UNCONFIRMED.into()));
+        assert_eq!(sent.released, 0);
+        service.join().await.unwrap();
+    });
+}
+
+#[test]
+fn an_oversize_original_that_cannot_be_staged_is_never_sent_and_leaves_no_copy() {
+    if !private_case("desktop_service::task_message::fixture_tests::an_oversize_original_that_cannot_be_staged_is_never_sent_and_leaves_no_copy") {
+        return;
+    }
+    tauri::async_runtime::block_on(async {
+        // No reference support: refused as too large, nothing staged.
+        let f = fixture(json!({}));
+        staging(&f.0);
+        let (service, _cache) = connected(&f).await;
+        let record = with_attachment(70 << 10);
+        let sent = send(service.clone(), &f.0, record.clone(), true, true).await;
+        assert_eq!(sent.answer, MessageAnswer::Unsent(TOO_LARGE.into()));
+        assert_eq!(
+            (sent.handoff, sent.released, copies(&f.0, &record)),
+            (None, 1, 0)
+        );
+        service.join().await.unwrap();
+        // Supported, but no staging folder is named: never sent.
+        let f = fixture(json!({"message_references": true}));
+        staging(&f.0);
+        let (service, _cache) = connected(&f).await;
+        let record = with_attachment(70 << 10);
+        let sent = send(service.clone(), &f.0, record.clone(), true, true).await;
+        assert_eq!(sent.answer, MessageAnswer::Unsent(NOT_SENT.into()));
+        assert_eq!((sent.handoff, copies(&f.0, &record)), (None, 0));
+        service.join().await.unwrap();
+        // Staged, then a failed handoff: exactly its copies go, nothing sent.
+        let f = fixture(json!({"message_references": true, "message_staging": true}));
+        staging(&f.0);
+        let (service, _cache) = connected(&f).await;
+        let record = with_attachment(70 << 10);
+        let sent = send(service.clone(), &f.0, record.clone(), true, false).await;
+        assert_eq!(sent.answer, MessageAnswer::Unsent(NOT_SENT.into()));
+        assert_eq!(sent.handoff, Some(0));
+        assert_eq!(copies(&f.0, &record), 0, "exactly its own copies went");
+        assert!(!f
+            .0
+            .join("staging")
+            .join(record["id"].as_str().unwrap())
+            .exists());
+        assert_eq!(count(&f.0, "task_message"), 0);
+        service.join().await.unwrap();
+    });
+}
+
+#[test]
+fn an_offered_original_that_never_started_keeps_its_copies_for_the_service() {
+    if !private_case("desktop_service::task_message::fixture_tests::an_offered_original_that_never_started_keeps_its_copies_for_the_service") {
+        return;
+    }
+    tauri::async_runtime::block_on(async {
+        let f = fixture(json!({"message_references": true, "message_staging": true}));
+        staging(&f.0);
+        let (service, _cache) = connected(&f).await;
+        let record = with_attachment(70 << 10);
+        // The service's drained not-started receipt for exactly this
+        // original, offered by reference.
+        let receipt = {
+            let (service, record) = (service.clone(), record.clone());
+            tauri::async_runtime::spawn_blocking(move || {
+                let read = Read::new(Some(service)).unwrap();
+                let (projection, _) = references::project(&record).unwrap();
+                let verified = wire::Intent {
+                    original: projection.to_string(),
+                    form: wire::Form::ReferenceV1,
+                    ..intent(&read.scope, "example", TASK, &record)
+                }
+                .verify()
+                .unwrap();
+                wire::Receipt {
+                    binding: verified.binding,
+                    admission_epoch: read.scope.service_epoch.clone(),
+                    revision: 2,
+                    phase: wire::Phase::Failed,
+                    drained: true,
+                    code: wire::NOT_STARTED.into(),
+                    outcome: None,
+                }
+            })
+            .await
+            .unwrap()
+        };
+        let path = f.0.join("fixture.json");
+        let mut config: Value = serde_json::from_slice(&std::fs::read(&path).unwrap()).unwrap();
+        config["message_receipt"] = serde_json::to_value(&receipt).unwrap();
+        std::fs::write(&path, config.to_string()).unwrap();
+        let sent = send(service.clone(), &f.0, record.clone(), true, true).await;
+        // Never ran, so it is released; but it was offered, so its copies
+        // are the service's to remove, never this client's.
+        assert_eq!(sent.answer, MessageAnswer::Unsent(NOT_STARTED.into()));
+        assert_eq!((sent.handoff, sent.released), (Some(0), 1));
+        assert_eq!(copies(&f.0, &record), 1);
+        assert_eq!(count(&f.0, "task_message"), 1);
         service.join().await.unwrap();
     });
 }

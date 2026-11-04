@@ -841,6 +841,7 @@ pub fn dispatch(config: &Config, args: &[String], dry: bool) -> Result<i32> {
                 if p.provider == "claude" { command.env("ANTHROPIC_CONFIG_DIR", home.join("anthropic")); }
                 for key in AUTH_ENV {command.env_remove(key);}
             }
+            let kimi_before = if cfg!(windows) && p.provider == "kimi" { inspection::kimi_login_grant(&home) } else { None };
             let code = platform::wait_interactive(&mut command)?;
             if code == 0 && p.provider == "claude" {
                 let verified = if native { claude::verify_login(&home, true) } else { claude::finish_login(&home) };
@@ -849,8 +850,17 @@ pub fn dispatch(config: &Config, args: &[String], dry: bool) -> Result<i32> {
                 }
                 eprintln!("hgs: Sign-in verified for this profile.");
             }
-            if code == 0 {
-                let _ = inspection::inspect(config, &["inspect".into(), id.into(), "--refresh".into()]);
+            let kimi_after = if cfg!(windows) && p.provider == "kimi" { inspection::kimi_login_grant(&home) } else { None };
+            // The Windows C runtime uses exit 3 for the libuv assertion. Native
+            // login errors (including incomplete model setup) keep their code.
+            let kimi_changed = cfg!(windows) && p.provider == "kimi" && code == 3
+                && kimi_after.is_some() && kimi_before != kimi_after;
+            if code == 0 || kimi_changed {
+                let report = inspection::inspect(config, &["inspect".into(), id.into(), "--refresh".into()]);
+                if kimi_changed && report.as_ref().is_ok_and(|report| inspection::kimi_login_recovered(code, kimi_before.as_deref(), kimi_after.as_deref(), report)) {
+                    eprintln!("hgs: Kimi exited with code {code} after saving credentials. Sign-in verified for this profile.");
+                    return Ok(0);
+                }
             }
             return Ok(code);
         },

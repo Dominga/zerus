@@ -3,9 +3,9 @@
 //! The root's passive status ("passive" in desktop-delivery-status.json,
 //! extracted by client/scripts/generate-delivery-status-fixture.py from the
 //! root projection) is parsed by client-core as the service connection does.
-//! The ownership display adds the activation view the platform-manual route
-//! leaves: on Windows the actual `observe()`, elsewhere the same `failed()`
-//! path. The result must equal client/fixtures/desktop-service-windows-passive.json,
+//! The ownership display adds the activation view a plain passive Windows
+//! registration status read leaves, which an activation attempt leaves too.
+//! The result must equal client/fixtures/desktop-service-windows-passive.json,
 //! which the client's paused-state tests consume. Nothing here grants
 //! activation authority: needs_resume stays false.
 use super::*;
@@ -13,14 +13,24 @@ use super::*;
 const CONFIGURATION: &str = "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa";
 
 fn platform_activation() -> mode_transition::View {
+    // A plain passive selection as the Windows route maps its status read
+    // (observe, Check result and reconnect all take this path).
     let controller = mode_transition::Controller::new();
-    #[cfg(windows)]
-    tauri::async_runtime::block_on(
-        controller.observe(PathBuf::from("hgs.exe"), CONFIGURATION.into()),
+    controller.project_for_test(
+        &json!({"schema":1,"configuration":CONFIGURATION,"selected_mode":"passive",
+            "running_mode":"passive","mode_selection":"explicit","ipc_ready":true,
+            "pending_restart":false,"pending_transition":null,"transition":null,
+            "activation_pending":null,"activation_automatic_blocked":false}),
+        true,
     );
-    #[cfg(not(windows))]
+    let read = controller.view();
     controller.platform_manual_for_test();
-    controller.view()
+    assert_eq!(
+        serde_json::to_value(&read).unwrap(),
+        serde_json::to_value(controller.view()).unwrap(),
+        "a status read and an activation attempt project the same view"
+    );
+    read
 }
 
 /// A current Service grant, as the GUI's startup grant leaves it while the

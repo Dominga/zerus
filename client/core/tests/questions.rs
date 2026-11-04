@@ -1206,4 +1206,7 @@ fn an_answer_checkpoint_lives_until_a_definite_outcome() {
     let mut unsaved = begun();
     unsaved.sending_failed();
     assert!(unsaved.checkpoint.is_none());
+    // Only the user's Allow retry ends an uncertain answer's identity.
+    uncertain.allow_retry();
+    assert!(uncertain.checkpoint.is_none() && !uncertain.uncertain);
 }

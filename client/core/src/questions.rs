@@ -884,11 +884,15 @@ impl AnswerDraft {
         self.notice = SUBMITTED_CODEX.to_owned();
     }
 
-    /// Allow retry, after the user checked the agent.
+    /// Allow retry, after the user checked the agent: the explicit
+    /// resolution of an uncertain answer. It also ends the held identity,
+    /// and the next answer reserves its own before its call
+    /// (zerus-5wmh.66.4.4). Nothing reaches it automatically.
     pub fn allow_retry(&mut self) {
         self.uncertain = false;
         self.error = false;
         self.notice.clear();
+        self.checkpoint = None;
     }
 
     pub fn snapshot(&self) -> Snapshot {

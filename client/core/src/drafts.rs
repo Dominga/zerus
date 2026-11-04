@@ -48,6 +48,10 @@ pub const NOT_RESTORED: &str =
     "Could not restore this draft completely. Saved files have been kept locally.";
 pub const INTERRUPTED: &str =
     "Delivery was interrupted. Check Activity or Terminal before sending again.";
+/// A reloaded draft that holds a reserved deferred input but was not saved
+/// while sending (a continuation's start or compaction may have run): it
+/// stays uncertain until the user allows a retry (zerus-5wmh.66.4.4).
+pub const UNCONFIRMED: &str = "Delivery is not confirmed. Check Terminal before retrying.";
 pub const ALREADY_EXISTS: &str =
     "Another draft already exists here. Recover the previous one from Saved drafts.";
 /// A write refused for this run: the store's earlier drafts could not be
@@ -88,6 +92,12 @@ pub struct StoredDraft {
 impl StoredDraft {
     fn is_empty(&self) -> bool {
         self.draft.text.is_empty() && self.draft.attachments.is_empty()
+    }
+
+    /// Something a rename, recover or import never overwrites: content, or
+    /// an unresolved deferred input even without content.
+    fn occupied(&self) -> bool {
+        !self.is_empty() || self.checkpoint.is_some()
     }
 }
 
@@ -474,9 +484,16 @@ fn load_once(root: &Path, key: &str) -> (StoredDraft, bool) {
 
 fn loaded((mut draft, valid): (StoredDraft, bool)) -> Loaded {
     let storage_error = (!valid).then(|| NOT_RESTORED.to_owned());
-    // A draft saved during a send may have been delivered.
-    draft.uncertain = draft.uncertain || draft.sending;
-    let notice = draft.uncertain.then(|| INTERRUPTED.to_owned());
+    // A draft saved during a send may have been delivered. One holding a
+    // reserved deferred input may have had its call run: it stays uncertain
+    // until the user allows a retry, never continued from here.
+    let held = draft.checkpoint.is_some() && !draft.uncertain && !draft.sending;
+    draft.uncertain = draft.uncertain || draft.sending || draft.checkpoint.is_some();
+    let notice = if held {
+        Some(UNCONFIRMED.to_owned())
+    } else {
+        draft.uncertain.then(|| INTERRUPTED.to_owned())
+    };
     Loaded {
         draft,
         storage_error,
@@ -939,7 +956,7 @@ impl DraftStore {
             false,
             Box::new(move || {
                 let destination = loaded(load_once(&root, &new));
-                if !destination.draft.is_empty() || destination.storage_error.is_some() {
+                if destination.draft.occupied() || destination.storage_error.is_some() {
                     return done(Err(ALREADY_EXISTS.into()));
                 }
                 let result = save_fenced(&fence, &root, &new, &draft)
@@ -964,7 +981,7 @@ impl DraftStore {
             false,
             Box::new(move || {
                 let here = loaded(load_once(&root, &owned));
-                if !here.draft.is_empty() || here.storage_error.is_some() {
+                if here.draft.occupied() || here.storage_error.is_some() {
                     return done(Err(ALREADY_EXISTS.into()));
                 }
                 let mut copy = read_draft(&qt_root, &owned);
@@ -1321,7 +1338,7 @@ pub fn import_once(root: &Path, sources: &[ImportSource]) -> ImportReport {
     for copies in candidates.chunk_by(|a, b| a.key == b.key) {
         let key = &copies[0].key;
         let here = loaded(load_once(root, key));
-        let mut kept = (here.storage_error.is_some() || !here.draft.is_empty())
+        let mut kept = (here.storage_error.is_some() || here.draft.occupied())
             .then(|| content_hash(&here.draft));
         drop(here);
         for copy in copies {

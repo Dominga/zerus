@@ -169,11 +169,33 @@ checkpoint records the original intent and identity only: the kind, the draft
 save revision and the exact message digest, the run and conversation, the
 question for an answer, a resume's start choice, and the CLI receipt family
 (`input_receipts`, `question_receipts`, `compact_receipts` or `resume_input`).
-An uncertain outcome keeps it; a definite one removes it. Restart, import or
-reconnect never rebuild executable consent from it, and nothing sends from it:
-a reload shows the draft as before, and imported and recovered drafts never
-carry one. A present but invalid field leaves the draft not restored, never
-read as absent. Executing kinds that reconcile its receipt remain a later slice.
+Restart, import or reconnect never rebuild executable consent from it, and
+nothing sends from it. Imported and recovered drafts never carry one. A
+present but invalid field leaves the draft not restored, never read as absent.
+Executing kinds that reconcile its receipt remain a later slice.
+
+A draft holds one such identity until it is resolved. A definite outcome
+resolves it, as does a cancellation before its call was dispatched or, for a
+start or compaction, the session seen ready for the send. An uncertain outcome
+keeps it. Once its call is dispatched, a Cancel send, an interruption or a time
+limit keeps it too, and the call's own late answer then decides: a definite one
+resolves it, an uncertain one keeps it. While it is held, the composer stays
+uncertain, with a notice that delivery is not confirmed (or, after a reload of
+a draft saved while sending, that it was interrupted), and refuses a new Send,
+a start or compaction, and a Retry of a failed message. A reload of a draft
+that holds one, including a draft saved while a start or compaction waited,
+loads it in that state. Only the user's explicit Allow retry ends a held
+identity; the next attempt then reserves its own before its call. Rename,
+recover and import treat a draft that holds one as occupied, even without text
+or files, and never overwrite it.
+
+This fail-closed rule changes behaviour in rare cases. After a quit or crash
+while a start or compaction ran, and after a Cancel send or time limit while
+that call was still running and then answered uncertainly, the user clicks
+Allow retry before sending again. A Retry of a failed message waits until the
+composer's own unresolved delivery is resolved, and a Retry that ends
+uncertainly leaves the composer uncertain even though its draft is another
+message.
 
 ## Executing kinds and the exit boundary
 

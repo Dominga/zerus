@@ -566,6 +566,11 @@ pub(crate) struct Hub {
     pub(crate) start: Option<(send::Pending, StartSend)>,
     /// Compact-to-send, by draft key (Qt's `m_compacts`).
     pub(crate) compacts: HashMap<String, (send::Pending, CompactSend)>,
+    /// The start or compaction calls whose continuation ended while they ran,
+    /// by request id: their draft key and the notice their end showed. Each
+    /// call's late outcome removes its entry and decides its held identity
+    /// (zerus-5wmh.66.4.4).
+    pub(crate) orphans: HashMap<String, (String, String)>,
     /// When the continuations were last polled (every 2.5 s).
     pub(crate) last_poll: f64,
     /// The draft key whose context reset runs: one at a time across all
@@ -1303,6 +1308,10 @@ impl Composers {
     }
 
     /// Allow retry (`MessageComposer.cpp:412-417`): clears an uncertain mark.
+    /// It is the user's explicit resolution of the draft's unresolved
+    /// delivery, so it also ends the held identity; the next attempt saves
+    /// its own before its call (zerus-5wmh.66.4.4). Nothing reaches it
+    /// automatically: only the composer's Allow retry command calls it.
     pub fn allow_retry(&self, handle: u64) {
         let mut hub = self.lock();
         let Some(composer) = Self::editable(&mut hub, handle) else {
@@ -1311,6 +1320,7 @@ impl Composers {
         composer.uncertain = false;
         composer.error = false;
         composer.notice.clear();
+        composer.checkpoint = None;
         self.save(composer);
         drop(hub);
         self.changed();
@@ -2708,19 +2718,10 @@ pub(crate) mod tests {
         );
     }
 
-    #[test]
-    fn a_rename_back_keeps_an_uncertain_delivery_identity() {
+    /// A valid reserved identity of a send of `run-1` (zerus-5wmh.66.4.4).
+    pub(crate) fn held_checkpoint() -> Checkpoint {
         use zerus_client_core::operation_recovery::deferred_input::{Intent, Kind};
-        let root = dir("rename-back-checkpoint");
-        let store = drafts(&root);
-        let mut there = StoredDraft::default();
-        there.draft.text = "already here".into();
-        store.save_durable(RENAMED, there, |_| {});
-        let (c, _) = hub_on(&store);
-        c.open(Some(session()));
-        let view = until(&c, |v| v.loaded);
-        c.edit(view.handle, 1, view.text_epoch, "first".into(), 5, 5);
-        let held = Checkpoint::reserve(Intent {
+        Checkpoint::reserve(Intent {
             kind: Kind::Send,
             draft_revision: 1,
             message_sha256: "a".repeat(64),
@@ -2730,7 +2731,21 @@ pub(crate) mod tests {
             start: None,
             retry_of: None,
             consent: false,
-        });
+        })
+    }
+
+    #[test]
+    fn a_rename_back_keeps_an_uncertain_delivery_identity() {
+        let root = dir("rename-back-checkpoint");
+        let store = drafts(&root);
+        let mut there = StoredDraft::default();
+        there.draft.text = "already here".into();
+        store.save_durable(RENAMED, there, |_| {});
+        let (c, _) = hub_on(&store);
+        c.open(Some(session()));
+        let view = until(&c, |v| v.loaded);
+        c.edit(view.handle, 1, view.text_epoch, "first".into(), 5, 5);
+        let held = held_checkpoint();
         {
             let mut hub = c.lock();
             let composer = hub.composers.get_mut(KEY).unwrap();
@@ -2854,7 +2869,29 @@ pub(crate) mod tests {
             13,
         );
         // A delivery of it was interrupted: that must survive the move.
-        c.lock().composers.get_mut(KEY).unwrap().uncertain = true;
+        let cp = Checkpoint::reserve(
+            zerus_client_core::operation_recovery::deferred_input::Intent {
+                kind: zerus_client_core::operation_recovery::deferred_input::Kind::Send,
+                draft_revision: 1,
+                message_sha256:
+                    zerus_client_core::operation_recovery::deferred_input::message_sha256(
+                        "not saved yet",
+                        [],
+                    ),
+                run_id: "run-1".into(),
+                conversation_id: "conv-1".into(),
+                question: None,
+                start: None,
+                retry_of: None,
+                consent: false,
+            },
+        );
+        {
+            let mut hub = c.lock();
+            let composer = hub.composers.get_mut(KEY).unwrap();
+            composer.uncertain = true;
+            composer.checkpoint = Some(cp.clone());
+        }
         c.open(Some(renamed()));
         // Renamed back while the first rename, which the store refuses, waits.
         let back = c.open(Some(session())).unwrap();
@@ -2867,6 +2904,11 @@ pub(crate) mod tests {
         assert_eq!(view.text, "not saved yet");
         assert!(view.text_epoch > back.text_epoch);
         assert!(view.uncertain && !view.can_send, "still uncertain");
+        assert_eq!(
+            c.lock().composers[KEY].checkpoint.as_ref(),
+            Some(&cp),
+            "a rename back keeps the held identity (review-n's #1316 probe)"
+        );
         drop(read_only);
         // The failed save is retried and reaches the disk; no load replaced it.
         let view = until(&c, |v| !v.status_error);

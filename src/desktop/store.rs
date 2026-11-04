@@ -301,7 +301,10 @@ impl Store {
                 "desktop state requires a newer hgs version"
             );
         }
-        let _file = private_file(&path, true)?;
+        // Finish the raw-file check before SQLite acquires any locks. On Unix,
+        // closing any descriptor for this file drops this process's POSIX
+        // locks, including those held by the live SQLite connection.
+        drop(private_file(&path, true)?);
         let mut db = Connection::open_with_flags(&path, flags | OpenFlags::SQLITE_OPEN_READ_WRITE)?;
         super::counts::register(&db)?;
         db.busy_timeout(Duration::from_secs(2))?;

@@ -258,6 +258,7 @@ impl Native for PeerNative {
                 json_output: call.json_output,
                 failure_json: call.failure_json,
                 max_output_bytes,
+                selected: call.selected,
             };
             self.gateway.call_dyn(outer).await
         };

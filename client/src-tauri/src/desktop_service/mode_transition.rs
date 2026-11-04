@@ -11,7 +11,8 @@ use zerus_client_core::{
 
 const ABI: &str = "desktop-service-activation-v1";
 const MARKER: &str = "Desktop service activation ABI: desktop-service-activation-v1";
-const CHOICE_MARKER: &str = "Desktop service mode choice scope ABI: desktop-service-mode-choice-scope-v1";
+const CHOICE_MARKER: &str =
+    "Desktop service mode choice scope ABI: desktop-service-mode-choice-scope-v1";
 const BYTES: usize = 64 << 10;
 mod review;
 pub(super) use review::{Action as ReviewAction, Prepared, View as ReviewView};
@@ -205,8 +206,11 @@ impl Controller {
                 "review-activation"
             })
         });
-        self.state.lock().unwrap_or_else(PoisonError::into_inner).choice_capable =
-            std::str::from_utf8(&help).is_ok_and(|s|s.lines().any(|l|l.trim() == CHOICE_MARKER));
+        self.state
+            .lock()
+            .unwrap_or_else(PoisonError::into_inner)
+            .choice_capable =
+            std::str::from_utf8(&help).is_ok_and(|s| s.lines().any(|l| l.trim() == CHOICE_MARKER));
         let Some(status) = self.status(route.clone(), &configuration, resources.clone()) else {
             return;
         };
@@ -322,6 +326,13 @@ impl Controller {
                 return None;
             }
         }
+        self.project(&status, route.windows);
+        Some(status)
+    }
+    /// The view one checked registration status leaves. Every path that reads
+    /// it (observe, Check result, reconnect, before an activation) projects the
+    /// same state, so a later read never undoes an earlier one.
+    fn project(&self, status: &Value, windows: bool) {
         let mut state = self.state.lock().unwrap_or_else(PoisonError::into_inner);
         state.view.automatic_blocked |= status["activation_automatic_blocked"] == true;
         state.selection = Some(status.clone());
@@ -329,19 +340,37 @@ impl Controller {
             && status["running_mode"] == "background"
             && status["ipc_ready"] == true
             && status["pending_restart"] == false;
-        state.view.needs_resume = !route.windows
+        state.view.needs_resume = !windows
             && state.view.review.is_none()
             && !state.view.automatic_blocked
             && status["selected_mode"] == "passive";
         if state.intent.is_none() {
+            // Windows ordinary activation is the maintained manual route: an
+            // activation attempt reaches the same code before any effect. Only
+            // a plain passive selection says so; an interrupted record, a latch
+            // or any transition keeps its own presentation.
+            let manual = windows
+                && state.view.review.is_none()
+                && !state.view.automatic_blocked
+                && status["selected_mode"] == "passive"
+                && status["running_mode"] == "passive"
+                && status["pending_restart"] == false
+                && status["transition"].is_null()
+                && status["activation_pending"].is_null();
             state.view.code = if state.view.needs_resume {
                 "activation_required"
+            } else if manual {
+                "activation_platform_manual"
             } else {
                 ""
             }
             .into();
         }
-        Some(status)
+    }
+    /// One checked status, as `status()` projects it after its native read.
+    #[cfg(test)]
+    pub(super) fn project_for_test(&self, status: &Value, windows: bool) {
+        self.project(status, windows);
     }
     fn lookup(
         self: &Arc<Self>,
@@ -404,9 +433,8 @@ impl Controller {
         }
         .into();
     }
-    /// The view the platform-manual route leaves (Windows), for projection
-    /// tests on other platforms.
-    #[cfg(all(test, not(windows)))]
+    /// The code a Windows activation attempt leaves before any effect.
+    #[cfg(test)]
     pub(super) fn platform_manual_for_test(&self) {
         self.failed("activation_platform_manual");
     }
@@ -921,6 +949,8 @@ pub(super) async fn startup(shared: &Arc<Shared>, automatic: bool, configuration
     }
 }
 
+#[cfg(test)]
+mod projection_tests;
 #[cfg(all(test, target_os = "linux"))]
 mod tests;
 
@@ -931,24 +961,30 @@ mod windows_pins {
     fn only_consuming_loans_pin_the_selected_image_and_its_ancestors() {
         // Native file-sharing control only: this is no caller, manager or
         // installed-GUI positive. The plain fixture need not be a PE image.
-        let root = std::env::temp_dir().join(format!("zerus-mode-pin-{}",uuid::Uuid::new_v4()));
+        let root = std::env::temp_dir().join(format!("zerus-mode-pin-{}", uuid::Uuid::new_v4()));
         std::fs::create_dir(&root).unwrap();
         let cli = root.join("hgs.exe");
         let old = root.join("held.exe");
-        std::fs::write(&cli,b"original selection").unwrap();
+        std::fs::write(&cli, b"original selection").unwrap();
         let route = Arc::new(Route::select(&cli).unwrap());
-        std::fs::rename(&cli,&old).unwrap(); // An idle snapshot holds no pin.
-        std::fs::rename(&old,&cli).unwrap();
+        std::fs::rename(&cli, &old).unwrap(); // An idle snapshot holds no pin.
+        std::fs::rename(&old, &cli).unwrap();
         let held = RoutePin::new(route.clone()).unwrap();
         let loan = held.clone();
         drop(held);
-        assert!(std::fs::rename(&cli,&old).is_err(),"the last original consuming loan must pin its image");
-        assert!(std::fs::rename(&root,root.with_extension("moved")).is_err(),"the same loan pins the ancestors");
+        assert!(
+            std::fs::rename(&cli, &old).is_err(),
+            "the last original consuming loan must pin its image"
+        );
+        assert!(
+            std::fs::rename(&root, root.with_extension("moved")).is_err(),
+            "the same loan pins the ancestors"
+        );
         loan.check().unwrap();
         drop(loan);
-        std::fs::rename(&cli,&old).unwrap();
-        std::fs::write(&cli,b"replacement selection").unwrap();
-        assert!(route.check().is_err(),"a replacement is never adopted");
+        std::fs::rename(&cli, &old).unwrap();
+        std::fs::write(&cli, b"replacement selection").unwrap();
+        assert!(route.check().is_err(), "a replacement is never adopted");
         drop(route);
         std::fs::remove_dir_all(root).unwrap();
     }

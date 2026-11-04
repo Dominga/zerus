@@ -357,3 +357,72 @@ fn only_the_exact_drained_recorded_outcome_settles() {
     other.plan_sha256 = "b".repeat(64);
     assert!(!lookup.matches(&other));
 }
+
+#[test]
+fn a_receipt_settles_only_when_its_binding_agrees_with_the_plan_and_its_configuration() {
+    let verified = intent(record("queue", "").to_string()).verify().unwrap();
+    let plan = &verified.plan;
+    let settled = |phase, code: &str, outcome| Receipt {
+        binding: verified.binding.clone(),
+        admission_epoch: EPOCH.into(),
+        revision: 3,
+        phase,
+        drained: true,
+        code: code.into(),
+        outcome,
+    };
+    let recorded = settled(
+        Phase::Recorded,
+        "",
+        Some(Outcome {
+            request_id: REQUEST.into(),
+            mode: "queue".into(),
+            dispatch_id: String::new(),
+            state: "queued".into(),
+        }),
+    );
+    let refused = settled(Phase::Failed, "task_message_refused", None);
+    let not_started = settled(Phase::Failed, NOT_STARTED, None);
+    assert_eq!(recorded.result(plan), Some(Ok(())));
+    assert!(refused.result(plan).is_some());
+    assert!(not_started.not_started(plan));
+    // The declared plan digest never overrides a conflicting original field
+    // the binding repeats, in any settling phase.
+    type Change = fn(&mut Binding);
+    let changes: [(&str, Change); 4] = [
+        ("project", |b| b.project = "other".into()),
+        ("task", |b| {
+            b.task_id = "55555555-5555-4555-8555-555555555555".into()
+        }),
+        ("request", |b| b.request_id = DISPATCH.into()),
+        ("input", |b| b.input_sha256 = "d".repeat(64)),
+    ];
+    for (name, change) in changes {
+        for receipt in [&recorded, &refused, &not_started] {
+            let mut changed = receipt.clone();
+            change(&mut changed.binding);
+            assert!(changed.valid(), "{name}: a valid shape");
+            assert_eq!(changed.result(plan), None, "{name}");
+            assert!(!changed.not_started(plan), "{name}");
+        }
+    }
+    // A lookup's receipt carries the queried configuration; its admission
+    // epoch stays its own.
+    let query = Query::for_plan(scope(), plan).unwrap();
+    let lookup = Lookup {
+        abi: ABI.into(),
+        request_id: REQUEST.into(),
+        scope: scope(),
+        read_only: true,
+        found: true,
+        receipt: Some(recorded.clone()),
+    };
+    assert!(lookup.matches(&query));
+    let mut foreign = lookup.clone();
+    foreign.receipt.as_mut().unwrap().binding.configuration = "b".repeat(64);
+    assert!(foreign.receipt.as_ref().unwrap().valid());
+    assert!(!foreign.matches(&query));
+    let mut earlier = lookup.clone();
+    earlier.receipt.as_mut().unwrap().admission_epoch = DISPATCH.into();
+    assert!(earlier.matches(&query));
+}

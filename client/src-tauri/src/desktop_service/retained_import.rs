@@ -491,7 +491,9 @@ pub(super) async fn before_grant(
     stop: Arc<AtomicBool>,
     explicit: bool,
 ) {
-    if !shared.business_permitted() { return; }
+    if !shared.business_permitted() {
+        return;
+    }
     let _ = attempt(
         shared,
         relay.clone(),

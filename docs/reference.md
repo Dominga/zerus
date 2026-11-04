@@ -341,7 +341,9 @@ answer is kept for ten minutes. Reads, polls, history, status, watch, terminal
 input and read marks keep the name until a label index exists. Confirmed
 delayed and worktree-cleanup end actions keep their scoped envelope, which
 already names the exact run and conversation. A refused ID shows as a changed
-session.
+session, but only when the CLI refused it while resolving it: another name, no
+session or several sessions. A later read's "no longer names", which can
+follow an effect, keeps the action's own result.
 
 `hgs session-action-status SESSION --json` reads one original lifecycle receipt.
 Supply the original `session-action` JSON unchanged, including its `request_id`,
@@ -3055,7 +3057,7 @@ selected inspector without transferring the journal or adding a polling loop.
 
 Task views (`task get`, history pages and list rows) include an `execution`
 object for a task that is In progress or recorded execution attempts:
-`requirement` (the task's requirement revision, from 1), `attempts`, `current`
+`requirement` (the task's requirement revision, from 1; each edit of its prompt or attachments counts the next one, a rename or comment does not), `attempts`, `current`
 and, when two attempts claim the same generation, `conflict: true`, which
 nothing resolves automatically. `current` is the attempt the task's execution is
 about: its `id` and `generation`, `origin` (`send`, `start`, `handoff` or
@@ -3080,8 +3082,13 @@ child or result is invented. A resume settles only the pauses it observed, so a
 pause that no resume observed keeps the attempt paused. A session's
 Stop, idle time, pause or elapsed time is never an attempt event and never
 moves a task. Attempts are kept beside the history under task schema 6, which a
-reader that does not know them shows read-only. This version reads attempts and
-guards reports against the current execution; recording attempts comes later.
+reader that does not know them shows read-only. The stored schema is one merged
+value, so an older replica's concurrent upgrade can leave a lower one; this
+version raises it again for a task with attempts in every write and every live
+import, and before a task is read for an inventory, so the raised value is what
+other replicas receive. That repair is a new change, not proof that an older
+replica did nothing before it. This version reads attempts and guards reports
+against the current execution; recording attempts comes later.
 
 Plain `task list` still returns every task for existing clients. With `--stage`
 and `--limit` (1–200) it returns one page of that stage in the same order and

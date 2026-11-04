@@ -2946,6 +2946,7 @@ hgs task add --project orchard [--backlog] [--target codex/api|any [--host ALIAS
 hgs task add --project orchard --title "Task title" --request-id UUID < description.txt
 hgs task rename orchard/T-a1b2c3 < title.txt
 hgs task list --project orchard [--stage todo]
+hgs task list --project orchard --stage todo --limit 50 [--after CURSOR|--before CURSOR] [--if-revision REVISION]
 hgs task get orchard/T-a1b2c3
 hgs task get TASK_UUID --project orchard --history-limit 80 [--history-before CURSOR]
 hgs task send orchard/T-a1b2c3 [--session codex/api [--host ALIAS]]
@@ -2976,6 +2977,37 @@ replicated and does not change the task document format.
 Task list rows also include a bounded `history_revision` token. A journal-only
 note or delivery receipt changes it, so the existing task stream can refresh the
 selected inspector without transferring the journal or adding a polling loop.
+
+Plain `task list` still returns every task for existing clients. With `--stage`
+and `--limit` (1–200) it returns one page of that stage in the same order and
+with the same rows, except that a prompt longer than 2 KiB is cut at a
+character boundary and marked `text_truncated: true` (`task get` returns all of
+it). The reply adds `page` (`schema: 1`, `stage`, `limit`, the zero-based
+`position` of its first row, the stage's `total`, and the opaque `next` and
+`previous` cursors), `counts` for every stage, `damaged` (at most 20) with
+`damaged_total`, and a `revision`. Pass a cursor as `--after` or `--before`; it
+binds the project and stage and names a row, so tasks added or moved elsewhere
+never shift the page after it. A page past either end returns the nearest whole
+page, and only an empty stage has no rows. `--if-revision` with the last
+`revision` answers `{"unchanged": true, "revision": ...}` without rows when
+nothing changed, after checking that page's rows against their files.
+
+Pages come from a local index of task headers in the project's replica folder
+(`task-index-v1.sqlite3`): a disposable cache, never replicated, rebuilt
+silently from the task documents when it is missing, damaged or of another
+version, and never a reason for a read to fail. Each save notes the task in the
+project's change journal (`changes`, a bounded hint that is only ever replaced,
+never written through), so a read decodes only changed tasks. Every task
+file's stamp (length, modification time, inode) is also checked at least every
+30 seconds for writers without the journal. A row is suspect when it was read
+from files modified within the last 2 seconds, before the journal last became
+unknown, more than 10 minutes ago, or at a time after now (a clock set back).
+A page reads its suspect rows from their documents again before it returns
+them, and each read of the index reads up to 256 others again, those read
+longest ago first, so every row, and with it every stage count, is read again
+within 10 minutes plus ceil(tasks / 256) reads. The index holds at most 256
+MiB whatever its page size; a larger one is built again. Short-ID lookups,
+list places and the agent start limit use the same index.
 
 Send pastes the task prompt into its session through the same input path as
 `hgs send`; the task becomes In progress, and Zerus does not

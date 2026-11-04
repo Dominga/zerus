@@ -202,6 +202,11 @@ class Forks(Base):
             self.send_event(source,'Stop',last_assistant_message='source reply')
             time.sleep(1.1)
             fork=self.fork(source,f'{agent}-branch')
+            # Resume carries the labels with the lineage (#1408 review).
+            labels=self.binding(fork)['fork_lineage_labels']
+            self.assertEqual(labels,{self.binding(source)['journal_name']:source})
+            self.hgs('pause',fork);self.resume(fork)
+            self.assertEqual(self.binding(fork)['fork_lineage_labels'],labels)
             self.send_event(source,'UserPromptSubmit',prompt='source after the fork')
             self.send_event(fork,'UserPromptSubmit',prompt='fork request')
             inherited=[('source request',source),('source reply',source)]

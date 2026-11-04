@@ -1073,6 +1073,37 @@ class SessionIdentity(Harness):
         self.assertNotIn(name, keys())
         self.assertNotIn(renamed, keys())
 
+    # #1408 review: `--fresh` over a saved, confirmed conversation is a new
+    # session with its own ID journal and launch label, and a name-only task
+    # for the replaced session's launch label never routes to it.
+    def test_a_fresh_launch_over_a_confirmed_session_is_a_new_session(self):
+        first = self.start(tag="w")
+        launched = self.binding(first)
+        self.hgs("rename", first, "claude/p/one")
+        self.hgs("pause", "claude/p/one")
+        old = self.binding("claude/p/one")
+        self.assertEqual((old["journal_name"], old["launch_label"]), ("session:" + launched["session_id"], first))
+        self.hgs("claude", "p", "-n", "one", "-d", "--fresh")
+        self.wait(lambda: self.binding("claude/p/one").get("conversation_id") not in (None, old["conversation_id"]))
+        fresh = self.binding("claude/p/one")
+        self.assertNotEqual(fresh["session_id"], old["session_id"])
+        self.assertEqual((fresh["journal_name"], fresh["launch_label"]),
+                         ("session:" + fresh["session_id"], "claude/p/one"))
+        catalog = {"projects": [{"id": "project-1", "name": "orchard", "color": "#123456",
+                                 "folders": [], "sessions": []}]}
+        initialized = subprocess.run([str(HGS), "swarm", "initialize"], input=json.dumps(catalog), env=self.env,
+                                     text=True, capture_output=True, timeout=30)
+        self.assertEqual(initialized.returncode, 0, initialized.stderr)
+
+        def target(label):
+            added = subprocess.run([str(HGS), "task", "add", "--project", "orchard", "--target", label],
+                                   input="Route me", env=self.env, text=True, capture_output=True, timeout=30)
+            self.assertEqual(added.returncode, 0, added.stdout + added.stderr)
+            return json.loads(added.stdout)["task"]["target"]["session"]
+
+        self.assertEqual(target(first), first, "the replaced session's launch label routes nowhere new")
+        self.assertEqual(target("claude/p/one"), "claude/p/one")
+
     # zerus-ucck P1: one durable session ID across pause and resume, a fresh
     # conversation, rename, archive and restore (a fork gets its own: see
     # test_fork); a record an older CLI wrote gains one when next written.

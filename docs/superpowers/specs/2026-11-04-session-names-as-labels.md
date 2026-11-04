@@ -90,10 +90,13 @@ Constraints (coordinator, 2026-11-04):
 - P1c must not move a machine client's hot path (polling, status, watch) onto `--session-id` until P2's O(1) index exists. Until then `--session-id` scans the bindings once per explicit call. P3 is gated on P1 and P2 being deployed to every computer in the swarm, and the mobile connector, because an older peer can only report ambiguity, not resolve it.
 - P2b (coordinator, 2026-11-04): rollback safety covers v0.47.0 and every later build. A session created by a launch gets `journal_name = session:<session_id>` and `launch_label`.
   - Resume, rename, Start fresh, Clear and restore carry both; recovery only sends input.
-  - A launch that replaces a saved record of the label continues that record's journal, and legacy name-only tasks also match `launch_label`.
+  - A `--fresh` launch over a saved, confirmed conversation of the label is a new session with its own journal and `launch_label`. Only a retry of an unconfirmed attempt continues that attempt's journal and label. Legacy name-only tasks also match `launch_label`.
   - Every v0.47.0 path reads and keeps `journal_name`. It drops the unknown `launch_label` on resume, and a later rename here pins the label it leaves.
   - On v0.47.0, an explicit `-r ID` relaunch that replaces a saved P2b record would continue under the label rather than the ID journal. That is the only rollback gap.
-  - A fork's lineage keeps its three-part `[journal, conversation, sequence]` entries, which earlier builds read. The labels its sources had go in a separate `fork_lineage_labels` map, so inherited rows still show the source's label. A build without that map shows the journal name instead.
+  - A fork's lineage keeps its three-part `[journal, conversation, sequence]` entries, which earlier builds read. The labels its sources had go in a separate `fork_lineage_labels` map, carried on resume, so inherited rows still show the source's label. Where the map is missing, the direct source falls back to the `fork_source_name` the fork recorded.
+  - Fork rollback round trips:
+    - A P2b fork resumed by v0.47.0 loses `fork_lineage`. If its source is later renamed or archived, the derived lineage finds nothing and saves an empty lineage for good, so the inherited view stays empty.
+    - A fork resumed by an earlier lineage-era build keeps its lineage but drops the labels. Its direct source then shows its recorded label; older ancestors show their journal name.
 
 ## Owner questions
 

@@ -830,14 +830,24 @@ pub(super) fn fork_lineage_labels(source: &Value, lineage: &str) -> String {
     Value::Object(labels).to_string()
 }
 
-/// The label an inherited source had when the fork began, from the fork's
-/// `fork_lineage_labels`, else its journal name, which is that label for every
-/// source before P2b.
-pub(super) fn lineage_label<'a>(labels: &'a Value, journal: &'a str) -> &'a str {
-    labels[journal]
-        .as_str()
-        .filter(|label| !label.is_empty())
-        .unwrap_or(journal)
+/// The label an inherited source of the fork `record` had when the fork
+/// began: from its `fork_lineage_labels`; for its direct source (the last
+/// lineage entry) without one, as a build that dropped the labels leaves it,
+/// the `fork_source_name` it recorded; else the journal name, which is that
+/// label for every source before P2b.
+pub(super) fn lineage_label<'a>(record: &'a Value, journal: &'a str) -> &'a str {
+    let nonempty = |value: &'a Value| value.as_str().filter(|label| !label.is_empty());
+    if let Some(label) = nonempty(&record["fork_lineage_labels"][journal]) {
+        return label;
+    }
+    let direct = record["fork_lineage"]
+        .as_array()
+        .and_then(|lineage| lineage.last())
+        .and_then(|entry| entry[0].as_str());
+    match nonempty(&record["fork_source_name"]) {
+        Some(source) if direct == Some(journal) => source,
+        _ => journal,
+    }
 }
 
 /// The `?3` scope of the Activity reads for a record.
@@ -856,7 +866,7 @@ fn mark_inherited(event: &mut Value, own: bool, name: &str) {
 // The activity tail includes tools and children. Keep main public messages in
 // a separate bounded window so a cold reader does not lose its newest prompt
 // merely because that turn has produced more than one hundred tool events.
-fn message_events(db: &Connection, name: &str, conversation: Option<&str>, scope: &str, labels: &Value) -> Result<(Vec<Value>, bool)> {
+fn message_events(db: &Connection, name: &str, conversation: Option<&str>, scope: &str, record: &Value) -> Result<(Vec<Value>, bool)> {
     static QUERY: OnceLock<String> = OnceLock::new();
     let query = QUERY.get_or_init(|| activity_query(" AND COALESCE(json_extract(payload, '$.agent_id'), '') IN ('', 'main') \
         AND json_extract(payload, '$.type') IN ('SessionCleared','UserPromptSubmit','UserPromptQueued','UserMessage','TurnStarted','QuestionAnswered','AgentMessage','Stop')", true, "101"));
@@ -871,7 +881,7 @@ fn message_events(db: &Connection, name: &str, conversation: Option<&str>, scope
         if events.len() == MESSAGE_EVENTS_LIMIT { truncated = true; break; }
         let mut event: Value = serde_json::from_str(&payload).map_err(|e| e.to_string())?;
         event["seq"] = json!(seq);
-        mark_inherited(&mut event, own, lineage_label(labels, &source));
+        mark_inherited(&mut event, own, lineage_label(record, &source));
         let size = event.to_string().len() + usize::from(!events.is_empty());
         if bytes + size > MESSAGE_EVENTS_BYTES { truncated = true; break; }
         bytes += size;
@@ -1101,7 +1111,7 @@ pub(super) fn inspection(name: &str, after: i64, archive_id: Option<&str>, inclu
     }
     output["events"] = json!(events);
     let (messages, truncated) =
-        message_events(&db, journal_name, conversation, &scope, &record["fork_lineage_labels"])?;
+        message_events(&db, journal_name, conversation, &scope, &record)?;
     output["message_events"] = json!(messages);
     output["message_events_truncated"] = json!(truncated);
     output["message_events_limit"] = json!(MESSAGE_EVENTS_LIMIT);
@@ -1130,7 +1140,7 @@ impl TimelineRow {
     pub(super) fn event(&self, record: &Value) -> Result<Value> {
         let mut event = timeline_event(record, self.seq, &self.payload)?;
         if let Some(source) = &self.inherited_from {
-            mark_inherited(&mut event, false, lineage_label(&record["fork_lineage_labels"], source));
+            mark_inherited(&mut event, false, lineage_label(record, source));
         }
         Ok(event)
     }
@@ -1738,9 +1748,16 @@ mod attention_regressions {
         let labels: Value = serde_json::from_str(&fork_lineage_labels(&source, &lineage)).unwrap();
         let expected = json!({"session:old":"codex/p/older", id:"codex/p/root"});
         assert_eq!(labels, expected);
-        assert_eq!(lineage_label(&labels, id), "codex/p/root");
-        assert_eq!(lineage_label(&labels, "codex/p/plain"), "codex/p/plain");
+        let fork = json!({"fork_lineage_labels": labels});
+        assert_eq!(lineage_label(&fork, id), "codex/p/root");
+        assert_eq!(lineage_label(&fork, "codex/p/plain"), "codex/p/plain");
         assert_eq!(lineage_label(&Value::Null, id), id);
+        // A build that dropped the labels: the direct source falls back to the
+        // label it recorded; an ancestor keeps its journal name.
+        let dropped = json!({"fork_source_name": "codex/p/root",
+            "fork_lineage": [["session:old", "c-old", 3], [id, "c-root", 9]]});
+        assert_eq!(lineage_label(&dropped, id), "codex/p/root");
+        assert_eq!(lineage_label(&dropped, "session:old"), "session:old");
         let plain = json!({"name":"codex/p/plain"});
         let lineage = json!([["codex/p/plain", "c-plain", 4]]).to_string();
         assert_eq!(fork_lineage_labels(&plain, &lineage), "{}");

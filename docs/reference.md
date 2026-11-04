@@ -310,8 +310,9 @@ Activity, read marks and notification preferences are keyed by
 `journal_name`, which is `session:<session_id>`, and `launch_label` keeps the
 label it was launched with. Rename, resume, Clear, Start fresh and restore
 keep both. A later write here can give the session a new ID after an older hgs
-dropped it; the journal stays where it is. A launch that replaces a saved
-record of the same label continues that record's journal. A session created
+dropped it; the journal stays where it is. A `--fresh` launch over a saved,
+confirmed conversation of the label is a new session with its own journal; only
+a retry of an unconfirmed attempt continues that attempt's journal. A session created
 before keeps the history of its label, pinned at its first rename. hgs v0.47.0
 and later read `journal_name` and keep it on every one of those paths.
 

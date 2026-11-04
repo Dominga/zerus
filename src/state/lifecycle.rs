@@ -177,6 +177,15 @@ pub(super) fn run(args: &[String]) -> Result<i32> {
         } else if replaces.is_some() {
             return Err(format!("{name}: saved binding disappeared before a fresh start"));
         }
+        // Only a retry of an unconfirmed attempt continues that attempt's
+        // journal and launch label; a launch that replaces a confirmed
+        // conversation (`--fresh`) is a new session (#1408 review).
+        let retried = replaced.as_ref().filter(|previous| {
+            attempts::retryable(previous, None)
+                || requested
+                    .as_deref()
+                    .is_some_and(|id| attempts::retryable(previous, Some(id)))
+        });
         let startup_kind = if expected.is_some() || requested.is_some() || !first.is_empty() {
             "resume"
         } else {
@@ -287,7 +296,7 @@ pub(super) fn run(args: &[String]) -> Result<i32> {
         }
         // A resume and a fresh start carried their journal and launch label.
         if !resumed && replaces.is_none() {
-            journal_identity(&mut record, &name, replaced.as_ref());
+            journal_identity(&mut record, &name, retried);
         }
         backend::current().set_run_marker(&name, &token)?;
         if let Some(owner)=super::worktree_lifecycle::for_folder(std::path::Path::new(string(&record,"launch_dir"))) {
@@ -696,13 +705,14 @@ fn print_resume(spec: &backend::LaunchSpec) {
 /// Where a launch keeps its history (zerus-ucck P2b). A session this launch
 /// creates keeps it under its durable ID, `session:<session_id>`, so its
 /// label is free to change or repeat; `launch_label` keeps the label it was
-/// created with for name-only tasks. A launch that replaces another saved
-/// record of the label (`replaced`, not a resume or a fresh start, which carry
-/// both) continues that journal as before: the label's, or the ID journal it
-/// replaces. hgs v0.47.0 and later read `journal_name` and keep it on
-/// resume, rename, Clear, Start fresh and restore.
-fn journal_identity(record: &mut Value, name: &str, replaced: Option<&Value>) {
-    match replaced {
+/// created with for name-only tasks. That includes a `--fresh` launch over a
+/// confirmed conversation of the label: a new session. Only a retry of an
+/// unconfirmed attempt (`retried`; a resume and a fresh start carry both)
+/// continues that attempt's journal as before, the label's or its ID journal,
+/// and its launch label. hgs v0.47.0 and later read `journal_name` and keep it
+/// on resume, rename, Clear, Start fresh and restore.
+fn journal_identity(record: &mut Value, name: &str, retried: Option<&Value>) {
+    match retried {
         None => {
             ensure_session_id(record);
             let journal = format!("session:{}", string(record, "session_id"));

@@ -4372,8 +4372,11 @@ with a message naming it instead of falling back to the cloud account.
 
 ## Official DeepSeek Harness
 
-The native adapter accepts exactly the reviewed `@deepseek-ai/dsh` releases
-`0.2.1-rc.2` and `0.2.1-rc.5`. Install a reviewed release on the agent host,
+The native adapter starts every `@deepseek-ai/dsh` release (owner, 2026-11-04).
+Zerus reviewed `0.2.1-rc.2` and `0.2.1-rc.5`; any other release starts with a
+note naming them and `harness-unreviewed` in the host's folder, since the bridge
+uses harness internals and a feature may fail there. Only a harness that reports
+no version is refused, before any session exists. Install a reviewed release on the agent host,
 sign in and choose **DeepSeek Harness** in New session:
 
 ```sh

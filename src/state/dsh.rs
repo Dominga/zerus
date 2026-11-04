@@ -23,6 +23,27 @@ const VERSION: &str = "0.2.1-rc.5";
 fn reviewed_harness_version(version: &str) -> bool {
     REVIEWED_VERSIONS.contains(&version)
 }
+/// The owner, 2026-11-04: every DeepSeek Harness release starts, reviewed or
+/// not. The release is the first `X.Y.Z[-pre]` on the first line of
+/// `dsh --version` (a bare version, or one after a package name); None when
+/// the harness prints no version at all.
+fn harness_release(output: &str) -> Option<String> {
+    static RELEASE: std::sync::OnceLock<regex::Regex> = std::sync::OnceLock::new();
+    let first = output.lines().map(str::trim).find(|line| !line.is_empty())?;
+    RELEASE
+        .get_or_init(|| regex::Regex::new(r"(?:^|[^0-9A-Za-z.])v?([0-9]+\.[0-9]+\.[0-9]+(?:-[0-9A-Za-z.]+)?)").expect("release pattern"))
+        .captures(first)
+        .map(|found| found[1].to_owned())
+}
+/// The note an unreviewed release starts with: the bridge uses harness
+/// internals, so a feature may fail until Zerus reviews that release.
+fn harness_unreviewed_note(release: &str) -> String {
+    format!(
+        "hgs: DeepSeek Harness {release} is not a release Zerus reviewed ({}); it is started anyway. \
+         If a DeepSeek feature fails, install a reviewed one: npm install -g @deepseek-ai/dsh@{VERSION}",
+        REVIEWED_VERSIONS.join(", ")
+    )
+}
 /// A refusal made before any binding, host or session exists; the desktop
 /// reads it as a definite creation failure (the session can be created again).
 pub(crate) const NOTHING_STARTED: &str = "(nothing was started; create the session again after the fix)";
@@ -31,7 +52,9 @@ pub(crate) const NOTHING_STARTED: &str = "(nothing was started; create the sessi
 /// started, so the session can be created again after the install.
 fn harness_version_refusal(installed: Option<&str>) -> String {
     let found = match installed {
-        Some(version) if !version.is_empty() => format!("DeepSeek Harness {} is installed", version.lines().next().unwrap_or(version)),
+        Some(version) if !version.is_empty() => {
+            format!("the installed DeepSeek Harness printed {:?} instead of its version", version.lines().next().unwrap_or(version))
+        }
         _ => "the installed DeepSeek Harness did not report its version".to_owned(),
     };
     format!(
@@ -698,8 +721,17 @@ fn ensure_host(record: &Value) -> Result<bool> {
         format!("Install the official harness: npm install -g @deepseek-ai/dsh@{VERSION}")
     })?;
     let installed = String::from_utf8_lossy(&version.stdout).trim().to_owned();
-    if !version.status.success() || !reviewed_harness_version(&installed) {
+    // The owner, 2026-11-04: any release starts; only a harness that reports
+    // no version at all is refused. An unreviewed one is noted and marked.
+    let Some(release) = version.status.success().then(|| harness_release(&installed)).flatten() else {
         return Err(harness_version_refusal(version.status.success().then_some(installed.as_str())));
+    };
+    let marker = dir.join("harness-unreviewed");
+    if reviewed_harness_version(&release) {
+        let _ = std::fs::remove_file(&marker);
+    } else {
+        eprintln!("{}", harness_unreviewed_note(&release));
+        let _ = atomic(&marker, &format!("{release}\n"));
     }
     let script = dir.join("hgs-bridge.mjs");
     atomic(&dir.join("command-guard.mjs"), COMMAND_GUARD)?;
@@ -3670,11 +3702,26 @@ mod harness_refusal_tests {
     use super::*;
 
     #[test]
-    fn a_harness_refusal_names_the_installed_release_and_the_fix() {
-        let text = harness_version_refusal(Some("0.2.2-rc.1"));
-        for part in ["0.2.2-rc.1 is installed", "0.2.1-rc.2 or 0.2.1-rc.5", "npm install -g @deepseek-ai/dsh@0.2.1-rc.5", "nothing was started"] {
+    fn a_harness_refusal_names_what_it_printed_and_the_fix() {
+        let text = harness_version_refusal(Some("usage: dsh"));
+        for part in ["printed \"usage: dsh\"", "0.2.1-rc.2 or 0.2.1-rc.5", "npm install -g @deepseek-ai/dsh@0.2.1-rc.5", "nothing was started"] {
             assert!(text.contains(part), "{part} missing: {text}");
         }
         assert!(harness_version_refusal(None).contains("did not report its version"));
+    }
+
+    /// The owner, 2026-11-04: every release starts; an unreviewed one is noted.
+    #[test]
+    fn every_release_starts_and_an_unreviewed_one_is_noted() {
+        for (output, release) in [("0.2.1-rc.5", "0.2.1-rc.5"), ("0.2.2-rc.1\n", "0.2.2-rc.1"), ("0.3.0", "0.3.0"),
+            ("@deepseek-ai/dsh/0.2.2-alpha.3 win32-x64 node-v22.19.0", "0.2.2-alpha.3"), ("dsh v0.2.4", "0.2.4"), ("\n0.2.1-rc.3\nmore", "0.2.1-rc.3")] {
+            assert_eq!(harness_release(output).as_deref(), Some(release), "{output:?}");
+        }
+        for output in ["", "usage: dsh", "latest", "0.2"] {
+            assert_eq!(harness_release(output), None, "{output:?}");
+        }
+        let note = harness_unreviewed_note("0.2.2-rc.1");
+        assert!(note.contains("0.2.2-rc.1 is not a release Zerus reviewed") && note.contains("started anyway"), "{note}");
+        assert!(reviewed_harness_version("0.2.1-rc.5") && !reviewed_harness_version("0.2.2-rc.1"));
     }
 }

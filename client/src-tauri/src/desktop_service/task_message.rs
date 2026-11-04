@@ -6,6 +6,8 @@ use super::creation_clone::Read;
 use super::*;
 use std::time::Instant;
 use zerus_client_core::desktop::{task_message as wire, ui_requests::Request};
+#[cfg(unix)]
+use zerus_client_core::tasks_write::references;
 
 /// A message this client never sent: nothing reached the service.
 pub(crate) const NOT_SENT: &str = zerus_client_core::source!(
@@ -102,6 +104,9 @@ pub(crate) fn call(
     shutdown: &AtomicBool,
 ) -> MessageAnswer {
     let sent = std::cell::Cell::new(false);
+    // The reference form's staged copies, exactly as this call created them.
+    #[cfg(unix)]
+    let staged = std::cell::RefCell::new(None);
     let result = (|| -> Result<MessageAnswer, Option<&'static str>> {
         let read = Read::new(service).map_err(|_| None)?;
         // Only a completed probe can prove no support; an I/O error cannot.
@@ -111,9 +116,35 @@ pub(crate) fn call(
         if !fresh {
             return Err(None);
         }
-        let intent = intent(&read.scope, project, task, record);
-        let verified = match intent.clone().verify() {
-            Ok(verified) => verified,
+        let inline = intent(&read.scope, project, task, record);
+        let (intent, verified) = match inline.clone().verify() {
+            Ok(verified) => (inline, verified),
+            // Too large to go inline: the reference form, where the service
+            // prepares it from staged copies; otherwise never sent.
+            #[cfg(unix)]
+            Err("task_message_original_too_large") => {
+                if !read
+                    .supports(wire::REFERENCE_HELP_MARKER)
+                    .map_err(|_| None)?
+                {
+                    return Err(Some(TOO_LARGE));
+                }
+                let (projection, blobs) =
+                    references::project(record).map_err(|_| Some(TOO_LARGE))?;
+                let reference = wire::Intent {
+                    original: projection.to_string(),
+                    form: wire::Form::ReferenceV1,
+                    ..inline
+                };
+                let verified = reference.clone().verify().map_err(|_| Some(TOO_LARGE))?;
+                let root = discover(&read).ok_or(None)?;
+                let views: Vec<&[u8]> = blobs.iter().map(Vec::as_slice).collect();
+                let copies = wire::staging::stage(&root, &verified.plan.request_id, &views)
+                    .map_err(|_| None)?;
+                *staged.borrow_mut() = Some(copies);
+                (reference, verified)
+            }
+            #[cfg(not(unix))]
             Err("task_message_original_too_large") => return Err(Some(TOO_LARGE)),
             Err(_) => return Err(None),
         };
@@ -163,9 +194,35 @@ pub(crate) fn call(
         None => MessageAnswer::Unconfirmed(UNCONFIRMED.into()),
     });
     if matches!(answer, MessageAnswer::Unsent(_)) {
+        // Never offered: exactly the copies this call staged go. Once offered,
+        // only the service's lookup decides, and nothing is removed here.
+        #[cfg(unix)]
+        if !sent.get() {
+            if let Some(copies) = staged.borrow_mut().take() {
+                let _ = copies.remove();
+            }
+        }
         (outbox.release)();
     }
     answer
+}
+
+/// The service's staging directory: read-only routing data for the exact
+/// current scope, never permission. The service checks everything it reads.
+#[cfg(unix)]
+fn discover(read: &Arc<Read>) -> Option<std::path::PathBuf> {
+    let bytes = read
+        .exchange(
+            None,
+            json!({"op":"task_message_staging","scope":read.scope}),
+            false,
+            None,
+        )
+        .ok()?;
+    let staging: wire::Staging = serde_json::from_slice(&bytes).ok()?;
+    staging
+        .matches(&read.scope)
+        .then(|| std::path::PathBuf::from(staging.staging))
 }
 
 /// Bounded read-only lookups of the exact original until it settles.

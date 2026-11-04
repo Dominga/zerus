@@ -603,6 +603,10 @@ impl Lookup {
     }
 }
 
+/// The client's per-request staging of a reference original's attachments.
+#[cfg(unix)]
+pub mod staging;
+
 #[cfg(test)]
 pub(super) fn test_intent() -> Intent {
     tests::frozen()

@@ -177,6 +177,18 @@ desktop-service mode lands together with attachments by reference.
 
 - **Consent.** Only the outbox record reserved by the same explicit Submit is
   sent, and only once. A record from before is never sent again.
+- **Form.** An original that fits the control frame is sent inline. A larger
+  one is sent by reference only when the service advertises the references
+  marker. The client then projects the record, learns the staging folder
+  through `task_message_staging`, and stages each distinct attachment as
+  `<staging>/<request_id>/<sha256>` (`client/core`
+  `desktop::task_message::staging`). It holds the staging folder and creates
+  its request folder once, never writing into one it did not create. Each
+  copy is a private `0600` file created with `O_EXCL` and synced, all before
+  the handoff marker. Otherwise it is never sent (`TOO_LARGE`). A definite
+  never-sent answer removes exactly the copies this client created. Once the
+  request was offered, nothing is removed here: the service removes the
+  copies it consumed.
 - **Handoff marker.** Before the admission request is written,
   `tasks_write::outbox::hand_off` durably records that the exact record (its ID
   and snapshot digest) was handed to the service. The marker is evidence, never

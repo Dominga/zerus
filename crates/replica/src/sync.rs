@@ -331,9 +331,9 @@ impl ProjectStore {
             });
             let cached = match remembered {
                 Some(cached) => cached.clone(),
-                None => match self.load(&uuid) {
-                    Ok(task) => Cached {
-                        files,
+                None => match self.load(&uuid).and_then(|task| self.repaired(task)) {
+                    Ok((task, saved)) => Cached {
+                        files: saved.unwrap_or(files),
                         version: version(&task.current_vv()),
                         error: None,
                         stage: Some(task.stage()?),
@@ -426,6 +426,26 @@ impl ProjectStore {
         Ok((page, false))
     }
 
+    /// A loaded task whose execution schema a merged lower value replaced is
+    /// repaired and saved under this store's lock before its version is used,
+    /// so the repair itself is what other replicas receive. Returns the task
+    /// and, when it was saved, its files' new stamps.
+    #[allow(clippy::type_complexity)]
+    fn repaired(&self, mut task: TaskDoc) -> Result<(TaskDoc, Option<Vec<Option<Stamp>>>)> {
+        if !task.repair_schema()? {
+            return Ok((task, None));
+        }
+        self.save(&mut task)?;
+        let uuid = task.uuid().to_owned();
+        Ok((
+            task,
+            Some(vec![
+                stamp(&self.snapshot_path(&uuid)),
+                stamp(&self.updates_path(&uuid)),
+            ]),
+        ))
+    }
+
     /// Imports another replica's updates. A document that cannot take them is
     /// refused and named; it never stops the others.
     pub fn import_updates(&self, updates: Vec<Update>) -> Result<Imported> {
@@ -469,6 +489,9 @@ impl ProjectStore {
                     if !task.import_block(bytes) {
                         return Err(Error::new("the updates could not be applied"));
                     }
+                    // Every live import restores the execution schema a merged
+                    // lower value replaced, before anything reads or exports it.
+                    task.repair_schema()?;
                     if task.current_vv() == before {
                         return Ok(false);
                     }
@@ -481,6 +504,7 @@ impl ProjectStore {
         } else {
             (TaskDoc::from_bytes(bytes)?, false)
         };
+        task.repair_schema()?;
         if task.uuid() != uuid {
             return Err(Error::new("the update is for another task"));
         }
@@ -511,5 +535,168 @@ impl ProjectStore {
         }
         self.note_change(uuid);
         Ok(())
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    //! The live-store repair of the execution schema (zerus-cg5h.4 S2b.2):
+    //! a lower value an older replica's concurrent upgrade left in a merge is
+    //! raised again under the project lock before the task is saved, read for
+    //! an inventory or exported.
+    use super::*;
+    use crate::execution::{NativeRequest, Origin, EXECUTION_TASK_SCHEMA};
+    use crate::{Actor, NewTask, Target};
+
+    const ID: &str = "11111111-1111-4111-8111-111111111111";
+
+    fn created() -> TaskDoc {
+        TaskDoc::create(NewTask {
+            project: "project-1",
+            id: "T-a1b2c3",
+            text: "Add rate limiting",
+            stage: Stage::Todo,
+            target: Target::Any,
+            author: Actor::Person,
+            rank: "V",
+            now: 1,
+        })
+        .unwrap()
+    }
+
+    fn reserve(task: &mut TaskDoc) {
+        let executor = SessionKey {
+            machine: "m1".into(),
+            session: "codex/api".into(),
+            session_id: "launch_id:api".into(),
+        };
+        let native = NativeRequest {
+            machine: "m1".into(),
+            name: "codex/api".into(),
+            run_id: "run-api".into(),
+            conversation_id: "conversation-api".into(),
+            digest: "ab".repeat(32),
+        };
+        task.reserve_attempt(ID, Origin::Send, &executor, native, &Actor::Person, 10)
+            .unwrap();
+    }
+
+    /// A newer replica reserves the first attempt while an older one, forked
+    /// from the same task, makes enough changes ending in its own schema
+    /// upgrade that the merge keeps that lower value. Returns the newer copy
+    /// and the older one's changes since the fork.
+    fn race() -> (TaskDoc, Vec<u8>) {
+        let base = created();
+        let bytes = base.snapshot().unwrap();
+        let version = base.version();
+        let mut newer = TaskDoc::from_bytes(&bytes).unwrap();
+        reserve(&mut newer);
+        let mut older = TaskDoc::from_bytes(&bytes).unwrap();
+        for n in 0..8 {
+            older
+                .comment(&format!("older {n}"), &Actor::Person, 2)
+                .unwrap();
+        }
+        older.set_stored_schema_for_test(5);
+        (newer, older.export_since(&version).unwrap())
+    }
+
+    /// The merge as an importer without the repair leaves it.
+    fn merged_unrepaired() -> TaskDoc {
+        let (newer, older) = race();
+        let mut merged = TaskDoc::from_bytes(&newer.snapshot().unwrap()).unwrap();
+        merged.import_unrepaired_for_test(&older);
+        assert_eq!(merged.stored_schema(), 5, "the older value wins this merge");
+        assert!(merged.needs_schema_repair());
+        merged
+    }
+
+    fn update(task: &TaskDoc, bytes: Vec<u8>) -> Update {
+        Update {
+            document: Document::Task(task.uuid().to_owned()),
+            bytes,
+        }
+    }
+
+    #[test]
+    fn a_live_import_saves_the_execution_schema_a_merge_lowered() {
+        let dir = tempfile::tempdir().unwrap();
+        let store = ProjectStore::open(dir.path(), "project-1").unwrap();
+        let (mut newer, older) = race();
+        store.save(&mut newer).unwrap();
+        let imported = store.import_updates(vec![update(&newer, older)]).unwrap();
+        assert_eq!((imported.changed, imported.refused.len()), (1, 0));
+        let saved = store.load(newer.uuid()).unwrap();
+        assert_eq!(saved.stored_schema(), EXECUTION_TASK_SCHEMA);
+        // Attempts and their facts are unchanged by the repair.
+        assert_eq!(
+            saved.execution_records().unwrap(),
+            newer.execution_records().unwrap()
+        );
+        // An import that changes nothing still repairs a copy that needs it.
+        let mut stale = merged_unrepaired();
+        let dir = tempfile::tempdir().unwrap();
+        let store = ProjectStore::open(dir.path(), "project-1").unwrap();
+        store.save(&mut stale).unwrap();
+        let again = store
+            .import_updates(vec![update(&stale, stale.snapshot().unwrap())])
+            .unwrap();
+        assert_eq!(again.refused.len(), 0);
+        assert_eq!(
+            store.load(stale.uuid()).unwrap().stored_schema(),
+            EXECUTION_TASK_SCHEMA
+        );
+    }
+
+    #[test]
+    fn an_inventory_repairs_a_copy_an_older_importer_saved_and_exports_the_repair() {
+        let dir = tempfile::tempdir().unwrap();
+        let store = ProjectStore::open(dir.path(), "project-1").unwrap();
+        let mut stale = merged_unrepaired();
+        store.save(&mut stale).unwrap();
+        let stale_version = version(&stale.current_vv());
+        let (inventory, damaged) = store.inventory().unwrap();
+        assert!(damaged.is_empty());
+        let saved = store.load(stale.uuid()).unwrap();
+        assert_eq!(saved.stored_schema(), EXECUTION_TASK_SCHEMA);
+        let listed = &inventory.tasks[stale.uuid()];
+        assert_eq!(listed, &version(&saved.current_vv()));
+        assert_ne!(listed, &stale_version);
+        // A replica that holds the stale copy receives the repair.
+        let theirs = Inventory {
+            project: Version::new(),
+            tasks: BTreeMap::from([(stale.uuid().to_owned(), stale_version)]),
+        };
+        let (page, _) = store.updates_for(&inventory, &theirs, 1 << 20).unwrap();
+        let mut peer = TaskDoc::from_bytes(&stale.snapshot().unwrap()).unwrap();
+        let bytes = page
+            .into_iter()
+            .find(|u| u.document == Document::Task(stale.uuid().to_owned()))
+            .unwrap()
+            .bytes;
+        peer.import_unrepaired_for_test(&bytes);
+        assert_eq!(peer.stored_schema(), EXECUTION_TASK_SCHEMA);
+    }
+
+    #[test]
+    fn every_write_keeps_the_schema_and_a_future_one_is_never_lowered() {
+        let mut stale = merged_unrepaired();
+        stale
+            .comment("A newer comment", &Actor::Person, 30)
+            .unwrap();
+        assert_eq!(stale.stored_schema(), EXECUTION_TASK_SCHEMA);
+        // A document of a newer schema is left as it is: read-only here.
+        let mut newer = created();
+        reserve(&mut newer);
+        newer.set_stored_schema_for_test(EXECUTION_TASK_SCHEMA + 1);
+        assert!(!newer.repair_schema().unwrap());
+        let other = TaskDoc::from_bytes(&newer.snapshot().unwrap()).unwrap();
+        newer.import(&other.snapshot().unwrap()).unwrap();
+        assert_eq!(newer.stored_schema(), EXECUTION_TASK_SCHEMA + 1);
+        assert!(!newer.view().unwrap().writable);
+        // A task without attempts is never raised.
+        let mut plain = created();
+        assert!(!plain.repair_schema().unwrap());
+        assert!(plain.stored_schema() < EXECUTION_TASK_SCHEMA);
     }
 }

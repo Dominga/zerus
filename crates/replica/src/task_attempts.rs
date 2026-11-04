@@ -265,7 +265,7 @@ impl TaskDoc {
         };
         self.write_attempt(&attempt)?;
         self.push_event(id, EventKind::Unknown, actor, now)?;
-        self.doc.commit();
+        self.commit()?;
         Ok(attempt)
     }
 
@@ -311,7 +311,7 @@ impl TaskDoc {
                 }
                 if !kinds.contains(&EventKind::NotStarted) {
                     self.push_event(id, EventKind::NotStarted, actor, now)?;
-                    self.doc.commit();
+                    self.commit()?;
                 }
                 return Ok(settled);
             }
@@ -350,7 +350,7 @@ impl TaskDoc {
         if unchanged {
             self.advance(&attempt, &delivery, actor, now)?;
         }
-        self.doc.commit();
+        self.commit()?;
         Ok(Settled {
             advanced: unchanged,
         })
@@ -447,7 +447,7 @@ impl TaskDoc {
         if !reason.trim().is_empty() {
             self.log("comment", actor, now, reason.trim(), None)?;
         }
-        self.doc.commit();
+        self.commit()?;
         Ok(())
     }
 
@@ -476,7 +476,7 @@ impl TaskDoc {
         if current.phase != Phase::Unknown {
             self.log("started", actor, now, "", Some(own))?;
         }
-        self.doc.commit();
+        self.commit()?;
         Ok(())
     }
 

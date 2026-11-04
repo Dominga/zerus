@@ -204,8 +204,11 @@ impl TaskDoc {
         &self.uuid
     }
 
+    /// Imports another replica's changes, restoring the execution schema when
+    /// a merged lower value replaced it.
     pub fn import(&mut self, bytes: &[u8]) -> Result<()> {
         self.doc.import(bytes)?;
+        self.repair_schema()?;
         Ok(())
     }
 
@@ -305,7 +308,7 @@ impl TaskDoc {
         self.upgrade_schema(NAMED_TASK_SCHEMA)?;
         self.fields().insert("title", title)?;
         self.log("title", actor, now, title, None)?;
-        self.doc.commit();
+        self.commit()?;
         Ok(())
     }
 
@@ -320,7 +323,7 @@ impl TaskDoc {
         }
     }
 
-    fn stored_schema(&self) -> i64 {
+    pub(crate) fn stored_schema(&self) -> i64 {
         integer(&self.meta(), "schema").unwrap_or(0)
     }
 
@@ -386,7 +389,7 @@ impl TaskDoc {
 
     /// The attempt records and attempt events (`execution` module), checked
     /// and bounded. Reading them never reads the history.
-    fn execution_records(&self) -> Result<(Vec<Attempt>, Vec<AttemptEvent>)> {
+    pub(crate) fn execution_records(&self) -> Result<(Vec<Attempt>, Vec<AttemptEvent>)> {
         let map = self.doc.get_map("attempts");
         let list = self.doc.get_list("attempt_events");
         if map.len() > MAX_ATTEMPTS || list.len() > MAX_ATTEMPT_EVENTS {
@@ -625,6 +628,34 @@ impl TaskDoc {
         Ok(entry)
     }
 
+    /// Commits a change. A task that records attempts keeps the execution
+    /// schema in every commit: a lower value an older replica's concurrent
+    /// upgrade left in the merge is raised again here, never lowered.
+    fn commit(&self) -> Result<()> {
+        if self.executes_attempts() {
+            self.upgrade_schema(execution::EXECUTION_TASK_SCHEMA)?;
+        }
+        self.doc.commit();
+        Ok(())
+    }
+
+    /// Whether the stored schema is below the execution schema its attempts
+    /// need: a lower upgrade by an older replica won the merge.
+    pub fn needs_schema_repair(&self) -> bool {
+        self.executes_attempts() && self.stored_schema() < execution::EXECUTION_TASK_SCHEMA
+    }
+
+    /// Raises the stored schema of a task with attempts to the execution
+    /// schema in a commit of its own; true when it did. Save the task before
+    /// using or exporting it.
+    pub fn repair_schema(&mut self) -> Result<bool> {
+        if !self.needs_schema_repair() {
+            return Ok(false);
+        }
+        self.commit()?;
+        Ok(true)
+    }
+
     /// Raises the stored schema, never lowering it. It compares the stored
     /// value, so an attempt write also restores the execution schema that a
     /// concurrent lower upgrade replaced.
@@ -695,7 +726,7 @@ impl TaskDoc {
             .insert("attachments", serde_json::to_string(files)?)?;
         self.count_requirement()?;
         self.log("attachments", actor, now, "Updated attachments", None)?;
-        self.doc.commit();
+        self.commit()?;
         Ok(())
     }
 
@@ -738,7 +769,7 @@ impl TaskDoc {
                     .insert("session_binding", serde_json::to_string(&binding)?)?;
             }
         }
-        self.doc.commit();
+        self.commit()?;
         Ok(())
     }
 
@@ -775,7 +806,7 @@ impl TaskDoc {
             self.count_requirement()?;
         }
         self.log("edited", actor, now, "", None)?;
-        self.doc.commit();
+        self.commit()?;
         Ok(())
     }
 
@@ -787,7 +818,7 @@ impl TaskDoc {
             return Err(Error::new("invalid rank"));
         }
         self.fields().insert("rank", value)?;
-        self.doc.commit();
+        self.commit()?;
         Ok(())
     }
 
@@ -820,7 +851,7 @@ impl TaskDoc {
         self.fields().insert("stage", to.as_str())?;
         self.fields().insert("stage_at", now)?;
         self.log("stage", actor, now, to.as_str(), None)?;
-        self.doc.commit();
+        self.commit()?;
         Ok(())
     }
 
@@ -849,7 +880,7 @@ impl TaskDoc {
             Target::Subagent { parent } => format!("subagent of {}", parent.session),
         };
         self.log("target", actor, now, &label, None)?;
-        self.doc.commit();
+        self.commit()?;
         Ok(())
     }
 
@@ -898,7 +929,7 @@ impl TaskDoc {
         fields.delete("cancel_reason")?;
         self.log("sent", actor, now, "", Some(session))?
             .insert("request_id", request_id)?;
-        self.doc.commit();
+        self.commit()?;
         Ok(())
     }
 
@@ -960,7 +991,7 @@ impl TaskDoc {
         self.fields().delete("worker")?;
         self.log("sent", actor, now, "handoff", Some(session))?
             .insert("request_id", request_id)?;
-        self.doc.commit();
+        self.commit()?;
         Ok(())
     }
 
@@ -1021,7 +1052,7 @@ impl TaskDoc {
             entry.insert("considered", considered)?;
         }
         self.record_report_fact(&view, &decision, kind, actor, now)?;
-        self.doc.commit();
+        self.commit()?;
         Ok(decision)
     }
 
@@ -1058,7 +1089,7 @@ impl TaskDoc {
                 return Ok(());
             }
             self.log("started", actor, now, "", Some(own))?;
-            self.doc.commit();
+            self.commit()?;
             return Ok(());
         }
         self.sendable()?;
@@ -1092,7 +1123,7 @@ impl TaskDoc {
         fields.delete("cancelled_at")?;
         fields.delete("cancel_reason")?;
         self.log("started", actor, now, "", Some(own))?;
-        self.doc.commit();
+        self.commit()?;
         Ok(())
     }
 
@@ -1118,7 +1149,7 @@ impl TaskDoc {
         if !reason.trim().is_empty() {
             self.log("comment", actor, now, reason.trim(), None)?;
         }
-        self.doc.commit();
+        self.commit()?;
         Ok(())
     }
 
@@ -1165,7 +1196,7 @@ impl TaskDoc {
             &format!("Delegated to {} ({})", worker.name, worker.id),
             Some(&worker.parent),
         )?;
-        self.doc.commit();
+        self.commit()?;
         Ok(())
     }
 
@@ -1196,7 +1227,7 @@ impl TaskDoc {
             self.upgrade_schema(DISCUSSION_TASK_SCHEMA)?;
             entry.insert("attachments", serde_json::to_string(files)?)?;
         }
-        self.doc.commit();
+        self.commit()?;
         Ok(())
     }
 
@@ -1297,7 +1328,7 @@ impl TaskDoc {
         if !files.is_empty() {
             entry.insert("attachments", serde_json::to_string(files)?)?;
         }
-        self.doc.commit();
+        self.commit()?;
         Ok(true)
     }
 
@@ -1361,7 +1392,7 @@ impl TaskDoc {
                 message.session.as_ref(),
             )?;
         }
-        self.doc.commit();
+        self.commit()?;
         Ok(())
     }
 
@@ -1373,7 +1404,7 @@ impl TaskDoc {
     ) -> Result<()> {
         self.writable()?;
         self.queued_submitted(dispatch, actor, now)?;
-        self.doc.commit();
+        self.commit()?;
         Ok(())
     }
 
@@ -1381,7 +1412,7 @@ impl TaskDoc {
     pub fn note(&mut self, text: &str, actor: &Actor, now: i64) -> Result<()> {
         self.writable()?;
         self.log("note", actor, now, text, None)?;
-        self.doc.commit();
+        self.commit()?;
         Ok(())
     }
 }
@@ -1390,6 +1421,17 @@ impl TaskDoc {
 impl TaskDoc {
     /// Records an attempt and its events as a writer of the execution schema
     /// does; this build reads them and does not write them yet.
+    /// Writes the stored schema as an older replica's upgrade does.
+    pub(crate) fn set_stored_schema_for_test(&mut self, value: i64) {
+        self.meta().insert("schema", value).unwrap();
+        self.doc.commit();
+    }
+
+    /// Imports as an importer without the schema repair does.
+    pub(crate) fn import_unrepaired_for_test(&mut self, bytes: &[u8]) {
+        self.doc.import(bytes).unwrap();
+    }
+
     pub(crate) fn record_attempt_for_test(&mut self, attempt: &Attempt, events: &[AttemptEvent]) {
         self.upgrade_schema(execution::EXECUTION_TASK_SCHEMA)
             .unwrap();

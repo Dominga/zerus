@@ -3068,8 +3068,13 @@ child or result is invented. A resume settles only the pauses it observed, so a
 pause that no resume observed keeps the attempt paused. A session's
 Stop, idle time, pause or elapsed time is never an attempt event and never
 moves a task. Attempts are kept beside the history under task schema 6, which a
-reader that does not know them shows read-only. This version reads attempts and
-guards reports against the current execution; recording attempts comes later.
+reader that does not know them shows read-only. The stored schema is one merged
+value, so an older replica's concurrent upgrade can leave a lower one; this
+version raises it again for a task with attempts in every write and every live
+import, and before a task is read for an inventory, so the raised value is what
+other replicas receive. That repair is a new change, not proof that an older
+replica did nothing before it. This version reads attempts and guards reports
+against the current execution; recording attempts comes later.
 
 Plain `task list` still returns every task for existing clients. With `--stage`
 and `--limit` (1–200) it returns one page of that stage in the same order and

@@ -83,6 +83,16 @@ describe("motion styles", () => {
     expect(working.filter((s) => !reduced.includes(s))).toEqual([]);
   });
 
+  it("opens a task's content without an entrance (zerus-agv9)", () => {
+    // The mockup's cards and rows enter elsewhere; inside Task View's content
+    // the end of an entrance blinked on the arch WebKit.
+    const entering = ["act-msg", "tv-doc", "tv-event"];
+    const entrance = (name: string) => all.some((r) => selectors(r.prelude).includes(`.${name}`) && /animation:\s*(?!none)\w/.test(r.body));
+    expect(entering.filter((name) => !entrance(name))).toEqual([]);
+    const stoppedHere = all.filter((r) => /animation:\s*none/.test(r.body)).flatMap((r) => selectors(r.prelude));
+    expect(entering.filter((name) => !stoppedHere.includes(`.tv-content .${name}`))).toEqual([]);
+  });
+
   it("pauses everything, pseudo-elements included, while the window is hidden", () => {
     expect(stopped('data-page-hidden="1"', /animation-play-state:\s*paused\s*!important/)).toEqual(["*", "*::before", "*::after"]);
   });

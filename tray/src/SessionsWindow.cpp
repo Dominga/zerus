@@ -1653,6 +1653,7 @@ SessionsWindow::SessionsWindow(const QString &hgsPath, QWidget *parent)
     auto *agentsLayout=m_inspector->body(InspectorCards::Tasks);
     agentsLayout->addWidget(m_children);
     m_ironRules=new IronRulesPanel;
+    m_ironRules->setBackend(m_client.rulesTransport());
     m_ironRules->changed=[this](int count){m_composer->setIronRulesCount(count);m_inspector->setValue(InspectorCards::IronRules,count>0?QString::number(count):QString());};
     // WhiteWh fork: lead and subordinate sessions of this project.
     m_leadPanel=new SessionLeadPanel;agentsLayout->addWidget(m_leadPanel);
@@ -2001,6 +2002,7 @@ SessionsWindow::SessionsWindow(const QString &hgsPath, QWidget *parent)
             tr("Give your Windows user full control of\n%1\n\nThe DeepSeek sandbox needs it to start a session there. Only your own access to this folder changes.").arg(folder))!=QMessageBox::Yes)return;
         m_creationFixAccess->setEnabled(false);m_creationFixAccess->setText(tr("Fixing folder rights…"));
         auto *process=new QProcess(this);
+        ChildProcess::inheritStdioOnly(*process);
         connect(process,&QProcess::finished,this,[this,process,id](int code,QProcess::ExitStatus status){
             process->deleteLater();
             const auto error=QString::fromUtf8(process->readAllStandardError()).trimmed();
@@ -5370,7 +5372,7 @@ void SessionsWindow::sendReportToLead()
 // Prompt order.
 QString SessionsWindow::teamProjectRules() const
 {
-    const auto rules=IronRules::rules(projectOfKey(m_selectedKey));
+    const auto rules=m_ironRules ? m_ironRules->projectRules() : QStringList{};
     QStringList lines;for(int i=0;i<rules.size();++i)lines<<QStringLiteral("%1. %2").arg(i+1).arg(rules[i]);
     return lines.join(QLatin1Char('\n'));
 }
@@ -6224,7 +6226,7 @@ void SessionsWindow::deliverMessage(const QString &key, const QString &host, con
                 // draft, retries and the local copy keep the text alone.
                 // U35: an hgs that holds messages keeps this one until the agent takes the previous.
                 const bool hold = key == m_selectedKey && m_details.value("input_hold_supported").toBool();
-                const quint64 request = m_client.requestSendMessage(host, name, IronRules::wrap(IronRules::rules(projectOfKey(key)), text), attachments, runId, conversationId, {}, compactionId, hold);
+                const quint64 request = m_client.requestSendMessage(host, name, text, attachments, runId, conversationId, {}, compactionId, hold, projectOfKey(key).isNull() ? QStringLiteral("") : projectOfKey(key));
                 m_pendingMessages.insert(request, {key, runId, conversationId});
                 if (m_push && m_push->key == key && !m_push->request && m_push->text == text) {
                     m_push->request = request; m_push->run = runId; m_push->conversation = conversationId;
@@ -7521,6 +7523,7 @@ void SessionsWindow::updateWorktrees()
     if(m_ironRules){
         const auto project=entry?m_organization.groupFor(entry->identity):QString();
         const auto *group=m_organization.group(project);
+        m_ironRules->setContext(entry?entry->host:QString(), entry?entry->session.name:QString(), entry?entry->session.runId:QString(), entry?entry->session.conversationId:QString());
         m_ironRules->setProject(project,group?group->name:project);
         m_composer->setIronRulesCount(m_ironRules->rules().size());
     }
@@ -7657,7 +7660,9 @@ TeamNewDialog *SessionsWindow::teamNewForm(QWidget *parent)
     QString folder,project;
     if(entry){if(entry->host.isEmpty())folder=entry->session.cwd;project=m_organization.groupFor(entry->identity);
         if(const auto *group=m_organization.group(project))project=group->name;}
-    return new TeamNewDialog(m_teams,&m_client,computers,sessions,folder,project,parent);
+    auto *dialog = new TeamNewDialog(m_teams,&m_client,computers,sessions,folder,project,parent);
+    dialog->setProperty("ironRulesProjectId", entry ? m_organization.groupFor(entry->identity) : QString());
+    return dialog;
 }
 void SessionsWindow::ensureTeamNewForm()
 {
@@ -7686,6 +7691,7 @@ void SessionsWindow::ensureTeamNewForm()
     QString project=m_organization.groupFor(entry->identity);
     if(const auto *group=m_organization.group(project))project=group->name;
     m_teamNewForm=new TeamNewTab(m_teams,&m_client,computers,coordinator,project,m_teamNewTab);
+    m_teamNewForm->setProperty("ironRulesProjectId", m_organization.groupFor(entry->identity));
     m_teamNewForm->setDark(m_dark);
     m_teamNewForm->askDesigner=[this]{showTeamDesigner();};
     // A discarded draft leaves the session without a team: the tab starts over.

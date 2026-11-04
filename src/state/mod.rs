@@ -87,6 +87,7 @@ mod supervisor;
 mod tasks;
 // WhiteWh fork: agent teams.
 pub(crate) mod teams;
+pub(crate) mod iron_rules;
 mod telemetry;
 mod terminate;
 mod session_action;
@@ -860,6 +861,7 @@ pub(crate) fn task_bindings() -> Result<Vec<Value>> {
 
 /// Compatibility entry point used by `hgs __state` and the legacy hook shim.
 pub fn dispatch(args: &[String]) -> Result<i32> {
+    if args.first().map(String::as_str)==Some("rules") { return iron_rules::dispatch(&args[1..]); }
     // Coordination metadata never starts or controls a native session host.
     if args.first().map(String::as_str)==Some("wait") { return waits::dispatch(&args[1..]); }
     // WhiteWh fork: agent teams.

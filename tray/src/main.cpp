@@ -47,6 +47,7 @@
 #include <pthread/qos.h>
 #endif
 
+#include <chrono>
 #include <cstdio>
 #include <cstdlib>
 #include <future>
@@ -62,10 +63,6 @@
 #include <QJsonObject>
 #include <QLockFile>
 
-#include <chrono>
-#include <future>
-#include <memory>
-#include <thread>
 #include <QStandardPaths>
 #include <qt_windows.h>
 #include <shellapi.h>

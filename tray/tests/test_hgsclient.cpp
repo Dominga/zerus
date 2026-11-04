@@ -87,6 +87,7 @@ private slots:
     void parsesProjects();
     void rejectsGarbageProjects();
     void messagesUseStdinAndIdentityReceipts();
+    void ironRulesUseStartupProofAndFallbackWithTheSameSendIdentity();
     void messageFailuresAreExplicitAndNeverRetried();
 #ifdef Q_OS_WIN
     void writeStartupFailuresAreReportedAfterRequest_data();
@@ -1335,6 +1336,41 @@ print(json.dumps({'status':'submitted','request_id':request['request_id'],'name'
     QCOMPARE(payload["attachments"].toArray().size(), 1);
     QCOMPARE(payload["attachments"].toArray()[0].toObject()["reference"].toString(), QString("[Image #1]"));
     QCOMPARE(QByteArray::fromBase64(payload["attachments"].toArray()[0].toObject()["data_base64"].toString().toLatin1()), bytes);
+}
+
+void TestHgsClient::ironRulesUseStartupProofAndFallbackWithTheSameSendIdentity()
+{
+    QTemporaryDir directory;
+    QFile script(directory.filePath("hgs")); QVERIFY(script.open(QIODevice::WriteOnly));
+    script.write(R"(#!/usr/bin/env python3
+import json,pathlib,sys
+root=pathlib.Path(__file__).parent
+if '--help' in sys.argv:
+ print('iron-rules-v1');sys.exit(0)
+request=json.load(sys.stdin)
+if 'rules' in sys.argv:
+ if request['scope']=='project':
+  print(json.dumps({'rules':['Project rule'],'revision':1,'migrated':True}));sys.exit(0)
+ print(json.dumps({'rules':['Session rule'],'effective_rules':'Project rules:\n1. Project rule\nSession rules:\n1. Session rule\n',
+  'project':'p1','start_project':'p1','start_delivery_supported':not (root/'fallback').exists()}));sys.exit(0)
+(root/'sent.json').write_text(json.dumps(request))
+print(json.dumps({'status':'submitted','request_id':request['request_id'],'name':sys.argv[-2],
+ 'run_id':request['expected_run_id'],'conversation_id':request['expected_conversation_id'],'submitted_text':request['text']}))
+)");
+    script.close(); QVERIFY(FakeCli::makeRunnable(script.fileName()));
+    HgsClient client(FakeCli::program(script.fileName()));
+    QSignalSpy sent(&client, &HgsClient::messageSent), failed(&client, &HgsClient::messageFailed);
+    const auto read = [&] { QFile f(directory.filePath("sent.json")); if (!f.open(QIODevice::ReadOnly)) return QJsonObject{}; return QJsonDocument::fromJson(f.readAll()).object(); };
+    client.requestSendMessage({}, "claude/x/one", "Ordinary message", {}, "r1", "c1", {}, {}, false, "p1");
+    QTRY_COMPARE(sent.size(), 1); QCOMPARE(failed.size(), 0); QCOMPARE(read().value("text").toString(), QString("Ordinary message"));
+    QFile flag(directory.filePath("fallback")); QVERIFY(flag.open(QIODevice::WriteOnly)); flag.close();
+    client.requestSendMessage({}, "claude/x/one", "Next message", {}, "r1", "c1", {}, {}, false, "p1");
+    QTRY_COMPARE(sent.size(), 2); QCOMPARE(failed.size(), 0);
+    const auto payload = read(); const auto text = payload.value("text").toString();
+    QVERIFY(text.contains("Project rule")); QVERIFY(text.contains("Session rule"));
+    QCOMPARE(IronRules::strip(text), QString("Next message"));
+    QCOMPARE(payload.value("expected_run_id").toString(), QString("r1"));
+    QCOMPARE(payload.value("expected_conversation_id").toString(), QString("c1"));
 }
 
 void TestHgsClient::messageFailuresAreExplicitAndNeverRetried()

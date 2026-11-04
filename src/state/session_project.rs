@@ -67,6 +67,68 @@ fn binding_metadata(path: &Path, name: &str, provider: Option<&str>) -> anyhow::
     );
     Ok(record)
 }
+/// Rules are metadata on the saved session, so rename, resume and context
+/// changes retain them. Pin native identities for the whole write.
+pub(crate) fn update_iron_rules(
+    name: &str,
+    run: &str,
+    conversation: &str,
+    expected: u64,
+    rules: &[String],
+    request: &str,
+    digest: &str,
+) -> anyhow::Result<Value> {
+    let _writer = lock(None).map_err(anyhow::Error::msg)?;
+    let _dsh = lock(Some(&root().join("dsh/bindings.lock"))).map_err(anyhow::Error::msg)?;
+    let _opencode = opencode::lock_bindings().map_err(anyhow::Error::msg)?;
+    let provider = if name.starts_with("opencode/") {
+        Some("opencode")
+    } else if name.starts_with("dsh/") {
+        Some("dsh")
+    } else {
+        None
+    };
+    let path = provider.map_or_else(
+        || record_path(name),
+        |provider| {
+            root()
+                .join(provider)
+                .join("bindings")
+                .join(legacy_record_path(name).file_name().unwrap())
+        },
+    );
+    let mut record = binding_metadata(&path, name, provider)?;
+    anyhow::ensure!(
+        string(&record, "run_id") == run && string(&record, "conversation_id") == conversation,
+        "Session identity changed"
+    );
+    let revision = record["iron_rules_revision"].as_u64().unwrap_or(0);
+    if record["iron_rules_request"] == request {
+        anyhow::ensure!(
+            record["iron_rules_digest"] == digest,
+            "Request identity was used for different rules"
+        );
+        return Ok(
+            json!({"scope":"session","name":name,"rules":record["iron_rules"],"revision":revision,"run_id":run,"conversation_id":conversation}),
+        );
+    }
+    anyhow::ensure!(
+        revision == expected,
+        "Session rules changed; read them again"
+    );
+    record["iron_rules"] = json!(rules);
+    record["iron_rules_revision"] = json!(revision + 1);
+    record["iron_rules_request"] = json!(request);
+    record["iron_rules_digest"] = json!(digest);
+    if provider.is_none() {
+        write(&mut record).map_err(anyhow::Error::msg)?;
+    } else {
+        atomic(&path, &record.to_string()).map_err(anyhow::Error::msg)?;
+    }
+    Ok(
+        json!({"scope":"session","name":name,"rules":rules,"revision":revision+1,"run_id":run,"conversation_id":conversation}),
+    )
+}
 #[cfg(test)]
 mod tests {
     use super::*;

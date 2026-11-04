@@ -130,6 +130,7 @@ QString osName(const QString &os)
 MachinesPage::MachinesPage(const QString &path, QWidget *parent) : QWidget(parent), m_client(new HgsClient(path, this))
 {
     setObjectName("machinesPage");
+    SettingsJson::warm(this, {QStringLiteral("machines/otherTransport/*")});
     // #647 (prototype, Machines): the machine list is a column of its own with
     // its title, Refresh, Add machine and the summary; the chosen machine's
     // cards scroll beside it.

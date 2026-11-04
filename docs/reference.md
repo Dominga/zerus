@@ -1379,9 +1379,12 @@ Claude's start-up trust stays manual for every other folder. No other agent
 ### The team roster on the owner's word
 
 The lead changes a team's roster only on the owner's explicit word: a sentence
-the owner typed in the lead's own session, at most 30 minutes old. For
-`add-member` the sentence must name what is added — the member's role or its
-agent/model, in English or Russian ("backend"/"бэкенд", "frontend"/"фронт",
+the owner typed in the lead's own session, at most 30 minutes old. Zerus reads
+that session's journal under its current and earlier names, so a session
+renamed after its journal began (its events stay under the name it had then)
+is still the lead's own. For `add-member` the sentence must name what is
+added — the member's role or its agent/model, in English or Russian
+("backend"/"бэкенд", "frontend"/"фронт",
 "qa", "reviewer"/"ревьюер", "expert"/"эксперт"; "DeepSeek"/"дипсик"/"dsh",
 "Claude"/"клод", "Opus"/"опус", "Codex"/"кодекс", "Kimi"/"кими") — not the
 generated id. The sentence says how many members it adds; one is the default.
@@ -1455,6 +1458,19 @@ Git checkout, otherwise the changed files its report names. A `hold` preset
 (the default) holds the folder while the task is in its test stage, so the
 implementer's next task in that folder waits; a `checkout` preset tests a
 detached checkout of the attempt's commits instead and frees it.
+
+### Reports and interim reports
+
+A member reports with `hgs team report --json` (`task`, `attempt`, `text`): the
+attempt becomes reported and the task `submitted`, then its pipeline's first
+stage starts. `"interim":true` records progress on the same open attempt
+instead: the attempt stays open and the task stays `in_progress`, the member
+keeps its work, and no stage starts. The lead reads the interim text in its
+inbox and in the task's feed (`interim_report`); Waiting for you does not show
+it, so the owner sees it only in the feed. A newer interim report replaces the
+previous one on the attempt. A question is not a report: it goes through
+`hgs team ask` (the lead answers it with `hgs team reply`), never
+`hgs team report`.
 
 ### Free planning: the plan mode and the open phase
 
@@ -1688,7 +1704,13 @@ returns "timed out after N min". The plan chooses a preset, never a command:
 only the owner's catalog writes it.
 
 A stage member that ends its turn without a verdict, with no stage question
-open, gives the lead one stalled item while the stage stays its own. An
+open, gives the lead one stalled item while the stage stays its own. A turn
+that waits for the lead's answer or for Background work (or for a Zerus build,
+such as the tests the reviewer runs) is not stalled: no silent item appears
+while that work runs, and the member may still report its verdict. The budget
+the member declared (`hgs team expect`) or the block timeout's "waiting N min"
+message tells the lead when the wait is too long; it is never reported as a
+missing report. An
 unconfirmed hand-off is not retried on a timer: the lead hears it stalled only
 with evidence that it did not arrive (the member stayed idle and free since
 delivery, with no question and no run claim under the stage's id), and the
@@ -1710,6 +1732,36 @@ the next hand-out names the stage's findings (or the send-back's reason), and
 that attempt is not counted as a failed member. Once the preset's rounds run
 out, the lead's decision is the last word: a rejection reaches the next
 hand-out with its reason, not the returned stage it followed.
+
+A non-final `hgs team reject` defaults to rework: the task keeps its assignee
+and the next attempt goes to that member as soon as it can take it. The member
+is reserved while the returned task is open, including a hold or an undecided
+report; no other task or stage is handed or rebalanced to it. A member with an
+open approval, a usage limit or a stopped session keeps the rework without a
+time limit. The lead's inbox shows `#N waits for its member, N min`; an explicit
+`hgs team reassign` moves it. With `"fresh":true`, reject uses the previous
+retry policy, preferring a free member of the same role that did not fail the
+task, subject to existing assignee pins. `"hold":true` still holds a returned
+task until release, and `"final":true` ends it.
+Only an explicit fresh rejection may bypass Output protection while the failed
+member has other work. Automatic refusals preserve shared/missing Output
+protection; a fresh rejection's exception ends when its next attempt is recorded.
+A draining member may finish its own reserved rework before leaving. Explicit
+reassignment clears the rework reservation and its wait age. Returning an
+unstarted phase to a draft also clears rework reservations. Member-wait inbox
+items exclude held rework and members available to take it.
+
+Tasks may declare `"output":["src/api.rs","src/protocol/"]`: repository-relative
+files or directories, with a directory covering all paths beneath it. Plan,
+extend, add-to-phase and edit-draft `tasks_update` normalize separators, remove
+redundant `.` components and duplicate paths, and retain this field in task
+status. A task has at most 128 paths, each at most 1024 characters and together
+at most 32 KiB. Absolute paths, parent (`..`) components, colons and control
+characters are refused; `.` covers the repository. Existing tasks without
+output remain valid. Rebalance keeps a queued task with its original member
+when its output overlaps that member's task in progress (equal paths or
+containment by path components). It also keeps a task without output whenever
+that member has work in progress. `src/api` does not overlap `src/apis`.
 
 A stage member may ask the lead with `hgs team ask` (its question belongs to the
 stage run and the lead answers it with `hgs team reply`), and the stage hand-off
@@ -5948,9 +6000,55 @@ folder are decided at once as before.
   test queue (forced, never reused) on the merged commit. All green keeps the
   merge and accepts the task; any failure resets the lead branch to `prev`
   (only while it is still the merge) and sends the task back with the failed
-  suites, their records and the end of the failing log.
-- Every kept merge moves `merge_tested` and the bounded `merge_log`; a phase
-  build then checks only `hgs test affected MERGE_TESTED..HEAD`.
+  suites, their records and the end of the failing log. A selected suite whose
+  declared platforms exclude this computer is not queued here: with a
+  configured test runner of its class it is dispatched there and waited for as
+  before; without one the merge records it as "not run here: SUITE runs on
+  PLATFORMS; no runner of that class" and decides on the suites that ran. The
+  merge view, the feed and the merge log name both the suites that ran and the
+  ones not run here. Each kept merge advances the queue's tested point for the
+  suites that ran, or when nothing was selected; a suite not run here keeps its
+  own range open, so it cannot hold the tested point of the suites that ran, and
+  the phase build names it and that range. On Windows each queued command
+  reaches `cmd /D /S /C` as one unescaped string, so a provider command that
+  quotes its folder (`cd /d "tests" && ...`) runs as written; Linux and macOS
+  keep `sh -c`.
+- An entry whose `merged` is reachable from HEAD is never merged again: the
+  queue first tries the rollback
+  while HEAD is that merge; once HEAD moved it selects and runs the recorded
+  `prev..merged` tests on HEAD. Success keeps the merge normally; a test or
+  selection failure returns the task and records one typed untested merge range
+  on that task (not a suite in `merge_not_run`). Repeated returns widen the one
+  range. A later merge selects the union of its own files and open ranges on
+  its HEAD, so overlapping tests run once. A range closes only after every
+  affected suite ran successfully on a HEAD containing it, or an accepted phase
+  build proved that exact named range. A build says "untested merge of task #N,
+  range X..Y"; newer ranges not named by that build remain open. Selection and
+  build snapshots are bounded to one batch of 500 ranges; each task has at most
+  one persisted open range. Old synthetic `merge-N` records migrate with their
+  original start point. If selecting the tests or
+  reading the runner config fails while HEAD is still the merge, the queue rolls
+  it back at once and requeues it with the reason; a rolled-back entry retries
+  only when HEAD or the tests map changed, or when the lead accepts or retries
+  it. A failed rollback itself retries only for a changed HEAD or an explicit
+  lead accept/retry, even if the tests map changes. A second selection error on
+  such a retry returns the task. While a merge is testing, reject and cancel
+  first say "its tests run; wait for the merge queue's result". Otherwise they
+  are refused with "the merge is still in the lead branch; retry, or
+  revert it by hand" while the merge is reachable; once a reset or revert makes
+  it unreachable they clear the entry. Only a `merge-base --is-ancestor` exit of
+  1 means not reachable; an unreadable answer keeps the entry with its reason.
+  Saved `waiting` entries become `queued`; saved `reverting` entries are dropped
+  when the task is Pending or Cancelled, or the merge is gone, and otherwise
+  become queued. Reachable untested work is retained as a range. Queue waits
+  carry a serde-default typed reason; Busy filtering and inbox guidance never
+  inspect the wording of the diagnostic. Missing or future reason values use
+  generic guidance, so old saved states still load.
+- Each kept merge advances `merge_tested` for the suites that ran (or when
+  nothing was selected), and the bounded per-suite points keep a suite not run
+  here at its own last run. A phase build checks
+  `hgs test affected MERGE_TESTED..HEAD` and the not-run suites from their own
+  points to HEAD.
 - With the queue on, every hand-out tells the member to merge the lead branch
   into its folder before it starts (the git-merge-lead template).
 
@@ -5967,6 +6065,10 @@ provider without them is `android`), carried by every queued request.
   Any other goes only to an enabled runner of its class; with none, or with
   every such runner unreachable, it stays queued with the reason (`hgs team
   test --json` action `queue` shows it) and never runs on another platform.
+  The merge queue does not wait for such a suite when no runner of its class is
+  configured: it records it as not run here (see the merge queue above) and
+  decides on the suites that ran; a suite of this computer's class always runs
+  here.
 - The scheduler reaches a runner only through hgs's own SSH transport:
   `hgs @ALIAS test runner --json` (BatchMode, connect timeout, the Windows peer
   channel; the peer needs this hgs, marker `test-runner-v1`). It first asks
@@ -6049,3 +6151,89 @@ its place only if it can fail for the change; lint and screenshots ride on the
 integration's and the test's own run. A split keeps every test, counted before
 and after; a repeat becomes a case of a table test, and a test that guards
 nothing is removed with the reason in the report.
+
+### Iron rules
+
+Iron rules are stored by Rust at four cumulative levels: project, team, member,
+and session. A lower level adds requirements and cannot cancel a higher level.
+Each level allows at most 20 nonempty rules of 300 characters each. Team settings
+use `settings.iron_rules`; members use `iron_rules` in their plan or
+`members_update`. These fields default to empty for old records. `project_id`
+is the stable project identity; the legacy team `project` remains its label.
+Give teams a stable `project_id`; an old label resolves only when unique.
+
+Only the owner changes rules. A lead may change its team's rules, its project
+rules or a member session's rules with a verified, unused `owner_word` from the
+owner's recent message in that lead session (the same journal verification as
+phase approvals). Merely writing `by: human` from an agent does not authorize it.
+A member cannot edit any level. A settings or plan update that changes rules
+passes this gate too. The GUI edits project/session rules in Iron rules, team
+rules in Team settings and member additions in the member editor.
+
+`hgs [@host] rules get|set|migrate --json` is additive (`iron-rules-v1` in help).
+Input is one JSON object on stdin. Project input names `scope: "project"` and
+`project: "STABLE_ID"`. Session input names `scope: "session"`, `name`,
+`expected_run_id` and `expected_conversation_id`; all identities must match the
+current binding. Get returns `rules` and `revision`. Writes add a canonical
+`request_id`, `expected_revision` from get, and a bounded `rules` array. Owner
+writes use `by: "human"`; a lead also supplies `team` and `owner_word`.
+Project requests are replay-safe; session requests replay the last exact write,
+while stale revisions or replaced identities are refused. Project rows and
+request receipts live in `HGS_STATE_DIR/iron-rules.sqlite3`; session additions
+remain in the exact native binding; team/member additions remain in the team.
+Migration imports the GUI's `workspace/ironRules` once per project and computer.
+It never overwrites an existing Rust row, including an intentionally empty list.
+The GUI retains its old value as a backup until and after a confirmed receipt;
+a failed import remains retryable. Old CLIs retain the legacy per-send fallback.
+
+Rules accompany every team task, including a pipeline stage, regardless of the
+catalog's prompt order or disabled rules block. Claude Code receives all levels
+through root SessionStart `additionalContext` on startup, resume, clear and
+compact, combined with the hint/task commands in one JSON response. Ordinary
+messages omit the wrapper only after startup delivered the current effective
+rules for the selected project. Changed rules, a missing or mismatched project,
+or missing startup proof keep the fallback until the next successful start.
+The current Codex, DeepSeek, Kimi and OpenCode adapters retain per-send delivery;
+they have no equivalent verified startup/resume/clear/compact delivery path in
+this integration. SessionStart never injects rules into subagents or ordinary
+message hooks. Team terminal startup introductions also carry inherited rules.
+Remote task delivery reads the exact remote session's own rules before sending;
+an unreadable new peer refuses delivery rather than omitting its rules.
+
+For a remote session, the lead-local read-only resolver accepts `host` with the
+exact session identities in `rules get`. It joins indexed local team membership
+with the remote binding's own rules. Remote team Claude sessions retain per-send
+delivery: their host cannot independently restore the lead's team/member rules
+at startup. GUI project rules belong to this GUI computer's Rust project store;
+session writes go to the selected session's host. No rules synchronization or
+remote startup contract is implied by this resolver.
+
+Iron-rules compatibility and failure handling:
+- Use the public `hgs @host rules ... --json` route; forwarding probes
+  `iron-rules-v1` and never requests a terminal or agent launch. Windows uses
+  the guarded peer channel or a guarded SSH command.
+- A startup proof belongs to the exact run and conversation and is invalidated
+  at every accepted main SessionStart before resolution. Foreign starts cannot
+  invalidate the parent's proof. Resolution errors are logged without losing
+  the ordinary hint/task context; they keep per-send delivery.
+- The combined startup context is written and flushed before the confirmed
+  binding is published. Its rules proof is part of that same atomic record
+  update, with no later proof-only write after a fresh conversation is visible.
+  Early invalidation remains in place: failed output leaves no proof and does
+  not publish a fresh binding as started.
+- Claude Code's [hook output limit](https://code.claude.com/docs/en/hooks#json-output)
+  is 10,000 characters per context string. Zerus accepts startup proof only for
+  at most 6000 UTF-16 units of rules and 8000 units of combined context. Larger
+  lists retain the per-send fallback. All remote sessions retain this fallback,
+  including non-team Claude; local project rules remain mandatory even if the
+  peer has a different row under the same project identity.
+- A failed GUI migration keeps sending the legacy project rules and retries
+  migration later. It does not authorize dropping session or inherited rules.
+- For an ambiguous legacy project label, delivery fails closed and the team's
+  inbox shows an iron-rules blocker. The owner resolves it with
+  `hgs team settings --json`, giving the team's exact `team`, a stable
+  `project_id`, `by: "human"` and a canonical `request_id`. A lead cannot change
+  this association by claiming to be the owner.
+- An older hgs that rewrites a team record does not preserve unknown
+  `iron_rules`/`project_id` fields. Keep team writers on a rules-aware hgs;
+  additive deserialization alone cannot protect these fields from old writers.

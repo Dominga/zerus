@@ -17,8 +17,8 @@ const SUMMARY_CHARS: usize = 300;
 /// message never names it twice.
 #[derive(Clone, Debug, PartialEq)]
 pub(crate) struct Item {
-    /// `report`, `question`, `permission`, `lead_task`, `stalled`, `budget`
-    /// or `task_waits` (spec 0: U45, U46, U48).
+    /// `report`, `question`, `permission`, `lead_task`, `stalled`, `budget`,
+    /// `interim_report`, `merge_waiting` or `task_waits` (spec 0: U45, U46, U48).
     pub kind: &'static str,
     pub key: String,
     pub task: Option<u32>,
@@ -119,7 +119,7 @@ fn reviewer_of(team: &Team, item: &Item) -> String {
         // #538 N3: a report a sub-lead may not accept is the lead's.
         ("report", Some(task)) if super::pipeline::lead_accepts_only(task) => team.lead.clone(),
         // The lead's own task has no reviewer: it stays the lead's.
-        ("report" | "question" | "stalled", Some(task)) if !task.assignee.is_empty() && task.assignee != team.lead => {
+        ("report" | "question" | "stalled" | "interim_report", Some(task)) if !task.assignee.is_empty() && task.assignee != team.lead => {
             team.reviewer_of(&task.assignee)
         }
         _ => team.lead.clone(),
@@ -131,10 +131,77 @@ fn all_items(team: &Team) -> Vec<Item> {
     // N5: a finished team has no open work, but the owner's decision on the
     // lead's proposal is still the lead's to read (spec 4).
     let finished = matches!(team.status, TeamStatus::Done | TeamStatus::Stopped);
-    if !active && !finished {
+    if !active && !finished && team.iron_rules_error.is_empty() {
         return Vec::new();
     }
     let mut items: Vec<Item> = Vec::new();
+    if !team.iron_rules_error.is_empty() {
+        items.push(Item { kind:"stalled", key:"iron_rules".into(), task:None, member:team.lead.clone(), since:team.iron_rules_error_at.unwrap_or_else(crate::state::now),
+            summary:"Iron rules block team delivery; the owner must select its project".into(),
+            detail:team.iron_rules_error.clone(),
+            command:format!("Owner: {{\"team\":\"{}\",\"project_id\":\"STABLE_ID\",\"by\":\"human\",\"request_id\":\"UUID\"}} | hgs team settings --json",team.id),
+            subagents:Value::Null });
+    }
+
+    // A queued merge that failed and was rolled back waits for the lead to fix
+    // the runner/tests map or to retry it.
+    if active {
+        for task in &team.tasks {
+            let Some(entry) = task.merge.as_ref().filter(|entry| {
+                entry.state == "queued"
+                    && !entry.note.is_empty()
+                    && entry.wait_reason != super::model::MergeWaitReason::Busy
+            }) else { continue };
+            let next = match entry.wait_reason {
+                super::model::MergeWaitReason::Rollback => "The merge could not be rolled back; revert it, then retry or reject.",
+                super::model::MergeWaitReason::Runners => "Fix the runner or machine config, then accept or retry the merge.",
+                super::model::MergeWaitReason::Selection => "Fix the tests map, then accept or retry the merge.",
+                super::model::MergeWaitReason::Ancestry => "Check the lead branch and git access, then accept or retry the merge.",
+                _ => "Fix the cause, then accept or retry the merge.",
+            };
+            items.push(Item {
+                subagents: Value::Null,
+                kind: "merge_waiting",
+                key: format!("merge_waiting:{}:{}", task.id, entry.commit),
+                task: Some(task.id),
+                member: team.name_of(&entry.author),
+                since: entry.at,
+                summary: summary(&format!("#{} merge waits: {}", task.id, entry.note)),
+                command: format!(
+                    "{} | hgs team retry --json",
+                    json!({"request_id":PLACEHOLDER,"team":team.id,"task":task.id})
+                ),
+                detail: format!("{} {next}", entry.note),
+            });
+        }
+    }
+    // A rework keeps its member indefinitely. Show the wait even when that
+    // member has an approval or usage limit rather than a stored task wait.
+    for task in team.tasks.iter().filter(|task| active && task.rework() && task.status == TaskStatus::Pending
+        && task.hold.is_none() && task.waits.as_ref().is_none_or(|wait| wait.waits_for == "member")) {
+        let unavailable = team.member(&task.assignee).is_some_and(|member| {
+            matches!(member.state, MemberState::Removed | MemberState::Paused) || member.session.is_none()
+                || member.limited.is_some() || member.stuck.is_some() || member.seen.is_some_and(|seen| !seen.live)
+                || matches!(member.seen_phase.as_str(), "approval" | "question" | "input" | "error" | "working" | "tool" | "compacting")
+                || matches!(member.seen_activity.as_str(), "busy" | "attention" | "background")
+        });
+        if !unavailable { continue; }
+        let since = task.rework_since.unwrap();
+        let minutes = ((crate::state::now() - since) / 60.0).max(0.0).floor() as u64;
+        items.push(Item {
+            subagents: Value::Null,
+            kind: "rework_waits",
+            key: format!("rework_waits:{}:{since}", task.id),
+            task: Some(task.id),
+            member: team.name_of(&task.assignee),
+            since,
+            summary: format!("#{} waits for its member, {minutes} min", task.id),
+            command: format!("{} | hgs team reassign --json",
+                json!({"request_id":PLACEHOLDER,"team":team.id,"task":task.id,"member":"MEMBER"})),
+            detail: format!("{} keeps this rework without a time limit. Wait for that member or explicitly reassign the task. {}",
+                team.name_of(&task.assignee), task.waits.as_ref().map(|wait| wait.reason.as_str()).unwrap_or_default()).trim_end().to_owned(),
+        });
+    }
     // #752: two or more members in one folder build each other's half-done
     // edits; the lead proposes the build broker once (a switch card), and a
     // card the owner denied is not proposed again.
@@ -190,6 +257,7 @@ fn all_items(team: &Team) -> Vec<Item> {
     // waits for nobody.
     for task in team.tasks.iter().filter(|_| active).filter(|task| task.status == TaskStatus::Pending) {
         let Some(wait) = task.waits.as_ref().filter(|wait| !wait.running()) else { continue };
+        if task.rework() && wait.waits_for == "member" { continue; }
         let attempt = task.attempts.iter().rev().find(|attempt| wait.attempt > 0 && attempt.n == wait.attempt);
         let member = match attempt {
             Some(attempt) => team.name_of(&attempt.member),
@@ -692,6 +760,25 @@ fn all_items(team: &Team) -> Vec<Item> {
                 }
             }
         }
+        // Owner (2026-11-01): an interim report (progress or a question) keeps
+        // its attempt open; the lead reads it here, the owner only in the feed.
+        if task.status == TaskStatus::InProgress {
+            if let Some(attempt) = task.open_attempt() {
+                if let Some(interim) = &attempt.interim {
+                    items.push(Item {
+                        subagents: Value::Null,
+                        kind: "interim_report",
+                        key: format!("interim:{}:{}", attempt.id, interim.at),
+                        task: Some(task.id),
+                        member: team.name_of(&attempt.member),
+                        since: interim.at,
+                        summary: summary(&format!("Interim: {}", interim.text)),
+                        command: format!("{} | hgs team status --json", json!({"team":team.id})),
+                        detail: interim.text.clone(),
+                    });
+                }
+            }
+        }
         // The lead's own task: handed out without a message, reported and
         // accepted in one step (C1).
         if task.status == TaskStatus::InProgress {
@@ -809,11 +896,20 @@ fn all_items(team: &Team) -> Vec<Item> {
         });
     }
     // U20: a delivered attempt whose turn ended long ago and still has no
-    // report is an item, whatever the capture did.
+    // report is an item, whatever the capture did. The owner (2026-11-01):
+    // waiting for the answer to the member's own question or for its Background
+    // work is not a stall, so that wait is no missing report; the budget or the
+    // block timeout reaches the lead as the blocked message instead.
     let now = crate::state::now();
     for task in &team.tasks {
         let Some(attempt) = task.open_attempt() else { continue };
         if attempt.member == team.lead || attempt.report.is_some() {
+            continue;
+        }
+        if attempt.open_question().is_some() || attempt.blocked_since.is_some() {
+            continue;
+        }
+        if team.member(&attempt.member).is_some_and(|member| member.background_since.is_some()) {
             continue;
         }
         let Some(ended) = attempt.turn_ended_at else { continue };

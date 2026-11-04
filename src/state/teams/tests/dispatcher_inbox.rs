@@ -10,6 +10,8 @@ fn keep_assignees_keeps_a_task_with_its_planned_member() {
     // dev works on #1; #2, also dev's, would go to the free dev2.
     team.task_mut(1).unwrap().attempts.push(Attempt { n: 1, member: "dev".into(), state: AttemptState::Delivered, ..Default::default() });
     team.task_mut(1).unwrap().status = TaskStatus::InProgress;
+    team.task_mut(1).unwrap().output = vec!["src/one.rs".into()];
+    team.task_mut(2).unwrap().output = vec!["src/two.rs".into()];
     let moved = |team: &Team| steps(team, &seen, 1.0).iter().any(|step| matches!(step, Step::Rebalance { .. }));
     // Off (the default), the free same-role member takes it, as today.
     assert!(moved(&team));
@@ -59,6 +61,42 @@ fn a_closed_question_is_never_sent() {
     let items = inbox::items(&team);
     assert!(items.iter().all(|item| item.kind != "question"), "{items:?}");
     assert!(items.iter().all(|item| item.kind == "dependency_cancelled"), "{items:?}");
+}
+
+/// The owner (2026-11-01): waiting for the answer to the member's own
+/// question, or for its Background work, is not a stall. No "ended its turn
+/// without a report" item while that holds; behind the block timeout the lead
+/// hears the waiting message (N5), never a missing report.
+#[test]
+fn a_member_waiting_for_an_answer_or_background_work_is_not_no_report() {
+    let mut team = team();
+    delivered(&mut team);
+    let ended = crate::state::now() - 10_000.0;
+    {
+        let attempt = &mut team.task_mut(1).unwrap().attempts[0];
+        attempt.turn_ended_at = Some(ended);
+        attempt.turn_reply = "r7".into();
+        attempt.questions.push(Question { id: "q1".into(), text: "Which database?".into(), at: ended + 1.0, ..Default::default() });
+    }
+    // The member asked and ended its turn: the question is its item.
+    let items = inbox::items(&team);
+    assert!(!items.iter().any(|item| item.kind == "no_report"), "a question is not a missing report: {items:?}");
+    assert!(items.iter().any(|item| item.kind == "question" && item.key == "question:q1"), "{items:?}");
+    // Once answered, Background work holds the same turn: still no missing report.
+    team.task_mut(1).unwrap().attempts[0].questions[0].answer = "The new one".into();
+    team.members.iter_mut().find(|member| member.id == "dev").unwrap().background_since = Some(ended + 2.0);
+    assert!(!inbox::items(&team).iter().any(|item| item.kind == "no_report"), "Background work is not a missing report");
+    // Behind the block timeout the lead hears the waiting message instead.
+    let at = crate::state::now();
+    let timeout = team.settings.blocked_timeout_seconds as f64;
+    team.task_mut(1).unwrap().attempts[0].blocked_since = Some(at - timeout - 1.0);
+    let lead = session("claude/x/lead", "r0", true);
+    let mut dev = session("codex/x/dev", "r1", true);
+    dev.reply_at = Some(ended);
+    dev.reply_id = "r7".into();
+    dev.background = true;
+    assert!(steps(&team, &[lead, dev], at).contains(&Step::BlockedLate { task: 1 }), "the block timeout tells the lead");
+    assert!(!inbox::items(&team).iter().any(|item| item.kind == "no_report"));
 }
 
 #[test]

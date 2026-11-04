@@ -370,7 +370,7 @@ MessageComposer::MessageComposer(QWidget *parent) : QWidget(parent)
         m_settingsPopup->hide(); emit settingsRequested(m_key, model, effort);
     });
     m_rulesChip = new QPushButton; m_rulesChip->setObjectName("ironRulesChip"); m_rulesChip->hide();
-    m_rulesChip->setToolTip(tr("This project's iron rules are sent at the start of every message"));
+    m_rulesChip->setToolTip(tr("Iron rules apply at session start and each team task; adapters without startup delivery also receive them with messages"));
     m_rulesChip->setAutoDefault(false); m_rulesChip->setCursor(Qt::PointingHandCursor); m_rulesChip->setIconSize(QSize(12, 12));
     connect(m_rulesChip, &QPushButton::clicked, this, &MessageComposer::ironRulesRequested);
     // U25: the compact row's centre ends with the session's reference.

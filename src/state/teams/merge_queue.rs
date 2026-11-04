@@ -8,16 +8,22 @@
 //! merge is under test at a time, so a rollback never drops another's work,
 //! and a phase integration only checks what came after the last tested merge.
 
-use super::model::{AttemptState, Decider, MergeEntry, MergeLog, Task, TaskStatus, Team};
+use super::model::{AttemptState, Decider, MergeEntry, MergeLog, MergeRange, MergeWaitReason, OpenNotRun, Task, TaskStatus, Team};
 use super::store::Event;
 use super::test_queue::{Request, TestStore};
 use serde_json::{json, Value};
+use sha2::{Digest, Sha256};
 use std::path::Path;
 use std::process::Command;
 use std::time::{Duration, Instant};
 
 /// How long one git step of the queue may take.
 const GIT_TIMEOUT: Duration = Duration::from_secs(120);
+
+/// A bounded per-suite tested-point map; the merge log is bounded too.
+const MERGE_SUITES: usize = 64;
+/// One bounded batch of open ranges (the ordinary team task limit).
+const MERGE_RANGES: usize = 500;
 
 /// The project turned the queue on (the owner may override it in the team).
 pub(crate) fn enabled(team: &Team) -> bool {
@@ -143,17 +149,99 @@ pub(crate) fn merge(lead: &str, entry: &MergeEntry, message: &str) -> Merged {
     }
 }
 
+fn range_files(team: &Team, prev: &str, merged: &str) -> anyhow::Result<Vec<String>> {
+    let changed = git_text(&team.folder, &["diff", "--name-only", "--no-renames", prev, merged])
+        .ok_or_else(|| anyhow::anyhow!("git could not read the range {prev}..{merged}"))?;
+    Ok(changed.lines().filter(|line| !line.is_empty()).map(str::to_owned).collect())
+}
+
+/// Fixed metadata per task, and at most one ordinary task batch per operation.
+pub(crate) fn open_merge_ranges(team: &Team) -> Vec<MergeRange> {
+    team.tasks.iter().filter_map(|task| task.untested_merge.clone()).take(MERGE_RANGES).collect()
+}
+
+/// Clear only the exact snapshots proved by this kept merge or accepted build.
+pub(crate) fn close_merge_ranges(team: &mut Team, ranges: &[MergeRange]) {
+    for range in ranges.iter().take(MERGE_RANGES) {
+        if let Some(task) = team.task_mut(range.task) {
+            if task.untested_merge.as_ref() == Some(range) {
+                task.untested_merge = None;
+            }
+        }
+    }
+}
+
+/// Round-4 saves represented an untested merge as a synthetic suite. Move the
+/// exact old shape, including its original start, without reintroducing it from
+/// the bounded log on the next keep.
+pub(crate) fn migrate_legacy_ranges(team: &mut Team) -> bool {
+    let legacy: Vec<_> = team.merge_not_run.iter().filter_map(|(suite, open)| {
+        let id = suite.strip_prefix("merge-")?.parse::<u32>().ok()?;
+        let prefix = format!("not run here: {suite} runs on all; the merge of ");
+        let (_, merged) = open.message.strip_prefix(&prefix)?.split_once(" was not tested on ")?;
+        (!open.since.is_empty() && !merged.is_empty() && team.task(id).is_some())
+            .then(|| (suite.clone(), open.message.clone(), MergeRange { task: id, prev: open.since.clone(), merged: merged.to_owned() }))
+    }).take(MERGE_RANGES).collect();
+    for (suite, message, range) in &legacy {
+        if let Some(task) = team.task_mut(range.task) {
+            if task.untested_merge.is_none() { task.untested_merge = Some(range.clone()); }
+        }
+        team.merge_not_run.remove(suite);
+        for log in &mut team.merge_log { log.not_run.retain(|old| old != message); }
+    }
+    !legacy.is_empty()
+}
+
+/// The requests a merge queues, and the suites of another platform it records
+/// as not run here because no test runner of their class exists.
+#[derive(Debug, Default)]
+pub(crate) struct Affected {
+    pub requests: Vec<Request>,
+    pub not_run: Vec<String>,
+    pub tested_ranges: Vec<MergeRange>,
+    pub not_run_since: std::collections::BTreeMap<String, String>,
+}
+
+/// The changed merge range and the HEAD on which its tests will run.
+#[derive(Clone, Copy)]
+pub(crate) struct TestRange<'a> {
+    prev: &'a str,
+    merged: &'a str,
+    run_at: &'a str,
+}
+
 /// The task's affected tests on the merged range, as test queue requests: the
-/// project's map over `prev..merged`, each run's command in its folder.
-pub(crate) fn affected_requests(team: &Team, id: u32, prev: &str, merged: &str, now: f64) -> anyhow::Result<Vec<Request>> {
+/// project's map over `prev..merged`, each run's command in its folder. A suite
+/// whose declared platforms exclude this computer is queued only when a
+/// configured test runner of its class exists; otherwise it is named as not run
+/// here and the merge decides on the suites that did run.
+pub(crate) fn affected_requests(
+    team: &Team,
+    id: u32,
+    range: TestRange<'_>,
+    now: f64,
+    host: &[String],
+    runners: &[super::test_runners::Runner],
+) -> anyhow::Result<Affected> {
     use crate::test_discipline::{affected, config, durations, map};
+    let TestRange { prev, merged, run_at } = range;
     let lead = Path::new(&team.folder);
     let loaded = config::load(lead, team.settings.tests.as_ref())?;
     let config = &loaded.config;
-    let changed = git_text(&team.folder, &["diff", "--name-only", "--no-renames", prev, merged]).unwrap_or_default();
-    let files: Vec<String> = changed.lines().map(str::to_owned).filter(|line| !line.is_empty()).collect();
-    if files.is_empty() {
-        return Ok(Vec::new());
+    let mut files: std::collections::BTreeSet<String> = range_files(team, prev, merged)?.into_iter().collect();
+    // Select once over the union, so overlapping suites/targets are not run twice.
+    // A provider selected only by an older open range still has to run here.
+    let mut ranges = Vec::new();
+    for range in open_merge_ranges(team) {
+        if ancestry_at(&team.folder, &range.merged, run_at) == Ancestry::Yes {
+            let changed = range_files(team, &range.prev, &range.merged)?;
+            files.extend(changed.iter().cloned());
+            ranges.push((range, changed));
+        }
+    }
+    let files: Vec<String> = files.into_iter().collect();
+    if files.is_empty() && ranges.is_empty() {
+        return Ok(Affected::default());
     }
     let committed = std::fs::read_to_string(lead.join(&config.map.file)).ok().and_then(|text| serde_json::from_str::<map::TestMap>(&text).ok());
     let touched: std::collections::BTreeSet<String> = config
@@ -166,9 +254,38 @@ pub(crate) fn affected_requests(team: &Team, id: u32, prev: &str, merged: &str, 
     let test_map = map::generate_only(lead, config, &tracked, committed.as_ref(), Some(&touched))?;
     let durations = durations::Durations::read(&lead.join(&config.map.durations)).unwrap_or_default();
     let selection = affected::select(lead, config, &test_map, &durations, &files, &Default::default(), false);
+    let available: std::collections::BTreeSet<&str> = config.providers.iter().filter(|provider| {
+        let platforms = provider.platform_classes();
+        super::test_runners::runs_here(&platforms, host) || runners.iter().any(|runner| platforms.contains(&runner.platform))
+    }).map(|provider| provider.name.as_str()).collect();
+    let mut tested_ranges = Vec::new();
+    let mut not_run_since: std::collections::BTreeMap<String, String> = Default::default();
+    for (range, files) in ranges {
+        let selected = affected::select(lead, config, &test_map, &durations, &files, &Default::default(), false);
+        for run in &selected.runs {
+            if !available.contains(run.provider.as_str()) {
+                let start = not_run_since.entry(run.provider.clone()).or_insert_with(|| range.prev.clone());
+                if *start != range.prev && ancestry_at(&team.folder, &range.prev, start) == Ancestry::Yes {
+                    *start = range.prev.clone();
+                }
+            }
+        }
+        if selected.unmapped.is_empty() && selected.manual.is_empty() && selected.elsewhere.is_empty()
+            && selected.runs.iter().all(|run| available.contains(run.provider.as_str())) {
+            tested_ranges.push(range);
+        }
+    }
     let mut requests = Vec::new();
+    let mut not_run = Vec::new();
     for run in &selection.runs {
         let Some(provider) = config.providers.iter().find(|provider| provider.name == run.provider) else { continue };
+        let platforms = provider.platform_classes();
+        if !super::test_runners::runs_here(&platforms, host)
+            && !runners.iter().any(|runner| platforms.contains(&runner.platform))
+        {
+            not_run.push(format!("not run here: {} runs on {}; no runner of that class", run.provider, platforms.join(" or ")));
+            continue;
+        }
         let command = if run.cwd == "." {
             run.command.clone()
         } else if cfg!(windows) {
@@ -189,7 +306,7 @@ pub(crate) fn affected_requests(team: &Team, id: u32, prev: &str, merged: &str, 
             suite: run.provider.clone(),
             task: Some(id),
             targets: run.targets.clone(),
-            commit: merged.to_owned(),
+            commit: run_at.to_owned(),
             // Never reused: the merge queue measures the merged commit.
             input_hash: String::new(),
             asked_by: "merge queue".into(),
@@ -199,23 +316,66 @@ pub(crate) fn affected_requests(team: &Team, id: u32, prev: &str, merged: &str, 
             budget_minutes: budget,
             resources: provider.resources.clone(),
             command,
-            platforms: provider.platform_classes(),
+            platforms,
         });
     }
-    Ok(requests)
+    Ok(Affected { requests, not_run, tested_ranges, not_run_since })
 }
 
 /// One step of the queue for a team: the merge under test decides when all its
-/// results are in; else the oldest queued entry merges. True when it changed
-/// something.
-pub(crate) fn step(team: &mut Team, database: &TestStore, now: f64, events: &mut Vec<Event>) -> anyhow::Result<bool> {
+/// results are in; else the oldest queued entry merges. `host` is this
+/// computer's test classes and `runners` the owner's configured test runners;
+/// a suite of another class without a runner is recorded as not run here. True
+/// when it changed something.
+pub(crate) fn step(
+    team: &mut Team,
+    database: &TestStore,
+    now: f64,
+    events: &mut Vec<Event>,
+    host: &[String],
+    runners: &[super::test_runners::Runner],
+) -> anyhow::Result<bool> {
+    step_with(team, database, now, events, || Ok((host.to_vec(), runners.to_vec())))
+}
+
+/// The step whose host classes and configured runners are read only once a
+/// merge has completed: a merge that only waits, a conflict or a busy lead
+/// folder never reads them.
+pub(crate) fn step_with<F>(
+    team: &mut Team,
+    database: &TestStore,
+    now: f64,
+    events: &mut Vec<Event>,
+    affected_hosts: F,
+) -> anyhow::Result<bool>
+where
+    F: FnOnce() -> anyhow::Result<(Vec<String>, Vec<super::test_runners::Runner>)>,
+{
+    let mut migrated = migrate_legacy_ranges(team);
+    let legacy: Vec<_> = team.tasks.iter().filter_map(|task| task.merge.as_ref()
+        .filter(|entry| matches!(entry.state.as_str(), "waiting" | "reverting"))
+        .map(|entry| (task.id, task.status, entry.clone()))).collect();
+    for (id, status, entry) in legacy {
+        if entry.state == "reverting" && (matches!(status, TaskStatus::Pending | TaskStatus::Cancelled)
+            || entry.merged.is_empty() || ancestry(&team.folder, &entry.merged) == Ancestry::No) {
+            record_untested_range(team, id, &entry, events);
+            team.task_mut(id).unwrap().merge = None;
+            events.push(Event::new("merge_migration_dropped", json!({"task":id})));
+        } else if let Some(found) = team.task_mut(id).and_then(|task| task.merge.as_mut()) {
+            found.state = "queued".into();
+            if found.note.is_empty() { found.note = "A saved waiting merge was requeued for the current rule".into(); }
+            found.retry = false;
+            found.requests.clear(); found.not_run.clear(); found.not_run_since.clear(); found.tested_ranges.clear();
+        }
+        migrated = true;
+    }
     if let Some(id) = team.tasks.iter().find(|task| task.merge.as_ref().is_some_and(|entry| entry.state == "testing")).map(|task| task.id) {
         let entry = team.task(id).and_then(|task| task.merge.clone()).unwrap_or_default();
         let mut results = Vec::new();
         for request in &entry.requests {
             match database.result_of(request)? {
                 Some(record) => results.push(record),
-                None => return Ok(false),
+                None => return Ok(migrated),
             }
         }
         let failed: Vec<String> = results
@@ -231,12 +391,18 @@ pub(crate) fn step(team: &mut Team, database: &TestStore, now: f64, events: &mut
                 .find(|record| !matches!(record.status.as_str(), "passed" | "flaky" | "reused"))
                 .map(|record| record.excerpt.lines().rev().take(12).collect::<Vec<_>>().into_iter().rev().collect::<Vec<_>>().join("\n"))
                 .unwrap_or_default();
-            let rolled = roll_back(&team.folder, &entry);
+            let rolled = roll_back(&team.folder, &entry).note();
+            let mut not_run = entry.not_run.clone();
+            for message in pending_not_run(team) {
+                push_not_run(&mut not_run, &message);
+            }
+            let note = not_run_note(&not_run);
+            let note = if note.is_empty() { String::new() } else { format!("\n{note}") };
             return_to_author(
                 team,
                 id,
                 &format!(
-                    "The merge queue merged this into the lead branch, and its affected tests failed on the merged commit: {}. {rolled}\n{excerpt}",
+                    "The merge queue merged this into the lead branch, and its affected tests failed on the merged commit: {}. {rolled}\n{excerpt}{note}",
                     failed.join("; ")
                 ),
                 events,
@@ -251,19 +417,45 @@ pub(crate) fn step(team: &mut Team, database: &TestStore, now: f64, events: &mut
         .min_by(|a, b| a.0.total_cmp(&b.0))
         .map(|(_, id)| id)
     else {
-        return Ok(false);
+        return Ok(migrated);
     };
-    let entry = team.task(id).and_then(|task| task.merge.clone()).unwrap_or_default();
+    let mut entry = team.task(id).and_then(|task| task.merge.clone()).unwrap_or_default();
+    let (head, map) = retry_stamps(team);
+    if !entry.merged.is_empty() {
+        let reachable = ancestry(&team.folder, &entry.merged);
+        if reachable != Ancestry::No {
+            return resolve_reachable(team, database, id, RecordedMerge { entry, head: &head, reachable }, now, events, affected_hosts).map(|changed| changed || migrated);
+        }
+        // A hand reset or revert removed the merge: the commit can be merged again.
+        if let Some(found) = team.task_mut(id).and_then(|task| task.merge.as_mut()) {
+            found.note.clear();
+        found.wait_reason = MergeWaitReason::Other;
+        found.tested_ranges.clear();
+            found.merged.clear();
+            found.prev.clear();
+            found.retry = false;
+        }
+        entry = team.task(id).and_then(|task| task.merge.clone()).unwrap_or_default();
+    }
+    if entry.wait_reason != MergeWaitReason::Busy && !entry.note.is_empty() && !entry.retry && !entry.wait_head.is_empty() && entry.wait_head == head && entry.wait_map == map {
+        return Ok(migrated);
+    }
+    if entry.retry {
+        if let Some(found) = team.task_mut(id).and_then(|task| task.merge.as_mut()) {
+            found.retry = false;
+        }
+    }
     let title = team.task(id).map(|task| task.title.clone()).unwrap_or_default();
     let short: String = entry.commit.chars().take(8).collect();
     let message = format!("Merge accepted work from {} ({short}) (#{id}): {title}", team.name_of(&entry.author));
     match merge(&team.folder, &entry, &message) {
         Merged::Busy(note) => {
             if let Some(found) = team.task_mut(id).and_then(|task| task.merge.as_mut()) {
-                if found.note == note {
-                    return Ok(false);
+                if found.note == note && found.wait_reason == MergeWaitReason::Busy {
+                    return Ok(migrated);
                 }
                 found.note = note;
+                found.wait_reason = MergeWaitReason::Busy;
             }
             Ok(true)
         }
@@ -285,62 +477,472 @@ pub(crate) fn step(team: &mut Team, database: &TestStore, now: f64, events: &mut
             Ok(true)
         }
         Merged::Done { prev, merged } => {
-            let requests = if prev == merged { Vec::new() } else { affected_requests(team, id, &prev, &merged, now).unwrap_or_default() };
-            for request in &requests {
+            if let Some(found) = team.task_mut(id).and_then(|task| task.merge.as_mut()) {
+                found.prev = prev.clone();
+                found.merged = merged.clone();
+            }
+            let affected = if prev == merged && open_merge_ranges(team).is_empty() {
+                Affected::default()
+            } else {
+                let (host, runners) = match affected_hosts() {
+                    Ok(pair) => pair,
+                    Err(error) => {
+                        let reason = format!("The test runners could not be read: {error}");
+                        return requeue_after_error(team, id, &prev, &merged, &reason, false, events);
+                    }
+                };
+                match affected_requests(team, id, TestRange { prev: &prev, merged: &merged, run_at: &merged }, now, &host, &runners) {
+                    Ok(affected) => affected,
+                    Err(error) => {
+                        let reason = format!("The affected tests could not be selected: {error}");
+                        return requeue_after_error(team, id, &prev, &merged, &reason, true, events);
+                    }
+                }
+            };
+            for request in &affected.requests {
                 database.enqueue(request)?;
             }
-            events.push(Event::new("merged", json!({"task":id,"prev":prev,"merged":merged,"tests":requests.len()})));
-            if requests.is_empty() {
-                let entry = MergeEntry { prev, merged, ..entry };
+            events.push(Event::new("merged", json!({"task":id,"prev":prev,"merged":merged,"tests":affected.requests.len(),"not_run":affected.not_run.clone()})));
+            if !affected.not_run.is_empty() {
+                events.push(Event::new("merge_not_run", json!({"task":id,"suites":affected.not_run.clone()})));
+            }
+            if affected.requests.is_empty() {
+                let entry = MergeEntry { prev, merged, not_run: affected.not_run, tested_ranges: affected.tested_ranges, not_run_since: affected.not_run_since, ..entry };
                 keep(team, id, &entry, Vec::new(), now, events)?;
             } else if let Some(found) = team.task_mut(id).and_then(|task| task.merge.as_mut()) {
                 found.state = "testing".into();
+                found.note.clear();
+                found.wait_reason = MergeWaitReason::Other;
+                found.tested_ranges.clear();
+                found.retry = false;
+                found.wait_head.clear();
+                found.wait_map.clear();
+                found.selection_failed = 0;
                 found.prev = prev;
                 found.merged = merged;
-                found.note.clear();
-                found.requests = requests.iter().map(|request| request.id.clone()).collect();
+                found.requests = affected.requests.iter().map(|request| request.id.clone()).collect();
+                found.not_run = affected.not_run;
+                found.not_run_since = affected.not_run_since;
+                found.tested_ranges = affected.tested_ranges;
             }
             Ok(true)
         }
     }
 }
 
-/// The merge stays: the range is tested, and the task is accepted as the
-/// accept that queued it asked.
+/// Whether `commit` is reachable from the lead branch's HEAD; only exit 1 is a
+/// definite no. A failed git call is unknown and never means "gone".
+#[derive(Clone, Copy, Debug, PartialEq)]
+enum Ancestry {
+    Yes,
+    No,
+    Unknown,
+}
+
+fn ancestry(folder: &str, commit: &str) -> Ancestry {
+    ancestry_at(folder, commit, "HEAD")
+}
+
+fn ancestry_at(folder: &str, commit: &str, head: &str) -> Ancestry {
+    if commit.is_empty() || head.is_empty() {
+        return Ancestry::Unknown;
+    }
+    match git(folder, &["merge-base", "--is-ancestor", commit, head]).exit {
+        Some(0) => Ancestry::Yes,
+        Some(1) => Ancestry::No,
+        _ => Ancestry::Unknown,
+    }
+}
+
+/// A stable fingerprint of the project's tests map and the team's override.
+fn tests_stamp(team: &Team) -> String {
+    let text = std::fs::read_to_string(Path::new(&team.folder).join(".zerus/tests.toml")).unwrap_or_default();
+    let settings = team.settings.tests.as_ref().map(|value| value.to_string()).unwrap_or_default();
+    let mut digest = Sha256::new();
+    digest.update(text.as_bytes());
+    digest.update(settings.as_bytes());
+    format!("{:x}", digest.finalize())
+}
+
+/// The HEAD and tests-map fingerprint a queued retry remembers.
+fn retry_stamps(team: &Team) -> (String, String) {
+    (git_text(&team.folder, &["rev-parse", "HEAD"]).unwrap_or_default(), tests_stamp(team))
+}
+
+/// Store a queued entry's reason once; a changed HEAD or map refreshes the
+/// stamps without repeating the event.
+fn set_queue_note(team: &mut Team, id: u32, reason: &str, wait_reason: MergeWaitReason, kind: &'static str, events: &mut Vec<Event>) -> bool {
+    let (head, map) = retry_stamps(team);
+    let Some(found) = team.task_mut(id).and_then(|task| task.merge.as_mut()) else { return false };
+    if found.state == "queued" && found.note == reason && found.wait_reason == wait_reason && found.wait_head == head && found.wait_map == map {
+        return false;
+    }
+    let announce = found.state != "queued" || found.note != reason;
+    found.state = "queued".into();
+    found.note = reason.to_owned();
+    found.wait_reason = wait_reason;
+    found.tested_ranges.clear();
+    found.wait_head = head;
+    found.wait_map = map;
+    found.retry = false;
+    found.requests.clear();
+    found.not_run.clear(); found.not_run_since.clear();
+    if announce {
+        events.push(Event::new(kind, json!({"task":id,"reason":reason})));
+    }
+    true
+}
+
+/// A saved merge and Git's current reachability result for its checkout.
+struct RecordedMerge<'a> {
+    entry: MergeEntry,
+    head: &'a str,
+    reachable: Ancestry,
+}
+
+/// An untested merge still reachable from HEAD: never merge it again. Try the
+/// rollback while HEAD is still that merge; once HEAD moved, run the recorded
+/// prev..merged tests on HEAD. A successful run keeps the merge normally; a
+/// selection error returns the task and records the open range.
+fn resolve_reachable<F>(
+    team: &mut Team,
+    database: &TestStore,
+    id: u32,
+    merge: RecordedMerge<'_>,
+    now: f64,
+    events: &mut Vec<Event>,
+    affected_hosts: F,
+) -> anyhow::Result<bool>
+where
+    F: FnOnce() -> anyhow::Result<(Vec<String>, Vec<super::test_runners::Runner>)>,
+{
+    let RecordedMerge { entry, head, reachable } = merge;
+    if head == entry.merged {
+        // A failed reset is retried only for a new HEAD or the lead's retry,
+        // never because the note or tests-map text happened to change.
+        if entry.wait_reason == MergeWaitReason::Rollback && !entry.retry && entry.wait_head == head {
+            return Ok(false);
+        }
+        return match roll_back(&team.folder, &entry) {
+            Rollback::Done => {
+                let head = git_text(&team.folder, &["rev-parse", "HEAD"]).unwrap_or_default();
+                let map = tests_stamp(team);
+                if let Some(found) = team.task_mut(id).and_then(|task| task.merge.as_mut()) {
+                    found.state = "queued".into();
+                    found.note = "The merge was rolled back after its tests could not be selected; retry after a change or the lead's action.".into();
+                    found.wait_reason = MergeWaitReason::Selection;
+                    found.tested_ranges.clear();
+                    found.wait_head = head.clone();
+                    found.wait_map = map;
+                    found.retry = false;
+                    found.requests.clear();
+                    found.not_run.clear(); found.not_run_since.clear();
+                    found.prev = head;
+                    found.merged.clear();
+                }
+                events.push(Event::new("merge_requeued", json!({"task":id,"reason":"rolled back"})));
+                Ok(true)
+            }
+            Rollback::Failed(note) => {
+                let reason = format!("The merge could not be rolled back: {note}");
+                Ok(set_queue_note(team, id, &reason, MergeWaitReason::Rollback, "merge_rollback_blocked", events))
+            }
+        };
+    }
+    if reachable == Ancestry::Unknown {
+        let reason = format!("git could not tell whether the merge {} is in the lead branch; the merge waits: {head}", entry.merged);
+        return Ok(set_queue_note(team, id, &reason, MergeWaitReason::Ancestry, "merge_rollback_blocked", events));
+    }
+    let (host, runners) = match affected_hosts() {
+        Ok(pair) => pair,
+        Err(error) => {
+            let reason = format!("The test runners could not be read: {error}; the merge waits on HEAD {head}");
+            return Ok(set_queue_note(team, id, &reason, MergeWaitReason::Runners, "merge_rollback_blocked", events));
+        }
+    };
+    let affected = match affected_requests(team, id, TestRange { prev: &entry.prev, merged: &entry.merged, run_at: head }, now, &host, &runners) {
+        Ok(affected) => affected,
+        Err(error) => {
+            let reason = format!("The affected tests could not be selected: {error}");
+            return_to_author(team, id, &reason, events);
+            events.push(Event::new("merge_affected_failed", json!({"task":id,"reason":reason})));
+            return Ok(true);
+        }
+    };
+    for request in &affected.requests {
+        database.enqueue(request)?;
+    }
+    events.push(Event::new(
+        "merged",
+        json!({"task":id,"prev":entry.prev,"merged":entry.merged,"tests":affected.requests.len(),"not_run":affected.not_run.clone()}),
+    ));
+    if !affected.not_run.is_empty() {
+        events.push(Event::new("merge_not_run", json!({"task":id,"suites":affected.not_run.clone()})));
+    }
+    if affected.requests.is_empty() {
+        keep(
+            team,
+            id,
+            &MergeEntry { prev: entry.prev, merged: entry.merged, not_run: affected.not_run, tested_ranges: affected.tested_ranges, not_run_since: affected.not_run_since, ..entry },
+            Vec::new(),
+            now,
+            events,
+        )?;
+    } else if let Some(found) = team.task_mut(id).and_then(|task| task.merge.as_mut()) {
+        found.state = "testing".into();
+        found.note.clear();
+        found.wait_reason = MergeWaitReason::Other;
+        found.tested_ranges.clear();
+        found.retry = false;
+        found.wait_head.clear();
+        found.wait_map.clear();
+        found.selection_failed = 0;
+        found.requests = affected.requests.iter().map(|request| request.id.clone()).collect();
+        found.not_run = affected.not_run;
+        found.not_run_since = affected.not_run_since;
+        found.tested_ranges = affected.tested_ranges;
+    }
+    Ok(true)
+}
+
+/// A merge that could not select its tests never stays in the lead branch:
+/// roll it back at once and put the entry back to queued. A second selection
+/// error returns the task; a rollback blocked by a moved branch keeps the entry
+/// queued with the reason and the lead inbox stops the queue until it acts.
+fn requeue_after_error(
+    team: &mut Team,
+    id: u32,
+    prev: &str,
+    merged: &str,
+    reason: &str,
+    selection: bool,
+    events: &mut Vec<Event>,
+) -> anyhow::Result<bool> {
+    let head = git_text(&team.folder, &["rev-parse", "HEAD"]).unwrap_or_default();
+    let rolled = if head == merged {
+        roll_back(&team.folder, &MergeEntry { prev: prev.to_owned(), merged: merged.to_owned(), ..Default::default() })
+    } else {
+        match ancestry(&team.folder, merged) {
+            Ancestry::No => Rollback::Done,
+            Ancestry::Yes => Rollback::Failed(format!("The lead branch moved since; revert {merged} by hand.")),
+            Ancestry::Unknown => {
+                let note = format!("{reason}; git could not tell whether {merged} is in the lead branch; the merge waits");
+                return Ok(set_queue_note(team, id, &note, MergeWaitReason::Ancestry, "merge_rollback_blocked", events));
+            }
+        }
+    };
+    match rolled {
+        Rollback::Done => {
+            let failed = team.task(id).and_then(|task| task.merge.as_ref()).map(|entry| entry.selection_failed).unwrap_or(0)
+                + u32::from(selection);
+            if selection && failed >= 2 {
+                let reason = format!("{reason}. The merge was rolled back; the tests could not be selected twice.");
+                return_to_author(team, id, &reason, events);
+                events.push(Event::new("merge_affected_failed", json!({"task":id,"reason":reason})));
+                return Ok(true);
+            }
+            let head = git_text(&team.folder, &["rev-parse", "HEAD"]).unwrap_or_default();
+            let map = tests_stamp(team);
+            if let Some(found) = team.task_mut(id).and_then(|task| task.merge.as_mut()) {
+                found.state = "queued".into();
+                found.note = format!("{reason}; the merge was rolled back and will be retried");
+                found.wait_reason = if selection { MergeWaitReason::Selection } else { MergeWaitReason::Runners };
+                found.tested_ranges.clear();
+                found.wait_head = head.clone();
+                found.wait_map = map;
+                found.retry = false;
+                found.selection_failed = failed;
+                found.requests.clear();
+                found.not_run.clear(); found.not_run_since.clear();
+                found.prev = head;
+                found.merged.clear();
+            }
+            events.push(Event::new("merge_requeued", json!({"task":id,"reason":reason})));
+            Ok(true)
+        }
+        Rollback::Failed(note) => {
+            let reason = format!("{reason}; {note}");
+            Ok(set_queue_note(team, id, &reason, MergeWaitReason::Rollback, "merge_rollback_failed", events))
+        }
+    }
+}
+
+/// Drop the oldest tested suite by its commit's place in the bounded log, not
+/// by its name.
+fn trim_tested_suites(team: &mut Team) {
+    while team.merge_tested_suites.len() > MERGE_SUITES {
+        let oldest = team
+            .merge_tested_suites
+            .iter()
+            .min_by_key(|(suite, commit)| {
+                team.merge_log
+                    .iter()
+                    .position(|entry| entry.merged == **commit && entry.suites.iter().any(|ran| ran == *suite))
+                    .unwrap_or(0)
+            })
+            .map(|(suite, _)| suite.clone());
+        let Some(oldest) = oldest else { break };
+        team.merge_tested_suites.remove(&oldest);
+    }
+}
+
+/// The same bound for the open not-run map, without losing a range: past the
+/// bound the tested point stays at the oldest open range and the feed says so.
+fn guard_not_run(team: &mut Team, events: &mut Vec<Event>) {
+    if team.merge_not_run.len() <= MERGE_SUITES {
+        return;
+    }
+    let oldest = team
+        .merge_not_run
+        .iter()
+        .min_by_key(|(_, open)| team.merge_log.iter().position(|entry| entry.merged == open.since || entry.prev == open.since).unwrap_or(0))
+        .map(|(_, open)| open.since.clone());
+    if let Some(oldest) = oldest {
+        if !oldest.is_empty() {
+            team.merge_tested = oldest.clone();
+        }
+        if team.merge_not_run.len() == MERGE_SUITES + 1 {
+            events.push(Event::new(
+                "merge_not_run_overflow",
+                json!({"open":team.merge_not_run.len(),"tested":oldest}),
+            ));
+        }
+    }
+}
+
+/// The merge stays: the suites that ran are tested, and the task is accepted as
+/// the accept that queued it asked. A suite not run here keeps only its own
+/// range open and is named in the accept reason.
 fn keep(team: &mut Team, id: u32, entry: &MergeEntry, suites: Vec<String>, now: f64, events: &mut Vec<Event>) -> anyhow::Result<()> {
+    close_merge_ranges(team, &entry.tested_ranges);
+    // Pending not-run suites from earlier merges stay pending unless this
+    // merge ran them; the current merge's own not-run suites join them.
+    let mut remaining = Vec::new();
+    for message in &entry.not_run {
+        push_not_run(&mut remaining, message);
+    }
+    for message in pending_not_run(team) {
+        if suites.iter().any(|ran| ran.as_str() == not_run_suite(&message)) {
+            continue;
+        }
+        push_not_run(&mut remaining, &message);
+    }
     if !entry.merged.is_empty() {
-        team.merge_tested = entry.merged.clone();
-        team.merge_log.push(MergeLog { task: id, prev: entry.prev.clone(), merged: entry.merged.clone(), at: now, suites });
+        // A suite that ran advances the tested point even when another suite
+        // could not run here; a merge with nothing selected advances too. Only
+        // a merge whose selected suites were all not run keeps it back.
+        if !suites.is_empty() || entry.not_run.is_empty() {
+            team.merge_tested = entry.merged.clone();
+            for suite in &suites {
+                if !suite.is_empty() {
+                    team.merge_tested_suites.insert(suite.clone(), entry.merged.clone());
+                }
+            }
+            trim_tested_suites(team);
+        }
+        // Keep the not-run suites in their own small map: the bounded log may
+        // age their entry out, but their range stays open until they run.
+        let previous = team.merge_not_run.clone();
+        let mut open = std::collections::BTreeMap::new();
+        for message in &remaining {
+            let suite = not_run_suite(message);
+            if suite.is_empty() {
+                continue;
+            }
+            let candidate = if entry.not_run.iter().any(|message| not_run_suite(message) == suite) {
+                entry.not_run_since.get(suite).cloned().unwrap_or_else(|| entry.prev.clone())
+            } else {
+                suite_since(team, suite)
+            };
+            let since = previous.get(suite).map(|open| open.since.clone()).filter(|since| !since.is_empty())
+                .map(|old| if candidate != old && ancestry_at(&team.folder, &candidate, &old) == Ancestry::Yes { candidate.clone() } else { old })
+                .unwrap_or(candidate);
+            open.insert(suite.to_owned(), OpenNotRun { since, message: message.clone() });
+        }
+        team.merge_not_run = open;
+        guard_not_run(team, events);
+        team.merge_log.push(MergeLog { task: id, prev: entry.prev.clone(), merged: entry.merged.clone(), at: now, suites, not_run: remaining.clone() });
         let extra = team.merge_log.len().saturating_sub(50);
         team.merge_log.drain(0..extra);
     }
+    let mut reason = entry.reason.clone();
+    let note = not_run_note(&remaining);
+    if !note.is_empty() {
+        if !reason.is_empty() {
+            reason.push(' ');
+        }
+        reason.push_str(&note);
+    }
     let actor = if entry.by_owner { super::ops::Actor::Human } else { super::ops::Actor::Member(team.lead.clone()) };
-    let input = json!({"task":id,"reason":entry.reason,"merged":true});
+    let input = json!({"task":id,"reason":reason,"merged":true});
     super::ops::apply(team, "accept", &input, &actor, &Default::default(), events)?;
     Ok(())
 }
 
+/// Whether the lead branch was reset to before the merge.
+#[derive(Debug, PartialEq)]
+enum Rollback {
+    Done,
+    Failed(String),
+}
+
+impl Rollback {
+    fn note(&self) -> String {
+        match self {
+            Self::Done => "The merge was rolled back.".into(),
+            Self::Failed(note) => note.clone(),
+        }
+    }
+}
+
 /// Resets the lead branch to before the merge, when it is still the merge.
-fn roll_back(lead: &str, entry: &MergeEntry) -> String {
+fn roll_back(lead: &str, entry: &MergeEntry) -> Rollback {
     match git_text(lead, &["rev-parse", "HEAD"]) {
         Some(head) if head == entry.merged && !entry.prev.is_empty() => {
             if git(lead, &["reset", "--hard", "--quiet", &entry.prev]).exit == Some(0) {
-                "The merge was rolled back.".into()
+                Rollback::Done
             } else {
-                format!("Rolling the merge back failed; revert {} by hand.", entry.merged)
+                Rollback::Failed(format!("Rolling the merge back failed; revert {} by hand.", entry.merged))
             }
         }
-        _ => format!("The lead branch moved since; revert {} by hand.", entry.merged),
+        _ => Rollback::Failed(format!("The lead branch moved since; revert {} by hand.", entry.merged)),
+    }
+}
+
+/// Whether an entry still names a merge reachable from HEAD (or git cannot say).
+pub(crate) fn merge_still_reachable(team: &Team, id: u32) -> bool {
+    let Some(entry) = team.task(id).and_then(|task| task.merge.as_ref()) else { return false };
+    !entry.merged.is_empty() && ancestry(&team.folder, &entry.merged) != Ancestry::No
+}
+
+/// Keep a returned task's untested merge range open for the phase build.
+fn record_untested_range(team: &mut Team, id: u32, entry: &MergeEntry, _events: &mut Vec<Event>) {
+    if entry.merged.is_empty() || entry.prev.is_empty() || ancestry(&team.folder, &entry.merged) == Ancestry::No {
+        return;
+    }
+    let previous = team.task(id).and_then(|task| task.untested_merge.as_ref()).cloned();
+    // Only a definite non-ancestor permits replacing the older start. A Git
+    // read failure must preserve it while extending the end to this merge.
+    let prev = previous
+        .filter(|range| ancestry_at(&team.folder, &range.merged, &entry.merged) != Ancestry::No)
+        .map(|range| range.prev)
+        .unwrap_or_else(|| entry.prev.clone());
+    if let Some(task) = team.task_mut(id) {
+        task.untested_merge = Some(MergeRange { task: id, prev, merged: entry.merged.clone() });
     }
 }
 
 /// The task goes back to its author with why: its report is rejected by Zerus
 /// and it waits to be handed out to the same member again.
 pub(crate) fn return_to_author(team: &mut Team, id: u32, reason: &str, events: &mut Vec<Event>) {
+    if let Some(entry) = team.task(id).and_then(|task| task.merge.clone()) {
+        record_untested_range(team, id, &entry, events);
+    }
     let Some(task) = team.task_mut(id) else { return };
     let author = task.merge.take().map(|entry| entry.author).unwrap_or_else(|| task.assignee.clone());
     if let Some(attempt) = task.attempts.iter_mut().rev().find(|attempt| attempt.state == AttemptState::Reported) {
         attempt.state = AttemptState::Rejected;
+        attempt.interim = None;
     }
     task.status = TaskStatus::Pending;
     task.assignee = author;
@@ -350,15 +952,121 @@ pub(crate) fn return_to_author(team: &mut Team, id: u32, reason: &str, events: &
     events.push(Event::new("merge_returned", json!({"task":id,"reason":task.decision_reason})));
 }
 
-/// What a phase integration still has to check: the lead-branch range after
-/// the queue's last tested merge (None when the queue tested nothing).
-pub(crate) fn untested_since(team: &Team) -> Option<String> {
-    (!team.merge_tested.is_empty()).then(|| team.merge_tested.clone())
+/// A not-run message names its suite: "not run here: SUITE runs on ...".
+fn not_run_suite(message: &str) -> &str {
+    message.strip_prefix("not run here: ").and_then(|rest| rest.split(" runs on ").next()).unwrap_or_default()
+}
+
+fn push_not_run(list: &mut Vec<String>, message: &str) {
+    let suite = not_run_suite(message);
+    if !list.iter().any(|existing| not_run_suite(existing) == suite) {
+        list.push(message.to_owned());
+    }
+}
+
+/// A sentence naming the not-run suites for the accept reason and the failure.
+fn not_run_note(messages: &[String]) -> String {
+    if messages.is_empty() {
+        return String::new();
+    }
+    let listed: Vec<&str> = messages.iter().map(|message| message.strip_prefix("not run here: ").unwrap_or(message.as_str())).collect();
+    format!("Not run here: {}.", listed.join("; "))
+}
+
+/// The not-run suites since each one's own last run: a suite that ran in a
+/// later merge is resolved even when another suite was not run there.
+fn pending_not_run(team: &Team) -> Vec<String> {
+    let mut found = Vec::new();
+    // The persisted map outlives the bounded log.
+    for open in team.merge_not_run.values() {
+        push_not_run(&mut found, &open.message);
+    }
+    for (at, entry) in team.merge_log.iter().enumerate() {
+        for message in &entry.not_run {
+            let suite = not_run_suite(message);
+            if suite.is_empty() || team.merge_not_run.contains_key(suite) {
+                continue;
+            }
+            let ran_later = team.merge_log[at + 1..].iter().any(|later| later.suites.iter().any(|ran| ran == suite));
+            if !ran_later {
+                push_not_run(&mut found, message);
+            }
+        }
+    }
+    found
+}
+
+/// The commit a suite's open range starts at: its persisted open range, its
+/// newest run, else the branch it first could not run on.
+fn suite_since(team: &Team, suite: &str) -> String {
+    if let Some(open) = team.merge_not_run.get(suite).filter(|open| !open.since.is_empty()) {
+        return open.since.clone();
+    }
+    let mut last = team.merge_tested_suites.get(suite).filter(|at| !at.is_empty()).cloned();
+    let mut first_not_run = None;
+    for entry in &team.merge_log {
+        if entry.suites.iter().any(|ran| ran == suite) && !entry.merged.is_empty() {
+            last = Some(entry.merged.clone());
+        }
+        if first_not_run.is_none() && entry.not_run.iter().any(|message| not_run_suite(message) == suite) {
+            first_not_run = Some(entry.prev.clone());
+        }
+    }
+    last.or(first_not_run).unwrap_or_else(|| team.merge_tested.clone())
+}
+
+/// What a phase integration still has to check: the newest tested merge and
+/// the suites not run since their own last run (None when everything selected
+/// was tested).
+#[derive(Debug, Default, PartialEq)]
+pub(crate) struct Untested {
+    pub since: String,
+    pub not_run: Vec<String>,
+    /// The suite and the commit its own open range starts at.
+    pub per_suite: Vec<(String, String)>,
+    pub merges: Vec<MergeRange>,
+}
+
+impl Untested {
+    /// The suites named by the not-run messages.
+    pub(crate) fn suites(&self) -> Vec<String> {
+        let mut found = Vec::new();
+        for message in &self.not_run {
+            let suite = not_run_suite(message);
+            if !suite.is_empty() && !found.iter().any(|existing: &String| existing.as_str() == suite) {
+                found.push(suite.to_owned());
+            }
+        }
+        found
+    }
+}
+
+pub(crate) fn untested_since(team: &Team) -> Option<Untested> {
+    let since = team.merge_tested.clone();
+    let not_run = pending_not_run(team);
+    let merges = open_merge_ranges(team);
+    if since.is_empty() && not_run.is_empty() && merges.is_empty() {
+        return None;
+    }
+    let per_suite = not_run
+        .iter()
+        .filter_map(|message| {
+            let suite = not_run_suite(message);
+            (!suite.is_empty()).then(|| (suite.to_owned(), suite_since(team, suite)))
+        })
+        .collect();
+    Some(Untested { since, not_run, per_suite, merges })
 }
 
 /// A queued or tested entry, for status.
 pub(crate) fn view(task: &Task) -> Option<Value> {
-    task.merge.as_ref().map(|entry| json!({"state":entry.state,"author":entry.author,"commit":entry.commit,"merged":entry.merged,"tests":entry.requests.len(),"note":entry.note}))
+    let entry = task.merge.as_ref()?;
+    let mut value = json!({"state":entry.state,"author":entry.author,"commit":entry.commit,"merged":entry.merged,"tests":entry.requests.len(),"note":entry.note});
+    if entry.wait_reason != MergeWaitReason::Other { value["wait_reason"] = json!(entry.wait_reason); }
+    if !entry.not_run.is_empty() {
+        value["not_run"] = json!(entry.not_run.clone());
+    }
+    Some(value)
 }
 
 #[cfg(test)]

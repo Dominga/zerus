@@ -258,8 +258,11 @@ fn bundle(project: &Path, commit: &str, tips: &[String]) -> anyhow::Result<Strin
     }
     let name = format!("refs/zerus-runner/{full}");
     git(project, &["update-ref", &name, &full])?;
-    let file = tempfile::NamedTempFile::new()?;
-    let path = file.path().to_string_lossy().into_owned();
+    // Git creates the bundle itself: a fresh temporary folder, never an open
+    // NamedTempFile, whose path Windows refuses to let git create ("fatal:
+    // cannot create ...: Permission denied").
+    let directory = tempfile::tempdir()?;
+    let path = directory.path().join("runner.bundle").to_string_lossy().into_owned();
     let mut args = vec!["bundle".to_owned(), "create".to_owned(), path.clone(), name.clone()];
     for tip in &known {
         args.push(format!("^{tip}"));

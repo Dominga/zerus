@@ -2,6 +2,127 @@ use super::*;
 use super::support::*;
 
 #[test]
+fn an_interim_report_needs_an_open_attempt_of_its_own_member() {
+    use crate::state::teams::model::Member;
+    let mut team = running_team();
+    let attempt = hand_out(&mut team, 1);
+    team.members.push(Member { id: "qa".into(), role: "Tester".into(), agent: "kimi".into(), ..Default::default() });
+    let none = BTreeSet::new();
+    let mut events = Vec::new();
+    let error = apply(
+        &mut team,
+        "report",
+        &json!({"task":1,"attempt":attempt,"text":"Half","interim":true}),
+        &Actor::Member("qa".into()),
+        &none,
+        &mut events,
+    )
+    .unwrap_err()
+    .to_string();
+    assert!(error.contains("belongs to another member"), "{error}");
+    // A final report closes the attempt; an interim no longer applies.
+    apply(&mut team, "report", &json!({"task":1,"attempt":attempt,"text":"Done"}), &Actor::Member("dev".into()), &none, &mut events).unwrap();
+    let error = apply(
+        &mut team,
+        "report",
+        &json!({"task":1,"attempt":attempt,"text":"More","interim":true}),
+        &Actor::Member("dev".into()),
+        &none,
+        &mut events,
+    )
+    .unwrap_err()
+    .to_string();
+    assert!(error.contains("In progress") || error.contains("no open attempt"), "{error}");
+    assert!(team.task(1).unwrap().attempts.iter().all(|attempt| attempt.interim.is_none()));
+}
+
+#[test]
+fn a_retried_attempt_drops_its_interim_report_and_item() {
+    let mut team = running_team();
+    let attempt = hand_out(&mut team, 1);
+    let none = BTreeSet::new();
+    let mut events = Vec::new();
+    apply(
+        &mut team,
+        "report",
+        &json!({"task":1,"attempt":attempt,"text":"Half","interim":true}),
+        &Actor::Member("dev".into()),
+        &none,
+        &mut events,
+    )
+    .unwrap();
+    assert!(crate::state::teams::inbox::items(&team).iter().any(|item| item.kind == "interim_report"));
+    apply(&mut team, "retry", &json!({"task":1,"by":"human"}), &Actor::Human, &none, &mut events).unwrap();
+    assert!(team.task(1).unwrap().attempts.iter().all(|attempt| attempt.interim.is_none()));
+    assert!(!crate::state::teams::inbox::items(&team).iter().any(|item| item.kind == "interim_report"));
+}
+
+#[test]
+fn an_interim_event_text_is_capped_but_the_report_keeps_it_all() {
+    let mut team = running_team();
+    let attempt = hand_out(&mut team, 1);
+    let none = BTreeSet::new();
+    let mut events = Vec::new();
+    let long = "x".repeat(5000);
+    apply(
+        &mut team,
+        "report",
+        &json!({"task":1,"attempt":attempt,"text":long,"interim":true}),
+        &Actor::Member("dev".into()),
+        &none,
+        &mut events,
+    )
+    .unwrap();
+    let event = events.iter().rev().find(|event| event.kind == "interim_report").unwrap();
+    let shown = event.payload["text"].as_str().unwrap();
+    assert!(shown.chars().count() <= 2003 && shown.ends_with("..."), "{}", shown.chars().count());
+    assert_eq!(team.task(1).unwrap().attempts[0].interim.as_ref().unwrap().text.chars().count(), 5000);
+}
+
+#[test]
+fn task_output_is_normalized_bounded_and_preserved_through_task_operations() {
+    let (base, _) = create("t", &json!({"name":"T","lead":{"id":"lead","agent":"claude"}})).unwrap();
+    let none = BTreeSet::new();
+    let mut events = Vec::new();
+    let mut team = base.clone();
+    apply(&mut team, "plan", &json!({"tasks":[{"id":1,"title":"API","assignee":"lead",
+        "output":["./src\\api//", "src/api", "docs/./api.md"]}]}), &Actor::Human, &none, &mut events).unwrap();
+    assert_eq!(team.task(1).unwrap().output, vec!["src/api", "docs/api.md"]);
+    apply(&mut team, "approve", &json!({}), &Actor::Human, &none, &mut events).unwrap();
+    apply(&mut team, "extend", &json!({"tasks":[{"id":2,"title":"Docs","assignee":"lead","output":["docs\\new.md"]}]}),
+        &Actor::Human, &none, &mut events).unwrap();
+    assert_eq!(team.task(2).unwrap().output, vec!["docs/new.md"]);
+    apply(&mut team, "edit-draft", &json!({"phase":2,"tasks_update":[{"id":2,"output":["./docs//guide/"]}]}),
+        &Actor::Human, &none, &mut events).unwrap();
+    assert_eq!(team.task(2).unwrap().output, vec!["docs/guide"]);
+    assert!(team.phases[0].changes.iter().any(|change| change["field"] == "output"));
+    let warning = apply(&mut team, "add-to-phase", &json!({"phase":1,"tasks":[{"id":3,"title":"Follow-up","assignee":"lead","output":["src\\follow.rs"]}]}),
+        &Actor::Human, &none, &mut events).unwrap();
+    apply(&mut team, "add-to-phase", &json!({"phase":1,"confirm":warning["pending"],"confirmation":"add"}),
+        &Actor::Human, &none, &mut events).unwrap();
+    assert_eq!(team.task(3).unwrap().output, vec!["src/follow.rs"]);
+    let saved: Team = serde_json::from_value(serde_json::to_value(&team).unwrap()).unwrap();
+    assert_eq!(saved.task(3).unwrap().output, vec!["src/follow.rs"]);
+    let status = crate::state::teams::commands::view_with_cancelled(&saved, &[], Some(&[]), true);
+    assert_eq!(status["tasks"].as_array().unwrap().iter().find(|task| task["id"] == 3).unwrap()["output"], json!(["src/follow.rs"]));
+    let old: Task = serde_json::from_value(json!({"id":9,"title":"Legacy"})).unwrap();
+    assert!(old.output.is_empty());
+    for invalid in [
+        json!(["/absolute"]), json!(["C:\\absolute"]), json!(["../outside"]), json!(["src/../outside"]),
+        json!(["\\\\server\\share"]), json!([""]), json!(["line\nbreak"]), json!(["tab\tpath"]),
+        json!(["x".repeat(1025)]), json!(vec!["src/api"; 129]), json!(vec!["x".repeat(1024); 33]),
+        json!("src/api"), json!([42]),
+    ] {
+        let mut creating = base.clone();
+        assert!(apply(&mut creating, "plan", &json!({"tasks":[{"id":1,"title":"Invalid","assignee":"lead","output":invalid}]}),
+            &Actor::Human, &none, &mut Vec::new()).is_err(), "plan accepted {invalid}");
+        let mut editing = team.clone();
+        assert!(apply(&mut editing, "edit-draft", &json!({"phase":2,"tasks_update":[{"id":2,"output":invalid}]}),
+            &Actor::Human, &none, &mut Vec::new()).is_err(), "edit accepted {invalid}");
+    }
+}
+
+#[test]
 fn only_you_approve_and_errors_block_it() {
     let (mut team, _) = create("t", &json!({"name":"T","lead":{"id":"lead","agent":"claude"}})).unwrap();
     let mut events = Vec::new();

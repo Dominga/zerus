@@ -1264,20 +1264,8 @@ pub(super) fn hook() -> Result<i32> {
         return Ok(0);
     };
     let event = stdin_json()?;
-    let mut started = false;
-    let mut hint = None;
-    let code = track(name, token, event, &mut started, &mut hint)?;
-    // The project's task commands, in the agent's context from its first turn on
-    // (docs/superpowers/specs/2026-10-13-project-task-queue-design.md); only a
-    // start this run recorded as its own conversation's, never a nested CLI's.
-    let tasks = (code == 0 && started)
-        .then(|| nonempty_env("HGS_AGENT").and_then(|agent| crate::tasks::session_context(&agent)))
-        .flatten();
-    if let Some(context) = start_context(hint, tasks) {
-        let stdout = io::stdout();
-        agent_hint::output(&mut stdout.lock(), &context)?;
-    }
-    Ok(code)
+    let stdout = io::stdout();
+    track(name, token, event, &mut stdout.lock())
 }
 
 /// Claude Code 2.1.312 refuses a hook output of two JSON objects: the agent
@@ -1285,14 +1273,41 @@ pub(super) fn hook() -> Result<i32> {
 fn start_context(hint: Option<String>, tasks: Option<Value>) -> Option<String> {
     let tasks = tasks.and_then(|context| context["hookSpecificOutput"]["additionalContext"].as_str().map(str::to_owned));
     let parts: Vec<String> = hint.into_iter().chain(tasks).collect();
-    (!parts.is_empty()).then(|| parts.join("
-
-"))
+    (!parts.is_empty()).then(|| parts.join("\n\n"))
 }
 
-/// Records one hook event of the session `name`'s run `token`; `started` says
-/// that it was the start of the run's own conversation.
-fn track(name: String, token: String, mut event: Value, started: &mut bool, hint_out: &mut Option<String>) -> Result<i32> {
+fn clear_rules_proof(record: &mut Value, event: &Value) -> bool {
+    if string(event,"hook_event_name") != "SessionStart" || !string(event,"agent_id").is_empty() { return false; }
+    record["iron_rules_start_supported"] = json!(false);
+    for key in ["iron_rules_start_project","iron_rules_start_digest","iron_rules_start_run","iron_rules_start_conversation"] {
+        record.as_object_mut().unwrap().remove(key);
+    }
+    true
+}
+
+fn startup_rules(record: &Value, event: &Value) -> Option<(String,String)> {
+    match iron_rules_start(record,event) {
+        Ok(Some((project,text))) if text.encode_utf16().count() <= super::iron_rules::MAX_START_RULES => Some((project,text)),
+        Ok(_) => None,
+        Err(error) => { eprintln!("hgs: {error}; iron rules keep per-send delivery"); None }
+    }
+}
+
+fn iron_rules_start(record: &Value, event: &Value) -> Result<Option<(String, String)>> {
+    if string(record, "agent") != "claude"
+        || string(event, "hook_event_name") != "SessionStart"
+        || !string(event, "agent_id").is_empty()
+    {
+        return Ok(None);
+    }
+    let context = super::iron_rules::record_context(record)
+        .map_err(|error| format!("Iron rules could not be read: {error}"))?;
+    Ok(Some(context))
+}
+
+/// Records one hook event of this exact run. A main start publishes its
+/// confirmed binding only after its combined context was delivered.
+fn track(name: String, token: String, mut event: Value, output: &mut impl std::io::Write) -> Result<i32> {
     if nonempty_env("HGS_AGENT").as_deref() == Some("claude") {
         if let std::borrow::Cow::Owned(prompt) = journal::pasted_text(string(&event, "prompt")) {
             event["prompt"] = json!(prompt);
@@ -1344,6 +1359,10 @@ fn track(name: String, token: String, mut event: Value, started: &mut bool, hint
         && !external_agents::main_start(&record, &event) {
         return Ok(0);
     }
+    // Only an accepted main start may invalidate this record's proof. A
+    // foreign or child start must not alter its parent's startup delivery.
+    // Clear before later work can fail, including rules resolution.
+    if clear_rules_proof(&mut record, &event) { write(&mut record)?; }
     let agent = string(&record, "agent").to_owned();
     if !events(&agent).contains(&kind)
         && !versioned_events(&agent).iter().any(|(event, _)| *event == kind)
@@ -1483,13 +1502,35 @@ fn track(name: String, token: String, mut event: Value, started: &mut bool, hint
         }
     }
     let hint = agent_hint::start(&mut record, &event);
-    write(&mut record)?;
-    if kind == "SessionStart" && string(&event, "agent_id").is_empty() {
-        archive::confirm_restore(&mut record)?;
-        *started = true;
+    let own_start = kind == "SessionStart" && string(&event, "agent_id").is_empty();
+    let rules = startup_rules(&record, &event);
+    let parts: Vec<_> = hint.map(str::to_owned)
+        .into_iter()
+        .chain(rules.as_ref().map(|(_, text)| text.clone()))
+        .filter(|text| !text.is_empty())
+        .collect();
+    let hint = (!parts.is_empty()).then(|| parts.join("\n\n"));
+    let tasks = own_start
+        .then(|| nonempty_env("HGS_AGENT").and_then(|agent| crate::tasks::session_context(&agent)))
+        .flatten();
+    if let Some(context) = start_context(hint, tasks) {
+        // A failed write or flush leaves only the early invalidation persisted.
+        // Never expose a fresh conversation as started before this succeeds.
+        agent_hint::output(output, &context)?;
+        if let Some((project, text)) = rules.filter(|_| context.encode_utf16().count() <= super::iron_rules::MAX_START_CONTEXT) {
+            record["iron_rules_start_supported"] = json!(true);
+            record["iron_rules_start_project"] = json!(project);
+            record["iron_rules_start_digest"] = json!(teams::store::digest(&json!(text)));
+            record["iron_rules_start_run"] = record["run_id"].clone();
+            record["iron_rules_start_conversation"] = record["conversation_id"].clone();
+        }
     }
-    // The caller writes it, with the task commands, as one JSON object.
-    *hint_out = hint.map(str::to_owned);
+    // The ready conversation and its proof become visible in the same atomic
+    // record update; hook() performs no later proof-only binding write.
+    write(&mut record)?;
+    if own_start {
+        archive::confirm_restore(&mut record)?;
+    }
     Ok(0)
 }
 
@@ -1497,6 +1538,203 @@ fn track(name: String, token: String, mut event: Value, started: &mut bool, hint
 mod tests {
     use super::windows::{self as forms, CLAUDE_EXEC_FORM};
     use super::*;
+
+    struct StartupBackend;
+    impl crate::state::backend::TerminalBackend for StartupBackend {
+        fn panes(&self) -> Result<Vec<crate::state::backend::PaneRow>> {
+            Ok(vec![crate::state::backend::PaneRow {
+                session: "claude/hooks/parent".into(), session_id: "$1".into(),
+                pane: "%1".into(), dead: "0".into(), run_marker: "parent-run".into(),
+            }])
+        }
+    }
+
+    struct StartupOutput {
+        path: PathBuf,
+        bytes: Vec<u8>,
+        visible: Vec<Value>,
+        fail_write: bool,
+        fail_flush: bool,
+    }
+
+    impl std::io::Write for StartupOutput {
+        fn write(&mut self, bytes: &[u8]) -> std::io::Result<usize> {
+            self.visible.push(serde_json::from_slice(&fs::read(&self.path)?).unwrap());
+            if self.fail_write { return Err(std::io::Error::new(std::io::ErrorKind::BrokenPipe, "fixture write")); }
+            self.bytes.extend_from_slice(bytes);
+            Ok(bytes.len())
+        }
+        fn flush(&mut self) -> std::io::Result<()> {
+            self.visible.push(serde_json::from_slice(&fs::read(&self.path)?).unwrap());
+            if self.fail_flush { return Err(std::io::Error::new(std::io::ErrorKind::BrokenPipe, "fixture flush")); }
+            Ok(())
+        }
+    }
+
+    fn pending_rules_start() -> Value {
+        json!({"version":1,"name":"claude/hooks/parent","run_id":"parent-run","pane":"%1",
+            "agent":"claude","pid":0,"conversation_id":"","activity":"unknown","phase":"unknown",
+            "iron_rules":["Keep this session rule"],"iron_rules_start_supported":true,
+            "iron_rules_start_project":"old-project","iron_rules_start_digest":"old-digest",
+            "iron_rules_start_run":"old-run","iron_rules_start_conversation":"old-conversation"})
+    }
+
+    #[test]
+    fn startup_proof_is_published_in_the_first_confirmed_binding() {
+        let directory = tempfile::tempdir().unwrap();
+        super::super::with_test_state_root(directory.path(), || {
+            let mut record = pending_rules_start();
+            write(&mut record).unwrap();
+            let mut output = StartupOutput { path: record_path("claude/hooks/parent"), bytes: Vec::new(),
+                visible: Vec::new(), fail_write: false, fail_flush: false };
+            let event = json!({"hook_event_name":"SessionStart","source":"startup","session_id":"new-conversation"});
+            crate::state::backend::with_fake(&StartupBackend, || {
+                assert_eq!(track("claude/hooks/parent".into(), "parent-run".into(), event, &mut output).unwrap(), 0);
+            });
+            assert!(!output.visible.is_empty(), "the real hook emitted its context");
+            for visible in &output.visible {
+                assert_eq!(string(visible, "conversation_id"), "", "start became visible before output finished: {visible}");
+                assert_eq!(visible["iron_rules_start_supported"], false);
+            }
+            let published: Value = serde_json::from_slice(&fs::read(&output.path).unwrap()).unwrap();
+            assert_eq!(published["conversation_id"], "new-conversation");
+            assert_eq!(published["activity"], "idle");
+            assert_eq!(published["iron_rules_start_supported"], true);
+            assert_eq!(published["iron_rules_start_run"], published["run_id"]);
+            assert_eq!(published["iron_rules_start_conversation"], published["conversation_id"]);
+            let expected = teams::store::digest(&json!(startup_rules(&published,
+                &json!({"hook_event_name":"SessionStart"})).unwrap().1));
+            assert_eq!(published["iron_rules_start_digest"], expected);
+            let sent: Value = serde_json::from_slice(&output.bytes).unwrap();
+            assert!(sent["hookSpecificOutput"]["additionalContext"].as_str().unwrap().contains("Keep this session rule"));
+        });
+    }
+
+    #[test]
+    fn broken_startup_output_never_publishes_a_proof_or_confirmed_binding() {
+        for fail_flush in [false, true] {
+            let directory = tempfile::tempdir().unwrap();
+            super::super::with_test_state_root(directory.path(), || {
+                let mut record = pending_rules_start();
+                write(&mut record).unwrap();
+                let mut output = StartupOutput { path: record_path("claude/hooks/parent"), bytes: Vec::new(),
+                    visible: Vec::new(), fail_write: !fail_flush, fail_flush };
+                crate::state::backend::with_fake(&StartupBackend, || {
+                    let event = json!({"hook_event_name":"SessionStart","session_id":"new-conversation"});
+                    assert!(track("claude/hooks/parent".into(), "parent-run".into(), event, &mut output).is_err());
+                });
+                let saved: Value = serde_json::from_slice(&fs::read(&output.path).unwrap()).unwrap();
+                assert_eq!(saved["conversation_id"], "");
+                assert_eq!(saved["activity"], "unknown");
+                assert_eq!(saved["iron_rules_start_supported"], false);
+                for key in ["iron_rules_start_project", "iron_rules_start_digest", "iron_rules_start_run", "iron_rules_start_conversation"] {
+                    assert!(saved.get(key).is_none(), "old proof survived failed output: {key}");
+                }
+            });
+        }
+    }
+
+    #[test]
+    fn a_foreign_session_start_leaves_the_record_and_rules_proof_byte_for_byte_unchanged() {
+        struct Backend;
+        impl crate::state::backend::TerminalBackend for Backend {
+            fn panes(&self) -> Result<Vec<crate::state::backend::PaneRow>> {
+                Ok(vec![crate::state::backend::PaneRow {
+                    session: "claude/hooks/parent".into(),
+                    session_id: "$1".into(),
+                    pane: "%1".into(),
+                    dead: "0".into(),
+                    run_marker: "parent-run".into(),
+                }])
+            }
+        }
+        for has_proof in [false, true] {
+            let directory = tempfile::tempdir().unwrap();
+            super::super::with_test_state_root(directory.path(), || {
+                let name = "claude/hooks/parent";
+                let mut record = json!({"version":1,"name":name,"run_id":"parent-run","pane":"%1",
+                    "agent":"claude","pid":0,"conversation_id":"11111111-1111-4111-8111-111111111111",
+                    "model":"parent-model","iron_rules":["Keep the session rule"]});
+                if has_proof {
+                    record["iron_rules_start_supported"] = json!(true);
+                    record["iron_rules_start_project"] = json!("project");
+                    record["iron_rules_start_digest"] = json!("digest");
+                    record["iron_rules_start_run"] = json!("parent-run");
+                    record["iron_rules_start_conversation"] = record["conversation_id"].clone();
+                }
+                write(&mut record).unwrap();
+                let path = record_path(name);
+                let before = fs::read(&path).unwrap();
+                let mut output = Vec::new();
+                crate::state::backend::with_fake(&Backend, || {
+                    let event = json!({"hook_event_name":"SessionStart",
+                        "session_id":"22222222-2222-4222-8222-222222222222","model":"foreign-model"});
+                    assert_eq!(track(name.into(), "parent-run".into(), event,
+                        &mut output).unwrap(), 0);
+                });
+                assert_eq!(fs::read(path).unwrap(), before, "foreign start changed the record (proof={has_proof})");
+                assert!(output.is_empty(), "foreign starts emit no main-session context");
+            });
+        }
+    }
+
+    #[test]
+    fn failed_or_oversized_start_rules_leave_hint_tasks_and_no_old_proof() {
+        let dir=tempfile::tempdir().unwrap();
+        super::super::with_test_state_root(dir.path(),|| {
+            let mut record=json!({"agent":"claude","name":"claude/x/one","run_id":"r1","conversation_id":"c1",
+                "iron_rules_start_supported":true,"iron_rules_start_digest":"old","iron_rules_start_run":"old-run","iron_rules":["Own"]});
+            let event=json!({"hook_event_name":"SessionStart","source":"compact"});
+            assert!(clear_rules_proof(&mut record,&event));
+            // A malformed authoritative list forces a real resolution error.
+            record["iron_rules"]=json!([5]);
+            assert!(startup_rules(&record,&event).is_none());
+            assert_eq!(record["iron_rules_start_supported"],false); assert!(record.get("iron_rules_start_run").is_none());
+            let context=start_context(Some("Agent hint".into()),crate::tasks::session_context("claude")).unwrap();
+            assert!(context.contains("Agent hint") && context.contains("Zerus tasks"));
+            record["iron_rules"]=json!((0..20).map(|_|"\u{1f600}".repeat(150)).collect::<Vec<_>>());
+            assert!(startup_rules(&record,&event).is_none(),"UTF-16 expansion must keep the fallback");
+            record["iron_rules"]=json!(["Small"]);
+            assert!(startup_rules(&record,&event).is_some());
+        });
+    }
+
+    #[test]
+    fn iron_rules_follow_claude_start_resume_clear_and_compact_but_not_messages() {
+        let dir = tempfile::tempdir().unwrap();
+        super::super::with_test_state_root(dir.path(), || {
+            let record = json!({"agent":"claude","name":"claude/example/one","iron_rules":["Session requirement"]});
+            for source in ["startup", "resume", "clear", "compact"] {
+                let (_, text) = iron_rules_start(
+                    &record,
+                    &json!({"hook_event_name":"SessionStart","source":source}),
+                )
+                .unwrap()
+                .unwrap();
+                assert_eq!(text.matches("Session requirement").count(), 1);
+                let mut out = Vec::new();
+                agent_hint::output(&mut out, &start_context(Some(text), None).unwrap()).unwrap();
+                let value: Value = serde_json::from_slice(&out).unwrap();
+                assert_eq!(value["hookSpecificOutput"]["hookEventName"], "SessionStart");
+            }
+            for event in [
+                json!({"hook_event_name":"UserPromptSubmit"}),
+                json!({"hook_event_name":"PreToolUse"}),
+                json!({"hook_event_name":"SessionStart","agent_id":"child"}),
+            ] {
+                assert!(iron_rules_start(&record, &event).unwrap().is_none());
+            }
+            for agent in ["codex", "kimi", "dsh", "opencode"] {
+                let mut record = record.clone();
+                record["agent"] = json!(agent);
+                assert!(
+                    iron_rules_start(&record, &json!({"hook_event_name":"SessionStart"}))
+                        .unwrap()
+                        .is_none()
+                );
+            }
+        });
+    }
 
     #[test]
     fn session_start_writes_one_json_object_with_the_hint_and_the_task_commands() {

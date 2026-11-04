@@ -1,3 +1,4 @@
+#include "IronRulesEditor.h"
 #include "Settings.h"
 #include "SlowEventLog.h"
 #include "TeamWorkspace.h"
@@ -1499,7 +1500,8 @@ QWidget *TeamWorkspace::inboxStrip(const Team &team, const QList<InboxItem> &ite
     const auto kindOf = [](const InboxItem &item) {
         return item.kind == "report" ? tr("report") : item.kind == "question" ? tr("question")
              : item.kind == "permission" ? tr("permission") : item.kind == "lead_task" ? tr("lead task")
-             : item.kind == "stalled" ? tr("stalled") : item.kind == "budget" ? tr("budget") : item.kind;
+             : item.kind == "stalled" ? tr("stalled") : item.kind == "budget" ? tr("budget")
+             : item.kind == "interim_report" ? tr("interim") : item.kind == "merge_waiting" ? tr("merge waiting") : item.kind;
     };
     auto *head = row(6);
     auto *toggle = new QToolButton; toggle->setIcon(workspaceIcon(m_inboxOpen ? "chevron-down" : "chevron-right", c.fg)); toggle->setAutoRaise(true);
@@ -3907,6 +3909,10 @@ void TeamWorkspace::memberMenu(const Team &team, const Member &member, const QPo
         if (ok && !text.trimmed().isEmpty() && sendMessage) sendMessage(host, session, text.trimmed());
     });
     message->setEnabled(!member.session.isEmpty());
+    menu.addAction(tr("Iron rules..."), this, [this, member] {
+        QStringList rules; if (!IronRules::edit(this, member.ironRules, rules)) return;
+        m_panel->act("settings", {{"members_update", QJsonArray{QJsonObject{{"id", member.id}, {"iron_rules", QJsonArray::fromStringList(rules)}}}}});
+    });
     if (!member.lead) {
         if (member.state == "paused") menu.addAction(tr("Resume member"), this, [this, id = member.id] { m_panel->act("resume-member", {{"member", id}}); });
         else menu.addAction(tr("Pause member"), this, [this, id = member.id] { m_panel->act("pause-member", {{"member", id}}); });

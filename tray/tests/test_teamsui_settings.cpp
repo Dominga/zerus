@@ -11,6 +11,7 @@
 #include "SettingsPage.h"
 #include "TeamConversation.h"
 #include "TeamSettingsDialog.h"
+#include "IronRulesEditor.h"
 #include "TeamWorkspace.h"
 
 // U53 (#618): the account picker of a composer. Profiles as `hgs account ls`
@@ -100,6 +101,7 @@ private slots:
     void moveToAnotherAccountNamesTheMembersAndAsksOnce();
     void teamCustomizationIsOptIn();
     void teamSettingsSendOnlyWhatChanged();
+    void teamAndMemberIronRulesAreBoundedAdditions();
     void teamSettingsAllowLandingAndEditMemberModels();
     void teamSettingsPausesAndPhaseAcceptance();
     void aboutNamesTheForkAndItsUpdate();
@@ -697,6 +699,23 @@ void TestTeamsUiSettings::teamCustomizationIsOptIn()
 // U48/U51/U52: the team settings send only what changed (a branch per task
 // switched off is null), refuse a branch name without {id}, and keep the
 // intake keys: a new key is shown once, a revoke asks first.
+void TestTeamsUiSettings::teamAndMemberIronRulesAreBoundedAdditions()
+{
+    HgsClient client(FakeCli::program(script())); TeamController controller(&client);
+    auto value = parse(team()); value.members[0].ironRules = {"Lead addition"};
+    TeamSettingsDialog dialog(&controller, value, true);
+    auto *rules = dialog.findChild<QPlainTextEdit *>("teamIronRules"); QVERIFY(rules);
+    rules->setPlainText("Team addition");
+    QCOMPARE(dialog.changes().value("iron_rules").toArray(), QJsonArray{"Team addition"});
+    QPlainTextEdit *member = nullptr;
+    for (auto *field : dialog.findChildren<QPlainTextEdit *>()) if (field->property("member").toString() == value.members[0].id) member = field;
+    QVERIFY(member); QCOMPARE(member->toPlainText(), QString("Lead addition")); member->setPlainText("New addition");
+    QCOMPARE(dialog.memberChanges().size(), 1);
+    QCOMPARE(dialog.memberChanges().first().toObject().value("iron_rules").toArray(), QJsonArray{"New addition"});
+    rules->setPlainText(QString(301, 'x')); QVERIFY(!dialog.problem().isEmpty());
+    QVERIFY(!dialog.findChild<QPushButton *>("teamSettingsSave")->isEnabled());
+}
+
 void TestTeamsUiSettings::teamSettingsSendOnlyWhatChanged()
 {
     HgsClient client(FakeCli::program(script()));
@@ -798,6 +817,9 @@ void TestTeamsUiSettings::teamSettingsPausesAndPhaseAcceptance()
         QTRY_COMPARE(calls(script(), "settings").size(), 1);
         QCOMPARE(calls(script(), "settings").first()["settings"].toObject(),
                  (QJsonObject{{"lead_removes_own_pause", true}, {"phase_acceptance", "owner"}}));
+        // The save callback accepts the dialog: let it finish before the
+        // controller is destroyed, so no late reply can outlive the test.
+        QTRY_VERIFY(!dialog.isVisible());
     }
     auto set = team();
     set["settings"] = QJsonObject{{"lead_removes_own_pause", true}, {"phase_acceptance", "owner"}};

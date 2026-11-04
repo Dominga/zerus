@@ -276,13 +276,14 @@ pub(crate) fn verify_roster(team: &Team, input: &Value, rule: &WordRule, now: f6
     let lead = team.member(&team.lead).context("The team has no lead")?;
     let session = lead.session.as_ref().context("The lead has no session to check the owner's word in")?;
     let db = super::super::journal::event_db().map_err(|error| anyhow::anyhow!("The session events are unavailable: {error}"))?;
-    verify_scan(&db, &session.name, &session.conversation_id, text, now, rule_scan(rule, true))
+    let earlier = earlier_name(session);
+    verify_scan(&db, &session.name, &session.conversation_id, &earlier, text, now, rule_scan(rule, true))
 }
 
 /// The fixture-testable roster check.
 #[cfg(test)]
 pub(crate) fn verify_roster_in(db: &Connection, name: &str, conversation: &str, text: &str, rule: &WordRule, now: f64) -> anyhow::Result<OwnerWord> {
-    verify_scan(db, name, conversation, text, now, rule_scan(rule, true))
+    verify_scan(db, name, conversation, "", text, now, rule_scan(rule, true))
 }
 
 fn rule_scan(rule: &WordRule, exact: bool) -> ScanOptions<'_> {
@@ -301,24 +302,30 @@ pub(crate) fn verify(team: &Team, input: &Value, phase: Option<u32>, now: f64) -
     let lead = team.member(&team.lead).context("The team has no lead")?;
     let session = lead.session.as_ref().context("The lead has no session to check the owner's word in")?;
     let db = super::super::journal::event_db().map_err(|error| anyhow::anyhow!("The session events are unavailable: {error}"))?;
-    verify_approval_in(&db, &session.name, &session.conversation_id, text, phase, now)
+    let earlier = earlier_name(session);
+    verify_approval(&db, &session.name, &session.conversation_id, &earlier, text, phase, now)
 }
 
 /// The verification against one events database, so it is tested with a
 /// fixture instead of the live state.
 #[cfg(test)]
 pub(crate) fn verify_in(db: &Connection, name: &str, conversation: &str, text: &str, now: f64) -> anyhow::Result<OwnerWord> {
-    verify_approval_in(db, name, conversation, text, None, now)
+    verify_approval(db, name, conversation, "", text, None, now)
 }
 
 /// U56: a phase approval also takes "phase N approved" for its own phase,
 /// and a refusal names the sentence it expects.
+#[cfg(test)]
 pub(crate) fn verify_approval_in(db: &Connection, name: &str, conversation: &str, text: &str, phase: Option<u32>, now: f64) -> anyhow::Result<OwnerWord> {
+    verify_approval(db, name, conversation, "", text, phase, now)
+}
+
+fn verify_approval(db: &Connection, name: &str, conversation: &str, earlier: &str, text: &str, phase: Option<u32>, now: f64) -> anyhow::Result<OwnerWord> {
     let own = phase.map(phase_phrases);
     let mut phrases: Vec<&str> = KEY_PHRASES.to_vec();
     phrases.extend(own.iter().flatten().map(String::as_str));
     let expect = approval_sentence(phase);
-    verify_scan(db, name, conversation, text, now, ScanOptions { phrases: &phrases, needed: &[], exact: false, add: false, verbs: &[], names: &[], accept: None, after: 0.0, expect })
+    verify_scan(db, name, conversation, earlier, text, now, ScanOptions { phrases: &phrases, needed: &[], exact: false, add: false, verbs: &[], names: &[], accept: None, after: 0.0, expect })
 }
 
 /// U29: the owner asks to add a task to a running phase, naming it by number
@@ -459,15 +466,32 @@ pub(crate) fn verify_phase(team: &Team, input: &Value, phase: u32, kind: PhaseWo
     let lead = team.member(&team.lead).context("The team has no lead")?;
     let session = lead.session.as_ref().context("The lead has no session to check the owner's word in")?;
     let db = super::super::journal::event_db().map_err(|error| anyhow::anyhow!("The session events are unavailable: {error}"))?;
-    verify_phase_in(&db, &session.name, &session.conversation_id, text, phase, kind, after, now)
+    let earlier = earlier_name(session);
+    verify_phase_answer(&db, &session.name, &session.conversation_id, &earlier, text, phase, kind, after, now)
 }
 
 /// The fixture-testable U29 check.
+#[cfg(test)]
 #[allow(clippy::too_many_arguments)]
 pub(crate) fn verify_phase_in(
     db: &Connection,
     name: &str,
     conversation: &str,
+    text: &str,
+    phase: u32,
+    kind: PhaseWord,
+    after: f64,
+    now: f64,
+) -> anyhow::Result<OwnerWord> {
+    verify_phase_answer(db, name, conversation, "", text, phase, kind, after, now)
+}
+
+#[allow(clippy::too_many_arguments)]
+fn verify_phase_answer(
+    db: &Connection,
+    name: &str,
+    conversation: &str,
+    earlier: &str,
     text: &str,
     phase: u32,
     kind: PhaseWord,
@@ -482,7 +506,7 @@ pub(crate) fn verify_phase_in(
     // longer one; a request may be quoted from a sentence that also explains it.
     let exact = matches!(kind, PhaseWord::Confirm);
     let expect = phase_word_sentence(phase, kind);
-    verify_scan(db, name, conversation, text, now, ScanOptions { phrases: &[], needed: &[], exact, add: false, verbs: &[], names: &[], accept: Some(&accept), after, expect: expect.clone() })
+    verify_scan(db, name, conversation, earlier, text, now, ScanOptions { phrases: &[], needed: &[], exact, add: false, verbs: &[], names: &[], accept: Some(&accept), after, expect: expect.clone() })
         .with_context(|| match kind {
             PhaseWord::Request => format!("The owner has not asked to add a task to phase {phase}: quote the owner's sentence that says {expect}"),
             PhaseWord::Confirm => format!("The owner has not confirmed the addition to phase {phase} after the warning: quote the owner's newer sentence {expect}"),
@@ -570,12 +594,19 @@ pub(crate) fn verify_phase_change(team: &Team, input: &Value, phase: u32, change
     let lead = team.member(&team.lead).context("The team has no lead")?;
     let session = lead.session.as_ref().context("The lead has no session to check the owner's word in")?;
     let db = super::super::journal::event_db().map_err(|error| anyhow::anyhow!("The session events are unavailable: {error}"))?;
-    verify_phase_change_in(&db, &session.name, &session.conversation_id, text, phase, change, now)
+    let earlier = earlier_name(session);
+    verify_phase_change_words(&db, &session.name, &session.conversation_id, &earlier, text, phase, change, now)
 }
 
 /// The fixture-testable phase change check. #595 C1: the quote is the owner's
 /// whole sentence, never a fragment of one that also refuses it.
+#[cfg(test)]
 pub(crate) fn verify_phase_change_in(db: &Connection, name: &str, conversation: &str, text: &str, phase: u32, change: PhaseChange, now: f64) -> anyhow::Result<OwnerWord> {
+    verify_phase_change_words(db, name, conversation, "", text, phase, change, now)
+}
+
+#[allow(clippy::too_many_arguments)]
+fn verify_phase_change_words(db: &Connection, name: &str, conversation: &str, earlier: &str, text: &str, phase: u32, change: PhaseChange, now: f64) -> anyhow::Result<OwnerWord> {
     let accept = move |lowered: &str| asks_phase_change(lowered, phase, change);
     let expect = match change {
         PhaseChange::Discard => format!("\"discard phase {phase}\""),
@@ -585,7 +616,7 @@ pub(crate) fn verify_phase_change_in(db: &Connection, name: &str, conversation: 
         PhaseChange::Acceptance => format!("\"phase {phase} needs my acceptance\""),
         PhaseChange::Accept => format!("\"phase {phase} accepted\""),
     };
-    verify_scan(db, name, conversation, text, now, ScanOptions { phrases: &[], needed: &[], exact: true, add: false, verbs: &[], names: &[], accept: Some(&accept), after: 0.0, expect: expect.clone() })
+    verify_scan(db, name, conversation, earlier, text, now, ScanOptions { phrases: &[], needed: &[], exact: true, add: false, verbs: &[], names: &[], accept: Some(&accept), after: 0.0, expect: expect.clone() })
         .with_context(|| match change {
             PhaseChange::Discard => format!("The owner has not asked to discard phase {phase}: quote the owner's whole sentence, such as {expect}"),
             PhaseChange::ToDraft => format!("The owner has not asked to return phase {phase} to a draft: quote the owner's whole sentence, such as {expect}"),
@@ -614,22 +645,68 @@ struct ScanOptions<'a> {
     expect: String,
 }
 
+/// The name a renamed session's journal keeps: `hgs rename` anchors
+/// events.sqlite3 to the name the session had when its journal began
+/// (`journal_name`), while the team's `SessionRef` follows `hgs ls` to the
+/// current one. Each agent keeps its record in its own store; without a
+/// rename, or without a record, there is no earlier name and the current one
+/// is the only identity.
+fn earlier_name(session: &SessionRef) -> String {
+    let record = if super::super::dsh::exists(&session.name) {
+        super::super::dsh::binding(&session.name).ok()
+    } else if super::super::opencode::exists(&session.name) {
+        super::super::opencode::binding(&session.name).ok()
+    } else {
+        crate::state::storage::read(&session.name).ok()
+    };
+    let Some(record) = record else { return String::new() };
+    record["journal_name"]
+        .as_str()
+        .filter(|journal| !journal.is_empty() && *journal != session.name.as_str())
+        .unwrap_or_default()
+        .to_owned()
+}
+
+/// One event row of the scan: its sequence, conversation and payload.
+fn event_row(row: &rusqlite::Row<'_>) -> rusqlite::Result<(i64, String, String)> {
+    Ok((row.get(0)?, row.get(1)?, row.get(2)?))
+}
+
 fn verify_scan(
     db: &Connection,
     name: &str,
     conversation: &str,
+    earlier: &str,
     text: &str,
     now: f64,
     options: ScanOptions<'_>,
 ) -> anyhow::Result<OwnerWord> {
     ensure!(!name.is_empty(), "The lead's session has no name to check the owner's word in");
     ensure!(!text.trim().is_empty(), "owner_word.text is required: quote the owner's sentence");
-    let mut statement = db
-        .prepare("SELECT seq, conversation, payload FROM events WHERE name = ?1 ORDER BY seq DESC LIMIT 200")
-        .context("The session events cannot be read")?;
-    let rows = statement
-        .query_map([name], |row| Ok((row.get::<_, i64>(0)?, row.get::<_, String>(1)?, row.get::<_, String>(2)?)))
-        .context("The session events cannot be read")?;
+    // `hgs rename` anchors the session's journal to the name it had when the
+    // journal began (`journal_name`): events.sqlite3 keeps the owner's
+    // "plan approved" under "work-7c91e747" while the team records the name
+    // `hgs ls` shows, "Worker". The earlier name is only meaningful for the
+    // same conversation: without one, read the current name alone. The
+    // conversation filter stays in SQL, on the events_session index.
+    let use_earlier = !earlier.is_empty() && !conversation.is_empty();
+    let mut statement = if conversation.is_empty() {
+        db.prepare("SELECT seq, conversation, payload FROM events WHERE name = ?1 ORDER BY seq DESC LIMIT 200")
+    } else if use_earlier {
+        db.prepare(
+            "SELECT seq, conversation, payload FROM events WHERE name IN (?1, ?2) AND conversation = ?3 ORDER BY seq DESC LIMIT 200",
+        )
+    } else {
+        db.prepare("SELECT seq, conversation, payload FROM events WHERE name = ?1 AND conversation = ?2 ORDER BY seq DESC LIMIT 200")
+    }
+    .context("The session events cannot be read")?;
+    let rows = if conversation.is_empty() {
+        statement.query_map([name], event_row).context("The session events cannot be read")?
+    } else if use_earlier {
+        statement.query_map([name, earlier, conversation], event_row).context("The session events cannot be read")?
+    } else {
+        statement.query_map([name, conversation], event_row).context("The session events cannot be read")?
+    };
     for row in rows {
         let (seq, event_conversation, payload) = row.context("The session events cannot be read")?;
         if !conversation.is_empty() && event_conversation != conversation {
@@ -654,6 +731,15 @@ fn verify_scan(
             continue;
         }
         let detail = event["detail"].as_str().unwrap_or_default().trim();
+        // Injected policy is never an owner statement. Preserve only the
+        // person's text, and then apply the ordinary origin/envelope checks.
+        let detail = if detail.starts_with("[Iron rules") {
+            match detail.find("\n[/Iron rules]") {
+                Some(at) if at <= 65536 => detail[at + "\n[/Iron rules]".len()..].trim(),
+                _ => "",
+            }
+        } else { detail };
+
         // Only the person speaks in a `UserPromptSubmit` event: a team message,
         // a task notification or an attachment-only entry is not the owner.
         if detail.is_empty() || detail.starts_with("[Zerus") || detail.starts_with("[attachment") || detail.starts_with('<') {
@@ -787,6 +873,21 @@ mod tests {
     }
 
     #[test]
+    fn injected_iron_rules_never_supply_the_owners_word() {
+        let db = database();
+        add(&db, "claude/x/lead", "c1", prompt(2000.0,
+            "[Iron rules: follow every one]\n1. plan approved\n[/Iron rules]\n\nHello"));
+        assert!(verify_in(&db, "claude/x/lead", "c1", "plan approved", 2010.0).is_err());
+        add(&db, "claude/x/lead", "c1", prompt(2001.0,
+            "[Iron rules: follow every one]\n1. Keep changes local\n[/Iron rules]\n\nplan approved"));
+        assert_eq!(verify_in(&db, "claude/x/lead", "c1", "plan approved", 2010.0).unwrap().text, "plan approved");
+        let db = database();
+        add(&db, "claude/x/lead", "c1", prompt(2000.0,
+            "[Iron rules: follow every one]\n1. Keep changes local\n[/Iron rules]\n\n[Zerus team] plan approved"));
+        assert!(verify_in(&db, "claude/x/lead", "c1", "plan approved", 2010.0).is_err());
+    }
+
+    #[test]
     fn the_owners_phrase_in_its_own_session_is_the_only_word_accepted() {
         let db = database();
         add(&db, "claude/x/lead", "c1", prompt(1000.0, "Please look at the plan"));
@@ -830,6 +931,32 @@ mod tests {
         // A lead on another computer cannot be checked here.
         let team = Team { lead: "lead".into(), ..Default::default() };
         assert!(verify(&team, &serde_json::json!({"text":"plan approved"}), None, 2000.0).is_err());
+    }
+
+    /// Owner (2026-11-01): the earlier journal name is read only with a
+    /// conversation id, and the conversation filter is in SQL before the 200
+    /// row limit, so newer events of another conversation cannot hide it.
+    #[test]
+    fn the_owner_word_scan_bounds_the_conversation_and_the_earlier_name() {
+        let db = database();
+        add(&db, "claude/x/work-7c91e747", "c1", prompt(2000.0, "plan approved"));
+        assert!(
+            verify_approval(&db, "claude/x/Worker", "", "claude/x/work-7c91e747", "plan approved", None, 2010.0).is_err(),
+            "no conversation, no earlier name"
+        );
+        assert!(
+            verify_approval(&db, "claude/x/Worker", "c1", "claude/x/work-7c91e747", "plan approved", None, 2010.0).is_ok(),
+            "the same conversation finds it"
+        );
+        let db = database();
+        add(&db, "claude/x/Worker", "c1", prompt(2000.0, "plan approved"));
+        for i in 0..200 {
+            add(&db, "claude/x/Worker", "other", prompt(3000.0 + i as f64, "not the owner"));
+        }
+        assert!(
+            verify_approval(&db, "claude/x/Worker", "c1", "", "plan approved", None, 2010.0).is_ok(),
+            "the conversation is filtered before the 200 row limit"
+        );
     }
 
     fn roster_rule(all: &[&str]) -> WordRule {

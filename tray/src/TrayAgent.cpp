@@ -163,6 +163,11 @@ TrayAgent::TrayAgent(const AppConfig &cfg, QObject *parent)
     , m_localTimer(this)
     , m_peerTimer(this)
 {
+    QTimer::singleShot(0, this, [this] {
+        IronRules::migrateLegacy(m_client.rulesTransport(), this, [](const QString &error) {
+            qWarning() << "Iron rules import remains pending:" << error;
+        });
+    });
     m_icons.setForegroundOverride(m_cfg.iconColor);
     { const auto members = Settings::value("teams/mutedMembers").toStringList(); m_state.setTeamMembers(QSet<QString>(members.cbegin(), members.cend())); }
     auto *updates=UpdateController::instance();

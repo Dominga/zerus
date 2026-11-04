@@ -66,7 +66,7 @@ public:
     // in one card, the field grows with its text, and the model and effort are
     // chosen from a menu that applies a choice at once.
     void setCompact(bool compact);
-    // WhiteWh fork: how many iron rules go with every message (0 hides the chip).
+    // WhiteWh fork: how many iron rules are shown for this scope (0 hides the chip).
     void setIronRulesCount(int count);
     // U25: the compact row's Copy session reference (zerus://session), shown
     // while the selected session has one to copy.

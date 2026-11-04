@@ -59,6 +59,9 @@ logs = ["~/.local/state/hgs/zerus.log"]
 # settings are watched as a log instead, since the owner's own tray writes them.
 
 [isolation.env]
+# On Windows USERPROFILE selects home; without it a test can reach the person's real profile.
+USERPROFILE = "home"
+HGS_STATE_DIR = "state"
 # The tray's home (its log, settings and single-instance socket) is the
 # run's home.
 HGS_TRAY_HOME = "home"
@@ -208,6 +211,8 @@ sources = [
 tests = ["tests/test_*.py"]
 # Real agents and hosts on this computer: never chosen automatically.
 manual = ["tests/test_dsh_native.py"]
+# The suite is POSIX-only (os.uname() and friends); the fork's Windows CI runs only cargo tests.
+platforms = ["linux", "macos"]
 
 [[provider.paths]]
 files = ["src/**", "Cargo.toml", "Cargo.lock", "build.rs"]

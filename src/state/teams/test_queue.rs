@@ -537,11 +537,21 @@ pub(crate) fn schedule(requests: &[Request], classes: &Classes, load: &Load) -> 
 }
 
 pub(crate) fn shell(command: &str, cwd: &Path) -> Command {
-    let mut process = if cfg!(windows) {
+    #[cfg(windows)]
+    let mut process = {
+        use std::os::windows::process::CommandExt;
         let mut process = Command::new("cmd");
-        process.args(["/D", "/S", "/C", command]);
+        process.args(["/D", "/S", "/C"]);
+        // /S reads the whole command from one pair of quotes and keeps the
+        // quotes inside it. A command such as `cd /d "tests" && ...` must
+        // arrive as the project wrote it: Rust's arg quoting escapes the
+        // inner quotes as \" and cmd fails with "The system cannot find the
+        // path specified.".
+        process.raw_arg(format!("\"{command}\""));
         process
-    } else {
+    };
+    #[cfg(not(windows))]
+    let mut process = {
         let mut process = Command::new("sh");
         process.args(["-c", command]);
         process
@@ -829,6 +839,29 @@ mod tests {
         assert!(store.queued("t").unwrap().is_empty());
         let found = store.last_green("t", "echo", "h").unwrap().unwrap();
         assert_eq!(found.id, written[0].id);
+    }
+
+    #[test]
+    fn a_queued_command_with_a_quoted_folder_runs() {
+        // The merge queue names its folder in quotes (`cd /d "tests" && ...`):
+        // Windows cmd must receive that line unescaped, or /S sees \" and the
+        // run fails in 0 s with "The system cannot find the path specified.".
+        let dir = tempfile::tempdir().unwrap();
+        let store = TestStore::open_at(&dir.path().join("tests.sqlite3"), false).unwrap();
+        let folder = dir.path().join("quoted folder");
+        std::fs::create_dir_all(&folder).unwrap();
+        std::fs::write(folder.join("marker.txt"), "quoted-folder-ok\n").unwrap();
+        let mut request = request("quoted", "quoted", 5.0, false, "small");
+        request.command = if cfg!(windows) {
+            "cd /d \"quoted folder\" && type marker.txt".into()
+        } else {
+            "cd \"quoted folder\" && cat marker.txt".into()
+        };
+        store.enqueue(&request).unwrap();
+        let written = run_due(&store, dir.path(), &store.queued("t").unwrap(), 100.0, &Default::default()).unwrap();
+        assert_eq!(written.len(), 1);
+        assert_eq!(written[0].status, "passed", "{}", written[0].excerpt);
+        assert!(written[0].excerpt.contains("quoted-folder-ok"), "{}", written[0].excerpt);
     }
 
     /// #719: the Tests view reads the queue with what runs now first; a result

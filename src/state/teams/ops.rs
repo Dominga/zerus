@@ -174,6 +174,7 @@ pub(crate) fn branch_name(template: &str, id: u32, member: &str, team8: &str) ->
 }
 
 fn validate_settings(settings: &Settings) -> anyhow::Result<()> {
+    super::super::iron_rules::validate(&json!(settings.iron_rules))?;
     ensure!(
         settings.tests.as_ref().is_none_or(|tests| tests.is_object()),
         "The tests override is an object shaped like .zerus/tests.toml"
@@ -208,6 +209,7 @@ fn validate_settings(settings: &Settings) -> anyhow::Result<()> {
 
 fn parse_member(value: &Value) -> anyhow::Result<Member> {
     let mut member: Member = serde_json::from_value(value.clone()).context("Invalid member")?;
+    member.iron_rules = super::super::iron_rules::validate(&json!(member.iron_rules))?;
     member.id = member_id(&member.id)?;
     member.role = clean_text(&member.role, 60, "A role")?;
     ensure!(!member.agent.is_empty(), "Member {} needs an agent", member.id);
@@ -295,12 +297,36 @@ fn clean_lane(lane: &mut super::model::Lane, task: u32) -> anyhow::Result<()> {
     Ok(())
 }
 
+/// Output is lexical repository scope, never a filesystem read. Keep it
+/// bounded and portable, including when this computer edits another OS's plan.
+fn clean_output(paths: &mut Vec<String>) -> anyhow::Result<()> {
+    ensure!(paths.len() <= 128, "A task output has at most 128 paths");
+    ensure!(paths.iter().map(String::len).sum::<usize>() <= 32_768, "A task output is too long");
+    let mut seen = BTreeSet::new();
+    for path in paths.iter_mut() {
+        ensure!(path.chars().count() <= 1024, "An output path is too long");
+        ensure!(!path.chars().any(char::is_control), "An output path contains control characters");
+        let normalized = path.trim().replace('\\', "/");
+        ensure!(!normalized.is_empty() && !normalized.starts_with('/') && !normalized.contains(':'),
+            "An output path must be repository-relative");
+        let mut parts = Vec::new();
+        for part in normalized.split('/') {
+            ensure!(part != "..", "An output path cannot contain parent components");
+            if !part.is_empty() && part != "." { parts.push(part); }
+        }
+        *path = if parts.is_empty() { ".".into() } else { parts.join("/") };
+    }
+    paths.retain(|path| seen.insert(path.clone()));
+    Ok(())
+}
+
 fn parse_task(value: &Value) -> anyhow::Result<Task> {
     let mut task: Task = serde_json::from_value(value.clone()).context("Invalid task")?;
     ensure!(task.id > 0, "Task numbers start at 1");
     task.title = clean_text(&task.title, 200, "A task title")?;
     ensure!(!task.title.trim().is_empty(), "Task #{} needs a title", task.id);
     task.description = clean_text(&task.description, 20_000, "A task description")?;
+    clean_output(&mut task.output)?;
     // U58: a task for a role keeps the role's text clean too.
     task.role = clean_text(&task.role, 60, "A task role")?;
     // C5: a check carries its exact command and expected exit code; a plan
@@ -348,6 +374,8 @@ fn parse_task(value: &Value) -> anyhow::Result<Task> {
     // sets the computed phase afterwards.
     task.phase = 1;
     task.attempts.clear();
+    task.rework_since = None;
+    task.fresh_retry = false;
     task.hold = None;
     task.decided_by = None;
     // U36: the plan names a preset; Zerus snapshots it when the task is
@@ -458,6 +486,7 @@ pub(crate) fn create(id: &str, input: &Value) -> anyhow::Result<(Team, Vec<Event
         name: name.clone(),
         goal: clean(text(input, "goal"), 20_000, "The goal")?,
         project: clean(text(input, "project"), 200, "The project")?,
+        project_id: clean(text(input, "project_id"), 200, "The project identity")?,
         folder: clean(text(input, "folder"), 4096, "The folder")?,
         template: clean(text(input, "template"), 120, "The template")?,
         status: TeamStatus::Planning,
@@ -781,9 +810,18 @@ fn ensure_draft_revision(team: &Team, input: &Value) -> anyhow::Result<()> {
 fn settings(team: &mut Team, input: &Value, actor: &Actor, events: &mut Vec<Event>) -> anyhow::Result<Value> {
     ensure!(matches!(actor, Actor::Human) || actor.is_lead(team), "Only the lead or you change the team's settings");
     ensure!(
-        matches!(team.status, TeamStatus::Planning | TeamStatus::Running | TeamStatus::Paused),
+        matches!(team.status, TeamStatus::Planning | TeamStatus::Running | TeamStatus::Paused)
+            || (team.status == TeamStatus::Draft && input.get("project_id").is_some()
+                && input.get("settings").is_none() && input.get("members_update").is_none()),
         "Only a planning, running or paused team changes its settings"
     );
+    if let Some(id) = input.get("project_id") {
+        ensure!(matches!(actor, Actor::Human), "Only the owner sets the team's project identity");
+        team.project_id = clean(id.as_str().context("project_id must be text")?, 200, "The project identity")?;
+        ensure!(!team.project_id.is_empty(), "Select a nonempty project identity");
+        team.iron_rules_error.clear();
+        team.iron_rules_error_at = None;
+    }
     let planning = team.status == TeamStatus::Planning;
     let mut changed = Vec::new();
     let mut widen = Vec::new();
@@ -796,13 +834,18 @@ fn settings(team: &mut Team, input: &Value, actor: &Actor, events: &mut Vec<Even
         // other field still changes only on a member without one. #581 N6: so
         // does its model list (U45), which only the next switch reads.
         let context_only = update.as_object().is_some_and(|fields| {
-            fields.keys().any(|key| key == "context_before_task" || key == "models")
-                && fields.keys().all(|key| key == "id" || key == "context_before_task" || key == "models")
+            fields.keys().any(|key| key == "context_before_task" || key == "models"|| key == "iron_rules")
+                && fields.keys().all(|key| {
+                    key == "id" || key == "context_before_task" || key == "models"|| key == "iron_rules"
+                })
         });
         ensure!(
             planning || member.session.is_none() || context_only,
             "A running team changes only members without a session"
         );
+        if let Some(rules) = update.get("iron_rules") {
+            member.iron_rules = super::super::iron_rules::validate(rules)?;
+        }
         if let Some(folder) = update.get("folder") {
             member.folder = serde_json::from_value(folder.clone()).context("A folder is shared, worktree or clone")?;
         }
@@ -856,6 +899,7 @@ fn settings(team: &mut Team, input: &Value, actor: &Actor, events: &mut Vec<Even
             merged[field] = value.clone();
         }
         let updated: Settings = serde_json::from_value(merged).context("Invalid settings")?;
+        super::super::iron_rules::validate(&json!(updated.iron_rules))?;
         validate_settings(&updated)?;
         ensure_lead_settings(&team.settings, &updated, actor, input["roster_word"].as_bool() == Some(true))?;
         // N13: only a sub-lead (and its parent lead) is refused auto; the owner
@@ -871,7 +915,7 @@ fn settings(team: &mut Team, input: &Value, actor: &Actor, events: &mut Vec<Even
         }
         team.settings = updated;
     }
-    if changed.is_empty() && input.get("settings").is_none() {
+    if changed.is_empty() && input.get("settings").is_none() && input.get("project_id").is_none() {
         anyhow::bail!("A settings change names settings or members_update");
     }
     // C4: a member of a running team launches with its profile as it is, so
@@ -1904,6 +1948,8 @@ fn return_to_draft(team: &mut Team, input: &Value, actor: &Actor, events: &mut V
     for task in &mut team.tasks {
         if wanted.contains(&task.id) && task.status == TaskStatus::Pending {
             task.status = TaskStatus::Draft;
+            task.rework_since = None;
+            task.fresh_retry = false;
         }
     }
     let label = actor.label(team);
@@ -2142,15 +2188,45 @@ fn add_build_task(team: &mut Team, phase: u32, by: &str, events: &mut Vec<Event>
         !team.tasks.iter().any(|task| task.phase == phase && task.phase_build && !task.status.finished()),
         "Phase {phase} already has a build task"
     );
+    super::merge_queue::migrate_legacy_ranges(team);
+    let build_merge_ranges = super::merge_queue::open_merge_ranges(team);
     let id = team.tasks.iter().map(|task| task.id).max().unwrap_or(0) + 1;
     let assignee = if team.member(&team.lead).is_some() { team.lead.clone() } else { String::new() };
     // U62 (#760): the merge queue tested its merged range already; the build
-    // checks only what came after.
+    // checks only what came after. A suite the queue could not run here is
+    // named, so the build checks it too.
     let description = match super::merge_queue::untested_since(team) {
-        Some(tested) => format!(
-            "Integrate the accepted work and run the build. The merge queue tested the lead branch up to {tested}: \
-             check only what came after it (hgs test affected {tested}..HEAD)."
-        ),
+        Some(untested) => {
+            let mut text = if untested.since.is_empty() {
+                "Integrate the accepted work and run the build.".to_owned()
+            } else {
+                format!(
+                    "Integrate the accepted work and run the build. The merge queue tested the lead branch up to {}: \
+                     check only what came after it (hgs test affected {}..HEAD).",
+                    untested.since, untested.since
+                )
+            };
+            let suites = untested.suites();
+            if !suites.is_empty() {
+                text.push_str(&format!(
+                    " The merge queue did not run {} here: check them too.",
+                    suites.join(", ")
+                ));
+                let ranges: Vec<String> = untested
+                    .per_suite
+                    .iter()
+                    .filter(|(_, since)| !since.is_empty())
+                    .map(|(suite, since)| format!("{suite} since {since}"))
+                    .collect();
+                if !ranges.is_empty() {
+                    text.push_str(&format!(" Their own ranges: {}; check each to HEAD.", ranges.join(", ")));
+                }
+            }
+            for range in &untested.merges {
+                text.push_str(&format!(" Also check the untested merge of task #{}, range {}..{}.", range.task, range.prev, range.merged));
+            }
+            text
+        }
         None => "Integrate the accepted work and run the build.".into(),
     };
     team.tasks.push(Task {
@@ -2161,6 +2237,7 @@ fn add_build_task(team: &mut Team, phase: u32, by: &str, events: &mut Vec<Event>
         phase,
         status: TaskStatus::Pending,
         phase_build: true,
+        build_merge_ranges,
         ..Default::default()
     });
     if let Some(at) = team.phases.iter().position(|record| record.n == phase) {
@@ -2453,6 +2530,16 @@ fn edit_draft(team: &mut Team, input: &Value, actor: &Actor, offline: &BTreeSet<
             }
             fields.push("criteria");
         }
+        if let Some(value) = value.get("output") {
+            let old = task.output.clone();
+            let mut output: Vec<String> = serde_json::from_value(value.clone()).context("output is a list of repository-relative paths")?;
+            clean_output(&mut output)?;
+            task.output = output;
+            if old != task.output {
+                changes.push(json!({"kind":"changed","task":id,"title":task.title,"field":"output","from":old,"to":task.output}));
+            }
+            fields.push("output");
+        }
         if let Some(value) = value.get("deps") {
             let old: Vec<String> = task.deps.iter().map(|dep| format!("#{}", dep.task)).collect();
             task.deps = serde_json::from_value(value.clone()).context("Invalid dependencies")?;
@@ -2690,6 +2777,7 @@ fn revoke(task: &mut Task, why: &str) -> Option<u32> {
     super::pipeline::revoke_runs(task, why);
     let attempt = task.open_attempt_mut()?;
     attempt.state = AttemptState::Revoked;
+    attempt.interim = None;
     attempt.error = why.to_owned();
     Some(attempt.n)
 }
@@ -3048,6 +3136,8 @@ fn report_with(team: &mut Team, input: &Value, actor: &Actor, captured: bool, ev
         }
     }
     ensure!(!body.is_empty() || check.is_some(), "A report needs text");
+    let interim = input["interim"].as_bool() == Some(true);
+    let accept = input["accept"].as_bool() == Some(true);
     let check_task = team.task(id).is_some_and(Task::is_check);
     ensure!(!check_task || check.is_some(), "A check task's report needs \"check\":{{\"exit\":N,\"tail\":\"...\"}}");
     ensure!(!check.is_some() || check_task, "Task #{id} is not a check: drop \"check\" from its report");
@@ -3059,6 +3149,44 @@ fn report_with(team: &mut Team, input: &Value, actor: &Actor, captured: bool, ev
     };
     let label = actor.label(team);
     let team_lead = team.lead.clone();
+    // Owner (2026-11-01): an interim report is progress or a question, not a
+    // delivery: the attempt stays open, the task In progress and no stage runs.
+    if interim {
+        ensure!(!captured, "A captured reply is not an interim report");
+        ensure!(!accept, "An interim report cannot accept a task");
+        ensure!(!check_task, "A check task decides on its report; it cannot be interim");
+        let (n, member, title) = {
+            let task = team.task_mut(id).context("Unknown task")?;
+            ensure!(task.status == TaskStatus::InProgress, "An interim report belongs to a task In progress");
+            let attempt = task
+                .attempts
+                .iter()
+                .find(|attempt| attempt.id == attempt_id && attempt.state.open())
+                .with_context(|| format!("Task #{id} has no open attempt {attempt_id}"))?;
+            ensure!(by_member.is_empty() || attempt.member == by_member, "This attempt belongs to another member");
+            let (n, member) = (attempt.n, attempt.member.clone());
+            let attempt = task.attempts.iter_mut().find(|attempt| attempt.id == attempt_id).expect("the attempt was found");
+            attempt.interim = Some(Report { text: body.clone(), at: now(), structured: structured.clone(), unstructured: structured.is_none(), ..Default::default() });
+            // An interim report is the member working again: clear the whole
+            // capture gate as WorkResumed does, so the next tick does not fire
+            // No report for the old turn.
+            attempt.turn_ended_at = None;
+            attempt.turn_reply.clear();
+            attempt.report_ready_at = None;
+            attempt.blocked_since = None;
+            attempt.no_report = false;
+            (n, member, task.title.clone())
+        };
+        let role = team.role_of(&member);
+        let reviewer = team.reviewer_of(&member);
+        let to = if reviewer.is_empty() { String::new() } else { team.role_of(&reviewer) };
+        let event_text = if body.chars().count() > 2000 { format!("{}...", body.chars().take(2000).collect::<String>()) } else { body.clone() };
+        events.push(Event::new(
+            "interim_report",
+            json!({"by":role,"to":to,"task":id,"title":title,"attempt":n,"text":event_text}),
+        ));
+        return Ok(json!({"status":"interim","task":id,"attempt":n}));
+    }
     // #684 N1: the attempt records its folder's HEAD and branch at the report,
     // so a later stage checks that commit and never reads HEAD at its start.
     let (folder_head, folder_branch) = if by_member.is_empty() {
@@ -3089,7 +3217,6 @@ fn report_with(team: &mut Team, input: &Value, actor: &Actor, captured: bool, ev
     };
     // C1: the lead reports its own task and accepts it in one step; nobody
     // else accepts on a report.
-    let accept = input["accept"].as_bool() == Some(true);
     if accept {
         ensure!(!by_member.is_empty() && by_member == team_lead, "Only the lead accepts its own task on its report");
     }
@@ -3119,6 +3246,7 @@ fn report_with(team: &mut Team, input: &Value, actor: &Actor, captured: bool, ev
         let attempt = task.attempts.iter_mut().find(|a| a.id == open_id).unwrap();
         attempt.state = AttemptState::Reported;
         attempt.report = Some(Report { text: body, at: now(), structured: structured.clone(), unstructured: structured.is_none(), captured, tests: test_delta.clone(), ..Default::default() });
+        attempt.interim = None;
         attempt.folder_head = folder_head.clone();
         attempt.folder_branch = folder_branch.clone();
         attempt.no_report = false;
@@ -3194,6 +3322,7 @@ fn report_with(team: &mut Team, input: &Value, actor: &Actor, captured: bool, ev
         }
         let was_captured = std::mem::take(&mut report.captured);
         attempt.no_report = false;
+        attempt.interim = None;
         // The lead hears the real report as a report, not as the captured one;
         // U36: a stage still reading it tells the lead after the last stage.
         if member != team_lead && task.status == TaskStatus::Submitted {
@@ -3260,6 +3389,7 @@ fn decide_check(team: &mut Team, id: u32, n: u32, events: &mut Vec<Event>) -> an
         // keeps its check result.
         if let Some(attempt) = task.attempts.iter_mut().rev().find(|attempt| attempt.state == AttemptState::Reported) {
             attempt.state = AttemptState::Rejected;
+            attempt.interim = None;
         }
         revoke(task, "check failed");
         task.status = TaskStatus::Pending;
@@ -4473,6 +4603,7 @@ fn decide(team: &mut Team, input: &Value, actor: &Actor, accept: bool, events: &
     ensure!(accept || !reason.is_empty(), "A rejection needs a reason");
     // A5: a rejection may keep the task for a member that is not ready for it.
     let hold = !accept && input["hold"].as_bool() == Some(true);
+    let fresh = !accept && input["fresh"].as_bool() == Some(true);
     ensure!(!(hold && input["final"].as_bool() == Some(true)), "A final rejection cannot be held");
     let label = actor.label(team);
     let worked_ahead = team.task(id).is_some_and(|task| task.attempts.iter().rev().find(|a| a.state == AttemptState::Reported).is_some_and(|a| a.worked_ahead));
@@ -4487,11 +4618,21 @@ fn decide(team: &mut Team, input: &Value, actor: &Actor, accept: bool, events: &
     // U62 (#760): with the merge queue on, an accept queues the author's commit
     // for the lead branch; the queue's own accept (merged) decides it.
     let merged = input["merged"].as_bool() == Some(true);
+    if !merged && team.task(id).and_then(|task| task.merge.as_ref()).is_some_and(|entry| entry.state == "testing") {
+        bail!("Task #{id} is merged into the lead branch and its tests run; wait for the merge queue's result");
+    }
     let queue = if accept && !merged { super::merge_queue::entry(team, id, &label, human, &reason) } else { None };
+    if !accept && !merged && super::merge_queue::merge_still_reachable(team, id) {
+        bail!("Task #{id}: the merge is still in the lead branch; retry, or revert it by hand");
+    }
     let task = team.task_mut(id).context("Unknown task")?;
     ensure!(!(task.decided_by == Some(Decider::Human) && task.status.finished()), "You already decided task #{id}");
-    if task.merge.as_ref().is_some_and(|entry| entry.state == "testing") && !merged {
-        bail!("Task #{id} is merged into the lead branch and its tests run; wait for the merge queue's result");
+    if accept && !merged {
+        if let Some(entry) = task.merge.as_mut().filter(|entry| entry.state == "queued" && !entry.note.is_empty()) {
+            entry.retry = true;
+            events.push(Event::new("merge_retry_requested", json!({"by":label,"task":id})));
+            return Ok(json!({"status":"merge_retry","task":id}));
+        }
     }
     // #538 N1: accepting over an open stage names why, as skip-stage does.
     ensure!(!accept || !task.status.in_stage() || !reason.is_empty(), "Accepting task #{id} in a stage needs a reason");
@@ -4521,11 +4662,14 @@ fn decide(team: &mut Team, input: &Value, actor: &Actor, accept: bool, events: &
     let filed_before = task.status == TaskStatus::Accepted && task.decided_by == Some(Decider::Lead);
     mark_decided(task);
     if accept {
+        task.rework_since = None;
+        task.fresh_retry = false;
         revoke(task, "accepted without this attempt");
         task.status = TaskStatus::Accepted;
     } else {
         if let Some(attempt) = task.attempts.iter_mut().rev().find(|a| a.state == AttemptState::Reported) {
             attempt.state = AttemptState::Rejected;
+            attempt.interim = None;
         }
         revoke(task, "rejected");
         task.status = if input["final"].as_bool() == Some(true) {
@@ -4538,6 +4682,8 @@ fn decide(team: &mut Team, input: &Value, actor: &Actor, accept: bool, events: &
         } else {
             TaskStatus::Pending
         };
+        task.rework_since = if !fresh && task.status == TaskStatus::Pending { Some(now()) } else { None };
+        task.fresh_retry = fresh && task.status == TaskStatus::Pending;
         if hold {
             task.hold = Some(Hold { by: label.clone(), at: now(), reason: reason.clone() });
         }
@@ -4550,6 +4696,8 @@ fn decide(team: &mut Team, input: &Value, actor: &Actor, accept: bool, events: &
     // the phase stays open.
     let phase_build = team.task(id).is_some_and(|task| task.phase_build);
     if accept && phase_build {
+        let ranges = std::mem::take(&mut team.task_mut(id).unwrap().build_merge_ranges);
+        super::merge_queue::close_merge_ranges(team, &ranges);
         team.last_build_at = Some(now());
         team.free_accepted_since_build = 0;
         if let Some(n) = team.free_close_pending.take() {
@@ -4609,6 +4757,8 @@ fn reassign(team: &mut Team, input: &Value, actor: &Actor, events: &mut Vec<Even
     let revoked = revoke(task, "reassigned");
     task.assignee = target.to_owned();
     task.pinned = true;
+    task.rework_since = None;
+    task.fresh_retry = false;
     // U45: a task for a role now has its member; a waiting step starts over.
     task.role.clear();
     task.waits = None;
@@ -4699,8 +4849,19 @@ fn retry(team: &mut Team, input: &Value, actor: &Actor, events: &mut Vec<Event>)
     let assignee = team.task(id).map(|task| task.assignee.clone()).unwrap_or_default();
     ensure!(actor.reviews(team, &assignee), "Only the lead or you retry tasks");
     let label = actor.label(team);
+    let reachable = super::merge_queue::merge_still_reachable(team, id);
     let task = team.task_mut(id).context("Unknown task")?;
     ensure!(!task.status.finished() && task.status != TaskStatus::Draft, "Task #{id} cannot be retried now");
+    if task.merge.as_ref().is_some_and(|entry| entry.state == "testing") {
+        bail!("Task #{id} is merged into the lead branch and its tests run; wait for the merge queue's result");
+    }
+    if reachable || task.merge.as_ref().is_some_and(|entry| entry.state == "queued" && !entry.note.is_empty()) {
+        if let Some(entry) = task.merge.as_mut() {
+            entry.retry = true;
+        }
+        events.push(Event::new("merge_retry_requested", json!({"by":label,"task":id})));
+        return Ok(json!({"status":"merge_retry","task":id}));
+    }
     let revoked = revoke(task, "retried");
     task.status = TaskStatus::Pending;
     // Spec 0: the lead or the owner retries a refused or unconfirmed step.
@@ -4727,12 +4888,25 @@ fn cancel(team: &mut Team, input: &Value, actor: &Actor, events: &mut Vec<Event>
     ensure!(matches!(actor, Actor::Human) || actor.is_lead(team), "Only the lead or you cancel tasks");
     subteam_stop_choice(input, team.task(id).context("Unknown task")?)?;
     let label = actor.label(team);
+    if team.task(id).and_then(|task| task.merge.as_ref()).is_some_and(|entry| entry.state == "testing") {
+        bail!("Task #{id} is merged into the lead branch and its tests run; wait for the merge queue's result");
+    }
+    if super::merge_queue::merge_still_reachable(team, id) {
+        bail!("Task #{id}: the merge is still in the lead branch; retry, or revert it by hand");
+    }
     let task = team.task_mut(id).context("Unknown task")?;
     ensure!(!task.status.finished(), "Task #{id} is already decided");
+    let merge_state = task.merge.as_ref().map(|entry| entry.state.clone());
+    match merge_state.as_deref() {
+        Some("testing") => bail!("Task #{id} is merged into the lead branch and its tests run; wait for the merge queue's result"),
+        Some("queued") => task.merge = None,
+        _ => {}
+    }
     let revoked = revoke(task, "cancelled");
     let phase = task.phase;
     let phase_build = task.phase_build;
     task.status = TaskStatus::Cancelled;
+    task.fresh_retry = false;
     // #759: the tasks it held start once their other dependencies are done;
     // the event and the lead's inbox name them for a re-plan.
     let released = super::plan::waiting_on(team, id);
@@ -5304,6 +5478,7 @@ pub(crate) fn apply(team: &mut Team, op: &str, input: &Value, actor: &Actor, off
                     .tasks
                     .iter()
                     .filter(|task| task.assignee == id && matches!(task.status, TaskStatus::Draft | TaskStatus::Pending | TaskStatus::Assigned))
+                    .filter(|task| !task.rework())
                     .map(|task| task.id)
                     .collect();
                 for (index, task_id) in movable.iter().enumerate() {

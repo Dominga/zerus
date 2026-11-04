@@ -276,6 +276,11 @@ impl Runtime {
         if authority.operation() == "task_message_input_release" {
             return json!({"request_id":authority.id(),"accepted":false,"durable":false,"code":"task_message_input_release_unsupported"});
         }
+        // The deferred send's wire is defined; its actor lands separately
+        // (zerus-5wmh.66.4.4, slice 3). Until then nothing is admitted.
+        if authority.operation() == "deferred_send" {
+            return json!({"request_id":authority.id(),"accepted":false,"durable":false,"code":"deferred_send_unsupported"});
+        }
         // A recognized native request is still not executing-kind admission.
         if authority.operation() == "task_start_reconcile" {
             return json!({"request_id":authority.id(),"accepted":false,"durable":false,"code":"task_start_reconcile_unsupported"});

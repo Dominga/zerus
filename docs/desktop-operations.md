@@ -172,7 +172,51 @@ question for an answer, a resume's start choice, and the CLI receipt family
 Restart, import or reconnect never rebuild executable consent from it, and
 nothing sends from it. Imported and recovered drafts never carry one. A
 present but invalid field leaves the draft not restored, never read as absent.
-Executing kinds that reconcile its receipt remain a later slice.
+
+The executing kinds that reconcile these receipts come one at a time (slice 3).
+The first, `deferred_send` (`desktop::deferred_send`, ABI
+`desktop-deferred-send-v1`), defines its closed wire:
+- **Intent.** The local session, the reserved request ID, the checkpoint's
+  exact JSON and the exact `hgs send <session> --json` stdin.
+- **Verification.** Strict typed decoding, so unknown or duplicate keys
+  refuse, as the CLI's own decoder does. The intent must be a `send`
+  checkpoint whose request ID, run and conversation the stdin repeats, and
+  whose message digest the stdin's text and decoded attachments reproduce.
+  A plain send only: no subagent target or compaction. v1 refuses any `@`
+  or other-machine session, and any session but a terminal agent's (Codex,
+  Claude, Kimi): an OpenCode or DeepSeek send goes to its own native backend
+  and receipts, so it stays on the direct path, decided before any offer
+  (`deferred_send_agent_refused`). The CLI's own send rules are mirrored, so an
+  original the CLI would refuse never spawns: a run, a non-empty message
+  within 64 KiB without control characters, no `/` or `!` command, at most
+  eight attachments with valid names, types and labels, each 10 MiB and
+  20 MiB in total. An intent whose service line does not fit the control
+  frame stays on the direct path, decided before any offer.
+- **Plan and binding.** The fixed `send <session> --json` call. The plan's
+  input digest is the SHA-256 of the exact stdin, which is the digest the
+  CLI's receipt records.
+- **Receipt.** Recorded only from the CLI's own matching `submitted`
+  receipt: a submission to the terminal, never proof the agent read it.
+  The wire owns the matching rule (`Outcome::from_receipt`). The CLI keys
+  `input_receipts/<request_id>.json` by request ID alone and keeps an
+  earlier `submitted` record when a later submit of that ID with other
+  content or another session is refused. So a record matches only when its
+  session (`name`), run, conversation, stdin digest and terminal transport
+  are all the plan's and its status is `submitted`. The outcome carries
+  that digest. `in_progress`, a duplicate or missing field, or more than
+  256 KiB is never an outcome.
+  Failed only at the no-spawn boundary (`deferred_send_not_started`).
+  Everything else after a possibly started child is Unknown and never
+  resent: `in_progress`, a missing, corrupt, mismatched, inaccessible or
+  replaced receipt, a timeout or a lost worker.
+- **Lookup.** A scoped read-only lookup by session, request ID and plan
+  fingerprint.
+
+No actor executes it yet: the native frontend lane carries the request on
+its own ordered lane, and the service refuses it
+(`deferred_send_unsupported`) until the actor lands; an unauthenticated
+hello naming it gets `frontend_authentication_required`, like its siblings.
+Its help marker is not advertised before then.
 
 A draft holds one such identity until it is resolved. A definite outcome
 resolves it, as does a cancellation before its call was dispatched or, for a

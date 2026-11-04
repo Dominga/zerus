@@ -89,6 +89,8 @@ internal object AttachmentReceiptMatch {
     fun replaceable(receipt: Event, native: Event) = native.receiptRequestId.isBlank() &&
         (native.requestId.isBlank() || native.requestId == receipt.requestId)
     fun matches(receipt: Event, native: Event): Boolean {
+        // A receipt of this session never stands for a fork's inherited row.
+        if (native.inheritedFrom.isNotBlank()) return false
         val submitted = receipt.submittedText.trim()
         if (submitted.isBlank() || native.text.trim() != submitted) return false
         if (kotlin.math.abs(native.at - receipt.at) <= 10) return true

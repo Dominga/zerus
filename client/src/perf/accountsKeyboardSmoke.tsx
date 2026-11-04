@@ -38,7 +38,8 @@ const account: Account = { key: "example", label: "Example", provider: "claude",
 const single: Account = { ...account, key: "single", label: "Single profile", members: [profile(7)] };
 
 async function run() {
-  setAccountsPage({ ...emptyAccounts(), snapshot: true, accounts: [account, single] });
+  const initialView = { ...emptyAccounts(), snapshot: true, accounts: [account, single] };
+  setAccountsPage(initialView);
   const { AccountsScreen } = await import("../ui/screens/Accounts");
   const dispose = render(() => <AccountsScreen />, document.getElementById("root")!);
   try {
@@ -111,6 +112,39 @@ async function run() {
     check(document.activeElement === accountRows[1] && !search(), "obsolete popup never takes focus after an account switch");
     radios()[0].focus(); key("ArrowDown", 0, 7); key("End", 0, 7);
     accountRows[0].click(); await frame(); state(0, 0, false);
+
+    const detail = document.querySelector(".acct-detail");
+    const refreshMore = document.querySelector<HTMLButtonElement>(".acct-more-anchor > button")!;
+    refreshMore.focus(); refreshMore.click(); await frame();
+    const refreshedSearch = () => document.querySelector<HTMLInputElement>(".acct-more input");
+    const searchBefore = refreshedSearch()!;
+    searchBefore.value = "workstation-4"; searchBefore.dispatchEvent(new InputEvent("input", { bubbles: true }));
+    const stamp = (hours: number, minutes: number) => new Date(2026, 0, 2, hours, minutes).getTime() / 1000;
+    const seeded: Account["usage"] = { ...emptyUsage("claude"), seeded: true, checked_at: stamp(13, 45), windows: [
+      { id: "five-hour", label: "5h", used: 20, minutes: 300, resets_at: null },
+    ] };
+    const snapshot = (usage: Account["usage"], truncated: number) => setAccountsPage({ ...initialView, truncated, accounts: [{ ...account, usage }, single] });
+    const usage = () => document.querySelector<HTMLElement>(".acct-usage")!;
+    const usageStamp = () => usage().querySelector(".row > .dim")?.textContent;
+    const sameDetail = () => {
+      check(document.querySelector(".acct-detail") === detail && refreshedSearch() === searchBefore, "same-key snapshot preserves the Detail and search nodes");
+      check(refreshedSearch()?.value === "workstation-4" && document.activeElement === searchBefore, "same-key snapshot preserves the query and focus");
+      state(0, 0, false);
+    };
+    snapshot(seeded, 17); await frame(); sameDetail();
+    check(document.querySelector(".acct-scroll .acct-none")?.textContent === "17 more accounts are not shown.", "truncated snapshot shows its explicit remainder");
+    check(document.querySelectorAll(".acct-row").length === 2, "truncated count creates no extra account cards");
+    check(usageStamp() === "Checked 13:45", "seeded snapshot shows Checked 13:45");
+    check((usage().textContent?.match(/Checked 13:45/gu) ?? []).length === 2, "seeded timestamp appears in the heading and window");
+
+    snapshot({ ...seeded, seeded: false, checked_at: stamp(14, 5) }, 0); await frame(); sameDetail();
+    check(!document.querySelector(".acct-scroll .acct-none"), "complete snapshot clears the truncated remainder");
+    check(usageStamp() === "Updated 14:05" && !usage().textContent?.includes("Checked "), "fresh snapshot replaces seeded text with the updated local time");
+    snapshot({ ...seeded, checked_at: null }, 0); await frame(); sameDetail();
+    check(!usageStamp() && !/\b(?:Checked|Updated) /u.test(usage().textContent ?? ""), "unknown timestamp renders no guessed time");
+    setAccountsPage(initialView); await frame(); sameDetail();
+    refreshedSearch()?.dispatchEvent(new KeyboardEvent("keydown", { key: "Escape", bubbles: true, cancelable: true }));
+    await frame(); check(document.activeElement === refreshMore && !refreshedSearch(), "refreshed Detail keeps its popover focus return");
     check(calls.every((command) => startupReads.has(command)), `profile navigation submitted IPC: ${calls.filter((command) => !startupReads.has(command)).join(", ")}`);
   } catch (error) { dispose(); throw error; }
   // Keep the screen mounted until the harness finishes its native accessibility
@@ -118,6 +152,6 @@ async function run() {
   const card_geometry = [...document.querySelectorAll<HTMLElement>(".acct-row")].map((row) => {
     const { x, y, width, height } = row.getBoundingClientRect(); return { x, y, width, height };
   });
-  report({ failures, card_geometry, accessibility_lists: [{ name: "Agent accounts", buttons: ["Example", "Single profile"] }], cases: ["roving Tab entry", "arrows wrap and Home/End", "exact profile and offline selection", "separate default action", "hidden profile and account reset", "popover search and focus return", "no management IPC"] });
+  report({ failures, card_geometry, accessibility_lists: [{ name: "Agent accounts", buttons: ["Example", "Single profile"] }], cases: ["roving Tab entry", "arrows wrap and Home/End", "exact profile and offline selection", "separate default action", "hidden profile and account reset", "popover search and focus return", "truncated count", "seeded/fresh/unknown timestamps", "same-key snapshot preserves Detail", "no management IPC"] });
 }
 void run().catch((error) => report({ failures: [String(error)] }));

@@ -163,6 +163,7 @@ pub(super) fn ensure_session_id(record: &mut Value) {
 pub(super) fn write(record: &mut Value) -> Result<()> {
     record["updated"] = json!(now());
     atomic_record(&record_path(string(record, "name")), record)?;
+    session_index::note(record, session_index::Kind::Record);
     rename::mirror_legacy(record)
 }
 
@@ -185,7 +186,29 @@ pub(super) fn read_run(name: &str, run_id: &str) -> Result<Option<Value>> {
 /// another session keeps `read_run`. It never depends on the ID surviving
 /// an older hgs.
 pub(super) fn read_own_run(name: &str, run_id: &str) -> Result<Option<Value>> {
-    read_session_run(name, run_id, nonempty_env("HGS_SESSION_ID").as_deref())
+    let session = nonempty_env("HGS_SESSION_ID");
+    // The ID index first (P2a): one verified read, under whatever label the
+    // session carries now, so a rename since launch costs no scan.
+    if let (Some(id), false) = (session.as_deref(), run_id.is_empty()) {
+        if let Some(found) = session_index::find(id) {
+            if found.kind == session_index::Kind::Record
+                && string(&found.record, "run_id") == run_id
+            {
+                return Ok(Some(found.record));
+            }
+        }
+    }
+    let record = read_session_run(name, run_id, session.as_deref())?;
+    if let (Some(id), Some(record)) = (session.as_deref(), record.as_ref()) {
+        if string(record, "session_id") == id {
+            let found = [(
+                string(record, "name").to_owned(),
+                session_index::Kind::Record,
+            )];
+            session_index::repair(id, &found);
+        }
+    }
+    Ok(record)
 }
 
 /// `session` is a hint, never a requirement: an older hgs can rebuild the
@@ -207,6 +230,7 @@ fn read_session_run(name: &str, run_id: &str, session: Option<&str>) -> Result<O
             return Ok(Some(record));
         }
     }
+    session_index::scanned();
     let (own, others): (Vec<Value>, Vec<Value>) = records()?
         .into_iter()
         .filter(|record| string(record, "run_id") == run_id)

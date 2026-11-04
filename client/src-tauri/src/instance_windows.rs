@@ -724,7 +724,10 @@ mod tests {
             assert!(bytes.len() <= 4096);
             let control: serde_json::Value = serde_json::from_slice(&bytes).unwrap();
             let mode = control["case"].as_str().unwrap().to_owned();
-            if matches!(mode.as_str(), "mode_check" | "mode_switch" | "mode_cancel" | "mode_review") {
+            if matches!(
+                mode.as_str(),
+                "mode_check" | "mode_switch" | "mode_cancel" | "mode_review"
+            ) {
                 report_chain(std::process::id());
                 let mut args = vec![
                     "desktop".into(),
@@ -744,8 +747,12 @@ mod tests {
                         "--json".into(),
                     ];
                     if let Some(reviewed) = control["after_review"].as_str() {
-                        args.extend(["--after-review".into(), reviewed.into(), "--request-id".into(),
-                            control["request_id"].as_str().unwrap().into()]);
+                        args.extend([
+                            "--after-review".into(),
+                            reviewed.into(),
+                            "--request-id".into(),
+                            control["request_id"].as_str().unwrap().into(),
+                        ]);
                     }
                 } else if matches!(mode.as_str(), "mode_cancel" | "mode_review") {
                     let id = control["request_id"].as_str().unwrap();
@@ -753,7 +760,12 @@ mod tests {
                     args = vec![
                         "desktop".into(),
                         "registration".into(),
-                        if mode == "mode_review" { "review-mode" } else { "cancel-rollback" }.into(),
+                        if mode == "mode_review" {
+                            "review-mode"
+                        } else {
+                            "cancel-rollback"
+                        }
+                        .into(),
                         "--json".into(),
                         "--request-id".into(),
                         id.into(),

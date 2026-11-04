@@ -35,6 +35,8 @@ pub const GIT_SUBSCRIPTIONS: usize = 64;
 pub const PROCESSES_SUBSCRIPTIONS: usize = 16;
 /// Concurrent tasks subscriptions (projects) per stream.
 pub const TASKS_SUBSCRIPTIONS: usize = 8;
+/// The most rows of each stage a windowed tasks subscription carries.
+pub const TASKS_WINDOW: usize = 200;
 /// The most events an Activity tail or tail snapshot carries.
 pub const ACTIVITY_TAIL: usize = 100;
 /// The most journal rows one Activity read returns.
@@ -146,6 +148,10 @@ pub struct Limits {
     /// 0 from a server without the tasks topic.
     #[serde(default)]
     pub tasks_subscriptions: usize,
+    /// The largest `window` a tasks subscription may ask for; 0 from a server
+    /// that always sends the whole list.
+    #[serde(default)]
+    pub tasks_window: usize,
 }
 
 impl Default for Limits {
@@ -160,6 +166,7 @@ impl Default for Limits {
             git_subscriptions: GIT_SUBSCRIPTIONS,
             processes_subscriptions: PROCESSES_SUBSCRIPTIONS,
             tasks_subscriptions: TASKS_SUBSCRIPTIONS,
+            tasks_window: TASKS_WINDOW,
         }
     }
 }
@@ -311,6 +318,11 @@ pub struct Subscription {
     /// How many recent events a subscription without `after` starts with.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub tail: Option<u32>,
+    /// Tasks: only the first `window` rows of each stage (1 to `tasks_window`),
+    /// with each stage's total and the cursor of its next page, instead of the
+    /// whole list. Servers without it ignore this additive field.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub window: Option<u32>,
 }
 
 /// The exact session a subscription follows.
@@ -695,10 +707,27 @@ mod tests {
         assert_eq!(older.git_subscriptions, 0);
         assert_eq!(older.processes_subscriptions, 0);
         assert_eq!(older.tasks_subscriptions, 0);
+        assert_eq!(older.tasks_window, 0);
         assert_eq!(
             Limits::default().processes_subscriptions,
             PROCESSES_SUBSCRIPTIONS
         );
+        assert_eq!(Limits::default().tasks_window, TASKS_WINDOW);
+    }
+
+    #[test]
+    fn a_tasks_window_is_additive_on_the_wire() {
+        let old: Subscription = serde_json::from_str(r#"{"topic":"tasks","project":"p"}"#).unwrap();
+        assert_eq!(old.window, None);
+        let plain = serde_json::to_value(&old).unwrap();
+        assert!(
+            plain.get("window").is_none(),
+            "an unwindowed request is unchanged"
+        );
+        let windowed: Subscription =
+            serde_json::from_str(r#"{"topic":"tasks","project":"p","window":50}"#).unwrap();
+        assert_eq!(windowed.window, Some(50));
+        assert_eq!(serde_json::to_value(&windowed).unwrap()["window"], 50);
     }
 
     #[test]

@@ -57,8 +57,34 @@ The CLI verifies the computer UUID, follows a renamed session by its conversatio
 ID, and rejects cleared, forgotten or ambiguous bindings. A conversation reference
 survives resume into a new run; an unconfirmed first-message reference requires
 the original run. A configured peer matching the machine name routes through SSH;
-use `hgs @configured-alias inspect '<reference>'` when its alias differs. A URI
-alone never launches a session or sends input.
+use `hgs @configured-alias inspect '<reference>'` when its alias differs.
+
+A reference identifies a session; it authorizes nothing. Reading it with
+`hgs inspect` never acts on the session. Any other session command does with it
+exactly what it does with the session's name: `hgs send` sends input, and `hgs a`
+may resume a saved session.
+A reference never launches a new session and never addresses a session other
+than the one it names.
+
+Every other command whose first argument is a session also accepts a reference
+there, for example `hgs pause '<reference>'` or `hgs send '<reference>' --json`.
+It resolves the session the reference names, following a rename, and then acts
+under the same checks as `--session-id`. Every record the command reads under
+that name must still carry the reference's conversation (or its run, when it
+names no conversation), and `kill` and `a` bind the terminal to the verified
+run. An archived conversation's reference reaches the commands that take
+`--archive` (`processes`, `reference`, `fork`, `kill`, `rename` and `resume`).
+A child agent's reference stays read-only, for `hgs inspect`. A reference and
+`--session-id` cannot be combined. A reference to another computer routes to its
+configured host, or to `@host`, only after that peer's `hgs --help` lists
+`session-reference-selector-v1`. It takes exactly one verified hop: the peer runs
+the command guarded by the reference's computer UUID (`--expect-machine`), so a
+peer that is another computer refuses it (`the selected SSH alias does not
+match`), and no peer forwards it again. A guarded call itself never routes a
+reference to another computer. A reference may also carry a `session` field,
+the session ID, which is then checked as well. `hgs reference`, `hgs self` and
+message envelopes do not add that field yet, because an older hgs refuses an
+unknown reference field.
 
 `hgs [@host] reference <session> --json [--archive ID] [--agent ID]` returns the
 same URI and readable identity fields. Optional `--run ID --conversation ID`
@@ -275,8 +301,35 @@ Consumers therefore treat `session_id` as a hint and fall back to the run and
 conversation identities.
 The agent's environment carries it as `HGS_SESSION_ID`, beside `HGS_SESSION`
 (the name at launch) and `HGS_RUN_ID`, and `hgs ls --json` rows and
-inspections include it. Nothing resolves sessions by it yet, and names stay
-unique; see `docs/superpowers/specs/2026-11-04-session-names-as-labels.md`.
+inspections include it. A hook prefers the record that carries the agent's
+`HGS_SESSION_ID`; when none does, for example after an older hgs rewrote the
+record, the run identity alone decides, as before.
+
+A command whose first argument is a session also accepts `--session-id ID`
+instead, for example `hgs inspect --session-id ID` or `hgs rename --session-id
+ID NEW-NAME`. A name given before the flag must be that session's current
+name; arguments after it are the command's own. The value must be the
+lowercase UUID shown by `hgs ls --json`, given once. Resolution only finds the
+session's name: every record the command then reads under that name, live or
+archived, must still carry the ID, so a name another session took meanwhile
+fails with "Session ID ID no longer names NAME" instead of acting on it. `kill`
+and `a` bind the terminal before their first effect: the name's immutable
+terminal session must run the run that the verified record carries, and they
+then act on that terminal session, never on the name. A `--run-id` given to
+`a --existing` must name that same run. An OpenCode session's attach goes to
+its own adapter, which checks its binding and run the same way.
+`hgs task` keeps its own `--session-id`, `notify` and `paste` stay the tray's
+and tmux's own entry points, and an agent's own flag after `--` is untouched.
+With `@host` the flag reaches a peer only once its `hgs --help` lists
+`session-id-selector-v1` and every marker the call needs already, including a
+guarded `--expect-machine` call that wraps the command and `native-ui`, whose
+peer resolves the ID itself; an older peer is refused with "update the
+selected computer". Names stay unique for now. When several sessions later
+share a name, commands exit with status 5 and list the candidates; see
+`docs/superpowers/specs/2026-11-04-session-names-as-labels.md`. Because an
+older hgs can change a session's ID once, a client whose `--session-id` is no
+longer found falls back to the name with its expected run and conversation
+identities.
 
 `hgs session-action-status SESSION --json` reads one original lifecycle receipt.
 Supply the original `session-action` JSON unchanged, including its `request_id`,
@@ -2988,6 +3041,29 @@ Task list rows also include a bounded `history_revision` token. A journal-only
 note or delivery receipt changes it, so the existing task stream can refresh the
 selected inspector without transferring the journal or adding a polling loop.
 
+Task views (`task get`, history pages and list rows) include an `execution`
+object for a task that is In progress or recorded execution attempts:
+`requirement` (the task's requirement revision, from 1), `attempts`, `current`
+and, when two attempts claim the same generation, `conflict: true`, which
+nothing resolves automatically. `current` is the attempt the task's execution is
+about: its `id` and `generation`, `origin` (`send`, `start`, `handoff` or
+`reopen`), `executor`, `request_id`, the `requirement` it executes, `phase`
+(`submitted`, `unknown`, `running`, `paused`, `ready`, `cancelled`, or
+`unconfirmed` when nothing shows who executes it), `at`, and `began_at` and
+`progress_at` when known. History written before attempts were recorded reads
+as `legacy: true` with generation 0, from its latest boundary alone: a send,
+handoff, reopen or direct start. A start by that boundary's session before the
+execution ends (a report, cancellation or stage move) acknowledges it; any other
+start is a boundary of its own, and an earlier execution never lends its origin,
+time or receipt to a later one. When merged replicas leave the latest boundary
+with another session than the one holding the task, `conflict` is set. No start,
+child or result is invented. A resume settles only the pauses it observed, so a
+pause that no resume observed keeps the attempt paused. A session's
+Stop, idle time, pause or elapsed time is never an attempt event and never
+moves a task. Attempts are kept beside the history under task schema 6, which a
+reader that does not know them shows read-only. This version reads attempts;
+recording them comes with the stale-report guard.
+
 Plain `task list` still returns every task for existing clients. With `--stage`
 and `--limit` (1–200) it returns one page of that stage in the same order and
 with the same rows, except that a prompt longer than 2 KiB is cut at a
@@ -5178,6 +5254,22 @@ project is read again when a stat of its task store changes and at least every
 changed. A list that cannot be read, such as an unknown project, sends a
 non-fatal `tasks_failed`. A stream follows at most 8 projects
 (`limits.tasks_subscriptions`).
+
+A subscription may add `"window": N` (1 to `limits.tasks_window`, 200; a server
+that announces 0 or omits it always sends the whole list). It then carries only
+the first N rows of each stage, read from the task index, in stage order (In
+review, In progress, To do, Backlog, Done), never the whole list. Every stage
+is read at one index revision: a window whose stages were read at different
+revisions is read again, at most 4 times, and then from the task documents read
+once, so each task is in exactly one stage of a window. That fallback, like
+the index's first build, reads every task document of the project once,
+without a separate I/O or memory budget, and sends at most N rows of each
+stage and the first damaged tasks. The last
+page's `value` adds the `counts` of every stage, `damaged_total`, the
+`revision` and `window: {schema: 1, limit, stages: {STAGE: {total, next}}}`;
+each `next` is the cursor of that stage's next page for `hgs task list --stage
+STAGE --limit N --after CURSOR`, or null when the stage has no more rows. A
+window that is not 1 to 200 is a non-fatal `bad_request`.
 
 The `organization` topic follows the shared project catalog as `hgs swarm get`
 prints it: `{"op":"subscribe","topic":"organization"}`, one per stream. A

@@ -14,6 +14,10 @@ pub use super::creation_clone::Scope;
 
 pub const ABI: &str = "desktop-task-message-v1";
 pub const HELP_MARKER: &str = "Desktop task message ABI: desktop-task-message-v1";
+/// The help line of a service that prepares the reference form from its own
+/// staging directory.
+pub const REFERENCE_HELP_MARKER: &str =
+    "Desktop task message references: desktop-task-message-reference-v1";
 pub const PROFILE: &str = "task-message-v1";
 /// The only modes this leaf carries: a queued message or a note. Their
 /// receipts prove the exact CLI metadata outcome, never native delivery.
@@ -453,6 +457,27 @@ pub struct Receipt {
     pub code: String,
     pub outcome: Option<Outcome>,
 }
+/// The read-only discovery of a service's staging directory: routing data
+/// bound to the queried scope, never permission, consent or a path the
+/// renderer supplies. The service checks everything it reads from there.
+#[derive(Clone, Debug, Deserialize, Serialize, PartialEq, Eq)]
+#[serde(deny_unknown_fields)]
+pub struct Staging {
+    pub abi: String,
+    pub scope: Scope,
+    pub read_only: bool,
+    pub staging: String,
+}
+impl Staging {
+    pub fn matches(&self, scope: &Scope) -> bool {
+        self.abi == ABI
+            && self.read_only
+            && self.scope == *scope
+            && self.staging.len() <= 4096
+            && std::path::Path::new(&self.staging).is_absolute()
+    }
+}
+
 impl std::fmt::Debug for Receipt {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         f.debug_struct("TaskMessageReceipt")
@@ -577,6 +602,10 @@ impl Lookup {
             })
     }
 }
+
+/// The client's per-request staging of a reference original's attachments.
+#[cfg(unix)]
+pub mod staging;
 
 #[cfg(test)]
 pub(super) fn test_intent() -> Intent {

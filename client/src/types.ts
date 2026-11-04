@@ -844,6 +844,13 @@ export interface Fetched {
   /** An image whose header gives its size, at most Qt's 64M pixels: a card may show its thumbnail. */
   thumbnail: boolean;
   image_size?: ImageSize | null;
+  /** A task's file: where `task_attachment_read` reads it. Its `path` is empty until it is read. */
+  source?: TaskFileSource;
+}
+/** A file a task page names: the entry (null for the task's own files), its number from 1 and its metadata. */
+export interface TaskFileSource {
+  entry: string | null; file: number;
+  meta: { name: string; mime: string; reference: string; size: number; sha256: string };
 }
 
 // Saved drafts (src-tauri `composer/saved.rs`).

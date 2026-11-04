@@ -238,3 +238,6 @@ impl Pin {
 
 #[cfg(test)]
 mod tests;
+
+mod relay;
+pub use relay::{PeerImage, ServiceImage};

@@ -186,6 +186,27 @@ class TaskCommands(Fixture):
         planned = self.hgs("target", task["ref"], "subagent", "--parent", "codex/api")["task"]
         self.assertEqual(planned["target"]["parent"]["session_id"], "launch_id:" + launch)
 
+    def test_task_views_carry_the_projected_execution_of_work_in_progress(self):
+        queued = self.add("For later", session="codex/api")
+        self.assertNotIn("execution", self.hgs("get", queued["ref"])["task"])
+        started = self.hgs("start", queued["ref"], "--json", session="codex/api")["task"]
+        # History before attempts: the session holding the task began it, no attempt is invented.
+        execution = started["execution"]
+        self.assertEqual((execution["requirement"], execution["attempts"]), (1, 0))
+        current = execution["current"]
+        self.assertEqual((current["legacy"], current["generation"], current["origin"], current["phase"]),
+                         (True, 0, "start", "running"))
+        self.assertEqual(current["executor"]["session_id"], started["session"]["session_id"])
+        self.assertIn("host", current["executor"])
+        # Every view of the task agrees: the full document, a history page and list rows.
+        page = self.hgs("get", queued["ref"], "--history-limit", "1")["task"]
+        self.assertEqual(page["execution"], execution)
+        self.assertEqual(self.hgs("list", "--project", "orchard", "--stage", "active")["tasks"][0]["execution"], execution)
+        self.assertEqual(self.hgs("list", "--project", "orchard")["tasks"][0]["execution"], execution)
+        # A result moves it to review, where history alone shows no current execution.
+        self.hgs("report", queued["ref"], "--json", text="Done", session="codex/api")
+        self.assertNotIn("execution", self.hgs("get", queued["ref"])["task"])
+
     def test_an_agent_explicitly_starts_work_without_sending_it(self):
         queued = self.add("For later", session="codex/api")
         self.assertEqual(queued["stage"], "todo")

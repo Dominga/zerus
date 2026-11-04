@@ -30,10 +30,10 @@ before any preparation, row or child: no qualified seam yet attests the code a
 macOS child runs before it receives the private input. Windows answers
 `task_message_unsupported` and advertises nothing.
 
-No client sends the kind yet: the editor still sends every message through its
-direct path. The client path, in desktop-service mode only, is a separate
-slice. It must keep the outcome described in [Oversize
-originals](#oversize-originals).
+The task editor sends a new queue or note through the service in
+desktop-service mode on Linux and macOS (see [Client](#client)); everything
+else keeps its direct path. The client keeps the outcome described in
+[Oversize originals](#oversize-originals).
 
 ## Actor
 
@@ -108,12 +108,13 @@ result are its own.
 
 ## Oversize originals
 
-Attachments travel inline in the original, base64-encoded in its content, so
-most messages with an attachment exceed the 64 KiB control frame: an inline
-original carries less than 48 KiB of attachment data in total. Such an
-original is refused before it is sent, with `task_message_original_too_large`
-from `Intent::verify`, which the service applies again. The user-visible
-outcome the client path must keep:
+Attachments travel inline in an inline original, base64-encoded in its
+content: an inline original carries less than 48 KiB of attachment data in
+total. A larger one is refused before it is sent, with
+`task_message_original_too_large` from `Intent::verify`, which the service
+applies again. The reference form below carries such messages instead, within
+the attachment limits. Above those limits, or when the service cannot take a
+reference, the user-visible outcome stays:
 
 - a clear refusal that names the size limit and the attachments, shown in the
   editor and in recovery review, never a silent drop;
@@ -121,23 +122,95 @@ outcome the client path must keep:
   message is never retried through another path on its own;
 - the outbox checkpoint, if already reserved, stays reviewable as never sent.
 
-A later slice should send attachments by reference so that such messages can
-use the service at all. The GUI would stage each attachment in a private,
-digest-named file under the configuration's desktop state. The original would
-carry only each attachment's digest and size. The service would read the
-staged files from its own fixed root (never a renderer-supplied path), rebuild
-the exact stdin and check it against the frozen `input_sha256` before
-admission. The control frame stays 64 KiB, and a staging budget bounds the
-staged bytes.
+## Reference preparation
+
+The service prepares a `reference-v1` original from staged copies of its
+attachments (zerus-5wmh.66.4.4.2). It advertises `Desktop task message
+references: desktop-task-message-reference-v1` on Linux only; macOS refuses
+the form like every original.
+
+- **Staging.** The service holds two private directories under its own
+  desktop state root from startup: `task-message-staging` and
+  `task-message-inputs`. The client learns the staging path only through the
+  read-only `task_message_staging` request, routing data for the exact current
+  scope that grants nothing. It stages each raw attachment as
+  `task-message-staging/<request_id>/<sha256>`, one directory per request, so
+  the same screenshot sent to two tasks stays two independent copies. Staged
+  copies are disposable: the draft keeps the original attachments.
+- **Anchored access.** Every service open, create and delete is anchored on a
+  held directory, with `O_NOFOLLOW|O_NONBLOCK|O_CLOEXEC` at open. Every object
+  must be owner-only: a `0700` directory or a `0600` regular file of this
+  user with one link. A replaced directory, another mode or owner, a special
+  file or a hard link is refused.
+- **Admission.** As for task-start reconciliation, the reply follows on the
+  same connection. The exact encoded input size is reserved first, against
+  its own budget (64 MiB and 64 records, reservations and orphans included).
+  A bounded worker that holds the lease prepares the input off the actor: it
+  reads each staged copy (its exact size and digest), rebuilds the stdin with
+  the same canonical serializer, checks it against the frozen digest, and
+  creates `task-message-inputs/<request_id>` once (`O_EXCL`) and syncs it. One
+  short transaction then rechecks the native permit after `BEGIN IMMEDIATE`,
+  with the same Service, configuration and lease, admits the original and
+  holds its input. An expired permit, a revoked writer or a stop refuses:
+  nothing was admitted, the exact published input is removed and then its
+  reservation is released. The same original again only reads its receipt.
+  A preparation that fails after it published the input (an unreadable
+  identity, a failed removal, a lost worker) leaves its reservation in place:
+  it is classified like a restart's below. A second request while the same
+  original is being prepared is refused as `task_message_preparing`, and one
+  whose request already has an input record as `task_message_input_exists`.
+  Neither refusal is definite: the client keeps the original in review and
+  only the read-only lookup decides.
+- **Execution.** The child's stdin streams from the input through the handle
+  kept since preparation, never a reopened name. The input stays in the
+  original's resources guard with the custody lock.
+- **Removal.** An input is removed, and its storage charge released, only
+  after its original drained physically and nothing in this process holds it.
+  A restart does not change that: a retired but undrained original keeps its
+  input. A failed removal stays visible and charged. Lookups never read an
+  input, so a legitimately removed one changes no receipt.
+- **Restart.** A reservation that nothing in this process holds, after a
+  restart or a failed preparation, is classified off the actor. If its input
+  exists, it was published but never admitted: it is kept, charged and
+  reviewable (`orphaned`). One without an input is released. There is no
+  age-based sweep.
+- **Charged records.** In v1, `orphaned` and `failed` records stay charged:
+  there is no release path for them yet, and 64 of them, or 64 MiB, refuse
+  every further reference original. Each such record names its exact input,
+  `task-message-inputs/<request_id>` with the recorded device and inode;
+  neither a person nor a later process may remove or release one by name or
+  age. Removing such an input by hand does not release its charge. An
+  explicit, exact review and release path is zerus-pi2k9.
+- **Records.** `desktop_task_message_inputs` and its budget, added at Store
+  schema 27 by merge order, keep one record per input; status reports the
+  charged records and bytes.
 
 ## Client
 
 `client/src-tauri/src/desktop_service/task_message.rs` sends one original and
-then only reads its result. It has no caller yet: the editor's routing in
-desktop-service mode lands together with attachments by reference.
+then only reads its result. The task editor is its only caller.
+
+- **Routing.** Only Linux and macOS, only in the selected desktop-service
+  mode, and only a new `queue` or `note` from an explicit Submit go to the
+  service; there is no fallback mixing. `send` and `reopen`, description
+  edits, the recovery of an unmarked record and everything outside that mode
+  keep the direct path. A macOS service refuses the kind and does not
+  advertise it, so its completed probe takes the direct path.
 
 - **Consent.** Only the outbox record reserved by the same explicit Submit is
   sent, and only once. A record from before is never sent again.
+- **Form.** An original that fits the control frame is sent inline. A larger
+  one is sent by reference only when the service advertises the references
+  marker. The client then projects the record, learns the staging folder
+  through `task_message_staging`, and stages each distinct attachment as
+  `<staging>/<request_id>/<sha256>` (`client/core`
+  `desktop::task_message::staging`). It holds the staging folder and creates
+  its request folder once, never writing into one it did not create. Each
+  copy is a private `0600` file created with `O_EXCL` and synced, all before
+  the handoff marker. Otherwise it is never sent (`TOO_LARGE`). A definite
+  never-sent answer removes exactly the copies this client created. Once the
+  request was offered, nothing is removed here: the service removes the
+  copies it consumed.
 - **Handoff marker.** Before the admission request is written,
   `tasks_write::outbox::hand_off` durably records that the exact record (its ID
   and snapshot digest) was handed to the service. The marker is evidence, never
@@ -147,11 +220,13 @@ desktop-service mode lands together with attachments by reference.
   a present marker, and an unreadable or foreign one too. A marked record that
   the lookup does not find, including after a crash between the marker and the
   request, stays in review until the user explicitly discards it or confirms
-  sending it again as a new record. An unreadable marker, or one that names
-  another record, is never taken as absent. Releasing or settling the record
-  removes the marker last, in the same durable step, after a directory sync
-  that makes the record's removal durable first: a record never outlives its
-  marker.
+  sending it again as a new record: the editor's reviewed release removes the
+  record and its marker, and the next Submit is a new original with a new
+  identity. Outside desktop-service mode a marked record is only refused. An
+  unreadable marker, or one that names another record, is never taken as
+  absent. Releasing or settling the record removes the marker last, in the
+  same durable step, after a directory sync that makes the record's removal
+  durable first: a record never outlives its marker.
 - **Answers.** Recorded settles like a delivered reply. Unsent means nothing
   ran: the request never left the client, or the exact drained receipt proves
   that the child never started. Only an Unsent answer releases the original,
@@ -159,6 +234,18 @@ desktop-service mode lands together with attachments by reference.
   the original failed or its result is unknown; it is never sent again and
   never takes the direct path. Direct is the only answer that uses the direct
   path, after a completed capability probe that shows no support for the kind.
+- **Editor.** Recorded settles like a delivered direct reply: the draft
+  clears if unchanged, then the record and its marker go. Unsent leaves an
+  ordinary draft that can be sent again; for a new original, the release step
+  saves the draft's settled flags durably before it removes the record. On
+  explicit recovery of a marked record, the lookup's not-started receipt does
+  the same in that order, but only while the draft still holds that original:
+  an edited draft keeps the record for the explicit reviewed release, which
+  shows it first. Unconfirmed stays in review, and a missing or unsettled
+  result stays in review with the release-or-check-later text.
+  A record too large even by reference is refused before staging
+  (`TOO_LARGE_REFERENCE`); the inline-only text names the 48 KiB limit only
+  for a service without reference support.
 
 ## Wire
 

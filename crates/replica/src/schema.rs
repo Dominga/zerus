@@ -175,6 +175,11 @@ pub struct TaskView {
     #[serde(skip_serializing_if = "Vec::is_empty")]
     pub attachments: Vec<crate::TaskAttachment>,
     pub log: Vec<LogEntry>,
+    /// The task's execution: its current attempt and requirement revision
+    /// (`execution` module). None for a task that is not In progress and
+    /// recorded no attempt.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub execution: Option<crate::execution::Execution>,
 }
 
 impl TaskView {

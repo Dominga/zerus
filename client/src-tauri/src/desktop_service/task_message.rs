@@ -6,6 +6,8 @@ use super::creation_clone::Read;
 use super::*;
 use std::time::Instant;
 use zerus_client_core::desktop::{task_message as wire, ui_requests::Request};
+#[cfg(unix)]
+use zerus_client_core::tasks_write::references;
 
 /// A message this client never sent: nothing reached the service.
 pub(crate) const NOT_SENT: &str = zerus_client_core::source!(
@@ -19,6 +21,11 @@ pub(crate) const NOT_STARTED: &str = zerus_client_core::source!(
 /// was sent, and it is never sent another way.
 pub(crate) const TOO_LARGE: &str = zerus_client_core::source!(
     "The message was not sent: with its attachments it is larger than the desktop service accepts. Attachments travel inside the message, less than 48 KiB in total. Your draft and attachments were kept."
+);
+/// Too large even by reference: nothing was sent, and it is never sent
+/// another way.
+pub(crate) const TOO_LARGE_REFERENCE: &str = zerus_client_core::source!(
+    "The message was not sent: it is larger than the desktop service accepts. Its text and attachment list must fit in 64 KiB, with up to 8 attachments of 10 MiB each and 20 MiB in total. Your draft and attachments were kept."
 );
 /// A sent original whose result this client cannot confirm. It stays for
 /// review and is never sent again.
@@ -102,6 +109,9 @@ pub(crate) fn call(
     shutdown: &AtomicBool,
 ) -> MessageAnswer {
     let sent = std::cell::Cell::new(false);
+    // The reference form's staged copies, exactly as this call created them.
+    #[cfg(unix)]
+    let staged = std::cell::RefCell::new(None);
     let result = (|| -> Result<MessageAnswer, Option<&'static str>> {
         let read = Read::new(service).map_err(|_| None)?;
         // Only a completed probe can prove no support; an I/O error cannot.
@@ -111,9 +121,38 @@ pub(crate) fn call(
         if !fresh {
             return Err(None);
         }
-        let intent = intent(&read.scope, project, task, record);
-        let verified = match intent.clone().verify() {
-            Ok(verified) => verified,
+        let inline = intent(&read.scope, project, task, record);
+        let (intent, verified) = match inline.clone().verify() {
+            Ok(verified) => (inline, verified),
+            // Too large to go inline: the reference form, where the service
+            // prepares it from staged copies; otherwise never sent.
+            #[cfg(unix)]
+            Err("task_message_original_too_large") => {
+                if !read
+                    .supports(wire::REFERENCE_HELP_MARKER)
+                    .map_err(|_| None)?
+                {
+                    return Err(Some(TOO_LARGE));
+                }
+                let (projection, blobs) =
+                    references::project(record).map_err(|_| Some(TOO_LARGE_REFERENCE))?;
+                let reference = wire::Intent {
+                    original: projection.to_string(),
+                    form: wire::Form::ReferenceV1,
+                    ..inline
+                };
+                let verified = reference
+                    .clone()
+                    .verify()
+                    .map_err(|_| Some(TOO_LARGE_REFERENCE))?;
+                let root = discover(&read).ok_or(None)?;
+                let views: Vec<&[u8]> = blobs.iter().map(Vec::as_slice).collect();
+                let copies = wire::staging::stage(&root, &verified.plan.request_id, &views)
+                    .map_err(|_| None)?;
+                *staged.borrow_mut() = Some(copies);
+                (reference, verified)
+            }
+            #[cfg(not(unix))]
             Err("task_message_original_too_large") => return Err(Some(TOO_LARGE)),
             Err(_) => return Err(None),
         };
@@ -163,9 +202,35 @@ pub(crate) fn call(
         None => MessageAnswer::Unconfirmed(UNCONFIRMED.into()),
     });
     if matches!(answer, MessageAnswer::Unsent(_)) {
+        // Never offered: exactly the copies this call staged go. Once offered,
+        // only the service's lookup decides, and nothing is removed here.
+        #[cfg(unix)]
+        if !sent.get() {
+            if let Some(copies) = staged.borrow_mut().take() {
+                let _ = copies.remove();
+            }
+        }
         (outbox.release)();
     }
     answer
+}
+
+/// The service's staging directory: read-only routing data for the exact
+/// current scope, never permission. The service checks everything it reads.
+#[cfg(unix)]
+fn discover(read: &Arc<Read>) -> Option<std::path::PathBuf> {
+    let bytes = read
+        .exchange(
+            None,
+            json!({"op":"task_message_staging","scope":read.scope}),
+            false,
+            None,
+        )
+        .ok()?;
+    let staging: wire::Staging = serde_json::from_slice(&bytes).ok()?;
+    staging
+        .matches(&read.scope)
+        .then(|| std::path::PathBuf::from(staging.staging))
 }
 
 /// Bounded read-only lookups of the exact original until it settles.
@@ -225,11 +290,29 @@ pub(crate) fn check(
     if !read.supports(wire::HELP_MARKER).ok()? {
         return None;
     }
-    let plan = intent(&read.scope, project, task, record)
-        .verify()
-        .ok()?
-        .plan;
+    let plan = plan(&read.scope, project, task, record)?;
     settled(&lookup(&read, &plan)?, &plan)
+}
+
+/// The plan of an exact record, whichever form carried it: both forms of one
+/// original verify to the same plan, and one too large to go inline was sent
+/// by reference.
+fn plan(scope: &wire::Scope, project: &str, task: &str, record: &Value) -> Option<wire::Plan> {
+    let inline = intent(scope, project, task, record);
+    match inline.clone().verify() {
+        Ok(verified) => Some(verified.plan),
+        #[cfg(unix)]
+        Err("task_message_original_too_large") => {
+            let (projection, _) = references::project(record).ok()?;
+            let reference = wire::Intent {
+                original: projection.to_string(),
+                form: wire::Form::ReferenceV1,
+                ..inline
+            };
+            reference.verify().ok().map(|verified| verified.plan)
+        }
+        Err(_) => None,
+    }
 }
 
 #[cfg(all(test, unix))]

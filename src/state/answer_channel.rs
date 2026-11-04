@@ -557,7 +557,7 @@ fn wait() -> Result<()> {
     // input is another request.
     let mut asked: Option<Option<String>> = None;
     let (record, card) = loop {
-        if let Some(record) = read_run(&name, &token)? {
+        if let Some(record) = read_own_run(&name, &token)? {
             let card = match kind {
                 Kind::Question => bind(&record, &event),
                 Kind::Approval => match asked.get_or_insert_with(|| claude_approval::channel::asked_use(&record, &event, started)) {
@@ -599,7 +599,7 @@ fn wait() -> Result<()> {
             close(&dir, "deadline");
             return Ok(());
         }
-        let current = read_run(&name, &token)?;
+        let current = read_own_run(&name, &token)?;
         if let Some(reason) = should_close(kind, current.as_ref(), &record, &card) {
             close(&dir, reason);
             return Ok(());
@@ -616,7 +616,7 @@ fn wait() -> Result<()> {
             // The question must still be the bound one when its answer goes out.
             // Claude tells the hook nothing of a Terminal approval: only the
             // screen still showing the request proves it waits.
-            let current = read_run(&name, &token)?;
+            let current = read_own_run(&name, &token)?;
             let answered = transcript.answered(current.as_ref().unwrap_or(&record), &tool);
             let withheld = withheld(kind, current.as_ref(), &record, &card, &event, answered, waits);
             let output = decision_kind(kind, &event, &card, &offer);

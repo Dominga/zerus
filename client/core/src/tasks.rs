@@ -13,8 +13,15 @@
 //! an update. Per followed project the core keeps the list's digest and the
 //! pages of one list in flight, at most [`TASKS_KEPT`] tasks; the view holds
 //! the list.
+//!
+//! The core asks for a window of [`WINDOW`] rows of each stage. A server
+//! that windows the list adds its counts, revision and each stage's total and
+//! next cursor ([`TasksUpdate::List`]'s `window`); the view loads further
+//! pages with [`page_call`]. An older server ignores the request and sends
+//! the whole list, with a null `window`.
+use crate::tasks_write::TaskCall;
 use crate::{Change, ComputerId};
-use serde_json::Value;
+use serde_json::{json, Map, Value};
 use std::collections::BTreeMap;
 use zerus_watch_protocol::{ErrorFrame, Snapshot};
 
@@ -24,6 +31,12 @@ pub use zerus_watch_protocol::TASKS_SUBSCRIPTIONS;
 pub const PROJECT_BYTES: usize = 128;
 /// Tasks one list keeps; later ones are left out and the list is truncated.
 pub const TASKS_KEPT: usize = 10_000;
+/// Rows of each stage the board follows; further pages are read on request.
+pub const WINDOW: u32 = 50;
+/// The most rows one further page asks for (`task list --limit`).
+pub const PAGE_LIMIT: usize = 200;
+/// The board's stages, in its order.
+pub const STAGES: [&str; 5] = ["review", "active", "todo", "backlog", "done"];
 
 /// Error codes after which the server no longer follows a project.
 const ENDED: [&str; 3] = [
@@ -35,6 +48,56 @@ const ENDED: [&str; 3] = [
 /// Whether `project` can name a project in a subscription.
 pub fn valid_project(project: &str) -> bool {
     !project.is_empty() && project.len() <= PROJECT_BYTES && !project.chars().any(char::is_control)
+}
+
+/// One further page of `stage`, after the cursor of the window or of the
+/// previous page.
+pub fn page_call(
+    project: &str,
+    stage: &str,
+    limit: usize,
+    after: Option<&str>,
+) -> Result<TaskCall, String> {
+    if !valid_project(project)
+        || !STAGES.contains(&stage)
+        || !(1..=PAGE_LIMIT).contains(&limit)
+        || after.is_some_and(|c| c.is_empty() || c.len() > 512 || c.chars().any(char::is_control))
+    {
+        return Err("Invalid task page request.".into());
+    }
+    Ok(TaskCall::list_page(project, stage, limit, after))
+}
+
+/// A page reply, only when it is the requested page of this project's stage:
+/// `{tasks, page, counts, revision}`. An hgs without paged lists is refused.
+pub fn checked_page(
+    reply: &Map<String, Value>,
+    project: &str,
+    stage: &str,
+    limit: usize,
+) -> Result<Value, String> {
+    if reply.get("project").and_then(|p| p["id"].as_str()) != Some(project) {
+        return Err("The task page did not match the selected project.".into());
+    }
+    let page = reply.get("page").ok_or("Update hgs to read task pages.")?;
+    let tasks = reply
+        .get("tasks")
+        .and_then(Value::as_array)
+        .ok_or("Invalid task page.")?;
+    if page["schema"] != 1
+        || page["stage"].as_str() != Some(stage)
+        || tasks.len() > limit
+        || tasks.iter().any(|t| t["stage"].as_str() != Some(stage))
+        || !page["next"].is_null() && !page["next"].is_string()
+    {
+        return Err("Invalid task page.".into());
+    }
+    Ok(json!({
+        "tasks": tasks,
+        "page": page,
+        "counts": reply.get("counts").cloned().unwrap_or(Value::Null),
+        "revision": reply.get("revision").cloned().unwrap_or(Value::Null),
+    }))
 }
 
 /// One change of a followed project's task list.
@@ -49,6 +112,10 @@ pub enum TasksUpdate {
         damaged: Value,
         digest: String,
         truncated: bool,
+        /// From a server that windows the list: `{counts, damaged_total,
+        /// revision, window: {schema, limit, stages: {STAGE: {total, next}}}}`.
+        /// Null when the whole list was sent.
+        window: Value,
     },
     /// The list could not be read (`tasks_failed`); the last list stays.
     Failed { code: String, message: String },
@@ -166,6 +233,15 @@ impl TasksState {
             return None;
         }
         followed.digest = (!digest.is_empty()).then(|| digest.clone());
+        let window = match summary.get("window") {
+            Some(window) if window.is_object() => json!({
+                "counts": summary.get("counts").cloned().unwrap_or(Value::Null),
+                "damaged_total": summary.get("damaged_total").cloned().unwrap_or(Value::Null),
+                "revision": summary.get("revision").cloned().unwrap_or(Value::Null),
+                "window": window,
+            }),
+            _ => Value::Null,
+        };
         Some(change(
             computer,
             key,
@@ -175,6 +251,7 @@ impl TasksState {
                 damaged: summary.get("damaged").cloned().unwrap_or(Value::Null),
                 digest,
                 truncated,
+                window,
             },
         ))
     }
@@ -317,5 +394,107 @@ mod tests {
         assert!(!valid_project(""));
         assert!(!valid_project(&"p".repeat(PROJECT_BYTES + 1)));
         assert!(!valid_project("bad\nproject"));
+    }
+
+    #[test]
+    fn a_windowed_list_carries_its_window_and_a_whole_list_none() {
+        let local = ComputerId::local();
+        let mut state = TasksState::default();
+        state.follow("p1");
+        let whole = state.snapshot(&local, &page("p1", &["a"], 0, Some("d1")));
+        let Some(Change::Tasks {
+            update: TasksUpdate::List { window, .. },
+            ..
+        }) = whole
+        else {
+            panic!("not a list")
+        };
+        assert_eq!(window, Value::Null);
+        let mut windowed = page("p1", &["b"], 0, Some("d2"));
+        let value = windowed.value.as_mut().unwrap();
+        value["counts"] = json!({"todo": 60});
+        value["damaged_total"] = json!(0);
+        value["revision"] = json!("r1");
+        value["window"] =
+            json!({"schema": 1, "limit": 50, "stages": {"todo": {"total": 60, "next": "c"}}});
+        let Some(Change::Tasks {
+            update: TasksUpdate::List { window, .. },
+            ..
+        }) = state.snapshot(&local, &windowed)
+        else {
+            panic!("not a list")
+        };
+        assert_eq!(window["counts"]["todo"], 60);
+        assert_eq!(window["revision"], "r1");
+        assert_eq!(window["window"]["stages"]["todo"]["next"], "c");
+    }
+
+    #[test]
+    fn a_further_page_is_requested_and_checked_exactly() {
+        let call = page_call("p1", "todo", 50, Some("t1.c")).unwrap();
+        assert_eq!(
+            call.args,
+            [
+                "list",
+                "--stage",
+                "todo",
+                "--limit",
+                "50",
+                "--after",
+                "t1.c",
+                "--project",
+                "p1"
+            ]
+        );
+        assert_eq!(page_call("p1", "done", 200, None).unwrap().args[4], "200");
+        for (project, stage, limit, after) in [
+            ("", "todo", 50, None),
+            ("p1", "doing", 50, None),
+            ("p1", "todo", 0, None),
+            ("p1", "todo", 201, None),
+            ("p1", "todo", 50, Some("")),
+            ("p1", "todo", 50, Some("a\nb")),
+        ] {
+            assert!(
+                page_call(project, stage, limit, after).is_err(),
+                "{stage} {limit} {after:?}"
+            );
+        }
+        let reply = |project: &str, stage: &str, tasks: Value| {
+            json!({"project": {"id": project}, "tasks": tasks, "counts": {"todo": 3}, "revision": "r",
+                   "page": {"schema": 1, "stage": stage, "limit": 2, "position": 2, "total": 3, "next": null, "previous": "c"}})
+            .as_object()
+            .unwrap()
+            .clone()
+        };
+        let row = json!({"uuid": "u", "stage": "todo"});
+        let good = checked_page(&reply("p1", "todo", json!([row])), "p1", "todo", 2).unwrap();
+        assert_eq!(good["page"]["position"], 2);
+        assert_eq!(good["revision"], "r");
+        assert!(checked_page(&reply("p2", "todo", json!([row])), "p1", "todo", 2).is_err());
+        assert!(checked_page(&reply("p1", "backlog", json!([row])), "p1", "todo", 2).is_err());
+        assert!(checked_page(
+            &reply("p1", "todo", json!([row, row, row])),
+            "p1",
+            "todo",
+            2
+        )
+        .is_err());
+        assert!(checked_page(
+            &reply("p1", "todo", json!([{"uuid": "u", "stage": "done"}])),
+            "p1",
+            "todo",
+            2
+        )
+        .is_err());
+        // An hgs without paged lists answers the whole list: refused.
+        let old = json!({"project": {"id": "p1"}, "tasks": [row], "damaged": []})
+            .as_object()
+            .unwrap()
+            .clone();
+        assert_eq!(
+            checked_page(&old, "p1", "todo", 2).unwrap_err(),
+            "Update hgs to read task pages."
+        );
     }
 }

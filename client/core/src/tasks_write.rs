@@ -168,6 +168,27 @@ impl TaskCall {
         TaskCall::new(with_project(words(&["get", task]), project), "")
     }
 
+    /// One file of a task, or of one of its history entries:
+    /// `task attachment TASK --file N [--entry ID]`.
+    pub fn attachment(project: &str, task: &str, file: usize, entry: Option<&str>) -> TaskCall {
+        let mut args = words(&["attachment", task, "--file"]);
+        args.push(file.to_string());
+        if let Some(entry) = entry {
+            args.extend(["--entry".to_owned(), entry.to_owned()]);
+        }
+        TaskCall::new(with_project(args, project), "")
+    }
+
+    /// One page of a stage: `task list --stage S --limit N [--after CURSOR]`.
+    pub fn list_page(project: &str, stage: &str, limit: usize, after: Option<&str>) -> TaskCall {
+        let mut args = words(&["list", "--stage", stage, "--limit"]);
+        args.push(limit.to_string());
+        if let Some(after) = after {
+            args.extend(["--after".to_owned(), after.to_owned()]);
+        }
+        TaskCall::new(with_project(args, project), "")
+    }
+
     /// To the top of its list.
     pub fn move_top(project: &str, task: &str) -> TaskCall {
         TaskCall::new(with_project(words(&["move", task, "--top"]), project), "")

@@ -23,8 +23,10 @@ use std::time::Duration;
 use zerus_replica::ids;
 
 const FILE: &str = "task-index-v1.sqlite3";
-/// 2: the histories of recently read tasks as well (slice B).
-const SCHEMA: i64 = 2;
+/// 2: the histories of recently read tasks as well (slice B). 3: rows and
+/// history headers carry the task's execution (zerus-cg5h.4), so rows cached
+/// without it are built again rather than mixed with rows that have it.
+const SCHEMA: i64 = 3;
 /// The histories kept: the most recently read tasks.
 const HISTORIES: i64 = 16;
 /// The one-task history cache this index replaces.

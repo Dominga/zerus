@@ -10,8 +10,6 @@ mod state;
 mod tests;
 
 use super::Store;
-#[cfg(unix)]
-use crate::platform;
 use crate::{
     config::Config,
     desktop::{feed, fleet},

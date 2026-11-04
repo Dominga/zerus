@@ -43,6 +43,55 @@ pub(super) const EXISTS: &str = "task_message_input_exists";
 /// Preparation ran past its deadline.
 pub(super) const EXPIRED: &str = "task_message_preparation_expired";
 
+/// Test-only preparation delays, by request ID: a permit can then expire, or a
+/// writer be revoked, while preparation runs.
+#[cfg(test)]
+pub(super) static DELAYS: std::sync::Mutex<Vec<(String, std::time::Duration)>> =
+    std::sync::Mutex::new(Vec::new());
+
+/// Test-only faults after the custody input was published, by request ID.
+#[cfg(test)]
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub(super) enum Fault {
+    /// Its identity cannot be read: the new file stays.
+    Identity,
+    /// Its write fails and so does its removal: the new file stays.
+    Removal,
+    /// The preparing thread panics: the new file stays.
+    Panic,
+}
+#[cfg(test)]
+pub(super) static FAULTS: std::sync::Mutex<Vec<(String, Fault)>> =
+    std::sync::Mutex::new(Vec::new());
+
+/// Test-only points inside one preparation on this thread.
+#[cfg(test)]
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub(super) enum Point {
+    /// Right before the custody input is created.
+    BeforeCreate,
+    /// Right after the custody input was written and synced.
+    AfterWrite,
+}
+#[cfg(test)]
+type Hook = Box<dyn FnOnce()>;
+#[cfg(test)]
+thread_local! {
+    pub(super) static HOOKS: std::cell::RefCell<Vec<(Point, Hook)>> =
+        const { std::cell::RefCell::new(Vec::new()) };
+}
+#[cfg(test)]
+fn hook(point: Point) {
+    let hook = HOOKS.with(|hooks| {
+        let mut hooks = hooks.borrow_mut();
+        let found = hooks.iter().position(|(at, _)| *at == point);
+        found.map(|n| hooks.remove(n).1)
+    });
+    if let Some(hook) = hook {
+        hook();
+    }
+}
+
 /// A device and inode: what a name must still denote.
 pub(super) type Identity = (u64, u64);
 
@@ -161,23 +210,28 @@ impl Roots {
                 .and_then(|file| identity(&file))
                 .is_ok_and(|now| now == held.identity)
                 && platform::verify_private_directory(&held.file).unwrap_or(false)
-        }) && std::fs::metadata(&self.root_path)
+        }) && std::fs::symlink_metadata(&self.root_path)
             .is_ok_and(|m| (m.dev(), m.ino()) == identity(&self.root).unwrap_or((0, 0)))
     }
 }
 
-/// The exact stdin of one admitted original, held through its own handle.
+/// The exact stdin of one admitted original, held through its own handle,
+/// with the one invocation it belongs to.
 pub(super) struct Input {
+    /// The read-write descriptor that wrote it. It is never handed to a
+    /// child: the child's stdin is a pipe, fed through positioned reads.
     pub(super) file: File,
     pub(super) identity: Identity,
     pub(super) bytes: u64,
     pub(super) sha256: String,
+    /// The original call's arguments.
+    pub(super) args: Vec<String>,
+    /// The original call's deadline, as the direct path's.
+    pub(super) timeout: std::time::Duration,
 }
 
 /// One prepared reference original.
 pub(super) struct Prepared {
-    /// The original call's arguments; its stdin is `input`, not a string.
-    pub(super) args: Vec<String>,
     pub(super) input: Input,
     /// The staged copies it read, by name and identity, for exact removal.
     pub(super) staged: Vec<(String, Identity)>,
@@ -217,6 +271,18 @@ pub(super) fn prepare(
     deadline: Instant,
 ) -> Result<Prepared, &'static str> {
     let expired = || Instant::now() >= deadline;
+    #[cfg(test)]
+    {
+        let delay = DELAYS
+            .lock()
+            .unwrap()
+            .iter()
+            .find(|(id, _)| *id == verified.plan.request_id)
+            .map(|(_, delay)| *delay);
+        if let Some(delay) = delay {
+            std::thread::sleep(delay);
+        }
+    }
     if !roots.current() {
         return Err(UNAVAILABLE);
     }
@@ -251,7 +317,12 @@ pub(super) fn prepare(
     {
         return Err(MISMATCH);
     }
-    if expired() || !roots.current() {
+    #[cfg(test)]
+    hook(Point::BeforeCreate);
+    if !roots.current() {
+        return Err(UNAVAILABLE);
+    }
+    if expired() {
         return Err(EXPIRED);
     }
     let mut file = open_at(
@@ -267,13 +338,42 @@ pub(super) fn prepare(
             UNAVAILABLE
         }
     })?;
+    // From here on the input may outlive a refusal: the caller keeps its
+    // reservation until the file is known to be gone.
+    #[cfg(test)]
+    let fault = FAULTS
+        .lock()
+        .unwrap()
+        .iter()
+        .find(|(id, _)| id == request)
+        .map(|(_, fault)| *fault);
+    #[cfg(test)]
+    if fault == Some(Fault::Identity) {
+        return Err(UNAVAILABLE);
+    }
     let created = identity(&file).map_err(|_| UNAVAILABLE)?;
+    #[cfg(test)]
+    if fault == Some(Fault::Panic) {
+        panic!("injected preparation panic");
+    }
     let written = file
         .write_all(call.input.as_bytes())
         .and_then(|()| file.sync_all())
         .and_then(|()| roots.inputs.sync());
+    #[cfg(test)]
+    hook(Point::AfterWrite);
+    #[cfg(test)]
+    let written = match fault {
+        Some(Fault::Removal) => Err(io::ErrorKind::Other.into()),
+        _ => written,
+    };
     if written.is_err() || expired() {
-        // Exactly the file this call created, never another one.
+        // Exactly the file this call created, never another one. A failed
+        // removal leaves it to the caller's reservation sweep.
+        #[cfg(test)]
+        if fault == Some(Fault::Removal) {
+            return Err(UNAVAILABLE);
+        }
         let _ = remove_input(roots, request, created);
         return Err(if written.is_err() {
             UNAVAILABLE
@@ -283,12 +383,13 @@ pub(super) fn prepare(
     }
     let invocation = call.invocation();
     Ok(Prepared {
-        args: invocation.args,
         input: Input {
             file,
             identity: created,
             bytes: call.input.len() as u64,
             sha256: verified.plan.input_sha256.clone(),
+            args: invocation.args,
+            timeout: invocation.timeout,
         },
         staged: copies,
     })
@@ -339,4 +440,19 @@ pub(super) fn remove_input(roots: &Roots, request: &str, expected: Identity) -> 
         Err(error) => return Err(error),
     }
     roots.inputs.sync()
+}
+
+/// Whether `request` has a custody input: what a restart checks for a
+/// reservation that never reached admission. It never reads the file.
+pub(super) fn input_exists(roots: &Roots, request: &str) -> io::Result<bool> {
+    match open_at(
+        &roots.inputs.file,
+        request,
+        libc::O_RDONLY | libc::O_NOCTTY,
+        0,
+    ) {
+        Ok(_) => Ok(true),
+        Err(error) if error.kind() == io::ErrorKind::NotFound => Ok(false),
+        Err(error) => Err(error),
+    }
 }

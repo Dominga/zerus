@@ -73,7 +73,7 @@ export function reviewTaskStart(project: string, task: Task, origin?: HTMLElemen
 }
 export async function startTask(project: string, task: Task) {
   if (writingTask()) return;
-  const fresh = tasks.project() === project ? tasks.tasks().find((t) => t.uuid === task.uuid) : undefined;
+  const fresh = tasks.project() === project ? tasks.find(task.uuid) : undefined;
   if (!fresh || fresh.stageAt !== task.stageAt || fresh.stage !== task.stage || JSON.stringify(startAssignment(fresh)) !== JSON.stringify(startAssignment(task)) || !["todo", "backlog"].includes(fresh.stage) || !supportsTaskStart(fresh)) { notify("error", tr("The task or executor changed. Nothing was sent. Refresh the task.")); return; }
   openTask(project, task.uuid);
   const reason = taskStartBlocker(project, task), executor = startExecutor(task);

@@ -81,6 +81,14 @@ fn try_bindings_at(path: &Path, wait: Duration) -> Option<Bindings> {
 pub(crate) fn exists(name: &str) -> bool {
     binding_path(name).is_file()
 }
+/// Valid OpenCode bindings, read without contacting a service.
+pub(super) fn binding_records() -> Vec<Value> {
+    let Ok(files) = fs::read_dir(bindings()) else { return Vec::new(); };
+    files.flatten().take(5000).filter_map(|file| {
+        let record: Value = serde_json::from_slice(&fs::read(file.path()).ok()?).ok()?;
+        (record["backend"] == "opencode" && binding_path(string(&record, "name")) == file.path()).then_some(record)
+    }).collect()
+}
 pub(super) fn binding(name: &str) -> Result<Value> {
     let bytes = fs::read(binding_path(name)).map_err(|e| e.to_string())?;
     if bytes.len() > 1_048_576 {
@@ -93,6 +101,7 @@ pub(super) fn binding(name: &str) -> Result<Value> {
     {
         return Err("Invalid OpenCode binding".into());
     }
+    session_id::verify(&record)?;
     Ok(record)
 }
 pub(super) fn native_id(id: &str, prefix: &str) -> bool {

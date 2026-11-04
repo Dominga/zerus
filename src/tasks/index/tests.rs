@@ -694,6 +694,82 @@ fn a_requested_history_is_revalidated_like_a_page_row() {
     }
 }
 
+/// The tasks window (zerus-cg5h.2 slice C): the first page of every stage,
+/// the same from the index and from the documents read once.
+#[cfg(unix)]
+#[test]
+fn a_window_is_the_first_page_of_every_stage_from_the_index_or_the_documents() {
+    use std::os::unix::fs::PermissionsExt;
+    let temp = tempfile::tempdir().unwrap();
+    let store = project(temp.path());
+    let indexed = super::super::window_pages(&store, 2).unwrap();
+    assert_eq!(indexed.len(), 5);
+    for (stage, page) in super::super::LIST_STAGES.iter().zip(&indexed) {
+        let expected = super::super::documents_page(&store, *stage, 2, &Anchor::Start, None).unwrap();
+        assert_eq!(page["tasks"], expected["tasks"], "{stage:?}");
+        assert_eq!(page["page"]["total"], expected["page"]["total"], "{stage:?}");
+        assert_eq!(page["page"]["next"], expected["page"]["next"], "{stage:?}");
+    }
+    // The folder is not private: the index cannot be used, the documents can.
+    fs::set_permissions(store.dir(), fs::Permissions::from_mode(0o755)).unwrap();
+    let read = super::super::window_pages(&store, 2).unwrap();
+    fs::set_permissions(store.dir(), fs::Permissions::from_mode(0o700)).unwrap();
+    for (page, from_documents) in indexed.iter().zip(&read) {
+        assert_eq!(page["tasks"], from_documents["tasks"]);
+        assert_eq!(page["page"], from_documents["page"]);
+        assert_eq!(page["counts"], from_documents["counts"]);
+    }
+    assert!(read[0]["revision"].as_str().unwrap().starts_with("documents-"));
+}
+
+#[test]
+fn a_window_keeps_a_task_a_later_page_moves_to_an_earlier_stage() {
+    let temp = tempfile::tempdir().unwrap();
+    let store = ProjectStore::open(temp.path(), "example").unwrap();
+    let mut task = new_task(&store, "T-aaaaaa", Stage::Todo, "V", "Plain");
+    aged_save(&store, &mut task);
+    let initial = super::super::window_pages(&store, 1).unwrap();
+    assert_eq!(initial[2]["tasks"].as_array().unwrap().len(), 1);
+    // An older hgs moves the cached To do task to Review before the next
+    // window, without a journal note: only the To do page's check finds it.
+    task.record_send(&agent(), "window-request", &Actor::Agent(agent()), now()).unwrap();
+    task.record_report("Done; please review", &Actor::Agent(agent()), now() + 1).unwrap();
+    write_plain(&store, &task);
+    let pages = super::super::window_pages(&store, 1).unwrap();
+    let expected = super::super::documents_page(&store, Stage::Review, 1, &Anchor::Start, None).unwrap();
+    assert_eq!(pages[0]["tasks"], expected["tasks"]);
+    assert_eq!(pages[0]["page"]["total"], json!(1));
+    assert!(pages.iter().all(|p| p["revision"] == pages[0]["revision"] && p["counts"] == pages[0]["counts"]));
+    let shown: usize = pages.iter().map(|p| p["tasks"].as_array().unwrap().len()).sum();
+    assert_eq!(shown, 1, "the task is in exactly one stage of the window");
+}
+
+#[test]
+fn a_window_is_read_again_until_its_pages_share_one_revision() {
+    let pages = |revisions: &[&str]| -> Vec<Value> { revisions.iter().map(|r| json!({"revision": r})).collect() };
+    let mut passes = vec![pages(&["a", "a", "b", "b", "b"]), pages(&["b"; 5])].into_iter();
+    let mut reads = 0;
+    let window = super::super::coherent_window(|| {
+        reads += 1;
+        passes.next().ok_or(())
+    });
+    assert_eq!((window, reads), (Ok(Some(pages(&["b"; 5]))), 2));
+    // A window that keeps changing is not returned: the documents answer.
+    let mut reads = 0;
+    let window = super::super::coherent_window(|| {
+        reads += 1;
+        Ok::<_, ()>(pages(&[&reads.to_string(), "next", "next", "next", "next"]))
+    });
+    assert_eq!((window, reads), (Ok(None), super::super::WINDOW_ATTEMPTS));
+    // A failed pass is not repeated.
+    let mut reads = 0;
+    let window = super::super::coherent_window(|| {
+        reads += 1;
+        Err::<Vec<Value>, _>("failed")
+    });
+    assert_eq!((window, reads), (Err("failed"), 1));
+}
+
 #[test]
 fn a_damaged_foreign_or_shared_index_is_built_again() {
     let temp = tempfile::tempdir().unwrap();

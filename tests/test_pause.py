@@ -3128,6 +3128,37 @@ os.execvp("codex", ["codex", *sys.argv[1:]])
         argv = json.loads((self.root / "launcher-runs.jsonl").read_text().splitlines()[-1])["argv"]
         self.assertEqual(argv[argv.index("resume"):argv.index("resume") + 2], ["resume", requested])
 
+    # zerus-ucck P2b (#1408 review): a retry of an unconfirmed attempt keeps
+    # that attempt's journal and launch label, through either arm of
+    # attempts::retryable; its new run still gets a session ID of its own.
+    def test_a_retry_continues_the_failed_attempt_s_journal(self):
+        self.gate.write_text("7")
+        name = self.launch()
+        failed = self.wait_failed(name)
+        self.assertEqual(failed["journal_name"], "session:" + failed["session_id"])
+        self.gate.unlink()
+        self.assertEqual(self.launch(), name)
+        self.wait(lambda: self.binding(name).get("conversation_id"))
+        retried = self.binding(name)
+        self.assertNotEqual(retried["session_id"], failed["session_id"])
+        self.assertEqual((retried["journal_name"], retried["launch_label"]),
+                         (failed["journal_name"], failed["launch_label"]))
+
+    def test_a_retry_of_a_requested_id_continues_its_journal(self):
+        requested = str(uuid.uuid4())
+        self.gate.write_text("7")
+        name = self.launch("-c", requested)
+        failed = self.wait_failed(name)
+        self.assertEqual((failed["requested_id"], failed["expected_id"]), (requested, requested))
+        self.gate.unlink()
+        self.hgs("codex", "-n", "dashboard", "-c", requested, "-d", cwd=self.project)
+        self.wait(lambda: self.binding(name).get("conversation_id") == requested and
+                  self.binding(name).get("activity") == "idle")
+        retried = self.binding(name)
+        self.assertEqual((retried["journal_name"], retried["launch_label"]),
+                         (failed["journal_name"], failed["launch_label"]))
+        self.assertEqual([record["run_id"] for record in self.attempts()], [failed["run_id"]])
+
     def test_repeated_failed_attempts_are_preserved_separately(self):
         failed = []
         for code in (7, 130):

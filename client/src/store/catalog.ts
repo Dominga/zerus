@@ -1,4 +1,4 @@
-import { batch } from "solid-js";
+import { batch, createSignal } from "solid-js";
 import { applyMachines } from "./machines";
 import { createStore, produce, reconcile, unwrap } from "solid-js/store";
 import type { Batch, ComputerId, RowOut, ViewRow } from "../types";
@@ -199,9 +199,14 @@ const REPLACED_MS = 10_000;
 export function createCatalog(given?: RowMarks, onMachines?: (b: Batch) => void) {
   const marks = given ?? appMarks;
   const [catalog, setCatalog] = createStore<CatalogState>({ rows: {}, order: [], computers: {} });
+  // Bumped with every change to the rows, their order or the computers, once
+  // per batch: whole-catalog aggregates track this instead of each field of
+  // every row (zerus-5wmh.66.50).
+  const [revision, setRevision] = createSignal(0);
+  const changed = () => setRevision((n) => n + 1);
   // A marks change applies the overlay again to the rows it touched, in place.
   // The marks only read the rows, so they scan the plain objects (no proxy reads).
-  given?.attach({ rows: () => unwrap(catalog.rows), patch: (id, fields) => setCatalog("rows", id, fields) });
+  given?.attach({ rows: () => unwrap(catalog.rows), patch: (id, fields) => { setCatalog("rows", id, fields); changed(); } });
   // `replaced` removals by computer + name, so the next run of that name can
   // inherit selection and drafts (the remove and its upsert may land in
   // different batches).
@@ -378,6 +383,7 @@ export function createCatalog(given?: RowMarks, onMachines?: (b: Batch) => void)
         for (const listener of replacedListeners) listener(from, to);
       }
       for (const next of upserted) inheritReplaced(next);
+      if (b.computers.length || b.replaces.length || b.removes.length || b.upserts.length) changed();
     });
   }
 
@@ -397,16 +403,34 @@ export function createCatalog(given?: RowMarks, onMachines?: (b: Batch) => void)
     batch(() => {
       for (const id of catalog.order) {
         const row = catalog.rows[id];
-        if (row && row.draft !== drafted(row)) setCatalog("rows", id, "draft", drafted(row));
+        if (row && row.draft !== drafted(row)) { setCatalog("rows", id, "draft", drafted(row)); changed(); }
       }
     });
   }
 
-  return { catalog, applyBatch, onReplaced, setDraftKeys, hasDraftKey: (key: string) => drafts.has(key) };
+  /**
+   * The ordered rows as plain objects, for whole-catalog aggregates such as
+   * the Overview's tiles: they track only the catalog's revision, never each
+   * field of every row, which would be ten subscriptions per row and batch at
+   * tens of thousands of sessions. Their fields are not reactive: render a
+   * row through `catalog.rows[row.key]`.
+   */
+  const plainRows = (): Session[] => {
+    revision();
+    const state = unwrap(catalog);
+    return state.order.map((id) => state.rows[id]).filter(Boolean);
+  };
+  /** The computers as plain objects, tracking only the catalog's revision. */
+  const plainComputers = (): CatalogState["computers"] => {
+    revision();
+    return unwrap(catalog).computers;
+  };
+
+  return { catalog, applyBatch, onReplaced, setDraftKeys, hasDraftKey: (key: string) => drafts.has(key), revision, plainRows, plainComputers };
 }
 
 /** The app's catalog. Tests build their own with `createCatalog`. */
-export const { catalog, applyBatch, onReplaced, setDraftKeys, hasDraftKey } = createCatalog(appMarks, applyMachines);
+export const { catalog, applyBatch, onReplaced, setDraftKeys, hasDraftKey, plainRows, plainComputers } = createCatalog(appMarks, applyMachines);
 
 /** Rows in display order. */
 export const orderedRows = () => catalog.order.map((id) => catalog.rows[id]).filter(Boolean);

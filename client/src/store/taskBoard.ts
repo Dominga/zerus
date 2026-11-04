@@ -21,8 +21,8 @@ export const stageDropAction = (task: Task | undefined, stage: string): BoardAct
 
 export async function actOnTask(project: string, task: Task, action: BoardAction) {
   if (writingTask()) return;
-  const fresh = tasks.project() === project ? tasks.tasks().find((t) => t.uuid === task.uuid) : undefined;
-  const anchor = action.kind === "reorder" ? tasks.tasks().find((t) => t.uuid === action.anchor) : undefined;
+  const fresh = tasks.project() === project ? tasks.find(task.uuid) : undefined;
+  const anchor = action.kind === "reorder" ? tasks.find(action.anchor) : undefined;
   if (!fresh || !canDrag(fresh) || fresh.stage !== task.stage || (action.kind === "reorder"
     ? !anchor || !anchor.writable || anchor.uuid === task.uuid || anchor.stage !== fresh.stage
     : !boardActions(fresh.stage).includes(action.kind))) {

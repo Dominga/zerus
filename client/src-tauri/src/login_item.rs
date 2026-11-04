@@ -125,7 +125,6 @@ mod tests {
     #[cfg(unix)]
     #[test]
     fn the_fix_runs_only_the_bundled_setup_with_autostart() {
-        use std::os::unix::fs::PermissionsExt;
         use std::sync::atomic::{AtomicUsize, Ordering};
         static NEXT: AtomicUsize = AtomicUsize::new(0);
         let root = std::env::temp_dir().join(format!(
@@ -138,12 +137,10 @@ mod tests {
         std::fs::create_dir_all(setup.parent().unwrap()).unwrap();
         std::fs::create_dir_all(executable.parent().unwrap()).unwrap();
         std::fs::write(&executable, "").unwrap();
-        std::fs::write(
+        crate::write_executable(
             &setup,
             "#!/bin/sh\nprintf '%s' \"$1\" > \"${ZERUS_TEST_LOG:?}\"\nprintf 'fixture problem\\n' >&2\nexit \"${ZERUS_TEST_EXIT:-0}\"\n",
-        )
-        .unwrap();
-        std::fs::set_permissions(&setup, std::fs::Permissions::from_mode(0o700)).unwrap();
+        );
         let log = root.join("args");
         unsafe {
             std::env::set_var("ZERUS_TEST_LOG", &log);

@@ -452,7 +452,7 @@ fn exact_twenty_four_upgrade_is_atomic_and_preserves_existing_leaves() {
             .db
             .query_row::<i64, _, _>("PRAGMA user_version", [], |r| r.get(0))
             .unwrap(),
-        SCHEMA
+        crate::desktop::store::SCHEMA
     );
     for table in [
         "desktop_creation_clones",

@@ -318,6 +318,19 @@ fn actual_root_projection_is_consumed_by_the_client_without_ready_json_fixtures(
     let mut f = Fixture::new(quiet());
     let mut client = State::new(f.location.configuration.clone()).unwrap();
     let mut output = Vec::new();
+    // A passive service: no background runtime decorates its lifecycle, so
+    // all five components stay not_started (the Windows passive GUI state).
+    let passive = f.passive_projection();
+    client.status(&passive).unwrap();
+    assert!(client.snapshot().connected);
+    assert!(!client.snapshot().background_ready());
+    for component in ["fleet", "presence", "reads", "attention", "approvals"] {
+        assert_eq!(
+            passive["lifecycle"]["background"][component]["code"], "not_started",
+            "{component}"
+        );
+    }
+    output.push(json!({"case":"passive","status":passive}));
     let mut check = |case: &str, f: &Fixture, reads: bool, approvals: bool| {
         let value = f.projection();
         client.status(&value).unwrap();
@@ -1035,6 +1048,25 @@ fn an_approval_at_the_end_of_a_large_catalog_is_found_on_the_first_scan() {
 }
 
 #[test]
+fn a_source_older_than_fresh_is_not_scanned_until_it_is_observed_again() {
+    // zerus-e04p, #1357 review: a source last observed more than FRESH ago,
+    // without a heartbeat, takes no part in discovery.
+    let (run, seen) = inspections();
+    let mut f = Fixture::new(run);
+    f.active();
+    f.enabled(true);
+    f.source_rows(idle_then_approval(1));
+    f.runtime.sources.age_fixture(Duration::from_secs(16));
+    f.scan();
+    f.tick_until(|r| r.jobs.is_empty());
+    assert!(seen.lock().unwrap().is_empty());
+    f.runtime.sources.heartbeat_fixture(&f.store);
+    f.scan();
+    f.tick_until(|r| r.jobs.is_empty());
+    assert!(seen.lock().unwrap().iter().any(|a| a == "claude/example/a"));
+}
+
+#[test]
 fn rows_stored_before_the_index_are_found_once_the_scan_backfills_them() {
     let (run, seen) = inspections();
     let mut f = Fixture::new(run.clone());
@@ -1090,9 +1122,12 @@ fn idle(count: usize) -> Vec<CatalogItem> {
 }
 
 impl Fixture {
-    /// One scan, its inspections settled, then a second passes: the 5 s
-    /// inspection cooldown counts it.
+    /// A live source's heartbeat, one scan with its inspections settled, then
+    /// a second passes: the 5 s inspection cooldown counts it. The heartbeat
+    /// keeps a test's sources current however slow the runner; without it,
+    /// more than `FRESH` of real time made every later scan skip them.
     fn second(&mut self) {
+        self.runtime.sources.heartbeat_fixture(&self.store);
         self.scan();
         self.tick_until(|r| r.jobs.is_empty());
         for (_, at) in self.runtime.recent.iter_mut() {
@@ -1172,6 +1207,8 @@ fn a_pass_ends_where_it_began_so_arrivals_cannot_hide_an_older_row() {
         .unwrap();
     let mut arrived = 20;
     for _ in 0..4 {
+        // zerus-e04p: a loaded runner can spend more than FRESH between scans.
+        f.runtime.sources.age_fixture(Duration::from_secs(16));
         for _ in 0..16 {
             let row = named(&format!("untracked-{arrived}"), "approval", false);
             let json = row.row.to_string();

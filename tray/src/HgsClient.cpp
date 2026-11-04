@@ -106,7 +106,7 @@ ProcessRunner::Request processRequest(const QString &program, const QStringList 
     // GUI actions are human input even when this GUI was launched from an
     // agent's shell tool. Never inherit that tool's attribution identity.
     auto environment = QProcessEnvironment::systemEnvironment();
-    environment.remove("HGS_SESSION");environment.remove("HGS_RUN_ID");
+    environment.remove("HGS_SESSION");environment.remove("HGS_SESSION_ID");environment.remove("HGS_RUN_ID");
     request.environment=environment;
 #ifdef Q_OS_MACOS
     // Qt encodes argv with QFile::encodeName(), which decomposes Unicode on

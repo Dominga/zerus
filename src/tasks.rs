@@ -13,8 +13,8 @@ use std::collections::BTreeMap;
 use std::io::Read;
 use std::time::{SystemTime, UNIX_EPOCH};
 use zerus_replica::{
-    cancel_message, task_dispatch_content, Actor, Position, ProjectStore, SessionKey, Settings,
-    Stage, Target, TaskAttachment, TaskDoc, Tools, MAX_TEXT,
+    cancel_message, execution::ReportKind, task_dispatch_content, Actor, Position, ProjectStore,
+    SessionKey, Settings, Stage, Target, TaskAttachment, TaskDoc, Tools, MAX_TEXT,
 };
 
 mod answers;
@@ -25,6 +25,7 @@ mod phone;
 mod sessions;
 mod messages;
 mod history;
+mod index;
 
 /// A send that pasted the prompt but could not record it: its outcome is
 /// uncertain, and the phone's receipt says so.
@@ -37,7 +38,7 @@ fn paste_uncertain(message: &str) -> bool {
     message.starts_with(SENT_UNRECORDED) || message.starts_with("delivery uncertain")
 }
 
-const USAGE: &str = "usage: hgs task list --project P [--stage S] | get REF [--history-limit 1..80 [--history-before CURSOR]] | add --project P [--backlog] [--start] [--target SESSION|any [--host ALIAS]] [--title TITLE [--request-id UUID]] [--position N] | edit REF | rename REF | move REF --top|--before REF|--after REF|--position N | stage REF backlog|todo|done | target REF SESSION|any|new-session|subagent [--parent SESSION] [--host ALIAS] | send REF [--session SESSION [--host ALIAS]] | start-plan REF --json | start-deliver REF --json [--recover-only] | cancel REF [--reason TEXT] | cancel-execution REF --json (guard JSON on stdin) | handoff REF --session SESSION [--host ALIAS] | start REF | report REF | comment REF [--content-json] | message REF --request-id UUID --mode queue|send|reopen|note [--expect-dispatch ID] [--content-json] | worker REF --subagent ID --request-id REQUEST | settings --project P [--set] | digests --json | exchange --json | mobile-send|mobile-cancel|mobile-done --json
+const USAGE: &str = "usage: hgs task list --project P [--stage S] | list --project P --stage S --limit 1..200 [--after CURSOR|--before CURSOR] [--if-revision R] | get REF [--history-limit 1..80 [--history-before CURSOR] [--attachments metadata]] | attachment REF --file N [--entry ID] | add --project P [--backlog] [--start] [--target SESSION|any [--host ALIAS]] [--title TITLE [--request-id UUID]] [--position N] | edit REF | rename REF | move REF --top|--before REF|--after REF|--position N | stage REF backlog|todo|done | target REF SESSION|any|new-session|subagent [--parent SESSION] [--host ALIAS] | send REF [--session SESSION [--host ALIAS]] | start-plan REF --json | start-deliver REF --json [--recover-only] | cancel REF [--reason TEXT] | cancel-execution REF --json (guard JSON on stdin) | handoff REF --session SESSION [--host ALIAS] | start REF | report REF [--progress|--ready] [--considered REV] | comment REF [--content-json] | message REF --request-id UUID --mode queue|send|reopen|note [--expect-dispatch ID] [--content-json] | worker REF --subagent ID --request-id REQUEST | settings --project P [--set] | digests --json | exchange --json | mobile-send|mobile-cancel|mobile-done --json
   REF is T-xxxxxx with --project P, or PROJECT/T-xxxxxx; texts and --set settings are read from stdin;
   a change an agent makes prints one line, and --json prints the task";
 
@@ -46,7 +47,7 @@ const USAGE: &str = "usage: hgs task list --project P [--stage S] | get REF [--h
 const AGENT_INSTRUCTIONS: &str = concat!(
     "Zerus tasks are this project's shared task list. Run `hgs task` in your shell: it acts as your session, on your session's project; `hgs guide tasks` lists the commands. Texts go on stdin, for example hgs task report <ref> <<'EOF' ... EOF.\n\n",
     "Filing. When the person says \"поставь таск\", \"добавь задачу\", \"запиши задачу\", \"в очередь\", \"на потом\", \"file a task\", \"add to the queue\" or \"for later\", file it with `hgs task add`. Never put these into TodoWrite or your own plan. For work you are already doing, use `hgs task add --start` or `hgs task start <ref>`; this records In progress without sending a duplicate message. Plain add only queues later work. New tasks go to the end of To do unless the person names a place (--backlog, --position N).\n\n",
-    "Working. A message starting \"[Zerus task <ref>]\" is a task for you; do it like any request from the person. When the prompt says the task was sent before, read its history with `hgs task get <ref>` before you start. Acknowledge a dispatched task with `hgs task start <ref>` before working; this does not send it again. For a subagent plan, register the native worker first. If you need the person, ask in this conversation as usual. When the work is done, or you find that it cannot be done, report with `hgs task report <ref>`: what you changed, how you checked it, and what is left undone or why it cannot be done.\n\n",
+    "Working. A message starting \"[Zerus task <ref>]\" is a task for you; do it like any request from the person. When the prompt says the task was sent before, read its history with `hgs task get <ref>` before you start. Acknowledge a dispatched task with `hgs task start <ref>` before working; this does not send it again. For a subagent plan, register the native worker first. If you need the person, ask in this conversation as usual. When the work is done, or you find that it cannot be done, report with `hgs task report <ref>`: what you changed, how you checked it, and what is left undone or why it cannot be done. An update while the work continues is `hgs task report <ref> --progress`; it keeps the task In progress.\n\n",
     "Cancelled. \"[Zerus task <ref> cancelled]\" means stop that task now and follow the message.\n\n",
     "Managing. `hgs task list` and `hgs task get` show tasks and their history; move, stage, target, edit, send and cancel change them as the person can. Accept a task (`hgs task stage <ref> done`) only when the person asks you to.\n\n",
     "Comments. `hgs task comment <ref>` adds a note for people and agents; it is never pasted into a session."
@@ -289,24 +290,41 @@ fn actor(here: &str, args: &[String], forwardable: bool) -> Result<Actor> {
 }
 
 fn view(task: &TaskDoc, project_name: &str, with_log: bool, machines: &Machines) -> Result<Value> {
-    let mut task_view = task.view().map_err(fail)?;
-    let files = if with_log { Vec::new() } else {
-        std::mem::take(&mut task_view.attachments).iter().map(TaskAttachment::metadata)
-            .collect::<std::result::Result<Vec<_>, _>>().map_err(fail)?
-    };
+    let task_view = task.view().map_err(fail)?;
+    if !with_log {
+        return label_view(row(task_view, task.revision())?, project_name, false, &[], machines);
+    }
     let dispatch_id = task_view.execution_id();
     let mut value = serde_json::to_value(task_view).map_err(fail)?;
     value["dispatch_id"] = json!(dispatch_id);
+    label_view(value, project_name, true, &[], machines)
+}
+
+/// A task's list row before its session references are named: no history,
+/// attachment metadata only, its dispatch ID and its history revision. The
+/// task index keeps these rows, so a listed row is the same either way.
+fn row(mut task_view: zerus_replica::TaskView, history_revision: String) -> Result<Value> {
+    let files = std::mem::take(&mut task_view.attachments).iter().map(TaskAttachment::metadata)
+        .collect::<std::result::Result<Vec<_>, _>>().map_err(fail)?;
+    let dispatch_id = task_view.execution_id();
+    task_view.log = Vec::new();
+    let mut value = serde_json::to_value(task_view).map_err(fail)?;
+    value.as_object_mut().expect("a task view is an object").remove("log");
+    value["dispatch_id"] = json!(dispatch_id);
     // A note or receipt changes no other list field. Its clock must change
     // the tasks-topic digest so the selected inspector can refresh.
-    if !with_log { value["history_revision"] = json!(task.revision()); }
-    label_view(value, project_name, with_log, &files, machines)
+    value["history_revision"] = json!(history_revision);
+    if !files.is_empty() { value["attachments"] = json!(files); }
+    Ok(value)
 }
 
 fn label_view(mut value: Value, project_name: &str, with_log: bool, files: &[Value], machines: &Machines) -> Result<Value> {
+    if !value.is_object() {
+        return Err(fail("a task view is not an object"));
+    }
     value["ref"] = json!(format!("{project_name}/{}", value["id"].as_str().unwrap_or_default()));
-    // Every session reference names its computer: the task's target, session and
-    // author, and each history entry's session and actor.
+    // Every session reference names its computer: the task's target, session,
+    // author and current executor, and each history entry's session and actor.
     let name = |reference: &mut Value| {
         if let Some(machine) = reference["machine"].as_str().map(str::to_owned) {
             reference["host"] = machines.host(&machine);
@@ -324,6 +342,7 @@ fn label_view(mut value: Value, project_name: &str, with_log: bool, files: &[Val
     for key in ["target", "session", "author"] { name(&mut value[key]); }
     if value["target"]["parent"].is_object() { name(&mut value["target"]["parent"]); }
     if value["worker"]["parent"].is_object() { name(&mut value["worker"]["parent"]); }
+    if value["execution"]["current"]["executor"].is_object() { name(&mut value["execution"]["current"]["executor"]); }
     if let Some(log) = value["log"].as_array_mut() {
         for entry in log {
             name(&mut entry["session"]);
@@ -339,6 +358,9 @@ fn label_view(mut value: Value, project_name: &str, with_log: bool, files: &[Val
 
 /// The place of `task` in its list, counting from 1.
 fn place(store: &ProjectStore, task: &TaskDoc) -> Result<usize> {
+    if let Some(Ok(Some(at))) = index::Index::open(store).map(|index| index.place(task.uuid())) {
+        return Ok(at);
+    }
     let stage = task.stage().map_err(fail)?;
     let (tasks, _) = store.listing().map_err(fail)?;
     Ok(tasks
@@ -354,6 +376,48 @@ fn with_answer(who: &Actor, action: &str, mut out: Value, place: usize, destinat
         out["answer"] = json!(answers::answer(action, &out, place, &own.session, destination));
     }
     out
+}
+
+/// A task by its UUID or short ID. A short ID is looked up in the task
+/// index rather than by reading every task; the messages are the store's.
+fn find(store: &ProjectStore, reference: &str) -> Result<TaskDoc> {
+    if zerus_replica::ids::is_short_id(reference) {
+        let found = index::Index::open(store).and_then(|index| {
+            let (uuids, _) = index.short_id(reference).ok()?;
+            let damaged = index.damaged().ok()?.1;
+            Some((uuids, damaged))
+        });
+        match found {
+            Some((uuids, _)) if uuids.len() > 1 => {
+                return Err(fail(format!("{reference} names more than one task; use its UUID")))
+            }
+            Some((uuids, damaged)) if uuids.is_empty() => {
+                return Err(fail(match damaged {
+                    0 => format!("no task {reference} in this project"),
+                    1 => format!("no task {reference} in this project; 1 task file could not be read"),
+                    n => format!("no task {reference} in this project; {n} task files could not be read"),
+                }))
+            }
+            Some((uuids, _)) => {
+                if let Ok(task) = store.load(&uuids[0]) {
+                    if task.id() == reference {
+                        return Ok(task);
+                    }
+                }
+            }
+            None => (),
+        }
+    }
+    store.find(reference).map_err(fail)
+}
+
+/// How many tasks agents started since `since` (Unix milliseconds), from the
+/// task index when it can answer.
+pub(super) fn agent_starts_since(store: &ProjectStore, since: i64) -> Result<usize> {
+    if let Some(Ok(count)) = index::Index::open(store).map(|index| index.agent_starts_since(since)) {
+        return Ok(count);
+    }
+    store.agent_starts_since(since).map_err(fail)
 }
 
 pub fn dispatch(config: &Config, args: &[String], dry: bool) -> Result<i32> {
@@ -420,16 +484,17 @@ fn execute(config: &Config, args: &[String]) -> Result<Value> {
             let store = store(config, &r.project.0)?;
             let value = if let Some(limit) = limit {
                 let uuid = if zerus_replica::ids::is_uuid(&r.task) { r.task.clone() }
-                    else { store.find(&r.task).map_err(fail)?.uuid().to_owned() };
-                let task = history::page(&store, &store_dir(config, &r.project.0), &uuid,
-                    limit, option(args, "--history-before")?)?;
+                    else { find(&store, &r.task)?.uuid().to_owned() };
+                let task = history::page(&store, &uuid, limit, option(args, "--history-before")?,
+                    history::summary(args)?)?;
                 label_view(task, &r.project.1, true, &[], &machines)?
             } else {
-                view(&store.find(&r.task).map_err(fail)?, &r.project.1, true, &machines)?
+                view(&find(&store, &r.task)?, &r.project.1, true, &machines)?
             };
             Ok(json!({"project": {"id": r.project.0, "name": r.project.1}, "task": value}))
         }
         "add" => add(config, args),
+        "attachment" => history::attachment(config, args),
         "message" => messages::execute(config, args),
         "cancel-execution" => {
             let guard = cancellation::read()?;
@@ -468,6 +533,15 @@ fn list(config: &Config, args: &[String]) -> Result<Value> {
         .map(Stage::parse)
         .transpose()
         .map_err(fail)?;
+    if let Some(limit) = option(args, "--limit")? {
+        let stage = only.ok_or_else(|| fail("--limit needs --stage"))?;
+        return paged(config, args, (&id, &name), stage, limit, &machines);
+    }
+    for paging in ["--after", "--before", "--if-revision"] {
+        if option(args, paging)?.is_some() {
+            return Err(fail(format!("{paging} needs --stage and --limit")));
+        }
+    }
     // One load of the project; each stage is then a filter of the sorted list.
     let (tasks, damaged) = store(config, &id)?.listing().map_err(fail)?;
     let mut out = Vec::new();
@@ -486,6 +560,254 @@ fn list(config: &Config, args: &[String]) -> Result<Value> {
         }
     }
     Ok(json!({"project": {"id": id, "name": name}, "tasks": out, "damaged": damaged}))
+}
+
+/// `task list --stage S --limit N`: one page of a stage, from the task index
+/// or, when it cannot answer, from the documents, in the same form.
+fn paged(config: &Config, args: &[String], project: (&str, &str), stage: Stage, limit: &str, machines: &Machines) -> Result<Value> {
+    let (id, name) = project;
+    let limit = limit
+        .parse::<usize>()
+        .ok()
+        .filter(|n| (1..=index::MAX_LIMIT).contains(n))
+        .ok_or_else(|| fail(format!("--limit must be between 1 and {}", index::MAX_LIMIT)))?;
+    let anchor = match (option(args, "--after")?, option(args, "--before")?) {
+        (Some(_), Some(_)) => return Err(fail("use --after or --before, not both")),
+        (Some(cursor), None) => {
+            let (rank, uuid) = index::parse_cursor(id, stage, cursor)?;
+            index::Anchor::After(rank, uuid)
+        }
+        (None, Some(cursor)) => {
+            let (rank, uuid) = index::parse_cursor(id, stage, cursor)?;
+            index::Anchor::Before(rank, uuid)
+        }
+        (None, None) => index::Anchor::Start,
+    };
+    let wanted = option(args, "--if-revision")?;
+    let store = store(config, id)?;
+    let indexed = index::Index::open(&store).and_then(|mut index| {
+        match indexed_page(&mut index, stage, limit, &anchor, wanted) {
+            Ok(out) => Some(out),
+            Err(failure) => {
+                index.discard(&failure);
+                None
+            }
+        }
+    });
+    let mut out = match indexed {
+        Some(out) => out,
+        None => documents_page(&store, stage, limit, &anchor, wanted)?,
+    };
+    if let Some(rows) = out.get_mut("tasks").and_then(Value::as_array_mut) {
+        for row in rows {
+            *row = label_view(std::mem::take(row), name, false, &[], machines)?;
+        }
+    }
+    out["project"] = json!({"id": id, "name": name});
+    Ok(out)
+}
+
+const LIST_STAGES: [Stage; 5] = [Stage::Review, Stage::Active, Stage::Todo, Stage::Backlog, Stage::Done];
+
+/// A page reply: the rows, the first damaged tasks, every stage's count and
+/// the revision a later `--if-revision` compares.
+#[allow(clippy::too_many_arguments)]
+fn page_reply(stage: Stage, limit: usize, rows: Vec<Value>, position: usize, next: Option<String>, previous: Option<String>,
+    counts: &BTreeMap<String, usize>, damaged: (Vec<Value>, usize), revision: String) -> Value {
+    let counts: serde_json::Map<String, Value> = LIST_STAGES
+        .iter()
+        .map(|s| (s.as_str().to_owned(), json!(counts.get(s.as_str()).copied().unwrap_or(0))))
+        .collect();
+    let total = counts[stage.as_str()].clone();
+    json!({
+        "tasks": rows,
+        "damaged": damaged.0,
+        "damaged_total": damaged.1,
+        "counts": counts,
+        "revision": revision,
+        "page": {"schema": 1, "stage": stage.as_str(), "limit": limit, "position": position,
+                 "total": total, "next": next, "previous": previous},
+    })
+}
+
+fn indexed_page(index: &mut index::Index, stage: Stage, limit: usize, anchor: &index::Anchor, wanted: Option<&str>) -> std::result::Result<Value, index::Failure> {
+    // The page's rows are checked against their files first, so an unchanged
+    // revision means this page is unchanged too.
+    let page = index.page(stage, limit, anchor)?;
+    let revision = index.revision()?;
+    if wanted == Some(revision.as_str()) {
+        return Ok(json!({"unchanged": true, "revision": revision}));
+    }
+    Ok(page_reply(stage, limit, page.rows, page.position, page.next, page.previous,
+        &index.counts()?, index.damaged()?, revision))
+}
+
+/// The same page read from every document, for when the index cannot answer.
+fn documents_page(store: &ProjectStore, stage: Stage, limit: usize, anchor: &index::Anchor, wanted: Option<&str>) -> Result<Value> {
+    Ok(page_of(&documents(store)?, store.project_id(), stage, limit, anchor, wanted))
+}
+
+/// Every task document read once, for pages built without the index: each
+/// stage's rows in order, the counts, the damaged tasks and a revision.
+struct Documents {
+    rows: BTreeMap<&'static str, Vec<(String, String, Value)>>,
+    counts: BTreeMap<String, usize>,
+    damaged: Vec<zerus_replica::Damaged>,
+    revision: String,
+}
+
+fn documents(store: &ProjectStore) -> Result<Documents> {
+    use sha2::Digest;
+    let (tasks, damaged) = store.listing().map_err(fail)?;
+    let mut hash = sha2::Sha256::new();
+    let mut counts = BTreeMap::new();
+    let mut rows: BTreeMap<&'static str, Vec<(String, String, Value)>> = BTreeMap::new();
+    for task in &tasks {
+        let view = task.view().map_err(fail)?;
+        let (this, rank, uuid) = (view.stage, view.rank.clone(), view.uuid.clone());
+        let listed = index::capped(row(view, task.revision())?);
+        hash.update(listed.to_string());
+        *counts.entry(this.as_str().to_owned()).or_insert(0) += 1;
+        rows.entry(this.as_str()).or_default().push((rank, uuid, listed));
+    }
+    for damaged in &damaged {
+        hash.update(format!("{}\n{}", damaged.uuid, damaged.error));
+    }
+    let revision = format!("documents-{:x}", hash.finalize());
+    Ok(Documents { rows, counts, damaged, revision })
+}
+
+/// One page of `stage` from documents read once, in the index's form.
+fn page_of(docs: &Documents, project: &str, stage: Stage, limit: usize, anchor: &index::Anchor, wanted: Option<&str>) -> Value {
+    if wanted == Some(docs.revision.as_str()) {
+        return json!({"unchanged": true, "revision": docs.revision});
+    }
+    let rows: &[(String, String, Value)] = docs.rows.get(stage.as_str()).map_or(&[], Vec::as_slice);
+    let below = |rank: &str, uuid: &str| rows.partition_point(|r| (r.0.as_str(), r.1.as_str()) < (rank, uuid));
+    let through = |rank: &str, uuid: &str| rows.partition_point(|r| (r.0.as_str(), r.1.as_str()) <= (rank, uuid));
+    let (mut start, mut end) = match anchor {
+        index::Anchor::Start => (0, limit.min(rows.len())),
+        index::Anchor::After(rank, uuid) => {
+            let start = through(rank, uuid);
+            (start, (start + limit).min(rows.len()))
+        }
+        index::Anchor::Before(rank, uuid) => {
+            let end = below(rank, uuid);
+            (end.saturating_sub(limit), end)
+        }
+        index::Anchor::End => (rows.len().saturating_sub(limit), rows.len()),
+    };
+    // A page past either end is the nearest whole page, as from the index.
+    if start == end && !rows.is_empty() {
+        (start, end) = match anchor {
+            index::Anchor::Before(..) => (0, limit.min(rows.len())),
+            _ => (rows.len().saturating_sub(limit), rows.len()),
+        };
+    }
+    let (next, previous) = if start < end {
+        let (first, last) = (&rows[start], &rows[end - 1]);
+        (
+            (end < rows.len()).then(|| index::cursor(project, stage, &last.0, &last.1)),
+            (start > 0).then(|| index::cursor(project, stage, &first.0, &first.1)),
+        )
+    } else {
+        (None, None)
+    };
+    let page: Vec<Value> = rows[start..end].iter().map(|r| r.2.clone()).collect();
+    let shown = docs
+        .damaged
+        .iter()
+        .take(index::DAMAGED_SHOWN)
+        .map(|d| json!({"uuid": d.uuid, "error": index::capped_error(&d.error)}))
+        .collect();
+    page_reply(stage, limit, page, start, next, previous, &docs.counts, (shown, docs.damaged.len()), docs.revision.clone())
+}
+
+/// Reads of the five indexed pages before a window is read from the documents.
+const WINDOW_ATTEMPTS: usize = 4;
+
+/// The pages of one `pass` that all have the same revision. Each page checks
+/// its rows against their files, so a later page can find a change an earlier
+/// page could not see, such as a task an older hgs moved to an earlier stage
+/// without a journal note; such a window is read again, at most
+/// `WINDOW_ATTEMPTS` times. `None` when no pass was coherent; a failed pass
+/// is returned at once.
+fn coherent_window<E>(
+    mut pass: impl FnMut() -> std::result::Result<Vec<Value>, E>,
+) -> std::result::Result<Option<Vec<Value>>, E> {
+    for _ in 0..WINDOW_ATTEMPTS {
+        let pages = pass()?;
+        if pages.iter().all(|page| page["revision"] == pages[0]["revision"]) {
+            return Ok(Some(pages));
+        }
+    }
+    Ok(None)
+}
+
+/// The first page of each stage in `LIST_STAGES` order, all of one revision:
+/// from the task index, or from the documents read once when the index
+/// cannot answer or keeps changing. That fallback reads every task document
+/// of the project, as the index's first build does, and keeps only each
+/// stage's first `limit` rows.
+fn window_pages(store: &ProjectStore, limit: usize) -> Result<Vec<Value>> {
+    let indexed = index::Index::open(store).and_then(|mut index| {
+        let read = coherent_window(|| {
+            LIST_STAGES
+                .iter()
+                .map(|stage| indexed_page(&mut index, *stage, limit, &index::Anchor::Start, None))
+                .collect::<std::result::Result<Vec<_>, _>>()
+        });
+        match read {
+            Ok(pages) => pages,
+            Err(failure) => {
+                index.discard(&failure);
+                None
+            }
+        }
+    });
+    match indexed {
+        Some(pages) => Ok(pages),
+        None => {
+            let docs = documents(store)?;
+            let project = store.project_id();
+            Ok(LIST_STAGES.iter().map(|stage| page_of(&docs, project, *stage, limit, &index::Anchor::Start, None)).collect())
+        }
+    }
+}
+
+/// The first `limit` rows of every stage, for the `hgs watch` tasks window:
+/// the rows in stage order, each stage's total and the cursor of its next
+/// page, the counts, the first damaged tasks and the revision. From the task
+/// index, or from the documents read once when it cannot answer.
+pub(crate) fn window(config: &Config, wanted: &str, limit: usize) -> Result<Value> {
+    if !(1..=index::MAX_LIMIT).contains(&limit) {
+        return Err(fail(format!("a tasks window is between 1 and {}", index::MAX_LIMIT)));
+    }
+    let machines = machines(config)?;
+    let (id, name) = project(config, wanted)?;
+    let pages = window_pages(&store(config, &id)?, limit)?;
+    // Every page has the same revision, counts and damaged tasks.
+    let last = pages.last().cloned().unwrap_or_default();
+    let mut tasks = Vec::new();
+    let mut stages = serde_json::Map::new();
+    for (stage, page) in LIST_STAGES.iter().zip(&pages) {
+        for row in page["tasks"].as_array().cloned().unwrap_or_default() {
+            tasks.push(label_view(row, &name, false, &[], &machines)?);
+        }
+        stages.insert(
+            stage.as_str().to_owned(),
+            json!({"total": last["counts"][stage.as_str()], "next": page["page"]["next"]}),
+        );
+    }
+    Ok(json!({
+        "project": {"id": id, "name": name},
+        "tasks": tasks,
+        "damaged": last["damaged"],
+        "damaged_total": last["damaged_total"],
+        "counts": last["counts"],
+        "revision": last["revision"],
+        "window": {"schema": 1, "limit": limit, "stages": stages},
+    }))
 }
 
 /// `--position N`, counting from 1, as a list index.
@@ -605,18 +927,10 @@ fn change_guarded(config: &Config, action: &str, args: &[String], wait: Option<s
             .map_err(fail)?
             .ok_or_else(|| fail("the project's tasks are busy; try again"))?,
     };
-    let mut task = store.find(&r.task).map_err(fail)?;
+    let mut task = find(&store, &r.task)?;
     if let Some(guard) = guard { guard.check(&task)?; }
     if action == "edit" && text.as_deref() == Some("") && task.title().is_empty() { agent_text("", action, &who)?; }
-    if task.view().map_err(fail)?.writable {
-        let view = task.view().map_err(fail)?;
-        let target = match view.target { Target::Session(target) | Target::NewSession { parent: target } | Target::Subagent { parent: target } => Some(target), Target::Any => None };
-        for key in target.into_iter().chain(view.session) {
-            if let Some(current) = machines.resolve(&key).filter(|current| !current.session_id.is_empty()) {
-                task.bind_session_identity(&key, &current).map_err(fail)?;
-            }
-        }
-    }
+    enrich(&mut task, &machines)?;
     if let Some(expected) = option(args, "--expect-new-session-parent")? {
         if action != "send" || !matches!(task.view().map_err(fail)?.target, Target::NewSession { parent } if format!("{}/{}", parent.machine, parent.session_id) == expected) {
             return Err(fail("task assignment changed while the new executor was starting; nothing was sent"));
@@ -676,8 +990,18 @@ fn change_guarded(config: &Config, action: &str, args: &[String], wait: Option<s
         }
         "comment" => task.comment_with_attachments(&text, &content.and_then(|content| content.attachments).unwrap_or_default(), &who, now()).map_err(fail)?,
         "report" => {
-            let moved = task.record_report(&text, &who, now()).map_err(fail)?;
-            extra = json!({"moved_to_review": moved});
+            let progress = flag(args, "--progress");
+            if progress && flag(args, "--ready") {
+                return Err(fail("choose --progress or --ready"));
+            }
+            let considered = option(args, "--considered")?
+                .map(|value| value.parse::<u64>().ok().filter(|n| *n >= 1)
+                    .ok_or_else(|| fail("--considered is a requirement revision from 1")))
+                .transpose()?;
+            let kind = if progress { ReportKind::Progress } else { ReportKind::Ready };
+            let decision = task.report(&text, kind, considered, &who, now()).map_err(fail)?;
+            extra = json!({"moved_to_review": decision.moves, "report": if progress { "progress" } else { "ready" }});
+            if let Some(stale) = decision.stale { extra["stale"] = json!(stale); }
         }
         "move" => {
             let position = if flag(args, "--top") {
@@ -736,6 +1060,23 @@ fn change_guarded(config: &Config, action: &str, args: &[String], wait: Option<s
         out[key] = value.clone();
     }
     Ok(with_answer(&who, action, out, at, &destination))
+}
+
+/// Binds the task's target and holder to the verified runs this computer
+/// resolves for them before any change. A name-only holder keeps that binding
+/// as its execution's evidence (`TaskDoc::bind_session_identity`).
+fn enrich(task: &mut TaskDoc, machines: &Machines) -> Result<()> {
+    let view = task.view().map_err(fail)?;
+    if !view.writable {
+        return Ok(());
+    }
+    let target = match view.target { Target::Session(target) | Target::NewSession { parent: target } | Target::Subagent { parent: target } => Some(target), Target::Any => None };
+    for key in target.into_iter().chain(view.session) {
+        if let Some(current) = machines.resolve(&key).filter(|current| !current.session_id.is_empty()) {
+            task.bind_session_identity(&key, &current).map_err(fail)?;
+        }
+    }
+    Ok(())
 }
 
 /// The session a send goes to, and whether it pins the task there: --session
@@ -869,7 +1210,7 @@ fn cancel_here(
     guard: Option<&cancellation::Guard>,
 ) -> Result<Value> {
     let store = store(config, &project.0)?;
-    let mut task = store.find(uuid).map_err(fail)?;
+    let mut task = find(&store, uuid)?;
     if let Some(guard) = guard { guard.check(&task)?; }
     let extra = cancel(&store, machines, &mut task, &project.1, cancellation::reason(args, guard)?, who, Some(reason))?;
     store.save(&mut task).map_err(fail)?;
@@ -893,9 +1234,7 @@ fn send(
     if handoff { task.check_handoff(who).map_err(fail)?; } else { task.check_send().map_err(fail)?; }
     let view = task.view().map_err(fail)?;
     let settings = store.project().map_err(fail)?.settings();
-    let starts = store
-        .agent_starts_since(now() - 3_600_000)
-        .map_err(fail)?;
+    let starts = agent_starts_since(store, now() - 3_600_000)?;
     settings
         .check_agent(who, &session, true, starts)
         .map_err(fail)?;
@@ -1085,6 +1424,41 @@ mod tests {
         let path = root.join(file);
         std::fs::create_dir_all(path.parent().unwrap()).unwrap();
         std::fs::write(path, serde_json::to_vec(&record).unwrap()).unwrap();
+    }
+
+    #[test]
+    fn enrichment_keeps_a_legacy_executor_s_report_authority_for_its_verified_run_alone() {
+        // review-n on #1389: a task an older hgs sent to a name-only session,
+        // then the enrichment every change makes before reporting.
+        use zerus_replica::{execution::{ReportKind, Stale}, NewTask};
+        let state = tempfile::tempdir().unwrap();
+        let root = state.path();
+        let file = |n: u8| format!("{n:064x}.json");
+        saved(root, &file(1), json!({"name":"codex/api","run_id":"run-api","launch_id":"launch-api"}));
+        saved(root, &format!("bindings/{}", file(2)), json!({"name":"codex/renamed","run_id":"run-renamed","legacy_shadow":{"name":"codex/older","run_id":"run-renamed"}}));
+        let machines = Machines { here: "node-here".into(), selves: vec![], peers: BTreeMap::new(), bindings: crate::state::task_bindings_in(root).unwrap() };
+        let legacy = |name: &str| {
+            let mut task = TaskDoc::create(NewTask { project: "example", id: "T-abcdef", text: "Description", stage: Stage::Todo, target: Target::Any, author: Actor::Person, rank: "U", now: 1 }).unwrap();
+            let key = SessionKey { machine: "node-here".into(), session: name.into(), session_id: String::new() };
+            task.record_send(&key, "legacy-send", &Actor::Person, 2).unwrap();
+            task
+        };
+        let agent = |name: &str, id: &str| Actor::Agent(SessionKey { machine: "node-here".into(), session: name.into(), session_id: id.into() });
+        for (name, current) in [("codex/api", agent("codex/api", "launch_id:launch-api")), ("codex/older", agent("codex/renamed", "run_id:run-renamed"))] {
+            let mut task = legacy(name);
+            enrich(&mut task, &machines).unwrap();
+            let execution = task.view().unwrap().execution.unwrap();
+            assert!(!execution.conflict, "{name}");
+            // Another run that holds the name or label is refused.
+            let other = agent(name, "launch_id:another-run");
+            let refused = task.report("Not mine", ReportKind::Ready, None, &other, 3).unwrap();
+            assert_eq!((refused.moves, refused.stale), (false, Some(Stale::OtherExecutor)), "{name}");
+            // Enrichment again (the next change) keeps the binding.
+            enrich(&mut task, &machines).unwrap();
+            let done = task.report("Done", ReportKind::Ready, None, &current, 4).unwrap();
+            assert_eq!((done.moves, done.stale), (true, None), "{name}");
+            assert_eq!(task.stage().unwrap(), Stage::Review);
+        }
     }
 
     #[test]

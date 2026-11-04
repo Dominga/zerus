@@ -14,6 +14,10 @@ pub use super::creation_clone::Scope;
 
 pub const ABI: &str = "desktop-task-message-v1";
 pub const HELP_MARKER: &str = "Desktop task message ABI: desktop-task-message-v1";
+/// The help line of a service that prepares the reference form from its own
+/// staging directory.
+pub const REFERENCE_HELP_MARKER: &str =
+    "Desktop task message references: desktop-task-message-reference-v1";
 pub const PROFILE: &str = "task-message-v1";
 /// The only modes this leaf carries: a queued message or a note. Their
 /// receipts prove the exact CLI metadata outcome, never native delivery.
@@ -26,11 +30,31 @@ pub enum Kind {
     TaskMessage,
 }
 
+/// How an intent carries its original. `Inline` (the default, never
+/// serialized) is the record bytes as saved. `ReferenceV1` is stated
+/// explicitly: the record's reference projection
+/// ([`tasks_write::references`]), whose attachments the service reads from
+/// its own staging and rebuilds; it is never taken for inline data.
+#[derive(Clone, Copy, Debug, Default, Deserialize, Serialize, PartialEq, Eq)]
+pub enum Form {
+    #[default]
+    #[serde(rename = "inline")]
+    Inline,
+    #[serde(rename = "reference-v1")]
+    ReferenceV1,
+}
+impl Form {
+    pub fn is_inline(&self) -> bool {
+        *self == Self::Inline
+    }
+}
+
 /// The exact outbox checkpoint of one native task message: the record bytes
-/// as saved, inline. Its frozen stdin is the record's own (an exact `input`,
-/// or the canonical serialization its `input_sha256` names). Neither an
-/// import nor this value itself supplies fresh execution consent, and a
-/// reopened or new reservation is durable data, never consent.
+/// as saved, inline, or its explicit reference projection. Its frozen stdin
+/// is the record's own (an exact `input`, or the canonical serialization its
+/// `input_sha256` names; a projection only the latter). Neither an import nor
+/// this value itself supplies fresh execution consent, and a reopened or new
+/// reservation is durable data, never consent.
 #[derive(Clone, Deserialize, Serialize, PartialEq, Eq)]
 #[serde(deny_unknown_fields)]
 pub struct Intent {
@@ -39,6 +63,8 @@ pub struct Intent {
     pub task_id: String,
     pub request_id: String,
     pub original: String,
+    #[serde(default, skip_serializing_if = "Form::is_inline")]
+    pub form: Form,
 }
 impl std::fmt::Debug for Intent {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
@@ -92,6 +118,8 @@ pub struct Binding {
     pub input_sha256: String,
     pub plan_sha256: String,
     pub consent_sha256: String,
+    #[serde(default, skip_serializing_if = "Form::is_inline")]
+    pub form: Form,
 }
 impl Binding {
     pub fn valid(&self) -> bool {
@@ -135,12 +163,17 @@ pub struct Verified {
     pub intent: Intent,
     pub plan: Plan,
     pub binding: Binding,
-    /// The decoded original record, for building its one call.
+    /// The decoded original record, for building its one call; for the
+    /// reference form, its projection.
     pub record: Value,
+    /// The ordered attachment references of the reference form.
+    pub references: Vec<tasks_write::references::Reference>,
 }
 impl Verified {
     /// The one original call, or its read-only check (`--recover-only`),
-    /// with the record's frozen stdin.
+    /// with the record's frozen stdin. The reference form has none until it
+    /// is rebuilt ([`Verified::rebuild`]): its frozen digest names the stdin
+    /// with the attachments' data, which a projection never reproduces.
     pub fn call(&self, recovery: bool) -> Option<tasks_write::TaskCall> {
         let call = tasks_write::message_call(
             &self.plan.project,
@@ -150,6 +183,28 @@ impl Verified {
         )
         .ok()?;
         (hash(call.input.as_bytes()) == self.plan.input_sha256).then_some(call)
+    }
+    /// The one original call of the reference form, from its ordered raw
+    /// attachments: their sizes and digests, then the complete rebuilt stdin,
+    /// must match exactly.
+    pub fn rebuild(&self, blobs: &[&[u8]]) -> Result<tasks_write::TaskCall, &'static str> {
+        if self.intent.form != Form::ReferenceV1 {
+            return Err("invalid_task_message_reference");
+        }
+        let record = tasks_write::references::rebuild(&self.record, blobs)?;
+        let call =
+            tasks_write::message_call(&self.plan.project, &self.plan.task_id, &record, false)
+                .map_err(|_| tasks_write::references::INPUT_CHANGED)?;
+        (hash(call.input.as_bytes()) == self.plan.input_sha256)
+            .then_some(call)
+            .ok_or(tasks_write::references::INPUT_CHANGED)
+    }
+    /// The exact byte length of the one call's stdin.
+    pub fn input_len(&self) -> Option<u64> {
+        match self.intent.form {
+            Form::Inline => self.call(false).map(|call| call.input.len() as u64),
+            Form::ReferenceV1 => tasks_write::references::input_len(&self.record).ok(),
+        }
     }
 }
 
@@ -219,8 +274,29 @@ impl Intent {
         if !unique(self.original.as_bytes()) {
             return Err("invalid_task_message_checkpoint");
         }
-        let record = tasks_write::outbox::decode(self.original.as_bytes())
-            .map_err(|_| "invalid_task_message_checkpoint")?;
+        let (record, references) = match self.form {
+            Form::Inline => (
+                tasks_write::outbox::decode(self.original.as_bytes())
+                    .map_err(|_| "invalid_task_message_checkpoint")?,
+                Vec::new(),
+            ),
+            // Only an explicit projection of a canonical record; its stdin
+            // is checked when it is rebuilt.
+            Form::ReferenceV1 => {
+                let projection: Value = serde_json::from_str(&self.original)
+                    .map_err(|_| "invalid_task_message_checkpoint")?;
+                let references = tasks_write::references::of(&projection)?;
+                let checkpoint = projection["id"].as_str().is_some_and(uuid)
+                    && projection["intent"].is_object()
+                    && ["version", "schema"]
+                        .iter()
+                        .all(|key| projection.get(key).is_none_or(|version| version == 1));
+                if !checkpoint {
+                    return Err("invalid_task_message_checkpoint");
+                }
+                (projection, references)
+            }
+        };
         let intent = &record["intent"];
         let text = |key| intent[key].as_str().unwrap_or("");
         if record["id"].as_str() != Some(self.request_id.as_str()) {
@@ -230,15 +306,22 @@ impl Intent {
         if record.get("input").is_none() && record.get("input_sha256").is_none() {
             return Err("task_message_input_not_frozen");
         }
-        let call = tasks_write::message_call(&self.project, &self.task_id, &record, false)
-            .map_err(|_| "task_message_input_changed")?;
+        let input_sha256 = match self.form {
+            Form::Inline => hash(
+                tasks_write::message_call(&self.project, &self.task_id, &record, false)
+                    .map_err(|_| "task_message_input_changed")?
+                    .input
+                    .as_bytes(),
+            ),
+            Form::ReferenceV1 => record["input_sha256"].as_str().unwrap_or_default().into(),
+        };
         let plan = Plan {
             project: self.project.clone(),
             task_id: self.task_id.clone(),
             request_id: self.request_id.clone(),
             mode: text("mode").into(),
             dispatch_id: text("dispatch").into(),
-            input_sha256: hash(call.input.as_bytes()),
+            input_sha256,
         };
         if !intent["mode"].is_string() || !intent["dispatch"].is_string() || !plan.valid() {
             return Err("task_message_mode_refused");
@@ -258,12 +341,14 @@ impl Intent {
             input_sha256: plan.input_sha256.clone(),
             plan_sha256: hash(&encoded),
             consent_sha256: hash(&consent),
+            form: self.form,
         };
         Ok(Verified {
             intent: self,
             plan,
             binding,
             record,
+            references,
         })
     }
 }
@@ -320,7 +405,35 @@ pub struct Outcome {
     /// `queued` for a queued message, `note` for a note.
     pub state: String,
 }
+/// The closed code of an original task message child that never started:
+/// refused before any child existed. After the custody drain its receipt is
+/// Failed with this code and no outcome.
+pub const NOT_STARTED: &str = "task_message_not_started";
+/// The closed code of an original that exited non-zero. It proves nothing about
+/// the message; the original stays for the client's own recovery.
+pub const EXITED: &str = "task_message_exited";
+
 impl Outcome {
+    /// The exact metadata outcome that `plan`'s original call proves through
+    /// its whole stdout (exit 0), checked by the same rules as the recovery
+    /// policy. Text, files, session and executor fields are never kept.
+    pub fn from_reply(plan: &Plan, stdout: &[u8]) -> Option<Self> {
+        let state = crate::operation_recovery::task_message::reply_state(
+            &plan.project,
+            &plan.task_id,
+            &plan.request_id,
+            &plan.mode,
+            &plan.dispatch_id,
+            stdout,
+        )
+        .ok()?;
+        Some(Self {
+            request_id: plan.request_id.clone(),
+            mode: plan.mode.clone(),
+            dispatch_id: plan.dispatch_id.clone(),
+            state: state.into(),
+        })
+    }
     pub fn matches(&self, plan: &Plan) -> bool {
         self.request_id == plan.request_id
             && self.mode == plan.mode
@@ -344,6 +457,27 @@ pub struct Receipt {
     pub code: String,
     pub outcome: Option<Outcome>,
 }
+/// The read-only discovery of a service's staging directory: routing data
+/// bound to the queried scope, never permission, consent or a path the
+/// renderer supplies. The service checks everything it reads from there.
+#[derive(Clone, Debug, Deserialize, Serialize, PartialEq, Eq)]
+#[serde(deny_unknown_fields)]
+pub struct Staging {
+    pub abi: String,
+    pub scope: Scope,
+    pub read_only: bool,
+    pub staging: String,
+}
+impl Staging {
+    pub fn matches(&self, scope: &Scope) -> bool {
+        self.abi == ABI
+            && self.read_only
+            && self.scope == *scope
+            && self.staging.len() <= 4096
+            && std::path::Path::new(&self.staging).is_absolute()
+    }
+}
+
 impl std::fmt::Debug for Receipt {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         f.debug_struct("TaskMessageReceipt")
@@ -377,6 +511,19 @@ impl Receipt {
                 .clone()
                 .verify()
                 .is_ok_and(|v| v.binding == self.binding)
+    }
+    /// Whether this exact original's drained receipt proves that its child
+    /// never started: Failed, no outcome and the closed [`NOT_STARTED`] code.
+    /// Nothing ran, so the message counts as never sent.
+    pub fn not_started(&self, plan: &Plan) -> bool {
+        self.valid()
+            && self.drained
+            && plan
+                .fingerprint()
+                .is_some_and(|fingerprint| fingerprint == self.binding.plan_sha256)
+            && self.phase == Phase::Failed
+            && self.outcome.is_none()
+            && self.code == NOT_STARTED
     }
     /// Only the exact original's drained outcome settles it: Recorded is the
     /// CLI's metadata outcome, Failed a definite refusal. Queued, Running and
@@ -454,6 +601,18 @@ impl Lookup {
                     && receipt.binding.plan_sha256 == query.plan_sha256
             })
     }
+}
+
+/// The client's per-request staging of a reference original's attachments.
+#[cfg(unix)]
+pub mod staging;
+
+/// The explicit review and release of charged custody inputs.
+pub mod review;
+
+#[cfg(test)]
+pub(super) fn test_intent() -> Intent {
+    tests::frozen()
 }
 
 #[cfg(test)]

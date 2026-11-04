@@ -509,6 +509,7 @@ impl ProjectStore {
                 )?;
             }
         }
+        self.note_change(uuid);
         Ok(())
     }
 }

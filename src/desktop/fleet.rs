@@ -47,14 +47,7 @@ pub struct Runtime {
 }
 
 fn spawn(command: &mut Command) -> std::io::Result<Child> {
-    #[cfg(unix)]
-    {
-        platform::spawn_in_turn(command)
-    }
-    #[cfg(not(unix))]
-    {
-        command.spawn()
-    }
+    platform::spawn_service_child(command)
 }
 
 impl Runtime {

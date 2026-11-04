@@ -22,7 +22,7 @@ export type Status =
 export interface Subagent {
   id: string;
   name: string;
-  state: "working" | "ready" | "attention" | "error" | "paused";
+  state: "working" | "ready" | "attention" | "error" | "paused" | "unknown" | "ended";
   summary: string;
   /** Qt's inactiveChild: hidden unless completed children, this child or its draft is retained. */
   inactive?: boolean;
@@ -110,6 +110,7 @@ export interface Session {
   /** The raw activity (`idle`, `busy`, ...). */
   activity: string;
   processState: string;
+  conversationState?: string;
   archiveId?: string;
   /** The latest reply and the attention it raised, for marking them read. */
   replyId?: string;

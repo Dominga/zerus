@@ -19,6 +19,9 @@ fn record(mode: &str, dispatch: &str) -> Value {
     let intent = message_intent("hello", &[], mode, dispatch);
     json!({"id": REQUEST, "intent": intent, "input_sha256": input_digest(&message_input(&intent))})
 }
+pub(super) fn frozen() -> Intent {
+    intent(record("queue", "").to_string())
+}
 fn intent(original: String) -> Intent {
     Intent {
         scope: scope(),
@@ -26,6 +29,7 @@ fn intent(original: String) -> Intent {
         task_id: TASK.into(),
         request_id: REQUEST.into(),
         original,
+        form: Default::default(),
     }
 }
 
@@ -129,6 +133,88 @@ fn legacy_unsupported_and_changed_originals_are_refused() {
     assert_eq!(unscoped.verify().err(), Some("invalid_task_message_intent"));
 }
 
+/// A canonical record with attachments, as the editor reserves it.
+fn with_files(bytes: usize) -> Value {
+    let shot = crate::attachments::Attachment {
+        name: "screen.png".into(),
+        mime: "image/png".into(),
+        bytes: (0..bytes)
+            .map(|n| (n % 251) as u8)
+            .collect::<Vec<_>>()
+            .into(),
+        reference: "[screen.png]".into(),
+    };
+    let intent = message_intent("see this", &[shot], "note", DISPATCH);
+    json!({"id": REQUEST, "intent": intent, "input_sha256": input_digest(&message_input(&intent))})
+}
+fn referenced(projection: &Value) -> Intent {
+    let mut intent = intent(projection.to_string());
+    intent.form = Form::ReferenceV1;
+    intent
+}
+
+#[test]
+fn a_reference_intent_rebuilds_only_the_exact_call_of_its_inline_original() {
+    let record = with_files(3000);
+    let inline = intent(record.to_string()).verify().unwrap();
+    let (projection, blobs) = crate::tasks_write::references::project(&record).unwrap();
+    let verified = referenced(&projection).verify().unwrap();
+    // The same effect: plan, mode, dispatch and frozen stdin.
+    assert_eq!(verified.plan, inline.plan);
+    assert_eq!(verified.references.len(), 1);
+    // A different, explicit original: its own binding and consent.
+    assert_eq!(verified.binding.form, Form::ReferenceV1);
+    assert_eq!(inline.binding.form, Form::Inline);
+    assert_ne!(verified.binding.source_sha256, inline.binding.source_sha256);
+    assert_ne!(
+        verified.binding.consent_sha256,
+        inline.binding.consent_sha256
+    );
+    assert_eq!(verified.binding.input_sha256, inline.binding.input_sha256);
+    // No call before the rebuild, then exactly the inline call.
+    assert!(verified.call(false).is_none());
+    let call = verified.rebuild(&[blobs[0].as_slice()]).unwrap();
+    let expected = inline.call(false).unwrap();
+    assert_eq!((call.args, call.input), (expected.args, expected.input));
+    assert_eq!(verified.input_len(), inline.input_len());
+    assert!(verified.rebuild(&[b"other bytes".as_slice()]).is_err());
+    assert!(inline.rebuild(&[blobs[0].as_slice()]).is_err());
+}
+
+#[test]
+fn the_form_is_stated_never_inferred() {
+    let record = with_files(3000);
+    let (projection, _) = crate::tasks_write::references::project(&record).unwrap();
+    // A projection is not inline data, and inline data is not a projection.
+    assert!(intent(projection.to_string()).verify().is_err());
+    assert!(referenced(&record).verify().is_err());
+    // Inline stays byte for byte as before; the reference form is named.
+    let inline = serde_json::to_value(intent(record.to_string())).unwrap();
+    assert!(inline.get("form").is_none());
+    let named = serde_json::to_value(referenced(&projection)).unwrap();
+    assert_eq!(named["form"], "reference-v1");
+    let mut unknown = named;
+    unknown["form"] = json!("reference-v2");
+    assert!(serde_json::from_value::<Intent>(unknown).is_err());
+}
+
+#[test]
+fn a_screenshot_over_the_inline_limit_fits_by_reference() {
+    let record = with_files(5 << 20);
+    assert_eq!(
+        intent(record.to_string()).verify().err(),
+        Some("task_message_original_too_large")
+    );
+    let (projection, blobs) = crate::tasks_write::references::project(&record).unwrap();
+    let verified = referenced(&projection).verify().unwrap();
+    assert!(fits_frontend_line(&Request::TaskMessage {
+        intent: Box::new(verified.intent.clone()),
+    }));
+    let call = verified.rebuild(&[blobs[0].as_slice()]).unwrap();
+    assert_eq!(verified.input_len(), Some(call.input.len() as u64));
+    assert_eq!(input_digest(&call.input), verified.plan.input_sha256);
+}
+
 #[test]
 fn the_complete_service_line_bounds_the_inline_original() {
     let padded = |n: usize| {
@@ -168,6 +254,37 @@ fn the_complete_service_line_bounds_the_inline_original() {
     })
     .unwrap();
     assert!(envelope.len() < zerus_watch_protocol::CONTROL_LINE_BYTES);
+}
+
+#[test]
+fn only_the_exact_drained_not_started_original_counts_as_never_sent() {
+    let verified = intent(record("queue", "").to_string()).verify().unwrap();
+    let plan = &verified.plan;
+    let receipt = Receipt {
+        binding: verified.binding.clone(),
+        admission_epoch: EPOCH.into(),
+        revision: 3,
+        phase: Phase::Failed,
+        drained: true,
+        code: NOT_STARTED.into(),
+        outcome: None,
+    };
+    assert!(receipt.valid() && receipt.not_started(plan));
+    // A started child's exit, an Unknown or an undrained original with the
+    // same code, or another original's plan, never counts.
+    let mut exited = receipt.clone();
+    exited.code = EXITED.into();
+    assert!(exited.valid() && !exited.not_started(plan));
+    let mut unknown = receipt.clone();
+    unknown.phase = Phase::Unknown;
+    assert!(unknown.valid() && !unknown.not_started(plan));
+    let mut undrained = receipt.clone();
+    undrained.drained = false;
+    assert!(!undrained.not_started(plan));
+    let other = intent(record("note", DISPATCH).to_string())
+        .verify()
+        .unwrap();
+    assert!(!receipt.not_started(&other.plan));
 }
 
 #[test]

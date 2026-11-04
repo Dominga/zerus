@@ -86,7 +86,12 @@ pub fn select_hgs(configured: Option<&Path>, installed: bool) -> PathBuf {
     } else {
         String::new()
     };
-    let choice = crate::windows_shell::choose_hgs(&status, &selected, &digest, None);
+    // This app's own image, for its binding to the staged CLI (zerus-5wmh.66.8.1.14).
+    let app = executable
+        .as_deref()
+        .and_then(|exe| std::fs::canonicalize(exe).ok());
+    let choice =
+        crate::windows_shell::choose_hgs(&status, &selected, &digest, None, app.as_deref());
     if choice.refresh {
         if let Err(error) = session_host(&selected, "install") {
             eprintln!("zerus-client: session-host install: {error}");

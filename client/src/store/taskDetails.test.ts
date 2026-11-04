@@ -67,6 +67,14 @@ describe("bounded task inspector", () => {
     expect(s.error()).toContain("offline"); expect(s.data()?.uuid).toBe("one"); expect(read).toHaveBeenCalledTimes(2);
     s.select("p", "two"); await tick(); expect(s.data()).toBeUndefined();
   });
+  it("keeps why a report did not move its task, and only when there is a reason", () => {
+    const log = [{ kind: "report", text: "Late", actor: { kind: "agent", session: "codex/old" }, at: 2, stale: "other_executor" },
+      { kind: "progress", text: "Half way", actor: { kind: "agent", session: "codex/new" }, at: 3, considered: 1 },
+      { kind: "report", text: "Done", actor: { kind: "agent", session: "codex/new" }, at: 4, stale: "" }];
+    const entries = taskDetail(raw("p", "one", { log, log_total: 3 }), "p", "one").log;
+    expect(entries.map((e) => [e.kind, e.stale])).toEqual([["report", "other_executor"], ["progress", undefined], ["report", undefined]]);
+    expect(entries.every((e, i) => i === 0 || !("stale" in e))).toBe(true);
+  });
   it("discards a read after close and refuses wrong identities and legacy journals", async () => {
     const first = deferred(), read = vi.fn().mockReturnValue(first.promise), s = createTaskDetails(read);
     s.select("p", "one"); s.select(); first.resolve(raw()); await tick(); expect(s.data()).toBeUndefined();

@@ -6,6 +6,8 @@ import { object, taskItem, text, type Task } from "../ui/screens/tasks-ui";
 export interface TaskEntry {
   kind: string; text: string; at: number; actor: string; session: string; requestId: string; files: Fetched[];
   delivery: { mode: string; state: string; error: string };
+  /** Why a report was recorded without moving its task (hgs `execution::Stale`). */
+  stale?: string;
 }
 export interface TaskDetail extends Task { files: Fetched[]; log: TaskEntry[]; total: number; next?: string; started: boolean; dispatch: string }
 const actor = (v: unknown) => { const a = object(v); return a.kind === "agent" ? text(a.session) + (a.host ? ` @${text(a.host)}` : "") : "You"; };
@@ -20,7 +22,8 @@ export function taskDetail(raw: unknown, project: string, uuid: string): TaskDet
       const e = object(value), delivery = object(e.delivery);
       return { kind: text(e.kind), text: text(e.text), at: typeof e.at === "number" ? e.at : 0,
         actor: actor(e.actor), session: text(object(e.session).session), requestId: text(e.request_id), files: files(e.attachments),
-        delivery: { mode: text(delivery.mode), state: text(delivery.state), error: text(delivery.error) } };
+        delivery: { mode: text(delivery.mode), state: text(delivery.state), error: text(delivery.error) },
+        ...(text(e.stale) ? { stale: text(e.stale) } : {}) };
     }) };
 }
 

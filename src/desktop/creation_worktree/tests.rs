@@ -93,8 +93,9 @@ fn exact_previous_store_upgrade_adds_only_the_independent_worktree_leaf() {
                 |r| r.get(0)
             )
             .unwrap(),
-        // Its own two tables, then the later launch leaf's two.
-        before + 2 + 2 + 1
+        // Its own two tables, then the later launch, termination outcome, task
+        // message and task message input leaves.
+        before + 2 + 2 + 1 + 2 + 2
     );
     // The clone leaf's original table is byte-compatible and separate.
     assert_eq!(

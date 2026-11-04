@@ -22,6 +22,7 @@ pub(super) fn read_archive(name: &str, id: &str) -> Result<Value> {
     {
         return Err(format!("{name}: invalid archive record {id}"));
     }
+    session_id::verify(&record)?;
     Ok(record)
 }
 

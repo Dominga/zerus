@@ -19,12 +19,16 @@ fn version(value: &str) -> Option<semver::Version> {
 
 /// The session-host enabled marker is authoritative, not leftover staged files.
 /// An explicit CLI selector never stages or switches to another executable.
+/// `app`, this app's own canonical image, stages again when the staged binding
+/// does not name it (docs/desktop-windows-mode.md): same or newer version only,
+/// and staging copies nothing when the CLI is unchanged.
 #[cfg(any(feature = "live", test))]
 pub fn choose_hgs(
     status: &Value,
     bundled: &Path,
     digest: &str,
     configured: Option<&Path>,
+    app: Option<&Path>,
 ) -> HgsChoice {
     let choice = |path: PathBuf, refresh, fallback: PathBuf| HgsChoice {
         path,
@@ -51,7 +55,26 @@ pub fn choose_hgs(
         version(cli["version"].as_str().unwrap_or_default())
             .is_none_or(|prior| current.cmp_precedence(&prior).is_ge())
     });
-    choice(stable.clone(), differs && newer, stable)
+    let unbound = app.is_some_and(|app| !bound(&status["frontend"], app));
+    choice(stable.clone(), (differs || unbound) && newer, stable)
+}
+
+/// Whether the status binding names `app`, still names the staged CLI and
+/// still holds for the file at the app's path (a same-path replacement does
+/// not). Informational: the CLI proves the pair itself before admitting it.
+#[cfg(any(feature = "live", test))]
+fn bound(frontend: &Value, app: &Path) -> bool {
+    let plain = |path: &str| {
+        path.strip_prefix(r"\\?\")
+            .unwrap_or(path)
+            .replace('/', "\\")
+            .to_ascii_lowercase()
+    };
+    frontend["cli_current"] == true
+        && frontend["frontend_current"] == true
+        && frontend["path"]
+            .as_str()
+            .is_some_and(|path| plain(path) == plain(&app.to_string_lossy()))
 }
 
 /// Value options are walked as pairs, so a value spelling --sessions survives.
@@ -199,24 +222,65 @@ mod tests {
     fn only_an_enabled_host_stages_and_explicit_selectors_are_preserved() {
         let bin = Path::new("C:/Zerus/hgs.exe");
         let status = json!({"enabled":true,"version":"1.56.0","cli":{"path":"C:/State/hgs.exe","installed":true,"sha256":"old","version":"1.55.0"}});
-        let choice = choose_hgs(&status, bin, "new", None);
+        let choice = choose_hgs(&status, bin, "new", None, None);
         assert!(choice.refresh);
         assert_eq!(choice.path, Path::new("C:/State/hgs.exe"));
         let mut older = status.clone();
         older["version"] = json!("1.54.0");
-        assert!(!choose_hgs(&older, bin, "new", None).refresh);
+        assert!(!choose_hgs(&older, bin, "new", None, None).refresh);
         older["version"] = json!("1.56.0-dev.9");
         older["cli"]["version"] = json!("1.56.0-dev.10");
-        assert!(!choose_hgs(&older, bin, "new", None).refresh);
+        assert!(!choose_hgs(&older, bin, "new", None, None).refresh);
         older["enabled"] = json!(false);
-        assert_eq!(choose_hgs(&older, bin, "new", None).path, bin);
+        assert_eq!(choose_hgs(&older, bin, "new", None, None).path, bin);
         let explicit = Path::new("D:/Pinned/hgs.exe");
-        let choice = choose_hgs(&status, bin, "new", Some(explicit));
+        let choice = choose_hgs(&status, bin, "new", Some(explicit), None);
         assert!(!choice.refresh);
         assert_eq!(choice.path, explicit);
         let mut absent = status;
         absent["cli"]["installed"] = json!(false);
-        assert_eq!(choose_hgs(&absent, bin, "", None).fallback, bin);
+        assert_eq!(choose_hgs(&absent, bin, "", None, None).fallback, bin);
+    }
+    #[test]
+    fn the_portable_app_stages_again_only_to_bind_itself_and_never_downgrades() {
+        let bin = Path::new("C:/Zip/hgs.exe");
+        let app = Path::new(r"C:\Zip\hgs-tray.exe");
+        let status = json!({"enabled":true,"version":"1.56.0","cli":{"path":"C:/State/hgs.exe","installed":true,"sha256":"same","version":"1.56.0"},
+            "frontend":{"path":r"C:\zip\HGS-TRAY.EXE","cli_current":true,"frontend_current":true}});
+        // Bound to this app and an unchanged CLI: nothing to do.
+        assert!(!choose_hgs(&status, bin, "same", None, Some(app)).refresh);
+        assert!(
+            !choose_hgs(
+                &status,
+                bin,
+                "same",
+                None,
+                Some(Path::new(r"\\?\C:\Zip\hgs-tray.exe"))
+            )
+            .refresh
+        );
+        // No binding, another app's, or one for a CLI since replaced: rebind.
+        for frontend in [
+            json!(null),
+            json!({"path":r"C:\Other\hgs-tray.exe","cli_current":true,"frontend_current":true}),
+            json!({"path":r"C:\Zip\hgs-tray.exe","cli_current":false,"frontend_current":true}),
+            // The same path now holds another app (replaced after a quit).
+            json!({"path":r"C:\Zip\hgs-tray.exe","cli_current":true,"frontend_current":false}),
+            json!({"path":r"C:\Zip\hgs-tray.exe"}),
+        ] {
+            let mut unbound = status.clone();
+            unbound["frontend"] = frontend;
+            let choice = choose_hgs(&unbound, bin, "same", None, Some(app));
+            assert!(choice.refresh);
+            assert_eq!(choice.path, Path::new("C:/State/hgs.exe"));
+            // Never from an older zip, and never without an app of our own.
+            let mut older = unbound.clone();
+            older["version"] = json!("1.55.0");
+            assert!(!choose_hgs(&older, bin, "other", None, Some(app)).refresh);
+            assert!(!choose_hgs(&unbound, bin, "same", None, None).refresh);
+            // An explicit selector still never stages.
+            assert!(!choose_hgs(&unbound, bin, "same", Some(bin), Some(app)).refresh);
+        }
     }
     #[test]
     fn restart_keeps_selector_and_values_but_never_opens_the_window() {

@@ -50,6 +50,10 @@ mod catalog_relay;
 pub(crate) mod creation_clone;
 pub(crate) mod creation_launch;
 pub(crate) mod creation_worktree;
+// Its one caller, the task editor's Service-mode routing, lands together with
+// attachments by reference (zerus-5wmh.66.4.4.2); until then it is unused.
+#[allow(dead_code)]
+pub(crate) mod task_message;
 #[cfg(any(target_os = "linux", target_os = "macos"))]
 pub(crate) mod task_start_reconcile;
 use catalog::catalog_loop;
@@ -61,6 +65,7 @@ mod read_import;
 mod reconnect;
 pub(crate) mod retained_import;
 mod status;
+pub(crate) mod termination_outcome;
 
 /// Registered at setup before start_source. Some contains a verified service
 /// watch frame; None invalidates the prior projection. Callbacks must not block.
@@ -118,10 +123,12 @@ fn startup_recovery() -> bool {
 fn ownership_display(
     view: crate::desktop_ownership::View,
     activation: mode_transition::View,
+    business_ready: bool,
 ) -> Option<Value> {
     let mut value = serde_json::to_value(view).ok()?;
     value["native_recovery"] = json!(startup_recovery());
     value["activation"] = serde_json::to_value(activation).ok()?;
+    value["activation"]["business_ready"] = business_ready.into();
     Some(value)
 }
 
@@ -404,6 +411,8 @@ struct Shared {
     #[cfg(all(test, any(target_os = "linux", target_os = "macos", windows)))]
     activation_backoffs: std::sync::atomic::AtomicUsize,
     #[cfg(all(test, any(target_os = "linux", target_os = "macos", windows)))]
+    activation_passive_waits: std::sync::atomic::AtomicUsize,
+    #[cfg(all(test, any(target_os = "linux", target_os = "macos", windows)))]
     activation_permanent: AtomicBool,
     allowed: bool,
     stopped: AtomicBool,
@@ -589,6 +598,8 @@ impl Service {
             #[cfg(all(test, any(target_os = "linux", target_os = "macos", windows)))]
             activation_backoffs: std::sync::atomic::AtomicUsize::new(0),
             #[cfg(all(test, any(target_os = "linux", target_os = "macos", windows)))]
+            activation_passive_waits: std::sync::atomic::AtomicUsize::new(0),
+            #[cfg(all(test, any(target_os = "linux", target_os = "macos", windows)))]
             activation_permanent: AtomicBool::new(false),
             allowed,
             stopped: AtomicBool::new(false),
@@ -655,7 +666,8 @@ impl Service {
     pub(crate) async fn ownership_rearm(self: &Arc<Self>) -> crate::desktop_ownership::View {
         // An uncertain activation has its own retained original. Resume never
         // replaces it with a Rearm or a new manager attempt.
-        if self.shared.mode_transition.pending() || self.shared.ownership.view().pending {
+        if self.shared.read_checks_only() || self.shared.mode_transition.blocks_resume()
+            || self.shared.ownership.view().pending {
             return self.ownership_result().await;
         }
         if self.shared.retained_import.is_some() {
@@ -746,6 +758,161 @@ impl Service {
             .await;
         view
     }
+    /// Consumes only the opaque continuation returned by the native-confirmation
+    /// controller. Review and a later mode choice remain separate operations.
+    async fn apply_mode_action(
+        self: &Arc<Self>,
+        prepared: Option<mode_transition::Prepared>,
+    ) -> Result<Value, String> {
+        use mode_transition::ReviewAction;
+        if let Some(prepared) = prepared {
+            let action = prepared.action();
+            self.shared
+                .mode_transition
+                .validate(&prepared)
+                .await
+                .map_err(str::to_owned)?;
+            if action != ReviewAction::Review && self.shared.read_checks_only() {
+                return Err("manual_refresh_required".into());
+            }
+            if action != ReviewAction::Review {
+                // Consent is for the original scope, not a later CLI upgrade or
+                // replacement endpoint discovered while the dialog was open.
+                match preflight(&self.shared, Arc::new(AtomicBool::new(false))).await {
+                    Ok(configuration) if configuration != prepared.configuration() => {
+                        return Err("activation_scope_changed".into())
+                    }
+                    Ok(_) | Err("service_unavailable") => (),
+                    Err(code) => return Err(code.into()),
+                }
+                if self.shared.read_checks_only() {
+                    return Err("manual_refresh_required".into());
+                }
+            }
+            // Preflight can wait while the original mode charge makes its
+            // ordinary observe busy. Revalidate the SAME opaque continuation.
+            self.shared
+                .mode_transition
+                .validate(&prepared)
+                .await
+                .map_err(str::to_owned)?;
+            if action != ReviewAction::Review && self.shared.read_checks_only() {
+                return Err("manual_refresh_required".into());
+            }
+            // Review never reaches this branch. A new background choice may make
+            // its explicit Rearm against the current connected service; an absent
+            // actor supplies no inferred grant. The native mode helper independently
+            // checks the actual database before any effect.
+            let same_scope = self
+                .shared
+                .configuration
+                .lock()
+                .unwrap_or_else(PoisonError::into_inner)
+                .as_deref()
+                == Some(prepared.configuration());
+            if prepared.background()
+                && same_scope
+                && self.snapshot().connected
+                && !self.shared.ownership.granted()
+            {
+                let check = self.shared.mode_transition.effect_check(&prepared);
+                let shared = self.shared.clone();
+                let checked = Arc::new(move || {
+                    if shared.stopped.load(Ordering::Acquire) {
+                        return Err("ownership_stopped");
+                    }
+                    if shared.read_checks_only() {
+                        return Err("manual_refresh_required");
+                    }
+                    check()?;
+                    if shared.read_checks_only() {
+                        return Err("manual_refresh_required");
+                    }
+                    Ok(())
+                });
+                self.shared
+                    .ownership
+                    .request_checked(
+                        zerus_client_core::desktop::ownership::Action::Rearm,
+                        prepared.configuration().into(),
+                        checked,
+                    )
+                    .await
+                    .map_err(str::to_owned)?;
+                if !self.shared.ownership.granted() {
+                    self.shared
+                        .publish_ownership(crate::desktop_ownership::Phase::Result)
+                        .await;
+                    return Err("ownership_unconfirmed".into());
+                }
+            }
+            if action != ReviewAction::Review && self.shared.read_checks_only() {
+                return Err("manual_refresh_required".into());
+            }
+            let offered = self.shared.mode_transition.apply(prepared).await;
+            if let Some(offered) = offered
+                .filter(|_| action == ReviewAction::Background && !self.shared.read_checks_only())
+            {
+                // This continuation still belongs to the SECOND confirmation.
+                // No status/Retry/backoff callback can enter this positive path.
+                let stop = Arc::new(AtomicBool::new(false));
+                if let Ok(configuration) = preflight(&self.shared, stop.clone()).await {
+                    let snapshot = self.snapshot();
+                    if let (Some(epoch), Some(generation)) = (snapshot.epoch, snapshot.generation) {
+                        if let Some(grant) = self
+                            .shared
+                            .ownership
+                            .current_grant(configuration.clone(), stop.clone())
+                            .await
+                        {
+                            if self
+                                .shared
+                                .mode_transition
+                                .business_allowed(&grant, epoch, generation, offered)
+                                .await
+                                && !self.shared.read_checks_only()
+                            {
+                                let _ = STARTUP_RECOVERY.compare_exchange(
+                                    1,
+                                    2,
+                                    Ordering::AcqRel,
+                                    Ordering::Acquire,
+                                );
+                                let relay = self
+                                    .shared
+                                    .relay
+                                    .lock()
+                                    .unwrap_or_else(PoisonError::into_inner)
+                                    .clone();
+                                if let Some(relay) = relay {
+                                    retained_import::before_grant(
+                                        &self.shared,
+                                        relay,
+                                        configuration,
+                                        stop.clone(),
+                                        false,
+                                    )
+                                    .await;
+                                }
+                                if self.shared.business_permitted() && !stop.load(Ordering::Acquire)
+                                {
+                                    self.shared.ownership.keep_epoch_refresh(grant, stop).await;
+                                }
+                            }
+                        }
+                    }
+                }
+            }
+            if action != ReviewAction::Review {
+                self.wake_connection(true);
+            }
+        }
+        self.shared
+            .publish_ownership(crate::desktop_ownership::Phase::Result)
+            .await;
+        serde_json::to_value(self.shared.mode_transition.view())
+            .map_err(|_| "activation_view_unavailable".into())
+    }
     /// Settings choices only: offline and generation-zero computers remain
     /// selectable. These names grant neither freshness nor writer authority.
     pub fn peers(&self) -> Option<BTreeSet<String>> {
@@ -756,7 +923,8 @@ impl Service {
             .clone()
     }
     pub fn retry(&self) {
-        if !self.shared.read_checks_only() && !startup_recovery() {
+        if !self.shared.read_checks_only() && !startup_recovery()
+            && !self.shared.mode_transition.blocks_resume() {
             if let Some(report) = &self.shared.retained_import {
                 report.request_retry();
             }
@@ -786,7 +954,8 @@ impl Service {
         if self.shared.stopped.load(Ordering::Acquire) {
             return;
         }
-        if !read_only && !self.shared.read_checks_only() && !startup_recovery() {
+        if !read_only && !self.shared.read_checks_only() && !startup_recovery()
+            && !self.shared.mode_transition.blocks_resume() {
             read_import::retry(self.shared.clone());
         }
         if let Some(cancel) = self
@@ -1151,6 +1320,21 @@ impl Shared {
         Ok(())
     }
 
+    fn business_permitted(&self) -> bool {
+        self.business_permitted_for(&self.snapshot.copy())
+    }
+    fn business_permitted_for(&self, snapshot: &Snapshot) -> bool {
+        if self.read_checks_only() || startup_recovery() {
+            return false;
+        }
+        if !self.mode_transition.blocks_resume() {
+            return true;
+        }
+        self.ownership.granted() && self.ownership.view().code.is_empty()
+            && self
+                .mode_transition
+                .business_permitted(snapshot, self.ownership.view().status.as_ref())
+    }
     fn publish_retained_import(&self) {
         let report = self.retained_import.as_ref().map(|report| report.status());
         let mut snapshot = self.snapshot.lock();
@@ -1189,7 +1373,7 @@ impl Shared {
         let view = tauri::async_runtime::spawn_blocking(move || owner.record_view(phase))
             .await
             .unwrap_or_else(|_| self.ownership.view());
-        let view = ownership_display(view, self.mode_transition.view());
+        let view = ownership_display(view, self.mode_transition.view(), self.business_permitted());
         let mut current = self.snapshot.lock();
         current.notification_ownership = view;
         self.pump.service(current.clone());
@@ -1212,7 +1396,7 @@ impl Shared {
             .view()
             .and_then(|v| serde_json::to_value(v).ok());
         snapshot.notification_ownership =
-            ownership_display(self.ownership.view(), self.mode_transition.view());
+            ownership_display(self.ownership.view(), self.mode_transition.view(), self.business_permitted_for(&snapshot));
         snapshot.pending_read_import = Some(
             self.read_import
                 .lock()
@@ -1510,6 +1694,16 @@ async fn preflight(shared: &Arc<Shared>, stop: Arc<AtomicBool>) -> Result<String
     // A successful status CLI can report an absent socket. Its unavailable
     // response has no capability table; this is not a protocol incompatibility.
     if value["running"] == false {
+        // The interrupted registration journal is reachable even while its
+        // service is absent. This is a bounded read, before any Grant/import
+        // or manager path; a manual-refresh original never changes scope.
+        if let Some(configuration) = value["configuration"].as_str()
+            .filter(|s| zerus_client_core::desktop::digest(s)) {
+            if original.is_some_and(|scope| scope.configuration != configuration) {
+                return Err("original_service_changed");
+            }
+            shared.mode_transition.observe(shared.hgs.clone(), configuration.into()).await;
+        }
         return Err("service_unavailable");
     }
     let configuration = value["configuration"]
@@ -1536,6 +1730,7 @@ async fn preflight(shared: &Arc<Shared>, stop: Arc<AtomicBool>) -> Result<String
         responder.configure_once(configuration.into());
     }
     shared.observe_manual_refresh(configuration, state.snapshot())?;
+    shared.mode_transition.observe(shared.hgs.clone(), configuration.into()).await;
     shared.publish(state.snapshot().clone());
     Ok(configuration.into())
 }
@@ -1671,13 +1866,13 @@ async fn connection(
     {
         return Err("manual_refresh_required");
     }
-    // Recover an existing activation before considering any fresh ownership
-    // mutation. Reconnection is always a read, including its helper journal.
-    shared
-        .mode_transition
-        .observe(shared.hgs.clone(), configuration.clone())
-        .await;
-    if !automatic && !startup_recovery() {
+    // Preflight observed the journal even when the actor was unavailable.
+    // Review never lends authority to the positive import or Grant paths.
+    // Retry/backoff and all reviewed-history reconnects remain read-only.
+    // Only the separate confirmed choice may open existing business eligibility.
+    let business = !automatic && !startup_recovery() && !shared.read_checks_only()
+        && !shared.mode_transition.blocks_resume();
+    if business {
         let explicit = shared
             .retained_import
             .as_ref()
@@ -1692,7 +1887,7 @@ async fn connection(
         .await;
     }
     if shared.ownership_supported.load(Ordering::Acquire) {
-        if automatic || startup_recovery() || shared.mode_transition.pending() {
+        if !business {
             // Recovery is read-only until the owner chooses Resume. Reopening a read stream is never a new Grant/Rearm or replay of
             // a retained migration, approval, send or other native intent.
             shared
@@ -1733,7 +1928,10 @@ async fn connection(
         .stderr(Stdio::piped())
         .kill_on_drop(true);
     crate::child_environment::restore(command.as_std_mut());
-    command.env_remove("HGS_SESSION").env_remove("HGS_RUN_ID");
+    command
+        .env_remove("HGS_SESSION")
+        .env_remove("HGS_SESSION_ID")
+        .env_remove("HGS_RUN_ID");
     let mut child = command.spawn().map_err(|_| "service_unavailable")?;
     // Keep stdin open: EOF is the proxy's explicit detach instruction.
     let stdin = child.stdin.take();
@@ -1770,7 +1968,7 @@ async fn connection(
             configuration.clone(),
         );
         tauri::async_runtime::spawn(async move {
-            if !automatic && !startup_recovery() {
+            if !automatic && !startup_recovery() && !shared.mode_transition.blocks_resume() {
                 recover_grant(shared, configuration, stop, cancelled).await;
             }
         })
@@ -1927,7 +2125,8 @@ async fn recover_grant(
     // not-applied result (or a matched transient refusal) admits a fresh Grant.
     let mut looked_up = None::<String>;
     let next = |looked_up: &Option<String>| {
-        if stop.load(Ordering::Acquire) || shared.stopped.load(Ordering::Acquire) {
+        if stop.load(Ordering::Acquire) || shared.stopped.load(Ordering::Acquire)
+            || shared.read_checks_only() || shared.mode_transition.blocks_resume() {
             return None;
         }
         match shared.ownership.uncertain_grant() {
@@ -1961,6 +2160,7 @@ async fn recover_grant(
             None => {
                 #[cfg(test)]
                 recovery_pause::reached(&shared.hgs).await;
+                if shared.read_checks_only() || shared.mode_transition.blocks_resume() { return; }
                 shared
                     .ownership
                     .recovery_grant(configuration.clone(), stop.clone())
@@ -2059,6 +2259,50 @@ pub async fn desktop_service_ownership_result(
     Ok(service.ownership_result().await)
 }
 
+/// Two distinct native confirmations. The renderer selects only the displayed
+/// original and the action; it cannot supply consent, a native caller or a PID.
+#[tauri::command]
+pub async fn desktop_service_mode_action(
+    app: tauri::AppHandle,
+    source: tauri::State<'_, crate::commands::AppState>,
+    display: mode_transition::ReviewView,
+    action: mode_transition::ReviewAction,
+) -> Result<Value, String> {
+    use mode_transition::ReviewAction;
+    use tauri_plugin_dialog::{DialogExt, MessageDialogButtons, MessageDialogKind};
+    if crate::actions::blocked() {
+        return Err("replay_transport_unavailable".into());
+    }
+    let service = source
+        .desktop_service()
+        .ok_or("ownership_service_mode_required")?;
+    if action != ReviewAction::Review && service.shared.read_checks_only() {
+        return Err("manual_refresh_required".into());
+    }
+    let window = crate::main_window(&app).ok_or("The main window is unavailable.")?;
+    let prepared = service.shared.mode_transition.confirm(display, action, move |display, action| {
+        let text = |message: zerus_client_core::text::Text| crate::native_text::render(&message);
+        let title = match action {
+            ReviewAction::Review => text(zerus_client_core::text!("Review interrupted mode change")),
+            ReviewAction::Background => text(zerus_client_core::text!("Use background mode")),
+            ReviewAction::Passive => text(zerus_client_core::text!("Use passive mode")),
+        };
+        let message = match action {
+            ReviewAction::Review if display.passive_available => text(zerus_client_core::text!("Zerus still cannot confirm whether the earlier mode change finished. This review does not start or stop the service or resume background work. You may need to restart Windows and review again.")),
+            ReviewAction::Review => text(zerus_client_core::text!("Zerus still cannot confirm whether the earlier mode change finished. This review does not start or stop the service or resume background work. You may need to restart your computer and review again.")),
+            ReviewAction::Background => text(zerus_client_core::text!("This is a new choice, made after the review. Zerus turns on background work once the running service confirms it, then checks the registration before using background mode.")),
+            ReviewAction::Passive => text(zerus_client_core::text!("This is a new choice, made after the review. Zerus stops background work and keeps the service available for the open app. The earlier change still has no confirmed result.")),
+        };
+        app.dialog().message(format!("{message}\n\n{}: {}\n{}: {}",
+            text(zerus_client_core::text!("Original request")), display.request_id,
+            text(zerus_client_core::text!("Configuration")), display.configuration))
+            .title(title.clone()).parent(&window).kind(MessageDialogKind::Warning)
+            .buttons(MessageDialogButtons::OkCancelCustom(title, text(zerus_client_core::text!("Cancel"))))
+            .blocking_show()
+    }).await.map_err(str::to_owned)?;
+    service.apply_mode_action(prepared).await
+}
+
 #[tauri::command]
 pub async fn desktop_service_read_marks(
     source: tauri::State<'_, crate::commands::AppState>,
@@ -2088,5 +2332,7 @@ pub async fn desktop_service_automatic_approvals(
     .await
 }
 
+#[cfg(test)]
+mod passive_projection_tests;
 #[cfg(all(test, unix))]
 mod tests;

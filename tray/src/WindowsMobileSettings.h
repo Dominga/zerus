@@ -102,7 +102,7 @@ private:
         payload.insert("revision",snapshot.value("revision").toString());
         auto *p=new QProcess(this);process=p;controls(true);
         auto environment=QProcessEnvironment::systemEnvironment();
-        for(const auto &key:{"HGS_SESSION","HGS_RUN_ID","HGS_EXPECTED_ID","HGS_AGENT","HGS_HOST_PANE","HGS_HOST_SESSION","TMUX","TMUX_PANE"})environment.remove(QLatin1String(key));
+        for(const auto &key:{"HGS_SESSION","HGS_SESSION_ID","HGS_RUN_ID","HGS_EXPECTED_ID","HGS_AGENT","HGS_HOST_PANE","HGS_HOST_SESSION","TMUX","TMUX_PANE"})environment.remove(QLatin1String(key));
         p->setProcessEnvironment(environment);p->setProcessChannelMode(QProcess::SeparateChannels);
         auto *deadline=new QTimer(p);deadline->setSingleShot(true);
         auto output=std::make_shared<QByteArray>();

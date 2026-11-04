@@ -89,6 +89,13 @@ elif config.get('retained_import_abi') and args[:2] in [
         ['desktop', 'import-evidence'], ['desktop', 'import-status']]:
     exec(compile((root / 'import-fixture.py').read_text(), 'import-fixture.py', 'exec'))
 elif args == ['desktop', 'ownership-status', '--json']:
+    if (root / 'mode-ownership-hold').exists():
+        (root / 'mode-ownership-entered').touch()
+        until = time.monotonic() + 15
+        while not (root / 'mode-ownership-release').exists():
+            if time.monotonic() > until:
+                raise SystemExit('private fixture barrier deadline')
+            time.sleep(.005)
     print(json.dumps(status()))
 elif args == ['desktop', 'frontend-request', '--json']:
     request = value['request']

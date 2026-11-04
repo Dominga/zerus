@@ -368,6 +368,28 @@ class WindowsTaskMode(unittest.TestCase):
         self.task = None
         self.installed = False
         self.latest = None
+        self.held_originals = []
+        self.addCleanup(self.close_originals)
+
+    def close_originals(self):
+        for dll, handle in self.held_originals:
+            dll.CloseHandle(handle)
+        self.held_originals.clear()
+
+    def pin_original(self, original):
+        """Read-only kernel lifetime pin; never a stop/adoption capability."""
+        import ctypes as c
+        from ctypes import wintypes as w
+        dll = c.WinDLL('kernel32', use_last_error=True)
+        dll.OpenProcess.argtypes = (w.DWORD, w.BOOL, w.DWORD)
+        dll.OpenProcess.restype = w.HANDLE
+        dll.CloseHandle.argtypes = (w.HANDLE,)
+        handle = dll.OpenProcess(0x1000 | 0x100000, False, original['pid'])
+        self.assertTrue(handle, c.get_last_error())
+        self.held_originals.append((dll, handle))
+        metadata = windows_process_metadata(original['pid'], handle)
+        self.assertEqual(metadata['birth'], original['birth'], metadata)
+        self.assertFalse(metadata['exited'], metadata)
 
     def cli(self, *args):
         result = subprocess.run([str(self.cli_image), *args], env=self.env,
@@ -408,6 +430,122 @@ class WindowsTaskMode(unittest.TestCase):
         result = self.frontend_call(dict(case='mode_cancel', request_id=request_id), 'MODE_CALLER_RESULT ')
         self.assertEqual(result['code'], 0, result)
         return json.loads(result['stdout'])
+
+    def review_mode(self, request_id):
+        result = self.frontend_call(dict(case='mode_review', request_id=request_id), 'MODE_CALLER_RESULT ')
+        self.assertEqual(result['code'], 0, result)
+        return json.loads(result['stdout'])
+
+    def choice_after_review(self, desired, reviewed):
+        request = str(uuid.uuid4())
+        result = self.frontend_call(dict(case='mode_switch', desired=desired, after_review=reviewed,
+                                        request_id=request), 'MODE_CALLER_RESULT ')
+        self.assertEqual(result['code'], 0, result)
+        value = json.loads(result['stdout'])
+        self.assertTrue(value['ok'], value)
+        self.assertEqual(value['request_id'], request)
+        return value
+
+    def review_old_stop_without_adopting_the_later_passive(self, original, current):
+        path = self.state / 'desktop' / 'windows-registration-mode.json'
+        record = json.loads(path.read_text(encoding='utf-8'))
+        request = str(uuid.uuid4())
+        # Arrange lost Stop metadata only. Both identities came from actual
+        # owned RunEx/readiness above; no synthetic native authentication.
+        record['pending'] = dict(request_id=request, desired='background', phase='stop_offered',
+                                 original=original, started=None)
+        path.write_text(json.dumps(record), encoding='utf-8')
+        grant = self.cli('desktop', 'ownership-status', '--json')
+        before = self.observe()['instances']
+        reply = self.review_mode(request)
+        self.assertEqual(reply['code'], 'reviewed_unknown', reply)
+        self.assertEqual(reply['outcome'], 'unknown', reply)
+        self.assertFalse(reply['manager_changed'])
+        self.assertFalse(reply['authority_changed'])
+        self.assertTrue(reply['activation_automatic_blocked'])
+        self.assertEqual(self.observe()['instances'], before)
+        self.assertEqual(self.cli('desktop', 'status', '--json')['lifecycle']['pid'], current['pid'])
+        self.assertEqual(self.cli('desktop', 'ownership-status', '--json'), grant)
+        archived = json.loads(path.read_bytes())['reviewed'][-1]
+        self.assertEqual(archived['original']['request_id'], request)
+        self.assertEqual(archived['original']['original'], original)
+        self.assertEqual(archived['original']['phase'], 'stop_offered')
+        self.assertEqual(archived['outcome'], 'unknown')
+        # A fresh explicit Rearm is a separate fixture action, not a capability
+        # obtained from Review. With a valid Grant, an OLD automatic switch
+        # frame must still refuse specifically at the durable review latch.
+        self.grant('ownership_rearm')
+        granted = self.cli('desktop', 'ownership-status', '--json')
+        refused = self.mode('background')
+        self.assertFalse(refused['ok'], refused)
+        self.assertIn('--after-review', refused['error'])
+        self.assertEqual(self.observe()['instances'], before)
+        self.assertEqual(self.cli('desktop', 'ownership-status', '--json'), granted)
+        background = self.choice_after_review('background', request)
+        self.latest = background['instance']
+        # Native original-ID receipt: the post-review choice records the SAME
+        # retained actual Grant and authenticated ready endpoint, not readiness
+        # inferred later from a different task instance.
+        receipt = self.cli('desktop', 'registration', 'mode-result', '--json',
+                           '--request-id', background['request_id'])['receipt']
+        current = self.cli('desktop', 'status', '--json')['lifecycle']
+        self.assertEqual((receipt['request'], receipt['reviewed'], receipt['desired'], receipt['phase']),
+                         (background['request_id'], request, 'background', 'settled'))
+        self.assertEqual(receipt['scope'], dict(journal=granted['journal'], owner_epoch=granted['owner_epoch'],
+                                               service_epoch=current['epoch'], generation=current['generation']))
+        registration = self.cli('desktop', 'registration', 'status', '--json')
+        self.assertEqual(registration['mode_choice'], receipt)
+        self.assertEqual((registration['service_epoch'],registration['service_generation']),
+                         (current['epoch'],current['generation']))
+        passive = self.choice_after_review('passive', request)
+        self.latest = passive['instance']
+        # A completed request remains read-only after a later choice overwrites
+        # completed_request_id. Re-offering it must not start a new transition.
+        before = self.observe()['instances']
+        record_before = path.read_bytes()
+        result = self.cli('desktop', 'registration', 'mode-result', '--json',
+                          '--request-id', background['request_id'])
+        self.assertTrue(result['read_only'], result)
+        self.assertEqual(result['outcome'], 'settled', result)
+        self.assertEqual(result['receipt']['reviewed'], request)
+        self.assertEqual(result['receipt']['desired'], 'background')
+        repeated = self.frontend_call(dict(case='mode_switch', desired='background',
+                                           after_review=request, request_id=background['request_id']),
+                                      'MODE_CALLER_RESULT ')
+        self.assertEqual(repeated['code'], 0, repeated)
+        self.assertFalse(json.loads(repeated['stdout'])['ok'], repeated)
+        self.assertEqual(path.read_bytes(), record_before)
+        self.assertEqual(self.observe()['instances'], before)
+
+    def live_original_review_requires_a_barrier_and_never_stops_it(self, current):
+        path = self.state / 'desktop' / 'windows-registration-mode.json'
+        record = json.loads(path.read_text(encoding='utf-8'))
+        request = str(uuid.uuid4())
+        record['pending'] = dict(request_id=request, desired='background', phase='stop_offered',
+                                 original=current, started=None)
+        path.write_text(json.dumps(record), encoding='utf-8')
+        grant = self.cli('desktop', 'ownership-status', '--json')
+        before = self.observe()['instances']
+        reply = self.review_mode(request)
+        self.assertEqual(reply['code'], 'reboot_required', reply)
+        self.assertEqual(reply['outcome'], 'unknown', reply)
+        self.assertFalse(reply['manager_changed'])
+        self.assertFalse(reply['authority_changed'])
+        self.assertEqual(self.observe()['instances'], before)
+        self.assertEqual(self.cli('desktop', 'ownership-status', '--json'), grant)
+        barrier = path.read_bytes()
+        refused = self.review_mode(request)
+        self.assertFalse(refused['ok'], refused)
+        self.assertEqual(path.read_bytes(), barrier)
+        self.assertEqual(self.cli('desktop', 'status', '--json')['lifecycle']['pid'], current['pid'])
+        # The fixture's existing exact-original stop qualifies physical absence;
+        # Review itself has no stop capability. Never reset the pending record.
+        self.assertTrue(self.stop_exact_passive(current)['stopped'])
+        finished = self.review_mode(request)
+        self.assertEqual(finished['code'], 'reviewed_unknown', finished)
+        self.assertEqual(finished['outcome'], 'unknown')
+        self.assertFalse(finished['manager_changed'])
+        self.assertEqual(self.cli('desktop', 'ownership-status', '--json'), grant)
 
     def recover_initial_start_and_cancel_background_before_a_grant(self, passive):
         path = self.state / 'desktop' / 'windows-registration-mode.json'
@@ -797,6 +935,7 @@ if(@(Get-OwnInstances $s $t).Count-ne 0) {throw 'fixture instance remains'};
             rollback = self.mode('passive')
             self.assertTrue(rollback['ok'], rollback)
             self.latest = rollback['instance']
+            self.pin_original(self.latest)  # Keep this OLD PID unavailable for reuse through review.
             self.assert_exact_user_created_state()
             self.assertEqual(self.cli('desktop', 'ownership-status', '--json')['state'], 'revoked')
             status = self.cli('desktop', 'registration', 'status', '--json')
@@ -823,7 +962,8 @@ if(@(Get-OwnInstances $s $t).Count-ne 0) {throw 'fixture instance remains'};
             still_running = self.cli('desktop', 'status', '--json')
             self.assertTrue(still_running['running'])
             self.assertEqual(still_running['lifecycle']['pid'], self.latest['pid'])
-            self.assertTrue(self.stop_exact_passive(self.latest)['stopped'])
+            self.review_old_stop_without_adopting_the_later_passive(rollback['instance'], self.latest)
+            self.live_original_review_requires_a_barrier_and_never_stops_it(self.latest)
             self.assertFalse(self.cli('desktop', 'status', '--json')['running'])
             self.assertFalse(self.cli('desktop', 'registration', 'remove', '--json')['registered'])
             self.installed = False

@@ -38,6 +38,7 @@ pub(super) fn migrate(tx: &rusqlite::Transaction<'_>) -> Result<()> {
 
 #[cfg(test)]
 pub(super) fn remove_fixture(db: &Connection) {
+    super::task_message::remove_fixture(db);
     db.execute_batch("DROP TABLE desktop_termination_outcomes;")
         .unwrap();
 }

@@ -78,6 +78,8 @@ pub(super) fn carry_fresh_start(previous: &Value, record: &mut Value) {
     if earlier.len() > CLEARED_CONVERSATIONS { earlier.drain(..earlier.len() - CLEARED_CONVERSATIONS); }
     if !earlier.is_empty() { record["cleared_conversations"] = json!(earlier); }
     if let Some(anchor) = previous.get("journal_name") { record["journal_name"] = anchor.clone(); }
+    // A clear starts another conversation of the same session.
+    if let Some(id) = previous.get("session_id") { record["session_id"] = id.clone(); }
 }
 
 // Earlier conversations of this session's Activity, oldest first. Only

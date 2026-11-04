@@ -415,7 +415,9 @@ Install and start:
    Alternatively, download `zerus-<version>-windows-x86_64-setup.exe` from the
    same Stable or Nightly release, verify its own `SHA256SUMS` entry and run it
    as your normal desktop user. The per-user installer contains the same tested
-   ZIP payload, checks the WebView2 prerequisite and
+   ZIP payload, checks the WebView2 prerequisite, installs only into an empty
+   folder or its own earlier installation (it refuses a folder that holds other
+   files, such as an extracted zip; keep a portable copy in its own folder) and
    offers **Start Zerus at login**, off by default. It preserves configuration,
    drafts and native host images when upgrading. Its login choice applies only
    to the desktop app; local agent hosting remains a separate opt-in. Service
@@ -465,7 +467,13 @@ Zerus then lists this computer's sessions, offers it in New session and Accounts
 and runs the stable CLI from its next start. When Zerus starts from another zip of
 the same or a newer version, it first stages that zip's `hgs.exe` again (a small
 *Starting Zerus…* note may show meanwhile); running sessions stay in the host that
-runs them, and the next host starts from the new image. **Machines** shows the
+runs them, and the next host starts from the new image. That start also binds
+the zip's app to the stable CLI, so the stable CLI accepts the app as your
+Zerus. If you move the folder or extract the same zip elsewhere, the app binds
+itself again when it next starts. The app of an older zip is not staged and
+stays refused, so start the newest zip you extracted. Running
+`.\hgs.exe session-host install` yourself removes the binding until the app
+next starts. **Machines** shows the
 session host's state for this computer, and `hgs.exe session-host status` reports
 the marker, the staged files and the host.
 
@@ -560,6 +568,15 @@ stops an idle session host without disabling anything.
   These commands never start or stop a running service or native agent. The
   task uses `InteractiveToken` and least privilege, never SYSTEM or Session 0;
   it runs the passive service with the selected configuration/state paths.
+  The service runs without a console window: `hgs.exe` declares a detached
+  console allocation policy, so Windows 11 24H2 and later give it none, and on
+  earlier releases it releases the console created only for it at startup (a
+  window may flash briefly at logon). Its helpers and its connections to other
+  computers in background mode start without windows too, so no terminal window
+  belongs to the service and closing one never stops it. On 24H2 and later the
+  same policy means `start hgs …`, a shortcut or another program that starts
+  `hgs.exe` without a console of its own (CREATE_NEW_CONSOLE or ShellExecute)
+  gets no console window either; run `hgs` from a terminal to see its output.
   Registration does not grant background writer ownership or enable automatic
   approvals. An explicit `HGS_EXECUTABLE` is preserved; otherwise installation
   stages only the stable `%USERPROFILE%\.local\bin\hgs.exe`, without enabling

@@ -101,6 +101,7 @@ fn kimi_fork(record: &Value) -> Result<String> {
     }
     for key in [
         "HGS_SESSION",
+        "HGS_SESSION_ID",
         "HGS_RUN_ID",
         "HGS_AGENT",
         "HGS_REQUESTED_ID",

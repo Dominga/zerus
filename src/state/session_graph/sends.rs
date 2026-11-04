@@ -228,6 +228,7 @@ pub(crate) fn forward_send(route: &str, args: &[String], origin: Value) -> crate
         .arg("send")
         .args(args)
         .env_remove("HGS_SESSION")
+        .env_remove("HGS_SESSION_ID")
         .env_remove("HGS_RUN_ID")
         .stdin(file)
         .stdout(Stdio::piped())

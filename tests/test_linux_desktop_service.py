@@ -13,6 +13,7 @@ import unittest
 import uuid
 import sys
 from unittest.mock import patch
+from desktop_activation_review import ReviewControls
 
 ROOT = Path(__file__).resolve().parents[1]
 installer = None
@@ -32,7 +33,7 @@ class Manager:
         self.state_override = None
         self.lifecycle = {"abi": installer.ABI, "configuration": "a" * 64, "ipc_ready": True,
                           "mode": "passive",
-                          "phase": "serving", "pid": 4321, "epoch": "original-epoch", "generation": 1,
+                          "phase": "serving", "pid": 4321, "epoch": "33333333-3333-4333-8333-333333333333", "generation": 1,
                           "background": {"attention": {"ready": False, "code": "not_started"}}}
         self.grant = {"abi": "desktop-ownership-v1", "configuration": "a" * 64, "state": "service",
                       "identity_current": True, "rearm_required": False, "revision": 1,
@@ -46,6 +47,8 @@ class Manager:
         self.after_revoke_check = None
         self.holds = []
         self.after_action = None
+        self.consumer = {"machine": str(uuid.uuid4()), "boot": str(uuid.uuid4()),
+                         "pid": os.getpid(), "birth": "fixture-native-birth"}
         self.release_failure = False
         self.during_probe = None
 
@@ -103,7 +106,7 @@ class Manager:
                 if self.caller_refused:
                     raise installer.Refusal("agent-descended frontend request refused")
                 return json.dumps({"schema": 1, "configuration": "a" * 64, "admitted": True,
-                                   "source": "interactive_terminal"})
+                                   "source": "interactive_terminal", "consumer": self.consumer})
             if args[1:] == ["desktop", "ownership-status", "--json"]:
                 return json.dumps(self.grant)
             if args[1:4] == ["desktop", "revoke", "--json"]:
@@ -152,7 +155,7 @@ class Manager:
 
 
 @unittest.skipUnless(sys.platform.startswith("linux"), "Linux service registration")
-class LinuxDesktopService(unittest.TestCase):
+class LinuxDesktopService(ReviewControls, unittest.TestCase):
     def setUp(self):
         self.temporary = tempfile.TemporaryDirectory(prefix="zerus-desktop-install-")
         self.addCleanup(self.temporary.cleanup)

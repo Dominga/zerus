@@ -162,6 +162,12 @@ impl Original {
     pub fn current(&self) -> bool {
         self.check_current().is_ok()
     }
+    /// The retained process object, for proofs that must use this exact
+    /// process, such as `PinnedImage::for_process` on its loaded image.
+    pub fn handle(&self) -> std::os::windows::io::BorrowedHandle<'_> {
+        use std::os::windows::io::AsHandle;
+        self.process.as_handle()
+    }
     /// Physical exit of this retained process handle. A failed currentness
     /// check (including unreadable metadata) does not establish process exit.
     pub fn exited(&self) -> bool {
@@ -464,7 +470,10 @@ fn agent(environment: &[u16]) -> io::Result<bool> {
             .position(|c| *c == u16::from(b'='))
             .ok_or(io::ErrorKind::InvalidData)?;
         let key = String::from_utf16(&entry[..equal]).map_err(|_| io::ErrorKind::InvalidData)?;
-        if equal_windows(&key, "HGS_SESSION")? || equal_windows(&key, "HGS_RUN_ID")? {
+        if equal_windows(&key, "HGS_SESSION")?
+            || equal_windows(&key, "HGS_SESSION_ID")?
+            || equal_windows(&key, "HGS_RUN_ID")?
+        {
             return Ok(true);
         }
         // Search paths are ordinary configuration, not injection primitives.

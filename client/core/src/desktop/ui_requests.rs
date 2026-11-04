@@ -34,6 +34,9 @@ pub enum Request {
     TaskMessage {
         intent: Box<super::task_message::Intent>,
     },
+    TaskMessageInputRelease {
+        release: Box<super::task_message::review::Release>,
+    },
     TaskStartReconcile {
         intent: Box<super::task_start_reconcile::Intent>,
     },
@@ -95,6 +98,7 @@ impl Request {
             Self::CreationWorktree { intent } => &intent.worktree_request_id,
             Self::CreationLaunch { intent } => &intent.launch_id,
             Self::TaskMessage { intent } => &intent.request_id,
+            Self::TaskMessageInputRelease { release } => &release.release_id,
             Self::TaskStartReconcile { intent } => &intent.reconcile_id,
             Self::TerminationOutcome { intent } => &intent.request_id,
             Self::NotificationControl { control, .. } => control.request_id(),
@@ -112,6 +116,7 @@ impl Request {
             Self::CreationWorktree { .. } => "creation_worktree",
             Self::CreationLaunch { .. } => "creation_launch",
             Self::TaskMessage { .. } => "task_message",
+            Self::TaskMessageInputRelease { .. } => "task_message_input_release",
             Self::TaskStartReconcile { .. } => "task_start_reconcile",
             Self::TerminationOutcome { .. } => "termination_outcome",
             Self::NotificationControl { control, .. } => control.operation(),
@@ -129,6 +134,7 @@ impl Request {
             Self::CreationWorktree { intent } => intent.as_ref().clone().verify().is_ok(),
             Self::CreationLaunch { intent } => intent.as_ref().clone().verify().is_ok(),
             Self::TaskMessage { intent } => intent.as_ref().clone().verify().is_ok(),
+            Self::TaskMessageInputRelease { release } => release.valid(),
             Self::TaskStartReconcile { intent } => intent.as_ref().clone().verify().is_ok(),
             Self::TerminationOutcome { intent } => intent.valid(),
             Self::NotificationControl { scope, control } => scope.valid() && control.valid(),
@@ -291,6 +297,7 @@ impl Cache {
                 | Request::CreationWorktree { .. }
                 | Request::CreationLaunch { .. }
                 | Request::TaskMessage { .. }
+                | Request::TaskMessageInputRelease { .. }
                 | Request::TaskStartReconcile { .. }
                 | Request::TerminationOutcome { .. }
         ) {
@@ -400,7 +407,7 @@ impl Responder {
         attempt: String,
         request: Request,
     ) -> io::Result<Registration> {
-        let agent = ["HGS_SESSION", "HGS_RUN_ID"]
+        let agent = ["HGS_SESSION", "HGS_SESSION_ID", "HGS_RUN_ID"]
             .iter()
             .any(|key| std::env::var_os(key).is_some_and(|v| !v.is_empty()));
         if agent
@@ -462,6 +469,14 @@ impl Responder {
             Request::TaskMessage { intent } => {
                 if self.ownership_mode.get() != Some(&super::ownership::Mode::Service)
                     || self.configuration.get() != Some(&intent.scope.configuration)
+                {
+                    return Err(io::ErrorKind::PermissionDenied.into());
+                }
+                Some(super::ownership::Mode::Service)
+            }
+            Request::TaskMessageInputRelease { release } => {
+                if self.ownership_mode.get() != Some(&super::ownership::Mode::Service)
+                    || self.configuration.get() != Some(&release.scope.configuration)
                 {
                     return Err(io::ErrorKind::PermissionDenied.into());
                 }
@@ -958,6 +973,171 @@ mod tests {
         let mut request = serde_json::to_value(value.request).unwrap();
         request["op"] = "creation_worktree".into();
         assert!(serde_json::from_value::<Request>(request).is_err());
+    }
+
+    #[test]
+    fn task_message_responder_requires_cached_service_mode_and_the_same_configuration() {
+        const CASE: &str = "desktop::ui_requests::tests::task_message_responder_requires_cached_service_mode_and_the_same_configuration";
+        if std::env::var_os("ZERUS_TASK_MESSAGE_RESPONDER_TEST_CHILD").is_none() {
+            let output = std::process::Command::new(std::env::current_exe().unwrap())
+                .args(["--exact", CASE, "--test-threads=1", "--nocapture"])
+                .env_remove("HGS_SESSION")
+                .env_remove("HGS_RUN_ID")
+                .env("ZERUS_TASK_MESSAGE_RESPONDER_TEST_CHILD", "1")
+                .output()
+                .unwrap();
+            assert!(
+                output.status.success(),
+                "{}",
+                String::from_utf8_lossy(&output.stderr)
+            );
+            assert!(String::from_utf8_lossy(&output.stdout).contains("1 passed; 0 failed"));
+            return;
+        }
+        use crate::desktop::{ownership::Mode, Build};
+        let intent = crate::desktop::task_message::test_intent();
+        let request = Request::TaskMessage {
+            intent: Box::new(intent.clone()),
+        };
+        assert_eq!(request.operation(), "task_message");
+        assert_eq!(request.id(), intent.request_id);
+        // The slot itself binds only the Service mode.
+        let cache = Cache::default();
+        let value = Envelope {
+            abi: ABI.into(),
+            attempt: id(1),
+            request: request.clone(),
+        };
+        assert!(cache.prepare(value.clone()).is_err());
+        assert!(cache
+            .prepare_with_mode(value.clone(), Some(Mode::Native))
+            .is_err());
+        // The responder admits only its own cached Service mode and exactly
+        // the configuration the original was scoped to.
+        for (configuration, mode, accepted) in [
+            (intent.scope.configuration.clone(), None, false),
+            (
+                intent.scope.configuration.clone(),
+                Some(Mode::Native),
+                false,
+            ),
+            ("f".repeat(64), Some(Mode::Service), false),
+            (
+                intent.scope.configuration.clone(),
+                Some(Mode::Service),
+                true,
+            ),
+        ] {
+            let responder = Responder::new(
+                "com.hgdev.hgs-tray".into(),
+                Build {
+                    version: "1.2.3".into(),
+                    source_commit: "a".repeat(40),
+                    source_dirty: Some(false),
+                },
+                id(80),
+                true,
+                false,
+            );
+            assert!(responder.configure_once(configuration));
+            if let Some(mode) = mode {
+                assert!(responder.configure_ownership_mode_once(mode));
+            }
+            let prepared = responder.prepare_ui_request(id(1), request.clone());
+            assert_eq!(prepared.is_ok(), accepted);
+            if let Ok(slot) = prepared {
+                *slot.0.child.lock().unwrap() = Some((27, "synthetic-birth".into()));
+                let evidence = responder.ui_requests.evidence(&id(1)).unwrap();
+                assert_eq!(evidence.ownership_mode, Some(Mode::Service));
+                assert_eq!(evidence.request_id, intent.request_id);
+                assert_eq!(evidence.fingerprint, request.fingerprint());
+            }
+        }
+    }
+
+    #[test]
+    fn task_message_input_release_responder_requires_cached_service_mode_and_the_same_configuration(
+    ) {
+        const CASE: &str = "desktop::ui_requests::tests::task_message_input_release_responder_requires_cached_service_mode_and_the_same_configuration";
+        if std::env::var_os("ZERUS_TASK_MESSAGE_INPUT_RELEASE_RESPONDER_TEST_CHILD").is_none() {
+            let output = std::process::Command::new(std::env::current_exe().unwrap())
+                .args(["--exact", CASE, "--test-threads=1", "--nocapture"])
+                .env_remove("HGS_SESSION")
+                .env_remove("HGS_RUN_ID")
+                .env("ZERUS_TASK_MESSAGE_INPUT_RELEASE_RESPONDER_TEST_CHILD", "1")
+                .output()
+                .unwrap();
+            assert!(
+                output.status.success(),
+                "{}",
+                String::from_utf8_lossy(&output.stderr)
+            );
+            assert!(String::from_utf8_lossy(&output.stdout).contains("1 passed; 0 failed"));
+            return;
+        }
+        use crate::desktop::{ownership::Mode, Build};
+        let release = crate::desktop::task_message::review::tests::release();
+        let request = Request::TaskMessageInputRelease {
+            release: Box::new(release.clone()),
+        };
+        assert_eq!(request.operation(), "task_message_input_release");
+        assert_eq!(request.id(), release.release_id);
+        // An invalid release never prepares.
+        let invalid = Request::TaskMessageInputRelease {
+            release: Box::new(crate::desktop::task_message::review::Release {
+                bytes: 0,
+                ..release.clone()
+            }),
+        };
+        // The responder admits only its own cached Service mode and exactly
+        // the configuration the release was scoped to.
+        for (configuration, mode, request, accepted) in [
+            (release.scope.configuration.clone(), None, &request, false),
+            (
+                release.scope.configuration.clone(),
+                Some(Mode::Native),
+                &request,
+                false,
+            ),
+            ("f".repeat(64), Some(Mode::Service), &request, false),
+            (
+                release.scope.configuration.clone(),
+                Some(Mode::Service),
+                &invalid,
+                false,
+            ),
+            (
+                release.scope.configuration.clone(),
+                Some(Mode::Service),
+                &request,
+                true,
+            ),
+        ] {
+            let responder = Responder::new(
+                "com.hgdev.hgs-tray".into(),
+                Build {
+                    version: "1.2.3".into(),
+                    source_commit: "a".repeat(40),
+                    source_dirty: Some(false),
+                },
+                id(80),
+                true,
+                false,
+            );
+            assert!(responder.configure_once(configuration));
+            if let Some(mode) = mode {
+                assert!(responder.configure_ownership_mode_once(mode));
+            }
+            let prepared = responder.prepare_ui_request(id(1), request.clone());
+            assert_eq!(prepared.is_ok(), accepted);
+            if let Ok(slot) = prepared {
+                *slot.0.child.lock().unwrap() = Some((27, "synthetic-birth".into()));
+                let evidence = responder.ui_requests.evidence(&id(1)).unwrap();
+                assert_eq!(evidence.ownership_mode, Some(Mode::Service));
+                assert_eq!(evidence.request_id, release.release_id);
+                assert_eq!(evidence.fingerprint, request.fingerprint());
+            }
+        }
     }
 
     #[test]

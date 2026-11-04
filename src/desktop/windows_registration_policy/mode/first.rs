@@ -65,6 +65,22 @@ impl Record {
         Ok(())
     }
 
+    /// The record against its independent first-choice anchor (the latest
+    /// reserved first choice, kept outside the desktop state folder). Returns
+    /// the lost original ID when either side has a first choice the other
+    /// does not show: a missing, emptied or replaced journal, a wiped state
+    /// folder, a missing anchor, or a different latest choice. Lost is never
+    /// treated as never written.
+    pub fn first_lost(&self, anchor: Option<&str>) -> Option<String> {
+        let latest = self.first_choices.last().map(|r| r.request.as_str());
+        match (anchor, latest) {
+            (None, None) => None,
+            (Some(anchor), Some(latest)) if anchor == latest => None,
+            (Some(anchor), _) => Some(anchor.into()),
+            (None, Some(latest)) => Some(latest.into()),
+        }
+    }
+
     /// The pending original is a first choice: only its own UUID reads it.
     pub(super) fn pending_first(&self) -> bool {
         self.pending
@@ -308,6 +324,46 @@ mod tests {
                 Mode::Background
             )
             .is_err());
+    }
+
+    #[test]
+    fn the_record_and_its_independent_anchor_must_agree_on_the_latest_first_choice() {
+        let empty = Record::empty(&plan()).unwrap();
+        assert_eq!(empty.first_lost(None), None, "never offered: nothing lost");
+        let reserve = |record: &mut Record, choice: &First| {
+            record.reserve_first(choice).unwrap();
+            record
+                .begin_id(Mode::Background, None, choice.request.clone())
+                .unwrap();
+        };
+        let mut record = Record::empty(&plan()).unwrap();
+        let choice = first();
+        reserve(&mut record, &choice);
+        let reserved = reopen(&record);
+        assert_eq!(reserved.first_lost(Some(&choice.request)), None);
+        // A missing, emptied or replaced journal, or a wiped state folder,
+        // while the anchor survives: lost, never "never written".
+        assert_eq!(
+            empty.first_lost(Some(&choice.request)),
+            Some(choice.request.clone())
+        );
+        // History without its anchor, or a different latest choice: lost.
+        assert_eq!(reserved.first_lost(None), Some(choice.request.clone()));
+        let other = first();
+        assert_eq!(
+            reserved.first_lost(Some(&other.request)),
+            Some(other.request.clone())
+        );
+        // The anchor follows the latest reserved choice.
+        let mut later = reserved.clone();
+        later.cancel(&choice.request).unwrap();
+        reserve(&mut later, &other);
+        let later = reopen(&later);
+        assert_eq!(later.first_lost(Some(&other.request)), None);
+        assert_eq!(
+            later.first_lost(Some(&choice.request)),
+            Some(choice.request.clone())
+        );
     }
 
     #[test]

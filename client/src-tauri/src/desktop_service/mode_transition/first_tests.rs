@@ -30,6 +30,18 @@ elif args == ['desktop', 'registration', 'status', '--json']:
     save()
 elif args[:7] == ['desktop', 'registration', 'install', '--mode', 'background', '--json', '--request-id'] and len(args) == 8:
     request = args[7]
+    if state.get('install') == 'journal_lost':
+        # Production shape after the WHOLE mode journal is gone or replaced
+        # (or the state folder wiped) while the independent anchor survives:
+        # no pending, history or receipt, only first_choice_lost and the latch.
+        state['status'].update(pending_transition=None, first_choice=None, mode_choice=None,
+                               reviewed_transition=None, first_choice_lost=request,
+                               activation_automatic_blocked=True)
+        state['receipts'].pop(request, None)
+        save()
+        print(json.dumps(dict(abi='desktop-registration-mode-v1', schema=1, configuration=config,
+                              request_id=request, ok=True, changed=True)))
+        sys.exit(0)
     if state.get('install') in ('missing_ok', 'missing_fail', 'replaced'):
         # A simulated effect that started, then its original evidence went
         # missing (journal deleted) or was replaced by another request's.
@@ -373,6 +385,31 @@ fn missing_or_replaced_evidence_after_a_possible_start_stays_unknown() {
         );
         assert_eq!(fixture.installs().len(), 1, "{case}");
     }
+}
+
+#[test]
+fn a_lost_journal_never_offers_or_infers_not_started_after_a_restart() {
+    let _process = crate::PROCESS_TREE.read().unwrap();
+    let fixture = Fixture::new("journal_lost", true);
+    let controller = fixture.controller();
+    let display = controller.view().first.unwrap();
+    let prepared =
+        tauri::async_runtime::block_on(controller.confirm_first(display.clone(), |_| true))
+            .unwrap()
+            .unwrap();
+    let id = tauri::async_runtime::block_on(controller.apply_first(prepared)).unwrap();
+    assert_eq!(fixture.installs().len(), 1);
+    assert!(controller.view().pending && !controller.first_settled(&id));
+    assert_ne!(controller.view().code, "activation_not_started");
+    // A restarted consumer has no intent and sees only the native loss.
+    let restarted = fixture.controller();
+    let view = restarted.view();
+    assert!(view.first.is_none(), "no offer after a lost journal");
+    assert!(view.automatic_blocked && !view.needs_resume && !view.pending);
+    assert_eq!(view.code, "activation_first_choice_lost");
+    let again = tauri::async_runtime::block_on(restarted.confirm_first(display, |_| true));
+    assert!(again.is_err());
+    assert_eq!(fixture.installs().len(), 1, "no new UUID or install");
 }
 
 #[test]

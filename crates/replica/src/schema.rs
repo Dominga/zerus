@@ -192,6 +192,20 @@ impl TaskView {
     /// Dispatch receipt, or an explicit direct-work acknowledgement. Names do
     /// not identify an execution. This anchor is not a distributed claim.
     pub fn execution_id(&self) -> Option<String> {
+        // A recorded attempt is its own anchor: its native request, or the
+        // attempt itself for a direct start.
+        if let Some(current) = self
+            .execution
+            .as_ref()
+            .and_then(|execution| execution.current.as_ref())
+            .filter(|current| !current.legacy)
+        {
+            return Some(if current.request_id.is_empty() {
+                format!("attempt:{}", current.id)
+            } else {
+                current.request_id.clone()
+            });
+        }
         self.log
             .iter()
             .rev()

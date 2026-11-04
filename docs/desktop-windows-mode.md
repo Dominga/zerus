@@ -423,6 +423,21 @@ Unknown and is looked up by that same UUID. Only a closed not-started boundary
 choice. An interrupted first choice records consumer and boot evidence like any
 transition and takes the ordinary Review route above.
 
+The latest reserved first choice is also kept in an independent anchor,
+`<HGS_CONFIG_DIR>/windows-first-choice-<configuration>.json`, written durably
+before the mode record that reserves it. The anchor lives in the config tree,
+outside the desktop state folder that holds the mode record and the Service
+Grant. Every mode status, operation and result cross-checks the two: when the
+record no longer shows the anchored choice (missing, emptied or replaced
+journal, or a wiped state folder), has first-choice history without its anchor,
+or names another latest choice, the first choice is **lost**, never "never
+written". Status reports `first_choice_lost` and latches automatic activation,
+every mode operation refuses without a new ID, and `mode-result` stays Unknown.
+There is no maintained clear or reset for a lost first choice; keep both files
+and follow up manually. Registration install and remove keep the anchor exactly
+as they keep the mode record. Only wiping both the config and the state trees
+looks like a fresh profile.
+
 ## Private qualification
 
 The Windows unit suite runs the creation-owner regression in one bounded child,

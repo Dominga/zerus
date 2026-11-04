@@ -192,7 +192,7 @@ pub(super) fn command(config: &Config, location: &Location, operation: &str) -> 
         &plan,
     )?;
     if operation == "status" {
-        let record = native::mode::pending_status(location, &plan)?;
+        let record = native::mode::pending_status(config, location, &plan)?;
         checked["pending_transition"] = record["pending_transition"].clone();
         checked["cancelled_request_id"] = record["cancelled_request_id"].clone();
         checked["completed_request_id"] = record["completed_request_id"].clone();
@@ -200,6 +200,7 @@ pub(super) fn command(config: &Config, location: &Location, operation: &str) -> 
         checked["activation_automatic_blocked"] = record["activation_automatic_blocked"].clone();
         checked["mode_choice"] = record["mode_choice"].clone();
         checked["first_choice"] = record["first_choice"].clone();
+        checked["first_choice_lost"] = record["first_choice_lost"].clone();
         let status = super::status(location)?;
         let lifecycle = &status["lifecycle"];
         checked["running_mode"] = if lifecycle["configuration"] == location.configuration

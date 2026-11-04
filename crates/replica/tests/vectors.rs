@@ -173,3 +173,132 @@ fn project_schema1_loro_1_16() {
     let expected: Settings = serde_json::from_slice(&read(expected)).unwrap();
     assert_eq!(project.settings(), expected);
 }
+
+const ATTEMPTS: &str = "task-schema6-loro1.16";
+
+/// A send reserved before its input, then two replicas at the same time: one
+/// settles it with its receipt and its executor starts and reports progress,
+/// the other adds a comment. Written only when missing.
+fn bless_attempts() {
+    use zerus_replica::execution::{NativeRequest, Origin, Receipt};
+    let executor = SessionKey {
+        session_id: "launch_id:00000000-0000-4000-8000-000000000003".into(),
+        ..api()
+    };
+    let id = "00000000-0000-4000-8000-000000000004";
+    let mut base = TaskDoc::create(NewTask {
+        project: "project-1",
+        id: "T-d4e5f6",
+        text: "Add rate limiting to POST /v1/orders.",
+        stage: Stage::Todo,
+        target: Target::Session(executor.clone()),
+        author: Actor::Person,
+        rank: "V",
+        now: 1_790_000_000_000,
+    })
+    .unwrap();
+    let native = NativeRequest {
+        machine: executor.machine.clone(),
+        name: executor.session.clone(),
+        run_id: "00000000-0000-4000-8000-000000000005".into(),
+        conversation_id: "00000000-0000-4000-8000-000000000006".into(),
+        digest: "0f".repeat(32),
+    };
+    base.reserve_attempt(
+        id,
+        Origin::Send,
+        &executor,
+        native.clone(),
+        &Actor::Person,
+        1_790_000_001_000,
+    )
+    .unwrap();
+    let snapshot = base.snapshot().unwrap();
+    let version = base.version();
+    let mut a = TaskDoc::from_bytes(&snapshot).unwrap();
+    let receipt = Receipt {
+        request_id: id.into(),
+        name: native.name,
+        run_id: native.run_id,
+        conversation_id: native.conversation_id,
+        first_message: false,
+        digest: native.digest,
+        submitted: true,
+    };
+    a.settle_attempt(
+        id,
+        zerus_replica::Settlement::Receipt(&receipt),
+        &Actor::Person,
+        1_790_000_002_000,
+    )
+    .unwrap();
+    a.record_start(&Actor::Agent(executor.clone()), 1_790_000_003_000)
+        .unwrap();
+    a.report(
+        "Token bucket in place; tests next.",
+        zerus_replica::execution::ReportKind::Progress,
+        Some(1),
+        &Actor::Agent(executor),
+        1_790_000_004_000,
+    )
+    .unwrap();
+    let mut b = TaskDoc::from_bytes(&snapshot).unwrap();
+    b.comment("Limit per API key.", &Actor::Person, 1_790_000_002_500)
+        .unwrap();
+    let (update_a, update_b) = (
+        a.export_since(&version).unwrap(),
+        b.export_since(&version).unwrap(),
+    );
+    a.import(&update_b).unwrap();
+    for (name, bytes) in [
+        (format!("{ATTEMPTS}.loro"), snapshot),
+        (format!("{ATTEMPTS}.version"), version),
+        (format!("{ATTEMPTS}-a.update"), update_a),
+        (format!("{ATTEMPTS}-b.update"), update_b),
+    ] {
+        fs::write(path(&name), bytes).unwrap();
+    }
+    let merged = serde_json::to_string_pretty(&a.view().unwrap()).unwrap() + "\n";
+    fs::write(path(&format!("{ATTEMPTS}-merged.json")), merged).unwrap();
+}
+
+#[test]
+fn task_schema6_attempts_loro_1_16() {
+    if blessing() && !path(&format!("{ATTEMPTS}.loro")).exists() {
+        bless_attempts();
+    }
+    let expected: serde_json::Value =
+        serde_json::from_slice(&read(&format!("{ATTEMPTS}-merged.json"))).unwrap();
+    let merged = |first: &str, second: &str| {
+        let mut task = TaskDoc::from_bytes(&read(&format!("{ATTEMPTS}.loro"))).unwrap();
+        task.import(&read(&format!("{ATTEMPTS}-{first}.update")))
+            .unwrap();
+        task.import(&read(&format!("{ATTEMPTS}-{second}.update")))
+            .unwrap();
+        task
+    };
+    // Concurrent updates merge to the same task and execution in either order.
+    for (first, second) in [("a", "b"), ("b", "a")] {
+        let view = merged(first, second).view().unwrap();
+        contains(&serde_json::to_value(&view).unwrap(), &expected, "view");
+        let current = view.execution.unwrap().current.unwrap();
+        assert_eq!(
+            (view.schema, view.writable, view.stage),
+            (6, true, Stage::Active)
+        );
+        assert_eq!(
+            serde_json::to_value(current.phase).unwrap(),
+            serde_json::json!("running")
+        );
+    }
+    // The stored base alone is a reservation: its delivery is unknown.
+    let base = TaskDoc::from_bytes(&read(&format!("{ATTEMPTS}.loro"))).unwrap();
+    assert!(base.held().unwrap().is_some());
+    // The stored document still accepts this build's edits under its rules.
+    let mut task = merged("a", "b");
+    let executor = task.view().unwrap().session.unwrap();
+    assert!(task
+        .record_report("Done.", &Actor::Agent(executor), 1_790_000_005_000)
+        .unwrap());
+    assert_eq!(task.view().unwrap().stage, Stage::Review);
+}

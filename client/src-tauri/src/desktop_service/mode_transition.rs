@@ -345,6 +345,21 @@ impl Controller {
             self.failed("activation_status_unavailable");
             return None;
         }
+        if route.windows && !status["first_choice_lost"].is_null() {
+            // The native journal lost an anchored first choice: explicitly
+            // unavailable. Never an offer, a Resume or an inferred NotStarted;
+            // an own unsettled intent keeps its pending original ID.
+            let mut state = self.state.lock().unwrap_or_else(PoisonError::into_inner);
+            state.first = None;
+            state.view.first = None;
+            state.view.automatic_blocked = true;
+            state.view.needs_resume = false;
+            state.selection = Some(status.clone());
+            if state.intent.as_ref().is_none_or(|i| i.complete) {
+                state.view.code = "activation_first_choice_lost".into();
+            }
+            return Some(status);
+        }
         let capable = self
             .state
             .lock()

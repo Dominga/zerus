@@ -384,7 +384,7 @@ class Installer:
         journal = _activation.Journal(self.ownership, lambda _: None)
         return journal.lookup(request_id, self.configuration)
 
-    def begin_activation(self, request_id):
+    def begin_activation(self, request_id, after_review=None):
         self.activation_image = _activation.Image(self.hgs)
         require(self.activation_image.digest == self.binary, "Original activation CLI changed; check its result.")
         caller = self.caller()
@@ -392,7 +392,7 @@ class Installer:
         self.activation_journal = _activation.Journal(self.ownership, self.save)
         self.activation_binding = _activation.binding(self.configuration, self.binary, digest(self.definition), grant)
         self.activation = self.activation_journal.reserve(request_id, self.activation_binding,
-                                                         _activation.consumer(caller.get("consumer")))
+                                                         _activation.consumer(caller.get("consumer")), after_review)
 
     def enter_activation_effect(self):
         if self.activation is not None and not self.activation.effect_started:
@@ -411,6 +411,8 @@ class Installer:
                 "activation_pending": _activation.pending(previous) if previous else None,
                 "activation_automatic_blocked": _activation.automatic_blocked(previous) if previous else False,
                 "activation_review": _activation.review_status(previous) if previous else None,
+                "mode_choice": _activation.choice_status(previous) if previous else None,
+                "service_epoch": lifecycle.get("epoch"), "service_generation": lifecycle.get("generation"),
                 "running_mode": lifecycle.get("mode"), "ipc_ready": lifecycle.get("ipc_ready", False),
                 "pending_restart": previous.get("pending_restart", False) if previous else False,
                 "last_revoke_request_id": previous.get("last_revoke_request_id") if previous else None,
@@ -519,7 +521,11 @@ class Installer:
                           f"--request-id {transition['request_id']} before choosing a new mode.") from error
         return transition
 
-    def install(self, *, check=False, no_start=False, session=False, refresh=False, activation_id=None, default_only=False):
+    def install(self, *, check=False, no_start=False, session=False, refresh=False, activation_id=None, default_only=False, after_review=None):
+        require(after_review is None or (_activation.canonical_uuid(after_review)
+                and activation_id is not None and self.requested_mode == "background"
+                and not (check or no_start or session or refresh or default_only)),
+                "--after-review selects a separately confirmed new background activation only")
         require(not default_only or activation_id is not None, "default activation requires its original UUID")
         require(activation_id is None or (_activation.canonical_uuid(activation_id)
                 and self.requested_mode == "background" and not (check or no_start or session or refresh)),
@@ -556,6 +562,7 @@ class Installer:
                         and previous.get("mode_selection", "retained") == "default"
                         and previous.get("mode", "passive") == "passive"),
                         "Explicit or retained selection needs the owner's Resume action; kept.")
+                _activation.choice_after_review(previous, after_review)
             state = self.state()
             require(self.requested_mode is not None or previous is None
                     or previous.get("mode", "passive") == self.mode,
@@ -589,7 +596,7 @@ class Installer:
                     or (active and current.get("mode") == "background")):
                 transition = self.rollback(previous)
             if activation_id is not None:
-                self.begin_activation(activation_id)
+                self.begin_activation(activation_id, after_review)
                 previous = self.ownership()  # Includes the durable original reservation.
             context = None if no_start or (refresh and not active) else graphics(self.env)
             changed = previous is None or previous.get("binary_sha256") != self.binary or previous.get("definition_sha256") != digest(self.definition)
@@ -673,7 +680,7 @@ class Installer:
             self.save(record)
             if self.activation is not None:
                 self.fence()
-                self.activation_journal.finish(self.activation, ready=True)
+                self.activation_journal.finish(self.activation, ready=True, lifecycle=lifecycle)
                 return self.activation_result(activation_id)
             return "Desktop service IPC ready. Background workers have their separate lifecycle status."
         finally:
@@ -689,7 +696,8 @@ class Installer:
 
 
 def main():
-    parser = argparse.ArgumentParser(description=__doc__, epilog="Desktop service activation ABI: " + _activation.ABI)
+    parser = argparse.ArgumentParser(description=__doc__, formatter_class=argparse.RawDescriptionHelpFormatter,
+        epilog="Desktop service activation ABI: " + _activation.ABI + "\n" + _activation.CHOICE_MARKER)
     parser.add_argument("action", choices=("install", "session", "refresh", "status", "cancel-rollback", "activation-status", "review-activation"), nargs="?", default="install")
     parser.add_argument("--hgs", default=shutil.which("hgs"))
     parser.add_argument("--config-dir")
@@ -700,6 +708,7 @@ def main():
     parser.add_argument("--json", action="store_true", help="stable configuration-scoped receipt for the native Settings action")
     parser.add_argument("--request-id", help="with cancel-rollback: the original pending rollback UUID to cancel")
     parser.add_argument("--activation-id", help="original activation UUID; install --mode background or activation-status only")
+    parser.add_argument("--after-review", help="with a new background activation: the exact reviewed original UUID")
     parser.add_argument("--default-only", action="store_true", help="refuse unless the locked selection is still newly installed implicit passive")
     args = parser.parse_args()
     instance = None
@@ -750,6 +759,10 @@ def main():
                 "activation status/review requires its original --activation-id")
         require(not args.default_only or (args.action == "install" and args.activation_id is not None),
                 "default-only requires the original activation install")
+        require(args.after_review is None or (_activation.canonical_uuid(args.after_review)
+                and args.action == "install" and args.mode == "background" and args.activation_id is not None
+                and not (args.default_only or args.check or args.no_start)),
+                "--after-review requires a separately confirmed new background activation")
         instance = Installer(args.hgs, env, mode=args.mode)
         if args.action == "review-activation":
             print(json.dumps(instance.review_activation(args.activation_id)))
@@ -760,7 +773,7 @@ def main():
         else:
             result = instance.cancel_rollback(args.request_id) if args.action == "cancel-rollback" else instance.install(
                 check=args.check, no_start=args.no_start, session=args.action == "session", refresh=args.action == "refresh",
-                activation_id=args.activation_id, default_only=args.default_only)
+                activation_id=args.activation_id, default_only=args.default_only, after_review=args.after_review)
             if isinstance(result, dict):
                 print(json.dumps(result))
             elif args.json:

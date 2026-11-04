@@ -483,6 +483,20 @@ class WindowsTaskMode(unittest.TestCase):
         self.assertEqual(self.cli('desktop', 'ownership-status', '--json'), granted)
         background = self.choice_after_review('background', request)
         self.latest = background['instance']
+        # Native original-ID receipt: the post-review choice records the SAME
+        # retained actual Grant and authenticated ready endpoint, not readiness
+        # inferred later from a different task instance.
+        receipt = self.cli('desktop', 'registration', 'mode-result', '--json',
+                           '--request-id', background['request_id'])['receipt']
+        current = self.cli('desktop', 'status', '--json')['lifecycle']
+        self.assertEqual((receipt['request'], receipt['reviewed'], receipt['desired'], receipt['phase']),
+                         (background['request_id'], request, 'background', 'settled'))
+        self.assertEqual(receipt['scope'], dict(journal=granted['journal'], owner_epoch=granted['owner_epoch'],
+                                               service_epoch=current['epoch'], generation=current['generation']))
+        registration = self.cli('desktop', 'registration', 'status', '--json')
+        self.assertEqual(registration['mode_choice'], receipt)
+        self.assertEqual((registration['service_epoch'],registration['service_generation']),
+                         (current['epoch'],current['generation']))
         passive = self.choice_after_review('passive', request)
         self.latest = passive['instance']
         # A completed request remains read-only after a later choice overwrites

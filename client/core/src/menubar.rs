@@ -5,7 +5,7 @@
 //! decides what reaches the status item (`tray/src/QuietTrayIcon.h`). Pure:
 //! the platform glue draws and shows it.
 use crate::marks::{self, Mark};
-use crate::readmarks::ReadMark;
+use crate::readmarks::{Queued, ReadMark};
 use crate::text::Text;
 use crate::{Change, ComputerId, ComputerStatus, ViewRow};
 use serde::{Deserialize, Serialize};
@@ -70,7 +70,8 @@ pub fn needs_attention(row: &ViewRow) -> bool {
 pub struct DeviceMarks {
     marks: BTreeMap<String, Mark>,
     replies: BTreeMap<String, String>,
-    /// Pending read marks by computer, then session name (`ReadMarks`' key).
+    /// Pending read marks by computer, then `ReadMarks`' key: `id:<session
+    /// ID>`, or the session name for a mark queued without one.
     pending: BTreeMap<String, BTreeMap<String, ReadMark>>,
 }
 
@@ -81,12 +82,32 @@ impl DeviceMarks {
         replies: BTreeMap<String, String>,
         pending: Vec<ReadMark>,
     ) -> Self {
+        let pending = pending
+            .into_iter()
+            .map(|mark| Queued {
+                mark,
+                session_id: None,
+            })
+            .collect();
+        Self::with_queued(marks, replies, pending)
+    }
+
+    /// From `AttentionMarks::snapshot` and `ReadMarks::queued`, keyed as the
+    /// queue keys them (zerus-ucck P2c-2b).
+    pub fn with_queued(
+        marks: BTreeMap<String, Mark>,
+        replies: BTreeMap<String, String>,
+        pending: Vec<Queued>,
+    ) -> Self {
         let mut by_computer: BTreeMap<String, BTreeMap<String, ReadMark>> = BTreeMap::new();
-        for mark in pending {
+        for queued in pending {
+            let part = queued
+                .session_id
+                .map_or_else(|| queued.mark.name.clone(), |id| format!("id:{id}"));
             by_computer
-                .entry(mark.computer.clone())
+                .entry(queued.mark.computer.clone())
                 .or_default()
-                .insert(mark.name.clone(), mark);
+                .insert(part, queued.mark);
         }
         Self {
             marks,
@@ -95,8 +116,14 @@ impl DeviceMarks {
         }
     }
 
-    fn queued(&self, computer: &str, name: &str) -> Option<&ReadMark> {
-        self.pending.get(computer)?.get(name)
+    /// `row`'s pending mark: under its session ID, or one its session left
+    /// under the name before the ID was known.
+    fn queued(&self, computer: &str, row: &ViewRow) -> Option<&ReadMark> {
+        let by = self.pending.get(computer)?;
+        row.session_id
+            .as_deref()
+            .and_then(|id| by.get(&format!("id:{id}")))
+            .or_else(|| by.get(&row.name))
     }
 }
 
@@ -123,21 +150,23 @@ pub fn read_state(computer: &ComputerId, row: &ViewRow, device: &DeviceMarks) ->
     let mark = if device.marks.is_empty() {
         None
     } else {
-        let key = marks::attention_key(
+        let id = row.session_id.as_deref();
+        let key = marks::row_attention_key(
             &computer.0,
             &row.agent,
             &row.name,
             row.created,
             conversation,
+            id,
         );
-        // A mark kept under the fallback key still applies until the
-        // frontend moves it (`FleetState.cpp:136-139`).
+        // A mark kept under a fallback key still applies until the frontend
+        // moves it (`FleetState.cpp:136-139`), also the name's fallback of a
+        // row that now lists its session ID.
         device.marks.get(&key).or_else(|| {
-            if conversation.is_empty() {
-                return None;
-            }
-            let fallback = marks::fallback_key(&computer.0, &row.agent, &row.name, row.created);
-            device.marks.get(&fallback)
+            marks::fallback_keys(&computer.0, &row.agent, &row.name, row.created, id)
+                .into_iter()
+                .filter(|fallback| *fallback != key)
+                .find_map(|fallback| device.marks.get(&fallback))
         })
     };
     let review_later = !archived && mark.is_some_and(|mark| mark.review);
@@ -156,7 +185,7 @@ pub fn read_state(computer: &ComputerId, row: &ViewRow, device: &DeviceMarks) ->
     } else {
         // A queued mark of this run and conversation reads the reply or the
         // attention until the host shows it.
-        let queued = device.queued(&computer.0, &row.name).filter(|queued| {
+        let queued = device.queued(&computer.0, row).filter(|queued| {
             !queued.run_id.is_empty()
                 && queued.run_id == row.run_id.as_deref().unwrap_or("")
                 && queued.conversation_id == conversation
@@ -1568,5 +1597,91 @@ mod tests {
             "Linux modes are not macOS modes"
         );
         assert_eq!(OpenMode::Terminal.label(), "Terminal.app");
+    }
+
+    /// zerus-ucck P2c-2b: a row that lists a durable session ID reads its
+    /// attention mark under the ID's fallback key, or under the name's until
+    /// the frontend moves it, and its queued read mark under the ID. Another
+    /// session with the same label never takes either.
+    #[test]
+    fn a_row_with_a_session_id_reads_its_marks_by_id() {
+        use crate::readmarks::Queued;
+        let (id, other) = (
+            "3f2a9c1d-6b7e-4c2a-9d1f-0a1b2c3d4e5f",
+            "7be01d44-6b7e-4c2a-9d1f-0a1b2c3d4e5f",
+        );
+        let local = ComputerId::local();
+        let mut row = ViewRow {
+            name: "claude/p/a".into(),
+            agent: "claude".into(),
+            created: 5,
+            session_id: Some(id.into()),
+            ..ViewRow::default()
+        };
+        let review = |key: String| {
+            let mark = Mark {
+                review: true,
+                acknowledged: String::new(),
+            };
+            DeviceMarks::new(BTreeMap::from([(key, mark)]), BTreeMap::new(), Vec::new())
+        };
+        let by_id = review(marks::session_fallback_key("", "claude", id));
+        let by_name = review(marks::fallback_key("", "claude", "claude/p/a", 5));
+        assert!(read_state(&local, &row, &by_id).review_later);
+        assert!(
+            read_state(&local, &row, &by_name).review_later,
+            "until moved"
+        );
+        // The ID's key wins over a mark the name's key still holds.
+        let both = DeviceMarks::new(
+            BTreeMap::from([
+                (
+                    marks::session_fallback_key("", "claude", id),
+                    Mark::default(),
+                ),
+                (
+                    marks::fallback_key("", "claude", "claude/p/a", 5),
+                    Mark {
+                        review: true,
+                        acknowledged: String::new(),
+                    },
+                ),
+            ]),
+            BTreeMap::new(),
+            Vec::new(),
+        );
+        assert!(!read_state(&local, &row, &both).review_later);
+        row.session_id = Some(other.into());
+        assert!(
+            !read_state(&local, &row, &by_id).review_later,
+            "another session"
+        );
+        // A read mark queued for this run reads the reply until the host shows it.
+        row.session_id = Some(id.into());
+        row.run_id = Some("run-1".into());
+        row.conversation_id = Some("conv-1".into());
+        row.reply_id = Some("r1".into());
+        row.shared_read = true;
+        let queued = |session_id: Option<&str>| {
+            let mark = ReadMark {
+                computer: String::new(),
+                name: "claude/p/a".into(),
+                run_id: "run-1".into(),
+                conversation_id: "conv-1".into(),
+                reply_id: Some("r1".into()),
+                attention_signature: None,
+            };
+            let queued = Queued {
+                mark,
+                session_id: session_id.map(str::to_owned),
+            };
+            DeviceMarks::with_queued(BTreeMap::new(), BTreeMap::new(), vec![queued])
+        };
+        assert!(!read_state(&local, &row, &queued(Some(id))).unread_reply);
+        assert!(
+            !read_state(&local, &row, &queued(None)).unread_reply,
+            "queued by name"
+        );
+        assert!(read_state(&local, &row, &queued(Some(other))).unread_reply);
     }
 }

@@ -1,7 +1,14 @@
 //! Read marks the host's snapshot does not show yet. Kept in a file so a
 //! restart keeps retrying (`tray/src/ReadMarks.h`).
+//!
+//! A mark whose row lists a durable session ID is queued under that ID
+//! (zerus-ucck P2c-2b), so two sessions that share a label never merge their
+//! marks. The file stays a list of marks; each also carries `session_id`
+//! when it has one, which older builds ignore. A mark queued before its
+//! row's ID was known stays under its name until a mark with the ID merges it.
 use crate::fsx::write_private_atomic;
 use crate::view::ViewRow;
+use serde::{Deserialize, Serialize};
 use std::collections::{BTreeMap, BTreeSet, HashSet};
 use std::path::PathBuf;
 
@@ -9,9 +16,34 @@ pub use zerus_desktop_read_policy::ReadMark;
 mod checkpoint;
 pub use checkpoint::{Checkpoint, CHECKPOINT_BYTES, CHECKPOINT_MARKS};
 
+/// A queued mark and the durable session ID of its row, when listed.
+#[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
+pub struct Queued {
+    #[serde(flatten)]
+    pub mark: ReadMark,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub session_id: Option<String>,
+}
+
+/// The queue key: the computer, and `id:<session ID>` or the session name.
+type Key = (String, String);
+
+fn key(computer: &str, name: &str, session_id: Option<&str>) -> Key {
+    let part = session_id.map_or_else(|| name.to_owned(), |id| format!("id:{id}"));
+    (computer.to_owned(), part)
+}
+
+fn key_of(queued: &Queued) -> Key {
+    key(
+        &queued.mark.computer,
+        &queued.mark.name,
+        queued.session_id.as_deref(),
+    )
+}
+
 pub struct ReadMarks {
     path: PathBuf,
-    marks: BTreeMap<(String, String), ReadMark>,
+    marks: BTreeMap<Key, Queued>,
     /// Marks added by [`ReadMarks::add_all`] and not yet written.
     unsaved: bool,
     checkpoint: checkpoint::State,
@@ -21,16 +53,21 @@ impl ReadMarks {
     /// A missing or unreadable file gives no marks.
     pub fn load(path: PathBuf) -> Self {
         let bytes = std::fs::read(&path);
-        let parsed: Option<Vec<ReadMark>> = bytes
+        let parsed: Option<Vec<Queued>> = bytes
             .as_ref()
             .ok()
             .and_then(|bytes| serde_json::from_slice(bytes).ok());
         let checkpoint = checkpoint::State::loaded(&bytes, parsed.as_ref().map(Vec::len));
         drop(bytes);
-        let list = parsed.unwrap_or_default();
-        let marks = list
+        let marks = parsed
+            .unwrap_or_default()
             .into_iter()
-            .map(|mark| ((mark.computer.clone(), mark.name.clone()), mark))
+            .map(|mut queued| {
+                queued.session_id = queued
+                    .session_id
+                    .filter(|id| crate::creation::canonical_uuid(id));
+                (key_of(&queued), queued)
+            })
             .collect();
         Self {
             path,
@@ -40,14 +77,39 @@ impl ReadMarks {
         }
     }
 
+    /// Merges `mark` into what is pending for its session: under its session
+    /// ID when it has one, taking along a mark its session left under the
+    /// name before the ID was known.
+    fn merge(&mut self, mark: ReadMark, session_id: Option<String>) {
+        let session_id = session_id.filter(|id| crate::creation::canonical_uuid(id));
+        let queued = Queued { mark, session_id };
+        let slot = key_of(&queued);
+        let named = key(&queued.mark.computer, &queued.mark.name, None);
+        let old = self.marks.remove(&slot).or_else(|| {
+            (queued.session_id.is_some()
+                && self
+                    .marks
+                    .get(&named)
+                    .is_some_and(|old| old.session_id.is_none()))
+            .then(|| self.marks.remove(&named))
+            .flatten()
+        });
+        let mark = match old {
+            Some(old) => ReadMark::merged(&old.mark, queued.mark),
+            None => queued.mark,
+        };
+        self.marks.insert(
+            slot,
+            Queued {
+                mark,
+                session_id: queued.session_id,
+            },
+        );
+    }
+
     /// Merges the mark into what is pending for its session, then saves.
     pub fn add(&mut self, mark: ReadMark) {
-        let key = (mark.computer.clone(), mark.name.clone());
-        let mark = match self.marks.get(&key) {
-            Some(old) => ReadMark::merged(old, mark),
-            None => mark,
-        };
-        self.marks.insert(key, mark);
+        self.merge(mark, None);
         self.save();
     }
 
@@ -56,16 +118,20 @@ impl ReadMarks {
     /// writes them ([`ReadMarks::flush`]) before it sends any, so the caller
     /// does no file I/O. Returns whether it merged any.
     pub fn add_all(&mut self, marks: impl IntoIterator<Item = ReadMark>) -> bool {
+        self.add_identified(marks.into_iter().map(|mark| (mark, None)))
+    }
+
+    /// [`ReadMarks::add_all`] with the durable session ID of each mark's row,
+    /// when the listing reports one.
+    pub fn add_identified(
+        &mut self,
+        marks: impl IntoIterator<Item = (ReadMark, Option<String>)>,
+    ) -> bool {
         let mut added = false;
-        for mut mark in marks.into_iter().filter(|mark| !mark.is_empty()) {
+        for (mut mark, session_id) in marks.into_iter().filter(|(mark, _)| !mark.is_empty()) {
             mark.reply_id = mark.reply_id.filter(|id| !id.is_empty());
             mark.attention_signature = mark.attention_signature.filter(|s| !s.is_empty());
-            let key = (mark.computer.clone(), mark.name.clone());
-            let mark = match self.marks.get(&key) {
-                Some(old) => ReadMark::merged(old, mark),
-                None => mark,
-            };
-            self.marks.insert(key, mark);
+            self.merge(mark, session_id);
             added = true;
         }
         self.unsaved |= added;
@@ -81,12 +147,40 @@ impl ReadMarks {
     }
 
     pub fn pending(&self) -> Vec<ReadMark> {
+        self.marks
+            .values()
+            .map(|queued| queued.mark.clone())
+            .collect()
+    }
+
+    /// The pending marks with their session IDs, for the webview's mirror.
+    pub fn queued(&self) -> Vec<Queued> {
         self.marks.values().cloned().collect()
     }
+
+    /// The key of `row`'s pending mark: its session ID's, or a mark its
+    /// session left under the name before the ID was known.
+    fn found(&self, computer: &str, row: &ViewRow) -> Option<Key> {
+        let id = row.session_id.as_deref();
+        let by_id = id.map(|id| key(computer, &row.name, Some(id)));
+        if let Some(by_id) = by_id.filter(|k| self.marks.contains_key(k)) {
+            return Some(by_id);
+        }
+        let named = key(computer, &row.name, None);
+        self.marks
+            .get(&named)
+            .is_some_and(|queued| queued.session_id.is_none())
+            .then_some(named)
+    }
+
     /// Indexed, read-only display lookup. Never saves, settles or delivers a
     /// mark; the exact run/conversation and current parts must still match.
     pub fn local_overlay(&self, computer: &str, row: &ViewRow) -> (bool, bool) {
-        let Some(mark) = self.marks.get(&(computer.to_owned(), row.name.clone())) else {
+        let Some(mark) = self
+            .found(computer, row)
+            .and_then(|key| self.marks.get(&key))
+            .map(|queued| &queued.mark)
+        else {
             return (false, false);
         };
         if !row.shared_read
@@ -112,13 +206,25 @@ impl ReadMarks {
         self.marks.is_empty()
     }
 
-    /// A complete snapshot of `computer` lists `names`: its marks for sessions
-    /// it no longer lists can never apply and are dropped (`updateUnread` in
-    /// `tray/src/FleetState.cpp`). Returns true when it dropped any (then saves).
-    pub fn drop_unlisted(&mut self, computer: &str, names: &HashSet<&str>) -> bool {
+    /// A complete snapshot of `computer` lists `names` and the session IDs
+    /// `ids`: its marks for sessions it no longer lists can never apply and
+    /// are dropped (`updateUnread` in `tray/src/FleetState.cpp`). A mark
+    /// queued under a session ID stays while that ID is listed, whatever its
+    /// label is now. Returns true when it dropped any (then saves).
+    pub fn drop_unlisted(
+        &mut self,
+        computer: &str,
+        names: &HashSet<&str>,
+        ids: &HashSet<&str>,
+    ) -> bool {
         let before = self.marks.len();
-        self.marks
-            .retain(|(owner, name), _| owner != computer || names.contains(name.as_str()));
+        self.marks.retain(|(owner, _), queued| {
+            owner != computer
+                || queued.session_id.as_deref().map_or_else(
+                    || names.contains(queued.mark.name.as_str()),
+                    |id| ids.contains(id),
+                )
+        });
         let dropped = self.marks.len() != before;
         if dropped {
             self.save();
@@ -146,10 +252,10 @@ impl ReadMarks {
     /// either empty, no longer the row's current value, or already shown as
     /// read by the host. Returns true when it changed anything (then saves).
     pub fn settle(&mut self, computer: &str, row: &ViewRow) -> bool {
-        let key = (computer.to_owned(), row.name.clone());
-        let Some(mark) = self.marks.get(&key) else {
+        let Some(key) = self.found(computer, row) else {
             return false;
         };
+        let mark = &self.marks[&key].mark;
         let settled = mark.settled(
             row.run_id.as_deref(),
             row.conversation_id.as_deref(),
@@ -171,7 +277,7 @@ impl ReadMarks {
     fn save(&mut self) {
         self.checkpoint.dirty = true;
         self.unsaved = false;
-        let list: Vec<&ReadMark> = self.marks.values().collect();
+        let list: Vec<&Queued> = self.marks.values().collect();
         let written = serde_json::to_vec(&list)
             .map_err(std::io::Error::from)
             .and_then(|bytes| {
@@ -377,14 +483,117 @@ mod tests {
                 "claude/sample-project/review",
                 "claude/sample-project/other",
             ]
-            .into()
+            .into(),
+            &HashSet::new()
         ));
-        assert!(marks.drop_unlisted("mac", &listed));
+        assert!(marks.drop_unlisted("mac", &listed, &HashSet::new()));
         assert_eq!(marks.pending(), vec![peer, mark("run-1", Some("r1"), None)]);
         assert_eq!(ReadMarks::load(temp.0.clone()).pending().len(), 2);
-        assert!(marks.drop_unlisted("laptop", &HashSet::new()));
-        assert!(marks.drop_unlisted("mac", &HashSet::new()));
+        assert!(marks.drop_unlisted("laptop", &HashSet::new(), &HashSet::new()));
+        assert!(marks.drop_unlisted("mac", &HashSet::new(), &HashSet::new()));
         assert!(marks.is_empty());
+    }
+
+    const ID_A: &str = "3f2a9c1d-6b7e-4c2a-9d1f-0a1b2c3d4e5f";
+    const ID_B: &str = "7be01d44-6b7e-4c2a-9d1f-0a1b2c3d4e5f";
+
+    /// zerus-ucck P2c-2b: two sessions that share a label keep their own
+    /// marks, each under its session ID, and a snapshot that still lists an
+    /// ID keeps its mark whatever the session's label is now.
+    #[test]
+    fn marks_are_queued_by_session_id() {
+        let temp = Temp::new("by-session-id");
+        let mut marks = ReadMarks::load(temp.0.clone());
+        let a = mark("run-1", Some("r1"), None);
+        let b = mark("run-2", Some("r2"), None);
+        assert!(marks.add_identified([
+            (a.clone(), Some(ID_A.into())),
+            (b.clone(), Some(ID_B.into()))
+        ]));
+        assert_eq!(
+            marks.pending(),
+            vec![a.clone(), b.clone()],
+            "never merged by label"
+        );
+        marks.flush();
+        let reloaded = ReadMarks::load(temp.0.clone());
+        assert_eq!(
+            reloaded
+                .queued()
+                .iter()
+                .map(|q| q.session_id.clone())
+                .collect::<Vec<_>>(),
+            [Some(ID_A.to_owned()), Some(ID_B.to_owned())]
+        );
+        // An older build reads the same file as plain marks.
+        let older: Vec<ReadMark> =
+            serde_json::from_slice(&std::fs::read(&temp.0).unwrap()).unwrap();
+        assert_eq!(older, vec![a.clone(), b.clone()]);
+        // The row with ID_A shows and settles only its own mark.
+        let mut row_a = row("run-1", None, None);
+        row_a.session_id = Some(ID_A.into());
+        row_a.shared_read = true;
+        assert_eq!(marks.local_overlay("mac", &row_a), (true, false));
+        let mut renamed = row("run-2", None, None);
+        renamed.name = "claude/sample-project/renamed".into();
+        renamed.session_id = Some(ID_B.into());
+        renamed.reply_id = Some("r2".into());
+        renamed.shared_read = true;
+        assert_eq!(
+            marks.local_overlay("mac", &renamed),
+            (true, false),
+            "found by ID after a rename"
+        );
+        assert!(!marks.drop_unlisted(
+            "mac",
+            &["claude/sample-project/renamed"].into(),
+            &[ID_A, ID_B].into()
+        ));
+        assert!(marks.drop_unlisted(
+            "mac",
+            &["claude/sample-project/review"].into(),
+            &[ID_A].into()
+        ));
+        assert_eq!(marks.pending(), vec![a.clone()]);
+        row_a.read_reply_id = Some("r1".into());
+        assert!(marks.settle("mac", &row_a));
+        assert!(marks.is_empty());
+    }
+
+    /// A mark queued before its row's ID was known (an older file) is found
+    /// by name for that row, and the next mark with the ID takes it along.
+    #[test]
+    fn a_mark_queued_by_name_moves_to_the_session_id() {
+        let temp = Temp::new("by-name-first");
+        std::fs::write(
+            &temp.0,
+            serde_json::to_vec(&vec![mark("run-1", Some("r1"), None)]).unwrap(),
+        )
+        .unwrap();
+        let mut marks = ReadMarks::load(temp.0.clone());
+        let mut with_id = row("run-1", None, None);
+        with_id.session_id = Some(ID_A.into());
+        with_id.shared_read = true;
+        assert_eq!(marks.local_overlay("mac", &with_id), (true, false));
+        assert!(marks.add_identified([(mark("run-1", None, Some("s1")), Some(ID_A.into()))]));
+        let queued = marks.queued();
+        assert_eq!(queued.len(), 1);
+        assert_eq!(queued[0].session_id.as_deref(), Some(ID_A));
+        assert_eq!(
+            queued[0].mark,
+            mark("run-1", Some("r1"), Some("s1")),
+            "merged, not duplicated"
+        );
+        // A mark under another session's ID is never taken for this row.
+        let mut other = row("run-1", None, None);
+        other.session_id = Some(ID_B.into());
+        other.shared_read = true;
+        assert_eq!(marks.local_overlay("mac", &other), (false, false));
+        assert!(!marks.settle("mac", &other));
+        // A non-canonical ID queues by name.
+        let mut plain = ReadMarks::load(Temp::new("noncanonical").0.clone());
+        plain.add_identified([(mark("run-9", Some("r9"), None), Some(ID_A.to_uppercase()))]);
+        assert_eq!(plain.queued()[0].session_id, None);
     }
 
     #[test]

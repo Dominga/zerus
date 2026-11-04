@@ -585,6 +585,42 @@ describe("persistence", () => {
     expect(b.port.updateAttentionMarks).toHaveBeenCalledWith({ [fallback]: null }, {});
   });
 
+  // zerus-ucck P2c-2b, as core `marks::row_attention_key` and `fallback_keys`.
+  it("keys a row without a conversation by its session ID and moves the name's fallback mark to it", async () => {
+    const sid = "3f2a9c1d-6b7e-4c2a-9d1f-0a1b2c3d4e5f";
+    const byName = keyOf({ conversationId: "" });
+    const byId = JSON.stringify(["", "claude", `id:${sid}`]);
+    expect(fallbackKey({ computer: "", cmd: "claude", name: NAME, created: 1_790_000_000, sessionId: sid })).toBe(byId);
+    const a = await setup([rowOut({ conversation_id: null, reply_id: null, session_id: sid })],
+      fakePort({ marks: { [byName]: { review: true, acknowledged: "" } }, replies: {} }));
+    expect(a.row().reviewLater).toBe(true);
+    const again = batchOf({ upserts: [rowOut({ conversation_id: null, reply_id: null, session_id: sid })] });
+    a.receive(again);
+    expect(a.port.updateAttentionMarks).toHaveBeenCalledWith({ [byId]: { review: true, acknowledged: "" }, [byName]: null }, {});
+    // Another session with the same label and start time never takes it.
+    const b = await setup([rowOut({ conversation_id: null, reply_id: null, session_id: "7be01d44-6b7e-4c2a-9d1f-0a1b2c3d4e5f" })],
+      fakePort({ marks: { [byId]: { review: true, acknowledged: "" } }, replies: {} }));
+    expect(b.row().reviewLater).toBe(false);
+  });
+
+  it("mirrors pending read marks by session ID, so two sessions sharing a label keep their own", async () => {
+    const [ida, idb] = ["3f2a9c1d-6b7e-4c2a-9d1f-0a1b2c3d4e5f", "7be01d44-6b7e-4c2a-9d1f-0a1b2c3d4e5f"];
+    const port = fakePort();
+    port.pendingReadMarks.mockResolvedValue([
+      mark({ run_id: "run-1", conversation_id: "conv-1", reply_id: "r1", session_id: ida }),
+      mark({ run_id: "run-2", conversation_id: "conv-2", reply_id: "r2", session_id: idb }),
+    ]);
+    const a = await setup([rowOut({ session_id: ida }), rowOut({ run_id: "run-2", conversation_id: "conv-2", reply_id: "r2", session_id: idb }, "run:b")], port);
+    expect(a.row().unreadReply).toBe(false);
+    expect(a.row("run:b").unreadReply).toBe(false);
+    // A snapshot that still lists B under a new label keeps its mark; one without A drops A's.
+    const renamed = rowOut({ name: "claude/sample-project/renamed", run_id: "run-2", conversation_id: "conv-2", reply_id: "r2", session_id: idb }, "run:b");
+    a.receive(batchOf({ replaces: [{ computer: "", rows: [renamed] }] }));
+    // The row is read again after the drop: its mark is still queued.
+    a.receive(batchOf({ upserts: [renamed] }));
+    expect(a.row("run:b").unreadReply).toBe(false);
+  });
+
   it(`keeps the ${CAP} newest written entries of each map`, async () => {
     expect(CAP).toBe(20_000);
     const legacy = { shared_read: false, attention_signature: undefined };

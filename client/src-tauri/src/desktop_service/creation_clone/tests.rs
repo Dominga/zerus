@@ -139,6 +139,61 @@ fn original_clone_child_is_bound_and_lost_reply_only_allows_a_scoped_read() {
     });
 }
 #[test]
+fn a_sent_create_whose_reply_is_lost_stays_unconfirmed_for_clone_and_worktree() {
+    if !private_case("desktop_service::creation_clone::tests::a_sent_create_whose_reply_is_lost_stays_unconfirmed_for_clone_and_worktree") {return}
+    tauri::async_runtime::block_on(async {
+        // The production create path (wait): once its admission request was
+        // written, a lost reply is Unknown and keeps its request ID. It is
+        // never the never-sent failure that retires the request.
+        let unconfirmed = |answer: creation::Answer| {
+            assert!(!answer.ok);
+            assert_eq!(
+                answer.error,
+                zerus_client_core::repository::UNCONFIRMED_OPERATION
+            );
+            assert!(answer.data.is_null(), "{}", answer.data);
+        };
+        let f = fixture(json!({"clone_lost":true}));
+        let (service, _cache) = connected(&f).await;
+        let (id, value) = operation();
+        unconfirmed(reply(service.clone(), id, value, true, true).await.unwrap());
+        assert!(f.0.join("clone-bound").exists(), "the clone was sent");
+        service.join().await.unwrap();
+
+        let f = fixture(json!({"worktree_abi":true}));
+        let (service, _cache) = connected(&f).await;
+        let id = uuid::Uuid::new_v4().to_string();
+        let value = json!({"id":id,"creation_schema":1,"created":1,"revision":4,"cmd":"codex",
+            "tag":"example","host":"","state":"worktree","source":"/srv/repo","target":"/srv/repo",
+            "worktree_source":"/srv/repo","branch":"work-1","destination":"/srv/repo-work-1",
+            "worktree_common":"/srv/repo/.git","worktree_receipts":true,
+            "worktree_id":uuid::Uuid::new_v4().to_string(),
+            "expected_machine":"22222222-2222-4222-8222-222222222222"});
+        let sent = service.clone();
+        let answer = tauri::async_runtime::spawn_blocking(move || {
+            crate::desktop_service::creation_worktree::call(
+                Some(sent),
+                &id,
+                &value,
+                true,
+                true,
+                &AtomicBool::new(false),
+            )
+        })
+        .await
+        .unwrap()
+        .expect("a service answer, not the direct path");
+        unconfirmed(answer);
+        let written = std::fs::read_to_string(f.0.join("worktree-calls")).unwrap_or_default();
+        assert_eq!(
+            written.lines().count(),
+            1,
+            "the worktree intent was sent once"
+        );
+        service.join().await.unwrap();
+    });
+}
+#[test]
 fn unsupported_or_mismatched_clone_results_never_advance_the_native_host() {
     if !private_case("desktop_service::creation_clone::tests::unsupported_or_mismatched_clone_results_never_advance_the_native_host") {return}
     tauri::async_runtime::block_on(async {

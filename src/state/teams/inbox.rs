@@ -585,7 +585,8 @@ fn all_items(team: &Team) -> Vec<Item> {
         .filter(|proposal| matches!(proposal["state"].as_str(), Some("accepted") | Some("rejected") | Some("answered")))
         .collect();
     let decided_at = |proposal: &Value| proposal["decided_at"].as_f64().or(proposal["at"].as_f64()).unwrap_or_default();
-    decided.sort_by(|a, b| decided_at(b).total_cmp(&decided_at(a)));
+    // A stable order: proposals decided in one go keep their places.
+    decided.sort_by(|a, b| decided_at(b).total_cmp(&decided_at(a)).then_with(|| a["id"].as_str().cmp(&b["id"].as_str())));
     for proposal in decided.into_iter().take(DECIDED_PROPOSALS) {
         let id = proposal["id"].as_str().unwrap_or_default().to_owned();
         let state = proposal["state"].as_str().unwrap_or_default().to_owned();
@@ -1173,7 +1174,23 @@ pub(crate) fn mark_told(told: &mut Vec<String>, named: &[Item], open: &std::coll
             told.push(item.key.clone());
         }
     }
-    told.retain(|key| open.contains(key));
+    // Owner feedback 2026-11-04 (20): a decided proposal is final. Only the
+    // latest few are listed, so one could leave the list and come back when
+    // several were decided at once; forgetting it then repeated the whole
+    // batch to the lead. Its key is kept (the newest 200) while other items
+    // are forgotten once they close, so an item that opens again is new.
+    told.retain(|key| open.contains(key) || key.starts_with("proposal:"));
+    let decided = told.iter().filter(|key| key.starts_with("proposal:")).count();
+    if decided > 200 {
+        let mut drop = decided - 200;
+        told.retain(|key| {
+            if drop > 0 && key.starts_with("proposal:") && !open.contains(key) {
+                drop -= 1;
+                return false;
+            }
+            true
+        });
+    }
 }
 
 /// The reports the owner's attention list shows: undecided for at least
@@ -1875,5 +1892,27 @@ mod tests {
         // The record the desktop answers from carries the questions and Other.
         let record = super::super::dispatcher::permission_record(team.member(&lead).unwrap().pending.as_ref().unwrap());
         assert_eq!(record["questions"], card["questions"]);
+    }
+}
+
+#[cfg(test)]
+mod told_tests {
+    use super::*;
+
+    fn item(key: &str) -> Item {
+        Item { subagents: Value::Null, kind: "proposal_decided", key: key.into(), task: None, member: String::new(), since: 0.0,
+            summary: String::new(), command: String::new(), detail: String::new() }
+    }
+
+    /// Owner feedback 2026-11-04 (20): a decided proposal told once is not
+    /// told again when it leaves the listed few and comes back.
+    #[test]
+    fn a_told_decision_stays_told_after_it_leaves_the_list() {
+        let mut told = Vec::new();
+        let open: std::collections::BTreeSet<String> = ["proposal:p1".to_owned(), "report:1".to_owned()].into();
+        mark_told(&mut told, &[item("proposal:p1"), item("report:1")], &open);
+        // Both leave the open list: the report is forgotten, the decision kept.
+        mark_told(&mut told, &[], &Default::default());
+        assert_eq!(told, vec!["proposal:p1".to_owned()]);
     }
 }

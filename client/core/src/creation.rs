@@ -345,6 +345,7 @@ pub fn valid_operation(id: &str, value: &Value) -> bool {
     if array_len(value, "history") > HISTORY
         || array_len(value, "previous_launches") > PREVIOUS
         || array_len(value, "worktree_previous") > PREVIOUS
+        || array_len(value, "clone_previous") > PREVIOUS
     {
         return false;
     }
@@ -1989,6 +1990,23 @@ impl Creations {
                 .and_then(Value::as_str)
                 .unwrap_or("The original clone result is unknown. Check again before continuing.")
                 .to_owned();
+            // Only a definitely effect-free failure (a clone this client never
+            // sent) frees its request for a later Continue setup.
+            if status == "failed" && result.get("effects_started") == Some(&Value::Bool(false)) {
+                let mut previous = value["clone_previous"]
+                    .as_array()
+                    .cloned()
+                    .unwrap_or_default();
+                previous.push(value["clone_id"].clone());
+                while previous.len() > PREVIOUS {
+                    previous.remove(0);
+                }
+                value["clone_previous"] = Value::Array(previous);
+                if let Some(object) = value.as_object_mut() {
+                    object.remove("clone_id");
+                }
+                self.put(id, value);
+            }
             return self.failed(id, &detail, status != "failed");
         }
         value["clone_done"] = Value::Bool(true);

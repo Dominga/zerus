@@ -78,19 +78,30 @@ async fn connected(f: &Fixture) -> (Arc<Service>, CacheServer) {
     eventually("clone service connected", || service.snapshot().connected).await;
     (service, cache)
 }
-async fn answer(service: Arc<Service>, id: String, value: Value, fresh: bool) -> creation::Answer {
+async fn reply(
+    service: Arc<Service>,
+    id: String,
+    value: Value,
+    fresh: bool,
+    wait: bool,
+) -> Option<creation::Answer> {
     tauri::async_runtime::spawn_blocking(move || {
         call(
             Some(service),
             &id,
             &value,
             fresh,
-            false,
+            wait,
             &AtomicBool::new(false),
         )
     })
     .await
     .unwrap()
+}
+async fn answer(service: Arc<Service>, id: String, value: Value, fresh: bool) -> creation::Answer {
+    reply(service, id, value, fresh, false)
+        .await
+        .expect("a service answer, not the direct path")
 }
 #[test]
 fn original_clone_child_is_bound_and_lost_reply_only_allows_a_scoped_read() {
@@ -152,8 +163,8 @@ fn unsupported_or_mismatched_clone_results_never_advance_the_native_host() {
 }
 
 #[test]
-fn missing_marker_definitively_refuses_only_a_fresh_unsent_clone() {
-    if !private_case("desktop_service::creation_clone::tests::missing_marker_definitively_refuses_only_a_fresh_unsent_clone") {return}
+fn a_missing_marker_sends_every_clone_call_down_the_direct_path() {
+    if !private_case("desktop_service::creation_clone::tests::a_missing_marker_sends_every_clone_call_down_the_direct_path") {return}
     tauri::async_runtime::block_on(async {
         let f = fixture(json!({"clone_no_abi":true}));
         let (service, _cache) = connected(&f).await;
@@ -164,26 +175,65 @@ fn missing_marker_definitively_refuses_only_a_fresh_unsent_clone() {
                 value["target"] = json!(r"C:\Work\repo");
                 assert!(
                     wire::Plan::from_operation(&id, &value).is_none(),
-                    "the missing-marker refusal precedes POSIX admission validation"
+                    "the missing-marker routing precedes POSIX admission validation"
                 );
             }
-            let refused = answer(service.clone(), id.clone(), value.clone(), true).await;
-            assert!(
-                refused.ok,
-                "a definite pre-send result, not a lost exchange"
-            );
-            assert_eq!(refused.data["status"], "failed");
-            assert_eq!(refused.data["request_id"], value["clone_id"]);
-            assert_eq!(refused.data["path"], value["target"]);
-            assert_eq!(refused.data["detail"], UNAVAILABLE);
-            let recovery = answer(service.clone(), id, value, false).await;
-            assert!(!recovery.ok);
-            assert_eq!(
-                recovery.error,
-                zerus_client_core::repository::UNCONFIRMED_OPERATION
-            );
+            // A fresh clone, a never-consented clone and a status read: the
+            // completed probe found no kind, so each takes the direct path.
+            for (fresh, wait) in [(true, true), (false, true), (false, false)] {
+                assert!(
+                    reply(service.clone(), id.clone(), value.clone(), fresh, wait)
+                        .await
+                        .is_none(),
+                    "{fresh} {wait}"
+                );
+            }
         }
         assert!(calls(&f).is_empty(), "neither mutation nor lookup was sent");
+        service.join().await.unwrap();
+    });
+}
+#[test]
+fn a_clone_that_never_reached_the_service_fails_definitely_and_a_read_does_not() {
+    if !private_case("desktop_service::creation_clone::tests::a_clone_that_never_reached_the_service_fails_definitely_and_a_read_does_not") {return}
+    tauri::async_runtime::block_on(async {
+        let unsent = |answer: Option<creation::Answer>, value: &Value| {
+            let answer = answer.unwrap();
+            assert!(answer.ok, "a definite pre-send result");
+            assert_eq!(answer.data["status"], "failed");
+            assert_eq!(answer.data["effects_started"], false);
+            assert_eq!(answer.data["request_id"], value["clone_id"]);
+            assert_eq!(answer.data["path"], value["target"]);
+            assert_eq!(answer.data["detail"], NOT_SENT);
+        };
+        // A supported service: a clone without fresh consent is never sent.
+        let f = fixture(json!({}));
+        let (service, _cache) = connected(&f).await;
+        let (id, value) = operation();
+        unsent(
+            reply(service.clone(), id.clone(), value.clone(), false, true).await,
+            &value,
+        );
+        assert!(calls(&f).is_empty(), "nothing was sent");
+        // A failed probe stops even a fresh clone before anything is sent;
+        // a status read there proves nothing and stays unconfirmed.
+        std::fs::write(
+            f.0.join("fixture.json"),
+            json!({"clone_help_fail":true}).to_string(),
+        )
+        .unwrap();
+        unsent(
+            reply(service.clone(), id.clone(), value.clone(), true, true).await,
+            &value,
+        );
+        let read = reply(service.clone(), id, value, false, false)
+            .await
+            .unwrap();
+        assert_eq!(
+            read.error,
+            zerus_client_core::repository::UNCONFIRMED_OPERATION
+        );
+        assert!(calls(&f).is_empty(), "nothing was sent");
         service.join().await.unwrap();
     });
 }

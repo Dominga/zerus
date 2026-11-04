@@ -33,15 +33,16 @@ service (`client/src-tauri/src/desktop_service/creation_launch.rs`):
   separately from clone and worktree:
   - a Submit, direct or from the task executor's Start (the same New session
     button, with a reserved identity);
-  - an explicit Continue setup's consent for exactly its next service step
-    (zerus-5wmh.66.4.3.9), when that step is this launch with the launch ID
-    reserved before the Continue.
+  - the launch step of an explicit Continue setup's chain over the remaining
+    steps ([Continue](desktop-creation-clone.md#continue)), bound to the
+    launch ID reserved before that Continue and following the preceding
+    steps' definite success.
 - **Never sent.** The reducer dispatches a launch only with a launch ID it
   reserved in this process. A launch without fresh consent, or one that stops
   before its admission request is written, was never sent. `launch_unsent`
   then retires the unused launch ID into the history, reserves a new one and
-  fails the creation. It stays resumable: an explicit Continue grants the
-  consent.
+  fails the creation. It stays resumable: an explicit Continue's chain
+  covers the launch.
 - **Results.** A Launched original reports launch success, and the session
   listing still binds it. A failed or Unknown original reports the launch as
   unconfirmed, as the direct path's failure does today, and so does a lost

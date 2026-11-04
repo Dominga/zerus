@@ -183,7 +183,10 @@ The first, `deferred_send` (`desktop::deferred_send`, ABI
   checkpoint whose request ID, run and conversation the stdin repeats, and
   whose message digest the stdin's text and decoded attachments reproduce.
   A plain send only: no subagent target or compaction. v1 refuses any `@`
-  or other-machine session. The CLI's own send rules are mirrored, so an
+  or other-machine session, and any session but a terminal agent's (Codex,
+  Claude, Kimi): an OpenCode or DeepSeek send goes to its own native backend
+  and receipts, so it stays on the direct path, decided before any offer
+  (`deferred_send_agent_refused`). The CLI's own send rules are mirrored, so an
   original the CLI would refuse never spawns: a run, a non-empty message
   within 64 KiB without control characters, no `/` or `!` command, at most
   eight attachments with valid names, types and labels, each 10 MiB and

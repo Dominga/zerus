@@ -41,6 +41,11 @@ pub const RECEIPT_IN_PROGRESS: &str = "deferred_send_in_progress";
 pub const RECEIPT_MISMATCH: &str = "deferred_send_receipt_mismatch";
 /// The CLI receipt is oversized or not a readable receipt.
 pub const RECEIPT_INVALID: &str = "deferred_send_receipt_invalid";
+/// The session is not a terminal agent's. An OpenCode or DeepSeek session's
+/// `hgs send` goes to its own native backend, which writes its own receipts
+/// and has its own rules, never `input_receipts`; such a send stays on the
+/// direct path, decided before any offer.
+pub const AGENT_REFUSED: &str = "deferred_send_agent_refused";
 /// The CLI's own bounds on one send, mirrored so that an original the CLI
 /// would refuse never spawns.
 const MAX_TEXT: usize = 64 * 1024;
@@ -211,8 +216,21 @@ pub struct Verified {
 
 /// A session name as the launch records hold it, on this computer only: v1
 /// refuses any `@alias` or other-machine target.
-fn local_session(value: &str) -> bool {
+fn local_name(value: &str) -> bool {
     super::creation_launch::session_name(value) && !value.contains('@')
+}
+/// Whether the session's agent is a terminal agent
+/// ([`super::creation_launch::AGENTS`]: Codex, Claude, Kimi), whose `hgs send`
+/// types into the terminal and writes `input_receipts`.
+fn terminal_agent(value: &str) -> bool {
+    value
+        .split('/')
+        .next()
+        .is_some_and(|agent| super::creation_launch::AGENTS.contains(&agent))
+}
+/// A local terminal agent's session: the only target of v1.
+fn local_session(value: &str) -> bool {
+    local_name(value) && terminal_agent(value)
 }
 fn uuid(value: &str) -> bool {
     creation::canonical_uuid(value) && value != "00000000-0000-0000-0000-000000000000"
@@ -301,12 +319,15 @@ fn reference_label(value: &str) -> bool {
 impl Intent {
     pub fn verify(self) -> Result<Verified, &'static str> {
         if !self.scope.valid()
-            || !local_session(&self.session)
+            || !local_name(&self.session)
             || !uuid(&self.request_id)
             || self.checkpoint.is_empty()
             || self.original.is_empty()
         {
             return Err("invalid_deferred_send_intent");
+        }
+        if !terminal_agent(&self.session) {
+            return Err(AGENT_REFUSED);
         }
         // The complete service line must fit the existing control frame; a
         // larger original stays on the direct path, decided before any offer.

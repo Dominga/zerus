@@ -196,6 +196,28 @@ fn only_a_plain_send_matching_its_checkpoint_verifies() {
     for (name, intent, code) in cases {
         assert_eq!(intent.verify().err(), Some(code), "{name}");
     }
+    // Only a terminal agent's session: OpenCode and DeepSeek route `hgs send`
+    // to their own native backends and receipts, so they, and any other
+    // agent, stay on the direct path with their own code.
+    for session in [
+        "dsh/example",
+        "dsh/example/main",
+        "opencode/example/main",
+        "gemini/example",
+    ] {
+        let other = Intent {
+            session: session.into(),
+            ..base.clone()
+        };
+        assert_eq!(other.verify().err(), Some(AGENT_REFUSED), "{session}");
+    }
+    for session in ["codex/example", "kimi/example/main", SESSION] {
+        let terminal = Intent {
+            session: session.into(),
+            ..base.clone()
+        };
+        assert!(terminal.verify().is_ok(), "{session}");
+    }
     // A duplicate key is refused, as the CLI refuses it.
     let duplicate = base.original.replacen("{", "{\"text\":\"other\",", 1);
     assert_eq!(
@@ -357,6 +379,13 @@ fn a_lookup_matches_only_its_own_query() {
     let intent = intent();
     let verified = intent.verify().unwrap();
     let query = Query::for_plan(scope(), &verified.plan).unwrap();
+    // A non-terminal agent's session is never a deferred send's.
+    let mut native = query.clone();
+    native.session = "dsh/example".into();
+    assert!(!native.valid());
+    let mut plan = verified.plan.clone();
+    plan.session = "opencode/example/main".into();
+    assert!(!plan.valid() && Query::for_plan(scope(), &plan).is_none());
     let found = Lookup {
         abi: ABI.into(),
         request_id: query.request_id.clone(),
@@ -568,6 +597,32 @@ fn verify_refuses_what_the_cli_itself_would_refuse_before_any_spawn() {
             with(
                 "attachments",
                 json!([file("a.txt", "text/\u{7}", &hello, "[File #1]")]),
+            ),
+        ),
+        (
+            "long mime",
+            with(
+                "attachments",
+                json!([file(
+                    "a.txt",
+                    &format!("text/{}", "x".repeat(96)),
+                    &hello,
+                    "[File #1]"
+                )]),
+            ),
+        ),
+        (
+            "control name",
+            with(
+                "attachments",
+                json!([file("a\u{1}.txt", "text/plain", &hello, "[File #1]")]),
+            ),
+        ),
+        (
+            "ten-digit label",
+            with(
+                "attachments",
+                json!([file("a.txt", "text/plain", &hello, "[File #1000000000]")]),
             ),
         ),
         (

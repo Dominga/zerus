@@ -82,6 +82,16 @@ pub struct Imported {
 }
 
 const CACHE: &str = "inventory.json";
+/// Beside the cache: the digest of the cache this build wrote. Only a build
+/// that repairs the execution schema writes it, so rows an older binary
+/// wrote or rewrote are never trusted and every task is read (and repaired)
+/// again (zerus-cg5h.4 S2b.2).
+const CACHE_MARK: &str = "inventory.repaired";
+
+/// What the mark holds for the cache `bytes`.
+fn cache_mark(bytes: &[u8]) -> String {
+    format!("schema-repair-1 {:x}\n", Sha256::digest(bytes))
+}
 
 /// What tells a file changed without reading it: its length, modification
 /// time and, on Unix, its inode (an atomic rewrite gets a new one).
@@ -286,8 +296,10 @@ impl ProjectStore {
         Vec<Damaged>,
     )> {
         let path = self.dir().join(CACHE);
+        let mark = self.dir().join(CACHE_MARK);
         let old: Cache = fs::read(&path)
             .ok()
+            .filter(|bytes| fs::read_to_string(&mark).ok() == Some(cache_mark(bytes)))
             .and_then(|bytes| serde_json::from_slice(&bytes).ok())
             .unwrap_or_default();
         let mut cache = Cache::default();
@@ -371,7 +383,12 @@ impl ProjectStore {
         }
         if cache != old {
             // Only a speed-up: an unwritten cache means reading the tasks again.
-            let _ = write_atomic(&path, &serde_json::to_vec(&cache)?);
+            // The mark follows the cache; until it does, the cache is not trusted.
+            let bytes = serde_json::to_vec(&cache)?;
+            let _ = fs::remove_file(&mark);
+            if write_atomic(&path, &bytes).is_ok() {
+                let _ = write_atomic(&mark, cache_mark(&bytes).as_bytes());
+            }
         }
         Ok((inventory, stages, damaged))
     }
@@ -676,6 +693,79 @@ mod tests {
             .bytes;
         peer.import_unrepaired_for_test(&bytes);
         assert_eq!(peer.stored_schema(), EXECUTION_TASK_SCHEMA);
+    }
+
+    #[test]
+    fn an_older_binary_s_inventory_cache_never_bypasses_the_repair() {
+        // review-n on #1402: an older importer persisted a lower-won copy and
+        // its own valid cache row for it (same format, matching stamps).
+        let dir = tempfile::tempdir().unwrap();
+        let store = ProjectStore::open(dir.path(), "project-1").unwrap();
+        let mut stale = merged_unrepaired();
+        store.save(&mut stale).unwrap();
+        let old_time = SystemTime::now() - Duration::from_secs(60);
+        for path in [
+            store.snapshot_path(stale.uuid()),
+            store.updates_path(stale.uuid()),
+        ] {
+            if path.exists() {
+                fs::File::options()
+                    .write(true)
+                    .open(&path)
+                    .unwrap()
+                    .set_times(fs::FileTimes::new().set_modified(old_time))
+                    .unwrap();
+            }
+        }
+        let files = vec![
+            stamp(&store.snapshot_path(stale.uuid())),
+            stamp(&store.updates_path(stale.uuid())),
+        ];
+        assert!(settled(&files));
+        let before = version(&stale.current_vv());
+        let older = Cache {
+            project: None,
+            tasks: BTreeMap::from([(
+                stale.uuid().to_owned(),
+                Cached {
+                    files,
+                    version: before.clone(),
+                    error: None,
+                    stage: Some(Stage::Todo),
+                    stage_at: Some(1),
+                    sent: Some(Sent { session: None }),
+                },
+            )]),
+        };
+        fs::write(store.dir().join(CACHE), serde_json::to_vec(&older).unwrap()).unwrap();
+        let (ours, damaged) = store.inventory().unwrap();
+        assert!(damaged.is_empty());
+        assert_ne!(ours.tasks[stale.uuid()], before);
+        assert_eq!(
+            store.load(stale.uuid()).unwrap().stored_schema(),
+            EXECUTION_TASK_SCHEMA
+        );
+        let (page, _) = store
+            .updates_for(&ours, &Inventory::default(), 1 << 20)
+            .unwrap();
+        let exported = page
+            .iter()
+            .find(|u| u.document == Document::Task(stale.uuid().to_owned()))
+            .unwrap();
+        assert_eq!(
+            TaskDoc::from_bytes(&exported.bytes)
+                .unwrap()
+                .stored_schema(),
+            EXECUTION_TASK_SCHEMA
+        );
+        // The cache this build wrote is trusted again.
+        let (again, _) = store.inventory().unwrap();
+        assert_eq!(again, ours);
+        let mark = fs::read_to_string(store.dir().join(CACHE_MARK)).unwrap();
+        assert_eq!(
+            mark,
+            cache_mark(&fs::read(store.dir().join(CACHE)).unwrap())
+        );
     }
 
     #[test]

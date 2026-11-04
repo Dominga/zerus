@@ -12,7 +12,7 @@ use zerus_desktop_migration::{canonical, configuration, HANDOFF_LOCK};
 #[path = "maintenance.rs"]
 pub(crate) mod maintenance;
 
-pub const SCHEMA: i64 = super::deferred_send::SCHEMA;
+pub const SCHEMA: i64 = super::deferred_answer::SCHEMA;
 pub struct HandoffLock {
     _lock: platform::FileLock,
     root: PathBuf,
@@ -272,12 +272,18 @@ pub(super) fn operation_undrained(db: &Connection) -> Result<u64> {
     } else {
         0
     };
+    let answers = if version >= super::deferred_answer::SCHEMA {
+        super::deferred_answer::undrained(db)?
+    } else {
+        0
+    };
     task.checked_add(clones)
         .and_then(|count| count.checked_add(cache))
         .and_then(|count| count.checked_add(worktrees))
         .and_then(|count| count.checked_add(launches))
         .and_then(|count| count.checked_add(messages))
         .and_then(|count| count.checked_add(sends))
+        .and_then(|count| count.checked_add(answers))
         .context("operation resource total overflow")
 }
 
@@ -301,6 +307,8 @@ pub struct Store {
     message_custody: super::task_message::Recovery,
     #[cfg(any(target_os = "linux", target_os = "macos"))]
     send_custody: super::deferred_send::Recovery,
+    #[cfg(any(target_os = "linux", target_os = "macos"))]
+    answer_custody: super::deferred_answer::Recovery,
 }
 impl Store {
     pub fn open(location: &Location, epoch: &str) -> Result<Self> {
@@ -534,6 +542,12 @@ impl Store {
             tx.pragma_update(None, "user_version", super::deferred_send::SCHEMA)?;
             tx.commit()?;
         }
+        if version < super::deferred_answer::SCHEMA {
+            let tx = db.transaction()?;
+            super::deferred_answer::migrate(&tx)?;
+            tx.pragma_update(None, "user_version", super::deferred_answer::SCHEMA)?;
+            tx.commit()?;
+        }
         // Opening Store follows acquisition of the real exclusive serve owner.
         // Cache workers are in-process and retain it through all actual I/O.
         let tx = db.transaction()?;
@@ -556,7 +570,8 @@ impl Store {
             | super::creation_worktree::startup(&mut db).is_err()
             | super::creation_launch::startup(&mut db).is_err()
             | super::task_message::startup(&mut db).is_err()
-            | super::deferred_send::startup(&mut db).is_err();
+            | super::deferred_send::startup(&mut db).is_err()
+            | super::deferred_answer::startup(&mut db).is_err();
         let tx = db.transaction()?;
         tx.execute(
             "UPDATE service SET generation=generation+1, epoch=?1 WHERE id=1",
@@ -587,6 +602,8 @@ impl Store {
             message_custody: super::task_message::Recovery::default(),
             #[cfg(any(target_os = "linux", target_os = "macos"))]
             send_custody: super::deferred_send::Recovery::default(),
+            #[cfg(any(target_os = "linux", target_os = "macos"))]
+            answer_custody: super::deferred_answer::Recovery::default(),
         })
     }
     pub fn checkpoint(&self) -> Result<()> {
@@ -623,6 +640,7 @@ impl Store {
         let launch = super::creation_launch::summary(&self.db);
         let message = super::task_message::summary(&self.db);
         let send = super::deferred_send::summary(&self.db);
+        let answer = super::deferred_answer::summary(&self.db);
         let mut status = match zerus_desktop_ledger::operations::totals(&self.db).and_then(
             |totals| {
                 let summary = |value: &Result<serde_json::Value>| match value {
@@ -637,13 +655,14 @@ impl Store {
                     summary(&launch)?,
                     summary(&message)?,
                     summary(&send)?,
+                    summary(&answer)?,
                 ))
             },
         ) {
-            Ok((totals, undrained, clone, worktree, launch, message, send)) => {
+            Ok((totals, undrained, clone, worktree, launch, message, send, answer)) => {
                 let unsettled = |v: &serde_json::Value| v["unsettled"].as_u64().unwrap_or(0);
-                serde_json::json!({"unsettled":totals.unsettled+unsettled(&clone)+unsettled(&worktree)+unsettled(&launch)+unsettled(&message)+unsettled(&send),"undrained":undrained,
-                "kinds":{"task_start_reconcile":{"unsettled":totals.unsettled,"undrained":totals.undrained},"creation_clone":clone,"creation_worktree":worktree,"creation_launch":launch,"task_message":message,"deferred_send":send},
+                serde_json::json!({"unsettled":totals.unsettled+unsettled(&clone)+unsettled(&worktree)+unsettled(&launch)+unsettled(&message)+unsettled(&send)+unsettled(&answer),"undrained":undrained,
+                "kinds":{"task_start_reconcile":{"unsettled":totals.unsettled,"undrained":totals.undrained},"creation_clone":clone,"creation_worktree":worktree,"creation_launch":launch,"task_message":message,"deferred_send":send,"deferred_answer":answer},
                 "admissions_paused":true,"recovery_error":self.operation_recovery_error || self.creation_recovery_error})
             }
             Err(_) => {
@@ -695,10 +714,11 @@ impl Store {
             || retained(&launch)
             || retained(&message)
             || retained(&send)
+            || retained(&answer)
         {
             let task = status["resource_custody"].take();
             status["resource_custody"] = serde_json::json!({"state":"retained","creation_clone":clone.ok(),
-                "creation_worktree":worktree.ok(),"creation_launch":launch.ok(),"task_message":message.ok(),"deferred_send":send.ok(),
+                "creation_worktree":worktree.ok(),"creation_launch":launch.ok(),"task_message":message.ok(),"deferred_send":send.ok(),"deferred_answer":answer.ok(),
                 "task_start_reconcile":task,"remediation":super::revoke::OPERATION_REMEDIATION});
         }
         status
@@ -739,6 +759,10 @@ impl Store {
         if self.send_custody.tick(location, &mut self.db).is_err() {
             self.creation_recovery_error = true;
         }
+        #[cfg(any(target_os = "linux", target_os = "macos"))]
+        if self.answer_custody.tick(location, &mut self.db).is_err() {
+            self.creation_recovery_error = true;
+        }
         #[cfg(not(any(target_os = "linux", target_os = "macos")))]
         let _ = location;
     }
@@ -747,6 +771,12 @@ impl Store {
     #[cfg(any(target_os = "linux", target_os = "macos"))]
     pub(super) fn send_owned(&self) -> super::deferred_send::Owned {
         self.send_custody.owned()
+    }
+    /// The deferred answers a live runtime drains itself; Store recovery
+    /// skips them while their token lives.
+    #[cfg(any(target_os = "linux", target_os = "macos"))]
+    pub(super) fn answer_owned(&self) -> super::deferred_answer::Owned {
+        self.answer_custody.owned()
     }
     #[cfg(all(test, any(target_os = "linux", target_os = "macos")))]
     pub(super) fn retry_operation_custody(&mut self) {

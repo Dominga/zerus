@@ -382,6 +382,17 @@ impl Validated {
         };
         Ok(*intent)
     }
+    /// Only the deferred answer actor calls this, after BEGIN IMMEDIATE.
+    /// Cached native Service mode was bound to this exact original request
+    /// during admission.
+    #[cfg(any(target_os = "linux", target_os = "macos"))]
+    pub fn deferred_answer(self) -> Result<zerus_client_core::desktop::deferred_answer::Intent> {
+        self.check()?;
+        let Request::DeferredAnswer { intent } = self.0 else {
+            anyhow::bail!("not a deferred answer");
+        };
+        Ok(*intent)
+    }
     /// Only the task message actor calls this after BEGIN IMMEDIATE. Cached
     /// native Service mode was bound to this exact original request during
     /// admission.

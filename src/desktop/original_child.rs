@@ -255,6 +255,31 @@ pub(in crate::desktop) fn run(
     deadline: Instant,
     final_check: impl FnOnce(&mut Command) -> std::io::Result<()>,
 ) -> Ended {
+    start(program, args, spec, Some(custody), deadline, final_check)
+}
+
+/// Runs a child that holds no custody, by the same rules: a read without
+/// any effect of its own (the deferred answer's observation), which no
+/// drain waits for. It inherits no lock and names none in `spec`'s variable.
+#[cfg_attr(target_os = "macos", allow(dead_code))]
+pub(in crate::desktop) fn run_unheld(
+    program: &Path,
+    args: &[String],
+    spec: Spec<'_>,
+    deadline: Instant,
+    final_check: impl FnOnce(&mut Command) -> std::io::Result<()>,
+) -> Ended {
+    start(program, args, spec, None, deadline, final_check)
+}
+
+fn start(
+    program: &Path,
+    args: &[String],
+    spec: Spec<'_>,
+    custody: Option<&Arc<InheritedLock>>,
+    deadline: Instant,
+    final_check: impl FnOnce(&mut Command) -> std::io::Result<()>,
+) -> Ended {
     let Spec {
         custody_env,
         input,
@@ -281,12 +306,14 @@ pub(in crate::desktop) fn run(
             Stdio::null()
         })
         .stdout(Stdio::piped())
-        .stderr(Stdio::piped())
-        .env(custody_env, custody.as_raw_fd().to_string());
+        .stderr(Stdio::piped());
+    if let Some(custody) = custody {
+        command.env(custody_env, custody.as_raw_fd().to_string());
+    }
     let spawned = {
         let _turn = platform::spawn_turn();
         custody
-            .inherit(&mut command)
+            .map_or(Ok(()), |custody| custody.inherit(&mut command))
             .and_then(|()| final_check(&mut command))
             .and_then(|()| {
                 #[cfg(test)]

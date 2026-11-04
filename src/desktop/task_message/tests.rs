@@ -82,8 +82,8 @@ fn exact_previous_store_upgrade_adds_only_the_independent_message_leaf() {
         crate::desktop::store::SCHEMA
     );
     // Its own two tables, the task message input leaf's two, then the
-    // deferred send leaf's two.
-    assert_eq!(tables(&store.db), before + 2 + 2 + 2);
+    // deferred send and deferred answer leaves' two each.
+    assert_eq!(tables(&store.db), before + 2 + 2 + 2 + 2);
     assert_eq!(ledger::undrained(&store.db).unwrap(), 0);
 }
 
@@ -100,8 +100,9 @@ fn the_input_upgrade_adds_only_its_two_tables_with_no_charge() {
     let before = tables(&store.db);
     drop(store);
     let store = Store::open(&location, &uuid::Uuid::new_v4().to_string()).unwrap();
-    // Its own two tables, then the deferred send leaf's two.
-    assert_eq!(tables(&store.db), before + 2 + 2);
+    // Its own two tables, then the deferred send and deferred answer
+    // leaves' two each.
+    assert_eq!(tables(&store.db), before + 2 + 2 + 2);
     assert_eq!(inputs::totals(&store.db).unwrap(), (0, 0));
 }
 

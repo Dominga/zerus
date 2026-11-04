@@ -99,6 +99,9 @@ impl Fixture {
             send: crate::desktop::deferred_send::Runtime::new(&config, &epoch, owner.clone())
                 .unwrap(),
             #[cfg(any(target_os = "linux", target_os = "macos"))]
+            answer: crate::desktop::deferred_answer::Runtime::new(&config, &epoch, owner.clone())
+                .unwrap(),
+            #[cfg(any(target_os = "linux", target_os = "macos"))]
             task_start: crate::desktop::task_start_reconcile::Runtime::new(
                 &config,
                 &epoch,
@@ -337,7 +340,7 @@ fn deferred_answer_intent(
 }
 
 #[test]
-fn a_deferred_answer_is_refused_until_its_actor_lands() {
+fn a_deferred_answer_reaches_its_actor_which_refuses_without_a_lease() {
     let mut f = Fixture::new();
     let intent = deferred_answer_intent(
         f.location.configuration.clone(),
@@ -348,11 +351,35 @@ fn a_deferred_answer_is_refused_until_its_actor_lands() {
         intent: Box::new(intent.clone()),
     };
     let authority = crate::desktop::ui_authority::Validated::fixture(&serde_json::json!(request));
+    let answer = f.runtime.frontend_request(&mut f.store, authority);
+    // The actor's own typed refusal: no fleet source, so no lease; nothing
+    // is admitted and no row exists.
+    #[cfg(any(target_os = "linux", target_os = "macos"))]
+    {
+        let admission: zerus_client_core::desktop::deferred_answer::Admission =
+            serde_json::from_value(answer).unwrap();
+        assert_eq!(admission.request_id, intent.request_id);
+        assert!(!admission.accepted && !admission.durable && admission.receipt.is_none());
+        #[cfg(target_os = "linux")]
+        assert_eq!(admission.code, "deferred_answer_unavailable");
+        #[cfg(target_os = "macos")]
+        assert_eq!(admission.code, "deferred_answer_native_image_unavailable");
+    }
+    // Windows has no executor.
+    #[cfg(windows)]
     assert_eq!(
-        f.runtime.frontend_request(&mut f.store, authority),
+        answer,
         serde_json::json!({"request_id": intent.request_id, "accepted": false,
             "durable": false, "code": "deferred_answer_unsupported"})
     );
+    let rows: i64 = f
+        .store
+        .db
+        .query_row("SELECT count(*) FROM desktop_deferred_answers", [], |r| {
+            r.get(0)
+        })
+        .unwrap();
+    assert_eq!(rows, 0);
 }
 
 #[test]

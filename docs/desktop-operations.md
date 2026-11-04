@@ -296,11 +296,44 @@ The second kind, `deferred_answer` (`desktop::deferred_answer`, ABI
 - **Lookup.** A scoped read-only lookup by session, request ID and plan
   fingerprint.
 
-No actor executes it yet: the native frontend lane carries the request on
-its own ordered lane, and the service refuses it
-(`deferred_answer_unsupported`) until the actor lands; an unauthenticated
-hello naming it gets `frontend_authentication_required`, like its siblings.
-Its help marker is not advertised before then.
+The service actor executes it on Linux, as it executes a deferred send:
+the same native lane, admission after BEGIN IMMEDIATE under the current
+lease and scope, live consent for that admission alone (restart, import or
+reconnect retires a queued original as `deferred_answer_interrupted`), the
+original receipt store opened before any child (here the `question_receipts`
+folder), the reservation, the selected session's own record checked from
+that root, and the consent veto last in the actual spawn turn. Between the
+session check and the original child, the worker observes the native
+current question without any effect: `hgs answer <session> --observe
+--json` runs from this service's pinned image in its own process group,
+with its frozen stdin, no custody and its own 10-second deadline inside the
+answer's 30 seconds. The held state root and the selected session must be
+unchanged after its reply too. Only a reply that finds the question with
+exactly the pinned consent identity of a v1 source starts the original
+child; no reply, a failed or late one, a malformed or larger one, another
+identity or another source starts nothing, and the answer fails as never
+started. The original `hgs answer <session> --json` then runs once through
+the shared original-child runner with the exact stdin and the effect's
+close-only custody lock. After the physical drain, the drain worker reads
+the CLI's own `question_receipts/<request_id>.json` from the held objects,
+by the deferred send's rules, within the same never-renewed 5-second
+deadline. It settles Recorded from the exact `answered` or `submitted`
+record, Failed from the exact `rejected` record (`deferred_answer_rejected`)
+or at the no-spawn boundary when no record exists
+(`deferred_answer_not_started`), and Unknown otherwise; an original of an
+earlier run is Unknown however exact its record. macOS refuses every
+original before any row (`deferred_answer_native_image_unavailable`),
+Windows refuses it too (`deferred_answer_unsupported`), and only Linux
+advertises the help marker. An unauthenticated hello naming it gets
+`frontend_authentication_required`, like its siblings.
+
+The observation fails closed by design. A Kimi panel that the person's
+inspection fitted but that is clipped again when the observation reads it
+gives no card, or one without a transport, so the answer does not start.
+Kimi's cache hint includes its idle time in the question's hash, so a
+redraw between the click and the observation changes the identity and
+refuses. Claude's resume prompt keeps `can_answer` outside the hash, but
+that is not a consent field and does not matter.
 A draft holds one such identity until it is resolved. A definite outcome
 resolves it, as does a cancellation before its call was dispatched or, for a
 start or compaction, the session seen ready for the send. An uncertain outcome

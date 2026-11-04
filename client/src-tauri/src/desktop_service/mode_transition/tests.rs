@@ -16,8 +16,7 @@ impl Fixture {
         let dir = root.join("lib/zerus");
         fs::create_dir_all(&dir).unwrap();
         let cli = root.join("bin/hgs");
-        fs::write(&cli, b"#!/bin/sh\nexit 1\n").unwrap();
-        fs::set_permissions(&cli, fs::Permissions::from_mode(0o700)).unwrap();
+        crate::write_executable(&cli, b"#!/bin/sh\nexit 1\n");
         fs::write(dir.join("install-linux-desktop-service.py"), SCRIPT).unwrap();
         for name in ["desktop-revoke-hold.py", "desktop-service-activation.py"] {
             fs::write(dir.join(name), b"# private transport fixture\n").unwrap();

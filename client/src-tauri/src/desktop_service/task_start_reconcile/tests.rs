@@ -46,18 +46,14 @@ fn private_case(case: &'static str) -> bool {
 }
 fn fixture(config: Value) -> Fixture {
     let f = Fixture::new(config);
-    fs::remove_file(f.0.join("hgs")).unwrap();
-    fs::write(
-        f.0.join("hgs"),
+    crate::write_executable(
+        &f.0.join("hgs"),
         format!(
             "#!/usr/bin/env python3\n{}\n{}",
             include_str!("fixture.py"),
             include_str!("../fake_hgs.py")
         ),
-    )
-    .unwrap();
-    use std::os::unix::fs::PermissionsExt;
-    fs::set_permissions(f.0.join("hgs"), fs::Permissions::from_mode(0o700)).unwrap();
+    );
     f
 }
 async fn connected(f: &Fixture) -> (Arc<Service>, CacheServer) {

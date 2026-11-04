@@ -414,3 +414,45 @@ fn malformed_source_or_causal_keys_never_look_like_missing_fields() {
         "duplicate journal witnesses must not be adopted"
     );
 }
+
+#[test]
+fn qts_local_completion_list_is_read_without_importing_its_values() {
+    use crate::settings::{QtSnapshot, qt::QtValue};
+    let mut local = fixture().0["organization"].clone();
+    local["imported_machines"] = json!(["fixture", "fixture-peer", "fixture"]);
+    let mut snapshot = QtSnapshot {
+        values: Default::default(),
+        source: "fixture",
+        sha256: "a".repeat(64),
+        modified_at: None,
+    };
+    snapshot.values.insert(
+        super::super::qt_import::KEY.into(),
+        QtValue::Bytes(local.to_string().into_bytes()),
+    );
+    assert_eq!(
+        qt_imported_machines(Some(&snapshot)).unwrap(),
+        BTreeSet::from(["fixture".into(), "fixture-peer".into()])
+    );
+    assert!(qt_imported_machines(None).unwrap().is_empty());
+    for markers in [
+        Value::Null,
+        json!({}),
+        json!(["fixture", 7]),
+        json!(["fixture\npeer"]),
+    ] {
+        local["imported_machines"] = markers;
+        snapshot.values.insert(
+            super::super::qt_import::KEY.into(),
+            QtValue::Text(local.to_string()),
+        );
+        assert_eq!(qt_imported_machines(Some(&snapshot)), Err(Code::Invalid));
+    }
+    local["imported_machines"] =
+        json!((0..257).map(|n| format!("fixture-{n}")).collect::<Vec<_>>());
+    snapshot.values.insert(
+        super::super::qt_import::KEY.into(),
+        QtValue::Text(local.to_string()),
+    );
+    assert_eq!(qt_imported_machines(Some(&snapshot)), Err(Code::Capacity));
+}

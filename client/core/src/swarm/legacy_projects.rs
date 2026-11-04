@@ -15,6 +15,40 @@ pub const MAX_BYTES: usize = 2 * 1024 * 1024;
 pub const MAX_ROWS: usize = 4096;
 pub const MAX_HEADS: usize = 32;
 
+/// Qt kept its per-computer completion list locally, outside the shared
+/// catalog. Read the retained source before considering another CLI list.
+/// Malformed markers never mean that every computer needs importing again.
+pub fn qt_imported_machines(
+    snapshot: Option<&crate::settings::QtSnapshot>,
+) -> Result<BTreeSet<String>, Code> {
+    use crate::settings::qt::QtValue;
+    let Some(value) = snapshot.and_then(|s| s.values.get(super::qt_import::KEY)) else {
+        return Ok(BTreeSet::new());
+    };
+    let encoded = match value {
+        QtValue::Bytes(bytes) => bytes.as_slice(),
+        QtValue::Text(text) => text.as_bytes(),
+        _ => return Err(Code::Invalid),
+    };
+    let local = super::qt_import::decode(encoded).map_err(|_| Code::Invalid)?;
+    let Some(value) = local.get("imported_machines") else {
+        return Ok(BTreeSet::new());
+    };
+    let machines = value.as_array().ok_or(Code::Invalid)?;
+    if machines.len() > 256 {
+        return Err(Code::Capacity);
+    }
+    machines
+        .iter()
+        .map(|v| {
+            v.as_str()
+                .filter(|s| label(s, 512))
+                .map(str::to_owned)
+                .ok_or(Code::Invalid)
+        })
+        .collect()
+}
+
 /// Fixed report codes, never a source value or process error.
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]

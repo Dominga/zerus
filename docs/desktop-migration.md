@@ -617,6 +617,26 @@ fresh identity/hash recheck before publication. Every snapshot/manifest keeps
 approval reservation and never delivers a request. Source discovery and G1's
 policy/UI integration remain separate.
 
+## Legacy per-computer project lists
+
+The production switch also checks the retained Qt `imported_machines` markers.
+A verified online computer already marked there is recorded as complete without
+reading its legacy list again. Other online computers use the existing bounded
+`project ls --json` read on the Organization worker; there is no new poller.
+Only missing POSIX links are added. Existing locations in any project preserve
+renames and moves; Next fields, defaults, order, assignments and tombstones win.
+Windows lists refuse with `legacy_projects_windows_unsupported` rather than send
+Windows paths to the POSIX shared writer.
+
+The separate private `legacy_project_lists_v1` family is bounded and records one
+reservation per physical computer before dispatch. Its original catalog/route
+binding and digest witnesses contain no project names or paths. A lost or unknown
+apply remains observation-only across restart, never an ordinary retrying draft.
+Completion needs a fresh checked catalog and matching live source after the
+original child and its pipes have drained. The Migration report shows key names
+and fixed reasons only. Ambiguous retained history and the 2 MiB whole-input cap
+are explicit blocked outcomes requiring review; neither silently drops data.
+
 ## Retained Qt shared organization
 
 On the production switch only, the existing local organization topic queues a

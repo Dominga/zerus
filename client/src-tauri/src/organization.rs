@@ -33,6 +33,7 @@
 
 pub mod clones;
 pub mod folders;
+mod legacy_projects;
 pub mod overview;
 pub mod swarm_dialog;
 
@@ -139,6 +140,9 @@ struct Hub {
     recovery_due: Option<String>,
     presentation_due: bool,
     catalog: Option<swarm_dialog::Context>,
+    legacy: Option<legacy_projects::Context>,
+    legacy_report: Option<legacy_projects::Report>,
+    legacy_epochs: HashMap<String, u64>,
     source_generation: u64,
     /// Only an adopted current source observation can qualify local metadata.
     /// Kept out of Controller: it is never shared state or apply input.
@@ -535,6 +539,7 @@ impl Organization {
 
     /// This computer's organization changes, from the drain thread.
     pub fn observe(&self, change: &Change) {
+        self.legacy_observe(change);
         // This callback precedes Pump::push. Drop the proof before a new hello
         // or a disconnect can leave the previous card cached in the pump.
         let identity_changed = match change {
@@ -1048,6 +1053,9 @@ impl Organization {
             return;
         }
         if self.catalog_pass() {
+            return;
+        }
+        if self.legacy_projects_pass() {
             return;
         }
         if let Err(detail) = self.recover_windows_folders() {
@@ -1766,6 +1774,7 @@ pub fn set_project_collapsed(state: State<'_, Organization>, project: String, co
 
 #[cfg(all(test, unix))]
 mod tests {
+    mod legacy_projects;
     mod swarm_conflicts;
     mod swarm_dialog_cases;
     mod windows_folders;

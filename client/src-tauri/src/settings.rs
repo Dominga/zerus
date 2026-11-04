@@ -134,6 +134,16 @@ pub async fn settings_qt_preferences(store: State<'_, Store>) -> Result<Value, S
     Ok(store.0.preference_report())
 }
 
+/// Read-only, key-only migration summary. Journal decoding stays off main.
+#[tauri::command]
+pub async fn settings_legacy_projects(app: AppHandle) -> Result<Value, String> {
+    use tauri::Manager;
+    let organization = app.state::<crate::organization::Organization>().inner().clone();
+    tauri::async_runtime::spawn_blocking(move || organization.legacy_project_report())
+        .await
+        .map_err(|_| "Could not read the legacy project import report.".to_owned())
+}
+
 /// Stores one setting and answers with the value now in effect (clamped as
 /// Qt clamps it; `null` for a removed override) and the store's revision after
 /// the change.

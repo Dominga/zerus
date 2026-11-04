@@ -94,6 +94,28 @@ class TaskListPages(Fixture):
             refused = self.hgs("list", "--project", "orchard", *args, ok=False)
             self.assertIn(message, refused, args)
 
+    def test_a_cached_row_of_another_shape_is_never_served(self):
+        import sqlite3
+        import time
+        for n in range(3):
+            self.add(f"Task {n}")
+        project = self.page("todo", 1)["project"]["id"]
+        folder = self.state / "replica" / hashlib.sha256(project.encode()).hexdigest()
+        # Settled files, so the page serves its cached rows without reading them again.
+        hour_ago = time.time() - 3600
+        for path in (folder / "tasks").iterdir():
+            os.utime(path, (hour_ago, hour_ago))
+        good = self.page("todo", 10)
+        good = self.page("todo", 10)
+        for raw in ["true", '"text"', "[1, 2]", "{}", "not json"]:
+            db = sqlite3.connect(folder / "task-index-v1.sqlite3")
+            db.execute("UPDATE tasks SET row=? WHERE uuid=?", (raw, good["tasks"][0]["uuid"]))
+            db.commit()
+            db.close()
+            served = self.page("todo", 10)
+            self.assertEqual(served["tasks"], good["tasks"], raw)
+            self.assertEqual(self.page("todo", 1)["tasks"], good["tasks"][:1], raw)
+
     def test_a_damaged_index_is_rebuilt_and_never_fails_a_read(self):
         for n in range(3):
             self.add(f"Task {n}")

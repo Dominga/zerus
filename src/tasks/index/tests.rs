@@ -576,6 +576,39 @@ fn permanently_unsettled_rows_cannot_starve_an_expired_row() {
     assert!(seen, "the moved task never reached To do");
 }
 
+/// review-n on #1350 R3: a cached row that is not the object the index
+/// wrote for that task is a damaged index, never served or labelled.
+#[test]
+fn a_cached_row_of_another_shape_is_damage() {
+    let temp = tempfile::tempdir().unwrap();
+    let store = project(temp.path());
+    // Settled files: the page serves its cached rows without reading them again.
+    for uuid in store.uuids().unwrap() {
+        age(&store, &uuid);
+    }
+    let good = Index::open(&store).unwrap().page(Stage::Todo, 200, &Anchor::Start).unwrap().rows;
+    let first = good[0]["uuid"].as_str().unwrap().to_owned();
+    let other = good[1]["uuid"].as_str().unwrap().to_owned();
+    for raw in [
+        "true".to_owned(),
+        "\"text\"".to_owned(),
+        "[1, 2]".to_owned(),
+        "{}".to_owned(),
+        "not json".to_owned(),
+        json!({"uuid": other, "stage": "todo", "id": "T-aaaa00"}).to_string(),
+        json!({"uuid": first, "stage": "backlog", "id": "T-aaaa00"}).to_string(),
+    ] {
+        let mut index = Index::open(&store).unwrap();
+        index.db.execute("UPDATE tasks SET row=?1 WHERE uuid=?2", params![raw, first]).unwrap();
+        assert!(matches!(index.page(Stage::Todo, 200, &Anchor::Start), Err(Failure::Damaged)), "{raw}");
+        let polled = super::super::indexed_page(&mut index, Stage::Todo, 200, &Anchor::Start, None);
+        assert!(matches!(polled, Err(Failure::Damaged)), "{raw}");
+        index.discard(&Failure::Damaged);
+        // Built again from the documents.
+        assert_eq!(Index::open(&store).unwrap().page(Stage::Todo, 200, &Anchor::Start).unwrap().rows, good, "{raw}");
+    }
+}
+
 #[test]
 fn a_damaged_foreign_or_shared_index_is_built_again() {
     let temp = tempfile::tempdir().unwrap();

@@ -158,6 +158,21 @@ pub(super) fn capped(mut row: Value) -> Value {
     row
 }
 
+/// A cached row, only if it is the object the index wrote for this task in
+/// this stage: anything else is a damaged index, never served.
+fn cached_row(raw: &str, uuid: &str, stage: Stage) -> Outcome<Value> {
+    let row: Value = serde_json::from_str(raw).map_err(|_| Failure::Damaged)?;
+    let fits = row.is_object()
+        && row["uuid"].as_str() == Some(uuid)
+        && row["stage"].as_str() == Some(stage.as_str())
+        && row["id"].is_string();
+    if fits {
+        Ok(row)
+    } else {
+        Err(Failure::Damaged)
+    }
+}
+
 /// What the index keeps of one task.
 enum Derived {
     Row {
@@ -685,7 +700,7 @@ impl<'a> Index<'a> {
         }
         let rows = rows
             .into_iter()
-            .map(|(_, _, _, row, _, _)| serde_json::from_str(&row).map_err(|_| Failure::Damaged))
+            .map(|(uuid, _, _, row, _, _)| cached_row(&row, &uuid, stage))
             .collect::<Outcome<Vec<Value>>>()?;
         Ok(Page { rows, position, next, previous })
     }

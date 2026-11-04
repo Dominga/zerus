@@ -319,6 +319,9 @@ fn row(mut task_view: zerus_replica::TaskView, history_revision: String) -> Resu
 }
 
 fn label_view(mut value: Value, project_name: &str, with_log: bool, files: &[Value], machines: &Machines) -> Result<Value> {
+    if !value.is_object() {
+        return Err(fail("a task view is not an object"));
+    }
     value["ref"] = json!(format!("{project_name}/{}", value["id"].as_str().unwrap_or_default()));
     // Every session reference names its computer: the task's target, session and
     // author, and each history entry's session and actor.

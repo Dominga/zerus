@@ -108,7 +108,7 @@ impl Fixture {
                 return progress;
             }
             assert!(
-                progress.stopped || Instant::now() >= budget.deadline,
+                Instant::now() >= budget.deadline,
                 "completed fixture slice consumed {consumed} records, expected {expected}"
             );
         }
@@ -116,8 +116,10 @@ impl Fixture {
     }
     /// Exactly `expected` records over bounded slices, each asking for no
     /// more than the remainder, so the preparation never crosses its
-    /// checkpoint. A slice that yields early must have met its deadline or
-    /// stop flag, the legal reasons under parallel load (zerus-0dmh).
+    /// checkpoint. A slice that yields early must have met its deadline, the
+    /// only legal reason here: no test sets the cancel flag, and a stop for a
+    /// records, bytes or files budget, or a deferred source, is not one
+    /// (zerus-0dmh, #1357 review).
     fn consume_exactly(&self, store: &mut Store, expected: usize) -> Progress {
         let mut consumed = 0;
         for _ in 0..32 {
@@ -137,7 +139,7 @@ impl Fixture {
                 return progress;
             }
             assert!(
-                progress.stopped || Instant::now() >= budget.deadline,
+                Instant::now() >= budget.deadline,
                 "completed fixture slice consumed {consumed} records, expected {expected}"
             );
         }

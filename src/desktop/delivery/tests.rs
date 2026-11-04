@@ -1035,6 +1035,25 @@ fn an_approval_at_the_end_of_a_large_catalog_is_found_on_the_first_scan() {
 }
 
 #[test]
+fn a_source_older_than_fresh_is_not_scanned_until_it_is_observed_again() {
+    // zerus-e04p, #1357 review: a source last observed more than FRESH ago,
+    // without a heartbeat, takes no part in discovery.
+    let (run, seen) = inspections();
+    let mut f = Fixture::new(run);
+    f.active();
+    f.enabled(true);
+    f.source_rows(idle_then_approval(1));
+    f.runtime.sources.age_fixture(Duration::from_secs(16));
+    f.scan();
+    f.tick_until(|r| r.jobs.is_empty());
+    assert!(seen.lock().unwrap().is_empty());
+    f.runtime.sources.heartbeat_fixture(&f.store);
+    f.scan();
+    f.tick_until(|r| r.jobs.is_empty());
+    assert!(seen.lock().unwrap().iter().any(|a| a == "claude/example/a"));
+}
+
+#[test]
 fn rows_stored_before_the_index_are_found_once_the_scan_backfills_them() {
     let (run, seen) = inspections();
     let mut f = Fixture::new(run.clone());

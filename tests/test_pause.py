@@ -1083,6 +1083,66 @@ class SessionIdentity(Harness):
         self.assertEqual(self.binding(legacy["name"])["session_id"], gained)
 
 
+    # zerus-ucck P1b: --session-id selects the session a command names first,
+    # and a hook prefers the record that carries its HGS_SESSION_ID without
+    # depending on it: an older hgs can change a session's ID once.
+    def test_a_session_id_selects_the_session_and_hooks_check_it(self):
+        name = self.start()
+        record = self.binding(name)
+        session = record["session_id"]
+        def call(*args):
+            return subprocess.run([str(HGS), *args], env=self.env, capture_output=True, text=True, timeout=20)
+        by_name = json.loads(self.hgs("inspect", name))
+        by_id = json.loads(self.hgs("inspect", "--session-id", session))
+        self.assertEqual((by_id["session_id"], by_id["conversation_id"]), (session, by_name["conversation_id"]))
+        self.assertEqual(json.loads(self.hgs("inspect", name, "--session-id", session))["session_id"], session)
+        other = call("inspect", "claude/p/other", "--session-id", session)
+        self.assertEqual(other.returncode, 1)
+        self.assertIn(f"Session ID {session} is {name}, not claude/p/other", other.stderr)
+        unknown = call("inspect", "--session-id", str(uuid.uuid4()))
+        self.assertEqual(unknown.returncode, 1)
+        self.assertIn("No live or saved session has ID", unknown.stderr)
+        for invalid in ([], [""], ["not-a-uuid"], [session.upper()], [session, "--session-id", session]):
+            self.assertEqual(call("inspect", "--session-id", *invalid).returncode, 2, invalid)
+        # Hooks: HGS_SESSION_ID is a hint. The run still decides when no record
+        # carries it, and among records sharing the run the agent's own wins.
+        def hook(prompt, session_id, hook_name=name):
+            event = dict(session_id=record["conversation_id"], hook_event_name="UserPromptSubmit", prompt=prompt)
+            self.hook(event, dict(self.env, HGS_SESSION=hook_name, HGS_RUN_ID=record["run_id"], HGS_SESSION_ID=session_id))
+        prompts = lambda: [e["detail"] for e in json.loads(self.hgs("inspect", name))["events"] if e["type"] == "UserPromptSubmit"]
+        path = lambda who: self.root / "state" / (hashlib.sha256(who.encode()).hexdigest() + ".json")
+        hook("an ID this record no longer carries", str(uuid.uuid4()))
+        self.assertEqual(self.binding(name)["session_id"], session)
+        copy = dict(json.loads(path(name).read_text()), name="claude/p/copy", session_id=str(uuid.uuid4()))
+        path("claude/p/copy").write_text(json.dumps(copy) + "\n")
+        hook("from the name of a copy sharing the run", session, "claude/p/copy")
+        hook("from a name no record has", session, "claude/p/gone")
+        path("claude/p/copy").unlink()
+        stripped = json.loads(path(name).read_text()); stripped.pop("session_id"); path(name).write_text(json.dumps(stripped) + "\n")
+        hook("after an older hgs dropped the ID", session)
+        self.assertEqual(prompts(), ["an ID this record no longer carries", "from the name of a copy sharing the run",
+                                     "from a name no record has", "after an older hgs dropped the ID"])
+        reminted = self.binding(name)["session_id"]
+        self.assertNotEqual(reminted, session)
+        self.assertEqual(str(uuid.UUID(reminted)), reminted)
+        session = reminted
+        # Lifecycle by ID: pause, resume and rename.
+        self.send_event(name, "Stop", last_assistant_message="done")
+        self.hgs("pause", "--session-id", session)
+        self.assertTrue(self.binding(name)["paused"])
+        previous_run = self.binding(name)["run_id"]
+        self.hgs("resume", "--session-id", session, "-d")
+        self.wait(lambda: self.binding(name).get("run_id") != previous_run and self.binding(name).get("activity") == "idle")
+        # A name before the flag must match; arguments after it are the command's own.
+        self.hgs("rename", "--session-id", session, "claude/p/renamed")
+        self.assertEqual(self.binding("claude/p/renamed")["session_id"], session)
+        self.hgs("rename", "claude/p/renamed", "--session-id", session, "claude/p/again")
+        self.assertEqual(self.binding("claude/p/again")["session_id"], session)
+        stale = call("rename", "claude/p/renamed", "--session-id", session, "claude/p/third")
+        self.assertEqual(stale.returncode, 1)
+        self.assertIn(f"Session ID {session} is claude/p/again, not claude/p/renamed", stale.stderr)
+
+
 class Lifecycle(Harness):
     def test_directory_browser(self):
         folder = self.root / "browse ' test"

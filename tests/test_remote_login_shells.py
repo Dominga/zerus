@@ -139,6 +139,28 @@ class RemoteLoginShells(unittest.TestCase):
                 options=json.loads((self.root/'ssh-args.json').read_text())
                 self.assertIn('BatchMode=yes',options);self.assertNotIn('-t',options)
 
+    def test_a_session_id_reaches_only_a_peer_that_advertises_the_selector(self):
+        # zerus-ucck P1: an older peer would read --session-id as a session name,
+        # so it never sees the flag; a current peer receives it unchanged.
+        identity = '22222222-2222-4222-8222-222222222222'
+        for name, shell in login_shells().items():
+            with self.subTest(shell=name):
+                executable = self.peer / '.local/bin/hgs'
+                executable.write_text(PEER_HGS)
+                old = self.hgs(shell, '@peer', 'inspect', '--session-id', identity)
+                self.assertNotEqual(old.returncode, 0)
+                self.assertIn('update the selected computer to select sessions by ID', old.stderr)
+                self.assertFalse((self.peer / 'argv.json').exists())
+                for invalid in (['--session-id'], ['--session-id', 'NOT-A-UUID'],
+                                ['--session-id', identity, '--session-id', identity]):
+                    refused = self.hgs(shell, '@peer', 'inspect', *invalid)
+                    self.assertEqual(refused.returncode, 2, refused.stderr)
+                    self.assertFalse((self.peer / 'argv.json').exists())
+                executable.write_text(PEER_HGS.replace("'hooks-health-v1'", "'hooks-health-v1' '  session-id-selector-v1'"))
+                result = self.hgs(shell, '@peer', 'inspect', '--session-id', identity)
+                self.assertEqual(result.returncode, 0, result.stderr)
+                self.assertEqual(self.received()[0], ['inspect', '--session-id', identity])
+
     def test_peer_status_reads_the_status_command(self):
         for name, shell in login_shells().items():
             with self.subTest(shell=name):

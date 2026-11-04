@@ -122,6 +122,8 @@ pub(crate) const USAGE: &str = r#"usage: hgs [@host] <cmd> [project] [-c [ID]] [
        hgs session-action-status <session> --json read an original exact lifecycle receipt
        hgs @host --expect-machine ID session-action-status <session> --json
        lifecycle-receipt-status-v1
+       hgs [@host] <command> --session-id ID ...   select a live or saved session by its durable ID instead of its name
+       session-id-selector-v1
        hgs [@host] compact-context <session> --json compact the idle agent context using its native command
        hgs [@host] clear-context <session> --json   clear the idle agent context using its native command
        hgs [@host] interrupt <session> --json   interrupt the current turn, keep the session
@@ -624,6 +626,18 @@ fn dispatch_normal(mut args: Vec<String>) -> Result<i32> {
         return Ok(1);
     };
     let args = &args[index + 1..];
+    // zerus-ucck P1: `--session-id ID` selects the session the command names
+    // first. A peer receives it unchanged, only after advertising it.
+    let selected;
+    let args = if session_id_flag(command, args)?.is_some()
+        && (target.is_empty() || config.is_self(&target))
+    {
+        local_sessions()?;
+        selected = select_session(command, args)?;
+        &selected[..]
+    } else {
+        args
+    };
     match command.as_str() {
         "--expect-machine" => {
             if dry { return Err(Error::new(2,"Guarded calls do not support --dry-run")); }
@@ -1067,6 +1081,70 @@ fn peer_json_archives(config: &Config, peer: &str, archives: bool) -> Value {
     value.insert("sessions".into(), json!([]));
     Value::Object(value)
 }
+/// Commands whose first argument is a session, which `--session-id` may
+/// select instead (zerus-ucck P1).
+const SESSION_COMMANDS: &[&str] = &[
+    "inspect", "reference", "processes", "send", "history", "history-projection", "terminal",
+    "session-action", "compact-context", "clear-context", "interrupt", "attachment", "file-read",
+    "answer", "read", "notifications", "fork", "effort", "settings", "schedules", "voice", "hooks",
+    "a", "kill", "rename", "archive", "pause", "resume", "native-ui",
+];
+
+/// The position and value of `--session-id` for a session command, refused
+/// when repeated, empty or not a session ID. Other commands keep their own
+/// meaning (`hgs task --session-id`, an agent's own flag after `--`).
+fn session_id_flag(command: &str, args: &[String]) -> Result<Option<(usize, String)>> {
+    if !SESSION_COMMANDS.contains(&command) {
+        return Ok(None);
+    }
+    let options = args.iter().position(|arg| arg == "--").unwrap_or(args.len());
+    let mut flags = args[..options].iter().enumerate().filter(|(_, arg)| *arg == "--session-id");
+    let Some((at, _)) = flags.next() else {
+        return Ok(None);
+    };
+    if flags.next().is_some() {
+        return Err(Error::new(2, "--session-id may be given once"));
+    }
+    let id = args.get(at + 1).map(String::as_str).unwrap_or("");
+    if !state::session_id::canonical(id) {
+        return Err(Error::new(2, "--session-id needs a session ID (a lowercase UUID from hgs ls --json)"));
+    }
+    Ok(Some((at, id.to_owned())))
+}
+
+/// The arguments with `--session-id ID` replaced by the selected session's
+/// current name. A name given before the flag must be that name; arguments
+/// after it are the command's own (a message, a new name, a path).
+fn select_session(command: &str, args: &[String]) -> Result<Vec<String>> {
+    let Some((at, id)) = session_id_flag(command, args)? else {
+        return Ok(args.to_vec());
+    };
+    let names = state::session_id::names_of(&id).map_err(|e| Error::new(1, e))?;
+    let name = match names.as_slice() {
+        [] => return Err(Error::new(1, format!("No live or saved session has ID {id}"))),
+        [name] => name.clone(),
+        _ => {
+            return Err(Error::new(
+                state::session_id::AMBIGUOUS,
+                format!("Several sessions carry ID {id}: {}", names.join(", ")),
+            ))
+        }
+    };
+    let mut rest = args.to_vec();
+    rest.drain(at..at + 2);
+    match args[..at].iter().find(|arg| !arg.starts_with('-')) {
+        Some(given) if *given != name => Err(Error::new(
+            1,
+            format!("Session ID {id} is {name}, not {given}"),
+        )),
+        Some(_) => Ok(rest),
+        None => {
+            rest.insert(0, name);
+            Ok(rest)
+        }
+    }
+}
+
 fn remote(
     config: &Config,
     target: &str,
@@ -1187,7 +1265,11 @@ fn remote(
         }
     };
     flags.extend(crate::machines::ssh_options(config, target));
-    let remote = if command == "--expect-machine" && args.get(1).is_some_and(|actual| actual=="session-action-status") {
+    let remote = if session_id_flag(command, &args)?.is_some() {
+        // An older peer would read the flag as a session name; it must
+        // advertise the selector first (zerus-ucck P1).
+        platform::remote_sh(&format!("if ~/.local/bin/hgs --help 2>/dev/null | grep -qEx '[[:space:]]*session-id-selector-v1[[:space:]]*'; then exec ~/.local/bin/hgs {}; else echo 'hgs: update the selected computer to select sessions by ID' >&2; exit 1; fi",platform::join(&remote_args)))
+    } else if command == "--expect-machine" && args.get(1).is_some_and(|actual| actual=="session-action-status") {
         // Probe the same executable, without reading the JSON stream. An old
         // peer must never interpret this reader's name as a program to launch.
         platform::remote_sh(&format!("if ~/.local/bin/hgs --help 2>/dev/null | grep -qF 'guarded-create-v1' && ~/.local/bin/hgs --help 2>/dev/null | grep -qEx '[[:space:]]*lifecycle-receipt-status-v1[[:space:]]*'; then exec ~/.local/bin/hgs {}; else echo 'hgs: update the selected computer to read lifecycle receipts' >&2; exit 1; fi",platform::join(&remote_args)))

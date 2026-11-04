@@ -126,6 +126,11 @@ impl TaskDoc {
         actor: &Actor,
         now: i64,
     ) -> Result<()> {
+        // The fact names the exact record this replica holds under `attempt`.
+        let of = self
+            .attempt(attempt)?
+            .ok_or_else(|| Error::new(format!("no attempt {attempt} in this task")))?
+            .fingerprint();
         let event = AttemptEvent {
             id: uuid::Uuid::new_v4().to_string(),
             attempt: attempt.to_owned(),
@@ -133,6 +138,7 @@ impl TaskDoc {
             actor: actor.clone(),
             at: now,
             settles: Vec::new(),
+            of,
         };
         check_event(&event)?;
         let list = self.doc.get_list("attempt_events");
@@ -1505,6 +1511,57 @@ mod tests {
         // An explicit start is a new attempt.
         task.record_start(&agent("api"), 13).unwrap();
         assert_eq!(current(&task).origin, Origin::Start);
+    }
+
+    #[test]
+    fn a_receipt_never_settles_another_original_reserved_under_its_id() {
+        // review-n on #1391: two replicas reserve one UUID with different
+        // contents. Whichever record the merge keeps, the other's receipt
+        // never proves it: the attempt is a visible conflict, held until the
+        // person cancels it.
+        let bytes = task().snapshot().unwrap();
+        for (left_peer, right_peer) in [(10, 20), (20, 10)] {
+            for settled_left in [true, false] {
+                let mut left = TaskDoc::from_bytes(&bytes).unwrap();
+                let mut right = TaskDoc::from_bytes(&bytes).unwrap();
+                left.doc.set_peer_id(left_peer).unwrap();
+                right.doc.set_peer_id(right_peer).unwrap();
+                send(&mut left, ONE, "api");
+                send(&mut right, ONE, "web");
+                if settled_left {
+                    settle(&mut left, ONE);
+                } else {
+                    settle(&mut right, ONE);
+                }
+                let mut merged = TaskDoc::from_bytes(&left.snapshot().unwrap()).unwrap();
+                merged.import(&right.snapshot().unwrap()).unwrap();
+                let execution = merged.view().unwrap().execution.unwrap();
+                let now = execution.current.as_ref().unwrap();
+                assert!(execution.conflict, "{left_peer} {settled_left}");
+                assert_eq!(now.phase, Phase::Unknown, "{left_peer} {settled_left}");
+                assert_eq!(execution.unknown, [ONE]);
+                assert!(merged.sendable().is_err());
+                // Its executor's report is a conflict, and no receipt resolves it.
+                let executor = now.executor.clone().unwrap();
+                assert_eq!(
+                    merged
+                        .report("Done", ReportKind::Ready, None, &Actor::Agent(executor), 30)
+                        .unwrap()
+                        .stale,
+                    Some(Stale::Conflict)
+                );
+                let own = receipt(&merged, ONE);
+                let _ = merged.settle_attempt(ONE, Settlement::Receipt(&own), &Actor::Person, 31);
+                assert_eq!(current(&merged).phase, Phase::Unknown);
+                // The person's disposition of that exact attempt releases the task.
+                merged
+                    .cancel_attempt(ONE, "Two originals", &Actor::Person, 32)
+                    .unwrap();
+                let execution = merged.view().unwrap().execution.unwrap();
+                assert!(!execution.conflict && execution.unknown.is_empty());
+                assert_eq!(execution.current.unwrap().phase, Phase::Cancelled);
+            }
+        }
     }
 
     #[test]

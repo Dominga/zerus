@@ -67,6 +67,28 @@ pub struct Attempt {
     pub delivery: Option<Delivery>,
 }
 
+impl Attempt {
+    /// SHA-256 (lowercase hex) of the attempt's immutable original contents.
+    /// Two records written under one ID by concurrent replicas differ here,
+    /// so a receipt or other fact about one never settles the other.
+    pub fn fingerprint(&self) -> String {
+        use sha2::{Digest, Sha256};
+        let original = (
+            &self.id,
+            self.generation,
+            self.origin,
+            &self.executor,
+            &self.request_id,
+            self.requirement,
+            &self.actor,
+            self.at,
+            &self.delivery,
+        );
+        let bytes = serde_json::to_vec(&original).expect("an attempt serializes");
+        format!("{:x}", Sha256::digest(bytes))
+    }
+}
+
 /// The exact native request an input-backed attempt reserved, frozen in the
 /// task before any input: what its receipt must show, and the task as the
 /// reservation saw it. Only that original receipt proves the delivery; a run
@@ -188,6 +210,11 @@ pub struct AttemptEvent {
     /// it never cancels a pause it did not see, even one merged later.
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub settles: Vec<String>,
+    /// The fingerprint of the exact attempt record this fact is about
+    /// (`Attempt::fingerprint`). A fact about another record under the same
+    /// ID never counts for this one.
+    #[serde(default, skip_serializing_if = "String::is_empty")]
+    pub of: String,
 }
 
 /// Where the current attempt stands.
@@ -349,6 +376,7 @@ pub(crate) fn check_event(event: &AttemptEvent) -> Result<()> {
         || (event.kind != EventKind::Resumed && !event.settles.is_empty())
         || event.settles.len() > MAX_ATTEMPT_EVENTS
         || !event.settles.iter().all(|id| canonical_uuid(id))
+        || (!event.of.is_empty() && !hex_digest(&event.of))
     {
         return Err(Error::failed("invalid task attempt event"));
     }
@@ -450,12 +478,26 @@ pub(crate) fn project(
             }
         });
     };
+    // Facts count only for the exact record they name. A fact about another
+    // record written under the same ID (two replicas reserved one UUID with
+    // different contents) leaves this one rebound: a conflict for review,
+    // held as Unknown until the person cancels it, never settled by the
+    // other original's receipt.
+    let mut rebound = std::collections::BTreeSet::new();
     let phases: Vec<(&Attempt, Projected)> = attempts
         .iter()
         .map(|attempt| {
-            let own: Vec<&AttemptEvent> =
-                events.iter().filter(|e| e.attempt == attempt.id).collect();
-            (attempt, phase_of(attempt, &own))
+            let fingerprint = attempt.fingerprint();
+            let (own, foreign): (Vec<&AttemptEvent>, Vec<&AttemptEvent>) = events
+                .iter()
+                .filter(|e| e.attempt == attempt.id)
+                .partition(|e| e.of.is_empty() || e.of == fingerprint);
+            let mut projected = phase_of(attempt, &own);
+            if !foreign.is_empty() && projected.0 != Phase::Cancelled {
+                rebound.insert(attempt.id.as_str());
+                projected.0 = Phase::Unknown;
+            }
+            (attempt, projected)
         })
         .collect();
     // An attempt whose input was never admitted is not an execution: the one
@@ -502,7 +544,7 @@ pub(crate) fn project(
             progress_at,
             legacy: false,
         }),
-        conflict: claims.len() > 1,
+        conflict: claims.len() > 1 || rebound.contains(attempt.id.as_str()),
         highest: top,
         unknown,
     })
@@ -779,6 +821,7 @@ mod tests {
             actor: Actor::Person,
             at,
             settles: Vec::new(),
+            of: String::new(),
         }
     }
 

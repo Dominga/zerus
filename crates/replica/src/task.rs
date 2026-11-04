@@ -2438,6 +2438,7 @@ mod tests {
                 actor: Actor::Agent(worker()),
                 at: 60,
                 settles: Vec::new(),
+                of: String::new(),
             }
         }
 

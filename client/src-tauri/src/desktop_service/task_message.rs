@@ -22,6 +22,11 @@ pub(crate) const NOT_STARTED: &str = zerus_client_core::source!(
 pub(crate) const TOO_LARGE: &str = zerus_client_core::source!(
     "The message was not sent: with its attachments it is larger than the desktop service accepts. Attachments travel inside the message, less than 48 KiB in total. Your draft and attachments were kept."
 );
+/// Too large even by reference: nothing was sent, and it is never sent
+/// another way.
+pub(crate) const TOO_LARGE_REFERENCE: &str = zerus_client_core::source!(
+    "The message was not sent: it is larger than the desktop service accepts. Its text and attachment list must fit in 64 KiB, with up to 8 attachments of 10 MiB each and 20 MiB in total. Your draft and attachments were kept."
+);
 /// A sent original whose result this client cannot confirm. It stays for
 /// review and is never sent again.
 pub(crate) const UNCONFIRMED: &str = zerus_client_core::source!(
@@ -130,13 +135,16 @@ pub(crate) fn call(
                     return Err(Some(TOO_LARGE));
                 }
                 let (projection, blobs) =
-                    references::project(record).map_err(|_| Some(TOO_LARGE))?;
+                    references::project(record).map_err(|_| Some(TOO_LARGE_REFERENCE))?;
                 let reference = wire::Intent {
                     original: projection.to_string(),
                     form: wire::Form::ReferenceV1,
                     ..inline
                 };
-                let verified = reference.clone().verify().map_err(|_| Some(TOO_LARGE))?;
+                let verified = reference
+                    .clone()
+                    .verify()
+                    .map_err(|_| Some(TOO_LARGE_REFERENCE))?;
                 let root = discover(&read).ok_or(None)?;
                 let views: Vec<&[u8]> = blobs.iter().map(Vec::as_slice).collect();
                 let copies = wire::staging::stage(&root, &verified.plan.request_id, &views)
@@ -282,11 +290,29 @@ pub(crate) fn check(
     if !read.supports(wire::HELP_MARKER).ok()? {
         return None;
     }
-    let plan = intent(&read.scope, project, task, record)
-        .verify()
-        .ok()?
-        .plan;
+    let plan = plan(&read.scope, project, task, record)?;
     settled(&lookup(&read, &plan)?, &plan)
+}
+
+/// The plan of an exact record, whichever form carried it: both forms of one
+/// original verify to the same plan, and one too large to go inline was sent
+/// by reference.
+fn plan(scope: &wire::Scope, project: &str, task: &str, record: &Value) -> Option<wire::Plan> {
+    let inline = intent(scope, project, task, record);
+    match inline.clone().verify() {
+        Ok(verified) => Some(verified.plan),
+        #[cfg(unix)]
+        Err("task_message_original_too_large") => {
+            let (projection, _) = references::project(record).ok()?;
+            let reference = wire::Intent {
+                original: projection.to_string(),
+                form: wire::Form::ReferenceV1,
+                ..inline
+            };
+            reference.verify().ok().map(|verified| verified.plan)
+        }
+        Err(_) => None,
+    }
 }
 
 #[cfg(all(test, unix))]

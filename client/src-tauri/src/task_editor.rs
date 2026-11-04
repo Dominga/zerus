@@ -4,6 +4,7 @@ use crate::composer::{
     fetch::{Fetched, Fetcher},
     Composers,
 };
+use crate::desktop_service::task_message::{self, MessageAnswer, Outbox};
 use serde::{Deserialize, Serialize};
 use serde_json::{json, Value};
 use std::{
@@ -25,6 +26,16 @@ use zerus_client_core::{
 const CHANGED: &str = "The selected task changed. Your draft was kept.";
 /// A record handed to the desktop service is checked only by the service.
 const HANDED_OFF: &str = "This message was handed to the desktop service, so only the service can check its result. Its original was kept for review; this check sent nothing.";
+/// The service has no settled result for a record handed to it: it stays for
+/// review until it settles or the user explicitly releases it.
+const HANDED_OFF_OPEN: &str = zerus_client_core::source!(
+    "The desktop service has no result for this message yet. Its original was kept for review and was not sent again. Check again later, or release the record to send the message again as a new one."
+);
+/// A handed-off original that provably never started, while the draft no
+/// longer holds it: it stays for the explicit reviewed release.
+const NOT_STARTED_KEPT: &str = zerus_client_core::source!(
+    "The desktop service did not start this message, so it was not sent. Your draft has changed since, so the original was kept for review: release the record to send your current draft as a new message."
+);
 const TOO_LONG: &str = "Message exceeds 64 KiB.";
 #[derive(Clone, Copy, Debug, Deserialize, Serialize, PartialEq)]
 #[serde(rename_all = "snake_case")]
@@ -117,6 +128,16 @@ struct Inner {
 }
 #[derive(Clone, Default)]
 pub struct TaskEditor(Arc<Inner>);
+/// The selected desktop service's task message route: Linux and macOS in
+/// desktop-service mode only.
+pub(crate) struct Route<'a> {
+    /// Sends the record reserved by this same Submit, once: its one-use
+    /// consent is that reservation.
+    pub send: &'a dyn Fn(&Value, Outbox<'_>) -> MessageAnswer,
+    /// The read-only lookup of a record handed to the service earlier. It
+    /// never sends anything.
+    pub check: &'a dyn Fn(&Value) -> Option<MessageAnswer>,
+}
 struct Permit(TaskEditor);
 impl Drop for Permit {
     fn drop(&mut self) {
@@ -543,7 +564,7 @@ fn submitted(
     recover: bool,
     call: &impl Fn(&TaskCall) -> Result<serde_json::Map<String, Value>, String>,
 ) -> Result<bool, String> {
-    submitted_with_delivery(slot, composers, detail, recover, None, call)
+    submitted_with_delivery(slot, composers, detail, recover, None, None, call)
 }
 
 fn submitted_with_delivery(
@@ -552,6 +573,7 @@ fn submitted_with_delivery(
     detail: Value,
     recover: bool,
     delivery: Option<&zerus_client_core::task_feedback::Delivery>,
+    route: Option<&Route<'_>>,
     call: &impl Fn(&TaskCall) -> Result<serde_json::Map<String, Value>, String>,
 ) -> Result<bool, String> {
     if slot.blocked {
@@ -571,6 +593,9 @@ fn submitted_with_delivery(
     } else {
         "note"
     };
+    // A record handed to the desktop service earlier, with the route that
+    // alone may check it.
+    let mut handed = None;
     let original = if slot.mode == Mode::Note {
         let pending = outbox::pending(store.root(), &slot.project, &slot.task)?;
         if !recover && pending.is_none() && (slot.stored.uncertain || slot.stored.sending) {
@@ -591,7 +616,7 @@ fn submitted_with_delivery(
             // the service's scoped lookup, never this direct check. An
             // unreadable or foreign handoff marker refuses as well.
             if outbox::handed_off(store.root(), &slot.project, &slot.task, &record)? {
-                return Err(HANDED_OFF.into());
+                handed = Some(route.ok_or(HANDED_OFF)?);
             }
             Some(record)
         } else {
@@ -607,11 +632,22 @@ fn submitted_with_delivery(
     {
         return Err("Write a note for this task…".into());
     }
+    // Only a new queue or note goes to the service. Send, reopen, recovery of
+    // an unmarked record and everything outside its mode keep the direct path.
+    let routed = route.filter(|_| {
+        slot.mode == Mode::Note && !recover && matches!(message_mode, "queue" | "note")
+    });
     let current_draft = slot.stored.draft.clone();
     let mut expected = current_draft.clone();
     slot.stored.sending = true;
     checkpoint(slot, store)?;
     let mut delivered = None;
+    // The service's answer proves that this original never ran and it was
+    // released: the draft goes back to an ordinary one.
+    let mut unsent = false;
+    // A handed-off record whose exact drained receipt proves that its child
+    // never started; released once the draft is durable.
+    let mut not_started = None;
     let result = (|| {
         if slot.mode == Mode::Description {
             // An interrupted replacement is checked against the canonical
@@ -644,6 +680,31 @@ fn submitted_with_delivery(
                 let content = &record["intent"]["content"];
                 expected.text = content["text"].as_str().unwrap_or("").into();
                 expected.attachments = tasks_write::decode_files(&content["attachments"]);
+                if let Some(route) = handed {
+                    // Only the service's read-only lookup; nothing is sent.
+                    let id = record["id"].as_str().unwrap_or("").to_owned();
+                    return match (route.check)(&record) {
+                        Some(MessageAnswer::Recorded(_)) => {
+                            delivered = Some(id);
+                            Ok(())
+                        }
+                        Some(MessageAnswer::Unsent(text)) => {
+                            // Only a draft that still holds this original
+                            // replaces it; an edited draft keeps the original
+                            // for the explicit reviewed release.
+                            if current_draft.text == expected.text
+                                && current_draft.attachments == expected.attachments
+                            {
+                                not_started = Some(record);
+                                Err(text)
+                            } else {
+                                Err(NOT_STARTED_KEPT.into())
+                            }
+                        }
+                        Some(MessageAnswer::Unconfirmed(text)) => Err(text),
+                        Some(MessageAnswer::Direct) | None => Err(HANDED_OFF_OPEN.into()),
+                    };
+                }
                 let message =
                     tasks_write::message_call(&slot.project, &slot.task, &record, recover)?;
                 (record, message)
@@ -676,6 +737,42 @@ fn submitted_with_delivery(
                 }
                 (reservation.record, message)
             };
+            if let Some(route) = routed {
+                let id = record["id"].as_str().unwrap_or("").to_owned();
+                let (project, task) = (&slot.project, &slot.task);
+                let mut settled = slot.stored.clone();
+                settled.sending = false;
+                settled.uncertain = false;
+                let released = std::cell::Cell::new(false);
+                let handoff = || outbox::hand_off(store.root(), project, task, &record);
+                // Never ran: the draft settles durably first, then exactly
+                // this original goes.
+                let release = || {
+                    if save(store, &key, settled.clone()).is_ok()
+                        && outbox::release(store.root(), project, task, &id).is_ok()
+                    {
+                        released.set(true);
+                    }
+                };
+                let outbox = Outbox {
+                    handoff: &handoff,
+                    release: &release,
+                };
+                match (route.send)(&record, outbox) {
+                    MessageAnswer::Recorded(_) => {
+                        delivered = Some(id);
+                        return Ok(());
+                    }
+                    MessageAnswer::Unsent(text) => {
+                        unsent = released.get();
+                        return Err(text);
+                    }
+                    MessageAnswer::Unconfirmed(text) => return Err(text),
+                    // The selected service has no such kind: the unchanged
+                    // direct call below, with no handoff marker.
+                    MessageAnswer::Direct => {}
+                }
+            }
             let reply = call(&message)?;
             tasks_write::message_delivered(
                 &reply,
@@ -692,8 +789,13 @@ fn submitted_with_delivery(
     })();
     if let Err(error) = result {
         slot.stored.sending = false;
-        slot.stored.uncertain = true;
+        // Only an original that provably never ran leaves an ordinary draft.
+        slot.stored.uncertain = !unsent && not_started.is_none();
         let saved = checkpoint(slot, store);
+        if let (Some(record), Ok(())) = (&not_started, &saved) {
+            // The draft is durable first; then exactly the record it saw goes.
+            outbox::release_if_unchanged(store.root(), &slot.project, &slot.task, record)?;
+        }
         slot.recovery = slot.mode == Mode::Note
             && outbox::pending(store.root(), &slot.project, &slot.task)?.is_some();
         saved?;
@@ -735,6 +837,7 @@ pub struct Submission {
 
 #[tauri::command]
 pub async fn task_editor_submit(
+    app: State<'_, crate::commands::AppState>,
     writes: State<'_, crate::task_details::TaskWrites>,
     state: State<'_, TaskEditor>,
     composers: State<'_, Composers>,
@@ -749,6 +852,11 @@ pub async fn task_editor_submit(
     let editor = state.inner().clone();
     let composers = composers.inner().clone();
     let fetcher = Arc::clone(fetcher.inner());
+    // Task messages go to the desktop service only on Linux and macOS, in the
+    // selected desktop-service mode; never mixed with the direct path.
+    let service = (cfg!(any(target_os = "linux", target_os = "macos"))
+        && crate::desktop_service::mode())
+    .then(|| app.desktop_service());
     let Submission {
         handle,
         rev,
@@ -763,6 +871,21 @@ pub async fn task_editor_submit(
             .as_mut()
             .filter(|s| s.handle == handle && s.rev == rev)
             .ok_or(CHANGED)?;
+        let (project, task) = (slot.project.clone(), slot.task.clone());
+        // The editor has no shutdown of its own: exiting ends this call, and
+        // a sent original stays for review.
+        let stopped = AtomicBool::new(false);
+        let send = |record: &Value, outbox: Outbox<'_>| {
+            let service = service.clone().flatten();
+            task_message::call(service, &project, &task, record, true, outbox, &stopped)
+        };
+        let check = |record: &Value| {
+            task_message::check(service.clone().flatten(), &project, &task, record)
+        };
+        let route = Route {
+            send: &send,
+            check: &check,
+        };
         let result = document(&slot.project, &slot.task).and_then(|detail| {
             submitted_with_delivery(
                 slot,
@@ -770,6 +893,7 @@ pub async fn task_editor_submit(
                 detail,
                 recover,
                 delivery.as_ref(),
+                service.is_some().then_some(&route),
                 &|call| tasks_write::run(&zerus_client_core::default_hgs(), call),
             )
         });
@@ -883,6 +1007,7 @@ pub async fn task_editor_release(
 mod tests {
     use super::*;
     use std::cell::{Cell, RefCell};
+    use std::time::Duration;
     const ID: &str = "11111111-1111-4111-8111-111111111111";
     fn slot(mode: Mode) -> Slot {
         Slot {
@@ -973,6 +1098,7 @@ mod tests {
                 detail.clone(),
                 false,
                 Some(&delivery),
+                None,
                 &|call| {
                     let record = outbox::pending(store.root(), "example", ID)?.unwrap();
                     assert_eq!(record["intent"]["mode"], mode);
@@ -1005,6 +1131,7 @@ mod tests {
                 changed,
                 true,
                 Some(&wrong),
+                None,
                 &|call| {
                     assert!(call.args.windows(2).any(|p| p == ["--mode", mode]));
                     assert!(call
@@ -1137,6 +1264,7 @@ mod tests {
             detail,
             false,
             Some(&delivery),
+            None,
             &|_| panic!("stale feedback cannot call hgs")
         )
         .is_err());
@@ -1220,6 +1348,578 @@ mod tests {
             Ok(receipt(record["id"].as_str().unwrap()))
         };
         assert!(submitted(&mut slot, &hub, detail(""), true, &recover).unwrap());
+    }
+    /// The service's Recorded answer for `record`.
+    fn recorded(record: &Value) -> MessageAnswer {
+        MessageAnswer::Recorded(zerus_client_core::desktop::task_message::Outcome {
+            request_id: record["id"].as_str().unwrap().into(),
+            mode: record["intent"]["mode"].as_str().unwrap().into(),
+            dispatch_id: String::new(),
+            state: "note".into(),
+        })
+    }
+    fn no_check(_: &Value) -> Option<MessageAnswer> {
+        panic!("a new message is never checked")
+    }
+    fn no_direct(_: &TaskCall) -> Result<serde_json::Map<String, Value>, String> {
+        panic!("a routed message never takes the direct path")
+    }
+    #[test]
+    fn a_new_note_goes_to_the_service_once_and_each_answer_settles_its_own_way() {
+        use crate::desktop_service::task_message::{NOT_SENT, UNCONFIRMED};
+        for case in ["recorded", "unsent", "unconfirmed", "direct"] {
+            let root = crate::composer::tests::dir(&format!("task-note-routed-{case}"));
+            let store = crate::composer::tests::drafts(&root);
+            let (hub, _) = crate::composer::tests::hub_on(&store);
+            let mut slot = slot(Mode::Note);
+            let sends = Cell::new(0);
+            let send = |record: &Value, outbox: Outbox<'_>| {
+                sends.set(sends.get() + 1);
+                // The record reserved by this Submit, not yet handed off.
+                assert_eq!(
+                    outbox::pending(store.root(), "example", ID)
+                        .unwrap()
+                        .as_ref(),
+                    Some(record)
+                );
+                assert!(!outbox::handed_off(store.root(), "example", ID, record).unwrap());
+                match case {
+                    "recorded" | "unconfirmed" => (outbox.handoff)().unwrap(),
+                    "unsent" => {
+                        (outbox.release)();
+                        // The draft's settled flags were durable before the
+                        // record went: no crash leaves a sending draft with no
+                        // record behind it.
+                        let durable = load(&store, &format!("task-comment\nexample\n{ID}"))
+                            .unwrap()
+                            .draft;
+                        assert!(!durable.sending && !durable.uncertain);
+                        assert!(outbox::pending(store.root(), "example", ID)
+                            .unwrap()
+                            .is_none());
+                    }
+                    _ => {}
+                }
+                match case {
+                    "recorded" => recorded(record),
+                    "unsent" => MessageAnswer::Unsent(NOT_SENT.into()),
+                    "unconfirmed" => MessageAnswer::Unconfirmed(UNCONFIRMED.into()),
+                    _ => MessageAnswer::Direct,
+                }
+            };
+            let route = Route {
+                send: &send,
+                check: &no_check,
+            };
+            let directs = Cell::new(0);
+            let direct = |call: &TaskCall| {
+                directs.set(directs.get() + 1);
+                assert!(!call.args.iter().any(|a| a == "--recover-only"));
+                let record = outbox::pending(store.root(), "example", ID)?.unwrap();
+                assert!(!outbox::handed_off(store.root(), "example", ID, &record)?);
+                Ok(receipt(record["id"].as_str().unwrap()))
+            };
+            let result = submitted_with_delivery(
+                &mut slot,
+                &hub,
+                detail(""),
+                false,
+                None,
+                Some(&route),
+                &direct,
+            );
+            assert_eq!(sends.get(), 1, "{case}: sent once");
+            let pending = outbox::pending(store.root(), "example", ID).unwrap();
+            let durable = load(&store, &slot.key()).unwrap().draft;
+            match case {
+                "recorded" | "direct" => {
+                    assert_eq!(result, Ok(true), "{case}");
+                    assert_eq!(directs.get(), usize::from(case == "direct"));
+                    assert!(pending.is_none(), "{case}: settled and released");
+                    assert!(durable.draft.text.is_empty());
+                }
+                "unsent" => {
+                    // Provably never ran: an ordinary draft, sendable again.
+                    assert_eq!(result, Err(NOT_SENT.into()));
+                    assert!(pending.is_none());
+                    assert_eq!(durable.draft.text, "Original");
+                    assert!(!durable.sending && !durable.uncertain);
+                    assert!(!slot.recovery);
+                }
+                _ => {
+                    // Sent but unconfirmed: kept, marked and in review.
+                    assert_eq!(result, Err(UNCONFIRMED.into()));
+                    let record = pending.unwrap();
+                    assert!(outbox::handed_off(store.root(), "example", ID, &record).unwrap());
+                    assert!(durable.uncertain && !durable.sending);
+                    assert!(slot.recovery);
+                }
+            }
+            assert!(
+                !outbox::path(store.root(), "example", ID)
+                    .with_extension("service")
+                    .exists()
+                    || case == "unconfirmed",
+                "{case}: the handoff marker goes with its record"
+            );
+        }
+    }
+    #[test]
+    fn send_reopen_and_unmarked_recovery_keep_the_direct_path() {
+        use zerus_client_core::task_feedback::Delivery;
+        let no_send = |_: &Value, _: Outbox<'_>| -> MessageAnswer {
+            panic!("only a new queue or note goes to the service")
+        };
+        let route = Route {
+            send: &no_send,
+            check: &no_check,
+        };
+        for (stage, mode) in [("active", "send"), ("review", "reopen")] {
+            let root = crate::composer::tests::dir(&format!("task-note-direct-{mode}"));
+            let store = crate::composer::tests::drafts(&root);
+            let (hub, _) = crate::composer::tests::hub_on(&store);
+            let mut slot = slot(Mode::Note);
+            let detail = json!({"uuid":ID,"project":"example","stage":stage,"stage_at":123,"dispatch_id":"","writable":true});
+            let delivery = Delivery {
+                mode: mode.into(),
+                stage_at: 123,
+                dispatch_id: String::new(),
+            };
+            // A lost direct reply leaves an unmarked record...
+            assert!(submitted_with_delivery(
+                &mut slot,
+                &hub,
+                detail.clone(),
+                false,
+                Some(&delivery),
+                Some(&route),
+                &|call| {
+                    assert!(call.args.windows(2).any(|p| p == ["--mode", mode]));
+                    Err("reply lost".into())
+                }
+            )
+            .is_err());
+            let record = outbox::pending(store.root(), "example", ID)
+                .unwrap()
+                .unwrap();
+            // ...which recovers only through the direct check, never the
+            // service's lookup.
+            assert!(submitted_with_delivery(
+                &mut slot,
+                &hub,
+                detail,
+                true,
+                None,
+                Some(&route),
+                &|call| {
+                    assert!(call.args.iter().any(|a| a == "--recover-only"));
+                    Ok(receipt(record["id"].as_str().unwrap()))
+                }
+            )
+            .unwrap());
+        }
+    }
+    /// A route whose send hands off and leaves the original unconfirmed.
+    fn unconfirmed(_: &Value, outbox: Outbox<'_>) -> MessageAnswer {
+        use crate::desktop_service::task_message::UNCONFIRMED;
+        (outbox.handoff)().unwrap();
+        MessageAnswer::Unconfirmed(UNCONFIRMED.into())
+    }
+    #[test]
+    fn a_not_started_original_is_released_only_while_the_draft_still_holds_it() {
+        use crate::desktop_service::task_message::{NOT_STARTED, UNCONFIRMED};
+        let root = crate::composer::tests::dir("task-note-edited-not-started");
+        let store = crate::composer::tests::drafts(&root);
+        let (hub, _) = crate::composer::tests::hub_on(&store);
+        let mut slot = slot(Mode::Note);
+        let not_started = |_: &Value| Some(MessageAnswer::Unsent(NOT_STARTED.into()));
+        let route = Route {
+            send: &unconfirmed,
+            check: &not_started,
+        };
+        let submit = |slot: &mut Slot, recover: bool| {
+            submitted_with_delivery(
+                slot,
+                &hub,
+                detail(""),
+                recover,
+                None,
+                Some(&route),
+                &no_direct,
+            )
+        };
+        assert_eq!(submit(&mut slot, false), Err(UNCONFIRMED.into()));
+        let record = outbox::pending(store.root(), "example", ID)
+            .unwrap()
+            .unwrap();
+        // The composer stays editable while the record is in review.
+        slot.stored.draft.text = "A different follow-up".into();
+        checkpoint(&mut slot, &store).unwrap();
+        assert_eq!(submit(&mut slot, true), Err(NOT_STARTED_KEPT.into()));
+        assert_eq!(
+            outbox::pending(store.root(), "example", ID)
+                .unwrap()
+                .as_ref(),
+            Some(&record),
+            "the original is kept for the reviewed release"
+        );
+        assert!(outbox::handed_off(store.root(), "example", ID, &record).unwrap());
+        let durable = load(&store, &slot.key()).unwrap().draft;
+        assert_eq!(durable.draft.text, "A different follow-up");
+        assert!(durable.uncertain);
+        // The explicit reviewed release still works, and shows the record first.
+        release_record(
+            &mut slot,
+            &store,
+            record["id"].as_str().unwrap(),
+            &outbox::snapshot(&record),
+        )
+        .unwrap();
+        assert!(outbox::pending(store.root(), "example", ID)
+            .unwrap()
+            .is_none());
+    }
+    fn file(byte: u8) -> zerus_client_core::attachments::Attachment {
+        zerus_client_core::attachments::Attachment {
+            name: "note.bin".into(),
+            mime: "application/octet-stream".into(),
+            bytes: std::sync::Arc::from(vec![byte; 4096]),
+            reference: String::new(),
+        }
+    }
+    /// Submits "Original" with one file through the service (Unconfirmed),
+    /// applies `edit` to the draft, then recovers with a not-started answer.
+    fn not_started_after(name: &str, edit: impl Fn(&mut Slot)) -> (Result<bool, String>, bool) {
+        use crate::desktop_service::task_message::NOT_STARTED;
+        let root = crate::composer::tests::dir(name);
+        let store = crate::composer::tests::drafts(&root);
+        let (hub, _) = crate::composer::tests::hub_on(&store);
+        let mut slot = slot(Mode::Note);
+        slot.stored.draft.attachments = vec![file(7)];
+        checkpoint(&mut slot, &store).unwrap();
+        let not_started = |_: &Value| Some(MessageAnswer::Unsent(NOT_STARTED.into()));
+        let route = Route {
+            send: &unconfirmed,
+            check: &not_started,
+        };
+        assert!(submitted_with_delivery(
+            &mut slot,
+            &hub,
+            detail(""),
+            false,
+            None,
+            Some(&route),
+            &no_direct
+        )
+        .is_err());
+        edit(&mut slot);
+        checkpoint(&mut slot, &store).unwrap();
+        let result = submitted_with_delivery(
+            &mut slot,
+            &hub,
+            detail(""),
+            true,
+            None,
+            Some(&route),
+            &no_direct,
+        );
+        (
+            result,
+            outbox::pending(store.root(), "example", ID)
+                .unwrap()
+                .is_some(),
+        )
+    }
+    #[test]
+    fn a_not_started_original_compares_its_attachments_too() {
+        use crate::desktop_service::task_message::NOT_STARTED;
+        assert_eq!(
+            not_started_after("task-note-file-same", |_| {}),
+            (Err(NOT_STARTED.into()), false)
+        );
+        assert_eq!(
+            not_started_after("task-note-file-removed", |s| s
+                .stored
+                .draft
+                .attachments
+                .clear()),
+            (Err(NOT_STARTED_KEPT.into()), true)
+        );
+        assert_eq!(
+            not_started_after("task-note-file-bytes", |s| s.stored.draft.attachments =
+                vec![file(8)]),
+            (Err(NOT_STARTED_KEPT.into()), true)
+        );
+    }
+    #[test]
+    fn routed_unsent_saves_the_draft_before_the_release() {
+        use crate::desktop_service::task_message::NOT_SENT;
+        let root = crate::composer::tests::dir("task-note-order-routed");
+        let store = crate::composer::tests::drafts(&root);
+        let (hub, _) = crate::composer::tests::hub_on(&store);
+        let mut slot = slot(Mode::Note);
+        let send = |_: &Value, outbox: Outbox<'_>| {
+            // Hold the draft writer: the settled draft is not durable yet,
+            // so the record must still be there.
+            let gate = crate::composer::tests::hold(&store);
+            let outbox_root = store.root().to_path_buf();
+            let watcher = std::thread::spawn(move || {
+                std::thread::sleep(Duration::from_millis(300));
+                let kept = outbox::pending(&outbox_root, "example", ID)
+                    .unwrap()
+                    .is_some();
+                let _ = gate.send(());
+                kept
+            });
+            (outbox.release)();
+            assert!(
+                watcher.join().unwrap(),
+                "the record outlives the unsaved settled draft"
+            );
+            MessageAnswer::Unsent(NOT_SENT.into())
+        };
+        let route = Route {
+            send: &send,
+            check: &no_check,
+        };
+        assert_eq!(
+            submitted_with_delivery(
+                &mut slot,
+                &hub,
+                detail(""),
+                false,
+                None,
+                Some(&route),
+                &no_direct
+            ),
+            Err(NOT_SENT.into())
+        );
+        assert!(outbox::pending(store.root(), "example", ID)
+            .unwrap()
+            .is_none());
+    }
+    #[test]
+    fn not_started_recovery_saves_the_draft_before_the_release() {
+        use crate::desktop_service::task_message::{NOT_STARTED, UNCONFIRMED};
+        let root = crate::composer::tests::dir("task-note-order-recovery");
+        let store = crate::composer::tests::drafts(&root);
+        let (hub, _) = crate::composer::tests::hub_on(&store);
+        let mut slot = slot(Mode::Note);
+        let watcher = RefCell::new(None);
+        let armed = Cell::new(false);
+        let check = |_: &Value| {
+            if armed.get() {
+                let gate = crate::composer::tests::hold(&store);
+                let outbox_root = store.root().to_path_buf();
+                *watcher.borrow_mut() = Some(std::thread::spawn(move || {
+                    std::thread::sleep(Duration::from_millis(300));
+                    let kept = outbox::pending(&outbox_root, "example", ID)
+                        .unwrap()
+                        .is_some();
+                    let _ = gate.send(());
+                    kept
+                }));
+            }
+            Some(MessageAnswer::Unsent(NOT_STARTED.into()))
+        };
+        let route = Route {
+            send: &unconfirmed,
+            check: &check,
+        };
+        assert_eq!(
+            submitted_with_delivery(
+                &mut slot,
+                &hub,
+                detail(""),
+                false,
+                None,
+                Some(&route),
+                &no_direct
+            ),
+            Err(UNCONFIRMED.into())
+        );
+        armed.set(true);
+        assert_eq!(
+            submitted_with_delivery(
+                &mut slot,
+                &hub,
+                detail(""),
+                true,
+                None,
+                Some(&route),
+                &no_direct
+            ),
+            Err(NOT_STARTED.into())
+        );
+        assert!(
+            watcher.borrow_mut().take().unwrap().join().unwrap(),
+            "the record outlives the unsaved settled draft"
+        );
+        assert!(outbox::pending(store.root(), "example", ID)
+            .unwrap()
+            .is_none());
+    }
+    #[test]
+    fn a_routed_unsent_whose_settled_draft_cannot_be_saved_keeps_its_record() {
+        use crate::desktop_service::task_message::NOT_SENT;
+        use sha2::Digest;
+        let root = crate::composer::tests::dir("task-note-unsaved-release");
+        let store = crate::composer::tests::drafts(&root);
+        let (hub, _) = crate::composer::tests::hub_on(&store);
+        let mut slot = slot(Mode::Note);
+        let key = slot.key();
+        let folder = store
+            .root()
+            .join(format!("{:x}", sha2::Sha256::digest(key.as_bytes())));
+        let send = |_: &Value, outbox: Outbox<'_>| {
+            // The draft's folder replaced by a file: its settled flags cannot
+            // be saved, so the record must not go.
+            let aside = folder.with_extension("aside");
+            std::fs::rename(&folder, &aside).unwrap();
+            std::fs::write(&folder, b"not a folder").unwrap();
+            (outbox.release)();
+            let kept = outbox::pending(store.root(), "example", ID)
+                .unwrap()
+                .is_some();
+            std::fs::remove_file(&folder).unwrap();
+            std::fs::rename(&aside, &folder).unwrap();
+            assert!(kept, "never released before the draft is durable");
+            MessageAnswer::Unsent(NOT_SENT.into())
+        };
+        let route = Route {
+            send: &send,
+            check: &no_check,
+        };
+        assert_eq!(
+            submitted_with_delivery(
+                &mut slot,
+                &hub,
+                detail(""),
+                false,
+                None,
+                Some(&route),
+                &no_direct
+            ),
+            Err(NOT_SENT.into())
+        );
+        // Not provably released: it stays in review.
+        assert!(outbox::pending(store.root(), "example", ID)
+            .unwrap()
+            .is_some());
+        assert!(load(&store, &key).unwrap().draft.uncertain);
+    }
+    #[test]
+    fn a_marked_record_recovers_only_through_the_service_lookup_or_an_explicit_release() {
+        use crate::desktop_service::task_message::{NOT_STARTED, UNCONFIRMED};
+        let root = crate::composer::tests::dir("task-note-marked");
+        let store = crate::composer::tests::drafts(&root);
+        let (hub, _) = crate::composer::tests::hub_on(&store);
+        let mut slot = slot(Mode::Note);
+        let sent = RefCell::new(Vec::new());
+        let send = |record: &Value, outbox: Outbox<'_>| {
+            sent.borrow_mut()
+                .push(record["id"].as_str().unwrap().to_owned());
+            (outbox.handoff)().unwrap();
+            MessageAnswer::Unconfirmed(UNCONFIRMED.into())
+        };
+        let answer = RefCell::new(None);
+        let checks = Cell::new(0);
+        let check = |record: &Value| {
+            checks.set(checks.get() + 1);
+            assert!(outbox::handed_off(store.root(), "example", ID, record).unwrap());
+            answer.borrow_mut().take()
+        };
+        let route = Route {
+            send: &send,
+            check: &check,
+        };
+        let submit = |slot: &mut Slot, recover: bool| {
+            submitted_with_delivery(
+                slot,
+                &hub,
+                detail(""),
+                recover,
+                None,
+                Some(&route),
+                &no_direct,
+            )
+        };
+        assert_eq!(submit(&mut slot, false), Err(UNCONFIRMED.into()));
+        let record = outbox::pending(store.root(), "example", ID)
+            .unwrap()
+            .unwrap();
+        // Unsettled or unconfirmed: it stays for review, nothing is sent.
+        for (given, expected) in [
+            (None, HANDED_OFF_OPEN),
+            (
+                Some(MessageAnswer::Unconfirmed(UNCONFIRMED.into())),
+                UNCONFIRMED,
+            ),
+            (Some(MessageAnswer::Direct), HANDED_OFF_OPEN),
+        ] {
+            *answer.borrow_mut() = given;
+            assert_eq!(submit(&mut slot, true), Err(expected.into()));
+            assert_eq!(
+                outbox::pending(store.root(), "example", ID)
+                    .unwrap()
+                    .as_ref(),
+                Some(&record)
+            );
+            assert!(load(&store, &slot.key()).unwrap().draft.uncertain);
+        }
+        assert_eq!((sent.borrow().len(), checks.get()), (1, 3));
+        // Without the service route, only the refusal: never the direct check.
+        assert_eq!(
+            submitted(&mut slot, &hub, detail(""), true, &no_direct),
+            Err(HANDED_OFF.into())
+        );
+        // The exact drained not-started receipt: nothing ran, so the draft
+        // settles first and then exactly that record and its marker go.
+        *answer.borrow_mut() = Some(MessageAnswer::Unsent(NOT_STARTED.into()));
+        assert_eq!(submit(&mut slot, true), Err(NOT_STARTED.into()));
+        assert!(outbox::pending(store.root(), "example", ID)
+            .unwrap()
+            .is_none());
+        let durable = load(&store, &slot.key()).unwrap().draft;
+        assert_eq!(durable.draft.text, "Original");
+        assert!(!durable.uncertain && !durable.sending);
+        // Sending again is a new original with a new identity.
+        assert_eq!(submit(&mut slot, false), Err(UNCONFIRMED.into()));
+        let again = outbox::pending(store.root(), "example", ID)
+            .unwrap()
+            .unwrap();
+        assert_ne!(again["id"], record["id"]);
+        // An unsettled one leaves only through the explicit reviewed
+        // release, which removes its marker as well.
+        *answer.borrow_mut() = None;
+        assert_eq!(submit(&mut slot, true), Err(HANDED_OFF_OPEN.into()));
+        release_record(
+            &mut slot,
+            &store,
+            again["id"].as_str().unwrap(),
+            &outbox::snapshot(&again),
+        )
+        .unwrap();
+        assert!(!outbox::path(store.root(), "example", ID)
+            .with_extension("service")
+            .exists());
+        // A Recorded lookup settles exactly like a delivered recovery.
+        assert_eq!(submit(&mut slot, false), Err(UNCONFIRMED.into()));
+        let third = outbox::pending(store.root(), "example", ID)
+            .unwrap()
+            .unwrap();
+        *answer.borrow_mut() = Some(recorded(&third));
+        assert_eq!(submit(&mut slot, true), Ok(true));
+        assert!(outbox::pending(store.root(), "example", ID)
+            .unwrap()
+            .is_none());
+        assert!(load(&store, &slot.key())
+            .unwrap()
+            .draft
+            .draft
+            .text
+            .is_empty());
+        assert_eq!(sent.borrow().len(), 3);
     }
     #[test]
     fn recovery_of_original_note_keeps_newer_text_and_clears_only_its_delivery_flags() {

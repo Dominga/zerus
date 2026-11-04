@@ -176,6 +176,7 @@ if 'review-activation' in args:
 elif 'activation-status' in args:
  result=stored if stored and stored['request_id']==request else reviewed if reviewed and reviewed['request_id']==request else dict(abi='desktop-service-activation-v1',request_id=request,configuration=scope,read_only=True,phase='missing',result=None)
 elif '--mode' in args:
+ if reviewed and config.get('refuse_choice'):sys.exit(1)
  if reviewed and ('--after-review' not in args or args[args.index('--after-review')+1]!=reviewed['request_id'] or reviewed['disposition']['state']!='reviewed_unknown'):sys.exit(1)
  with (root/'effects').open('a') as out:out.write(request+'\n')
  result=dict(abi='desktop-service-activation-v1',request_id=request,configuration=scope,read_only=True,phase='unknown' if config['lose'] else 'settled',result=None if config['lose'] else dict(ok=True,code='ready'))
@@ -212,7 +213,7 @@ async fn acknowledge_model_boot(f: &Fixture, owner: &Arc<Controller>) {
         .await
         .unwrap()
         .unwrap();
-    owner.apply(first).await;
+    let _ = owner.apply(first).await;
     assert_eq!(
         owner.view().review.unwrap().disposition,
         review::Disposition::RebootRequired
@@ -227,7 +228,7 @@ async fn acknowledge_model_boot(f: &Fixture, owner: &Arc<Controller>) {
         .await
         .unwrap()
         .unwrap();
-    owner.apply(second).await;
+    let _ = owner.apply(second).await;
     assert_eq!(
         owner.view().review.unwrap().disposition,
         review::Disposition::ReviewedUnknown
@@ -295,7 +296,7 @@ async fn review_lost_reply_and_reconnect_are_reads_until_a_second_confirmation()
         .await
         .unwrap()
         .unwrap();
-    restarted.apply(choice).await;
+    let _ = restarted.apply(choice).await;
     assert_eq!(f.effects(), 2);
     assert_eq!(fs::read(f.root.join("review.json")).unwrap(), archived);
     assert!(!restarted.view().pending);
@@ -335,7 +336,7 @@ async fn second_confirmation_refuses_changed_selection_and_lost_choice_never_rot
         .await
         .unwrap()
         .unwrap();
-    owner.apply(choice).await;
+    let _ = owner.apply(choice).await;
     let original = fs::read(f.root.join("intent.json")).unwrap();
     let id = owner.view().request_id.unwrap();
     assert_eq!(
@@ -590,6 +591,28 @@ fn actual_reviewed_archive_needs_a_second_confirmation_before_its_only_rearm_and
             count,
             "Retry cannot refresh a Grant"
         );
+        // A previous settled receipt must not settle a later failed choice.
+        helpers.patch("refuse_choice", json!(true));
+        let refused = confirm_when_idle(
+            &running.service.shared.mode_transition,
+            ReviewAction::Background,
+        )
+        .await;
+        running
+            .service
+            .apply_mode_action(Some(refused))
+            .await
+            .unwrap();
+        assert!(
+            !running.service.shared.business_permitted(),
+            "a historical receipt is not THIS confirmed choice"
+        );
+        assert_eq!(
+            mutations(&running).len(),
+            count,
+            "a missing new receipt must not refresh ownership"
+        );
+        assert_eq!(helpers.effects(), 2);
         let native = running.source.0.join("current.json");
         let mut replaced: Value = serde_json::from_slice(&fs::read(&native).unwrap()).unwrap();
         replaced["owner_epoch"] = uuid::Uuid::new_v4().to_string().into();

@@ -370,9 +370,12 @@ impl Controller {
         .map_err(|_| "activation_confirmation_unavailable")?
     }
 
-    pub(in crate::desktop_service) async fn apply(self: &Arc<Self>, original: Prepared) {
+    pub(in crate::desktop_service) async fn apply(
+        self: &Arc<Self>,
+        original: Prepared,
+    ) -> Option<String> {
         let owner = self.clone();
-        let _ = tauri::async_runtime::spawn_blocking(move || {
+        tauri::async_runtime::spawn_blocking(move || {
             let Prepared {
                 display,
                 action,
@@ -386,7 +389,7 @@ impl Controller {
                 || owner.checked_target(&display, action).is_err()
             {
                 owner.failed("activation_scope_changed");
-                return;
+                return None;
             }
             if action == Action::Review {
                 // No Grant/Rearm, activation, new UUID or manager call here.
@@ -397,6 +400,7 @@ impl Controller {
                     resources.clone(),
                 );
                 owner.status(route, &display.configuration, resources);
+                None
             } else {
                 let id = uuid::Uuid::new_v4().to_string();
                 owner.reserve(id.clone(), display.configuration.clone(), route.clone());
@@ -407,15 +411,18 @@ impl Controller {
                     &id,
                 );
                 owner.lookup(
-                    id,
+                    id.clone(),
                     display.configuration.clone(),
                     route.clone(),
                     resources.clone(),
                 );
                 owner.status(route, &display.configuration, resources);
+                Some(id)
             }
         })
-        .await;
+        .await
+        .ok()
+        .flatten()
     }
     pub(in crate::desktop_service) async fn validate(
         self: &Arc<Self>,
@@ -564,6 +571,7 @@ impl Controller {
         grant: &crate::desktop_ownership::CurrentGrant,
         epoch: String,
         generation: u64,
+        offered: String,
     ) -> bool {
         let charge = match self.gate.admit(Role::Fleet) {
             Ok(c) => c,
@@ -578,6 +586,10 @@ impl Controller {
                     r.view.disposition == Disposition::ReviewedUnknown
                         && state.choice_capable
                         && !state.view.pending
+                        && state
+                            .intent
+                            .as_ref()
+                            .is_some_and(|i| i.id == offered && i.complete && i.joined)
                 })
                 .map(|r| (r.route.clone(), r.view.clone()))
         };
@@ -597,6 +609,11 @@ impl Controller {
                 &epoch,
                 generation,
             )?;
+            // A previous healthy background receipt cannot settle THIS new
+            // confirmation when its original was refused/missing or never offered.
+            if choice.request != offered {
+                return None;
+            }
             let bytes = owner.call_bounded(
                 route.clone(),
                 route.arguments(Some(&choice.request), false, false),

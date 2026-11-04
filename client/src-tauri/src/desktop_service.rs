@@ -745,12 +745,16 @@ impl Service {
             if action != ReviewAction::Review {
                 // Consent is for the original scope, not a later CLI upgrade or
                 // replacement endpoint discovered while the dialog was open.
-                match preflight(&self.shared,Arc::new(AtomicBool::new(false))).await {
-                    Ok(configuration) if configuration != prepared.configuration() => return Err("activation_scope_changed".into()),
+                match preflight(&self.shared, Arc::new(AtomicBool::new(false))).await {
+                    Ok(configuration) if configuration != prepared.configuration() => {
+                        return Err("activation_scope_changed".into())
+                    }
                     Ok(_) | Err("service_unavailable") => (),
                     Err(code) => return Err(code.into()),
                 }
-                if self.shared.read_checks_only() { return Err("manual_refresh_required".into()); }
+                if self.shared.read_checks_only() {
+                    return Err("manual_refresh_required".into());
+                }
             }
             // Review never reaches this branch. A new background choice may make
             // its explicit Rearm against the current connected service; an absent
@@ -786,8 +790,10 @@ impl Service {
             if action != ReviewAction::Review && self.shared.read_checks_only() {
                 return Err("manual_refresh_required".into());
             }
-            self.shared.mode_transition.apply(prepared).await;
-            if action == ReviewAction::Background && !self.shared.read_checks_only() {
+            let offered = self.shared.mode_transition.apply(prepared).await;
+            if let Some(offered) = offered
+                .filter(|_| action == ReviewAction::Background && !self.shared.read_checks_only())
+            {
                 // This continuation still belongs to the SECOND confirmation.
                 // No status/Retry/backoff callback can enter this positive path.
                 let stop = Arc::new(AtomicBool::new(false));
@@ -803,8 +809,9 @@ impl Service {
                             if self
                                 .shared
                                 .mode_transition
-                                .business_allowed(&grant, epoch, generation)
-                                .await && !self.shared.read_checks_only()
+                                .business_allowed(&grant, epoch, generation, offered)
+                                .await
+                                && !self.shared.read_checks_only()
                             {
                                 let _ = STARTUP_RECOVERY.compare_exchange(
                                     1,
@@ -828,7 +835,8 @@ impl Service {
                                     )
                                     .await;
                                 }
-                                if self.shared.business_permitted() && !stop.load(Ordering::Acquire) {
+                                if self.shared.business_permitted() && !stop.load(Ordering::Acquire)
+                                {
                                     self.shared.ownership.keep_epoch_refresh(grant, stop).await;
                                 }
                             }

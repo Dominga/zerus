@@ -54,11 +54,38 @@ export function retainedSourceNotice(state: DesktopService | undefined): string 
   if (captureNotice) return captureNotice;
   if (drafts?.paused) return tr("Importing drafts from Qt is paused because the earlier drafts could not be recorded. New drafts are saved.");
   if (report?.worktree_cache_capture?.paused) return tr("Saving folder catalogs is paused while their original cache is preserved. Fresh folder queries and session creation remain available.");
+  // Persistence pauses above remain first. Among reports, review and active
+  // preparation take precedence over a deferred sibling. Details keep every
+  // source's independent reason, regardless of which notice is shown.
+  const notices: { text: string; priority: number }[] = [];
+  const creations = report?.creations_report;
+  if (creations?.required && !creations.complete) {
+    if (creations.running) notices.push({ text: tr("Preparing the saved creation report. Your sessions remain available."), priority: 1 });
+    else if (creations.phase !== "unknown" && ["creations_import_waiting", "creations_import_source_resources_pending", "creations_import_handoff_busy", "creations_import_before_record"].includes(creations.code)) notices.push({ text: tr("The saved creation report is deferred. Your sessions remain available; Retry keeps the original report identity."), priority: 0 });
+    else notices.push({ text: tr("The saved creation report needs review. An unconfirmed publication will only be looked up, never resent."), priority: 2 });
+  }
+  if (report?.required && report.code && report.code !== "retained_import_staged") {
+    if (report.running) notices.push({ text: tr("Preparing the migration report. Your sessions remain available."), priority: 1 });
+    else if (report.phase !== "unknown" && ["retained_import_handoff_busy", "retained_import_source_resources_pending"].includes(report.code)) notices.push({ text: tr("The migration report is deferred while background work is running."), priority: 0 });
+    else notices.push({ text: tr("The migration report needs review. Your sessions remain available."), priority: 2 });
+  }
+  const local = report?.local_reads_report;
+  if (local?.required && !local.complete) {
+    if (local.running) notices.push({ text: tr("Preparing the historical local read-mark report. Your sessions remain available."), priority: 1 });
+    else if (local.phase !== "unknown" && ["local_reads_import_waiting", "local_reads_import_source_resources_pending", "local_reads_import_handoff_busy", "local_reads_import_before_record"].includes(local.code)) notices.push({ text: tr("The historical local read-mark report is deferred. Retry keeps the original report identity."), priority: 0 });
+    else notices.push({ text: tr("The historical local read-mark report needs review. An unconfirmed publication will only be looked up, never resent."), priority: 2 });
+  }
+  const cache = report?.worktree_cache_report;
+  if (cache?.required && !cache.complete) {
+    if (cache.running) notices.push({ text: tr("Preparing the historical folder catalog report. Your sessions remain available."), priority: 1 });
+    else if (cache.phase !== "unknown" && ["worktree_cache_import_waiting", "worktree_cache_import_source_resources_pending", "worktree_cache_import_handoff_busy", "worktree_cache_import_before_record"].includes(cache.code)) notices.push({ text: tr("The historical folder catalog report is deferred. Retry keeps the original report identity."), priority: 0 });
+    else notices.push({ text: tr("The historical folder catalog report needs review. An unconfirmed publication will only be looked up, never resent."), priority: 2 });
+  }
   const downloadsReport = report?.downloads_report;
   if (downloadsReport?.required && !downloadsReport.complete) {
-    if (downloadsReport.running) return tr("Preparing the historical downloaded files report. Your sessions remain available.");
-    if (downloadsReport.phase !== "unknown" && ["downloads_import_waiting", "downloads_import_source_resources_pending", "downloads_import_handoff_busy", "downloads_import_before_record"].includes(downloadsReport.code)) return tr("The historical downloaded files report is deferred. Retry keeps the original report identity.");
-    return tr("The historical downloaded files report needs review. An unconfirmed publication will only be looked up, never resent.");
+    if (downloadsReport.running) notices.push({ text: tr("Preparing the historical downloaded files report. Your sessions remain available."), priority: 1 });
+    else if (downloadsReport.phase !== "unknown" && ["downloads_import_waiting", "downloads_import_source_resources_pending", "downloads_import_handoff_busy", "downloads_import_before_record"].includes(downloadsReport.code)) notices.push({ text: tr("The historical downloaded files report is deferred. Retry keeps the original report identity."), priority: 0 });
+    else notices.push({ text: tr("The historical downloaded files report needs review. An unconfirmed publication will only be looked up, never resent."), priority: 2 });
   }
   // A not-captured or partial drafts report is permanent and shown in the
   // Migration report; it needs no banner of its own. Before the capture's
@@ -66,32 +93,13 @@ export function retainedSourceNotice(state: DesktopService | undefined): string 
   // above already explain a refused capture.
   const draftsReport = draftsReportStarted(report) ? report?.drafts_report : undefined;
   if (draftsReport?.required && !draftsReport.complete) {
-    if (draftsReport.running) return tr("Preparing the historical drafts report. Your sessions remain available.");
-    if (draftsReport.phase !== "unknown" && DRAFTS_REPORT_DEFERRED.includes(draftsReport.code)) return tr("The historical drafts report is deferred. Retry keeps the original report identity.");
-    if (!draftsReport.partial && draftsReport.code !== "drafts_import_capture_unavailable") return tr("The historical drafts report needs review. An unconfirmed publication will only be looked up, never resent.");
+    if (draftsReport.running) notices.push({ text: tr("Preparing the historical drafts report. Your sessions remain available."), priority: 1 });
+    else if (draftsReport.phase !== "unknown" && DRAFTS_REPORT_DEFERRED.includes(draftsReport.code)) notices.push({ text: tr("The historical drafts report is deferred. Retry keeps the original report identity."), priority: 0 });
+    else if (!draftsReport.partial && draftsReport.code !== "drafts_import_capture_unavailable") notices.push({ text: tr("The historical drafts report needs review. An unconfirmed publication will only be looked up, never resent."), priority: 2 });
   }
-  const local = report?.local_reads_report;
-  if (local?.required && !local.complete) {
-    if (local.running) return tr("Preparing the historical local read-mark report. Your sessions remain available.");
-    if (local.phase !== "unknown" && ["local_reads_import_waiting", "local_reads_import_source_resources_pending", "local_reads_import_handoff_busy", "local_reads_import_before_record"].includes(local.code)) return tr("The historical local read-mark report is deferred. Retry keeps the original report identity.");
-    return tr("The historical local read-mark report needs review. An unconfirmed publication will only be looked up, never resent.");
-  }
-  const creations = report?.creations_report;
-  if (creations?.required && !creations.complete) {
-    if (creations.running) return tr("Preparing the saved creation report. Your sessions remain available.");
-    if (["creations_import_waiting", "creations_import_source_resources_pending", "creations_import_handoff_busy", "creations_import_before_record"].includes(creations.code)) return tr("The saved creation report is deferred. Your sessions remain available; Retry keeps the original report identity.");
-    return tr("The saved creation report needs review. An unconfirmed publication will only be looked up, never resent.");
-  }
-  const cache = report?.worktree_cache_report;
-  if (cache?.required && !cache.complete) {
-    if (cache.running) return tr("Preparing the historical folder catalog report. Your sessions remain available.");
-    if (cache.phase !== "unknown" && ["worktree_cache_import_waiting", "worktree_cache_import_source_resources_pending", "worktree_cache_import_handoff_busy", "worktree_cache_import_before_record"].includes(cache.code)) return tr("The historical folder catalog report is deferred. Retry keeps the original report identity.");
-    return tr("The historical folder catalog report needs review. An unconfirmed publication will only be looked up, never resent.");
-  }
-  if (!report?.required || !report.code || report.code === "retained_import_staged") return "";
-  if (report.running) return tr("Preparing the migration report. Your sessions remain available.");
-  if (report.code === "retained_import_handoff_busy") return tr("The migration report is deferred while background work is running.");
-  return tr("The migration report needs review. Your sessions remain available.");
+  return notices.find(notice => notice.priority === 2)?.text
+    ?? notices.find(notice => notice.priority === 1)?.text
+    ?? notices[0]?.text ?? "";
 }
 
 /** Draft capture outcomes that recorded the earlier drafts (or found none). */

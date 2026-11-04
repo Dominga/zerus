@@ -264,6 +264,16 @@ impl Fixture {
         Arc<Service>,
         crate::desktop_service::frontend::tests::native::CacheServer,
     ) {
+        self.service_observed(extra, Vec::new())
+    }
+    fn service_observed(
+        &self,
+        extra: Value,
+        projections: Vec<Projection>,
+    ) -> (
+        Arc<Service>,
+        crate::desktop_service::frontend::tests::native::CacheServer,
+    ) {
         use crate::desktop_service::frontend::tests::native::{responder, CacheServer};
         let source = Path::new(env!("CARGO_MANIFEST_DIR")).join("src");
         fs::remove_file(self.root.join("hgs")).unwrap();
@@ -299,6 +309,7 @@ impl Fixture {
             drain,
             Some(responder),
             Observers {
+                projections,
                 retained_sources: Some(self.report.inputs.clone()),
                 ..Default::default()
             },
@@ -729,4 +740,226 @@ fn the_download_status_follows_a_folder_change_at_once() {
         f.report.status()["downloads_capture"]["code"],
         "download_capture_captured"
     );
+}
+
+#[cfg(target_os = "linux")]
+#[test]
+fn report_completion_wakes_the_next_group_without_watch_frames() {
+    use crate::desktop_service::tests::eventually;
+    use migration::creation_report::Group;
+    let _process = crate::PROCESS_TREE.read().unwrap();
+    tauri::async_runtime::block_on(async {
+        let f = Fixture::new("success");
+        let frames = Arc::new(Mutex::new(Vec::new()));
+        let observed = frames.clone();
+        let (service, _cache) = f.service_observed(
+            json!({"silent_watch":true}),
+            vec![Arc::new(move |frame| {
+                if let Some(frame) = frame {
+                    observed.lock().unwrap().push(frame["t"].clone());
+                }
+            })],
+        );
+        let report = service.shared.retained_import.as_ref().unwrap().clone();
+        eventually("silent connected service after Qt drains", || {
+            service.snapshot().connected
+                && service.shared.report_frame_finished.load(Ordering::Acquire) == 1
+                && report.status()["complete"] == true
+                && report.work.snapshot().unwrap().count(Role::Operations) == 0
+        })
+        .await;
+        // Queue both ready groups behind one real admission. Creations has a
+        // verified missing source, so its worker uses no publisher/pipe and
+        // releases Work before processing completion. Only the completion
+        // schedule_current (not a later resource Drop) can wake LocalReads.
+        let held = report.work.admit(Role::Operations).unwrap();
+        report.inputs.creations.prepare().unwrap();
+        zerus_client_core::fsx::write_private_durable(
+            &f.root.join("attention-marks.json"),
+            br#"{"version":1,"marks":[],"replies":[]}"#,
+        )
+        .unwrap();
+        report.inputs.local_reads.prepare().unwrap();
+        assert_eq!(
+            report.group_status(Group::LocalReads)["code"],
+            "local_reads_import_waiting"
+        );
+        assert_eq!(f.attempts(), 1);
+        drop(held);
+        // One initial dispatch only; no subsequent frame, explicit scheduling
+        // or reconnect can conceal a missing completion wake.
+        creations::schedule_current(&service.shared);
+        eventually(
+            "completion alone publishes the next historical group",
+            || report.group_status(Group::LocalReads)["phase"] == "published",
+        )
+        .await;
+        assert_eq!(report.group_status(Group::Creations)["required"], false);
+        assert_eq!(report.group_status(Group::Creations)["complete"], true);
+        assert_eq!(f.attempts(), 2);
+        assert_eq!(*frames.lock().unwrap(), vec![json!("hello")]);
+        assert_eq!(
+            f.calls()
+                .iter()
+                .filter(|c| c["args"] == json!(["desktop", "watch", "--json"]))
+                .count(),
+            1
+        );
+        assert!(service.snapshot().connected && service.shared.ownership.granted());
+        service.stop();
+        service.join().await.unwrap();
+    });
+}
+
+#[cfg(target_os = "linux")]
+#[test]
+fn report_qt_retry_waiting_for_a_group_completes_without_watch_or_reconnect() {
+    use crate::desktop_service::tests::eventually;
+    let _process = crate::PROCESS_TREE.read().unwrap();
+    tauri::async_runtime::block_on(async {
+        let f = Fixture::new("busy");
+        let frames = Arc::new(Mutex::new(Vec::new()));
+        let observed = frames.clone();
+        let (service, _cache) = f.service_observed(
+            json!({"silent_watch":true}),
+            vec![Arc::new(move |frame| {
+                if let Some(frame) = frame {
+                    observed.lock().unwrap().push(frame["t"].clone());
+                }
+            })],
+        );
+        let report = service.shared.retained_import.as_ref().unwrap().clone();
+        eventually("original Qt negative and connected silent service", || {
+            service.snapshot().connected
+                && service.shared.report_frame_finished.load(Ordering::Acquire) == 1
+                && report.status()["phase"] == "not_committed"
+                && report.work.snapshot().unwrap().count(Role::Operations) == 0
+        })
+        .await;
+        let original = report.status();
+        f.mode("hold");
+        zerus_client_core::fsx::write_private_durable(
+            &f.root.join("creations.json"),
+            br#"{"schema":1,"operations":{},"opaque":"before-load"}"#,
+        )
+        .unwrap();
+        report.inputs.creations.prepare().unwrap();
+        eventually("original group holds the report slot", || {
+            f.root.join("holding").exists()
+        })
+        .await;
+        let relay = service.shared.relay.lock().unwrap().clone().unwrap();
+        let stop = service.shared.cancellation.lock().unwrap().clone().unwrap();
+        report.request_retry();
+        // The same explicit-Retry hook used by connection, without reconnect
+        // or a new hello concealing a lost completion wake.
+        before_grant(
+            &service.shared,
+            relay,
+            "a".repeat(64),
+            stop,
+            report.take_retry(),
+        )
+        .await;
+        assert_eq!(
+            report.status()["code"],
+            "retained_import_source_resources_pending"
+        );
+        assert_eq!(f.attempts(), 2);
+        assert!(service.snapshot().connected && service.shared.ownership.granted());
+        f.mode("success");
+        fs::write(f.root.join("release"), b"release original child").unwrap();
+        eventually(
+            "the explicit Qt retry resumes after the group drains",
+            || report.status()["phase"] == "published",
+        )
+        .await;
+        let settled = report.status();
+        assert_eq!(settled["import_id"], original["import_id"]);
+        assert_eq!(settled["import_record"], original["import_record"]);
+        assert_eq!(f.attempts(), 3);
+        assert_eq!(*frames.lock().unwrap(), vec![json!("hello")]);
+        assert_eq!(
+            f.calls()
+                .iter()
+                .filter(|c| c["args"] == json!(["desktop", "watch", "--json"]))
+                .count(),
+            1
+        );
+        assert!(service.snapshot().connected && service.shared.ownership.granted());
+        service.stop();
+        service.join().await.unwrap();
+    });
+}
+
+#[cfg(target_os = "linux")]
+#[test]
+fn report_slot_wakes_only_after_the_last_original_resource_and_never_after_stop() {
+    use crate::desktop_service::tests::eventually;
+    use migration::creation_report::Group;
+    let _process = crate::PROCESS_TREE.read().unwrap();
+    tauri::async_runtime::block_on(async {
+        for stopped in [false, true] {
+            let f = Fixture::new("success");
+            let frames = Arc::new(Mutex::new(Vec::new()));
+            let observed = frames.clone();
+            let (service, _cache) = f.service_observed(
+                json!({"silent_watch":true}),
+                vec![Arc::new(move |frame| {
+                    if let Some(frame) = frame {
+                        observed.lock().unwrap().push(frame["t"].clone());
+                    }
+                })],
+            );
+            let report = service.shared.retained_import.as_ref().unwrap().clone();
+            eventually("initial Qt report physically drained", || {
+                service.snapshot().connected
+                    && service.shared.report_frame_finished.load(Ordering::Acquire) == 1
+                    && report.status()["complete"] == true
+                    && report.work.snapshot().unwrap().count(Role::Operations) == 0
+            })
+            .await;
+            let completion = Arc::new(std::sync::atomic::AtomicU8::new(0));
+            let resource = work_resources(
+                &service.shared,
+                report.work.admit(Role::Operations).unwrap(),
+                completion.clone(),
+            );
+            let original_pipe = resource.clone();
+            zerus_client_core::fsx::write_private_durable(
+                &f.root.join("attention-marks.json"),
+                br#"{"version":1,"marks":[],"replies":[]}"#,
+            )
+            .unwrap();
+            report.inputs.local_reads.prepare().unwrap();
+            assert_eq!(
+                report.group_status(Group::LocalReads)["code"],
+                "local_reads_import_source_resources_pending"
+            );
+            // The logical worker finished; its original pipe still owns the
+            // same admission. Dropping the caller is never physical drain.
+            completion.fetch_or(FINISHED, Ordering::AcqRel);
+            drop(resource);
+            assert_eq!(report.work.snapshot().unwrap().count(Role::Operations), 1);
+            assert_eq!(f.attempts(), 1);
+            if stopped {
+                service.stop();
+            }
+            drop(original_pipe);
+            if stopped {
+                service.join().await.unwrap();
+                assert_eq!(report.work.snapshot().unwrap().count(Role::Operations), 0);
+                assert_eq!(f.attempts(), 1);
+            } else {
+                eventually("last original resource schedules pending report", || {
+                    report.group_status(Group::LocalReads)["phase"] == "published"
+                })
+                .await;
+                assert_eq!(f.attempts(), 2);
+                assert_eq!(*frames.lock().unwrap(), vec![json!("hello")]);
+                service.stop();
+                service.join().await.unwrap();
+            }
+        }
+    });
 }

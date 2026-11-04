@@ -27,6 +27,7 @@ pub use windows::*;
 /// Whether a console belongs to this process alone: it has a window and no other
 /// process, such as the user's shell, is attached. Windows creates one for a
 /// console program whose starter gave it none (a logon task, COM activation).
+#[cfg(any(windows, test))]
 pub fn private_console(window: bool, attached: u32) -> bool {
     window && attached == 1
 }

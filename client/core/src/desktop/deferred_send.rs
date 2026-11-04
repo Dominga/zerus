@@ -173,6 +173,18 @@ impl Binding {
         self.valid()
             .then(|| hash(&serde_json::to_vec(self).expect("fixed send binding")))
     }
+    /// Whether this binding names exactly `plan`: every field it repeats,
+    /// and the plan's own fingerprint. A declared digest never overrides a
+    /// conflicting original field.
+    pub fn agrees(&self, plan: &Plan) -> bool {
+        self.session == plan.session
+            && self.request_id == plan.request_id
+            && self.run_id == plan.run_id
+            && self.conversation_id == plan.conversation_id
+            && self.message_sha256 == plan.message_sha256
+            && self.input_sha256 == plan.input_sha256
+            && plan.fingerprint().as_deref() == Some(self.plan_sha256.as_str())
+    }
 }
 
 pub struct Verified {
@@ -405,19 +417,13 @@ impl Receipt {
     /// Whether this exact original's drained receipt proves that its child
     /// never started. Nothing ran, so the message counts as never sent.
     pub fn not_started(&self, plan: &Plan) -> bool {
-        self.valid()
-            && self.drained
-            && plan.fingerprint().as_deref() == Some(self.binding.plan_sha256.as_str())
-            && self.phase == Phase::Failed
+        self.valid() && self.drained && self.binding.agrees(plan) && self.phase == Phase::Failed
     }
     /// Only the exact original's drained receipt settles it: Recorded is the
     /// CLI's own submission receipt, Failed the closed no-spawn boundary.
     /// Queued, Running and Unknown never settle, and nothing is resent.
     pub fn result(&self, plan: &Plan) -> Option<Result<(), String>> {
-        if !self.valid()
-            || !self.drained
-            || plan.fingerprint().as_deref() != Some(self.binding.plan_sha256.as_str())
-        {
+        if !self.valid() || !self.drained || !self.binding.agrees(plan) {
             return None;
         }
         match self.phase {
@@ -477,7 +483,10 @@ impl Lookup {
             && self.scope == query.scope
             && self.found == self.receipt.is_some()
             && self.receipt.as_ref().is_none_or(|receipt| {
+                // The receipt's own immutable configuration is the queried
+                // one; its admission epoch stays its own.
                 receipt.valid()
+                    && receipt.binding.configuration == query.scope.configuration
                     && receipt.binding.session == query.session
                     && receipt.binding.request_id == query.request_id
                     && receipt.binding.plan_sha256 == query.plan_sha256

@@ -309,6 +309,32 @@ fn only_a_drained_submitted_receipt_or_the_no_spawn_boundary_settles() {
     other_plan.input_sha256 = "d".repeat(64);
     assert_eq!(recorded.result(&other_plan), None);
     assert!(!failed.not_started(&other_plan));
+    // The declared plan digest never overrides a conflicting original field
+    // the binding repeats, for Recorded and Failed alike.
+    type Change = fn(&mut Binding);
+    let changes: [(&str, Change); 6] = [
+        ("session", |b| b.session = "claude/other-send".into()),
+        ("request", |b| {
+            b.request_id = "00000000-0000-4000-8000-000000000001".into()
+        }),
+        ("run", |b| b.run_id = "run-2".into()),
+        ("conversation", |b| {
+            b.conversation_id = "conversation-2".into()
+        }),
+        ("input", |b| b.input_sha256 = "d".repeat(64)),
+        ("message", |b| b.message_sha256 = "d".repeat(64)),
+    ];
+    for (name, change) in changes {
+        let mut changed = recorded.clone();
+        change(&mut changed.binding);
+        assert!(changed.valid(), "{name}: a valid shape");
+        assert_eq!(changed.result(plan), None, "{name}");
+        let mut changed = failed.clone();
+        change(&mut changed.binding);
+        assert!(changed.valid(), "{name}: a valid shape");
+        assert_eq!(changed.result(plan), None, "{name}");
+        assert!(!changed.not_started(plan), "{name}");
+    }
 }
 
 #[test]
@@ -366,6 +392,20 @@ fn a_lookup_matches_only_its_own_query() {
     let mut other_query = query.clone();
     other_query.plan_sha256 = "e".repeat(64);
     assert!(!found.matches(&other_query));
+    // Another configuration's receipt, even in this scope's reply, is never
+    // this query's.
+    let mut foreign = found.clone();
+    if let Some(receipt) = foreign.receipt.as_mut() {
+        receipt.binding.configuration = "b".repeat(64);
+        assert!(receipt.valid());
+    }
+    assert!(!foreign.matches(&query));
+    // The historical admission epoch stays separate from the current scope.
+    let mut admitted_earlier = found.clone();
+    if let Some(receipt) = admitted_earlier.receipt.as_mut() {
+        receipt.admission_epoch = "00000000-0000-4000-8000-000000000093".into();
+    }
+    assert!(admitted_earlier.matches(&query));
 }
 
 #[test]

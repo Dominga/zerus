@@ -159,6 +159,101 @@ pub fn run_accounted(
     cancel: &AtomicBool,
     resources: Arc<dyn Send + Sync>,
 ) -> Result<Exit, Stopped> {
+    accounted(
+        hgs,
+        inv,
+        parent_env,
+        stdout_cap,
+        cancel,
+        resources,
+        Pipes::default(),
+    )
+}
+
+/// Routing data only. This neither selects a program nor authorizes a call.
+/// Preserve non-Unicode values and the original working directory; never log it.
+#[derive(Clone, PartialEq, Eq)]
+pub struct FrozenEnvironment {
+    values: Vec<(std::ffi::OsString, std::ffi::OsString)>,
+    directory: std::path::PathBuf,
+}
+impl FrozenEnvironment {
+    pub fn capture() -> std::io::Result<Self> {
+        let mut values = Vec::new();
+        let mut bytes = 0usize;
+        for (key, value) in std::env::vars_os() {
+            let size = key
+                .as_encoded_bytes()
+                .len()
+                .saturating_add(value.as_encoded_bytes().len());
+            bytes = bytes.saturating_add(size);
+            if values.len() == 1024 || size > 65536 || bytes > 1 << 20 {
+                return Err(std::io::ErrorKind::InvalidData.into());
+            }
+            values.push((key, value));
+        }
+        let mut values = crate::child_environment::restored(values);
+        values.retain(|(key, _)| key != "HGS_SESSION" && key != "HGS_RUN_ID");
+        values.sort();
+        Ok(Self {
+            values,
+            directory: std::env::current_dir()?,
+        })
+    }
+    pub fn current(&self) -> bool {
+        Self::capture().is_ok_and(|now| &now == self)
+    }
+    pub fn apply(&self, command: &mut Command) {
+        command
+            .env_clear()
+            .envs(self.values.iter().cloned())
+            .current_dir(&self.directory)
+            .env_remove("HGS_SESSION")
+            .env_remove("HGS_RUN_ID");
+    }
+}
+
+/// The existing accounted runner with fixed routing environment and a final
+/// caller-supplied spawn check. Invocation timeouts are unchanged (no 30s cap).
+/// Resources remain charged through actual child and pipe lifetime, including
+/// a bounded error return. Neither this API nor its environment grants consent.
+pub fn run_accounted_frozen(
+    hgs: &Path,
+    inv: &Invocation,
+    environment: &FrozenEnvironment,
+    stdout_cap: usize,
+    cancel: &AtomicBool,
+    resources: Arc<dyn Send + Sync>,
+    before_spawn: impl FnOnce() -> std::io::Result<()> + Send + 'static,
+) -> Result<Exit, Stopped> {
+    let environment = environment.clone();
+    accounted(
+        hgs,
+        inv,
+        &[],
+        stdout_cap,
+        cancel,
+        resources,
+        Pipes {
+            clear_environment: true,
+            spawn: Some(Box::new(move |command| {
+                environment.apply(command);
+                before_spawn()?;
+                command.spawn()
+            })),
+            ..Pipes::default()
+        },
+    )
+}
+fn accounted(
+    hgs: &Path,
+    inv: &Invocation,
+    parent_env: &[(&str, &str)],
+    stdout_cap: usize,
+    cancel: &AtomicBool,
+    resources: Arc<dyn Send + Sync>,
+    mut pipes: Pipes,
+) -> Result<Exit, Stopped> {
     if cancel.load(Ordering::Acquire) {
         return Err(Stopped::Cancelled);
     }
@@ -167,20 +262,12 @@ pub fn run_accounted(
         resources: Some(resources.clone()),
         exited: child_exited.clone(),
     };
-    let result = run_inner(
-        hgs,
-        inv,
-        parent_env,
-        &[],
-        stdout_cap,
-        Some(cancel),
-        Pipes {
-            readers: Some(resources),
-            retain_all: true,
-            child_exited: Some(child_exited.clone()),
-            ..Pipes::default()
-        },
-    );
+    let result = run_inner(hgs, inv, parent_env, &[], stdout_cap, Some(cancel), {
+        pipes.readers = Some(resources);
+        pipes.retain_all = true;
+        pipes.child_exited = Some(child_exited.clone());
+        pipes
+    });
     if matches!(result, Ok(Exit::StartFailed(_))) {
         child_exited.store(true, Ordering::Release);
     }
@@ -949,6 +1036,97 @@ fn reader(
         let _ = done.send(eof);
     });
     buffer
+}
+
+#[cfg(test)]
+mod frozen_tests {
+    use super::*;
+    const MARKER: &str = "ZERUS_FROZEN_RUN_CHILD";
+    #[test]
+    fn child() {
+        let Some(mode) = std::env::var(MARKER).ok() else {
+            return;
+        };
+        if mode == "wait" {
+            thread::sleep(Duration::from_secs(31));
+            println!("original invocation timeout preserved");
+            return;
+        }
+        assert_eq!(mode, "environment");
+        assert!(std::env::var_os("PATH").is_none());
+        assert_eq!(std::env::var_os("ZERUS_FROZEN_EMPTY"), Some("".into()));
+        assert_eq!(std::env::var_os("HGS_SESSION"), None);
+        assert_eq!(std::env::var_os("HGS_RUN_ID"), None);
+        let raw = std::env::var_os("ZERUS_FROZEN_RAW").unwrap();
+        assert!(raw.to_str().is_none());
+        assert_eq!(
+            std::env::current_dir().unwrap(),
+            std::path::PathBuf::from(std::env::var_os("ZERUS_FROZEN_DIR").unwrap())
+        );
+        println!("frozen native environment preserved");
+    }
+    fn call(environment: &FrozenEnvironment) -> Exit {
+        let invocation = Invocation {
+            args: [
+                "--exact",
+                "run::frozen_tests::child",
+                "--nocapture",
+                "--test-threads=1",
+            ]
+            .map(String::from)
+            .to_vec(),
+            stdin: None,
+            timeout: Duration::from_secs(45),
+            request_id: None,
+        };
+        run_accounted_frozen(
+            &std::env::current_exe().unwrap(),
+            &invocation,
+            environment,
+            4096,
+            &AtomicBool::new(false),
+            Arc::new(()),
+            || Ok(()),
+        )
+        .unwrap()
+    }
+    #[test]
+    fn a_real_child_receives_exact_frozen_native_values_and_absence() {
+        let mut environment = FrozenEnvironment::capture().unwrap();
+        assert!(environment.current());
+        environment.values.retain(|(key, _)| key != "PATH");
+        environment
+            .values
+            .push((MARKER.into(), "environment".into()));
+        environment
+            .values
+            .push(("ZERUS_FROZEN_EMPTY".into(), "".into()));
+        #[cfg(unix)]
+        let raw = {
+            use std::os::unix::ffi::OsStringExt;
+            std::ffi::OsString::from_vec(vec![0xff])
+        };
+        #[cfg(windows)]
+        let raw = {
+            use std::os::windows::ffi::OsStringExt;
+            std::ffi::OsString::from_wide(&[0xd800])
+        };
+        environment.values.push(("ZERUS_FROZEN_RAW".into(), raw));
+        environment.directory = std::env::temp_dir().canonicalize().unwrap();
+        environment.values.push((
+            "ZERUS_FROZEN_DIR".into(),
+            environment.directory.as_os_str().to_owned(),
+        ));
+        assert!(matches!(call(&environment), Exit::Code {code:0, stdout, ..}
+            if String::from_utf8_lossy(&stdout).contains("frozen native environment preserved")));
+    }
+    #[test]
+    fn the_native_runner_still_allows_an_original_over_thirty_seconds() {
+        let mut environment = FrozenEnvironment::capture().unwrap();
+        environment.values.push((MARKER.into(), "wait".into()));
+        assert!(matches!(call(&environment), Exit::Code {code:0, stdout, ..}
+            if String::from_utf8_lossy(&stdout).contains("original invocation timeout preserved")));
+    }
 }
 
 #[cfg(test)]

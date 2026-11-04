@@ -1,7 +1,7 @@
 # Original termination outcome retention
 
 The service retains the original explicit Remove-after-Terminate capture through
-`desktop-termination-outcome-v1`. This leaf stores data only. It neither invokes
+`desktop-termination-outcome-v1`. The retention boundary stores data only. It neither invokes
 Terminate nor authorizes cleanup, establishes current checkout ownership, or
 reports native resource drain. The native Terminate runner keeps its existing
 45-second local and 60-second peer budgets; this path does not move it to the
@@ -39,6 +39,50 @@ selected configuration and original Terminate UUID, plus its own query UUID.
 It returns bounded identity/hash metadata, never the captured paths or raw input.
 Missing is explicit, and corrupt or conflicting data refuses rather than becoming
 an empty result. Neither status nor a retained acknowledgement grants retry,
-execution, removal or resource release. Native UI submission and background
-receipt reconciliation remain separate work; this leaf supplies their typed
-retention boundary without an additional executor.
+execution, removal or resource release. The native submission described below
+consumes this typed retention boundary; background receipt reconciliation
+remains separate work, without an additional Terminate executor.
+
+## Native submission
+
+In service mode, the existing native Remove confirmation consumes its opaque
+Offer once and freezes the original Terminate UUID, input and machine-guarded
+invocation before dispatch. The read-only offer retains its selected service
+relay, helper image, configuration/epoch/generation and native environment;
+confirmation carries that same selection without selecting another helper. It
+uses that same helper and environment for capability probes, inspection,
+retention and the one native call. A failed retention never selects the ordinary
+CLI or falls back to a different action. Ordinary/native and replay paths keep
+their existing behavior.
+
+The controller checks the actual selected configuration through desktop status,
+then uses a fresh original-child registration for retention. A lost reply may
+query only the original UUID, while the same live controller has never invoked
+Terminate and all old helper/pipe resources have physically finished. Missing,
+corrupt, unknown, foreign or cleanup-authorizing responses refuse. After every
+slow retention/guard/delay check, the dispatcher rechecks the captured session
+and current helper, routing, configuration, environment and cancellation.
+
+Immediately before calling the existing runner, a one-way process-local stage
+changes to DispatchBegun. Failure, timeout, GUI exit or a later status cannot
+restore it. The original 45-second local / 60-second peer invocation remains;
+the metadata RPC's owned runner and its 30-second cap are not used for Terminate.
+Original machine guards, scoped receipt validation, completion/Pump hooks and
+Quit/exit-work behavior remain intact. A metadata acknowledgement is never a
+successful termination receipt or cleanup proposal.
+
+The same Actions claim is retained by actual I/O resources, including after a
+cancelled/dropped async caller or bounded error with a pipe still open. Fixed
+native environment snapshots preserve OS strings, empty/unset values and the
+working directory, apply the existing WebKit child environment restoration, and
+strip person-action attribution as before. Retained snapshots are bounded; OS
+environment enumeration itself still uses the standard library's snapshot.
+
+The native cleanup owner keeps at most 64 process-local correlation records.
+They preserve the original intent and offered/dispatch bookkeeping, and cannot
+construct a controller. This confirmation path keeps an unconfirmed native run
+fenced across session, alias or conversation changes. These records are not yet
+a durable client
+recovery journal: restart observation and service-owned receipt reconciliation
+remain separate follow-up work. No stored metadata can submit a recovered
+Terminate or remove a checkout.

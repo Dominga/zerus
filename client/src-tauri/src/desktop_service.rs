@@ -59,6 +59,7 @@ mod read_import;
 mod reconnect;
 pub(crate) mod retained_import;
 mod status;
+pub(crate) mod termination_outcome;
 
 /// Registered at setup before start_source. Some contains a verified service
 /// watch frame; None invalidates the prior projection. Callbacks must not block.

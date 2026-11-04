@@ -764,6 +764,22 @@ pub(crate) fn task_bindings() -> Result<Vec<Value>> {
     task_bindings_in(&root())
 }
 
+/// The durable session ID of this computer's live or saved session `name`,
+/// from its record or provider binding (zerus-ucck P2c); None for an archive,
+/// an ID-less record or no session.
+// The swarm's tests resolve their own sessions, never the real state.
+#[cfg_attr(test, allow(dead_code))]
+pub(crate) fn session_id_of(name: &str) -> Option<String> {
+    let record = record_path(name)
+        .exists()
+        .then(|| read(name).ok())
+        .flatten()
+        .or_else(|| dsh::binding(name).ok())
+        .or_else(|| opencode::binding(name).ok())?;
+    let id = string(&record, "session_id");
+    (session_id::canonical(id) && string(&record, "archive_id").is_empty()).then(|| id.to_owned())
+}
+
 /// The record fields task routing reads (`tasks::sessions`).
 const TASK_BINDING_FIELDS: [&str; 6] = ["name", "run_id", "launch_id", "journal_name", "legacy_shadow", "rename_shadow"];
 

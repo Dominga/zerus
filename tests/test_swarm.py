@@ -46,6 +46,18 @@ if (root / ('preference-' + alias)).exists():
     output = json.loads(result.stdout)
     if 'kinds' in output: output['kinds'] = [kind for kind in output['kinds'] if kind != 'order']
     print(json.dumps(output)); sys.exit(0)
+if (root / ('nosessionid-' + alias)).exists():
+    # A member from before session membership by ID: it lists the kinds it
+    # accepts, without "session_id", and rejects that kind.
+    request = sys.stdin.read()
+    if args[1:] == ['exchange'] and any(op['key']['kind'] == 'session_id' for op in json.loads(request)['operations']):
+        print('unknown variant from a newer member', file=sys.stderr); sys.exit(1)
+    result = subprocess.run([os.environ['SWARM_TEST_HGS'], *args], input=request, env=env, text=True, capture_output=True)
+    sys.stderr.write(result.stderr)
+    if result.returncode: sys.exit(result.returncode)
+    output = json.loads(result.stdout)
+    if 'kinds' in output: output['kinds'] = [kind for kind in output['kinds'] if kind != 'session_id']
+    print(json.dumps(output)); sys.exit(0)
 if not (root / ('old-' + alias)).exists():
     os.execve(os.environ['SWARM_TEST_HGS'], [os.environ['SWARM_TEST_HGS'], *args], env)
 # A member from before shared preferences: it rejects unknown fields and key
@@ -507,6 +519,22 @@ class Swarm(unittest.TestCase):
         self.assertTrue(self.call('b', 'sync')['c']['ok'])
         self.assertEqual(self.tasks('c'), ['Add rate limiting'])
         self.assertNotIn('tasks_outdated', self.call('b', 'get')['peers']['c'])
+
+    def test_membership_by_id_waits_for_every_member_to_list_the_kind(self):
+        # zerus-ucck P2c-1: a desktop may read membership by ID only while
+        # every machine of the catalog lists the session_id kind.
+        self.join('a', 'b'); self.join('b', 'a'); self.join('c', 'b'); self.join('b', 'c')
+        self.converge()
+        gate = lambda: self.call('b', 'get')['membership_by_id']
+        self.assertEqual(gate(), {'ready': True, 'missing': []})
+        (self.root / 'nosessionid-c').touch()  # c now answers like a release before the kind
+        self.assertTrue(self.call('b', 'sync')['c']['ok'])
+        c = self.call('c', 'get')['node_id']
+        self.assertEqual(gate(), {'ready': False, 'missing': [c]})
+        # After the update the gate opens again.
+        (self.root / 'nosessionid-c').unlink()
+        self.assertTrue(self.call('b', 'sync')['c']['ok'])
+        self.assertEqual(gate(), {'ready': True, 'missing': []})
 
     def test_the_worker_sends_a_new_task_within_seconds(self):
         self.join('a', 'b'); self.join('b', 'a')

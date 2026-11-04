@@ -15,6 +15,9 @@ use std::{
 const OUTDATED: &str = "outdated-peers.json";
 /// Members whose hgs does not replicate tasks, kept the same way.
 const REPLICA_OUTDATED: &str = "replica-outdated-peers.json";
+/// Members whose last sync listed the `session_id` catalog kind, kept the same
+/// way (zerus-ucck P2c-1).
+const SESSION_IDS: &str = "session-id-peers.json";
 
 #[derive(Clone, Debug, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
@@ -85,10 +88,40 @@ fn flag_outdated(
     }
 }
 
+/// Whether a desktop may read session membership by ID: every machine of the
+/// catalog is this computer, or a direct peer whose last sync listed the
+/// `session_id` kind. A machine without such a peer fails closed.
+fn flag_membership(
+    snapshot: &mut Value,
+    peers: &BTreeMap<String, Peer>,
+    session_ids: &BTreeMap<String, String>,
+) {
+    let missing: Vec<Value> = snapshot["machines"]
+        .as_array()
+        .into_iter()
+        .flatten()
+        .filter(|machine| machine["local"] != true)
+        .filter(|machine| {
+            !machine["connection"].as_str().is_some_and(|alias| {
+                peers
+                    .get(alias)
+                    .is_some_and(|peer| session_ids.get(alias) == Some(&peer.node))
+            })
+        })
+        .map(|machine| machine["id"].clone())
+        .collect();
+    snapshot["membership_by_id"] = json!({"ready": missing.is_empty(), "missing": missing});
+}
+
 /// The files a catalog snapshot reads, for a reader that follows changes.
 pub fn snapshot_files(config: &Config) -> Vec<PathBuf> {
     let dir = config.dir.join("swarm");
-    vec![dir.join("catalog.json"), dir.join(OUTDATED), dir.join(REPLICA_OUTDATED)]
+    vec![
+        dir.join("catalog.json"),
+        dir.join(OUTDATED),
+        dir.join(REPLICA_OUTDATED),
+        dir.join(SESSION_IDS),
+    ]
 }
 
 /// The catalog snapshot as `swarm get` shows it, read without the lock and
@@ -128,6 +161,7 @@ pub fn read_snapshot(config: &Config) -> Result<Value> {
     };
     let mut snapshot = data.snapshot(config);
     flag_outdated(&mut snapshot, &data.peers, &members(OUTDATED), &members(REPLICA_OUTDATED));
+    flag_membership(&mut snapshot, &data.peers, &members(SESSION_IDS));
     Ok(snapshot)
 }
 
@@ -138,11 +172,14 @@ pub struct LockedStore {
     pub outdated: BTreeMap<String, String>,
     /// Alias -> node of members that keep syncing the catalog but not tasks.
     pub replica_outdated: BTreeMap<String, String>,
+    /// Alias -> node of members whose last sync listed the `session_id` kind.
+    pub session_ids: BTreeMap<String, String>,
     pub path: PathBuf,
     _lock: platform::FileLock,
     original: Vec<u8>,
     outdated_original: Vec<u8>,
     replica_outdated_original: Vec<u8>,
+    session_ids_original: Vec<u8>,
 }
 
 impl LockedStore {
@@ -235,15 +272,22 @@ impl LockedStore {
         } else {
             fs::read(dir.join(REPLICA_OUTDATED)).unwrap_or_default()
         };
+        let session_ids_original = if scoped {
+            vec![]
+        } else {
+            fs::read(dir.join(SESSION_IDS)).unwrap_or_default()
+        };
         let mut loaded = Self {
             data,
             outdated: serde_json::from_slice(&outdated_original).unwrap_or_default(),
             replica_outdated: serde_json::from_slice(&replica_outdated_original).unwrap_or_default(),
+            session_ids: serde_json::from_slice(&session_ids_original).unwrap_or_default(),
             path,
             _lock: lock,
             original,
             outdated_original,
             replica_outdated_original,
+            session_ids_original,
         };
         if refresh {
             let node = loaded.data.node_id.clone();
@@ -272,6 +316,12 @@ impl LockedStore {
             &mut self.replica_outdated,
             peers,
             &mut self.replica_outdated_original,
+        )?;
+        save_members(
+            &self.path.with_file_name(SESSION_IDS),
+            &mut self.session_ids,
+            peers,
+            &mut self.session_ids_original,
         )
     }
     /// Persist only the catalog. Scoped assignment must not prune peer metadata.
@@ -288,6 +338,7 @@ impl LockedStore {
     pub fn snapshot(&self, config: &Config) -> Value {
         let mut snapshot = self.data.snapshot(config);
         flag_outdated(&mut snapshot, &self.data.peers, &self.outdated, &self.replica_outdated);
+        flag_membership(&mut snapshot, &self.data.peers, &self.session_ids);
         snapshot
     }
     pub fn backup(&self, reason: &str) -> Result<PathBuf> {
@@ -361,6 +412,33 @@ impl Store {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// zerus-ucck P2c-1: a desktop reads membership by ID only when every
+    /// machine of the catalog is this computer or a peer whose last sync
+    /// listed the `session_id` kind; any other machine fails closed.
+    #[test]
+    fn membership_by_id_is_ready_only_when_every_machine_lists_the_kind() {
+        let peer = |node: &str| Peer { node: node.into(), ..Peer::default() };
+        let peers = BTreeMap::from([("new".to_owned(), peer("node-new")), ("old".to_owned(), peer("node-old"))]);
+        let snapshot = |machines: Value| json!({"machines": machines});
+        let local = json!({"id": "node-local", "connection": "here", "local": true});
+        let new = json!({"id": "node-new", "connection": "new", "local": false});
+        let old = json!({"id": "node-old", "connection": "old", "local": false});
+        let unconnected = json!({"id": "node-far", "connection": null, "local": false});
+        let listed = BTreeMap::from([("new".to_owned(), "node-new".to_owned())]);
+        let flagged = |machines: Value, listed: &BTreeMap<String, String>| {
+            let mut value = snapshot(machines);
+            flag_membership(&mut value, &peers, listed);
+            value["membership_by_id"].clone()
+        };
+        assert_eq!(flagged(json!([local, new]), &listed), json!({"ready": true, "missing": []}));
+        assert_eq!(flagged(json!([local, new, old]), &listed), json!({"ready": false, "missing": ["node-old"]}));
+        assert_eq!(flagged(json!([local, unconnected]), &listed), json!({"ready": false, "missing": ["node-far"]}));
+        // A peer re-enrolled as another node is no longer the one that listed it.
+        let stale = BTreeMap::from([("new".to_owned(), "node-before".to_owned())]);
+        assert_eq!(flagged(json!([local, new]), &stale), json!({"ready": false, "missing": ["node-new"]}));
+        assert_eq!(flagged(json!([local]), &BTreeMap::new()), json!({"ready": true, "missing": []}));
+    }
     #[test]
     fn scoped_session_edit_preserves_other_catalog_and_local_peer_metadata() {
         let dir = tempfile::tempdir().unwrap();

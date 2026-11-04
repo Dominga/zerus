@@ -371,10 +371,17 @@ fn assign(store: &mut Store, request: &Request, _conversation: &str) -> Result<S
     catalog.set(
         &store.node_id,
         Key::Session {
-            machine: local,
+            machine: local.clone(),
             session: request.name.clone(),
         },
         json!(request.project_id),
+    )?;
+    super::session_ids::twin(
+        &mut catalog,
+        &store.node_id,
+        &local,
+        &request.name,
+        &json!(request.project_id),
     )?;
     store.catalog = catalog;
     Ok(folder)

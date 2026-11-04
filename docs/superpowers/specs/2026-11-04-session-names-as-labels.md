@@ -69,7 +69,12 @@ The `--json` form is `{"error":"ambiguous_session","name":…,"candidates":[{ses
 
 - **Rows.** Rows already use `run:` keys. Labels that repeat in a visible list get a short suffix (folder or start time) so the person can tell the sessions apart. Identical labels never merge.
 - **Drafts and read marks.** Composer drafts and desktop read marks move from computer and name to computer and session ID, with a one-time fallback that reads the name key.
-- **Catalog membership.** It moves to `Key::Session { machine, session: "id:<session_id>" }`, the same pattern as today's `archive\n<id>`. Older peers would read an `id:` member as an unknown session and show it in the default project. For one release window the desktop therefore writes both keys and resolves a conflict in favour of the ID key. A swarm drops name keys only once every peer reports a version that reads ID keys.
+- **Catalog membership.** Decided in P2c-1 (coordinator, 2026-11-04; choice A). This replaces the earlier `id:<session_id>`-in-`Key::Session` wording.
+  - A new catalog key kind, `Key::SessionId { machine, session_id }`, is valued `{project, label}`. Members that do not list the `session_id` kind never receive or reject it, as with the preference and order kinds.
+  - Every writer on the session's own computer dual-writes: the name membership, then its ID twin. `swarm apply` derives the twin for this computer's sessions.
+  - An ID membership is readable only when its operation is at least as new (Lamport clock, then actor, then ID) as the name membership for its recorded label, so an older writer's later name-only move wins.
+  - `membership_by_id` is ready only when every machine of the catalog is this computer or a direct peer whose last sync listed the kind. Unknown machines fail closed.
+  - Desktops read the ID form only when it is ready. The name form is still written, and read everywhere else, until P3 decides the connector's capability and when to stop writing names, together with owner questions 1 and 3.
 - **Rename and restore.** Rename no longer refuses a label in use, and restore no longer needs a free name. Fork keeps its readable `-fork`, `-2`… suffixes, but a taken label stops being an error.
 
 ## Phasing
@@ -78,7 +83,7 @@ The `--json` form is `{"error":"ambiguous_session","name":…,"candidates":[{ses
 | --- | --- | --- |
 | P0 (done, #1223) | Archived sessions never hold a label; a fork suffixes a taken label | unique among live and saved |
 | P1 | `session_id` in records, `HGS_SESSION_ID`, hooks and machine clients resolve by ID, `--session-id` and references on every command, the ambiguity error | still unique, so nothing visible changes |
-| P2 | `terminal_name`, the `sessions/<id>` layout with a label index, `journal_name` for new sessions, catalog, drafts and read marks by ID (dual-written) | still unique |
+| P2 | The ID index (P2a), `journal_name` for new sessions (P2b), catalog membership, drafts and read marks by ID, dual-written (P2c). `terminal_name` and the `sessions/<id>` layout for a reused label moved to P3 (coordinator, 2026-11-04). | still unique |
 | P3 | Remove the uniqueness checks from launch, rename, restore and fork | labels may repeat |
 
 Each phase ships separately and keeps older CLIs, peers and records working.

@@ -37,6 +37,7 @@ pub(crate) fn infer_new_session(config: &Config, name: &str, directory: &Path) {
             };
             let actor = store.data.node_id.clone();
             store.data.catalog.set(&actor, key, json!(project))?;
+            super::session_ids::twin(&mut store.data.catalog, &actor, &actor, name, &json!(project))?;
             store.save_catalog_only()?;
         }
         Ok(())
@@ -80,6 +81,7 @@ pub(crate) fn inherit_fork_project(
                 };
                 let actor = store.data.node_id.clone();
                 store.data.catalog.set(&actor, key, json!(project))?;
+                super::session_ids::twin(&mut store.data.catalog, &actor, &actor, name, &json!(project))?;
                 store.save_catalog_only()?;
             }
             anyhow::Ok(true)

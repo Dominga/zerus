@@ -201,6 +201,16 @@ pub fn sync_peer(config: &Config, alias: &str) -> Result<()> {
         let node = identity["node_id"].as_str().unwrap().to_owned();
         local.outdated.insert(alias.into(), node);
     }
+    // Whether this member reads session membership by ID (zerus-ucck P2c-1).
+    if peer_kinds
+        .as_ref()
+        .is_some_and(|kinds| kinds.contains("session_id"))
+    {
+        let node = identity["node_id"].as_str().unwrap().to_owned();
+        local.session_ids.insert(alias.into(), node);
+    } else {
+        local.session_ids.remove(alias);
+    }
     local.save()?;
     if identity["digest"] != local.data.catalog.digest() {
         drop(local);
@@ -383,6 +393,11 @@ pub fn join(config: &Config, alias: &str, request: Join) -> Result<Value> {
         local.data.catalog = catalog;
         let mut existing = local.data.catalog.values();
         for (mut key, mut value) in old {
+            // ID twins are derived: the next membership write here makes them
+            // again, and until then a desktop reads the name form.
+            if matches!(key, Key::SessionId { .. }) {
+                continue;
+            }
             // The swarm's delivery choice and project order win over the
             // joining machine's own.
             if matches!(key, Key::Preference { .. } | Key::Order { .. })

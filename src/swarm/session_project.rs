@@ -395,6 +395,7 @@ fn assign(store: &mut Store, request: &Request, snapshot: &Snapshot) -> Result<(
     store
         .catalog
         .set(&store.node_id, snapshot.key.clone(), json!(id))?;
+    super::session_ids::twin(&mut store.catalog, &store.node_id, &store.node_id, &request.name, &json!(id))?;
     store.catalog.validate()
 }
 #[cfg(unix)]

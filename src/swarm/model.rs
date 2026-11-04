@@ -195,7 +195,17 @@ impl Store {
                 }
             }
             let parents = observed.get(&key).cloned().unwrap_or_default();
-            self.catalog.write(&self.node_id, key, value, parents)?;
+            let session = match &key {
+                Key::Session { machine, session } => Some((machine.clone(), session.clone())),
+                _ => None,
+            };
+            self.catalog
+                .write(&self.node_id, key, value.clone(), parents)?;
+            // This computer's sessions also move by ID (zerus-ucck P2c-1).
+            if let Some((machine, label)) = session {
+                let node = self.node_id.clone();
+                super::session_ids::twin(&mut self.catalog, &node, &machine, &label, &value)?;
+            }
         }
         Ok(())
     }
@@ -301,13 +311,36 @@ impl Store {
                 p["accessible"] = json!(true);
             }
         }
+        // The same sessions by durable ID, where a desktop may read them
+        // (zerus-ucck P2c-1): only twins at least as new as the name form.
+        let heads = self.catalog.effective_heads();
+        for (machine, session_id, project) in super::session_ids::readable(&self.catalog, &heads) {
+            if let Some(p) = projects.get_mut(&project) {
+                let machine = aliases.get(&machine).cloned().unwrap_or(machine);
+                let members = p
+                    .as_object_mut()
+                    .unwrap()
+                    .entry("session_ids")
+                    .or_insert_with(|| json!([]));
+                members
+                    .as_array_mut()
+                    .unwrap()
+                    .push(json!(format!("{machine}\n{session_id}")));
+            }
+        }
         let conflicts: Vec<_> = self
             .catalog
             .effective_heads()
             .into_iter()
             // Concurrent preference and order edits resolve to the newest head
             // and the next choice on any device supersedes them; nothing to review.
-            .filter(|(key, _)| !matches!(key, Key::Preference { .. } | Key::Order { .. }))
+            // An ID twin follows its name membership, which a desktop reviews.
+            .filter(|(key, _)| {
+                !matches!(
+                    key,
+                    Key::Preference { .. } | Key::Order { .. } | Key::SessionId { .. }
+                )
+            })
             .filter_map(|(key, heads)| {
                 let variants: BTreeSet<_> = heads.iter().map(|o| o.value.to_string()).collect();
                 if variants.len() <= 1 {
@@ -339,7 +372,7 @@ impl Store {
         }
         json!({"schema":1,"node_id":self.node_id,"swarm_id":self.catalog.swarm_id,"digest":self.catalog.digest(),"initialized":self.imported,
             "organization":organization,
-            "versions":self.catalog.versions(),"conflicts":conflicts,"preferences":self.catalog.preferences(),"machines":machines,"peers":self.peers})
+            "versions":self.catalog.desktop_versions(),"conflicts":conflicts,"preferences":self.catalog.preferences(),"machines":machines,"peers":self.peers})
     }
 }
 

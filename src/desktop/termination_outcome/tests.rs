@@ -195,6 +195,57 @@ fn unreadable_or_replaced_stored_data_is_not_an_empty_success_or_repaired() {
 }
 
 #[test]
+fn changing_only_the_first_service_epoch_is_corruption_even_after_restart() {
+    let mut f = Fixture::new();
+    let original = f.intent();
+    assert_eq!(frontend(&mut f.store, permit(&original))["accepted"], true);
+    let mut altered = original.clone();
+    altered.scope.service_epoch = id();
+    assert_eq!(altered.fingerprint(), original.fingerprint());
+    f.store
+        .db
+        .execute_batch("DROP TRIGGER desktop_termination_outcomes_immutable;")
+        .unwrap();
+    f.store.db.execute(
+        "UPDATE desktop_termination_outcomes SET original=json_set(original,'$.scope.service_epoch',?1) WHERE request_id=?2",
+        [&altered.scope.service_epoch, &original.request_id],
+    ).unwrap();
+    let changed: String = f
+        .store
+        .db
+        .query_row(
+            "SELECT original FROM desktop_termination_outcomes WHERE request_id=?1",
+            [&original.request_id],
+            |r| r.get(0),
+        )
+        .unwrap();
+    assert_eq!(serde_json::from_str::<Intent>(&changed).unwrap(), altered);
+    assert_eq!(f.query(&original.request_id)["accepted"], false);
+    assert_eq!(frontend(&mut f.store, permit(&original))["accepted"], false);
+    drop(f.store);
+    f.epoch = id();
+    f.store = Store::open(&f.location, &f.epoch).unwrap();
+    let mut current = original.clone();
+    current.scope.service_epoch = f.epoch.clone();
+    assert_eq!(f.query(&original.request_id)["accepted"], false);
+    assert_eq!(frontend(&mut f.store, permit(&current))["accepted"], false);
+    let retained: String = f
+        .store
+        .db
+        .query_row(
+            "SELECT original FROM desktop_termination_outcomes WHERE request_id=?1",
+            [&original.request_id],
+            |r| r.get(0),
+        )
+        .unwrap();
+    assert_eq!(
+        retained, changed,
+        "corrupt originals must never be repaired"
+    );
+    assert_eq!(f.rows(), 1);
+}
+
+#[test]
 fn reply_loss_and_restart_use_original_id_without_rewriting_the_original_scope() {
     let mut f = Fixture::new();
     let intent = f.intent();

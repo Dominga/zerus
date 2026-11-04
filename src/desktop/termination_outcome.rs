@@ -17,6 +17,7 @@ pub(super) fn migrate(tx: &rusqlite::Transaction<'_>) -> Result<()> {
             confirmation_id TEXT NOT NULL CHECK(length(confirmation_id)=36),
             configuration TEXT NOT NULL CHECK(length(configuration)=64),
             fingerprint TEXT NOT NULL CHECK(length(fingerprint)=64),
+            original_sha256 TEXT NOT NULL CHECK(length(original_sha256)=64),
             original TEXT NOT NULL CHECK(json_valid(original) AND length(CAST(original AS BLOB)) BETWEEN 1 AND {}),
             retained_at INTEGER NOT NULL CHECK(retained_at>=0),
             UNIQUE(configuration,confirmation_id)
@@ -56,35 +57,55 @@ fn status(intent: &Intent, fingerprint: String) -> Result<Status> {
 }
 
 fn load(db: &Connection, id: &str, configuration: &str) -> Result<Option<Status>> {
-    let stored: Option<(String, String, String, String)> = db
+    let stored: Option<(String, String, String, String, String)> = db
         .query_row(
-            "SELECT original,fingerprint,configuration,confirmation_id FROM desktop_termination_outcomes WHERE request_id=?1",
+            "SELECT original,fingerprint,configuration,confirmation_id,original_sha256 FROM desktop_termination_outcomes WHERE request_id=?1",
             [id],
             |row| {
                 let bytes = row.get_ref(0)?.as_str()?;
                 let fingerprint = row.get_ref(1)?.as_str()?;
                 let configuration = row.get_ref(2)?.as_str()?;
                 let confirmation = row.get_ref(3)?.as_str()?;
-                if bytes.len() > wire::RECORD_BYTES || fingerprint.len() != 64 || configuration.len() != 64 || confirmation.len() != 36 {
+                let original_sha256 = row.get_ref(4)?.as_str()?;
+                if bytes.len() > wire::RECORD_BYTES
+                    || fingerprint.len() != 64
+                    || configuration.len() != 64
+                    || confirmation.len() != 36
+                    || original_sha256.len() != 64
+                {
                     return Err(rusqlite::Error::InvalidQuery);
                 }
-                Ok((bytes.into(), fingerprint.into(), configuration.into(), confirmation.into()))
+                Ok((
+                    bytes.into(),
+                    fingerprint.into(),
+                    configuration.into(),
+                    confirmation.into(),
+                    original_sha256.into(),
+                ))
             },
         )
         .optional()?;
     stored
-        .map(|(bytes, fingerprint, selected, confirmation)| {
-            let original: Intent = serde_json::from_str(&bytes)?;
-            ensure!(
-                selected == configuration
-                    && original.scope.configuration == configuration
-                    && original.request_id == id
-                    && original.confirmation_id == confirmation
-                    && original.fingerprint().as_deref() == Some(&fingerprint),
-                "original termination outcome changed"
-            );
-            status(&original, fingerprint)
-        })
+        .map(
+            |(bytes, fingerprint, selected, confirmation, original_sha256)| {
+                // Correlation deliberately excludes the current epoch. Integrity of
+                // the FIRST stored epoch and every other original byte is separate.
+                ensure!(
+                    wire::hash(bytes.as_bytes()) == original_sha256,
+                    "stored termination original changed"
+                );
+                let original: Intent = serde_json::from_str(&bytes)?;
+                ensure!(
+                    selected == configuration
+                        && original.scope.configuration == configuration
+                        && original.request_id == id
+                        && original.confirmation_id == confirmation
+                        && original.fingerprint().as_deref() == Some(&fingerprint),
+                    "original termination outcome changed"
+                );
+                status(&original, fingerprint)
+            },
+        )
         .transpose()
 }
 
@@ -134,16 +155,18 @@ fn retain(store: &mut Store, authority: Validated) -> Result<Status> {
         |row| row.get(0),
     )?;
     ensure!(rows < wire::RECORDS, "termination outcome capacity");
+    let original_sha256 = wire::hash(original.as_bytes());
     // Recheck the SAME original permit after reads/encoding and immediately
     // before insertion. No slow preparation can renew its two-second deadline.
     authority.check_termination_outcome()?;
     tx.execute(
-        "INSERT INTO desktop_termination_outcomes VALUES(?1,?2,?3,?4,?5,?6)",
+        "INSERT INTO desktop_termination_outcomes VALUES(?1,?2,?3,?4,?5,?6,?7)",
         rusqlite::params![
             intent.request_id,
             intent.confirmation_id,
             intent.scope.configuration,
             fingerprint,
+            original_sha256,
             original,
             chrono::Utc::now().timestamp_millis()
         ],

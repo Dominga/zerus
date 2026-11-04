@@ -861,7 +861,9 @@ fn serve(config: &Config, location: Location, background_mode: bool) -> Result<(
                                 if authority.operation() == "termination_outcome" =>
                             {
                                 match authority.into_request(&mut frontend_order) {
-                                    Ok(request) => termination_outcome::frontend(&mut store, request),
+                                    Ok(request) => {
+                                        termination_outcome::frontend(&mut store, request)
+                                    }
                                     Err(_) => frontend_refused(
                                         hello.request.as_ref(),
                                         "frontend_identity_expired",
@@ -991,18 +993,25 @@ fn serve(config: &Config, location: Location, background_mode: bool) -> Result<(
                         };
                         frame(&epoch, seq, "response", result)
                     } else if hello.op == "request" {
-                        let result = if hello.request.as_ref().is_some_and(|v| {
-                            v["op"] == "termination_outcome_status"
-                        }) {
+                        let result = if hello
+                            .request
+                            .as_ref()
+                            .is_some_and(|v| v["op"] == "termination_outcome_status")
+                        {
                             termination_outcome::query(
                                 &store,
                                 &location.configuration,
                                 hello.request.as_ref().unwrap(),
                             )
-                        } else if hello.request.as_ref().is_some_and(|v| {
-                            v["op"] == "termination_outcome"
-                        }) {
-                            frontend_refused(hello.request.as_ref(), "frontend_authentication_required")
+                        } else if hello
+                            .request
+                            .as_ref()
+                            .is_some_and(|v| v["op"] == "termination_outcome")
+                        {
+                            frontend_refused(
+                                hello.request.as_ref(),
+                                "frontend_authentication_required",
+                            )
                         } else if hello.request.as_ref().is_some_and(|v| {
                             matches!(
                                 v["op"].as_str(),

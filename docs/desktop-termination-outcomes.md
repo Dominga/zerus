@@ -29,6 +29,9 @@ refuses new admission; originals are neither expired nor recycled. A confirmatio
 cannot bind a different Terminate UUID. A duplicate requires identical original
 capture, choice and input bytes. The current epoch must match on each admission;
 a duplicate after restart retains the first stored epoch and original bytes.
+A separate SHA-256 covers the complete stored original bytes, including that
+first epoch; the epoch-independent correlation fingerprint cannot replace this
+integrity check.
 A failed commit never returns durable success.
 
 On reply loss, the read-only `termination_outcome_status` query requires the

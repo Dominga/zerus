@@ -1,6 +1,15 @@
 use super::*;
 use std::os::unix::fs::PermissionsExt;
 
+thread_local! {
+    static AFTER_COPY: std::cell::RefCell<Option<Box<dyn FnOnce()>>> = const { std::cell::RefCell::new(None) };
+}
+pub(super) fn after_copy() {
+    if let Some(change) = AFTER_COPY.with_borrow_mut(Option::take) {
+        change();
+    }
+}
+
 struct Fixture(PathBuf);
 impl Fixture {
     fn new() -> Self {
@@ -108,8 +117,15 @@ fn snapshots_refuse_empty_oversize_or_non_executable_originals() {
 
 #[test]
 fn fixed_kernel_self_selection_reads_the_actual_running_object() {
-    let pin = Pin::open(Path::new("/proc/self/exe")).unwrap();
     let actual = File::open("/proc/self/exe").unwrap().metadata().unwrap();
+    if actual.len() > MAX_IMAGE_BYTES {
+        // Hosted debug binaries can exceed 500 MiB. They are deliberately
+        // refused, not permission to increase the release helper's copy cap.
+        assert!(matches!(Pin::open(Path::new("/proc/self/exe")), Err(e)
+            if e.kind() == io::ErrorKind::InvalidData));
+        return;
+    }
+    let pin = Pin::open(Path::new("/proc/self/exe")).unwrap();
     let retained = pin.source.metadata().unwrap();
     assert_eq!(
         (retained.dev(), retained.ino()),
@@ -117,4 +133,65 @@ fn fixed_kernel_self_selection_reads_the_actual_running_object() {
     );
     assert!(sealed(&pin.image));
     assert!(pin.current());
+}
+
+#[test]
+fn every_missing_seal_and_future_write_only_is_refused_by_the_verifier() {
+    for missing in [
+        libc::F_SEAL_WRITE,
+        libc::F_SEAL_SHRINK,
+        libc::F_SEAL_GROW,
+        libc::F_SEAL_SEAL,
+    ] {
+        let fd = unsafe {
+            libc::memfd_create(
+                c"zerus-incomplete-seals".as_ptr(),
+                libc::MFD_CLOEXEC | libc::MFD_ALLOW_SEALING,
+            )
+        };
+        assert!(fd >= 0);
+        // SAFETY: the successful call returned one new owned fd.
+        let file = unsafe { File::from_raw_fd(fd) };
+        let required =
+            libc::F_SEAL_WRITE | libc::F_SEAL_SHRINK | libc::F_SEAL_GROW | libc::F_SEAL_SEAL;
+        let incomplete = (required & !missing) | libc::F_SEAL_FUTURE_WRITE;
+        assert_eq!(unsafe { libc::fcntl(fd, libc::F_ADD_SEALS, incomplete) }, 0);
+        assert_eq!(unsafe { libc::fcntl(fd, libc::F_GET_SEALS) } & missing, 0);
+        assert!(
+            !sealed(&file),
+            "the original verifier must require seal {missing}"
+        );
+    }
+}
+
+#[test]
+fn same_size_source_rewrite_after_copy_refuses_publication_of_the_snapshot() {
+    use std::os::unix::fs::FileExt;
+    let f = Fixture::new();
+    let path = f.script();
+    let mut source = open(&path).unwrap();
+    let expected = stamp(&source).unwrap();
+    let writer = OpenOptions::new().write(true).open(&path).unwrap();
+    let size = expected.bytes;
+    let inode = expected.inode;
+    AFTER_COPY.with_borrow_mut(|slot| {
+        *slot = Some(Box::new(move || {
+            // The real original file changes only after the full copy has read it.
+            // No injected stamp/result or changed-length guard supplies refusal.
+            writer.write_all_at(&vec![b'x'; size as usize], 0).unwrap();
+            // Make the real version change deterministic on coarse-timestamp
+            // filesystems too, without changing length or substituting a stamp.
+            writer
+                .set_modified(std::time::UNIX_EPOCH + Duration::from_secs(1))
+                .unwrap();
+            assert_eq!(writer.metadata().unwrap().len(), size);
+            assert_eq!(writer.metadata().unwrap().ino(), inode);
+        }))
+    });
+    let result = snapshot(&mut source, &expected);
+    assert!(
+        stamp(&source).unwrap() != expected,
+        "control must actually change the source version"
+    );
+    assert!(matches!(result, Err(e) if e.kind() == io::ErrorKind::PermissionDenied));
 }

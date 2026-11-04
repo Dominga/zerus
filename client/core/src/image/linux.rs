@@ -57,6 +57,8 @@ fn snapshot(source: &mut File, expected: &Stamp) -> io::Result<File> {
         image.write_all(&buffer[..n])?;
         remaining -= n as u64;
     }
+    #[cfg(test)]
+    tests::after_copy();
     let mut tail = [0];
     if source.read(&mut tail)? != 0 || stamp(source)? != *expected || Instant::now() >= until {
         return Err(io::ErrorKind::PermissionDenied.into());

@@ -1,14 +1,17 @@
 //! Native process/image component controls. No actor authentication, Terminate,
 //! installed bundle, private owner state or complete controller qualification.
 use super::*;
+#[cfg(windows)]
+use std::io::Read;
 use std::{
-    io::Read,
     process::Stdio,
     sync::{atomic::AtomicBool, Arc},
     time::Duration,
 };
 use zerus_client_core::{run, Exit, Invocation};
+#[cfg(windows)]
 const CHILD: &str = "desktop_service::termination_outcome::image::tests::child";
+#[cfg(windows)]
 const MARKER: &str = "ZERUS_TERMINATION_IMAGE_FIXTURE";
 struct Fixture(PathBuf);
 impl Fixture {
@@ -16,11 +19,13 @@ impl Fixture {
         let root = std::env::temp_dir().join(format!("zerus-image-{}", uuid::Uuid::new_v4()));
         std::fs::create_dir(&root).unwrap();
         std::fs::create_dir(root.join("bin")).unwrap();
-        std::fs::copy(
-            std::env::current_exe().unwrap(),
-            root.join("bin/fixture.exe"),
-        )
-        .unwrap();
+        #[cfg(windows)]
+        let source = std::env::current_exe().unwrap();
+        // The hosted debug Tauri test binary exceeds the production image cap.
+        // cat is a small native ELF and also proves exact input through EOF.
+        #[cfg(target_os = "linux")]
+        let source = PathBuf::from("/bin/cat");
+        std::fs::copy(source, root.join("bin/fixture.exe")).unwrap();
         Self(root)
     }
     fn path(&self) -> PathBuf {
@@ -41,6 +46,7 @@ impl Drop for Owned {
         let _ = self.0.wait();
     }
 }
+#[cfg(windows)]
 #[test]
 fn child() {
     if std::env::var_os(MARKER).is_none() {
@@ -51,14 +57,35 @@ fn child() {
     assert_eq!(input, b"fixed image fixture input");
     println!("original image fixture completed");
 }
+fn arguments() -> Vec<String> {
+    #[cfg(windows)]
+    {
+        ["--exact", CHILD, "--nocapture", "--test-threads=1"]
+            .map(String::from)
+            .to_vec()
+    }
+    #[cfg(target_os = "linux")]
+    {
+        Vec::new()
+    }
+}
+fn completed(exit: Exit) -> bool {
+    matches!(exit, Exit::Code {code:0, stdout, ..} if {
+        #[cfg(windows)]
+        { String::from_utf8_lossy(&stdout).contains("original image fixture completed") }
+        #[cfg(target_os = "linux")]
+        { stdout == b"fixed image fixture input" }
+    })
+}
 fn command(image: &Image) -> Command {
     let mut command = Command::new(image.executable());
     command
-        .args(["--exact", CHILD, "--nocapture", "--test-threads=1"])
-        .env(MARKER, "1")
+        .args(arguments())
         .stdin(Stdio::piped())
         .stdout(Stdio::piped())
         .stderr(Stdio::piped());
+    #[cfg(windows)]
+    command.env(MARKER, "1");
     command
 }
 fn run_after(image: Arc<Image>, after_check: impl FnOnce()) -> Exit {
@@ -102,9 +129,7 @@ fn leaf_or_ancestor_replacement_after_the_last_check_cannot_execute_the_replacem
             }
             std::fs::copy("/bin/false", &path).unwrap();
         });
-        assert!(
-            matches!(exit,Exit::Code {code:0,stdout,..} if String::from_utf8_lossy(&stdout).contains("original image fixture completed"))
-        );
+        assert!(completed(exit));
     }
 }
 #[cfg(windows)]
@@ -120,9 +145,7 @@ fn execution_and_ancestor_pins_exclude_replacement_through_the_original_child() 
         assert!(std::fs::rename(f.0.join("bin"), f.0.join("moved-bin")).is_err());
         assert!(std::fs::OpenOptions::new().write(true).open(&path).is_err());
     });
-    assert!(
-        matches!(exit,Exit::Code {code:0,stdout,..} if String::from_utf8_lossy(&stdout).contains("original image fixture completed"))
-    );
+    assert!(completed(exit));
 }
 #[cfg(windows)]
 #[test]
@@ -135,8 +158,7 @@ fn an_unpaired_surrogate_is_never_the_held_loaded_image() {
     std::fs::copy(std::env::current_exe().unwrap(), &surrogate).unwrap();
     let mut untrusted = Command::new(&surrogate);
     untrusted
-        .args(["--exact", CHILD, "--nocapture", "--test-threads=1"])
-        .env(MARKER, "1")
+        .args(arguments())
         .stdin(Stdio::piped())
         .stdout(Stdio::null())
         .stderr(Stdio::null());
@@ -144,6 +166,7 @@ fn an_unpaired_surrogate_is_never_the_held_loaded_image() {
         image.before_spawn(&mut untrusted).is_err(),
         "wrong program refuses before creation"
     );
+    untrusted.env(MARKER, "1");
     let mut child = Owned(untrusted.spawn().unwrap());
     assert!(
         !image.matches_child(&child.0),
@@ -159,9 +182,7 @@ fn the_frozen_accounted_runner_executes_the_retained_image_and_keeps_its_input()
     let image = Arc::new(Image::capture(&f.path()).unwrap());
     let environment = run::FrozenEnvironment::capture().unwrap();
     let invocation = Invocation {
-        args: ["--exact", CHILD, "--nocapture", "--test-threads=1"]
-            .map(String::from)
-            .to_vec(),
+        args: arguments(),
         stdin: Some(b"fixed image fixture input".to_vec()),
         timeout: Duration::from_secs(45),
         request_id: None,
@@ -175,6 +196,7 @@ fn the_frozen_accounted_runner_executes_the_retained_image_and_keeps_its_input()
         &AtomicBool::new(false),
         image.clone(),
         move |command| {
+            #[cfg(windows)]
             command.env(MARKER, "1");
             checked.before_spawn(command)?;
             let mut child = command.spawn()?;
@@ -185,7 +207,5 @@ fn the_frozen_accounted_runner_executes_the_retained_image_and_keeps_its_input()
         },
     )
     .unwrap();
-    assert!(
-        matches!(exit,Exit::Code {code:0,stdout,..} if String::from_utf8_lossy(&stdout).contains("original image fixture completed"))
-    );
+    assert!(completed(exit));
 }

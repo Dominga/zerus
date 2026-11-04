@@ -103,7 +103,9 @@ once (at most 256 MiB, with a five-second copy deadline), then applies and
 verifies all four write/shrink/grow/seal seals on an executable memfd. Help,
 ABI probes and subsequent executions use that same immutable snapshot. A leaf,
 ancestor or same-inode rewrite after the last check cannot change its bytes.
-New requests still check the original source and ancestor identities. Unsupported
+New requests still check the original source and ancestor identities. Debug helpers above 256 MiB (including roughly 500 MiB debug builds) are
+refused; shipped release helpers are far smaller. Hosted component fixtures use
+a private small native executable rather than the large Tauri test binary. Unsupported
 sealing or executable-memfd policy refuses; there is no mutable-fd fallback.
 Native ELF does not inherit the execution descriptor; a script retains only its
 own sealed source descriptor for the interpreter.
@@ -123,3 +125,15 @@ as an execution fence. Platform component tests do not establish installed,
 Root-authenticated or end-to-end controller qualification. Linux fake-actor
 protocol tests explicitly construct their private fixture context rather than
 passing through the production platform gate; they cannot enable it.
+
+### Temporary Linux/macOS removal availability
+
+G1 decision for R4: the old Service `selected:None` path is not a safe fallback.
+It reselects `default_hgs` and does not retain the selected relay/image/config
+through the original effect. Its refusal remains intact. While the new submission
+is unavailable, Terminate visibly explains that automatic folder removal is
+unavailable in background mode. The ordinary guarded Terminate remains available;
+the separate manual folder review opens its existing native guard flow without
+implying termination success, cleanup consent or replay. All offer errors are
+visible. Linux authentication `.66.4.6.9` and the qualified macOS caller under
+`.66.3.40.4` block the default-Service flip in #1340.

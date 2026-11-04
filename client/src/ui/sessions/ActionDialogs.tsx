@@ -15,6 +15,9 @@ import { setSetting } from "../../store/settings";
 import { sessionForks } from "../../store/sessionForks";
 import { FORK_CHECKING, FORK_HINT } from "./fork-ui";
 import { tr } from "../../i18n";
+import { readCleanupOffer } from "./termination-offer";
+import { CleanupOfferNotice } from "./CleanupOfferNotice";
+import { openWorktreeReview } from "../../store/worktreeCleanup";
 import { captureUntrackedShell, untrackedShell, UNVERIFIED_SHELL } from "../../store/untrackedShell";
 import type { Action } from "../../types";
 
@@ -196,13 +199,14 @@ function RenameDialog(props: { row: ActionRow; close: () => void }) {
   );
 }
 
-function TerminateDialog(props: { row: ActionRow; close: () => void }) {
+export function TerminateDialog(props: { row: ActionRow; close: () => void }) {
   const copy = terminateCopy(props.row);
   const shell = untrackedShell(props.row);
   const [terminal, setTerminal] = createSignal<Extract<Action, { kind: "terminate_shell" }>>();
   const [terminalError, setTerminalError] = createSignal("");
   const [offer, setOffer] = createSignal<string>();
   const [remove, setRemove] = createSignal(false);
+  const [offerError, setOfferError] = createSignal("");
   let closed = false, consumed = false;
   onMount(() => {
     if (shell) {
@@ -212,11 +216,9 @@ function TerminateDialog(props: { row: ActionRow; close: () => void }) {
     }
     const target = targetOf(props.row, "terminate");
     if (copy.action !== "terminate" || !target) return;
-    void terminationCleanupOffer(target).then((value) => {
-      if (!value) return;
-      if (closed) { void terminationCleanupCancel(value.id); return; }
-      setOffer(value.id); setRemove(value.checked);
-    }).catch(() => { /* The ordinary guarded Terminate stays available. */ });
+    void readCleanupOffer(target, { offer: terminationCleanupOffer, cancel: terminationCleanupCancel }, () => !closed, (state) => {
+      setOffer(state.offer?.id); setRemove(state.offer?.checked ?? false); setOfferError(state.error ?? "");
+    });
   });
   onCleanup(() => { closed = true; const id = offer(); if (id && !consumed) void terminationCleanupCancel(id); });
   const submit = () => {
@@ -236,6 +238,10 @@ function TerminateDialog(props: { row: ActionRow; close: () => void }) {
           <p class="hint">{tr("The working folder will be kept. Detached jobs may continue after this shell terminal closes.")}</p>
           <Show when={terminalError()}><p class="dlg-error">{tr(terminalError())}</p></Show>
         </Show>
+        <Show when={offerError()}><CleanupOfferNotice error={offerError()} review={props.row.cwdPath ? () => {
+          // Opening the existing review neither terminates nor removes anything.
+          props.close(); void openWorktreeReview(props.row.computer, props.row.cwdPath, props.row.cwdPath);
+        } : undefined} /></Show>
         <Show when={offer()}>
           <label class="check" style={{ "margin-top": "10px" }}><input type="checkbox" checked={remove()} onChange={(e) => setRemove(e.currentTarget.checked)} /> {tr("Remove the working folder after stopping")}</label>
           <p class="hint" style={{ "margin-top": "6px" }}>{tr("Removal runs in the background after exact successful termination, only for a verified generated worktree. Unknown local data keeps the folder for review. Computer: %1", props.row.machine)}</p>

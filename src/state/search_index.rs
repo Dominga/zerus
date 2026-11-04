@@ -170,22 +170,37 @@ impl Store {
                 }
             }
         }
-        let file = crate::platform::no_follow(crate::platform::private_open(
-            fs::OpenOptions::new()
-                .create(true)
-                .truncate(false)
-                .read(true)
-                .write(true),
-        ))
-        .open(&path)
-        .map_err(|e| e.to_string())?;
-        if !crate::platform::verify_private_file(&file).map_err(|e| e.to_string())? {
-            return Err("Search index file is not private".into());
+        // Never close a raw descriptor of the live index on Unix: it would drop
+        // the SQLite locks of every connection this process has open on it
+        // (zerus-iiee). Create it owner-only if missing, check it by path, and
+        // bind the connection to the checked file.
+        #[cfg(unix)]
+        let identity = {
+            crate::sqlite_file::create(&path).map_err(|e| e.to_string())?;
+            crate::sqlite_file::private(&path)
+                .map_err(|_| "Search index file is not private".to_string())?
+        };
+        #[cfg(not(unix))]
+        {
+            let file = crate::platform::no_follow(crate::platform::private_open(
+                fs::OpenOptions::new()
+                    .create(true)
+                    .truncate(false)
+                    .read(true)
+                    .write(true),
+            ))
+            .open(&path)
+            .map_err(|e| e.to_string())?;
+            if !crate::platform::verify_private_file(&file).map_err(|e| e.to_string())? {
+                return Err("Search index file is not private".into());
+            }
         }
         let flags = OpenFlags::SQLITE_OPEN_READ_WRITE
             | OpenFlags::SQLITE_OPEN_NO_MUTEX
             | OpenFlags::SQLITE_OPEN_NOFOLLOW;
         let db = Connection::open_with_flags(&path, flags).map_err(|e| e.to_string())?;
+        #[cfg(unix)]
+        crate::sqlite_file::bind(&db, identity).map_err(|e| e.to_string())?;
         let index = Index::new(db, DEFAULT_FILE_BYTES).map_err(|e| e.to_string())?;
         let parent = crate::platform::canonical(directory.parent().ok_or("Invalid index path")?)
             .map_err(|e| e.to_string())?;
@@ -1198,5 +1213,35 @@ mod windows_tests {
         assert!(progress.complete);
         assert_eq!(progress.staged, 1);
         assert_eq!(store.status().unwrap()["catalog"]["queued_paths"], 1);
+    }
+}
+
+#[cfg(all(test, unix))]
+mod lock_regressions {
+    use super::*;
+    use crate::sqlite_file::foreign_lock_refused;
+
+    /// zerus-iiee: opening the search index again keeps the SQLite locks of a
+    /// connection already open, also after a restart.
+    #[test]
+    fn opening_the_index_again_keeps_a_live_connection_s_locks() {
+        let temp = tempfile::tempdir().unwrap();
+        let directory = temp.path().join("state").join("content-search-v1");
+        let path = directory.join("index.sqlite3");
+        // The second round is a restart: every earlier connection is gone.
+        for round in 0..2 {
+            let live = Store::open(&directory).unwrap();
+            // A writer's transaction: opening again during it is refused as
+            // busy and must never drop the writer's lock. (A reader's shared
+            // lock is not used here: the refused writer's own downgrade takes
+            // a shared lock again and would hide its loss.)
+            live.index.connection().execute_batch("BEGIN IMMEDIATE").unwrap();
+            assert!(foreign_lock_refused(&path), "round {round}: the writer holds its lock");
+            drop(Store::open(&directory));
+            assert!(foreign_lock_refused(&path), "round {round}: another open kept the lock");
+            live.index.connection().execute_batch("COMMIT").unwrap();
+            drop(live);
+            assert!(!foreign_lock_refused(&path), "round {round}: the lock went with its connection");
+        }
     }
 }

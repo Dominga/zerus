@@ -129,6 +129,20 @@ function Detail(props: { a: Account }) {
   // The selected machine, with its profile tag when another profile shares it.
   const where = () => (tags().has(m().key) ? `${m().machine} (${tags().get(m().key)})` : m().machine);
   const choose = (key: string) => { setSelectedProfile(key); closeManagement(); clearManagementNotice(); };
+  const stepProfile = (event: KeyboardEvent & { currentTarget: HTMLDivElement }) => {
+    if (event.altKey || event.ctrlKey || event.metaKey) return;
+    const rows = [...event.currentTarget.querySelectorAll<HTMLButtonElement>(".acct-mrow-pick")];
+    const at = rows.findIndex((row) => row === event.target);
+    // The adjacent Make default buttons keep their own keyboard behavior.
+    if (at < 0) return;
+    const next = event.key === "ArrowRight" || event.key === "ArrowDown" ? (at + 1) % rows.length
+      : event.key === "ArrowLeft" || event.key === "ArrowUp" ? (at + rows.length - 1) % rows.length
+      : event.key === "Home" ? 0 : event.key === "End" ? rows.length - 1 : undefined;
+    if (next === undefined) return;
+    event.preventDefault();
+    rows[next].click();
+    rows[next].focus();
+  };
   return (
     <div class="acct-detail">
       <div class="acct-title">
@@ -147,10 +161,10 @@ function Detail(props: { a: Account }) {
       <section class="acct-card box">
         <h3>{tr("Machines")}</h3>
         {/* One row per profile: the row chooses it; the default is a badge or a separate button beside it. */}
-        <div class="acct-mrows" classList={{ defaults: defaultable() }} role="radiogroup" aria-label={tr("Machine profile")}>
+        <div class="acct-mrows" classList={{ defaults: defaultable() }} role="radiogroup" aria-label={tr("Machine profile")} onKeyDown={stepProfile}>
           <For each={shown()}>{(x) => (
             <div class="acct-mrow" classList={{ on: x.key === m().key }}>
-              <button class="acct-mrow-pick" role="radio" aria-checked={x.key === m().key} onClick={() => choose(x.key)}>
+              <button class="acct-mrow-pick" role="radio" aria-checked={x.key === m().key} tabIndex={x.key === m().key ? 0 : -1} onClick={() => choose(x.key)}>
                 <MachineTile os={osOf(machineCards[x.host]?.platform)} state={x.online ? connectionOf(catalog.computers[x.host]?.status).tile : "offline"} size={22} />
                 <MachineLabel alias={x.machine} dimmed={!x.online} />
                 <ProfileTag tag={tags().get(x.key)} id={x.id} />

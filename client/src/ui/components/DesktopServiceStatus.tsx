@@ -25,7 +25,7 @@ export function PausedServiceDetail() {
   const settings = () => servicePaused(desktopService.state()) === "settings" || firstChoicePending(desktopService.state());
   return (
     <div class="detail-empty paused-service">
-      <h2>{tr("Background work is paused")}</h2>
+      <h2>{firstChoicePending(desktopService.state()) ? tr("Turning on background mode") : tr("Background work is paused")}</h2>
       <Show when={settings()} fallback={<>
         <p>{tr("Zerus runs your sessions through a background service, which stays paused until you resume it.")}</p>
         <button type="button" class="btn primary" disabled={resumeBlocked()} onClick={resume}>{tr("Resume background work")}</button>

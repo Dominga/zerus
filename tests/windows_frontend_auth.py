@@ -448,15 +448,38 @@ class WindowsTaskMode(unittest.TestCase):
         positive = self.frontend_call(control, 'OWNERSHIP_OBSERVATION ')
         self.assertTrue(positive['checked'], positive)
         self.assertEqual(positive['current'], ownership)
-        # A different real portable frontend file is still admitted natively,
-        # but it is not the original granted Origin even with identical bytes.
-        other = self.cli_image.with_name('hgs-tray.exe')
-        shutil.copy2(self.frontend_source, other)
+        # A second natively selected image, with identical bytes, is not the
+        # granted Origin. cli_image now names the staged CLI: its sibling is
+        # self.frontend itself, so copying there would not change the requester.
+        # This class runs ONLY on a disposable hosted runner. Use the other
+        # maintained installed-app path, refuse any existing file, and remove
+        # only our exact file and the empty directories we created.
+        other = Path(self.env['LOCALAPPDATA']) / 'Programs' / 'Zerus' / 'hgs-tray.exe'
+        self.assertFalse(other.exists(), 'disposable runner already has a Zerus frontend')
+        created = []
+        parent = other.parent
+        while not parent.exists():
+            created.append(parent)
+            parent = parent.parent
+        original = self.frontend.stat()
+        owned = False
         try:
+            other.parent.mkdir(parents=True, exist_ok=True)
+            with other.open('xb') as target:
+                owned = True
+                with self.frontend_source.open('rb') as source:
+                    shutil.copyfileobj(source, target)
+            self.assertFalse(os.path.samefile(other, self.frontend))
             refused = self.frontend_call(control, 'OWNERSHIP_OBSERVATION ', frontend=other)
             self.assertFalse(refused['checked'], refused)
+            current = self.frontend.stat()
+            self.assertEqual((current.st_dev, current.st_ino, current.st_size, current.st_mtime_ns),
+                             (original.st_dev, original.st_ino, original.st_size, original.st_mtime_ns))
         finally:
-            other.unlink()
+            if owned:
+                other.unlink()
+            for directory in created:
+                directory.rmdir()
         for key, value in [('service_epoch', str(uuid.uuid4())),
                            ('generation', lifecycle['generation'] + 1),
                            ('owner_epoch', str(uuid.uuid4())), ('journal', str(uuid.uuid4()))]:

@@ -1,5 +1,5 @@
-//! Original native reconciliation metadata. No IPC, task call or outbox writer.
-//! An offered original can only be queried, never offered again by this API.
+//! Original native reconciliation metadata and exact submitted/drained settlement.
+//! No IPC or task call. An offered original can never be offered again here.
 use super::*;
 use std::{ffi::OsString, io::Write};
 
@@ -210,8 +210,8 @@ impl Disk {
     }
 }
 
-/// Bounded metadata read, independent of executor liveness or an extant outbox.
-/// It can only construct an exact read Query; it cannot offer anything.
+/// Bounded saved metadata, independent of executor liveness or an extant outbox.
+/// Queries cannot offer; exact submitted/drained settlement has separate checks.
 pub struct Saved {
     slot: Slot,
     disk: Disk,

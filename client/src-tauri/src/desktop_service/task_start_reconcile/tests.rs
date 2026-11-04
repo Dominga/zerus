@@ -249,3 +249,69 @@ fn original_pipe_lifetime_retains_the_native_task_write_permit_after_failure() {
         service.join().await.unwrap();
     });
 }
+
+#[test]
+fn older_helper_or_changed_original_image_stays_unoffered() {
+    if !private_case("desktop_service::task_start_reconcile::tests::older_helper_or_changed_original_image_stays_unoffered"){return;}
+    tauri::async_runtime::block_on(async {
+        let f = fixture(json!({"task_no_abi":true}));
+        let (service, _cache) = connected(&f).await;
+        let (root, view) = source(&f);
+        assert!(
+            invoke(service.clone(), root.clone(), view.clone(), Arc::new(()))
+                .await
+                .is_err()
+        );
+        assert!(calls(&f).is_empty());
+        assert!(Saved::read(&root, &view.project, &view.task)
+            .unwrap()
+            .is_none());
+        let read = Read::new(Some(service.clone())).unwrap();
+        let bytes = fs::read(f.0.join("hgs")).unwrap();
+        zerus_client_core::fsx::write_private_atomic(&f.0.join("hgs"), &bytes, true).unwrap();
+        assert!(!read.current());
+        assert!(read
+            .exchange(None, Value::Null, true, Arc::new(()))
+            .is_err());
+        assert!(calls(&f).is_empty());
+        service.stop();
+        service.join().await.unwrap();
+    });
+}
+
+#[test]
+fn larger_native_original_and_oversized_control_input_stay_unoffered() {
+    if !private_case("desktop_service::task_start_reconcile::tests::larger_native_original_and_oversized_control_input_stay_unoffered"){return;}
+    tauri::async_runtime::block_on(async {
+        let f = fixture(json!({}));
+        let (service, _cache) = connected(&f).await;
+        let (root, view) = source(&f);
+        let file = outbox::path(&root.join("task-start"), &view.project, &view.task);
+        let mut value: Value = serde_json::from_slice(&fs::read(&file).unwrap()).unwrap();
+        value["opaque_future"] = json!("x".repeat(wire::SOURCE_BYTES));
+        zerus_client_core::fsx::write_private_atomic(
+            &file,
+            &serde_json::to_vec(&value).unwrap(),
+            true,
+        )
+        .unwrap();
+        let view = task_start::open(&root, &view.project, &view.task, None).unwrap();
+        assert!(
+            invoke(service.clone(), root.clone(), view.clone(), Arc::new(()))
+                .await
+                .is_err()
+        );
+        assert!(Saved::read(&root, &view.project, &view.task)
+            .unwrap()
+            .is_none());
+        let read = Read::new(Some(service.clone())).unwrap();
+        let result = read.exchange(None, json!({"op":"task_start_reconcile_result", "padding":"x".repeat(zerus_watch_protocol::CONTROL_LINE_BYTES)}), false, Arc::new(()));
+        assert!(result.is_err());
+        assert!(
+            calls(&f).is_empty(),
+            "oversized input is refused before a helper receives it"
+        );
+        service.stop();
+        service.join().await.unwrap();
+    });
+}

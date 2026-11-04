@@ -195,3 +195,42 @@ fn a_genuinely_new_delivery_is_preserved_and_only_then_can_have_an_explicit_new_
     assert_eq!(next.saved().reconcile_id(), READ);
     assert_eq!(fs::read(&f.file).unwrap(), before);
 }
+
+#[test]
+fn source_change_or_native_connection_loss_at_the_cas_boundary_keeps_the_original() {
+    for change in [false, true] {
+        let f = Fixture::new();
+        let mut saved = offered(&f);
+        let (q, r) = submitted(&f, &saved);
+        let before = fs::read(&f.file).unwrap();
+        let changed = [before.as_slice(), b" "].concat();
+        let prefix = format!("{}.", f.file.file_name().unwrap().to_str().unwrap());
+        let mut boundary = false;
+        let result = saved.settle_submitted(&q, &r, || {
+            let staged = fs::read_dir(f.file.parent().unwrap()).unwrap().any(|e| {
+                let name = e.unwrap().file_name();
+                let name = name.to_str().unwrap();
+                name.starts_with(&prefix) && name.ends_with(".tmp")
+            });
+            if staged {
+                boundary = true;
+                if change {
+                    crate::fsx::write_private_atomic(&f.file, &changed, true).unwrap();
+                } else {
+                    return false;
+                }
+            }
+            true
+        });
+        assert!(
+            boundary,
+            "the original was staged before the native final check"
+        );
+        assert!(result.is_err());
+        assert_eq!(
+            fs::read(&f.file).unwrap(),
+            if change { changed } else { before }
+        );
+        assert_eq!(saved.phase(), Phase::SettlementPrepared);
+    }
+}

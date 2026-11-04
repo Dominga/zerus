@@ -2704,6 +2704,8 @@ mod tests {
         assert!(USAGE.lines().any(|line| line.trim() == worktree_marker));
         let launch_marker = zerus_client_core::desktop::creation_launch::HELP_MARKER;
         assert!(USAGE.lines().any(|line| line.trim() == launch_marker));
+        let task_marker = zerus_client_core::desktop::task_start_reconcile::HELP_MARKER;
+        assert!(USAGE.lines().any(|line| line.trim() == task_marker));
         // Windows has no `hgs paste`, `hgs clip` or `hgs notify`, no Ctrl+V
         // that pulls a peer's image, and no POSIX creation-clone executor.
         // Its dry runs print the host's requests; every other line stays as is.
@@ -2712,6 +2714,7 @@ mod tests {
         assert!(!neutral.contains("Ctrl+V"), "{neutral}");
         assert!(!neutral.lines().any(|line| line.trim() == clone_marker));
         assert!(!neutral.lines().any(|line| line.trim() == worktree_marker));
+        assert!(!neutral.lines().any(|line| line.trim() == task_marker));
         assert_eq!(
             neutral,
             USAGE

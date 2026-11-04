@@ -222,7 +222,7 @@ finally:
         else:
             self.assertNotIn('desktop-creation-worktree', help_text)
 
-    def test_task_start_reconcile_is_closed_and_not_yet_advertised(self):
+    def test_task_start_reconcile_is_closed_and_only_unix_advertises_the_native_caller(self):
         self.serve()
         status = self.cli('desktop', 'status', '--json')
         intent = dict(scope=dict(configuration=status['configuration'], service_epoch=status['epoch']),
@@ -231,8 +231,11 @@ finally:
         self.assertFalse(refused['accepted'])
         self.assertEqual(refused['code'], 'frontend_authentication_required')
         help_text = subprocess.run([str(HGS), '--help'], env=self.env, capture_output=True, text=True).stdout
-        self.assertNotIn('Desktop task Start reconcile ABI:', help_text)
-        self.assertNotIn('task-start-reconcile-v1', help_text)
+        marker = 'Desktop task start reconcile ABI: desktop-task-start-reconcile-v1'
+        if sys.platform.startswith(('linux', 'darwin')):
+            self.assertIn(marker, [line.strip() for line in help_text.splitlines()])
+        else:
+            self.assertNotIn(marker, help_text)
         with closing(sqlite3.connect(self.desktop / 'state.sqlite3')) as db:
             self.assertEqual(db.execute('SELECT count(*) FROM desktop_operations').fetchone()[0], 0)
             self.assertEqual(db.execute('SELECT count(*) FROM desktop_operation_attempts').fetchone()[0], 0)

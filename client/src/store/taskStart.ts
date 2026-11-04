@@ -1,6 +1,6 @@
 import { pendingExecutor, configureTaskExecutor, taskExecutors } from "./taskExecutors";
 import { createSignal } from "solid-js";
-import { taskStartOpen, taskStart, taskStartRelease } from "../bridge";
+import { taskStartOpen, taskStart, taskStartRelease, taskStartCheck, taskStartDiscardCheck } from "../bridge";
 import { tasks } from "./tasks";
 import { selected } from "./ui";
 import { findTaskSession } from "./taskContext";
@@ -13,9 +13,9 @@ import { sessionIdentity, sessionLabel, type Task } from "../ui/screens/tasks-ui
 import type { Session } from "../ui/sessions/types";
 import { tr } from "../i18n";
 
-export interface StartView { project: string; task: string; id: string; session: string; phase: string; snapshot: string; error: string; pending: boolean; outcome?: string | null }
+export interface StartView { project: string; task: string; id: string; session: string; phase: string; snapshot: string; error: string; pending: boolean; outcome?: string | null; check_available?: boolean; unsent_check?: boolean; check_problem?: string }
 export interface StartInput { assignment: { kind: string; machine: string; session_id: string; name: string }; project: string; task: string; stage_at: number; target: { computer: string; name: string; run_id: string; conversation_id: string }; catalog_key: string; session_id: string }
-export interface StartPort { open(project: string, task: string): Promise<StartView>; start(input: StartInput): Promise<StartView>; release(view: StartView): Promise<StartView> }
+export interface StartPort { open(project: string, task: string): Promise<StartView>; start(input: StartInput): Promise<StartView>; release(view: StartView): Promise<StartView>; check?(view: StartView): Promise<StartView>; discardCheck?(view: StartView): Promise<StartView> }
 const scope = (v: { project: string; task: string } | undefined) => v ? `${v.project}\n${v.task}` : "";
 export function createTaskStarts(port: StartPort) {
   const [view, setView] = createSignal<StartView>(), [error, setError] = createSignal("");
@@ -36,10 +36,12 @@ export function createTaskStarts(port: StartPort) {
   return { view, error, follow, scope: () => wanted,
     start: async (input: StartInput) => { generation++; return accept(await port.start(input)); },
     release: async (snapshot: StartView) => { generation++; return accept(await port.release(snapshot)); },
+    check: async (snapshot: StartView) => { if (!port.check) throw new Error("Checking the original receipt is unavailable."); generation++; const answer = await port.check(snapshot); if (answer.id !== snapshot.id) throw new Error("The saved task start changed. Refresh the task."); return accept(answer); },
+    discardCheck: async (snapshot: StartView) => { if (!port.discardCheck) throw new Error("Discarding the unsent check is unavailable."); generation++; const answer = await port.discardCheck(snapshot); if (answer.id !== snapshot.id) throw new Error("The saved task start changed. Refresh the task."); return accept(answer); },
     refresh: () => { generation++; void load(); },
   };
 }
-export const taskStarts = createTaskStarts({ open: (project, task) => taskStartOpen(project, task), start: (input) => taskStart(input), release: (view) => taskStartRelease(view) });
+export const taskStarts = createTaskStarts({ open: (project, task) => taskStartOpen(project, task), start: (input) => taskStart(input), release: (view) => taskStartRelease(view), check: (view) => taskStartCheck(view), discardCheck: (view) => taskStartDiscardCheck(view) });
 export const [descriptionEditing, setDescriptionEditing] = createSignal<{ project: string; task: string; owner?: symbol }>();
 export interface StartReview { task: Task; view: StartView; origin?: HTMLElement }
 export const [taskStartReview, setTaskStartReview] = createSignal<StartReview>();
@@ -97,5 +99,25 @@ export async function releaseTaskStart(review: StartReview): Promise<boolean> {
     else throw new Error("Unconfirmed release");
     return true;
   } catch { notify("error", tr("Could not release the start record."), true); return false; }
+  finally { setWritingTask(undefined); }
+}
+export async function checkTaskStart(review: StartReview): Promise<boolean> {
+  const view = startReviewView(review);
+  if (writingTask() || !view.check_available || view.phase === "delivering") return false;
+  setWritingTask(review.task.uuid);
+  try {
+    const answer = await taskStarts.check(view);
+    if (answer.id !== view.id || answer.outcome !== "submitted" || answer.pending) throw new Error("The original receipt is still unconfirmed.");
+    toast(tr("Delivery receipt found"), tr("The task reached its executor. Nothing was sent again.")); return true;
+  } catch (e) { notify("error", String(e), true); taskStarts.refresh(); return false; }
+  finally { setWritingTask(undefined); }
+}
+export async function discardTaskStartCheck(review: StartReview, expected?: StartView): Promise<boolean> {
+  const view = expected ?? startReviewView(review);
+  if (writingTask() || !view.unsent_check) return false;
+  setWritingTask(review.task.uuid);
+  try {
+    await taskStarts.discardCheck(view); return true;
+  } catch (e) { notify("error", String(e), true); taskStarts.refresh(); return false; }
   finally { setWritingTask(undefined); }
 }

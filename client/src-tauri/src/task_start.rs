@@ -1,6 +1,7 @@
 //! The task Start has one nonqueued write lane and one transient in-flight
 //! scope. Its recovery evidence stays in the existing private draft outbox.
 use crate::{composer::Composers, task_details::TaskWrites};
+use serde_json::{json, Value};
 use std::sync::{Arc, Mutex};
 use tauri::State;
 use zerus_client_core::{
@@ -8,6 +9,30 @@ use zerus_client_core::{
     task_start::{self, Assignment, Selection, View},
     tasks_write,
 };
+
+fn present(root: &std::path::Path, view: View) -> Value {
+    let mut value = json!(&view);
+    let enabled =
+        crate::desktop_service::mode() && cfg!(any(target_os = "linux", target_os = "macos"));
+    value["check_available"] = json!(enabled && view.pending && view.phase != "delivering");
+    #[cfg(any(target_os = "linux", target_os = "macos"))]
+    if enabled {
+        use zerus_client_core::task_start::capture::journal::{Phase, Saved};
+        match Saved::read(root, &view.project, &view.task) {
+            Ok(saved) => {
+                value["unsent_check"] = json!(saved
+                    .is_some_and(|s| s.phase() == Phase::Prepared && s.original_id() == view.id))
+            }
+            Err(_) => {
+                value["check_available"] = json!(false);
+                value["check_problem"]=json!("Receipt checking is unavailable. Review the original task history before allowing another start.");
+            }
+        }
+    }
+    #[cfg(not(any(target_os = "linux", target_os = "macos")))]
+    let _ = root;
+    value
+}
 
 #[derive(Clone)]
 struct Scope {
@@ -33,7 +58,7 @@ pub async fn task_start_open(
     composers: State<'_, Composers>,
     project: String,
     task: String,
-) -> Result<View, String> {
+) -> Result<Value, String> {
     let root = composers.0.store.root().to_path_buf();
     let active = crate::composer::lock(&state.0)
         .clone()
@@ -41,19 +66,22 @@ pub async fn task_start_open(
     tauri::async_runtime::spawn_blocking(move || {
         if let Some(active) = active {
             zerus_client_core::task_details::document_call(&project, &task)?;
-            return Ok(View {
-                project,
-                task,
-                id: active.id,
-                session: active.session,
-                phase: "delivering".into(),
-                snapshot: String::new(),
-                error: String::new(),
-                pending: true,
-                outcome: None,
-            });
+            return Ok(present(
+                &root,
+                View {
+                    project,
+                    task,
+                    id: active.id,
+                    session: active.session,
+                    phase: "delivering".into(),
+                    snapshot: String::new(),
+                    error: String::new(),
+                    pending: true,
+                    outcome: None,
+                },
+            ));
         }
-        task_start::open(&root, &project, &task, None)
+        task_start::open(&root, &project, &task, None).map(|view| present(&root, view))
     })
     .await
     .map_err(|e| e.to_string())?
@@ -77,7 +105,7 @@ pub async fn task_start(
     app: State<'_, crate::commands::AppState>,
     composers: State<'_, Composers>,
     input: Start,
-) -> Result<View, String> {
+) -> Result<Value, String> {
     if crate::actions::blocked() {
         return Err(crate::screens::REPLAY_NEEDS_HGS.into());
     }
@@ -145,6 +173,7 @@ pub async fn task_start(
             &id,
             |call| tasks_write::run(&zerus_client_core::default_hgs(), call),
         )
+        .map(|view| present(&root, view))
     })
     .await
     .map_err(|e| e.to_string())?
@@ -158,7 +187,7 @@ pub async fn task_start_release(
     task: String,
     id: String,
     snapshot: String,
-) -> Result<View, String> {
+) -> Result<Value, String> {
     if crate::actions::blocked() {
         return Err(crate::screens::REPLAY_NEEDS_HGS.into());
     }
@@ -169,6 +198,89 @@ pub async fn task_start_release(
         task_start::release(&root, &project, &task, &id, &snapshot, |call| {
             tasks_write::run(&zerus_client_core::default_hgs(), call)
         })
+        .map(|view| present(&root, view))
+    })
+    .await
+    .map_err(|e| e.to_string())?
+}
+
+#[tauri::command]
+pub async fn task_start_check(
+    writes: State<'_, TaskWrites>,
+    app: State<'_, crate::commands::AppState>,
+    composers: State<'_, Composers>,
+    project: String,
+    task: String,
+    id: String,
+    snapshot: String,
+) -> Result<Value, String> {
+    if crate::actions::blocked() || !crate::desktop_service::mode() {
+        return Err("Checking the original delivery receipt is unavailable.".into());
+    }
+    let permit = Arc::new(writes.begin()?);
+    let root = composers.0.store.root().to_path_buf();
+    let service = app.desktop_service();
+    tauri::async_runtime::spawn_blocking(move || {
+        #[cfg(any(target_os = "linux", target_os = "macos"))]
+        {
+            let resources: Arc<dyn Send + Sync> = permit;
+            let view = crate::desktop_service::task_start_reconcile::check(
+                service, &root, &project, &task, &id, &snapshot, resources,
+            )?;
+            Ok(present(&root, view))
+        }
+        #[cfg(not(any(target_os = "linux", target_os = "macos")))]
+        {
+            let _ = (permit, root, service, project, task, id, snapshot);
+            Err("Checking the original delivery receipt is unavailable on this computer.".into())
+        }
+    })
+    .await
+    .map_err(|e| e.to_string())?
+}
+
+/// Only the explicitly confirmed discard action reaches this metadata-only
+/// path. Opening or querying a task never calls it, and it cannot cancel an offer.
+#[tauri::command]
+pub async fn task_start_discard_check(
+    writes: State<'_, TaskWrites>,
+    composers: State<'_, Composers>,
+    project: String,
+    task: String,
+    id: String,
+    snapshot: String,
+) -> Result<Value, String> {
+    if crate::actions::blocked() || !crate::desktop_service::mode() {
+        return Err("Discarding the unsent check is unavailable.".into());
+    }
+    let permit = writes.begin()?;
+    let root = composers.0.store.root().to_path_buf();
+    tauri::async_runtime::spawn_blocking(move || {
+        let _permit = permit;
+        #[cfg(any(target_os = "linux", target_os = "macos"))]
+        {
+            use zerus_client_core::task_start::capture::journal::Saved;
+            let view = task_start::open(&root, &project, &task, None)?;
+            if view.id != id || view.snapshot != snapshot {
+                return Err("The saved task start changed. Refresh the task.".into());
+            }
+            let saved = Saved::read(&root, &project, &task)
+                .map_err(|_| "The unsent check could not be verified.")?
+                .ok_or("The unsent check is unavailable.")?;
+            if saved.original_id() != id {
+                return Err("The unsent check changed. Refresh the task.".into());
+            }
+            let reconcile = saved.reconcile_id().to_owned();
+            saved
+                .discard_prepared(&reconcile)
+                .map_err(|_| "The unsent check could not be discarded.")?;
+            Ok(present(&root, view))
+        }
+        #[cfg(not(any(target_os = "linux", target_os = "macos")))]
+        {
+            let _ = (root, project, task, id, snapshot);
+            Err("Discarding the unsent check is unavailable on this computer.".into())
+        }
     })
     .await
     .map_err(|e| e.to_string())?

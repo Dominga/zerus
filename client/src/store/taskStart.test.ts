@@ -2,7 +2,7 @@ import { beforeEach, expect, it, vi } from "vitest";
 import { taskItem } from "../ui/screens/tasks-ui";
 import type { Session } from "../ui/sessions/types";
 const fixture = vi.hoisted(() => ({ project: "example", rows: [] as ReturnType<typeof taskItem>[], selected: undefined as Session | undefined, offline: false }));
-vi.mock("../bridge", () => ({ taskStartOpen: vi.fn(), taskStart: vi.fn(), taskStartRelease: vi.fn() }));
+vi.mock("../bridge", () => ({ taskStartOpen: vi.fn(), taskStart: vi.fn(), taskStartRelease: vi.fn(), taskStartCheck: vi.fn(), taskStartDiscardCheck: vi.fn() }));
 vi.mock("./tasks", () => ({ tasks: { project: () => fixture.project, tasks: () => fixture.rows } }));
 vi.mock("./ui", () => ({ selected: () => fixture.selected }));
 vi.mock("./taskContext", () => ({ findTaskSession: () => (r: { id: string }) => fixture.selected && r.id === `run_id:${fixture.selected.runId}` ? fixture.selected : undefined }));
@@ -11,11 +11,11 @@ vi.mock("./taskNavigation", () => ({ openTask: vi.fn() }));
 vi.mock("./actions", () => ({ notify: vi.fn() }));
 vi.mock("./notices", () => ({ toast: vi.fn() }));
 vi.mock("./taskBoard", async () => { const { createSignal } = await import("solid-js"); const [writingTask, setWritingTask] = createSignal<string>(); return { writingTask, setWritingTask }; });
-import { taskStart, taskStartOpen, taskStartRelease } from "../bridge";
+import { taskStart, taskStartOpen, taskStartRelease, taskStartCheck, taskStartDiscardCheck } from "../bridge";
 import { notify } from "./actions";
 import { toast } from "./notices";
 import { setWritingTask } from "./taskBoard";
-import { createTaskStarts, taskStarts, taskStartBlocker, startTask, releaseTaskStart, setDescriptionEditing, type StartView } from "./taskStart";
+import { createTaskStarts, taskStarts, taskStartBlocker, startTask, releaseTaskStart, checkTaskStart, discardTaskStartCheck, setDescriptionEditing, type StartView } from "./taskStart";
 const task = taskItem({ uuid: "11111111-1111-4111-8111-111111111111", id: "T-example", stage: "todo", stage_at: 123, target: { kind: "any" } });
 const view = (overrides: Partial<StartView> = {}): StartView => ({ project: "example", task: task.uuid, id: "22222222-2222-4222-8222-222222222222", phase: "review", pending: true, session: "codex/example/worker", snapshot: "original", error: "Uncertain", ...overrides });
 const tick = async () => { await Promise.resolve(); await Promise.resolve(); await Promise.resolve(); };
@@ -64,4 +64,24 @@ it("settles a receipt or releases the exact reviewed snapshot, with the specifie
   expect(await releaseTaskStart(review)).toBe(true); expect(toast).toHaveBeenCalledWith("Start record released", "Another start is allowed. Nothing was stopped or sent again.");
   vi.mocked(taskStartRelease).mockRejectedValueOnce(new Error("changed")); expect(await releaseTaskStart(review)).toBe(false);
   expect(notify).toHaveBeenCalledWith("error", "Could not release the start record.", true);
+});
+
+it("checks only an explicit original receipt and never releases or sends after a lost check", async () => {
+  const review = { task, view: view({ check_available: true }) };
+  vi.mocked(taskStartCheck).mockRejectedValueOnce(new Error("response lost"));
+  expect(await checkTaskStart(review)).toBe(false);
+  expect(taskStartCheck).toHaveBeenCalledExactlyOnceWith(review.view);
+  expect(taskStart).not.toHaveBeenCalled(); expect(taskStartRelease).not.toHaveBeenCalled();
+  vi.mocked(taskStartCheck).mockResolvedValueOnce(view({ phase: "started", pending: false, outcome: "submitted" }));
+  expect(await checkTaskStart(review)).toBe(true);
+  expect(toast).toHaveBeenCalledWith("Delivery receipt found", "The task reached its executor. Nothing was sent again.");
+});
+it("discard consumes the confirmed unsent snapshot and preserves refusal on changed identity", async () => {
+  const expected = view({ unsent_check: true }), review = { task, view: expected };
+  vi.mocked(taskStartDiscardCheck).mockResolvedValueOnce(view({ unsent_check: false }));
+  expect(await discardTaskStartCheck(review, expected)).toBe(true);
+  expect(taskStartDiscardCheck).toHaveBeenCalledExactlyOnceWith(expected);
+  expect(taskStart).not.toHaveBeenCalled(); expect(taskStartRelease).not.toHaveBeenCalled(); expect(taskStartCheck).not.toHaveBeenCalled();
+  vi.mocked(taskStartDiscardCheck).mockResolvedValueOnce(view({ id: "another-original" }));
+  expect(await discardTaskStartCheck(review, expected)).toBe(false);
 });

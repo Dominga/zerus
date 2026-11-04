@@ -3,6 +3,9 @@
 use super::*;
 use std::{ffi::OsString, io::Write};
 
+mod completion;
+pub use completion::Settlement;
+
 pub const BYTES: usize = 96 << 10;
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum Error {
@@ -18,6 +21,8 @@ pub enum Phase {
     Prepared,
     OfferedUnknown,
     CancelledBeforeOffer,
+    SettlementPrepared,
+    Completed,
 }
 #[derive(Clone, Deserialize, Serialize, PartialEq, Eq)]
 #[serde(deny_unknown_fields)]
@@ -26,6 +31,7 @@ struct Record {
     phase: Phase,
     version: Version,
     previous_cancelled: Option<String>,
+    completion: Option<wire::Lookup>,
     intent: wire::Intent,
 }
 impl Record {
@@ -37,6 +43,7 @@ impl Record {
             && self.intent.binding.key.project == project
             && self.intent.binding.key.task == task
             && self.intent.clone().verify().is_ok()
+            && self.valid_completion()
     }
 }
 struct Slot {
@@ -212,15 +219,23 @@ pub struct Saved {
 impl Saved {
     pub fn read(store: &Path, project: &str, task: &str) -> Result<Option<Self>, Error> {
         let slot = Slot::open(store, project, task).map_err(|_| Error::Unavailable)?;
-        Disk::open(&slot, project, task)
-            .map(|disk| disk.map(|disk| Self { slot, disk }))
-            .map_err(|_| Error::Unavailable)
+        let disk = Disk::open(&slot, project, task).map_err(|_| Error::Unavailable)?;
+        if disk.is_none() {
+            match open_at(&slot.folder, &slot.lock_name, false) {
+                Err(e) if e.kind() == io::ErrorKind::NotFound => return Ok(None),
+                _ => return Err(Error::Unavailable), // Retained history may be missing.
+            }
+        }
+        Ok(disk.map(|disk| Self { slot, disk }))
     }
     pub fn phase(&self) -> Phase {
         self.disk.record.phase
     }
     pub fn reconcile_id(&self) -> &str {
         &self.disk.record.intent.reconcile_id
+    }
+    pub fn original_id(&self) -> &str {
+        &self.disk.record.intent.binding.key.request_id
     }
     pub fn current(&self) -> bool {
         self.disk.current(&self.slot).is_ok()
@@ -247,7 +262,7 @@ impl Saved {
         if self.reconcile_id() != reconcile_id {
             return Err(Error::Unavailable);
         }
-        if self.phase() == Phase::OfferedUnknown {
+        if self.phase() != Phase::Prepared && self.phase() != Phase::CancelledBeforeOffer {
             return Err(Error::OfferedUnknown);
         }
         let lock = self.slot.lock(false)?;
@@ -318,6 +333,7 @@ impl Journal {
             phase: Phase::Prepared,
             version: source.version.clone(),
             previous_cancelled: previous,
+            completion: None,
             intent: candidate.clone(),
         };
         let disk = match disk {
@@ -343,8 +359,12 @@ impl Journal {
                 )?
             }
             Some(disk) => {
-                if cancelled_id.is_some() {
-                    return Err(Error::Unavailable);
+                if let Some(cancelled) = cancelled_id {
+                    if disk.record.previous_cancelled.as_deref() != Some(cancelled)
+                        || disk.record.intent.reconcile_id != reconcile_id
+                    {
+                        return Err(Error::Unavailable);
+                    }
                 }
                 disk
             }
@@ -413,6 +433,7 @@ impl Journal {
             Phase::Prepared => {}
             Phase::OfferedUnknown => return Err(Error::OfferedUnknown),
             Phase::CancelledBeforeOffer => return Err(Error::Cancelled),
+            Phase::SettlementPrepared | Phase::Completed => return Err(Error::OfferedUnknown),
         }
         self.check_current()?;
         let intent = self
@@ -454,6 +475,10 @@ fn publish(
     mut check: impl FnMut() -> io::Result<()>,
     mut sync: impl FnMut(&File, bool) -> io::Result<()>,
 ) -> Result<Disk, Error> {
+    let key = &old.record.intent.binding.key;
+    if !next.valid(&key.project, &key.task) {
+        return Err(Error::Unavailable);
+    }
     let bytes = encode(next)?;
     old.current(slot).map_err(|_| Error::Unavailable)?;
     check().map_err(|_| Error::Unavailable)?;

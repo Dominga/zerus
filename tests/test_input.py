@@ -649,6 +649,33 @@ signal.pause()
         self.assertEqual(result.returncode, 0, result.stderr)
         self.assertEqual(json.loads(self.record_path.read_text()), self.record)
 
+    def test_subagent_retirement_checks_exact_guards_and_finite_input_and_record(self):
+        self.record.update(agent='claude', main_done=True, activity='idle', phase='idle', active_tools={},
+                           subagents={'stale': dict(external=True, state='working', updated=2.0)})
+        self.write_record()
+        request = dict(request_id=str(uuid.uuid4()), expected_run_id=self.run_id,
+                       expected_conversation_id=self.conversation_id, agent_id='stale', expected_updated=2.0)
+        def refused(payload, reason):
+            before = self.record_path.read_bytes()
+            result = subprocess.run([str(HGS), 'subagent', 'retire', self.name, '--json'],
+                                    input=json.dumps(payload), env=self.env, text=True,
+                                    capture_output=True, timeout=5)
+            self.assertNotEqual(result.returncode, 0)
+            self.assertIn(reason, result.stderr)
+            self.assertEqual(self.record_path.read_bytes(), before)
+        refused(dict(request, expected_run_id='changed'), 'generation changed')
+        refused(dict(request, expected_conversation_id='changed'), 'generation changed')
+        refused(dict(request, agent_id='missing'), 'not in the selected conversation')
+        refused(dict(request, expected_updated=3.0), 'changed; inspect it again')
+        refused(dict(request, extra=True), 'Invalid subagent retirement request')
+        refused(dict(request, extra='x' * 8192), 'exceeds 8 KiB')
+        self.record['subagents']['stale']['group'] = True
+        self.write_record()
+        refused(request, 'profile group')
+        self.record['retirement_padding'] = 'x' * (16 * 1024 * 1024)
+        self.write_record()
+        refused(request, 'exceeds retirement bound')
+
     def test_login_delay_cannot_receive_first_prompt_until_native_composer(self):
         self.fresh_unconfirmed()
         self.screen('\x1b[2J\x1b[HPassword: ','10:0')

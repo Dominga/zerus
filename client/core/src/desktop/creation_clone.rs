@@ -276,6 +276,13 @@ impl Binding {
         self.valid()
             .then(|| hash(&serde_json::to_vec(self).expect("fixed clone binding")))
     }
+    /// Whether this binding names exactly `plan`: the clone request it repeats,
+    /// and the plan's own fingerprint. A declared digest never overrides a
+    /// conflicting original field.
+    pub fn agrees(&self, plan: &Plan) -> bool {
+        self.clone_request_id == plan.clone_request_id
+            && plan.fingerprint().as_deref() == Some(self.plan_sha256.as_str())
+    }
 }
 
 pub const REPLY_BYTES: usize = 24 << 10;
@@ -367,7 +374,7 @@ impl Receipt {
     /// Only an exact original repository receipt after actual resource drain
     /// advances the native creation reducer. Queued/unknown never means success.
     pub fn result(&self, plan: &Plan) -> Option<Value> {
-        if !self.valid() || !self.drained || self.binding.plan_sha256 != plan.fingerprint()? {
+        if !self.valid() || !self.drained || !self.binding.agrees(plan) {
             return None;
         }
         let expected = match self.phase {
@@ -709,5 +716,17 @@ mod tests {
         let mut intent = checkpoint();
         intent.original = " ".repeat(SOURCE_BYTES + 1);
         assert!(intent.verify().is_err());
+    }
+
+    #[test]
+    fn a_receipt_settles_only_when_its_binding_names_the_plan_request() {
+        let verified = checkpoint().verify().unwrap();
+        let receipt = completed(&verified);
+        assert!(receipt.result(&verified.plan).is_some());
+        // The declared plan digest never overrides a conflicting request.
+        let mut changed = receipt.clone();
+        changed.binding.clone_request_id = "44444444-4444-4444-8444-444444444444".into();
+        assert!(changed.valid(), "a valid shape");
+        assert!(changed.result(&verified.plan).is_none());
     }
 }

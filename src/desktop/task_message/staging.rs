@@ -64,6 +64,34 @@ pub(super) enum Fault {
 pub(super) static FAULTS: std::sync::Mutex<Vec<(String, Fault)>> =
     std::sync::Mutex::new(Vec::new());
 
+/// Test-only points inside one preparation on this thread.
+#[cfg(test)]
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub(super) enum Point {
+    /// Right before the custody input is created.
+    BeforeCreate,
+    /// Right after the custody input was written and synced.
+    AfterWrite,
+}
+#[cfg(test)]
+type Hook = Box<dyn FnOnce()>;
+#[cfg(test)]
+thread_local! {
+    pub(super) static HOOKS: std::cell::RefCell<Vec<(Point, Hook)>> =
+        const { std::cell::RefCell::new(Vec::new()) };
+}
+#[cfg(test)]
+fn hook(point: Point) {
+    let hook = HOOKS.with(|hooks| {
+        let mut hooks = hooks.borrow_mut();
+        let found = hooks.iter().position(|(at, _)| *at == point);
+        found.map(|n| hooks.remove(n).1)
+    });
+    if let Some(hook) = hook {
+        hook();
+    }
+}
+
 /// A device and inode: what a name must still denote.
 pub(super) type Identity = (u64, u64);
 
@@ -182,7 +210,7 @@ impl Roots {
                 .and_then(|file| identity(&file))
                 .is_ok_and(|now| now == held.identity)
                 && platform::verify_private_directory(&held.file).unwrap_or(false)
-        }) && std::fs::metadata(&self.root_path)
+        }) && std::fs::symlink_metadata(&self.root_path)
             .is_ok_and(|m| (m.dev(), m.ino()) == identity(&self.root).unwrap_or((0, 0)))
     }
 }
@@ -190,6 +218,8 @@ impl Roots {
 /// The exact stdin of one admitted original, held through its own handle,
 /// with the one invocation it belongs to.
 pub(super) struct Input {
+    /// The read-write descriptor that wrote it. It is never handed to a
+    /// child: the child's stdin is a pipe, fed through positioned reads.
     pub(super) file: File,
     pub(super) identity: Identity,
     pub(super) bytes: u64,
@@ -287,7 +317,12 @@ pub(super) fn prepare(
     {
         return Err(MISMATCH);
     }
-    if expired() || !roots.current() {
+    #[cfg(test)]
+    hook(Point::BeforeCreate);
+    if !roots.current() {
+        return Err(UNAVAILABLE);
+    }
+    if expired() {
         return Err(EXPIRED);
     }
     let mut file = open_at(
@@ -325,6 +360,8 @@ pub(super) fn prepare(
         .write_all(call.input.as_bytes())
         .and_then(|()| file.sync_all())
         .and_then(|()| roots.inputs.sync());
+    #[cfg(test)]
+    hook(Point::AfterWrite);
     #[cfg(test)]
     let written = match fault {
         Some(Fault::Removal) => Err(io::ErrorKind::Other.into()),

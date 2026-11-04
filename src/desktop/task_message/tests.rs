@@ -1613,7 +1613,8 @@ mod actor {
             std::fs::write(
                 &path,
                 format!(
-                    "#!/usr/bin/env python3\nimport json,pathlib,sys\npathlib.Path({:?}).write_bytes(sys.stdin.buffer.read())\na=sys.argv\nprint(json.dumps({{'task':{{'uuid':a[a.index('message')+1],'project':a[a.index('--project')+1]}},'message':{{'kind':'message','request_id':a[a.index('--request-id')+1],'session':None,'delivery':{{'mode':a[a.index('--mode')+1],'state':'queued','stage':'todo','stage_at':7}}}}}}))\n",
+                    "#!/usr/bin/env python3\nimport json,os,pathlib,stat,sys\npathlib.Path({:?}).with_suffix('.fifo').write_text(str(stat.S_ISFIFO(os.fstat(0).st_mode)))\npathlib.Path({:?}).write_bytes(sys.stdin.buffer.read())\na=sys.argv\nprint(json.dumps({{'task':{{'uuid':a[a.index('message')+1],'project':a[a.index('--project')+1]}},'message':{{'kind':'message','request_id':a[a.index('--request-id')+1],'session':None,'delivery':{{'mode':a[a.index('--mode')+1],'state':'queued','stage':'todo','stage_at':7}}}}}}))\n",
+                    seen.to_str().unwrap(),
                     seen.to_str().unwrap()
                 ),
             )
@@ -1646,6 +1647,11 @@ mod actor {
                 (Phase::Recorded, "")
             );
             assert_eq!(std::fs::read_to_string(&seen).unwrap(), stdin);
+            // The child read a pipe, never the custody input's descriptor.
+            assert_eq!(
+                std::fs::read_to_string(seen.with_extension("fifo")).unwrap(),
+                "True"
+            );
             f.until("input removed", |f| f.state(&original) == "removed");
             assert!(!f.input_path(&original).exists());
             assert!(!staged.exists(), "its staged copies went at admission");
@@ -2214,11 +2220,16 @@ mod staging_tests {
             let dir = stage(&root, &request, &blobs);
             let file = dir.join(&verified.references[0].sha256);
             edit(&dir, &file);
-            assert_eq!(
-                staging::prepare(&roots, &verified, soon()).err(),
-                Some(code),
-                "{name}"
-            );
+            // Bounded: an open that blocks (a FIFO without O_NONBLOCK) fails
+            // here instead of hanging the suite.
+            let (send, done) = std::sync::mpsc::channel();
+            std::thread::spawn(move || {
+                let _ = send.send(staging::prepare(&roots, &verified, soon()).err());
+            });
+            let refused = done
+                .recv_timeout(Duration::from_secs(10))
+                .unwrap_or_else(|_| panic!("{name}: preparation blocked"));
+            assert_eq!(refused, Some(code), "{name}");
             assert!(!input(&root, &request).exists(), "{name}: no input");
         }
         // A copy of another size is refused as not the original's.
@@ -2262,6 +2273,90 @@ mod staging_tests {
         )
         .unwrap();
         assert!(Roots::open(&root).is_err());
+    }
+
+    #[test]
+    fn current_refuses_a_replaced_or_linked_root_and_an_unsafe_inputs_folder() {
+        let (temp, root, roots) = fresh();
+        assert!(roots.current());
+        let inputs = root.join(staging::INPUTS);
+        std::fs::set_permissions(&inputs, std::fs::Permissions::from_mode(0o755)).unwrap();
+        assert!(!roots.current(), "an inputs folder open to others");
+        std::fs::set_permissions(&inputs, std::fs::Permissions::from_mode(0o700)).unwrap();
+        assert!(roots.current());
+        // The desktop root behind a link to itself, then replaced.
+        let moved = temp.path().canonicalize().unwrap().join("moved");
+        std::fs::rename(&root, &moved).unwrap();
+        std::os::unix::fs::symlink(&moved, &root).unwrap();
+        assert!(!roots.current(), "a linked root");
+        std::fs::remove_file(&root).unwrap();
+        std::fs::rename(&moved, &root).unwrap();
+        assert!(roots.current());
+        std::fs::rename(&root, &moved).unwrap();
+        private_dir(&root.join(staging::STAGING));
+        private_dir(&root.join(staging::INPUTS));
+        std::fs::set_permissions(&root, std::fs::Permissions::from_mode(0o700)).unwrap();
+        assert!(!roots.current(), "a replaced root");
+        let (verified, blobs, _) = original(&[shot(29, 1024)]);
+        stage(&moved, &verified.plan.request_id, &blobs);
+        assert_eq!(
+            staging::prepare(&roots, &verified, soon()).err(),
+            Some(staging::UNAVAILABLE)
+        );
+        assert!(!input(&moved, &verified.plan.request_id).exists());
+    }
+
+    #[test]
+    fn a_root_replaced_before_the_create_or_expiry_after_the_write_leaves_no_input() {
+        // Replaced after the copies were read, right before the create.
+        let (temp, root, roots) = fresh();
+        let (verified, blobs, _) = original(&[shot(31, 2048)]);
+        let request = verified.plan.request_id.clone();
+        stage(&root, &request, &blobs);
+        let (held, swapped) = (root.join(staging::INPUTS), temp.path().join("held-inputs"));
+        let (from, to) = (held.clone(), swapped.clone());
+        staging::HOOKS.with(|hooks| {
+            hooks.borrow_mut().push((
+                staging::Point::BeforeCreate,
+                Box::new(move || {
+                    std::fs::rename(&from, &to).unwrap();
+                    private_dir(&from);
+                }),
+            ))
+        });
+        assert_eq!(
+            staging::prepare(&roots, &verified, soon()).err(),
+            Some(staging::UNAVAILABLE)
+        );
+        assert!(!held.join(&request).exists() && !swapped.join(&request).exists());
+        // Expiry after the custody write: exactly that new file goes.
+        let (_temp, root, roots) = fresh();
+        let (verified, blobs, _) = original(&[shot(37, 2048)]);
+        let request = verified.plan.request_id.clone();
+        stage(&root, &request, &blobs);
+        let deadline = Instant::now() + Duration::from_millis(500);
+        let written = input(&root, &request);
+        let seen = std::rc::Rc::new(std::cell::Cell::new(false));
+        let (path, saw) = (written.clone(), seen.clone());
+        staging::HOOKS.with(|hooks| {
+            hooks.borrow_mut().push((
+                staging::Point::AfterWrite,
+                Box::new(move || {
+                    saw.set(path.exists());
+                    std::thread::sleep(deadline.saturating_duration_since(Instant::now()));
+                    std::thread::sleep(Duration::from_millis(20));
+                }),
+            ))
+        });
+        assert_eq!(
+            staging::prepare(&roots, &verified, deadline).err(),
+            Some(staging::EXPIRED)
+        );
+        assert!(
+            seen.get(),
+            "the input was written before the deadline passed"
+        );
+        assert!(!written.exists(), "and removed exactly");
     }
 
     #[test]

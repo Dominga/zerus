@@ -18,6 +18,23 @@ fn prepared(f: &Fixture) -> Journal {
         }
     }
 }
+#[track_caller]
+fn metadata_lock(slot: &Slot) -> File {
+    metadata_lock_after_busy(slot, || {})
+}
+fn metadata_lock_after_busy(slot: &Slot, mut busy: impl FnMut()) -> File {
+    let until = std::time::Instant::now() + std::time::Duration::from_secs(8);
+    loop {
+        match slot.lock(false) {
+            Ok(file) => return file,
+            Err(Error::Busy) if std::time::Instant::now() < until => {
+                busy();
+                std::thread::sleep(std::time::Duration::from_millis(1))
+            }
+            Err(error) => panic!("original metadata flock unavailable: {error:?}"),
+        }
+    }
+}
 fn saved(f: &Fixture) -> Saved {
     Saved::read(
         &f.store,
@@ -131,7 +148,7 @@ fn recorded_original_is_the_only_candidate_removed_and_reading_never_mutates() {
     );
     drop(journal);
     let observed = saved(&f);
-    let lock = observed.slot.lock(false).unwrap();
+    let lock = metadata_lock(&observed.slot);
     recover(&observed.slot, &observed.disk, &lock).unwrap();
     assert_eq!(observed.publication_status(), Status::Clear);
     assert_eq!(
@@ -162,7 +179,7 @@ fn renamed_original_retires_tracking_without_replacing_journal_or_offering_again
     let bytes = observed.disk.bytes.clone();
     assert_eq!(observed.phase(), Phase::OfferedUnknown);
     assert_eq!(observed.publication_status(), Status::Recoverable);
-    let lock = observed.slot.lock(false).unwrap();
+    let lock = metadata_lock(&observed.slot);
     recover(&observed.slot, &observed.disk, &lock).unwrap();
     assert_eq!(observed.publication_status(), Status::Clear);
     assert_eq!(file_version(&held, super::super::BYTES).unwrap(), before);
@@ -184,7 +201,7 @@ fn unknown_slot_is_bounded_across_repeated_explicit_checks_and_legacy_files_are_
     for _ in 0..32 {
         let mut explicit = prepared(&f);
         assert_eq!(explicit.saved().publication_status(), Status::NeedsReview);
-        assert_eq!(explicit.offer().err(), Some(Error::PublicationUnknown));
+        assert_eq!(explicit.offer().err(), Some(Error::PublicationNeedsReview));
         assert_eq!(names(&f), before);
         assert_eq!(
             fs::read(f.file.with_extension("reconcile.tmp")).unwrap(),
@@ -301,7 +318,11 @@ fn replaced_changed_and_unsafe_candidates_remain_for_review_even_with_identical_
         let journal_bytes = fs::read(f.file.with_extension("reconcile")).unwrap();
         assert_eq!(
             journal.saved().publication_status(),
-            Status::NeedsReview,
+            if change == "tracking-oversize" {
+                Status::Oversize
+            } else {
+                Status::NeedsReview
+            },
             "{change}"
         );
         assert!(
@@ -342,7 +363,7 @@ fn copied_before_or_published_journal_cannot_authorize_orphan_cleanup() {
         let bytes = fs::read(&path).unwrap();
         crate::fsx::write_private_atomic(&path, &bytes, true).unwrap();
         let observed = saved(&f);
-        let lock = observed.slot.lock(false).unwrap();
+        let lock = metadata_lock(&observed.slot);
         let tracking = read(&lock, BYTES).unwrap().0;
         assert_eq!(observed.publication_status(), Status::NeedsReview, "{cut}");
         assert!(recover(&observed.slot, &observed.disk, &lock).is_err());
@@ -528,7 +549,7 @@ fn real_writer_death_keeps_one_slot_and_recovers_only_the_recorded_original() {
         abort_original_at(&f, cut);
         let observed = saved(&f);
         let before = observed.disk.bytes.clone();
-        let lock = observed.slot.lock(false).unwrap();
+        let lock = metadata_lock(&observed.slot);
         assert_eq!(observed.reconcile_id(), f.intent.reconcile_id);
         assert_ne!(observed.publication_status(), Status::NeedsReview, "{cut}");
         recover(&observed.slot, &observed.disk, &lock).unwrap();
@@ -723,7 +744,7 @@ fn recovery_syncs_the_namespace_before_retiring_published_tracking() {
     rename_candidate(&journal.saved.slot); // Deliberately NO directory sync.
     drop(journal);
     let observed = saved(&f);
-    let lock = observed.slot.lock(false).unwrap();
+    let lock = metadata_lock(&observed.slot);
     let inspection = inspect(&observed.slot, &observed.disk, &lock).unwrap();
     let mut order = Vec::new();
     reconcile_with_sync(
@@ -753,57 +774,129 @@ fn recovery_syncs_the_namespace_before_retiring_published_tracking() {
 }
 
 #[test]
-fn torn_wal_tails_cannot_start_the_next_step_or_leave_a_known_allocation_wedged() {
-    for cut in ["allocation", "created", "ready"] {
-        let f = Fixture::new();
-        let journal = prepared(&f);
-        let _held = stage(&journal, "recorded");
-        let path = f.file.with_extension("reconcile-lock");
-        let log = frames(&fs::read(&path).unwrap());
-        let count = match cut {
-            "allocation" => 0,
-            "created" => 1,
-            _ => 2,
-        };
-        let mut bytes = encode_frames(&log[..count]);
-        let tail = serde_json::to_vec(&log[count]).unwrap();
-        // Use the actual encoder's stage-first order for the interrupted write.
-        let expected = match count {
-            0 => b"{\"stage\":\"allocated\"".as_slice(),
-            1 => b"{\"stage\":\"created\"",
-            _ => b"{\"stage\":\"ready\"",
-        };
-        bytes.extend_from_slice(&expected[..expected.len() - 1]);
-        assert!(!tail.is_empty());
-        if count < 2 {
-            let candidate = f.file.with_extension("reconcile.tmp");
-            fs::remove_file(&candidate).unwrap();
-            if count == 1 {
-                journal
-                    .saved
-                    .slot
-                    .create(&name(&journal.saved.slot), true)
-                    .unwrap();
+fn any_unterminated_wal_tail_is_uncommitted_at_every_stage() {
+    for count in 0..=3 {
+        for tail in [
+            b"{\"stage\":\"alloc".as_slice(),
+            b"\0\0\0\0\0",
+            b"garbage\xff\0",
+            b"{\"stage\":\"unrecognized\"}",
+        ] {
+            let f = Fixture::new();
+            let journal = prepared(&f);
+            let _held = stage(&journal, "recorded");
+            let path = f.file.with_extension("reconcile-lock");
+            let log = frames(&fs::read(&path).unwrap());
+            let mut bytes = encode_frames(&log[..count]);
+            bytes.extend_from_slice(tail);
+            if count < 2 {
+                fs::remove_file(f.file.with_extension("reconcile.tmp")).unwrap();
+                if count == 1 {
+                    journal
+                        .saved
+                        .slot
+                        .create(&name(&journal.saved.slot), true)
+                        .unwrap();
+                }
             }
+            fs::write(&path, bytes).unwrap();
+            assert_eq!(
+                journal.saved().publication_status(),
+                Status::Recoverable,
+                "{count}/{tail:?}"
+            );
+            recover(&journal.saved.slot, &journal.saved.disk, &journal.lock).unwrap();
+            assert_eq!(journal.saved().publication_status(), Status::Clear);
+            assert_eq!(journal.saved().phase(), Phase::Prepared);
+            assert_eq!(journal.saved().reconcile_id(), f.intent.reconcile_id);
+            assert!(!f.file.with_extension("reconcile.tmp").exists());
         }
-        fs::write(&path, bytes).unwrap();
-        assert_eq!(
-            journal.saved().publication_status(),
-            Status::Recoverable,
-            "{cut}"
-        );
-        recover(&journal.saved.slot, &journal.saved.disk, &journal.lock).unwrap();
-        assert_eq!(journal.saved().publication_status(), Status::Clear, "{cut}");
-        assert_eq!(journal.saved().phase(), Phase::Prepared);
     }
-    // Complete unknown frames are corruption, not an uncommitted tail.
+}
+
+#[test]
+fn allocation_without_created_never_adopts_a_nonempty_candidate() {
     let f = Fixture::new();
     let journal = prepared(&f);
-    fs::write(
-        f.file.with_extension("reconcile-lock"),
-        b"{\"stage\":\"unrecognized\"}\n",
-    )
-    .unwrap();
+    let held = stage(&journal, "recorded");
+    let path = f.file.with_extension("reconcile-lock");
+    let log = frames(&fs::read(&path).unwrap());
+    let allocated = encode_frames(&log[..1]);
+    fs::write(&path, &allocated).unwrap();
+    let candidate = fs::read(f.file.with_extension("reconcile.tmp")).unwrap();
+    assert!(!candidate.is_empty());
     assert_eq!(journal.saved().publication_status(), Status::NeedsReview);
-    assert!(recover(&journal.saved.slot, &journal.saved.disk, &journal.lock).is_err());
+    assert_eq!(
+        recover(&journal.saved.slot, &journal.saved.disk, &journal.lock).err(),
+        Some(Error::PublicationNeedsReview)
+    );
+    assert_eq!(fs::read(&path).unwrap(), allocated);
+    assert_eq!(
+        fs::read(f.file.with_extension("reconcile.tmp")).unwrap(),
+        candidate
+    );
+    assert_eq!(held.metadata().unwrap().nlink(), 1);
+    assert_eq!(journal.saved().phase(), Phase::Prepared);
+}
+
+#[test]
+fn complete_unknown_and_oversize_wal_have_distinct_refusals_and_are_kept() {
+    for (bytes, status, error) in [
+        (
+            b"{\"stage\":\"unrecognized\"}\n".to_vec(),
+            Status::NeedsReview,
+            Error::PublicationNeedsReview,
+        ),
+        (
+            vec![0; BYTES + 1],
+            Status::Oversize,
+            Error::PublicationOversize,
+        ),
+    ] {
+        let f = Fixture::new();
+        let mut journal = prepared(&f);
+        let path = f.file.with_extension("reconcile-lock");
+        let original = journal.saved.disk.bytes.clone();
+        fs::write(&path, &bytes).unwrap();
+        assert_eq!(journal.saved().publication_status(), status);
+        // An oversized lock refuses even before acquiring its flock or reading it.
+        if status == Status::Oversize {
+            assert_eq!(journal.saved.slot.lock(false).err(), Some(error));
+        } else {
+            assert_eq!(journal.offer().err(), Some(error));
+        }
+        drop(journal);
+        assert_eq!(
+            saved(&f).discard_prepared(&f.intent.reconcile_id).err(),
+            Some(error)
+        );
+        assert_eq!(fs::read(&path).unwrap(), bytes);
+        assert_eq!(
+            fs::read(f.file.with_extension("reconcile")).unwrap(),
+            original
+        );
+        assert!(!f.file.with_extension("reconcile.tmp").exists());
+    }
+}
+
+#[test]
+fn fixture_metadata_lock_waits_for_the_actual_original_flock() {
+    let f = Fixture::new();
+    let Journal { saved, lock, .. } = prepared(&f);
+    let (busy, observed) = std::sync::mpsc::sync_channel(1);
+    std::thread::scope(|threads| {
+        let waiter = threads.spawn(|| {
+            metadata_lock_after_busy(&saved.slot, || {
+                let _ = busy.try_send(());
+            })
+        });
+        observed
+            .recv_timeout(std::time::Duration::from_secs(8))
+            .unwrap();
+        assert_eq!(saved.slot.lock(false).err(), Some(Error::Busy));
+        drop(lock);
+        let acquired = waiter.join().unwrap();
+        lock_current(&saved.slot, &acquired).unwrap();
+        assert!(read(&acquired, BYTES).unwrap().0.is_empty());
+    });
 }

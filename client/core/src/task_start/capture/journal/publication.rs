@@ -9,6 +9,7 @@ pub enum Status {
     Clear,
     Recoverable,
     NeedsReview,
+    Oversize,
 }
 #[derive(Clone, Deserialize, Serialize)]
 #[serde(deny_unknown_fields)]
@@ -68,33 +69,14 @@ fn born(file: &File) -> Option<[u64; 2]> {
 fn decode(slot: &Slot, bytes: Vec<u8>, version: FileVersion) -> io::Result<Snapshot> {
     let mut pending: Option<Pending> = None;
     for (count, line) in bytes.split_inclusive(|b| *b == b'\n').enumerate() {
+        // A complete LF-terminated frame must be durable before its filesystem
+        // step can start. Any unterminated tail is uncommitted, including NULs,
+        // garbage and complete JSON without LF; it grants no next step.
+        if line.last() != Some(&b'\n') {
+            break;
+        }
         if count >= 3 {
             return Err(refused());
-        }
-        let expected = [
-            b"{\"stage\":\"allocated\"".as_slice(),
-            b"{\"stage\":\"created\"",
-            b"{\"stage\":\"ready\"",
-        ][count];
-        if line.last() != Some(&b'\n') {
-            // Only a syntactically incomplete final frame, or a complete
-            // expected frame lacking its final LF, is an uncommitted tail.
-            // No corresponding filesystem step may have started yet.
-            if !(expected.starts_with(line) || line.starts_with(expected)) {
-                return Err(refused());
-            }
-            match serde_json::from_slice::<serde_json::Value>(line) {
-                Err(e) if e.is_eof() => (),
-                Ok(_) => {
-                    let _: Frame = serde_json::from_value(
-                        wire::original_value(std::str::from_utf8(line).map_err(|_| refused())?)
-                            .map_err(|_| refused())?,
-                    )
-                    .map_err(|_| refused())?;
-                }
-                _ => return Err(refused()),
-            }
-            break;
         }
         let value = wire::original_value(
             std::str::from_utf8(&line[..line.len() - 1]).map_err(|_| refused())?,
@@ -378,9 +360,24 @@ fn inspect(slot: &Slot, disk: &Disk, lock: &File) -> io::Result<Inspection> {
         file,
     })
 }
+pub(super) fn lock_version(file: &File) -> Result<FileVersion, Error> {
+    // Metadata only: retain all private/single-link/type checks without reading
+    // or allocating an oversized WAL. The accepted content bound stays 4 KiB.
+    let version = file_version(file, usize::MAX).map_err(|_| Error::Unavailable)?;
+    if version.length > BYTES as u64 {
+        return Err(Error::PublicationOversize);
+    }
+    Ok(version)
+}
 pub(super) fn status(slot: &Slot, disk: &Disk) -> Status {
     (|| {
+        disk.current(slot)?;
         let lock = open_at(&slot.folder, &slot.lock_name, false)?;
+        match lock_version(&lock) {
+            Err(Error::PublicationOversize) => return Ok(Status::Oversize),
+            Err(_) => return Err(refused()),
+            Ok(_) => (),
+        }
         inspect(slot, disk, &lock).map(|v| v.status)
     })()
     .unwrap_or(Status::NeedsReview)
@@ -398,8 +395,13 @@ pub(super) fn clear(
     sync(&file, false)?;
     lock_current(slot, lock)
 }
-pub(super) fn recover(slot: &Slot, disk: &Disk, lock: &File) -> io::Result<()> {
-    reconcile(slot, disk, lock, inspect(slot, disk, lock)?)
+pub(super) fn recover(slot: &Slot, disk: &Disk, lock: &File) -> Result<(), Error> {
+    lock_version(lock)?;
+    let observed = inspect(slot, disk, lock).map_err(|_| Error::PublicationNeedsReview)?;
+    if observed.status == Status::NeedsReview {
+        return Err(Error::PublicationNeedsReview);
+    }
+    reconcile(slot, disk, lock, observed).map_err(|_| Error::PublicationUnknown)
 }
 fn reconcile(slot: &Slot, disk: &Disk, lock: &File, observed: Inspection) -> io::Result<()> {
     reconcile_with_sync(slot, disk, lock, observed, &mut |file, _| file.sync_all())
@@ -413,7 +415,7 @@ fn reconcile_with_sync(
 ) -> io::Result<()> {
     match observed.status {
         Status::Clear => return Ok(()),
-        Status::NeedsReview => return Err(refused()),
+        Status::NeedsReview | Status::Oversize => return Err(refused()),
         Status::Recoverable => (),
     }
     fence(slot, lock, &observed.snapshot)?;

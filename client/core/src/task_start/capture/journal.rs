@@ -16,6 +16,8 @@ pub enum Error {
     OfferedUnknown,
     Cancelled,
     PublicationUnknown,
+    PublicationNeedsReview,
+    PublicationOversize,
 }
 #[derive(Clone, Copy, Debug, Deserialize, Serialize, PartialEq, Eq)]
 #[serde(rename_all = "snake_case")]
@@ -166,9 +168,7 @@ impl Slot {
             }
         }
         .map_err(|_| Error::Unavailable)?;
-        if file_version(&file, publication::BYTES).is_err() {
-            return Err(Error::Unavailable);
-        }
+        publication::lock_version(&file)?;
         // SAFETY: only this retained metadata lock, never a service/native lock.
         if unsafe { libc::flock(file.as_raw_fd(), libc::LOCK_EX | libc::LOCK_NB) } != 0 {
             let error = io::Error::last_os_error();
@@ -508,7 +508,7 @@ fn publish(
     let bytes = encode(next)?;
     old.current(slot).map_err(|_| Error::Unavailable)?;
     check().map_err(|_| Error::Unavailable)?;
-    publication::recover(slot, old, lock).map_err(|_| Error::PublicationUnknown)?;
+    publication::recover(slot, old, lock)?;
     old.current(slot).map_err(|_| Error::Unavailable)?;
     check().map_err(|_| Error::Unavailable)?;
     let mut tracked = publication::allocate(slot, old, lock, next, &bytes, &mut sync)

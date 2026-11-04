@@ -245,7 +245,9 @@ before its next filesystem step:
 3. Ready records the exact final file version after its body sync. Full object,
    bytes, hash and ID checks precede rename, directory sync and Intent return.
 
-An incomplete final frame never grants the next filesystem step. Recovery keeps
+Any unterminated final line is uncommitted, including NUL-filled or garbage
+bytes and complete JSON lacking its final newline. It never grants the next
+filesystem step. Complete newline-terminated unknown frames still refuse. Recovery keeps
 the same observed file and tracking snapshots under the original metadata flock.
 An allocation with no candidate can retire its metadata; an empty allocated file
 or an original created file with an incomplete body can be removed. A ready file
@@ -256,7 +258,11 @@ branches sync the namespace before clearing tracking, including a rename seen
 only in the page cache and a removal interrupted before directory sync.
 
 `Saved::publication_status()` is a bounded read-only observation of this managed
-slot: `Clear`, `Recoverable` or `NeedsReview`. It supplies no permission. A later
+slot: `Clear`, `Recoverable`, `NeedsReview` or `Oversize`. It supplies no
+permission. Native Check and discard report distinct closed manual-review and
+oversize reasons; opening the Task Start review also displays that reason and
+disables Check. The oversize refusal uses private regular-file metadata only:
+it does not read a WAL beyond the unchanged 4 KiB limit. A later
 explicit Check, confirmed unsent discard or exact submitted/drained completion
 can recover publication metadata. This does not rotate the original ID or offer
 again; the saved phase and all existing admission/CAS guards remain decisive.
@@ -272,6 +278,43 @@ way to permit another offer. Initial preparation with missing/corrupt history
 still refuses. Older random-name temporary files have no durable object record;
 they stay unindexed and are never removed by name, age or owner. The bounded slot
 status makes no claim that those legacy files are absent.
+
+
+### Manual publication review
+
+Use this procedure for the displayed recovery-data review or tracking-size
+refusal. It is an operator review, not permission to reset an uncertain Check.
+
+1. Close this Task Start review and other Next windows using the same private
+   draft store. Leave native agents, terminals and the desktop service running;
+   none of them needs to be stopped to inspect this metadata.
+2. Keep a private copy of the task checkpoint, marker, `.reconcile` journal,
+   `.reconcile-lock` tracking and fixed `.reconcile.tmp` if present. Keep the
+   original permissions. They may contain task text: do not paste them into a
+   public issue. Report only the displayed reason and original task/Check IDs.
+3. Have a maintainer inspect the bounded saved journal and tracking through the
+   retained-directory readers, with the same metadata flock held for any repair.
+   A Busy lock must wait for its original child/pipe custody to release it; never
+   delete a lock or force another owner. An oversized lock must first be inspected as metadata, not loaded without a
+   bound. Match the original delivery/Check IDs and before/after hashes and native
+   objects. Look up that exact saved Check through the existing authenticated
+   original-result read lane. Missing or Unknown is not proof of no effect.
+4. Only the original, verified publication can use the recovery rules above.
+   Complete unknown frames, replaced objects and oversized/unverifiable tracking
+   cannot be repaired by deleting or truncating the lock/candidate/journal or by
+   creating another Check ID. Keep them for maintainer-assisted review when the
+   original evidence cannot be established; there is no general reset command.
+   In particular, never turn an OfferedUnknown record back into Prepared.
+5. To continue the task manually meanwhile, inspect its history and the original
+   executor's Activity. The existing **I reviewed it, allow another start** action
+   remains a separate explicit owner decision. It does not stop the original,
+   prove no effect, settle its receipt, repair publication metadata or authorize
+   an automatic retry. The original Check stays preserved and may remain
+   unavailable until its evidence is resolved.
+
+Ordinary torn final lines do not require this procedure: a later explicit
+metadata publisher recovers the valid committed prefix under the original flock.
+There is no scan, automatic repair of corrupt complete frames or unsafe cleanup.
 
 ## Explicit native receipt check and settlement
 

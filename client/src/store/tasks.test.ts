@@ -1,4 +1,5 @@
 import { describe, expect, it, vi } from "vitest";
+import { createComputed, createRoot } from "solid-js";
 import { createTasks, WINDOW } from "./tasks";
 import { TASK_LIMIT } from "../ui/screens/tasks-ui";
 import { emptyBatch, isEmptyBatch, type TasksOut } from "../types";
@@ -179,6 +180,25 @@ describe("windowed project tasks", () => {
     store.apply([{ ...windowed([row("t1")], stagesOf({ total: 3, next: "c1" })), key: "p2", payload: { ...windowed([row("t1")], stagesOf({ total: 3, next: "c1" })).payload as object, project: { id: "p2" } } }]);
     await store.more("todo");
     expect(store.pageError()).toContain("hgs too old"); expect(store.tasks().map((t) => t.uuid)).toEqual(["t1"]);
+  });
+  it("a stage's total follows each new whole list from an older hgs", () => {
+    const store = createTasks(vi.fn().mockResolvedValue(undefined), vi.fn()); store.follow("p1");
+    const seen: number[] = [];
+    const dispose = createRoot((dispose) => { createComputed(() => seen.push(store.total("todo"))); return dispose; });
+    store.apply([list("p1", [row("a")])]);
+    store.apply([list("p1", [row("a"), row("b"), row("c")])]);
+    dispose();
+    expect(seen.at(-1)).toBe(3);
+  });
+  it("what remains of a stage follows the rows Show more loads", async () => {
+    const read = vi.fn().mockResolvedValue({ tasks: [row("t3"), row("t4")], page: { next: null } });
+    const store = createTasks(vi.fn().mockResolvedValue(undefined), read); store.follow("p1");
+    store.apply([windowed([row("t1"), row("t2")], stagesOf({ total: 4, next: "c2" }))]);
+    const seen: number[] = [];
+    const dispose = createRoot((dispose) => { createComputed(() => seen.push(store.remaining("todo"))); return dispose; });
+    await store.more("todo");
+    dispose();
+    expect(seen).toEqual([2, 0]);
   });
   it("a whole list from an older hgs has no window and nothing more to load", () => {
     const store = createTasks(vi.fn().mockResolvedValue(undefined), vi.fn()); store.follow("p1");

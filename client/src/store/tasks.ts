@@ -1,4 +1,4 @@
-import { createSignal } from "solid-js";
+import { batch, createSignal } from "solid-js";
 import { followTasks, readTaskPage } from "../bridge";
 import type { TasksOut } from "../types";
 import { STAGES, TASK_LIMIT, object, taskItem, text, type Stage, type Task } from "../ui/screens/tasks-ui";
@@ -34,6 +34,8 @@ export function createTasks(follow: (project: string | null) => Promise<void>, r
   const [damaged, setDamaged] = createSignal(0);
   const [windowed, setWindowed] = createSignal(false);
   const [totals, setTotals] = createSignal(none(0));
+  /** The published rows of each stage: `total` and `remaining` track them through this signal. */
+  const [shown, setShown] = createSignal(none(0), { equals: (a, b) => STAGES.every((s) => a[s] === b[s]) });
   const [loading, setLoading] = createSignal(none(false));
   const [pageError, setPageError] = createSignal("");
   /** Tasks read on their own (a selected task beyond the loaded rows), at most `ADOPTED`. */
@@ -48,7 +50,10 @@ export function createTasks(follow: (project: string | null) => Promise<void>, r
     let queue = 0;
     const seen = new Set<string>();
     const ordered = (whole ?? STAGES.flatMap((s) => rows[s])).filter((t) => !seen.has(t.uuid) && !!seen.add(t.uuid));
-    setTasks(ordered.map((t) => t.stage === "todo" ? { ...t, queue: ++queue } : t));
+    const counts = none(0);
+    for (const t of ordered) if (t.stage in counts) counts[t.stage as Stage]++;
+    const published = ordered.map((t) => t.stage === "todo" ? { ...t, queue: ++queue } : t);
+    batch(() => { setTasks(published); setShown(counts); });
   };
   /** `found` as the rows of `stage`: the freshest read of those tasks, so no other stage keeps them. */
   const place = (stage: Stage, found: Task[]) => {
@@ -104,13 +109,13 @@ export function createTasks(follow: (project: string | null) => Promise<void>, r
       setAdopted(next);
     },
     /** Every task of a stage, or only those loaded when the list is not windowed. */
-    total: (stage: Stage) => windowed() ? totals()[stage] : rows[stage].length,
+    total: (stage: Stage) => windowed() ? totals()[stage] : shown()[stage],
     /** Rows of a stage not loaded yet. */
-    remaining: (stage: Stage) => windowed() ? Math.max(0, totals()[stage] - rows[stage].length) : 0,
+    remaining: (stage: Stage) => windowed() ? Math.max(0, totals()[stage] - shown()[stage]) : 0,
     follow(nextProject: string | undefined) {
       if (nextProject === project()) return;
       const mine = ++generation;
-      setProject(nextProject); setTasks([]); setLoaded(false); setError(""); setTruncated(false); setDamaged(0);
+      setProject(nextProject); setTasks([]); setShown(none(0)); setLoaded(false); setError(""); setTruncated(false); setDamaged(0);
       setWindowed(false); setTotals(none(0)); setLoading(none(false)); setPageError(""); setAdopted(new Map());
       rows = none([]); next = none(null); extent = none(0); whole = null;
       sent = sent.then(() => follow(nextProject ?? null)).catch((e) => { if (mine === generation) { setError(String(e)); setLoaded(true); } });

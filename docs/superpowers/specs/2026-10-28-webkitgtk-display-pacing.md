@@ -306,6 +306,8 @@ own `-Dprefix`. A copied or renamed prefix therefore keeps running
 it was installed to. On arch this was seen with both a copied 2.54.2 stage and
 the 2.54.1 prefixes. Install with `cmake --install` and `meson install` into
 the final `PREFIX` (or with `DESTDIR` and move the tree to exactly that path).
+A `DESTDIR` install skips meson's post-install `gio-querymodules` and
+`glib-compile-schemas` steps; the arch prefixes have run without those caches.
 Never copy a library from the build tree: its build-tree `DT_RPATH` is searched
 before `LD_LIBRARY_PATH`, and the installation step removes it.
 

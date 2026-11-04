@@ -389,18 +389,20 @@ impl PortableScope {
         let _ = scope.refresh();
         Some(scope)
     }
+    #[cfg(test)]
     fn snapshot(&self) -> Option<std::sync::Arc<FrontendBinding>> {
         self.snapshot
             .lock()
             .unwrap_or_else(|poisoned| poisoned.into_inner())
             .clone()
     }
-    /// Read the private record again, one read in flight per scope. Only a
-    /// record that passes every check and binds this process's own CLI is
-    /// returned, and only such a record replaces the snapshot; when it names
-    /// another app, the cache drops its proofs made against the old record.
-    /// A failed read returns nothing and leaves the snapshot alone: the
-    /// operation that asked is refused, never answered from the snapshot.
+    /// Read the private record for one admitting operation. Reads are
+    /// serialized, one in flight per scope, and each operation decides on its
+    /// own read, started after it arrived. Only a record that passes every
+    /// check and binds this process's own CLI is returned, and only such a
+    /// record replaces the snapshot. When it names another app, the cache
+    /// drops its proofs made against the old record. A failed read returns
+    /// nothing: the operation is refused and never answered from the snapshot.
     fn refresh(&self) -> Option<std::sync::Arc<FrontendBinding>> {
         let _one = self
             .reread
@@ -428,16 +430,13 @@ impl PortableScope {
         Some(binding)
     }
     /// A running GUI (an authenticated frontend, a mode caller's ancestor):
-    /// the proof for that exact process within the caller's own deadline. A
-    /// cached proof made against the current record is image evidence only,
-    /// rechecked for the same process; anything else is a miss, which reads
-    /// the record again and proves the process against it.
+    /// the proof for that exact process within the caller's own deadline.
+    /// Every call reads and checks the current private record first, with a
+    /// read of its own; a missing, unsafe or other-CLI record refuses even when
+    /// a proof is cached. A cached proof is reused only when that record names
+    /// exactly its app object and digest, and it is rechecked for the same
+    /// process; otherwise the process is proven against the record.
     pub fn running(&self, original: &Original, until: Instant) -> Option<std::sync::Arc<GuiProof>> {
-        if let (Some(binding), Some(proof)) = (self.snapshot(), self.cache.find(original)) {
-            if proof.bound_to(&binding) && proof.proves(original) {
-                return Some(proof);
-            }
-        }
         let binding = self.refresh()?;
         if let Some(proof) = self.cache.find(original) {
             if proof.bound_to(&binding) && proof.proves(original) {

@@ -828,3 +828,76 @@ fn a_running_service_refuses_a_record_for_another_cli_object() {
     // The snapshot was not replaced by it.
     assert_eq!(scope.snapshot().as_deref(), Some(&binding));
 }
+
+#[test]
+fn a_warm_proof_never_outlives_its_record() {
+    let dir = tempfile::tempdir().unwrap();
+    let gui = FixtureGui::start(&dir.path().join("zip"));
+    let (scope, binding, layout) = serve(dir.path(), &gui.image);
+    let record = layout.images.join(staging::FRONTEND_BINDING);
+    let home = dir.path().join("serve-home");
+    let good = fs::read(&record).unwrap();
+    let original = gui.original();
+    // Warm: the proof is cached and reused while the record still names it.
+    let warm = scope.running(&original, until()).unwrap();
+    assert!(Arc::ptr_eq(
+        &warm,
+        &scope.running(&original, until()).unwrap()
+    ));
+    drop(warm);
+    let restore = || {
+        fs::write(&record, &good).unwrap();
+        assert!(scope.running(&original, until()).is_some(), "restored");
+    };
+    // Missing.
+    fs::remove_file(&record).unwrap();
+    assert!(
+        scope.running(&original, until()).is_none(),
+        "missing record"
+    );
+    publish_into(&home, &binding);
+    assert!(scope.running(&original, until()).is_some());
+    // Corrupt.
+    fs::write(&record, b"{\"schema\":1").unwrap();
+    assert!(
+        scope.running(&original, until()).is_none(),
+        "corrupt record"
+    );
+    restore();
+    // Readable by others.
+    icacls(&[
+        record.as_os_str(),
+        "/grant".as_ref(),
+        "*S-1-1-0:(R)".as_ref(),
+    ]);
+    assert!(scope.running(&original, until()).is_none(), "unsafe record");
+    icacls(&[
+        record.as_os_str(),
+        "/remove:g".as_ref(),
+        "*S-1-1-0".as_ref(),
+    ]);
+    assert!(scope.running(&original, until()).is_some());
+    // Another CLI object.
+    let copy = dir.path().join("other-cli.exe");
+    fs::copy(std::env::current_exe().unwrap(), &copy).unwrap();
+    publish_into(
+        &home,
+        &binding_with(&gui.image, &PinnedImage::open(&copy).unwrap()),
+    );
+    assert!(scope.running(&original, until()).is_none(), "another CLI");
+    publish_into(&home, &binding);
+    assert!(scope.running(&original, until()).is_some());
+    // Another app object: only the new one is admitted, never the cached GUI.
+    let other = dir.path().join("other").join(staging::FRONTEND_IMAGE);
+    fs::create_dir_all(other.parent().unwrap()).unwrap();
+    fs::write(&other, ORIGINAL).unwrap();
+    publish_into(&home, &binding_for(&other));
+    assert!(scope.running(&original, until()).is_none(), "changed app");
+    assert!(scope.closed(&other, until()).is_some());
+    assert_eq!(
+        scope.cache.len(),
+        0,
+        "proofs for the old record are dropped"
+    );
+    gui.quit();
+}

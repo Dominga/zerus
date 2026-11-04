@@ -83,11 +83,12 @@ the zip's app relays through the stable CLI staged from that zip.
   or same-path replaced copy binds itself again. Same or newer version only,
   never a downgrade, and an unchanged CLI is not copied again.
 - **Visibility.** A process that admits frontends records its own CLI when it
-  starts. It reads the private record again whenever it has no current proof
-  for a request: for each notification launch, and for a GUI process it has
-  not proven against the current record. It does this one read at a time,
-  with the same checks. A failed or unsafe read refuses that request and
-  never falls back to the record the process read earlier. A running service
+  starts. Every admitting request, with a GUI running or a notification
+  launch, reads and checks the current private record first, with a read of
+  its own; these reads run one at a time. A cached proof is reused only when
+  that record names exactly its app. A failed or unsafe read refuses the
+  request, even when a proof is cached, and never falls back to the record
+  the process read earlier. A running service
   therefore admits a rebinding at once while the stable CLI is unchanged, for
   example a re-extracted or same-path replaced app; proofs made against the
   older record no longer admit anything once it has changed. A record that

@@ -36,8 +36,14 @@ impl Journal {
             platform::verify_private(root, platform::Private::Directory)?,
             "unsafe audit directory"
         );
-        // Resolve allowed ancestor aliases without following the journal leaf.
-        let path = platform::canonical(root)?.join("journal.sqlite3");
+        // Resolve allowed ancestor aliases without following the journal leaf,
+        // and check the canonical folder too: it is the one used from here.
+        let canonical = platform::canonical(root)?;
+        ensure!(
+            platform::verify_private(&canonical, platform::Private::Directory)?,
+            "unsafe audit directory"
+        );
+        let path = canonical.join("journal.sqlite3");
         match fs::symlink_metadata(&path) {
             Err(e) if e.kind() == std::io::ErrorKind::NotFound => return Ok(None),
             Err(e) => return Err(e.into()),

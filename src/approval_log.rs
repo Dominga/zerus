@@ -110,6 +110,11 @@ pub(crate) fn open(root: &Path) -> Result<Connection> {
     // NOFOLLOW checks every component; resolve the verified directory only,
     // preserving ancestor aliases while still refusing a linked journal.
     let root = platform::canonical(root)?;
+    // The canonical folder is the one used from here: check it as well, so an
+    // ancestor changed after the first check never selects another folder.
+    if !platform::verify_private(&root, platform::Private::Directory)? {
+        return Err(bad("The approval journal folder must be private"));
+    }
     let path = root.join("journal.sqlite3");
     // Never close a raw fd on an existing SQLite inode: another connection
     // (including the actor's audit reader) may already hold POSIX locks.

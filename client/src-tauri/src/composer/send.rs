@@ -878,6 +878,14 @@ pub(crate) struct Pending {
     pub(crate) call: Call,
 }
 
+#[cfg(test)]
+std::thread_local! {
+    /// Runs once, on this thread, right after `reconcile` leaves the hub lock:
+    /// a test's barrier in the window where another call can run.
+    static AFTER_RECONCILE: std::cell::RefCell<Option<Box<dyn FnOnce()>>> =
+        std::cell::RefCell::new(None);
+}
+
 /// How a delivery or continuation ends ([`Composers::finish`]).
 struct End<'a> {
     ok: bool,
@@ -1607,7 +1615,10 @@ impl Composers {
 
     /// `MessageComposer::deliveryFinished`. A Retry that kept the draft
     /// gives the draft back its marks; otherwise a success clears the draft,
-    /// and an uncertain end marks it, so Send waits for Allow retry.
+    /// and an uncertain end marks it, so Send waits for Allow retry. Tests
+    /// only: it finishes whatever the composer holds when it runs, so the
+    /// history clear applies `finish_in` under the lock that decided it.
+    #[cfg(test)]
     pub(crate) fn delivery_finished(
         &self,
         key: &str,
@@ -1734,7 +1745,7 @@ impl Composers {
     /// (`reconcileMessages`); a failed row delivered after all clears a
     /// draft that still holds it. True when a row went.
     pub(crate) fn reconcile(&self) -> bool {
-        let (key, removed, clear) = {
+        let (removed, cleared) = {
             let mut guard = self.lock();
             let Some(key) = guard.open_key.clone() else {
                 return false;
@@ -1768,10 +1779,28 @@ impl Composers {
                     // text match.
                     && c.checkpoint.is_none()
             });
-            (key, reconciled.removed > 0, clear)
+            // Applied under the lock that decided it, so a send admitted
+            // after this check is never cleared by it (zerus-5wmh.66.4.4).
+            if clear {
+                let end = End {
+                    ok: true,
+                    detail: "",
+                    uncertain: false,
+                    preserve: false,
+                };
+                self.finish_in(hub, &key, None, end);
+            }
+            (reconciled.removed > 0, clear)
         };
-        if clear {
-            self.delivery_finished(&key, true, "", false, false);
+        #[cfg(test)]
+        AFTER_RECONCILE.with(|hook| {
+            if let Some(hook) = hook.borrow_mut().take() {
+                hook();
+            }
+        });
+        if cleared {
+            self.reconcile();
+            self.changed();
         }
         removed
     }
@@ -7342,6 +7371,74 @@ mod continuations {
             );
             eprintln!("eviction definite={definite}: original held, 32 other entries unchanged");
         }
+    }
+
+    /// review-n's #1316 R4 probe (zerus-5wmh.66.4.4).
+    #[test]
+    fn a_history_clear_cannot_overwrite_a_new_checkpoint() {
+        let root = dir("probe-r4-history-admission-gap");
+        let store = drafts(&root);
+        let (c, fake) = send_hub_on(&store);
+        *lock(&fake.outcome) = Box::new(|_, _| Outcome::Failed {
+            detail: "refused".into(),
+        });
+        let view = opened(&c, ready());
+        assert_eq!(
+            c.send_message(view.handle, 1, view.text_epoch, "old text".into(), 0, 0),
+            SendReply::Sending
+        );
+        until(&c, |v| !v.sending && v.status_error && v.local.len() == 1);
+        store.flush();
+        assert!(on_disk(&root).is_none());
+        let mut late = state(ready());
+        late.activity.push(ActivityOut {
+            computer: ComputerId::from("studio"), key: "run:run-1".into(), kind: "events".into(),
+            payload: json!({"events":[{"type":"UserPromptSubmit","detail":"old text","at":*lock(&fake.now)}]})
+        });
+        let (entered_tx, entered_rx) = std::sync::mpsc::channel();
+        let (release_tx, release_rx) = std::sync::mpsc::channel();
+        let observing = c.clone();
+        let worker = std::thread::spawn(move || {
+            AFTER_RECONCILE.with(|slot| {
+                *slot.borrow_mut() = Some(Box::new(move || {
+                    entered_tx.send(()).unwrap();
+                    release_rx.recv_timeout(Duration::from_secs(10)).unwrap();
+                }))
+            });
+            observing.observe(&late);
+        });
+        entered_rx
+            .recv_timeout(Duration::from_secs(10))
+            .expect("reached actual reconcile gap");
+        *lock(&fake.outcome) = Box::new(|_, _| Outcome::Uncertain {
+            detail: "new reply lost".into(),
+        });
+        let view = c.current().unwrap();
+        let begun = c.send_message(
+            view.handle,
+            view.rev + 1,
+            view.text_epoch,
+            "new held input".into(),
+            0,
+            0,
+        );
+        let view = until(&c, |v| !v.sending && v.uncertain);
+        store.flush();
+        let held = on_disk(&root).expect("new input has its durable checkpoint");
+        let before = (view.text.clone(), view.uncertain);
+        release_tx.send(()).unwrap();
+        worker.join().unwrap();
+        store.flush();
+        let view = c.current().unwrap();
+        let after = on_disk(&root);
+        eprintln!("history-clear gap: begun={begun:?} before={before:?} after_text={:?} after_uncertain={} new_checkpoint_kept={}", view.text, view.uncertain, after.as_ref()==Some(&held));
+        assert_eq!(
+            after.as_ref(),
+            Some(&held),
+            "an old text-only clear must not erase the input reserved while the lock was released"
+        );
+        assert_eq!(view.text, "new held input");
+        assert!(view.uncertain);
     }
 
     fn sent_ids(fake: &Fake) -> Vec<String> {

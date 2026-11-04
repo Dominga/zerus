@@ -1,9 +1,12 @@
 import { createSignal, createEffect, createRoot } from "solid-js";
 import { orderedRows } from "./catalog";
 import { groupOf } from "./organization";
-import { selected, setPage, setSelectedKey, setDetailTab, setSubagentOpen } from "./ui";
+import { page, selected, selectedKey, setPage, setSelectedKey, setDetailTab, setSubagentOpen } from "./ui";
 import { tasks } from "./tasks";
-import { openInspector } from "./inspector";
+import { inspectorOpen, inspectorTab, openInspector } from "./inspector";
+import { notify } from "./actions";
+import { resolveTaskReference } from "../bridge";
+import { openLinkedReference, SHORT_REFERENCE } from "./taskLinks";
 
 const UUID = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i;
 
@@ -38,10 +41,19 @@ if (params.has("task") || params.get("page") === "tasks") createRoot((dispose) =
     if (task && project) { openTask(project, task.uuid); dispose(); }
     // A windowed list loads some rows of each stage: a task named by its UUID
     // opens anyway, and Task View reads it on its own. A short reference
-    // beyond the window cannot be resolved here, so the board stays open
-    // without it rather than opening it later by surprise.
+    // beyond the window is resolved by one bounded read that checks it.
     else if (project && tasks.project() === project && tasks.windowed() && tasks.loaded()) {
       if (UUID.test(ref)) openTask(project, ref.toLowerCase());
+      else if (SHORT_REFERENCE.test(ref)) {
+        // Any navigation meanwhile drops the late result: another task,
+        // project, session, page or inspector panel.
+        const board = () => [selectedTask(), tasks.project(), selectedKey(), page(), inspectorOpen(), inspectorTab()];
+        const before = board();
+        void openLinkedReference(project, ref, {
+          resolve: resolveTaskReference, open: openTask, notify,
+          unchanged: () => board().every((value, at) => value === before[at]),
+        });
+      }
       dispose();
     }
   });

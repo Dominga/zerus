@@ -48,9 +48,9 @@ describe("task files read on their own", () => {
 });
 
 function deferred<T>() {
-  let resolve!: (value: T) => void;
-  const promise = new Promise<T>((yes) => { resolve = yes; });
-  return { promise, resolve };
+  let resolve!: (value: T) => void, reject!: (reason: unknown) => void;
+  const promise = new Promise<T>((yes, no) => { resolve = yes; reject = no; });
+  return { promise, resolve, reject };
 }
 /** A card's file as its page names it: not read yet. */
 const listed = (mime: string): Fetched => ({ path: "", name: "f1.png", mime, bytes: 3, thumbnail: false, source: source(1) });
@@ -62,7 +62,11 @@ function card(mime: string, removedDuringRead: boolean) {
   };
   let dispose!: () => void;
   const shown = createRoot((done) => { dispose = done; return taskFileCard(listed(mime), "p1", "t1", port); });
-  return { shown, read, opened, notices, dispose, finish: () => { if (removedDuringRead) dispose(); pending.resolve(copy("f1.png")); } };
+  return {
+    shown, read, opened, notices, dispose,
+    finish: () => { if (removedDuringRead) dispose(); pending.resolve(copy("f1.png")); },
+    fail: (error: Error) => pending.reject(error),
+  };
 }
 
 describe("a task file card (zerus-cg5h.28)", () => {
@@ -94,5 +98,31 @@ describe("a task file card (zerus-cg5h.28)", () => {
       expect([c.shown.reading(), c.notices]).toEqual([false, []]);
       c.dispose();
     }
+  });
+  it("an open whose read fails says why and is no longer reading", async () => {
+    const c = card("text/plain", false);
+    const opening = c.shown.open();
+    await tick();
+    expect(c.shown.reading()).toBe(true);
+    c.fail(new Error("This attachment changed. Refresh this task."));
+    await opening;
+    expect([c.shown.reading(), c.shown.copy(), c.opened]).toEqual([false, undefined, []]);
+    expect(c.notices).toEqual(["error Error: This attachment changed. Refresh this task."]);
+    c.dispose();
+  });
+  it("a card removed while an earlier preview is pending never reads its own", async () => {
+    const pending = deferred<Fetched>(), read = vi.fn(() => pending.promise);
+    const port: TaskFileCardPort = { files: createTaskFiles(read), open: async () => null, notify: () => {} };
+    const image = (file: number): Fetched => ({ ...listed("image/png"), name: `f${file}.png`, source: source(file, String(file).repeat(64)) });
+    let first!: () => void, second!: () => void;
+    createRoot((done) => { first = done; taskFileCard(image(1), "p1", "t1", port); });
+    createRoot((done) => { second = done; taskFileCard(image(2), "p1", "t1", port); });
+    await tick();
+    expect(read).toHaveBeenCalledExactlyOnceWith("p1", "t1", source(1, "1".repeat(64)));
+    second();
+    pending.resolve(copy("f1.png"));
+    await tick();
+    expect(read).toHaveBeenCalledOnce();
+    first();
   });
 });

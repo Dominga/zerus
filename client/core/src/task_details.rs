@@ -6,11 +6,14 @@
 use crate::{
     attachments::{Attachment, MAX_ATTACHMENTS, MAX_ATTACHMENT_BYTES, MAX_TOTAL_BYTES},
     creation::canonical_uuid,
-    tasks_write::TaskCall,
+    run::run_limited,
+    tasks_write::{decode, TaskCall, TASK_REPLY_LIMIT},
 };
 use serde::{Deserialize, Serialize};
 use serde_json::{Map, Value};
 use sha2::{Digest, Sha256};
+use std::path::Path;
+use std::time::Duration;
 
 pub const HISTORY_PAGE: usize = 80;
 
@@ -48,6 +51,93 @@ fn page_call(
         call.args.extend(["--history-before".into(), before.into()]);
     }
     Ok(call)
+}
+
+/// A link's short task reference: `T-` and six base-36 characters, alone or
+/// as a task's `ref` (`PROJECT/T-xxxxxx`).
+fn short_reference(reference: &str) -> Option<&str> {
+    let short = reference
+        .rsplit_once('/')
+        .map_or(reference, |(_, short)| short);
+    (reference.len() <= 256
+        && !reference.chars().any(char::is_control)
+        && short.len() == 8
+        && short.starts_with("T-")
+        && short[2..]
+            .bytes()
+            .all(|b| b.is_ascii_digit() || b.is_ascii_lowercase()))
+    .then_some(short)
+}
+
+/// Resolving a deep link's short reference: one bounded read of that task,
+/// at most one history event and file metadata only. The CLI finds a short
+/// ID through its task index, so no list is loaded.
+pub fn reference_call(project: &str, reference: &str) -> Result<TaskCall, String> {
+    let short = short_reference(reference).ok_or("Invalid task reference.")?;
+    if project.is_empty() || project.len() > 128 || project.chars().any(char::is_control) {
+        return Err("Invalid task reference.".into());
+    }
+    let mut call = TaskCall::get(project, short);
+    call.args.extend([
+        "--history-limit".into(),
+        "1".into(),
+        "--attachments".into(),
+        "metadata".into(),
+    ]);
+    Ok(call)
+}
+
+/// A deep link waits at most this long for its reference (a task read's
+/// own limit is 30 s); the board then stays as it is.
+pub const REFERENCE_TIMEOUT: Duration = Duration::from_secs(10);
+
+/// [`reference_call`] run within [`REFERENCE_TIMEOUT`], its reply checked by
+/// [`resolved`]. It blocks: callers run it off the UI thread.
+pub fn resolve(hgs: &Path, project: &str, reference: &str) -> Result<String, String> {
+    resolve_within(hgs, project, reference, REFERENCE_TIMEOUT)
+}
+
+fn resolve_within(
+    hgs: &Path,
+    project: &str,
+    reference: &str,
+    timeout: Duration,
+) -> Result<String, String> {
+    let mut invocation = reference_call(project, reference)?.invocation();
+    invocation.timeout = timeout;
+    let reply = match run_limited(hgs, &invocation, &[], TASK_REPLY_LIMIT) {
+        Ok(exit) => decode(exit)?,
+        Err(_) => return Err("Task response exceeds 36 MiB".into()),
+    };
+    resolved(&reply, project, reference)
+}
+
+/// The canonical UUID of the task a short reference names, only when the
+/// reply is that task of that project: the same project, short ID and, for a
+/// `PROJECT/T-xxxxxx` link, the same `ref`.
+pub fn resolved(
+    reply: &Map<String, Value>,
+    project: &str,
+    reference: &str,
+) -> Result<String, String> {
+    let mismatch = || "The task reply did not match the linked task.".to_owned();
+    let short = short_reference(reference).ok_or_else(mismatch)?;
+    let detail = reply
+        .get("task")
+        .filter(|t| t.is_object())
+        .ok_or_else(mismatch)?;
+    let uuid = detail["uuid"]
+        .as_str()
+        .filter(|uuid| canonical_uuid(uuid))
+        .ok_or_else(mismatch)?;
+    if reply.get("project").and_then(|p| p["id"].as_str()) != Some(project)
+        || detail["project"].as_str() != Some(project)
+        || detail["id"].as_str() != Some(short)
+        || (short != reference && detail["ref"].as_str() != Some(reference))
+    {
+        return Err(mismatch());
+    }
+    Ok(uuid.to_owned())
 }
 
 pub fn checked(reply: &Map<String, Value>, project: &str, task: &str) -> Result<Value, String> {
@@ -371,6 +461,145 @@ mod tests {
         assert!(checked(&reply(), "example", ID).is_ok());
         assert!(checked(&reply(), "other", ID).is_err());
         assert!(checked(&reply(), "example", "another").is_err());
+    }
+    #[test]
+    fn a_short_reference_resolves_only_to_the_task_it_names() {
+        let call = reference_call("example", "T-ab12cd").unwrap();
+        assert_eq!(
+            call.args,
+            vec![
+                "get",
+                "T-ab12cd",
+                "--project",
+                "example",
+                "--history-limit",
+                "1",
+                "--attachments",
+                "metadata"
+            ]
+        );
+        assert!(call.input.is_empty());
+        // A task's `ref` reads the same task; the CLI gets only its short ID.
+        assert_eq!(
+            reference_call("example", "Sample project/T-ab12cd")
+                .unwrap()
+                .args[1],
+            "T-ab12cd"
+        );
+        for bad in [
+            "T-AB12CD",
+            "T-ab12c",
+            "T-ab12cde",
+            "ab12cd",
+            ID,
+            "T-ab12c!",
+            "x/T-ab\n12",
+        ] {
+            assert!(reference_call("example", bad).is_err(), "{bad:?}");
+        }
+        assert!(reference_call("", "T-ab12cd").is_err());
+        assert!(reference_call("example\nother", "T-ab12cd").is_err());
+
+        let reply = |project: &str, uuid: &str, id: &str, r#ref: &str| {
+            json!({"project":{"id":project},"task":{"uuid":uuid,"project":project,"id":id,"ref":r#ref}})
+                .as_object()
+                .unwrap()
+                .clone()
+        };
+        let good = reply("example", ID, "T-ab12cd", "Sample project/T-ab12cd");
+        assert_eq!(resolved(&good, "example", "T-ab12cd").unwrap(), ID);
+        assert_eq!(
+            resolved(&good, "example", "Sample project/T-ab12cd").unwrap(),
+            ID
+        );
+        for (reply, reference) in [
+            (good.clone(), "Other project/T-ab12cd"),
+            (good.clone(), "T-zz99zz"),
+            (
+                reply("other", ID, "T-ab12cd", "Sample project/T-ab12cd"),
+                "T-ab12cd",
+            ),
+            (
+                reply(
+                    "example",
+                    "11111111-1111-4111-8111-11111111111",
+                    "T-ab12cd",
+                    "",
+                ),
+                "T-ab12cd",
+            ),
+            (
+                reply(
+                    "example",
+                    "AAAAAAAA-1111-4111-8111-111111111111",
+                    "T-ab12cd",
+                    "",
+                ),
+                "T-ab12cd",
+            ),
+            (reply("example", ID, "T-zz99zz", ""), "T-ab12cd"),
+        ] {
+            assert!(
+                resolved(&reply, "example", reference).is_err(),
+                "{reference} {reply:?}"
+            );
+        }
+        let mut other_task_project = good.clone();
+        other_task_project["task"]["project"] = json!("other");
+        assert!(resolved(&other_task_project, "example", "T-ab12cd").is_err());
+        assert!(resolved(&Map::new(), "example", "T-ab12cd").is_err());
+    }
+    /// A fake `hgs` in its own folder: `reply`, an optional `sleep` and the
+    /// recorded `calls`.
+    #[cfg(unix)]
+    fn fake_hgs(name: &str, reply: &str, sleep: Option<&str>) -> std::path::PathBuf {
+        let dir = std::env::temp_dir().join(format!(
+            "zerus-task-reference-{}-{name}",
+            std::process::id()
+        ));
+        let _ = std::fs::remove_dir_all(&dir);
+        std::fs::create_dir_all(&dir).unwrap();
+        std::fs::write(dir.join("reply"), reply).unwrap();
+        if let Some(sleep) = sleep {
+            std::fs::write(dir.join("sleep"), sleep).unwrap();
+        }
+        let script = dir.join("hgs");
+        std::os::unix::fs::symlink(
+            Path::new(env!("CARGO_MANIFEST_DIR")).join("tests/support/fake_hgs_task_reference.sh"),
+            &script,
+        )
+        .unwrap();
+        script
+    }
+    #[cfg(unix)]
+    #[test]
+    fn a_short_reference_is_one_bounded_read_with_its_own_timeout() {
+        assert_eq!(REFERENCE_TIMEOUT, Duration::from_secs(10));
+        let reply = json!({"project":{"id":"example"},"task":{"uuid":ID,"project":"example",
+            "id":"T-ab12cd","ref":"Sample project/T-ab12cd"}})
+        .to_string();
+        let hgs = fake_hgs("found", &reply, None);
+        assert_eq!(resolve(&hgs, "example", "T-ab12cd").unwrap(), ID);
+        let calls = std::fs::read_to_string(hgs.with_file_name("calls")).unwrap();
+        assert_eq!(
+            calls,
+            "task get T-ab12cd --project example --history-limit 1 --attachments metadata\n"
+        );
+        // Another task's reply opens nothing.
+        let other = reply.replace("T-ab12cd", "T-zz99zz");
+        let hgs = fake_hgs("other", &other, None);
+        assert!(resolve(&hgs, "example", "T-ab12cd").is_err());
+        // A read past its limit ends, and resolves nothing.
+        let hgs = fake_hgs("slow", &reply, Some("5"));
+        let started = std::time::Instant::now();
+        let error =
+            resolve_within(&hgs, "example", "T-ab12cd", Duration::from_millis(300)).unwrap_err();
+        assert!(error.contains("timed out"), "{error}");
+        assert!(
+            started.elapsed() < Duration::from_secs(4),
+            "{:?}",
+            started.elapsed()
+        );
     }
     #[test]
     fn an_older_cli_cannot_return_a_full_journal_to_the_inspector() {

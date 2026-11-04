@@ -905,6 +905,74 @@ mod tests {
         assert_eq!(cleanup.step(), Step::Done);
     }
 
+    /// Every dialog counts exactly `Entry::eligible`: a removed or unknown
+    /// folder is never a target, and a verified refusal needs a fresh review
+    /// before another removal (no retry without Check again).
+    #[test]
+    fn only_a_freshly_verified_folder_that_is_not_settled_is_eligible() {
+        let reviewed = || {
+            let mut entry = terminated("o");
+            entry.exit_cleanup = false;
+            entry.verified = true;
+            entry.row = ready_row("o");
+            entry
+        };
+        assert!(reviewed().eligible());
+        for settled in [Status::Removed, Status::Unconfirmed] {
+            let mut entry = reviewed();
+            entry.status = Some(settled);
+            assert!(!entry.eligible(), "{settled:?} is never a target (U4)");
+        }
+        let mut entry = reviewed();
+        entry.verified = false;
+        assert!(
+            !entry.eligible(),
+            "an unverified folder is never a target (U2)"
+        );
+        // Probe PV: after a verified refusal, Remove again without Check again
+        // stays idle; only a fresh review admits the folder again.
+        let mut cleanup = Cleanup::manual(vec![{
+            let mut entry = terminated("o");
+            entry.exit_cleanup = false;
+            entry
+        }]);
+        let Step::Review {
+            host, common_dir, ..
+        } = cleanup.step()
+        else {
+            panic!()
+        };
+        cleanup.reviewed(&host, &common_dir, Ok(&review_of(ready_row("o"))));
+        let Step::Remove { .. } = cleanup.remove(Consents::default()) else {
+            panic!()
+        };
+        assert_eq!(
+            cleanup.removed(&Removed::Refused {
+                reply: json!({"status": "kept"}),
+                detail: "Folder kept.".into()
+            }),
+            Step::Idle
+        );
+        assert!(!cleanup.entries[0].eligible());
+        assert_eq!(
+            cleanup.remove(Consents::default()),
+            Step::Idle,
+            "no retry without a fresh review"
+        );
+        cleanup.review_remaining();
+        let Step::Review {
+            host, common_dir, ..
+        } = cleanup.step()
+        else {
+            panic!()
+        };
+        cleanup.reviewed(&host, &common_dir, Ok(&review_of(ready_row("o"))));
+        assert!(matches!(
+            cleanup.remove(Consents::default()),
+            Step::Remove { .. }
+        ));
+    }
+
     #[test]
     fn a_manual_removal_uses_only_the_consents_given() {
         let unchecked = |fingerprint: &str| {

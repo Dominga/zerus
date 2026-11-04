@@ -2948,7 +2948,8 @@ hgs task rename orchard/T-a1b2c3 < title.txt
 hgs task list --project orchard [--stage todo]
 hgs task list --project orchard --stage todo --limit 50 [--after CURSOR|--before CURSOR] [--if-revision REVISION]
 hgs task get orchard/T-a1b2c3
-hgs task get TASK_UUID --project orchard --history-limit 80 [--history-before CURSOR]
+hgs task get TASK_UUID --project orchard --history-limit 80 [--history-before CURSOR] [--attachments metadata]
+hgs task attachment TASK_UUID --project orchard --file 1 [--entry ENTRY_ID]
 hgs task send orchard/T-a1b2c3 [--session codex/api [--host ALIAS]]
 hgs task handoff orchard/T-a1b2c3 --session codex/worker [--host ALIAS]
 hgs task start orchard/T-a1b2c3
@@ -2971,9 +2972,16 @@ task document, `log_total`, `start_confirmed`, `history_schema: 1` and
 page; a null cursor marks the beginning. Use the task UUID from the list to avoid
 a project-wide short-ID lookup. Cursors bind the project, task and immutable
 history entry, so new records and receipt refinements preserve an older page.
-Omit the cursor to return to the latest page. The local indexed projection keeps
-one task per project and is rebuilt when its source changes; it is never
-replicated and does not change the task document format.
+Omit the cursor to return to the latest page. Pages come from the project's
+local task index, which keeps the histories of the 16 most recently read tasks
+and reads a task's history again only after that task changes; it is never
+replicated and does not change the task document format. A task whose history
+the index cannot give is read from its document, with the same page.
+`--attachments metadata` returns each attachment of the task and of its entries
+as `name`, `mime`, `reference`, `size` and the `sha256` of its bytes instead of
+the file, and gives each entry an opaque `id`. `hgs task attachment` returns one
+file with its bytes (`data_base64`): `--file N` counts from 1 among the task's
+own attachments, or among an entry's with `--entry` and that entry's `id`.
 Task list rows also include a bounded `history_revision` token. A journal-only
 note or delivery receipt changes it, so the existing task stream can refresh the
 selected inspector without transferring the journal or adding a polling loop.

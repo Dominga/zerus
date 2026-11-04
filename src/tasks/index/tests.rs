@@ -629,6 +629,30 @@ fn a_cached_row_of_another_shape_is_damage() {
     }
 }
 
+/// The same for a cached history: a task the journal names is read again
+/// even when its files kept their stamps.
+#[test]
+fn a_changed_task_s_history_is_read_again_even_with_an_unchanged_stamp() {
+    let temp = tempfile::tempdir().unwrap();
+    let store = ProjectStore::open(temp.path(), "example").unwrap();
+    let mut task = new_task(&store, "T-aaaaaa", Stage::Todo, "V", "Plain");
+    aged_save(&store, &mut task);
+    let history = |store: &ProjectStore, uuid: &str| super::super::history::page(store, uuid, 80, None, false).unwrap();
+    history(&store, task.uuid());
+    task.comment("later", &Actor::Person, 5).unwrap();
+    aged_save(&store, &mut task);
+    {
+        let db = Connection::open(store.dir().join(FILE)).unwrap();
+        db.execute(
+            "UPDATE histories SET files=?1 WHERE uuid=?2",
+            params![files(store.dir(), task.uuid()), task.uuid()],
+        )
+        .unwrap();
+    }
+    let page = history(&store, task.uuid());
+    assert!(page["log"].as_array().unwrap().iter().any(|e| e["text"] == json!("later")), "{page}");
+}
+
 #[test]
 fn a_damaged_foreign_or_shared_index_is_built_again() {
     let temp = tempfile::tempdir().unwrap();
@@ -696,6 +720,8 @@ fn queries_use_their_indexes() {
         ("SELECT count(*) FROM tasks WHERE stage='todo' AND (rank, uuid) < ('V', 'u')", "tasks_order"),
         ("SELECT uuid FROM tasks WHERE short_id='T-aaaa01'", "tasks_short"),
         ("SELECT count(*) FROM sends WHERE at >= 5", "sends_at"),
+        ("SELECT id, payload FROM entries WHERE uuid='u' AND (at, ordinal) < (5, 1) ORDER BY at DESC, ordinal DESC LIMIT 3", "entries_place"),
+        ("SELECT at, ordinal FROM entries WHERE uuid='u' AND id='1@2'", "entries_id"),
     ] {
         let found = plan(sql);
         assert!(found.contains(wanted) && !found.contains("TEMP B-TREE"), "{sql}: {found}");

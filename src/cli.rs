@@ -94,7 +94,7 @@ pub(crate) const USAGE: &str = r#"usage: hgs [@host] <cmd> [project] [-c [ID]] [
        hgs [@host] history-projection <session> --json retired and refreshed history rows
        hgs [@host] graph snapshot --json   bounded saved relationship metadata (partial coverage)
        hgs [@host] wait begin|ack|finish|cancel|list --json   explicit independent-agent waits (JSON stdin)
-       hgs [@host] team OPERATION --json   agent teams: plan, run, report and decide tasks (JSON stdin)
+       hgs [@host] team OPERATION --json   agent teams: plan, run, report and decide tasks (JSON stdin or --json-file PATH)
        hgs [@host] rules get|set|migrate --json   owner-managed iron rules, iron-rules-v1 (JSON stdin)
        hgs run --json [--wait] | --list --json   a build Zerus tracks as this session's work (JSON stdin)
        hgs test config|map|affected|durations|coverage|tools …   the project's tests (.zerus/tests.toml; hgs guide tests)

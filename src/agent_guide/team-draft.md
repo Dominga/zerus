@@ -8,7 +8,8 @@ lead when the owner names you.
 Read the draft before every change, so the revision is the current one:
   {"action":"get","team":"ID"} | hgs team draft --json
 The answer carries draft (revision, unseen, owner_edited), revision, unseen and
-preflight - the plan errors the owner would hit on create.
+preflight - the plan errors the owner would hit on create - and fields.
+Set only the fields you change (hgs guide team-input).
 Change the draft (lead or owner), carrying the revision you read:
   {"action":"update","request_id":"UUID","team":"ID","revision":N,
    "set":{"name":"...","goal":"...","addendum":"...","settings":{...},

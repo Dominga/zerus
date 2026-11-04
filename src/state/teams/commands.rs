@@ -4474,6 +4474,11 @@ pub(crate) fn dispatch(args: &[String]) -> Result<i32> {
     if bytes.len() > 256 * 1024 {
         return Err("Team request exceeds 256 KiB".into());
     }
+    // Feedback 2026-11-04 (8): an empty request says how to send one from
+    // PowerShell, which has no <<<.
+    if bytes.iter().all(u8::is_ascii_whitespace) {
+        return Err(format!("hgs team {operation} reads one JSON object: pipe it in, or save it and pass --json-file PATH"));
+    }
     let input: Value = super::super::json_request(&bytes)?;
     if !input.is_object() {
         return Err("A JSON object is required".into());

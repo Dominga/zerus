@@ -1351,6 +1351,43 @@ Shift+PgUp/PgDn in Terminal, and Alt+↑/↓ in the Projects dialog's list.
 
 ## Agent teams
 
+### Team requests
+
+Every `hgs team OPERATION --json` reads one JSON object on stdin, or from a file
+with `--json-file PATH` (PowerShell has no `<<<`); a UTF-8 BOM is dropped. A
+command run from outside every agent session acts as the owner; `"by":"human"`
+is accepted and any other value refused. An agent session acts as itself.
+
+A member has one shape in `plan`, `add-member` and a draft:
+`{"id":"dev","role":"Backend","agent":"claude","account":"work","model":"opus","effort":"medium"}`
+(optionally `models`, `prompt`, `folder`, `computer`, `permissions`). Members,
+leads and tasks are parsed strictly: an unknown field is refused with its name,
+the accepted fields and an example, and a wrong type with serde's reason. A
+task's text is `description`. A member without `account` starts on its
+computer's default account for its agent, which the preflight names.
+`max_members` counts the members besides the lead.
+
+`draft get` answers the draft's `fields` (name, goal, addendum, settings,
+members, tasks and plan mode). A draft update sets only the fields it names;
+`members` is a list that replaces them all or an object of changes by member
+id, where null removes a member and a new id adds one. `plan_mode` is a draft
+field: the owner chooses it and the lead offers it with `plan_mode_reason`.
+
+A swap card names, for each member, what changes (`agent`, `model`, `effort`,
+`account`, `prompt` or `session`), or `"fresh": true` for a new session with
+the same settings; an unknown field such as `with`, or a swap that changes
+nothing, is refused. One card swaps several members with
+`"members":[{"id":...},...]`. Before the new session starts, the session a swap
+replaced is paused when it can be (its conversation stays under Saved) and
+renamed to `<name>-replaced`, so the member's name is free even when the old
+session waits on a dialog. For a relaunch or a swap, the owner's word may name
+the members together ("перезапусти их", "relaunch them all"); it then pays for
+one change per member.
+
+The build broker is offered only for a shared folder that builds: a project
+build file at its root, an Unreal project or the project's `build_broker`
+table. A decided proposal reaches the lead's inbox message once.
+
 ### The Team designer's project and folder
 
 Team designer does not require an open session. Choose any project folder on

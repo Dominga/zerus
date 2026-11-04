@@ -172,6 +172,10 @@ private:
     QString m_saveError;       // the last refused draft call, until one succeeds
     bool m_starting = false, m_sending = false, m_applying = false, m_creating = false, m_retried = false;
     bool m_createAfterSave = false; // Create team pressed while edits were unsaved
+    // Owner feedback 2026-11-04 (1-3): the server's newer revision while the
+    // owner still edits some fields, and the fields kept, for the status line.
+    qint64 m_serverRevision = 0;
+    QStringList m_keptFields;
     QTimer m_flushTimer, m_pollTimer;
     static int s_pollInterval;
 };

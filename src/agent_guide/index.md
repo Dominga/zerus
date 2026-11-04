@@ -12,17 +12,18 @@ Session names look like provider/project/tag. [@h] marks an optional @alias.
   hgs guide wait              wait for a result another session owes you
   hgs guide team              lead or work in an agent team
   hgs guide team-tests        affected tests, never a full suite
-  hgs guide team-lead         add a phase to a running team, or finish it
+  hgs guide team-lead         add a phase or finish a running team
   hgs guide team-custom       models, stages, branches, scale, intake
   hgs guide team-draft        plan a draft with the owner
+  hgs guide team-input        member shape and --json-file
   hgs guide team-tree         lead a sub-team and pass work up
   hgs guide team-run          run a routine command outside the sandbox
-  hgs guide team-safe         allow a member's routine request without asking
+  hgs guide team-safe         allow a member's routine request
   hgs guide team-propose      propose a change on a card
   hgs guide team-broker       builds in one shared folder
-  hgs guide run               start a build or long test so it shows as your work
+  hgs guide run               start a build or test as your work
   hgs guide tests             run only the tests your change touches
-  hgs guide designer          propose roles and templates for agent teams
+  hgs guide designer          propose team roles and templates
   hgs guide launch            start a session, here or on a peer
   hgs guide stop              interrupt, pause, kill or archive
   hgs guide tasks             the project's task list: file, report, send

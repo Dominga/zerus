@@ -897,6 +897,11 @@ void TeamNewTab::validate()
         else {
             const QString saved = m_savedAt.isValid() ? tr("Draft saved %1").arg(QLocale().toString(m_savedAt.time(), QLocale::ShortFormat)) : tr("Draft");
             summary = QStringLiteral("<span style='color:%1;'>%2 · rev %3</span>").arg(c.muted.name(), saved).arg(m_revision);
+            // Feedback 1: the lead's newer revision is shown except the fields
+            // the owner is still changing; the line names them.
+            if (!m_keptFields.isEmpty())
+                summary += QStringLiteral("<br><span style='color:%1;'>%2</span>").arg(c.warn.name(),
+                    tr("Revision %1 from the lead is shown except your unsaved %2, which are sent on top of it").arg(m_serverRevision).arg(m_keptFields.join(QStringLiteral(", ")).toHtmlEscaped()));
         }
         m_summary->setText(summary);
     }
@@ -1039,8 +1044,12 @@ void TeamNewTab::flush()
     validate();
     const QJsonObject input{{"action", "update"}, {"team", m_draft}, {"revision", m_revision}, {"set", set}};
     m_teams->call(QStringLiteral("draft"), input, [this, guard = QPointer<TeamNewTab>(this), set, draft = m_draft](bool ok, const QJsonObject &result, const QString &error) {
-        if (!guard || draft != m_draft) return;
+        if (!guard) return;
+        // Feedback 2026-11-04 (1-3): a send whose answer arrived after the tab
+        // moved to another draft still ends; a stuck send held every later
+        // save, every read of the lead's edits and Create team.
         m_sending = false;
+        if (draft != m_draft) return;
         if (!ok) {
             // Someone wrote first: the owner's edit still wins, against the
             // revision the refusal names. Once; then the next read decides.
@@ -1064,6 +1073,7 @@ void TeamNewTab::flush()
         renderUnseen(); validate();
         if (!m_dirty.isEmpty()) m_flushTimer.start();
         else if (m_createAfterSave) createTeam();
+        else readDraft();
     });
 }
 
@@ -1100,6 +1110,10 @@ void TeamNewTab::applyDraft(const Teams::Team &team)
     }
     // Revisions only grow: a read that left before the last update is old.
     if (team.draftRevision < m_revision) return;
+    m_serverRevision = team.draftRevision;
+    m_keptFields.clear();
+    if (team.draftRevision != m_revision)
+        for (const auto &field : m_dirty) m_keptFields << field;
     if (const auto *lead = team.member(team.lead)) m_leadSessionName = lead->session;
     if (team.draftRevision != m_revision) {
         // The lead's edits, except the fields the owner is changing now.
@@ -1160,6 +1174,14 @@ void TeamNewTab::createTeam()
         m_createAfterSave = true;
         m_create->setText(tr("Saving…"));
         flush();
+        // Feedback 2: a save that does not finish says so instead of leaving
+        // Create team waiting with nothing sent.
+        QTimer::singleShot(30000, this, [this, guard = QPointer<TeamNewTab>(this), draft = m_draft] {
+            if (!guard || draft != m_draft || !m_createAfterSave || m_creating) return;
+            m_createAfterSave = false; m_create->setText(tr("Create team"));
+            if (m_saveError.isEmpty()) m_saveError = tr("the draft did not save within 30 seconds, so Create team was not sent; press it again");
+            validate();
+        });
         return;
     }
     m_createAfterSave = false;

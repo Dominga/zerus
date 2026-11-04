@@ -587,9 +587,11 @@ impl Service {
                 }
             }));
             let weak = Arc::downgrade(&shared);
+            // A settled drafts capture also starts its historical report.
             report.hook_drafts(Arc::new(move || {
                 if let Some(shared) = weak.upgrade() {
                     shared.publish_retained_import();
+                    retained_import::creations::schedule_current(&shared);
                 }
             }));
         }

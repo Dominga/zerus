@@ -3,8 +3,8 @@
 //! Reuses desktop-import-v1 and never carries Qt/Settings hashes, worker
 //! authority, consent or a mutable operation.
 use super::{
-    download_report::Binding, journal::MAX_ATTEMPTS, preload::Reference, transport::StagedReceipt,
-    SourceError, SourceResult,
+    download_report::Binding, draft_report, journal::MAX_ATTEMPTS, preload::Reference,
+    transport::StagedReceipt, SourceError, SourceResult,
 };
 use serde::{Deserialize, Serialize};
 use std::{
@@ -25,6 +25,9 @@ pub enum Group {
     /// The download folder's committed original index
     /// (`download_report`, zerus-5wmh.66.5.2.1.3.1).
     Downloads,
+    /// The drafts capture's committed original manifests
+    /// (`draft_report`, zerus-5wmh.66.5.2.1.2).
+    Drafts,
 }
 impl Group {
     pub fn scope(self) -> &'static str {
@@ -33,6 +36,7 @@ impl Group {
             Self::LocalReads => "next-local-read-marks-preload-v1",
             Self::WorktreeCache => "next-worktree-cache-preload-v1",
             Self::Downloads => "next-download-index-preload-v1",
+            Self::Drafts => "next-drafts-preload-v1",
         }
     }
     fn file(self) -> &'static str {
@@ -41,6 +45,7 @@ impl Group {
             Self::LocalReads => "local-read-retained-import-v1.json",
             Self::WorktreeCache => "worktree-cache-retained-import-v1.json",
             Self::Downloads => "download-index-retained-import-v1.json",
+            Self::Drafts => "drafts-retained-import-v1.json",
         }
     }
     fn lock(self) -> &'static str {
@@ -49,30 +54,40 @@ impl Group {
             Self::LocalReads => "local-read-retained-import-v1.lock",
             Self::WorktreeCache => "worktree-cache-retained-import-v1.lock",
             Self::Downloads => "download-index-retained-import-v1.lock",
+            Self::Drafts => "drafts-retained-import-v1.lock",
         }
     }
 }
-/// What a record publishes: a preload capture's reference, or the download
-/// folder's evidence binding. Untagged, so a preload record's serialized
-/// bytes are exactly as before; the two shapes share no field set.
+/// What a record publishes: a preload capture's reference, the download
+/// folder's evidence binding, or the drafts capture's binding. Untagged, so
+/// a preload record's serialized bytes are exactly as before; no two shapes
+/// share a field set.
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(untagged)]
 pub enum Source {
     Preload(Reference),
     Downloads(Binding),
+    Drafts(draft_report::Binding),
 }
 impl Source {
     pub fn capture_id(&self) -> &str {
         match self {
             Self::Preload(reference) => reference.capture_id(),
             Self::Downloads(binding) => binding.capture_id(),
+            Self::Drafts(binding) => binding.capture_id(),
         }
     }
     pub fn valid(&self) -> bool {
         match self {
             Self::Preload(reference) => reference.valid(),
             Self::Downloads(binding) => binding.valid(),
+            Self::Drafts(binding) => binding.valid(),
         }
+    }
+    /// Whether what it publishes is the whole family: a drafts capture whose
+    /// Next store showed an earlier uncaptured run stays incomplete.
+    pub fn complete(&self) -> bool {
+        !matches!(self, Self::Drafts(binding) if binding.earlier_run)
     }
 }
 impl From<Reference> for Source {
@@ -83,6 +98,11 @@ impl From<Reference> for Source {
 impl From<Binding> for Source {
     fn from(binding: Binding) -> Self {
         Self::Downloads(binding)
+    }
+}
+impl From<draft_report::Binding> for Source {
+    fn from(binding: draft_report::Binding) -> Self {
+        Self::Drafts(binding)
     }
 }
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]
@@ -228,11 +248,15 @@ impl Record {
             Group::LocalReads.scope(),
             Group::WorktreeCache.scope(),
             Group::Downloads.scope(),
+            Group::Drafts.scope(),
         ]
         .contains(&self.scope.as_str())
             // The download scope holds only download bindings, and only it.
             && matches!(self.source, Source::Downloads(_))
                 == (self.scope == Group::Downloads.scope())
+            // The drafts scope holds only drafts bindings, and only it.
+            && matches!(self.source, Source::Drafts(_))
+                == (self.scope == Group::Drafts.scope())
             && digest(&self.configuration)
             && self.source.valid()
             && self.import_id == self.source.capture_id()

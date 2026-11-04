@@ -833,13 +833,18 @@ fn entry(
     }
 }
 
+/// The manifest's own key, when its folder is named after it.
+pub(crate) fn manifest_key(folder: &str, bytes: &[u8]) -> Option<String> {
+    serde_json::from_slice::<Value>(bytes)
+        .ok()
+        .and_then(|value| value.get("key")?.as_str().map(str::to_owned))
+        .filter(|key| sha256(key.as_bytes()) == folder)
+}
+
 /// Supported only when the existing per-key checkpoint decoder accepts the
 /// manifest under the key its folder is named after.
 fn classify(store: Store, folder: &str, path: &Path, bytes: &[u8]) -> (Class, Vec<BlobRef>) {
-    let key = serde_json::from_slice::<Value>(bytes)
-        .ok()
-        .and_then(|value| value.get("key")?.as_str().map(str::to_owned));
-    let Some(key) = key.filter(|key| sha256(key.as_bytes()) == folder) else {
+    let Some(key) = manifest_key(folder, bytes) else {
         return (Class::Unsupported, Vec::new());
     };
     let origin = match store {
@@ -939,6 +944,89 @@ impl Snapshot {
     pub fn bytes(&self, entry: &Entry) -> &[u8] {
         let start = entry.offset as usize;
         &self.container[start..start + entry.size as usize]
+    }
+}
+
+/// A committed capture, read for publication: the receipt's exact bytes and
+/// the version it binds. Only [`Capture::committed`] makes one.
+pub struct Committed {
+    slot: PathBuf,
+    receipt: Vec<u8>,
+    index_sha256: String,
+    pub snapshot: Snapshot,
+}
+
+impl Committed {
+    /// `receipt.json`'s exact bytes.
+    pub fn receipt(&self) -> &[u8] {
+        &self.receipt
+    }
+
+    /// The SHA-256 of `index.json`'s exact bytes, as the receipt binds it.
+    pub fn index_sha256(&self) -> &str {
+        &self.index_sha256
+    }
+
+    /// By bounded stats only, never the container's bytes: the slot still
+    /// holds exactly this receipt, its index and container parts still have
+    /// the stamps it records (and no further part), and no failure record.
+    pub fn unchanged(&self) -> bool {
+        let Ok(Some((bytes, _))) = disk::read(&self.slot.join("receipt.json"), META) else {
+            return false;
+        };
+        let Ok(receipt) = serde_json::from_slice::<Receipt>(&bytes) else {
+            return false;
+        };
+        let leaf = |name: &str, expected: Option<&Stamp>| {
+            disk::stat(&self.slot.join(name)).is_ok_and(|actual| actual.as_ref() == expected)
+        };
+        let parts: Vec<&Stamp> = receipt.container.iter().chain(&receipt.more).collect();
+        bytes == self.receipt
+            && leaf("index.json", Some(&receipt.index))
+            && parts
+                .iter()
+                .enumerate()
+                .all(|(n, stamp)| leaf(&part(n), Some(stamp)))
+            && leaf(&part(parts.len()), None)
+            && leaf("failed.json", None)
+    }
+}
+
+impl Capture {
+    /// The committed capture in this store's slot, read-only: it never
+    /// creates the slot, a leaf or the lock, and never captures. No receipt
+    /// (not yet captured, or still inside the first job), a recorded failure
+    /// (not captured, permanently) and any failed check are errors, never a
+    /// complete source.
+    pub fn committed(&self) -> SourceResult<Committed> {
+        if !self.data.is_absolute() {
+            return Err(SourceError::UnsupportedSource);
+        }
+        let slot = self.data.join(SLOT);
+        if read_json::<Failed>(&slot.join("failed.json"))?.is_some() {
+            return Err(SourceError::SourceUnreadable);
+        }
+        let seed = read_json::<Seed>(&slot.join("identity.json"))?
+            .filter(Seed::valid)
+            .ok_or(SourceError::InvalidMetadata)?;
+        let (receipt, _) = disk::read(&slot.join("receipt.json"), META)
+            .map_err(unreadable)?
+            .ok_or(SourceError::SourceUnreadable)?;
+        let index_sha256 = serde_json::from_slice::<Receipt>(&receipt)
+            .map_err(|_| SourceError::InvalidMetadata)?
+            .index_sha256;
+        let snapshot = Snapshot::open(&slot, &seed)?;
+        let committed = Committed {
+            slot,
+            receipt,
+            index_sha256,
+            snapshot,
+        };
+        // The receipt read first is the one the version was opened with.
+        if !committed.unchanged() {
+            return Err(SourceError::SourceChanged);
+        }
+        Ok(committed)
     }
 }
 

@@ -219,6 +219,29 @@ describe("desktop service presentation", () => {
     expect(retainedSourceDetails(done)!.downloadsReport!.next).toContain("never downloads, removes or cleans up files");
     expect(retainedSourceDetails(view({ required: false, complete: true }))).toBeUndefined();
   });
+  it("presents the historical drafts report as evidence and keeps an incomplete one visible", () => {
+    const report = { required: false, complete: true, running: false, code: "retained_import_staged", phase: "published" };
+    const view = (patch: object) => serviceView({ retained_source_import: { ...report, drafts_report: { required: true, complete: false, partial: false, running: false, code: "drafts_import_waiting", phase: null, ...patch } } });
+    expect(retainedSourceNotice(view({ running: true }))).toContain("Preparing the historical drafts report");
+    expect(retainedSourceNotice(view({}))).toContain("is deferred");
+    const unknown = view({ code: "drafts_import_original_result_unconfirmed", phase: "unknown" });
+    expect(retainedSourceNotice(unknown)).toContain("needs review");
+    expect(retainedSourceDetails(unknown)!.draftsReport!.next).toContain("checks the original report result");
+    const done = view({ complete: true, code: "drafts_import_staged", phase: "published" });
+    expect(retainedSourceNotice(done)).toBe("");
+    expect(retainedSourceDetails(done)!.draftsReport!.next).toContain("never sends, imports or deletes drafts");
+    // Published without Next's earlier drafts: incomplete, with no banner.
+    const partial = view({ partial: true, code: "drafts_import_staged", phase: "published" });
+    expect(retainedSourceNotice(partial)).toBe("");
+    expect(retainedSourceDetails(partial)!.draftsReport!.reason).toContain("saved without the drafts already in Zerus");
+    expect(retainedSourceDetails(partial)!.draftsReport!.next).toContain("stays incomplete");
+    // Not captured: unavailable and incomplete, never saved for review.
+    const unavailable = view({ code: "drafts_import_capture_unavailable" });
+    expect(retainedSourceNotice(unavailable)).toBe("");
+    expect(retainedSourceDetails(unavailable)!.draftsReport!.reason).toContain("historical drafts report was not sent");
+    expect(retainedSourceDetails(unavailable)!.draftsReport!.next).toContain("stays incomplete");
+    expect(retainedSourceDetails(view({ required: false, complete: true }))).toBeUndefined();
+  });
   it("explains the archive and data-directory refusals without changing readiness", () => {
     const report = { required: false, complete: true, running: false, code: "retained_import_staged", phase: "published" };
     const view = (code: string) => serviceView({ retained_source_import: { ...report, creations_capture: { code, paused: true, capture_id: null } } });

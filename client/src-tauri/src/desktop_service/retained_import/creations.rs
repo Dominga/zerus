@@ -6,27 +6,31 @@ use zerus_client_core::migration::{
         Group, Journal as CreationJournal, Phase, Record as CreationRecord, Source,
         Stored as CreationStored,
     },
-    download_report,
+    download_report, draft_report,
     preload::Prepared,
 };
-/// One group's source held for an attempt: a preload capture's snapshot, or
-/// the download folder's committed original (zerus-5wmh.66.5.2.1.3.1).
+/// One group's source held for an attempt: a preload capture's snapshot,
+/// the download folder's committed original (zerus-5wmh.66.5.2.1.3.1), or
+/// the drafts capture's committed originals (zerus-5wmh.66.5.2.1.2).
 #[derive(Clone)]
 enum Held {
     Preload(Arc<migration::preload::Snapshot>),
     Downloads(Arc<download_report::Snapshot>),
+    Drafts(Arc<draft_report::Snapshot>),
 }
 impl Held {
     fn reference(&self) -> Result<Source, SourceError> {
         match self {
             Self::Preload(snapshot) => snapshot.reference().map(Source::from),
             Self::Downloads(snapshot) => snapshot.reference().map(Source::from),
+            Self::Drafts(snapshot) => snapshot.reference().map(Source::from),
         }
     }
     fn report_sources(self) -> Result<Vec<migration::SourceStream>, SourceError> {
         match self {
             Self::Preload(snapshot) => snapshot.report_sources(),
             Self::Downloads(snapshot) => snapshot.report_sources(),
+            Self::Drafts(snapshot) => snapshot.report_sources(),
         }
     }
 }
@@ -41,6 +45,7 @@ macro_rules! codes {
                     Group::LocalReads => match self { $(Self::$variant => concat!("local_reads_import_", $suffix)),* },
                     Group::WorktreeCache => match self { $(Self::$variant => concat!("worktree_cache_import_", $suffix)),* },
                     Group::Downloads => match self { $(Self::$variant => concat!("downloads_import_", $suffix)),* },
+                    Group::Drafts => match self { $(Self::$variant => concat!("drafts_import_", $suffix)),* },
                 }
             }
         }
@@ -65,11 +70,12 @@ codes! {
     Waiting => "waiting",
     WorkerUnavailable => "worker_unavailable",
 }
-const GROUPS: [Group; 4] = [
+const GROUPS: [Group; 5] = [
     Group::Creations,
     Group::LocalReads,
     Group::WorktreeCache,
     Group::Downloads,
+    Group::Drafts,
 ];
 #[cfg(test)]
 type BeforeRecordHook =
@@ -112,14 +118,21 @@ impl Report {
             Group::LocalReads => &self.local_reads,
             Group::WorktreeCache => &self.worktree_cache,
             Group::Downloads => &self.downloads_report,
+            Group::Drafts => &self.drafts_report,
         }
         .lock()
         .unwrap_or_else(PoisonError::into_inner)
     }
     pub(super) fn group_status(&self, group: Group) -> Value {
         let s = self.group_state(group);
-        json!({"scope":group.scope(),"required":!s.not_applicable,"complete":s.not_applicable||s.stored.as_ref().is_some_and(|r|r.record.phase==Phase::Published),
-            "running":s.running,"code":s.code,"import_id":s.stored.as_ref().map(|r|&r.record.import_id),
+        // A published drafts report whose Next store showed an earlier
+        // uncaptured run stays incomplete: published, never complete.
+        let partial = s
+            .stored
+            .as_ref()
+            .is_some_and(|r| !r.record.source.complete());
+        json!({"scope":group.scope(),"required":!s.not_applicable,"complete":s.not_applicable||!partial&&s.stored.as_ref().is_some_and(|r|r.record.phase==Phase::Published),
+            "partial":partial,"running":s.running,"code":s.code,"import_id":s.stored.as_ref().map(|r|&r.record.import_id),
             "phase":s.stored.as_ref().map(|r|r.record.phase),"import_record":s.stored.as_ref().and_then(|r|r.record.expected.as_ref()).map(|r|&r.import_record)})
     }
     pub(super) fn retry_creations(&self) {
@@ -134,11 +147,12 @@ impl Report {
             Group::Creations => Some(&self.inputs.creations),
             Group::LocalReads => Some(&self.inputs.local_reads),
             Group::WorktreeCache => Some(&self.inputs.worktree_cache),
-            Group::Downloads => None,
+            Group::Downloads | Group::Drafts => None,
         }
     }
     /// The managed data folder the group's journal lives in. The download
-    /// group has no capture of its own and uses the creations capture's.
+    /// and drafts groups have no preload capture and use the creations
+    /// capture's (the drafts capture's own slot is in the same folder).
     fn group_data(&self, group: Group) -> Result<PathBuf, SourceError> {
         self.capture_for(group)
             .unwrap_or(&self.inputs.creations)
@@ -151,6 +165,9 @@ impl Report {
                 Prepared::Missing { .. } => None,
                 Prepared::Snapshot(snapshot) => Some(Held::Preload(snapshot)),
             }),
+            None if group == Group::Drafts => {
+                Ok(draft_report::retained(&self.inputs.drafts)?.map(Held::Drafts))
+            }
             None => match &self.inputs.downloads {
                 Some(folder) => Ok(download_report::retained(&folder())?.map(Held::Downloads)),
                 None => Ok(None),
@@ -185,6 +202,20 @@ impl Report {
                     | "local_read_source_unsupported"
                     | "local_read_source_too_large"
             ),
+            // The drafts capture runs as the draft store's first job. Its
+            // outcome, captured or not, is final for the run; waiting and a
+            // refused slot are visible already.
+            None if group == Group::Drafts => {
+                matches!(
+                    self.inputs.drafts.status().code,
+                    "draft_capture_captured"
+                        | "draft_capture_not_applicable"
+                        | "draft_capture_next_earlier_run"
+                        | "draft_capture_too_large"
+                        | "draft_capture_changed"
+                        | "draft_capture_unreadable"
+                ) && self.inputs.creations.data_path().is_ok()
+            }
             None => self.inputs.downloads.is_some() && self.inputs.creations.data_path().is_ok(),
         }
     }
@@ -642,6 +673,8 @@ fn schedule(
 
 #[cfg(all(test, unix))]
 mod downloads_tests;
+#[cfg(all(test, unix))]
+mod drafts_tests;
 #[cfg(all(test, unix))]
 mod local_reads_tests;
 #[cfg(all(test, unix))]

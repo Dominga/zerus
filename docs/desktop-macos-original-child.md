@@ -14,10 +14,15 @@ generation checks refuse changes. The task-name right is released on every
 return. No task control right or process suspension is used.
 
 On refusal, stdin is closed. The caller still owns the same child, output pipes
-and worker/admission charges through its existing stop/reap/cleanup path,
-including past an outer timeout. Security runs synchronously off UI and actor
-threads. A successful observation is point-in-time evidence: it cannot prevent
-a later exec and does not grant an effect, writer or native permission.
+and worker/admission charges, and must kill and reap that child through its
+existing cleanup path, including past an outer timeout. Call the primitive
+before any write; never put private data in argv or the environment. Security
+runs synchronously off UI and actor threads.
+
+The held task right refuses an exec that happened before a token re-read. The
+remaining window is after the final re-read, when the verified helper's own code
+can still exec. A successful observation is point-in-time evidence, not an exec
+fence, and does not grant an effect, writer or native permission.
 
 The primitive is separate from the service-to-app host check and from
 connected-peer observations. Tests use isolated Apple-signed system helpers to

@@ -234,11 +234,14 @@ fn native_wrong_requirement_or_cdhash_closes_input_without_sending_private_bytes
 
 #[test]
 fn native_exec_of_that_same_child_between_live_checks_is_refused() {
+    // /bin/sh is a Mac shim which may re-exec before readiness. Keep the
+    // interpreter's actual image stable until our explicit public trigger.
+    const INTERPRETER: &str = "/bin/zsh";
     let tree = super::super::tests::Tree::new();
     let mut child = spawn(
         &tree.0,
-        "/bin/sh",
-        &["-c", "printf 'ready\\n'; read ignored; exec /bin/cat"],
+        INTERPRETER,
+        &["-f", "-c", "printf 'ready\\n'; read ignored; exec /bin/cat"],
     );
     read_exact(&mut child.0, b"ready\n");
     let original = child.0.id();
@@ -268,11 +271,12 @@ fn native_exec_of_that_same_child_between_live_checks_is_refused() {
         }
         observed.set(true);
     });
-    assert!(observe(&mut child.0, &expected("/bin/sh"), || Ok(())).is_err());
+    let result = observe(&mut child.0, &expected(INTERPRETER), || Ok(()));
     assert!(
         executed.get(),
         "must reach the first real live-code check and observe exec"
     );
+    assert_eq!(result, Err(Refusal::Child));
     assert!(child.0.stdin.is_none());
     assert_eq!(child.0.id(), original);
     child.finish();

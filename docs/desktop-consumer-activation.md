@@ -140,8 +140,12 @@ that connection, its scheduling decision stays deferred across later successful
 reads, reconnects and transient-loss recovery, including a busy read gate. A
 background-selected host offers the existing Resume control; only that explicit
 action or the existing separately confirmed continuation can reopen scheduling.
-Healthy synchronous preflight retains its existing startup behavior. A cancelled
-classifier can finish its original bounded read without delaying watch teardown;
+Healthy synchronous preflight retains its existing startup behavior. An explicit
+mode continuation retains and revalidates its own native confirmation around
+its slow Service preflight; its own occupied read gate does not create a
+connection deferral. Only that same checked, settled background result may
+clear an earlier deferral, never confirmation alone or an uncertain result.
+A cancelled classifier can finish its original bounded read without delaying watch teardown;
 its child/pipe resources stay retained through physical completion and it cannot
 publish a late result. Missing authority still needs its existing explicit action.
 

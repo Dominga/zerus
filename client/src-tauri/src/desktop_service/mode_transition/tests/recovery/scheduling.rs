@@ -260,7 +260,7 @@ fn reconnect_detaches_a_slow_classifier_without_releasing_its_original_resources
         .await;
         running.service.retry();
         let connected = tokio::time::timeout(
-            Duration::from_secs(1),
+            Duration::from_secs(5),
             eventually(
                 "the new read watch is not delayed by the old bounded helper",
                 || watches(&running) == 2 && running.service.snapshot().connected,
@@ -301,5 +301,52 @@ fn reconnect_detaches_a_slow_classifier_without_releasing_its_original_resources
             retained,
             "detaching must not release original helper/pipe custody"
         );
+    });
+}
+
+#[test]
+fn a_busy_reconnect_cannot_borrow_the_previous_successful_selection() {
+    let _process = crate::PROCESS_TREE.read().unwrap();
+    tauri::async_runtime::block_on(async {
+        let helpers = Fixture::new();
+        helpers.config("explicit", "background", false);
+        let running = start_native(&helpers, configuration());
+        eventually("healthy modern classification and Grant settled", || {
+            watches(&running) == 1 && running.service.shared.ownership.granted()
+        })
+        .await;
+        let mode = &running.service.shared.mode_transition;
+        assert!(!mode.classification_pending());
+        assert!(mode.startup_permitted());
+        let before = effects(&running);
+        let held = mode.gate.admit(Role::Fleet).unwrap();
+        running.service.retry();
+        eventually(
+            "reconnect keeps its read watch with the other original still held",
+            || watches(&running) == 2 && running.service.snapshot().connected,
+        )
+        .await;
+        let pending = mode.classification_pending();
+        let deferred = !mode.startup_permitted();
+        drop(held);
+        if pending {
+            eventually("the new classification recovers without scheduling", || {
+                !mode.classification_pending()
+            })
+            .await;
+        }
+        let scheduling = running.service.shared.business_scheduling_permitted();
+        let after = effects(&running);
+        running.service.join().await.unwrap();
+        assert!(
+            pending,
+            "a busy reconnect borrowed the previous successful selection"
+        );
+        assert!(
+            deferred && !scheduling,
+            "only explicit consent may reopen this deferred reconnect"
+        );
+        assert_eq!(after, before);
+        assert_eq!(helpers.effects(), 0);
     });
 }

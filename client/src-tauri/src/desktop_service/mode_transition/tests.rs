@@ -565,7 +565,7 @@ fn actual_reviewed_archive_needs_a_second_confirmation_before_its_only_rearm_and
             zerus_client_core::desktop::drain::Observation::Idle
         );
         helpers.config("default", "passive", false);
-        let running = start_native(&helpers, json!({"ready":true}));
+        let running = start_native(&helpers, json!({"ready":true,"observation_abi":true}));
         crate::desktop_service::tests::eventually(
             "reviewed consumer opens its read stream",
             || {
@@ -596,6 +596,10 @@ fn actual_reviewed_archive_needs_a_second_confirmation_before_its_only_rearm_and
             || running.service.shared.business_permitted(),
         )
         .await;
+        assert!(
+            running.service.shared.mode_transition.startup_permitted(),
+            "a confirmed B2 continuation must not defer on its own charge"
+        );
         assert_eq!(mutations(&running), vec!["rearm", "grant"]);
         let count = mutations(&running).len();
         running.service.retry();
@@ -924,5 +928,108 @@ fn actual_unconfirmed_grant_offers_only_original_lookup_and_never_activates() {
             fs::read(running.source.0.join("original.json")).unwrap(),
             original
         );
+    });
+}
+
+#[test]
+fn actual_modern_service_first_choice_keeps_its_confirmed_scheduling_continuation() {
+    let _process = crate::PROCESS_TREE.read().unwrap();
+    tauri::async_runtime::block_on(async {
+        for (outcome, previously_deferred) in [("settle", false), ("settle", true), ("lost", true)]
+        {
+            let helpers = Fixture::new();
+            let registration = super::first_tests::Fixture::new(outcome, true);
+            let running = start_native(
+                &helpers,
+                json!({"ready":true,"state":"service",
+                "existing_grant":true,"observation_abi":true,"hold_mode_preflight":true}),
+            );
+            let mode = &running.service.shared.mode_transition;
+            mode.fixture_windows(Some(registration.cli.clone()));
+            fs::write(running.source.0.join("mode-preflight-release"), []).unwrap();
+            let watches = || {
+                running
+                    .source
+                    .calls()
+                    .iter()
+                    .filter(|c| c["args"] == json!(["desktop", "watch", "--json"]))
+                    .count()
+            };
+            crate::desktop_service::tests::eventually(
+                "modern first-choice Service is ready",
+                || {
+                    watches() == 1
+                        && running.service.shared.ownership.granted()
+                        && mode.view().first.is_some()
+                },
+            )
+            .await;
+            assert!(mode.state.lock().unwrap().classification_required);
+            assert!(mode.startup_permitted());
+            if previously_deferred {
+                // A genuine other-owner busy reconnect defers the connection.
+                // Only the later native-confirmed choice may reopen it.
+                let held = mode.gate.admit(Role::Fleet).unwrap();
+                running.service.retry();
+                crate::desktop_service::tests::eventually("busy reconnect is connected", || {
+                    watches() == 2
+                })
+                .await;
+                assert!(mode.classification_pending());
+                assert!(!mode.startup_permitted());
+                drop(held);
+                crate::desktop_service::tests::eventually(
+                    "passive offer recovers read-only",
+                    || !mode.classification_pending() && mode.view().first.is_some(),
+                )
+                .await;
+                assert!(!mode.startup_permitted());
+            }
+            let before = mutations(&running);
+            let prepared = mode
+                .confirm_first(mode.view().first.unwrap(), |_| true)
+                .await
+                .unwrap()
+                .unwrap();
+            assert!(
+                mode.gate.admit(Role::Fleet).is_err(),
+                "the SAME Prepared holds the charge"
+            );
+            let result = running
+                .service
+                .apply_first_choice(Some(prepared))
+                .await
+                .unwrap();
+            let id = result["request_id"].as_str().unwrap();
+            let settled = mode.first_settled(id);
+            let view = mode.view();
+            let startup = mode.startup_permitted();
+            let scheduling = running.service.shared.business_scheduling_permitted();
+            let after = mutations(&running);
+            let installs = registration.installs();
+            running.service.join().await.unwrap();
+            if outcome == "settle" {
+                assert!(settled && view.active && !view.pending);
+                assert!(startup, "a confirmed first choice must not require a second Resume; previously deferred={previously_deferred}");
+                assert!(!view.needs_resume, "the settled first choice is not paused");
+                assert!(scheduling);
+            } else {
+                assert!(!settled && view.pending);
+                assert!(
+                    !startup && !scheduling,
+                    "confirmation alone cannot clear an uncertain first choice"
+                );
+            }
+            assert_eq!(
+                before, after,
+                "no extra Rearm/Grant to clear a scheduling deferral"
+            );
+            assert_eq!(
+                installs,
+                [format!(
+                    "desktop registration install --mode background --json --request-id {id}"
+                )]
+            );
+        }
     });
 }

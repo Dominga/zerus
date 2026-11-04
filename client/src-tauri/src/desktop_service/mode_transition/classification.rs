@@ -52,9 +52,10 @@ impl Controller {
             .unwrap_or_else(PoisonError::into_inner)
             .observation_only
     }
-    /// Existing explicit Resume only. Clearing a scheduling deferral grants no
-    /// native authority: the unchanged caller/Grant/per-kind checks still run.
-    pub(in crate::desktop_service) fn confirmed_resume(&self) {
+    /// Only explicit Resume or the checked settlement of its SAME native-
+    /// confirmed background choice. Clearing a scheduling deferral grants no
+    /// native authority: unchanged caller/Grant/per-kind checks still run.
+    pub(in crate::desktop_service) fn confirmed_scheduling(&self) {
         self.state
             .lock()
             .unwrap_or_else(PoisonError::into_inner)
@@ -231,7 +232,7 @@ mod tests {
         );
         owner.preflight_decision(true); // A healthy reconnect cannot clear it.
         assert!(!owner.startup_permitted());
-        owner.confirmed_resume(); // The existing explicit continuation is distinct.
+        owner.confirmed_scheduling(); // The existing explicit continuation is distinct.
         assert!(owner.startup_permitted());
     }
 }

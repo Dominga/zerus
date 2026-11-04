@@ -648,7 +648,7 @@ impl Service {
         {
             return self.ownership_result().await;
         }
-        self.shared.mode_transition.confirmed_resume();
+        self.shared.mode_transition.confirmed_scheduling();
         if self.shared.retained_import.is_some() {
             let relay = self
                 .shared
@@ -758,7 +758,13 @@ impl Service {
         }
         // Consent is for the displayed scope, not a later CLI upgrade or a
         // replacement endpoint discovered while the dialog was open.
-        match preflight(&self.shared, Arc::new(AtomicBool::new(false))).await {
+        match preflight_for(
+            &self.shared,
+            Arc::new(AtomicBool::new(false)),
+            PreflightMode::ConfirmedMode,
+        )
+        .await
+        {
             Ok(configuration) if configuration != prepared.configuration() => {
                 return Err("activation_scope_changed".into())
             }
@@ -783,10 +789,16 @@ impl Service {
             .apply_first(prepared)
             .await
             .map_err(str::to_owned)?;
+        let settled = transition.first_settled(&offered);
+        if settled {
+            // This SAME native-confirmed choice settled. Observation alone
+            // never enters this continuation or clears a prior deferral.
+            transition.confirmed_scheduling();
+        }
         self.shared
             .publish_ownership(crate::desktop_ownership::Phase::Result)
             .await;
-        if transition.first_settled(&offered) {
+        if settled {
             // Read-only: the reconnect observes the background service; it is
             // not a trigger for Grant, import or manager work.
             self.wake_connection(true);
@@ -813,7 +825,13 @@ impl Service {
             if action != ReviewAction::Review {
                 // Consent is for the original scope, not a later CLI upgrade or
                 // replacement endpoint discovered while the dialog was open.
-                match preflight(&self.shared, Arc::new(AtomicBool::new(false))).await {
+                match preflight_for(
+                    &self.shared,
+                    Arc::new(AtomicBool::new(false)),
+                    PreflightMode::ConfirmedMode,
+                )
+                .await
+                {
                     Ok(configuration) if configuration != prepared.configuration() => {
                         return Err("activation_scope_changed".into())
                     }
@@ -907,6 +925,9 @@ impl Service {
                                 .await
                                 && !self.shared.read_checks_only()
                             {
+                                // Only THIS settled, scoped native-confirmed
+                                // background choice may clear an old deferral.
+                                self.shared.mode_transition.confirmed_scheduling();
                                 let _ = STARTUP_RECOVERY.compare_exchange(
                                     1,
                                     2,
@@ -1701,8 +1722,44 @@ async fn request(
     serde_json::from_slice(&bytes).map_err(|_| "invalid_service_response")
 }
 
+#[derive(Clone, Copy)]
+enum PreflightMode {
+    Connection,
+    // Only the two explicit mode call sites, while their SAME Prepared holds
+    // the Fleet charge. They validate it again after this slow read; a skipped
+    // observation supplies no admission and cannot decide a connection freeze.
+    ConfirmedMode,
+}
+impl PreflightMode {
+    async fn observe(self, shared: &Arc<Shared>, configuration: &str) {
+        match self {
+            Self::Connection => {
+                shared
+                    .mode_transition
+                    .observe_preflight(shared.hgs.clone(), configuration.into())
+                    .await
+            }
+            Self::ConfirmedMode => {
+                shared
+                    .mode_transition
+                    .observe(shared.hgs.clone(), configuration.into())
+                    .await
+            }
+        }
+    }
+}
 async fn preflight(shared: &Arc<Shared>, stop: Arc<AtomicBool>) -> Result<String, &'static str> {
-    let _classification = shared.mode_transition.preflight_scope();
+    preflight_for(shared, stop, PreflightMode::Connection).await
+}
+async fn preflight_for(
+    shared: &Arc<Shared>,
+    stop: Arc<AtomicBool>,
+    mode: PreflightMode,
+) -> Result<String, &'static str> {
+    let _classification = match mode {
+        PreflightMode::Connection => Some(shared.mode_transition.preflight_scope()),
+        PreflightMode::ConfirmedMode => None,
+    };
     let original = shared.original_read_scope()?;
     let help = command(shared, vec!["--help".into()], None, stop.clone()).await?;
     shared.notification_supported.store(
@@ -1764,10 +1821,7 @@ async fn preflight(shared: &Arc<Shared>, stop: Arc<AtomicBool>) -> Result<String
             if original.is_some_and(|scope| scope.configuration != configuration) {
                 return Err("original_service_changed");
             }
-            shared
-                .mode_transition
-                .observe_preflight(shared.hgs.clone(), configuration.into())
-                .await;
+            mode.observe(shared, configuration).await;
         }
         return Err("service_unavailable");
     }
@@ -1795,10 +1849,7 @@ async fn preflight(shared: &Arc<Shared>, stop: Arc<AtomicBool>) -> Result<String
         responder.configure_once(configuration.into());
     }
     shared.observe_manual_refresh(configuration, state.snapshot())?;
-    shared
-        .mode_transition
-        .observe_preflight(shared.hgs.clone(), configuration.into())
-        .await;
+    mode.observe(shared, configuration).await;
     shared.publish(state.snapshot().clone());
     Ok(configuration.into())
 }

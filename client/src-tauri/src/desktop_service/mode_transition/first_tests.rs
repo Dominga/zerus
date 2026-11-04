@@ -86,12 +86,12 @@ else:
     sys.exit(2)
 "#;
 
-struct Fixture {
+pub(super) struct Fixture {
     root: PathBuf,
-    cli: PathBuf,
+    pub(super) cli: PathBuf,
 }
 impl Fixture {
-    fn new(install: &str, first: bool) -> Self {
+    pub(super) fn new(install: &str, first: bool) -> Self {
         let root = std::env::temp_dir().join(format!("zerus-first-{}", uuid::Uuid::new_v4()));
         fs::create_dir_all(&root).unwrap();
         let root = root.canonicalize().unwrap();
@@ -124,7 +124,7 @@ impl Fixture {
         }
         self.write(state);
     }
-    fn installs(&self) -> Vec<String> {
+    pub(super) fn installs(&self) -> Vec<String> {
         fs::read_to_string(self.root.join("calls"))
             .unwrap_or_default()
             .lines()

@@ -13,7 +13,7 @@
 use crate::host::staging::Layout;
 #[cfg(windows)]
 use crate::host::staging::{self, BoundObject, FrontendBinding, FRONTEND_SCHEMA};
-#[cfg(windows)]
+#[cfg(any(windows, test))]
 use std::path::Path;
 use std::path::PathBuf;
 #[cfg(windows)]
@@ -373,14 +373,22 @@ impl Drop for PortableScope {
 #[cfg(windows)]
 impl PortableScope {
     /// For a process that admits frontends: this process's own loaded image,
-    /// established once (the CLI is pinned only while that is done), and the
-    /// private record as it is now, if it binds that image.
-    pub fn materialize(home: &str) -> Option<Self> {
+    /// established once (the CLI is pinned only while that is done). Only
+    /// when that image is exactly `<dir>\.local\bin\hgs.exe` does a portable
+    /// scope exist, reading `<dir>\.local\share\hgs\host\frontend.json`,
+    /// where the binding install writes it; the private chain checks cover
+    /// every folder from `<dir>\.local` down. Any other CLI has none.
+    pub fn materialize() -> Option<Self> {
         let own = PinnedImage::for_process(&own_process()).ok()?;
         let cli = object(&own);
         drop(own);
+        // Beside the bound CLI itself, never from HOME or another setting.
+        let images = images_beside(&cli.path)?;
+        Self::with_images(images, cli)
+    }
+    fn with_images(images: PathBuf, cli: BoundObject) -> Option<Self> {
         let scope = Self {
-            images: staging::images_below(home),
+            images,
             cli,
             snapshot: std::sync::Mutex::new(None),
             reread: std::sync::Mutex::new(()),
@@ -529,13 +537,30 @@ fn prove_creation(layout: &Layout, until: Instant) -> Option<(Ancestry, PinnedIm
 }
 
 #[cfg(windows)]
-pub(crate) fn materialize(home: &str) -> Option<PortableScope> {
-    PortableScope::materialize(home)
+pub(crate) fn materialize() -> Option<PortableScope> {
+    PortableScope::materialize()
 }
 
 #[cfg(not(windows))]
-pub(crate) fn materialize(_: &str) -> Option<PortableScope> {
+pub(crate) fn materialize() -> Option<PortableScope> {
     None
+}
+
+/// The host images folder that belongs to the stable CLI at `cli`: for exactly
+/// `<dir>\.local\bin\hgs.exe`, `<dir>\.local\share\hgs\host` (the Layout of
+/// `staging::Layout`, so the binding install writes there). Anything else has
+/// none.
+#[cfg(any(windows, test))]
+fn images_beside(cli: &Path) -> Option<PathBuf> {
+    let named = |path: &Path, name: &str| {
+        path.file_name()
+            .and_then(|value| value.to_str())
+            .is_some_and(|value| value.eq_ignore_ascii_case(name))
+    };
+    let bin = cli.parent()?;
+    let local = bin.parent()?;
+    (named(cli, crate::host::staging::EXECUTABLE) && named(bin, "bin") && named(local, ".local"))
+        .then(|| local.join("share").join("hgs").join("host"))
 }
 
 /// For `session-host status`: the bound app's path, whether the binding still
@@ -562,3 +587,59 @@ pub(crate) fn status(layout: &Layout) -> Option<(PathBuf, bool, bool)> {
 
 #[cfg(all(test, windows))]
 mod tests;
+
+#[cfg(test)]
+mod layout_tests {
+    use super::*;
+    use crate::host::staging::EXECUTABLE;
+
+    #[test]
+    fn the_service_reads_the_record_exactly_where_the_install_writes_it() {
+        let dir = tempfile::tempdir().unwrap();
+        let fixture = dir
+            .path()
+            .join("fixture home")
+            .to_string_lossy()
+            .into_owned();
+        let homes = [
+            fixture.as_str(),
+            if cfg!(windows) {
+                r"C:\Users\Example"
+            } else {
+                "/home/example"
+            },
+        ];
+        for home in homes {
+            let layout =
+                crate::host::staging::Layout::new(home, Path::new(home).join("config").as_path());
+            assert_eq!(
+                images_beside(&layout.cli),
+                Some(layout.images.clone()),
+                "{home}"
+            );
+        }
+    }
+
+    #[test]
+    fn a_cli_outside_dot_local_bin_has_no_record_location() {
+        let root = Path::new(if cfg!(windows) {
+            r"C:\Users\Example"
+        } else {
+            "/home/example"
+        });
+        for cli in [
+            root.join("AppData/Local/Programs/Zerus").join(EXECUTABLE),
+            root.join("tools/bin").join(EXECUTABLE),
+            root.join(".local/lib").join(EXECUTABLE),
+            root.join(".local/bin/hgs-tray.exe"),
+            PathBuf::from(EXECUTABLE),
+        ] {
+            assert_eq!(images_beside(&cli), None, "{}", cli.display());
+        }
+        // Names compare without regard to ASCII case, as Windows does.
+        assert_eq!(
+            images_beside(&root.join(".LOCAL/Bin/HGS.EXE")),
+            Some(root.join(".LOCAL").join("share").join("hgs").join("host"))
+        );
+    }
+}

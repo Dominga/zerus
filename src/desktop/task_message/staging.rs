@@ -436,32 +436,142 @@ pub(super) struct Expected {
     pub(super) sha256: String,
 }
 
+/// The longest one custody-input removal, its read included, may take. It
+/// is never renewed after a slow read.
+pub(super) const REMOVAL_TIME: std::time::Duration = std::time::Duration::from_secs(10);
+
+/// Test-only points inside one custody-input removal.
+#[cfg(test)]
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub(super) enum RemovalPoint {
+    /// After the read, before the opened file is checked again.
+    Read,
+    /// After every check of the opened file, before the name's last check.
+    BeforeName,
+}
+/// Test-only removal hooks, by request ID and point, run on the removal
+/// worker.
+#[cfg(test)]
+type RemovalHook = Box<dyn FnOnce() + Send>;
+#[cfg(test)]
+pub(super) static REMOVAL_HOOKS: std::sync::Mutex<Vec<(String, RemovalPoint, RemovalHook)>> =
+    std::sync::Mutex::new(Vec::new());
+#[cfg(test)]
+fn removal_hook(request: &str, point: RemovalPoint) {
+    let hook = {
+        let mut hooks = REMOVAL_HOOKS.lock().unwrap();
+        let found = hooks
+            .iter()
+            .position(|(id, at, _)| id == request && *at == point);
+        found.map(|n| hooks.remove(n).2)
+    };
+    if let Some(hook) = hook {
+        hook();
+    }
+}
+/// Test-only removal deadlines, by request ID, in place of [`REMOVAL_TIME`].
+#[cfg(test)]
+pub(super) static REMOVAL_TIMES: std::sync::Mutex<Vec<(String, std::time::Duration)>> =
+    std::sync::Mutex::new(Vec::new());
+
+/// The deadline of one removal of `request`, fixed when it starts.
+pub(super) fn removal_deadline(request: &str) -> Instant {
+    #[cfg(test)]
+    if let Some((_, time)) = REMOVAL_TIMES
+        .lock()
+        .unwrap()
+        .iter()
+        .find(|(id, _)| id == request)
+    {
+        return Instant::now() + *time;
+    }
+    let _ = request;
+    Instant::now() + REMOVAL_TIME
+}
+
+/// A file's exact native version: what must not change across a removal.
+#[derive(Clone, Copy, PartialEq, Eq)]
+struct FileVersion {
+    identity: Identity,
+    size: u64,
+    mode: u32,
+    links: u64,
+    modified: (i64, i64),
+    changed: (i64, i64),
+}
+fn file_version(file: &File) -> io::Result<FileVersion> {
+    let metadata = file.metadata()?;
+    Ok(FileVersion {
+        identity: (metadata.dev(), metadata.ino()),
+        size: metadata.len(),
+        mode: metadata.mode(),
+        links: metadata.nlink(),
+        modified: (metadata.mtime(), metadata.mtime_nsec()),
+        changed: (metadata.ctime(), metadata.ctime_nsec()),
+    })
+}
+
 /// Removes the custody input of `request` only while its name still denotes
-/// the expected private object with exactly the record's bytes. Once nothing
-/// holds the input, its inode number may be reused by a file created later
-/// under the same name, so the identity alone never proves it. A missing
-/// input was already removed.
-pub(super) fn remove_input(roots: &Roots, request: &str, expected: &Expected) -> io::Result<()> {
-    match open_at(
+/// exactly the expected object: the recorded identity, a private regular
+/// file of this user with one link, and the record's size and SHA-256. The
+/// bytes are read through the opened file, whose version must not change
+/// across that read. Right before the unlink, within `deadline`, the held
+/// folder and the canonical name (never followed) must still denote that
+/// same opened, unchanged file. Anything else refuses and leaves the input
+/// charged: the identity alone, the bytes alone or another name never
+/// authorize a removal. A missing input was already removed.
+pub(super) fn remove_input(
+    roots: &Roots,
+    request: &str,
+    expected: &Expected,
+    deadline: Instant,
+) -> io::Result<()> {
+    let refused = || io::Error::from(io::ErrorKind::InvalidData);
+    if !roots.current() {
+        return Err(refused());
+    }
+    let mut file = match open_at(
         &roots.inputs.file,
         request,
         libc::O_RDONLY | libc::O_NOCTTY,
         0,
     ) {
-        Ok(mut file) => {
-            let exact = identity(&file)? == expected.identity
-                && platform::verify_private_file(&file)?
-                && file.metadata()?.len() == expected.bytes
-                && content_digest(&mut file, expected.bytes)?.as_deref()
-                    == Some(expected.sha256.as_str());
-            if !exact {
-                return Err(io::ErrorKind::InvalidData.into());
-            }
-            unlink_at(&roots.inputs.file, request, 0)?
-        }
-        Err(error) if error.kind() == io::ErrorKind::NotFound => {}
+        Ok(file) => file,
+        Err(error) if error.kind() == io::ErrorKind::NotFound => return roots.inputs.sync(),
         Err(error) => return Err(error),
+    };
+    let before = file_version(&file)?;
+    if before.identity != expected.identity
+        || before.size != expected.bytes
+        || !platform::verify_private_file(&file)?
+    {
+        return Err(refused());
     }
+    let digest = content_digest(&mut file, expected.bytes, deadline)?;
+    #[cfg(test)]
+    removal_hook(request, RemovalPoint::Read);
+    if file_version(&file)? != before
+        || !platform::verify_private_file(&file)?
+        || digest.as_deref() != Some(expected.sha256.as_str())
+    {
+        return Err(refused());
+    }
+    #[cfg(test)]
+    removal_hook(request, RemovalPoint::BeforeName);
+    if Instant::now() >= deadline || !roots.current() {
+        return Err(refused());
+    }
+    // The canonical name still denotes that same held, unchanged file.
+    let named = open_at(
+        &roots.inputs.file,
+        request,
+        libc::O_RDONLY | libc::O_NOCTTY,
+        0,
+    );
+    if named.and_then(|now| file_version(&now)).ok() != Some(before) {
+        return Err(refused());
+    }
+    unlink_at(&roots.inputs.file, request, 0)?;
     roots.inputs.sync()
 }
 
@@ -483,13 +593,16 @@ fn remove_held(roots: &Roots, request: &str, held: &File) -> io::Result<()> {
     roots.inputs.sync()
 }
 
-/// The SHA-256 of exactly `size` bytes read through `file`, or `None` when it
-/// holds another amount.
-fn content_digest(file: &mut File, size: u64) -> io::Result<Option<String>> {
+/// The SHA-256 of exactly `size` bytes read through `file` before
+/// `deadline`, or `None` when it holds another amount.
+fn content_digest(file: &mut File, size: u64, deadline: Instant) -> io::Result<Option<String>> {
     let mut hasher = Sha256::new();
     let mut read = 0u64;
     let mut buffer = vec![0u8; 64 << 10];
     loop {
+        if Instant::now() >= deadline {
+            return Err(io::ErrorKind::TimedOut.into());
+        }
         let n = file.read(&mut buffer)?;
         if n == 0 {
             break;

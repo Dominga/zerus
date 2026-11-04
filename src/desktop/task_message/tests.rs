@@ -1680,6 +1680,67 @@ mod actor {
             assert!(!f.input_path(&original).exists());
         }
 
+        /// The sweep's removal worker keeps the service's own exclusion until
+        /// it finished, even when its runtime is gone, and never unlinks
+        /// after its deadline.
+        #[test]
+        #[cfg(target_os = "linux")]
+        fn a_removal_worker_keeps_the_owner_until_it_finished_and_never_unlinks_late() {
+            let dir = tempfile::tempdir().unwrap();
+            let (image, _seen) = replying_image(dir.path());
+            let mut f = Fixture::unexecuted();
+            f.runtime.fixture_image(&image);
+            let (original, blobs, _) = f.referenced(&[shot(29, 3000)]);
+            f.stage(&original, &blobs);
+            let id = original.plan.request_id.clone();
+            staging::REMOVAL_TIMES
+                .lock()
+                .unwrap()
+                .push((id.clone(), Duration::from_millis(300)));
+            let (entered, reading) = std::sync::mpsc::channel::<()>();
+            let (resume, held) = std::sync::mpsc::channel::<()>();
+            staging::REMOVAL_HOOKS.lock().unwrap().push((
+                id.clone(),
+                staging::RemovalPoint::Read,
+                Box::new(move || {
+                    let _ = entered.send(());
+                    let _ = held.recv_timeout(Duration::from_secs(10));
+                }),
+            ));
+            let queue = f.send_reference(
+                &original,
+                ui_authority::Validated::fixture(&Fixture::request(&original)),
+            );
+            assert_eq!(f.answered(&queue)["accepted"], true);
+            let end = Instant::now() + Duration::from_secs(10);
+            while reading.try_recv().is_err() {
+                assert!(Instant::now() < end, "the removal never started");
+                f.runtime.poll(&mut f.store, Some(f.exclusion.clone()));
+                std::thread::sleep(Duration::from_millis(2));
+            }
+            // The runtime goes while its worker still reads.
+            let old = std::mem::replace(
+                &mut f.runtime,
+                runtime::Runtime::new(&f.config, &f.epoch, f.owner.clone()).unwrap(),
+            );
+            drop(old);
+            let during = Arc::strong_count(&f.owner);
+            std::thread::sleep(Duration::from_millis(400));
+            resume.send(()).unwrap();
+            let end = Instant::now() + Duration::from_secs(10);
+            while Arc::strong_count(&f.owner) >= during {
+                assert!(Instant::now() < end, "the worker never let go");
+                std::thread::sleep(Duration::from_millis(2));
+            }
+            assert_eq!(
+                Arc::strong_count(&f.owner),
+                during - 1,
+                "the worker held one loan"
+            );
+            assert!(f.input_path(&original).exists(), "never unlinked late");
+            assert_eq!(f.state(&original), "held", "still charged");
+        }
+
         /// A permit that expires, or a writer revoked, while preparation runs:
         /// nothing is admitted, and the exact published input is removed
         /// before its reservation is released.
@@ -2128,10 +2189,10 @@ mod staging_tests {
         );
         staging::remove_staged(&roots, &request, &prepared.staged).unwrap();
         assert!(!dir.exists(), "exactly its copies, then the empty folder");
-        staging::remove_input(&roots, &request, &expected(&prepared)).unwrap();
+        staging::remove_input(&roots, &request, &expected(&prepared), soon()).unwrap();
         assert!(!input(&root, &request).exists());
         // Removing what is already gone is not an error.
-        staging::remove_input(&roots, &request, &expected(&prepared)).unwrap();
+        staging::remove_input(&roots, &request, &expected(&prepared), soon()).unwrap();
     }
 
     #[test]
@@ -2376,6 +2437,75 @@ mod staging_tests {
     }
 
     #[test]
+    fn a_removal_checks_the_name_again_after_its_read_within_its_deadline() {
+        use staging::RemovalPoint::{BeforeName, Read};
+        let cases = [
+            ("swapped before the name", BeforeName),
+            ("renamed during the read", Read),
+            ("rewritten during the read", Read),
+            ("late", Read),
+            ("exact", Read),
+        ];
+        for (case, point) in cases {
+            let (_temp, root, roots) = fresh();
+            let (verified, blobs, _) = original(&[shot(19, 4096)]);
+            let request = verified.plan.request_id.clone();
+            stage(&root, &request, &blobs);
+            let prepared = staging::prepare(&roots, &verified, soon()).unwrap();
+            let wanted = expected(&prepared);
+            let path = input(&root, &request);
+            let bytes = std::fs::read(&path).unwrap();
+            let name = path.clone();
+            let hook: Box<dyn FnOnce() + Send> = match case {
+                "swapped before the name" | "renamed during the read" => Box::new(move || {
+                    // The held original moves aside; another object takes
+                    // its name.
+                    std::fs::rename(&name, name.with_extension("aside")).unwrap();
+                    std::fs::write(&name, b"replacement").unwrap();
+                    std::fs::set_permissions(&name, std::fs::Permissions::from_mode(0o600))
+                        .unwrap();
+                }),
+                "rewritten during the read" => Box::new(move || {
+                    // The same bytes again, in place: another version.
+                    use std::io::Write;
+                    std::thread::sleep(Duration::from_millis(20));
+                    let mut file = std::fs::OpenOptions::new().write(true).open(&name).unwrap();
+                    file.write_all(&bytes).unwrap();
+                    file.sync_all().unwrap();
+                }),
+                "late" => Box::new(|| std::thread::sleep(Duration::from_millis(400))),
+                _ => Box::new(|| {}),
+            };
+            staging::REMOVAL_HOOKS
+                .lock()
+                .unwrap()
+                .push((request.clone(), point, hook));
+            let deadline = Instant::now()
+                + if case == "late" {
+                    Duration::from_millis(300)
+                } else {
+                    Duration::from_secs(20)
+                };
+            let result = staging::remove_input(&roots, &request, &wanted, deadline);
+            match case {
+                "exact" => {
+                    result.unwrap();
+                    assert!(!path.exists());
+                }
+                "swapped before the name" | "renamed during the read" => {
+                    assert!(result.is_err(), "{case}");
+                    assert_eq!(std::fs::read(&path).unwrap(), b"replacement", "{case}");
+                    assert!(path.with_extension("aside").exists(), "{case}");
+                }
+                _ => {
+                    assert!(result.is_err(), "{case}");
+                    assert!(path.exists(), "{case}");
+                }
+            }
+        }
+    }
+
+    #[test]
     fn removal_touches_only_the_exact_objects_it_read_or_created() {
         let (_temp, root, roots) = fresh();
         let (verified, blobs, _) = original(&[shot(13, 1024)]);
@@ -2400,13 +2530,13 @@ mod staging_tests {
             let mut file = std::fs::OpenOptions::new().write(true).open(&path).unwrap();
             file.write_all(&other).unwrap();
         }
-        assert!(staging::remove_input(&roots, &request, &wanted).is_err());
+        assert!(staging::remove_input(&roots, &request, &wanted, soon()).is_err());
         assert_eq!(std::fs::read(&path).unwrap(), other);
         // And another object of other bytes under the custody name stays.
         std::fs::remove_file(&path).unwrap();
         std::fs::write(&path, b"another").unwrap();
         std::fs::set_permissions(&path, std::fs::Permissions::from_mode(0o600)).unwrap();
-        assert!(staging::remove_input(&roots, &request, &wanted).is_err());
+        assert!(staging::remove_input(&roots, &request, &wanted, soon()).is_err());
         assert!(path.exists());
         // A staged copy is still held, so a file recreated under its name
         // is another object: it stays, and so does the folder.

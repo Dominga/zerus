@@ -393,11 +393,19 @@ impl Runtime {
         };
         let (send, done) = mpsc::sync_channel(1);
         let request = id.clone();
+        // The worker keeps this service's own exclusion until it finished,
+        // its folder sync included: an actor error or a dropped runtime never
+        // releases it while a removal still reads or unlinks.
+        let owner = self.owner.clone();
         let worker = thread::Builder::new()
             .name("task-message-input".into())
             .spawn(move || {
+                let _owner = owner;
                 let ok = match expected {
-                    Some(expected) => staging::remove_input(&roots, &request, &expected).is_ok(),
+                    Some(expected) => {
+                        let deadline = staging::removal_deadline(&request);
+                        staging::remove_input(&roots, &request, &expected, deadline).is_ok()
+                    }
                     None => staging::input_exists(&roots, &request).unwrap_or(true),
                 };
                 let _ = send.send(ok);

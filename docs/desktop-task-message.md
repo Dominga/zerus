@@ -167,8 +167,23 @@ the form like every original.
 - **Removal.** An input is removed, and its storage charge released, only
   after its original drained physically and nothing in this process holds it.
   A restart does not change that: a retired but undrained original keeps its
-  input. A failed removal stays visible and charged. Lookups never read an
-  input, so a legitimately removed one changes no receipt.
+  input. The removal needs all of the following:
+  - the recorded identity of a private regular file of this user with one
+    link;
+  - the record's size and SHA-256, read through the opened file, whose exact
+    version (identity, size, mode, links, modification and status times) must
+    not change across that read;
+  - within one deadline that is never renewed, the held folder and the
+    canonical name, never followed, still denoting that same opened,
+    unchanged file right before the unlink.
+
+  The identity alone, the bytes alone or another name never authorize it. The
+  worker keeps the service's own exclusion until it finished, its folder sync
+  included. A failed removal stays visible and charged. Staged copies stay
+  open from the moment they were created (client) or read (service) until
+  their removal, so a file recreated under a copy's name never shares its
+  inode. Lookups never read an input, so a legitimately removed one changes
+  no receipt.
 - **Restart.** A reservation that nothing in this process holds, after a
   restart or a failed preparation, is classified off the actor. If its input
   exists, it was published but never admitted: it is kept, charged and

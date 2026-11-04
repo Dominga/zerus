@@ -138,20 +138,49 @@ fn highest_rate(value: &gst::glib::SendValue) -> Option<gst::Fraction> {
     None
 }
 
-fn side(structure: &gst::StructureRef, field: &str, wanted: i32) -> Option<u32> {
+/// The values a size field allows: one, each of a list such as
+/// `height={ 480, 360 }`, or a range's value closest to `wanted`.
+fn sides(structure: &gst::StructureRef, field: &str, wanted: i32) -> Vec<u32> {
     if let Ok(value) = structure.get::<i32>(field) {
-        return u32::try_from(value).ok();
+        return u32::try_from(value).into_iter().collect();
     }
-    // A list of sizes, such as `height={ 480, 360 }`: the one closest to wanted.
     if let Ok(list) = structure.get::<gst::List>(field) {
-        let closest = list
+        return list
             .iter()
             .filter_map(|value| value.get::<i32>().ok())
-            .min_by_key(|value| value.abs_diff(wanted))?;
-        return u32::try_from(closest).ok();
+            .filter_map(|value| u32::try_from(value).ok())
+            .collect();
     }
-    let range = structure.get::<gst::IntRange<i32>>(field).ok()?;
-    u32::try_from(wanted.clamp(range.min(), range.max())).ok()
+    let Ok(range) = structure.get::<gst::IntRange<i32>>(field) else {
+        return Vec::new();
+    };
+    u32::try_from(wanted.clamp(range.min(), range.max()))
+        .into_iter()
+        .collect()
+}
+
+/// The frame size a format offers closest to 640x480 in area. Width and
+/// height are chosen together, preferring a usual shape from 4:3 to 16:9,
+/// so lists of both never pair, say, 320 wide with 720 high.
+fn size(structure: &gst::StructureRef) -> Option<(u32, u32)> {
+    let heights = sides(structure, "height", 480);
+    let pairs: Vec<(u32, u32)> = sides(structure, "width", 640)
+        .into_iter()
+        .flat_map(|width| heights.iter().map(move |&height| (width, height)))
+        .collect();
+    let usual = |&&(width, height): &&(u32, u32)| {
+        let (width, height) = (u64::from(width), u64::from(height));
+        3 * width >= 4 * height && 9 * width <= 16 * height
+    };
+    let distance = |&&(width, height): &&(u32, u32)| {
+        (u64::from(width) * u64::from(height)).abs_diff(640 * 480)
+    };
+    pairs
+        .iter()
+        .filter(usual)
+        .min_by_key(distance)
+        .or_else(|| pairs.iter().min_by_key(distance))
+        .copied()
 }
 
 /// Frames in ordinary memory, what the decoder and converter take. A camera
@@ -175,10 +204,7 @@ fn formats(caps: &gst::Caps) -> Vec<(CameraFormat, gst::Caps, bool)> {
         if (name != "video/x-raw" && !jpeg) || !system_memory(structure, features) {
             continue;
         }
-        let (Some(width), Some(height)) = (
-            side(structure, "width", 640),
-            side(structure, "height", 480),
-        ) else {
+        let Some((width, height)) = size(structure) else {
             continue;
         };
         let Some(rate) = structure.value("framerate").ok().and_then(highest_rate) else {
@@ -553,10 +579,13 @@ fn record(
         .map_err(|error| error.to_string())?;
     // A camera that cannot produce the chosen format refuses this link; say
     // so plainly rather than with GStreamer's element names.
-    camera
-        .element
-        .link(&filter)
-        .map_err(|_| NO_FORMAT.to_owned())?;
+    camera.element.link(&filter).map_err(|error| {
+        eprintln!(
+            "video: the camera does not link to {}: {error}",
+            camera.caps
+        );
+        NO_FORMAT.to_owned()
+    })?;
     let audio: gst_app::AppSrc = element(&pipeline, "audio")?;
     let preview: gst_app::AppSink = element(&pipeline, "preview")?;
     let poster_sink: gst_app::AppSink = element(&pipeline, "poster")?;
@@ -777,6 +806,29 @@ mod tests {
         let (format, fixed, jpeg) = chosen(&caps);
         assert_eq!((format.width, format.height), (640, 480));
         assert!(jpeg, "MJPEG is offered first at that size: {fixed}");
+    }
+
+    /// Lists of both widths and heights are chosen together: the usual-shaped
+    /// pair closest to 640x480, never a per-side pick such as 320x720.
+    #[test]
+    fn lists_of_widths_and_heights_are_chosen_together() {
+        init().unwrap();
+        let both = "video/x-raw, format=YUY2, width={ (int)1280, (int)320 }, \
+            height={ (int)720, (int)240 }, framerate=30/1";
+        let offered = formats(&gst::Caps::from_str(both).unwrap());
+        let [(format, _, _)] = offered.as_slice() else {
+            panic!("one format: {offered:?}")
+        };
+        assert_eq!((format.width, format.height), (320, 240));
+        // One list keeps its closest value, as before.
+        let one =
+            "video/x-raw, format=YUY2, width={ (int)424, (int)320 }, height=240, framerate=30/1";
+        let offered = formats(&gst::Caps::from_str(one).unwrap());
+        assert_eq!((offered[0].0.width, offered[0].0.height), (424, 240));
+        // An unusual shape alone is still offered.
+        let odd = "video/x-raw, format=YUY2, width=176, height=144, framerate=30/1";
+        let offered = formats(&gst::Caps::from_str(odd).unwrap());
+        assert_eq!((offered[0].0.width, offered[0].0.height), (176, 144));
     }
 
     /// The reported failure, without opening the camera: a V4L2 source not

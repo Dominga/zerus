@@ -26,6 +26,7 @@ pub struct TerminationCleanup(Arc<Inner>);
 #[derive(Default)]
 struct Inner {
     model: Mutex<Model>,
+    pending: Arc<crate::desktop_service::termination_outcome::Pending>,
 }
 #[derive(Default)]
 struct Model {
@@ -56,6 +57,7 @@ impl TerminationCleanup {
 struct Offer {
     id: String,
     capture: Capture,
+    selected: Option<crate::desktop_service::termination_outcome::Selected>,
     at: Instant,
 }
 struct Job {
@@ -196,15 +198,10 @@ fn leaf(path: &str) -> String {
         .unwrap_or(path)
         .into()
 }
+/// The folders core cleanup would remove (zerus-k2ga: one predicate, so the
+/// counted folders and the removed ones are the same).
 fn ready(entry: &zerus_client_core::termination_cleanup::Entry) -> bool {
-    !matches!(entry.status, Some(Status::Removed | Status::Unconfirmed))
-        && entry.verified
-        && (review::removable(&entry.row)
-            || review::process_reviewable(&entry.row)
-            || (entry.row["discardable"] == true
-                && entry.row["discard_fingerprint"]
-                    .as_str()
-                    .is_some_and(|s| !s.is_empty())))
+    entry.eligible()
 }
 impl Model {
     fn retain(
@@ -793,11 +790,30 @@ pub async fn termination_cleanup_offer(
         .and_then(|m| m.machine_id)
         .filter(|id| zerus_client_core::creation::canonical_uuid(id))
         .ok_or(STATE_CHANGED)?;
-    let capture = tauri::async_runtime::spawn_blocking(move || {
+    let service = if crate::desktop_service::mode() {
+        Some(
+            app.desktop_service()
+                .ok_or(crate::desktop_service::termination_outcome::UNCONFIRMED)?,
+        )
+    } else {
+        None
+    };
+    let (capture, selected) = tauri::async_runtime::spawn_blocking(move || {
+        if let Some(service) = service {
+            let (capture, selected) =
+                crate::desktop_service::termination_outcome::Selected::inspect(
+                    service,
+                    &call_target,
+                    &machine,
+                    Arc::new(_read),
+                )?;
+            return Ok((capture, Some(selected)));
+        }
+        let _read = _read;
         let hgs = default_hgs();
         probe(&hgs, &call_target, &bounded_run)?;
         let value = inspection(&hgs, &call_target, &machine, &bounded_run)?;
-        Capture::from_inspection(&call_target, &machine, &value)
+        Capture::from_inspection(&call_target, &machine, &value).map(|capture| (capture, None))
     })
     .await
     .map_err(|e| e.to_string())??;
@@ -813,6 +829,7 @@ pub async fn termination_cleanup_offer(
     m.offers.push_back(Offer {
         id: id.clone(),
         capture,
+        selected,
         at: Instant::now(),
     });
     Ok(Some(OfferView {
@@ -859,15 +876,30 @@ pub async fn termination_cleanup_confirm(
             })
             .transpose()?;
         m.reserved += 1;
-        (o.capture, delayed)
+        (o.capture, delayed, o.selected)
     };
-    let (capture, delayed) = capture;
+    let (capture, delayed, selected) = capture;
     // A remembered checkbox default never changes the action's admission.
     let _ = settings.0.set(PREF, Value::Bool(true));
-    let outcome = if delayed.is_some() {
-        crate::actions::dispatch_cleanup_reserved(&actions, capture.clone(), delayed).await
-    } else {
-        crate::actions::dispatch_cleanup(&actions, capture.clone()).await
+    let outcome = match (crate::desktop_service::mode(), selected) {
+        (true, Some(selected)) => {
+            match crate::desktop_service::termination_outcome::Confirmation::new(
+                id.clone(),
+                capture.clone(),
+                selected,
+                state.0.pending.clone(),
+            ) {
+                Ok(native) => {
+                    crate::actions::dispatch_cleanup_native(&actions, native, delayed).await
+                }
+                Err(error) => Err(error),
+            }
+        }
+        (false, None) if delayed.is_some() => {
+            crate::actions::dispatch_cleanup_reserved(&actions, capture.clone(), delayed).await
+        }
+        (false, None) => crate::actions::dispatch_cleanup(&actions, capture.clone()).await,
+        _ => Err(STATE_CHANGED.into()),
     };
     let mut m = lock(&state.0.model);
     m.reserved -= 1;
@@ -1322,6 +1354,58 @@ mod tests {
         m.jobs[0].manual_review = true;
         // The UI-ready predicate shares the existing core validator.
         assert_eq!(m.view().rows[0].ready, ready(&m.jobs[0].cleanup.entries[0]));
+    }
+    /// zerus-k2ga: a dirty folder beside hidden programs is ready, counted
+    /// and needs both consents, alone or beside a clean folder, so the
+    /// counted folders are the ones core cleanup removes.
+    #[test]
+    fn a_dirty_folder_beside_hidden_programs_is_ready_counted_and_needs_both_consents() {
+        let combined = json!({"path":"/srv/example/work","kind":"linked","verdict":"blocked","fingerprint":"f",
+            "reasons":[{"code":"changes"},{"code":"processes_unavailable"}],"discardable":false,
+            "discardable_with_process_consent":true,"discard_fingerprint":"d","process_fingerprint":"p"});
+        let reviewed = |path: &str, row: Value, id: &str| {
+            let mut j = job(Some(Status::Kept));
+            j.id = id.into();
+            j.cleanup.entries[0] = Entry::terminated(
+                "example-peer",
+                MACHINE,
+                path,
+                "/srv/example/.git",
+                "owner-1",
+                None,
+            )
+            .unwrap();
+            j.cleanup.entries[0].status = Some(Status::Kept);
+            j.cleanup.entries[0].verified = true;
+            j.cleanup.entries[0].row = row;
+            j.manual_review = true;
+            j
+        };
+        let mut m = Model::default();
+        m.jobs
+            .push_back(reviewed("/srv/example/work", combined.clone(), "job-1"));
+        let v = m.view();
+        assert!(
+            v.rows[0].ready,
+            "the dirty folder alone is a removal target"
+        );
+        assert!(v.required.discard_changes && v.required.unchecked_processes);
+        let clean = json!({"path":"/srv/example/other","kind":"linked","verdict":"ready","fingerprint":"g","reasons":[]});
+        m.jobs
+            .push_back(reviewed("/srv/example/other", clean, "job-2"));
+        let v = m.view();
+        assert_eq!(
+            v.rows.iter().map(|r| r.ready).collect::<Vec<_>>(),
+            [true, true]
+        );
+        assert!(v.required.discard_changes && v.required.unchecked_processes);
+        for (job, row) in m.jobs.iter().zip(&v.rows) {
+            assert_eq!(
+                row.ready,
+                job.cleanup.entries[0].eligible(),
+                "counted as core removes"
+            );
+        }
     }
     #[test]
     fn current_inspection_reads_are_bounded_and_charge_until_their_guard_ends() {

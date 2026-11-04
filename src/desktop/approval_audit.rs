@@ -4,8 +4,10 @@ use crate::{config::Config, platform};
 use anyhow::{ensure, Result};
 use rusqlite::{params, Connection, OpenFlags, OptionalExtension, ToSql};
 use serde_json::{json, Value};
+#[cfg(windows)]
+use std::fs::File;
 use std::{
-    fs::{self, File, OpenOptions},
+    fs,
     path::{Path, PathBuf},
     time::Duration,
 };
@@ -14,11 +16,11 @@ use zerus_client_core::desktop::approval_audit::{self as wire, Request};
 pub(super) mod worker;
 
 struct Journal {
-    file: File,
     identity: (u64, u64),
     token: String,
     db: Connection,
 }
+#[cfg(windows)]
 fn key(file: &File) -> Result<(u64, u64)> {
     let id = platform::FileIdentity::of(file)?;
     Ok((id.device, id.inode))
@@ -34,24 +36,33 @@ impl Journal {
             platform::verify_private(root, platform::Private::Directory)?,
             "unsafe audit directory"
         );
-        let path = root.join("journal.sqlite3");
+        // Resolve allowed ancestor aliases without following the journal leaf,
+        // and check the canonical folder too: it is the one used from here.
+        let canonical = platform::canonical(root)?;
+        ensure!(
+            platform::verify_private(&canonical, platform::Private::Directory)?,
+            "unsafe audit directory"
+        );
+        let path = canonical.join("journal.sqlite3");
         match fs::symlink_metadata(&path) {
             Err(e) if e.kind() == std::io::ErrorKind::NotFound => return Ok(None),
             Err(e) => return Err(e.into()),
             Ok(_) => (),
         }
-        let mut options = OpenOptions::new();
-        options.read(true);
-        #[cfg(unix)]
-        platform::no_follow(&mut options);
-        #[cfg(windows)]
-        platform::refuse_link(&mut options);
-        let file = options.open(&path)?;
-        ensure!(platform::verify_private_file(&file)?, "unsafe audit file");
-        let identity = key(&file)?;
+        // A raw open/close here would also cancel the same process's live
+        // reservation writer locks. Bind SQLite's own file to stat instead.
+        ensure!(
+            platform::verify_private(&path, platform::Private::File)?,
+            "unsafe audit file"
+        );
+        let file = platform::file_identity(&path)
+            .ok_or_else(|| anyhow::anyhow!("audit file unavailable"))?;
+        let identity = (file.device, file.inode);
         let db = Connection::open_with_flags(
             &path,
-            OpenFlags::SQLITE_OPEN_READ_ONLY | OpenFlags::SQLITE_OPEN_NO_MUTEX,
+            OpenFlags::SQLITE_OPEN_READ_ONLY
+                | OpenFlags::SQLITE_OPEN_NO_MUTEX
+                | OpenFlags::SQLITE_OPEN_NOFOLLOW,
         )?;
         db.busy_timeout(Duration::from_millis(100))?;
         db.execute_batch(
@@ -60,7 +71,6 @@ impl Journal {
         let version: i64 = db.query_row("PRAGMA user_version", [], |r| r.get(0))?;
         ensure!(version == 1, "audit schema requires migration");
         let result = Self {
-            file,
             identity,
             token: uuid::Uuid::new_v4().to_string(),
             db,
@@ -72,14 +82,13 @@ impl Journal {
         let path = root.join("journal.sqlite3");
         ensure!(
             platform::verify_private(root, platform::Private::Directory)?
-                && platform::verify_private(&path, platform::Private::File)?
-                && platform::verify_private_file(&self.file)?,
+                && platform::verify_private(&path, platform::Private::File)?,
             "audit protection changed"
         );
         let current = platform::file_identity(&path)
             .ok_or_else(|| anyhow::anyhow!("audit file unavailable"))?;
         ensure!(
-            (current.device, current.inode) == self.identity && key(&self.file)? == self.identity,
+            (current.device, current.inode) == self.identity,
             "audit journal replaced"
         );
         self.connection_current()?;
@@ -91,7 +100,7 @@ impl Journal {
     fn connection_current(&self) -> Result<()> {
         use std::{ffi::CStr, os::unix::ffi::OsStrExt};
         // SQLite's public file control checks its OWN open file against its
-        // filename. Also join that filename to our retained descriptor, so
+        // filename. Also join that filename to the captured identity, so
         // swapping a parent path during open cannot select a different DB.
         let name =
             unsafe { rusqlite::ffi::sqlite3_db_filename(self.db.handle(), c"main".as_ptr()) };

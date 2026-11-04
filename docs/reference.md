@@ -262,6 +262,22 @@ paused: launch the intended conversation with its explicit native ID to bind it.
 
 ### Tracking and durable state
 
+Every session record has a durable `session_id`, a UUID assigned when the
+session is first created. Every write of this hgs keeps it: resume, Clear and
+fresh starts, rename, pause, archive and restore. A fork is another session
+with its own. A record written by an older hgs gains one the next time this
+hgs writes any of its records, including archives.
+
+The ID is stable across writes of this hgs version and later ones. An older
+hgs, after a rollback or in a mixed fleet, rebuilds a record on resume
+without this field; the next write here then assigns a new ID, once.
+Consumers therefore treat `session_id` as a hint and fall back to the run and
+conversation identities.
+The agent's environment carries it as `HGS_SESSION_ID`, beside `HGS_SESSION`
+(the name at launch) and `HGS_RUN_ID`, and `hgs ls --json` rows and
+inspections include it. Nothing resolves sessions by it yet, and names stay
+unique; see `docs/superpowers/specs/2026-11-04-session-names-as-labels.md`.
+
 `hgs session-action-status SESSION --json` reads one original lifecycle receipt.
 Supply the original `session-action` JSON unchanged, including its `request_id`,
 `action`, `expected_run_id`, `expected_conversation_id` and any original action
@@ -662,6 +678,11 @@ old events when it reconnects. This does not mark the underlying work as read.
 muted or acknowledging pending work. Muted sessions remain available in the
 Needs attention filter.
 
+The desktop service accepts notification clicks only for a live, unblocked
+attention request on Linux, macOS and Windows. After a read, mute or resolution
+retires that request, a later click is ignored even if the operating system has
+not yet removed the banner.
+
 Notifications open Activity for the exact requesting run and conversation,
 including remote or renamed sessions. Polling and restarts do not repeat the same
 request; resolved notifications are removed. Main-agent reply banners wait until
@@ -828,6 +849,11 @@ historical/unconfirmed process records never establish background work. The CLI'
 additive `process_work` summary uses current owned OS trees (one process-table
 sample per fleet listing) or the native DeepSeek job registry; it does not scan
 native transcripts on each fleet poll.
+
+Subagent rows and the Inspector use **Recorded** for offline, archived, paused,
+stopped or unverifiable parent sessions. Recorded children contribute no current
+work to the displayed counts; their saved states are retained. A current child's
+explicit input or approval request still takes precedence over Working.
 
 Working and compacting timers use native start evidence and update locally without extra
 host requests. An idle agent with pending jobs it scheduled for itself (Kimi
@@ -1900,6 +1926,43 @@ An open child's Activity and draft stay in place when its turn finishes. A child
 draft keeps its row visible after returning to main Activity. Finished turns are
 not proof that the agent's task or process has ended.
 
+Cross-provider children (for example, Codex launched from Claude) bind their
+original PID and native birth identity to the parent's run and conversation at
+the verified hook caller. If that original exits without a completion event,
+the child shows **Ended** or **Unknown**, never **Working**. Missing or unreadable
+process identity remains unknown. Explicit pending input/approval stays visible:
+process uncertainty suppresses Working, not attention. Neither a recycled PID nor an old journal
+start establishes current work. Recorded native jobs of such a child become
+unknown unless their own separately verified original process is still live.
+Other confirmed live jobs keep their ordinary **Background** status. Offline
+and historical rows establish no current work. Process observations do not
+invent a Stop, successful result, unread reply, or native execution permission.
+
+`hgs [@host] subagent retire SESSION --json` explicitly retires one stale child
+record without starting, stopping or messaging its agent. Inspect the current
+parent and child first, then submit an exact-generation request:
+
+```sh
+hgs subagent retire claude/example/review --json <<'JSON'
+{"request_id":"11111111-1111-4111-8111-111111111111","expected_run_id":"22222222-2222-4222-8222-222222222222","expected_conversation_id":"33333333-3333-4333-8333-333333333333","agent_id":"external:codex:44444444-4444-4444-8444-444444444444","expected_updated":1700000000.5}
+JSON
+```
+
+The command refuses a verified live original, current native-child work,
+changed run/conversation/child timestamp, or a profile group. An unbound legacy
+or unavailable identity can be retired explicitly as record housekeeping, not
+as proof of process exit or successful completion. Requests are at most 8 KiB,
+the selected manifest read is capped at 16 MiB, the writer-lock admission waits
+at most two seconds, and the parent keeps at most 64 immutable retirement
+receipts. Repeating the same UUID and payload reads its original receipt; it
+never retires a later start. A fresh verified SessionStart may resume that child.
+An intermediate hook can also recover a mistaken retirement when its native
+caller verifies the same original process, or binds a previously unbound legacy
+record. A different recorded birth still requires a fresh SessionStart.
+Process checking admits at most 64 external identities per read; excess or
+unverifiable entries remain unknown. Older peers require the
+`subagent-retire-v1` help capability and refuse this command until updated.
+
 Claude child tracking reconciles hooks with exact native history, including
 workflow children. A final assistant `end_turn`, a successful `toolEndsTurn`
 result bound to its exact owned tool call, or a final **Request interrupted by
@@ -2599,6 +2662,13 @@ requires a fresh complete inventory and refuses known programs or sessions using
 the folder, changed files or ownership, and all other protections. An incomplete
 inventory remains blocked. Automatic cleanup never uses this exception. Process
 names, PIDs and access details remain available under **Details**.
+
+A checkout with uncommitted or untracked files can also have such access
+denials. Its review then offers both consents (`discardable_with_process_consent`
+beside the discard and process fingerprints, while `discardable` stays false for
+older clients). Removal needs both: **Permanently discard** and **Remove even if
+some running programs cannot be checked**. Each consent alone is refused, and
+every other protection still wins.
 
 A refusal before deletion shows **Folder kept**. **Check again** refreshes only
 remaining folders and clears the prior local-file, discard and process choices;

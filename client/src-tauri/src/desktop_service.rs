@@ -61,6 +61,7 @@ mod read_import;
 mod reconnect;
 pub(crate) mod retained_import;
 mod status;
+pub(crate) mod termination_outcome;
 
 /// Registered at setup before start_source. Some contains a verified service
 /// watch frame; None invalidates the prior projection. Callbacks must not block.
@@ -1704,7 +1705,10 @@ async fn connection(
         .stderr(Stdio::piped())
         .kill_on_drop(true);
     crate::child_environment::restore(command.as_std_mut());
-    command.env_remove("HGS_SESSION").env_remove("HGS_RUN_ID");
+    command
+        .env_remove("HGS_SESSION")
+        .env_remove("HGS_SESSION_ID")
+        .env_remove("HGS_RUN_ID");
     let mut child = command.spawn().map_err(|_| "service_unavailable")?;
     // Keep stdin open: EOF is the proxy's explicit detach instruction.
     let stdin = child.stdin.take();

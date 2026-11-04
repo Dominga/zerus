@@ -719,9 +719,23 @@ writer commits values with the handled record, naming the original
 `workspace/organization` key and the exact Qt store hash, path, time and
 mtime-after-switch condition. A handled family stays handled across rollback;
 the Qt store is never written. Vivid never belongs in organization-layout/shared
-state. Local Windows drive/UNC folders still wait on the Windows Next Projects local
-folder model (`.66.2.31`, G3 dependent `.66.5.3.10`); no independent G3 folder
-stack is created. No G1 evidence/marker or effect authority is added.
+state.
+
+Local Windows drive/UNC folders use the existing `local_windows_folders` Layout
+family (`.66.2.31`, [#745](https://github.com/ufna/zerus/pull/745)). The bounded
+first-G3 preparer ([#763](https://github.com/ufna/zerus/pull/763)) and production
+organization-worker caller ([#870](https://github.com/ufna/zerus/pull/870)) fulfill
+`.66.5.3.10` without an independent folder stack. A current live local Windows
+watch must match the catalog; original explicit folder machine IDs must match
+that node, never an inferred alias or path owner. Existing whole-family presence,
+including empty or unsupported values, wins before Qt is read. Source,
+generation/revision, node and fresh live-project checks precede the existing
+Layout writer commit; folders and `g3_local_windows_folders` handled metadata
+share that checkpoint. Absent Qt organization stays unhandled without a repeated
+error or fabricated empty family, and a handled family never reseeds on restart
+or rollback. This local presentation import adds no G1 evidence/marker or effect
+authority and does not enable native Windows folder actions. Windows PC
+qualification and whole-G3 acceptance remain separate and pending.
 
 ## Delivery boundary
 

@@ -47,6 +47,58 @@ within the existing 64 KiB registration-record bound.
   the last known catalog visible. **Retry now** checks the connection. It does
   not repeat the activation command; an uncertain activation stays on Check.
 
+## Explicit review of an interrupted Unix activation
+
+An interrupted activation keeps its original UUID, binding and **Unknown**
+manager result. Reviewing it changes separate metadata only. It neither stops
+nor starts a service, changes a Grant/revoke, joins or releases an original
+resource charge, nor establishes that the previous manager effect succeeded.
+Status, Retry and automatic reconnect never perform this review.
+
+Use the updated maintained helper from a foreground terminal outside Zerus
+agents. Select the same CLI, configuration and state as the registration, and
+replace `UUID` with the original `activation_pending` UUID from helper status:
+
+```sh
+# Linux; adjust the installed prefix to match the selected CLI.
+python3 "$HOME/.local/lib/zerus/install-linux-desktop-service.py" \
+  review-activation --hgs "$HOME/.local/bin/hgs" --activation-id UUID --json
+
+# macOS; APP is the selected installed Zerus app.
+python3 "$APP/Contents/Resources/setup/install-macos-desktop-service.py" \
+  "$APP/Contents/MacOS/hgs" --review-activation --activation-id UUID --json
+```
+
+Pass the original `--config-dir` and `--state-dir` when they are nondefault.
+Do not select a mode in this command. The helper must acquire the same exclusive
+registration lock that the original helper held through its effects and child
+cleanup. A busy lock refuses; Review never kills that helper or its consumer.
+
+New attempts capture the admitted native consumer's PID/birth, native machine
+identity and kernel boot identity. Only a different native boot on that same
+machine proves that all the original processes are gone. This source slice
+does not expose a same-boot acknowledgement, even when the consumer has exited
+and the helper lock has released: an abruptly killed helper might have left an
+orphaned manager child or unconfirmed pipe cleanup.
+
+Legacy records have no trustworthy process or boot ordering. Their first
+explicit Review durably records a reboot barrier bound to the exact original
+UUID/binding, machine and current kernel boot. It returns `reboot_required` and
+does **not** acknowledge the attempt. **Restart the computer, then use Review
+interrupted mode change again** (or repeat the exact helper command above).
+The same reboot-barrier route applies to a new attempt from the current boot.
+Only a genuinely different kernel boot on the same machine permits the
+`reviewed_unknown` disposition. Same-boot, unavailable or inconsistent identity
+evidence refuses. File dates and wall-clock age never substitute for the barrier.
+
+The original result remains Unknown permanently, including after review and
+restart. Automatic/default activation remains suppressed. Any later mode choice
+is a separate explicit confirmation with a new request and complete fresh
+native caller, current Grant, registration/manager and endpoint preflight.
+Acknowledgement supplies no permission to replay or adopt the old operation.
+The Settings review control and Windows disposition are separate source slices;
+native installed acceptance remains outstanding.
+
 ## Qt rollback
 
 Use the existing updater/installer rollback. Before a current desktop service

@@ -1,0 +1,26 @@
+{
+  "children": {
+    "a-worker": {"state": "working"},
+    "b-input": {"state": "working", "display_state": "input"},
+    "c-approval": {"state": "approval"},
+    "d-unknown": {"state": "working", "display_state": "unknown"},
+    "e-ended": {"state": "ended"},
+    "f-paused": {"state": "paused"},
+    "g-error": {"state": "error"},
+    "h-ready": {"state": "ready"}
+  },
+  "live_captions": ["Working", "Needs input", "Needs input", "Unknown", "Ended", "Paused", "Error", "Ready"],
+  "live_details_captions": ["Working", "Needs input", "Needs approval", "Unknown", "Ended", "Paused", "Error", "Ready"],
+  "cases": [
+    {"name": "live", "raw": {"state": "running", "process_state": "live", "activity": "busy"}, "online": true, "current": true, "working": 1},
+    {"name": "offline", "raw": {"state": "running", "activity": "busy"}, "online": false, "current": false, "working": 0},
+    {"name": "archive", "raw": {"state": "archived", "activity": "idle"}, "archive_id": "archive-a", "online": true, "current": false, "working": 0},
+    {"name": "archive with last live metadata", "raw": {"state": "running", "activity": "busy"}, "archive_id": "archive-b", "online": true, "current": false, "working": 0},
+    {"name": "paused", "raw": {"state": "paused", "activity": "busy"}, "online": true, "current": false, "working": 0},
+    {"name": "stopped", "raw": {"state": "stopped", "activity": "busy"}, "online": true, "current": false, "working": 0},
+    {"name": "exited", "raw": {"state": "running", "process_state": "exited", "activity": "busy"}, "online": true, "current": false, "working": 0},
+    {"name": "unverifiable", "raw": {"state": "running", "activity": "unknown"}, "online": true, "current": false, "working": 0},
+    {"name": "ended", "raw": {"state": "running", "status": "attention", "conversation_state": "ended", "activity": "busy"}, "online": true, "current": false, "working": 0},
+    {"name": "live idle after native Stop", "raw": {"state": "running", "conversation_state": "ended", "activity": "idle"}, "online": true, "current": true, "working": 1}
+  ]
+}

@@ -325,8 +325,10 @@ finally:
 
     def check_custody_adoption(self, variable, name):
         import fcntl
-        fake = self.root / f'custody-bin-{variable}'
-        fake.mkdir(mode=0o700)
+        # hgs prepends HOME/.local/bin and the package-manager directories to
+        # PATH. A fixture only in the caller's PATH loses to Homebrew Git on
+        # macOS, so use the private user-install directory created by setUp.
+        fake = self.root / '.local/bin'
         record = self.root / f'custody-record-{variable}'
         git = fake / 'git'
         git.write_text('#!/bin/sh\n'
@@ -350,8 +352,10 @@ finally:
                                     pass_fds=(held,), capture_output=True, text=True, timeout=20)
         finally:
             os.close(held)
-        self.assertIn('closed', record.read_text().split(), result.stderr)
-        self.assertNotIn('open', record.read_text().split())
+        self.assertTrue(record.is_file(), f'Custody Git fixture did not run: {result}')
+        observed = record.read_text().split()
+        self.assertIn('closed', observed, result.stderr)
+        self.assertNotIn('open', observed)
         # The command and its programs have exited: nothing holds the lock,
         # although the program's own child is still running.
         probe = os.open(lock_path, os.O_RDWR)
@@ -408,6 +412,7 @@ finally:
 #include <stdio.h>
 int main(int argc, char **argv) {
     if (argc != 2) return 90;
+    fprintf(stderr, "MODE_CALLER_CONSUMER=%ld\n", (long)getpid());
     pid_t child = fork();
     if (child < 0) return 91;
     if (child == 0) {
@@ -444,7 +449,7 @@ try:
   env.pop('HGS_SESSION',None);env.pop('HGS_RUN_ID',None)
  child=subprocess.run([sys.argv[3],'desktop','registration','mode-check','--json'],env=env,
                       stdin=subprocess.DEVNULL,stdout=subprocess.PIPE,stderr=subprocess.PIPE,timeout=5)
- print(json.dumps(dict(code=child.returncode,out=child.stdout.decode(),error=child.stderr.decode())))
+ print(json.dumps(dict(code=child.returncode,out=child.stdout.decode(),error=child.stderr.decode(),consumer_pid=os.getpid())))
 finally:
  if tty is not None: os.close(tty)
 '''
@@ -498,9 +503,20 @@ finally:
         foreground = case(sys.executable, terminal=True)
         self.assertEqual(foreground['code'], 0, foreground)
         self.assertEqual(json.loads(foreground['out'])['source'], 'interactive_terminal')
+        foreground_consumer = json.loads(foreground['out'])['consumer']
+        self.assertEqual(foreground_consumer['pid'], foreground['consumer_pid'])
         gui = case(frontend, native=True)
         self.assertEqual(gui['code'], 0, gui)
         self.assertEqual(json.loads(gui['out'])['source'], 'installed_frontend')
+        gui_consumer = json.loads(gui['out'])['consumer']
+        self.assertEqual(gui_consumer['pid'], int(re.search(r'MODE_CALLER_CONSUMER=(\d+)', gui['error'])[1]))
+        for value in (foreground_consumer, gui_consumer):
+            self.assertGreater(len(value['birth']), 0)
+            for field in ('machine', 'boot'):
+                self.assertEqual(str(uuid.UUID(value[field])), value[field])
+                self.assertNotEqual(uuid.UUID(value[field]).int, 0)
+        self.assertEqual(foreground_consumer['machine'], gui_consumer['machine'])
+        self.assertEqual(foreground_consumer['boot'], gui_consumer['boot'])
 
     def test_approval_audit_is_selected_scoped_and_does_not_create_a_journal(self):
         self.serve()
@@ -1013,6 +1029,28 @@ finally:
         self.assertFalse((self.state / 'desktop-presence.json').exists())
         self.assertFalse((self.state / 'read-marks.json').exists())
         self.assertFalse((self.root / 'unexpected-tool').exists())
+
+    @unittest.skipUnless(os.name == 'posix', 'SQLite POSIX record locks')
+    def test_live_actor_retains_sqlite_lock_until_original_exit(self):
+        import fcntl
+        self.env['HGS_PEERS'] = ''
+        database = self.desktop / 'state.sqlite3'
+        # SQLite's shared database lock occupies this byte range even in WAL
+        # mode. A raw descriptor closed after SQLite opened would drop it and
+        # let another connection mistake itself for the last WAL user.
+        previous_epoch = None
+        for restart in range(2):
+            with self.subTest(restart=restart):
+                process, status = self.serve(background=True)
+                self.assertNotEqual(status['epoch'], previous_epoch)
+                previous_epoch = status['epoch']
+                with database.open('r+b') as file:
+                    with self.assertRaises(BlockingIOError,
+                                           msg='live actor lost its SQLite shared lock'):
+                        fcntl.lockf(file, fcntl.LOCK_EX | fcntl.LOCK_NB, 512, 0x40000000)
+                self.stop(process)
+                with database.open('r+b') as file:
+                    fcntl.lockf(file, fcntl.LOCK_EX | fcntl.LOCK_NB, 512, 0x40000000)
 
     def test_background_fleet_lifetime_revoke_and_stale_epoch(self):
         self.env['HGS_PEERS'] = ''

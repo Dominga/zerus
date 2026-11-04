@@ -1001,11 +1001,22 @@ fn assess(tree: &Value, trees: &[Value], context: &Context, total: Instant) -> V
         "status":status.entries,"nested":row["nested"],"sessions":row["sessions"],
         "ignored":row["ignored_fingerprint"],"discard":row["discard_fingerprint"]})));
     // A complete roster with only stable access-denied paths permits a narrow
-    // manual exception. All other blockers (including any readable use) win.
+    // manual exception. All other blockers (including any readable use) win,
+    // except changes the person may also discard: then removal needs both
+    // explicit consents (zerus-k2ga).
+    let discard_offered = row["discard_fingerprint"].as_str().is_some_and(|s| !s.is_empty());
+    let codes: Vec<&str> = reasons.iter().map(|r| string(r, "code")).collect();
+    let changed = codes.iter().any(|code| matches!(*code, "changes" | "untracked"));
     if context.processes.as_ref().is_ok_and(|p| !p.unreadable.is_empty())
-        && reasons.len() == 1 && reasons[0]["code"] == "processes_unavailable"
+        && codes.contains(&"processes_unavailable")
+        && codes.iter().all(|code| *code == "processes_unavailable"
+            || (discard_offered && matches!(*code, "changes" | "untracked")))
     {
         row["process_fingerprint"] = json!(process_consent(&row, &context.common, now() as u64));
+        if changed {
+            // Older clients read `discardable` alone, so it stays false here.
+            row["discardable_with_process_consent"] = json!(true);
+        }
     }
     finish(row, reasons, notes)
 }
@@ -2350,9 +2361,8 @@ fn remove(args: &[String], attempted: &mut bool, observed: &mut Option<Value>) -
         return Err("Only linked worktrees can be removed; the main checkout stays.".into());
     }
     let discard = options.get("--discard-fingerprint").copied();
-    if discard.is_some()
-        && (row["discardable"] != true || discard != row["discard_fingerprint"].as_str())
-    {
+    let discardable = row["discardable"] == true || row["discardable_with_process_consent"] == true;
+    if discard.is_some() && (!discardable || discard != row["discard_fingerprint"].as_str()) {
         return Err(
             "Discard confirmation is stale or this worktree is still protected. Review it again."
                 .into(),
@@ -2364,18 +2374,27 @@ fn remove(args: &[String], attempted: &mut bool, observed: &mut Option<Value>) -
     {
         return Err("Process confirmation is stale or this worktree is still protected. Review it again.".into());
     }
-    if row["verdict"] == "blocked" && discard.is_none() && process_consent.is_none() {
+    // Every blocking reason needs its own explicit consent: a discard for
+    // changes, the bounded acceptance for unreadable processes (zerus-k2ga).
+    if row["verdict"] == "blocked" {
         let reasons: Vec<_> = row["reasons"]
             .as_array()
             .into_iter()
             .flatten()
+            .filter(|r| match string(r, "code") {
+                "changes" | "untracked" => discard.is_none(),
+                "processes_unavailable" => process_consent.is_none(),
+                _ => true,
+            })
             .map(|r| string(r, "message").to_owned())
             .collect();
-        return Err(format!(
-            "Cannot remove {}: {}",
-            path.display(),
-            reasons.join(" ")
-        ));
+        if !reasons.is_empty() {
+            return Err(format!(
+                "Cannot remove {}: {}",
+                path.display(),
+                reasons.join(" ")
+            ));
+        }
     }
     if automatic {
         let policy = super::worktree_maintenance::policy()?;

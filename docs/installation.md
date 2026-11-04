@@ -112,6 +112,9 @@ unless the prefix also contains a `gtk/` override. That override must contain
 both GTK3 and GDK3 libraries under `gtk/lib`; a partial override is rejected.
 To retain a private WebKit build with system GTK, select a separate prefix
 containing only its `lib/` and `libexec/` directories (symlinks are supported).
+The patch set, build commands and qualification checks for the private arch
+stack are in the
+[WebKitGTK display pacing design](superpowers/specs/2026-10-28-webkitgtk-display-pacing.md#building-the-private-prefix).
 The installer saves the selection in `~/.local/share/hgs/local-webkit.json`
 (`$HGS_INSTALL_PREFIX/share/hgs/local-webkit.json` for an isolated install).
 Later preview installs retain it without the variable. The local service and

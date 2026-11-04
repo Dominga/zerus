@@ -258,6 +258,7 @@ fn command(
         .env("HGS_CONFIG_DIR", &config.dir)
         .env("HGS_STATE_DIR", &config.state)
         .env_remove("HGS_SESSION")
+        .env_remove("HGS_SESSION_ID")
         .env_remove("HGS_RUN_ID")
         .stdin(Stdio::null())
         .stdout(Stdio::null())

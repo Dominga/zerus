@@ -201,6 +201,12 @@ fn checksum(payload: &[u8]) -> [u8; 4] {
     Sha256::digest(payload)[..4].try_into().expect("four bytes")
 }
 
+/// A block as this store writes it, for fixtures of other writers.
+#[cfg(test)]
+pub(crate) fn block_for_test(payload: &[u8]) -> Vec<u8> {
+    block(payload)
+}
+
 fn block(payload: &[u8]) -> Vec<u8> {
     let mut out = Vec::with_capacity(HEADER + payload.len());
     out.extend_from_slice(&(payload.len() as u32).to_le_bytes());
@@ -209,10 +215,63 @@ fn block(payload: &[u8]) -> Vec<u8> {
     out
 }
 
-/// The managed mark: the version vector of the task's snapshot, by decimal peer.
-#[derive(Serialize, Deserialize)]
-struct Mark {
-    snapshot: BTreeMap<String, i32>,
+/// The managed mark: what this store last saved of a task cut over to the
+/// execution schema. `snapshot` is the version vector its snapshot holds, by
+/// decimal peer; `updates` is the header of the first block of the updates
+/// file that follows that snapshot, in hex. Every fold of such a task leaves
+/// that file opening with a block of no changes, so a writer that folds or
+/// rewrites the files without this mark (an older build) leaves them apart
+/// from it.
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+pub(crate) struct Mark {
+    pub(crate) snapshot: Option<BTreeMap<String, i32>>,
+    #[serde(default)]
+    pub(crate) updates: Option<String>,
+}
+
+impl Mark {
+    pub(crate) fn new(snapshot: &VersionVector, first: &[u8]) -> Self {
+        Self {
+            snapshot: Some(
+                snapshot
+                    .iter()
+                    .map(|(peer, counter)| (peer.to_string(), *counter))
+                    .collect(),
+            ),
+            updates: head(first),
+        }
+    }
+
+    /// The snapshot version it records, when it records a possible one: a
+    /// snapshot holds the task's creation, so an empty version or a peer
+    /// counted at zero or below is unreadable.
+    pub(crate) fn version(&self) -> Option<VersionVector> {
+        let snapshot = self.snapshot.as_ref().filter(|s| !s.is_empty())?;
+        snapshot
+            .iter()
+            .map(|(peer, counter)| Some((peer.parse().ok()?, (*counter > 0).then_some(*counter)?)))
+            .collect()
+    }
+}
+
+/// A block's header in hex: its length and checksum.
+fn head(bytes: &[u8]) -> Option<String> {
+    let header = bytes.get(..HEADER)?;
+    Some(header.iter().map(|b| format!("{b:02x}")).collect())
+}
+
+/// The header of the first block of an updates file; none when it has none.
+fn first_head(path: &Path) -> Result<Option<String>> {
+    let mut header = [0u8; HEADER];
+    match File::open(path) {
+        Ok(mut file) => match std::io::Read::read_exact(&mut file, &mut header) {
+            Ok(()) => Ok(head(&header)),
+            Err(error) if error.kind() == ErrorKind::UnexpectedEof => Ok(None),
+            Err(error) => Err(error.into()),
+        },
+        Err(error) if error.kind() == ErrorKind::NotFound => Ok(None),
+        Err(error) => Err(error.into()),
+    }
 }
 
 /// The intact blocks with their end offsets, and whether the whole input was
@@ -430,28 +489,34 @@ impl ProjectStore {
         self.dir.join("tasks").join(format!("{uuid}.managed"))
     }
 
-    /// Whether this store ever saved the task cut over to the execution schema.
+    /// Whether this store ever saved the task cut over to the execution
+    /// schema. Any entry at the mark's path counts, even one that cannot be
+    /// read or a dangling link: only its verified absence means unmarked.
     pub fn was_managed(&self, uuid: &str) -> bool {
-        self.managed_path(uuid).exists()
+        !matches!(
+            fs::symlink_metadata(self.managed_path(uuid)),
+            Err(error) if error.kind() == ErrorKind::NotFound
+        )
     }
 
-    /// The snapshot version the mark records; none when it cannot be read.
-    pub(crate) fn managed_snapshot(&self, uuid: &str) -> Option<VersionVector> {
-        let mark: Mark = serde_json::from_slice(&fs::read(self.managed_path(uuid)).ok()?).ok()?;
-        mark.snapshot
-            .into_iter()
-            .map(|(peer, counter)| Some((peer.parse().ok()?, counter)))
-            .collect()
+    /// The task's mark; none when it is missing or cannot be read.
+    pub(crate) fn mark(&self, uuid: &str) -> Option<Mark> {
+        serde_json::from_slice(&fs::read(self.managed_path(uuid)).ok()?).ok()
     }
 
-    pub(crate) fn mark_managed(&self, uuid: &str, snapshot: &VersionVector) -> Result<()> {
-        let mark = Mark {
-            snapshot: snapshot
-                .iter()
-                .map(|(peer, counter)| (peer.to_string(), *counter))
-                .collect(),
-        };
-        write_atomic(&self.managed_path(uuid), &serde_json::to_vec(&mark)?)
+    pub(crate) fn write_mark(&self, uuid: &str, mark: &Mark) -> Result<()> {
+        write_atomic(&self.managed_path(uuid), &serde_json::to_vec(mark)?)
+    }
+
+    /// The snapshot version the mark records, only while the updates file
+    /// still opens with the block the mark names: no other writer folded or
+    /// rewrote the files since this store last saved them.
+    pub(crate) fn fresh_snapshot(&self, uuid: &str) -> Option<VersionVector> {
+        let mark = self.mark(uuid)?;
+        let first = first_head(&self.updates_path(uuid)).ok()??;
+        (mark.updates.as_ref() == Some(&first))
+            .then(|| mark.version())
+            .flatten()
     }
 
     pub fn uuids(&self) -> Result<Vec<String>> {
@@ -521,37 +586,54 @@ impl ProjectStore {
         if !fold && task.saved.as_ref() == Some(&current) {
             return Ok(());
         }
-        // The mark precedes the snapshot it describes: after a crash between
-        // them it records a version past the snapshot, which only makes a
-        // later recovery more cautious.
         let managed = task.execution_managed();
+        // A fold of a cut-over task leaves its updates file opening with a
+        // block of no changes; any other save appends the changes.
+        let next = if fold {
+            managed
+                .then(|| task.export_since_vv(&current).map(|bytes| block(&bytes)))
+                .transpose()?
+        } else {
+            let saved = task.saved.as_ref().expect("checked above");
+            Some(block(&task.export_since_vv(saved)?))
+        };
+        // The mark precedes the files it describes: after a crash between
+        // them it names a version or a block they do not hold, which only
+        // keeps a later recovery from going ahead.
         if managed {
-            let snapshot = if fold {
-                Some(&current)
+            let first = next.as_deref().expect("a cut-over save writes a block");
+            let mark = if fold {
+                Mark::new(&current, first)
             } else {
-                task.folded.as_ref()
+                let first = match first_head(&updates)? {
+                    Some(head) => head,
+                    None => head(first).expect("a block has its header"),
+                };
+                let mut mark = Mark::new(task.folded.as_ref().expect("checked above"), &[]);
+                mark.updates = Some(first);
+                mark
             };
-            if let Some(snapshot) =
-                snapshot.filter(|v| self.managed_snapshot(task.uuid()).as_ref() != Some(*v))
-            {
-                self.mark_managed(task.uuid(), snapshot)?;
+            if self.mark(task.uuid()).as_ref() != Some(&mark) {
+                self.write_mark(task.uuid(), &mark)?;
             }
         }
         if fold {
             // The snapshot first: a crash before the removal leaves updates
             // the snapshot already contains, and importing them again is harmless.
             write_atomic(&snapshot, &task.snapshot()?)?;
-            match fs::remove_file(&updates) {
-                Ok(()) => {}
-                Err(error) if error.kind() == ErrorKind::NotFound => {}
-                Err(error) => return Err(error.into()),
+            match &next {
+                Some(first) => write_atomic(&updates, first)?,
+                None => match fs::remove_file(&updates) {
+                    Ok(()) => {}
+                    Err(error) if error.kind() == ErrorKind::NotFound => {}
+                    Err(error) => return Err(error.into()),
+                },
             }
-            task.saved_len = 0;
+            task.saved_len = next.as_ref().map_or(0, |first| first.len() as u64);
             task.needs_fold = false;
             task.folded = Some(current.clone());
         } else {
-            let saved = task.saved.clone().expect("checked above");
-            let bytes = block(&task.export_since_vv(&saved)?);
+            let bytes = next.expect("an append writes a block");
             let mut file = private_options().create(true).append(true).open(&updates)?;
             file.write_all(&bytes)?;
             file.sync_all()?;

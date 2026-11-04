@@ -3332,14 +3332,20 @@ project; a task file that fails to load is listed under `damaged` and left in
 place until another computer of the swarm sends its copy, which replaces it;
 a copy of the damaged file stays beside it as `<file>.damaged-<time>`. A task
 this computer saved with attempts or a floor gets a mark, `<uuid>.managed`,
-naming the version its snapshot holds; the mark is written before each
-snapshot. Its damaged copy is replaced only when the other copy, merged with
-every update saved here, holds that version, so no attempt fact is lost.
-Otherwise the copy is kept: it stays under `damaged`, nothing is sent for it,
-and each copy another computer or a phone sends is refused and named in that
-exchange's refusals, not kept for later. A person reviews it: moving the
-damaged files away keeps it refused while the mark remains, and removing the
-mark as well accepts the next copy sent, which may lack attempts. The swarm worker
+naming the version its snapshot holds and the first block of the updates file
+that follows it; the mark is written before the files it describes, and every
+fold of such a task opens a new updates file with a block of no changes. Its
+damaged copy is replaced only when the mark is readable and still describes
+the files (an older Zerus that folded or rewrote them leaves it stale), every
+update saved here applies, and the other copy merged with them holds that
+version, so no attempt fact is lost. A copy without a mark is replaced only
+when every update saved here applies and the result shows no attempts or
+floor. Otherwise the copy is kept: it stays under `damaged`, nothing is sent
+for it, and each copy another computer or a phone sends is refused and named
+in that exchange's refusals, not kept for later. A person reviews it: moving
+the damaged files away keeps it refused while the mark remains, and removing
+the mark as well accepts the next copy sent, which may lack attempts. Any
+entry at the mark's path counts as a mark, even one that cannot be read. The swarm worker
 replicates them with the catalog: after each catalog
 sync it compares every project's digest with the member's and exchanges only
 the changes each side lacks, in pages of at most 1 MiB, and a task changed

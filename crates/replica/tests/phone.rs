@@ -585,11 +585,13 @@ fn a_damaged_copy_the_phone_cannot_cover_is_kept_for_review() {
     // A cut append: the next save folds the attempt into the snapshot.
     let updates = task_file(b.path(), task.uuid()).with_extension("updates");
     let mut bytes = fs::read(&updates).unwrap();
+    let appended = bytes.len();
     bytes.push(0);
     fs::write(&updates, bytes).unwrap();
     let mut folded = computer.load(task.uuid()).unwrap();
     computer.save(&mut folded).unwrap();
-    assert!(!updates.exists());
+    // The fold leaves only the block of no changes that opens the file.
+    assert!(fs::read(&updates).unwrap().len() < appended);
     comment(&phone, task.uuid(), "An ordinary offline comment");
     fs::write(
         task_file(b.path(), task.uuid()),

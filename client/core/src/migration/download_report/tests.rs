@@ -162,3 +162,42 @@ fn the_held_reference_rechecks_the_exact_receipt_bytes() {
     assert_ne!(fresh.receipt_sha256, expected.receipt_sha256);
     assert_eq!(held.reference(), Err(SourceError::SourceChanged));
 }
+
+/// Windows canonicalizes a download folder to a verbatim path; the report
+/// names it as its computer does, the form the download-index decoder takes
+/// (zerus-5wmh.66.5.2.1.3.2). Other verbatim and device paths name no folder.
+#[test]
+fn a_verbatim_windows_folder_is_reported_as_its_computer_names_it() {
+    use crate::paths::{absolute, Style};
+    for (canonical, expected) in [
+        (
+            r"\\?\C:\Users\example\Downloads",
+            r"C:\Users\example\Downloads",
+        ),
+        (r"\\?\d:\dl", r"d:\dl"),
+        (
+            r"\\?\UNC\files.example\share\dl",
+            r"\\files.example\share\dl",
+        ),
+    ] {
+        let folder = computer_folder(canonical).unwrap();
+        assert_eq!(folder, expected);
+        assert!(absolute(&folder, Style::Windows), "{folder}");
+    }
+    for unsupported in [
+        r"\\?\Volume{00000000-0000-0000-0000-000000000000}\dl",
+        r"\\?\GLOBALROOT\Device\dl",
+        r"\\.\pipe\dl",
+        r"\\?\C:",
+    ] {
+        assert_eq!(computer_folder(unsupported), None, "{unsupported}");
+    }
+    // Paths already in a computer's form are unchanged.
+    for plain in [
+        "/home/example/Downloads",
+        r"C:\Users\example\Downloads",
+        r"\\files.example\share\dl",
+    ] {
+        assert_eq!(computer_folder(plain).as_deref(), Some(plain));
+    }
+}

@@ -58,6 +58,16 @@ elif args[:7] == ['desktop', 'registration', 'install', '--mode', 'background', 
         print(json.dumps(dict(abi='desktop-registration-mode-v1', schema=1, configuration=config,
                               request_id=request, ok=True, changed=True)))
         sys.exit(0)
+    if state.get('install') == 'refused':
+        # Model the native durable pre-manager refusal: the original ID is
+        # readable, but no background transition settled and no mode changed.
+        receipt = dict(request=request, desired='background', phase='refused')
+        state['receipts'][request] = receipt
+        state['status']['first_choice'] = receipt
+        save()
+        print(json.dumps(dict(abi='desktop-registration-mode-v1', schema=1, configuration=config,
+                              request_id=request, ok=False, changed=False)))
+        sys.exit(0)
     if state.get('install') == 'lost':
         pending = dict(request_id=request, desired='background', phase='stop_offered', original=None, started=None)
         state['status'].update(pending_transition=pending, pending_restart=True)

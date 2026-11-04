@@ -765,7 +765,7 @@ impl Service {
         match preflight_for(
             &self.shared,
             Arc::new(AtomicBool::new(false)),
-            PreflightMode::ConfirmedMode,
+            PreflightMode::FirstChoice(&prepared),
         )
         .await
         {
@@ -832,7 +832,7 @@ impl Service {
                 match preflight_for(
                     &self.shared,
                     Arc::new(AtomicBool::new(false)),
-                    PreflightMode::ConfirmedMode,
+                    PreflightMode::ReviewedChoice(&prepared),
                 )
                 .await
                 {
@@ -1726,15 +1726,26 @@ async fn request(
     serde_json::from_slice(&bytes).map_err(|_| "invalid_service_response")
 }
 
-#[derive(Clone, Copy)]
-enum PreflightMode {
+enum PreflightMode<'a> {
     Connection,
-    // Only the two explicit mode call sites, while their SAME Prepared holds
-    // the Fleet charge. They validate it again after this slow read; a skipped
-    // observation supplies no admission and cannot decide a connection freeze.
-    ConfirmedMode,
+    // Only a borrow of the SAME opaque native confirmation can select plain
+    // observation. Its original charge remains held through the preflight;
+    // callers still revalidate before/after and keep native effect admission.
+    FirstChoice(&'a mode_transition::FirstPrepared),
+    ReviewedChoice(&'a mode_transition::Prepared),
 }
-impl PreflightMode {
+impl PreflightMode<'_> {
+    fn check_configuration(&self, configuration: &str) -> Result<(), &'static str> {
+        let expected = match self {
+            Self::Connection => return Ok(()),
+            Self::FirstChoice(prepared) => prepared.configuration(),
+            Self::ReviewedChoice(prepared) => prepared.configuration(),
+        };
+        if expected != configuration {
+            return Err("activation_scope_changed");
+        }
+        Ok(())
+    }
     async fn observe(self, shared: &Arc<Shared>, configuration: &str) {
         match self {
             Self::Connection => {
@@ -1743,7 +1754,7 @@ impl PreflightMode {
                     .observe_preflight(shared.hgs.clone(), configuration.into())
                     .await
             }
-            Self::ConfirmedMode => {
+            Self::FirstChoice(_) | Self::ReviewedChoice(_) => {
                 shared
                     .mode_transition
                     .observe(shared.hgs.clone(), configuration.into())
@@ -1758,11 +1769,11 @@ async fn preflight(shared: &Arc<Shared>, stop: Arc<AtomicBool>) -> Result<String
 async fn preflight_for(
     shared: &Arc<Shared>,
     stop: Arc<AtomicBool>,
-    mode: PreflightMode,
+    mode: PreflightMode<'_>,
 ) -> Result<String, &'static str> {
     let _classification = match mode {
         PreflightMode::Connection => Some(shared.mode_transition.preflight_scope()),
-        PreflightMode::ConfirmedMode => None,
+        PreflightMode::FirstChoice(_) | PreflightMode::ReviewedChoice(_) => None,
     };
     let original = shared.original_read_scope()?;
     let help = command(shared, vec!["--help".into()], None, stop.clone()).await?;
@@ -1825,6 +1836,7 @@ async fn preflight_for(
             if original.is_some_and(|scope| scope.configuration != configuration) {
                 return Err("original_service_changed");
             }
+            mode.check_configuration(configuration)?;
             mode.observe(shared, configuration).await;
         }
         return Err("service_unavailable");
@@ -1844,6 +1856,7 @@ async fn preflight_for(
     }) {
         return Err("original_service_changed");
     }
+    mode.check_configuration(configuration)?;
     *shared
         .configuration
         .lock()

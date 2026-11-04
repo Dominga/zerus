@@ -216,7 +216,8 @@ QString implementerOf(const Task &task, const StageRun &run)
 int scaleRoom(const Team &team)
 {
     if (team.maxMembers <= 0) return 10;
-    const auto seats = std::count_if(team.members.cbegin(), team.members.cend(), [](const Member &m) { return m.state != QLatin1String("removed"); });
+    // Owner feedback 2026-11-04 (4): the cap counts the members besides the lead.
+    const auto seats = std::count_if(team.members.cbegin(), team.members.cend(), [&team](const Member &m) { return m.state != QLatin1String("removed") && m.id != team.lead; });
     return team.maxMembers - int(seats);
 }
 

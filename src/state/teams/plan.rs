@@ -937,13 +937,13 @@ pub(crate) fn validate(team: &Team, offline: &BTreeSet<String>) -> Validation {
             ));
         }
     }
-    let count = team.members.iter().filter(|member| member.state != MemberState::Removed).count();
+    let count = team.capped_members();
     if count > team.settings.max_members {
         found.warnings.push(finding(
             "members",
             None,
             None,
-            format!("{count} members — over the team limit of {}", team.settings.max_members),
+            format!("{count} members besides the lead — over the team limit of {} (the lead is not counted)", team.settings.max_members),
         ));
     }
     // B3/B6 preflight: a member's folder against the folder policy and the
@@ -1361,7 +1361,8 @@ mod tests {
         let mut t = team(vec![task(1, &[(9, Hard)], Pending), task(2, &[(3, Hard)], Pending), task(3, &[(2, Hard)], Pending)]);
         t.tasks[0].assignee = "nobody".into();
         t.members[1].computer = "msi-old".into();
-        t.settings.max_members = 1;
+        // The lead is not counted: one member besides it is over a cap of 0.
+        t.settings.max_members = 0;
         let found = validate(&t, &BTreeSet::from(["msi-old".to_owned()]));
         let kinds: Vec<&str> = found.errors.iter().map(|f| f.kind).collect();
         assert_eq!(kinds, vec!["assignee", "dependency", "cycle"]);

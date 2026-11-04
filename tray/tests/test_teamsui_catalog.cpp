@@ -1085,10 +1085,10 @@ void TestTeamsUiCatalog::catalogTemplateEditorRosterSkeletonAndChecks()
     // Work in: Same folder with writers warns.
     segment("teamTemplateWork", "same");
     QTRY_VERIFY(editor.findChild<QLabel *>("teamTemplateWorkWarning"));
-    // Max members 3: Lead + roster is 4.
-    for (int i = 0; i < 3; ++i) { QTRY_VERIFY(editor.findChild<QWidget *>("teamTemplateMax")); editor.findChild<QWidget *>("teamTemplateMax")->findChild<QPushButton *>("teamStepperMinus")->click(); }
-    QTRY_COMPARE(value(editor.findChild<QWidget *>("teamTemplateMax")), 3);
-    QTRY_VERIFY(issues().contains("Lead + roster = 4 > max members 3"));
+    // Max members 2: the roster is 3 (the lead is not counted).
+    for (int i = 0; i < 4; ++i) { QTRY_VERIFY(editor.findChild<QWidget *>("teamTemplateMax")); editor.findChild<QWidget *>("teamTemplateMax")->findChild<QPushButton *>("teamStepperMinus")->click(); }
+    QTRY_COMPARE(value(editor.findChild<QWidget *>("teamTemplateMax")), 2);
+    QTRY_VERIFY(issues().contains("Roster = 3 > max members 2 (the lead is not counted)"));
     // Task skeleton: a phase, an "after" that points forward, + Task.
     auto *phase = editor.findChildren<QComboBox *>("teamTemplateTaskPhase").at(2);
     phase->setCurrentIndex(phase->findData("2")); emit phase->activated(phase->currentIndex());

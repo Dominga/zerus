@@ -298,7 +298,7 @@ fn resolve_actor(
     // A process outside every session acts as the owner; a session env that
     // does not own the calling process could name another one (H7).
     ensure!(env.is_none(), "Zerus could not verify the calling session");
-    ensure!(text(input, "by") == "human", "Run this from the lead's session, or add \"by\":\"human\" to act as yourself");
+    ensure!(says_owner(input), "{}", BY_REFUSAL);
     Ok(Actor::Human)
 }
 
@@ -1340,9 +1340,19 @@ pub(crate) fn authorize_external_rules(input: &Value) -> anyhow::Result<()> {
 /// session carries DSH_SESSION_ID, HGS_SESSION or HGS_RUN_ID and is refused.
 fn owner_caller(input: &Value, record: bool, dsh: bool, env: bool, run: bool) -> anyhow::Result<()> {
     ensure!(!record && !dsh && !env && !run, "An agent session cannot act as the owner");
-    ensure!(text(input, "by") == "human", "Add \"by\":\"human\" to act as yourself");
+    ensure!(says_owner(input), "{}", BY_REFUSAL);
     Ok(())
 }
+
+/// Owner feedback 2026-11-04 (17): a process outside every agent session (the
+/// owner's own shell or script) acts as the owner without saying so; the
+/// session and ancestry checks before this decide that. `"by":"human"` stays
+/// accepted, and any other value is refused.
+fn says_owner(input: &Value) -> bool {
+    matches!(input.get("by").map(|by| by.as_str()), None | Some(Some("" | "human")))
+}
+
+const BY_REFUSAL: &str = "\"by\" is \"human\" or left out: a command run from outside every agent session acts as you, and an agent acts as itself";
 
 /// C2: an operation before any team exists is yours: from a process outside
 /// every session, saying so.
@@ -1356,11 +1366,17 @@ fn owner_without_team(input: &Value, record: bool, dsh: bool, env: bool, run: bo
 /// returned flag is what `catalog::run` takes: false leaves every owner path
 /// refused, true lets that operation check its own contract.
 fn catalog_owner(input: &Value) -> anyhow::Result<bool> {
+    let (dsh, session, run) = caller_identities();
+    let record = caller_record().is_some();
+    // Owner feedback 2026-11-04 (17): without "by" the owner's own shell is
+    // the owner and an agent session reads the catalog as itself.
+    if text(input, "by").is_empty() {
+        return Ok(!record && dsh.is_none() && session.is_none() && run.is_none());
+    }
     if text(input, "by") != "human" {
         return Ok(false);
     }
-    let (dsh, session, run) = caller_identities();
-    owner_caller(input, caller_record().is_some(), dsh.is_some(), session.is_some(), run.is_some())?;
+    owner_caller(input, record, dsh.is_some(), session.is_some(), run.is_some())?;
     Ok(true)
 }
 

@@ -969,9 +969,13 @@ fn the_create_and_catalog_owner_paths_refuse_an_agent_session() {
             let error = format!("{:#}", run("create", &input, false).unwrap_err());
             assert!(error.contains("An agent session cannot act as the owner"), "{error}");
         }
-        // Without "by":"human" the catalog command is not the owner's at all.
-        set_test_caller_identities(Some((None, None, None)));
+        // Without "by" an agent session reads the catalog as itself, and the
+        // owner's own shell (outside every session) is the owner (feedback 17).
+        set_test_caller_identities(Some((None, Some("hgs/x/dev".to_owned()), None)));
         assert!(!super::catalog_owner(&json!({})).unwrap());
+        set_test_caller_identities(Some((None, None, None)));
+        assert!(super::catalog_owner(&json!({})).unwrap());
+        assert!(!super::catalog_owner(&json!({"by":"lead"})).unwrap());
         // Outside every session you create the team and reach the owner path.
         assert!(super::catalog_owner(&json!({"by":"human"})).unwrap());
         let created = run("create", &input, false).unwrap();
@@ -1565,7 +1569,10 @@ fn only_the_owner_outside_every_session_starts_a_draft() {
     for (record, dsh, env, run) in [(true, false, false, false), (false, true, false, false), (false, false, true, false), (false, false, false, true)] {
         assert!(owner_without_team(&owner, record, dsh, env, run).is_err(), "{record} {dsh} {env} {run}");
     }
-    assert!(owner_without_team(&json!({}), false, false, false, false).is_err());
+    // Feedback 17: the owner's own shell needs no "by"; another value is refused.
+    owner_without_team(&json!({}), false, false, false, false).unwrap();
+    assert!(owner_without_team(&json!({}), false, false, true, false).is_err());
+    assert!(owner_without_team(&json!({"by":"lead"}), false, false, false, false).is_err());
 }
 
 #[test]

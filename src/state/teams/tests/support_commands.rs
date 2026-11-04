@@ -125,7 +125,8 @@ pub(crate) fn full_team() -> Team {
         name: "T".into(),
         lead: "lead".into(),
         status: TeamStatus::Running,
-        settings: Settings { max_members: 6, folder_policy: FolderPolicy::Shared, ..Default::default() },
+        // Full: five members besides the lead (the lead is not counted).
+        settings: Settings { max_members: 5, folder_policy: FolderPolicy::Shared, ..Default::default() },
         ..Default::default()
     };
     team.members.push(Member {

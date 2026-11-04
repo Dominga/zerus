@@ -2305,6 +2305,11 @@ impl Team {
             self.used_owner_words.drain(..excess);
         }
     }
+    /// Owner feedback 2026-11-04 (4): `max_members` counts the members
+    /// besides the lead, so "six members" means six beside their lead.
+    pub(crate) fn capped_members(&self) -> usize {
+        self.members.iter().filter(|member| member.state != MemberState::Removed && member.id != self.lead).count()
+    }
     pub(crate) fn member(&self, id: &str) -> Option<&Member> {
         self.members.iter().find(|member| member.id == id)
     }

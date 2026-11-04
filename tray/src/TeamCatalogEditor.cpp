@@ -1806,9 +1806,10 @@ QWidget *TeamCatalogEditor::templateEditor(int index)
     maxRow->addStretch();
     addText(tr("Max members"), box(maxRow));
     // Checks (spec 11.4).
-    int seated = 1;
+    // The cap counts the roster; the lead is not one of its members.
+    int seated = 0;
     for (const auto &seat : t.roster) seated += seat.count;
-    if (seated > t.maxMembers) issues.prepend(tr("Lead + roster = %1 > max members %2").arg(seated).arg(t.maxMembers));
+    if (seated > t.maxMembers) issues.prepend(tr("Roster = %1 > max members %2 (the lead is not counted)").arg(seated).arg(t.maxMembers));
     for (int i = 0; i < t.tasks.size(); ++i) {
         const auto &task = t.tasks[i];
         if (task.role == "lead") continue;

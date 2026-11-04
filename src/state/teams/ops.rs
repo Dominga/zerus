@@ -5262,7 +5262,7 @@ pub(crate) fn apply(team: &mut Team, op: &str, input: &Value, actor: &Actor, off
             // forbids worktrees.
             fill_folder(team, &mut member, input["member"].get("folder").is_none());
             ensure!(team.members.iter().all(|m| m.id != member.id), "Member id {} is used", member.id);
-            let active = team.members.iter().filter(|m| m.state != MemberState::Removed).count();
+            let active = team.capped_members();
             let id = member.id.clone();
             let role = member.role.clone();
             // U32/N7: the lead adds on the owner's verified word even at a full
@@ -5274,7 +5274,7 @@ pub(crate) fn apply(team: &mut Team, op: &str, input: &Value, actor: &Actor, off
                 && input["owner_word_event"].is_i64();
             let quote = input["owner_word_checked"]["text"].as_str().unwrap_or_default();
             if active >= team.settings.max_members {
-                ensure!(on_word, "The team already has its {} members", team.settings.max_members);
+                ensure!(on_word, "The team already has its {} members besides the lead; raise max_members first", team.settings.max_members);
                 let old = team.settings.max_members;
                 let new = old.saturating_add(1);
                 let budget = input["tree_sessions"].as_u64().map(|budget| budget as usize).unwrap_or(team.settings.tree_sessions as usize);
@@ -5336,10 +5336,10 @@ pub(crate) fn apply(team: &mut Team, op: &str, input: &Value, actor: &Actor, off
             let count = input["count"].as_u64().context("scale names how many members to add")?;
             ensure!((1..=32).contains(&count), "scale adds 1 to 32 members");
             let count = count as usize;
-            let active = team.members.iter().filter(|member| member.state != MemberState::Removed).count();
+            let active = team.capped_members();
             ensure!(
                 active + count <= team.settings.max_members,
-                "The team has {active} of {} members; adding {count} does not fit",
+                "The team has {active} of {} members besides the lead; adding {count} does not fit",
                 team.settings.max_members
             );
             let on_word = input["roster_word"].as_bool() == Some(true) && matches!(actor, Actor::Member(lead) if *lead == team.lead);

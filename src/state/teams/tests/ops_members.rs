@@ -178,10 +178,12 @@ fn scale_adds_a_roles_members_at_once_within_the_roster() {
     assert_eq!((added.state, added.draining), (MemberState::NotCreated, false));
     assert_eq!(team.member("backend2").unwrap().role, "Backend");
     assert_eq!(events.iter().filter(|event| event.kind == "member_added").count(), 2);
-    // The roster's cap counts them: two more do not fit and add nothing.
-    let error = apply(&mut team, "scale", &json!({"role":"Backend","agent":"codex","count":2}), &Actor::Human, &none, &mut events);
+    // The roster's cap counts them (not the lead): one more than the room
+    // left does not fit and adds nothing.
+    let room = team.settings.max_members - team.capped_members();
+    let error = apply(&mut team, "scale", &json!({"role":"Backend","agent":"codex","count":room + 1}), &Actor::Human, &none, &mut events);
     let error = error.unwrap_err().to_string();
-    assert!(error.contains("of 6 members"), "{error}");
+    assert!(error.contains("of 6 members besides the lead"), "{error}");
     assert!(team.member("backend3").is_none(), "a scale that does not fit adds nothing");
     // A role, an agent and a count are required; only the lead or you scale.
     for input in [

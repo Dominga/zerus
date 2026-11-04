@@ -855,10 +855,11 @@ void TeamNewTab::validate()
     QString slug = name.toLower(); slug.replace(QRegularExpression(QStringLiteral("[^a-z0-9]+")), QStringLiteral("-")); slug.remove(QRegularExpression(QStringLiteral("^-+|-+$")));
     m_branch->setText(git ? tr("· branch team/%1/<role>").arg(slug.isEmpty() ? QStringLiteral("…") : slug) : QString());
     int bad = 0; for (const auto &m : m_members) bad += !rowErrors(m).isEmpty();
-    m_membersCount->setText(QStringLiteral("<b>%1</b> &nbsp;<span style='color:%2;'>%3 / %4</span>").arg(tr("Members"), c.dim.name()).arg(m_members.size() + 1).arg(m_max->value()));
+    m_membersCount->setText(QStringLiteral("<b>%1</b> &nbsp;<span style='color:%2;'>%3 / %4</span>").arg(tr("Members"), c.dim.name()).arg(m_members.size()).arg(m_max->value()));
     m_membersCount->setStyleSheet(QStringLiteral("color:%1;font-size:13px;").arg(c.fg.name()));
     m_membersCount->setToolTip(tr("The lead counts as one member"));
-    m_addMember->setEnabled(m_members.size() + 1 < m_max->value() && !m_creating);
+    // The limit counts the members besides the lead.
+    m_addMember->setEnabled(m_members.size() < m_max->value() && !m_creating);
     const bool drafting = !m_draft.isEmpty();
     const bool folderOk = !folder.isEmpty() && probed.dir;
     // Start planning: a folder and a lead.
@@ -876,7 +877,7 @@ void TeamNewTab::validate()
     else if (name.isEmpty()) reason = tr("Name the team");
     else if (!folderOk) reason = tr("Choose an existing folder");
     else if (bad) reason = bad == 1 ? tr("Fix 1 member row") : tr("Fix %1 member rows").arg(bad);
-    else if (m_members.size() + 1 > m_max->value()) reason = tr("More members than the limit");
+    else if (m_members.size() > m_max->value()) reason = tr("More members than the limit (the lead is not counted)");
     else if (!m_preflightErrors.isEmpty()) reason = m_preflightErrors.size() == 1 ? tr("Fix 1 preflight error") : tr("Fix %1 preflight errors").arg(m_preflightErrors.size());
     // Owner, 2026-10-29: saving never blocks Create team (it saves first); a
     // blocker shows red in its own field.

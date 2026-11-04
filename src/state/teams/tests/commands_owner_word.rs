@@ -443,13 +443,13 @@ fn the_owners_word_adds_a_member_by_role_and_raises_a_full_cap() {
         assert_eq!(value["status"], "added");
         assert_eq!(value["by"], "Lead on your word");
         let saved = Store::open(false).unwrap().load(&id).unwrap().unwrap();
-        assert_eq!(saved.settings.max_members, 7);
+        assert_eq!(saved.settings.max_members, 6);
         let added = saved.member("backend4").unwrap().added.clone().unwrap();
         assert_eq!(added["by"], "Lead on your word");
         assert_eq!(added["owner_word"], sentence);
         // Status shows how the member joined.
         let status = run("status", &json!({"team":id}), false).unwrap();
-        assert_eq!(status["settings"]["max_members"], 7);
+        assert_eq!(status["settings"]["max_members"], 6);
         let member = status["members"].as_array().unwrap().iter().find(|member| member["id"] == "backend4").cloned().unwrap();
         assert_eq!(member["added"]["by"], "Lead on your word");
         assert_eq!(member["added"]["owner_word"], sentence);
@@ -457,7 +457,7 @@ fn the_owners_word_adds_a_member_by_role_and_raises_a_full_cap() {
         let events = run("events", &json!({"team":id}), false).unwrap();
         let items = events["items"].as_array().unwrap();
         let raised = items.iter().find(|item| item["kind"] == "max_members_raised").unwrap();
-        assert_eq!((raised["detail"]["old"].as_u64(), raised["detail"]["new"].as_u64()), (Some(6), Some(7)));
+        assert_eq!((raised["detail"]["old"].as_u64(), raised["detail"]["new"].as_u64()), (Some(5), Some(6)));
         let joined = items.iter().find(|item| item["kind"] == "member_added").unwrap();
         assert_eq!(
             (joined["detail"]["by"].as_str(), joined["detail"]["owner_word"].as_str()),

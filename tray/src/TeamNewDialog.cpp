@@ -537,7 +537,8 @@ void TeamNewDialog::validate()
     else if (probed.unresponsive) problems << tr("The folder does not answer: its disk may be busy");
     else if (!probed.dir) problems << tr("Choose an existing folder");
     if (bad) problems << tr("Fix %n member row(s) to create the team", nullptr, bad);
-    if (m_rowList.size() + 1 > m_maxMembers->value()) problems << tr("More members than the limit");
+    // The limit counts the members besides the lead.
+    if (m_rowList.size() > m_maxMembers->value()) problems << tr("More members than the limit (the lead is not counted)");
     m_summary->setText(problems.isEmpty() ? tr("Create starts the lead; it plans, and you approve before members start.") : QStringLiteral("⚠ ") + problems.join(QStringLiteral(" · ")));
     m_summary->setStyleSheet(QStringLiteral("color:%1;").arg((problems.isEmpty() ? c.muted : c.warn).name()));
     m_create->setEnabled(problems.isEmpty());

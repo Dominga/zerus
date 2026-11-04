@@ -162,6 +162,12 @@ impl Original {
     pub fn current(&self) -> bool {
         self.check_current().is_ok()
     }
+    /// The retained process object, for proofs that must use this exact
+    /// process, such as `PinnedImage::for_process` on its loaded image.
+    pub fn handle(&self) -> std::os::windows::io::BorrowedHandle<'_> {
+        use std::os::windows::io::AsHandle;
+        self.process.as_handle()
+    }
     /// Physical exit of this retained process handle. A failed currentness
     /// check (including unreadable metadata) does not establish process exit.
     pub fn exited(&self) -> bool {

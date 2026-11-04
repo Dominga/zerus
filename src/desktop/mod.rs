@@ -30,6 +30,7 @@ mod operations;
 mod owner;
 mod ownership;
 mod pending_reads;
+pub(crate) mod portable_frontend;
 mod presence_admission;
 mod presence_worker;
 #[allow(dead_code)]

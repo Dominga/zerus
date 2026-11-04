@@ -73,7 +73,7 @@ const REFRESHED: [&str; 3] = [
     "claude_terminal_choice",
 ];
 /// The fields consent was given for (`consentIdentity`).
-const CONSENT_FIELDS: [&str; 16] = [
+pub const CONSENT_FIELDS: [&str; 16] = [
     "question_id",
     "question_hash",
     "run_id",

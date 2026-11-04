@@ -249,6 +249,52 @@ refuses it too (`deferred_send_unsupported`), and only Linux advertises the
 help marker. An unauthenticated hello naming it gets
 `frontend_authentication_required`, like its siblings.
 
+The second kind, `deferred_answer` (`desktop::deferred_answer`, ABI
+`desktop-deferred-answer-v1`), defines its closed wire for one `hgs answer
+<session> --json` to a question card:
+- **Intent.** The local session, the reserved request ID, the checkpoint's
+  exact JSON, the question's consent identity as the person saw it at the
+  click (`pinned`, exactly the closed `CONSENT_FIELDS` projection) and the
+  exact stdin.
+- **Verification.** Strict typed decoding of the checkpoint and the stdin,
+  as the CLI decodes it. The checkpoint must be a valid `answer` checkpoint
+  of this request whose identity hash is that of `pinned`; `pinned`, the
+  checkpoint and the stdin name the same question, question hash, run and
+  conversation. The stdin's answers are exactly the client's answer items,
+  and the checkpoint's message digest is theirs. An empty conversation is
+  accepted only for the CLI's own startup question identities. v1 refuses
+  any `@` or other-machine session and any session but a terminal agent's,
+  and offers only the sources whose `rejected` receipt proves that nothing
+  was delivered: Claude permission mode, resume, usage limit and folder
+  trust, Codex hooks trust, update, rate limit and folder trust, and Kimi
+  folder trust, cache hint, plan review, tool approval and wire questions.
+  Codex asynchronous questions and goal resume, Claude hook questions and
+  Claude tool approvals stay on the direct path
+  (`deferred_answer_source_refused`), as do OpenCode and DeepSeek
+  (`deferred_answer_agent_refused`), decided before any offer.
+- **Plan and binding.** The fixed `answer <session> --json` call. The plan's
+  input digest is the SHA-256 of the raw stdin, which is the digest the
+  CLI's receipt records. Before its child the actor compares `pinned` again
+  with the native current question read from the original store
+  (`consent_current`); that fresh observation, never `pinned` alone, decides
+  source and transport.
+- **Receipt.** Recorded only from the CLI's own exact
+  `question_receipts/<request_id>.json` record of this session, run,
+  conversation, question, question hash and stdin digest with status
+  `answered` or `submitted` (Codex's asynchronous submission, not the
+  provider's completion). Its `open_terminal` flag is only data for an
+  explicit Open Terminal action. Failed only at the no-spawn boundary
+  (`deferred_answer_not_started`) or from the exact `rejected` record
+  (`deferred_answer_rejected`). Everything else after a possibly started
+  child is Unknown and never resent.
+- **Lookup.** A scoped read-only lookup by session, request ID and plan
+  fingerprint.
+
+No actor executes it yet: the native frontend lane carries the request on
+its own ordered lane, and the service refuses it
+(`deferred_answer_unsupported`) until the actor lands; an unauthenticated
+hello naming it gets `frontend_authentication_required`, like its siblings.
+Its help marker is not advertised before then.
 A draft holds one such identity until it is resolved. A definite outcome
 resolves it, as does a cancellation before its call was dispatched or, for a
 start or compaction, the session seen ready for the send. An uncertain outcome

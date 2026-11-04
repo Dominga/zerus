@@ -40,6 +40,9 @@ pub enum Request {
     DeferredSend {
         intent: Box<super::deferred_send::Intent>,
     },
+    DeferredAnswer {
+        intent: Box<super::deferred_answer::Intent>,
+    },
     TaskStartReconcile {
         intent: Box<super::task_start_reconcile::Intent>,
     },
@@ -106,6 +109,7 @@ impl Request {
             Self::TaskMessage { intent } => &intent.request_id,
             Self::TaskMessageInputRelease { release } => &release.release_id,
             Self::DeferredSend { intent } => &intent.request_id,
+            Self::DeferredAnswer { intent } => &intent.request_id,
             Self::TaskStartReconcile { intent } => &intent.reconcile_id,
             Self::TerminationOutcome { intent } => &intent.request_id,
             Self::NotificationControl { control, .. } => control.request_id(),
@@ -126,6 +130,7 @@ impl Request {
             Self::TaskMessage { .. } => "task_message",
             Self::TaskMessageInputRelease { .. } => "task_message_input_release",
             Self::DeferredSend { .. } => "deferred_send",
+            Self::DeferredAnswer { .. } => "deferred_answer",
             Self::TaskStartReconcile { .. } => "task_start_reconcile",
             Self::TerminationOutcome { .. } => "termination_outcome",
             Self::NotificationControl { control, .. } => control.operation(),
@@ -146,6 +151,7 @@ impl Request {
             Self::TaskMessage { intent } => intent.as_ref().clone().verify().is_ok(),
             Self::TaskMessageInputRelease { release } => release.valid(),
             Self::DeferredSend { intent } => intent.as_ref().clone().verify().is_ok(),
+            Self::DeferredAnswer { intent } => intent.as_ref().clone().verify().is_ok(),
             Self::TaskStartReconcile { intent } => intent.as_ref().clone().verify().is_ok(),
             Self::TerminationOutcome { intent } => intent.valid(),
             Self::NotificationControl { scope, control } => scope.valid() && control.valid(),
@@ -312,6 +318,7 @@ impl Cache {
                 | Request::TaskMessage { .. }
                 | Request::TaskMessageInputRelease { .. }
                 | Request::DeferredSend { .. }
+                | Request::DeferredAnswer { .. }
                 | Request::TaskStartReconcile { .. }
                 | Request::TerminationOutcome { .. }
         ) {
@@ -497,6 +504,14 @@ impl Responder {
                 Some(super::ownership::Mode::Service)
             }
             Request::DeferredSend { intent } => {
+                if self.ownership_mode.get() != Some(&super::ownership::Mode::Service)
+                    || self.configuration.get() != Some(&intent.scope.configuration)
+                {
+                    return Err(io::ErrorKind::PermissionDenied.into());
+                }
+                Some(super::ownership::Mode::Service)
+            }
+            Request::DeferredAnswer { intent } => {
                 if self.ownership_mode.get() != Some(&super::ownership::Mode::Service)
                     || self.configuration.get() != Some(&intent.scope.configuration)
                 {
@@ -1201,6 +1216,90 @@ mod tests {
         // An intent that does not verify never prepares.
         let invalid = Request::DeferredSend {
             intent: Box::new(crate::desktop::deferred_send::Intent {
+                original: "{}".into(),
+                ..intent.clone()
+            }),
+        };
+        // The responder admits only its own cached Service mode and exactly
+        // the configuration the intent was scoped to.
+        for (configuration, mode, request, accepted) in [
+            (intent.scope.configuration.clone(), None, &request, false),
+            (
+                intent.scope.configuration.clone(),
+                Some(Mode::Native),
+                &request,
+                false,
+            ),
+            ("f".repeat(64), Some(Mode::Service), &request, false),
+            (
+                intent.scope.configuration.clone(),
+                Some(Mode::Service),
+                &invalid,
+                false,
+            ),
+            (
+                intent.scope.configuration.clone(),
+                Some(Mode::Service),
+                &request,
+                true,
+            ),
+        ] {
+            let responder = Responder::new(
+                "com.hgdev.hgs-tray".into(),
+                Build {
+                    version: "1.2.3".into(),
+                    source_commit: "a".repeat(40),
+                    source_dirty: Some(false),
+                },
+                id(80),
+                true,
+                false,
+            );
+            assert!(responder.configure_once(configuration));
+            if let Some(mode) = mode {
+                assert!(responder.configure_ownership_mode_once(mode));
+            }
+            let prepared = responder.prepare_ui_request(id(1), request.clone());
+            assert_eq!(prepared.is_ok(), accepted);
+            if let Ok(slot) = prepared {
+                *slot.0.child.lock().unwrap() = Some((27, "synthetic-birth".into()));
+                let evidence = responder.ui_requests.evidence(&id(1)).unwrap();
+                assert_eq!(evidence.ownership_mode, Some(Mode::Service));
+                assert_eq!(evidence.request_id, intent.request_id);
+                assert_eq!(evidence.fingerprint, request.fingerprint());
+            }
+        }
+    }
+
+    #[test]
+    fn deferred_answer_responder_requires_cached_service_mode_and_the_same_configuration() {
+        const CASE: &str = "desktop::ui_requests::tests::deferred_answer_responder_requires_cached_service_mode_and_the_same_configuration";
+        if std::env::var_os("ZERUS_DEFERRED_ANSWER_RESPONDER_TEST_CHILD").is_none() {
+            let output = std::process::Command::new(std::env::current_exe().unwrap())
+                .args(["--exact", CASE, "--test-threads=1", "--nocapture"])
+                .env_remove("HGS_SESSION")
+                .env_remove("HGS_RUN_ID")
+                .env("ZERUS_DEFERRED_ANSWER_RESPONDER_TEST_CHILD", "1")
+                .output()
+                .unwrap();
+            assert!(
+                output.status.success(),
+                "{}",
+                String::from_utf8_lossy(&output.stderr)
+            );
+            assert!(String::from_utf8_lossy(&output.stdout).contains("1 passed; 0 failed"));
+            return;
+        }
+        use crate::desktop::{ownership::Mode, Build};
+        let intent = crate::desktop::deferred_answer::tests::intent();
+        let request = Request::DeferredAnswer {
+            intent: Box::new(intent.clone()),
+        };
+        assert_eq!(request.operation(), "deferred_answer");
+        assert_eq!(request.id(), intent.request_id);
+        // An intent that does not verify never prepares.
+        let invalid = Request::DeferredAnswer {
+            intent: Box::new(crate::desktop::deferred_answer::Intent {
                 original: "{}".into(),
                 ..intent.clone()
             }),

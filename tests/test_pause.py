@@ -1018,6 +1018,61 @@ class SessionIdentity(Harness):
     """zerus-ucck P1: the durable session ID. A class of its own keeps the
     pinned Lifecycle bodies unchanged (test_pause_signal_trace_source)."""
 
+    # zerus-ucck P2b: a new session keeps its history under its durable ID
+    # and the label it was launched with. Rename, pause and resume, a fresh
+    # start, an older writer's re-minted ID, archive and restore all keep that
+    # one journal, and no event is ever keyed by a label.
+    def test_a_new_session_keeps_its_history_under_its_id(self):
+        name = self.start(tag="journal")
+        first = self.binding(name)
+        journal = "session:" + first["session_id"]
+        self.assertEqual((first["journal_name"], first["launch_label"]), (journal, name))
+
+        def keys():
+            db = sqlite3.connect(self.root / "state/events.sqlite3")
+            try:
+                return {row[0] for row in db.execute("SELECT DISTINCT name FROM events")}
+            finally:
+                db.close()
+
+        def seqs(label):
+            return {event["seq"] for event in json.loads(self.hgs("inspect", label))["events"]}
+
+        def kept(label):
+            record = self.binding(label)
+            self.assertEqual((record["journal_name"], record["launch_label"]), (journal, name), label)
+            self.assertLessEqual(before, seqs(label), label)
+
+        self.wait(lambda: journal in keys())
+        before = seqs(name)
+        self.assertTrue(before)
+        renamed = "claude/p/journal-renamed"
+        self.hgs("rename", name, renamed)
+        kept(renamed)
+        self.hgs("pause", renamed)
+        self.resume(renamed)
+        kept(renamed)
+        self.hgs("pause", renamed)
+        conversation, run = self.binding(renamed)["conversation_id"], self.binding(renamed)["run_id"]
+        self.hgs("resume", renamed, "--fresh", "--expected-run-id", run, "-d")
+        self.wait(lambda: self.binding(renamed).get("conversation_id") not in (None, conversation))
+        kept(renamed)
+        # An older writer drops the ID; the re-minted one keeps the journal.
+        path = self.root / "state" / (hashlib.sha256(renamed.encode()).hexdigest() + ".json")
+        older = json.loads(path.read_text()); older.pop("session_id"); path.write_text(json.dumps(older) + "\n")
+        self.hgs("pause", renamed)
+        self.assertNotEqual(self.binding(renamed)["session_id"], first["session_id"])
+        kept(renamed)
+        self.hgs("archive", renamed)
+        archived = next(json.loads(p.read_text()) for p in (self.root / "state" / "archives").glob("*.json")
+                        if json.loads(p.read_text())["name"] == renamed)
+        self.assertEqual((archived["journal_name"], archived["launch_label"]), (journal, name))
+        self.hgs("resume", renamed, "--archive", archived["archive_id"], "-d")
+        self.wait(lambda: self.binding(renamed).get("activity") == "idle")
+        kept(renamed)
+        self.assertNotIn(name, keys())
+        self.assertNotIn(renamed, keys())
+
     # zerus-ucck P1: one durable session ID across pause and resume, a fresh
     # conversation, rename, archive and restore (a fork gets its own: see
     # test_fork); a record an older CLI wrote gains one when next written.

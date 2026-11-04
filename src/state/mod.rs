@@ -764,7 +764,8 @@ pub(crate) fn task_bindings() -> Result<Vec<Value>> {
 }
 
 /// The record fields task routing reads (`tasks::sessions`).
-const TASK_BINDING_FIELDS: [&str; 6] = ["name", "run_id", "launch_id", "journal_name", "legacy_shadow", "rename_shadow"];
+const TASK_BINDING_FIELDS: [&str; 7] =
+    ["name", "run_id", "launch_id", "journal_name", "launch_label", "legacy_shadow", "rename_shadow"];
 
 /// A saved record reduced to [`TASK_BINDING_FIELDS`]. Every other field, such
 /// as up to 128 shell jobs with their full command texts, is skipped while

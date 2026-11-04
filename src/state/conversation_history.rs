@@ -836,7 +836,7 @@ fn inherited(db: &Connection, parent: &Value, r: &Request, existed: bool) -> Res
                 continue;
             }
             row["seq"] = json!(seq);
-            row["inherited_from"] = json!(name);
+            row["inherited_from"] = json!(journal::lineage_label(&parent["fork_lineage_labels"], name));
             add(db, &canonical, row, "inherited")?;
         }
         if let Some((seq, _)) = rows.last() {

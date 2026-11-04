@@ -82,10 +82,17 @@ the zip's app relays through the stable CLI staged from that zip.
   facts as `cli_current` and `frontend_current`. So a moved, newly extracted
   or same-path replaced copy binds itself again. Same or newer version only,
   never a downgrade, and an unchanged CLI is not copied again.
-- **Visibility.** A service reads the binding when it starts. A binding made
-  later, for example by a copy of the zip extracted elsewhere, is used from
-  the service's next start. An upgrade restarts the service on the new CLI
-  in any case.
+- **Visibility.** A process that admits frontends records its own CLI when it
+  starts. It reads the private record again whenever it has no current proof
+  for a request: for each notification launch, and for a GUI process it has
+  not proven against the current record. It does this one read at a time,
+  with the same checks. A failed or unsafe read refuses that request and
+  never falls back to the record the process read earlier. A running service
+  therefore admits a rebinding at once while the stable CLI is unchanged, for
+  example a re-extracted or same-path replaced app; proofs made against the
+  older record no longer admit anything once it has changed. A record that
+  names another CLI, as after an upgrade, is refused until the service starts
+  again on that CLI. No service or manager is restarted automatically.
 
 As with the common frontend boundary, this prevents unintended agent descent.
 Deliberate same-user parent-process spoofing is outside its scope. Caller

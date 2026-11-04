@@ -45,8 +45,18 @@ const PROOFS: usize = 4;
 /// CLI and the app; each use proves the app again (`running`, `closed`).
 #[cfg_attr(not(windows), allow(dead_code))]
 pub(crate) struct PortableScope {
+    /// The host images folder holding the private record.
     #[cfg(windows)]
-    binding: FrontendBinding,
+    images: PathBuf,
+    /// This process's own loaded image, established once when the scope was made.
+    #[cfg(windows)]
+    cli: BoundObject,
+    /// The last record that passed every check and binds `cli`.
+    #[cfg(windows)]
+    snapshot: std::sync::Mutex<Option<std::sync::Arc<FrontendBinding>>>,
+    /// One record read in flight per scope.
+    #[cfg(windows)]
+    reread: std::sync::Mutex<()>,
     #[cfg(windows)]
     cache: std::sync::Arc<Cache>,
 }
@@ -95,7 +105,9 @@ pub(crate) struct GuiProof {
     pid: u32,
     birth: u64,
     image: PinnedImage,
+    /// The record this proof was made against.
     frontend: BoundObject,
+    digest: String,
 }
 
 #[cfg(windows)]
@@ -116,6 +128,7 @@ impl GuiProof {
             birth: original.birth,
             image,
             frontend: binding.frontend.clone(),
+            digest: binding.frontend_sha256.clone(),
         };
         (digest == binding.frontend_sha256
             && original.current()
@@ -129,6 +142,10 @@ impl GuiProof {
             && self.image.matches_process(&self.process).is_ok()
             && self.image.revalidate().is_ok()
             && is(&self.image, &self.frontend)
+    }
+    /// Whether this proof was made against `binding`'s app.
+    fn bound_to(&self, binding: &FrontendBinding) -> bool {
+        self.frontend == binding.frontend && self.digest == binding.frontend_sha256
     }
     /// This proof is for `original` (same PID and native birth) and still holds.
     pub fn proves(&self, original: &Original) -> bool {
@@ -259,6 +276,15 @@ impl Cache {
         }
         self.signal();
     }
+    fn remove(&self, proof: &std::sync::Arc<GuiProof>) {
+        self.lock()
+            .proofs
+            .retain(|held| !std::sync::Arc::ptr_eq(held, proof));
+    }
+    /// Drop the proofs the cache owns that were made against another record.
+    fn retain_bound(&self, binding: &FrontendBinding) {
+        self.lock().proofs.retain(|held| held.bound_to(binding));
+    }
     fn close(&self) {
         let mut state = self.lock();
         state.closed = true;
@@ -346,47 +372,94 @@ impl Drop for PortableScope {
 
 #[cfg(windows)]
 impl PortableScope {
-    /// For a process that admits frontends: the private binding, when this
-    /// process's own loaded image is the bound CLI object. The CLI is pinned
-    /// only while that is established.
+    /// For a process that admits frontends: this process's own loaded image,
+    /// established once (the CLI is pinned only while that is done), and the
+    /// private record as it is now, if it binds that image.
     pub fn materialize(home: &str) -> Option<Self> {
-        Self::from_binding(staging::read_frontend(&staging::images_below(home))?)
-    }
-    fn from_binding(binding: FrontendBinding) -> Option<Self> {
         let own = PinnedImage::for_process(&own_process()).ok()?;
-        let cli = is(&own, &binding.cli);
+        let cli = object(&own);
         drop(own);
-        cli.then(|| {
-            Some(Self {
-                binding,
-                cache: Cache::new()?,
-            })
-        })
-        .flatten()
+        let scope = Self {
+            images: staging::images_below(home),
+            cli,
+            snapshot: std::sync::Mutex::new(None),
+            reread: std::sync::Mutex::new(()),
+            cache: Cache::new()?,
+        };
+        let _ = scope.refresh();
+        Some(scope)
+    }
+    fn snapshot(&self) -> Option<std::sync::Arc<FrontendBinding>> {
+        self.snapshot
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner())
+            .clone()
+    }
+    /// Read the private record again, one read in flight per scope. Only a
+    /// record that passes every check and binds this process's own CLI is
+    /// returned, and only such a record replaces the snapshot; when it names
+    /// another app, the cache drops its proofs made against the old record.
+    /// A failed read returns nothing and leaves the snapshot alone: the
+    /// operation that asked is refused, never answered from the snapshot.
+    fn refresh(&self) -> Option<std::sync::Arc<FrontendBinding>> {
+        let _one = self
+            .reread
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner());
+        let binding = staging::read_frontend(&self.images)?;
+        if binding.cli != self.cli {
+            return None;
+        }
+        let binding = std::sync::Arc::new(binding);
+        let changed = {
+            let mut snapshot = self
+                .snapshot
+                .lock()
+                .unwrap_or_else(|poisoned| poisoned.into_inner());
+            let changed = snapshot.as_deref() != Some(&*binding);
+            if changed {
+                *snapshot = Some(binding.clone());
+            }
+            changed
+        };
+        if changed {
+            self.cache.retain_bound(&binding);
+        }
+        Some(binding)
     }
     /// A running GUI (an authenticated frontend, a mode caller's ancestor):
     /// the proof for that exact process within the caller's own deadline. A
-    /// cached proof is image evidence only, rechecked for the same process.
+    /// cached proof made against the current record is image evidence only,
+    /// rechecked for the same process; anything else is a miss, which reads
+    /// the record again and proves the process against it.
     pub fn running(&self, original: &Original, until: Instant) -> Option<std::sync::Arc<GuiProof>> {
-        if let Some(proof) = self.cache.find(original) {
-            return proof.proves(original).then_some(proof);
+        if let (Some(binding), Some(proof)) = (self.snapshot(), self.cache.find(original)) {
+            if proof.bound_to(&binding) && proof.proves(original) {
+                return Some(proof);
+            }
         }
-        let proof = std::sync::Arc::new(GuiProof::prove(&self.binding, original, until)?);
+        let binding = self.refresh()?;
+        if let Some(proof) = self.cache.find(original) {
+            if proof.bound_to(&binding) && proof.proves(original) {
+                return Some(proof);
+            }
+            self.cache.remove(&proof);
+        }
+        let proof = std::sync::Arc::new(GuiProof::prove(&binding, original, until)?);
         self.cache.insert(proof.clone());
         Some(proof)
     }
-    /// With the UI closed (a notification launch): the bound app pinned, and
-    /// its digest read through that same pin, which the caller keeps through
-    /// the launch. Never taken from a running GUI's proof.
+    /// With the UI closed (a notification launch): the record read again, the
+    /// bound app pinned, and its digest read through that same pin, which the
+    /// caller keeps through the launch. Never taken from a running GUI's proof.
     pub fn closed(&self, image: &Path, until: Instant) -> Option<PinnedImage> {
+        let binding = self.refresh()?;
         let pin = PinnedImage::open(image).ok()?;
-        if !is(&pin, &self.binding.frontend) {
+        if !is(&pin, &binding.frontend) {
             return None;
         }
         let digest = pin.sha256(DIGEST_BYTES, until).ok()?;
-        (digest == self.binding.frontend_sha256
-            && pin.revalidate().is_ok()
-            && Instant::now() < until)
+        (digest == binding.frontend_sha256 && pin.revalidate().is_ok() && Instant::now() < until)
             .then_some(pin)
     }
 }

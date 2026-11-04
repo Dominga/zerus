@@ -37,8 +37,28 @@ fn binding_for(gui: &Path) -> FrontendBinding {
     binding_with(gui, &PinnedImage::for_process(&own_process()).unwrap())
 }
 
-fn scope_for(gui: &Path) -> PortableScope {
-    PortableScope::from_binding(binding_for(gui)).expect("this process is the bound CLI")
+/// Publish `binding` into the private home `home`, as the app's own install does.
+fn publish_into(home: &Path, binding: &FrontendBinding) -> Layout {
+    let layout = Layout::new(&home.to_string_lossy(), &home.join("config"));
+    let source = home.with_extension("source").join(staging::EXECUTABLE);
+    fs::create_dir_all(source.parent().unwrap()).unwrap();
+    fs::write(&source, b"staged CLI fixture").unwrap();
+    staging::install_bound(&layout, &source, "1.0.0", |_, publish| {
+        assert!(publish(binding, &|| true)?);
+        Ok(Some(binding.clone()))
+    })
+    .unwrap();
+    layout
+}
+
+/// A serving scope of this process (its own image is the bound CLI) over a
+/// private home in `root` whose record binds `gui`.
+fn serve(root: &Path, gui: &Path) -> (PortableScope, FrontendBinding, Layout) {
+    let binding = binding_for(gui);
+    let home = root.join("serve-home");
+    let layout = publish_into(&home, &binding);
+    let scope = materialize(&home.to_string_lossy()).expect("this process's own image");
+    (scope, binding, layout)
 }
 
 fn until() -> Instant {
@@ -47,9 +67,9 @@ fn until() -> Instant {
 
 #[test]
 fn a_closed_launch_proof_keeps_its_own_pin_until_released() {
-    let (_dir, gui) = fixture();
+    let (dir, gui) = fixture();
     let zip = gui.parent().unwrap().to_owned();
-    let scope = scope_for(&gui);
+    let (scope, _, _) = serve(dir.path(), &gui);
     let pin = scope
         .closed(&gui, until())
         .expect("the bound app is proven");
@@ -71,8 +91,8 @@ fn a_closed_launch_proof_keeps_its_own_pin_until_released() {
 
 #[test]
 fn an_edit_that_keeps_the_length_and_write_time_is_refused() {
-    let (_dir, gui) = fixture();
-    let scope = scope_for(&gui);
+    let (dir, gui) = fixture();
+    let (scope, binding, _) = serve(dir.path(), &gui);
     let written = fs::metadata(&gui).unwrap().modified().unwrap();
     {
         let mut file = fs::OpenOptions::new().write(true).open(&gui).unwrap();
@@ -81,7 +101,7 @@ fn an_edit_that_keeps_the_length_and_write_time_is_refused() {
     }
     // The same object, length and write time: only the digest differs.
     let pinned = PinnedImage::open(&gui).unwrap();
-    assert!(is(&pinned, &scope.binding.frontend));
+    assert!(is(&pinned, &binding.frontend));
     drop(pinned);
     assert!(scope.closed(&gui, until()).is_none());
 }
@@ -89,7 +109,7 @@ fn an_edit_that_keeps_the_length_and_write_time_is_refused() {
 #[test]
 fn a_swapped_object_is_refused_and_only_the_original_object_returns() {
     let (dir, gui) = fixture();
-    let scope = scope_for(&gui);
+    let (scope, _, _) = serve(dir.path(), &gui);
     let aside = dir.path().join("original.exe");
     // A out, B in: identical bytes in another object are refused.
     fs::rename(&gui, &aside).unwrap();
@@ -109,18 +129,24 @@ fn a_binding_for_another_cli_object_is_refused() {
     let copy = dir.path().join(staging::EXECUTABLE);
     fs::copy(std::env::current_exe().unwrap(), &copy).unwrap();
     let binding = binding_with(&gui, &PinnedImage::open(&copy).unwrap());
-    assert!(PortableScope::from_binding(binding).is_none());
+    let home = dir.path().join("serve-home");
+    publish_into(&home, &binding);
+    let scope = materialize(&home.to_string_lossy()).unwrap();
+    assert!(scope.snapshot().is_none());
+    assert!(scope.closed(&gui, until()).is_none());
 }
 
 #[test]
 fn a_missing_or_corrupt_record_proves_nothing() {
     let dir = tempfile::tempdir().unwrap();
+    let (_, gui) = fixture();
     let home = dir.path().to_string_lossy().into_owned();
-    assert!(materialize(&home).is_none());
+    let scope = materialize(&home).unwrap();
+    assert!(scope.snapshot().is_none() && scope.closed(&gui, until()).is_none());
     let images = staging::images_below(&home);
     fs::create_dir_all(&images).unwrap();
     fs::write(images.join(staging::FRONTEND_BINDING), b"{\"schema\":1").unwrap();
-    assert!(materialize(&home).is_none());
+    assert!(scope.closed(&gui, until()).is_none());
 }
 
 #[test]
@@ -147,6 +173,8 @@ struct FixtureGui {
 impl FixtureGui {
     fn start(folder: &Path) -> Self {
         fs::create_dir_all(folder).unwrap();
+        let _ = fs::remove_file(folder.join("quit"));
+        let _ = fs::remove_file(folder.join("ready"));
         let image = folder.join(staging::FRONTEND_IMAGE);
         fs::copy(std::env::current_exe().unwrap(), &image).unwrap();
         let child = run_role(&image, "gui")
@@ -185,7 +213,7 @@ fn wait_until(what: &str, done: impl Fn() -> bool) {
 fn a_running_gui_proof_is_released_on_exit_while_borrowers_keep_their_pin() {
     let dir = tempfile::tempdir().unwrap();
     let gui = FixtureGui::start(&dir.path().join("zip"));
-    let scope = scope_for(&gui.image);
+    let (scope, _, _) = serve(dir.path(), &gui.image);
     let original = gui.original();
     let proof = scope
         .running(&original, until())
@@ -220,7 +248,7 @@ fn another_process_or_an_exited_one_has_no_proof() {
     let dir = tempfile::tempdir().unwrap();
     let gui = FixtureGui::start(&dir.path().join("zip"));
     let other = FixtureGui::start(&dir.path().join("other"));
-    let scope = scope_for(&gui.image);
+    let (scope, _, _) = serve(dir.path(), &gui.image);
     // Another process running another image is not the bound app.
     assert!(scope.running(&other.original(), until()).is_none());
     let original = gui.original();
@@ -242,19 +270,23 @@ fn maintained_staging_proceeds_while_old_portable_work_remains() {
     fs::create_dir_all(layout.cli.parent().unwrap()).unwrap();
     fs::copy(std::env::current_exe().unwrap(), &layout.cli).unwrap();
     let binding = binding_with(&old_gui.image, &PinnedImage::open(&layout.cli).unwrap());
-    let request = dir.path().join("service-binding.json");
-    fs::write(&request, serde_json::to_vec(&binding).unwrap()).unwrap();
+    // Its record, as the old app's install published it (the CLI unchanged).
+    staging::install_bound(&layout, &layout.cli, "1.0.0", |_, publish| {
+        assert!(publish(&binding, &|| true)?);
+        Ok(Some(binding.clone()))
+    })
+    .unwrap();
     let mut service = run_role(&layout.cli, "scope")
-        .env(HOME, dir.path())
-        .env(REPORT, &request)
+        .env(HOME, &home)
+        .env(REPORT, &old_gui.image)
         .env_remove(AGENT_MARKER)
         .spawn()
         .unwrap();
     wait_until("the serving process materialized its scope", || {
-        dir.path().join("scope-ready").exists()
+        home.join("scope-ready").exists()
     });
     // This test process holds old-GUI work of its own: a running proof.
-    let scope = scope_for(&old_gui.image);
+    let (scope, _, _) = serve(&dir.path().join("parent"), &old_gui.image);
     let old_work = scope.running(&old_gui.original(), until()).unwrap();
     // A newer zip elsewhere: its staging replaces the running stable CLI and
     // binds its own app while both the scope and the old work are alive.
@@ -281,7 +313,7 @@ fn maintained_staging_proceeds_while_old_portable_work_remains() {
     // The old work finishes on its own proof; the serving process is untouched.
     assert!(old_work.current());
     assert!(service.try_wait().unwrap().is_none());
-    fs::write(dir.path().join("scope-done"), b"").unwrap();
+    fs::write(home.join("scope-done"), b"").unwrap();
     assert!(service.wait().unwrap().success());
     drop(old_work);
     // Normal quit of the old app, then a same-path replacement of it.
@@ -388,9 +420,11 @@ fn creation_role() {
         // keep it until told to finish.
         "scope" => {
             let dir = PathBuf::from(std::env::var(HOME).unwrap());
-            let binding: FrontendBinding =
-                serde_json::from_slice(&fs::read(std::env::var(REPORT).unwrap()).unwrap()).unwrap();
-            let scope = PortableScope::from_binding(binding).expect("serving scope");
+            let gui = PathBuf::from(std::env::var(REPORT).unwrap());
+            let scope = materialize(&dir.to_string_lossy()).expect("serving scope");
+            let launch = scope.closed(&gui, Instant::now() + DIGEST_TIME);
+            assert!(launch.is_some(), "the serving scope admits the bound app");
+            drop(launch);
             fs::write(dir.join("scope-ready"), b"").unwrap();
             let end = Instant::now() + Duration::from_secs(120);
             while !dir.join("scope-done").exists() && Instant::now() < end {
@@ -679,7 +713,7 @@ fn an_inherited_untrusted_ace_refuses_the_candidate_before_the_record_exists() {
 fn a_failed_watcher_drops_the_cache_s_proofs_and_a_new_one_takes_over() {
     let dir = tempfile::tempdir().unwrap();
     let gui = FixtureGui::start(&dir.path().join("zip"));
-    let scope = scope_for(&gui.image);
+    let (scope, _, _) = serve(dir.path(), &gui.image);
     let original = gui.original();
     let borrower = scope.running(&original, until()).unwrap();
     assert_eq!(scope.cache.len(), 1);
@@ -708,4 +742,89 @@ fn a_failed_watcher_drops_the_cache_s_proofs_and_a_new_one_takes_over() {
     drop(borrower);
     fs::remove_file(&image).unwrap();
     fs::write(&image, ORIGINAL).unwrap();
+}
+
+#[test]
+fn a_running_service_admits_a_same_path_rebind_at_once_and_never_the_old_object() {
+    let dir = tempfile::tempdir().unwrap();
+    let zip = dir.path().join("zip");
+    let old = FixtureGui::start(&zip);
+    let home = dir.path().join("serve-home");
+    publish_into(&home, &binding_for(&old.image));
+    // A serving scope made before anything changes.
+    let scope = materialize(&home.to_string_lossy()).unwrap();
+    drop(
+        scope
+            .running(&old.original(), until())
+            .expect("the old app"),
+    );
+    // A normal quit; the old object is kept aside and a new app takes its path.
+    let image = old.image.clone();
+    old.quit();
+    wait_until("the old proof is released", || scope.cache.len() == 0);
+    let aside = zip.join("old-app.exe");
+    fs::rename(&image, &aside).unwrap();
+    let new = FixtureGui::start(&zip);
+    assert!(new.image == image);
+    // Not admitted under the old record.
+    assert!(scope.running(&new.original(), until()).is_none());
+    // The app's own rebind (the real chain is covered by
+    // a_same_path_replacement_is_seen_at_start_and_rebinds_through_the_app_s_own_install).
+    publish_into(&home, &binding_for(&new.image));
+    // The same serving scope, no restart: the new app is admitted at once,
+    // and the old record's object never again.
+    let proof = scope
+        .running(&new.original(), until())
+        .expect("admitted at once");
+    assert!(proof.proves(&new.original()));
+    assert!(scope.closed(&aside, until()).is_none());
+    assert!(scope.closed(&new.image, until()).is_some());
+    drop(proof);
+    new.quit();
+}
+
+#[test]
+fn a_corrupt_or_unsafe_record_during_serving_refuses_without_the_snapshot() {
+    let (dir, gui) = fixture();
+    let (scope, binding, layout) = serve(dir.path(), &gui);
+    let record = layout.images.join(staging::FRONTEND_BINDING);
+    assert!(scope.closed(&gui, until()).is_some());
+    let good = serde_json::to_vec(&binding).unwrap();
+    // Corrupt, though still a private file: refused, the snapshot is not used.
+    fs::write(&record, b"{\"schema\":1").unwrap();
+    assert!(scope.snapshot().is_some());
+    assert!(scope.closed(&gui, until()).is_none());
+    fs::write(&record, &good).unwrap();
+    assert!(scope.closed(&gui, until()).is_some());
+    // Readable by others: refused the same way.
+    icacls(&[
+        record.as_os_str(),
+        "/grant".as_ref(),
+        "*S-1-1-0:(R)".as_ref(),
+    ]);
+    assert!(scope.closed(&gui, until()).is_none());
+    icacls(&[
+        record.as_os_str(),
+        "/remove:g".as_ref(),
+        "*S-1-1-0".as_ref(),
+    ]);
+    assert!(scope.closed(&gui, until()).is_some());
+    // Gone: refused too.
+    fs::remove_file(&record).unwrap();
+    assert!(scope.closed(&gui, until()).is_none());
+}
+
+#[test]
+fn a_running_service_refuses_a_record_for_another_cli_object() {
+    let (dir, gui) = fixture();
+    let (scope, binding, _) = serve(dir.path(), &gui);
+    assert!(scope.closed(&gui, until()).is_some());
+    // A rebinding that names another CLI object, as a changed CLI would.
+    let copy = dir.path().join("other-cli.exe");
+    fs::copy(std::env::current_exe().unwrap(), &copy).unwrap();
+    let other = binding_with(&gui, &PinnedImage::open(&copy).unwrap());
+    publish_into(&dir.path().join("serve-home"), &other);
+    assert!(scope.closed(&gui, until()).is_none());
+    // The snapshot was not replaced by it.
+    assert_eq!(scope.snapshot().as_deref(), Some(&binding));
 }

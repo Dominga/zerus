@@ -522,6 +522,8 @@ mod live {
                     drain,
                     self.desktop_responder.get().cloned(),
                     crate::desktop_service::Observers {
+                        #[cfg(all(test, target_os = "linux"))]
+                        mode_helpers: None,
                         notification_controls: self.notification_controls.get().cloned(),
                         retained_sources: self.retained_import_source.get().cloned(),
                         projections: self

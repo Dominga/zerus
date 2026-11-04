@@ -26,7 +26,11 @@ if args == ['--help']:
     raise SystemExit(0)
 if args == ['desktop', 'status', '--json']:
     log()
-    print(json.dumps({{'configuration': configuration, 'running': False}}))
+    status = {{'configuration': configuration, 'running': False}}
+    if os.environ.get('REVOCATION_LIFECYCLE') == 'unavailable':
+        status['lifecycle'] = {{'abi': 'desktop-lifecycle-v1', 'phase': 'unavailable',
+                               'mode': None, 'ipc_ready': False}}
+    print(json.dumps(status))
     raise SystemExit(0)
 if args[:2] == ['desktop', 'revoke']:
     request_id = args[args.index('--request-id') + 1]

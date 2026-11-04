@@ -34,6 +34,7 @@ REQUIRED_FILES = [
     "Contents/Resources/setup/install-macos-session-service.py",
     "Contents/Resources/setup/install-macos-desktop-service.py",
     "Contents/Resources/setup/desktop-revoke-hold.py",
+    "Contents/Resources/setup/desktop-service-activation.py",
     "Contents/Resources/setup/install-recovery-service.py",
     "Contents/Resources/setup/install-swarm-service.py",
     "Contents/Resources/setup/launchd_agent.py",

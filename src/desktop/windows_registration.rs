@@ -199,6 +199,7 @@ pub(super) fn command(config: &Config, location: &Location, operation: &str) -> 
         checked["reviewed_transition"] = record["reviewed_transition"].clone();
         checked["activation_automatic_blocked"] = record["activation_automatic_blocked"].clone();
         checked["mode_choice"] = record["mode_choice"].clone();
+        checked["first_choice"] = record["first_choice"].clone();
         let status = super::status(location)?;
         let lifecycle = &status["lifecycle"];
         checked["running_mode"] = if lifecycle["configuration"] == location.configuration

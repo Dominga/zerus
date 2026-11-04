@@ -1,20 +1,22 @@
 //! Debug builds only: this module and its environment read are never compiled
 //! into a release image (`scripts/check-windows-portable.py` proves the
 //! published executables omit its markers). The hosted fixture holds ONE exact
-//! first choice at Held, after its durable reservation and before the final
-//! production fences, for a bounded time (zerus-yfbd.1).
+//! first choice at Held, after its durable reservation and after the Stop
+//! phase deadline has started, for a bounded time (zerus-yfbd.1).
 //!
 //! It only waits. Nothing is skipped, forced, injected or rewritten: the
 //! registration lock, the retained Grant, caller and resources stay held, and
-//! a release, the timeout or any unsafe or mismatched handshake continues into
-//! the same ordinary code, which may still refuse on its own evidence.
+//! no budget is renewed. A release, the timeout or any unsafe or mismatched
+//! handshake continues into the same ordinary code: the StopOffered save's
+//! fence refuses a wait that outlived the Stop deadline, still at Held.
 use super::*;
 use std::io::Write;
 
 /// Data only: the exact canonical original UUID to hold, nothing else.
 pub(super) const ENV: &str = "HGS_TEST_MODE_HELD_PAUSE";
-/// One monotonic bound, well inside the CLI's exchange timeout.
-const LIMIT: Duration = Duration::from_secs(20);
+/// One monotonic bound for the wait itself, well inside the CLI's exchange
+/// timeout. It never extends the transition's own deadline.
+const LIMIT: Duration = Duration::from_secs(12);
 const RELEASE_BYTES: usize = 64;
 
 fn canonical(value: &str) -> bool {

@@ -644,11 +644,6 @@ class WindowsTaskMode(unittest.TestCase):
                                                   for pid in helper['owned']):
             time.sleep(0.1)
 
-    def release_held_helper(self, request_id):
-        release = self.config / f'held-release-{request_id}'
-        release.write_bytes(request_id.encode('ascii'))
-        return release
-
     def lost_reply_at_held_keeps_its_original(self):
         """Debug held seam (zerus-yfbd.1). While a first choice is held after
         its durable reservation, an ownership change is refused: the Grant
@@ -712,6 +707,42 @@ class WindowsTaskMode(unittest.TestCase):
         self.assertEqual(result['receipt']['phase'], 'refused', result)
         self.assertEqual(self.observe()['instances'], before)
         self.assertEqual(self.cli('desktop', 'ownership-status', '--json'), granted)
+
+    def expired_hold_refuses_at_held(self):
+        """The hold consumes the Stop deadline it started in. Held past it (here
+        to the seam's own bound, with no release), the unchanged StopOffered
+        save's fence refuses the expired deadline before any manager effect:
+        the same original stays pending at Held, and only the supported
+        pre-manager cancellation closes it."""
+        path = self.state / 'desktop' / 'windows-registration-mode.json'
+        before = self.observe()['instances']
+        service = self.cli('desktop', 'status', '--json')['lifecycle']['pid']
+        self.assertEqual([item['engine_pid'] for item in before], [service], before)
+        granted = self.cli('desktop', 'ownership-status', '--json')
+        request = str(uuid.uuid4())
+        child = self.first_call_started(request)
+        helper = self.held_helper(request, child)
+        expired = self.first_call_finished(child)
+        self.assertEqual(expired['code'], 0, expired)
+        refused = json.loads(expired['stdout'])
+        self.assertFalse(refused['ok'], refused)
+        self.assertIn('deadline reached', refused['error'])
+        helper['marker'].unlink()
+        record = json.loads(path.read_text(encoding='utf-8'))
+        self.assertEqual((record['pending']['request_id'], record['pending']['phase']), (request, 'held'), record)
+        status = self.cli('desktop', 'registration', 'status', '--json')
+        self.assertEqual(status['selected_mode'], 'passive')
+        self.assertEqual((status['first_choice']['request'], status['first_choice']['phase']),
+                         (request, 'unknown'), status)
+        result = self.cli('desktop', 'registration', 'mode-result', '--json', '--request-id', request)
+        self.assertEqual((result['outcome'], result['receipt']['phase']), ('unknown', 'unknown'), result)
+        self.assertEqual(self.observe()['instances'], before)
+        self.assertEqual(self.cli('desktop', 'status', '--json')['lifecycle']['pid'], service)
+        self.assertEqual(self.cli('desktop', 'ownership-status', '--json'), granted)
+        cancelled = self.cancel(request)
+        self.assertEqual(cancelled['cancelled_request_id'], request, cancelled)
+        self.assertFalse(cancelled['manager_changed'], cancelled)
+        self.assertEqual(self.observe()['instances'], before)
 
     def first_background_choice_from_plain_passive(self):
         """zerus-yfbd.1: the first explicit background choice, with the
@@ -1102,6 +1133,15 @@ class WindowsTaskMode(unittest.TestCase):
         self.assertEqual(self.cli('desktop', 'status', '--json')['lifecycle']['pid'], rollback['instance']['pid'])
 
     def powershell(self, script, data):
+        result = subprocess.run(self.powershell_command(script, data), env=self.env, capture_output=True,
+                                text=True, encoding='utf-8', timeout=12)
+        self.assertEqual(result.returncode, 0,
+                         'fixture PowerShell stdout: ' + result.stdout[-8192:]
+                         + '\nstderr: ' + result.stderr[-1024:])
+        self.assertLessEqual(len(result.stdout.encode('utf-8')), 8192)
+        return json.loads(result.stdout)
+
+    def powershell_command(self, script, data):
         # Fixture-only native COM observation/cleanup. No task-name-wide Stop,
         # schtasks /End, PID kill or executable-pattern cleanup is used.
         request = self.root / ('sdk-' + str(uuid.uuid4()) + '.json')
@@ -1140,16 +1180,9 @@ function Get-OwnInstances($scheduler,$registered) {
  exit 1
 }
 ''')
-        command = [str(Path(os.environ['SystemRoot']) / 'System32/WindowsPowerShell/v1.0/powershell.exe'),
-                   '-NoLogo', '-NoProfile', '-NonInteractive', '-EncodedCommand',
-                   base64.b64encode(body.encode('utf-16le')).decode('ascii')]
-        result = subprocess.run(command, env=self.env, capture_output=True, text=True,
-                                encoding='utf-8', timeout=12)
-        self.assertEqual(result.returncode, 0,
-                         'fixture PowerShell stdout: ' + result.stdout[-8192:]
-                         + '\nstderr: ' + result.stderr[-1024:])
-        self.assertLessEqual(len(result.stdout.encode('utf-8')), 8192)
-        return json.loads(result.stdout)
+        return [str(Path(os.environ['SystemRoot']) / 'System32/WindowsPowerShell/v1.0/powershell.exe'),
+                '-NoLogo', '-NoProfile', '-NonInteractive', '-EncodedCommand',
+                base64.b64encode(body.encode('utf-16le')).decode('ascii')]
 
     def observe(self):
         return self.powershell(r'''
@@ -1256,17 +1289,47 @@ if(@(Get-OwnInstances $s $t).Count-ne 0) {throw 'fixture instance remains'};
 ''', dict(task=self.task, task_image=task_image, image=str(self.cli_image), sid=self.sid, guid=expected['guid'],
           pid=expected['pid'], birth=expected['birth'] + (1 if wrong_birth else 0)))
 
-    def run_own_task(self):
-        """Start the fixture's own passive task once, from outside any
-        transition (an instance restart). Never retried."""
+    def armed_instance_restart(self, request_id, original):
+        """A COM worker armed BEFORE the call: it pins the exact original
+        instance, waits for the helper's own held marker, then stops exactly
+        that instance, starts the task once and releases the hold, within the
+        Stop deadline the hold consumes. Never retried."""
         plan = self.cli('desktop', 'registration', '--json')
-        return self.powershell(r"""
+        armed = self.root / f'armed-{request_id}'
+        worker = subprocess.Popen(self.powershell_command(r"""
 $s=New-Object -ComObject Schedule.Service;$s.Connect();$t=$s.GetFolder('\').GetTask($x.task);
 $d=$t.Definition;
 if($d.Actions.Count-ne 1 -or $d.Actions.Item(1).Path-cne $x.task_image) {throw 'fixture task action changed'};
-if(@(Get-OwnInstances $s $t).Count-ne 0) {throw 'fixture instance still runs'};
-$r=$t.Run($null);@{guid=[string]$r.InstanceGuid}|ConvertTo-Json -Compress
-""", dict(task=self.task, task_image=plan['argv'][0]))
+$values=@(Get-OwnInstances $s $t);if($values.Count-ne 1) {throw 'fixture task instance count changed'};
+$i=$values[0];$i.Refresh();if($i.InstanceGuid-cne $x.guid -or $i.EnginePID-ne $x.pid) {throw 'fixture original instance changed'};
+$p=[Diagnostics.Process]::GetProcessById($i.EnginePID);$handle=$p.Handle;
+if($p.HasExited -or $p.StartTime.ToFileTimeUtc()-ne [int64]$x.birth -or $p.MainModule.FileName-cne $x.image) {throw 'fixture original identity changed'};
+[IO.File]::WriteAllText($x.armed,'armed');
+$clock=[Diagnostics.Stopwatch]::StartNew();
+while(-not [IO.File]::Exists($x.marker)) {if($clock.ElapsedMilliseconds-ge 60000) {throw 'held marker never appeared'};Start-Sleep -Milliseconds 5};
+$seen=$clock.ElapsedMilliseconds;
+$i.Refresh();if($i.InstanceGuid-cne $x.guid -or $i.EnginePID-ne $p.Id) {throw 'fixture instance changed before stop'};
+$i.Stop();if(-not $p.WaitForExit(5000)) {throw 'fixture original process exit unconfirmed'};
+if(@(Get-OwnInstances $s $t).Count-ne 0) {throw 'fixture instance remains'};
+$r=$t.Run($null);
+[IO.File]::WriteAllText($x.release,$x.request,[Text.ASCIIEncoding]::new());
+@{stopped=$true;later=[string]$r.InstanceGuid;restart_ms=$clock.ElapsedMilliseconds-$seen}|ConvertTo-Json -Compress
+""", dict(task=self.task, task_image=plan['argv'][0], guid=original['guid'], pid=original['pid'],
+          birth=original['birth'], image=str(self.cli_image), armed=str(armed),
+          marker=str(self.config / f'held-pause-{request_id}.json'),
+          release=str(self.config / f'held-release-{request_id}'), request=request_id)),
+            env=self.env, stdout=subprocess.PIPE, stderr=subprocess.PIPE, text=True, encoding='utf-8',
+            creationflags=subprocess.CREATE_NO_WINDOW)
+        deadline = time.monotonic() + 30
+        while not armed.exists() and worker.poll() is None and time.monotonic() < deadline:
+            time.sleep(0.05)
+        self.assertTrue(armed.exists(), worker.communicate(timeout=30) if worker.poll() is not None else 'not armed')
+        return worker
+
+    def armed_instance_restarted(self, worker):
+        out, err = worker.communicate(timeout=60)
+        self.assertEqual(worker.returncode, 0, 'fixture PowerShell stdout: ' + out[-8192:] + '\nstderr: ' + err[-1024:])
+        return json.loads(out)
 
     def exact_later_instance(self, guid, wait=8):
         """Exactly one running instance of the fixture task, the given GUID, on
@@ -1287,11 +1350,13 @@ $r=$t.Run($null);@{guid=[string]$r.InstanceGuid}|ConvertTo-Json -Compress
     def test_first_choice_instance_drift_at_held_is_refused_before_any_stop(self):
         """Debug held seam (zerus-yfbd.1), in its own fixture because it ends
         at a reboot-gated Review. The passive instance changes while a first
-        choice is held after its durable reservation. Production order: the
-        StopOffered save passes its fence (caller, Grant, image, handoff,
-        deadline), then stop_original refuses the changed task selection. No
-        Stop, update or start is sent, the same original stays pending, and
-        its same-boot Review is reboot_required."""
+        choice is held after its durable reservation: an armed worker restarts
+        it and releases the hold within the Stop deadline the hold consumes,
+        so expiry cannot mask the instance check (expired_hold_refuses_at_held
+        covers expiry). Production order: the StopOffered save passes its fence
+        (caller, Grant, image, handoff, deadline), then stop_original refuses
+        the changed task selection. No Stop, update or start is sent, the same
+        original stays pending, and its same-boot Review is reboot_required."""
         initial = self.cli('desktop', 'registration', 'status', '--json')
         self.assertFalse(initial['registered'], 'Task-mode fixture requires an unused disposable runner')
         self.task = initial['task_name']
@@ -1309,20 +1374,21 @@ $r=$t.Run($null);@{guid=[string]$r.InstanceGuid}|ConvertTo-Json -Compress
             granted = self.cli('desktop', 'ownership-status', '--json')
             path = self.state / 'desktop' / 'windows-registration-mode.json'
             request = str(uuid.uuid4())
+            worker = self.armed_instance_restart(request, self.latest)
             child = self.first_call_started(request)
-            helper = self.held_helper(request, child)
-            stopped = self.stop_exact_passive(self.latest)
-            self.assertTrue(stopped['stopped'], stopped)
-            later = self.run_own_task()
-            replacement = self.exact_later_instance(later['guid'])
-            release = self.release_held_helper(request)
             drift = self.first_call_finished(child)
+            later = self.armed_instance_restarted(worker)
+            print('MODE_TASK_DRIFT_RESTART ' + json.dumps(later), file=sys.stderr)
+            marker = self.config / f'held-pause-{request}.json'
+            self.assertEqual(json.loads(marker.read_text(encoding='utf-8'))['request'], request)
             self.assertEqual(drift['code'], 0, drift)
             refused = json.loads(drift['stdout'])
             self.assertFalse(refused['ok'], refused)
+            # The instance check refused, not the deadline the hold consumed.
             self.assertIn('Original task selection changed before stop', refused['error'])
-            release.unlink()
-            helper['marker'].unlink(missing_ok=True)
+            replacement = self.exact_later_instance(later['later'])
+            (self.config / f'held-release-{request}').unlink()
+            marker.unlink()
             record = json.loads(path.read_text(encoding='utf-8'))
             self.assertEqual((record['pending']['request_id'], record['pending']['phase']),
                              (request, 'stop_offered'), record)
@@ -1333,7 +1399,7 @@ $r=$t.Run($null);@{guid=[string]$r.InstanceGuid}|ConvertTo-Json -Compress
             self.assertEqual(self.cli('desktop', 'ownership-status', '--json'), granted)
             # The one later instance the fixture started was neither stopped
             # nor replaced by the helper: same GUID, PID and birth, still live.
-            self.assertEqual(self.exact_later_instance(later['guid'], wait=0), replacement)
+            self.assertEqual(self.exact_later_instance(later['later'], wait=0), replacement)
             result = self.cli('desktop', 'registration', 'mode-result', '--json', '--request-id', request)
             self.assertEqual((result['outcome'], result['receipt']['phase']), ('unknown', 'unknown'), result)
             # The arranged later instance is live on the same boot: Review
@@ -1343,7 +1409,7 @@ $r=$t.Run($null);@{guid=[string]$r.InstanceGuid}|ConvertTo-Json -Compress
             self.assertEqual(reviewed['outcome'], 'unknown', reviewed)
             self.assertFalse(reviewed['manager_changed'], reviewed)
             self.assertFalse(reviewed['authority_changed'], reviewed)
-            self.assertEqual(self.exact_later_instance(later['guid'], wait=0), replacement)
+            self.assertEqual(self.exact_later_instance(later['later'], wait=0), replacement)
             # Teardown: stop exactly that later passive instance, then remove.
             stopped = self.stop_exact_passive(dict(guid=replacement['guid'], pid=replacement['pid'],
                                                    birth=replacement['birth']))
@@ -1421,6 +1487,7 @@ $r=$t.Run($null);@{guid=[string]$r.InstanceGuid}|ConvertTo-Json -Compress
             # form; the ordinary form stays covered by next_background below.
             self.overlapping_layout_refuses_the_first_choice()
             self.lost_reply_at_held_keeps_its_original()
+            self.expired_hold_refuses_at_held()
             background = self.first_background_choice_from_plain_passive()
             self.assertTrue(background['ok'], background)
             self.lost_journal_refuses_every_mode_operation(background)

@@ -707,13 +707,14 @@ fn effect(
         }
     }
     save(location, passive, &record, &mut || fence.check())?;
+    fence.phase(Budget::Stop);
     // Debug builds only: the hosted fixture's bounded hold of an exact first
-    // choice at Held. The next code is the same production fence and stop.
+    // choice at Held. It consumes the Stop deadline just started, so the
+    // unchanged StopOffered save below refuses an expired wait at Held.
     #[cfg(debug_assertions)]
     if first.is_some() {
         held_pause::wait(config, &id);
     }
-    fence.phase(Budget::Stop);
     if let Some(original) = &mut original {
         record.advance(Phase::Held, Phase::StopOffered)?;
         save(location, passive, &record, &mut || fence.check())?;

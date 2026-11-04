@@ -641,6 +641,8 @@ fn serve(config: &Config, location: Location, background_mode: bool) -> Result<(
     let mut collect_at = Instant::now();
     let mut failed = false;
     let mut background_blocked = false;
+    #[cfg(any(windows, all(test, target_os = "linux")))]
+    let mut retirement_drained = false;
     let run_result = (|| -> Result<()> {
         if background_mode {
             background_blocked = !revoke::background_permitted(&location, &store)?;
@@ -679,6 +681,10 @@ fn serve(config: &Config, location: Location, background_mode: bool) -> Result<(
                     runtime.drain(&mut store, Duration::from_millis(10))
                 });
                 if drained.is_ok() && feed.stop(&mut store).is_ok() {
+                    #[cfg(any(windows, all(test, target_os = "linux")))]
+                    {
+                        retirement_drained = true;
+                    }
                     background = None;
                     // Audit/finalizer I/O can retain the original serve owner
                     // outside the background runtime. Never abandon those loans.
@@ -820,6 +826,16 @@ fn serve(config: &Config, location: Location, background_mode: bool) -> Result<(
                         value["background_start"] = json!({"admitted":false,"code":"explicit_handoff_required","durably_blocked":true});
                     }
                     upgrade.decorate(&mut value);
+                    #[cfg(any(windows, all(test, target_os = "linux")))]
+                    if hello.op == "status" && hello.request.is_none() {
+                        upgrade.decorate_refresh(
+                            &mut value,
+                            &owner,
+                            retirement_drained,
+                            active.load(Ordering::SeqCst),
+                            store.operation_undrained()?,
+                        );
+                    }
                     let mut streaming = false;
                     let mut activation_waiting = false;
                     let reply = if hello.abi != ABI || hello.configuration != location.configuration

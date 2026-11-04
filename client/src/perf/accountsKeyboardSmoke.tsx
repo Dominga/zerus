@@ -2,6 +2,7 @@
 // Start Vite, then: dbus-run-session -- python3 scripts/menu-smoke.py
 //   --url http://127.0.0.1:1420/scripts/accounts-keyboard-smoke.html
 //   --title "Zerus Accounts keyboard regression (synthetic)"
+// Add --accessibility to verify WebKit's native list/item/button tree too.
 import { render } from "solid-js/web";
 import { setAccountsPage, setRequestedProfile } from "../store/accounts";
 import { emptyAccounts, emptyUsage, type Account, type Profile } from "../types";
@@ -111,7 +112,12 @@ async function run() {
     radios()[0].focus(); key("ArrowDown", 0, 7); key("End", 0, 7);
     accountRows[0].click(); await frame(); state(0, 0, false);
     check(calls.every((command) => startupReads.has(command)), `profile navigation submitted IPC: ${calls.filter((command) => !startupReads.has(command)).join(", ")}`);
-  } finally { dispose(); }
-  report({ failures, cases: ["roving Tab entry", "arrows wrap and Home/End", "exact profile and offline selection", "separate default action", "hidden profile and account reset", "popover search and focus return", "no management IPC"] });
+  } catch (error) { dispose(); throw error; }
+  // Keep the screen mounted until the harness finishes its native accessibility
+  // read and closes the fixture window (which owns this render's lifetime).
+  const card_geometry = [...document.querySelectorAll<HTMLElement>(".acct-row")].map((row) => {
+    const { x, y, width, height } = row.getBoundingClientRect(); return { x, y, width, height };
+  });
+  report({ failures, card_geometry, accessibility_lists: [{ name: "Agent accounts", buttons: ["Example", "Single profile"] }], cases: ["roving Tab entry", "arrows wrap and Home/End", "exact profile and offline selection", "separate default action", "hidden profile and account reset", "popover search and focus return", "no management IPC"] });
 }
 void run().catch((error) => report({ failures: [String(error)] }));

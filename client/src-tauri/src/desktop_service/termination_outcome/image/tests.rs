@@ -93,7 +93,7 @@ fn run_after(image: Arc<Image>, after_check: impl FnOnce()) -> Exit {
     image.before_spawn(&mut command).unwrap();
     after_check(); // The reviewer's race: AFTER the final check, before spawn.
     let mut child = command.spawn().unwrap();
-    let verified = image.matches_child(&child);
+    let verified = image.matches_child(&mut child);
     // Use the actual original Child, never adopt its PID for custody.
     use std::io::Write;
     let mut input = child.stdin.take();
@@ -169,7 +169,7 @@ fn an_unpaired_surrogate_is_never_the_held_loaded_image() {
     untrusted.env(MARKER, "1");
     let mut child = Owned(untrusted.spawn().unwrap());
     assert!(
-        !image.matches_child(&child.0),
+        !image.matches_child(&mut child.0),
         "identical bytes at a different file ID are not the original image"
     );
     drop(child.0.stdin.take());
@@ -200,7 +200,7 @@ fn the_frozen_accounted_runner_executes_the_retained_image_and_keeps_its_input()
             command.env(MARKER, "1");
             checked.before_spawn(command)?;
             let mut child = command.spawn()?;
-            if !checked.matches_child(&child) {
+            if !checked.matches_child(&mut child) {
                 drop(child.stdin.take());
             }
             Ok(child)

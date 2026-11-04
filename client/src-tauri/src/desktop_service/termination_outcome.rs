@@ -414,7 +414,13 @@ impl Context {
             .clone()
             .ok_or(UNCONFIRMED)?;
         let helper = routing.executable()?.to_owned();
-        let image = Arc::new(Image::capture(&helper).map_err(|_| UNCONFIRMED)?);
+        let image = Arc::new(Image::selected(routing.clone()).map_err(|_| {
+            if cfg!(target_os = "macos") {
+                image::MAC_UNAVAILABLE
+            } else {
+                UNCONFIRMED
+            }
+        })?);
         let context = Arc::new(Self {
             service,
             scope: wire::Scope {
@@ -451,6 +457,12 @@ impl Context {
         }))
     }
     fn current(&self) -> bool {
+        self.same_context() && self.image.current(&self.helper)
+    }
+    /// Facts the image observation cannot establish. Keep this separate from
+    /// the new-source admission check: Linux still executes its sealed original
+    /// if the mutable source changes AFTER the last check, as before.
+    fn same_context(&self) -> bool {
         let shared = &self.service.shared;
         let snapshot = self.service.snapshot();
         !shared.stopped.load(Ordering::Acquire)
@@ -478,10 +490,7 @@ impl Context {
                 .unwrap_or_else(PoisonError::into_inner)
                 .as_ref()
                 .is_some_and(|v| Arc::ptr_eq(v, &self.routing))
-            && self
-                .routing
-                .executable()
-                .is_ok_and(|p| p == self.helper && self.image.current(p))
+            && self.routing.executable().is_ok_and(|p| p == self.helper)
     }
     fn current_or_refuse(&self) -> Result<(), String> {
         if !self.current() || self.busy.load(Ordering::Acquire) {
@@ -498,13 +507,23 @@ impl Context {
         #[cfg(all(test, target_os = "linux"))]
         tests::after_spawn_check();
         let mut child = command.spawn()?;
-        if !self.image.matches_child(&child) {
-            self.rejected.store(true, Ordering::Release);
-            drop(child.stdin.take());
+        let observed = self.image.matches_child(&mut child);
+        #[cfg(all(test, target_os = "linux"))]
+        tests::after_image_observation(&mut child);
+        // Native image observation may be slow; it does not check the Service
+        // epoch/configuration/cancellation. Recheck the SAME Context last.
+        if !observed || !self.same_context() {
+            self.reject_child(&mut child);
+            #[cfg(all(test, target_os = "linux"))]
+            tests::observe_refused_child(&mut child);
         }
         // Never lose custody by returning Err after spawning. Both runners
         // retain/reap THIS child; rejected cannot become a successful receipt.
         Ok(child)
+    }
+    fn reject_child(&self, child: &mut std::process::Child) {
+        self.rejected.store(true, Ordering::Release);
+        drop(child.stdin.take());
     }
     fn start_call(&self) -> Result<Arc<dyn Send + Sync>, String> {
         self.current_or_refuse()?;
@@ -557,15 +576,18 @@ impl Context {
             move |command| {
                 environment.apply(command);
                 let mut child = original.spawn(command)?;
-                if registration
-                    .as_ref()
-                    .is_some_and(|registration| !registration.bind_original(&child))
-                {
+                let refused = original.rejected.load(Ordering::Acquire)
+                    || registration
+                        .as_ref()
+                        .is_some_and(|registration| !registration.bind_original(&child));
+                #[cfg(all(test, target_os = "linux"))]
+                tests::after_original_binding(&mut child);
+                if refused || !original.same_context() {
                     // Withhold the envelope but keep THIS child in the owned
                     // runner's stop/reap/pipe custody, including on refusal.
-                    drop(child.stdin.take());
+                    original.reject_child(&mut child);
                     #[cfg(all(test, target_os = "linux"))]
-                    tests::observe_refused_binding(&mut child);
+                    tests::observe_refused_child(&mut child);
                 }
                 Ok(child)
             },

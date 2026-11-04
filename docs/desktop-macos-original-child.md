@@ -28,9 +28,18 @@ The primitive is separate from the service-to-app host check and from
 connected-peer observations. Tests use isolated Apple-signed system helpers to
 exercise real task tokens and live code, including a same-child exec before
 input release. These are not a genuine installed Zerus pair positive or owner
-acceptance. The new service-native termination caller remains unavailable on
-Mac until its native adversarial evidence and ordinary/G1 source reviews are
-complete; this primitive does not enable that caller.
+acceptance. The service-native termination caller has its own narrow
+`Image::selected` adapter: it retains the original `Connection`, refuses
+unpaired/path-only routes and invokes this observation for every spawned helper.
+It then rechecks the same Service/configuration/epoch/generation/relay and
+cancellation immediately before handing the child to a runner; retention RPCs
+repeat that check after original-child registration. Rejection closes input and
+stays latched, with the same child and actual resources retained for cleanup.
+See [the caller boundary](desktop-termination-outcomes.md#execution-custody-and-platform-boundary).
+Its ordinary/G1 source review and native caller controls are independent of
+this primitive's evidence. The installed-pair Terminate/Remove positive belongs
+to the next coordinated Mac window; it is required for actual caller
+qualification and cannot be inferred from a component fixture.
 
 The native interfaces follow Apple's [task-info definitions](https://github.com/apple-oss-distributions/xnu/blob/main/osfmk/mach/task_info.h)
 and [task-name info conversion](https://github.com/apple-oss-distributions/xnu/blob/main/osfmk/kern/task.c).

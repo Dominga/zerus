@@ -117,6 +117,10 @@ pub struct LogEntry {
     /// The requirement revision a report says it considered.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub considered: Option<u64>,
+    /// The history entry a person's review of an unexplained execution entry
+    /// names (`Execution::unexplained`).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub reviews: Option<String>,
 }
 
 /// A task message's durable outbox reservation. Submission is not consumption.

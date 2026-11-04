@@ -65,7 +65,15 @@ pub struct Attempt {
     /// The native input a send, handoff or reopen reserved before any input.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub delivery: Option<Delivery>,
+    /// The history entries of the task's earlier executions (`sent` and
+    /// `resumed`) when this attempt began, by history entry ID: the baseline
+    /// that explains them. One no attempt froze or names is unexplained.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub frontier: Option<Vec<String>>,
 }
+
+/// The most history entries one attempt's frontier names.
+pub const MAX_FRONTIER: usize = 1024;
 
 impl Attempt {
     /// SHA-256 (lowercase hex) of the attempt's immutable original contents.
@@ -84,7 +92,13 @@ impl Attempt {
             self.at,
             &self.delivery,
         );
-        let bytes = serde_json::to_vec(&original).expect("an attempt serializes");
+        // A later field joins the fingerprint only when present, so a record
+        // written before it keeps the fingerprint its facts name.
+        let bytes = match &self.frontier {
+            None => serde_json::to_vec(&original),
+            Some(frontier) => serde_json::to_vec(&(original, frontier)),
+        }
+        .expect("an attempt serializes");
         format!("{:x}", Sha256::digest(bytes))
     }
 }
@@ -293,6 +307,49 @@ pub struct Execution {
     /// person's disposition of that exact attempt settles it.
     #[serde(skip_serializing_if = "Vec::is_empty")]
     pub unknown: Vec<String>,
+    /// History entries of an execution (`sent`, `resumed`) that no attempt
+    /// explains, by history entry ID: neither frozen in an attempt's frontier
+    /// nor naming an attempt's request, nor reviewed by the person. Each makes
+    /// the task a conflict and holds new delivery until the person reviews it.
+    #[serde(skip_serializing_if = "Vec::is_empty")]
+    pub unexplained: Vec<String>,
+}
+
+/// The execution entries no attempt explains (`Execution::unexplained`), in
+/// history order. Only a task whose attempts froze a frontier is checked.
+pub(crate) fn unexplained(log: &[LogEntry], ids: &[String], attempts: &[Attempt]) -> Vec<String> {
+    use std::collections::BTreeSet;
+    if !attempts.iter().any(|attempt| attempt.frontier.is_some()) {
+        return Vec::new();
+    }
+    let frozen: BTreeSet<&str> = attempts
+        .iter()
+        .flat_map(|attempt| attempt.frontier.iter().flatten())
+        .map(String::as_str)
+        .collect();
+    let requests: BTreeSet<&str> = attempts
+        .iter()
+        .filter(|attempt| !attempt.request_id.is_empty())
+        .map(|attempt| attempt.request_id.as_str())
+        .collect();
+    let reviewed: BTreeSet<&str> = log
+        .iter()
+        .filter(|entry| entry.kind == "reviewed" && entry.actor == Actor::Person)
+        .filter_map(|entry| entry.reviews.as_deref())
+        .collect();
+    log.iter()
+        .zip(ids)
+        .filter(|(entry, id)| {
+            matches!(entry.kind.as_str(), "sent" | "resumed")
+                && !frozen.contains(id.as_str())
+                && !reviewed.contains(id.as_str())
+                && !entry
+                    .request_id
+                    .as_deref()
+                    .is_some_and(|request| requests.contains(request))
+        })
+        .map(|(_, id)| id.clone())
+        .collect()
 }
 
 /// A name-only session key bound to its verified run: `from` is the key
@@ -342,6 +399,12 @@ pub(crate) fn check_attempt(key: &str, attempt: &Attempt) -> Result<()> {
             .delivery
             .as_ref()
             .is_some_and(|d| !delivery_valid(attempt, d))
+        || attempt.frontier.as_ref().is_some_and(|frontier| {
+            frontier.len() > MAX_FRONTIER
+                || frontier
+                    .iter()
+                    .any(|id| id.is_empty() || id.len() > 128 || id.chars().any(char::is_control))
+        })
     {
         return Err(Error::failed("invalid task attempt"));
     }
@@ -481,6 +544,7 @@ pub(crate) fn project(
                 conflict,
                 highest: 0,
                 unknown: Vec::new(),
+                unexplained: Vec::new(),
             }
         });
     };
@@ -533,6 +597,7 @@ pub(crate) fn project(
             conflict,
             highest: top,
             unknown,
+            unexplained: Vec::new(),
         });
     }
     let counts = |phase: Phase| !any_started || phase != Phase::NotStarted;
@@ -568,6 +633,7 @@ pub(crate) fn project(
         conflict: claims.len() > 1 || rebound.contains(attempt.id.as_str()),
         highest: top,
         unknown,
+        unexplained: Vec::new(),
     })
 }
 
@@ -831,6 +897,7 @@ mod tests {
             actor: Actor::Person,
             at: 100 * generation as i64,
             delivery: None,
+            frontier: None,
         }
     }
 
@@ -869,6 +936,7 @@ mod tests {
             delivery: None,
             stale: None,
             considered: None,
+            reviews: None,
         }
     }
 

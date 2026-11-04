@@ -1,7 +1,7 @@
 //! Actor attachment to an original platform handle. Selection/admission belongs
 //! to the lifecycle; no generic request or ambient path search starts a host.
 #![allow(dead_code)] // Activated by the explicit service handoff/policy integration.
-use super::{Activation, Endpoint, Outbox, RestorePage, Session};
+use super::{Activation, AdmittedClick, Endpoint, Outbox, RestorePage, Session};
 use crate::desktop::{
     attention,
     store::{Location, Store},
@@ -396,7 +396,7 @@ impl<H: Host> Runtime<H> {
         &mut self,
         store: &mut Store,
         attention: &mut attention::Runtime,
-    ) -> Vec<Activation> {
+    ) -> Vec<AdmittedClick> {
         if self.quiescing && !self.retirement_started {
             self.outbox.retire();
             attention.set_policy(attention::Policy::default());

@@ -662,6 +662,11 @@ old events when it reconnects. This does not mark the underlying work as read.
 muted or acknowledging pending work. Muted sessions remain available in the
 Needs attention filter.
 
+The desktop service accepts notification clicks only for a live, unblocked
+attention request on Linux, macOS and Windows. After a read, mute or resolution
+retires that request, a later click is ignored even if the operating system has
+not yet removed the banner.
+
 Notifications open Activity for the exact requesting run and conversation,
 including remote or renamed sessions. Polling and restarts do not repeat the same
 request; resolved notifications are removed. Main-agent reply banners wait until

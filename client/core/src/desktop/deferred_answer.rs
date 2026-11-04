@@ -422,11 +422,15 @@ impl Intent {
             return Err("deferred_answer_intent_changed");
         }
         // The CLI's own rule: a run, a conversation unless the question is a
-        // startup one, a 64-digit hash and at least one answer.
+        // startup one, a 64-digit hash and at least one answer. The CLI skips
+        // only an optional Codex asynchronous question, a source v1 never
+        // takes, and refuses that before its receipt: a Skip here would end
+        // Unknown although nothing was sent.
         if request.expected_run_id.is_empty()
             || (request.expected_conversation_id.is_empty()
                 && !startup_question_id(&request.question_id))
             || request.answers.is_empty()
+            || request.answers.iter().any(|answer| answer.skip)
         {
             return Err("deferred_answer_refused");
         }

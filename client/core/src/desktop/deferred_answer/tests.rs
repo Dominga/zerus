@@ -304,15 +304,111 @@ fn only_an_answer_matching_its_checkpoint_and_pinned_consent_verifies() {
         outside.verify().err(),
         Some("deferred_answer_consent_changed")
     );
+    // Each binding field on its own: `pinned` names another question, run
+    // or conversation than the checkpoint and the stdin, although the
+    // checkpoint hashed exactly that identity.
+    for (key, value) in [
+        ("question_id", json!("q-2")),
+        ("run_id", json!("run-2")),
+        ("conversation_id", json!("conversation-2")),
+    ] {
+        let mut changed = crate::questions::consent_identity(&asked);
+        changed[key] = value;
+        let mut rehashed = cp.clone();
+        rehashed.question.as_mut().unwrap().identity_sha256 = checkpoint::identity_sha256(&changed);
+        let drifted = Intent {
+            checkpoint: serde_json::to_string(&rehashed).unwrap(),
+            pinned: changed.to_string(),
+            ..base.clone()
+        };
+        assert_eq!(
+            drifted.verify().err(),
+            Some("deferred_answer_consent_changed"),
+            "{key}"
+        );
+    }
+    // A checkpoint the client never saves, of the right kind and family
+    // and naming this request.
+    let mut versioned = cp.clone();
+    versioned.version += 1;
+    let versioned = Intent {
+        checkpoint: serde_json::to_string(&versioned).unwrap(),
+        ..base.clone()
+    };
+    assert_eq!(
+        versioned.verify().err(),
+        Some("invalid_deferred_answer_checkpoint")
+    );
     // No answers: the CLI's own refusal, never offered.
     let empty = intent_of(&asked, &[]);
     assert_eq!(empty.verify().err(), Some("deferred_answer_refused"));
-    // A Skip answer verifies only in the client's exact Skip shape.
-    let skip = vec![AnswerItem::Skip {
+    // A Skip, alone or beside a choice: the CLI skips only an optional Codex
+    // asynchronous question, which v1 never takes, and refuses any other
+    // before its receipt.
+    let skip = AnswerItem::Skip {
         question_id: "q-1".into(),
         skip: true,
-    }];
-    assert!(intent_of(&asked, &skip).verify().is_ok());
+    };
+    for source in SOURCES {
+        let mut optional = question(source);
+        optional["optional"] = json!(true);
+        assert_eq!(
+            intent_of(&optional, std::slice::from_ref(&skip))
+                .verify()
+                .err(),
+            Some("deferred_answer_refused"),
+            "{source}"
+        );
+    }
+    let mut two = asked.clone();
+    two["questions"]
+        .as_array_mut()
+        .unwrap()
+        .push(json!({"id": "q-2", "question": "And this one?",
+            "options": [{"id": "yes", "label": "Yes"}]}));
+    let mut mixed = choice("yes");
+    mixed.push(AnswerItem::Skip {
+        question_id: "q-2".into(),
+        skip: true,
+    });
+    assert_eq!(
+        intent_of(&two, &mixed).verify().err(),
+        Some("deferred_answer_refused")
+    );
+    let mut both = choice("yes");
+    both.push(AnswerItem::Choice {
+        question_id: "q-2".into(),
+        selected_option_ids: vec!["yes".into()],
+        text: String::new(),
+    });
+    assert!(intent_of(&two, &both).verify().is_ok());
+}
+
+#[test]
+fn an_intent_beyond_the_control_line_stays_on_the_direct_path() {
+    // A Kimi plan review's consent identity carries the whole plan, so its
+    // pinned identity alone can exceed the control line.
+    let mut review = question("kimi_plan_review");
+    review["questions"][0]["body"] = json!("x".repeat(zerus_watch_protocol::CONTROL_LINE_BYTES));
+    let large = intent_of(&review, &choice("yes"));
+    assert!(large.original.len() <= MAX_INPUT && large.checkpoint.len() < 1024);
+    assert_eq!(
+        large.clone().verify().err(),
+        Some("deferred_answer_original_too_large")
+    );
+    // Decided before any decoding.
+    let undecodable = Intent {
+        checkpoint: "{".into(),
+        original: "{".into(),
+        ..large
+    };
+    assert_eq!(
+        undecodable.verify().err(),
+        Some("deferred_answer_original_too_large")
+    );
+    // The same plan in a line that fits verifies.
+    review["questions"][0]["body"] = json!("x".repeat(1 << 10));
+    assert!(intent_of(&review, &choice("yes")).verify().is_ok());
 }
 
 #[test]
@@ -563,10 +659,207 @@ fn only_a_drained_recorded_receipt_or_a_proven_non_delivery_settles() {
         assert!(!invalid.valid(), "{invalid:?}");
         assert_eq!(invalid.result(plan), None);
     }
-    // Another plan's receipt is never this one's.
-    let mut other = plan.clone();
-    other.input_sha256 = "d".repeat(64);
-    assert_eq!(recorded.result(&other), None);
+    // A Recorded receipt settles only with this plan's own outcome: another
+    // status, request or stdin digest never does.
+    for outcome in [
+        Outcome {
+            status: "rejected".into(),
+            ..answered.clone()
+        },
+        Outcome {
+            status: "in_progress".into(),
+            ..answered.clone()
+        },
+        Outcome {
+            request_id: "00000000-0000-4000-8000-000000000001".into(),
+            ..answered.clone()
+        },
+        Outcome {
+            input_sha256: "d".repeat(64),
+            ..answered.clone()
+        },
+    ] {
+        assert!(!outcome.matches(plan), "{outcome:?}");
+        let mismatched = receipt(&verified, Phase::Recorded, true, "", Some(outcome));
+        assert!(mismatched.valid() && mismatched.binding.agrees(plan));
+        assert_eq!(mismatched.result(plan), None, "{mismatched:?}");
+    }
+    // Another plan's receipt is never this one's, through fields its
+    // outcome does not carry too: it neither settles nor proves that
+    // nothing was delivered.
+    let others: Vec<(&str, Plan)> = vec![
+        (
+            "session",
+            Plan {
+                session: "claude/other-answer".into(),
+                ..plan.clone()
+            },
+        ),
+        (
+            "run",
+            Plan {
+                run_id: "run-2".into(),
+                ..plan.clone()
+            },
+        ),
+        (
+            "conversation",
+            Plan {
+                conversation_id: "conversation-2".into(),
+                ..plan.clone()
+            },
+        ),
+        (
+            "question",
+            Plan {
+                question_id: "q-2".into(),
+                ..plan.clone()
+            },
+        ),
+        (
+            "question hash",
+            Plan {
+                question_hash: "c".repeat(64),
+                ..plan.clone()
+            },
+        ),
+        (
+            "identity",
+            Plan {
+                identity_sha256: "e".repeat(64),
+                ..plan.clone()
+            },
+        ),
+        (
+            "message",
+            Plan {
+                message_sha256: "f".repeat(64),
+                ..plan.clone()
+            },
+        ),
+        (
+            "stdin",
+            Plan {
+                input_sha256: "d".repeat(64),
+                ..plan.clone()
+            },
+        ),
+    ];
+    for (name, other) in &others {
+        assert!(other.valid(), "{name}");
+        assert_eq!(recorded.result(other), None, "{name}");
+        assert!(!recorded.not_delivered(other), "{name}");
+        for code in [NOT_STARTED, REJECTED] {
+            let failed = receipt(&verified, Phase::Failed, true, code, None);
+            assert_eq!(failed.result(other), None, "{name} {code}");
+            assert!(!failed.not_delivered(other), "{name} {code}");
+        }
+    }
+    // Another intent's receipt: one stdin byte more, or an intent that
+    // does not verify.
+    let spaced = Intent {
+        original: format!(" {}", intent.original),
+        ..intent.clone()
+    };
+    assert!(spaced.clone().verify().is_ok());
+    assert!(!recorded.matches(&spaced));
+    let unverified = Intent {
+        checkpoint: "{}".into(),
+        ..intent.clone()
+    };
+    assert!(!recorded.matches(&unverified));
+}
+
+#[test]
+fn an_admission_matches_only_its_own_durable_acceptance() {
+    let intent = intent();
+    let verified = intent.clone().verify().unwrap();
+    let admitted = Admission {
+        abi: ABI.into(),
+        request_id: intent.request_id.clone(),
+        scope: scope(),
+        accepted: true,
+        durable: true,
+        code: String::new(),
+        receipt: Some(receipt(&verified, Phase::Queued, false, "", None)),
+    };
+    assert!(admitted.matches(&intent));
+    let spaced = Intent {
+        original: format!(" {}", intent.original),
+        ..intent.clone()
+    };
+    let another = spaced.verify().unwrap();
+    let cases: Vec<(&str, Admission)> = vec![
+        (
+            "abi",
+            Admission {
+                abi: "x".into(),
+                ..admitted.clone()
+            },
+        ),
+        (
+            "request",
+            Admission {
+                request_id: "00000000-0000-4000-8000-000000000001".into(),
+                ..admitted.clone()
+            },
+        ),
+        (
+            "scope",
+            Admission {
+                scope: Scope {
+                    service_epoch: "00000000-0000-4000-8000-000000000092".into(),
+                    ..scope()
+                },
+                ..admitted.clone()
+            },
+        ),
+        (
+            "refused",
+            Admission {
+                accepted: false,
+                ..admitted.clone()
+            },
+        ),
+        (
+            "not durable",
+            Admission {
+                durable: false,
+                ..admitted.clone()
+            },
+        ),
+        (
+            "code",
+            Admission {
+                code: "deferred_answer_busy".into(),
+                ..admitted.clone()
+            },
+        ),
+        (
+            "no receipt",
+            Admission {
+                receipt: None,
+                ..admitted.clone()
+            },
+        ),
+        (
+            "invalid receipt",
+            Admission {
+                receipt: Some(receipt(&verified, Phase::Recorded, false, "", None)),
+                ..admitted.clone()
+            },
+        ),
+        (
+            "another original's receipt",
+            Admission {
+                receipt: Some(receipt(&another, Phase::Queued, false, "", None)),
+                ..admitted.clone()
+            },
+        ),
+    ];
+    for (name, other) in cases {
+        assert!(!other.matches(&intent), "{name}");
+    }
 }
 
 #[test]
@@ -601,6 +894,65 @@ fn a_lookup_matches_only_its_own_query() {
     let mut another = query.clone();
     another.plan_sha256 = "f".repeat(64);
     assert!(!found.matches(&another));
+    // An absent receipt matches only as not found.
+    let missing = Lookup {
+        found: false,
+        receipt: None,
+        ..found.clone()
+    };
+    assert!(missing.matches(&query));
+    for other in [
+        Lookup {
+            receipt: None,
+            ..found.clone()
+        },
+        Lookup {
+            request_id: "00000000-0000-4000-8000-000000000001".into(),
+            ..found.clone()
+        },
+        Lookup {
+            scope: Scope {
+                service_epoch: "00000000-0000-4000-8000-000000000092".into(),
+                ..scope()
+            },
+            ..found.clone()
+        },
+    ] {
+        assert!(!other.matches(&query), "{other:?}");
+    }
+    // A valid receipt of another configuration, session or request, even in
+    // this scope's reply, is never this query's; nor is an invalid one.
+    let bound = |change: &dyn Fn(&mut Receipt)| {
+        let mut lookup = found.clone();
+        change(lookup.receipt.as_mut().unwrap());
+        lookup
+    };
+    for (name, other) in [
+        (
+            "configuration",
+            bound(&|r: &mut Receipt| r.binding.configuration = "b".repeat(64)),
+        ),
+        (
+            "session",
+            bound(&|r: &mut Receipt| r.binding.session = "claude/other-answer".into()),
+        ),
+        (
+            "request",
+            bound(&|r: &mut Receipt| {
+                r.binding.request_id = "00000000-0000-4000-8000-000000000001".into()
+            }),
+        ),
+    ] {
+        assert!(other.receipt.as_ref().unwrap().valid(), "{name}");
+        assert!(!other.matches(&query), "{name}");
+    }
+    let invalid = bound(&|r: &mut Receipt| r.drained = true);
+    assert!(!invalid.receipt.as_ref().unwrap().valid());
+    assert!(!invalid.matches(&query));
+    // The historical admission epoch stays separate from the current scope.
+    let earlier =
+        bound(&|r: &mut Receipt| r.admission_epoch = "00000000-0000-4000-8000-000000000093".into());
+    assert!(earlier.matches(&query));
     // A DeepSeek session is never this kind's.
     let mut native = query.clone();
     native.session = "dsh/example".into();

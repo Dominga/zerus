@@ -24,6 +24,13 @@ mod windows;
 #[cfg(windows)]
 pub use windows::*;
 
+/// Whether a console belongs to this process alone: it has a window and no other
+/// process, such as the user's shell, is attached. Windows creates one for a
+/// console program whose starter gave it none (a logon task, COM activation).
+pub fn private_console(window: bool, attached: u32) -> bool {
+    window && attached == 1
+}
+
 /// A completed process roster may still contain protected Linux processes whose
 /// paths the OS refuses to disclose. Keep these separate from readable paths:
 /// they require personal confirmation, never automatic cleanup authority.
@@ -654,5 +661,37 @@ mod tests {
         drop(FileLock::exclusive(owner).unwrap());
         contender.try_lock_exclusive().unwrap();
         drop(still_open);
+    }
+}
+
+#[cfg(test)]
+mod console_allocation_tests {
+    #[test]
+    fn only_a_console_no_other_process_uses_is_released() {
+        // A logon task or COM start: Windows made a console for this process alone.
+        assert!(super::private_console(true, 1));
+        // Started from a terminal: the user's shell shares it, so it stays.
+        assert!(!super::private_console(true, 2));
+        // No console window, or no attached process count: nothing to release.
+        assert!(!super::private_console(false, 1));
+        assert!(!super::private_console(true, 0));
+    }
+
+    #[test]
+    fn the_manifest_gives_hgs_no_console_when_its_starter_has_none() {
+        let manifest = include_str!("../hgs.manifest");
+        let settings = manifest
+            .split("<windowsSettings>")
+            .nth(1)
+            .and_then(|rest| rest.split("</windowsSettings>").next())
+            .expect("windowsSettings");
+        assert!(settings.contains(
+            r#"<consoleAllocationPolicy xmlns="http://schemas.microsoft.com/SMI/2024/WindowsSettings">detached</consoleAllocationPolicy>"#
+        ));
+        // The settings it already had stay.
+        assert!(
+            settings.contains(">UTF-8</activeCodePage>")
+                && settings.contains(">true</longPathAware>")
+        );
     }
 }

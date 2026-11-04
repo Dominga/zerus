@@ -56,10 +56,10 @@ use windows_sys::{
         },
         System::{
             Console::{
-                GenerateConsoleCtrlEvent, GetConsoleMode, GetStdHandle, SetConsoleCtrlHandler,
-                SetConsoleMode, CTRL_BREAK_EVENT, CTRL_CLOSE_EVENT, CTRL_C_EVENT,
-                CTRL_LOGOFF_EVENT, CTRL_SHUTDOWN_EVENT, ENABLE_VIRTUAL_TERMINAL_PROCESSING,
-                STD_OUTPUT_HANDLE,
+                FreeConsole, GenerateConsoleCtrlEvent, GetConsoleMode, GetConsoleProcessList,
+                GetConsoleWindow, GetStdHandle, SetConsoleCtrlHandler, SetConsoleMode,
+                CTRL_BREAK_EVENT, CTRL_CLOSE_EVENT, CTRL_C_EVENT, CTRL_LOGOFF_EVENT,
+                CTRL_SHUTDOWN_EVENT, ENABLE_VIRTUAL_TERMINAL_PROCESSING, STD_OUTPUT_HANDLE,
             },
             Diagnostics::ToolHelp::{
                 CreateToolhelp32Snapshot, Process32FirstW, Process32NextW, Thread32First,
@@ -1060,6 +1060,18 @@ pub(super) fn virtual_terminal() -> bool {
 }
 pub fn gui_env() -> Vec<String> {
     Vec::new()
+}
+
+/// The desktop service never keeps a console of its own: closing that window or
+/// Windows Terminal tab would end it. Windows 11 24H2 and later allocate none
+/// (`consoleAllocationPolicy` in src/hgs.manifest); earlier releases create one
+/// for a logon task, which is released here before startup. A console that
+/// another process shares, such as the terminal it was started from, is kept.
+pub fn release_private_console() -> bool {
+    let window = !unsafe { GetConsoleWindow() }.is_null();
+    let mut processes = [0u32; 2];
+    let attached = unsafe { GetConsoleProcessList(processes.as_mut_ptr(), processes.len() as u32) };
+    super::private_console(window, attached) && unsafe { FreeConsole() } != 0
 }
 
 static INTERRUPTED: AtomicBool = AtomicBool::new(false);

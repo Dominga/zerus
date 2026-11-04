@@ -332,6 +332,12 @@ pub struct Flags {
     /// `hgs watch --json` (watch-v1): the heartbeat follows the local listing
     /// as a stream instead of running `ls` (`watch_listing`). Not an operation.
     pub watch: bool,
+    /// `session-id-selector-v1`: the CLI selects a session by `--session-id`.
+    /// Not an operation (`session_selector`).
+    pub session_selector: bool,
+    /// `mobile-peer-session-id-v1`: its mobile peer entry points accept that
+    /// flag after the session. Not an operation.
+    pub peer_session_id: bool,
 }
 
 impl Flags {
@@ -381,6 +387,12 @@ impl Flags {
             watch: help
                 .lines()
                 .any(|line| line.trim() == zerus_watch_protocol::HELP_MARKER),
+            session_selector: help
+                .lines()
+                .any(|line| line.trim() == crate::session_selector::SELECTOR_MARKER),
+            peer_session_id: help
+                .lines()
+                .any(|line| line.trim() == crate::session_selector::PEER_MARKER),
         };
         if flags.windows_gateway {
             return flags.windows_local();

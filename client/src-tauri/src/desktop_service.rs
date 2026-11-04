@@ -50,6 +50,8 @@ mod catalog_relay;
 pub(crate) mod creation_clone;
 pub(crate) mod creation_launch;
 pub(crate) mod creation_worktree;
+#[cfg(any(target_os = "linux", target_os = "macos"))]
+pub(crate) mod task_start_reconcile;
 use catalog::catalog_loop;
 mod details;
 pub mod frontend;

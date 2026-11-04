@@ -5,6 +5,7 @@ use serde::{Deserialize, Serialize};
 use serde_json::Value;
 
 pub const PROFILE: &str = "task-start-reconcile-v1";
+pub const HELP_MARKER: &str = "Desktop task start reconcile ABI: desktop-task-start-reconcile-v1";
 /// Embedded originals must leave room inside the unchanged 64 KiB control line.
 /// The larger pure-policy/storage limits do not enlarge this wire boundary.
 pub const SOURCE_BYTES: usize = 32 << 10;

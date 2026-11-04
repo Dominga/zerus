@@ -139,7 +139,24 @@ desktop-service mode lands together with attachments by reference.
 ## Wire
 
 - **Intent.** The scope, the project and task, the original task message UUID
-  (`request_id`) and `original`: the exact outbox record bytes, inline.
+  (`request_id`), `original` and its explicit `form`. The default inline form
+  (never serialized) carries the exact outbox record bytes. The
+  `reference-v1` form carries the record's reference projection (below).
+- **Reference form.** `tasks_write::references` projects a record whose stdin
+  was frozen in its canonical form (`input_sha256`) and has attachments. Each
+  attachment's `data_base64` becomes a `data_ref` with the raw bytes' SHA-256
+  and size; every other field, the attachment order and metadata included,
+  stays exact, and only the one canonical base64 encoding projects. The
+  existing attachment limits hold: at most 8, each at most 10 MiB, 20 MiB in
+  total. Rebuilding requires each raw attachment's exact size and digest
+  (`task_message_reference_mismatch`), uses the same canonical serializer, and
+  the rebuilt stdin must hash to the frozen `input_sha256`
+  (`task_message_input_changed`); its exact length is known before any
+  attachment is read.
+  The form is stated, never inferred: an inline intent never accepts a
+  projection, and a reference intent never accepts inline data. A reference
+  intent has no call until it is rebuilt (`Verified::rebuild`), and then
+  exactly the call its inline original would have had.
 - **Verification.** Duplicate keys at the record or intent level are refused
   before any value is built. The record must decode (`outbox::decode`, which
   refuses a malformed frozen input), carry the request ID and have frozen its
@@ -157,7 +174,10 @@ desktop-service mode lands together with attachments by reference.
   check, with that stdin.
 - **Binding.** The kind, schema 1, the configuration, the project, task and
   request IDs, the raw source, UI snapshot (`outbox::snapshot`) and input
-  digests, and the plan and consent digests.
+  digests, and the plan and consent digests. A reference intent's binding also
+  names its form, and its source, snapshot and consent digests are those of
+  the projection. Its plan, and with it the frozen input digest, is that of
+  its inline original.
 - **Receipt.** The phases are Queued, Reserved, Running, Recorded, Failed and
   Unknown. Recorded carries the closed outcome: the request, mode, dispatch
   and a `queued` or `note` state. That is the exact CLI metadata outcome,

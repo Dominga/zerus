@@ -203,6 +203,12 @@ impl Runtime {
                 intent.scope == self.scope,
                 "task message connection changed"
             );
+            // The reference form needs its staged attachments, which this
+            // service does not prepare yet: refused before any row.
+            ensure!(
+                intent.form.is_inline(),
+                "task message reference form unavailable"
+            );
             let verified = intent.verify().map_err(anyhow::Error::msg)?;
             lease.current(
                 &tx,

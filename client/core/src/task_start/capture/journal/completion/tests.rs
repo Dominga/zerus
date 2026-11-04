@@ -5,7 +5,11 @@ use std::fs;
 const READ: &str = "0000000a-1111-4111-8111-111111111111";
 const NEXT: &str = "0000000b-1111-4111-8111-111111111111";
 fn offered(f: &Fixture) -> Saved {
-    let mut journal = Journal::prepare(f.capture().unwrap(), &f.intent.reconcile_id).unwrap();
+    let mut journal = Journal::prepare(
+        f.capture().unwrap(),
+        &CheckId::fixture_initial(&f.intent.reconcile_id),
+    )
+    .unwrap();
     journal.offer().unwrap();
     drop(journal);
     saved(f)
@@ -191,11 +195,31 @@ fn a_genuinely_new_delivery_is_preserved_and_only_then_can_have_an_explicit_new_
         Settlement::ChangedOriginal
     );
     assert_eq!(fs::read(&f.file).unwrap(), before);
+    let observed = Saved::read(
+        &f.store,
+        &f.intent.binding.key.project,
+        &f.intent.binding.key.task,
+    )
+    .unwrap()
+    .unwrap();
+    let old_journal = fs::read(f.file.with_extension("reconcile")).unwrap();
+    assert_eq!(
+        observed
+            .prepare_new_original(f.capture().unwrap(), &CheckId::fresh())
+            .err(),
+        Some(Error::Unavailable)
+    );
+    assert_eq!(
+        fs::read(f.file.with_extension("reconcile")).unwrap(),
+        old_journal
+    );
+    let proposal = saved.next_check_id().unwrap();
+    let next_id = proposal.as_str().to_owned();
     let next = saved
-        .prepare_new_original(f.capture().unwrap(), READ)
+        .prepare_new_original(f.capture().unwrap(), &proposal)
         .unwrap();
     assert_eq!(next.saved().phase(), Phase::Prepared);
-    assert_eq!(next.saved().reconcile_id(), READ);
+    assert_eq!(next.saved().reconcile_id(), next_id);
     assert_eq!(fs::read(&f.file).unwrap(), before);
 }
 
@@ -303,7 +327,7 @@ fn completed_original_cannot_prepare_another_check_for_the_same_delivery_id() {
     });
     let before = fs::read(f.file.with_extension("reconcile")).unwrap();
     assert!(saved
-        .prepare_new_original(f.capture().unwrap(), READ)
+        .prepare_new_original(f.capture().unwrap(), &CheckId::fresh())
         .is_err());
     assert_eq!(
         fs::read(f.file.with_extension("reconcile")).unwrap(),
@@ -314,7 +338,11 @@ fn completed_original_cannot_prepare_another_check_for_the_same_delivery_id() {
 fn settlement_and_completed_phases_refuse_offer_before_any_publication_attempt() {
     for phase in [Phase::SettlementPrepared, Phase::Completed] {
         let f = Fixture::new();
-        let mut journal = Journal::prepare(f.capture().unwrap(), &f.intent.reconcile_id).unwrap();
+        let mut journal = Journal::prepare(
+            f.capture().unwrap(),
+            &CheckId::fixture_initial(&f.intent.reconcile_id),
+        )
+        .unwrap();
         journal.offer().unwrap();
         let (_, r) = submitted(&f, journal.saved());
         let mut record = journal.saved.disk.record.clone();

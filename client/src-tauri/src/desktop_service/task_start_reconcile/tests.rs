@@ -346,8 +346,9 @@ fn prepare_check(service: Arc<Service>, root: &Path, view: &task_start::View) ->
         read.scope.clone(),
     )
     .unwrap();
-    let id = uuid::Uuid::new_v4().to_string();
-    let journal = Journal::prepare(source, &id).unwrap();
+    let proposal = CheckId::fresh();
+    let id = proposal.as_str().to_owned();
+    let journal = Journal::prepare(source, &proposal).unwrap();
     assert_eq!(journal.saved().phase(), Phase::Prepared);
     id
 }
@@ -493,9 +494,10 @@ fn original_lookup(
         read.scope.clone(),
     )
     .unwrap();
-    let intent = source.intent(&uuid::Uuid::new_v4().to_string()).unwrap();
+    let proposal = CheckId::fresh();
+    let intent = source.intent(proposal.as_str()).unwrap();
     let registration = read.prepare(intent.clone()).unwrap();
-    let mut journal = Journal::prepare(source, &intent.reconcile_id).unwrap();
+    let mut journal = Journal::prepare(source, &proposal).unwrap();
     journal.offer().unwrap();
     let held: Arc<dyn Send + Sync> = Arc::new(Mutex::new(journal));
     read.exchange(Some(registration), Value::Null, false, held)
@@ -665,5 +667,67 @@ fn publication_review_and_oversize_are_visible_without_offering_or_discarding() 
             journal_problem(journal::Error::PublicationOversize),
             PUBLICATION_OVERSIZE
         );
+    });
+}
+
+#[test]
+fn two_confirmed_discards_keep_old_check_ids_retired_before_a_fresh_native_check() {
+    if !private_case("desktop_service::task_start_reconcile::tests::two_confirmed_discards_keep_old_check_ids_retired_before_a_fresh_native_check") { return; }
+    tauri::async_runtime::block_on(async {
+        let f = fixture(json!({}));
+        let (service, _cache) = connected(&f).await;
+        let (root, view) = source(&f);
+        let first = prepare_check(service.clone(), &root, &view);
+        crate::task_start::discard_check(
+            &root,
+            &view.project,
+            &view.task,
+            &view.id,
+            &view.snapshot,
+            &first,
+        )
+        .unwrap();
+        let saved = Saved::read(&root, &view.project, &view.task)
+            .unwrap()
+            .unwrap();
+        let proposal = saved.next_check_id().unwrap();
+        let second = proposal.as_str().to_owned();
+        let read = Read::new(Some(service.clone())).unwrap();
+        let original = Captured::read(
+            &root,
+            &view.project,
+            &view.task,
+            &view.id,
+            &view.snapshot,
+            read.scope.clone(),
+        )
+        .unwrap();
+        drop(Journal::prepare_after_discard(original, &proposal, &first).unwrap());
+        crate::task_start::discard_check(
+            &root,
+            &view.project,
+            &view.task,
+            &view.id,
+            &view.snapshot,
+            &second,
+        )
+        .unwrap();
+        assert!(calls(&f).is_empty());
+        let answer = invoke(service.clone(), root.clone(), view, Arc::new(()))
+            .await
+            .unwrap();
+        assert_eq!(answer.outcome.as_deref(), Some("submitted"));
+        let log = calls(&f);
+        assert_eq!(
+            log.iter()
+                .filter(|c| c["op"] == "task_start_reconcile")
+                .count(),
+            1
+        );
+        assert!(log
+            .iter()
+            .all(|c| c["reconcile_id"] != first && c["reconcile_id"] != second));
+        service.stop();
+        service.join().await.unwrap();
     });
 }

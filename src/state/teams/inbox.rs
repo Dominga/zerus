@@ -1315,6 +1315,20 @@ pub(crate) fn attention(team: &Team, now: f64) -> Vec<Value> {
             out.push(item);
         }
     }
+    // The owner, 2026-11-05: a running team whose lead's session stopped has
+    // nobody to read its reports or hand out its tasks; only the owner can
+    // resume it (or restart_crashed does, when it is on).
+    if team.status == TeamStatus::Running {
+        if let Some(lead) = team.member(&team.lead).filter(|lead| lead.state == MemberState::Active && lead.session.is_some()) {
+            if let Some(seen) = lead.seen.filter(|seen| !seen.live) {
+                out.push(json!({"kind":"lead_stopped","member":team.role_of(&lead.id),"member_id":lead.id,"since":seen.at,
+                    "minutes":((now - seen.at).max(0.0) / 60.0).round() as u64,
+                    "summary":format!("The lead's session stopped: nobody reads reports or hands out tasks. Resume {}{}",
+                        lead.session.as_ref().map(|session| session.name.as_str()).unwrap_or_default(),
+                        if team.settings.restart_crashed { "" } else { " (or turn on restart_crashed)" })}));
+            }
+        }
+    }
     // A request only the member's Terminal takes waits for the owner at once:
     // nobody else can answer it.
     for member in &team.members {
@@ -1709,6 +1723,24 @@ mod tests {
         team.members.iter_mut().find(|member| member.id == "dev").unwrap().terminal_question = None;
         assert!(!super::items(&team).iter().any(|item| item.kind == "terminal_question"));
         assert!(!super::attention(&team, now).iter().any(|item| item["kind"] == "permission_terminal"));
+    }
+
+    /// The owner, 2026-11-05: the lead's session stopped and the team still
+    /// showed Running; nobody read reports. The owner sees it at once.
+    #[test]
+    fn a_stopped_lead_waits_for_the_owner_at_once() {
+        let mut team = team();
+        let now = 5_000.0;
+        team.members.iter_mut().find(|member| member.id == "lead").unwrap().seen = Some(MemberSeen { at: now - 120.0, live: false });
+        let attention = super::attention(&team, now);
+        let found = attention.iter().find(|item| item["kind"] == "lead_stopped").expect("the owner sees the stopped lead");
+        assert_eq!(found["minutes"], 2);
+        assert!(found["summary"].as_str().unwrap().contains("restart_crashed"), "{found}");
+        let waiting = super::super::owner_waiting::items(std::slice::from_ref(&team), now);
+        assert!(waiting.iter().any(|item| item["kind"] == "lead_stopped" && item["action"] == "resume_lead"), "{waiting:?}");
+        // A live lead, or a paused team, is no item.
+        team.members.iter_mut().find(|member| member.id == "lead").unwrap().seen = Some(MemberSeen { at: now, live: true });
+        assert!(!super::attention(&team, now).iter().any(|item| item["kind"] == "lead_stopped"));
     }
 
     #[test]

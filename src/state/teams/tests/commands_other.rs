@@ -583,6 +583,45 @@ fn the_leads_answer_reaches_the_members_subagent_card() {
     });
 }
 
+/// The owner, 2026-11-05: Kimi refused the lead's answer ("Another Kimi
+/// request is waiting. Answer in Terminal.") and the request stayed in the
+/// lead's inbox, which could never answer it. It moves to the owner.
+#[test]
+fn an_answer_only_the_terminal_takes_moves_the_request_to_the_owner() {
+    use crate::state::teams::model::{PendingQuestion, SessionRef};
+    let (mut team, _, _) = review_team();
+    let card = json!({"question_id":"k1","question_hash":"hk","approval":true,"can_answer":true,
+        "questions":[{"id":"approval","header":"Bash","question":"Run this command?","options":[{"id":"1","label":"Approve once"}]}]});
+    {
+        let dev = team.members.iter_mut().find(|member| member.id == "dev").unwrap();
+        dev.session = Some(SessionRef { name: "kimi/x/dev".into(), run_id: "r1".into(), conversation_id: "c".into(), ..Default::default() });
+        dev.pending = Some(PendingQuestion { question_id: "k1".into(), question_hash: "hk".into(), approval: true, at: 1.0, card: card.clone() });
+    }
+    let id = team.id.clone();
+    with_review_team(&team, || {
+        let inspected = json!({"pending_questions":[card.clone()]}).to_string();
+        super::super::dispatcher::set_fake_hgs(Some(Box::new(move |_, args: &[&str], _: Option<&Value>| {
+            Ok(match args.first().copied() {
+                Some("inspect") => super::super::dispatcher::fake_output(0, &inspected, ""),
+                _ => super::super::dispatcher::fake_output(1, "", "Another Kimi request is waiting. Answer in Terminal."),
+            })
+        })));
+        let result = as_lead(|| {
+            call("answer", json!({"member":"dev","question_id":"k1","expected_question_hash":"hk",
+                "answers":[{"question_id":"approval","selected_option_ids":["1"]}]}))
+        });
+        super::super::dispatcher::set_fake_hgs(None);
+        let error = result.unwrap_err().to_string();
+        assert!(error.contains("Nothing was answered") && error.contains("owner"), "{error}");
+        let after = Store::open(false).unwrap().load(&id).unwrap().unwrap();
+        let dev = after.members.iter().find(|member| member.id == "dev").unwrap();
+        assert!(dev.pending.is_none());
+        let moved = dev.terminal_question.as_ref().expect("the owner's now");
+        assert_eq!((moved.question_id.as_str(), moved.card["can_answer"].as_bool()), ("k1", Some(false)));
+        assert!(super::super::inbox::attention(&after, 10.0).iter().any(|item| item["kind"] == "permission_terminal"));
+    });
+}
+
 /// N20: the lead's own permission card is the owner's to answer. The lead
 /// answering it would decide the whole subagent group it was asked to
 /// confirm, so `hgs team answer` refuses it before reading the card.

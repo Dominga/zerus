@@ -65,6 +65,25 @@ fn a_crashed_member_is_restarted_only_when_the_team_allows_it() {
     assert!(found.contains(&Step::Restart { member: "dev".into() }), "{found:?}");
 }
 
+/// The owner, 2026-11-05: three Kimi agents exited while their terminals
+/// stayed open, and the team treated them as live. An exited agent is a
+/// stopped session; with restart_crashed on it is restarted, the lead too.
+#[test]
+fn an_exited_agent_with_an_open_terminal_is_stopped_and_restarted_even_the_lead() {
+    let listing = json!([{"sessions":[{"name":"kimi/x/lead","state":"running","runtime_state":"live","process_state":"exited",
+        "activity":"idle","phase":"idle"}]}]);
+    let found = seen(&listing);
+    assert_eq!((found[0].live, found[0].free, found[0].state.as_str()), (false, false, "stopped"));
+    // A paused session stays paused.
+    let paused = seen(&json!([{"sessions":[{"name":"kimi/x/lead","state":"paused","process_state":"exited"}]}]));
+    assert_eq!(paused[0].state, "paused");
+    let mut t = team();
+    t.settings.restart_crashed = true;
+    t.members.iter_mut().find(|member| member.id == "lead").unwrap().seen = Some(MemberSeen { at: 1.0, live: true });
+    let found = steps(&t, &[stopped("claude/x/lead", "r0", "stopped")], 20.0);
+    assert!(found.contains(&Step::Restart { member: "lead".into() }), "{found:?}");
+}
+
 #[test]
 fn a_paused_archived_limited_or_unseen_session_is_never_restarted() {
     let mut t = team();

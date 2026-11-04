@@ -46,6 +46,14 @@ gains the exact command and, after the answer, who answered.
   `hgs team waiting` lists it as `permission_escalated` with action
   `open_terminal`). It clears when the session stops asking. Owner,
   2026-11-04: such an approval waited half an hour with an idle lead.
+  A lead's `hgs team answer` that the native side refuses as Terminal-only
+  ("Another Kimi request is waiting. Answer in Terminal.") moves the
+  request the same way at once; nothing was answered, and the error says so.
+- Owner, 2026-11-05: an agent whose process exited while its terminal stays
+  open (`process_state: "exited"`, Agent exited) is a stopped session for the
+  team, never live. `restart_crashed` (still off by default) restarts the lead
+  too, and a running team whose lead's session stopped is on the owner's
+  attention list at once (`lead_stopped`, action `resume_lead`).
 
 ```json
 {"request_id":"UUID","team":"ID","member":"frontend","question_id":"Q",

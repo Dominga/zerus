@@ -132,7 +132,12 @@ pub(crate) fn seen(listing: &Value) -> Vec<Seen> {
         for record in machine["sessions"].as_array().into_iter().flatten() {
             let field = |key: &str| record[key].as_str().unwrap_or_default();
             // Terminal sessions report their process, DeepSeek ones a state.
-            let live = !matches!(field("state"), "paused" | "stopped" | "archived")
+            // The owner, 2026-11-05: an agent that exited while its terminal
+            // stays open is stopped, as the session state says (Agent exited),
+            // never live: the team waited on three exited Kimi sessions.
+            let exited = field("process_state") == "exited";
+            let live = !exited
+                && !matches!(field("state"), "paused" | "stopped" | "archived")
                 && (field("state") == "running" || field("process_state") == "running" || field("runtime_state") == "live");
             let activity = field("activity").to_owned();
             let idle = live && activity == "idle";
@@ -213,7 +218,7 @@ pub(crate) fn seen(listing: &Value) -> Vec<Seen> {
                 tool_started: record["tool_started"].as_f64().filter(|at| *at > 0.0),
                 agent: field("agent").to_owned(),
                 live,
-                state: field("state").to_owned(),
+                state: if exited && !matches!(field("state"), "paused" | "archived") { "stopped".to_owned() } else { field("state").to_owned() },
                 cwd: field("cwd").to_owned(),
                 muted: record["notification_preferences"]["muted"] == true,
                 notify_revision: record["notification_preferences"]["revision"].as_u64(),
@@ -877,11 +882,12 @@ pub(crate) fn steps_with(team: &Team, seen: &[Seen], now: f64, listed: Option<&B
     // U52: a member session that exited on its own is launched again into its
     // own conversation, at most three times an hour. A paused, archived,
     // limited or swapped session is never restarted, and neither is one that
-    // has not been seen live since (a failed relaunch does not loop).
+    // has not been seen live since (a failed relaunch does not loop). The
+    // lead too (owner, 2026-11-05): a team whose lead exited has nobody to
+    // read its reports.
     if team.settings.restart_crashed && team.status == TeamStatus::Running {
         for member in &team.members {
-            if member.id == team.lead
-                || member.agent == "opencode"
+            if member.agent == "opencode"
                 || member.state != MemberState::Active
                 || member.session.is_none()
                 || member.limited.is_some()
@@ -5144,7 +5150,14 @@ fn sync_permission(store: &mut Store, team: &Team, member_id: &str) -> anyhow::R
     // A request Zerus cannot answer (Kimi's Edit and Write approvals) is
     // never the lead's to answer, but it is never silent either: it keeps the
     // time it was first seen, so the lead hears of it once.
-    let terminal = cards.iter().find(|card| card["can_answer"] == false).map(|card| {
+    // One the lead's answer was refused for stays the owner's while the
+    // session still asks it.
+    let kept = member
+        .terminal_question
+        .as_ref()
+        .filter(|seen| cards.iter().any(|card| card["question_id"].as_str() == Some(seen.question_id.as_str())))
+        .cloned();
+    let terminal = kept.or_else(|| cards.iter().find(|card| card["can_answer"] == false).map(|card| {
         let question_id = card["question_id"].as_str().unwrap_or_default().to_owned();
         let at = member
             .terminal_question
@@ -5158,7 +5171,7 @@ fn sync_permission(store: &mut Store, team: &Team, member_id: &str) -> anyhow::R
             at,
             card: card.clone(),
         }
-    });
+    }));
     let answered = ask.is_none() && same.is_none();
     if ask.is_none() && !answered && terminal == member.terminal_question {
         return Ok(());
@@ -5739,6 +5752,13 @@ fn restart_crashed(store: &mut Store, team: &Team, member_id: &str) -> anyhow::R
         events.push(Event::new("restart_failed", json!({"member":team.role_of(member_id),"error":error})));
         Ok(())
     })
+}
+
+/// Whether a refused native answer can only be given in the session's
+/// Terminal: Kimi's adapters say so whenever Zerus cannot prove which
+/// request its panel shows.
+pub(crate) fn terminal_only(error: &str) -> bool {
+    error.contains("in Terminal") || error.contains("enlarge Terminal")
 }
 
 /// U52: too many crashes this hour leave the session stopped; the lead hears

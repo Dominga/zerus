@@ -2238,7 +2238,33 @@ fn answer(input: &Value) -> anyhow::Result<Value> {
     let request = json!({"request_id":uuid::Uuid::new_v4().to_string(),"expected_run_id":session.run_id,
         "expected_conversation_id":session.conversation_id,"question_id":question,"expected_question_hash":hash,"answers":input["answers"]});
     let output = super::dispatcher::hgs(&session.host, &["answer", &session.name, "--json"], Some(&request), std::time::Duration::from_secs(120))?;
-    ensure!(output.status.success(), "{}", String::from_utf8_lossy(&output.stderr).trim());
+    if !output.status.success() {
+        let error = String::from_utf8_lossy(&output.stderr).trim().to_owned();
+        // The owner, 2026-11-05: Kimi refuses an answer from outside its
+        // Terminal while another of its requests waits; the lead then had a
+        // request it could never answer. It goes to the owner at once.
+        if super::dispatcher::terminal_only(&error) {
+            let name = team.name_of(&member_id);
+            let mut store = Store::open(true)?;
+            store.mutate(None, &team.id, None, |team, events| {
+                let role = team.role_of(&member_id);
+                if let Some(found) = team.members.iter_mut().find(|found| found.id == member_id) {
+                    if let Some(mut asked) = found.pending.take_if(|pending| pending.question_id == question) {
+                        asked.card["can_answer"] = json!(false);
+                        asked.card["answer_unavailable_reason"] = json!(error);
+                        if found.permission.as_ref().is_some_and(|pending| pending["question_id"] == question.as_str()) {
+                            found.permission = None;
+                        }
+                        events.push(Event::new("question_in_terminal", json!({"member":role,"question_id":question,"reason":error})));
+                        found.terminal_question = Some(asked);
+                    }
+                }
+                Ok(Value::Null)
+            })?;
+            bail!("{error} Nothing was answered: it now waits for the owner in {name}'s Terminal, and the owner sees it at once.");
+        }
+        bail!("{error}");
+    }
     // B2: a denied permission's text reaches the member as one message, and
     // B1: the lead's or owner's answer is recorded with its reason.
     let selected: Vec<&str> = input["answers"]

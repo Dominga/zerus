@@ -125,6 +125,14 @@ fn team_items(team: &Team, now: f64, out: &mut Vec<Value>) {
                 found["member_id"] = attention["member_id"].clone();
                 out.push(found);
             }
+            // The lead's session stopped: the team waits for the owner to resume it.
+            "lead_stopped" => {
+                let member = attention["member"].as_str().unwrap_or_default().to_owned();
+                let mut found = item(team, "lead_stopped", &member, summary, at, "resume_lead");
+                found["member"] = json!(member);
+                found["member_id"] = attention["member_id"].clone();
+                out.push(found);
+            }
             // Only the member's Terminal takes this answer: the button opens the
             // team, and the title says where to answer.
             "permission_terminal" => {

@@ -1134,7 +1134,11 @@ impl Organization {
             .sync
             .next_due()
             .into_iter()
-            .chain(hub.legacy.as_ref().and_then(legacy_projects::Context::next_due))
+            .chain(
+                hub.legacy
+                    .as_ref()
+                    .and_then(legacy_projects::Context::next_due),
+            )
             .min()
             .map_or(IDLE_MS, |at| at.saturating_sub(now))
             .clamp(1, IDLE_MS);

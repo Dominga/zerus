@@ -138,7 +138,10 @@ pub async fn settings_qt_preferences(store: State<'_, Store>) -> Result<Value, S
 #[tauri::command]
 pub async fn settings_legacy_projects(app: AppHandle) -> Result<Value, String> {
     use tauri::Manager;
-    let organization = app.state::<crate::organization::Organization>().inner().clone();
+    let organization = app
+        .state::<crate::organization::Organization>()
+        .inner()
+        .clone();
     tauri::async_runtime::spawn_blocking(move || organization.legacy_project_report())
         .await
         .map_err(|_| "Could not read the legacy project import report.".to_owned())

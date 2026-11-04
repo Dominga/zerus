@@ -1607,10 +1607,12 @@ void TestTeamsUiMembers::memberMenuScalesAndDrains()
         for (auto *action : menu->actions())
             if (action->objectName() == "teamWorkspaceMemberScale") { QVERIFY(!action->isEnabled()); QVERIFY(action->toolTip().contains("2 members")); }
     });
-    // #581 L2: the lead takes a seat, as hgs's scale counts it; a removed member does not.
+    // Owner feedback 2026-11-04 (4): the cap counts the members besides the
+    // lead, as hgs's scale does; a removed member does not take a seat either.
     int seated = 0;
-    for (const auto &value : drained["members"].toArray()) seated += value.toObject()["state"].toString() != QLatin1String("removed");
-    QVERIFY(seated >= 3);
+    for (const auto &value : drained["members"].toArray())
+        seated += value.toObject()["state"].toString() != QLatin1String("removed") && value.toObject()["id"].toString() != drained["lead"].toString();
+    QVERIFY(seated >= 2);
     auto exact = drained; exact["settings"] = QJsonObject{{"max_members", seated}}; exact["revision"] = 15;
     QCOMPARE(scaleRoom(parse(exact)), 0);
     auto spare = exact; spare["settings"] = QJsonObject{{"max_members", seated + 2}};

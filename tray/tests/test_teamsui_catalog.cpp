@@ -1140,7 +1140,7 @@ void TestTeamsUiCatalog::catalogTemplateEditorRosterSkeletonAndChecks()
         else { QCOMPARE(o["role"].toString(), QStringLiteral("tester")); QCOMPARE(o["count"].toInt(), 1); QVERIFY(o["optional"].toBool()); }
     }
     QCOMPARE(feature["work"].toString(), QStringLiteral("worktree"));
-    QCOMPARE(feature["max_members"].toInt(), 3);
+    QCOMPARE(feature["max_members"].toInt(), 2);
     QCOMPARE(feature["phase_approval"].toString(), QStringLiteral("review"));
     QCOMPARE(feature["phases"].toString(), QStringLiteral("owner"));
     const auto tasks = feature["tasks"].toArray();

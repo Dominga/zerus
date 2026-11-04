@@ -926,7 +926,8 @@ void TestSessionsWindow::leadSessionAnswersAProposalOnItsCard()
         QCOMPARE(card->property("proposal").toString(), QStringLiteral("p1"));
         QCOMPARE(card->findChild<QLabel *>("teamProposalWhat")->text(), QStringLiteral("Add 2 members"));
         QStringList lines; for (auto *line : card->findChildren<QLabel *>("teamProposalChange")) lines << line->text();
-        QCOMPARE(lines, (QStringList{"Designer (claude, sonnet)", "Designer (claude, sonnet)"}));
+        // Owner feedback 2026-11-04: a member without an account says it takes the default one.
+        QCOMPARE(lines, (QStringList{"Designer (claude, sonnet, default account)", "Designer (claude, sonnet, default account)"}));
         QVERIFY(card->findChild<QLabel *>("teamProposalBy")->text().startsWith("Lead asks, "));
         QVERIFY(card->findChild<QLabel *>("teamProposalReason")->text().contains("need a designer each"));
         // Above the composer, in the Activity column.

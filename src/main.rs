@@ -20,6 +20,7 @@ mod screen;
 mod self_exec;
 mod session_reference;
 mod speech;
+mod sqlite_file;
 mod state;
 mod status;
 mod swarm;

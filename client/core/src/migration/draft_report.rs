@@ -21,6 +21,15 @@
 //! `next-drafts-preload-provenance` family binds the receipt and records each
 //! root, its boundary and whether it is complete. A not-captured outcome
 //! publishes nothing here: it stays unavailable.
+//!
+//! Size edges, by design: a report is never published in part. A supported
+//! manifest whose checkpoint body fits the decoder's 1 MiB bound but whose
+//! entry cannot fit one report page (a body within a few hundred bytes of
+//! 1 MiB) refuses its family as too large. So does a capture near the 64 MiB
+//! container cap whose report exceeds the executor's 64 MiB staging budget.
+//! Either way the attempt's record is kept for review
+//! (`source_kept_for_review`), never a prefix and never complete, and the
+//! originals stay in the private capture.
 use super::{
     draft_preload::{
         manifest_key, Capture, Class, Committed, Entry, Store, BOUNDARY, DEV_BOUNDARY, FORMAT,

@@ -327,3 +327,78 @@ fn a_failure_record_beside_the_receipt_is_never_published() {
     assert_eq!(held.reference(), Err(SourceError::SourceChanged));
     assert!(retained(&capture).is_err());
 }
+
+/// A further container part the receipt does not list is never published,
+/// by the held reference or by a fresh read.
+#[test]
+fn an_extra_container_part_is_never_published() {
+    let s = Scratch::new();
+    draft(&s.next(), "codex/sample/a", "kept");
+    let capture = s.captured();
+    let held = retained(&capture).unwrap().unwrap();
+    assert!(!s.slot().join("original-1.bin").exists());
+    disk::create(&s.slot().join("original-1.bin"), b"more").unwrap();
+    assert_eq!(held.reference(), Err(SourceError::SourceChanged));
+    assert!(retained(&capture).is_err());
+}
+
+/// An index replaced with the same bytes is another leaf: the receipt's
+/// stamp no longer matches, so it is never published.
+#[test]
+fn a_replaced_index_is_never_published() {
+    let s = Scratch::new();
+    draft(&s.next(), "codex/sample/a", "kept");
+    let capture = s.captured();
+    let held = retained(&capture).unwrap().unwrap();
+    let index = s.slot().join("index.json");
+    let bytes = fs::read(&index).unwrap();
+    std::thread::sleep(std::time::Duration::from_millis(20));
+    fs::remove_file(&index).unwrap();
+    disk::create(&index, &bytes).unwrap();
+    assert_eq!(held.reference(), Err(SourceError::SourceChanged));
+    assert!(retained(&capture).is_err());
+}
+
+/// A manifest whose checkpoint body is `body` bytes long once encoded.
+fn manifest_with_body(key: &str, body: usize) -> Vec<u8> {
+    let manifest = |text: usize| {
+        json!({"version": 1, "key": key, "text": "x".repeat(text)})
+            .to_string()
+            .into_bytes()
+    };
+    let encoded = |bytes: &[u8]| {
+        let body = sources::draft_checkpoint(Origin::Next, key, bytes)
+            .unwrap()
+            .into_chunks()
+            .next()
+            .unwrap()
+            .unwrap();
+        serde_json::to_vec(&body).unwrap().len()
+    };
+    let overhead = encoded(&manifest(0));
+    let bytes = manifest(body - overhead);
+    assert_eq!(encoded(&bytes), body);
+    bytes
+}
+
+/// The size edge is intended: a supported manifest whose body fits the
+/// checkpoint decoder's 1 MiB bound but whose entry cannot fit one report
+/// page refuses the whole family as too large, never a prefix.
+#[test]
+fn an_entry_that_cannot_fit_one_page_refuses_the_family_never_a_prefix() {
+    let s = Scratch::new();
+    draft(&s.next(), "codex/sample/a", "small");
+    let key = "codex/sample/big";
+    let folder = s.next().join(sha256(key.as_bytes()));
+    fs::create_dir_all(&folder).unwrap();
+    let body = zerus_desktop_migration::MAX_SNAPSHOT_BYTES as usize - 100;
+    fs::write(folder.join("draft.json"), manifest_with_body(key, body)).unwrap();
+    let capture = s.captured();
+    assert_eq!(capture.status().code, "draft_capture_captured");
+    let held = retained(&capture).unwrap().unwrap();
+    let classes: Vec<Class> = held.entries().iter().map(|entry| entry.class).collect();
+    assert_eq!(classes, [Class::Supported, Class::Supported]);
+    let next = held.report_sources().unwrap().into_iter().next().unwrap();
+    assert_eq!(next.identity().family, "next-drafts-preload");
+    assert_eq!(drain(next), Err(SourceError::TooLarge));
+}

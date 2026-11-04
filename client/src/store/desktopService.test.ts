@@ -242,6 +242,20 @@ describe("desktop service presentation", () => {
     expect(retainedSourceDetails(unavailable)!.draftsReport!.next).toContain("stays incomplete");
     expect(retainedSourceDetails(view({ required: false, complete: true }))).toBeUndefined();
   });
+  it("shows no drafts report until the drafts capture's outcome is final", () => {
+    const report = { required: false, complete: true, running: false, code: "retained_import_staged", phase: "published" };
+    const view = (capture: { code: string; writes?: boolean }) => serviceView({ retained_source_import: { ...report, drafts_capture: { writes: true, paused: false, capture_id: null, manifests: 0, ...capture }, drafts_report: { required: true, complete: false, partial: false, running: false, code: "drafts_import_waiting", phase: null } } });
+    for (const code of ["draft_capture_waiting", "draft_capture_private_slot"]) {
+      expect(retainedSourceNotice(view({ code }))).not.toContain("drafts report");
+      expect(retainedSourceDetails(view({ code }))?.draftsReport).toBeUndefined();
+    }
+    // A refused capture keeps its own notice and section.
+    const refused = view({ code: "draft_capture_private_slot", writes: false });
+    expect(retainedSourceNotice(refused)).toContain("Drafts are not being saved");
+    expect(retainedSourceDetails(refused)!.drafts).toBeDefined();
+    // Once the outcome is final the report shows as before.
+    expect(retainedSourceNotice(view({ code: "draft_capture_captured" }))).toContain("historical drafts report is deferred");
+  });
   it("explains the archive and data-directory refusals without changing readiness", () => {
     const report = { required: false, complete: true, running: false, code: "retained_import_staged", phase: "published" };
     const view = (code: string) => serviceView({ retained_source_import: { ...report, creations_capture: { code, paused: true, capture_id: null } } });

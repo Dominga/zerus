@@ -29,6 +29,8 @@ ls --json` prints `ls-<alias or local>.json`, and `hgs [@alias] inspect NAME
 --after N [--skip-processes]` prints `inspect-<alias or local>.json` with only
 the events after N (the newest 100 for 0) and `cursor` at the newest event;
 without the file either call exits 2.
+`listing_wait_file` holds a listing at an acknowledged barrier; `listing_wait_after`
+allows that many initial reads through before the barrier is armed.
 """
 import json
 import os
@@ -64,12 +66,14 @@ def log(entry):
                 msvcrt.locking(lock.fileno(), msvcrt.LK_UNLCK, 1)
 
 
-def previous_watches(host):
+def previous_runs(host, args):
     count = 0
     with open(os.path.join(HERE, "log.ndjson"), encoding="utf-8") as handle:
-        for line in handle:
+        # A concurrent append may still be writing its last line. Match the
+        # Rust fixture reader: only complete records establish an invocation.
+        for line in handle.read().split("\n")[:-1]:
             entry = json.loads(line)
-            if entry.get("host") == host and entry.get("args") == ["watch", "--json"]:
+            if entry.get("host") == host and entry.get("args") == args:
                 count += 1
     return count - 1
 
@@ -127,7 +131,7 @@ def serve(host, writer, until_file=None):
 
 def watch(host, spec, config):
     runs = spec.get("runs") or [[]]
-    steps = runs[min(previous_watches(host), len(runs) - 1)]
+    steps = runs[min(previous_runs(host, ["watch", "--json"]), len(runs) - 1)]
     writer = Writer()
     for step in steps:
         if "file" in step:
@@ -174,7 +178,8 @@ def main():
         return watch(host, spec, config)
     reply = os.path.join(HERE, "%s-" + (host or "local") + ".json")
     if args == ["ls", "--json"]:
-        if spec.get("listing_wait_file"):
+        if spec.get("listing_wait_file") and previous_runs(host, args) >= spec.get("listing_wait_after", 0):
+            log({"host": host, "listing_wait": spec["listing_wait_file"]})
             while not os.path.exists(os.path.join(HERE, spec["listing_wait_file"])):
                 time.sleep(0.01)
         if not os.path.exists(reply % "ls"):

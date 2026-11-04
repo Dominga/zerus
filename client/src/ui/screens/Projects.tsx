@@ -136,6 +136,7 @@ export function ProjectsScreen() {
   const launchPlace = () => `${launchFolder().machine}\n${launchFolder().path}\n${machineCards[""]?.host ?? ""}`;
   const [launchExists] = createResource(launchPlace, () => folderExists(untrack(launchFolder)));
   const launchButton = () => folderButton(folderLaunch(launchFolder(), launchExists.latest), launchFolder().machine);
+  const launchReason = () => launchButton().disabled ? launchButton().tip : undefined;
   const launchSelected = () => { const p = project(), f = selected(); if (p && f) void newSessionInFolder(p.id, f); };
   showAskedProject(projectToShow, () => setProjectToShow(undefined), view, choose);
 
@@ -282,9 +283,9 @@ export function ProjectsScreen() {
               <div class="proj-folders" style={{height: `${split()}px`}}>
                 <div class="row proj-fhead">
                   <h2 class="section-title">{tr("Folders")}</h2>
-                  <span class="grow" />
+                  <span id="project-folder-launch-reason" class="grow muted ell" role="status" title={launchReason()}>{launchReason()}</span>
                   <button class="btn small" disabled={!organization.grouping().ready} aria-describedby={editDescription()} onClick={(e) => setCloneOrigin(e.currentTarget)}><Icon name="download" size={12} />{tr("Clone repository…")}</button>
-                  <button class="btn small" disabled={launchButton().disabled} title={launchButton().tip} onClick={launchSelected}><Icon name="plus" size={12} />{tr("New session…")}</button>
+                  <button class="btn small" disabled={launchButton().disabled} title={launchButton().tip} aria-describedby={launchReason() ? "project-folder-launch-reason" : undefined} onClick={launchSelected}><Icon name="plus" size={12} />{tr("New session…")}</button>
                 </div>
                 <div class="su-tablewrap">
                   <table class="su-table proj-table">

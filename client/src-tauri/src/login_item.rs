@@ -125,7 +125,6 @@ mod tests {
     #[cfg(unix)]
     #[test]
     fn the_fix_runs_only_the_bundled_setup_with_autostart() {
-        use std::os::unix::fs::PermissionsExt;
         use std::sync::atomic::{AtomicUsize, Ordering};
         static NEXT: AtomicUsize = AtomicUsize::new(0);
         let root = std::env::temp_dir().join(format!(

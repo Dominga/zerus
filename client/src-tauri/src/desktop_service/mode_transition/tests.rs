@@ -2,7 +2,7 @@
 //! Native helper caller/Grant and manager policy are tested in the Python
 //! helper suite; this fixture does not manufacture a native auth positive.
 use super::*;
-use std::{fs, os::unix::fs::PermissionsExt};
+use std::fs;
 
 const CONFIG: &str = "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa";
 struct Fixture {

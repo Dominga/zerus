@@ -392,7 +392,6 @@ fn a_unix_error_number_is_never_retried_as_windows_sharing_contention() {
 #[test]
 fn direct_native_output_holders_pin_the_barrier_until_actual_eof() {
     let _process_tree = crate::PROCESS_TREE.read().unwrap();
-    use std::os::unix::fs::PermissionsExt;
     for pipe in ["stdout", "stderr"] {
         let f = Fixture::new();
         let fake = f.root.join("hgs");

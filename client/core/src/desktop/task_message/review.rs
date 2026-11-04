@@ -21,12 +21,18 @@
 use super::Scope;
 use serde::{Deserialize, Serialize};
 
+/// The help line of a service that lists and releases reviewed inputs.
+pub const HELP_MARKER: &str =
+    "Desktop task message input review: desktop-task-message-input-review-v1";
 /// The read-only listing operation.
 pub const LIST_OP: &str = "task_message_inputs";
 /// The most records one page carries.
 pub const PAGE: usize = 16;
 /// The record states a review may release.
 pub const STATES: [&str; 2] = ["orphaned", "failed"];
+/// A kept release's code when the slot, the object or the folder is not
+/// what the review saw.
+pub const CHANGED: &str = "task_message_input_changed";
 
 /// One object's exact version, as a review observed it.
 #[derive(Clone, Copy, Debug, Deserialize, Serialize, PartialEq, Eq)]

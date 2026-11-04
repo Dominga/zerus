@@ -439,6 +439,15 @@ export function ownershipNotice(view: NotificationOwnership | undefined): string
   return "";
 }
 
+/** Held task message copies the service reports for review; only a connected status counts. */
+export function heldInputsNotice(state: DesktopService | undefined): string {
+  const held = state?.connected ? state.task_message_inputs : undefined;
+  if (!held || !(held.review > 0)) return "";
+  return held.full
+    ? tr("Large task messages are paused: some held message copies need review.")
+    : tr("Some held task message copies need review.");
+}
+
 /**
  * A connected service that runs passive: it reports none of its background work
  * started. "resume": the native activation helper offers the explicit Resume
@@ -484,7 +493,12 @@ export function serviceStatus(state: DesktopService | undefined) {
     label = tr("Service views unavailable");
     notice = tr("Activity, processes and project tasks are unavailable with this background service connection.");
   }
-  const pending = pendingReadNotice(state), retained = retainedSourceNotice(state), owner = ownershipNotice(state.notification_ownership);
+  const pending = pendingReadNotice(state), retained = retainedSourceNotice(state), inputs = heldInputsNotice(state), owner = ownershipNotice(state.notification_ownership);
+  // Held copies are listed and released by the running background service:
+  // a paused, not-ready or handoff-waiting one cannot, so it offers no review.
+  // The notice still tells the user that copies are held.
+  const reviewable = !!inputs && !manualRefresh && !paused && state.connected && !state.code
+    && COMPONENTS.every((name) => state.background[name]?.ready);
   const mode = state.notification_ownership?.activation, access = state.notification_ownership?.status;
   const modeReview = !!mode?.review && !(mode.review.disposition === "reviewed_unknown" && mode.business_ready && mode.active
     && !mode.pending && !state.notification_ownership?.pending && !state.notification_ownership?.native_recovery
@@ -497,13 +511,14 @@ export function serviceStatus(state: DesktopService | undefined) {
   if (!notice) {
     if (pending) label = state.pending_read_import?.running ? tr("Transferring read marks") : tr("Read marks need attention");
     else if (retained) label = tr("Migration report");
+    else if (reviewable) label = tr("Held message copies");
     else if (owner) label = ownership === "check" ? tr("Background access unconfirmed") : ownership === "rearm" ? tr("Background access paused") : tr("Background access unavailable");
     else if (paused === "settings") label = tr("Background access paused");
   }
   // A reason without Retry or Resume: no in-app action turns background mode on
   // here yet (zerus-5wmh.66.8.1.15); Settings shows the current state.
   const settings = paused === "settings" ? tr("Zerus runs your sessions through a background service, which is paused on this computer. Settings shows its current state.") : "";
-  const reasons = [notice, pending, retained, manualRefresh ? "" : owner, settings].filter(Boolean);
+  const reasons = [notice, pending, retained, inputs, manualRefresh ? "" : owner, settings].filter(Boolean);
   return { label, details: reasons.join("\n") || tr("Background service connected"), healthy: !reasons.length,
-    retry: !manualRefresh && !!(notice || pending || retained || (owner && !ownership)), review: !!retained, ownership, manualRefresh, modeReview };
+    retry: !manualRefresh && !!(notice || pending || retained || (owner && !ownership)), review: !!retained, inputsReview: reviewable, ownership, manualRefresh, modeReview };
 }

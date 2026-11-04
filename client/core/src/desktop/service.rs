@@ -80,8 +80,29 @@ pub struct Snapshot {
     /// Shared host presentation only. Null and incomplete counts stay unknown.
     pub attention_counts: Option<Value>,
     pub automatic_approvals: Option<bool>,
+    /// Held task message copies a person may review. Display only: it never
+    /// authorizes a release, which names a fresh review's observation.
+    #[serde(default)]
+    pub task_message_inputs: Option<HeldInputs>,
     pub details_available: bool,
     pub code: String,
+}
+/// The service's held task message copies awaiting review.
+#[derive(Clone, Copy, Debug, Default, Deserialize, Serialize, PartialEq, Eq)]
+#[serde(deny_unknown_fields)]
+pub struct HeldInputs {
+    /// Orphaned or failed copies that stay charged until reviewed.
+    pub review: u64,
+    /// No further copy fits: large task messages are paused.
+    pub full: bool,
+}
+impl HeldInputs {
+    fn parse(value: &Value) -> Option<Self> {
+        Some(Self {
+            review: value["review"].as_u64()?,
+            full: value["full"].as_bool()?,
+        })
+    }
 }
 impl Default for Snapshot {
     fn default() -> Self {
@@ -98,6 +119,7 @@ impl Default for Snapshot {
             background: BTreeMap::new(),
             attention_counts: None,
             automatic_approvals: None,
+            task_message_inputs: None,
             details_available: false,
             code: "unavailable".into(),
         }
@@ -235,6 +257,9 @@ impl State {
             background,
             attention_counts: counts,
             automatic_approvals: value["automatic_approvals"].as_bool(),
+            task_message_inputs: HeldInputs::parse(
+                &value["operation_queue"]["kinds"]["task_message"]["inputs"],
+            ),
             details_available: self.snapshot.details_available
                 && value["detail_subscriptions"]["abi"] == details::ABI
                 && value["detail_subscriptions"]["stopping"] != true,

@@ -75,7 +75,7 @@ describe("Windows passive service (the actual native projection)", () => {
   it("is paused with the Settings action, and the footer offers neither Retry nor Resume", () => {
     expect(servicePaused(windows())).toBe("settings");
     expect(serviceStatus(windows())).toEqual({ label: "Background access paused", details: SETTINGS_BODY, healthy: false,
-      retry: false, review: false, ownership: undefined, manualRefresh: false, modeReview: false });
+      retry: false, review: false, inputsReview: false, ownership: undefined, manualRefresh: false, modeReview: false });
   });
   it.each<[string, DesktopService]>([
     ["disconnected", windows({ connected: false })],
@@ -158,5 +158,24 @@ describe("service status in the footer", () => {
     const css = fs.readFileSync(new URL("../styles/app.css", import.meta.url), "utf8");
     expect(css.match(/\.statusbar\s*\{([^}]+)\}/)?.[1]).toContain("height: 28px");
     expect(css).not.toContain(".page.with-service-status");
+  });
+});
+
+describe("held message copies while the service cannot list them", () => {
+  it("keep the paused label and offer no review a passive service cannot list", () => {
+    const status = serviceStatus(passive({ task_message_inputs: { review: 2, full: true } }));
+    expect(status).toMatchObject({ label: "Background access paused", inputsReview: false, ownership: "rearm" });
+    expect(status?.details).toContain("Large task messages are paused: some held message copies need review.");
+    expect(serviceStatus(healthy({ task_message_inputs: { review: 2, full: false } }))).toMatchObject({ label: "Held message copies", inputsReview: true });
+  });
+  it.each([
+    { code: "background_unready" },
+    { background: { fleet: { ready: false, code: "warming" } } },
+    { code: "explicit_handoff_required" },
+  ])("offer no review while the service is not ready: %j", (patch) => {
+    const status = serviceStatus(healthy({ ...patch, task_message_inputs: { review: 1, full: false } }));
+    expect(status).toMatchObject({ inputsReview: false });
+    expect(status?.label).not.toBe("Held message copies");
+    expect(status?.details).toContain("Some held task message copies need review.");
   });
 });

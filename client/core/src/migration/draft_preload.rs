@@ -287,8 +287,9 @@ pub struct Capture {
     qt: Option<PathBuf>,
     dev: Vec<PathBuf>,
     state: Mutex<Status>,
-    /// Republishes the status after it changes.
-    notify: Mutex<Option<Hook>>,
+    /// Each listener republishes the status after it changes: the service
+    /// report, and the app's Saved drafts in every mode.
+    notify: Mutex<Vec<Hook>>,
     /// Queues the draft store's Retry job.
     retry: Mutex<Option<Hook>>,
 }
@@ -307,7 +308,7 @@ impl Capture {
                 writes: true,
                 paused: false,
             }),
-            notify: Mutex::new(None),
+            notify: Mutex::new(Vec::new()),
             retry: Mutex::new(None),
         }
     }
@@ -348,8 +349,9 @@ impl Capture {
         lock(&self.state).clone()
     }
 
+    /// Adds a listener for status changes; earlier listeners stay.
     pub fn hook(&self, notify: Hook) {
-        *lock(&self.notify) = Some(notify);
+        lock(&self.notify).push(notify);
     }
 
     /// The draft store's Retry job; set once the store is open.
@@ -357,8 +359,8 @@ impl Capture {
         *lock(&self.retry) = Some(retry);
     }
 
-    /// Retry from the migration status: queues the store's Retry job, which
-    /// never changes a recorded outcome.
+    /// Retry from the migration status or Saved drafts: queues the store's
+    /// Retry job, which never changes a recorded outcome.
     pub fn request_retry(&self) {
         let retry = lock(&self.retry).clone();
         if let Some(retry) = retry {
@@ -367,8 +369,8 @@ impl Capture {
     }
 
     fn changed(&self) {
-        let notify = lock(&self.notify).clone();
-        if let Some(notify) = notify {
+        let listeners = lock(&self.notify).clone();
+        for notify in listeners {
             notify();
         }
     }

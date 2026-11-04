@@ -836,7 +836,15 @@ fn launch(context: tauri::Context<tauri::Wry>, startup: Startup) {
                             store.retry_import();
                         }
                     }));
+                    // Saved drafts shows the status and Retry in every mode
+                    // (zerus-5wmh.66.5.2.1.2.1); it reads the status again
+                    // whenever it opens, so a change before this is not lost.
+                    let changed = app.handle().clone();
+                    capture.hook(std::sync::Arc::new(move || {
+                        let _ = tauri::Emitter::emit(&changed, "draft-capture-changed", ());
+                    }));
                 }
+                app.manage(composer::saved::DraftCapture(capture.clone()));
                 // The switch build takes Qt's and the dev app's drafts once,
                 // right after the capture (zerus-5wmh.13.1); the dev identity
                 // and a replay never import.
@@ -1745,6 +1753,8 @@ fn handler() -> impl Fn(tauri::ipc::Invoke) -> bool + Send + Sync + 'static {
         composer::saved::draft_conflicts,
         composer::saved::draft_recover,
         composer::saved::draft_restore,
+        composer::saved::draft_capture_status,
+        composer::saved::draft_capture_retry,
         composer::send::send_message,
         composer::queue::queue_send_now,
         composer::queue::send_push,

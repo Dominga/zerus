@@ -166,7 +166,7 @@ export function retainedSourceDetails(state: DesktopService | undefined): Migrat
       reason = tr("The historical drafts report was not sent because local preparation failed.");
       next = tr("Check access to the original journal and the Zerus data folder, then use Retry. The original report identity is preserved.");
     } else if (draftsReport.partial && draftsReport.phase === "published") {
-      reason = tr("The historical drafts report was saved without the drafts already in Zerus, because an earlier run changed them before they could be recorded.");
+      reason = tr("The historical drafts report was saved without earlier versions of the drafts already in Zerus. Your drafts are kept and nothing is lost.");
       next = tr("This part of the migration report stays incomplete. Retry never records the earlier drafts later.");
     } else if (draftsReport.complete) {
       reason = tr("The migration report has been saved for review.");
@@ -245,7 +245,7 @@ export function retainedSourceDetails(state: DesktopService | undefined): Migrat
       : drafts.paused
         ? tr("Importing drafts from Qt is paused because the earlier drafts could not be recorded. New drafts are saved.")
         : drafts.code === "draft_capture_next_earlier_run"
-          ? tr("Your Qt drafts were recorded. Drafts already in Zerus could not be recorded, because an earlier run changed them first.")
+          ? tr("Your drafts are kept and nothing is lost. Earlier versions of the drafts already in Zerus could not be recorded for the migration report, because an earlier run changed them first.")
           : tr("The earlier drafts could not be recorded for the migration report. Drafts are saved and imported normally."),
     next: !drafts.writes
       ? tr("Check that the Zerus data folder is available and owned by your user. Retry records the earlier drafts before any draft is saved.")

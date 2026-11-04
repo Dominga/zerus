@@ -390,8 +390,9 @@ impl TaskDoc {
                 fields.delete("worker")?;
                 fields.delete("cancelled_at")?;
                 fields.delete("cancel_reason")?;
-                self.log("sent", actor, now, "", Some(executor))?
-                    .insert("request_id", attempt.request_id.as_str())?;
+                let entry = self.log("sent", actor, now, "", Some(executor))?;
+                entry.insert("request_id", attempt.request_id.as_str())?;
+                entry.insert("of", attempt.fingerprint())?;
                 self.queued_included(delivery, &attempt.request_id, actor, now)?;
             }
             Origin::Handoff => {
@@ -404,8 +405,9 @@ impl TaskDoc {
                 fields.insert("stage_at", now)?;
                 fields.insert("summary", "")?;
                 fields.delete("worker")?;
-                self.log("sent", actor, now, "handoff", Some(executor))?
-                    .insert("request_id", attempt.request_id.as_str())?;
+                let entry = self.log("sent", actor, now, "handoff", Some(executor))?;
+                entry.insert("request_id", attempt.request_id.as_str())?;
+                entry.insert("of", attempt.fingerprint())?;
                 self.queued_included(delivery, &attempt.request_id, actor, now)?;
             }
             Origin::Reopen => {
@@ -413,14 +415,15 @@ impl TaskDoc {
                 fields.insert("stage_at", now)?;
                 fields.delete("cancelled_at")?;
                 fields.insert("cancel_reason", "")?;
-                self.log(
+                let entry = self.log(
                     "resumed",
                     actor,
                     now,
                     "Changes requested and submitted",
                     Some(executor),
-                )?
-                .insert("request_id", attempt.request_id.as_str())?;
+                )?;
+                entry.insert("request_id", attempt.request_id.as_str())?;
+                entry.insert("of", attempt.fingerprint())?;
             }
             Origin::Start => {}
         }
@@ -1659,10 +1662,20 @@ mod tests {
                 let own = receipt(&merged, ONE);
                 let _ = merged.settle_attempt(ONE, Settlement::Receipt(&own), &Actor::Person, 31);
                 assert_eq!(current(&merged).phase, Phase::Unknown);
-                // The person's disposition of that exact attempt releases the task.
+                // The person's disposition of that exact attempt, and a review of
+                // any send the other original's settlement recorded, release it:
+                // that send is bound to the other record, so the kept one never
+                // explains it.
                 merged
                     .cancel_attempt(ONE, "Two originals", &Actor::Person, 32)
                     .unwrap();
+                let unexplained = merged.unexplained_entries().unwrap();
+                let kept_settled = merged.attempt(ONE).unwrap().unwrap().executor
+                    == if settled_left { run("api") } else { run("web") };
+                assert_eq!(unexplained.len(), usize::from(!kept_settled));
+                for entry in &unexplained {
+                    merged.review_entry(entry, &Actor::Person, 33).unwrap();
+                }
                 let execution = merged.view().unwrap().execution.unwrap();
                 assert!(!execution.conflict && execution.unknown.is_empty());
                 assert_eq!(execution.current.unwrap().phase, Phase::Cancelled);
@@ -2015,6 +2028,61 @@ mod tests {
         assert!(!settle(&mut newer, ONE).advanced);
         assert_eq!(newer.stage().unwrap(), Stage::Todo);
         assert_eq!(state(&newer), "queued");
+    }
+
+    #[test]
+    fn an_entry_that_reuses_an_attempt_s_request_id_is_still_unexplained() {
+        // review-n on #1405: a concurrent legacy send to another executor
+        // under the attempt's own UUID. Only the entry the attempt's own
+        // settlement wrote, for its exact record and executor, is explained.
+        let bytes = task().snapshot().unwrap();
+        let mut current = TaskDoc::from_bytes(&bytes).unwrap();
+        let mut older = TaskDoc::from_bytes(&bytes).unwrap();
+        send(&mut current, ONE, "api");
+        older
+            .record_send(&run("web"), ONE, &Actor::Person, 5)
+            .unwrap();
+        current.import(&older.snapshot().unwrap()).unwrap();
+        let unexplained = current.unexplained_entries().unwrap();
+        assert_eq!(unexplained.len(), 1);
+        current
+            .settle_attempt(ONE, Settlement::NotAdmitted, &Actor::Person, 20)
+            .unwrap();
+        assert!(current
+            .reserve_attempt(
+                TWO,
+                Origin::Handoff,
+                &run("ops"),
+                native("ops"),
+                &agent("web"),
+                21
+            )
+            .is_err());
+        // The person's review of that exact entry ends its hold.
+        current
+            .review_entry(&unexplained[0], &Actor::Person, 22)
+            .unwrap();
+        assert!(current.unexplained_entries().unwrap().is_empty());
+        // Each binding counts on its own: the same executor and UUID without
+        // the record's fingerprint, or the fingerprint for another executor.
+        let mut same_executor = TaskDoc::from_bytes(&bytes).unwrap();
+        let mut legacy = TaskDoc::from_bytes(&bytes).unwrap();
+        send(&mut same_executor, ONE, "api");
+        legacy
+            .record_send(&run("api"), ONE, &Actor::Person, 5)
+            .unwrap();
+        same_executor.import(&legacy.snapshot().unwrap()).unwrap();
+        assert_eq!(same_executor.unexplained_entries().unwrap().len(), 1);
+        let mut foreign = TaskDoc::from_bytes(&bytes).unwrap();
+        send(&mut foreign, ONE, "api");
+        let fingerprint = foreign.attempt(ONE).unwrap().unwrap().fingerprint();
+        let entry = foreign
+            .log("sent", &Actor::Person, 6, "", Some(&run("web")))
+            .unwrap();
+        entry.insert("request_id", ONE).unwrap();
+        entry.insert("of", fingerprint).unwrap();
+        foreign.doc.commit();
+        assert_eq!(foreign.unexplained_entries().unwrap().len(), 1);
     }
 
     #[test]

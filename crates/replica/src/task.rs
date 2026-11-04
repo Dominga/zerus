@@ -478,6 +478,7 @@ impl TaskDoc {
                     stale: string(&entry, "stale").and_then(|s| Stale::parse(&s)),
                     considered: integer(&entry, "considered").and_then(|n| u64::try_from(n).ok()),
                     reviews: string(&entry, "reviews"),
+                    of: string(&entry, "of"),
                 },
             ));
         }

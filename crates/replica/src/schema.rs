@@ -121,6 +121,10 @@ pub struct LogEntry {
     /// names (`Execution::unexplained`).
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub reviews: Option<String>,
+    /// For an execution entry an attempt's settlement wrote: the fingerprint
+    /// of that exact attempt record (`Attempt::fingerprint`).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub of: Option<String>,
 }
 
 /// A task message's durable outbox reservation. Submission is not consumption.

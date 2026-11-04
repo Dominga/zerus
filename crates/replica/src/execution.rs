@@ -327,11 +327,27 @@ pub(crate) fn unexplained(log: &[LogEntry], ids: &[String], attempts: &[Attempt]
         .flat_map(|attempt| attempt.frontier.iter().flatten())
         .map(String::as_str)
         .collect();
-    let requests: BTreeSet<&str> = attempts
+    // An attempt explains the entry its settlement wrote: its request, the
+    // fingerprint of its exact record and its executor, never the request
+    // ID alone, which a concurrent writer could reuse for another executor.
+    let originals: Vec<(&str, String, &SessionKey)> = attempts
         .iter()
         .filter(|attempt| !attempt.request_id.is_empty())
-        .map(|attempt| attempt.request_id.as_str())
+        .map(|attempt| {
+            (
+                attempt.request_id.as_str(),
+                attempt.fingerprint(),
+                &attempt.executor,
+            )
+        })
         .collect();
+    let named = |entry: &LogEntry| {
+        originals.iter().any(|(request, fingerprint, executor)| {
+            entry.request_id.as_deref() == Some(*request)
+                && entry.of.as_deref() == Some(fingerprint.as_str())
+                && entry.session.as_ref() == Some(*executor)
+        })
+    };
     let reviewed: BTreeSet<&str> = log
         .iter()
         .filter(|entry| entry.kind == "reviewed" && entry.actor == Actor::Person)
@@ -343,10 +359,7 @@ pub(crate) fn unexplained(log: &[LogEntry], ids: &[String], attempts: &[Attempt]
             matches!(entry.kind.as_str(), "sent" | "resumed")
                 && !frozen.contains(id.as_str())
                 && !reviewed.contains(id.as_str())
-                && !entry
-                    .request_id
-                    .as_deref()
-                    .is_some_and(|request| requests.contains(request))
+                && !named(entry)
         })
         .map(|(_, id)| id.clone())
         .collect()
@@ -937,6 +950,7 @@ mod tests {
             stale: None,
             considered: None,
             reviews: None,
+            of: None,
         }
     }
 

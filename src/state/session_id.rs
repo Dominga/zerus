@@ -1,0 +1,220 @@
+//! Durable session identity (zerus-ucck P1, names-as-labels spec): selecting a
+//! live or saved session by its `session_id`, and reporting a name that
+//! several sessions share.
+use super::*;
+
+/// Exit status for a name several sessions share (status 3 already means
+/// "unreachable").
+pub(crate) const AMBIGUOUS: i32 = 5;
+/// At most this many candidates are listed, newest first.
+const CANDIDATES: usize = 20;
+
+/// The session a `--session-id` command selected: its name when selected and
+/// its ID. Resolution only finds the name; it never authorises the command.
+/// Every later read of a record by that name, live, archived or a DeepSeek or
+/// OpenCode binding, must carry the ID, so a name that another session took
+/// meanwhile is refused under whatever lock the command holds when it reads
+/// its target (#1355 review).
+static SELECTED: std::sync::Mutex<Option<(String, String)>> = std::sync::Mutex::new(None);
+
+/// Records the selection for the rest of this command.
+pub(crate) fn select(name: &str, id: &str) {
+    *SELECTED.lock().unwrap_or_else(std::sync::PoisonError::into_inner) =
+        Some((name.to_owned(), id.to_owned()));
+}
+
+/// The selected name and ID, when the command was given `--session-id`.
+pub(crate) fn selected() -> Option<(String, String)> {
+    SELECTED.lock().unwrap_or_else(std::sync::PoisonError::into_inner).clone()
+}
+
+/// The run of the session selected under `name`, read under the state lock and
+/// checked against the selected ID; None without a selection for `name`. A
+/// terminal action binds its target to this run before its first effect
+/// (#1355 review).
+pub(crate) fn selected_run(name: &str) -> Result<Option<String>> {
+    if selected().is_none_or(|(selected, _)| selected != name) {
+        return Ok(None);
+    }
+    let _guard = lock(None)?;
+    let record = read(name)?;
+    Ok(Some(string(&record, "run_id").to_owned()))
+}
+
+/// Refuses a selected name that no longer has a record: a reader must not
+/// fall back to whatever untracked terminal now holds the name.
+pub(super) fn verify_absent(name: &str) -> Result<()> {
+    match selected() {
+        Some((selected, id)) if selected == name => {
+            Err(format!("Session ID {id} no longer names {name}; refresh and retry"))
+        }
+        _ => Ok(()),
+    }
+}
+
+/// Refuses a record that has the selected name but not the selected ID.
+pub(super) fn verify(record: &Value) -> Result<()> {
+    let selected = SELECTED.lock().unwrap_or_else(std::sync::PoisonError::into_inner);
+    match selected.as_ref() {
+        Some((name, id)) if string(record, "name") == name && string(record, "session_id") != id => {
+            Err(format!("Session ID {id} no longer names {name}; refresh and retry"))
+        }
+        _ => Ok(()),
+    }
+}
+
+/// A session ID as hgs writes it: a lowercase hyphenated UUID.
+pub(crate) fn canonical(id: &str) -> bool {
+    uuid::Uuid::parse_str(id).is_ok_and(|uuid| uuid.hyphenated().to_string() == id)
+}
+
+/// The current names of the live or saved sessions whose durable ID is `id`:
+/// one, or none. One scan of the bindings, as `hgs ls` reads them, for one
+/// explicit CLI call; P2's `sessions/<id>` layout makes it a lookup. Never put
+/// it on a polling, status or watch path before that.
+pub(crate) fn names_of(id: &str) -> Result<Vec<String>> {
+    if !canonical(id) {
+        return Err("A session ID is a lowercase UUID; copy it from hgs ls --json".into());
+    }
+    let mut names: Vec<String> = records()?
+        .into_iter()
+        .chain(dsh::binding_records())
+        .chain(opencode::binding_records())
+        .filter(|record| string(record, "session_id") == id && string(record, "archive_id").is_empty())
+        .map(|record| string(&record, "name").to_owned())
+        .collect();
+    names.sort();
+    names.dedup();
+    Ok(names)
+}
+
+/// The report for a name several sessions share: the text lines and the
+/// `--json` value. Candidates carry `session_id`, `run_id`,
+/// `conversation_id`, `state` (live or saved), `cwd`, `created` and an
+/// optional `reference`, never transcript content. P2's label index calls it
+/// when a name matches more than one session; until P3 names stay unique.
+#[cfg_attr(not(test), allow(dead_code))]
+pub(crate) fn ambiguity(name: &str, mut candidates: Vec<Value>) -> (String, Value) {
+    let total = candidates.len();
+    candidates.sort_by(|a, b| {
+        b["created"].as_f64().unwrap_or(0.0).total_cmp(&a["created"].as_f64().unwrap_or(0.0))
+    });
+    candidates.truncate(CANDIDATES);
+    let candidates: Vec<Value> = candidates
+        .into_iter()
+        .map(|c| {
+            json!({"session_id":c["session_id"],"run_id":c["run_id"],"conversation_id":c["conversation_id"],
+                "state":c["state"],"cwd":c["cwd"],"created":c["created"],"reference":c["reference"]})
+        })
+        .collect();
+    let home = home();
+    let mut text = format!(
+        "{total} sessions on this computer are named {name}. Choose one with --session-id, or use its reference:"
+    );
+    for c in &candidates {
+        let id: String = string(c, "session_id").chars().take(8).collect();
+        let cwd = Path::new(string(c, "cwd"));
+        let folder = match cwd.strip_prefix(&home) {
+            Ok(rest) if !home.as_os_str().is_empty() => format!("~/{}", rest.display()),
+            _ => cwd.display().to_string(),
+        };
+        let started = c["created"]
+            .as_f64()
+            .and_then(|at| chrono::DateTime::from_timestamp(at as i64, 0))
+            .map(|at| at.with_timezone(&chrono::Local).format("%Y-%m-%d %H:%M").to_string())
+            .unwrap_or_default();
+        text.push_str(&format!("\n  {id:<8}  {:<6}  {folder}  started {started}", string(c, "state")));
+        if !string(c, "reference").is_empty() {
+            text.push_str(&format!("  {}", string(c, "reference")));
+        }
+    }
+    (
+        text,
+        json!({"error":"ambiguous_session","name":name,"total":total,"candidates":candidates}),
+    )
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    /// #1355 review: every raw reader on a selector command refuses a name
+    /// the selected ID left, whether another ID's record or no record holds
+    /// it. The fixture runs in a child process with a private state directory.
+    #[test]
+    fn raw_readers_refuse_a_name_the_selected_id_left() {
+        let state = tempfile::tempdir().unwrap();
+        let output = std::process::Command::new(std::env::current_exe().unwrap())
+            .args([
+                "--exact",
+                "state::session_id::tests::raw_readers_fixture",
+                "--ignored",
+                "--test-threads=1",
+            ])
+            .env("HGS_STATE_DIR", state.path())
+            .env("ZERUS_RAW_READERS_FIXTURE", "1")
+            .env_remove("HGS_SESSION")
+            .env_remove("HGS_SESSION_ID")
+            .env_remove("HGS_RUN_ID")
+            .output()
+            .unwrap();
+        let stdout = String::from_utf8_lossy(&output.stdout);
+        assert!(
+            output.status.success() && stdout.contains("test result: ok. 1 passed"),
+            "{stdout}{}",
+            String::from_utf8_lossy(&output.stderr)
+        );
+    }
+    #[test]
+    #[ignore = "run by raw_readers_refuse_a_name_the_selected_id_left"]
+    fn raw_readers_fixture() {
+        if std::env::var_os("ZERUS_RAW_READERS_FIXTURE").is_none() {
+            return;
+        }
+        std::fs::create_dir_all(root()).unwrap();
+        let name = "claude/example/raw";
+        let fresh = || uuid::Uuid::new_v4().to_string();
+        let other = json!({"version":1,"agent":"claude","name":name,"run_id":fresh(),
+            "conversation_id":fresh(),"session_id":fresh(),"created":1});
+        atomic(&record_path(name), &other.to_string()).unwrap();
+        select(name, &fresh());
+        let refused = |error: String| assert!(error.contains("no longer names"), "{error}");
+        refused(super::super::notifications::current(name).unwrap_err());
+        let input = json!({"request_id":fresh(),"expected_run_id":other["run_id"],
+            "expected_conversation_id":other["conversation_id"]});
+        refused(super::super::hook_health::session_report(name, &input).unwrap_err());
+        std::fs::remove_file(record_path(name)).unwrap();
+        refused(super::super::journal::inspection(name, 0, None, false).unwrap_err());
+    }
+    #[test]
+    fn only_a_lowercase_hyphenated_uuid_is_a_session_id() {
+        assert!(canonical("3f2a9c1d-0b4e-4d6a-9c1d-2e3f4a5b6c7d"));
+        for value in [
+            "",
+            "3F2A9C1D-0B4E-4D6A-9C1D-2E3F4A5B6C7D",
+            "3f2a9c1d0b4e4d6a9c1d2e3f4a5b6c7d",
+            "{3f2a9c1d-0b4e-4d6a-9c1d-2e3f4a5b6c7d}",
+            "codex/project/tag",
+        ] {
+            assert!(!canonical(value), "{value}");
+        }
+    }
+    #[test]
+    fn an_ambiguous_name_lists_bounded_candidates_newest_first_without_content() {
+        let candidate = |n: usize| {
+            json!({"session_id":format!("{n:08x}-0000-4000-8000-000000000000"),"run_id":format!("run-{n}"),
+                "conversation_id":format!("conversation-{n}"),"state":if n.is_multiple_of(2) {"live"} else {"saved"},
+                "cwd":"/srv/example/project","created":1_800_000_000 + n as i64,"detail":"private transcript"})
+        };
+        let (text, value) = ambiguity("codex/project/tag", (0..25).map(candidate).collect());
+        assert_eq!(value["error"], "ambiguous_session");
+        assert_eq!((value["name"].as_str(), value["total"].as_u64()), (Some("codex/project/tag"), Some(25)));
+        let listed = value["candidates"].as_array().unwrap();
+        assert_eq!(listed.len(), 20);
+        assert_eq!(listed[0]["run_id"], "run-24", "newest first");
+        assert_eq!(listed[19]["run_id"], "run-5");
+        assert!(!value.to_string().contains("private transcript"));
+        assert!(text.starts_with("25 sessions on this computer are named codex/project/tag. Choose one with --session-id"));
+        assert_eq!(text.lines().count(), 21);
+        assert!(text.lines().nth(1).unwrap().starts_with("  00000018  live    /srv/example/project  started "));
+    }
+}

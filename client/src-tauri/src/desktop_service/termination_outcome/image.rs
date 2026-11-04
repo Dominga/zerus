@@ -1,7 +1,7 @@
 //! Execution custody for this native producer, separate from audit freshness.
 //! Windows retains the maintained file/ancestor pins and checks the loaded
-//! section of the SAME Child. Linux's shared snapshot is immutable; its new
-//! service submission refuses until native relay authentication is qualified.
+//! section of the SAME Child. Linux executes its immutable Core snapshot;
+//! the service authenticates that original relay against its startup snapshot.
 //! Mac uses only the Context's retained genuine paired Connection and observes
 //! EVERY original child before stdin. The observation is not an exec fence.
 use std::{
@@ -13,12 +13,8 @@ use std::{
 use zerus_client_core::desktop::relay;
 
 pub(super) const MAC_UNAVAILABLE: &str = "termination_native_image_unavailable";
-pub(super) const LINUX_UNAVAILABLE: &str = "termination_native_relay_unavailable";
 
 pub(super) fn prepare<T>(prepare: impl FnOnce() -> Result<T, String>) -> Result<T, String> {
-    if cfg!(target_os = "linux") {
-        return Err(LINUX_UNAVAILABLE.into());
-    }
     prepare()
 }
 
@@ -167,12 +163,12 @@ mod macos_tests;
 mod tests;
 #[cfg(all(test, target_os = "linux"))]
 #[test]
-fn unavailable_platform_refuses_before_native_preparation_or_spawn() {
-    let called = std::cell::Cell::new(false);
+fn linux_preparation_is_not_a_relay_permission_or_a_renewable_fallback() {
+    let called = std::cell::Cell::new(0);
     let result: Result<(), String> = prepare(|| {
-        called.set(true);
-        Ok(())
+        called.set(called.get() + 1);
+        Err("original preparation refused".into())
     });
-    assert_eq!(result, Err(LINUX_UNAVAILABLE.into()));
-    assert!(!called.get());
+    assert_eq!(result, Err("original preparation refused".into()));
+    assert_eq!(called.get(), 1);
 }

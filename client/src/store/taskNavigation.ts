@@ -5,6 +5,8 @@ import { selected, setPage, setSelectedKey, setDetailTab, setSubagentOpen } from
 import { tasks } from "./tasks";
 import { openInspector } from "./inspector";
 
+const UUID = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i;
+
 export const [taskDescriptionRequest, setTaskDescriptionRequest] = createSignal<{ project: string; uuid: string }>();
 export function requestTaskDescription(project: string, uuid: string) { openTask(project, uuid); setTaskDescriptionRequest({ project, uuid }); }
 export const [taskRenameRequest, setTaskRenameRequest] = createSignal<{ project: string; uuid: string }>();
@@ -34,5 +36,13 @@ if (params.has("task") || params.get("page") === "tasks") createRoot((dispose) =
     if (!ref) { dispose(); return; }
     const task = tasks.project() === project ? tasks.tasks().find((t) => t.uuid === ref || t.id === ref || t.ref === ref) : undefined;
     if (task && project) { openTask(project, task.uuid); dispose(); }
+    // A windowed list loads some rows of each stage: a task named by its UUID
+    // opens anyway, and Task View reads it on its own. A short reference
+    // beyond the window cannot be resolved here, so the board stays open
+    // without it rather than opening it later by surprise.
+    else if (project && tasks.project() === project && tasks.windowed() && tasks.loaded()) {
+      if (UUID.test(ref)) openTask(project, ref.toLowerCase());
+      dispose();
+    }
   });
 });

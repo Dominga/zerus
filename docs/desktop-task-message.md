@@ -108,12 +108,13 @@ result are its own.
 
 ## Oversize originals
 
-Attachments travel inline in the original, base64-encoded in its content, so
-most messages with an attachment exceed the 64 KiB control frame: an inline
-original carries less than 48 KiB of attachment data in total. Such an
-original is refused before it is sent, with `task_message_original_too_large`
-from `Intent::verify`, which the service applies again. The user-visible
-outcome the client path must keep:
+Attachments travel inline in an inline original, base64-encoded in its
+content: an inline original carries less than 48 KiB of attachment data in
+total. A larger one is refused before it is sent, with
+`task_message_original_too_large` from `Intent::verify`, which the service
+applies again. The reference form below carries such messages instead, within
+the attachment limits. Above those limits, or when the service cannot take a
+reference, the user-visible outcome stays:
 
 - a clear refusal that names the size limit and the attachments, shown in the
   editor and in recovery review, never a silent drop;
@@ -121,14 +122,68 @@ outcome the client path must keep:
   message is never retried through another path on its own;
 - the outbox checkpoint, if already reserved, stays reviewable as never sent.
 
-A later slice should send attachments by reference so that such messages can
-use the service at all. The GUI would stage each attachment in a private,
-digest-named file under the configuration's desktop state. The original would
-carry only each attachment's digest and size. The service would read the
-staged files from its own fixed root (never a renderer-supplied path), rebuild
-the exact stdin and check it against the frozen `input_sha256` before
-admission. The control frame stays 64 KiB, and a staging budget bounds the
-staged bytes.
+## Reference preparation
+
+The service prepares a `reference-v1` original from staged copies of its
+attachments (zerus-5wmh.66.4.4.2). It advertises `Desktop task message
+references: desktop-task-message-reference-v1` on Linux only; macOS refuses
+the form like every original.
+
+- **Staging.** The service holds two private directories under its own
+  desktop state root from startup: `task-message-staging` and
+  `task-message-inputs`. The client learns the staging path only through the
+  read-only `task_message_staging` request, routing data for the exact current
+  scope that grants nothing. It stages each raw attachment as
+  `task-message-staging/<request_id>/<sha256>`, one directory per request, so
+  the same screenshot sent to two tasks stays two independent copies. Staged
+  copies are disposable: the draft keeps the original attachments.
+- **Anchored access.** Every service open, create and delete is anchored on a
+  held directory, with `O_NOFOLLOW|O_NONBLOCK|O_CLOEXEC` at open. Every object
+  must be owner-only: a `0700` directory or a `0600` regular file of this
+  user with one link. A replaced directory, another mode or owner, a special
+  file or a hard link is refused.
+- **Admission.** As for task-start reconciliation, the reply follows on the
+  same connection. The exact encoded input size is reserved first, against
+  its own budget (64 MiB and 64 records, reservations and orphans included).
+  A bounded worker that holds the lease prepares the input off the actor: it
+  reads each staged copy (its exact size and digest), rebuilds the stdin with
+  the same canonical serializer, checks it against the frozen digest, and
+  creates `task-message-inputs/<request_id>` once (`O_EXCL`) and syncs it. One
+  short transaction then rechecks the native permit after `BEGIN IMMEDIATE`,
+  with the same Service, configuration and lease, admits the original and
+  holds its input. An expired permit, a revoked writer or a stop refuses:
+  nothing was admitted, the exact published input is removed and then its
+  reservation is released. The same original again only reads its receipt.
+  A preparation that fails after it published the input (an unreadable
+  identity, a failed removal, a lost worker) leaves its reservation in place:
+  it is classified like a restart's below. A second request while the same
+  original is being prepared is refused as `task_message_preparing`, and one
+  whose request already has an input record as `task_message_input_exists`.
+  Neither refusal is definite: the client keeps the original in review and
+  only the read-only lookup decides.
+- **Execution.** The child's stdin streams from the input through the handle
+  kept since preparation, never a reopened name. The input stays in the
+  original's resources guard with the custody lock.
+- **Removal.** An input is removed, and its storage charge released, only
+  after its original drained physically and nothing in this process holds it.
+  A restart does not change that: a retired but undrained original keeps its
+  input. A failed removal stays visible and charged. Lookups never read an
+  input, so a legitimately removed one changes no receipt.
+- **Restart.** A reservation that nothing in this process holds, after a
+  restart or a failed preparation, is classified off the actor. If its input
+  exists, it was published but never admitted: it is kept, charged and
+  reviewable (`orphaned`). One without an input is released. There is no
+  age-based sweep.
+- **Charged records.** In v1, `orphaned` and `failed` records stay charged:
+  there is no release path for them yet, and 64 of them, or 64 MiB, refuse
+  every further reference original. Each such record names its exact input,
+  `task-message-inputs/<request_id>` with the recorded device and inode;
+  neither a person nor a later process may remove or release one by name or
+  age. Removing such an input by hand does not release its charge. An
+  explicit, exact review and release path is zerus-pi2k9.
+- **Records.** `desktop_task_message_inputs` and its budget, added at Store
+  schema 27 by merge order, keep one record per input; status reports the
+  charged records and bytes.
 
 ## Client
 
@@ -138,6 +193,18 @@ desktop-service mode lands together with attachments by reference.
 
 - **Consent.** Only the outbox record reserved by the same explicit Submit is
   sent, and only once. A record from before is never sent again.
+- **Form.** An original that fits the control frame is sent inline. A larger
+  one is sent by reference only when the service advertises the references
+  marker. The client then projects the record, learns the staging folder
+  through `task_message_staging`, and stages each distinct attachment as
+  `<staging>/<request_id>/<sha256>` (`client/core`
+  `desktop::task_message::staging`). It holds the staging folder and creates
+  its request folder once, never writing into one it did not create. Each
+  copy is a private `0600` file created with `O_EXCL` and synced, all before
+  the handoff marker. Otherwise it is never sent (`TOO_LARGE`). A definite
+  never-sent answer removes exactly the copies this client created. Once the
+  request was offered, nothing is removed here: the service removes the
+  copies it consumed.
 - **Handoff marker.** Before the admission request is written,
   `tasks_write::outbox::hand_off` durably records that the exact record (its ID
   and snapshot digest) was handed to the service. The marker is evidence, never
@@ -163,7 +230,24 @@ desktop-service mode lands together with attachments by reference.
 ## Wire
 
 - **Intent.** The scope, the project and task, the original task message UUID
-  (`request_id`) and `original`: the exact outbox record bytes, inline.
+  (`request_id`), `original` and its explicit `form`. The default inline form
+  (never serialized) carries the exact outbox record bytes. The
+  `reference-v1` form carries the record's reference projection (below).
+- **Reference form.** `tasks_write::references` projects a record whose stdin
+  was frozen in its canonical form (`input_sha256`) and has attachments. Each
+  attachment's `data_base64` becomes a `data_ref` with the raw bytes' SHA-256
+  and size; every other field, the attachment order and metadata included,
+  stays exact, and only the one canonical base64 encoding projects. The
+  existing attachment limits hold: at most 8, each at most 10 MiB, 20 MiB in
+  total. Rebuilding requires each raw attachment's exact size and digest
+  (`task_message_reference_mismatch`), uses the same canonical serializer, and
+  the rebuilt stdin must hash to the frozen `input_sha256`
+  (`task_message_input_changed`); its exact length is known before any
+  attachment is read.
+  The form is stated, never inferred: an inline intent never accepts a
+  projection, and a reference intent never accepts inline data. A reference
+  intent has no call until it is rebuilt (`Verified::rebuild`), and then
+  exactly the call its inline original would have had.
 - **Verification.** Duplicate keys at the record or intent level are refused
   before any value is built. The record must decode (`outbox::decode`, which
   refuses a malformed frozen input), carry the request ID and have frozen its
@@ -181,7 +265,10 @@ desktop-service mode lands together with attachments by reference.
   check, with that stdin.
 - **Binding.** The kind, schema 1, the configuration, the project, task and
   request IDs, the raw source, UI snapshot (`outbox::snapshot`) and input
-  digests, and the plan and consent digests.
+  digests, and the plan and consent digests. A reference intent's binding also
+  names its form, and its source, snapshot and consent digests are those of
+  the projection. Its plan, and with it the frozen input digest, is that of
+  its inline original.
 - **Receipt.** The phases are Queued, Reserved, Running, Recorded, Failed and
   Unknown. Recorded carries the closed outcome: the request, mode, dispatch
   and a `queued` or `note` state. That is the exact CLI metadata outcome,

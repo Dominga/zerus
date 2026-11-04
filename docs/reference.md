@@ -275,8 +275,35 @@ Consumers therefore treat `session_id` as a hint and fall back to the run and
 conversation identities.
 The agent's environment carries it as `HGS_SESSION_ID`, beside `HGS_SESSION`
 (the name at launch) and `HGS_RUN_ID`, and `hgs ls --json` rows and
-inspections include it. Nothing resolves sessions by it yet, and names stay
-unique; see `docs/superpowers/specs/2026-11-04-session-names-as-labels.md`.
+inspections include it. A hook prefers the record that carries the agent's
+`HGS_SESSION_ID`; when none does, for example after an older hgs rewrote the
+record, the run identity alone decides, as before.
+
+A command whose first argument is a session also accepts `--session-id ID`
+instead, for example `hgs inspect --session-id ID` or `hgs rename --session-id
+ID NEW-NAME`. A name given before the flag must be that session's current
+name; arguments after it are the command's own. The value must be the
+lowercase UUID shown by `hgs ls --json`, given once. Resolution only finds the
+session's name: every record the command then reads under that name, live or
+archived, must still carry the ID, so a name another session took meanwhile
+fails with "Session ID ID no longer names NAME" instead of acting on it. `kill`
+and `a` bind the terminal before their first effect: the name's immutable
+terminal session must run the run that the verified record carries, and they
+then act on that terminal session, never on the name. A `--run-id` given to
+`a --existing` must name that same run. An OpenCode session's attach goes to
+its own adapter, which checks its binding and run the same way.
+`hgs task` keeps its own `--session-id`, `notify` and `paste` stay the tray's
+and tmux's own entry points, and an agent's own flag after `--` is untouched.
+With `@host` the flag reaches a peer only once its `hgs --help` lists
+`session-id-selector-v1` and every marker the call needs already, including a
+guarded `--expect-machine` call that wraps the command and `native-ui`, whose
+peer resolves the ID itself; an older peer is refused with "update the
+selected computer". Names stay unique for now. When several sessions later
+share a name, commands exit with status 5 and list the candidates; see
+`docs/superpowers/specs/2026-11-04-session-names-as-labels.md`. Because an
+older hgs can change a session's ID once, a client whose `--session-id` is no
+longer found falls back to the name with its expected run and conversation
+identities.
 
 `hgs session-action-status SESSION --json` reads one original lifecycle receipt.
 Supply the original `session-action` JSON unchanged, including its `request_id`,
@@ -4938,6 +4965,13 @@ per-component readiness. Its epoch changes on service restart. The registration'
 `session` object describes the graphical login environment needed by platform
 installers; it is a requirement, not a claim that the environment is present.
 
+`lifecycle.console_released` is true when the Windows service was given a
+console window of its own and released it before serving, so no window stays
+open. A logon task or a COM activation gives a console program such a window.
+It is false when the service shares its console with another process, such as
+the terminal it was started from, when it had no console, and on Linux and
+macOS. It is diagnostic only; readiness never depends on it.
+
 `lifecycle.mode` reports the running command's `passive` or `background`
 selection independently of worker admission. On all three desktop platforms, `registration --json
 --background` renders the explicit background variant without installing it;
@@ -5171,6 +5205,22 @@ project is read again when a stat of its task store changes and at least every
 changed. A list that cannot be read, such as an unknown project, sends a
 non-fatal `tasks_failed`. A stream follows at most 8 projects
 (`limits.tasks_subscriptions`).
+
+A subscription may add `"window": N` (1 to `limits.tasks_window`, 200; a server
+that announces 0 or omits it always sends the whole list). It then carries only
+the first N rows of each stage, read from the task index, in stage order (In
+review, In progress, To do, Backlog, Done), never the whole list. Every stage
+is read at one index revision: a window whose stages were read at different
+revisions is read again, at most 4 times, and then from the task documents read
+once, so each task is in exactly one stage of a window. That fallback, like
+the index's first build, reads every task document of the project once,
+without a separate I/O or memory budget, and sends at most N rows of each
+stage and the first damaged tasks. The last
+page's `value` adds the `counts` of every stage, `damaged_total`, the
+`revision` and `window: {schema: 1, limit, stages: {STAGE: {total, next}}}`;
+each `next` is the cursor of that stage's next page for `hgs task list --stage
+STAGE --limit N --after CURSOR`, or null when the stage has no more rows. A
+window that is not 1 to 200 is a non-fatal `bad_request`.
 
 The `organization` topic follows the shared project catalog as `hgs swarm get`
 prints it: `{"op":"subscribe","topic":"organization"}`, one per stream. A

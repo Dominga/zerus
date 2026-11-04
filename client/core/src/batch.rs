@@ -401,11 +401,16 @@ impl Coalescer {
                     damaged,
                     digest,
                     truncated,
-                } => (
-                    "list",
-                    json!({"tasks": tasks, "project": project, "damaged": damaged,
-                           "digest": digest, "truncated": truncated}),
-                ),
+                    window,
+                } => {
+                    let mut payload = json!({"tasks": tasks, "project": project,
+                        "damaged": damaged, "digest": digest, "truncated": truncated});
+                    // Only a windowed list names its window; a whole list keeps its shape.
+                    if !window.is_null() {
+                        payload["window"] = window;
+                    }
+                    ("list", payload)
+                }
                 TasksUpdate::Failed { code, message } => {
                     ("failed", json!({"code": code, "message": message}))
                 }
@@ -1039,6 +1044,7 @@ mod tests {
             damaged: json!([]),
             digest: digest.into(),
             truncated: false,
+            window: Value::Null,
         };
         let failed = TasksUpdate::Failed {
             code: "tasks_failed".into(),
@@ -1074,6 +1080,20 @@ mod tests {
         );
         let value = serde_json::to_value(&batch).unwrap();
         assert_eq!(value["tasks"][1]["payload"]["code"], "tasks_failed");
+        let window = json!({"counts": {"todo": 120}, "damaged_total": 0, "revision": "r1",
+            "window": {"schema": 1, "limit": 50, "stages": {}}});
+        coalescer.push(tasks(
+            "p1",
+            TasksUpdate::List {
+                tasks: vec![json!({"text": "d4"})],
+                project: json!({"id": "p1"}),
+                damaged: json!([]),
+                digest: "d4".into(),
+                truncated: false,
+                window: window.clone(),
+            },
+        ));
+        assert_eq!(coalescer.take().tasks[0].payload["window"], window);
         assert!(value.get("processes").is_none());
         assert!(serde_json::to_value(Batch::default())
             .unwrap()

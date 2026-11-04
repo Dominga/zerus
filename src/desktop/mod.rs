@@ -92,7 +92,7 @@ pub(crate) mod creation_test {
     }
 }
 
-const USAGE: &str = "usage: hgs desktop serve [--config-dir DIR --state-dir DIR] [--background] | status [--json] | startup --json | owner-status --json | ownership-status --json | ownership-result --json | swarm-restart --json (Windows) | watch --json | feed --json | request --json | catalog-relay --json | registration --json [--background] | registration install|remove|status --json (Windows) | registration install --mode background|passive --json (Windows) | registration cancel-rollback --json --request-id UUID (Windows) | notification-registration install|status --json | notification-registration remove --json --request-id UUID (Windows) | revoke --json [--request-id UUID] [--reason rollback] | import-evidence --json | import-status --json --import-id UUID";
+const USAGE: &str = "usage: hgs desktop serve [--config-dir DIR --state-dir DIR] [--background] | status [--json] | startup --json | owner-status --json | ownership-status --json | ownership-result --json | swarm-restart --json (Windows) | watch --json | feed --json | request --json | catalog-relay --json | registration --json [--background] | registration install|remove|status --json (Windows) | registration install --mode background|passive --json [--after-review UUID --request-id NEW_UUID] (Windows) | registration cancel-rollback --json --request-id UUID (Windows) | registration review-mode --json --request-id UUID (Windows) | registration mode-result --json --request-id UUID (Windows) | notification-registration install|status --json | notification-registration remove --json --request-id UUID (Windows) | revoke --json [--request-id UUID] [--reason rollback] | import-evidence --json | import-status --json --import-id UUID";
 const HEARTBEAT: Duration = Duration::from_secs(10);
 pub const STARTUP_REFUSED: i32 = 78;
 
@@ -302,6 +302,24 @@ pub fn dispatch(config: &Config, target: &str, args: &[String], dry: bool) -> cl
                         "Use the maintained platform installer to cancel rollback metadata."
                     )
                 }
+            }
+            ["registration", "review-mode", "--json", "--request-id", id] => {
+                #[cfg(windows)]
+                { println!("{}", windows_registration::review_mode(config, &location, id)?); Ok(()) }
+                #[cfg(not(windows))]
+                { let _ = id; anyhow::bail!("Use the maintained Unix helper to review its original activation.") }
+            }
+            ["registration", "mode-result", "--json", "--request-id", id] => {
+                #[cfg(windows)]
+                { println!("{}", windows_registration::mode_result(config, &location, id)?); Ok(()) }
+                #[cfg(not(windows))]
+                { let _ = id; anyhow::bail!("Use the maintained Unix helper to read its original activation.") }
+            }
+            ["registration", "install", "--mode", mode, "--json", "--after-review", reviewed, "--request-id", request] => {
+                #[cfg(windows)]
+                { println!("{}", windows_registration::mode_after_review(config, &location, mode, reviewed, request)?); Ok(()) }
+                #[cfg(not(windows))]
+                { let _ = (mode, reviewed, request); anyhow::bail!("Use the maintained Unix helper for an explicit mode choice.") }
             }
             ["notification-registration", rest @ ..] => {
                 let (operation, request_id) = match rest {
@@ -549,11 +567,14 @@ impl Drop for Permit {
 fn serve(config: &Config, location: Location, background_mode: bool) -> Result<()> {
     // A logon-task start on Windows before 24H2 gets a console window of its own.
     #[cfg(windows)]
-    platform::release_private_console();
+    lifecycle::CONSOLE_RELEASED.store(
+        platform::release_private_console(),
+        std::sync::atomic::Ordering::Relaxed,
+    );
     let mut upgrade = upgrade::Upgrade::new();
     #[cfg(all(test, target_os = "linux"))]
     upgrade::actor_tests::configure(&mut upgrade);
-    let (_signals, owner, listener, epoch, mut store) = (|| -> Result<_> {
+    let (_signals, owner, listener, epoch, mut store, ui_scope) = (|| -> Result<_> {
         #[cfg(windows)]
         crate::host::token::private_creation::prepare()
             .context("select exact-user desktop creation owner")?;
@@ -573,8 +594,12 @@ fn serve(config: &Config, location: Location, background_mode: bool) -> Result<(
         let store = Store::open(&location, &epoch).context("open desktop store")?;
         // A status deadline must not start while startup still owns the actor
         // for migrations/recovery. Publish only once that work has completed.
+        #[allow(unused_mut)]
+        let mut ui_scope = ui_authority::Scope::new(config, &location);
+        #[cfg(target_os = "linux")]
+        ui_scope.initialize_reference(&lock);
         let listener = Arc::new(Listener::bind(&location).context("bind desktop listener")?);
-        Ok((signals, lock, listener, epoch, store))
+        Ok((signals, lock, listener, epoch, store, Arc::new(ui_scope)))
     })()
     .context(StartupRefused)?;
     let stopped = Arc::new(AtomicBool::new(false));
@@ -592,7 +617,6 @@ fn serve(config: &Config, location: Location, background_mode: bool) -> Result<(
     let mut frontend = frontend::Cache::default();
     let mut background: Option<background::Runtime> = None;
     let mut frontend_order = ui_authority::Order::default();
-    let ui_scope = Arc::new(ui_authority::Scope::new(config, &location));
     // At most16 queued controls/data, thirteen bounded parsers and one passive
     // producer. Background mode owns the only internal source producer.
     let (send, receive) = mpsc::sync_channel(protocol::PENDING);
@@ -983,6 +1007,25 @@ fn serve(config: &Config, location: Location, background_mode: bool) -> Result<(
                                             ),
                                         }
                                     }
+                                    // The reference form prepares off the actor and
+                                    // answers later on this same connection.
+                                    #[cfg(any(target_os = "linux", target_os = "macos"))]
+                                    Ok(request)
+                                        if request.operation() == "task_message"
+                                            && request
+                                                .task_message_preview()
+                                                .is_ok_and(|intent| !intent.form.is_inline()) =>
+                                    {
+                                        runtime.task_message_request(
+                                            &mut store,
+                                            request,
+                                            queue.clone(),
+                                            seq,
+                                        );
+                                        streaming = true;
+                                        activation_waiting = true;
+                                        Value::Null
+                                    }
                                     #[cfg(any(target_os = "linux", target_os = "macos"))]
                                     Ok(request)
                                         if request.operation() == "task_start_reconcile" =>
@@ -1108,6 +1151,16 @@ fn serve(config: &Config, location: Location, background_mode: bool) -> Result<(
                             .is_some_and(|v| v["op"] == "task_message_result")
                         {
                             task_message::query(&store, hello.request.as_ref().unwrap())
+                        } else if hello
+                            .request
+                            .as_ref()
+                            .is_some_and(|v| v["op"] == "task_message_staging")
+                        {
+                            task_message::staging_route(
+                                &store,
+                                &location,
+                                hello.request.as_ref().unwrap(),
+                            )
                         } else if hello
                             .request
                             .as_ref()

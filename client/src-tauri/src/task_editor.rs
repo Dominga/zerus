@@ -236,6 +236,7 @@ fn open_slot(
     task: String,
     mode: Mode,
     read: impl Fn(&str, &str) -> Result<Value, String>,
+    fetch: impl FnMut(&TaskCall) -> Result<serde_json::Map<String, Value>, String>,
 ) -> Result<Slot, String> {
     {
         let mut guard = crate::composer::lock(&editor.0.slot);
@@ -256,13 +257,9 @@ fn open_slot(
     {
         let detail = read(&project, &task)?;
         writable(&detail, mode)?;
-        let files = tasks_write::decode_files(&detail["attachments"]);
-        if detail["attachments"]
-            .as_array()
-            .is_some_and(|a| a.len() != files.len())
-        {
-            return Err("Task attachments could not be read.".into());
-        }
+        // The page names the files; each is read once and must match it.
+        let named = task_details::file_metadata(&detail["attachments"])?;
+        let files = task_details::fetch_files(&project, &task, &named, fetch)?;
         stored.draft.text = detail["text"].as_str().unwrap_or("").into();
         stored.draft.attachments = files;
         if stored.draft.text.len() > crate::composer::MAX_TEXT_BYTES {
@@ -322,7 +319,9 @@ pub async fn task_editor_open(
     let fetcher = Arc::clone(fetcher.inner());
     tauri::async_runtime::spawn_blocking(move || {
         let _permit = permit;
-        let mut slot = open_slot(&editor, &composers, project, task, mode, document)?;
+        let mut slot = open_slot(&editor, &composers, project, task, mode, document, |call| {
+            tasks_write::run(&zerus_client_core::default_hgs(), call)
+        })?;
         refresh_files(&mut slot, &composers, &fetcher)?;
         let answer = view(&slot);
         *crate::composer::lock(&editor.0.slot) = Some(slot);
@@ -618,9 +617,11 @@ fn submitted_with_delivery(
             // An interrupted replacement is checked against the canonical
             // document before another write; it is never replayed by a read.
             if slot.stored.uncertain {
-                let current_files = tasks_write::decode_files(&detail["attachments"]);
+                // The page names its files by digest and size: compared with
+                // the expected bytes, no file is read again.
                 if detail["text"].as_str() == Some(expected.text.as_str())
-                    && current_files == expected.attachments
+                    && task_details::file_metadata(&detail["attachments"])
+                        .is_ok_and(|named| task_details::same_files(&named, &expected.attachments))
                 {
                     return Ok(());
                 }
@@ -908,6 +909,36 @@ mod tests {
     }
     fn detail(text: &str) -> Value {
         json!({"uuid":ID,"project":"example","stage":"todo","writable":true,"text":text,"attachments":[]})
+    }
+    /// A file as a page with `--attachments metadata` names it.
+    pub(super) fn named(name: &str, bytes: &[u8]) -> Value {
+        use sha2::Digest;
+        json!({"name":name,"mime":"text/plain","reference":"[File #1]","size":bytes.len(),
+            "sha256":format!("{:x}", sha2::Sha256::digest(bytes))})
+    }
+    /// `hgs task attachment`'s reply for file `number` of the task.
+    pub(super) fn file_reply(
+        number: usize,
+        name: &str,
+        bytes: &[u8],
+    ) -> serde_json::Map<String, Value> {
+        let mut reply = named(name, bytes);
+        reply["project"] = json!({"id":"example","name":"Example"});
+        reply["task"] = json!(ID);
+        reply["entry"] = Value::Null;
+        reply["file"] = json!(number);
+        // An attachment serializes its bytes as `data_base64`.
+        let file = zerus_client_core::attachments::Attachment {
+            name: name.into(),
+            mime: "text/plain".into(),
+            bytes: Arc::from(bytes),
+            reference: String::new(),
+        };
+        reply["data_base64"] = serde_json::to_value(&file).unwrap()["data_base64"].take();
+        reply.as_object().unwrap().clone()
+    }
+    pub(super) fn no_files(_: &TaskCall) -> Result<serde_json::Map<String, Value>, String> {
+        panic!("no file is read")
     }
     fn receipt(id: &str) -> serde_json::Map<String, Value> {
         json!({"task":{"uuid":ID,"project":"example"},"message":{"request_id":id}})
@@ -1254,6 +1285,41 @@ mod tests {
         assert_eq!(calls.get(), 1);
     }
     #[test]
+    fn an_unknown_description_with_files_is_confirmed_by_their_digests_and_sizes() {
+        let root = crate::composer::tests::dir("task-description-files");
+        let store = crate::composer::tests::drafts(&root);
+        let (hub, _) = crate::composer::tests::hub_on(&store);
+        let mut slot = slot(Mode::Description);
+        slot.stored
+            .draft
+            .attachments
+            .push(zerus_client_core::attachments::Attachment {
+                name: "notes.txt".into(),
+                mime: "text/plain".into(),
+                bytes: Arc::from(b"private snapshot".as_slice()),
+                reference: "[File #1]".into(),
+            });
+        let calls = Cell::new(0);
+        let fail = |_: &TaskCall| {
+            calls.set(calls.get() + 1);
+            Err("unknown".into())
+        };
+        assert!(submitted(&mut slot, &hub, detail("previous"), false, &fail).is_err());
+        assert_eq!(calls.get(), 1);
+        // The same text with another file, or with none, is not this save.
+        let mut other = detail("Original");
+        other["attachments"] = json!([named("notes.txt", b"private snapshoT")]);
+        assert!(submitted(&mut slot, &hub, other, false, &fail).is_err());
+        assert!(submitted(&mut slot, &hub, detail("Original"), false, &fail).is_err());
+        let mut saved = detail("Original");
+        saved["attachments"] = json!([named("notes.txt", b"private snapshot")]);
+        assert!(submitted(&mut slot, &hub, saved, false, &|_| panic!(
+            "a confirmed description is neither written nor read again"
+        ))
+        .unwrap());
+        assert_eq!(calls.get(), 1);
+    }
+    #[test]
     fn delivery_evidence_is_kept_until_the_draft_clear_is_durable() {
         let root = crate::composer::tests::dir("task-note-clear-failure");
         let store = crate::composer::tests::drafts(&root);
@@ -1445,6 +1511,7 @@ mod tests {
 
 #[cfg(test)]
 mod open_tests {
+    use super::tests::{file_reply, named, no_files};
     use super::*;
     use std::cell::Cell;
     const ID: &str = "11111111-1111-4111-8111-111111111111";
@@ -1481,6 +1548,7 @@ mod open_tests {
             ID.into(),
             Mode::Description,
             |_, _| panic!("an imported description must not be reseeded"),
+            no_files,
         )
         .unwrap();
         assert_eq!(opened.stored, stored);
@@ -1495,7 +1563,13 @@ mod open_tests {
         let calls = Cell::new(0);
         let read = |_: &str, _: &str| {
             calls.set(calls.get() + 1);
-            Ok(json!({"text":"Canonical", "stage":"todo", "attachments":[], "writable":true}))
+            Ok(json!({"text":"Canonical", "stage":"todo", "writable":true,
+                "attachments":[named("notes.txt", b"private snapshot")]}))
+        };
+        let mut fetched = Vec::new();
+        let mut fetch = |call: &TaskCall| {
+            fetched.push(call.args.clone());
+            Ok(file_reply(1, "notes.txt", b"private snapshot"))
         };
         let opened = open_slot(
             &editor,
@@ -1504,10 +1578,15 @@ mod open_tests {
             ID.into(),
             Mode::Description,
             read,
+            &mut fetch,
         )
         .unwrap();
         assert_eq!(opened.stored.draft.text, "Canonical");
         assert_eq!(calls.get(), 1);
+        assert_eq!(
+            &*opened.stored.draft.attachments[0].bytes,
+            b"private snapshot"
+        );
         let second = open_slot(
             &editor,
             &hub,
@@ -1515,10 +1594,15 @@ mod open_tests {
             ID.into(),
             Mode::Description,
             read,
+            &mut fetch,
         )
         .unwrap();
         assert_eq!(second.stored.draft.text, "Canonical");
         assert_eq!(calls.get(), 1);
+        assert_eq!(
+            fetched,
+            [["attachment", ID, "--file", "1", "--project", "example"]]
+        );
         let key = format!("task-description\nexample\n{ID}");
         save(
             &store,
@@ -1536,6 +1620,7 @@ mod open_tests {
             ID.into(),
             Mode::Description,
             |_, _| panic!("an interrupted empty replacement is not reseeded"),
+            no_files,
         )
         .unwrap();
         assert!(interrupted.stored.draft.text.is_empty() && interrupted.stored.uncertain);
@@ -1546,6 +1631,7 @@ mod open_tests {
             ID.into(),
             Mode::Note,
             |_, _| panic!("opening a note does not read the task"),
+            no_files,
         )
         .unwrap();
         assert!(note.stored.draft.text.is_empty());

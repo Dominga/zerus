@@ -11,6 +11,8 @@ use crate::{
 };
 use policy::mode::{Budget, Mode, Phase, Record, RECORD_BYTES};
 mod recovery;
+mod boot;
+mod review;
 use std::{
     path::Path,
     sync::{atomic::AtomicBool, Arc},
@@ -115,9 +117,9 @@ pub(in crate::desktop::windows_registration) fn command(
         let record = pending_status(location, &plan)?;
         reply["pending_transition"] = record["pending_transition"].clone();
         let pending = reply["pending_transition"].is_object();
-        reply["changed"] = if pending { Value::Null } else { false.into() };
+        reply["changed"] = if pending && request["operation"] != "review" { Value::Null } else { false.into() };
         reply["manager_changed"] = reply["changed"].clone();
-        reply["outcome"] = if pending { "unknown" } else { "refused" }.into();
+        reply["outcome"] = if pending || request["operation"] == "review" { "unknown" } else { "refused" }.into();
         return Ok(reply);
     }
     ensure!(
@@ -130,7 +132,7 @@ pub(in crate::desktop::windows_registration) fn command(
         .remove("pending")
         .unwrap_or(Value::Null);
     reply["ok"] = pending.is_null().into();
-    reply["outcome"] = if pending.is_null() {
+    reply["outcome"] = if request["operation"] == "review" { "unknown" } else if pending.is_null() {
         "settled"
     } else {
         "pending"
@@ -173,6 +175,22 @@ fn load(location: &Location, plan: &Plan) -> Result<Record> {
         Err(error) => Err(error),
     }
 }
+/// Original-ID metadata only. No COM connection, caller admission, Grant,
+/// current-instance lookup or readiness inference belongs to this path.
+pub(in crate::desktop::windows_registration) fn result(
+    config: &Config, location: &Location, request: &str,
+) -> Result<Value> {
+    let sid = crate::host::token::user_sid()?;
+    let preview = registration::windows_plan(config, location)?;
+    let plan = Plan::parse(&json!({"schema":1,"operation":"status","plan":preview}), &sid)?;
+    let record = load(location, &plan)?;
+    let receipt = record.choices.iter().find(|r|r.request == request);
+    Ok(json!({"abi":MODE_ABI,"schema":1,"configuration":location.configuration,
+        "request_id":request,"read_only":true,"receipt":receipt,
+        "outcome":receipt.map(|r|r.phase).unwrap_or(policy::mode::review::ChoicePhase::Unknown),
+        "code":if receipt.is_some() {"original_choice_result"} else {"original_choice_unavailable"},
+        "manager_changed":false,"authority_changed":false,"changed":false}))
+}
 pub(in crate::desktop::windows_registration) fn pending_status(
     location: &Location,
     preview: &Value,
@@ -184,7 +202,9 @@ pub(in crate::desktop::windows_registration) fn pending_status(
     )?;
     let record = load(location, &plan)?;
     Ok(
-        json!({"pending_transition":record.pending,"cancelled_request_id":record.cancelled,"completed_request_id":record.completed}),
+        json!({"pending_transition":record.pending,"cancelled_request_id":record.cancelled,"completed_request_id":record.completed,
+            "reviewed_transition":record.reviewed.last(),
+            "activation_automatic_blocked":!record.reviewed.is_empty() || record.pending.as_ref().is_some_and(|p|p.review.is_some())}),
     )
 }
 fn save(
@@ -344,7 +364,7 @@ struct Runtime<'a> {
     passive: &'a Plan,
     background: &'a Plan,
 }
-fn effect(runtime: Runtime<'_>, desired: Mode) -> Result<Value> {
+fn effect(runtime: Runtime<'_>, desired: Mode, choice: Option<&policy::mode::review::Choice>) -> Result<Value> {
     let until = Budget::Preflight.deadline(Instant::now());
     let Runtime {
         config,
@@ -367,9 +387,11 @@ fn effect(runtime: Runtime<'_>, desired: Mode) -> Result<Value> {
         background
     };
     let mut record = load(location, passive)?;
+    let requested = record.choice(choice)?;
     let resuming = record.pending.clone();
     if let Some(pending) = &resuming {
-        if pending.desired != desired || !pending.phase.pre_manager() {
+        ensure!(pending.review.is_none(), "Review interrupted mode change by its original UUID; a reboot barrier cannot resume or replay its effects.");
+        if requested.is_some() || pending.desired != desired || !pending.phase.pre_manager() {
             return recovery::observe(
                 recovery::Inputs {
                     config,
@@ -405,9 +427,29 @@ fn effect(runtime: Runtime<'_>, desired: Mode) -> Result<Value> {
             "Original task or service changed; retain the pending UUID and inspect it."
         );
     }
+    let consumer = if resuming.is_none() {
+        admission.check()?;
+        let boot = boot::current()?;
+        ensure!(requested.is_none() || record.reviewed.last().is_some_and(|a|
+            a.original.review.as_ref().is_some_and(|r|r.barrier.machine == boot.machine)),
+            "The reviewed original belongs to another machine.");
+        let (pid, birth) = admission.caller.consumer();
+        admission.check()?;
+        Some(policy::mode::review::Consumer { pid, birth, boot })
+    } else { None };
     if resuming.is_none() && from == desired && original.is_some() {
+        if let Some(choice) = choice {
+            record.reserve_choice(choice, desired)?;
+            record.complete(&choice.request)?;
+            save(location, passive, &record, &mut || {
+                fence.check()?;
+                original.as_ref().context("Original instance absent.")?.check()?;
+                ensure!(selected(native, passive, background)? == from, "Owned mode changed.");
+                Ok(())
+            })?;
+        }
         return Ok(
-            json!({"abi":MODE_ABI,"schema":1,"configuration":location.configuration,"task_name":passive.name,"selected_mode":desired.name(),"running_mode":desired.name(),"pending":null,"changed":false}),
+            json!({"abi":MODE_ABI,"schema":1,"configuration":location.configuration,"task_name":passive.name,"selected_mode":desired.name(),"running_mode":desired.name(),"pending":null,"changed":false,"request_id":requested}),
         );
     }
     marker(config, &new.argv[0])?;
@@ -442,7 +484,12 @@ fn effect(runtime: Runtime<'_>, desired: Mode) -> Result<Value> {
     let id = if let Some(pending) = &resuming {
         pending.request_id.clone()
     } else {
-        let id = record.begin(desired, observation)?.request_id.clone();
+        if let Some(choice) = choice { record.reserve_choice(choice, desired)?; }
+        let id = match requested {
+            Some(id) => record.begin_id(desired, observation, id)?,
+            None => record.begin(desired, observation)?,
+        }.request_id.clone();
+        record.pending.as_mut().expect("original").consumer = consumer;
         save(location, passive, &record, &mut || fence.check())?;
         id
     };
@@ -569,8 +616,7 @@ fn effect(runtime: Runtime<'_>, desired: Mode) -> Result<Value> {
     }
     admission.check()?;
     ready.check()?;
-    record.completed = Some(id.clone());
-    record.pending = None;
+    record.complete(&id)?;
     save(location, passive, &record, &mut || admission.check())?;
     Ok(
         json!({"abi":MODE_ABI,"schema":1,"configuration":location.configuration,"task_name":passive.name,"selected_mode":desired.name(),"running_mode":desired.name(),"pending":null,"request_id":id,"changed":true,"instance":ready.observation()}),
@@ -584,12 +630,13 @@ fn operation(args: &[String]) -> Result<Value> {
     let request = policy::read_frame(&mut std::io::stdin().lock(), length)?;
     let op = request["operation"].as_str().unwrap_or("");
     ensure!(
-        request["schema"] == 1 && matches!(op, "switch" | "cancel_rollback"),
+        request["schema"] == 1 && matches!(op, "switch" | "cancel_rollback" | "review"),
         "Unsupported mode request."
     );
     let keys = request.as_object().context("Invalid mode request.")?;
     ensure!(
-        keys.len() == 3
+        (keys.len() == 3 || (op == "switch" && keys.len() == 5
+            && request["after_review"].is_string() && request["request_id"].is_string()))
             && if op == "switch" {
                 keys.contains_key("mode")
             } else {
@@ -656,6 +703,11 @@ fn operation(args: &[String]) -> Result<Value> {
         folder: unsafe { scheduler.GetFolder(&BSTR::from("\\")) }?,
         scheduler: scheduler.clone(),
     };
+    if op == "review" {
+        let id = request["request_id"].as_str().context("Original transition UUID required.")?;
+        return review::command(recovery::Inputs { config: &config, location: &location,
+            native: &mut native, admission: &admission, passive: &passive, background: &background }, id);
+    }
     if let Some((mut record, id)) = offered_cancel {
         // This read-only lane returns before the effect path. It cannot stop,
         // update, start, revoke or acquire a later runtime's rollback hold.
@@ -673,6 +725,9 @@ fn operation(args: &[String]) -> Result<Value> {
         );
     }
     let desired = Mode::parse(request["mode"].as_str().unwrap_or(""))?;
+    let choice = request["after_review"].as_str().map(|reviewed| policy::mode::review::Choice {
+        reviewed: reviewed.into(), request: request["request_id"].as_str().unwrap_or("").into(),
+    });
     effect(
         Runtime {
             config: &config,
@@ -684,6 +739,7 @@ fn operation(args: &[String]) -> Result<Value> {
             background: &background,
         },
         desired,
+        choice.as_ref(),
     )
 }
 
@@ -735,6 +791,8 @@ mod tests {
         for request in [
             json!({"schema":1,"operation":"switch","mode":"passive"}),
             json!({"schema":1,"operation":"cancel_rollback","request_id":"11111111-1111-4111-8111-111111111111"}),
+            json!({"schema":1,"operation":"review","request_id":"11111111-1111-4111-8111-111111111111"}),
+            json!({"schema":1,"operation":"switch","mode":"background","after_review":"11111111-1111-4111-8111-111111111111","request_id":"22222222-2222-4222-8222-222222222222"}),
         ] {
             let error = command(&config, &location, request).unwrap_err();
             assert_eq!(error.to_string(), crate::self_exec::TEST_IMAGE);

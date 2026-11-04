@@ -283,6 +283,19 @@ impl Runtime {
         }
         self.maintenance.frontend_request(store, authority)
     }
+    /// A reference-form task message: preparation runs off the actor and the
+    /// reply follows on `queue`.
+    #[cfg(any(target_os = "linux", target_os = "macos"))]
+    pub fn task_message_request(
+        &mut self,
+        store: &mut Store,
+        authority: super::ui_authority::Validated,
+        queue: Arc<Queue>,
+        seq: u64,
+    ) {
+        self.message
+            .frontend_reference(store, authority, self.notifications.handoff(), queue, seq)
+    }
     #[cfg(any(target_os = "linux", target_os = "macos"))]
     pub fn task_start_request(
         &mut self,

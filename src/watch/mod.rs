@@ -1318,13 +1318,22 @@ impl<'a> Watch<'a> {
 
     // ---- Tasks -------------------------------------------------------------
 
-    fn subscribe_tasks(&mut self, project: Option<&str>) {
+    fn subscribe_tasks(&mut self, project: Option<&str>, window: Option<u32>) {
         let Some(project) = project.filter(|project| {
             !project.is_empty() && project.len() <= tasks::PROJECT_BYTES && !project.chars().any(char::is_control)
         }) else {
             self.out.error("bad_request", "a tasks subscription names its project ID", Some(topic::TASKS), None);
             return;
         };
+        if window.is_some_and(|rows| rows == 0 || rows as usize > protocol::TASKS_WINDOW) {
+            self.out.error(
+                "bad_request",
+                &format!("a tasks window is between 1 and {} rows of each stage", protocol::TASKS_WINDOW),
+                Some(topic::TASKS),
+                Some(project),
+            );
+            return;
+        }
         if !self.tasks.contains(project) && self.tasks.len() >= protocol::TASKS_SUBSCRIPTIONS {
             self.out.error(
                 "too_many_subscriptions",
@@ -1334,7 +1343,7 @@ impl<'a> Watch<'a> {
             );
             return;
         }
-        let job = self.tasks.subscribe(project, Instant::now());
+        let job = self.tasks.subscribe(project, window, Instant::now());
         self.run_tasks([job]);
     }
 
@@ -1351,7 +1360,8 @@ impl<'a> Watch<'a> {
                 Ok(()) => {}
                 Err(mpsc::TrySendError::Full(job)) => self.tasks.defer(job, Instant::now()),
                 Err(mpsc::TrySendError::Disconnected(job)) => {
-                    self.tasks_done(tasks::Done { token: job.token, key: job.key, value: Some(Err("Task list worker is unavailable".into())) });
+                    let tasks::Job { token, key, .. } = job;
+                    self.tasks_done(tasks::Done { token, key, value: Some(Err("Task list worker is unavailable".into())) });
                 }
             }
         }
@@ -1516,7 +1526,7 @@ impl<'a> Watch<'a> {
             topic::CATALOG | topic::CATALOG_META => return,
             topic::GIT => return self.subscribe_git(request.path.as_deref()),
             topic::PROCESSES => return self.subscribe_processes(request.session, request.interval_ms, request.refresh == Some(true)),
-            topic::TASKS => return self.subscribe_tasks(request.project.as_deref()),
+            topic::TASKS => return self.subscribe_tasks(request.project.as_deref(), request.window),
             topic::ORGANIZATION => return self.subscribe_organization(),
             topic::ACTIVITY => {}
             other => {

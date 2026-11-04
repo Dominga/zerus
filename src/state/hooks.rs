@@ -1268,7 +1268,7 @@ fn track(name: String, token: String, mut event: Value, output: &mut StartOutput
     let kind = kind_value.as_str();
     let _guard = lock(None)?;
     let panes = live()?;
-    let own = read_run(&name, &token)?;
+    let own = read_own_run(&name, &token)?;
     let record = if continuations::foreign(own.as_ref(), sid) {
         continuations::owner(&event, sid, &panes)?
     } else {

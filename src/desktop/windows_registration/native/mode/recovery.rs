@@ -288,8 +288,7 @@ pub(super) fn observe(
         Ok(())
     };
     check()?;
-    record.completed = Some(saved.request_id.clone());
-    record.pending = None;
+    record.complete(&saved.request_id)?;
     save(location, passive, record, &mut check)?;
     Ok(
         json!({"abi":MODE_ABI,"schema":1,"configuration":location.configuration,"task_name":passive.name,

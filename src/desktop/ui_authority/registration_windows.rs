@@ -194,6 +194,15 @@ impl Caller {
         }
     }
 
+    /// Observation from the SAME admitted native evidence. This is routing
+    /// metadata only; no supplied PID or serialized role can construct Caller.
+    pub(in crate::desktop) fn consumer(&self) -> (u32, u64) {
+        match self.evidence {
+            Evidence::Frontend { pid, birth, .. } => (pid, birth),
+            Evidence::Console { parent, birth, .. } => (parent, birth),
+        }
+    }
+
     /// Recheck the originals under one fresh bounded observation, never a new
     /// PID walk. The caller retains this evidence across its original effects.
     pub(in crate::desktop) fn check(&self, scope: &Scope) -> Result<()> {

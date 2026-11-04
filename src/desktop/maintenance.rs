@@ -10,8 +10,6 @@ mod state;
 mod tests;
 
 use super::Store;
-#[cfg(unix)]
-use crate::platform;
 use crate::{
     config::Config,
     desktop::{feed, fleet},
@@ -773,17 +771,5 @@ fn unix_now() -> i64 {
     chrono::Utc::now().timestamp()
 }
 fn spawn(command: &mut std::process::Command) -> std::io::Result<std::process::Child> {
-    #[cfg(unix)]
-    {
-        platform::spawn_in_turn(command)
-    }
-    // The service has no console: its children must not open windows.
-    #[cfg(windows)]
-    {
-        crate::platform::spawn_windowless(command)
-    }
-    #[cfg(not(any(unix, windows)))]
-    {
-        command.spawn()
-    }
+    crate::platform::spawn_service_child(command)
 }

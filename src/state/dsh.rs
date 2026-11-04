@@ -48,6 +48,7 @@ pub(super) fn binding(name: &str) -> Result<Value> {
     {
         return Err("Invalid DeepSeek binding".into());
     }
+    session_id::verify(&value)?;
     Ok(value)
 }
 /// Saves the binding, keeping its durable session ID on the caller's record.

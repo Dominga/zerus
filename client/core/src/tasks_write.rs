@@ -168,6 +168,27 @@ impl TaskCall {
         TaskCall::new(with_project(words(&["get", task]), project), "")
     }
 
+    /// One file of a task, or of one of its history entries:
+    /// `task attachment TASK --file N [--entry ID]`.
+    pub fn attachment(project: &str, task: &str, file: usize, entry: Option<&str>) -> TaskCall {
+        let mut args = words(&["attachment", task, "--file"]);
+        args.push(file.to_string());
+        if let Some(entry) = entry {
+            args.extend(["--entry".to_owned(), entry.to_owned()]);
+        }
+        TaskCall::new(with_project(args, project), "")
+    }
+
+    /// One page of a stage: `task list --stage S --limit N [--after CURSOR]`.
+    pub fn list_page(project: &str, stage: &str, limit: usize, after: Option<&str>) -> TaskCall {
+        let mut args = words(&["list", "--stage", stage, "--limit"]);
+        args.push(limit.to_string());
+        if let Some(after) = after {
+            args.extend(["--after".to_owned(), after.to_owned()]);
+        }
+        TaskCall::new(with_project(args, project), "")
+    }
+
     /// To the top of its list.
     pub fn move_top(project: &str, task: &str) -> TaskCall {
         TaskCall::new(with_project(words(&["move", task, "--top"]), project), "")
@@ -921,6 +942,180 @@ pub mod outbox {
     }
 }
 
+/// The reference form (`reference-v1`) of a canonical task message record:
+/// the record with each attachment's `data_base64` replaced by a `data_ref`
+/// naming the raw bytes' SHA-256 and size. Every other field, the attachment
+/// order and metadata included, stays exact. Only a record whose stdin was
+/// frozen in its canonical form (`input_sha256`) has one. Rebuilding uses the
+/// same canonical serializer as [`content`] and [`message_input`], and the
+/// rebuilt stdin must hash to the frozen digest.
+pub mod references {
+    use super::{
+        input_digest, message_input, MAX_ATTACHMENTS, MAX_ATTACHMENT_BYTES, MAX_TOTAL_BYTES,
+    };
+    use base64::Engine;
+    use serde_json::{json, Value};
+    use sha2::{Digest, Sha256};
+
+    /// The form name an intent states for a reference projection.
+    pub const FORM: &str = "reference-v1";
+    const INVALID: &str = "invalid_task_message_reference";
+    /// A raw attachment whose size or digest is not its reference's.
+    pub const MISMATCH: &str = "task_message_reference_mismatch";
+    /// A rebuilt stdin whose digest is not the frozen one.
+    pub const INPUT_CHANGED: &str = "task_message_input_changed";
+
+    /// One attachment's raw bytes, by digest and size.
+    #[derive(Clone, Debug, PartialEq, Eq)]
+    pub struct Reference {
+        pub sha256: String,
+        pub size: u64,
+    }
+
+    fn digest(bytes: &[u8]) -> String {
+        format!("{:x}", Sha256::digest(bytes))
+    }
+    fn hex(value: &str) -> bool {
+        value.len() == 64
+            && value
+                .bytes()
+                .all(|b| b.is_ascii_digit() || (b'a'..=b'f').contains(&b))
+    }
+    fn attachments(record: &Value) -> Option<&Vec<Value>> {
+        record["intent"]["content"]["attachments"].as_array()
+    }
+
+    /// The ordered references of a projection, with its shape and the
+    /// attachment limits checked. It reads no file and builds no input.
+    pub fn of(projection: &Value) -> Result<Vec<Reference>, &'static str> {
+        let frozen = projection["input_sha256"].as_str().is_some_and(hex);
+        if !projection.is_object()
+            || projection.get("input").is_some()
+            || !frozen
+            || !projection["intent"]["content"].is_object()
+        {
+            return Err(INVALID);
+        }
+        let items = attachments(projection).ok_or(INVALID)?;
+        if items.is_empty() || items.len() > MAX_ATTACHMENTS {
+            return Err(INVALID);
+        }
+        let mut total = 0u64;
+        let mut references = Vec::with_capacity(items.len());
+        for item in items {
+            let reference = &item["data_ref"];
+            let fields = reference.as_object().map_or(0, |o| o.len());
+            let sha256 = reference["sha256"].as_str().filter(|v| hex(v));
+            let size = reference["size"].as_u64();
+            let (Some(sha256), Some(size)) = (sha256, size) else {
+                return Err(INVALID);
+            };
+            total = total.saturating_add(size);
+            if item.get("data_base64").is_some()
+                || fields != 2
+                || size == 0
+                || size > MAX_ATTACHMENT_BYTES as u64
+                || total > MAX_TOTAL_BYTES as u64
+            {
+                return Err(INVALID);
+            }
+            references.push(Reference {
+                sha256: sha256.into(),
+                size,
+            });
+        }
+        Ok(references)
+    }
+
+    /// The projection of a canonical record and its ordered raw attachments.
+    /// A record without attachments, with a non-canonical or legacy input or
+    /// with an attachment that is not canonical base64 has none.
+    pub fn project(record: &Value) -> Result<(Value, Vec<Vec<u8>>), &'static str> {
+        let canonical = record.get("input").is_none()
+            && record["input_sha256"].as_str()
+                == Some(input_digest(&message_input(&record["intent"])).as_str());
+        if !canonical {
+            return Err(INVALID);
+        }
+        let items = attachments(record).ok_or(INVALID)?;
+        let mut projection = record.clone();
+        let mut blobs = Vec::with_capacity(items.len());
+        for (index, item) in items.iter().enumerate() {
+            // A field already named `data_ref`, even null, would be replaced:
+            // that record has no projection that keeps every other field.
+            if item.get("data_ref").is_some() {
+                return Err(INVALID);
+            }
+            let encoded = item["data_base64"].as_str().ok_or(INVALID)?;
+            if encoded.len() > MAX_ATTACHMENT_BYTES.div_ceil(3) * 4 {
+                return Err(INVALID);
+            }
+            // The standard engine decodes only the one canonical encoding
+            // (canonical padding, no trailing bits or whitespace), the one
+            // that rebuilds the same stdin.
+            let bytes = base64::engine::general_purpose::STANDARD
+                .decode(encoded)
+                .map_err(|_| INVALID)?;
+            let slot = &mut projection["intent"]["content"]["attachments"][index];
+            let object = slot.as_object_mut().ok_or(INVALID)?;
+            object.remove("data_base64");
+            object.insert(
+                "data_ref".into(),
+                json!({"sha256": digest(&bytes), "size": bytes.len()}),
+            );
+            blobs.push(bytes);
+        }
+        of(&projection)?;
+        Ok((projection, blobs))
+    }
+
+    /// The exact record a projection stands for, from its ordered raw
+    /// attachments. Each must have its reference's size and digest, and the
+    /// rebuilt canonical stdin must hash to the frozen `input_sha256`.
+    pub fn rebuild(projection: &Value, blobs: &[&[u8]]) -> Result<Value, &'static str> {
+        let references = of(projection)?;
+        if blobs.len() != references.len() {
+            return Err(MISMATCH);
+        }
+        let mut record = projection.clone();
+        for (index, (reference, bytes)) in references.iter().zip(blobs).enumerate() {
+            if bytes.len() as u64 != reference.size || digest(bytes) != reference.sha256 {
+                return Err(MISMATCH);
+            }
+            let slot = &mut record["intent"]["content"]["attachments"][index];
+            let object = slot.as_object_mut().ok_or(INVALID)?;
+            object.remove("data_ref");
+            object.insert(
+                "data_base64".into(),
+                base64::engine::general_purpose::STANDARD
+                    .encode(bytes)
+                    .into(),
+            );
+        }
+        let input = message_input(&record["intent"]);
+        if record["input_sha256"].as_str() != Some(input_digest(&input).as_str()) {
+            return Err(INPUT_CHANGED);
+        }
+        Ok(record)
+    }
+
+    /// The exact byte length of the stdin a projection rebuilds, without its
+    /// attachments: base64 needs no JSON escaping, so each one adds exactly
+    /// its encoded length to the content with empty data.
+    pub fn input_len(projection: &Value) -> Result<u64, &'static str> {
+        let references = of(projection)?;
+        let mut content = projection["intent"]["content"].clone();
+        let items = content["attachments"].as_array_mut().ok_or(INVALID)?;
+        for item in items.iter_mut() {
+            let object = item.as_object_mut().ok_or(INVALID)?;
+            object.remove("data_ref");
+            object.insert("data_base64".into(), "".into());
+        }
+        let encoded: u64 = references.iter().map(|r| r.size.div_ceil(3) * 4).sum();
+        Ok(content.to_string().len() as u64 + encoded)
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -1176,6 +1371,178 @@ mod tests {
         assert!(decode_files(&json!([{"name": "a", "data_base64": ""}])).is_empty());
         let nine: Vec<Value> = (0..9).map(|_| json!({"data_base64": "aGk="})).collect();
         assert!(decode_files(&Value::Array(nine)).is_empty());
+    }
+}
+
+#[cfg(test)]
+mod references_tests {
+    use super::references::{self, Reference};
+    use super::*;
+    use sha2::Digest;
+
+    const ID: &str = "11111111-1111-4111-8111-111111111111";
+
+    fn file(name: &str, bytes: Vec<u8>) -> Attachment {
+        Attachment {
+            name: name.into(),
+            mime: "image/png".into(),
+            bytes: bytes.into(),
+            reference: format!("[{name}]"),
+        }
+    }
+    /// A canonical record as the editor reserves it, with an opaque field.
+    fn record(files: &[Attachment]) -> Value {
+        let intent = message_intent("see these", files, "queue", "");
+        json!({"id": ID, "intent": intent, "input_sha256": input_digest(&message_input(&intent)),
+            "opaque_future": {"kept": true}})
+    }
+    fn pair() -> Vec<Attachment> {
+        let shot: Vec<u8> = (0..3000u32).map(|n| (n % 251) as u8).collect();
+        // The same bytes twice: each attachment keeps its own reference.
+        vec![
+            file("a.png", shot.clone()),
+            file("b.png", shot),
+            file("c.txt", b"note".to_vec()),
+        ]
+    }
+
+    #[test]
+    fn a_projection_keeps_every_other_field_and_rebuilds_the_exact_record() {
+        let files = pair();
+        let record = record(&files);
+        let (projection, blobs) = references::project(&record).unwrap();
+        let items = projection["intent"]["content"]["attachments"]
+            .as_array()
+            .unwrap();
+        assert_eq!(items.len(), 3);
+        for (item, file) in items.iter().zip(&files) {
+            assert!(item.get("data_base64").is_none());
+            assert_eq!(item["name"], file.name.as_str(), "order and metadata kept");
+            assert_eq!(item["reference"], file.reference.as_str());
+        }
+        assert_eq!(projection["opaque_future"], record["opaque_future"]);
+        assert_eq!(projection["input_sha256"], record["input_sha256"]);
+        assert_eq!(
+            references::of(&projection).unwrap()[0],
+            Reference {
+                sha256: format!("{:x}", sha2::Sha256::digest(&files[0].bytes)),
+                size: 3000
+            }
+        );
+        let views: Vec<&[u8]> = blobs.iter().map(Vec::as_slice).collect();
+        assert_eq!(references::rebuild(&projection, &views).unwrap(), record);
+        assert_eq!(
+            references::input_len(&projection).unwrap(),
+            message_input(&record["intent"]).len() as u64
+        );
+    }
+
+    #[test]
+    fn only_a_canonical_record_with_canonical_attachments_has_a_projection() {
+        let record = record(&pair());
+        // A non-canonical frozen input, a legacy record or no attachments.
+        let mut exact = record.clone();
+        exact.as_object_mut().unwrap().remove("input_sha256");
+        exact["input"] = json!(message_input(&record["intent"]));
+        let mut legacy = record.clone();
+        legacy.as_object_mut().unwrap().remove("input_sha256");
+        let plain = {
+            let intent = message_intent("text only", &[], "queue", "");
+            json!({"id": ID, "intent": intent, "input_sha256": input_digest(&message_input(&intent))})
+        };
+        // Encodings of the same bytes other than the one canonical encoding:
+        // trailing bits, missing padding, whitespace.
+        let loose = ["bm90ZR==", "bm90ZQ", "bm90ZQ==\n", "bm90 ZQ=="].map(|encoded| {
+            let mut loose = record.clone();
+            loose["intent"]["content"]["attachments"][2]["data_base64"] = json!(encoded);
+            loose["input_sha256"] = json!(input_digest(&message_input(&loose["intent"])));
+            loose
+        });
+        let mut changed = record.clone();
+        changed["input_sha256"] = json!("0".repeat(64));
+        // An attachment that already has a `data_ref` field, null or not:
+        // projecting it would overwrite that field (review-n on #1324).
+        let named = [json!(null), json!({"sha256": "0".repeat(64), "size": 4})].map(|value| {
+            let mut named = record.clone();
+            named["intent"]["content"]["attachments"][2]["data_ref"] = value;
+            named["input_sha256"] = json!(input_digest(&message_input(&named["intent"])));
+            assert!(
+                outbox::decode(named.to_string().as_bytes()).is_ok(),
+                "a valid record"
+            );
+            named
+        });
+        for refused in [exact, legacy, plain, changed]
+            .into_iter()
+            .chain(loose)
+            .chain(named)
+        {
+            assert!(references::project(&refused).is_err(), "{refused}");
+        }
+    }
+
+    #[test]
+    fn a_rebuild_refuses_any_other_bytes_and_any_other_shape() {
+        let record = record(&pair());
+        let (projection, blobs) = references::project(&record).unwrap();
+        let views: Vec<&[u8]> = blobs.iter().map(Vec::as_slice).collect();
+        let wrong = b"note!".to_vec();
+        // The same size, other bytes.
+        let mut flipped = blobs[0].clone();
+        flipped[0] ^= 1;
+        assert_eq!(
+            references::rebuild(&projection, &[flipped.as_slice(), views[1], views[2]]),
+            Err(references::MISMATCH)
+        );
+        for bad in [
+            vec![views[0], views[1]],
+            vec![views[0], views[1], views[2], views[2]],
+            vec![views[0], views[1], wrong.as_slice()],
+            vec![views[2], views[1], views[0]],
+        ] {
+            assert!(references::rebuild(&projection, &bad).is_err());
+        }
+        // Metadata changed after the input was frozen no longer rebuilds it.
+        let mut renamed = projection.clone();
+        renamed["intent"]["content"]["attachments"][0]["name"] = json!("other.png");
+        assert_eq!(
+            references::rebuild(&renamed, &views),
+            Err(references::INPUT_CHANGED)
+        );
+        let shape = |edit: &dyn Fn(&mut Value)| {
+            let mut changed = projection.clone();
+            edit(&mut changed);
+            references::of(&changed).is_err()
+        };
+        fn first(v: &mut Value) -> &mut Value {
+            &mut v["intent"]["content"]["attachments"][0]
+        }
+        assert!(shape(&|v| first(v)["data_base64"] = json!("")));
+        assert!(shape(&|v| first(v)["data_ref"]["extra"] = json!(1)));
+        assert!(shape(&|v| first(v)["data_ref"]["size"] = json!(0)));
+        assert!(shape(
+            &|v| first(v)["data_ref"]["size"] = json!(MAX_ATTACHMENT_BYTES + 1)
+        ));
+        assert!(shape(
+            &|v| first(v)["data_ref"]["sha256"] = json!("A".repeat(64))
+        ));
+        assert!(shape(&|v| v["input"] = json!("{}")));
+        assert!(shape(&|v| v["input_sha256"] = json!("not a digest")));
+        assert!(shape(&|v| v["intent"]["content"]["attachments"] = json!([])));
+        // The attachment count and total size limits hold for references too.
+        let many = |count: usize, size: usize| {
+            let mut changed = projection.clone();
+            let item = projection["intent"]["content"]["attachments"][0].clone();
+            let mut items = vec![item; count];
+            for item in &mut items {
+                item["data_ref"]["size"] = json!(size);
+            }
+            changed["intent"]["content"]["attachments"] = json!(items);
+            references::of(&changed).is_err()
+        };
+        assert!(!many(MAX_ATTACHMENTS, 1));
+        assert!(many(MAX_ATTACHMENTS + 1, 1));
+        assert!(many(3, MAX_ATTACHMENT_BYTES), "over the total");
     }
 }
 

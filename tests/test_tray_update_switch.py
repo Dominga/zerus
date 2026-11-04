@@ -135,7 +135,7 @@ class Switch(Fixture):
         self.assertEqual(updater.snapshot(saved, roots), 3)
         self.assertEqual(saved.stat().st_mode & 0o777, 0o700)
         self.assertEqual((saved / f'client-{TEST_ID}/client-draft/draft.json').stat().st_mode & 0o777, 0o600)
-        self.assertEqual(updater.changed_drafts(saved, roots), (2, []))
+        self.assertEqual(updater.changed_drafts(saved, roots), (updater.KeptDrafts(total=2, unsent=2), []))
         blob = next((client_root / 'client-draft').glob('*.bin'))
         blob.write_bytes(b'changed')
         shutil.rmtree(qt_root / 'qt-draft')
@@ -145,6 +145,50 @@ class Switch(Fixture):
         (client_root / 'link').symlink_to(link)
         with self.assertRaisesRegex(updater.UpdateError, 'symbolic links'):
             updater.snapshot(self.root / 'again', roots)
+
+    def test_the_report_tells_unsent_input_from_form_state_and_held_identities(self):
+        # zerus-8iwj: an answered or submitted question form is saved form
+        # state, not unsent input. A held delivery identity (`deferred_input`,
+        # zerus-5wmh.66.4.4) is compared and counted on its own.
+        client = {'CFBundleIdentifier': TEST_ID, 'ZerusGUI': 'tauri'}
+        roots = updater.draft_roots({}, client)
+        qt_root, client_root = roots[0][1], roots[1][1]
+        held = {'version': 1, 'kind': 'send', 'request_id': '00000000-0000-4000-8000-000000000001'}
+
+        def manifest(name, **fields):
+            folder = client_root / name
+            folder.mkdir(parents=True)
+            body = {'version': 1, 'key': name, 'text': '', 'attachments': [], **fields}
+            (folder / 'draft.json').write_text(json.dumps(body))
+
+        def rewrite(name, change):
+            path = client_root / name / 'draft.json'
+            body = json.loads(path.read_text())
+            change(body)
+            path.write_text(json.dumps(body))
+
+        self.draft(qt_root, 'typed', 'unsent text')
+        self.draft(client_root, 'with-file', '', blob=b'attachment')
+        manifest('answered', form_state={'answers': {'q': 'yes'}, 'answered': True})
+        manifest('submitted', form_state={'answers': {'q': 'no'}, 'submitted': True})
+        manifest('empty-form', form_state={})
+        manifest('held-only', deferred_input=held)
+        manifest('held-text', text='maybe sent', deferred_input=held)
+        saved = self.root / 'saved'
+        updater.snapshot(saved, roots)
+        self.assertEqual(updater.changed_drafts(saved, roots),
+                         (updater.KeptDrafts(total=6, unsent=3, forms=2, held=2), []))
+        # A changed answered form, a changed held identity and a lost
+        # identity-only draft each block, as any changed draft does.
+        rewrite('answered', lambda body: body['form_state'].update(answered=False))
+        rewrite('held-text', lambda body: body['deferred_input'].update(
+            request_id='00000000-0000-4000-8000-000000000002'))
+        shutil.rmtree(client_root / 'held-only')
+        kept, problems = updater.changed_drafts(saved, roots)
+        self.assertEqual(problems, [f'client-{TEST_ID} answered: changed',
+                                    f'client-{TEST_ID} held-only: missing',
+                                    f'client-{TEST_ID} held-text: changed'])
+        self.assertEqual(kept, updater.KeptDrafts(total=3, unsent=2, forms=1, held=0))
 
     def test_a_half_deleted_bundle_has_no_kind(self):
         half = self.bundle('half', 'qt')

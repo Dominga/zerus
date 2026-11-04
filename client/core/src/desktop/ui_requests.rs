@@ -1056,6 +1056,91 @@ mod tests {
     }
 
     #[test]
+    fn task_message_input_release_responder_requires_cached_service_mode_and_the_same_configuration(
+    ) {
+        const CASE: &str = "desktop::ui_requests::tests::task_message_input_release_responder_requires_cached_service_mode_and_the_same_configuration";
+        if std::env::var_os("ZERUS_TASK_MESSAGE_INPUT_RELEASE_RESPONDER_TEST_CHILD").is_none() {
+            let output = std::process::Command::new(std::env::current_exe().unwrap())
+                .args(["--exact", CASE, "--test-threads=1", "--nocapture"])
+                .env_remove("HGS_SESSION")
+                .env_remove("HGS_RUN_ID")
+                .env("ZERUS_TASK_MESSAGE_INPUT_RELEASE_RESPONDER_TEST_CHILD", "1")
+                .output()
+                .unwrap();
+            assert!(
+                output.status.success(),
+                "{}",
+                String::from_utf8_lossy(&output.stderr)
+            );
+            assert!(String::from_utf8_lossy(&output.stdout).contains("1 passed; 0 failed"));
+            return;
+        }
+        use crate::desktop::{ownership::Mode, Build};
+        let release = crate::desktop::task_message::review::tests::release();
+        let request = Request::TaskMessageInputRelease {
+            release: Box::new(release.clone()),
+        };
+        assert_eq!(request.operation(), "task_message_input_release");
+        assert_eq!(request.id(), release.release_id);
+        // An invalid release never prepares.
+        let invalid = Request::TaskMessageInputRelease {
+            release: Box::new(crate::desktop::task_message::review::Release {
+                bytes: 0,
+                ..release.clone()
+            }),
+        };
+        // The responder admits only its own cached Service mode and exactly
+        // the configuration the release was scoped to.
+        for (configuration, mode, request, accepted) in [
+            (release.scope.configuration.clone(), None, &request, false),
+            (
+                release.scope.configuration.clone(),
+                Some(Mode::Native),
+                &request,
+                false,
+            ),
+            ("f".repeat(64), Some(Mode::Service), &request, false),
+            (
+                release.scope.configuration.clone(),
+                Some(Mode::Service),
+                &invalid,
+                false,
+            ),
+            (
+                release.scope.configuration.clone(),
+                Some(Mode::Service),
+                &request,
+                true,
+            ),
+        ] {
+            let responder = Responder::new(
+                "com.hgdev.hgs-tray".into(),
+                Build {
+                    version: "1.2.3".into(),
+                    source_commit: "a".repeat(40),
+                    source_dirty: Some(false),
+                },
+                id(80),
+                true,
+                false,
+            );
+            assert!(responder.configure_once(configuration));
+            if let Some(mode) = mode {
+                assert!(responder.configure_ownership_mode_once(mode));
+            }
+            let prepared = responder.prepare_ui_request(id(1), request.clone());
+            assert_eq!(prepared.is_ok(), accepted);
+            if let Ok(slot) = prepared {
+                *slot.0.child.lock().unwrap() = Some((27, "synthetic-birth".into()));
+                let evidence = responder.ui_requests.evidence(&id(1)).unwrap();
+                assert_eq!(evidence.ownership_mode, Some(Mode::Service));
+                assert_eq!(evidence.request_id, release.release_id);
+                assert_eq!(evidence.fingerprint, request.fingerprint());
+            }
+        }
+    }
+
+    #[test]
     fn task_start_native_responder_uses_its_cached_configuration_and_mode() {
         const CASE: &str = "desktop::ui_requests::tests::task_start_native_responder_uses_its_cached_configuration_and_mode";
         if std::env::var_os("ZERUS_TASK_START_RESPONDER_TEST_CHILD").is_none() {

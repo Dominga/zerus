@@ -23,6 +23,12 @@ use zerus_client_core::desktop::task_message::review::{
 /// Listings off the actor at once.
 const LISTINGS: usize = 2;
 static LISTING: AtomicUsize = AtomicUsize::new(0);
+#[cfg(test)]
+thread_local! {
+    /// Makes the next listing's worker fail to start on this thread.
+    pub(in crate::desktop::task_message) static LISTING_SPAWN_FAILS: std::cell::Cell<bool> =
+        const { std::cell::Cell::new(false) };
+}
 
 /// Another review or removal holds the slot.
 const BUSY: &str = "task_message_input_review_busy";
@@ -126,43 +132,58 @@ impl Runtime {
             }
         };
         let scope = self.scope.clone();
-        let spawned = thread::Builder::new()
-            .name("task-message-review".into())
-            .spawn(move || {
-                let more = rows.len() > wire_review::PAGE;
-                let entries: Vec<Entry> = rows
-                    .into_iter()
-                    .take(wire_review::PAGE)
-                    .map(|row| Entry {
-                        observed: staging::observe(&roots, &row.request_id),
-                        recorded: (row.state == "failed").then_some(row.identity).flatten(),
-                        request_id: row.request_id,
-                        state: row.state,
-                        bytes: row.bytes,
-                        input_sha256: row.input_sha256,
-                        created: row.created,
-                    })
-                    .collect();
-                let next = more.then(|| {
-                    let last = entries.last().expect("a full page");
-                    Cursor {
-                        created: last.created,
-                        request_id: last.request_id.clone(),
-                    }
-                });
-                let page = Page {
-                    abi: wire::ABI.into(),
-                    scope,
-                    read_only: true,
-                    entries,
-                    next,
-                    code: String::new(),
-                };
-                answer_on(&epoch, &queue, seq, json!(page));
-                LISTING.fetch_sub(1, Ordering::AcqRel);
+        let (reply_epoch, reply_queue) = (epoch.clone(), queue.clone());
+        let work = move || {
+            let more = rows.len() > wire_review::PAGE;
+            let entries: Vec<Entry> = rows
+                .into_iter()
+                .take(wire_review::PAGE)
+                .map(|row| Entry {
+                    observed: staging::observe(&roots, &row.request_id),
+                    recorded: (row.state == "failed").then_some(row.identity).flatten(),
+                    request_id: row.request_id,
+                    state: row.state,
+                    bytes: row.bytes,
+                    input_sha256: row.input_sha256,
+                    created: row.created,
+                })
+                .collect();
+            let next = more.then(|| {
+                let last = entries.last().expect("a full page");
+                Cursor {
+                    created: last.created,
+                    request_id: last.request_id.clone(),
+                }
             });
+            let page = Page {
+                abi: wire::ABI.into(),
+                scope,
+                read_only: true,
+                entries,
+                next,
+                code: String::new(),
+            };
+            answer_on(&epoch, &queue, seq, json!(page));
+            LISTING.fetch_sub(1, Ordering::AcqRel);
+        };
+        #[cfg(test)]
+        let refused = LISTING_SPAWN_FAILS.with(|fail| fail.replace(false));
+        #[cfg(not(test))]
+        let refused = false;
+        let spawned = if refused {
+            Err(std::io::Error::other("listing worker refused"))
+        } else {
+            thread::Builder::new()
+                .name("task-message-review".into())
+                .spawn(work)
+                .map(drop)
+        };
+        // A listing whose worker never started still answers and closes its
+        // connection.
         if spawned.is_err() {
             LISTING.fetch_sub(1, Ordering::AcqRel);
+            let value = self.page_refusal("task_message_inputs_unavailable");
+            answer_on(&reply_epoch, &reply_queue, seq, value);
         }
     }
 

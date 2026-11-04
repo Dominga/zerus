@@ -6,6 +6,8 @@ use super::{consent::Consent, ledger, staging};
 
 mod reference;
 mod review;
+#[cfg(test)]
+pub(super) use review::LISTING_SPAWN_FAILS;
 
 /// The one removal slot: a custody-input removal or restart recovery, or one
 /// explicit review's claim (zerus-pi2k9). Either excludes the other, the

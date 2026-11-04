@@ -236,7 +236,9 @@ the form like every original.
   - **Absent slot.** Releases the charge only after a complete, error-free scan
     of the folder (at most 256 entries, 64 MiB hashed in all, 5 s, the
     enumeration included) finds no copy of those bytes under another name.
-    The scan holds every object it opened. Afterwards the folder's own
+    The scan holds every object it opened: at most 256 descriptors, and the
+    service does not raise its descriptor limit for it, so running out keeps
+    the record as unsafe. Afterwards the folder's own
     version, its complete set of names and every held object's version must
     be unchanged, each name must still denote its held object, and the slot
     must still be absent; any addition, removal, replacement or in-place

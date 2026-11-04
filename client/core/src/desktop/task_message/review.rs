@@ -190,3 +190,242 @@ impl Released {
             && self.scope == release.scope
     }
 }
+
+#[cfg(test)]
+pub(crate) mod tests {
+    use super::*;
+
+    fn id(n: usize) -> String {
+        format!("00000000-0000-4000-8000-{n:012x}")
+    }
+    pub(crate) fn scope() -> Scope {
+        Scope {
+            configuration: "a".repeat(64),
+            service_epoch: id(90),
+        }
+    }
+    fn version(size: u64) -> Version {
+        Version {
+            device: 1,
+            inode: 2,
+            size,
+            mode: 0o100600,
+            links: 1,
+            modified: (1, 0),
+            changed: (1, 0),
+        }
+    }
+    /// A valid release of an absent slot.
+    pub(crate) fn release() -> Release {
+        Release {
+            scope: scope(),
+            release_id: id(3),
+            request_id: id(2),
+            state: "orphaned".into(),
+            bytes: 10,
+            input_sha256: "b".repeat(64),
+            observed: None,
+        }
+    }
+
+    #[test]
+    fn a_release_names_one_reviewable_record_and_a_matching_observation() {
+        assert!(release().valid());
+        assert!(Release {
+            state: "failed".into(),
+            observed: Some(version(10)),
+            ..release()
+        }
+        .valid());
+        assert!(Release {
+            bytes: 64 << 20,
+            ..release()
+        }
+        .valid());
+        let refused = [
+            Release {
+                scope: Scope {
+                    configuration: "x".into(),
+                    ..scope()
+                },
+                ..release()
+            },
+            Release {
+                release_id: "not-a-uuid".into(),
+                ..release()
+            },
+            Release {
+                request_id: "not-a-uuid".into(),
+                ..release()
+            },
+            // Its own identity, never the request's.
+            Release {
+                release_id: id(2),
+                ..release()
+            },
+            Release {
+                state: "held".into(),
+                ..release()
+            },
+            Release {
+                state: "removed".into(),
+                ..release()
+            },
+            Release {
+                bytes: 0,
+                ..release()
+            },
+            Release {
+                bytes: (64 << 20) + 1,
+                ..release()
+            },
+            Release {
+                input_sha256: "B".repeat(64),
+                ..release()
+            },
+            // A present object must be the record's size with one link.
+            Release {
+                observed: Some(version(11)),
+                ..release()
+            },
+            Release {
+                observed: Some(Version {
+                    links: 2,
+                    ..version(10)
+                }),
+                ..release()
+            },
+        ];
+        for release in refused {
+            assert!(!release.valid(), "{release:?}");
+        }
+    }
+
+    fn entry(n: usize) -> Entry {
+        Entry {
+            request_id: id(n),
+            state: "orphaned".into(),
+            bytes: 10,
+            input_sha256: "c".repeat(64),
+            created: n as i64,
+            recorded: None,
+            observed: Observation::Absent,
+        }
+    }
+    fn page(entries: Vec<Entry>) -> Page {
+        Page {
+            abi: super::super::ABI.into(),
+            scope: scope(),
+            read_only: true,
+            entries,
+            next: None,
+            code: String::new(),
+        }
+    }
+
+    #[test]
+    fn a_page_matches_only_its_own_bounded_read_only_listing() {
+        let list = List {
+            op: LIST_OP.into(),
+            scope: scope(),
+            after: Some(Cursor {
+                created: 1,
+                request_id: id(1),
+            }),
+        };
+        assert!(list.valid());
+        assert!(!List {
+            op: "task_message_inputz".into(),
+            ..list.clone()
+        }
+        .valid());
+        assert!(!List {
+            after: Some(Cursor {
+                created: 1,
+                request_id: "x".into()
+            }),
+            ..list.clone()
+        }
+        .valid());
+        assert!(page((1..=PAGE).map(entry).collect()).matches(&list));
+        assert!(
+            page(Vec::new()).matches(&list),
+            "a refusal or an empty page"
+        );
+        let refused = [
+            page((1..=PAGE + 1).map(entry).collect()),
+            Page {
+                abi: "desktop-task-message-v0".into(),
+                ..page(Vec::new())
+            },
+            Page {
+                read_only: false,
+                ..page(Vec::new())
+            },
+            Page {
+                scope: Scope {
+                    service_epoch: id(91),
+                    ..scope()
+                },
+                ..page(Vec::new())
+            },
+            page(vec![Entry {
+                request_id: "x".into(),
+                ..entry(1)
+            }]),
+            page(vec![Entry {
+                state: "held".into(),
+                ..entry(1)
+            }]),
+            page(vec![Entry {
+                input_sha256: "nope".into(),
+                ..entry(1)
+            }]),
+        ];
+        for page in refused {
+            assert!(!page.matches(&list), "{page:?}");
+        }
+    }
+
+    #[test]
+    fn a_reply_matches_only_its_own_release() {
+        let release = release();
+        let reply = Released {
+            abi: super::super::ABI.into(),
+            release_id: release.release_id.clone(),
+            request_id: release.request_id.clone(),
+            scope: scope(),
+            outcome: Outcome::Removed,
+            code: String::new(),
+        };
+        assert!(reply.matches(&release));
+        for other in [
+            Released {
+                abi: "x".into(),
+                ..reply.clone()
+            },
+            Released {
+                release_id: id(9),
+                ..reply.clone()
+            },
+            Released {
+                request_id: id(9),
+                ..reply.clone()
+            },
+            Released {
+                scope: Scope {
+                    service_epoch: id(91),
+                    ..scope()
+                },
+                ..reply.clone()
+            },
+        ] {
+            assert!(!other.matches(&release));
+        }
+        // A refusal before any claim has neither shape.
+        let refusal = serde_json::json!({"abi": super::super::ABI, "read_only": false,
+            "code": "task_message_input_review_refused"});
+        assert!(serde_json::from_value::<Released>(refusal.clone()).is_err());
+        assert!(serde_json::from_value::<Page>(refusal).is_err());
+    }
+}

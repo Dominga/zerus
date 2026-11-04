@@ -2684,6 +2684,78 @@ mod actor {
                 assert!(second.next.is_none());
             }
 
+            /// A reviewed object whose version matches but whose bytes are not
+            /// the record's is never removed (review-q2's R1).
+            #[test]
+            fn a_reviewed_object_with_other_bytes_is_kept() {
+                let mut f = Fixture::new(|_, _, _, _, _| panic!("nothing runs"));
+                let original = f.orphan(71, 1);
+                let path = f.input_path(&original);
+                let mut bytes = std::fs::read(&path).unwrap();
+                bytes[0] ^= 1;
+                {
+                    use std::io::Write;
+                    std::fs::OpenOptions::new()
+                        .write(true)
+                        .open(&path)
+                        .unwrap()
+                        .write_all(&bytes)
+                        .unwrap();
+                }
+                // The review observes the rewritten object as it now is.
+                let version = present(f.observed(&original));
+                let answer = f.release(&f.release_of(&original, "orphaned", Some(version)));
+                assert_eq!(
+                    (answer.outcome, answer.code.as_str()),
+                    (Outcome::Kept, staging::REVIEW_CHANGED)
+                );
+                assert_eq!(std::fs::read(&path).unwrap(), bytes, "never removed");
+                assert_eq!(f.state(&original), "orphaned");
+                assert_eq!(inputs::totals(&f.store.db).unwrap().0, 1);
+            }
+
+            /// An in-place change between the post-read recheck and the final
+            /// name observation keeps the object (review-q2's R6).
+            #[test]
+            fn an_in_place_change_before_the_name_check_is_kept() {
+                let mut f = Fixture::new(|_, _, _, _, _| panic!("nothing runs"));
+                let original = f.orphan(73, 1);
+                let path = f.input_path(&original);
+                let version = present(f.observed(&original));
+                let target = path.clone();
+                at(&original, staging::ReviewPoint::BeforeName, move || {
+                    use std::io::Write;
+                    std::fs::OpenOptions::new()
+                        .write(true)
+                        .open(&target)
+                        .unwrap()
+                        .write_all(b"X")
+                        .unwrap();
+                });
+                let answer = f.release(&f.release_of(&original, "orphaned", Some(version)));
+                assert_eq!(
+                    (answer.outcome, answer.code.as_str()),
+                    (Outcome::Kept, staging::REVIEW_CHANGED)
+                );
+                assert!(path.exists(), "never removed");
+                assert_eq!(f.state(&original), "orphaned");
+            }
+
+            /// A listing whose worker cannot start still answers, and the
+            /// listing bound is restored.
+            #[test]
+            fn a_listing_whose_worker_never_started_answers_a_refusal() {
+                let mut f = Fixture::new(|_, _, _, _, _| panic!("nothing runs"));
+                let original = f.orphan(75, 1);
+                runtime::LISTING_SPAWN_FAILS.with(|fail| fail.set(true));
+                let refused = f.list(None);
+                assert_eq!(refused.code, "task_message_inputs_unavailable");
+                assert!(refused.entries.is_empty() && refused.next.is_none());
+                let listed = f.list(None);
+                assert_eq!(listed.code, "");
+                assert_eq!(listed.entries[0].request_id, original.plan.request_id);
+            }
+
             /// The open-record queries search the open-state partial index
             /// on the first and every cursor page: a retained terminal history
             /// adds no work.

@@ -564,8 +564,47 @@ pub struct Captured {
 
 /// The folder at `root`'s committed original, read in full and checked
 /// against its own receipt. An unsupported or unreadable folder is an error
-/// naming that state: never published as complete.
+/// naming that state: never published as complete. `Ok(None)` only by
+/// [`status`]'s own rules: no folder, a verified-absent or unpublished slot,
+/// or a valid seed of this folder without a receipt.
 pub fn captured(root: &Path) -> Result<Option<Captured>, Evidence> {
+    let Some(found) = seeded(root)? else {
+        return Ok(None);
+    };
+    let receipt = match disk::read(&found.slot.join("receipt.json"), META) {
+        Ok(None) => return Ok(None),
+        Ok(Some((bytes, _))) => bytes,
+        Err(_) => return Err(Evidence::Unreadable),
+    };
+    let snapshot = Snapshot::open(&found.slot, &found.object, found.birth.as_deref())
+        .map_err(|_| Evidence::Unreadable)?;
+    // The bytes read first are the receipt the original was opened with.
+    if serde_json::from_slice::<Original>(&receipt).ok().as_ref() != Some(&snapshot.receipt) {
+        return Err(Evidence::Unreadable);
+    }
+    Ok(Some(Captured {
+        folder: found.canonical,
+        directory: found.object,
+        birth: found.birth,
+        receipt,
+        snapshot,
+    }))
+}
+
+/// A folder's slot and its verified seed.
+struct Seeded {
+    canonical: PathBuf,
+    object: String,
+    birth: Option<String>,
+    slot: PathBuf,
+    seed: Seed,
+}
+
+/// The slot of the folder at `root` and its seed, by one rule for every
+/// reader: `Ok(None)` only for no folder, a verified-absent slot, or a slot
+/// with neither seed nor receipt. A seed that does not bind this folder and
+/// anything unreadable are errors, before any receipt is looked at.
+fn seeded(root: &Path) -> Result<Option<Seeded>, Evidence> {
     if fs::symlink_metadata(root).is_err_and(|error| error.kind() == io::ErrorKind::NotFound) {
         return Ok(None);
     }
@@ -577,31 +616,46 @@ pub fn captured(root: &Path) -> Result<Option<Captured>, Evidence> {
     }
     let (canonical, object, birth) = folder(&canonical).map_err(|_| Evidence::Unreadable)?;
     let slot = slot(&canonical, &object, birth.as_deref());
-    if !slot.exists() {
-        return Ok(None);
-    }
-    let receipt = match disk::read(&slot.join("receipt.json"), META) {
-        Ok(None) => return Ok(None),
-        Ok(Some((bytes, _))) => bytes,
+    match missing(&slot) {
+        Ok(true) => return Ok(None),
+        Ok(false) => {}
         Err(_) => return Err(Evidence::Unreadable),
-    };
-    let snapshot =
-        Snapshot::open(&slot, &object, birth.as_deref()).map_err(|_| Evidence::Unreadable)?;
-    if serde_json::to_vec(&snapshot.receipt).ok().as_deref()
-        != serde_json::from_slice::<Original>(&receipt)
-            .ok()
-            .and_then(|r| serde_json::to_vec(&r).ok())
-            .as_deref()
-    {
-        return Err(Evidence::Unreadable);
     }
-    Ok(Some(Captured {
-        folder: canonical,
-        directory: object,
+    let seed = match read_json::<Seed>(&slot.join("identity.json")) {
+        Ok(Some(seed)) if seed.binds(&object, birth.as_deref()) => seed,
+        Ok(None) => {
+            return match unpublished(&slot) {
+                Evidence::None => Ok(None),
+                other => Err(other),
+            }
+        }
+        _ => return Err(Evidence::Unreadable),
+    };
+    Ok(Some(Seeded {
+        canonical,
+        object,
         birth,
-        receipt,
-        snapshot,
+        slot,
+        seed,
     }))
+}
+
+/// The receipt now, by bounded stats and its own read only: what
+/// [`status`] reports, with the SHA-256 of the receipt's exact bytes.
+pub fn fingerprint(root: &Path) -> Result<Option<(Box<Original>, String)>, Evidence> {
+    let Some(found) = seeded(root)? else {
+        return Ok(None);
+    };
+    match disk::read(&found.slot.join("receipt.json"), META) {
+        Ok(None) => Ok(None),
+        Ok(Some((bytes, _))) => match serde_json::from_slice::<Original>(&bytes) {
+            Ok(receipt) if receipt.valid(&found.seed) && receipt.leaf_matches(&found.slot) => {
+                Ok(Some((Box::new(receipt), hex(&Sha256::digest(&bytes)))))
+            }
+            _ => Err(Evidence::Unreadable),
+        },
+        Err(_) => Err(Evidence::Unreadable),
+    }
 }
 
 /// [`evidence`] by bounded stats only, for a status shown often: the seed
@@ -609,37 +663,10 @@ pub fn captured(root: &Path) -> Result<Option<Captured>, Evidence> {
 /// bytes. A receipt it reports Captured still passes every check a change
 /// makes before relying on it.
 pub fn status(root: &Path) -> Evidence {
-    if fs::symlink_metadata(root).is_err_and(|error| error.kind() == io::ErrorKind::NotFound) {
-        return Evidence::None;
-    }
-    let Ok(canonical) = fs::canonicalize(root) else {
-        return Evidence::Unreadable;
-    };
-    match place(&canonical) {
-        Place::Local => {}
-        Place::Unsupported => return Evidence::Unsupported,
-        Place::Unknown => return Evidence::Unreadable,
-    }
-    let Ok((canonical, object, birth)) = folder(&canonical) else {
-        return Evidence::Unreadable;
-    };
-    let slot = slot(&canonical, &object, birth.as_deref());
-    match missing(&slot) {
-        Ok(true) => return Evidence::None,
-        Ok(false) => {}
-        Err(_) => return Evidence::Unreadable,
-    }
-    let seed = match read_json::<Seed>(&slot.join("identity.json")) {
-        Ok(Some(seed)) if seed.binds(&object, birth.as_deref()) => seed,
-        Ok(None) => return unpublished(&slot),
-        _ => return Evidence::Unreadable,
-    };
-    match read_json::<Original>(&slot.join("receipt.json")) {
+    match fingerprint(root) {
         Ok(None) => Evidence::None,
-        Ok(Some(receipt)) if receipt.valid(&seed) && receipt.leaf_matches(&slot) => {
-            Evidence::Captured(Box::new(receipt))
-        }
-        _ => Evidence::Unreadable,
+        Ok(Some((receipt, _))) => Evidence::Captured(receipt),
+        Err(error) => error,
     }
 }
 

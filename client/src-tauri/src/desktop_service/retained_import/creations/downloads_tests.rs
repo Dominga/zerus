@@ -18,7 +18,7 @@ fn plain(f: &Fixture, name: &str, body: &[u8]) {
 fn run(f: &Fixture, explicit: bool) -> Result<(), &'static str> {
     // The journal lives in the creations capture's managed data folder.
     super::tests::source(f);
-    let charge = f.report.work.admit(Role::Operations).unwrap();
+    let charge = super::super::tests::admit_drained(&f.report);
     f.report.run_group(
         GROUP,
         f.relay.clone(),
@@ -198,4 +198,104 @@ fn a_group_found_not_applicable_publishes_once_evidence_exists() {
     assert_eq!(status["required"], true);
     assert_eq!(status["phase"], "published");
     assert_eq!(status["complete"], true);
+}
+
+/// The folder's only evidence slot.
+fn slot(f: &Fixture) -> PathBuf {
+    fs::read_dir(folder(f).join(".zerus-files-preload-v1"))
+        .unwrap()
+        .next()
+        .unwrap()
+        .unwrap()
+        .path()
+}
+
+/// Evidence that cannot be read (an archive the user cannot open, or a seed
+/// that binds nothing) is unavailable and keeps the group required: never
+/// "not applicable" and complete.
+#[test]
+fn unreadable_evidence_never_makes_the_group_not_applicable() {
+    use std::os::unix::fs::PermissionsExt;
+    let _process = crate::PROCESS_TREE.read().unwrap();
+    let root = unsafe { libc::geteuid() } == 0;
+    for case in ["permissions", "seed"] {
+        if case == "permissions" && root {
+            continue;
+        }
+        let f = Fixture::new("success");
+        plain(&f, "old.txt", b"old cache");
+        assert_eq!(ON.trim(&folder(&f), 0, 2).error, None);
+        let dir = folder(&f).join(".zerus-files-preload-v1");
+        if case == "permissions" {
+            fs::set_permissions(&dir, fs::Permissions::from_mode(0o000)).unwrap();
+        } else {
+            let slot = slot(&f);
+            fs::remove_file(slot.join("receipt.json")).unwrap();
+            let seed = slot.join("identity.json");
+            let mut value: Value = serde_json::from_slice(&fs::read(&seed).unwrap()).unwrap();
+            value["version"] = json!(2);
+            fs::write(seed, serde_json::to_vec(&value).unwrap()).unwrap();
+        }
+        let result = run(&f, false);
+        let status = f.report.group_status(GROUP);
+        if case == "permissions" {
+            fs::set_permissions(&dir, fs::Permissions::from_mode(0o700)).unwrap();
+        }
+        assert_eq!(
+            result,
+            Err("downloads_import_capture_unavailable"),
+            "{case}"
+        );
+        assert_eq!(status["required"], true, "{case}");
+        assert_eq!(status["complete"], false, "{case}");
+    }
+}
+
+/// The commit gate checks the receipt's exact bytes: one appended byte
+/// before the record keeps the source for review and commits nothing.
+#[test]
+fn a_receipt_changed_before_the_record_is_kept_never_committed() {
+    let _process = crate::PROCESS_TREE.read().unwrap();
+    let f = Fixture::new("success");
+    plain(&f, "old.txt", b"old cache");
+    assert_eq!(ON.trim(&folder(&f), 0, 2).error, None);
+    let receipt = slot(&f).join("receipt.json");
+    f.report.group_state(GROUP).before_record = Some(Box::new(move |_| {
+        let mut bytes = fs::read(&receipt).unwrap();
+        bytes.push(b'\n');
+        fs::write(&receipt, bytes).unwrap();
+        Box::new(())
+    }));
+    assert_eq!(
+        run(&f, false),
+        Err("downloads_import_source_kept_for_review")
+    );
+    let status = f.report.group_status(GROUP);
+    assert_eq!(status["phase"], "quarantined");
+    let id = status["import_id"].as_str().unwrap();
+    assert!(!f.root.join(format!("committed-{id}.json")).exists());
+}
+
+/// A published or unconfirmed record stays required under its own ID after
+/// the folder moves away: only looked up, never "not applicable".
+#[test]
+fn published_and_unknown_records_stay_required_after_the_folder_moves() {
+    let _process = crate::PROCESS_TREE.read().unwrap();
+    for mode in ["success", "lost"] {
+        let f = Fixture::new(mode);
+        plain(&f, "old.txt", b"old cache");
+        assert_eq!(ON.trim(&folder(&f), 0, 2).error, None);
+        assert_eq!(run(&f, false).is_ok(), mode == "success", "{mode}");
+        let before = f.report.group_status(GROUP);
+        let attempts = f.attempts();
+        fs::rename(folder(&f), f.root.join("downloads-old")).unwrap();
+        let again = run(&f, true);
+        let after = f.report.group_status(GROUP);
+        assert_eq!(after["import_id"], before["import_id"], "{mode}");
+        assert_eq!(after["phase"], before["phase"], "{mode}");
+        assert_eq!(after["required"], true, "{mode}");
+        assert_eq!(after["complete"], mode == "success", "{mode}");
+        assert_eq!(again.is_ok(), mode == "success", "{mode}");
+        assert_eq!(f.attempts(), attempts, "{mode}");
+    }
 }

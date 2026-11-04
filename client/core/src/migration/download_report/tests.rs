@@ -95,3 +95,70 @@ fn download_records_keep_their_own_scope_and_preload_bytes_are_unchanged() {
     // A download binding never fits another group's scope.
     assert!(Record::new_group(Group::Creations, configuration, binding, 1).is_err());
 }
+
+/// The folder's only evidence slot.
+fn slot(f: &Folder) -> PathBuf {
+    fs::read_dir(f.0.join(evidence::DIR))
+        .unwrap()
+        .next()
+        .unwrap()
+        .unwrap()
+        .path()
+}
+
+/// An archive that cannot be read is unreadable, never "no source": the
+/// report must not find the group not applicable.
+#[cfg(unix)]
+#[test]
+fn an_unreadable_archive_is_never_no_source() {
+    use std::os::unix::fs::PermissionsExt;
+    if unsafe { libc::geteuid() } == 0 {
+        return;
+    }
+    let f = Folder::new();
+    f.plain("old.txt", b"old cache");
+    assert_eq!(ON.trim(&f.0, 0, 2).error, None);
+    let dir = f.0.join(evidence::DIR);
+    fs::set_permissions(&dir, fs::Permissions::from_mode(0o000)).unwrap();
+    let shown = evidence::status(&f.0);
+    let held = retained(&f.0);
+    fs::set_permissions(&dir, fs::Permissions::from_mode(0o700)).unwrap();
+    assert_eq!(shown, Evidence::Unreadable);
+    assert!(matches!(held, Err(SourceError::SourceUnreadable)));
+}
+
+/// The seed is checked before the receipt is looked at: an invalid seed
+/// without a receipt is unreadable, as the shown status says.
+#[test]
+fn an_invalid_seed_without_a_receipt_is_unreadable_never_no_source() {
+    let f = Folder::new();
+    f.plain("old.txt", b"old cache");
+    assert_eq!(ON.trim(&f.0, 0, 2).error, None);
+    let slot = slot(&f);
+    fs::remove_file(slot.join("receipt.json")).unwrap();
+    let seed = slot.join("identity.json");
+    let mut value: serde_json::Value = serde_json::from_slice(&fs::read(&seed).unwrap()).unwrap();
+    value["version"] = serde_json::json!(2);
+    fs::write(seed, serde_json::to_vec(&value).unwrap()).unwrap();
+    assert_eq!(evidence::status(&f.0), Evidence::Unreadable);
+    assert!(matches!(retained(&f.0), Err(SourceError::SourceUnreadable)));
+}
+
+/// The binding promises the receipt's exact bytes: a held snapshot whose
+/// receipt changed, even to the same parsed receipt, is changed.
+#[test]
+fn the_held_reference_rechecks_the_exact_receipt_bytes() {
+    let f = Folder::new();
+    f.plain("old.txt", b"old cache");
+    assert_eq!(ON.trim(&f.0, 0, 2).error, None);
+    let held = retained(&f.0).unwrap().unwrap();
+    let expected = held.reference().unwrap();
+    let receipt = slot(&f).join("receipt.json");
+    let mut bytes = fs::read(&receipt).unwrap();
+    bytes.push(b'\n');
+    fs::write(&receipt, bytes).unwrap();
+    let fresh = retained(&f.0).unwrap().unwrap().reference().unwrap();
+    assert_eq!(fresh.index_sha256, expected.index_sha256);
+    assert_ne!(fresh.receipt_sha256, expected.receipt_sha256);
+    assert_eq!(held.reference(), Err(SourceError::SourceChanged));
+}

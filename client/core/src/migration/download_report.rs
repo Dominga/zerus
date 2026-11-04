@@ -73,11 +73,16 @@ pub struct Snapshot {
 
 impl Snapshot {
     /// The binding, after the folder's evidence is checked again by bounded
-    /// stats: the same receipt (and so the same stamped parts) is still
-    /// there for the same folder object.
+    /// stats and the receipt's own read: the same receipt, byte for byte
+    /// (and so the same stamped parts), is still there for the same folder
+    /// object. The original's parts are not read again.
     pub fn reference(&self) -> SourceResult<Binding> {
-        match evidence::status(&self.root) {
-            Evidence::Captured(receipt) if *receipt == self.receipt => Ok(self.binding.clone()),
+        match evidence::fingerprint(&self.root) {
+            Ok(Some((receipt, sha256)))
+                if *receipt == self.receipt && sha256 == self.binding.receipt_sha256 =>
+            {
+                Ok(self.binding.clone())
+            }
             _ => Err(SourceError::SourceChanged),
         }
     }

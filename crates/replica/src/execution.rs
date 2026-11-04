@@ -239,11 +239,18 @@ pub(crate) fn project(
     requirement: u64,
 ) -> Option<Execution> {
     let Some(top) = attempts.iter().map(|a| a.generation).max() else {
-        return (stage == Stage::Active).then(|| Execution {
-            requirement,
-            attempts: 0,
-            current: Some(legacy(session, log, requirement)),
-            conflict: false,
+        return (stage == Stage::Active).then(|| {
+            let current = legacy(session, log, requirement);
+            // Every write records its boundary and the session holding the task
+            // together, so they differ only after concurrent replicas merged two
+            // executions: a conflict, never resolved by picking one.
+            let conflict = current.executor.is_some() && current.executor.as_ref() != session;
+            Execution {
+                requirement,
+                attempts: 0,
+                current: Some(current),
+                conflict,
+            }
         });
     };
     let mut claims: Vec<&Attempt> = attempts.iter().filter(|a| a.generation == top).collect();
@@ -272,46 +279,97 @@ pub(crate) fn project(
 }
 
 /// The current execution of history written before attempts were recorded:
-/// its last send, and whether the session that holds the task began it.
+/// its latest boundary, a send, handoff, reopen or direct start, with every
+/// field taken from that boundary alone. A start by the boundary's own session
+/// before the execution ends (a report, a cancellation or a stage move)
+/// acknowledges it; any other start is a boundary of its own.
 fn legacy(session: Option<&SessionKey>, log: &[LogEntry], requirement: u64) -> CurrentAttempt {
-    let sent = log.iter().rposition(|e| e.kind == "sent");
-    let own_start = |e: &LogEntry| e.kind == "started" && e.session.as_ref() == session;
-    let (origin, at, request_id, began_at) = match sent {
-        Some(index) => {
-            let entry = &log[index];
-            let origin = if entry.text == "handoff" {
-                Origin::Handoff
-            } else {
-                Origin::Send
-            };
-            let began = log[index + 1..].iter().find(|e| own_start(e)).map(|e| e.at);
-            (
-                Some(origin),
-                entry.at,
-                entry.request_id.clone().unwrap_or_default(),
-                began,
-            )
+    struct Boundary<'a> {
+        origin: Origin,
+        at: i64,
+        request_id: &'a str,
+        executor: Option<&'a SessionKey>,
+        began_at: Option<i64>,
+        open: bool,
+    }
+    fn begin<'a>(entry: &'a LogEntry, origin: Origin, request_id: &'a str) -> Boundary<'a> {
+        Boundary {
+            origin,
+            at: entry.at,
+            request_id,
+            executor: entry.session.as_ref(),
+            began_at: None,
+            open: true,
         }
-        None => match log.iter().rev().find(|e| own_start(e)) {
-            Some(entry) => (Some(Origin::Start), entry.at, String::new(), Some(entry.at)),
-            None => (None, 0, String::new(), None),
-        },
-    };
-    let phase = match (origin, began_at) {
-        (None, _) => Phase::Unconfirmed,
-        (_, Some(_)) => Phase::Running,
-        (_, None) => Phase::Submitted,
+    }
+    let mut latest: Option<Boundary> = None;
+    for entry in log {
+        match entry.kind.as_str() {
+            "sent" => {
+                let origin = if entry.text == "handoff" {
+                    Origin::Handoff
+                } else {
+                    Origin::Send
+                };
+                latest = Some(begin(
+                    entry,
+                    origin,
+                    entry.request_id.as_deref().unwrap_or(""),
+                ));
+            }
+            "resumed" => latest = Some(begin(entry, Origin::Reopen, "")),
+            "started" => match latest.as_mut() {
+                Some(open)
+                    if open.open
+                        && open.executor.is_some()
+                        && open.executor == entry.session.as_ref() =>
+                {
+                    open.began_at.get_or_insert(entry.at);
+                }
+                _ => {
+                    latest = Some(Boundary {
+                        began_at: Some(entry.at),
+                        ..begin(entry, Origin::Start, "")
+                    })
+                }
+            },
+            "report" | "cancelled" | "stage" => {
+                if let Some(ended) = latest.as_mut() {
+                    ended.open = false;
+                }
+            }
+            _ => {}
+        }
+    }
+    let Some(boundary) = latest else {
+        return CurrentAttempt {
+            id: String::new(),
+            generation: 0,
+            origin: Origin::Send,
+            executor: session.cloned(),
+            request_id: String::new(),
+            requirement,
+            phase: Phase::Unconfirmed,
+            at: 0,
+            began_at: None,
+            progress_at: None,
+            legacy: true,
+        };
     };
     CurrentAttempt {
         id: String::new(),
         generation: 0,
-        origin: origin.unwrap_or(Origin::Send),
-        executor: session.cloned(),
-        request_id,
+        origin: boundary.origin,
+        executor: boundary.executor.cloned(),
+        request_id: boundary.request_id.to_owned(),
         requirement,
-        phase,
-        at,
-        began_at,
+        phase: if boundary.began_at.is_some() {
+            Phase::Running
+        } else {
+            Phase::Submitted
+        },
+        at: boundary.at,
+        began_at: boundary.began_at,
         progress_at: None,
         legacy: true,
     }
@@ -645,19 +703,18 @@ mod tests {
             (Phase::Submitted, "second-send", None)
         );
         assert_eq!(now.executor, worker);
-        // A start by a session that does not hold the task is not this execution's start.
+        // Another session's start inside an open execution can only come from
+        // merged replicas: the latest boundary is shown, as a conflict.
         let mut elsewhere = log.to_vec();
         elsewhere.push(entry("started", 22, Some("other"), None));
-        let now = current(&project(
-            Stage::Active,
-            worker.as_ref(),
-            &elsewhere,
-            &[],
-            &[],
-            1,
-        ))
-        .clone();
-        assert_eq!((now.phase, now.began_at), (Phase::Submitted, None));
+        let merged = project(Stage::Active, worker.as_ref(), &elsewhere, &[], &[], 1);
+        let now = current(&merged).clone();
+        assert_eq!(
+            (now.origin, now.at, now.request_id.as_str(), now.executor),
+            (Origin::Start, 22, "", Some(session("other")))
+        );
+        assert!(merged.unwrap().conflict);
+        assert!(!sent.as_ref().unwrap().conflict);
         let mut began = log.to_vec();
         began.push(entry("started", 25, Some("worker"), None));
         let now = current(&project(
@@ -710,6 +767,88 @@ mod tests {
         }
         assert_eq!(next_generation(sent.as_ref()), 1);
         assert_eq!(next_generation(None), 1);
+    }
+
+    #[test]
+    fn a_legacy_execution_is_its_latest_boundary_alone() {
+        let legacy = |log: &[LogEntry], holder: &str| {
+            let execution =
+                project(Stage::Active, Some(&session(holder)), log, &[], &[], 1).unwrap();
+            assert!(!execution.conflict, "{log:?}");
+            execution.current.unwrap()
+        };
+        // review-n's sequence: an earlier, finished send never lends its
+        // origin, time or receipt to a later direct start.
+        let restarted = [
+            entry("sent", 10, Some("one"), Some("old-send-to-one")),
+            entry("report", 20, None, None),
+            entry("stage", 30, None, None),
+            entry("started", 40, Some("two"), None),
+        ];
+        let now = legacy(&restarted, "two");
+        assert_eq!(
+            (
+                now.origin,
+                now.at,
+                now.request_id.as_str(),
+                now.began_at,
+                now.phase
+            ),
+            (Origin::Start, 40, "", Some(40), Phase::Running)
+        );
+        assert_eq!(now.executor, Some(session("two")));
+        // The same with a reopen and a second result in between.
+        let reopened = [
+            entry("sent", 10, Some("one"), Some("old-send-to-one")),
+            entry("report", 20, None, None),
+            entry("resumed", 25, Some("one"), None),
+            entry("report", 30, None, None),
+            entry("stage", 35, None, None),
+            entry("started", 40, Some("two"), None),
+        ];
+        assert_eq!(legacy(&reopened, "two"), now);
+        // A reopen is a boundary of its own, without the send's receipt.
+        let now = legacy(&reopened[..3], "one");
+        assert_eq!(
+            (
+                now.origin,
+                now.at,
+                now.request_id.as_str(),
+                now.began_at,
+                now.phase
+            ),
+            (Origin::Reopen, 25, "", None, Phase::Submitted)
+        );
+        let mut acknowledged = reopened[..3].to_vec();
+        acknowledged.push(entry("started", 27, Some("one"), None));
+        let now = legacy(&acknowledged, "one");
+        assert_eq!((now.origin, now.began_at), (Origin::Reopen, Some(27)));
+        // A handoff starts over: the previous executor's start is not the new one's.
+        let handed = [
+            entry("sent", 10, Some("one"), Some("first")),
+            entry("started", 12, Some("one"), None),
+            LogEntry {
+                text: "handoff".into(),
+                ..entry("sent", 20, Some("two"), Some("second"))
+            },
+        ];
+        let now = legacy(&handed, "two");
+        assert_eq!(
+            (now.origin, now.request_id.as_str(), now.began_at, now.phase),
+            (Origin::Handoff, "second", None, Phase::Submitted)
+        );
+        // A start after the execution ended is a new boundary, even by the same session.
+        let again = [
+            entry("sent", 10, Some("one"), Some("first")),
+            entry("cancelled", 15, None, None),
+            entry("stage", 16, None, None),
+            entry("started", 18, Some("one"), None),
+        ];
+        let now = legacy(&again, "one");
+        assert_eq!(
+            (now.origin, now.at, now.request_id.as_str()),
+            (Origin::Start, 18, "")
+        );
     }
 
     #[test]

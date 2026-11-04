@@ -3025,8 +3025,13 @@ about: its `id` and `generation`, `origin` (`send`, `start`, `handoff` or
 (`submitted`, `unknown`, `running`, `paused`, `ready`, `cancelled`, or
 `unconfirmed` when nothing shows who executes it), `at`, and `began_at` and
 `progress_at` when known. History written before attempts were recorded reads
-as `legacy: true` with generation 0, from the last send and whether the session
-holding the task began it; no start, child or result is invented. A session's
+as `legacy: true` with generation 0, from its latest boundary alone: a send,
+handoff, reopen or direct start. A start by that boundary's session before the
+execution ends (a report, cancellation or stage move) acknowledges it; any other
+start is a boundary of its own, and an earlier execution never lends its origin,
+time or receipt to a later one. When merged replicas leave the latest boundary
+with another session than the one holding the task, `conflict` is set. No start,
+child or result is invented. A session's
 Stop, idle time, pause or elapsed time is never an attempt event and never
 moves a task. Attempts are kept beside the history under task schema 6, which a
 reader that does not know them shows read-only. This version reads attempts;

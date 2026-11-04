@@ -2102,6 +2102,35 @@ mod tests {
         }
 
         #[test]
+        fn a_direct_start_after_a_finished_send_is_its_own_execution() {
+            // review-n's sequence, through public schema-5 operations only.
+            let one = api();
+            let two = SessionKey {
+                session: "codex/web".into(),
+                ..api()
+            };
+            let mut task = task(Stage::Todo);
+            task.record_send(&one, "old-send-to-one", &Actor::Person, 10)
+                .unwrap();
+            assert!(task.record_report("Done", &Actor::Agent(one), 20).unwrap());
+            task.set_stage(Stage::Todo, &Actor::Person, 30).unwrap();
+            task.record_start(&Actor::Agent(two.clone()), 40).unwrap();
+            let execution = task.view().unwrap().execution.unwrap();
+            assert!(!execution.conflict);
+            let current = execution.current.unwrap();
+            assert_eq!(
+                (
+                    current.origin,
+                    current.at,
+                    current.request_id.as_str(),
+                    current.began_at
+                ),
+                (Origin::Start, 40, "", Some(40))
+            );
+            assert_eq!(current.executor, Some(two));
+        }
+
+        #[test]
         fn a_task_with_attempts_is_read_and_this_build_cannot_write_it() {
             let mut task = task(Stage::Todo);
             task.record_send(&worker(), "request-1", &Actor::Person, 10)

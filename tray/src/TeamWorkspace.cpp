@@ -24,6 +24,7 @@
 #include "CollapsibleBlock.h"
 #include "WorkspaceStyle.h"
 #include <QApplication>
+#include <QKeyEvent>
 #include <QClipboard>
 #include <QComboBox>
 #include <QDialog>
@@ -95,11 +96,31 @@ protected:
 };
 
 // A member card that focuses the canvas on its member when clicked.
+// The owner, 2026-11-05: a click meant for the card's contents (its
+// permission history, status or tasks) turned on the member filter, and the
+// graph dimmed with no obvious cause. Only a click (no drag) on the card
+// itself, outside a part marked teamCardOwnsClick, toggles it.
 class MemberCard : public QFrame {
 public:
     std::function<void()> clicked;
 protected:
-    void mouseReleaseEvent(QMouseEvent *event) override { if (event->button() == Qt::LeftButton && clicked) clicked(); QFrame::mouseReleaseEvent(event); }
+    void mousePressEvent(QMouseEvent *event) override { m_pressed = event->position().toPoint(); QFrame::mousePressEvent(event); }
+    void mouseReleaseEvent(QMouseEvent *event) override
+    {
+        const QPoint at = event->position().toPoint();
+        if (event->button() == Qt::LeftButton && clicked && rect().contains(at)
+            && (at - m_pressed).manhattanLength() < QApplication::startDragDistance() && !ownedByPart(childAt(at)))
+            clicked();
+        QFrame::mouseReleaseEvent(event);
+    }
+private:
+    bool ownedByPart(QWidget *child) const
+    {
+        for (QWidget *w = child; w && w != this; w = w->parentWidget())
+            if (w->property("teamCardOwnsClick").toBool()) return true;
+        return false;
+    }
+    QPoint m_pressed{-10000, -10000};
 };
 }
 
@@ -483,6 +504,17 @@ void TeamWorkspace::showEvent(QShowEvent *event)
 {
     QWidget::showEvent(event);
     render();
+}
+
+void TeamWorkspace::keyPressEvent(QKeyEvent *event)
+{
+    if (event->key() == Qt::Key_Escape && !m_focus.isEmpty()) {
+        m_focus.clear();
+        scheduleRender();
+        event->accept();
+        return;
+    }
+    QWidget::keyPressEvent(event);
 }
 
 void TeamWorkspace::resizeEvent(QResizeEvent *event)
@@ -1879,6 +1911,16 @@ QWidget *TeamWorkspace::toolbar(const Team &team)
         }
         h->addWidget(filter);
     }
+    // The member filter shows right after the state filter, in the accent,
+    // so a dimmed graph names its cause (owner, 2026-11-05).
+    if (!m_focus.isEmpty()) {
+        auto *chip = button(tr("Only %1's tasks  ×").arg(team.roleOf(m_focus)), "teamWorkspaceFocus"); chip->setProperty("chip", true);
+        chip->setToolTip(tr("A click on a member's card shows only its tasks. Click here or press Esc to show every member again."));
+        chip->setStyleSheet(QStringLiteral("QPushButton#teamWorkspaceFocus{color:%1;border:1px solid %1;border-radius:10px;padding:1px 8px;font-weight:600;}")
+                                .arg(c.accent.name()));
+        QObject::connect(chip, &QPushButton::clicked, this, [this] { m_focus.clear(); scheduleRender(); });
+        h->addWidget(chip);
+    }
     // U38: Graph and Board's heat tint.
     if (auto *heat = heatSwitch(team)) h->addWidget(heat);
     // U58: only a team with cancelled work offers to show it.
@@ -1889,12 +1931,6 @@ QWidget *TeamWorkspace::toolbar(const Team &team)
         show->setToolTip(m_teams->showCancelled() ? tr("Cancelled tasks and the phases they emptied are shown") : tr("Cancelled tasks and the phases they emptied are hidden"));
         QObject::connect(show, &QPushButton::clicked, this, [this](bool on) { m_teams->setShowCancelled(on); });
         h->addWidget(show);
-    }
-    if (!m_focus.isEmpty()) {
-        auto *chip = button(tr("Member: %1  ×").arg(team.roleOf(m_focus)), "teamWorkspaceFocus"); chip->setProperty("chip", true);
-        chip->setToolTip(tr("Show every member again"));
-        QObject::connect(chip, &QPushButton::clicked, this, [this] { m_focus.clear(); scheduleRender(); });
-        h->addWidget(chip);
     }
     if (!planning || m_view != "graph") h->addStretch();
     const auto groups = phaseGroups(team);
@@ -3631,6 +3667,10 @@ QWidget *TeamWorkspace::members(const Team &team)
             top->addWidget(shown);
         }
         col->addLayout(top);
+        if (m.id == m_focus) {
+            auto *only = label(tr("Only its tasks are shown · click the card for all"), c.accent, 11, false, "teamWorkspaceMemberFocused");
+            col->addWidget(only);
+        }
         int done = 0, total = 0, open = 0;
         for (const auto &t : team.tasks) if (t.assignee == m.id) { ++total; done += t.status == "accepted"; open += !t.finished(); }
         // A member added to a running team waits for its first task.
@@ -3656,7 +3696,7 @@ QWidget *TeamWorkspace::members(const Team &team)
         }
         // U54: its step in a move this desktop runs, or what keeps it from its
         // move or launch, with the review action.
-        if (auto *block = memberBlock(team, m)) col->addWidget(block);
+        if (auto *block = memberBlock(team, m)) { block->setProperty("teamCardOwnsClick", true); col->addWidget(block); }
         // #756: its build through the build broker, short.
         if (const auto build = team.buildStates.value(m.id); !build.state.isEmpty()) {
             auto *buildLabel = label(build.text(double(QDateTime::currentSecsSinceEpoch())), build.building() ? c.accent : c.text3, 11, false, "teamMemberBuild");
@@ -3666,8 +3706,10 @@ QWidget *TeamWorkspace::members(const Team &team)
         }
         // U36: the stages it has and may take.
         if (team.status == "running" || team.status == "paused")
-            if (auto *stages = memberStageQueue(team, m, c, workedClock()(), [this](int task) { m_drawerTask = task; scheduleRender(); }))
+            if (auto *stages = memberStageQueue(team, m, c, workedClock()(), [this](int task) { m_drawerTask = task; scheduleRender(); })) {
+                stages->setProperty("teamCardOwnsClick", true);
                 col->addWidget(stages);
+            }
         // A5 and U25 (spec 5.7): the member's open tasks, the current one first,
         // folded by default behind "N tasks"; the choice is kept per member.
         if (!m.queue.isEmpty()) {
@@ -3684,6 +3726,7 @@ QWidget *TeamWorkspace::members(const Team &team)
             col->addWidget(tasks, 0, Qt::AlignLeft);
             if (tasksOpen) {
                 auto *queue = new QWidget; queue->setObjectName("teamMemberQueue"); queue->setProperty("member", m.id);
+                queue->setProperty("teamCardOwnsClick", true);
                 auto *qv = new QVBoxLayout(queue); qv->setContentsMargins(0, 0, 0, 0); qv->setSpacing(1);
                 for (int i = 0; i < qMin(5, int(m.queue.size())); ++i) {
                     const auto *task = team.task(m.queue[i]);
@@ -3769,6 +3812,7 @@ QWidget *TeamWorkspace::members(const Team &team)
         // native answers array; a deny's reason travels as the answer text.
         if (m.permission.permission()) {
             auto *box = new QFrame; box->setObjectName("teamMemberPermission"); box->setProperty("member", m.id);
+            box->setProperty("teamCardOwnsClick", true);
             box->setProperty("team", team.id); box->setProperty("question", m.permission.id); box->setProperty("questionHash", m.permission.hash);
             box->setStyleSheet(QStringLiteral("QFrame#teamMemberPermission{background:%1;border:1px solid %2;border-radius:7px;}")
                                    .arg(alpha(c.warn, .10).name(QColor::HexArgb), alpha(c.warn, .40).name(QColor::HexArgb)));
@@ -3864,6 +3908,7 @@ QWidget *TeamWorkspace::members(const Team &team)
             if (open) {
                 auto *list = permissionAnswerList(m.permissionAnswers, c, QDateTime::currentSecsSinceEpoch(), 5, "teamMemberPermissions");
                 list->setProperty("member", m.id);
+                list->setProperty("teamCardOwnsClick", true);
                 col->addWidget(list);
             }
         }

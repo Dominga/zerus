@@ -332,6 +332,13 @@ void TestTeamsUiWorkspace::workspaceShowsGraphBoardAndFocus()
     QTRY_VERIFY(workspace.findChild<QPushButton *>("teamWorkspaceFocus"));
     QTRY_COMPARE(workspace.findChildren<QFrame *>("teamBoardCard").size(), 1);
     QVERIFY(workspace.findChild<QLabel *>("teamBoardEmpty"));   // empty columns say so
+    // The owner, 2026-11-05: the focused card says so, and a drag across a
+    // card is no click, so the filter stays as it is.
+    QVERIFY(workspace.findChild<QLabel *>("teamWorkspaceMemberFocused"));
+    for (auto *m : workspace.findChildren<QFrame *>("teamWorkspaceMember")) if (m->property("teamMember") == "tester") {
+        QTest::mousePress(m, Qt::LeftButton, {}, QPoint(4, 4)); QTest::mouseRelease(m, Qt::LeftButton, {}, QPoint(60, 4)); break; }
+    QCoreApplication::processEvents();
+    QVERIFY(workspace.findChild<QPushButton *>("teamWorkspaceFocus"));
     // A card opens the drawer.
     // A phase card is itself the button.
     auto *boardCard = workspace.findChildren<QFrame *>("teamBoardCard").value(0);

@@ -74,6 +74,8 @@ public:
 protected:
     void showEvent(QShowEvent *event) override;
     void resizeEvent(QResizeEvent *event) override;
+    // Esc clears the member filter.
+    void keyPressEvent(QKeyEvent *event) override;
 private:
     // A change of the owner's (a click, a view, the theme) always rebuilds.
     void scheduleRender();

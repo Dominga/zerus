@@ -391,3 +391,71 @@ fn a_reloaded_held_send_is_only_looked_up_never_offered() {
     std::thread::sleep(Duration::from_millis(50));
     assert_eq!(looked.checking.load(Ordering::SeqCst), 1, "looked up once");
 }
+
+/// review-3 (H, G): each in-progress answer doubles the delay, from 2 s,
+/// and never past 30 s.
+#[test]
+fn held_checks_back_off_from_two_to_thirty_seconds() {
+    let root = dir("handed-backoff");
+    let (c, _fake) = send_hub_on(&drafts(&root));
+    let service = Arc::new(Service::default());
+    route(&c, &service);
+    answer(&service, |plan| SendAnswer::Pending(plan.clone()));
+    let view = open_local(&c);
+    send(&c, &view, "slow");
+    until(&c, |v| v.delivery_pending);
+    let (key, handle, plan) = {
+        let hub = c.lock();
+        let key = hub.open_key.clone().unwrap();
+        let composer = hub.composers.get(&key).unwrap();
+        (
+            key.clone(),
+            composer.handle,
+            composer.handed.as_ref().unwrap().plan.clone(),
+        )
+    };
+    let mut delays = Vec::new();
+    for _ in 0..6 {
+        c.checked(&key, handle, &plan, Basis::Handed, Checked::InProgress);
+        delays.push(
+            c.lock()
+                .composers
+                .get(&key)
+                .unwrap()
+                .handed
+                .as_ref()
+                .unwrap()
+                .delay,
+        );
+    }
+    assert_eq!(delays, [4.0, 8.0, 16.0, 30.0, 30.0, 30.0]);
+}
+
+/// review-3: a check that panics ends the hold in state 5, with Allow retry,
+/// never a state 6 that lasts until the composer goes.
+#[test]
+fn a_panicking_check_ends_the_hold_with_allow_retry() {
+    let root = dir("handed-panic");
+    let (c, fake) = send_hub_on(&drafts(&root));
+    let (offer, looked) = (Arc::new(AtomicUsize::new(0)), Arc::new(AtomicUsize::new(0)));
+    let (offered, checks) = (offer.clone(), looked.clone());
+    c.set_deferred(DeferredRoute {
+        send: Arc::new(move |name, checkpoint, stdin| {
+            offered.fetch_add(1, Ordering::SeqCst);
+            SendAnswer::Pending(deferred_send::plan(name, checkpoint, stdin).unwrap())
+        }),
+        check: Arc::new(move |_| {
+            checks.fetch_add(1, Ordering::SeqCst);
+            panic!("a check that dies");
+        }),
+    });
+    let view = open_local(&c);
+    send(&c, &view, "slow");
+    until(&c, |v| v.delivery_pending);
+    let view = ticks(&c, &fake, FIRST, |v| !v.delivery_pending);
+    assert_eq!(looked.load(Ordering::SeqCst), 1);
+    assert!(view.uncertain && view.status_error && !view.can_send);
+    assert_eq!(view.status, UNCONFIRMED);
+    assert!(held(&c).is_some(), "the identity stays for Allow retry");
+    assert_eq!(offer.load(Ordering::SeqCst), 1, "never offered again");
+}

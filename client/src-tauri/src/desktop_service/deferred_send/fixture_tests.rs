@@ -243,3 +243,50 @@ fn the_admission_or_the_lookup_settles_and_an_unsettled_send_is_pending() {
         service.join().await.unwrap();
     });
 }
+
+/// review-3 (N, L): a check against a service without the kind knows
+/// nothing, and each call uses its own lane: the original only the frontend
+/// lane, the lookups only the read-only request lane.
+#[test]
+fn a_check_without_the_kind_knows_nothing_and_each_call_uses_its_lane() {
+    if !private_case("desktop_service::deferred_send::fixture_tests::a_check_without_the_kind_knows_nothing_and_each_call_uses_its_lane") {
+        return;
+    }
+    tauri::async_runtime::block_on(async {
+        let f = fixture(json!({"send_no_abi": true}));
+        let (service, _cache) = connected(&f).await;
+        let (checkpoint, stdin) = original("hello");
+        let plan = super::plan(SESSION, &checkpoint, &stdin).unwrap();
+        let s = service.clone();
+        let checked = tauri::async_runtime::spawn_blocking(move || check(Some(s), &plan))
+            .await
+            .unwrap();
+        assert_eq!(checked, Checked::Unavailable, "missing marker");
+        service.join().await.unwrap();
+        // A lost admission: the original only on the frontend lane, the
+        // lookups only on the read-only request lane.
+        let f = fixture(json!({}));
+        let (service, _cache) = connected(&f).await;
+        let (checkpoint, stdin) = original("hello");
+        assert_eq!(
+            send(service.clone(), SESSION, checkpoint, stdin).await,
+            SendAnswer::Unconfirmed(UNCONFIRMED.into())
+        );
+        let calls: Vec<Value> = std::fs::read_to_string(f.0.join("send-calls"))
+            .unwrap()
+            .lines()
+            .map(|line| serde_json::from_str(line).unwrap())
+            .collect();
+        let lane = |op: &str| -> Vec<String> {
+            calls
+                .iter()
+                .filter(|c| c["value"]["request"]["op"] == op || c["value"]["op"] == op)
+                .map(|c| c["args"][1].as_str().unwrap().to_owned())
+                .collect()
+        };
+        assert_eq!(lane("deferred_send"), ["frontend-request"]);
+        let lookups = lane("deferred_send_result");
+        assert!(!lookups.is_empty() && lookups.iter().all(|a| a == "request"));
+        service.join().await.unwrap();
+    });
+}

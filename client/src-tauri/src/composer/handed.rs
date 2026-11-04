@@ -275,7 +275,10 @@ impl Composers {
         };
         let me = self.clone();
         (self.0.deps.spawn)(Box::new(move || {
-            let checked = (route.check)(&plan);
+            // A check that panicked knows nothing: never a held state 6.
+            let checked =
+                std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| (route.check)(&plan)))
+                    .unwrap_or(Checked::Unavailable);
             me.checked(&key, handle, &plan, basis, checked);
         }));
     }

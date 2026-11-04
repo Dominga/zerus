@@ -2,7 +2,8 @@
 # existing service fixture. It records every deferred send request and answers
 # from fixture.json: `send_admission` is the admission reply to print (absent:
 # the reply is lost) and `send_receipts` the lookup receipts, one per lookup
-# with the last repeating (absent: none is found).
+# with the last repeating (absent: none is found). As the real service does,
+# the generic `desktop request` lane refuses the original itself.
 import sys
 if sys.argv[1:] == ['--help']:
     import json
@@ -24,6 +25,10 @@ elif sys.argv[1:3] in [['desktop', 'frontend-request'], ['desktop', 'request']]:
         with (root / 'send-calls').open('a') as log:
             log.write(json.dumps({'args': sys.argv[1:], 'value': value, 'pid': os.getpid()}) + '\n')
         c = json.loads((root / 'fixture.json').read_text())
+        if request['op'] == 'deferred_send' and sys.argv[2] != 'frontend-request':
+            print(json.dumps(dict(request_id=None, accepted=False, durable=False,
+                                  code='frontend_authentication_required')))
+            sys.exit(0)
         if request['op'] == 'deferred_send':
             admission = c.get('send_admission')
             if admission is None:

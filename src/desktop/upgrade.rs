@@ -8,6 +8,9 @@ use std::{
 
 pub(super) const CHECK: Duration = Duration::from_secs(5);
 
+#[cfg(all(test, target_os = "linux"))]
+pub(super) mod actor_tests;
+
 pub(super) fn owner_loans_released(owner: &Arc<crate::platform::FileLock>) -> bool {
     Arc::strong_count(owner) == 1
 }

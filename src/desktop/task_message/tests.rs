@@ -2437,6 +2437,45 @@ mod staging_tests {
     }
 
     #[test]
+    fn a_custody_input_needs_its_recorded_identity_and_a_private_file() {
+        for case in [
+            "hard link",
+            "readable by others",
+            "same bytes, other object",
+        ] {
+            let (_temp, root, roots) = fresh();
+            let (verified, blobs, _) = original(&[shot(23, 2048)]);
+            let request = verified.plan.request_id.clone();
+            stage(&root, &request, &blobs);
+            let prepared = staging::prepare(&roots, &verified, soon()).unwrap();
+            let wanted = expected(&prepared);
+            drop(prepared);
+            let path = input(&root, &request);
+            match case {
+                "hard link" => std::fs::hard_link(&path, path.with_extension("link")).unwrap(),
+                "readable by others" => {
+                    std::fs::set_permissions(&path, std::fs::Permissions::from_mode(0o644)).unwrap()
+                }
+                _ => {
+                    // Created while the original still exists, so it is
+                    // another object whatever the filesystem, with the same
+                    // bytes.
+                    let other = path.with_extension("other");
+                    std::fs::write(&other, std::fs::read(&path).unwrap()).unwrap();
+                    std::fs::set_permissions(&other, std::fs::Permissions::from_mode(0o600))
+                        .unwrap();
+                    std::fs::rename(&other, &path).unwrap();
+                }
+            }
+            assert!(
+                staging::remove_input(&roots, &request, &wanted, soon()).is_err(),
+                "{case}"
+            );
+            assert!(path.exists(), "{case}: kept for explicit review");
+        }
+    }
+
+    #[test]
     fn a_removal_checks_the_name_again_after_its_read_within_its_deadline() {
         use staging::RemovalPoint::{BeforeName, Read};
         let cases = [

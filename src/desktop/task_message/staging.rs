@@ -550,10 +550,8 @@ pub(super) fn remove_input(
     let digest = content_digest(&mut file, expected.bytes, deadline)?;
     #[cfg(test)]
     removal_hook(request, RemovalPoint::Read);
-    if file_version(&file)? != before
-        || !platform::verify_private_file(&file)?
-        || digest.as_deref() != Some(expected.sha256.as_str())
-    {
+    // Its mode and links are part of the version, so it is still private.
+    if file_version(&file)? != before || digest.as_deref() != Some(expected.sha256.as_str()) {
         return Err(refused());
     }
     #[cfg(test)]

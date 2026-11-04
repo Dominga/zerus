@@ -130,11 +130,21 @@ impl Controller {
         Route::select(ordinary)
     }
     pub fn view(&self) -> View {
-        self.state
-            .lock()
-            .unwrap_or_else(PoisonError::into_inner)
-            .view
-            .clone()
+        let state = self.state.lock().unwrap_or_else(PoisonError::into_inner);
+        let mut view = state.view.clone();
+        // Classification may recover eligibility, but the deferred connection
+        // still needs the existing explicit Resume before scheduling work.
+        if state.observation_only
+            && !view.pending
+            && !view.automatic_blocked
+            && view.review.is_none()
+            && state.selection.as_ref().is_some_and(|s| {
+                s["selected_mode"] == "background" && s["running_mode"] == "background"
+            })
+        {
+            view.needs_resume = true;
+        }
+        view
     }
     pub fn close(&self) -> zerus_client_core::desktop::drain::Closed {
         self.stop.store(true, Ordering::Release);
@@ -173,12 +183,12 @@ impl Controller {
         configuration: String,
         activate: bool,
         default_only: bool,
-    ) {
+    ) -> bool {
         let Ok(charge) = self.gate.admit(Role::Fleet) else {
-            return;
+            return false;
         };
         if self.stop.load(Ordering::Acquire) {
-            return;
+            return false;
         }
         self.state
             .lock()
@@ -186,15 +196,14 @@ impl Controller {
             .view
             .running = true;
         let owner = self.clone();
-        let _ = tauri::async_runtime::spawn_blocking(move || {
+        let joined = tauri::async_runtime::spawn_blocking(move || {
             owner.run(ordinary, configuration, activate, default_only, charge)
         })
-        .await;
-        self.state
-            .lock()
-            .unwrap_or_else(PoisonError::into_inner)
-            .view
-            .running = false;
+        .await
+        .is_ok();
+        let mut state = self.state.lock().unwrap_or_else(PoisonError::into_inner);
+        state.view.running = false;
+        joined && state.selection.is_some()
     }
     fn run(
         self: &Arc<Self>,

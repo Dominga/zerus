@@ -1702,6 +1702,7 @@ async fn request(
 }
 
 async fn preflight(shared: &Arc<Shared>, stop: Arc<AtomicBool>) -> Result<String, &'static str> {
+    let _classification = shared.mode_transition.preflight_scope();
     let original = shared.original_read_scope()?;
     let help = command(shared, vec!["--help".into()], None, stop.clone()).await?;
     shared.notification_supported.store(
@@ -1765,7 +1766,7 @@ async fn preflight(shared: &Arc<Shared>, stop: Arc<AtomicBool>) -> Result<String
             }
             shared
                 .mode_transition
-                .observe(shared.hgs.clone(), configuration.into())
+                .observe_preflight(shared.hgs.clone(), configuration.into())
                 .await;
         }
         return Err("service_unavailable");
@@ -1796,7 +1797,7 @@ async fn preflight(shared: &Arc<Shared>, stop: Arc<AtomicBool>) -> Result<String
     shared.observe_manual_refresh(configuration, state.snapshot())?;
     shared
         .mode_transition
-        .observe(shared.hgs.clone(), configuration.into())
+        .observe_preflight(shared.hgs.clone(), configuration.into())
         .await;
     shared.publish(state.snapshot().clone());
     Ok(configuration.into())
@@ -2179,7 +2180,11 @@ async fn connection(
     shared.details_changed.notify_one();
     drop(stdin);
     let _ = grant_worker.await;
-    let _ = classification_worker.await;
+    // A cancelled classifier can still own a bounded read (and its original
+    // child/pipe loans). Give it a short join grace, then detach without abort:
+    // its stop check suppresses publication and its retained resources drain
+    // physically in that same worker, without delaying this watch's teardown.
+    let _ = tokio::time::timeout(Duration::from_millis(100), classification_worker).await;
     if let Some(worker) = notification_worker {
         let _ = worker.await;
     }

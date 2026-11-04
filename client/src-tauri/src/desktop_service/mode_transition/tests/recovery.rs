@@ -578,3 +578,97 @@ fn a_legacy_cli_without_classification_capability_still_connects() {
         running.service.join().await.unwrap();
     });
 }
+
+#[test]
+fn g1_gate_busy_preflight_recovery_never_opens_business_scheduling() {
+    let _process = crate::PROCESS_TREE.read().unwrap();
+    tauri::async_runtime::block_on(async {
+        let helpers = Fixture::new();
+        helpers.config("default", "passive", false);
+        let mut config = configuration();
+        config["hold_mode_preflight"] = true.into();
+        let running = start_native(&helpers, config);
+        let release = Release(running.source.0.join("mode-preflight-release"));
+        eventually(
+            "pause actual CLI preflight before mode classification",
+            || running.source.0.join("mode-preflight-entered").exists(),
+        )
+        .await;
+        let held = running
+            .service
+            .shared
+            .mode_transition
+            .gate
+            .admit(Role::Fleet)
+            .unwrap();
+        drop(release);
+        eventually(
+            "unclassified watch remains connected while mode gate is busy",
+            || {
+                running.service.snapshot().connected
+                    && watches(&running) > 0
+                    && running
+                        .service
+                        .shared
+                        .report_frame_finished
+                        .load(Ordering::Acquire)
+                        > 0
+            },
+        )
+        .await;
+        let pending = running
+            .service
+            .shared
+            .mode_transition
+            .classification_pending();
+        let initially_blocked = !running.service.shared.business_scheduling_permitted();
+        drop(held);
+        eventually("classification recovers in the same watch", || {
+            !running
+                .service
+                .shared
+                .mode_transition
+                .classification_pending()
+                && running.service.shared.mode_transition.view().needs_resume
+        })
+        .await;
+        let startup = running.service.shared.mode_transition.startup_permitted();
+        let scheduling = running.service.shared.business_scheduling_permitted();
+        let watch_count = watches(&running);
+        let effect_calls = effects(&running);
+        let manager_calls = helpers.effects();
+        running.service.join().await.unwrap();
+        assert!(pending && initially_blocked);
+        assert_eq!(watch_count, 1);
+        assert!(effect_calls.is_empty());
+        assert_eq!(manager_calls, 0);
+        assert!(!scheduling, "read-only classification recovery opened business scheduling; startup_permitted={startup}");
+        assert!(!startup);
+    });
+}
+
+#[test]
+fn healthy_synchronous_modern_classification_keeps_existing_startup_behavior() {
+    let _process = crate::PROCESS_TREE.read().unwrap();
+    tauri::async_runtime::block_on(async {
+        let helpers = Fixture::new();
+        helpers.config("explicit", "background", false);
+        let running = start_native(&helpers, configuration());
+        eventually(
+            "healthy synchronous preflight retains its original startup grant",
+            || watches(&running) > 0 && running.service.shared.ownership.granted(),
+        )
+        .await;
+        assert!(!running
+            .service
+            .shared
+            .mode_transition
+            .classification_pending());
+        assert!(running.service.shared.mode_transition.startup_permitted());
+        assert!(running.service.shared.business_scheduling_permitted());
+        assert_eq!(helpers.effects(), 0);
+        running.service.join().await.unwrap();
+    });
+}
+
+mod scheduling;

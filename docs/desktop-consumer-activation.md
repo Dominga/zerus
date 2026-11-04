@@ -135,8 +135,15 @@ work still needs its own native admission and original custody. Read-only
 restoration starts after the watch's first authenticated hello, so its bounded
 queries do not delay the read connection. A modern helper that cannot yet be
 classified keeps that watch, catalog and details connected read-only. Its mode
-classification retries with bounded backoff; recovery never resumes startup
-work automatically. Missing authority still needs its existing explicit action.
+classification retries with bounded backoff. If preflight could not classify
+that connection, its scheduling decision stays deferred across later successful
+reads, reconnects and transient-loss recovery, including a busy read gate. A
+background-selected host offers the existing Resume control; only that explicit
+action or the existing separately confirmed continuation can reopen scheduling.
+Healthy synchronous preflight retains its existing startup behavior. A cancelled
+classifier can finish its original bounded read without delaying watch teardown;
+its child/pipe resources stay retained through physical completion and it cannot
+publish a late result. Missing authority still needs its existing explicit action.
 
 Component controls model the confirmation response and manager/native caller
 outcomes. The actual OS dialogs, installed Settings path, Windows Fast Startup

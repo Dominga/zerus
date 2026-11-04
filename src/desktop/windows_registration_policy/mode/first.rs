@@ -65,6 +65,13 @@ impl Record {
         Ok(())
     }
 
+    /// The pending original is a first choice: only its own UUID reads it.
+    pub(super) fn pending_first(&self) -> bool {
+        self.pending
+            .as_ref()
+            .is_some_and(|p| self.first_choices.iter().any(|r| r.request == p.request_id))
+    }
+
     pub(super) fn check_first(&self) -> Result<()> {
         let mut ids = BTreeSet::new();
         ensure!(
@@ -301,6 +308,36 @@ mod tests {
                 Mode::Background
             )
             .is_err());
+    }
+
+    #[test]
+    fn an_ordinary_frame_never_continues_a_pending_first_choice() {
+        for phase in [Phase::Prepared, Phase::Held] {
+            let mut record = Record::empty(&plan()).unwrap();
+            let choice = first();
+            record.reserve_first(&choice).unwrap();
+            record
+                .begin_id(Mode::Background, Some(instance()), choice.request.clone())
+                .unwrap();
+            record.pending.as_mut().unwrap().phase = phase;
+            let reopened = reopen(&record);
+            let before = reopened.encode(&plan()).unwrap();
+            let error = reopened.choice(None).unwrap_err();
+            assert!(
+                error.to_string().contains("first mode choice is pending"),
+                "{phase:?}: {error:#}"
+            );
+            assert_eq!(reopened.encode(&plan()).unwrap(), before);
+            assert_eq!(reopened.first_choices[0].phase, ChoicePhase::Unknown);
+            // The closed pre-manager cancellation stays available.
+            let mut cancelled = reopened.clone();
+            cancelled.cancel(&choice.request).unwrap();
+            assert_eq!(cancelled.first_choices[0].phase, ChoicePhase::Refused);
+        }
+        // Without a typed first-choice pending, the ordinary form is unchanged.
+        let mut ordinary = Record::empty(&plan()).unwrap();
+        ordinary.begin(Mode::Background, Some(instance())).unwrap();
+        assert_eq!(ordinary.choice(None).unwrap(), None);
     }
 
     #[test]

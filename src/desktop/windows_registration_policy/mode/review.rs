@@ -117,6 +117,14 @@ impl ChoiceScope {
 impl Record {
     pub fn choice(&self, choice: Option<&Choice>) -> Result<Option<String>> {
         if self.reviewed.is_empty() && choice.is_none() {
+            // An ordinary frame never adopts or continues a pending FIRST
+            // choice, not even before its manager effects: that original is
+            // read by its own UUID, cancelled at a closed pre-manager boundary
+            // or reviewed.
+            ensure!(
+                !self.pending_first(),
+                "A first mode choice is pending; read its original mode-result, cancel it before any manager effect, or review it by its original UUID. This request cannot continue it."
+            );
             return Ok(None);
         }
         let last = self

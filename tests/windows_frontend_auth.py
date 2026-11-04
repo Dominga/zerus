@@ -502,6 +502,42 @@ class WindowsTaskMode(unittest.TestCase):
         self.refused_first_choice(str(uuid.uuid4()), 'from a passive registration only')
         return first
 
+    def pending_first_choice_refuses_the_old_frame(self, current):
+        """A reserved FIRST choice whose helper died at Prepared or Held: the
+        OLD no-request-ID switch never adopts or continues it."""
+        path = self.state / 'desktop' / 'windows-registration-mode.json'
+        for phase in ('prepared', 'held'):
+            record = json.loads(path.read_text(encoding='utf-8'))
+            request = str(uuid.uuid4())
+            # Arrange lost reply metadata only, around the actual running
+            # passive instance; no synthetic native authentication.
+            record['pending'] = dict(request_id=request, desired='background', phase=phase,
+                                     original=current, started=None)
+            record.setdefault('first_choices', []).append(
+                dict(request=request, desired='background', phase='unknown'))
+            path.write_text(json.dumps(record), encoding='utf-8')
+            arranged = path.read_bytes()
+            before = self.observe()['instances']
+            grant = self.cli('desktop', 'ownership-status', '--json')
+            service = self.cli('desktop', 'status', '--json')['lifecycle']['pid']
+            refused = self.mode('background')
+            self.assertFalse(refused['ok'], refused)
+            self.assertIn('first mode choice is pending', refused['error'])
+            # Zero Stop/Update/RunEx, ownership or record change; no new ID.
+            self.assertEqual(path.read_bytes(), arranged)
+            self.assertEqual(self.observe()['instances'], before)
+            self.assertEqual(self.cli('desktop', 'ownership-status', '--json'), grant)
+            self.assertEqual(self.cli('desktop', 'status', '--json')['lifecycle']['pid'], service)
+            result = self.cli('desktop', 'registration', 'mode-result', '--json', '--request-id', request)
+            self.assertEqual((result['outcome'], result['receipt']['phase']), ('unknown', 'unknown'), result)
+            # Closed only through the supported pre-manager cancellation.
+            cancelled = self.cancel(request)
+            self.assertEqual(cancelled['cancelled_request_id'], request, cancelled)
+            self.assertFalse(cancelled['manager_changed'], cancelled)
+            self.assertEqual(self.observe()['instances'], before)
+            result = self.cli('desktop', 'registration', 'mode-result', '--json', '--request-id', request)
+            self.assertEqual(result['receipt']['phase'], 'refused', result)
+
     def review_old_stop_without_adopting_the_later_passive(self, original, current):
         path = self.state / 'desktop' / 'windows-registration-mode.json'
         record = json.loads(path.read_text(encoding='utf-8'))
@@ -1008,6 +1044,7 @@ if(@(Get-OwnInstances $s $t).Count-ne 0) {throw 'fixture instance remains'};
             # reads, and a NEW one still needs a current Service Grant.
             self.refused_first_choice(background['request_id'], 'already offered')
             self.refused_first_choice(str(uuid.uuid4()), 'Grant')
+            self.pending_first_choice_refuses_the_old_frame(self.latest)
             self.cancel_ready_rollback_after_authority_moves(background, rollback)
             # A separately explicit new choice is admitted after cancellation;
             # the original manager effects and revoke are never replayed.

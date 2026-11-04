@@ -398,12 +398,14 @@ export const ownershipActions = createOwnershipActions(
   () => invoke("desktop_service_ownership_rearm"),
   () => invoke("desktop_service_ownership_result"),
 );
+const HELPER_UNAVAILABLE = ["activation_helper_unavailable", "activation_helper_update_required", "activation_helper_changed"];
+const COMPONENTS = ["fleet", "presence", "reads", "attention", "approvals"];
 export function ownershipNotice(view: NotificationOwnership | undefined): string {
   if (!view) return "";
   if (view.pending) return tr("Background access is unconfirmed. Check the result before making another change.");
   if (view.activation?.pending) return tr("Background activation is unconfirmed. Check the original result before making another change.");
   if (view.activation?.needs_resume) {
-    if (["activation_helper_unavailable", "activation_helper_update_required", "activation_helper_changed"].includes(view.activation.code))
+    if (HELPER_UNAVAILABLE.includes(view.activation.code))
       return tr("Background activation is unavailable. Update Zerus and its desktop service, then Resume to check again.");
     return tr("Background work is paused. Resume to activate the service explicitly.");
   }
@@ -412,6 +414,18 @@ export function ownershipNotice(view: NotificationOwnership | undefined): string
   if (view.code || view.status?.state !== "service" || !view.status.identity_current)
     return tr("Background access is unavailable. Retry to check the service.");
   return "";
+}
+
+/**
+ * A connected service that runs passive: it reports none of its background work
+ * started, and the native controller settled on offering the explicit Resume.
+ * Presentation only; Resume stays the user's action.
+ */
+export function servicePaused(state: DesktopService | undefined): boolean {
+  const ownership = state?.notification_ownership, activation = ownership?.activation;
+  return !!state?.connected && state.executable_upgrade?.state !== "manual_refresh_required"
+    && COMPONENTS.every((name) => state.background[name]?.code === "not_started")
+    && !ownership?.pending && !!activation?.needs_resume && !activation.pending && !HELPER_UNAVAILABLE.includes(activation.code);
 }
 
 /** Compact footer presentation; full reasons stay in its accessible tooltip. */
@@ -430,7 +444,9 @@ export function serviceStatus(state: DesktopService | undefined) {
   } else if (state.code === "explicit_handoff_required") {
     label = tr("Background handoff required");
     notice = tr("Background service is waiting for an explicit handoff.");
-  } else if (state.code || !["fleet", "presence", "reads", "attention", "approvals"].every((name) => state.background[name]?.ready)) {
+  } else if (servicePaused(state)) {
+    // Passive by selection, not a fault: the ownership notice explains it and offers Resume.
+  } else if (state.code || !COMPONENTS.every((name) => state.background[name]?.ready)) {
     label = tr("Background service not ready");
     notice = tr("Background service is not ready. Some actions are unavailable.");
   } else if (!state.details_available) {

@@ -547,6 +547,102 @@ fn original_incomplete_pipes_block_rearm_and_remain_visible_through_join() {
 }
 
 #[test]
+fn a_passive_service_refusal_waits_quietly_and_reads_again_once_background_is_ready() {
+    if !private_case("desktop_service::activation::tests::a_passive_service_refusal_waits_quietly_and_reads_again_once_background_is_ready") { return; }
+    let _process = crate::PROCESS_TREE.read().unwrap();
+    tauri::async_runtime::block_on(async {
+        let fixture = Fixture::new(json!({
+            "ready": false, "ready_later": true, "activation_abi": true, "activation_passive": 1
+        }));
+        let responder = responder();
+        let _cache = CacheServer::start(&fixture.0, responder.clone());
+        let (service, rx) = start(&fixture, responder);
+        until("the passive refusal is waited out quietly", || {
+            service
+                .shared
+                .activation_passive_waits
+                .load(Ordering::Acquire)
+                == 1
+        })
+        .await;
+        // While the service stays passive, no further read and no error backoff.
+        tokio::time::sleep(Duration::from_millis(300)).await;
+        assert_eq!(waits(&fixture).len(), 1);
+        assert_eq!(
+            service.shared.activation_backoffs.load(Ordering::Acquire),
+            0
+        );
+        assert!(!service.snapshot().background_ready());
+        // A status with background work ready re-arms the reader at once.
+        std::fs::write(fixture.0.join("background-ready"), b"").unwrap();
+        let delivery = receive(&rx).await;
+        assert!(delivery.current());
+        let calls = waits(&fixture);
+        assert_eq!(calls.len(), 2);
+        assert_ne!(
+            calls[0]["value"]["request"]["request_id"],
+            calls[1]["value"]["request"]["request_id"]
+        );
+        assert_eq!(
+            service
+                .shared
+                .activation_passive_waits
+                .load(Ordering::Acquire),
+            1
+        );
+        assert_eq!(
+            service.shared.activation_backoffs.load(Ordering::Acquire),
+            0
+        );
+        service.join().await.unwrap();
+    });
+}
+
+#[test]
+fn the_passive_wait_is_bounded_and_sends_only_fresh_activation_reads() {
+    if !private_case("desktop_service::activation::tests::the_passive_wait_is_bounded_and_sends_only_fresh_activation_reads") { return; }
+    let _process = crate::PROCESS_TREE.read().unwrap();
+    tauri::async_runtime::block_on(async {
+        let fixture = Fixture::new(json!({
+            "ready": false, "activation_abi": true, "activation_passive": 3
+        }));
+        let responder = responder();
+        let _cache = CacheServer::start(&fixture.0, responder.clone());
+        let (service, rx) = start(&fixture, responder);
+        until("first passive refusal", || waits(&fixture).len() == 1).await;
+        *service.shared.activation_retry.lock().unwrap() = Some(Duration::from_millis(150));
+        // Still passive: each wait lasts its bounded interval, then one fresh read.
+        let delivery = receive(&rx).await;
+        assert!(delivery.current());
+        let calls = waits(&fixture);
+        assert_eq!(calls.len(), 4);
+        let ids: std::collections::BTreeSet<_> = calls
+            .iter()
+            .map(|call| call["value"]["request"]["request_id"].to_string())
+            .collect();
+        assert_eq!(ids.len(), 4, "every read is new, never a replay");
+        assert_eq!(
+            service
+                .shared
+                .activation_passive_waits
+                .load(Ordering::Acquire),
+            3
+        );
+        assert_eq!(
+            service.shared.activation_backoffs.load(Ordering::Acquire),
+            0
+        );
+        // The reader sent activation reads only: no other frontend request.
+        assert!(fixture
+            .calls()
+            .iter()
+            .filter_map(|call| call["value"]["request"]["op"].as_str())
+            .all(|op| op == "activation_wait"));
+        service.join().await.unwrap();
+    });
+}
+
+#[test]
 fn stopping_during_the_full_minute_backoff_does_not_wait_for_its_deadline() {
     if !private_case("desktop_service::activation::tests::stopping_during_the_full_minute_backoff_does_not_wait_for_its_deadline") { return; }
     let _process = crate::PROCESS_TREE.read().unwrap();

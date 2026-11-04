@@ -131,6 +131,46 @@ async fn backoff(shared: &Shared, stop: &AtomicBool) -> bool {
     }
 }
 
+/// A passive service refused the read: background work, and so any click to
+/// deliver, is not running. Nothing is logged or sent while waiting. The next
+/// read starts as soon as a status shows background work ready, or the
+/// connection or its epoch changes, and at the latest after the ordinary retry
+/// interval. The wait sends nothing and never asks for a mode change.
+async fn passive(shared: &Shared, stop: &AtomicBool, epoch: &str) -> bool {
+    #[cfg(test)]
+    shared
+        .activation_passive_waits
+        .fetch_add(1, Ordering::Release);
+    #[cfg(test)]
+    let delay = shared
+        .activation_retry
+        .lock()
+        .unwrap_or_else(PoisonError::into_inner)
+        .unwrap_or(RETRY);
+    #[cfg(not(test))]
+    let delay = RETRY;
+    let until = tokio::time::Instant::now() + delay;
+    loop {
+        if shared.stopped.load(Ordering::Acquire) || stop.load(Ordering::Acquire) {
+            return false;
+        }
+        {
+            let snapshot = shared.snapshot.lock();
+            if snapshot.background_ready()
+                || !snapshot.connected
+                || snapshot.epoch.as_deref() != Some(epoch)
+            {
+                return true;
+            }
+        }
+        let remaining = until.saturating_duration_since(tokio::time::Instant::now());
+        if remaining.is_zero() {
+            return true;
+        }
+        tokio::time::sleep(remaining.min(Duration::from_millis(50))).await;
+    }
+}
+
 fn invocation(args: &[&str], input: Vec<u8>, timeout: Duration) -> Invocation {
     Invocation {
         args: args.iter().map(|s| (*s).into()).collect(),
@@ -298,6 +338,13 @@ pub(super) async fn run(shared: Arc<Shared>, configuration: String, stop: Arc<At
                     Ok(Err(ReadError::Retryable(reason))) => reason,
                     _ => Reason::WorkerJoin,
                 };
+                if reason == Reason::Refused(diagnostic::Refusal::DesktopBackgroundUnavailable) {
+                    // The honest passive state, not a failure: no log line.
+                    if !passive(&shared, &stop, &epoch).await {
+                        return;
+                    }
+                    continue;
+                }
                 if !stop.load(Ordering::Acquire) && !shared.stopped.load(Ordering::Acquire) {
                     eprintln!(
                         "zerus-client: desktop activation unavailable: {}",

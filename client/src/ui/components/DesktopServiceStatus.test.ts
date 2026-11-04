@@ -1,5 +1,5 @@
 import { describe, expect, it } from "vitest";
-import { serviceStatus } from "../../store/desktopService";
+import { servicePaused, serviceStatus } from "../../store/desktopService";
 import type { DesktopService, NotificationOwnership } from "../../types";
 
 const healthy = (patch: Partial<DesktopService> = {}): DesktopService => ({ connected: true, epoch: "fixture", generation: 1,
@@ -7,6 +7,53 @@ const healthy = (patch: Partial<DesktopService> = {}): DesktopService => ({ conn
   attention_counts: null, automatic_approvals: false, details_available: true, code: "", ...patch });
 const rearm: NotificationOwnership = { pending: false, running: false, code: "", request_id: null,
   status: { abi: "fixture", configuration: "fixture", journal: null, revision: 1, state: "revoked", rearm_required: true, request_id: null, owner_epoch: null, identity_current: true } };
+
+const notStarted = Object.fromEntries(["fleet", "presence", "reads", "attention", "approvals"].map((key) => [key, { ready: false, code: "not_started" }]));
+const activation = { pending: false, running: false, needs_resume: true, code: "activation_required" };
+const passive = (patch: Partial<DesktopService> = {}, ownership: Partial<NotificationOwnership> = {}): DesktopService => healthy({
+  background: notStarted, code: "background_unready", details_available: false,
+  notification_ownership: { ...rearm, status: { ...rearm.status!, state: "service", rearm_required: false }, activation, ...ownership }, ...patch });
+
+describe("passive service", () => {
+  it("is paused only while connected, with no background work started and Resume offered", () => {
+    expect(servicePaused(undefined)).toBe(false);
+    expect(servicePaused(passive())).toBe(true);
+    expect(servicePaused(passive({ code: "explicit_handoff_required" }))).toBe(true);
+  });
+  it.each<[string, DesktopService]>([
+    ["disconnected", passive({ connected: false })],
+    ["reconnecting", passive({ connected: false, reconnecting: true })],
+    ["before the first status", { ...passive(), connected: false, background: {}, code: "unavailable" }],
+    ["one component started", passive({ background: { ...notStarted, fleet: { ready: false, code: "warming" } } })],
+    ["ready", healthy({ notification_ownership: passive().notification_ownership })],
+    ["a missing component", passive({ background: { fleet: { ready: false, code: "not_started" } } })],
+    ["manual refresh", passive({ executable_upgrade: { state: "manual_refresh_required" } })],
+    ["an unconfirmed ownership change", passive({}, { pending: true })],
+    ["an unconfirmed activation", passive({}, { activation: { ...activation, pending: true, code: "activation_unconfirmed" } })],
+    ["an unavailable helper", passive({}, { activation: { ...activation, code: "activation_helper_unavailable" } })],
+    ["no activation offer", passive({}, { activation: undefined })],
+    ["a settled activation", passive({}, { activation: { ...activation, needs_resume: false, code: "" } })],
+  ])("is not paused when %s", (_, state) => {
+    expect(servicePaused(state)).toBe(false);
+  });
+  it("replaces the skeletons, Connecting and the empty detail only while paused without computers", async () => {
+    const fs = (await import(/* @vite-ignore */ ["node", "fs"].join(":"))) as { readFileSync(path: URL, encoding: "utf8"): string };
+    const read = (path: string) => fs.readFileSync(new URL(path, import.meta.url), "utf8");
+    const component = read("./DesktopServiceStatus.tsx");
+    expect(component).toContain("servicePaused(desktopService.state()) && !Object.keys(catalog.computers).length");
+    const detail = component.match(/export function PausedServiceDetail[\s\S]*?\n}\n/)?.[0] ?? "";
+    expect(detail).toContain('tr("Background work is paused")');
+    expect(detail).toContain('tr("Resume to activate the service explicitly.")');
+    expect(detail).toMatch(/class="btn primary" disabled=\{resumeBlocked\(\)\} onClick=\{resume\}>\{tr\("Resume background work"\)\}/);
+    expect(component).toContain("const resume = () => void ownershipActions.rearm()");
+    expect(component).toContain("ownershipActions.busy() || !!desktopService.state()?.notification_ownership?.running");
+    expect(read("../sessions/SessionDetail.tsx")).toMatch(/function EmptyDetail\(\) \{\s*return \(\s*<Show when=\{!servicePausedEmpty\(\)\} fallback=\{<PausedServiceDetail \/>\}>/);
+    const list = read("../sessions/SessionList.tsx").match(/function ListPlaceholder\(\)[\s\S]*?\n}\n/)?.[0] ?? "";
+    expect(list.indexOf("<Show when={!servicePausedEmpty()}")).toBeGreaterThan(-1);
+    expect(list.indexOf("<Show when={!servicePausedEmpty()}")).toBeLessThan(list.indexOf("skel-card"));
+    expect(read("../../App.tsx")).toContain('fallback={<Show when={!servicePaused(desktopService.state())}><span>{props.mode() === "starting" ? tr("Starting…") : tr("Connecting…")}</span></Show>}');
+  });
+});
 
 describe("service status in the footer", () => {
   it("keeps the healthy indicator compact and offers no Retry", () => {
@@ -50,6 +97,13 @@ describe("service status in the footer", () => {
     expect(status).toMatchObject({ healthy: false, retry: true, review: true });
     expect(status?.details).toContain("Saved read marks");
     expect(status?.details).toContain("migration report needs review");
+  });
+  it("presents a passive service as paused work with Resume, not as a fault to Retry", () => {
+    const status = serviceStatus(passive());
+    expect(status).toMatchObject({ healthy: false, retry: false, ownership: "rearm", label: "Background access paused" });
+    expect(status?.details).toBe("Background work is paused. Resume to activate the service explicitly.");
+    // A durable handoff block keeps its own label and Retry.
+    expect(serviceStatus(passive({ code: "explicit_handoff_required" }))).toMatchObject({ label: "Background handoff required", retry: true, ownership: "rearm" });
   });
   it("inserts status only in the fixed-height footer, never above the page", async () => {
     const fs = (await import(/* @vite-ignore */ ["node", "fs"].join(":"))) as { readFileSync(path: URL, encoding: "utf8"): string };

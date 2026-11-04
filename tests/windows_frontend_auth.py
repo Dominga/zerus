@@ -659,8 +659,10 @@ class WindowsTaskMode(unittest.TestCase):
         path = self.state / 'desktop' / 'windows-registration-mode.json'
         configuration = self.cli('desktop', 'status', '--json')['configuration']
         before = self.observe()['instances']
-        granted = self.cli('desktop', 'ownership-status', '--json')
         service = self.cli('desktop', 'status', '--json')['lifecycle']['pid']
+        # "Unchanged" below compares exactly this one running passive engine.
+        self.assertEqual([item['engine_pid'] for item in before], [service], before)
+        granted = self.cli('desktop', 'ownership-status', '--json')
         database = (self.state / 'desktop' / 'state.sqlite3').as_uri() + '?mode=ro'
         with closing(sqlite3.connect(database, uri=True)) as db:
             commands = db.execute('SELECT count(*) FROM desktop_commands').fetchone()[0]
@@ -1266,6 +1268,22 @@ if(@(Get-OwnInstances $s $t).Count-ne 0) {throw 'fixture instance still runs'};
 $r=$t.Run($null);@{guid=[string]$r.InstanceGuid}|ConvertTo-Json -Compress
 """, dict(task=self.task, task_image=plan['argv'][0]))
 
+    def exact_later_instance(self, guid, wait=8):
+        """Exactly one running instance of the fixture task, the given GUID, on
+        a live engine of the selected CLI image. Unobservable fails the
+        control: an empty or different set is never success."""
+        deadline, instances = time.monotonic() + wait, []
+        while True:
+            instances = self.observe()['instances']
+            if (len(instances) == 1 and instances[0]['guid'] == guid) or time.monotonic() >= deadline:
+                break
+            time.sleep(0.25)
+        self.assertEqual([item['guid'] for item in instances], [guid], instances)
+        metadata = windows_process_metadata(instances[0]['engine_pid'])
+        self.assertFalse(metadata.get('exited', True), metadata)
+        self.assertEqual(Path(metadata['image']).resolve(strict=True), self.cli_image)
+        return dict(guid=guid, pid=instances[0]['engine_pid'], birth=metadata['birth'])
+
     def test_first_choice_instance_drift_at_held_is_refused_before_any_stop(self):
         """Debug held seam (zerus-yfbd.1), in its own fixture because it ends
         at a reboot-gated Review. The passive instance changes while a first
@@ -1296,6 +1314,7 @@ $r=$t.Run($null);@{guid=[string]$r.InstanceGuid}|ConvertTo-Json -Compress
             stopped = self.stop_exact_passive(self.latest)
             self.assertTrue(stopped['stopped'], stopped)
             later = self.run_own_task()
+            replacement = self.exact_later_instance(later['guid'])
             release = self.release_held_helper(request)
             drift = self.first_call_finished(child)
             self.assertEqual(drift['code'], 0, drift)
@@ -1312,32 +1331,28 @@ $r=$t.Run($null);@{guid=[string]$r.InstanceGuid}|ConvertTo-Json -Compress
             self.assertEqual((status['first_choice']['request'], status['first_choice']['phase']),
                              (request, 'unknown'), status)
             self.assertEqual(self.cli('desktop', 'ownership-status', '--json'), granted)
-            # The later instance the fixture started was neither stopped nor
-            # replaced by the helper.
-            instances = self.observe()['instances']
-            self.assertTrue(all(item['guid'] == later['guid'] for item in instances), (later, instances))
+            # The one later instance the fixture started was neither stopped
+            # nor replaced by the helper: same GUID, PID and birth, still live.
+            self.assertEqual(self.exact_later_instance(later['guid'], wait=0), replacement)
             result = self.cli('desktop', 'registration', 'mode-result', '--json', '--request-id', request)
             self.assertEqual((result['outcome'], result['receipt']['phase']), ('unknown', 'unknown'), result)
+            # The arranged later instance is live on the same boot: Review
+            # needs a reboot barrier and changes nothing.
             reviewed = self.review_mode(request)
-            if instances:
-                # A later live instance on the same boot needs a reboot barrier.
-                self.assertEqual(reviewed['code'], 'reboot_required', reviewed)
+            self.assertEqual(reviewed['code'], 'reboot_required', reviewed)
             self.assertEqual(reviewed['outcome'], 'unknown', reviewed)
             self.assertFalse(reviewed['manager_changed'], reviewed)
             self.assertFalse(reviewed['authority_changed'], reviewed)
-            self.assertEqual(self.observe()['instances'], instances)
-            # Teardown: stop the exact later passive instance, then remove.
-            if instances:
-                pid = instances[0]['engine_pid']
-                metadata = windows_process_metadata(pid)
-                self.assertEqual(Path(metadata['image']).resolve(strict=True), self.cli_image)
-                stopped = self.stop_exact_passive(dict(guid=later['guid'], pid=pid, birth=metadata['birth']))
-                self.assertTrue(stopped['stopped'], stopped)
-                # Evidence for zerus-aucth: Review once nothing of the task runs.
-                again = self.review_mode(request)
-                self.assertFalse(again['manager_changed'], again)
-                print('MODE_TASK_DRIFT_REVIEW ' + json.dumps({key: again.get(key) for key in
-                      ('code', 'outcome', 'manager_changed', 'authority_changed')}), file=sys.stderr)
+            self.assertEqual(self.exact_later_instance(later['guid'], wait=0), replacement)
+            # Teardown: stop exactly that later passive instance, then remove.
+            stopped = self.stop_exact_passive(dict(guid=replacement['guid'], pid=replacement['pid'],
+                                                   birth=replacement['birth']))
+            self.assertTrue(stopped['stopped'], stopped)
+            # Evidence for zerus-aucth: Review once nothing of the task runs.
+            again = self.review_mode(request)
+            self.assertFalse(again['manager_changed'], again)
+            print('MODE_TASK_DRIFT_REVIEW ' + json.dumps({key: again.get(key) for key in
+                  ('code', 'outcome', 'manager_changed', 'authority_changed')}), file=sys.stderr)
             self.assertFalse(self.cli('desktop', 'status', '--json')['running'])
             self.assertFalse(self.cli('desktop', 'registration', 'remove', '--json')['registered'])
             self.installed = False

@@ -602,7 +602,7 @@ impl Runtime {
                     .root
                     .parent()
                     .context("deferred send state unavailable")
-                    .and_then(|state| Ok(Arc::new(Roots::open(state)?)))
+                    .and_then(|state| Ok(Arc::new(Roots::open(state, receipt::FOLDER)?)))
                     .and_then(|roots| {
                         let (prepared, held) = custody::prepare(&location, &original)?;
                         Ok((prepared, held, roots))

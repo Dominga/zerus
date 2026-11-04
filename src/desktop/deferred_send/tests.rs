@@ -577,7 +577,7 @@ fn state_root(parent: &Path) -> PathBuf {
     state
 }
 fn observe(state: &Path, plan: &wire::Plan) -> super::receipt::Observed {
-    let roots = super::receipt::Roots::open(state).unwrap();
+    let roots = super::receipt::Roots::open(state, super::receipt::FOLDER).unwrap();
     super::receipt::read(&roots, plan, &|| {}).0
 }
 
@@ -660,7 +660,7 @@ fn the_receipt_observation_reads_only_the_exact_private_submitted_record() {
     write_receipt(&state, id, exact.as_bytes());
     mode(&folder, 0o755);
     assert!(
-        super::receipt::Roots::open(&state).is_err(),
+        super::receipt::Roots::open(&state, super::receipt::FOLDER).is_err(),
         "a shared folder is never held"
     );
     mode(&folder, 0o700);
@@ -693,11 +693,17 @@ fn the_receipt_observation_reads_only_the_exact_private_submitted_record() {
     clear();
     // A linked or shared state root is never held.
     mode(&state, 0o755);
-    assert!(super::receipt::Roots::open(&state).is_err(), "shared root");
+    assert!(
+        super::receipt::Roots::open(&state, super::receipt::FOLDER).is_err(),
+        "shared root"
+    );
     mode(&state, 0o700);
     let linked = temp.path().join("linked");
     std::os::unix::fs::symlink(&state, &linked).unwrap();
-    assert!(super::receipt::Roots::open(&linked).is_err(), "linked root");
+    assert!(
+        super::receipt::Roots::open(&linked, super::receipt::FOLDER).is_err(),
+        "linked root"
+    );
 }
 
 /// review: the original store is the one opened before the child; a moved,
@@ -720,7 +726,7 @@ fn only_the_original_unchanged_store_proves_a_submission() {
         if folder {
             write_receipt(&state, &id, exact.as_bytes());
         }
-        let roots = Roots::open(&state).unwrap();
+        let roots = Roots::open(&state, super::receipt::FOLDER).unwrap();
         (state, roots)
     };
     let copy = |state: &Path, to: &Path| {

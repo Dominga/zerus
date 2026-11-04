@@ -30,6 +30,9 @@ mod operations;
 // One bounded original-child runner for the launch and task message leaves.
 #[cfg(any(target_os = "linux", target_os = "macos"))]
 mod original_child;
+// The CLI state store one deferred original holds and reads.
+#[cfg(any(target_os = "linux", target_os = "macos"))]
+mod original_store;
 mod owner;
 mod ownership;
 mod pending_reads;

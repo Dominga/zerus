@@ -111,6 +111,12 @@ pub struct LogEntry {
     pub attachments: Vec<crate::TaskAttachment>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub delivery: Option<TaskDelivery>,
+    /// Why a report was recorded without moving its task.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub stale: Option<crate::execution::Stale>,
+    /// The requirement revision a report says it considered.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub considered: Option<u64>,
 }
 
 /// A task message's durable outbox reservation. Submission is not consumption.

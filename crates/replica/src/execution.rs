@@ -297,8 +297,8 @@ pub(crate) fn project(
 /// The current execution of history written before attempts were recorded:
 /// its latest boundary, a send, handoff, reopen or direct start, with every
 /// field taken from that boundary alone. A start by the boundary's own session
-/// before the execution ends (a report, a cancellation or a stage move)
-/// acknowledges it; any other start is a boundary of its own.
+/// before the execution ends (a result report that moved it, a cancellation
+/// or a stage move) acknowledges it; any other start is a boundary of its own.
 fn legacy(session: Option<&SessionKey>, log: &[LogEntry], requirement: u64) -> CurrentAttempt {
     struct Boundary<'a> {
         origin: Origin,
@@ -349,6 +349,8 @@ fn legacy(session: Option<&SessionKey>, log: &[LogEntry], requirement: u64) -> C
                     })
                 }
             },
+            // A stale report and progress were recorded without ending anything.
+            "report" if entry.stale.is_some() => {}
             "report" | "cancelled" | "stage" => {
                 if let Some(ended) = latest.as_mut() {
                     ended.open = false;
@@ -412,7 +414,7 @@ pub enum ReportKind {
 }
 
 /// Why a report cannot move its task.
-#[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize)]
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
 pub enum Stale {
     /// The reporter is not the current attempt's executor.
@@ -423,6 +425,22 @@ pub enum Stale {
     Finished,
     /// Two attempts claim the task; a person resolves it.
     Conflict,
+}
+
+impl Stale {
+    pub fn as_str(self) -> &'static str {
+        match self {
+            Self::OtherExecutor => "other_executor",
+            Self::OtherAttempt => "other_attempt",
+            Self::Finished => "finished",
+            Self::Conflict => "conflict",
+        }
+    }
+
+    /// A stored reason; one this build does not know reads as none.
+    pub fn parse(value: &str) -> Option<Self> {
+        serde_json::from_value(serde_json::Value::String(value.to_owned())).ok()
+    }
 }
 
 /// What a report does to its task.
@@ -542,6 +560,8 @@ mod tests {
             request_id: request.map(str::to_owned),
             attachments: Vec::new(),
             delivery: None,
+            stale: None,
+            considered: None,
         }
     }
 
@@ -917,6 +937,21 @@ mod tests {
         assert_eq!(
             (now.origin, now.request_id.as_str(), now.began_at, now.phase),
             (Origin::Handoff, "second", None, Phase::Submitted)
+        );
+        // A stale report and progress end nothing: the executor's start still acknowledges.
+        let kept = [
+            entry("sent", 10, Some("one"), Some("first")),
+            LogEntry {
+                stale: Some(Stale::OtherExecutor),
+                ..entry("report", 11, Some("other"), None)
+            },
+            entry("progress", 12, Some("one"), None),
+            entry("started", 13, Some("one"), None),
+        ];
+        let now = legacy(&kept, "one");
+        assert_eq!(
+            (now.origin, now.request_id.as_str(), now.began_at),
+            (Origin::Send, "first", Some(13))
         );
         // A start after the execution ended is a new boundary, even by the same session.
         let again = [

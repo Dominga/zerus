@@ -1,0 +1,52 @@
+Skia compositor: keep an ended animation's values until the main thread commits
+
+Backport of the WebKitGTK 2.54.2 change to SkiaCompositingLayer (2.54.1 is
+affected; 2.54.2 is not). Once an accelerated animation has ended on the
+compositor (AnimationsState::isRunning is false) but the web process has not
+yet committed the final style, 2.54.1 painted the layer's own opacity,
+transform and filter, which are still the values from the animation's start.
+Every CSS entrance (rise, fadeIn, drop, pop, slideL, insp-in) therefore
+presented one frame near its start opacity exactly at its end. The ended
+state already holds the filled final values, so use it as 2.54.2 does.
+
+Found by Zerus zerus-agv9 / zerus-5wmh.28.2 (task-view-flicker-smoke and
+entrance-survey-smoke under menu-smoke.py --paint-column).
+
+--- a/Source/WebCore/platform/graphics/skia/SkiaCompositingLayer.cpp
++++ b/Source/WebCore/platform/graphics/skia/SkiaCompositingLayer.cpp
+@@ -388,7 +388,7 @@
+ 
+ const TransformationMatrix& SkiaCompositingLayer::localTransform() const
+ {
+-    if (!m_animationsState || !m_animationsState->isRunning)
++    if (!m_animationsState)
+         return m_transform;
+ 
+     return m_animationsState->transform ? m_animationsState->transform.value() : m_transform;
+@@ -396,7 +396,7 @@
+ 
+ const TransformationMatrix& SkiaCompositingLayer::futureLocalTransform() const
+ {
+-    if (!m_animationsState || !m_animationsState->isRunning)
++    if (!m_animationsState)
+         return m_transform;
+ 
+     return m_animationsState->futureTransform ? m_animationsState->futureTransform.value() : localTransform();
+@@ -404,7 +404,7 @@
+ 
+ float SkiaCompositingLayer::opacityForAnimationsState(const AnimationsState* animationsState) const
+ {
+-    if (!animationsState || !animationsState->isRunning)
++    if (!animationsState)
+         return m_opacity;
+ 
+     return animationsState->opacity.value_or(m_opacity);
+@@ -417,7 +417,7 @@
+ 
+ const std::optional<SkiaCompositingLayer::Filter> SkiaCompositingLayer::filter() const
+ {
+-    if (!m_animationsState || !m_animationsState->isRunning)
++    if (!m_animationsState)
+         return m_filter;
+ 
+     return m_animationsState->filter ? m_animationsState->filter : m_filter;

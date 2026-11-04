@@ -311,6 +311,7 @@ impl Validated {
                     | Request::CreationWorktree { .. }
                     | Request::CreationLaunch { .. }
                     | Request::TaskMessage { .. }
+                    | Request::TaskMessageInputRelease { .. }
                     | Request::TaskStartReconcile { .. }
                     | Request::TerminationOutcome { .. }
             ),
@@ -361,6 +362,30 @@ impl Validated {
             anyhow::bail!("not a task message");
         };
         Ok(intent)
+    }
+    /// Only the task message runtime calls this, after BEGIN IMMEDIATE, for
+    /// one exact claim of a reviewed custody input.
+    #[cfg(any(target_os = "linux", target_os = "macos"))]
+    pub fn task_message_input_release(
+        self,
+    ) -> Result<zerus_client_core::desktop::task_message::review::Release> {
+        self.check()?;
+        let Request::TaskMessageInputRelease { release } = self.0 else {
+            anyhow::bail!("not a task message input release");
+        };
+        Ok(*release)
+    }
+    /// A read of the reviewed release before its claim. It grants nothing:
+    /// the claim still consumes this permit after BEGIN IMMEDIATE.
+    #[cfg(any(target_os = "linux", target_os = "macos"))]
+    pub fn task_message_input_release_preview(
+        &self,
+    ) -> Result<&zerus_client_core::desktop::task_message::review::Release> {
+        self.check()?;
+        let Request::TaskMessageInputRelease { release } = &self.0 else {
+            anyhow::bail!("not a task message input release");
+        };
+        Ok(release)
     }
     /// Only the worktree actor calls this after BEGIN IMMEDIATE. Cached native
     /// Service mode was bound to this exact original request during admission.
@@ -916,6 +941,14 @@ fn validate(
             "task message does not match the native service frontend"
         );
     }
+    if let Request::TaskMessageInputRelease { release } = &envelope.request {
+        ensure!(
+            reply.request.ownership_mode
+                == Some(zerus_client_core::desktop::ownership::Mode::Service)
+                && release.scope.configuration == configuration,
+            "task message input release does not match the native service frontend"
+        );
+    }
     if let Request::TaskStartReconcile { intent } = &envelope.request {
         ensure!(
             reply.request.ownership_mode
@@ -997,6 +1030,7 @@ enum OrderedOperation {
     CreationWorktree,
     CreationLaunch,
     TaskMessage,
+    TaskMessageInputRelease,
     TaskStartReconcile,
     ActivationWait,
     AutomaticApprovals,
@@ -1016,6 +1050,7 @@ impl From<&Request> for OrderedOperation {
             Request::CreationWorktree { .. } => Self::CreationWorktree,
             Request::CreationLaunch { .. } => Self::CreationLaunch,
             Request::TaskMessage { .. } => Self::TaskMessage,
+            Request::TaskMessageInputRelease { .. } => Self::TaskMessageInputRelease,
             Request::TaskStartReconcile { .. } => Self::TaskStartReconcile,
             Request::ActivationWait { .. } => Self::ActivationWait,
             Request::AutomaticApprovals { .. } => Self::AutomaticApprovals,
@@ -1594,6 +1629,52 @@ mod tests {
             .is_err());
         if let Request::TaskMessage { intent } = &mut envelope.request {
             intent.scope.configuration = "b".repeat(64);
+        }
+        reply.request.fingerprint = envelope.request.fingerprint();
+        assert!(validate(&envelope, &caller, &frontend, &reply, &"a".repeat(64)).is_err());
+    }
+    #[test]
+    fn task_message_input_release_has_its_own_lane_and_never_passes_the_generic_boundary() {
+        use zerus_client_core::desktop::{
+            ownership::Mode,
+            task_message::{review::Release, Scope},
+        };
+        let (mut envelope, caller, frontend, mut reply) = fixture();
+        envelope.request = Request::TaskMessageInputRelease {
+            release: Box::new(Release {
+                scope: Scope {
+                    configuration: "a".repeat(64),
+                    service_epoch: id(91),
+                },
+                release_id: id(3),
+                request_id: id(2),
+                state: "orphaned".into(),
+                bytes: 10,
+                input_sha256: "e".repeat(64),
+                observed: None,
+            }),
+        };
+        assert_eq!(
+            OrderedOperation::from(&envelope.request),
+            OrderedOperation::TaskMessageInputRelease
+        );
+        assert_ne!(
+            OrderedOperation::TaskMessageInputRelease,
+            OrderedOperation::TaskMessage
+        );
+        assert_eq!(envelope.request.id(), id(3), "the release's own identity");
+        reply.request.request_id = id(3);
+        reply.request.fingerprint = envelope.request.fingerprint();
+        assert!(validate(&envelope, &caller, &frontend, &reply, &"a".repeat(64)).is_err());
+        reply.request.ownership_mode = Some(Mode::Native);
+        assert!(validate(&envelope, &caller, &frontend, &reply, &"a".repeat(64)).is_err());
+        reply.request.ownership_mode = Some(Mode::Service);
+        validate(&envelope, &caller, &frontend, &reply, &"a".repeat(64)).unwrap();
+        assert!(Validated::fixture(&serde_json::json!(envelope.request))
+            .into_request()
+            .is_err());
+        if let Request::TaskMessageInputRelease { release } = &mut envelope.request {
+            release.scope.configuration = "b".repeat(64);
         }
         reply.request.fingerprint = envelope.request.fingerprint();
         assert!(validate(&envelope, &caller, &frontend, &reply, &"a".repeat(64)).is_err());

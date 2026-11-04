@@ -5,6 +5,15 @@ use super::child::{self, Ended};
 use super::{consent::Consent, ledger, staging};
 
 mod reference;
+mod review;
+
+/// The one removal slot: a custody-input removal or restart recovery, or one
+/// explicit review's claim (zerus-pi2k9). Either excludes the other, the
+/// sweep, admission of that input and a second review.
+pub(super) enum Slot {
+    Removal(reference::Removal),
+    Review(Box<review::Review>),
+}
 use crate::desktop::creation_clone::lease::{Lease, Machine};
 use crate::{
     config::Config,
@@ -123,8 +132,9 @@ pub(in crate::desktop) struct Runtime {
     roots: Option<Arc<staging::Roots>>,
     /// The one reference original being prepared off the actor.
     admitting: Option<Box<reference::Admitting>>,
-    /// The one custody-input removal or restart recovery off the actor.
-    removal: Option<reference::Removal>,
+    /// The one custody-input removal, restart recovery or review off the
+    /// actor.
+    removal: Option<Slot>,
     /// Published inputs whose admission was refused, for exact removal.
     refused: Vec<(String, staging::Expected, Option<std::fs::File>)>,
     /// The original custody inputs this process still holds for their exact
@@ -187,6 +197,9 @@ impl Runtime {
         }
         for consent in self.admitted.values() {
             consent.stop();
+        }
+        if let Some(Slot::Review(review)) = &self.removal {
+            review.stop();
         }
     }
     fn refresh(&mut self, store: &Store, exclusion: Option<Arc<HandoffLock>>) {
@@ -283,6 +296,13 @@ impl Runtime {
                 self.exclusion.as_ref(),
             )?;
             let original = ledger::load(&tx, &id)?;
+            // A request whose custody input was ever recorded (reserved,
+            // orphaned, failed, removed or released) never gets a new row,
+            // reference or inline.
+            ensure!(
+                original.is_some() || super::inputs::load(&tx, &id)?.is_none(),
+                "task message input exists"
+            );
             let consent = Consent::admitted(verified, lease.clone())?;
             let row = ledger::admit(
                 &tx,

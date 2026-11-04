@@ -2058,6 +2058,619 @@ mod actor {
             assert_eq!(answer["code"], runtime::MAC_UNAVAILABLE);
             assert!(f.input(&original).is_none());
         }
+
+        /// The explicit review and release of charged custody inputs
+        /// (zerus-pi2k9), under G1's conditions.
+        mod review {
+            use super::*;
+            use zerus_client_core::desktop::task_message::review::{
+                Cursor, List, Observation, Outcome, Page, Release, Released, Version, LIST_OP,
+            };
+
+            impl Fixture {
+                /// A published but never admitted input: an exact orphan.
+                fn orphan(&mut self, seed: u8, created: i64) -> Verified {
+                    let (original, blobs, _) = self.referenced(&[shot(seed, 3000)]);
+                    let id = original.plan.request_id.clone();
+                    let tx = self
+                        .store
+                        .db
+                        .transaction_with_behavior(TransactionBehavior::Immediate)
+                        .unwrap();
+                    inputs::reserve(
+                        &tx,
+                        &id,
+                        original.input_len().unwrap(),
+                        &original.plan.input_sha256,
+                        created,
+                    )
+                    .unwrap();
+                    tx.commit().unwrap();
+                    self.stage(&original, &blobs);
+                    let roots = staging::Roots::open(&self.location.root).unwrap();
+                    drop(
+                        staging::prepare(
+                            &roots,
+                            &original,
+                            Instant::now() + Duration::from_secs(10),
+                        )
+                        .unwrap(),
+                    );
+                    let tx = self
+                        .store
+                        .db
+                        .transaction_with_behavior(TransactionBehavior::Immediate)
+                        .unwrap();
+                    inputs::recover_reserved(&tx, &id, true).unwrap();
+                    tx.commit().unwrap();
+                    assert_eq!(self.state(&original), "orphaned");
+                    original
+                }
+                fn list(&mut self, after: Option<Cursor>) -> Page {
+                    let queue = Arc::new(Queue::default());
+                    let list = List {
+                        op: LIST_OP.into(),
+                        scope: wire::Scope {
+                            configuration: self.location.configuration.clone(),
+                            service_epoch: self.epoch.clone(),
+                        },
+                        after,
+                    };
+                    self.runtime
+                        .task_message_inputs(&self.store, &json!(list), queue.clone(), 1);
+                    let page: Page = serde_json::from_value(self.answered(&queue)).unwrap();
+                    assert!(page.matches(&list), "{page:?}");
+                    page
+                }
+                fn observed(&mut self, original: &Verified) -> Observation {
+                    let page = self.list(None);
+                    page.entries
+                        .into_iter()
+                        .find(|e| e.request_id == original.plan.request_id)
+                        .expect("listed")
+                        .observed
+                }
+                fn release_of(
+                    &self,
+                    original: &Verified,
+                    state: &str,
+                    observed: Option<Version>,
+                ) -> Release {
+                    Release {
+                        scope: wire::Scope {
+                            configuration: self.location.configuration.clone(),
+                            service_epoch: self.epoch.clone(),
+                        },
+                        release_id: uuid::Uuid::new_v4().to_string(),
+                        request_id: original.plan.request_id.clone(),
+                        state: state.into(),
+                        bytes: original.input_len().unwrap(),
+                        input_sha256: original.plan.input_sha256.clone(),
+                        observed,
+                    }
+                }
+                fn send_release(
+                    &mut self,
+                    release: &Release,
+                    expires: Option<Instant>,
+                ) -> Arc<Queue> {
+                    let request = json!(
+                        zerus_client_core::desktop::ui_requests::Request::TaskMessageInputRelease {
+                            release: Box::new(release.clone()),
+                        }
+                    );
+                    let authority = match expires {
+                        Some(at) => ui_authority::Validated::fixture_expiring(&request, at),
+                        None => ui_authority::Validated::fixture(&request),
+                    };
+                    let queue = Arc::new(Queue::default());
+                    self.runtime.task_message_input_release(
+                        &mut self.store,
+                        authority,
+                        Some(self.exclusion.clone()),
+                        queue.clone(),
+                        1,
+                    );
+                    queue
+                }
+                fn release(&mut self, release: &Release) -> Released {
+                    let queue = self.send_release(release, None);
+                    let value = self.answered(&queue);
+                    let released: Released = serde_json::from_value(value).unwrap();
+                    assert!(released.matches(release), "{released:?}");
+                    released
+                }
+            }
+            fn present(observation: Observation) -> Version {
+                match observation {
+                    Observation::Present { version } => version,
+                    other => panic!("not present: {other:?}"),
+                }
+            }
+            /// Runs `hook` on the review's worker at `point`, for `original`.
+            fn at(
+                original: &Verified,
+                point: staging::ReviewPoint,
+                hook: impl FnOnce() + Send + 'static,
+            ) {
+                staging::REVIEW_HOOKS.lock().unwrap().push((
+                    original.plan.request_id.clone(),
+                    point,
+                    Box::new(hook),
+                ));
+            }
+
+            #[test]
+            fn an_orphan_is_removed_only_as_the_exact_reviewed_object() {
+                let mut f = Fixture::new(|_, _, _, _, _| panic!("nothing runs"));
+                let original = f.orphan(29, 1);
+                let path = f.input_path(&original);
+                let version = present(f.observed(&original));
+                // Same bytes under the same name after the review: another
+                // object, never deleted from this review.
+                let bytes = std::fs::read(&path).unwrap();
+                std::fs::remove_file(&path).unwrap();
+                std::fs::write(&path, &bytes).unwrap();
+                std::fs::set_permissions(&path, std::fs::Permissions::from_mode(0o600)).unwrap();
+                let stale = f.release_of(&original, "orphaned", Some(version));
+                let answer = f.release(&stale);
+                assert_eq!(
+                    (answer.outcome, answer.code.as_str()),
+                    (Outcome::Kept, staging::REVIEW_CHANGED)
+                );
+                assert!(path.exists());
+                assert_eq!(f.state(&original), "orphaned");
+                // A fresh review of the current object removes exactly it.
+                let version = present(f.observed(&original));
+                let answer = f.release(&f.release_of(&original, "orphaned", Some(version)));
+                assert_eq!(answer.outcome, Outcome::Removed, "{answer:?}");
+                assert!(!path.exists());
+                let record = f.input(&original).unwrap();
+                assert_eq!(record.state, "removed");
+                assert_eq!(record.identity, Some((version.device, version.inode)));
+                assert_eq!(inputs::totals(&f.store.db).unwrap(), (0, 0));
+                assert!(f.list(None).entries.is_empty());
+                // Never released twice, never admitted again by that ID.
+                let again = f.release(&f.release_of(&original, "orphaned", Some(version)));
+                assert_eq!(again.outcome, Outcome::Kept);
+                let queue = f.send_reference(
+                    &original,
+                    ui_authority::Validated::fixture(&Fixture::request(&original)),
+                );
+                assert_eq!(f.answered(&queue)["code"], staging::EXISTS);
+                assert!(ledger::load(&f.store.db, &original.plan.request_id)
+                    .unwrap()
+                    .is_none());
+            }
+
+            #[test]
+            fn a_change_while_hashing_or_a_stop_before_the_unlink_removes_nothing() {
+                for case in ["in place", "stop", "revoke", "swapped"] {
+                    let mut f = Fixture::new(|_, _, _, _, _| panic!("nothing runs"));
+                    let original = f.orphan(31, 1);
+                    let other = f.orphan(33, 2);
+                    let path = f.input_path(&original);
+                    let version = present(f.observed(&original));
+                    let other_version = present(f.observed(&other));
+                    let (held, release_hook) = std::sync::mpsc::channel::<()>();
+                    let (entered, wait) = std::sync::mpsc::channel::<()>();
+                    let mutate = (case == "in place").then(|| path.clone());
+                    if case == "swapped" {
+                        // Right before the unlink, another object takes the
+                        // name: it is never removed.
+                        let name = path.clone();
+                        at(&original, staging::ReviewPoint::BeforeUnlink, move || {
+                            let other = name.with_extension("other");
+                            std::fs::write(&other, b"other").unwrap();
+                            std::fs::set_permissions(
+                                &other,
+                                std::fs::Permissions::from_mode(0o600),
+                            )
+                            .unwrap();
+                            std::fs::rename(&other, &name).unwrap();
+                        });
+                    }
+                    at(&original, staging::ReviewPoint::Hashed, move || {
+                        if let Some(path) = mutate {
+                            // Same length, other bytes, written in place.
+                            use std::io::{Seek, Write};
+                            let mut file =
+                                std::fs::OpenOptions::new().write(true).open(&path).unwrap();
+                            file.seek(std::io::SeekFrom::Start(0)).unwrap();
+                            file.write_all(b"X").unwrap();
+                        }
+                        let _ = entered.send(());
+                        let _ = release_hook.recv_timeout(Duration::from_secs(10));
+                    });
+                    let queue =
+                        f.send_release(&f.release_of(&original, "orphaned", Some(version)), None);
+                    wait.recv_timeout(Duration::from_secs(10)).unwrap();
+                    // The worker holds the claim: still charged, not drained,
+                    // the slot excludes a second review.
+                    assert_eq!(f.runtime.review_finished(), Some(false));
+                    assert_eq!(inputs::totals(&f.store.db).unwrap().0, 2);
+                    // The one slot excludes a second review, of this record or
+                    // of any other.
+                    let second = f.release(&f.release_of(&original, "orphaned", Some(version)));
+                    assert_eq!(
+                        (second.outcome, second.code.as_str()),
+                        (Outcome::Kept, "task_message_input_review_busy")
+                    );
+                    let third = f.release(&f.release_of(&other, "orphaned", Some(other_version)));
+                    assert_eq!(
+                        (third.outcome, third.code.as_str()),
+                        (Outcome::Kept, "task_message_input_review_busy")
+                    );
+                    assert_eq!(
+                        f.runtime.review_finished(),
+                        Some(false),
+                        "the first claim stays"
+                    );
+                    match case {
+                        "stop" => f.runtime.request_stop(),
+                        "revoke" => {
+                            f.store
+                                .db
+                                .execute("UPDATE desktop_writer SET revoked=1 WHERE id=1", [])
+                                .unwrap();
+                            f.runtime.poll(&mut f.store, Some(f.exclusion.clone()));
+                        }
+                        _ => {}
+                    }
+                    assert!(!f.runtime.drained(), "{case}: the claim joins the drain");
+                    held.send(()).unwrap();
+                    let answer: Released = serde_json::from_value(f.answered(&queue)).unwrap();
+                    let code = if matches!(case, "in place" | "swapped") {
+                        staging::REVIEW_CHANGED
+                    } else {
+                        staging::REVIEW_STOPPED
+                    };
+                    assert_eq!(
+                        (answer.outcome, answer.code.as_str()),
+                        (Outcome::Kept, code),
+                        "{case}"
+                    );
+                    assert!(path.exists(), "{case}: nothing removed");
+                    assert_eq!(f.state(&original), "orphaned");
+                    assert_eq!(inputs::totals(&f.store.db).unwrap().0, 2);
+                }
+            }
+
+            #[test]
+            fn an_absent_slot_is_released_only_after_a_clean_bounded_scan() {
+                use std::os::unix::fs::PermissionsExt;
+                let cases = ["clean", "elsewhere", "unsafe", "bound", "churn"];
+                for case in cases {
+                    let mut f = Fixture::new(|_, _, _, _, _| panic!("nothing runs"));
+                    let original = f.orphan(37, 1);
+                    let path = f.input_path(&original);
+                    let folder = path.parent().unwrap().to_path_buf();
+                    match case {
+                        "elsewhere" => std::fs::rename(&path, folder.join("moved")).unwrap(),
+                        _ => std::fs::remove_file(&path).unwrap(),
+                    }
+                    match case {
+                        "unsafe" => {
+                            let fifo = std::ffi::CString::new(
+                                folder.join("fifo").as_os_str().as_encoded_bytes(),
+                            )
+                            .unwrap();
+                            // SAFETY: a NUL-terminated path in the private test folder.
+                            assert_eq!(unsafe { libc::mkfifo(fifo.as_ptr(), 0o600) }, 0);
+                        }
+                        "bound" => {
+                            for n in 0..=staging::SCAN_ENTRIES {
+                                let file = folder.join(format!("filler-{n}"));
+                                std::fs::write(&file, b"x").unwrap();
+                                std::fs::set_permissions(
+                                    &file,
+                                    std::fs::Permissions::from_mode(0o600),
+                                )
+                                .unwrap();
+                            }
+                        }
+                        "churn" => {
+                            let back = path.clone();
+                            at(&original, staging::ReviewPoint::Scanned, move || {
+                                std::fs::write(&back, b"back").unwrap();
+                            });
+                        }
+                        _ => {}
+                    }
+                    assert_eq!(f.observed(&original), Observation::Absent, "{case}");
+                    let answer = f.release(&f.release_of(&original, "orphaned", None));
+                    let expected = match case {
+                        "clean" => (Outcome::Released, ""),
+                        "elsewhere" => (Outcome::Kept, staging::REVIEW_ELSEWHERE),
+                        "unsafe" => (Outcome::Kept, staging::REVIEW_UNSAFE),
+                        "bound" => (Outcome::Kept, staging::REVIEW_BOUND),
+                        _ => (Outcome::Kept, staging::REVIEW_CHANGED),
+                    };
+                    assert_eq!((answer.outcome, answer.code.as_str()), expected, "{case}");
+                    if case == "clean" {
+                        assert_eq!(f.state(&original), "released");
+                        assert_eq!(inputs::totals(&f.store.db).unwrap(), (0, 0));
+                        // The released ID never reserves or admits again.
+                        let queue = f.send_reference(
+                            &original,
+                            ui_authority::Validated::fixture(&Fixture::request(&original)),
+                        );
+                        assert_eq!(f.answered(&queue)["code"], staging::EXISTS);
+                    } else {
+                        assert_eq!(f.state(&original), "orphaned", "{case}");
+                        assert_eq!(inputs::totals(&f.store.db).unwrap().0, 1, "{case}");
+                    }
+                    if case == "elsewhere" {
+                        assert!(
+                            folder.join("moved").exists(),
+                            "a copy elsewhere is never touched"
+                        );
+                    }
+                }
+            }
+
+            #[test]
+            fn a_permit_expired_before_the_claim_claims_nothing() {
+                let mut f = Fixture::new(|_, _, _, _, _| panic!("nothing runs"));
+                let original = f.orphan(41, 1);
+                let version = present(f.observed(&original));
+                // Already expired: refused before anything is read.
+                let queue = f.send_release(
+                    &f.release_of(&original, "orphaned", Some(version)),
+                    Some(Instant::now() - Duration::from_millis(1)),
+                );
+                assert_eq!(
+                    f.answered(&queue)["code"],
+                    "task_message_input_review_refused"
+                );
+                assert_eq!(f.runtime.review_finished(), None, "never claimed");
+                // Expiring while BEGIN IMMEDIATE waits for the writer lock:
+                // the permit is consumed after BEGIN, so nothing is claimed.
+                f.store.db.busy_timeout(Duration::from_secs(3)).unwrap();
+                let expires = Instant::now() + Duration::from_millis(400);
+                let path = f.location.root.join("state.sqlite3");
+                let (send, receive) = std::sync::mpsc::sync_channel(1);
+                let blocker = std::thread::spawn(move || {
+                    let mut db = rusqlite::Connection::open(path).unwrap();
+                    let tx = db
+                        .transaction_with_behavior(TransactionBehavior::Immediate)
+                        .unwrap();
+                    send.send(()).unwrap();
+                    std::thread::sleep(
+                        (expires + Duration::from_millis(20))
+                            .saturating_duration_since(Instant::now()),
+                    );
+                    tx.commit().unwrap();
+                });
+                receive.recv_timeout(Duration::from_secs(1)).unwrap();
+                let release = f.release_of(&original, "orphaned", Some(version));
+                let queue = f.send_release(&release, Some(expires));
+                blocker.join().unwrap();
+                let answer: Released = serde_json::from_value(f.answered(&queue)).unwrap();
+                assert!(answer.matches(&release));
+                assert_eq!(
+                    (answer.outcome, answer.code.as_str()),
+                    (Outcome::Kept, "task_message_input_review_refused")
+                );
+                assert_eq!(f.runtime.review_finished(), None, "never claimed");
+                assert!(f.input_path(&original).exists());
+                assert_eq!(f.state(&original), "orphaned");
+            }
+
+            #[test]
+            fn a_restart_after_the_unlink_leaves_only_a_fresh_absent_review() {
+                let mut f = Fixture::new(|_, _, _, _, _| panic!("nothing runs"));
+                let original = f.orphan(43, 1);
+                let version = present(f.observed(&original));
+                let _queue =
+                    f.send_release(&f.release_of(&original, "orphaned", Some(version)), None);
+                let end = Instant::now() + Duration::from_secs(10);
+                while f.runtime.review_finished() != Some(true) {
+                    assert!(Instant::now() < end, "the worker never finished");
+                    std::thread::sleep(Duration::from_millis(2));
+                }
+                // The process ends before Phase C recorded the effect.
+                assert!(!f.input_path(&original).exists());
+                f.runtime = runtime::Runtime::new(&f.config, &f.epoch, f.owner.clone()).unwrap();
+                f.runtime
+                    .fixture_executor(MACHINE, Arc::new(|_, _, _, _, _| panic!("nothing runs")));
+                f.runtime.fixture_mac_fence(false);
+                f.runtime.poll(&mut f.store, Some(f.exclusion.clone()));
+                assert_eq!(
+                    f.state(&original),
+                    "orphaned",
+                    "never recorded without a review"
+                );
+                assert_eq!(f.observed(&original), Observation::Absent);
+                let answer = f.release(&f.release_of(&original, "orphaned", None));
+                assert_eq!(answer.outcome, Outcome::Released);
+                assert_eq!(inputs::totals(&f.store.db).unwrap(), (0, 0));
+            }
+
+            /// A failed record's original must have drained exactly, here
+            /// one admitted but neither run nor drained, held by no consent
+            /// of this process (as after a restart).
+            #[test]
+            fn a_failed_record_is_refused_until_its_original_drained() {
+                let mut f = Fixture::new(|_, _, _, _, _| panic!("nothing runs"));
+                let original = f.original();
+                assert!(f.admit(&original).accepted);
+                f.runtime = runtime::Runtime::new(&f.config, &f.epoch, f.owner.clone()).unwrap();
+                f.runtime
+                    .fixture_executor(MACHINE, Arc::new(|_, _, _, _, _| panic!("nothing runs")));
+                f.runtime.fixture_mac_fence(false);
+                let id = original.plan.request_id.clone();
+                let tx = f
+                    .store
+                    .db
+                    .transaction_with_behavior(TransactionBehavior::Immediate)
+                    .unwrap();
+                inputs::reserve(&tx, &id, 10, &"e".repeat(64), 1).unwrap();
+                inputs::hold(&tx, &id, (1, 2)).unwrap();
+                tx.execute(
+                    "UPDATE desktop_task_message_inputs SET state='failed' WHERE request_id=?1",
+                    [&id],
+                )
+                .unwrap();
+                tx.commit().unwrap();
+                let mut release = Release {
+                    scope: wire::Scope {
+                        configuration: f.location.configuration.clone(),
+                        service_epoch: f.epoch.clone(),
+                    },
+                    release_id: uuid::Uuid::new_v4().to_string(),
+                    request_id: id.clone(),
+                    state: "failed".into(),
+                    bytes: 10,
+                    input_sha256: "e".repeat(64),
+                    observed: None,
+                };
+                let answer = f.release(&release);
+                assert_eq!(
+                    (answer.outcome, answer.code.as_str()),
+                    (Outcome::Kept, "task_message_input_review_refused")
+                );
+                assert_eq!(f.input(&original).unwrap().state, "failed");
+                assert_eq!(inputs::totals(&f.store.db).unwrap(), (1, 10));
+                // Nor is an orphan's release taken for a failed record's.
+                release.release_id = uuid::Uuid::new_v4().to_string();
+                release.state = "orphaned".into();
+                assert_eq!(f.release(&release).outcome, Outcome::Kept);
+                // And an orphan must have no execution row at all.
+                f.store
+                    .db
+                    .execute(
+                        "UPDATE desktop_task_message_inputs SET state='orphaned' WHERE request_id=?1",
+                        [&id],
+                    )
+                    .unwrap();
+                release.release_id = uuid::Uuid::new_v4().to_string();
+                let answer = f.release(&release);
+                assert_eq!(
+                    (answer.outcome, answer.code.as_str()),
+                    (Outcome::Kept, "task_message_input_review_refused")
+                );
+                assert_eq!(f.input(&original).unwrap().state, "orphaned");
+            }
+
+            /// A failed record whose original drained: only its recorded
+            /// object, unchanged, is removed.
+            #[test]
+            #[cfg(target_os = "linux")]
+            fn a_failed_record_removes_only_its_recorded_object_after_the_drain() {
+                let dir = tempfile::tempdir().unwrap();
+                let (image, _seen) = replying_image(dir.path());
+                let mut f = Fixture::unexecuted();
+                f.runtime.fixture_image(&image);
+                let (original, blobs, _) = f.referenced(&[shot(53, 3000)]);
+                f.stage(&original, &blobs);
+                let queue = f.send_reference(
+                    &original,
+                    ui_authority::Validated::fixture(&Fixture::request(&original)),
+                );
+                assert_eq!(f.answered(&queue)["accepted"], true);
+                // Its removal failed: the sweep never takes a failed record.
+                f.store
+                    .db
+                    .execute(
+                        "UPDATE desktop_task_message_inputs SET state='failed' WHERE request_id=?1",
+                        [&original.plan.request_id],
+                    )
+                    .unwrap();
+                f.until("drained", |f| f.row(&original).receipt.drained);
+                let recorded = f.input(&original).unwrap().identity.unwrap();
+                let path = f.input_path(&original);
+                assert!(path.exists());
+                let entry = f
+                    .list(None)
+                    .entries
+                    .into_iter()
+                    .find(|e| e.request_id == original.plan.request_id)
+                    .unwrap();
+                assert_eq!(entry.recorded, Some(recorded));
+                let version = present(entry.observed);
+                // The same bytes as another object are not the recorded one.
+                let bytes = std::fs::read(&path).unwrap();
+                let aside = path.with_extension("aside");
+                std::fs::rename(&path, &aside).unwrap();
+                std::fs::write(&path, &bytes).unwrap();
+                std::fs::set_permissions(&path, std::fs::Permissions::from_mode(0o600)).unwrap();
+                let other = present(f.observed(&original));
+                let answer = f.release(&f.release_of(&original, "failed", Some(other)));
+                assert_eq!(
+                    (answer.outcome, answer.code.as_str()),
+                    (Outcome::Kept, "task_message_input_review_refused")
+                );
+                std::fs::remove_file(&path).unwrap();
+                std::fs::rename(&aside, &path).unwrap();
+                // Renaming changed its status time: the earlier review is
+                // stale, so a fresh one names the recorded object again.
+                assert_eq!(
+                    f.release(&f.release_of(&original, "failed", Some(version)))
+                        .outcome,
+                    Outcome::Kept
+                );
+                let version = present(f.observed(&original));
+                assert_eq!((version.device, version.inode), recorded);
+                let answer = f.release(&f.release_of(&original, "failed", Some(version)));
+                assert_eq!(answer.outcome, Outcome::Removed, "{answer:?}");
+                assert!(!path.exists());
+                let record = f.input(&original).unwrap();
+                assert_eq!(
+                    (record.state.as_str(), record.identity),
+                    ("removed", Some(recorded))
+                );
+                assert_eq!(inputs::totals(&f.store.db).unwrap(), (0, 0));
+            }
+
+            /// Any input record, even a released one, keeps its request ID
+            /// from a new inline admission as well.
+            #[test]
+            fn an_input_record_keeps_its_request_id_from_inline_admission() {
+                let mut f = Fixture::new(|_, _, _, _, _| panic!("nothing runs"));
+                let original = f.original();
+                let tx = f
+                    .store
+                    .db
+                    .transaction_with_behavior(TransactionBehavior::Immediate)
+                    .unwrap();
+                inputs::reserve(&tx, &original.plan.request_id, 10, &"e".repeat(64), 1).unwrap();
+                inputs::recover_reserved(&tx, &original.plan.request_id, false).unwrap();
+                tx.commit().unwrap();
+                assert_eq!(f.input(&original).unwrap().state, "released");
+                assert!(!f.admit(&original).accepted);
+                assert!(ledger::load(&f.store.db, &original.plan.request_id)
+                    .unwrap()
+                    .is_none());
+            }
+
+            #[test]
+            fn a_listing_is_one_bounded_page_with_a_stable_cursor() {
+                let mut f = Fixture::new(|_, _, _, _, _| panic!("nothing runs"));
+                let originals: Vec<Verified> = (0..18)
+                    .map(|n| f.orphan(47 + n as u8, 10 + n as i64))
+                    .collect();
+                let first = f.list(None);
+                assert_eq!(first.entries.len(), 16);
+                let cursor = first.next.clone().expect("a second page");
+                // A record that arrives later is listed after, never twice.
+                let late = f.orphan(99, 100);
+                let second = f.list(Some(cursor));
+                let ids: Vec<&str> = first
+                    .entries
+                    .iter()
+                    .chain(second.entries.iter())
+                    .map(|e| e.request_id.as_str())
+                    .collect();
+                let mut expected: Vec<&str> = originals
+                    .iter()
+                    .map(|o| o.plan.request_id.as_str())
+                    .collect();
+                expected.push(&late.plan.request_id);
+                assert_eq!(ids, expected);
+                assert!(second.next.is_none());
+            }
+        }
     }
 }
 

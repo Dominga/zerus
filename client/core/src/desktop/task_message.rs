@@ -607,6 +607,9 @@ impl Lookup {
 #[cfg(unix)]
 pub mod staging;
 
+/// The explicit review and release of charged custody inputs.
+pub mod review;
+
 #[cfg(test)]
 pub(super) fn test_intent() -> Intent {
     tests::frozen()

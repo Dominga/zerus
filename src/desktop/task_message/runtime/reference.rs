@@ -358,9 +358,13 @@ impl Runtime {
 
     /// One removal or recovery at a time, off the actor.
     fn poll_removal(&mut self, store: &mut Store) -> Result<()> {
-        if let Some(removal) = self.removal.take() {
+        if let Some(slot) = self.removal.take() {
+            let removal = match slot {
+                Slot::Removal(removal) => removal,
+                Slot::Review(review) => return self.poll_review(store, review),
+            };
             if !removal.worker.is_finished() {
-                self.removal = Some(removal);
+                self.removal = Some(Slot::Removal(removal));
                 return Ok(());
             }
             let ok = removal.worker.join().is_ok() && removal.done.try_recv().unwrap_or(false);
@@ -434,18 +438,19 @@ impl Runtime {
                 };
                 let _ = send.send(ok);
             })?;
-        self.removal = Some(Removal {
+        self.removal = Some(Slot::Removal(Removal {
             id,
             job,
             worker,
             done,
-        });
+        }));
         Ok(())
     }
 
     /// Whether this process still holds `id` in any form.
-    fn holds(&self, id: &str) -> bool {
+    pub(super) fn holds(&self, id: &str) -> bool {
         self.admitted.contains_key(id)
+            || matches!(&self.removal, Some(Slot::Review(review)) if review.request_id() == id)
             || self
                 .admitting
                 .as_ref()

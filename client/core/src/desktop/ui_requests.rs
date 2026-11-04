@@ -34,6 +34,9 @@ pub enum Request {
     TaskMessage {
         intent: Box<super::task_message::Intent>,
     },
+    TaskMessageInputRelease {
+        release: Box<super::task_message::review::Release>,
+    },
     TaskStartReconcile {
         intent: Box<super::task_start_reconcile::Intent>,
     },
@@ -95,6 +98,7 @@ impl Request {
             Self::CreationWorktree { intent } => &intent.worktree_request_id,
             Self::CreationLaunch { intent } => &intent.launch_id,
             Self::TaskMessage { intent } => &intent.request_id,
+            Self::TaskMessageInputRelease { release } => &release.release_id,
             Self::TaskStartReconcile { intent } => &intent.reconcile_id,
             Self::TerminationOutcome { intent } => &intent.request_id,
             Self::NotificationControl { control, .. } => control.request_id(),
@@ -112,6 +116,7 @@ impl Request {
             Self::CreationWorktree { .. } => "creation_worktree",
             Self::CreationLaunch { .. } => "creation_launch",
             Self::TaskMessage { .. } => "task_message",
+            Self::TaskMessageInputRelease { .. } => "task_message_input_release",
             Self::TaskStartReconcile { .. } => "task_start_reconcile",
             Self::TerminationOutcome { .. } => "termination_outcome",
             Self::NotificationControl { control, .. } => control.operation(),
@@ -129,6 +134,7 @@ impl Request {
             Self::CreationWorktree { intent } => intent.as_ref().clone().verify().is_ok(),
             Self::CreationLaunch { intent } => intent.as_ref().clone().verify().is_ok(),
             Self::TaskMessage { intent } => intent.as_ref().clone().verify().is_ok(),
+            Self::TaskMessageInputRelease { release } => release.valid(),
             Self::TaskStartReconcile { intent } => intent.as_ref().clone().verify().is_ok(),
             Self::TerminationOutcome { intent } => intent.valid(),
             Self::NotificationControl { scope, control } => scope.valid() && control.valid(),
@@ -291,6 +297,7 @@ impl Cache {
                 | Request::CreationWorktree { .. }
                 | Request::CreationLaunch { .. }
                 | Request::TaskMessage { .. }
+                | Request::TaskMessageInputRelease { .. }
                 | Request::TaskStartReconcile { .. }
                 | Request::TerminationOutcome { .. }
         ) {
@@ -462,6 +469,14 @@ impl Responder {
             Request::TaskMessage { intent } => {
                 if self.ownership_mode.get() != Some(&super::ownership::Mode::Service)
                     || self.configuration.get() != Some(&intent.scope.configuration)
+                {
+                    return Err(io::ErrorKind::PermissionDenied.into());
+                }
+                Some(super::ownership::Mode::Service)
+            }
+            Request::TaskMessageInputRelease { release } => {
+                if self.ownership_mode.get() != Some(&super::ownership::Mode::Service)
+                    || self.configuration.get() != Some(&release.scope.configuration)
                 {
                     return Err(io::ErrorKind::PermissionDenied.into());
                 }

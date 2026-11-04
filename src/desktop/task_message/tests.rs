@@ -2254,9 +2254,16 @@ mod staging_tests {
             Some(staging::EXPIRED)
         );
         assert!(!input(&root, &request).exists());
-        // The staging folder replaced under the same name.
+        // The staging folder replaced under the same name: refused before
+        // any copy is read, even one the held folder still has (here one
+        // that would not match).
         let staging_dir = root.join(staging::STAGING);
         std::fs::rename(&staging_dir, root.join("moved")).unwrap();
+        let held_copy = root
+            .join("moved")
+            .join(&request)
+            .join(&verified.references[0].sha256);
+        std::fs::write(&held_copy, b"not the original").unwrap();
         private_dir(&staging_dir);
         stage(&root, &request, &blobs);
         assert!(!roots.current());

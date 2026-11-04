@@ -3250,6 +3250,75 @@ fn switch_model(store: &mut Store, team: &Team, task_id: u32, member_id: &str, f
     })
 }
 
+/// Owner feedback 2026-11-04 (14, 15): a swapped member's old session kept
+/// the member's name, so every new session failed with "This session already
+/// has an account", and an old session waiting on a startup dialog refused
+/// pause and archive alike. It is paused when it can be (its conversation stays
+/// under Saved; nothing is killed) and renamed to `<name>-replaced`, so the new
+/// session starts under the member's name. A remote one is left to its own
+/// computer. The note says what happened; an error names the old session.
+fn set_aside_replaced(member: &Member) -> anyhow::Result<Option<String>> {
+    let Some(old) = member.replaced.as_ref().filter(|old| old.host.is_empty() && !old.name.is_empty()) else {
+        return Ok(None);
+    };
+    #[cfg(test)]
+    if let Some(stand_in) = test_set_aside() {
+        return stand_in(&old.name);
+    }
+    let Ok(record) = crate::state::storage::read(&old.name) else {
+        return Ok(None);
+    };
+    // A different run under the old name is not the session the swap replaced.
+    if !old.run_id.is_empty() && record["run_id"].as_str().is_some_and(|run| !run.is_empty() && run != old.run_id) {
+        return Ok(None);
+    }
+    let paused = crate::state::lifecycle::pause_one_quiet(&record, None, true).is_ok();
+    let target = (1..=9)
+        .map(|n| if n == 1 { format!("{}-replaced", old.name) } else { format!("{}-replaced-{n}", old.name) })
+        .find(|name| crate::state::storage::read(name).is_err())
+        .context("the old session's -replaced names are all taken; rename or close it in Sessions")?;
+    crate::state::rename::dispatch(&[old.name.clone(), target.clone()], false).map_err(|error| {
+        anyhow::anyhow!("the old session {} still holds the member's name and could not be renamed ({error}); close or rename it in Sessions, then hgs team relaunch", old.name)
+    })?;
+    Ok(Some(if paused {
+        format!("the replaced session was paused and saved as {target}")
+    } else {
+        format!("the replaced session was busy or waiting on a dialog, so it was renamed to {target} and still runs; close it in Sessions when it is no longer needed")
+    }))
+}
+
+#[cfg(test)]
+type SetAside = fn(&str) -> anyhow::Result<Option<String>>;
+#[cfg(test)]
+thread_local! {
+    static TEST_SET_ASIDE: std::cell::Cell<Option<SetAside>> = const { std::cell::Cell::new(None) };
+}
+#[cfg(test)]
+fn test_set_aside() -> Option<SetAside> {
+    TEST_SET_ASIDE.with(std::cell::Cell::get)
+}
+#[cfg(test)]
+pub(crate) fn set_test_set_aside(stand_in: Option<SetAside>) {
+    TEST_SET_ASIDE.with(|cell| cell.set(stand_in));
+}
+
+#[cfg(test)]
+mod set_aside_tests {
+    use super::*;
+
+    #[test]
+    fn only_a_local_replaced_session_is_set_aside() {
+        set_test_set_aside(Some(|name| Ok(Some(format!("set aside {name}")))));
+        let mut member = Member { id: "dev".into(), ..Default::default() };
+        assert_eq!(set_aside_replaced(&member).unwrap(), None, "nothing was replaced");
+        member.replaced = Some(SessionRef { host: "mac".into(), name: "codex/x/dev".into(), ..Default::default() });
+        assert_eq!(set_aside_replaced(&member).unwrap(), None, "a remote session is its computer's");
+        member.replaced = Some(SessionRef { name: "codex/x/dev".into(), ..Default::default() });
+        assert_eq!(set_aside_replaced(&member).unwrap().as_deref(), Some("set aside codex/x/dev"));
+        set_test_set_aside(None);
+    }
+}
+
 fn launch(team: &Team, member: &Member) -> anyhow::Result<()> {
     super::super::iron_rules::for_team(team, member)?;
     let folder = member_folder(team, member)?;
@@ -6351,7 +6420,25 @@ fn run_step(store: &mut Store, team: &Team, step: &Step, host: &str) -> anyhow::
                             Ok(())
                         })?;
                     }
-                    launch(&team, &found)
+                    // Feedback 14: a swap's old session is set aside first, so
+                    // the new one can take the member's name.
+                    match set_aside_replaced(&found) {
+                        Ok(note) => {
+                            if note.is_some() || found.replaced.is_some() {
+                                change(store, &team.id, |team, events| {
+                                    if let Some(note) = &note {
+                                        events.push(Event::new("member_retired", json!({"member":team.role_of(member),"note":note})));
+                                    }
+                                    if let Some(record) = team.members.iter_mut().find(|m| m.id == *member) {
+                                        record.replaced = None;
+                                    }
+                                    Ok(())
+                                })?;
+                            }
+                            launch(&team, &found)
+                        }
+                        Err(error) => Err(error),
+                    }
                 }
                 Err(error) => Err(error),
             };

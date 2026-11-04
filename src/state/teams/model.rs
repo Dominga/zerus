@@ -537,6 +537,11 @@ pub(crate) struct Member {
     /// H6: a swapped member's new session starts even before its next task.
     #[serde(default, skip_serializing_if = "std::ops::Not::not")]
     pub launch_after_swap: bool,
+    /// Owner feedback 2026-11-04 (14): the session a swap replaced, which the
+    /// dispatcher pauses and renames before the new session takes the same
+    /// name; None once it is set aside or gone.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub replaced: Option<SessionRef>,
     /// Spec 5.6 (U25): the member it reports to - the lead (empty) or a
     /// sub-lead of the same team.
     #[serde(default, skip_serializing_if = "String::is_empty")]

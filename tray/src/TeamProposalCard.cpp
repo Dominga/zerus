@@ -334,7 +334,7 @@ bool TeamProposalCards::ask(const View &view)
         title = tr("Remove member?"); text = tr("%1? Its session keeps running; it gets no more tasks.").arg(view.what); action = tr("Remove");
     } else if (view.kind == "swap-member") {
         title = tr("Swap member?");
-        text = tr("%1? Its open task goes to the new session with what was done so far; the old session keeps running for you to stop.").arg(view.what);
+        text = tr("%1? Each open task goes to the new session with what was done so far; the old session is paused and kept under Saved as <name>-replaced.").arg(view.what);
         action = tr("Swap");
     } else if (view.kind == "cancel-tasks") {
         title = tr("Cancel tasks?"); text = tr("%1?\n%2").arg(view.what, view.lines.join(QLatin1Char('\n'))); action = tr("Cancel tasks");

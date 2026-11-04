@@ -1366,9 +1366,11 @@ QString proposalText(const Team &team, const Team::Proposal &proposal)
     }
     if (proposal.kind == "remove-member") return tr("Remove %1").arg(role);
     if (proposal.kind == "swap-member") {
+        // Feedback 2026-11-04 (18): one card may swap several members.
+        if (const auto members = proposedMembers(proposal); members.size() > 1) return tr("Swap %1 members").arg(members.size());
         const auto session = object.value("session").toObject().value("name").toString();
         if (!session.isEmpty()) return tr("Swap %1 to the session %2").arg(role, session);
-        return how.isEmpty() ? tr("Swap %1 to a new session").arg(role) : tr("Swap %1 to %2").arg(role, how.join(QStringLiteral(", ")));
+        return how.isEmpty() ? tr("Swap %1 to a new session with the same settings").arg(role) : tr("Swap %1 to %2").arg(role, how.join(QStringLiteral(", ")));
     }
     if (proposal.kind == "next-goal") return tr("Next goal: %1").arg(proposal.goal.section('\n', 0, 0).left(120));
     if (proposal.kind == "switch-plan-mode") return proposal.mode == "standard" ? tr("Switch to standard planning") : tr("Switch to free planning");
@@ -1410,7 +1412,18 @@ QStringList proposalChanges(const Team &team, const Team::Proposal &proposal)
     } else if (proposal.kind == "remove-member") {
         lines << tr("Its session keeps running; it gets no more tasks.");
     } else if (proposal.kind == "swap-member") {
-        lines << tr("Its open task goes to the new session with what was done so far; the old session keeps running for you to stop.");
+        if (const auto members = proposedMembers(proposal); members.size() > 1)
+            for (const auto &value : members) {
+                const auto member = value.toObject();
+                const QString id = member.value("id").toString();
+                QStringList how;
+                for (const auto *key : {"agent", "model", "effort", "account"})
+                    if (const auto field = member.value(QLatin1String(key)).toString(); !field.isEmpty()) how << field;
+                if (member.contains("prompt")) how << tr("new prompt");
+                const QString role = team.member(id) ? team.roleOf(id) : id;
+                lines << (how.isEmpty() ? tr("%1: a new session with the same settings").arg(role) : tr("%1: %2").arg(role, how.join(QStringLiteral(", "))));
+            }
+        lines << tr("Each open task goes to the new session with what was done so far; the old session is paused and kept under Saved as <name>-replaced.");
     } else if (proposal.kind == "next-goal") {
         lines << proposal.goal.left(600);
     } else if (proposal.kind == "add-to-phase") {

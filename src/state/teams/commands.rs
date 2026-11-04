@@ -1527,7 +1527,7 @@ fn proposal_input(team: &str, kind: &str, member: &Value, request: &str) -> anyh
     let id = member.as_str().or_else(|| member["id"].as_str()).unwrap_or_default();
     ensure!(!id.is_empty(), "The swap-member proposal names its member");
     value["member"] = json!(id);
-    for key in ["agent", "model", "effort", "account", "session"] {
+    for key in ["agent", "model", "effort", "account", "session", "prompt"] {
         if let Some(field) = member.get(key).filter(|field| !field.is_null()) {
             value[key] = field.clone();
         }

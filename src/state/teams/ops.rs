@@ -3559,7 +3559,9 @@ fn swap_one(team: &mut Team, input: &Value, id: &str, keep_session: bool, actor:
         if keep_session {
             from = member.session.as_ref().map(|session| session.name.clone()).unwrap_or_default();
         } else if let Some(old) = member.session.take() {
-            from = old.name;
+            from = old.name.clone();
+            // Feedback 14: the new session needs the old one's name.
+            member.replaced = Some(old);
         }
         let fields =
             [("agent", &mut member.agent), ("model", &mut member.model), ("effort", &mut member.effort), ("account", &mut member.account)];
@@ -3568,6 +3570,11 @@ fn swap_one(team: &mut Team, input: &Value, id: &str, keep_session: bool, actor:
                 *field = value.to_owned();
                 changed.push(key);
             }
+        }
+        // Feedback 12: a swap's role prompt was ignored; it changes now.
+        if let Some(prompt) = input["prompt"].as_str().filter(|prompt| !prompt.trim().is_empty()) {
+            member.prompt = clean_text(prompt, 8000, "A role prompt")?;
+            changed.push("prompt");
         }
         // N32: an adopted session works in its own folder; the continuation
         // and the folder checks follow it there.
@@ -4389,6 +4396,7 @@ fn propose(team: &mut Team, input: &Value, actor: &Actor, events: &mut Vec<Event
             json!({"phase":phase})
         }
         "question" => question_change(input)?,
+        "swap-member" => swap_change(team, input)?,
         "switch-setting" => {
             // #752: a switch card names one owner setting the lead may propose
             // and the value Allow sets.
@@ -4407,15 +4415,8 @@ fn propose(team: &mut Team, input: &Value, actor: &Actor, events: &mut Vec<Event
     // owner's decision runs it and the desktop shows it.
     let mut member = input["member"].clone();
     if kind == "swap-member" {
-        if let Some(id) = member.as_str().map(str::to_owned) {
-            member = json!({"id":id});
-        }
-        ensure!(member["id"].as_str().is_some_and(|id| !id.is_empty()), "A swap proposal names its member");
-        for key in ["agent", "model", "effort", "account", "session"] {
-            if let Some(field) = input.get(key).filter(|field| !field.is_null()) {
-                member[key] = field.clone();
-            }
-        }
+        // The card's first member; a batch keeps every member in its change.
+        member = change["members"][0].clone();
     }
     ensure!(member.to_string().len() <= 8192, "A proposal's member has at most 8 KiB");
     // #740: the change is checked now, on a copy of the team, by the code
@@ -4517,6 +4518,70 @@ fn question_change(input: &Value) -> anyhow::Result<Value> {
     let recommended = clean(text(input, "recommended").trim(), 200, "A recommended option")?;
     ensure!(recommended.is_empty() || options.contains(&recommended), "The recommended option is one of the options");
     Ok(json!({"question":question,"options":options,"recommended":recommended}))
+}
+
+/// The fields one swapped member may change.
+const SWAP_FIELDS: &[&str] = &["agent", "model", "effort", "account", "session", "prompt"];
+
+/// Owner feedback 2026-11-04 (12, 18): a swap card names, for each member, what
+/// changes; an unknown field ("with") or a swap that changes nothing is
+/// refused instead of becoming an empty swap the owner might allow, and one
+/// card may swap several members ("members": [...]).
+fn swap_change(team: &Team, input: &Value) -> anyhow::Result<Value> {
+    const EXAMPLE: &str = r#"{"kind":"swap-member","reason":"...","member":"dev","account":"additional"} or {"kind":"swap-member","reason":"...","members":[{"id":"dev","account":"additional"},{"id":"qa","model":"opus"}]}"#;
+    for mistake in ["with", "to", "new", "change", "changes", "target", "replace"] {
+        if input.get(mistake).is_some() {
+            bail!(
+                "A swap proposal has no field \"{mistake}\": name the new values directly ({}). Example: {EXAMPLE}",
+                SWAP_FIELDS.join(", ")
+            );
+        }
+    }
+    let entries: Vec<Value> = match input.get("members").and_then(Value::as_array) {
+        Some(list) => list.clone(),
+        None => {
+            let mut one = match &input["member"] {
+                Value::String(id) => json!({"id":id}),
+                Value::Object(_) => input["member"].clone(),
+                _ => bail!("A swap proposal names its member. Example: {EXAMPLE}"),
+            };
+            for key in SWAP_FIELDS.iter().chain(&["fresh"]) {
+                if let Some(field) = input.get(*key).filter(|field| !field.is_null()) {
+                    one[*key] = field.clone();
+                }
+            }
+            vec![one]
+        }
+    };
+    ensure!(!entries.is_empty() && entries.len() <= 50, "A swap proposal names 1 to 50 members");
+    let mut members = Vec::new();
+    for entry in entries {
+        let mut entry = match entry {
+            Value::String(id) => json!({"id":id}),
+            other => other,
+        };
+        let mut allowed = vec!["id", "fresh"];
+        allowed.extend_from_slice(SWAP_FIELDS);
+        super::strict::check_keys(&entry, &allowed, "A swapped member", EXAMPLE)?;
+        let id = text(&entry, "id").to_owned();
+        ensure!(!id.is_empty(), "A swapped member names its id. Example: {EXAMPLE}");
+        ensure!(team.member(&id).is_some(), "The team has no member {id}");
+        ensure!(members.iter().all(|other: &Value| other["id"] != entry["id"]), "Member {id} is swapped twice");
+        let changes = SWAP_FIELDS.iter().any(|key| match entry.get(*key) {
+            Some(Value::String(value)) => !value.trim().is_empty(),
+            Some(Value::Object(_)) => true,
+            _ => false,
+        });
+        ensure!(
+            changes || entry["fresh"].as_bool() == Some(true),
+            "The swap of {id} changes nothing: name its new agent, model, effort, account, prompt or session, or say \"fresh\": true for a new session with the same settings"
+        );
+        if let Some(prompt) = entry.get("prompt").and_then(Value::as_str) {
+            entry["prompt"] = json!(clean_text(prompt, 8000, "A role prompt")?);
+        }
+        members.push(entry);
+    }
+    Ok(json!({"members":members}))
 }
 
 /// The change Allow applies for a proposal, on `team`: run by the owner's

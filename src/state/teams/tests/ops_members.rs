@@ -896,3 +896,64 @@ fn a_draft_members_update_keeps_the_plans_member_checks() {
     apply(&mut team, "draft", &json!({"action":"create","approve":true,"confirm_widening":true}), &Actor::Human, &none, &mut events).unwrap();
     assert_eq!(team.status, TeamStatus::Running);
 }
+
+/// Owner feedback 2026-11-04 (14): a swap to a fresh session remembers the
+/// session it replaced, so the dispatcher sets it aside before the new
+/// session takes the member's name.
+#[test]
+fn a_swap_to_a_fresh_session_remembers_the_one_it_replaced() {
+    let mut team = running_team();
+    let none = BTreeSet::new();
+    let old = SessionRef { host: String::new(), name: "codex/x/dev".into(), run_id: "r1".into(), conversation_id: "c1".into() };
+    team.members.iter_mut().find(|member| member.id == "dev").unwrap().session = Some(old.clone());
+    apply(&mut team, "swap-member", &json!({"member":"dev","account":"additional"}), &Actor::Human, &none, &mut Vec::new()).unwrap();
+    let member = team.member("dev").unwrap();
+    assert_eq!(member.session, None);
+    assert!(member.launch_after_swap);
+    assert_eq!(member.replaced.as_ref(), Some(&old));
+    assert_eq!(member.account, "additional");
+}
+
+/// Owner feedback 2026-11-04 (12, 18): a swap card names what changes; an
+/// unknown field or an empty swap is refused, and one card swaps several
+/// members.
+#[test]
+fn a_swap_card_names_what_changes_and_may_swap_several_members() {
+    let mut team = running_team();
+    let none = BTreeSet::new();
+    let lead = Actor::Member("lead".into());
+    let propose = |team: &mut Team, input: Value| apply(team, "propose", &input, &lead, &none, &mut Vec::new());
+    let error = propose(&mut team, json!({"kind":"swap-member","reason":"r","member":"dev","with":{"account":"additional"}}))
+        .unwrap_err()
+        .to_string();
+    assert!(error.contains("no field \"with\"") && error.contains("account"), "{error}");
+    let error = propose(&mut team, json!({"kind":"swap-member","reason":"r","member":"dev"})).unwrap_err().to_string();
+    assert!(error.contains("changes nothing") && error.contains("\"fresh\": true"), "{error}");
+    let error = propose(&mut team, json!({"kind":"swap-member","reason":"r","members":[{"id":"dev","acount":"x"}]}))
+        .unwrap_err()
+        .to_string();
+    assert!(error.contains("no field \"acount\""), "{error}");
+    assert!(team.proposals.is_empty(), "nothing was proposed");
+    // A fresh session with the same settings is said explicitly.
+    propose(&mut team, json!({"kind":"swap-member","reason":"r","member":"dev","fresh":true})).unwrap();
+    // One card for several members, each with its own change and prompt.
+    team.members.push(Member { id: "qa".into(), role: "QA".into(), agent: "claude".into(), ..Default::default() });
+    propose(
+        &mut team,
+        json!({"kind":"swap-member","reason":"move to additional","members":[
+            {"id":"dev","account":"additional"},{"id":"qa","account":"additional","prompt":"Test the menu"}]}),
+    )
+    .unwrap();
+    let card = team.proposals.last().unwrap();
+    assert_eq!(card["change"]["members"].as_array().map(Vec::len), Some(2), "{card}");
+    assert_eq!(card["member"]["id"], "dev");
+    assert_eq!(card["change"]["members"][1]["prompt"], "Test the menu");
+}
+
+/// Feedback 12: a swap's prompt changes the member's prompt.
+#[test]
+fn a_swap_changes_the_role_prompt() {
+    let mut team = running_team();
+    apply(&mut team, "swap-member", &json!({"member":"dev","prompt":"Review only"}), &Actor::Human, &BTreeSet::new(), &mut Vec::new()).unwrap();
+    assert_eq!(team.member("dev").unwrap().prompt, "Review only");
+}

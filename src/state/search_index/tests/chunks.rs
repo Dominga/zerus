@@ -104,16 +104,7 @@ fn all_large_snapshot_shapes_complete_in_single_record_slices_live_and_archived(
                 assert_eq!(formatted["content_truncated"], true);
             }
             // Sweep and publication still reverify the large binding.
-            let page = store
-                .publish(
-                    &fixture.state,
-                    "tailneedle",
-                    50,
-                    None,
-                    &fixture.budget(128),
-                    &AtomicBool::new(false),
-                )
-                .unwrap();
+            let page = fixture.publish_pages(&mut store, "tailneedle", || fixture.budget(128));
             assert_eq!(
                 page["results"].as_array().unwrap().len(),
                 usize::from(prompt > 0) + usize::from(reply > 0),

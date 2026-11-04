@@ -1058,6 +1058,13 @@ draft mark on the card. A draft typed in the older build stays under the name.
 Back on this build, the composer shows the draft kept under the session ID, and
 the one written under the name stays in **Saved drafts**.
 
+Read marks waiting for a host follow the same rule. A mark is queued under the
+session ID the listing reports for its run, so two sessions that share a name
+keep separate marks; it is still delivered with `hgs read NAME`, guarded by run
+and conversation. A **Needs attention** or review-later mark of a session
+without a conversation is kept under its session ID, and one kept under the
+name moves to it.
+
 The **Active** filter combines sessions currently working or Scheduled, those in
 **Needs attention**, and sessions with unsent text or attachment drafts, counting
 each session once. Desktop and Android use the same filter IDs and membership

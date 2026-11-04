@@ -35,6 +35,45 @@ pub fn fallback_key(computer: &str, agent: &str, name: &str, created: i64) -> St
     serde_json::json!([computer, agent, name, created]).to_string()
 }
 
+/// The attention key of a row without a conversation whose listing reports a
+/// durable session ID (zerus-ucck P2c-2b): computer, agent and `id:<ID>`, so
+/// two sessions that share a label and start time never share a mark.
+pub fn session_fallback_key(computer: &str, agent: &str, session_id: &str) -> String {
+    serde_json::json!([computer, agent, format!("id:{session_id}")]).to_string()
+}
+
+/// [`attention_key`] for a row that may list a durable session ID: without a
+/// conversation, the session ID's fallback key.
+pub fn row_attention_key(
+    computer: &str,
+    agent: &str,
+    name: &str,
+    created: i64,
+    conversation: &str,
+    session_id: Option<&str>,
+) -> String {
+    match session_id {
+        Some(id) if conversation.is_empty() => session_fallback_key(computer, agent, id),
+        _ => attention_key(computer, agent, name, created, conversation),
+    }
+}
+
+/// The keys a row's mark may still sit under before it moves to
+/// [`row_attention_key`]: its session ID's fallback key, then the name's.
+pub fn fallback_keys(
+    computer: &str,
+    agent: &str,
+    name: &str,
+    created: i64,
+    session_id: Option<&str>,
+) -> Vec<String> {
+    session_id
+        .map(|id| session_fallback_key(computer, agent, id))
+        .into_iter()
+        .chain([fallback_key(computer, agent, name, created)])
+        .collect()
+}
+
 /// `attentionKey` (`FleetState.cpp:52-54`): the reply key, or the fallback
 /// key without a conversation.
 pub fn attention_key(

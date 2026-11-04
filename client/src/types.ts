@@ -405,6 +405,8 @@ export interface ReadMark {
   conversation_id: string;
   reply_id: string | null;
   attention_signature: string | null;
+  /** The durable session ID the Rust queue keys the mark by, when its row lists one (zerus-ucck P2c-2b). */
+  session_id?: string | null;
 }
 
 /** A computer's machine card from its `catalog.meta` (client/core `machine.rs`); an older host leaves fields null. */

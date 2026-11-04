@@ -34,7 +34,7 @@ use zerus_client_core::marks::Mark;
 use zerus_client_core::menubar::{
     tray_conf_value, Apply, Desk, DeviceMarks, Entry, Face, Gate, OpenMode,
 };
-use zerus_client_core::readmarks::ReadMark;
+use zerus_client_core::readmarks::Queued;
 use zerus_client_core::shell;
 use zerus_client_core::text::Text;
 use zerus_client_core::{text, Change, ComputerId};
@@ -897,14 +897,14 @@ impl MarksCache {
     pub fn device(
         &mut self,
         read: impl FnOnce(Option<u64>) -> Option<crate::actions::MarkMaps>,
-        pending: Vec<ReadMark>,
+        pending: Vec<Queued>,
     ) -> DeviceMarks {
         if let Some((version, marks, replies)) = read(self.version) {
             self.version = Some(version);
             self.marks = marks;
             self.replies = replies;
         }
-        DeviceMarks::new(self.marks.clone(), self.replies.clone(), pending)
+        DeviceMarks::with_queued(self.marks.clone(), self.replies.clone(), pending)
     }
 }
 
@@ -914,7 +914,7 @@ fn device_marks(app: &AppHandle, cache: &mut MarksCache) -> Option<DeviceMarks> 
     let attention = app.try_state::<crate::actions::Attention>()?;
     let pending = app
         .try_state::<crate::actions::Actions>()
-        .map(|actions| actions.pending_marks())
+        .map(|actions| actions.queued_marks())
         .unwrap_or_default();
     Some(cache.device(|seen| attention.marks_since(seen), pending))
 }
@@ -1912,13 +1912,16 @@ mod tests {
                 },
             )])
         };
-        let pending = |run: &str| ReadMark {
-            computer: "mac".into(),
-            name: "claude/p/a".into(),
-            run_id: run.into(),
-            conversation_id: "conv-a".into(),
-            reply_id: Some("r1".into()),
-            attention_signature: None,
+        let pending = |run: &str| Queued {
+            mark: zerus_client_core::readmarks::ReadMark {
+                computer: "mac".into(),
+                name: "claude/p/a".into(),
+                run_id: run.into(),
+                conversation_id: "conv-a".into(),
+                reply_id: Some("r1".into()),
+                attention_signature: None,
+            },
+            session_id: None,
         };
         let mut asked = Vec::new();
         let first = cache.device(
@@ -1930,7 +1933,7 @@ mod tests {
         );
         assert_eq!(
             first,
-            DeviceMarks::new(mark(true), BTreeMap::new(), vec![pending("run-1")])
+            DeviceMarks::with_queued(mark(true), BTreeMap::new(), vec![pending("run-1")])
         );
         // A read mark changed alone: the attention maps are not copied again.
         let second = cache.device(
@@ -1942,7 +1945,7 @@ mod tests {
         );
         assert_eq!(
             second,
-            DeviceMarks::new(mark(true), BTreeMap::new(), vec![pending("run-2")])
+            DeviceMarks::with_queued(mark(true), BTreeMap::new(), vec![pending("run-2")])
         );
         let third = cache.device(
             |seen| {

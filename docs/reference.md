@@ -328,8 +328,20 @@ selected computer". Names stay unique for now. When several sessions later
 share a name, commands exit with status 5 and list the candidates; see
 `docs/superpowers/specs/2026-11-04-session-names-as-labels.md`. Because an
 older hgs can change a session's ID once, a client whose `--session-id` is no
-longer found falls back to the name with its expected run and conversation
-identities.
+longer found treats the session as changed and never retries the call: its next
+action uses the refreshed listing, with the name and its expected run and
+conversation identities when the row lists no ID.
+
+The desktop client adds `--session-id` only to explicit actions: send, send
+now, answer, queued-message removal, clear and compact, interrupt, model
+settings, pause, resume, start fresh, rename, fork, archive, terminate, kill
+and forget. It does so when the listed row for the action's exact run carries a
+session ID and that computer's `hgs --help` lists `session-id-selector-v1`; the
+answer is kept for ten minutes. Reads, polls, history, status, watch, terminal
+input and read marks keep the name until a label index exists. Confirmed
+delayed and worktree-cleanup end actions keep their scoped envelope, which
+already names the exact run and conversation. A refused ID shows as a changed
+session.
 
 `hgs session-action-status SESSION --json` reads one original lifecycle receipt.
 Supply the original `session-action` JSON unchanged, including its `request_id`,

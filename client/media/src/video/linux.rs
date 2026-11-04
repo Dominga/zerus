@@ -317,6 +317,23 @@ fn description(
     ))
 }
 
+/// A pipeline error's text for the notice. The element that failed and
+/// GStreamer's debug detail, which name the actual cause (for example a
+/// format the camera refused), are logged once, since the notice shows only
+/// the short text (zerus-5wmh.66.3.41).
+fn reported(error: &gst::message::Error) -> String {
+    let source = error
+        .src()
+        .map(|source| source.path_string().to_string())
+        .unwrap_or_default();
+    let debug = error
+        .debug()
+        .map(|debug| debug.to_string())
+        .unwrap_or_default();
+    eprintln!("video: {source} failed: {} ({debug})", error.error());
+    error.error().to_string()
+}
+
 /// A private folder for the recording, removed when dropped.
 struct Folder(PathBuf);
 
@@ -633,9 +650,7 @@ fn record(
         }
         while let Some(message) = bus.timed_pop(gst::ClockTime::ZERO) {
             match message.view() {
-                gst::MessageView::Error(error) => {
-                    return fail(&pipeline, error.error().to_string())
-                }
+                gst::MessageView::Error(error) => return fail(&pipeline, reported(error)),
                 gst::MessageView::StateChanged(change)
                     if !started
                         && change.current() == gst::State::Playing
@@ -711,9 +726,7 @@ fn record(
         {
             match message.view() {
                 gst::MessageView::Eos(..) => ended = true,
-                gst::MessageView::Error(error) => {
-                    return fail(&pipeline, error.error().to_string())
-                }
+                gst::MessageView::Error(error) => return fail(&pipeline, reported(error)),
                 _ => {}
             }
         }

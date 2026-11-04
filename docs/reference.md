@@ -3084,8 +3084,12 @@ same computer, before any change; the task keeps it until its next send or
 start. Only that run is then the executor: a name alone never names one, so
 another run that holds the name is not, and a holder an older build bound
 without recording it reads as a conflict. When merged replicas leave the latest boundary with another session
-than the one holding the task, `conflict` is set. No start,
-child or result is invented. A resume settles only the pauses it observed, so a
+than the one holding the task, `conflict` is set. Each attempt freezes the history
+entries of the task's executions so far (`sent`, `resumed`); a send or reopen
+it settles names its request. An execution entry neither frozen nor named, such
+as a send an older build recorded concurrently, is listed in `unexplained`, sets
+`conflict` and holds any new delivery until the person reviews that exact entry.
+No start, child or result is invented. A resume settles only the pauses it observed, so a
 pause that no resume observed keeps the attempt paused. A session's
 Stop, idle time, pause or elapsed time is never an attempt event and never
 moves a task. Attempts are kept beside the history under task schema 6, which a

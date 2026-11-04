@@ -477,6 +477,8 @@ impl TaskDoc {
                     },
                     stale: string(&entry, "stale").and_then(|s| Stale::parse(&s)),
                     considered: integer(&entry, "considered").and_then(|n| u64::try_from(n).ok()),
+                    reviews: string(&entry, "reviews"),
+                    of: string(&entry, "of"),
                 },
             ));
         }
@@ -557,15 +559,24 @@ impl TaskDoc {
         let stage = self.stage()?;
         let session = self.session();
         let execution = match self.execution_records() {
-            Ok((attempts, events)) => execution::project(
-                stage,
-                session.as_ref(),
-                self.binding().as_ref(),
-                &log,
-                &attempts,
-                &events,
-                self.requirement(),
-            ),
+            Ok((attempts, events)) => {
+                let mut execution = execution::project(
+                    stage,
+                    session.as_ref(),
+                    self.binding().as_ref(),
+                    &log,
+                    &attempts,
+                    &events,
+                    self.requirement(),
+                );
+                // Execution entries no attempt explains make the task a
+                // conflict, whatever its attempts project.
+                if let Some(execution) = execution.as_mut() {
+                    execution.unexplained = execution::unexplained(&log, &ids, &attempts);
+                    execution.conflict |= !execution.unexplained.is_empty();
+                }
+                execution
+            }
             Err(_) if !writable => None,
             Err(error) => return Err(error),
         };
@@ -2497,6 +2508,7 @@ mod tests {
                 actor: Actor::Person,
                 at: 50,
                 delivery: None,
+                frontier: None,
             }
         }
 

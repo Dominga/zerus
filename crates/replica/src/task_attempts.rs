@@ -82,6 +82,14 @@ impl TaskDoc {
     }
 
     pub(super) fn not_held(&self) -> Result<()> {
+        let unexplained = self.unexplained_entries()?;
+        if !unexplained.is_empty() {
+            return Err(Error::new(format!(
+                "this task has execution entries no attempt explains ({}); nothing is sent or \
+                 started again until the person reviews each",
+                unexplained.join(", ")
+            )));
+        }
         let unknown = self.unknown_deliveries()?;
         if unknown.is_empty() {
             return Ok(());
@@ -221,7 +229,8 @@ impl TaskDoc {
                 "an attempt needs its executor's verified identity on the computer that holds its receipts",
             ));
         }
-        let view = self.view()?;
+        let (view, ids) = self.view_with_history_ids()?;
+        let frontier = Some(frontier(&view, &ids)?);
         // The queued messages the request was rendered with: this task state.
         let queued: Vec<QueuedMessage> = view
             .log
@@ -262,6 +271,7 @@ impl TaskDoc {
                 queued,
                 requirement_digest: self.requirement_digest()?,
             }),
+            frontier,
         };
         self.write_attempt(&attempt)?;
         self.push_event(id, EventKind::Unknown, actor, now)?;
@@ -345,7 +355,11 @@ impl TaskDoc {
             && self.requirement() == attempt.requirement
             // The exact requirement the request was rendered from: a revision
             // count alone does not identify it across replicas.
-            && self.requirement_digest()? == delivery.requirement_digest;
+            && self.requirement_digest()? == delivery.requirement_digest
+            // An execution entry no attempt explains is a conflict the person
+            // reviews; a receipt never advances past it, even when every
+            // other field returned to what the reservation saw.
+            && self.unexplained_entries()?.is_empty();
         self.push_event(id, EventKind::Submitted, actor, now)?;
         if unchanged {
             self.advance(&attempt, &delivery, actor, now)?;
@@ -376,8 +390,9 @@ impl TaskDoc {
                 fields.delete("worker")?;
                 fields.delete("cancelled_at")?;
                 fields.delete("cancel_reason")?;
-                self.log("sent", actor, now, "", Some(executor))?
-                    .insert("request_id", attempt.request_id.as_str())?;
+                let entry = self.log("sent", actor, now, "", Some(executor))?;
+                entry.insert("request_id", attempt.request_id.as_str())?;
+                entry.insert("of", attempt.fingerprint())?;
                 self.queued_included(delivery, &attempt.request_id, actor, now)?;
             }
             Origin::Handoff => {
@@ -390,8 +405,9 @@ impl TaskDoc {
                 fields.insert("stage_at", now)?;
                 fields.insert("summary", "")?;
                 fields.delete("worker")?;
-                self.log("sent", actor, now, "handoff", Some(executor))?
-                    .insert("request_id", attempt.request_id.as_str())?;
+                let entry = self.log("sent", actor, now, "handoff", Some(executor))?;
+                entry.insert("request_id", attempt.request_id.as_str())?;
+                entry.insert("of", attempt.fingerprint())?;
                 self.queued_included(delivery, &attempt.request_id, actor, now)?;
             }
             Origin::Reopen => {
@@ -399,16 +415,56 @@ impl TaskDoc {
                 fields.insert("stage_at", now)?;
                 fields.delete("cancelled_at")?;
                 fields.insert("cancel_reason", "")?;
-                self.log(
+                let entry = self.log(
                     "resumed",
                     actor,
                     now,
                     "Changes requested and submitted",
                     Some(executor),
                 )?;
+                entry.insert("request_id", attempt.request_id.as_str())?;
+                entry.insert("of", attempt.fingerprint())?;
             }
             Origin::Start => {}
         }
+        Ok(())
+    }
+
+    /// The history entries of an execution that no attempt explains
+    /// (`Execution::unexplained`).
+    pub fn unexplained_entries(&self) -> Result<Vec<String>> {
+        Ok(self
+            .view()?
+            .execution
+            .map(|execution| execution.unexplained)
+            .unwrap_or_default())
+    }
+
+    /// The person reviews one execution entry no attempt explains, such as a
+    /// send an older build recorded concurrently. The entry and any unknown
+    /// delivery stay; this ends only that entry's hold. It is not proof of
+    /// what that entry's input did.
+    pub fn review_entry(&mut self, entry: &str, actor: &Actor, now: i64) -> Result<()> {
+        self.writable()?;
+        if actor != &Actor::Person {
+            return Err(Error::new(
+                "only the person reviews an execution entry no attempt explains",
+            ));
+        }
+        if !self.unexplained_entries()?.iter().any(|id| id == entry) {
+            return Err(Error::new(format!(
+                "{entry} is not an execution entry of this task that no attempt explains"
+            )));
+        }
+        self.log(
+            "reviewed",
+            actor,
+            now,
+            "Reviewed an execution entry no attempt explains",
+            None,
+        )?
+        .insert("reviews", entry)?;
+        self.commit()?;
         Ok(())
     }
 
@@ -503,6 +559,7 @@ impl TaskDoc {
             actor: actor.clone(),
             at: now,
             delivery: None,
+            frontier: Some(frontier(view, &self.view_with_history_ids()?.1)?),
         })
     }
 
@@ -589,6 +646,24 @@ impl TaskDoc {
         }
         Ok(())
     }
+}
+
+/// The history entries of the task's executions so far (`sent`, `resumed`),
+/// by history entry ID, for an attempt to freeze as its frontier.
+fn frontier(view: &TaskView, ids: &[String]) -> Result<Vec<String>> {
+    let frontier: Vec<String> = view
+        .log
+        .iter()
+        .zip(ids)
+        .filter(|(entry, _)| matches!(entry.kind.as_str(), "sent" | "resumed"))
+        .map(|(_, id)| id.clone())
+        .collect();
+    if frontier.len() > execution::MAX_FRONTIER {
+        return Err(Error::new(
+            "this task has too many executions for another attempt",
+        ));
+    }
+    Ok(frontier)
 }
 
 /// The digest of a message's content: its text and attachments.
@@ -1078,6 +1153,7 @@ mod tests {
                     actor: Actor::Person,
                     at: 1,
                     delivery: None,
+                    frontier: None,
                 },
                 &[],
             );
@@ -1586,10 +1662,20 @@ mod tests {
                 let own = receipt(&merged, ONE);
                 let _ = merged.settle_attempt(ONE, Settlement::Receipt(&own), &Actor::Person, 31);
                 assert_eq!(current(&merged).phase, Phase::Unknown);
-                // The person's disposition of that exact attempt releases the task.
+                // The person's disposition of that exact attempt, and a review of
+                // any send the other original's settlement recorded, release it:
+                // that send is bound to the other record, so the kept one never
+                // explains it.
                 merged
                     .cancel_attempt(ONE, "Two originals", &Actor::Person, 32)
                     .unwrap();
+                let unexplained = merged.unexplained_entries().unwrap();
+                let kept_settled = merged.attempt(ONE).unwrap().unwrap().executor
+                    == if settled_left { run("api") } else { run("web") };
+                assert_eq!(unexplained.len(), usize::from(!kept_settled));
+                for entry in &unexplained {
+                    merged.review_entry(entry, &Actor::Person, 33).unwrap();
+                }
                 let execution = merged.view().unwrap().execution.unwrap();
                 assert!(!execution.conflict && execution.unknown.is_empty());
                 assert_eq!(execution.current.unwrap().phase, Phase::Cancelled);
@@ -1786,6 +1872,282 @@ mod tests {
                 assert_eq!(current(&merged).phase, Phase::Submitted);
             }
         }
+    }
+
+    #[test]
+    fn an_execution_entry_no_attempt_explains_holds_the_task_for_review() {
+        // desktop-u's G1 point 4: a replica that never saw the attempt (an
+        // older build after a lost schema race) records its own send. Whether
+        // its clock is earlier or later, and in either merge order, nothing
+        // froze or names that entry.
+        let bytes = task().snapshot().unwrap();
+        for (older_at, newer_first) in [(5, true), (5, false), (50, true), (50, false)] {
+            let mut newer = TaskDoc::from_bytes(&bytes).unwrap();
+            let mut older = TaskDoc::from_bytes(&bytes).unwrap();
+            send(&mut newer, ONE, "api");
+            older
+                .record_send(&run("api"), "legacy-second-send", &Actor::Person, older_at)
+                .unwrap();
+            let (mut merged, other) = if newer_first {
+                (newer, older)
+            } else {
+                (older, newer)
+            };
+            merged.import(&other.snapshot().unwrap()).unwrap();
+            let (view, ids) = merged.view_with_history_ids().unwrap();
+            let sent = view
+                .log
+                .iter()
+                .zip(&ids)
+                .find(|(e, _)| {
+                    e.kind == "sent" && e.request_id.as_deref() == Some("legacy-second-send")
+                })
+                .map(|(_, id)| id.clone())
+                .unwrap();
+            let execution = view.execution.unwrap();
+            assert_eq!(
+                execution.unexplained,
+                std::slice::from_ref(&sent),
+                "{older_at} {newer_first}"
+            );
+            assert!(execution.conflict);
+            // The original delivery stays unknown, and nothing more is sent or started.
+            assert_eq!(execution.unknown, [ONE]);
+            for refused in [
+                merged.sendable().unwrap_err().to_string(),
+                merged.handoffable(&agent("api")).unwrap_err().to_string(),
+            ] {
+                assert!(refused.contains("no attempt explains"), "{refused}");
+            }
+            // The attempt's own receipt is kept, but never advances a conflict.
+            assert!(!settle(&mut merged, ONE).advanced);
+            // Only the person reviews that exact entry: an agent's review entry,
+            // as another replica could record one, explains nothing.
+            assert!(merged.review_entry(&sent, &agent("api"), 60).is_err());
+            merged
+                .log("reviewed", &agent("api"), 60, "An agent's review", None)
+                .unwrap()
+                .insert("reviews", sent.as_str())
+                .unwrap();
+            merged.doc.commit();
+            assert_eq!(
+                merged.unexplained_entries().unwrap(),
+                std::slice::from_ref(&sent)
+            );
+            assert!(merged
+                .review_entry("no-such-entry", &Actor::Person, 60)
+                .is_err());
+            merged.review_entry(&sent, &Actor::Person, 60).unwrap();
+            let execution = merged.view().unwrap().execution.unwrap();
+            assert!(execution.unexplained.is_empty());
+            assert!(merged.review_entry(&sent, &Actor::Person, 61).is_err());
+        }
+    }
+
+    #[test]
+    fn an_unreviewed_execution_entry_bars_settlement_even_when_fields_return() {
+        // desktop-u on #1405: a concurrent legacy execution whose replica
+        // brought the stage, its time and the holder back to what the
+        // reservation saw. Field equality never disposes of that entry.
+        let mut baseline = task();
+        baseline
+            .record_send(&run("api"), "legacy-before", &Actor::Person, 2)
+            .unwrap();
+        baseline.record_report("Done", &agent("api"), 3).unwrap();
+        baseline.set_stage(Stage::Todo, &Actor::Person, 4).unwrap();
+        let queued = crate::TaskDelivery {
+            mode: "queue".into(),
+            state: "queued".into(),
+            stage: "todo".into(),
+            stage_at: 4,
+            dispatch_id: String::new(),
+            submitted_id: String::new(),
+            run_id: String::new(),
+            conversation_id: String::new(),
+            prompt: String::new(),
+            error: String::new(),
+        };
+        let message = uuid::Uuid::new_v4().to_string();
+        baseline
+            .reserve_message(
+                &message,
+                "Use Redis",
+                &[],
+                &queued,
+                None,
+                (&Actor::Person, 4),
+            )
+            .unwrap();
+        let bytes = baseline.snapshot().unwrap();
+        let mut newer = TaskDoc::from_bytes(&bytes).unwrap();
+        send(&mut newer, ONE, "api");
+        let mut older = TaskDoc::from_bytes(&bytes).unwrap();
+        older
+            .record_send(&run("api"), "legacy-concurrent", &Actor::Person, 5)
+            .unwrap();
+        older
+            .record_report("Legacy done", &agent("api"), 6)
+            .unwrap();
+        older.set_stage(Stage::Todo, &Actor::Person, 4).unwrap();
+        newer.import(&older.snapshot().unwrap()).unwrap();
+        let unexplained = newer.unexplained_entries().unwrap();
+        assert_eq!(unexplained.len(), 1);
+        let sent_before = newer
+            .view()
+            .unwrap()
+            .log
+            .iter()
+            .filter(|e| e.kind == "sent")
+            .count();
+        // The receipt is attached as that attempt's evidence, and nothing advances.
+        assert!(!settle(&mut newer, ONE).advanced);
+        let view = newer.view().unwrap();
+        assert_eq!(view.stage, Stage::Todo);
+        assert_eq!(
+            view.log.iter().filter(|e| e.kind == "sent").count(),
+            sent_before
+        );
+        let state = |task: &TaskDoc| {
+            task.view()
+                .unwrap()
+                .log
+                .into_iter()
+                .find(|e| e.kind == "message" && e.request_id.as_deref() == Some(&message))
+                .unwrap()
+                .delivery
+                .unwrap()
+                .state
+        };
+        assert_eq!(state(&newer), "queued");
+        assert_eq!(current(&newer).phase, Phase::Submitted);
+        // The person's review ends the hold; it never reconstructs the
+        // advance or replays the delivery.
+        newer
+            .review_entry(&unexplained[0], &Actor::Person, 30)
+            .unwrap();
+        assert!(!settle(&mut newer, ONE).advanced);
+        assert_eq!(newer.stage().unwrap(), Stage::Todo);
+        assert_eq!(state(&newer), "queued");
+    }
+
+    #[test]
+    fn an_entry_that_reuses_an_attempt_s_request_id_is_still_unexplained() {
+        // review-n on #1405: a concurrent legacy send to another executor
+        // under the attempt's own UUID. Only the entry the attempt's own
+        // settlement wrote, for its exact record and executor, is explained.
+        let bytes = task().snapshot().unwrap();
+        let mut current = TaskDoc::from_bytes(&bytes).unwrap();
+        let mut older = TaskDoc::from_bytes(&bytes).unwrap();
+        send(&mut current, ONE, "api");
+        older
+            .record_send(&run("web"), ONE, &Actor::Person, 5)
+            .unwrap();
+        current.import(&older.snapshot().unwrap()).unwrap();
+        let unexplained = current.unexplained_entries().unwrap();
+        assert_eq!(unexplained.len(), 1);
+        current
+            .settle_attempt(ONE, Settlement::NotAdmitted, &Actor::Person, 20)
+            .unwrap();
+        assert!(current
+            .reserve_attempt(
+                TWO,
+                Origin::Handoff,
+                &run("ops"),
+                native("ops"),
+                &agent("web"),
+                21
+            )
+            .is_err());
+        // The person's review of that exact entry ends its hold.
+        current
+            .review_entry(&unexplained[0], &Actor::Person, 22)
+            .unwrap();
+        assert!(current.unexplained_entries().unwrap().is_empty());
+        // Each binding counts on its own: the same executor and UUID without
+        // the record's fingerprint, or the fingerprint for another executor.
+        let mut same_executor = TaskDoc::from_bytes(&bytes).unwrap();
+        let mut legacy = TaskDoc::from_bytes(&bytes).unwrap();
+        send(&mut same_executor, ONE, "api");
+        legacy
+            .record_send(&run("api"), ONE, &Actor::Person, 5)
+            .unwrap();
+        same_executor.import(&legacy.snapshot().unwrap()).unwrap();
+        assert_eq!(same_executor.unexplained_entries().unwrap().len(), 1);
+        let mut foreign = TaskDoc::from_bytes(&bytes).unwrap();
+        send(&mut foreign, ONE, "api");
+        let fingerprint = foreign.attempt(ONE).unwrap().unwrap().fingerprint();
+        let entry = foreign
+            .log("sent", &Actor::Person, 6, "", Some(&run("web")))
+            .unwrap();
+        entry.insert("request_id", ONE).unwrap();
+        entry.insert("of", fingerprint).unwrap();
+        foreign.doc.commit();
+        assert_eq!(foreign.unexplained_entries().unwrap().len(), 1);
+    }
+
+    #[test]
+    fn entries_an_attempt_froze_or_names_are_explained() {
+        // History before the first attempt is its frozen baseline.
+        let mut task = task();
+        task.record_send(&run("api"), "legacy-send", &Actor::Person, 2)
+            .unwrap();
+        task.record_report("Done", &agent("api"), 3).unwrap();
+        task.set_stage(Stage::Todo, &Actor::Person, 4).unwrap();
+        let attempt = send(&mut task, ONE, "api");
+        assert_eq!(attempt.frontier.as_ref().map(Vec::len), Some(1));
+        settle(&mut task, ONE);
+        task.record_report("Done again", &agent("api"), 21).unwrap();
+        // A settled reopen names its request in its history entry.
+        task.reserve_attempt(
+            TWO,
+            Origin::Reopen,
+            &run("api"),
+            native("api"),
+            &Actor::Person,
+            22,
+        )
+        .unwrap();
+        settle(&mut task, TWO);
+        let view = task.view().unwrap();
+        let resumed = view.log.iter().rev().find(|e| e.kind == "resumed").unwrap();
+        assert_eq!(resumed.request_id.as_deref(), Some(TWO));
+        let execution = view.execution.unwrap();
+        assert!(execution.unexplained.is_empty() && !execution.conflict);
+        // A direct start freezes its baseline too.
+        task.record_report("Finished", &agent("api"), 30).unwrap();
+        task.set_stage(Stage::Todo, &Actor::Person, 31).unwrap();
+        task.record_start(&agent("api"), 32).unwrap();
+        let (_, ids) = task.view_with_history_ids().unwrap();
+        let start = task.current_attempt().unwrap().unwrap();
+        let record = task.attempt(&start.id).unwrap().unwrap();
+        let frontier = record.frontier.unwrap();
+        assert_eq!(frontier.len(), 3);
+        assert!(frontier.iter().all(|id| ids.contains(id)));
+        assert!(task.unexplained_entries().unwrap().is_empty());
+    }
+
+    #[test]
+    fn attempts_without_a_frontier_leave_the_history_unchecked() {
+        // Records written before frontiers existed (S1's format) keep their meaning.
+        let mut task = task();
+        task.record_send(&run("api"), "legacy-send", &Actor::Person, 2)
+            .unwrap();
+        task.record_attempt_for_test(
+            &Attempt {
+                id: ONE.into(),
+                generation: 1,
+                origin: Origin::Start,
+                executor: run("api"),
+                request_id: String::new(),
+                requirement: 1,
+                actor: Actor::Person,
+                at: 3,
+                delivery: None,
+                frontier: None,
+            },
+            &[],
+        );
+        assert!(task.unexplained_entries().unwrap().is_empty());
     }
 
     #[test]

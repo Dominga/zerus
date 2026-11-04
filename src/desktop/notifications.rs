@@ -602,7 +602,7 @@ impl Outbox {
                         continue;
                     }
                     if self.admitted.len() == EVENTS * 2 {
-                        self.error = Some("notification_click_capacity");
+                        // Transient click pressure must not disable posting.
                         continue;
                     }
                     let proof = Arc::new(ClickProof {

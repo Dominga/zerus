@@ -517,10 +517,12 @@ impl Composers {
             hub.stored_keys.push_front(key.to_owned());
             hub.stored_keys.truncate(DRAFT_KEYS);
         }
+        // A composer holding an unresolved delivery has a draft of its own.
         let empty = |c: &&mut Composer| {
             c.loaded
                 && !c.busy()
                 && c.storage_error.is_none()
+                && c.checkpoint.is_none()
                 && c.draft.text.is_empty()
                 && c.draft.attachments.is_empty()
         };
@@ -589,9 +591,13 @@ impl Composers {
         composer.anchor = stored.anchor;
         composer.label.clear();
         composer.form_state = Map::new();
-        composer.uncertain = uncertain;
-        composer.error = error;
-        composer.notice = notice;
+        // The draft's unresolved delivery stays held, with its doubt, until
+        // the user allows a retry (zerus-5wmh.66.4.4).
+        if composer.checkpoint.is_none() {
+            composer.uncertain = uncertain;
+            composer.error = error;
+            composer.notice = notice;
+        }
         composer.removed = None;
         composer.text_epoch += 1;
         composer.attachments_changed();
@@ -898,6 +904,68 @@ mod tests {
             read_draft(&root.join("drafts"), KEY).draft.draft.text,
             "from the Qt app",
             "the held composer saves what it took, never its empty draft"
+        );
+    }
+
+    /// review-n's #1316 R2 probe (zerus-5wmh.66.4.4).
+    #[test]
+    fn a_recovery_callback_never_installs_over_a_held_memory_identity() {
+        let root = dir("probe-r2-recovered-memory");
+        let store = Arc::new(DraftStore::open(root.join("drafts")));
+        let (c, _) = crate::composer::tests::hub_on(&store);
+        c.open(Some(session()));
+        until(&c, |v| v.loaded);
+        let held = crate::composer::tests::held_checkpoint();
+        {
+            let mut hub = c.lock();
+            let composer = hub.composers.get_mut(KEY).unwrap();
+            composer.checkpoint = Some(held.clone());
+            composer.uncertain = true;
+        }
+        let mut copy = Loaded::default();
+        copy.draft.draft.text = "recovered elsewhere".into();
+        // Model the writer result after an identity appeared in memory during recovery.
+        c.recovered(KEY, copy);
+        let hub = c.lock();
+        let composer = &hub.composers[KEY];
+        assert_eq!(composer.checkpoint.as_ref(), Some(&held));
+        assert!(
+            composer.draft.text.is_empty() && composer.uncertain,
+            "the callback must not install or normalize a held draft"
+        );
+    }
+
+    #[test]
+    fn a_restore_keeps_the_open_draft_s_unresolved_identity() {
+        let root = dir("restore-held");
+        let other = "\nclaude/sample-project/other";
+        let store_root = write_store(root.join("drafts"), vec![(other, text("a clean draft"))]);
+        let store = Arc::new(DraftStore::open(store_root.clone()));
+        let (c, _) = crate::composer::tests::hub_on(&store);
+        c.open(Some(session()));
+        let view = until(&c, |v| v.loaded);
+        c.edit(view.handle, 1, view.text_epoch, "current".into(), 0, 0);
+        let held = crate::composer::tests::held_checkpoint();
+        {
+            let mut hub = c.lock();
+            let composer = hub.composers.get_mut(KEY).unwrap();
+            composer.uncertain = true;
+            composer.error = true;
+            composer.checkpoint = Some(held.clone());
+        }
+        assert_eq!(c.restore(view.handle, DraftSource::Client, other), Ok(()));
+        let restored = c.current().unwrap();
+        assert_eq!(restored.text, "a clean draft");
+        assert!(
+            restored.uncertain && !restored.can_send,
+            "its unresolved delivery stays held until Allow retry"
+        );
+        assert_eq!(c.lock().composers[KEY].checkpoint.as_ref(), Some(&held));
+        c.flush();
+        store.flush();
+        assert_eq!(
+            read_draft(&store_root, KEY).draft.checkpoint.as_deref(),
+            Some(&held)
         );
     }
 

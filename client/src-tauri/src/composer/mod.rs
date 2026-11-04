@@ -44,6 +44,7 @@ use zerus_client_core::attachments::{self, Attachment, Draft, FileRead, Selectio
 use zerus_client_core::cache::Chip;
 use zerus_client_core::drafts::{DraftStore, IndexPage, Loaded, StoredDraft, ALREADY_EXISTS};
 use zerus_client_core::local_messages::{LocalMessage, LocalMessages};
+use zerus_client_core::operation_recovery::deferred_input::Checkpoint;
 use zerus_client_core::send::{CompactSend, StartSend};
 use zerus_client_core::session_usage::ContextChip;
 use zerus_client_core::{Action, Batch, Outcome, Target, ViewRow};
@@ -387,6 +388,11 @@ pub(crate) struct Composer {
     /// The SHA-256 digests of one attachment list (`attachments_rev`), for
     /// the continuations' draft marks: each list is hashed once.
     pub(crate) digests: Option<(u64, Vec<String>)>,
+    /// The deferred input reserved before its dispatch, saved with this
+    /// draft (zerus-5wmh.66.4.4): a send, or a continuation's start or
+    /// compaction. Kept while its outcome is uncertain and loaded back as
+    /// data; nothing sends from it.
+    pub(crate) checkpoint: Option<Checkpoint>,
 }
 
 impl Composer {
@@ -420,6 +426,7 @@ impl Composer {
             kept: None,
             delivering: None,
             digests: None,
+            checkpoint: None,
         }
     }
 
@@ -450,6 +457,7 @@ impl Composer {
             form_state: self.form_state.clone(),
             sending: self.sending,
             uncertain: self.uncertain,
+            checkpoint: self.checkpoint.clone().map(Box::new),
         }
     }
 
@@ -558,6 +566,11 @@ pub(crate) struct Hub {
     pub(crate) start: Option<(send::Pending, StartSend)>,
     /// Compact-to-send, by draft key (Qt's `m_compacts`).
     pub(crate) compacts: HashMap<String, (send::Pending, CompactSend)>,
+    /// The start or compaction calls whose continuation ended while they
+    /// were in flight, oldest first, at most [`send::ORPHANS`]. Each call's
+    /// late answer removes its entry and decides its held identity; Allow
+    /// retry retires its draft's entries (zerus-5wmh.66.4.4).
+    pub(crate) orphans: VecDeque<send::Orphan>,
     /// When the continuations were last polled (every 2.5 s).
     pub(crate) last_poll: f64,
     /// The draft key whose context reset runs: one at a time across all
@@ -810,6 +823,8 @@ impl Composers {
         composer.label = stored.label;
         composer.form_state = stored.form_state;
         composer.uncertain = stored.uncertain || stored.sending || loaded.notice.is_some();
+        // Its original identity, as data: a reload never continues it.
+        composer.checkpoint = stored.checkpoint.map(|checkpoint| *checkpoint);
         if let Some(notice) = loaded.notice {
             composer.show_error(notice);
         }
@@ -913,8 +928,10 @@ impl Composers {
                             newer.anchor = moved.anchor;
                             newer.label = moved.label;
                             newer.form_state = moved.form_state;
-                            // An uncertain delivery stays uncertain.
+                            // An uncertain delivery stays uncertain, and
+                            // keeps its reserved identity (zerus-5wmh.66.4.4).
                             newer.uncertain = moved.uncertain;
+                            newer.checkpoint = moved.checkpoint;
                             newer.error = moved.error;
                             newer.notice = moved.notice;
                             newer.removed = moved.removed;
@@ -1291,6 +1308,10 @@ impl Composers {
     }
 
     /// Allow retry (`MessageComposer.cpp:412-417`): clears an uncertain mark.
+    /// It is the user's explicit resolution of the draft's unresolved
+    /// delivery, so it also ends the held identity; the next attempt saves
+    /// its own before its call (zerus-5wmh.66.4.4). Nothing reaches it
+    /// automatically: only the composer's Allow retry command calls it.
     pub fn allow_retry(&self, handle: u64) {
         let mut hub = self.lock();
         let Some(composer) = Self::editable(&mut hub, handle) else {
@@ -1299,7 +1320,11 @@ impl Composers {
         composer.uncertain = false;
         composer.error = false;
         composer.notice.clear();
+        composer.checkpoint = None;
         self.save(composer);
+        // Its late answers resolve nothing now: their tracking goes.
+        let key = composer.key.clone();
+        hub.orphans.retain(|orphan| orphan.key != key);
         drop(hub);
         self.changed();
     }
@@ -2696,6 +2721,59 @@ pub(crate) mod tests {
         );
     }
 
+    /// A valid reserved identity of a send of `run-1` (zerus-5wmh.66.4.4).
+    pub(crate) fn held_checkpoint() -> Checkpoint {
+        use zerus_client_core::operation_recovery::deferred_input::{Intent, Kind};
+        Checkpoint::reserve(Intent {
+            kind: Kind::Send,
+            draft_revision: 1,
+            message_sha256: "a".repeat(64),
+            run_id: "run-1".into(),
+            conversation_id: "conv-1".into(),
+            question: None,
+            start: None,
+            retry_of: None,
+            consent: false,
+        })
+    }
+
+    #[test]
+    fn a_rename_back_keeps_an_uncertain_delivery_identity() {
+        let root = dir("rename-back-checkpoint");
+        let store = drafts(&root);
+        let mut there = StoredDraft::default();
+        there.draft.text = "already here".into();
+        store.save_durable(RENAMED, there, |_| {});
+        let (c, _) = hub_on(&store);
+        c.open(Some(session()));
+        let view = until(&c, |v| v.loaded);
+        c.edit(view.handle, 1, view.text_epoch, "first".into(), 5, 5);
+        let held = held_checkpoint();
+        {
+            let mut hub = c.lock();
+            let composer = hub.composers.get_mut(KEY).unwrap();
+            composer.uncertain = true;
+            composer.checkpoint = Some(held.clone());
+        }
+        let release = hold(&store);
+        c.open(Some(renamed()));
+        // Renamed back while the refused first rename is still queued: the
+        // newer composer takes the moved draft, its doubt and its identity.
+        let back = c.open(Some(session())).unwrap();
+        release.send(()).unwrap();
+        let view = until(&c, |v| v.loaded && v.key == KEY);
+        assert_eq!(view.handle, back.handle, "the newer composer stays");
+        assert_eq!(c.lock().composers[KEY].checkpoint.as_ref(), Some(&held));
+        store.flush();
+        assert_eq!(
+            read_draft(&root.join("drafts"), KEY)
+                .draft
+                .checkpoint
+                .as_deref(),
+            Some(&held)
+        );
+    }
+
     #[test]
     fn a_refused_remove_or_undo_hands_the_text_back() {
         let root = dir("hand-back");
@@ -2794,7 +2872,29 @@ pub(crate) mod tests {
             13,
         );
         // A delivery of it was interrupted: that must survive the move.
-        c.lock().composers.get_mut(KEY).unwrap().uncertain = true;
+        let cp = Checkpoint::reserve(
+            zerus_client_core::operation_recovery::deferred_input::Intent {
+                kind: zerus_client_core::operation_recovery::deferred_input::Kind::Send,
+                draft_revision: 1,
+                message_sha256:
+                    zerus_client_core::operation_recovery::deferred_input::message_sha256(
+                        "not saved yet",
+                        [],
+                    ),
+                run_id: "run-1".into(),
+                conversation_id: "conv-1".into(),
+                question: None,
+                start: None,
+                retry_of: None,
+                consent: false,
+            },
+        );
+        {
+            let mut hub = c.lock();
+            let composer = hub.composers.get_mut(KEY).unwrap();
+            composer.uncertain = true;
+            composer.checkpoint = Some(cp.clone());
+        }
         c.open(Some(renamed()));
         // Renamed back while the first rename, which the store refuses, waits.
         let back = c.open(Some(session())).unwrap();
@@ -2807,6 +2907,11 @@ pub(crate) mod tests {
         assert_eq!(view.text, "not saved yet");
         assert!(view.text_epoch > back.text_epoch);
         assert!(view.uncertain && !view.can_send, "still uncertain");
+        assert_eq!(
+            c.lock().composers[KEY].checkpoint.as_ref(),
+            Some(&cp),
+            "a rename back keeps the held identity (review-n's #1316 probe)"
+        );
         drop(read_only);
         // The failed save is retried and reaches the disk; no load replaced it.
         let view = until(&c, |v| !v.status_error);

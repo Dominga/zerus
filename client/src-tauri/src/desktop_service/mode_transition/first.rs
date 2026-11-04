@@ -38,7 +38,10 @@ pub(super) fn offer(status: &Value) -> Option<Value> {
         && status["reviewed_transition"].is_null()
         && status["mode_choice"].is_null()
         && status["activation_automatic_blocked"] == false
-        && status["first_choice_lost"].is_null()
+        // Present and null: a helper that cannot say whether the journal is
+        // lost or the anchor layout is separate never offers.
+        && status.get("first_choice_lost").is_some_and(Value::is_null)
+        && status.get("first_choice_unavailable").is_some_and(Value::is_null)
         && status["first_choice"]["phase"] != "unknown")
         .then(|| {
             json!([
@@ -336,6 +339,7 @@ mod tests {
             "selected_mode":"passive","running_mode":"passive","mode_selection":"explicit","ipc_ready":true,
             "pending_restart":false,"pending_transition":null,"transition":null,"activation_pending":null,
             "reviewed_transition":null,"mode_choice":null,"first_choice":null,
+            "first_choice_lost":null,"first_choice_unavailable":null,
             "activation_automatic_blocked":false,"service_epoch":"e","service_generation":1});
         for (key, value) in patch.as_object().unwrap() {
             status[key] = value.clone();
@@ -387,8 +391,17 @@ mod tests {
                 "lost first choice, even unlatched",
                 json!({"first_choice_lost":"11111111-1111-4111-8111-111111111111"}),
             ),
+            (
+                "anchor inside the state loss domain",
+                json!({"first_choice_unavailable":"anchor_layout"}),
+            ),
         ] {
             assert!(offer(&plain(patch)).is_none(), "{case}");
+        }
+        for key in ["first_choice_lost", "first_choice_unavailable"] {
+            let mut older = plain(json!({}));
+            older.as_object_mut().unwrap().remove(key);
+            assert!(offer(&older).is_none(), "a helper without {key}");
         }
     }
 

@@ -9,6 +9,46 @@ use std::collections::BTreeSet;
 
 const FIRST: usize = 48; // Bytes, including reserved review growth, can refuse sooner.
 
+/// Windows path containment by components on paths the native side has
+/// already canonicalized (junctions, symlinks, short names and drive aliases
+/// of existing folders resolved). The comparison only ever widens equality:
+/// `\\?\` and `\\?\UNC\` forms compare like their plain forms, components
+/// fold case both ways and ignore trailing dots and spaces, and a remaining
+/// `..` counts as contained. True when `inner` is `outer` or below it; never
+/// a string prefix.
+pub(in crate::desktop) fn within(inner: &str, outer: &str) -> bool {
+    let parts = |path: &str| -> Vec<String> {
+        let path = match path.strip_prefix(r"\\?\UNC\") {
+            Some(rest) => format!(r"\\{rest}"),
+            None => path.strip_prefix(r"\\?\").unwrap_or(path).to_owned(),
+        };
+        path.split(['\\', '/'])
+            .filter(|part| !part.is_empty() && *part != ".")
+            .map(str::to_owned)
+            .collect()
+    };
+    let same = |a: &String, b: &String| {
+        let (a, b) = (
+            a.trim_end_matches(['.', ' ']),
+            b.trim_end_matches(['.', ' ']),
+        );
+        a.to_lowercase() == b.to_lowercase() || a.to_uppercase() == b.to_uppercase()
+    };
+    let (inner, outer) = (parts(inner), parts(outer));
+    if inner.iter().chain(&outer).any(|part| part == "..") {
+        return true;
+    }
+    !outer.is_empty()
+        && inner.len() >= outer.len()
+        && inner.iter().zip(&outer).all(|(a, b)| same(a, b))
+}
+
+/// The first-choice anchor folder must lie outside the desktop state tree
+/// and its mode folder, whose loss the anchor detects.
+pub(in crate::desktop) fn anchor_separate(anchor: &str, state: &str, root: &str) -> bool {
+    !within(anchor, state) && !within(anchor, root)
+}
+
 /// Routing only: the caller's NEW original UUID. Never consent or authority.
 pub(in crate::desktop) struct First {
     pub request: String,
@@ -324,6 +364,51 @@ mod tests {
                 Mode::Background
             )
             .is_err());
+    }
+
+    #[test]
+    fn the_anchor_folder_must_lie_outside_the_state_tree_by_windows_components() {
+        let state = r"C:\Users\Example\.local\state\hgs";
+        let root = r"C:\Users\Example\.local\state\hgs\desktop";
+        // The maintained default layout: separate config and state trees.
+        assert!(anchor_separate(
+            r"C:\Users\Example\.config\hgs",
+            state,
+            root
+        ));
+        // A sibling that only shares a string prefix is still separate.
+        assert!(anchor_separate(
+            r"C:\Users\Example\.local\state\hgs2",
+            state,
+            root
+        ));
+        for (case, anchor) in [
+            (
+                "inside the mode folder",
+                r"C:\Users\Example\.local\state\hgs\desktop\config",
+            ),
+            ("the state tree itself", state),
+            ("other case", r"c:\USERS\example\.LOCAL\State\HGS\cfg"),
+            (
+                "verbatim prefix",
+                r"\\?\C:\Users\Example\.local\state\hgs\cfg",
+            ),
+            ("forward slashes", "C:/Users/example/.local/state/hgs/cfg"),
+        ] {
+            assert!(!anchor_separate(anchor, state, root), "{case}");
+        }
+        assert!(within(
+            r"\\?\UNC\server\share\state\cfg",
+            r"\\server\share\state"
+        ));
+        assert!(!within(r"\\server\share\state2", r"\\server\share\state"));
+        // A root outside the state tree is checked on its own.
+        assert!(!anchor_separate(r"D:\desktop\cfg", state, r"D:\desktop"));
+        // Equality only widens: trailing dots, both case folds, `..`.
+        assert!(within(r"C:\state.\cfg", r"C:\state"));
+        assert!(within(r"C:\STRASSE\cfg", "C:\\stra\u{17f}\u{17f}e"));
+        assert!(within(r"C:\x\..\other", r"C:\x"));
+        assert!(!within(r"C:\", ""), "an empty outer contains nothing");
     }
 
     #[test]

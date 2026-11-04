@@ -73,8 +73,15 @@ elif args[:7] == ['desktop', 'registration', 'install', '--mode', 'background', 
                           request_id=request, ok=True, changed=True)))
 elif args[:5] == ['desktop', 'registration', 'mode-result', '--json', '--request-id'] and len(args) == 6:
     request = args[5]
-    print(json.dumps(dict(abi='desktop-registration-mode-v1', schema=1, configuration=config, request_id=request,
-                          read_only=True, receipt=state['receipts'].get(request))))
+    lost = state['status'].get('first_choice_lost')
+    if lost:
+        # The native shape for ANY original while the journal is lost.
+        print(json.dumps(dict(abi='desktop-registration-mode-v1', schema=1, configuration=config, request_id=request,
+                              read_only=True, receipt=None, outcome='unknown', code='first_choice_lost',
+                              first_choice_lost=lost, manager_changed=False, authority_changed=False, changed=False)))
+    else:
+        print(json.dumps(dict(abi='desktop-registration-mode-v1', schema=1, configuration=config, request_id=request,
+                              read_only=True, receipt=state['receipts'].get(request))))
 else:
     sys.exit(2)
 "#;
@@ -95,6 +102,7 @@ impl Fixture {
             "schema":1,"configuration":CONFIG,"task_name":"hgs-desktop-fixture",
             "selected_mode":"passive","running_mode":"passive","pending_restart":false,
             "pending_transition":null,"reviewed_transition":null,"mode_choice":null,"first_choice":null,
+            "first_choice_lost":null,"first_choice_unavailable":null,
             "completed_request_id":null,"cancelled_request_id":null,
             "activation_automatic_blocked":false,"service_epoch":"e","service_generation":1}}));
         fixture
@@ -430,4 +438,91 @@ fn the_spawn_veto_admits_only_this_continuations_own_reservation() {
         Some("activation_unconfirmed")
     );
     assert!(controller.checked_first(&display, Some(&id)).is_ok());
+}
+
+const LOST: &str = "44444444-4444-4444-8444-444444444444";
+const ORIGINAL: &str = "55555555-5555-4555-8555-555555555555";
+
+#[test]
+fn a_lost_reply_keeps_any_retained_original_pending_without_resume_or_not_started() {
+    let _process = crate::PROCESS_TREE.read().unwrap();
+    let fixture = Fixture::new("settle", true);
+    // A lost journal that still carries another original's pending ID (an
+    // activation or reviewed choice), as a restarted consumer reads it.
+    let pending = json!({"request_id":ORIGINAL,"desired":"background","phase":"update_offered",
+        "original":null,"started":null});
+    fixture.patch(
+        json!({"pending_transition":pending,"first_choice_lost":LOST,
+        "activation_automatic_blocked":true}),
+    );
+    let controller = fixture.controller();
+    let check = |case: &str| {
+        let view = controller.view();
+        assert!(view.pending, "{case}");
+        assert_eq!(view.request_id.as_deref(), Some(ORIGINAL), "{case}");
+        assert!(!view.needs_resume && view.automatic_blocked, "{case}");
+        assert!(view.first.is_none(), "{case}");
+        assert_eq!(view.code, "activation_first_choice_lost", "{case}");
+    };
+    check("restarted lookup");
+    // Even after the original exchange physically joined, the explicit loss
+    // is never the ordinary missing rule's NotStarted.
+    controller
+        .state
+        .lock()
+        .unwrap()
+        .intent
+        .as_mut()
+        .unwrap()
+        .joined = true;
+    for round in 0..3 {
+        tauri::async_runtime::block_on(controller.observe(fixture.cli.clone(), CONFIG.into()));
+        check(&format!("joined, Check {round}"));
+    }
+    assert!(fixture.lookups().iter().all(|l| l == ORIGINAL));
+    assert!(fixture.installs().is_empty());
+}
+
+#[test]
+fn a_coherent_healthy_read_after_a_loss_recovers_but_the_durable_latch_stays() {
+    let _process = crate::PROCESS_TREE.read().unwrap();
+    let fixture = Fixture::new("settle", true);
+    fixture.patch(json!({"first_choice_lost":LOST,"activation_automatic_blocked":true}));
+    let controller = fixture.controller();
+    let view = controller.view();
+    assert!(view.automatic_blocked && view.first.is_none());
+    assert_eq!(view.code, "activation_first_choice_lost");
+    // The loss lasts only while a read reports it.
+    fixture.patch(json!({"first_choice_lost":null,"activation_automatic_blocked":false}));
+    tauri::async_runtime::block_on(controller.observe(fixture.cli.clone(), CONFIG.into()));
+    let view = controller.view();
+    assert!(!view.automatic_blocked, "a healthy read recovers");
+    assert!(view.first.is_some(), "the plain passive offer returns");
+    assert_eq!(view.code, "activation_platform_manual");
+    // The durable native latch (a consistent latched status) stays sticky
+    // for this process; only the loss is recoverable.
+    let mut latched = fixture.state()["status"].clone();
+    latched["activation_automatic_blocked"] = true.into();
+    controller.project_for_test(&latched, true);
+    latched["activation_automatic_blocked"] = false.into();
+    controller.project_for_test(&latched, true);
+    assert!(controller.view().automatic_blocked);
+}
+
+#[test]
+fn an_overlapping_anchor_layout_never_offers_or_reaches_the_helper() {
+    let _process = crate::PROCESS_TREE.read().unwrap();
+    let fixture = Fixture::new("settle", true);
+    let healthy = fixture.controller();
+    let display = healthy.view().first.expect("separate layout offers");
+    fixture.patch(json!({"first_choice_unavailable":"anchor_layout"}));
+    let controller = fixture.controller();
+    let view = controller.view();
+    assert!(view.first.is_none() && !view.automatic_blocked && !view.pending);
+    // The healthy controller's older offer closes on its next read.
+    tauri::async_runtime::block_on(healthy.observe(fixture.cli.clone(), CONFIG.into()));
+    assert!(healthy.view().first.is_none());
+    let refused = tauri::async_runtime::block_on(healthy.confirm_first(display, |_| true));
+    assert!(refused.is_err());
+    assert!(fixture.installs().is_empty());
 }

@@ -200,6 +200,51 @@ fn read_anchor(config: &Config, location: &Location, plan: &Plan) -> Result<Opti
         Err(error) => Err(error),
     }
 }
+/// The anchor proves a lost journal only from outside the state tree that
+/// holds the journal and the Service Grant. Existing folders resolve natively
+/// (junctions, symlinks, short names and drive aliases); the policy compares
+/// the results by components with Windows case folding. An unresolvable or
+/// non-Unicode layout counts as overlapping. Nothing repairs or moves it.
+fn anchor_layout_separate(config: &Config, location: &Location) -> bool {
+    let canonical = |path: &std::path::Path| {
+        zerus_desktop_migration::canonical(path)
+            .ok()
+            .and_then(|path| path.to_str().map(str::to_owned))
+    };
+    match (
+        canonical(&config.dir),
+        canonical(&config.state),
+        canonical(&location.root),
+    ) {
+        (Some(anchor), Some(state), Some(root)) => {
+            policy::mode::first::anchor_separate(&anchor, &state, &root)
+        }
+        _ => false,
+    }
+}
+const ANCHOR_LAYOUT: &str = "The first background choice needs the config folder outside the desktop state folder; this layout keeps both in one loss domain. Nothing was reserved or changed.";
+pub(in crate::desktop::windows_registration) fn ensure_first_layout(
+    config: &Config,
+    location: &Location,
+) -> Result<()> {
+    ensure!(anchor_layout_separate(config, location), ANCHOR_LAYOUT);
+    Ok(())
+}
+/// The journal and its anchor as one generation: every writer holds the
+/// registration lock from anchor publication through its record save, so a
+/// reader under the same lock never pairs one commit's anchor with another's
+/// record. A busy writer is bounded unavailability (the lock wait), never loss.
+fn journal(
+    sid: &str,
+    config: &Config,
+    location: &Location,
+    plan: &Plan,
+) -> Result<(Record, Option<String>)> {
+    let _lock = Lock::acquire(sid)?;
+    let record = load(location, plan)?;
+    let lost = record.first_lost(read_anchor(config, location, plan)?.as_deref());
+    Ok((record, lost))
+}
 /// Durable before the record save that reserves this first choice.
 fn write_anchor(
     config: &Config,
@@ -208,6 +253,7 @@ fn write_anchor(
     request: &str,
     fence: &mut impl FnMut() -> Result<()>,
 ) -> Result<()> {
+    ensure!(anchor_layout_separate(config, location), ANCHOR_LAYOUT);
     fence()?;
     let bytes = serde_json::to_vec(&json!({"schema":1,"configuration":location.configuration,
         "sid":plan.sid,"request":request}))?;
@@ -245,9 +291,9 @@ pub(in crate::desktop::windows_registration) fn result(
     let sid = crate::host::token::user_sid()?;
     let preview = registration::windows_plan(config, location)?;
     let plan = Plan::parse(&json!({"schema":1,"operation":"status","plan":preview}), &sid)?;
-    let record = load(location, &plan)?;
+    let (record, lost) = journal(&sid, config, location, &plan)?;
     // A journal that lost its anchored first choice answers nothing settled.
-    if let Some(lost) = record.first_lost(read_anchor(config, location, &plan)?.as_deref()) {
+    if let Some(lost) = lost {
         return Ok(json!({"abi":MODE_ABI,"schema":1,"configuration":location.configuration,
             "request_id":request,"read_only":true,"receipt":null,
             "outcome":policy::mode::review::ChoicePhase::Unknown,"code":"first_choice_lost",
@@ -277,14 +323,17 @@ pub(in crate::desktop::windows_registration) fn pending_status(
         &json!({"schema":1,"operation":"status","plan":preview}),
         &sid,
     )?;
-    let record = load(location, &plan)?;
-    let lost = record.first_lost(read_anchor(config, location, &plan)?.as_deref());
+    let (record, lost) = journal(&sid, config, location, &plan)?;
+    // An anchor inside the state loss domain could never prove a loss: no
+    // first choice is offered or admitted on that layout.
+    let unavailable = (!anchor_layout_separate(config, location)).then_some("anchor_layout");
     Ok(
         json!({"pending_transition":record.pending,"cancelled_request_id":record.cancelled,"completed_request_id":record.completed,
             "reviewed_transition":record.reviewed.last(),
             "mode_choice":record.choices.last(),
             "first_choice":record.first_choices.last(),
             "first_choice_lost":lost,
+            "first_choice_unavailable":unavailable,
             "activation_automatic_blocked":lost.is_some() || !record.reviewed.is_empty() || record.pending.as_ref().is_some_and(|p|p.review.is_some())}),
     )
 }
@@ -772,6 +821,9 @@ fn operation(args: &[String]) -> Result<Value> {
     );
     let config = Config::load().map_err(|error| anyhow::anyhow!(error.to_string()))?;
     let location = Location::new(&config)?;
+    // Before admission, the lock, any anchor or record reservation and any
+    // manager effect: an overlapping layout never takes a first choice.
+    ensure!(!first_form || anchor_layout_separate(&config, &location), ANCHOR_LAYOUT);
     let scope = ui_authority::Scope::new(&config, &location);
     let caller = ui_authority::registration::Caller::capture(&scope)?;
     let admission = Admission { scope, caller };
@@ -937,5 +989,98 @@ mod tests {
         }
         // Refused before any record, plan or helper environment was touched.
         assert_eq!(std::fs::read_dir(root.path()).unwrap().count(), 0);
+    }
+
+    fn layout(root: &std::path::Path, dir: std::path::PathBuf) -> (Config, Location) {
+        let state = root.join("state");
+        std::fs::create_dir_all(state.join("desktop")).unwrap();
+        let config = Config {
+            home: root.to_str().unwrap().into(),
+            dir,
+            state: state.clone(),
+            selves: vec![],
+            peers: vec![],
+            base_peers: vec![],
+            peers_from_environment: false,
+            machines: Default::default(),
+            tab: false,
+            tab_colors: String::new(),
+        };
+        let location = Location::new(&config).unwrap();
+        (config, location)
+    }
+    fn plan() -> Plan {
+        Plan::parse(&json!({"schema":1,"operation":"status","plan":{"schema":1,"operation":"preview","label":"hgs-desktop","configuration":"a".repeat(64),"user_sid":"S-1-5-21-1001","task_name":"hgs-desktop-S-1-5-21-1001","definition":"synthetic definition","argv":["C:/Example/hgs.exe","desktop","serve","--config-dir","C:/Example/config","--state-dir","C:/Example/state"],"session":{"kind":"interactive_user","allow_session_zero":false}}}), "S-1-5-21-1001").unwrap()
+    }
+
+    #[test]
+    fn only_a_config_folder_outside_the_state_tree_takes_a_first_choice_anchor() {
+        let root = tempfile::tempdir().unwrap();
+        let root = zerus_desktop_migration::canonical(root.path()).unwrap();
+        let (disjoint, location) = layout(&root, root.join("config"));
+        std::fs::create_dir_all(&disjoint.dir).unwrap();
+        assert!(anchor_layout_separate(&disjoint, &location));
+        // A junction outside the state tree that resolves into it.
+        let junction = root.join("alias");
+        let made = std::process::Command::new("cmd")
+            .args(["/d", "/c", "mklink", "/J"])
+            .arg(&junction)
+            .arg(root.join("state"))
+            .output()
+            .unwrap();
+        assert!(made.status.success(), "{made:?}");
+        let upper = root.join("state").to_str().unwrap().to_uppercase();
+        for (case, dir) in [
+            ("inside the mode folder", root.join(r"state\desktop\config")),
+            ("the state tree itself", root.join("state")),
+            ("other case", std::path::PathBuf::from(format!(r"{upper}\cfg"))),
+            ("through a junction", junction.join("cfg")),
+        ] {
+            let (config, location) = layout(&root, dir);
+            assert!(!anchor_layout_separate(&config, &location), "{case}");
+            std::fs::create_dir_all(&config.dir).unwrap();
+            let request = uuid::Uuid::new_v4().to_string();
+            let error = write_anchor(&config, &location, &plan(), &request, &mut || Ok(()))
+                .unwrap_err();
+            assert_eq!(error.to_string(), ANCHOR_LAYOUT, "{case}");
+            assert!(!anchor_path(&config, &location).exists(), "{case}");
+        }
+    }
+
+    #[test]
+    fn a_journal_read_waits_out_a_writer_and_never_pairs_a_new_anchor_with_an_old_record() {
+        let root = tempfile::tempdir().unwrap();
+        let root = zerus_desktop_migration::canonical(root.path()).unwrap();
+        let (config, location) = layout(&root, root.join("config"));
+        std::fs::create_dir_all(&config.dir).unwrap();
+        let plan = plan();
+        // A writer's commit window: its new anchor is published under the
+        // lock and its record save has not happened yet.
+        let request = uuid::Uuid::new_v4().to_string();
+        write_anchor(&config, &location, &plan, &request, &mut || Ok(())).unwrap();
+        let lock = format!("test-{}", uuid::Uuid::new_v4());
+        let (held, wait) = std::sync::mpsc::channel();
+        let (release, done) = std::sync::mpsc::channel::<()>();
+        let writer = {
+            let lock = lock.clone();
+            std::thread::spawn(move || {
+                let _held = Lock::acquire(&lock).unwrap();
+                held.send(()).unwrap();
+                done.recv().unwrap();
+            })
+        };
+        wait.recv().unwrap();
+        let started = Instant::now();
+        let error = journal(&lock, &config, &location, &plan).unwrap_err();
+        assert!(
+            error.to_string().contains("Registration lock not confirmed"),
+            "{error:#}"
+        );
+        assert!(started.elapsed() < Duration::from_secs(5));
+        release.send(()).unwrap();
+        writer.join().unwrap();
+        // Outside any writer the same pair is a durable loss.
+        let (_, lost) = journal(&lock, &config, &location, &plan).unwrap();
+        assert_eq!(lost, Some(request));
     }
 }

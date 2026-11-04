@@ -1461,6 +1461,42 @@ mod tests {
         }
     }
 
+    /// zerus-ucck P2b: a session created with an ID journal keeps the label it
+    /// was launched with, so a name-only task an older hgs made for that label
+    /// still reaches it after a rename.
+    #[test]
+    fn a_name_only_task_reaches_a_renamed_session_by_its_launch_label() {
+        let state = tempfile::tempdir().unwrap();
+        let root = state.path();
+        let file = |n: u8| format!("{n:064x}.json");
+        let journal = "session:3f2a9c1d-0b4e-4d6a-9c1d-2e3f4a5b6c7d";
+        let renamed = json!({"version":1,"name":"codex/renamed","run_id":"run-1","launch_id":"launch-1",
+            "journal_name":journal,"launch_label":"codex/launched"});
+        saved(root, &file(1), renamed);
+        let other = json!({"version":1,"name":"codex/other","run_id":"run-2","launch_label":"codex/shared"});
+        saved(root, &file(2), other);
+        let third = json!({"version":1,"name":"codex/third","run_id":"run-3","launch_label":"codex/shared"});
+        saved(root, &file(3), third);
+        let machines = Machines {
+            here: "node-here".into(),
+            selves: vec![],
+            peers: BTreeMap::new(),
+            bindings: crate::state::task_bindings_in(root).unwrap(),
+        };
+        let routed = |session: &str| {
+            let key = SessionKey {
+                machine: "node-here".into(),
+                session: session.into(),
+                session_id: String::new(),
+            };
+            machines.resolve(&key).map(|key| key.session)
+        };
+        assert_eq!(routed("codex/launched"), Some("codex/renamed".to_owned()));
+        // A label two sessions were launched with stays ambiguous.
+        assert_eq!(routed("codex/shared"), None);
+        assert_eq!(routed("codex/renamed"), Some("codex/renamed".to_owned()));
+    }
+
     #[test]
     fn a_large_saved_record_still_routes_by_name_and_identity() {
         let state = tempfile::tempdir().unwrap();

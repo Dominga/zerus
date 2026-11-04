@@ -177,6 +177,15 @@ pub(super) fn run(args: &[String]) -> Result<i32> {
         } else if replaces.is_some() {
             return Err(format!("{name}: saved binding disappeared before a fresh start"));
         }
+        // Only a retry of an unconfirmed attempt continues that attempt's
+        // journal and launch label; a launch that replaces a confirmed
+        // conversation (`--fresh`) is a new session (#1408 review).
+        let retried = replaced.as_ref().filter(|previous| {
+            attempts::retryable(previous, None)
+                || requested
+                    .as_deref()
+                    .is_some_and(|id| attempts::retryable(previous, Some(id)))
+        });
         let startup_kind = if expected.is_some() || requested.is_some() || !first.is_empty() {
             "resume"
         } else {
@@ -206,12 +215,20 @@ pub(super) fn run(args: &[String]) -> Result<i32> {
             {
                 record["fork_lineage"] = lineage;
             }
+            if let Some(labels) = nonempty_env("HGS_FORK_LINEAGE_LABELS")
+                .and_then(|labels| serde_json::from_str::<Value>(&labels).ok())
+                .filter(|labels| labels.as_object().is_some_and(|labels| !labels.is_empty()))
+            {
+                record["fork_lineage_labels"] = labels;
+            }
         }
         std::env::remove_var("HGS_FORK_PARENT_ID");
         std::env::remove_var("HGS_FORK_SOURCE_NAME");
         std::env::remove_var("HGS_FORK_SOURCE_ARCHIVE");
         std::env::remove_var("HGS_FORK_LINEAGE");
+        std::env::remove_var("HGS_FORK_LINEAGE_LABELS");
         agent_hint::inherit_fork(&mut record, fork_hint_revision.as_deref());
+        let resumed = expected.is_some();
         if let Some(expected) = expected {
             let previous = read(&name)?;
             refuse_unsettled_clear(&previous)?;
@@ -252,8 +269,10 @@ pub(super) fn run(args: &[String]) -> Result<i32> {
                 "fork_parent_id",
                 "fork_source_name",
                 "fork_lineage",
+                "fork_lineage_labels",
                 "cleared_conversations",
                 "session_id",
+                "launch_label",
             ] {
                 if let Some(value) = previous.get(key) {
                     record[key] = value.clone();
@@ -274,6 +293,10 @@ pub(super) fn run(args: &[String]) -> Result<i32> {
             record["requested_id"] = json!(requested);
         } else if let Some(previous) = replaced.as_ref().filter(|_| replaces.is_some()) {
             clear_context::carry_fresh_start(previous, &mut record);
+        }
+        // A resume and a fresh start carried their journal and launch label.
+        if !resumed && replaces.is_none() {
+            journal_identity(&mut record, &name, retried);
         }
         backend::current().set_run_marker(&name, &token)?;
         if let Some(owner)=super::worktree_lifecycle::for_folder(std::path::Path::new(string(&record,"launch_dir"))) {
@@ -679,6 +702,35 @@ fn print_resume(spec: &backend::LaunchSpec) {
     );
 }
 
+/// Where a launch keeps its history (zerus-ucck P2b). A session this launch
+/// creates keeps it under its durable ID, `session:<session_id>`, so its
+/// label is free to change or repeat; `launch_label` keeps the label it was
+/// created with for name-only tasks. That includes a `--fresh` launch over a
+/// confirmed conversation of the label: a new session. Only a retry of an
+/// unconfirmed attempt (`retried`; a resume and a fresh start carry both)
+/// continues that attempt's journal as before, the label's or its ID journal,
+/// and its launch label. hgs v0.47.0 and later read `journal_name` and keep it
+/// on resume, rename, Clear, Start fresh and restore.
+fn journal_identity(record: &mut Value, name: &str, retried: Option<&Value>) {
+    match retried {
+        None => {
+            ensure_session_id(record);
+            let journal = format!("session:{}", string(record, "session_id"));
+            record["journal_name"] = json!(journal);
+            record["launch_label"] = json!(name);
+        }
+        Some(previous) => {
+            let journal = journal::journal_name(previous);
+            if journal.starts_with("session:") {
+                record["journal_name"] = json!(journal);
+            }
+            if let Some(label) = previous.get("launch_label") {
+                record["launch_label"] = label.clone();
+            }
+        }
+    }
+}
+
 fn resume_archive(name: &str, id: &str, dry: bool, scope: Option<&session_action::Scope>) -> Result<i32> {
     let archived = archive::read_archive(name, id)?;
     refuse_unsettled_clear(&archived)?;
@@ -894,6 +946,39 @@ fn verify_requested(record: &Value, snapshot: &Snapshot, requested: &str) -> Res
 
 #[cfg(all(test, unix))]
 mod tests {
+    /// zerus-ucck P2b: a session a launch creates keeps its history under its
+    /// durable ID and the label it was created with; a replacement keeps the
+    /// journal it replaces, as before.
+    #[test]
+    fn a_new_session_journals_under_its_id_and_a_replacement_continues() {
+        let new = || json!({"version":1,"name":"codex/p/one","agent":"codex","run_id":"run-1"});
+        let mut created = new();
+        super::journal_identity(&mut created, "codex/p/one", None);
+        let id = string(&created, "session_id").to_owned();
+        assert!(super::session_id::canonical(&id));
+        assert_eq!(created["journal_name"], format!("session:{id}"));
+        assert_eq!(created["launch_label"], "codex/p/one");
+        // A replaced record without an ID journal keeps the label's journal,
+        // as every hgs did; one with an ID journal continues it.
+        let mut replaced = new();
+        super::journal_identity(
+            &mut replaced,
+            "codex/p/one",
+            Some(&json!({"name":"codex/p/one","journal_name":"codex/p/first"})),
+        );
+        assert!(replaced.get("journal_name").is_none() && replaced.get("launch_label").is_none());
+        assert_eq!(super::journal::journal_name(&replaced), "codex/p/one");
+        let previous = json!({"name":"codex/p/one","journal_name":format!("session:{id}"),"launch_label":"codex/p/launched"});
+        let mut continued = new();
+        super::journal_identity(&mut continued, "codex/p/one", Some(&previous));
+        assert_eq!(continued["journal_name"], format!("session:{id}"));
+        assert_eq!(continued["launch_label"], "codex/p/launched");
+        assert!(
+            continued.get("session_id").is_none(),
+            "the ID is the writer's, never copied here"
+        );
+    }
+
     use super::*;
 
     #[test]

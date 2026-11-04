@@ -78,6 +78,7 @@ pub(super) fn carry_fresh_start(previous: &Value, record: &mut Value) {
     if earlier.len() > CLEARED_CONVERSATIONS { earlier.drain(..earlier.len() - CLEARED_CONVERSATIONS); }
     if !earlier.is_empty() { record["cleared_conversations"] = json!(earlier); }
     if let Some(anchor) = previous.get("journal_name") { record["journal_name"] = anchor.clone(); }
+    if let Some(label) = previous.get("launch_label") { record["launch_label"] = label.clone(); }
     // A clear starts another conversation of the same session.
     if let Some(id) = previous.get("session_id") { record["session_id"] = id.clone(); }
 }
@@ -1036,11 +1037,13 @@ pub(super) fn dispatch(args: &[String]) -> Result<i32> {
         }
     }
     #[test] fn fresh_starts_continue_the_activity_timeline_like_a_clear() {
-        let previous=json!({"run_id":"old-run","conversation_id":"second","cleared_conversations":["first"],"journal_name":"anchor"});
+        let previous=json!({"run_id":"old-run","conversation_id":"second","cleared_conversations":["first"],"journal_name":"anchor",
+            "launch_label":"codex/p/launched"});
         let mut record=json!({"run_id":"run","conversation_id":null});
         carry_fresh_start(&previous,&mut record);
         assert_eq!(earlier_conversations(&record),json!(["first","second"]));
         assert_eq!(record["journal_name"],"anchor");
+        assert_eq!(record["launch_label"],"codex/p/launched");
         observe_start(&mut record,&json!({"session_id":"third","source":"startup"}));
         record["conversation_id"]=json!("third");
         assert!(record["fresh_from"].is_null());

@@ -154,14 +154,15 @@ async fn passive(shared: &Shared, stop: &AtomicBool, epoch: &str) -> bool {
         if shared.stopped.load(Ordering::Acquire) || stop.load(Ordering::Acquire) {
             return false;
         }
+        // The status copy, never the admission lock: catalog delivery holds
+        // that lock across its view callback, which must not delay this
+        // wait's deadline or its stop. The result only schedules a fresh read.
+        let snapshot = shared.snapshot.copy();
+        if snapshot.background_ready()
+            || !snapshot.connected
+            || snapshot.epoch.as_deref() != Some(epoch)
         {
-            let snapshot = shared.snapshot.lock();
-            if snapshot.background_ready()
-                || !snapshot.connected
-                || snapshot.epoch.as_deref() != Some(epoch)
-            {
-                return true;
-            }
+            return true;
         }
         let remaining = until.saturating_duration_since(tokio::time::Instant::now());
         if remaining.is_zero() {

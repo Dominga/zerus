@@ -2071,5 +2071,7 @@ pub async fn desktop_service_automatic_approvals(
     .await
 }
 
+#[cfg(test)]
+mod passive_projection_tests;
 #[cfg(all(test, unix))]
 mod tests;

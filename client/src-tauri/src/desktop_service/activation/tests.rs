@@ -604,13 +604,17 @@ fn the_passive_wait_is_bounded_and_sends_only_fresh_activation_reads() {
     let _process = crate::PROCESS_TREE.read().unwrap();
     tauri::async_runtime::block_on(async {
         let fixture = Fixture::new(json!({
-            "ready": false, "activation_abi": true, "activation_passive": 3
+            "ready": false, "activation_abi": true, "activation_passive": 3,
+            "activation_passive_hold": true
         }));
         let responder = responder();
         let _cache = CacheServer::start(&fixture.0, responder.clone());
         let (service, rx) = start(&fixture, responder);
-        until("first passive refusal", || waits(&fixture).len() == 1).await;
+        // The fixture holds the first refusal until the seam is installed, so
+        // the first passive wait cannot capture the production delay.
+        until("first passive read", || waits(&fixture).len() == 1).await;
         *service.shared.activation_retry.lock().unwrap() = Some(Duration::from_millis(150));
+        std::fs::write(fixture.0.join("release-first-passive"), b"").unwrap();
         // Still passive: each wait lasts its bounded interval, then one fresh read.
         let delivery = receive(&rx).await;
         assert!(delivery.current());
@@ -638,6 +642,88 @@ fn the_passive_wait_is_bounded_and_sends_only_fresh_activation_reads() {
             .iter()
             .filter_map(|call| call["value"]["request"]["op"].as_str())
             .all(|op| op == "activation_wait"));
+        service.join().await.unwrap();
+    });
+}
+
+/// A connected, passive service and its epoch, with the activation reader
+/// idle: the passive wait is then exercised directly.
+async fn passive_service(fixture: &Fixture) -> (Arc<Service>, String) {
+    let responder = responder();
+    let (service, _) = start(fixture, responder);
+    until("connected passive status", || {
+        let snapshot = service.snapshot();
+        snapshot.connected && snapshot.epoch.is_some() && !snapshot.background_ready()
+    })
+    .await;
+    let epoch = service.snapshot().epoch.unwrap();
+    (service, epoch)
+}
+
+/// Holds the admission lock as a stalled catalog view callback does.
+fn hold_admission(service: &Arc<Service>, hold: Duration) -> std::thread::JoinHandle<()> {
+    let shared = service.shared.clone();
+    let (held, holding) = mpsc::channel();
+    let holder = std::thread::spawn(move || {
+        let guard = shared.snapshot.lock();
+        held.send(()).unwrap();
+        std::thread::sleep(hold);
+        drop(guard);
+    });
+    holding.recv().unwrap();
+    holder
+}
+
+#[test]
+fn the_passive_wait_keeps_its_deadline_while_a_view_callback_holds_admission() {
+    if !private_case("desktop_service::activation::tests::the_passive_wait_keeps_its_deadline_while_a_view_callback_holds_admission") { return; }
+    let _process = crate::PROCESS_TREE.read().unwrap();
+    tauri::async_runtime::block_on(async {
+        let fixture = Fixture::new(json!({"ready": false}));
+        let (service, epoch) = passive_service(&fixture).await;
+        *service.shared.activation_retry.lock().unwrap() = Some(Duration::from_millis(25));
+        let holder = hold_admission(&service, Duration::from_secs(3));
+        let started = Instant::now();
+        let reread = passive(&service.shared, &AtomicBool::new(false), &epoch).await;
+        let elapsed = started.elapsed();
+        holder.join().unwrap();
+        assert!(reread, "the deadline schedules a fresh read");
+        assert!(
+            elapsed < Duration::from_millis(1500),
+            "waited {elapsed:?} for the admission lock"
+        );
+        service.join().await.unwrap();
+    });
+}
+
+#[test]
+fn stopping_the_passive_wait_does_not_wait_for_a_held_admission_lock() {
+    if !private_case("desktop_service::activation::tests::stopping_the_passive_wait_does_not_wait_for_a_held_admission_lock") { return; }
+    let _process = crate::PROCESS_TREE.read().unwrap();
+    tauri::async_runtime::block_on(async {
+        let fixture = Fixture::new(json!({"ready": false}));
+        let (service, epoch) = passive_service(&fixture).await;
+        // The production minute: only the stop can end this wait early.
+        assert!(service.shared.activation_retry.lock().unwrap().is_none());
+        let holder = hold_admission(&service, Duration::from_secs(3));
+        let stop = Arc::new(AtomicBool::new(false));
+        let stopper = {
+            let stop = stop.clone();
+            std::thread::spawn(move || {
+                std::thread::sleep(Duration::from_millis(20));
+                stop.store(true, Ordering::Release);
+            })
+        };
+        let started = Instant::now();
+        let reread = passive(&service.shared, &stop, &epoch).await;
+        let elapsed = started.elapsed();
+        stopper.join().unwrap();
+        holder.join().unwrap();
+        assert!(!reread, "a stopped wait never reads again");
+        assert!(
+            elapsed < Duration::from_millis(1500),
+            "stop waited {elapsed:?} for the admission lock"
+        );
         service.join().await.unwrap();
     });
 }

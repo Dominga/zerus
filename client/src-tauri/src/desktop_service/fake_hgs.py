@@ -544,6 +544,9 @@ elif args == ['desktop', 'frontend-request', '--json']:
         # (src/desktop/delivery.rs passive_frontend_request).
         passive = config.get('activation_passive', 0)
         if n <= passive:
+            if n == 1 and config.get('activation_passive_hold'):
+                # A barrier: the test installs its seams before the first refusal.
+                wait(root / 'release-first-passive')
             print(json.dumps({'request_id': request['request_id'], 'accepted': False, 'durable': False,
                               'code': 'desktop_background_unavailable'}), flush=True)
             raise SystemExit(0)

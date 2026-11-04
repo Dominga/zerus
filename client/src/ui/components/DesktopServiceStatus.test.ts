@@ -1,6 +1,9 @@
 import { describe, expect, it } from "vitest";
 import { servicePaused, serviceStatus } from "../../store/desktopService";
 import type { DesktopService, NotificationOwnership } from "../../types";
+// Produced by the native passive_projection_tests from the root's passive status
+// and the platform-manual activation view (Windows); never hand-written here.
+import windowsPassive from "../../../fixtures/desktop-service-windows-passive.json";
 
 const healthy = (patch: Partial<DesktopService> = {}): DesktopService => ({ connected: true, epoch: "fixture", generation: 1,
   background: Object.fromEntries(["fleet", "presence", "reads", "attention", "approvals"].map((key) => [key, { ready: true, code: "ready" }])),
@@ -14,11 +17,15 @@ const passive = (patch: Partial<DesktopService> = {}, ownership: Partial<Notific
   background: notStarted, code: "background_unready", details_available: false,
   notification_ownership: { ...rearm, status: { ...rearm.status!, state: "service", rearm_required: false }, activation, ...ownership }, ...patch });
 
+const SETTINGS_BODY = "Zerus runs your sessions through a background service, which stays paused until you turn it on in Settings.";
+const windows = (patch: Partial<DesktopService> = {}): DesktopService => ({ ...(structuredClone(windowsPassive) as unknown as DesktopService), ...patch });
+const windowsOwnership = (patch: (view: NotificationOwnership) => NotificationOwnership) => windows({ notification_ownership: patch(windows().notification_ownership!) });
+
 describe("passive service", () => {
   it("is paused only while connected, with no background work started and Resume offered", () => {
-    expect(servicePaused(undefined)).toBe(false);
-    expect(servicePaused(passive())).toBe(true);
-    expect(servicePaused(passive({ code: "explicit_handoff_required" }))).toBe(true);
+    expect(servicePaused(undefined)).toBeUndefined();
+    expect(servicePaused(passive())).toBe("resume");
+    expect(servicePaused(passive({ code: "explicit_handoff_required" }))).toBe("resume");
   });
   it.each<[string, DesktopService]>([
     ["disconnected", passive({ connected: false })],
@@ -34,17 +41,21 @@ describe("passive service", () => {
     ["no activation offer", passive({}, { activation: undefined })],
     ["a settled activation", passive({}, { activation: { ...activation, needs_resume: false, code: "" } })],
   ])("is not paused when %s", (_, state) => {
-    expect(servicePaused(state)).toBe(false);
+    expect(servicePaused(state)).toBeUndefined();
   });
   it("replaces the skeletons, Connecting and the empty detail only while paused without computers", async () => {
     const fs = (await import(/* @vite-ignore */ ["node", "fs"].join(":"))) as { readFileSync(path: URL, encoding: "utf8"): string };
     const read = (path: string) => fs.readFileSync(new URL(path, import.meta.url), "utf8");
     const component = read("./DesktopServiceStatus.tsx");
-    expect(component).toContain("servicePaused(desktopService.state()) && !Object.keys(catalog.computers).length");
+    expect(component).toContain("!!servicePaused(desktopService.state()) && !Object.keys(catalog.computers).length");
     const detail = component.match(/export function PausedServiceDetail[\s\S]*?\n}\n/)?.[0] ?? "";
     expect(detail).toContain('tr("Background work is paused")');
+    expect(detail).toContain('servicePaused(desktopService.state()) === "settings"');
     expect(detail).toContain('tr("Zerus runs your sessions through a background service, which stays paused until you resume it.")');
     expect(detail).toMatch(/class="btn primary" disabled=\{resumeBlocked\(\)\} onClick=\{resume\}>\{tr\("Resume background work"\)\}/);
+    expect(detail).toContain(`tr("${SETTINGS_BODY}")`);
+    expect(detail).toMatch(/class="btn primary" onClick=\{openServiceSettings\}>\{tr\("Open background service settings"\)\}/);
+    expect(component).toContain('const openServiceSettings = () => void import("../screens/settings/sections").then(({ openSettings }) => openSettings("about"));');
     expect(component).toContain("const resume = () => void ownershipActions.rearm()");
     expect(component).toContain("ownershipActions.busy() || !!desktopService.state()?.notification_ownership?.running");
     expect(read("../sessions/SessionDetail.tsx")).toMatch(/function EmptyDetail\(\) \{\s*return \(\s*<Show when=\{!servicePausedEmpty\(\)\} fallback=\{<PausedServiceDetail \/>\}>/);
@@ -52,6 +63,37 @@ describe("passive service", () => {
     expect(list.indexOf("<Show when={!servicePausedEmpty()}")).toBeGreaterThan(-1);
     expect(list.indexOf("<Show when={!servicePausedEmpty()}")).toBeLessThan(list.indexOf("skel-card"));
     expect(read("../../App.tsx")).toContain('fallback={<Show when={!servicePaused(desktopService.state())}><span>{props.mode() === "starting" ? tr("Starting…") : tr("Connecting…")}</span></Show>}');
+  });
+});
+
+describe("Windows passive service (the actual native projection)", () => {
+  it("has no native activation route and offers no Resume", () => {
+    expect(windows().notification_ownership?.activation).toEqual({ pending: false, running: false, needs_resume: false, code: "activation_platform_manual" });
+    expect(windows().code).toBe("background_unready");
+  });
+  it("is paused with the Settings action, and the footer offers neither Retry nor Resume", () => {
+    expect(servicePaused(windows())).toBe("settings");
+    expect(serviceStatus(windows())).toEqual({ label: "Background access paused", details: SETTINGS_BODY, healthy: false,
+      retry: false, review: false, ownership: undefined, manualRefresh: false });
+  });
+  it.each<[string, DesktopService]>([
+    ["disconnected", windows({ connected: false })],
+    ["one component started", windows({ background: { ...windows().background, fleet: { ready: false, code: "warming" } } })],
+    ["ready", windows({ background: Object.fromEntries(Object.keys(windows().background).map((key) => [key, { ready: true, code: "running" }])), code: "" })],
+    ["manual refresh", windows({ executable_upgrade: { state: "manual_refresh_required" } })],
+    ["an unconfirmed ownership change", windowsOwnership((view) => ({ ...view, pending: true }))],
+    ["revoked background access", windowsOwnership((view) => ({ ...view, status: { ...view.status!, state: "revoked", rearm_required: true } }))],
+    ["native recovery", windowsOwnership((view) => ({ ...view, native_recovery: true }))],
+    ["a changed frontend identity", windowsOwnership((view) => ({ ...view, status: { ...view.status!, state: "identity_changed", identity_current: false } }))],
+    ["an unknown activation code", windowsOwnership((view) => ({ ...view, activation: { ...view.activation!, code: "activation_status_unavailable" } }))],
+  ])("is not paused when %s", (_, state) => {
+    expect(servicePaused(state)).toBeUndefined();
+    expect(serviceStatus(state)?.details).not.toContain(SETTINGS_BODY);
+  });
+  it("keeps the existing recovery actions when ownership itself needs one", () => {
+    const revoked = windowsOwnership((view) => ({ ...view, status: { ...view.status!, state: "revoked", rearm_required: true } }));
+    expect(serviceStatus(revoked)).toMatchObject({ ownership: "rearm" });
+    expect(serviceStatus(windows({ connected: false }))).toMatchObject({ retry: true, label: "Background service unavailable" });
   });
 });
 

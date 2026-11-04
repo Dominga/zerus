@@ -58,11 +58,12 @@ fn actual_root_status_controls_client_readiness_but_never_blocks_connected_disab
         "/../fixtures/desktop-delivery-status.json"
     )))
     .unwrap();
-    assert_eq!(cases.len(), 7);
+    assert_eq!(cases.len(), 8);
     for case in cases {
         let label = case["case"].as_str().unwrap();
         let status = &case["status"];
         let (reads, approvals, enabled) = match label {
+            "passive" => (false, false, Some(false)),
             "awaiting_handoff" => (false, false, None),
             "disabled_but_ready" | "read_degraded" => (label != "read_degraded", true, Some(false)),
             "enabled" => (true, true, Some(true)),

@@ -7,18 +7,30 @@ import { tr } from "../../i18n";
 import { MigrationReportDialog } from "./MigrationReportDialog";
 
 /** A connected passive service that lists no computers yet; the main area explains it. */
-export const servicePausedEmpty = () => servicePaused(desktopService.state()) && !Object.keys(catalog.computers).length;
+export const servicePausedEmpty = () => !!servicePaused(desktopService.state()) && !Object.keys(catalog.computers).length;
 
 const resume = () => void ownershipActions.rearm().catch(error => toast(tr("Background service"), String(error), "error", true));
 const resumeBlocked = () => ownershipActions.busy() || !!desktopService.state()?.notification_ownership?.running;
+/** Settings > About holds the service mode review and choice. */
+const openServiceSettings = () => void import("../screens/settings/sections").then(({ openSettings }) => openSettings("about"));
 
-/** The empty main area while background work is paused, with Resume as its one action. */
+/**
+ * The empty main area while background work is paused. Its one action is
+ * Resume where the native helper offers it, otherwise the Settings page where
+ * the mode is chosen (Windows).
+ */
 export function PausedServiceDetail() {
+  const settings = () => servicePaused(desktopService.state()) === "settings";
   return (
     <div class="detail-empty paused-service">
       <h2>{tr("Background work is paused")}</h2>
-      <p>{tr("Zerus runs your sessions through a background service, which stays paused until you resume it.")}</p>
-      <button type="button" class="btn primary" disabled={resumeBlocked()} onClick={resume}>{tr("Resume background work")}</button>
+      <Show when={settings()} fallback={<>
+        <p>{tr("Zerus runs your sessions through a background service, which stays paused until you resume it.")}</p>
+        <button type="button" class="btn primary" disabled={resumeBlocked()} onClick={resume}>{tr("Resume background work")}</button>
+      </>}>
+        <p>{tr("Zerus runs your sessions through a background service, which stays paused until you turn it on in Settings.")}</p>
+        <button type="button" class="btn primary" onClick={openServiceSettings}>{tr("Open background service settings")}</button>
+      </Show>
     </div>
   );
 }
@@ -41,9 +53,7 @@ export function DesktopServiceStatus(props: { counts?: boolean }) {
         <button type="button" class="btn small ghost" aria-label={tr("Review migration report")} onClick={(event) => setReviewOrigin(event.currentTarget)}>{tr("Review")}</button>
       </Show>
       <Show when={view().manualRefresh && !props.counts}>
-        <button type="button" class="btn small ghost" onClick={() => {
-          void import("../screens/settings/sections").then(({ openSettings }) => openSettings("about"));
-        }}>{tr("Review service update")}</button>
+        <button type="button" class="btn small ghost" onClick={openServiceSettings}>{tr("Review service update")}</button>
       </Show>
       <Show when={view().retry}><button type="button" class="btn small ghost" onClick={() => void retryDesktopService().catch(error => toast(tr("Background service"), String(error), "error", true))}>{tr("Retry now")}</button></Show>
       <Show when={view().ownership === "check"} fallback={

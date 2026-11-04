@@ -211,6 +211,40 @@ class TrayUpdate(unittest.TestCase):
         self.assertIn("'second'", previous.read_text())
         self.assertEqual([variant for variant, _ in self.running()], ['third'])
 
+    def test_unregistered_current_cli_qt_update_only_reads_the_registration(self):
+        # The current CLI reports the lifecycle ABI even when no service exists.
+        # Exercise the full updater with that shape and a helper that refuses
+        # any install, like an agent-descended caller. It must never get one.
+        self.env['REVOCATION_LIFECYCLE'] = 'unavailable'
+        source = self.root / 'updater-source'
+        (source / 'tray').mkdir(parents=True)
+        (source / 'scripts').mkdir()
+        updater = source / 'tray/update-installed.py'
+        shutil.copy2(UPDATER, updater)
+        helper = source / 'scripts/install-linux-desktop-service.py'
+        self.script(helper, f'#!{sys.executable}\n'
+                    'import json, os, pathlib, sys\n'
+                    'root = pathlib.Path(os.environ["TRAY_FIXTURE"])\n'
+                    'with (root / "qt-helper.calls").open("a") as out:\n'
+                    '    out.write(json.dumps(sys.argv[1:]) + "\\n")\n'
+                    'if sys.argv[1] != "status":\n'
+                    '    print("agent-descended frontend request refused", file=sys.stderr)\n'
+                    '    raise SystemExit(1)\n'
+                    'print(json.dumps({"schema":1,"operation":"status",'
+                    '"configuration":"fixture-configuration","registered":False,"selected_mode":"passive"}))\n')
+        self.build('first', self.installed)
+        built = self.build('second')
+        result = subprocess.run([sys.executable, str(updater), str(built), str(self.installed)],
+                                env=self.env, capture_output=True, text=True, timeout=60)
+        self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
+        self.assertIn("'second'", self.installed.read_text())
+        calls = [json.loads(line) for line in (self.root / 'qt-helper.calls').read_text().splitlines()]
+        self.assertEqual(calls, [['status', '--hgs', str(self.home / '.local/bin/hgs'), '--json']])
+        manager = self.root / 'systemctl'
+        self.assertFalse(manager.exists(), "an unregistered Qt update must not invoke the service manager")
+        self.assertFalse((self.home / '.config/systemd/user/hgs-desktop.service').exists())
+        self.assertFalse((self.home / '.config/systemd/user/.hgs-desktop.zerus-registration.json').exists())
+
     def test_gui_without_a_signal_handler_is_never_killed(self):
         old = self.launch('old')
         result = self.update(self.build('second'))
@@ -313,6 +347,7 @@ class TrayUpdate(unittest.TestCase):
             helper = self.root / 'scripts/install-linux-desktop-service.py'
             helper.parent.mkdir(parents=True, exist_ok=True)
             shutil.copy2(REPO / 'scripts/desktop-revoke-hold.py', helper.with_name('desktop-revoke-hold.py'))
+            shutil.copy2(REPO / 'scripts/desktop-service-activation.py', helper.with_name('desktop-service-activation.py'))
             self.script(helper, f'#!{sys.executable}\nimport json, os, pathlib, sys\n'
                         'with (pathlib.Path(os.environ["TRAY_FIXTURE"]) / "desktop-service.calls").open("a") as log:\n'
                         '    log.write(json.dumps(sys.argv[1:]) + "\\n")\n'

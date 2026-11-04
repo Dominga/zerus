@@ -9,6 +9,8 @@ mod catalog_read;
 mod catalog_relay;
 mod counts;
 mod creation_clone;
+mod creation_worktree;
+pub(crate) mod creation_launch;
 #[cfg(any(target_os = "linux", target_os = "macos"))]
 mod custody;
 mod delivery;
@@ -1019,6 +1021,31 @@ fn serve(config: &Config, location: Location, background_mode: bool) -> Result<(
                             .is_some_and(|v| v["op"] == "creation_clone_result")
                         {
                             creation_clone::query(&store, hello.request.as_ref().unwrap())
+                        } else if hello
+                            .request
+                            .as_ref()
+                            .is_some_and(|v| v["op"] == "creation_worktree_result")
+                        {
+                            creation_worktree::query(&store, hello.request.as_ref().unwrap())
+                        } else if hello
+                            .request
+                            .as_ref()
+                            .is_some_and(|v| v["op"] == "creation_launch_result")
+                        {
+                            creation_launch::query(&store, hello.request.as_ref().unwrap())
+                        } else if hello
+                            .request
+                            .as_ref()
+                            .is_some_and(|v| v["op"] == "task_start_reconcile_result")
+                        {
+                            #[cfg(any(target_os = "linux", target_os = "macos"))]
+                            {
+                                task_start_reconcile::query(&store, hello.request.as_ref().unwrap())
+                            }
+                            #[cfg(not(any(target_os = "linux", target_os = "macos")))]
+                            {
+                                json!({"read_only":true,"code":"task_start_result_unavailable"})
+                            }
                         } else if hello.request.as_ref().is_some_and(|v| {
                             matches!(
                                 v["op"].as_str(),

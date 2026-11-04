@@ -27,10 +27,11 @@ if mode=='wait':
  while not (p/'release').exists():
   if time.monotonic()>=end: os._exit(71)
   time.sleep(.002)
-if mode in ('pipe','pipe-no-lock'):
+if mode in ('pipe','pipe-no-lock','lock-only'):
  pid=os.fork()
  if pid==0:
   os.close(0);os.close(2)
+  if mode=='lock-only': os.close(1)
   if mode=='pipe-no-lock':
    # InheritedLock preserves its original descriptor, not a fixed fd 3.
    # Keep only stdout so this branch tests the reader's resource custody.
@@ -677,6 +678,156 @@ fn later_explicit_lookup_uses_old_original_admission_and_a_separate_attempt_afte
             .unwrap(),
         "submitted"
     );
+}
+
+fn original_result_query(f: &Fixture) -> wire::Query {
+    wire::Query {
+        request_id: uuid::Uuid::new_v4().to_string(),
+        scope: f.intent.scope.clone(),
+        reconcile_id: f.intent.reconcile_id.clone(),
+        binding: f.intent.binding.clone(),
+    }
+}
+fn original_result(f: &Fixture, query: &wire::Query) -> wire::Lookup {
+    let before = f.store.db.total_changes();
+    let value = super::query(
+        &f.store,
+        &json!({"op":"task_start_reconcile_result","query":query}),
+    );
+    assert_eq!(f.store.db.total_changes(), before);
+    let reply: wire::Lookup = serde_json::from_value(value.clone())
+        .unwrap_or_else(|_| panic!("invalid result metadata: {value}"));
+    assert!(reply.matches(query), "{value}");
+    reply
+}
+#[test]
+fn result_lookup_missing_and_completed_are_exact_reads_without_another_worker() {
+    let mut f = Fixture::new("reply");
+    let q = original_result_query(&f);
+    let absent = original_result(&f, &q);
+    assert!(!absent.found);
+    assert!(absent.attempt.is_none());
+    assert_eq!(f.counts(), (0, 0, 0));
+    assert!(!f.path("entered").exists());
+    f.request();
+    f.until(|f| f.runtime.work.is_none());
+    let before = f.counts();
+    let changed = fs::metadata(f.path("input")).unwrap().modified().unwrap();
+    let found = original_result(&f, &q);
+    let attempt = found.attempt.unwrap();
+    assert!(attempt.drained);
+    assert_eq!(attempt.phase, wire::Phase::Submitted);
+    let receipt = attempt.submitted(&q).unwrap();
+    assert_eq!(receipt.id, f.intent.binding.key.request_id);
+    assert_eq!(
+        serde_json::to_value(&attempt.ticket).unwrap(),
+        f.store
+            .db
+            .query_row::<String, _, _>("SELECT ticket FROM desktop_operation_attempts", [], |r| r
+                .get(0))
+            .map(|v| serde_json::from_str::<Value>(&v).unwrap())
+            .unwrap()
+    );
+    assert_eq!(f.counts(), before);
+    assert_eq!(
+        fs::metadata(f.path("input")).unwrap().modified().unwrap(),
+        changed
+    );
+    let mut absent = q.clone();
+    absent.reconcile_id = uuid::Uuid::new_v4().to_string();
+    let missing = original_result(&f, &absent);
+    assert!(!missing.found);
+    assert!(missing.attempt.is_none());
+    assert_eq!(f.counts(), before);
+}
+#[test]
+fn result_lookup_does_not_promote_submitted_metadata_while_original_kernel_custody_is_held() {
+    let mut f = Fixture::new("lock-only");
+    f.request();
+    f.until(|f| f.path("survivor").exists());
+    f.until(|f| matches!(f.runtime.work, Some(Work::Draining { .. })));
+    let q = original_result_query(&f);
+    let held = original_result(&f, &q).attempt.unwrap();
+    assert_eq!(held.phase, wire::Phase::Submitted);
+    assert!(!held.drained);
+    assert!(held.submitted(&q).is_none());
+    let (_, record) = ledger::custody::pending(&f.store.db).unwrap().unwrap();
+    assert!(matches!(
+        custody::probe(&f.runtime.location, &record.unwrap()),
+        custody::Observation::Held
+    ));
+    fs::write(f.path("release"), b"original actual custody release").unwrap();
+    f.until(|f| f.runtime.work.is_none());
+    let drained = original_result(&f, &q).attempt.unwrap();
+    assert!(drained.drained);
+    assert_eq!(drained.ticket, held.ticket);
+    assert_eq!(drained.outcome, held.outcome);
+    assert!(drained.submitted(&q).is_some());
+    assert_eq!(f.counts(), (1, 1, 1));
+}
+#[test]
+fn result_lookup_keeps_reserved_and_restarted_unknown_separate_from_drain() {
+    let mut f = Fixture::new("wait");
+    f.request();
+    f.until(|f| f.path("entered").exists());
+    let mut q = original_result_query(&f);
+    let reserved = original_result(&f, &q).attempt.unwrap();
+    assert_eq!(reserved.phase, wire::Phase::Reserved);
+    assert!(!reserved.drained);
+    assert!(reserved.submitted(&q).is_none());
+    let old = reserved.ticket.clone();
+    let next = uuid::Uuid::new_v4().to_string();
+    f.store = Store::open(&f.runtime.location, &next).unwrap();
+    q.scope.service_epoch = next;
+    let unknown = original_result(&f, &q).attempt.unwrap();
+    assert_eq!(unknown.ticket, old);
+    assert_eq!(unknown.phase, wire::Phase::Unknown);
+    assert!(!unknown.drained);
+    assert!(unknown.submitted(&q).is_none());
+    fs::write(f.path("release"), b"original actual release").unwrap();
+    f.until(|f| f.runtime.work.is_none());
+    let drained = original_result(&f, &q).attempt.unwrap();
+    assert_eq!(drained.ticket, old);
+    assert_eq!(drained.phase, wire::Phase::Unknown);
+    assert!(drained.drained);
+    assert!(drained.submitted(&q).is_none());
+    assert_eq!(f.counts(), (1, 1, 1));
+}
+#[test]
+fn result_lookup_refuses_changed_scope_original_and_malformed_requests_without_writes() {
+    let mut f = Fixture::new("reply");
+    f.request();
+    f.until(|f| f.runtime.work.is_none());
+    let q = original_result_query(&f);
+    let before = f.store.db.total_changes();
+    for change in 0..7 {
+        let mut bad = q.clone();
+        match change {
+            0 => bad.scope.service_epoch = uuid::Uuid::new_v4().to_string(),
+            1 => bad.binding.source_record_sha256 = "f".repeat(64),
+            2 => bad.binding.executor.run_id = uuid::Uuid::new_v4().to_string(),
+            3 => bad.binding.key.request_id = uuid::Uuid::new_v4().to_string(),
+            4 => bad.binding.key.task = uuid::Uuid::new_v4().to_string(),
+            5 => bad.binding.key.project = "other".into(),
+            _ => bad.binding.ui_snapshot_sha256 = "f".repeat(64),
+        }
+        let reply = super::query(
+            &f.store,
+            &json!({"op":"task_start_reconcile_result","query":bad}),
+        );
+        assert_eq!(
+            reply["code"], "task_start_result_unavailable",
+            "{change}:{reply}"
+        );
+    }
+    let mut body = json!({"op":"task_start_reconcile_result","query":q});
+    body["permit"] = json!(true);
+    assert_eq!(
+        super::query(&f.store, &body)["code"],
+        "task_start_result_unavailable"
+    );
+    assert_eq!(f.store.db.total_changes(), before);
+    assert_eq!(f.counts(), (1, 1, 1));
 }
 
 fn native_cli(f: &Fixture, args: &[&str], input: Option<Vec<u8>>) -> Value {

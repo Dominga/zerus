@@ -1,0 +1,184 @@
+//! One native launch intent, then only scoped reads of its original result.
+//! The admitted service launch survives this reader and the entire GUI
+//! exiting. It shares clone's scoped, current-service reader; nothing else is
+//! shared.
+use super::creation_clone::Read;
+use super::*;
+use std::time::Instant;
+use zerus_client_core::{
+    creation,
+    desktop::{creation_launch as wire, ui_requests::Request},
+};
+
+/// A launch this client never sent: nothing reached the service, so the
+/// reducer retires its unused launch ID and Continue setup can start it.
+pub(crate) const NOT_SENT: &str = zerus_client_core::source!(
+    "The agent was not started: the launch was not sent to the desktop service. Continue setup to start it."
+);
+/// The longest a launch takes to settle: the direct path's 90-second launch,
+/// its drain and a margin.
+const SETTLE: Duration = Duration::from_secs(150);
+
+/// What the service says about one original launch.
+#[derive(Debug, PartialEq, Eq)]
+pub(crate) enum LaunchAnswer {
+    /// The original child exited 0 after its drain: launch-command success.
+    Launched,
+    /// The original failed or its result is unknown, with the detail the
+    /// reducer records; it is never sent again.
+    Unconfirmed(String),
+    /// This launch never left the client: it had no fresh consent, or it
+    /// stopped before its admission request was written.
+    Unsent(String),
+    /// A completed capability probe found no launch support on the selected
+    /// service, so nothing of this kind reached it: the unchanged direct path
+    /// launches it.
+    Direct,
+}
+
+/// The reducer's answer for a settled original, as the direct path reads its
+/// exit: success advances, anything else is the launch's error.
+fn settled(receipt: &wire::Receipt, plan: &wire::Plan) -> Option<LaunchAnswer> {
+    Some(match receipt.result(plan)? {
+        Ok(()) => LaunchAnswer::Launched,
+        Err(error) => LaunchAnswer::Unconfirmed(error),
+    })
+}
+
+/// Called only by the native creation host for its exact durable launch
+/// checkpoint. `fresh` is the host's one-use consent for this launch (a
+/// direct or task Submit, or an explicit Continue for exactly this step),
+/// consumed before this call, never from JSON.
+///
+/// The reducer dispatches a launch only with a launch ID it reserved in this
+/// process, so a launch without fresh consent, or one that stops before its
+/// admission request is written, was never sent: `Unsent`. Only a completed
+/// probe without the kind routes it to the direct path. A lost admission
+/// reply falls through to the bounded read-only lookup. A missing or Unknown
+/// result of a sent original never authorizes a resend or the direct path.
+pub(crate) fn call(
+    service: Option<Arc<Service>>,
+    id: &str,
+    operation: &Value,
+    fresh: bool,
+    shutdown: &AtomicBool,
+) -> LaunchAnswer {
+    let sent = std::cell::Cell::new(false);
+    let result = (|| -> Result<LaunchAnswer, ()> {
+        let read = Read::new(service).map_err(drop)?;
+        if !creation::valid_operation(id, operation) {
+            return Err(());
+        }
+        // Only a completed probe can prove no support; an I/O error cannot.
+        if !read.supports(wire::HELP_MARKER).map_err(drop)? {
+            return Ok(LaunchAnswer::Direct);
+        }
+        if !fresh {
+            return Err(());
+        }
+        let plan = wire::Plan::from_operation(id, operation).ok_or(())?;
+        let until = Instant::now() + RPC_WAIT;
+        let charge = loop {
+            if shutdown.load(Ordering::Acquire) || !read.current() || Instant::now() >= until {
+                return Err(());
+            }
+            match read.service.shared.creation_rpc.admit(Role::Fleet) {
+                Ok(charge) => break charge,
+                Err(zerus_client_core::desktop::drain::Refused::Capacity) => {
+                    std::thread::sleep(Duration::from_millis(10))
+                }
+                Err(_) => return Err(()),
+            }
+        };
+        let intent = wire::Intent {
+            scope: read.scope.clone(),
+            creation_id: id.into(),
+            launch_id: plan.launch_id.clone(),
+            revision: operation["revision"].as_u64().ok_or(())?,
+            original: serde_json::to_string(operation).map_err(drop)?,
+        };
+        intent.clone().verify().map_err(drop)?;
+        sent.set(true);
+        // A lost or unreadable reply may still have been admitted: only
+        // the read-only lookup below can tell.
+        let admission = read
+            .exchange(
+                Some(Request::CreationLaunch {
+                    intent: Box::new(intent.clone()),
+                }),
+                Value::Null,
+                false,
+                Some(charge),
+            )
+            .ok()
+            .and_then(|bytes| serde_json::from_slice::<wire::Admission>(&bytes).ok());
+        if let Some(admission) = admission {
+            if !admission.matches(&intent) {
+                return Err(());
+            }
+            if let Some(answer) = admission.receipt.and_then(|r| settled(&r, &plan)) {
+                return Ok(answer);
+            }
+        }
+        let until = Instant::now() + SETTLE;
+        let mut delay = Duration::from_millis(250);
+        loop {
+            if shutdown.load(Ordering::Acquire) || !read.current() {
+                return Err(());
+            }
+            let query = wire::Query::for_plan(read.scope.clone(), id.into(), &plan).ok_or(())?;
+            let bytes = read
+                .exchange(
+                    None,
+                    json!({"op":"creation_launch_result","query":query}),
+                    false,
+                    None,
+                )
+                .map_err(drop)?;
+            let lookup: wire::Lookup = serde_json::from_slice(&bytes).map_err(drop)?;
+            if !lookup.matches(&query) {
+                return Err(());
+            }
+            let receipt = lookup.receipt.ok_or(())?; // Missing never authorizes Start.
+            if let Some(answer) = settled(&receipt, &plan) {
+                return Ok(answer);
+            }
+            if receipt.drained || Instant::now() >= until {
+                return Err(());
+            }
+            let next = Instant::now() + delay;
+            while Instant::now() < next {
+                if shutdown.load(Ordering::Acquire) || !read.current() {
+                    return Err(());
+                }
+                std::thread::sleep(Duration::from_millis(25));
+            }
+            delay = (delay * 2).min(Duration::from_secs(5));
+        }
+    })();
+    result.unwrap_or_else(|()| {
+        if sent.get() {
+            LaunchAnswer::Unconfirmed(zerus_client_core::repository::UNCONFIRMED_OPERATION.into())
+        } else {
+            // Nothing reached the service: never Unknown.
+            LaunchAnswer::Unsent(NOT_SENT.into())
+        }
+    })
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn a_launch_that_never_reached_the_service_is_unsent_never_unknown() {
+        let stopped = AtomicBool::new(false);
+        // No selected service: nothing was sent, with or without consent.
+        for fresh in [true, false] {
+            assert_eq!(
+                call(None, "c", &json!({}), fresh, &stopped),
+                LaunchAnswer::Unsent(NOT_SENT.into())
+            );
+        }
+    }
+}

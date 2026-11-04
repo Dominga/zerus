@@ -587,3 +587,72 @@ fn a_receipt_whose_length_disagrees_with_its_parts_refuses() {
         assert_eq!(evidence(&folder.0), Evidence::Unreadable);
     }
 }
+
+/// The stat-only status agrees with the full read on every outcome it can
+/// see without the original's bytes.
+#[test]
+fn the_stat_only_status_follows_the_capture() {
+    let folder = Folder::new();
+    folder.plain("a.txt", b"a", 90_000);
+    assert_eq!(status(&folder.0), Evidence::None);
+    assert_eq!(ON.trim(&folder.0, 0, NOW).error, None);
+    assert_eq!(status(&folder.0), evidence(&folder.0));
+    assert!(matches!(status(&folder.0), Evidence::Captured(_)));
+    // Damage that keeps the length: both refuse to call it captured.
+    let (canonical, object, birth) = super::folder(&folder.0).unwrap();
+    let slot = slot(&canonical, &object, birth.as_deref());
+    let length = fs::metadata(slot.join("original.bin")).unwrap().len() as usize;
+    std::thread::sleep(std::time::Duration::from_millis(20));
+    fs::write(slot.join("original.bin"), vec![b' '; length]).unwrap();
+    assert_eq!(status(&folder.0), Evidence::Unreadable);
+    assert_eq!(evidence(&folder.0), Evidence::Unreadable);
+}
+
+/// review-n P2 on #1256: only a verified missing slot is "no evidence". An
+/// evidence folder that cannot be read is Unreadable, as the refused change
+/// says, never None.
+#[cfg(unix)]
+#[test]
+fn an_inaccessible_evidence_folder_is_unreadable_not_missing() {
+    use std::os::unix::fs::PermissionsExt;
+    let folder = Folder::new();
+    folder.plain("a.txt", b"a", 90_000);
+    assert_eq!(ON.trim(&folder.0, 0, NOW).error, None);
+    let dir = folder.0.join(DIR);
+    fs::set_permissions(&dir, fs::Permissions::from_mode(0o000)).unwrap();
+    // Root bypasses permissions: nothing to check then.
+    let blocked = fs::read_dir(&dir).is_err();
+    let (status, full, trimmed) = (
+        status(&folder.0),
+        evidence(&folder.0),
+        ON.trim(&folder.0, 0, NOW).error,
+    );
+    fs::set_permissions(&dir, fs::Permissions::from_mode(0o700)).unwrap();
+    if blocked {
+        assert_eq!(status, Evidence::Unreadable);
+        assert_eq!(full, Evidence::Unreadable);
+        assert_eq!(trimmed.as_deref(), Some(NOT_RECORDED));
+    }
+}
+
+/// review-n P2 on #1256: a slot the writer made but had not yet published
+/// (no seed, no receipt) is "no evidence", as the writer treats it; a
+/// receipt without its seed stays Unreadable.
+#[test]
+fn an_unpublished_slot_is_none_and_a_receipt_without_its_seed_is_unreadable() {
+    let folder = Folder::new();
+    folder.plain("old.txt", b"old cache", 90_000);
+    let (canonical, object, birth) = super::folder(&folder.0).unwrap();
+    let slot = slot(&canonical, &object, birth.as_deref());
+    private_dir(&folder.0.join(DIR));
+    private_dir(&slot);
+    assert_eq!(status(&folder.0), Evidence::None);
+    assert_eq!(evidence(&folder.0), Evidence::None);
+    // The writer recovers that prefix and captures.
+    assert_eq!(ON.trim(&folder.0, 0, NOW).error, None);
+    assert!(matches!(status(&folder.0), Evidence::Captured(_)));
+    // A receipt whose seed is gone is fenced, never "none".
+    fs::remove_file(slot.join("identity.json")).unwrap();
+    assert_eq!(status(&folder.0), Evidence::Unreadable);
+    assert_eq!(evidence(&folder.0), Evidence::Unreadable);
+}

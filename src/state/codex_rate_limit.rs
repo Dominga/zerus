@@ -38,11 +38,13 @@ fn parse(screen: &str) -> Option<Panel> {
     // followed by the ordinary composer or further output is not this panel.
     if end - start > 32
         || rows[start..=end].iter().any(|row| {
-            row.starts_with("› ")
-                && !row
-                    .strip_prefix("› ")
-                    .unwrap()
-                    .starts_with(|c: char| c.is_ascii_digit())
+            // An empty composer becomes a bare marker after trim_end.
+            *row == "›"
+                || (row.starts_with("› ")
+                    && !row
+                        .strip_prefix("› ")
+                        .unwrap()
+                        .starts_with(|c: char| c.is_ascii_digit()))
         })
     {
         return None;

@@ -1,5 +1,5 @@
 import { describe, expect, it, vi } from "vitest";
-import { createDesktopService, createServiceApprovalIntent, pendingReadNotice, retainedSourceNotice, retainedSourceDetails, ownershipNotice, createOwnershipActions } from "./desktopService";
+import { createDesktopService, createServiceApprovalIntent, pendingReadNotice, retainedSourceNotice, retainedSourceDetails, ownershipNotice, createOwnershipActions, serviceStatus } from "./desktopService";
 import { createApprovalOptIn } from "../ui/screens/settings/approval-opt-in";
 import { emptyBatch, isEmptyBatch, type DesktopService, type NotificationOwnership } from "../types";
 import { normalize } from "../bridge";
@@ -85,6 +85,28 @@ describe("desktop service presentation", () => {
     expect(retainedSourceDetails(unavailable)!.worktreeCache?.next).toContain("Restart Zerus");
   });
 
+  it("keeps historical folder-cache publication separate from live persistence and grants", () => {
+    const base = { required: false, complete: true, running: false, code: "retained_import_staged", phase: "published" };
+    const report = { required: true, complete: false, running: false, code: "worktree_cache_import_before_record", phase: "before_record" };
+    const view = (patch = {}) => serviceView({ retained_source_import: { ...base, worktree_cache_report: { ...report, ...patch } } });
+    const state = view(), before = structuredClone(state);
+    expect(retainedSourceNotice(state)).toContain("folder catalog report is deferred");
+    expect(retainedSourceDetails(state)!.worktreeCacheReport?.reason).toContain("not sent because local preparation failed");
+    expect(retainedSourceNotice(view({ running: true }))).toContain("Preparing the historical folder catalog report");
+    const unknown = view({ phase: "unknown" });
+    expect(retainedSourceNotice(unknown)).toContain("never resent");
+    expect(retainedSourceDetails(unknown)!.worktreeCacheReport?.next).toContain("checks the original report");
+    const published = view({ complete: true, phase: "published", code: "worktree_cache_import_staged" });
+    expect(retainedSourceNotice(published)).toBe("");
+    expect(retainedSourceDetails(published)!.worktreeCacheReport?.next).toContain("does not verify today's checkouts");
+    const paused = serviceView({ retained_source_import: { ...state.retained_source_import!, worktree_cache_capture: { code: "worktree_cache_source_changed", paused: true, capture_id: "original" } } });
+    const details = retainedSourceDetails(paused)!;
+    expect(details.worktreeCache?.code).toBe("worktree_cache_source_changed");
+    expect(details.worktreeCacheReport?.code).toBe("worktree_cache_import_before_record");
+    expect(state).toEqual(before); expect(state.connected).toBe(true);
+    expect(state.pending_read_import).toBeUndefined();
+  });
+
   it("reviews the actual migration reason and gives a read-only next step", () => {
     const report = { required: true, complete: false, running: false, code: "retained_import_qt_unavailable", phase: null };
     const state = serviceView({ retained_source_import: report, background: { fleet: { ready: true, code: "ready" } } });
@@ -168,6 +190,21 @@ describe("desktop service presentation", () => {
       expect(retainedSourceDetails(view({ code, writes: true, paused: false }))).toBeUndefined();
     }
     expect(paused.connected).toBe(true);
+  });
+  it("shows the download folder's evidence only when it is incomplete", () => {
+    const report = { required: false, complete: true, running: false, code: "retained_import_staged", phase: "published" };
+    const view = (code: string) => serviceView({ retained_source_import: { ...report, downloads_capture: { code, capture_id: null } } });
+    for (const code of ["download_capture_none", "download_capture_captured"]) {
+      expect(retainedSourceNotice(view(code))).toBe("");
+      expect(retainedSourceDetails(view(code))).toBeUndefined();
+    }
+    const refused = view("download_capture_unreadable");
+    expect(retainedSourceNotice(refused)).toContain("Changes to the downloaded files folder are refused");
+    expect(retainedSourceDetails(refused)!.downloads!.next).toContain("Nothing is recaptured or overwritten");
+    const unsupported = view("download_capture_unsupported");
+    expect(retainedSourceNotice(unsupported)).toBe("");
+    expect(retainedSourceDetails(unsupported)!.downloads!.reason).toContain("cannot be recorded, so it is not part of the migration report");
+    expect(retainedSourceDetails(unsupported)!.downloads!.next).toContain("stays incomplete");
   });
   it("explains the archive and data-directory refusals without changing readiness", () => {
     const report = { required: false, complete: true, running: false, code: "retained_import_staged", phase: "published" };
@@ -302,6 +339,17 @@ describe("notification ownership presentation", () => {
     expect(ownershipNotice(updated)).not.toContain("revoked");
     const current = view(); current.status = { ...current.status!, state: "service", rearm_required: false, identity_current: true };
     expect(ownershipNotice(current)).toBe("");
+  });
+  it("offers explicit activation for retained passive mode and keeps unknown activation on Check", () => {
+    const current = view(); current.status = { ...current.status!, state: "service", rearm_required: false, identity_current: true };
+    current.activation = { pending: false, running: false, needs_resume: true, code: "activation_required" };
+    expect(ownershipNotice(current)).toContain("explicitly");
+    expect(ownershipNotice({ ...current, pending: true })).toContain("Background access is unconfirmed");
+    const status = { connected: true, code: "explicit_handoff_required", background: {}, notification_ownership: current } as DesktopService;
+    expect(serviceStatus(status)?.ownership).toBe("rearm");
+    current.activation = { pending: true, running: false, needs_resume: true, code: "activation_unconfirmed" };
+    expect(ownershipNotice(current)).toContain("original result");
+    expect(serviceStatus(status)?.ownership).toBe("check");
   });
   it("mount and result lookups never grant or rearm; only the explicit action calls its native route", async () => {
     const send = vi.fn(async () => view());

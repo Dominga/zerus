@@ -795,6 +795,9 @@ mod tests {
             2000.,
         )
         .unwrap();
+        // Isolate byte pressure from the count-bound case above: two entries
+        // are well below SNAPSHOTS, but together exceed SNAPSHOT_BYTES.
+        let mut live = Catalogs::new("hgs", None);
         let stamp = live.stamp("", "/srv/fresh");
         let fresh = live
             .accept(
@@ -809,6 +812,52 @@ mod tests {
         assert!(live.saved().to_string().len() <= SNAPSHOT_BYTES);
         assert_eq!(live.snapshot("", "/srv/fresh"), Some(&fresh));
         assert!(live.snapshot("", "/srv/large").is_none());
+    }
+
+    #[test]
+    fn an_overlapping_old_key_cannot_evict_its_fresh_reply_under_count_pressure() {
+        let mut old = Catalogs::new("hgs", None);
+        for i in 0..SNAPSHOTS {
+            let path = if i == 0 {
+                "/srv/fresh".into()
+            } else {
+                format!("/srv/old-{i}")
+            };
+            let stamp = old.stamp("", &path);
+            old.accept(
+                "",
+                &path,
+                &stamp,
+                ok(json!({"state":"ok","worktrees":[],"sampled_at":i,"path":path})),
+                1000.,
+            )
+            .unwrap();
+        }
+        let mut live = Catalogs::new("hgs", None);
+        let mut fresh = Vec::new();
+        for path in ["/srv/fresh", "/srv/new"] {
+            let stamp = live.stamp("", path);
+            let value = live
+                .accept(
+                    "",
+                    path,
+                    &stamp,
+                    ok(json!({"state":"ok","worktrees":[],"sampled_at":2000,"path":path})),
+                    2000.,
+                )
+                .unwrap();
+            fresh.push((path, value));
+        }
+        // The old value for /srv/fresh is the oldest incoming candidate, but
+        // that key now names a fresh reply. Eviction must consider only the
+        // missing legacy folders, not remove the current value at that key.
+        live.restore_saved(Some(old.saved()));
+        assert_eq!(live.snapshots.len(), SNAPSHOTS);
+        for (path, value) in fresh {
+            assert_eq!(live.snapshot("", path), Some(&value));
+        }
+        assert!(live.snapshot("", "/srv/old-1").is_none());
+        assert!(live.snapshot("", "/srv/old-2").is_some());
     }
 
     #[test]

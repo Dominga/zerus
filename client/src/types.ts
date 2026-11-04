@@ -855,6 +855,8 @@ export interface SavedDraftItem {
 }
 /** `next` is an opaque token for the following page. */
 export interface SavedDraftsPage { items: SavedDraftItem[]; next: string | null }
+/** The G3 drafts capture's status (draft_preload::Status), shown in Saved drafts in every mode. */
+export interface DraftCaptureStatus { code: string; capture_id: string | null; manifests: number; writes: boolean; paused: boolean }
 /** The import's conflicts; `next` is the following page's offset. */
 export interface ConflictsPage { items: SavedDraftItem[]; next: number | null }
 export interface SavedDraftDetail { text: string; attachments: number; detail: string; restorable: boolean }

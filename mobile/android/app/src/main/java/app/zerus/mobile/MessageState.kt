@@ -133,9 +133,12 @@ object ConversationMerge {
             var match = named("hgs_delivery") ?: named("opencode_native")
             if (match == null && message.status in listOf("submitted", "recorded") && message.submittedAt > 0) {
                 val text = message.submittedText.ifBlank { message.text }.trim()
+                // A fork's inherited row was never sent from this session: it is
+                // no candidate, so it neither takes the send nor makes it ambiguous.
                 if (text.isNotBlank()) match = result.indices.filter { index ->
                     val event = result[index]
-                    index !in used && event.role == "You" && event.requestId.isBlank() && event.text.trim() == text && abs(event.at - message.submittedAt) <= 10
+                    index !in used && event.role == "You" && event.inheritedFrom.isBlank() && event.requestId.isBlank() &&
+                        event.text.trim() == text && abs(event.at - message.submittedAt) <= 10
                 }.singleOrNull()?.takeIf { index ->
                     outgoing.count { other -> other.belongsTo(target) && other.status in listOf("submitted", "recorded") &&
                         other.submittedAt > 0 && other.submittedText.ifBlank { other.text }.trim() == result[index].text.trim() &&

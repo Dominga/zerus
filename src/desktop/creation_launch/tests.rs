@@ -391,6 +391,43 @@ mod launch_child {
     }
 
     #[test]
+    fn only_a_child_that_never_existed_is_not_started() {
+        let (_temp, _location, _record, held) = lock();
+        let deadline = Instant::now() + Duration::from_secs(20);
+        // A missing program: the spawn itself fails before any child runs.
+        assert_eq!(
+            child::run(
+                std::path::Path::new("/nonexistent/zerus-hgs"),
+                &[],
+                &held,
+                deadline
+            ),
+            Ended::NotStarted
+        );
+        // A refusal inside pre_exec, where custody's own setup runs.
+        child::REFUSE_PRE_EXEC.with(|refuse| refuse.set(true));
+        assert_eq!(
+            child::run(
+                std::path::Path::new("/usr/bin/env"),
+                &["true".into()],
+                &held,
+                deadline
+            ),
+            Ended::NotStarted
+        );
+        // Once a child exists, a later failure is never "not started".
+        assert_eq!(
+            child::run(
+                std::path::Path::new("/bin/sh"),
+                &["-c".into(), "kill -9 $$".into()],
+                &held,
+                deadline
+            ),
+            Ended::Unknown("creation_launch_signalled")
+        );
+    }
+
+    #[test]
     fn the_launch_child_leads_its_own_process_group() {
         let (_temp, _location, _record, held) = lock();
         let mut args = vec!["python3".to_string()];
@@ -571,6 +608,26 @@ mod actor {
                 + Sync
                 + 'static,
         ) -> Self {
+            Self::build(Some(Arc::new(execute)))
+        }
+        /// No executor: the original path runs, and this test image's own
+        /// self-exec refusal stops it before any child.
+        fn unexecuted() -> Self {
+            Self::build(None)
+        }
+        #[allow(clippy::type_complexity)]
+        fn build(
+            execute: Option<
+                Arc<
+                    dyn Fn(
+                            &wire::Plan,
+                            &Arc<zerus_client_core::run::custody::InheritedLock>,
+                        ) -> Ended
+                        + Send
+                        + Sync,
+                >,
+            >,
+        ) -> Self {
             let temp = tempfile::tempdir().unwrap();
             let root = temp.path().canonicalize().unwrap();
             let config = Config {
@@ -601,7 +658,10 @@ mod actor {
             let mut runtime = runtime::Runtime::new(&config, &epoch, owner.clone()).unwrap();
             // This synthetic source/Validated seam tests the actor, not native
             // authentication or an installed frontend authority positive.
-            runtime.fixture_executor(MACHINE, Arc::new(execute));
+            match execute {
+                Some(execute) => runtime.fixture_executor(MACHINE, execute),
+                None => runtime.fixture_machine(MACHINE),
+            }
             runtime.poll(&mut store, Some(exclusion.clone()));
             Self {
                 _temp: temp,
@@ -754,6 +814,45 @@ mod actor {
             f.until("stopped", |f| f.runtime.drained());
             assert_eq!(launches.load(Ordering::SeqCst), 1);
         }
+    }
+
+    /// A drained receipt of a launch that never started: Failed, the closed
+    /// code, no exit; the client's never-sent proof.
+    fn settled_not_started(f: &mut Fixture, original: &Verified) {
+        f.until("settled", |f| f.row(original).receipt.drained);
+        let receipt = f.row(original).receipt;
+        assert_eq!(receipt.phase, Phase::Failed, "{receipt:?}");
+        assert_eq!(receipt.code, wire::NOT_STARTED);
+        assert!(receipt.launch.is_none());
+        assert!(receipt.not_started(&original.plan));
+        assert!(receipt.result(&original.plan).is_none(), "no exit to read");
+        // The same original admitted again returns its settled receipt.
+        assert_eq!(f.admit(original).receipt.unwrap(), receipt);
+        f.runtime.request_stop();
+        f.until("stopped", |f| f.runtime.drained());
+    }
+
+    #[test]
+    fn a_launch_that_never_started_settles_failed_only_after_its_drain() {
+        let launches = Arc::new(AtomicUsize::new(0));
+        let count = launches.clone();
+        // The executor reports the closed pre-child result, as child::run does.
+        let mut f = Fixture::new(move |_, _| {
+            count.fetch_add(1, Ordering::SeqCst);
+            Ended::NotStarted
+        });
+        let original = f.original();
+        assert!(f.admit(&original).accepted);
+        settled_not_started(&mut f, &original);
+        assert_eq!(launches.load(Ordering::SeqCst), 1);
+    }
+
+    #[test]
+    fn the_own_image_refusal_never_starts_the_launch() {
+        let mut f = Fixture::unexecuted();
+        let original = f.original();
+        assert!(f.admit(&original).accepted);
+        settled_not_started(&mut f, &original);
     }
 
     #[test]

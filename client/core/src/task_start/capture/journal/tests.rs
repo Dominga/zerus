@@ -396,8 +396,7 @@ fn missing_journal_beside_its_original_lock_never_creates_another_reconciliation
         &f.intent.binding.key.project,
         &f.intent.binding.key.task
     )
-    .unwrap()
-    .is_none());
+    .is_err());
     assert_eq!(
         Journal::prepare(f.capture().unwrap(), NEXT).err(),
         Some(Error::Unavailable)
@@ -407,6 +406,40 @@ fn missing_journal_beside_its_original_lock_never_creates_another_reconciliation
         Some(Error::Unavailable)
     );
     assert_eq!(names(&f), before);
+}
+
+#[test]
+fn invalid_next_record_is_refused_before_publication_and_replaced_preparation_is_idempotent() {
+    let f = Fixture::new();
+    drop(prepared(&f));
+    saved(&f).discard_prepared(&f.intent.reconcile_id).unwrap();
+    let snapshot = saved(&f);
+    let lock = snapshot.slot.lock(false).unwrap();
+    let before = snapshot.disk.bytes.clone();
+    let mut invalid = snapshot.disk.record.clone();
+    invalid.phase = Phase::Prepared;
+    invalid.previous_cancelled = Some(invalid.intent.reconcile_id.clone());
+    assert!(publish(
+        &snapshot.slot,
+        &snapshot.disk,
+        &invalid,
+        || lock_current(&snapshot.slot, &lock),
+        |f, _| f.sync_all()
+    )
+    .is_err());
+    assert_eq!(
+        fs::read(f.file.with_extension("reconcile")).unwrap(),
+        before
+    );
+    drop(lock);
+    drop(snapshot);
+    let first =
+        Journal::prepare_after_discard(f.capture().unwrap(), NEXT, &f.intent.reconcile_id).unwrap();
+    drop(first);
+    let repeated =
+        Journal::prepare_after_discard(f.capture().unwrap(), NEXT, &f.intent.reconcile_id).unwrap();
+    assert_eq!(repeated.saved().phase(), Phase::Prepared);
+    assert_eq!(repeated.saved().reconcile_id(), NEXT);
 }
 
 #[test]

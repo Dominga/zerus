@@ -918,9 +918,11 @@ pub(super) fn fork(
         "conversation_id":child,"run_id":run,"created":now(),"launch_id":null,"paused":false,
         "fork_parent_id":record["conversation_id"],"fork_source_name":name}))?;
     let _ = fs::remove_file(&pending);
-    // A fork starts in its source session's project (zerus-zjsj).
+    // A fork starts in its source session's project (zerus-zjsj), written
+    // after the bindings lock is released (zerus-wx3k).
+    drop(_guard);
     if let Ok(config) = crate::config::Config::load() {
-        crate::swarm::inherit_fork_project(&config, &target, name, None);
+        crate::swarm::inherit_fork_project(&config, &target, name, None, &run, &json!(child));
     }
     match scope {
         Some(scope) => scope.result(&target, &run, child, None),

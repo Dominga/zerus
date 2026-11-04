@@ -147,7 +147,9 @@ pub(super) fn run(args: &[String]) -> Result<i32> {
     let token = nonempty_env("HGS_RUN_ID").unwrap_or_else(|| uuid::Uuid::new_v4().to_string());
     let pane = backend::current().own_pane()?;
     let cwd = std::env::current_dir().map_err(|e| e.to_string())?;
-    {
+    // The launch's binding is written under the state lock; a fork's inherited
+    // project waits until after it.
+    let fork_project = {
         let _guard = lock(None)?;
         let actual_name = backend::current()
             .pane_info(
@@ -278,17 +280,21 @@ pub(super) fn run(args: &[String]) -> Result<i32> {
         write(&mut record)?;
         // Keep this exact newly-created binding pinned during optional initial
         // placement. A removal/replacement must not inherit the old folder's
-        // inference. The swarm lock is nonblocking and Git shares one 3s cap;
-        // a fork's inherited project retries the lock within its own 3s cap.
+        // inference. The swarm lock is nonblocking and Git shares one 3s cap.
         if infer_project {
             if let Ok(config) = crate::config::Config::load() {
                 crate::swarm::infer_new_session(&config, &name, &cwd);
             }
         }
-        if let Some((source, archive)) = fork_source.filter(|(source, _)| !source.is_empty()) {
-            if let Ok(config) = crate::config::Config::load() {
-                crate::swarm::inherit_fork_project(&config, &name, &source, archive.as_deref());
-            }
+        fork_source
+            .filter(|(source, _)| !source.is_empty())
+            .map(|(source, archive)| (source, archive, record["conversation_id"].clone()))
+    };
+    // A fork's inherited project waits for a busy catalog outside the state
+    // lock, writing only while this run still holds its binding (zerus-wx3k).
+    if let Some((source, archive, conversation)) = fork_project {
+        if let Ok(config) = crate::config::Config::load() {
+            crate::swarm::inherit_fork_project(&config, &name, &source, archive.as_deref(), &token, &conversation);
         }
     }
     std::env::set_var("HGS_RUN_ID", &token);

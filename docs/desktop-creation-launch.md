@@ -42,7 +42,8 @@ service (`client/src-tauri/src/desktop_service/creation_launch.rs`):
   before its admission request is written, was never sent. `launch_unsent`
   then retires the unused launch ID into the history, reserves a new one and
   fails the creation. It stays resumable: an explicit Continue's chain
-  covers the launch.
+  covers the launch. So does a sent launch whose exact original drained
+  receipt proves its child never started (below).
 - **Results.** A Launched original reports launch success, and the session
   listing still binds it. A failed or Unknown original reports the launch as
   unconfirmed, as the direct path's failure does today, and so does a lost
@@ -96,7 +97,15 @@ ticket and result are launch-specific.
   and that process is never stopped.
 - **Settlement.** After the actual resource drain, a recorded exit 0 is
   Launched and any other exit is Failed, read through the direct path's own
-  `launch::launched`. Everything else is Unknown, with its reason as the code.
+  `launch::launched`. A child that never started (a closed internal result,
+  only before any child exists: the own image refused, custody refused, or
+  `spawn` failed, which reports a fork or exec failure before any program
+  code runs) is recorded before the drain under its own internal marker. The
+  drain settles it as Failed with code `creation_launch_not_started` and no
+  exit. Only that exact original drained receipt (`Receipt::not_started`)
+  answers the client as never sent; no error text is matched. Everything
+  else, including any started child's later failure, timeout, a lost result
+  or a restart before the result, is Unknown, with its reason as the code.
 
 ## Wire
 

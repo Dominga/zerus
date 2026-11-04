@@ -51,7 +51,7 @@ pub const ALREADY_EXISTS: &str =
     "Another draft already exists here. Recover the previous one from Saved drafts.";
 /// A write refused for this run: the store's earlier drafts could not be
 /// recorded first (zerus-5wmh.66.5.2.1.2), so nothing is overwritten.
-pub const NOT_RECORDED: &str = "Drafts are not being saved: their earlier versions could not be recorded. Check access to the Zerus data folder, then retry.";
+pub const NOT_RECORDED: &str = "Drafts are not being saved: their earlier versions could not be recorded. Check access to the Zerus data folder, then use Retry in Saved drafts.";
 /// Saved drafts skips larger manifests.
 pub(crate) const MAX_MANIFEST: u64 = 1024 * 1024;
 const PREVIEW_CHARS: usize = 200;

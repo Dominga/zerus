@@ -376,6 +376,11 @@ pub(super) fn running(tx: &Transaction<'_>, row: &Row) -> Result<()> {
     next.revision += 1;
     state(tx, row, &next)
 }
+/// Recorded only by [`not_started`], before the drain; only the drain turns it
+/// into a Failed receipt with [`wire::NOT_STARTED`]. No Unknown code can be
+/// either.
+const NOT_STARTED_PENDING: &str = "awaiting_not_started_drain";
+
 /// Records the original child's drained exit (or none, when it is unknown)
 /// before the resource drain settles the receipt. The exit never changes
 /// once written.
@@ -385,6 +390,20 @@ pub(super) fn result(
     exit: Option<&wire::Exited>,
     code: &str,
 ) -> Result<()> {
+    ensure!(
+        code != NOT_STARTED_PENDING && code != wire::NOT_STARTED,
+        "only the pre-child result records a launch that never started"
+    );
+    record(tx, row, exit, code)
+}
+
+/// Records the closed pre-child result: the original launch child never
+/// started. The receipt stays Unknown until the custody drain settles it.
+pub(super) fn not_started(tx: &Transaction<'_>, row: &Row) -> Result<()> {
+    record(tx, row, None, NOT_STARTED_PENDING)
+}
+
+fn record(tx: &Transaction<'_>, row: &Row, exit: Option<&wire::Exited>, code: &str) -> Result<()> {
     ensure!(!row.receipt.drained, "creation is already drained");
     if let Some(exit) = exit {
         ensure!(
@@ -428,11 +447,16 @@ pub(super) fn drained(
         |r| r.get(0),
     )?;
     let exit: Option<wire::Exited> = exit.map(|v| serde_json::from_str(&v)).transpose()?;
+    // The closed pre-child result, recorded before this drain: nothing ran.
+    let not_started = exit.is_none() && row.receipt.code == NOT_STARTED_PENDING;
     let mut next = row.receipt.clone();
     next.phase = Phase::Unknown;
     next.drained = true;
     next.revision += 1;
-    if let Some(exit) = exit {
+    if not_started {
+        next.phase = Phase::Failed;
+        next.code = wire::NOT_STARTED.into();
+    } else if let Some(exit) = exit {
         next.phase = if exit.code == 0 {
             Phase::Launched
         } else {
@@ -444,7 +468,7 @@ pub(super) fn drained(
             next.launch = None;
         }
     }
-    if next.phase != Phase::Unknown {
+    if next.phase != Phase::Unknown && !not_started {
         next.code.clear();
     } else if next.code.is_empty() || next.code == "awaiting_resource_drain" {
         next.code = "launch_result_unconfirmed".into();

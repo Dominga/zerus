@@ -54,10 +54,21 @@ pub(crate) fn adopt_custody() -> Result<(), String> {
 pub(super) enum Ended {
     /// It exited with `code`, and both output pipes ended, within the deadline.
     Exited { code: i32, stderr: String },
-    /// Its result is unknown, for the named reason: it never started, a signal
-    /// ended it, the deadline passed (the child alone was then killed), or
-    /// another process kept its output open past the deadline.
+    /// It never started: refused before any child existed (the own image, its
+    /// custody, or the spawn itself, which reports a fork or exec failure
+    /// before any program code runs). Nothing ran.
+    NotStarted,
+    /// Its result is unknown, for the named reason: a signal ended it, the
+    /// deadline passed (the child alone was then killed), or another process
+    /// kept its output open past the deadline.
     Unknown(&'static str),
+}
+
+#[cfg(test)]
+thread_local! {
+    /// Makes the next spawn on this thread fail inside `pre_exec`, as a custody
+    /// refusal there would.
+    pub(super) static REFUSE_PRE_EXEC: std::cell::Cell<bool> = const { std::cell::Cell::new(false) };
 }
 
 /// Runs `program args` as the original launch child under `custody`.
@@ -77,10 +88,21 @@ pub(super) fn run(
         .env(CUSTODY_FD, custody.as_raw_fd().to_string());
     let spawned = {
         let _turn = platform::spawn_turn();
-        custody.inherit(&mut command).and_then(|()| command.spawn())
+        custody.inherit(&mut command).and_then(|()| {
+            #[cfg(test)]
+            if REFUSE_PRE_EXEC.with(|refuse| refuse.replace(false)) {
+                // SAFETY: returns an error only; nothing else runs after fork.
+                unsafe {
+                    command.pre_exec(|| Err(std::io::Error::from_raw_os_error(libc::EPERM)));
+                }
+            }
+            command.spawn()
+        })
     };
+    // Only these pre-child branches mean "not started"; once a child exists,
+    // every outcome is its exit or Unknown.
     let Ok(mut child) = spawned else {
-        return Ended::Unknown("creation_launch_not_started");
+        return Ended::NotStarted;
     };
     let stdout = child.stdout.take();
     let stderr_pipe = child.stderr.take();

@@ -89,7 +89,9 @@ pub(crate) type EffectCheck = Arc<dyn Fn() -> Result<(), &'static str> + Send + 
 /// native Grant receipt. Read-only scope, never constructible from JSON.
 pub(crate) struct CurrentGrant(Status);
 impl CurrentGrant {
-    pub(crate) fn status(&self) -> &Status { &self.0 }
+    pub(crate) fn status(&self) -> &Status {
+        &self.0
+    }
 }
 
 pub(crate) struct Controller {
@@ -449,7 +451,6 @@ impl Controller {
         let _ = tauri::async_runtime::spawn_blocking(move || job.run()).await;
         self.view()
     }
-
 }
 
 struct Job {
@@ -506,8 +507,12 @@ impl Job {
         if self.stopped() {
             return Err("ownership_stopped");
         }
-        let held: Arc<dyn Send + Sync> =
-            Arc::new((self.resources.clone(), self.owner.clone(), route.clone(), self.effect_check.clone()));
+        let held: Arc<dyn Send + Sync> = Arc::new((
+            self.resources.clone(),
+            self.owner.clone(),
+            route.clone(),
+            self.effect_check.clone(),
+        ));
         let mut call = invocation(args, input);
         self.bound(&mut call)?;
         let step = match args {
@@ -717,8 +722,12 @@ impl Job {
         }
         // All slow help/status work has finished. Check the SAME confirmed
         // target before reserving any ownership original, then again at spawn.
-        if let Some(check) = &self.effect_check {check()?;}
-        if self.stopped() {return Err("ownership_stopped");}
+        if let Some(check) = &self.effect_check {
+            check()?;
+        }
+        if self.stopped() {
+            return Err("ownership_stopped");
+        }
         let request = Request::DesktopOwnership {
             request_id: uuid::Uuid::new_v4().to_string(),
             action,
@@ -794,7 +803,9 @@ impl Job {
                 // later ownership-side wait. No mutating child on refusal.
                 if let Some(check) = check {
                     if let Err(code) = check() {
-                        *original_error.lock().unwrap_or_else(PoisonError::into_inner) = Some(code);
+                        *original_error
+                            .lock()
+                            .unwrap_or_else(PoisonError::into_inner) = Some(code);
                         return Err(std::io::Error::other(code));
                     }
                 }

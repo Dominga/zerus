@@ -642,8 +642,10 @@ impl Service {
     pub(crate) async fn ownership_rearm(self: &Arc<Self>) -> crate::desktop_ownership::View {
         // An uncertain activation has its own retained original. Resume never
         // replaces it with a Rearm or a new manager attempt.
-        if self.shared.read_checks_only() || self.shared.mode_transition.blocks_resume()
-            || self.shared.ownership.view().pending {
+        if self.shared.read_checks_only()
+            || self.shared.mode_transition.blocks_resume()
+            || self.shared.ownership.view().pending
+        {
             return self.ownership_result().await;
         }
         if self.shared.retained_import.is_some() {
@@ -899,8 +901,10 @@ impl Service {
             .clone()
     }
     pub fn retry(&self) {
-        if !self.shared.read_checks_only() && !startup_recovery()
-            && !self.shared.mode_transition.blocks_resume() {
+        if !self.shared.read_checks_only()
+            && !startup_recovery()
+            && !self.shared.mode_transition.blocks_resume()
+        {
             if let Some(report) = &self.shared.retained_import {
                 report.request_retry();
             }
@@ -930,8 +934,11 @@ impl Service {
         if self.shared.stopped.load(Ordering::Acquire) {
             return;
         }
-        if !read_only && !self.shared.read_checks_only() && !startup_recovery()
-            && !self.shared.mode_transition.blocks_resume() {
+        if !read_only
+            && !self.shared.read_checks_only()
+            && !startup_recovery()
+            && !self.shared.mode_transition.blocks_resume()
+        {
             read_import::retry(self.shared.clone());
         }
         if let Some(cancel) = self
@@ -1306,7 +1313,8 @@ impl Shared {
         if !self.mode_transition.blocks_resume() {
             return true;
         }
-        self.ownership.granted() && self.ownership.view().code.is_empty()
+        self.ownership.granted()
+            && self.ownership.view().code.is_empty()
             && self
                 .mode_transition
                 .business_permitted(snapshot, self.ownership.view().status.as_ref())
@@ -1371,8 +1379,11 @@ impl Shared {
             .notification_controls
             .view()
             .and_then(|v| serde_json::to_value(v).ok());
-        snapshot.notification_ownership =
-            ownership_display(self.ownership.view(), self.mode_transition.view(), self.business_permitted_for(&snapshot));
+        snapshot.notification_ownership = ownership_display(
+            self.ownership.view(),
+            self.mode_transition.view(),
+            self.business_permitted_for(&snapshot),
+        );
         snapshot.pending_read_import = Some(
             self.read_import
                 .lock()
@@ -1673,12 +1684,17 @@ async fn preflight(shared: &Arc<Shared>, stop: Arc<AtomicBool>) -> Result<String
         // The interrupted registration journal is reachable even while its
         // service is absent. This is a bounded read, before any Grant/import
         // or manager path; a manual-refresh original never changes scope.
-        if let Some(configuration) = value["configuration"].as_str()
-            .filter(|s| zerus_client_core::desktop::digest(s)) {
+        if let Some(configuration) = value["configuration"]
+            .as_str()
+            .filter(|s| zerus_client_core::desktop::digest(s))
+        {
             if original.is_some_and(|scope| scope.configuration != configuration) {
                 return Err("original_service_changed");
             }
-            shared.mode_transition.observe(shared.hgs.clone(), configuration.into()).await;
+            shared
+                .mode_transition
+                .observe(shared.hgs.clone(), configuration.into())
+                .await;
         }
         return Err("service_unavailable");
     }
@@ -1706,7 +1722,10 @@ async fn preflight(shared: &Arc<Shared>, stop: Arc<AtomicBool>) -> Result<String
         responder.configure_once(configuration.into());
     }
     shared.observe_manual_refresh(configuration, state.snapshot())?;
-    shared.mode_transition.observe(shared.hgs.clone(), configuration.into()).await;
+    shared
+        .mode_transition
+        .observe(shared.hgs.clone(), configuration.into())
+        .await;
     shared.publish(state.snapshot().clone());
     Ok(configuration.into())
 }
@@ -1846,7 +1865,9 @@ async fn connection(
     // Review never lends authority to the positive import or Grant paths.
     // Retry/backoff and all reviewed-history reconnects remain read-only.
     // Only the separate confirmed choice may open existing business eligibility.
-    let business = !automatic && !startup_recovery() && !shared.read_checks_only()
+    let business = !automatic
+        && !startup_recovery()
+        && !shared.read_checks_only()
         && !shared.mode_transition.blocks_resume();
     if business {
         let explicit = shared
@@ -2101,8 +2122,11 @@ async fn recover_grant(
     // not-applied result (or a matched transient refusal) admits a fresh Grant.
     let mut looked_up = None::<String>;
     let next = |looked_up: &Option<String>| {
-        if stop.load(Ordering::Acquire) || shared.stopped.load(Ordering::Acquire)
-            || shared.read_checks_only() || shared.mode_transition.blocks_resume() {
+        if stop.load(Ordering::Acquire)
+            || shared.stopped.load(Ordering::Acquire)
+            || shared.read_checks_only()
+            || shared.mode_transition.blocks_resume()
+        {
             return None;
         }
         match shared.ownership.uncertain_grant() {
@@ -2136,7 +2160,9 @@ async fn recover_grant(
             None => {
                 #[cfg(test)]
                 recovery_pause::reached(&shared.hgs).await;
-                if shared.read_checks_only() || shared.mode_transition.blocks_resume() { return; }
+                if shared.read_checks_only() || shared.mode_transition.blocks_resume() {
+                    return;
+                }
                 shared
                     .ownership
                     .recovery_grant(configuration.clone(), stop.clone())

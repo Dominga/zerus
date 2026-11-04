@@ -608,7 +608,7 @@ fn schedule(
     configuration: String,
     stop: Arc<AtomicBool>,
 ) {
-    if shared.stopped.load(Ordering::Acquire) || stop.load(Ordering::Acquire) {
+    if !shared.business_permitted() || shared.stopped.load(Ordering::Acquire) || stop.load(Ordering::Acquire) {
         return;
     }
     let Some(report) = shared.retained_import.clone() else {

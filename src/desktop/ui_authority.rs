@@ -335,6 +335,7 @@ impl Validated {
             !matches!(
                 self.0,
                 Request::DesktopOwnership { .. }
+                    | Request::DesktopOwnershipObserve { .. }
                     | Request::NotificationControl { .. }
                     | Request::CacheMaintenance { .. }
                     | Request::CreationClone { .. }
@@ -482,6 +483,19 @@ impl Validated {
     pub fn check_ownership(self) -> Result<()> {
         self.ownership_parts().map(|_| ())
     }
+    /// A native requester observation is deliberately separate from mutation
+    /// admission. This accessor cannot be consumed by the ownership writer.
+    pub fn ownership_observation(
+        &self,
+    ) -> Result<(zerus_client_core::desktop::ownership::observation::Query, super::ownership::Origin)> {
+        self.check()?;
+        let Request::DesktopOwnershipObserve { query } = &self.0 else {
+            anyhow::bail!("not an ownership observation");
+        };
+        let origin = self.2.ownership.as_ref().context("original ownership identity missing")?;
+        ensure!(origin.current(), "ownership image changed");
+        Ok((query.as_ref().clone(), origin.clone()))
+    }
     /// Only original-outcome retention consumes this, after BEGIN IMMEDIATE.
     pub fn termination_outcome_parts(
         &self,
@@ -523,6 +537,14 @@ impl Validated {
             Freshness::Fixture,
             Metadata::default(),
         )
+    }
+    /// Actor policy model only: production observations obtain this Origin
+    /// from authenticate(), never from a supplied value.
+    #[cfg(test)]
+    pub fn fixture_observation(value: &Value, origin: super::ownership::Origin) -> Self {
+        let mut permit = Self::fixture(value);
+        permit.2.ownership = Some(origin);
+        permit
     }
     /// A fixture from a frontend whose hello names `application`.
     #[cfg(test)]
@@ -876,7 +898,8 @@ pub(super) fn authenticate(location: &Scope, peer_pid: u32, value: &Value) -> Re
         Instant::now() < until && caller.current() && frontend.current(),
         "frontend changed during authentication"
     );
-    let ownership_origin = if matches!(envelope.request, Request::DesktopOwnership { .. }) {
+    let ownership_origin = if matches!(envelope.request,
+        Request::DesktopOwnership { .. } | Request::DesktopOwnershipObserve { .. }) {
         Some(super::ownership::Origin::capture(
             Path::new(&frontend.executable),
             reply.hello.build.clone(),
@@ -948,6 +971,11 @@ fn validate(
             reply.request.ownership_mode == Some(action.mode()),
             "ownership mode does not match the native frontend"
         );
+    }
+    if let Request::DesktopOwnershipObserve { query } = &envelope.request {
+        ensure!(reply.request.ownership_mode == Some(zerus_client_core::desktop::ownership::Mode::Service)
+            && query.configuration == configuration,
+            "ownership observation mode/configuration changed");
     }
     if let Request::CacheMaintenance { command, .. } = &envelope.request {
         let selected = match command.as_ref() {
@@ -1104,6 +1132,7 @@ enum OrderedOperation {
     MaintenanceConfigure,
     ImportPendingReads,
     DesktopOwnership,
+    DesktopOwnershipObserve,
     NotificationPreferences,
     NotificationFocus,
 }
@@ -1125,6 +1154,7 @@ impl From<&Request> for OrderedOperation {
             Request::MaintenanceConfigure { .. } => Self::MaintenanceConfigure,
             Request::ImportPendingReads { .. } => Self::ImportPendingReads,
             Request::DesktopOwnership { .. } => Self::DesktopOwnership,
+            Request::DesktopOwnershipObserve { .. } => Self::DesktopOwnershipObserve,
             Request::NotificationControl { control, .. } => match control {
                 Command::Configure { .. } => Self::NotificationPreferences,
                 Command::Focus { .. } => Self::NotificationFocus,

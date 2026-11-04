@@ -608,7 +608,7 @@ fn schedule(
     configuration: String,
     stop: Arc<AtomicBool>,
 ) {
-    if !shared.business_permitted()
+    if !shared.business_scheduling_permitted()
         || shared.stopped.load(Ordering::Acquire)
         || stop.load(Ordering::Acquire)
     {

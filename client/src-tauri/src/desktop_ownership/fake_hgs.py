@@ -29,7 +29,8 @@ def status():
                 journal=None if config.get('never_service') else journal,
                 revision=0 if config.get('never_service') else 3, state=config.get('state', 'passive'),
                 rearm_required=config.get('rearm_required', False), request_id=None,
-                owner_epoch=None, identity_current=False)
+                owner_epoch=epoch if config.get('existing_grant') else None,
+                identity_current=config.get('existing_grant', False))
 
 
 def receipt(request):
@@ -77,6 +78,12 @@ if args in [['desktop', 'ownership-status', '--json'], ['desktop', 'ownership-re
         log.write(json.dumps(dict(args=args, value=value, pid=os.getpid())) + '\n')
 
 if args == ['--help']:
+    if config.get('observation_help_pipe') and (root / 'observation-help-armed').exists() and os.fork() == 0:
+        (root / 'observation-help-pipe-held').touch()
+        until = time.monotonic() + 15
+        while not (root / 'observation-pipe-release').exists() and time.monotonic() < until:
+            time.sleep(.005)
+        os._exit(0)
     print('Desktop service ABI: desktop-v1\nDesktop catalog changes ABI: desktop-catalog-changes-v1\n'
           'Desktop catalog relay ABI: desktop-catalog-relay-v1\nDesktop pending read import ABI: desktop-pending-reads-v1')
     if config.get('frontend_abi', True):
@@ -85,6 +92,8 @@ if args == ['--help']:
         print('Desktop ownership ABI: ' + abi)
     if config.get('retained_import_abi'):
         print('Desktop import ABI: desktop-import-v1')
+    if config.get('observation_abi'):
+        print('Desktop ownership observation ABI: desktop-ownership-observation-v1')
 elif config.get('retained_import_abi') and args[:2] in [
         ['desktop', 'import-evidence'], ['desktop', 'import-status']]:
     exec(compile((root / 'import-fixture.py').read_text(), 'import-fixture.py', 'exec'))
@@ -96,9 +105,16 @@ elif args == ['desktop', 'ownership-status', '--json']:
             if time.monotonic() > until:
                 raise SystemExit('private fixture barrier deadline')
             time.sleep(.005)
+    if config.get('observation_help_pipe'):
+        (root / 'observation-help-armed').touch()
     print(json.dumps(status()))
 elif args == ['desktop', 'frontend-request', '--json']:
     request = value['request']
+    if request['op'] not in ('desktop_ownership', 'desktop_ownership_observe'):
+        import io
+        sys.stdin = io.StringIO(json.dumps(value) + '\n')
+        exec(compile((root / 'catalog-fixture.py').read_text(), 'catalog-fixture.py', 'exec'))
+        raise SystemExit(0)
     assert value['abi'] == 'desktop-ui-request-v1'
     with socket.socket(socket.AF_UNIX) as stream:
         stream.settimeout(2)
@@ -109,9 +125,44 @@ elif args == ['desktop', 'frontend-request', '--json']:
         evidence = json.loads(stream.makefile('rb').readline(4097))['request']
     assert evidence['child_pid'] == os.getpid()
     assert evidence['attempt'] == value['attempt']
-    assert evidence['request_id'] == request['request_id']
-    assert evidence['ownership_mode'] == ('native' if request['action'] == 'native_takeover' else 'service')
+    observed_query = request.get('query') if request['op'] == 'desktop_ownership_observe' else None
+    assert evidence['request_id'] == (observed_query['request_id'] if observed_query else request['request_id'])
+    assert evidence['ownership_mode'] == ('native' if request.get('action') == 'native_takeover' else 'service')
     assert evidence['fingerprint'] == hashlib.sha256(json.dumps(request, separators=(',', ':')).encode()).hexdigest()
+    if observed_query:
+        # Actor result policy MODEL only; the Rust actor controls independently
+        # compare actual captured Origin objects. No issued receipt is made.
+        (root / 'observation-bound').touch()
+        if (root / 'observation-hold').exists():
+            (root / 'observation-entered').touch()
+            until = time.monotonic() + 15
+            while not (root / 'observation-release').exists():
+                if time.monotonic() >= until:
+                    raise SystemExit('private observation deadline')
+                time.sleep(.005)
+        current = status()
+        live_config = json.loads((root / 'fixture.json').read_text())
+        live_epoch = (root / 'runtime-epoch').read_text() if (root / 'runtime-epoch').exists() else '00000000-0000-4000-8000-000000000001'
+        valid = (not live_config.get('observation_origin_mismatch')
+                 and observed_query['service_epoch'] == live_epoch
+                 and observed_query['generation'] == live_config.get('status_generation', 1)
+                 and current['state'] == 'service' and current['identity_current']
+                 and not current['rearm_required']
+                 and all(current[k] == observed_query[k] for k in ('configuration', 'journal', 'owner_epoch')))
+        if config.get('observation_pipe') and os.fork() == 0:
+            (root / 'observation-pipe-held').touch()
+            until = time.monotonic() + 15
+            while not (root / 'observation-pipe-release').exists() and time.monotonic() < until:
+                time.sleep(.005)
+            os._exit(0)
+        if valid:
+            answer = dict(abi='desktop-ownership-observation-v1', query=observed_query, current=current)
+            if config.get('observation_bad_epoch'):
+                answer['query'] = dict(observed_query, service_epoch=epoch)
+        else:
+            answer = dict(request_id=observed_query['request_id'], code='ownership_observation_unavailable')
+        print(json.dumps(answer))
+        raise SystemExit(0)
     (root / 'original.json').write_text(json.dumps(request))
     (root / 'bound').touch()
     if config.get('lost') and (not config.get('lost_once') or not (root / 'lost-once').exists()):

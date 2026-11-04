@@ -1,5 +1,5 @@
 import { Show, createMemo } from "solid-js";
-import { desktopService, modeReviewActions, ownershipActions } from "../../../store/desktopService";
+import { desktopService, modeReviewActions, ownershipActions, serviceStatus } from "../../../store/desktopService";
 import { toast } from "../../../store/ui";
 import { tr } from "../../../i18n";
 import { Actions, Group, Status } from "./ui";
@@ -8,7 +8,7 @@ import type { ModeReviewAction } from "../../../store/desktopService";
 
 export function ServiceModeReview() {
   const activation = () => desktopService.state()?.notification_ownership?.activation;
-  const original = () => activation()?.review;
+  const original = () => serviceStatus(desktopService.state())?.modeReview ? activation()?.review : undefined;
   const manual = () => desktopService.state()?.executable_upgrade?.state === "manual_refresh_required";
   const busy = () => modeReviewActions.busy() || activation()?.running;
   const accessPending = () => desktopService.state()?.notification_ownership?.pending;

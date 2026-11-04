@@ -116,17 +116,38 @@ helpers need an update before they can publish the scoped choice receipt.
 
 The permanent default/manager latch stays set. Ordinary Service work becomes
 eligible only after the new choice's native original-ID result is durably
-settled to background and is still the latest applicable choice. Its retained
-linkage must match the reviewed UUID, configuration, actual current service
-epoch/generation and current ownership journal/epoch. A fresh ownership read
-must also match this consumer's own native Grant receipt, with current identity
-and no revoke or rearm requirement. This history never supplies per-kind import,
-cleanup or manager authority. Existing source capture, native admission and
-original child/pipe/Owner custody still apply. Only that second confirmed
-continuation can arm existing imports or refresh the SAME-origin Grant while
-keeping its epoch. Status, Retry, backoff and read-only reconnect do not queue
-those operations. Passive, unknown, changed-origin or changed-epoch evidence
-closes eligibility; missing authority needs its explicit action again.
+settled to background and is still the latest applicable choice. Its exact
+reviewed/new UUIDs, configuration and original completion scope stay historical.
+A later GUI or service start can recover eligibility without another dialog:
+a separate bounded native observation compares the requesting frontend Origin
+with the existing coherent granted row, the same ownership journal/owner epoch,
+current identity and the authenticated CURRENT service epoch/generation, with
+no revoke or rearm requirement. It cannot synthesize this consumer's own issued
+Grant receipt or relabel the choice's old endpoint. Older helpers, missing or
+unavailable proof, a later interruption/passive choice or incarnation drift
+leave eligibility closed.
+
+Observation restores eligibility only; no first-watch, status, Retry, backoff,
+report or scheduler callback queues Grant, imports, replay or manager work.
+The existing second confirmed continuation alone can arm its imports or refresh
+the SAME-origin Grant while retaining its epoch; independently requested normal
+work still needs its own native admission and original custody. Read-only
+restoration starts after the watch's first authenticated hello, so its bounded
+queries do not delay the read connection. A modern helper that cannot yet be
+classified keeps that watch, catalog and details connected read-only. Its mode
+classification retries with bounded backoff. If preflight could not classify
+that connection, its scheduling decision stays deferred across later successful
+reads, reconnects and transient-loss recovery, including a busy read gate. A
+background-selected host offers the existing Resume control; only that explicit
+action or the existing separately confirmed continuation can reopen scheduling.
+Healthy synchronous preflight retains its existing startup behavior. An explicit
+mode continuation retains and revalidates its own native confirmation around
+its slow Service preflight; its own occupied read gate does not create a
+connection deferral. Only that same checked, settled background result may
+clear an earlier deferral, never confirmation alone or an uncertain result.
+A cancelled classifier can finish its original bounded read without delaying watch teardown;
+its child/pipe resources stay retained through physical completion and it cannot
+publish a late result. Missing authority still needs its existing explicit action.
 
 Component controls model the confirmation response and manager/native caller
 outcomes. The actual OS dialogs, installed Settings path, Windows Fast Startup

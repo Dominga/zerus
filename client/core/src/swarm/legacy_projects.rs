@@ -9,9 +9,12 @@ use sha2::{Digest, Sha256};
 use std::collections::BTreeSet;
 use std::io::{self, Write};
 
-/// Whole encoded inputs, including session assignments and causal keys, are
-/// bounded. An oversized catalog returns Capacity, never a partial proposal.
+/// One encoded proposal (its two sides and causal keys) and one legacy list
+/// are bounded. An oversized proposal returns Capacity, never a partial one.
+/// Session assignments are not part of a proposal; see [`plan`].
 pub const MAX_BYTES: usize = 2 * 1024 * 1024;
+/// The catalog itself is the bounded `swarm get` read, assignments included.
+const SNAPSHOT_BYTES: usize = crate::reads::READ_LIMIT;
 pub const MAX_ROWS: usize = 4096;
 pub const MAX_HEADS: usize = 32;
 
@@ -340,7 +343,7 @@ pub fn plan(
     if style == Style::Windows {
         return Err(Code::WindowsUnsupported);
     }
-    bytes(snapshot, MAX_BYTES)?;
+    bytes(snapshot, SNAPSHOT_BYTES)?;
     bytes(rows, MAX_BYTES)?;
     if !binding.matches(snapshot) || !label(machine_name, 512) {
         return Err(Code::Changed);
@@ -433,12 +436,39 @@ pub fn plan(
     // Unlike an ordinary desktop edit, an import never writes the shared
     // order register, including when new projects are added. Root preserves
     // that register when both sides omit it and appends unnamed projects.
+    // Nor does it write session assignments: Root takes Session keys only
+    // from `sessions` arrays, so with neither side carrying them every
+    // assignment stays as it is (one side alone would delete them). Retained
+    // assignments would otherwise fill the proposal cap long before folders.
     for side in [&mut base, &mut additions] {
-        side.as_object_mut()
-            .ok_or(Code::Invalid)?
-            .remove("project_order");
+        let side = side.as_object_mut().ok_or(Code::Invalid)?;
+        side.remove("project_order");
+        side.remove("session_assignments_explicit");
+        let projects = side
+            .get_mut("projects")
+            .and_then(Value::as_array_mut)
+            .ok_or(Code::Invalid)?;
+        for project in projects {
+            project
+                .as_object_mut()
+                .ok_or(Code::Invalid)?
+                .remove("sessions");
+        }
     }
-    let input = json!({"base":base,"desired":additions,"versions":snapshot["versions"]});
+    // Only project and folder heads are parents of what Root writes here.
+    let versions: serde_json::Map<String, Value> = snapshot["versions"]
+        .as_object()
+        .ok_or(Code::Invalid)?
+        .iter()
+        .filter(|(key, _)| {
+            matches!(
+                serde_json::from_str::<VersionKey>(key),
+                Ok(VersionKey::Project { .. } | VersionKey::Folder { .. })
+            )
+        })
+        .map(|(key, heads)| (key.clone(), heads.clone()))
+        .collect();
+    let input = json!({"base":base,"desired":additions,"versions":versions});
     bytes(&input, MAX_BYTES)?;
     Ok(Plan {
         input,

@@ -26,6 +26,8 @@ const GRANT_BACKOFF: Duration = Duration::from_millis(250);
 
 mod diagnostic;
 pub(crate) use diagnostic::Phase;
+mod observation;
+pub(crate) use observation::NativeCurrent;
 
 #[derive(Clone, Default, Debug, Serialize)]
 pub(crate) struct View {

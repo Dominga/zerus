@@ -652,6 +652,7 @@ impl Service {
         {
             return self.ownership_result().await;
         }
+        self.shared.mode_transition.confirmed_scheduling();
         if self.shared.retained_import.is_some() {
             let relay = self
                 .shared
@@ -761,7 +762,13 @@ impl Service {
         }
         // Consent is for the displayed scope, not a later CLI upgrade or a
         // replacement endpoint discovered while the dialog was open.
-        match preflight(&self.shared, Arc::new(AtomicBool::new(false))).await {
+        match preflight_for(
+            &self.shared,
+            Arc::new(AtomicBool::new(false)),
+            PreflightMode::ConfirmedMode,
+        )
+        .await
+        {
             Ok(configuration) if configuration != prepared.configuration() => {
                 return Err("activation_scope_changed".into())
             }
@@ -786,10 +793,16 @@ impl Service {
             .apply_first(prepared)
             .await
             .map_err(str::to_owned)?;
+        let settled = transition.first_settled(&offered);
+        if settled {
+            // This SAME native-confirmed choice settled. Observation alone
+            // never enters this continuation or clears a prior deferral.
+            transition.confirmed_scheduling();
+        }
         self.shared
             .publish_ownership(crate::desktop_ownership::Phase::Result)
             .await;
-        if transition.first_settled(&offered) {
+        if settled {
             // Read-only: the reconnect observes the background service; it is
             // not a trigger for Grant, import or manager work.
             self.wake_connection(true);
@@ -816,7 +829,13 @@ impl Service {
             if action != ReviewAction::Review {
                 // Consent is for the original scope, not a later CLI upgrade or
                 // replacement endpoint discovered while the dialog was open.
-                match preflight(&self.shared, Arc::new(AtomicBool::new(false))).await {
+                match preflight_for(
+                    &self.shared,
+                    Arc::new(AtomicBool::new(false)),
+                    PreflightMode::ConfirmedMode,
+                )
+                .await
+                {
                     Ok(configuration) if configuration != prepared.configuration() => {
                         return Err("activation_scope_changed".into())
                     }
@@ -910,6 +929,9 @@ impl Service {
                                 .await
                                 && !self.shared.read_checks_only()
                             {
+                                // Only THIS settled, scoped native-confirmed
+                                // background choice may clear an old deferral.
+                                self.shared.mode_transition.confirmed_scheduling();
                                 let _ = STARTUP_RECOVERY.compare_exchange(
                                     1,
                                     2,
@@ -964,6 +986,7 @@ impl Service {
         if !self.shared.read_checks_only()
             && !startup_recovery()
             && !self.shared.mode_transition.blocks_resume()
+            && self.shared.mode_transition.startup_permitted()
         {
             if let Some(report) = &self.shared.retained_import {
                 report.request_retry();
@@ -998,6 +1021,7 @@ impl Service {
             && !self.shared.read_checks_only()
             && !startup_recovery()
             && !self.shared.mode_transition.blocks_resume()
+            && self.shared.mode_transition.startup_permitted()
         {
             read_import::retry(self.shared.clone());
         }
@@ -1373,11 +1397,17 @@ impl Shared {
         if !self.mode_transition.blocks_resume() {
             return true;
         }
-        self.ownership.granted()
-            && self.ownership.view().code.is_empty()
-            && self
-                .mode_transition
-                .business_permitted(snapshot, self.ownership.view().status.as_ref())
+        self.ownership.view().code.is_empty()
+            && self.mode_transition.business_permitted(
+                snapshot,
+                self.ownership.view().status.as_ref(),
+                self.ownership.granted(),
+            )
+    }
+    fn business_scheduling_permitted(&self) -> bool {
+        self.business_permitted()
+            && ((!self.mode_transition.blocks_resume() && self.mode_transition.startup_permitted())
+                || self.mode_transition.scheduling_permitted())
     }
     fn publish_retained_import(&self) {
         let report = self.retained_import.as_ref().map(|report| report.status());
@@ -1696,7 +1726,44 @@ async fn request(
     serde_json::from_slice(&bytes).map_err(|_| "invalid_service_response")
 }
 
+#[derive(Clone, Copy)]
+enum PreflightMode {
+    Connection,
+    // Only the two explicit mode call sites, while their SAME Prepared holds
+    // the Fleet charge. They validate it again after this slow read; a skipped
+    // observation supplies no admission and cannot decide a connection freeze.
+    ConfirmedMode,
+}
+impl PreflightMode {
+    async fn observe(self, shared: &Arc<Shared>, configuration: &str) {
+        match self {
+            Self::Connection => {
+                shared
+                    .mode_transition
+                    .observe_preflight(shared.hgs.clone(), configuration.into())
+                    .await
+            }
+            Self::ConfirmedMode => {
+                shared
+                    .mode_transition
+                    .observe(shared.hgs.clone(), configuration.into())
+                    .await
+            }
+        }
+    }
+}
 async fn preflight(shared: &Arc<Shared>, stop: Arc<AtomicBool>) -> Result<String, &'static str> {
+    preflight_for(shared, stop, PreflightMode::Connection).await
+}
+async fn preflight_for(
+    shared: &Arc<Shared>,
+    stop: Arc<AtomicBool>,
+    mode: PreflightMode,
+) -> Result<String, &'static str> {
+    let _classification = match mode {
+        PreflightMode::Connection => Some(shared.mode_transition.preflight_scope()),
+        PreflightMode::ConfirmedMode => None,
+    };
     let original = shared.original_read_scope()?;
     let help = command(shared, vec!["--help".into()], None, stop.clone()).await?;
     shared.notification_supported.store(
@@ -1721,6 +1788,13 @@ async fn preflight(shared: &Arc<Shared>, stop: Arc<AtomicBool>) -> Result<String
         }),
         Ordering::Release,
     );
+    if std::str::from_utf8(&help).ok().is_some_and(|text| {
+        text.lines().any(|line| {
+            line.trim() == zerus_client_core::desktop::ownership::observation::HELP_MARKER
+        })
+    }) {
+        shared.mode_transition.require_classification();
+    }
     if !std::str::from_utf8(&help).ok().is_some_and(|help| {
         help.lines().any(|line| line.trim() == HELP)
             && help
@@ -1751,10 +1825,7 @@ async fn preflight(shared: &Arc<Shared>, stop: Arc<AtomicBool>) -> Result<String
             if original.is_some_and(|scope| scope.configuration != configuration) {
                 return Err("original_service_changed");
             }
-            shared
-                .mode_transition
-                .observe(shared.hgs.clone(), configuration.into())
-                .await;
+            mode.observe(shared, configuration).await;
         }
         return Err("service_unavailable");
     }
@@ -1782,10 +1853,7 @@ async fn preflight(shared: &Arc<Shared>, stop: Arc<AtomicBool>) -> Result<String
         responder.configure_once(configuration.into());
     }
     shared.observe_manual_refresh(configuration, state.snapshot())?;
-    shared
-        .mode_transition
-        .observe(shared.hgs.clone(), configuration.into())
-        .await;
+    mode.observe(shared, configuration).await;
     shared.publish(state.snapshot().clone());
     Ok(configuration.into())
 }
@@ -1924,11 +1992,13 @@ async fn connection(
     // Preflight observed the journal even when the actor was unavailable.
     // Review never lends authority to the positive import or Grant paths.
     // Retry/backoff and all reviewed-history reconnects remain read-only.
-    // Only the separate confirmed choice may open existing business eligibility.
+    // A separate confirmed choice or its checked cold read may make business
+    // eligible. Only the explicit continuation may schedule startup work.
     let business = !automatic
         && !startup_recovery()
         && !shared.read_checks_only()
-        && !shared.mode_transition.blocks_resume();
+        && !shared.mode_transition.blocks_resume()
+        && shared.mode_transition.startup_permitted();
     if business {
         let explicit = shared
             .retained_import
@@ -1960,7 +2030,7 @@ async fn connection(
     } else {
         shared.ownership.unsupported();
     }
-    mode_transition::startup(&shared, automatic, &configuration).await;
+    mode_transition::startup(&shared, !business, &configuration).await;
     shared
         .publish_ownership(crate::desktop_ownership::Phase::StartupGrant)
         .await;
@@ -2025,9 +2095,31 @@ async fn connection(
             configuration.clone(),
         );
         tauri::async_runtime::spawn(async move {
-            if !automatic && !startup_recovery() && !shared.mode_transition.blocks_resume() {
+            // Freeze the preflight decision: a later read-only classification
+            // can never start this original connection's positive recovery.
+            if business && !startup_recovery() && !shared.mode_transition.blocks_resume() {
                 recover_grant(shared, configuration, stop, cancelled).await;
             }
+        })
+    };
+    let classification_ready = Arc::new(Notify::new());
+    let classification_worker = {
+        let (shared, stop, ready, configuration, stopping) = (
+            shared.clone(),
+            stop.clone(),
+            classification_ready.clone(),
+            configuration.clone(),
+            grant_cancel.clone(),
+        );
+        tauri::async_runtime::spawn(async move {
+            mode_transition::classification::connected(
+                shared,
+                configuration,
+                stop,
+                ready,
+                stopping,
+            )
+            .await;
         })
     };
     let mut last_frame = tokio::time::Instant::now();
@@ -2056,6 +2148,7 @@ async fn connection(
                         last_frame = tokio::time::Instant::now();
                         shared.observe_manual_refresh(&configuration, state.snapshot())?;
                         shared.publish(state.snapshot().clone());
+                        if frame["t"] == "hello" { classification_ready.notify_one(); }
                         if state.snapshot().executable_upgrade == Some(service::ExecutableUpgrade::ManualRefreshRequired) {
                             return Err("manual_refresh_required");
                         }
@@ -2142,6 +2235,11 @@ async fn connection(
     shared.details_changed.notify_one();
     drop(stdin);
     let _ = grant_worker.await;
+    // A cancelled classifier can still own a bounded read (and its original
+    // child/pipe loans). Give it a short join grace, then detach without abort:
+    // its stop check suppresses publication and its retained resources drain
+    // physically in that same worker, without delaying this watch's teardown.
+    let _ = tokio::time::timeout(Duration::from_millis(100), classification_worker).await;
     if let Some(worker) = notification_worker {
         let _ = worker.await;
     }
@@ -2186,6 +2284,7 @@ async fn recover_grant(
             || shared.stopped.load(Ordering::Acquire)
             || shared.read_checks_only()
             || shared.mode_transition.blocks_resume()
+            || !shared.mode_transition.startup_permitted()
         {
             return None;
         }
@@ -2220,7 +2319,10 @@ async fn recover_grant(
             None => {
                 #[cfg(test)]
                 recovery_pause::reached(&shared.hgs).await;
-                if shared.read_checks_only() || shared.mode_transition.blocks_resume() {
+                if shared.read_checks_only()
+                    || shared.mode_transition.blocks_resume()
+                    || !shared.mode_transition.startup_permitted()
+                {
                     return;
                 }
                 shared

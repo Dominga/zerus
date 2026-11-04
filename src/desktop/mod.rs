@@ -539,6 +539,8 @@ impl Drop for Permit {
 
 fn serve(config: &Config, location: Location, background_mode: bool) -> Result<()> {
     let mut upgrade = upgrade::Upgrade::new();
+    #[cfg(all(test, target_os = "linux"))]
+    upgrade::actor_tests::configure(&mut upgrade);
     let (_signals, owner, listener, epoch, mut store) = (|| -> Result<_> {
         #[cfg(windows)]
         crate::host::token::private_creation::prepare()
@@ -582,6 +584,8 @@ fn serve(config: &Config, location: Location, background_mode: bool) -> Result<(
     // At most16 queued controls/data, thirteen bounded parsers and one passive
     // producer. Background mode owns the only internal source producer.
     let (send, receive) = mpsc::sync_channel(protocol::PENDING);
+    #[cfg(all(test, target_os = "linux"))]
+    let fault_send = upgrade::actor_tests::fault_sender(&send);
     let acceptor = {
         let ui_scope = ui_scope.clone();
         let (listener, stopped, active, ingress) = (
@@ -628,6 +632,8 @@ fn serve(config: &Config, location: Location, background_mode: bool) -> Result<(
                 }
             })?
     };
+    #[cfg(all(test, target_os = "linux"))]
+    upgrade::actor_tests::started(&location, &owner);
     let mut fanout = Fanout::default();
     let mut migration = handoff::inspect(&location);
     let mut seq = 0;
@@ -742,6 +748,8 @@ fn serve(config: &Config, location: Location, background_mode: bool) -> Result<(
             }
             frontend.tick(&location);
             store.recover_operation_custody(&location);
+            #[cfg(all(test, target_os = "linux"))]
+            upgrade::actor_tests::replacement_error(&upgrade, &fault_send, &active);
             match receive.recv_timeout(if full_batch {
                 Duration::ZERO
             } else {
@@ -1352,6 +1360,8 @@ fn serve(config: &Config, location: Location, background_mode: bool) -> Result<(
         Instant::now() < deadline,
         platform::shutdown_signal() != 0,
     ) {
+        #[cfg(all(test, target_os = "linux"))]
+        upgrade::actor_tests::connection_wait(replaced, &active);
         thread::sleep(Duration::from_millis(10));
     }
     let drained = if replaced {
@@ -1378,6 +1388,8 @@ fn serve(config: &Config, location: Location, background_mode: bool) -> Result<(
         // the original kernel owner through any independent finalizer/audit
         // loan even if the actor ended on an unrelated listener/store error.
         drop(background.take());
+        #[cfg(all(test, target_os = "linux"))]
+        upgrade::actor_tests::owner_wait(&owner);
         while !upgrade::owner_loans_released(&owner) && platform::shutdown_signal() == 0 {
             thread::sleep(Duration::from_millis(10));
         }

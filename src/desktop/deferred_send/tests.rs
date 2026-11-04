@@ -1,0 +1,1303 @@
+use super::*;
+use crate::desktop::store::{Location, Store};
+use rusqlite::TransactionBehavior;
+use serde_json::{json, Value};
+use std::os::unix::fs::PermissionsExt;
+use std::path::{Path, PathBuf};
+use zerus_client_core::desktop::deferred_send::{Intent, Phase, Verified};
+use zerus_client_core::operation_recovery::deferred_input::{self as checkpoint, Checkpoint};
+
+const SESSION: &str = "claude/private-send";
+const RUN: &str = "run-1";
+const CONVERSATION: &str = "conversation-1";
+const MACHINE: &str = "22222222-2222-4222-8222-222222222222";
+
+/// A saved send checkpoint with the exact stdin the client builds for it.
+fn original(configuration: &str, epoch: &str) -> Verified {
+    let text = "hello";
+    let checkpoint = Checkpoint::reserve(checkpoint::Intent {
+        kind: checkpoint::Kind::Send,
+        draft_revision: 3,
+        message_sha256: checkpoint::message_sha256(text, Vec::<(&str, &str, &str, &[u8])>::new()),
+        run_id: RUN.into(),
+        conversation_id: CONVERSATION.into(),
+        question: None,
+        start: None,
+        retry_of: None,
+        consent: true,
+    });
+    let stdin = json!({"request_id": checkpoint.request_id, "text": text, "attachments": [],
+        "expected_run_id": RUN, "expected_conversation_id": CONVERSATION});
+    Intent {
+        scope: wire::Scope {
+            configuration: configuration.into(),
+            service_epoch: epoch.into(),
+        },
+        session: SESSION.into(),
+        request_id: checkpoint.request_id.clone(),
+        checkpoint: serde_json::to_string(&checkpoint).unwrap(),
+        original: stdin.to_string(),
+    }
+    .verify()
+    .unwrap()
+}
+/// The CLI's own record of `plan`'s request with `status`, as `hgs send`
+/// writes it.
+fn cli_record(plan: &wire::Plan, status: &str) -> Value {
+    json!({"request_id": plan.request_id, "name": plan.session, "run_id": plan.run_id,
+        "conversation_id": plan.conversation_id, "first_message": false,
+        "digest": plan.input_sha256, "status": status, "submitted_at": 7.5,
+        "submitted_text": "hello", "text": "hello", "attachments": [], "transport": "terminal"})
+}
+fn mode(path: &Path, mode: u32) {
+    std::fs::set_permissions(path, std::fs::Permissions::from_mode(mode)).unwrap();
+}
+/// Writes `body` atomically as the CLI's private receipt of `request` under
+/// the CLI state root `state`.
+fn write_receipt(state: &Path, request: &str, body: &[u8]) -> PathBuf {
+    let folder = state.join("input_receipts");
+    if !folder.exists() {
+        std::fs::create_dir(&folder).unwrap();
+    }
+    mode(&folder, 0o700);
+    let path = folder.join(format!("{request}.json"));
+    let temp = folder.join(format!(".{request}.tmp"));
+    std::fs::write(&temp, body).unwrap();
+    mode(&temp, 0o600);
+    std::fs::rename(&temp, &path).unwrap();
+    path
+}
+fn fixture() -> (tempfile::TempDir, Location, Store, String) {
+    let temp = tempfile::tempdir().unwrap();
+    let location = Location {
+        root: temp.path().canonicalize().unwrap().join("state/desktop"),
+        configuration: "a".repeat(64),
+    };
+    location.prepare().unwrap();
+    let epoch = uuid::Uuid::new_v4().to_string();
+    let store = Store::open(&location, &epoch).unwrap();
+    (temp, location, store, epoch)
+}
+fn tables(db: &rusqlite::Connection) -> i64 {
+    db.query_row(
+        "SELECT count(*) FROM sqlite_schema WHERE type='table'",
+        [],
+        |r| r.get(0),
+    )
+    .unwrap()
+}
+
+#[test]
+fn exact_previous_store_upgrade_adds_only_the_independent_send_leaf() {
+    assert_eq!(
+        SCHEMA - 1,
+        crate::desktop::task_message::INPUTS_SCHEMA,
+        "rebase this test onto the actual merge-order predecessor"
+    );
+    assert_eq!(SCHEMA, crate::desktop::store::SCHEMA);
+    let (_temp, location, store, _) = fixture();
+    remove_fixture(&store.db);
+    store
+        .db
+        .pragma_update(None, "user_version", SCHEMA - 1)
+        .unwrap();
+    let before = tables(&store.db);
+    drop(store);
+    let store = Store::open(&location, &uuid::Uuid::new_v4().to_string()).unwrap();
+    assert_eq!(
+        store
+            .db
+            .query_row::<i64, _, _>("PRAGMA user_version", [], |r| r.get(0))
+            .unwrap(),
+        crate::desktop::store::SCHEMA
+    );
+    assert_eq!(tables(&store.db), before + 2);
+    assert_eq!(ledger::undrained(&store.db).unwrap(), 0);
+    assert_eq!(
+        store.operation_status()["kinds"]["deferred_send"]["undrained"],
+        0
+    );
+}
+
+fn admit(store: &mut Store, verified: &Verified, writer: &str) -> ledger::Row {
+    let tx = store
+        .db
+        .transaction_with_behavior(TransactionBehavior::Immediate)
+        .unwrap();
+    let row = ledger::admit(&tx, verified, writer, 1).unwrap();
+    tx.commit().unwrap();
+    row
+}
+
+#[test]
+fn admission_is_immutable_and_the_same_id_returns_only_its_original_receipt() {
+    let (_temp, location, mut store, epoch) = fixture();
+    let verified = original(&location.configuration, &epoch);
+    let writer = uuid::Uuid::new_v4().to_string();
+    let row = admit(&mut store, &verified, &writer);
+    assert_eq!(row.receipt.phase, Phase::Queued);
+    assert_eq!(
+        admit(&mut store, &verified, &writer).receipt,
+        row.receipt,
+        "the same original again"
+    );
+    assert_eq!(ledger::undrained(&store.db).unwrap(), 1);
+    assert_eq!(store.operation_undrained().unwrap(), 1);
+    let status = store.operation_status();
+    assert_eq!(status["kinds"]["deferred_send"]["undrained"], 1);
+    assert_eq!(status["kinds"]["deferred_send"]["authority"], false);
+    for statement in [
+        "UPDATE desktop_deferred_sends SET source='{}'",
+        "UPDATE desktop_deferred_sends SET session='claude/other'",
+        "UPDATE desktop_deferred_sends SET checkpoint='{}'",
+        "DELETE FROM desktop_deferred_sends",
+    ] {
+        assert!(store.db.execute(statement, []).is_err(), "{statement}");
+    }
+    // Another stdin under the same request ID never replaces it.
+    let mut intent = verified.intent.clone();
+    intent.original = format!(" {}", intent.original);
+    let changed = intent.verify().unwrap();
+    assert_ne!(changed.binding, verified.binding);
+    let tx = store
+        .db
+        .transaction_with_behavior(TransactionBehavior::Immediate)
+        .unwrap();
+    assert!(ledger::admit(&tx, &changed, &writer, 3).is_err());
+    drop(tx);
+    let kept = ledger::load(&store.db, &verified.plan.request_id)
+        .unwrap()
+        .unwrap();
+    assert_eq!(kept.receipt.binding, row.receipt.binding);
+    assert_eq!(kept.verified.intent.original, verified.intent.original);
+}
+
+#[test]
+fn capacity_refusal_is_atomic_and_retirement_never_rearms_a_queued_original() {
+    let (_temp, location, mut store, epoch) = fixture();
+    let verified = original(&location.configuration, &epoch);
+    let writer = uuid::Uuid::new_v4().to_string();
+    for full in [
+        "UPDATE desktop_deferred_send_budget SET bytes=16777216",
+        "UPDATE desktop_deferred_send_budget SET rows=4096",
+        "UPDATE desktop_deferred_send_budget SET active=32",
+    ] {
+        let saved: (i64, i64, i64) = store
+            .db
+            .query_row(
+                "SELECT rows,bytes,active FROM desktop_deferred_send_budget",
+                [],
+                |r| Ok((r.get(0)?, r.get(1)?, r.get(2)?)),
+            )
+            .unwrap();
+        store.db.execute(full, []).unwrap();
+        let tx = store
+            .db
+            .transaction_with_behavior(TransactionBehavior::Immediate)
+            .unwrap();
+        assert!(ledger::admit(&tx, &verified, &writer, 1).is_err(), "{full}");
+        drop(tx);
+        assert!(ledger::load(&store.db, &verified.plan.request_id)
+            .unwrap()
+            .is_none());
+        store
+            .db
+            .execute(
+                "UPDATE desktop_deferred_send_budget SET rows=?1,bytes=?2,active=?3",
+                [saved.0, saved.1, saved.2],
+            )
+            .unwrap();
+    }
+    let row = admit(&mut store, &verified, &writer);
+    let tx = store
+        .db
+        .transaction_with_behavior(TransactionBehavior::Immediate)
+        .unwrap();
+    ledger::retire(&tx, &row).unwrap();
+    tx.commit().unwrap();
+    assert_eq!(ledger::undrained(&store.db).unwrap(), 0);
+    let retired = ledger::load(&store.db, &verified.plan.request_id)
+        .unwrap()
+        .unwrap();
+    assert_eq!(
+        (retired.receipt.phase, retired.receipt.code.as_str()),
+        (Phase::Unknown, "deferred_send_interrupted")
+    );
+    assert!(retired.receipt.drained);
+    assert!(retired.receipt.result(&verified.plan).is_none());
+    let replay = admit(&mut store, &verified, &writer);
+    assert_eq!(replay.receipt, retired.receipt);
+}
+
+/// A reserved, running original with its exact custody, as the actor leaves
+/// it before the child.
+fn running(
+    store: &mut Store,
+    location: &Location,
+    verified: &Verified,
+    epoch: &str,
+) -> (
+    zerus_desktop_ledger::operations::custody::Record,
+    std::sync::Arc<zerus_client_core::run::custody::InheritedLock>,
+) {
+    use zerus_desktop_ledger::operations::{custody::Record, Ticket};
+    let writer = uuid::Uuid::new_v4().to_string();
+    let row = admit(store, verified, &writer);
+    let ticket = Ticket {
+        operation_id: verified.binding.operation_id().unwrap(),
+        attempt_id: uuid::Uuid::new_v4().to_string(),
+        revision: 2,
+        admission_id: verified.plan.request_id.clone(),
+        binding_sha256: verified.binding.fingerprint().unwrap(),
+        writer_epoch: writer,
+        service_epoch: epoch.into(),
+        lease: uuid::Uuid::new_v4().to_string(),
+    };
+    let (prepared, held) = crate::desktop::custody::prepare(location, &ticket).unwrap();
+    let record = Record {
+        prepared,
+        helper: None,
+    };
+    let tx = store
+        .db
+        .transaction_with_behavior(TransactionBehavior::Immediate)
+        .unwrap();
+    ledger::reserve(&tx, &row, &ticket, &record).unwrap();
+    tx.commit().unwrap();
+    assert_eq!(
+        ledger::load(&store.db, &verified.plan.request_id)
+            .unwrap()
+            .unwrap()
+            .receipt
+            .phase,
+        Phase::Running
+    );
+    (record, held)
+}
+
+/// Observes `record` until its release, within a bound: a process another
+/// test forks keeps a copy of every descriptor until its exec closes it.
+fn released(
+    location: &Location,
+    record: &zerus_desktop_ledger::operations::custody::Record,
+) -> crate::desktop::custody::Observation {
+    use crate::desktop::custody::{probe, Observation};
+    let until = std::time::Instant::now() + std::time::Duration::from_secs(5);
+    loop {
+        let observation = probe(location, record);
+        if matches!(observation, Observation::Released { .. }) || std::time::Instant::now() >= until
+        {
+            return observation;
+        }
+        std::thread::sleep(std::time::Duration::from_millis(5));
+    }
+}
+
+#[test]
+fn only_the_released_custody_settles_a_send_and_only_its_exact_cli_record_records_it() {
+    use super::receipt::{Observed as Cli, MISSING, UNAVAILABLE};
+    use crate::desktop::custody::{self, Observation};
+    #[derive(Clone, Copy, Debug)]
+    enum Ending {
+        Exited,
+        NotStarted,
+        Unknown,
+    }
+    let exact = |plan: &wire::Plan| {
+        let body = cli_record(plan, wire::SUBMITTED).to_string();
+        Cli::Submitted(wire::Outcome::from_receipt(plan, body.as_bytes()).unwrap())
+    };
+    let other = |plan: &wire::Plan| {
+        let mut outcome =
+            wire::Outcome::from_receipt(plan, cli_record(plan, "submitted").to_string().as_bytes())
+                .unwrap();
+        outcome.input_sha256 = "f".repeat(64);
+        Cli::Submitted(outcome)
+    };
+    let unknown = |code: &'static str| move |_: &wire::Plan| Cli::Unknown(code);
+    type Read = Box<dyn Fn(&wire::Plan) -> Cli>;
+    let cases: Vec<(Ending, Read, Phase, &str)> = vec![
+        // The exit proves nothing; only the CLI's own record decides.
+        (Ending::Exited, Box::new(exact), Phase::Recorded, ""),
+        (
+            Ending::Exited,
+            Box::new(unknown(MISSING)),
+            Phase::Unknown,
+            MISSING,
+        ),
+        (
+            Ending::Exited,
+            Box::new(unknown(wire::RECEIPT_IN_PROGRESS)),
+            Phase::Unknown,
+            wire::RECEIPT_IN_PROGRESS,
+        ),
+        (
+            Ending::Exited,
+            Box::new(other),
+            Phase::Unknown,
+            wire::RECEIPT_MISMATCH,
+        ),
+        (
+            Ending::Exited,
+            Box::new(unknown(UNAVAILABLE)),
+            Phase::Unknown,
+            UNAVAILABLE,
+        ),
+        // The closed pre-child result fails only when no record exists.
+        (
+            Ending::NotStarted,
+            Box::new(unknown(MISSING)),
+            Phase::Failed,
+            wire::NOT_STARTED,
+        ),
+        (Ending::NotStarted, Box::new(exact), Phase::Recorded, ""),
+        (
+            Ending::NotStarted,
+            Box::new(unknown(wire::RECEIPT_IN_PROGRESS)),
+            Phase::Unknown,
+            wire::RECEIPT_IN_PROGRESS,
+        ),
+        (
+            Ending::NotStarted,
+            Box::new(unknown(UNAVAILABLE)),
+            Phase::Unknown,
+            UNAVAILABLE,
+        ),
+        (
+            Ending::NotStarted,
+            Box::new(other),
+            Phase::Unknown,
+            wire::RECEIPT_MISMATCH,
+        ),
+        // The child's own reason stays unless its exact record exists.
+        (
+            Ending::Unknown,
+            Box::new(unknown(MISSING)),
+            Phase::Unknown,
+            "deferred_send_timed_out",
+        ),
+        (Ending::Unknown, Box::new(exact), Phase::Recorded, ""),
+    ];
+    for (index, (ending, read, phase, code)) in cases.into_iter().enumerate() {
+        let (_temp, location, mut store, epoch) = fixture();
+        let verified = original(&location.configuration, &epoch);
+        let (record, held) = running(&mut store, &location, &verified, &epoch);
+        let row = ledger::pending(&store.db).unwrap().unwrap();
+        let tx = store
+            .db
+            .transaction_with_behavior(TransactionBehavior::Immediate)
+            .unwrap();
+        match ending {
+            Ending::Exited => ledger::ended(&tx, &row, ledger::AWAITING_DRAIN).unwrap(),
+            Ending::NotStarted => ledger::not_started(&tx, &row).unwrap(),
+            Ending::Unknown => ledger::ended(&tx, &row, "deferred_send_timed_out").unwrap(),
+        }
+        tx.commit().unwrap();
+        // Nothing settles before the drain, whatever the receipt says.
+        let row = ledger::pending(&store.db).unwrap().unwrap();
+        assert_eq!(row.receipt.phase, Phase::Unknown, "{index}");
+        assert!(row.receipt.result(&verified.plan).is_none());
+        let observation = custody::probe(&location, &record);
+        assert!(matches!(observation, Observation::Held));
+        let tx = store
+            .db
+            .transaction_with_behavior(TransactionBehavior::Immediate)
+            .unwrap();
+        assert!(ledger::drained(tx, row, observation, &read(&verified.plan)).is_err());
+        drop(held);
+        let row = ledger::pending(&store.db).unwrap().unwrap();
+        let observation = released(&location, &record);
+        let tx = store
+            .db
+            .transaction_with_behavior(TransactionBehavior::Immediate)
+            .unwrap();
+        let settled = ledger::drained(tx, row, observation, &read(&verified.plan)).unwrap();
+        assert_eq!(
+            (settled.phase, settled.code.as_str()),
+            (phase, code),
+            "{index}: {ending:?}"
+        );
+        assert!(settled.drained && settled.valid());
+        match phase {
+            Phase::Recorded => {
+                assert_eq!(settled.result(&verified.plan), Some(Ok(())));
+                assert_eq!(
+                    settled.outcome.as_ref().unwrap().input_sha256,
+                    verified.plan.input_sha256
+                );
+            }
+            Phase::Failed => {
+                assert!(settled.not_started(&verified.plan));
+                assert_eq!(
+                    settled.result(&verified.plan),
+                    Some(Err(wire::NOT_STARTED.into()))
+                );
+            }
+            _ => assert!(settled.result(&verified.plan).is_none()),
+        }
+        // The settled receipt is the stored one, and it is final.
+        assert_eq!(
+            ledger::load(&store.db, &verified.plan.request_id)
+                .unwrap()
+                .unwrap()
+                .receipt,
+            settled
+        );
+        assert_eq!(ledger::undrained(&store.db).unwrap(), 0);
+    }
+}
+
+#[test]
+fn no_unknown_code_poses_as_the_closed_not_started_result() {
+    let (_temp, location, mut store, epoch) = fixture();
+    let verified = original(&location.configuration, &epoch);
+    let (_record, _held) = running(&mut store, &location, &verified, &epoch);
+    let row = ledger::pending(&store.db).unwrap().unwrap();
+    for code in [wire::NOT_STARTED, "awaiting_not_started_drain"] {
+        let tx = store
+            .db
+            .transaction_with_behavior(TransactionBehavior::Immediate)
+            .unwrap();
+        assert!(ledger::ended(&tx, &row, code).is_err(), "{code}");
+    }
+}
+
+#[test]
+fn the_lookup_reads_only_its_exact_original() {
+    let (_temp, location, mut store, epoch) = fixture();
+    let verified = original(&location.configuration, &epoch);
+    let (_record, _held) = running(&mut store, &location, &verified, &epoch);
+    let query = wire::Query::for_plan(verified.intent.scope.clone(), &verified.plan).unwrap();
+    let read = |store: &Store, query: &wire::Query| {
+        super::query(
+            store,
+            &json!({"op": "deferred_send_result", "query": query}),
+        )
+    };
+    let lookup: wire::Lookup = serde_json::from_value(read(&store, &query)).unwrap();
+    assert!(lookup.matches(&query) && lookup.read_only);
+    assert_eq!(lookup.receipt.unwrap().phase, Phase::Running);
+    let mut changed = query.clone();
+    changed.scope.service_epoch = uuid::Uuid::new_v4().to_string();
+    assert_eq!(
+        read(&store, &changed)["code"],
+        "deferred_send_result_unavailable"
+    );
+    // Another plan under the same request ID is not this original's.
+    let mut other = query.clone();
+    other.plan_sha256 = "f".repeat(64);
+    assert_eq!(
+        read(&store, &other)["code"],
+        "deferred_send_result_unavailable"
+    );
+    assert_eq!(
+        super::query(
+            &store,
+            &json!({"op": "task_message_result", "query": query})
+        )["code"],
+        "deferred_send_result_unavailable"
+    );
+    let mut missing = query;
+    missing.request_id = uuid::Uuid::new_v4().to_string();
+    let lookup: wire::Lookup = serde_json::from_value(read(&store, &missing)).unwrap();
+    assert!(!lookup.found && lookup.receipt.is_none());
+}
+
+/// The observation of the CLI's own receipt (G1 condition 2): only an exact,
+/// private, bounded `submitted` record is a submission.
+#[test]
+fn the_receipt_observation_reads_only_the_exact_private_submitted_record() {
+    use super::receipt::{observe, Observed, MISSING, UNAVAILABLE};
+    let temp = tempfile::tempdir().unwrap();
+    let state = temp.path().canonicalize().unwrap().join("state");
+    std::fs::create_dir(&state).unwrap();
+    let verified = original(&"a".repeat(64), &uuid::Uuid::new_v4().to_string());
+    let plan = &verified.plan;
+    let id = &plan.request_id;
+    let folder = state.join("input_receipts");
+    let path = folder.join(format!("{id}.json"));
+    let clear = || {
+        let _ = std::fs::remove_file(&path);
+    };
+    // No folder, then no record.
+    assert_eq!(observe(&state, plan), Observed::Unknown(MISSING));
+    std::fs::create_dir(&folder).unwrap();
+    mode(&folder, 0o700);
+    assert_eq!(observe(&state, plan), Observed::Unknown(MISSING));
+    // The exact submitted record.
+    write_receipt(
+        &state,
+        id,
+        cli_record(plan, "submitted").to_string().as_bytes(),
+    );
+    match observe(&state, plan) {
+        Observed::Submitted(outcome) => {
+            assert!(outcome.matches(plan));
+            assert_eq!(outcome.input_sha256, plan.input_sha256);
+        }
+        other => panic!("{other:?}"),
+    }
+    let with = |key: &str, value: Value| {
+        let mut record = cli_record(plan, "submitted");
+        record[key] = value;
+        record.to_string()
+    };
+    for (body, code) in [
+        (
+            cli_record(plan, "in_progress").to_string(),
+            wire::RECEIPT_IN_PROGRESS,
+        ),
+        // The CLI keeps an earlier record when another stdin reuses the ID.
+        (
+            with("digest", json!("f".repeat(64))),
+            wire::RECEIPT_MISMATCH,
+        ),
+        (with("name", json!("claude/other")), wire::RECEIPT_MISMATCH),
+        (with("run_id", json!("run-2")), wire::RECEIPT_MISMATCH),
+        (
+            with("conversation_id", json!("conversation-2")),
+            wire::RECEIPT_MISMATCH,
+        ),
+        (with("transport", json!("pane")), wire::RECEIPT_MISMATCH),
+        (with("status", json!("failed")), wire::RECEIPT_MISMATCH),
+        ("{".into(), wire::RECEIPT_INVALID),
+    ] {
+        write_receipt(&state, id, body.as_bytes());
+        assert_eq!(observe(&state, plan), Observed::Unknown(code), "{body}");
+    }
+    // Over the bound, though otherwise exact.
+    let mut large = cli_record(plan, "submitted");
+    large["text"] = json!("x".repeat(wire::RECEIPT_BYTES));
+    write_receipt(&state, id, large.to_string().as_bytes());
+    assert_eq!(observe(&state, plan), Observed::Unknown(UNAVAILABLE));
+    // Unsafe records and folders are never read.
+    let exact = cli_record(plan, "submitted").to_string();
+    write_receipt(&state, id, exact.as_bytes());
+    mode(&path, 0o644);
+    assert_eq!(
+        observe(&state, plan),
+        Observed::Unknown(UNAVAILABLE),
+        "shared record"
+    );
+    write_receipt(&state, id, exact.as_bytes());
+    mode(&folder, 0o755);
+    assert_eq!(
+        observe(&state, plan),
+        Observed::Unknown(UNAVAILABLE),
+        "shared folder"
+    );
+    mode(&folder, 0o700);
+    let elsewhere = temp.path().join("elsewhere.json");
+    std::fs::write(&elsewhere, exact.as_bytes()).unwrap();
+    mode(&elsewhere, 0o600);
+    clear();
+    std::os::unix::fs::symlink(&elsewhere, &path).unwrap();
+    assert_eq!(
+        observe(&state, plan),
+        Observed::Unknown(UNAVAILABLE),
+        "linked record"
+    );
+    clear();
+    std::fs::hard_link(&elsewhere, &path).unwrap();
+    assert_eq!(
+        observe(&state, plan),
+        Observed::Unknown(UNAVAILABLE),
+        "second name"
+    );
+    clear();
+    let fifo = std::ffi::CString::new(path.to_str().unwrap()).unwrap();
+    // SAFETY: a NUL-terminated path; mkfifo only creates the node.
+    assert_eq!(unsafe { libc::mkfifo(fifo.as_ptr(), 0o600) }, 0);
+    assert_eq!(
+        observe(&state, plan),
+        Observed::Unknown(UNAVAILABLE),
+        "a FIFO is never opened for a blocking read"
+    );
+    clear();
+    // A linked folder, then a file in its place.
+    write_receipt(&state, id, exact.as_bytes());
+    let moved = temp.path().join("moved");
+    std::fs::rename(&folder, &moved).unwrap();
+    std::os::unix::fs::symlink(&moved, &folder).unwrap();
+    assert_eq!(
+        observe(&state, plan),
+        Observed::Unknown(UNAVAILABLE),
+        "linked folder"
+    );
+    std::fs::remove_file(&folder).unwrap();
+    std::fs::write(&folder, b"").unwrap();
+    assert_eq!(
+        observe(&state, plan),
+        Observed::Unknown(UNAVAILABLE),
+        "not a folder"
+    );
+}
+
+mod actor {
+    use super::super::child::{self, Ended};
+    use super::*;
+    use crate::{config::Config, desktop::ui_authority};
+    use std::sync::{
+        atomic::{AtomicUsize, Ordering},
+        Arc,
+    };
+    use std::time::{Duration, Instant};
+    use zerus_client_core::run::custody::InheritedLock;
+
+    type Execute = dyn Fn(
+            &Path,
+            &wire::Plan,
+            &[String],
+            &[u8],
+            &Arc<InheritedLock>,
+            &Arc<dyn Send + Sync>,
+        ) -> Ended
+        + Send
+        + Sync;
+
+    struct Fixture {
+        _temp: tempfile::TempDir,
+        location: Location,
+        store: Store,
+        runtime: runtime::Runtime,
+        exclusion: Arc<crate::desktop::store::HandoffLock>,
+        epoch: String,
+        config: Config,
+        owner: Arc<crate::platform::FileLock>,
+    }
+    impl Fixture {
+        /// `execute` stands in for the one child; it also receives the CLI
+        /// state root, where the real `hgs send` writes its receipt.
+        fn new(
+            execute: impl Fn(
+                    &Path,
+                    &wire::Plan,
+                    &[String],
+                    &[u8],
+                    &Arc<InheritedLock>,
+                    &Arc<dyn Send + Sync>,
+                ) -> Ended
+                + Send
+                + Sync
+                + 'static,
+        ) -> Self {
+            Self::build(Some(Arc::new(execute)))
+        }
+        /// No executor: the original path runs, and this test image's own
+        /// self-exec refusal stops it before any child.
+        fn unexecuted() -> Self {
+            Self::build(None)
+        }
+        fn build(execute: Option<Arc<Execute>>) -> Self {
+            let temp = tempfile::tempdir().unwrap();
+            let root = temp.path().canonicalize().unwrap();
+            let config = Config {
+                home: root.to_str().unwrap().into(),
+                dir: root.join("config"),
+                state: root.join("state"),
+                selves: vec![],
+                peers: vec![],
+                base_peers: vec![],
+                peers_from_environment: false,
+                machines: Default::default(),
+                tab: false,
+                tab_colors: String::new(),
+            };
+            std::fs::create_dir(&config.dir).unwrap();
+            let location = Location::new(&config).unwrap();
+            location.prepare().unwrap();
+            // The CLI's state root is the service root's parent.
+            assert_eq!(location.root.parent().unwrap(), config.state);
+            let epoch = uuid::Uuid::new_v4().to_string();
+            let mut store = Store::open(&location, &epoch).unwrap();
+            zerus_desktop_ledger::authorize(
+                &mut store.db,
+                &uuid::Uuid::new_v4().to_string(),
+                &epoch,
+            )
+            .unwrap();
+            let owner = Arc::new(location.lock().unwrap());
+            let exclusion = Arc::new(location.handoff_lock().unwrap());
+            let mut runtime = runtime::Runtime::new(&config, &epoch, owner.clone()).unwrap();
+            // This synthetic source/Validated seam tests the actor, not native
+            // authentication or an installed frontend authority positive.
+            match execute {
+                Some(execute) => {
+                    let state = config.state.clone();
+                    runtime.fixture_executor(
+                        MACHINE,
+                        Arc::new(move |plan, args, input, lock, resources| {
+                            execute(&state, plan, args, input, lock, resources)
+                        }),
+                    )
+                }
+                None => runtime.fixture_machine(MACHINE),
+            }
+            // The shared actor logic is tested on every platform; the macOS
+            // fence has its own test.
+            runtime.fixture_mac_fence(false);
+            runtime.poll(&mut store, Some(exclusion.clone()));
+            Self {
+                _temp: temp,
+                location,
+                store,
+                runtime,
+                exclusion,
+                epoch,
+                config,
+                owner,
+            }
+        }
+        fn original(&self) -> Verified {
+            super::original(&self.location.configuration, &self.epoch)
+        }
+        fn request(original: &Verified) -> Value {
+            json!(
+                zerus_client_core::desktop::ui_requests::Request::DeferredSend {
+                    intent: Box::new(original.intent.clone()),
+                }
+            )
+        }
+        fn admit(&mut self, original: &Verified) -> wire::Admission {
+            serde_json::from_value(self.runtime.frontend(
+                &mut self.store,
+                ui_authority::Validated::fixture(&Self::request(original)),
+                Some(self.exclusion.clone()),
+            ))
+            .unwrap()
+        }
+        fn until(&mut self, what: &str, done: impl Fn(&Self) -> bool) {
+            let until = Instant::now() + Duration::from_secs(8);
+            while !done(self) {
+                assert!(
+                    Instant::now() < until,
+                    "timed out: {what}, {}",
+                    self.runtime.status()
+                );
+                self.runtime
+                    .poll(&mut self.store, Some(self.exclusion.clone()));
+                std::thread::sleep(Duration::from_millis(2));
+            }
+        }
+        fn row(&self, original: &Verified) -> ledger::Row {
+            ledger::load(&self.store.db, &original.plan.request_id)
+                .unwrap()
+                .unwrap()
+        }
+        fn revoke(&mut self) {
+            self.store
+                .db
+                .execute("UPDATE desktop_writer SET revoked=1 WHERE id=1", [])
+                .unwrap();
+        }
+    }
+    fn submitted(state: &Path, plan: &wire::Plan) {
+        write_receipt(
+            state,
+            &plan.request_id,
+            cli_record(plan, wire::SUBMITTED).to_string().as_bytes(),
+        );
+    }
+
+    #[test]
+    fn an_admitted_send_runs_once_and_settles_only_from_its_cli_receipt() {
+        let sent = Arc::new(AtomicUsize::new(0));
+        let count = sent.clone();
+        let mut f = Fixture::new(move |state, plan, args, input, _, _| {
+            count.fetch_add(1, Ordering::SeqCst);
+            // The one `hgs send <session> --json`, with the exact stdin.
+            assert_eq!(args, ["send", SESSION, "--json"]);
+            let stdin: Value = serde_json::from_slice(input).unwrap();
+            assert_eq!(stdin["request_id"], plan.request_id.as_str());
+            assert_eq!(
+                (
+                    stdin["expected_run_id"].as_str(),
+                    stdin["expected_conversation_id"].as_str()
+                ),
+                (Some(RUN), Some(CONVERSATION))
+            );
+            assert_eq!(
+                format!("{:x}", <sha2::Sha256 as sha2::Digest>::digest(input)),
+                plan.input_sha256
+            );
+            submitted(state, plan);
+            Ended::Exited { code: 0 }
+        });
+        let original = f.original();
+        let admission = f.admit(&original);
+        assert!(admission.accepted && admission.durable && admission.matches(&original.intent));
+        f.until("settled", |f| f.row(&original).receipt.drained);
+        let receipt = f.row(&original).receipt;
+        assert_eq!(
+            (receipt.phase, receipt.code.as_str()),
+            (Phase::Recorded, "")
+        );
+        assert_eq!(receipt.result(&original.plan), Some(Ok(())));
+        // The same original admitted again returns its settled receipt.
+        assert_eq!(f.admit(&original).receipt.unwrap(), receipt);
+        f.runtime.request_stop();
+        f.until("stopped", |f| f.runtime.drained());
+        assert_eq!(sent.load(Ordering::SeqCst), 1, "never sent again");
+    }
+
+    #[test]
+    fn an_exit_alone_never_settles_and_only_the_exact_receipt_records() {
+        enum Record {
+            None,
+            Exact,
+            InProgress,
+            OtherStdin,
+        }
+        for (ended, record, phase, code) in [
+            (
+                Ended::Exited { code: 0 },
+                Record::None,
+                Phase::Unknown,
+                super::super::receipt::MISSING,
+            ),
+            (
+                Ended::Exited { code: 0 },
+                Record::InProgress,
+                Phase::Unknown,
+                wire::RECEIPT_IN_PROGRESS,
+            ),
+            (
+                Ended::Exited { code: 1 },
+                Record::OtherStdin,
+                Phase::Unknown,
+                wire::RECEIPT_MISMATCH,
+            ),
+            // The CLI's exact record, whatever the exit said.
+            (
+                Ended::Exited { code: 2 },
+                Record::Exact,
+                Phase::Recorded,
+                "",
+            ),
+            (
+                Ended::Unknown("deferred_send_output_retained"),
+                Record::Exact,
+                Phase::Recorded,
+                "",
+            ),
+            (
+                Ended::Unknown("deferred_send_timed_out"),
+                Record::None,
+                Phase::Unknown,
+                "deferred_send_timed_out",
+            ),
+        ] {
+            let result = std::sync::Mutex::new(Some((ended, record)));
+            let mut f = Fixture::new(move |state, plan, _, _, _, _| {
+                let (ended, record) = result.lock().unwrap().take().unwrap();
+                let body = match record {
+                    Record::None => None,
+                    Record::Exact => Some(cli_record(plan, wire::SUBMITTED)),
+                    Record::InProgress => Some(cli_record(plan, "in_progress")),
+                    Record::OtherStdin => {
+                        let mut other = cli_record(plan, wire::SUBMITTED);
+                        other["digest"] = json!("e".repeat(64));
+                        Some(other)
+                    }
+                };
+                if let Some(body) = body {
+                    write_receipt(state, &plan.request_id, body.to_string().as_bytes());
+                }
+                ended
+            });
+            let original = f.original();
+            assert!(f.admit(&original).accepted);
+            f.until("settled", |f| f.row(&original).receipt.drained);
+            let receipt = f.row(&original).receipt;
+            assert_eq!((receipt.phase, receipt.code.as_str()), (phase, code));
+            f.runtime.request_stop();
+            f.until("stopped", |f| f.runtime.drained());
+        }
+        // The real original path: this test image refuses its own image, and
+        // no record of the request exists.
+        let mut f = Fixture::unexecuted();
+        let original = f.original();
+        assert!(f.admit(&original).accepted);
+        f.until("settled", |f| f.row(&original).receipt.drained);
+        let receipt = f.row(&original).receipt;
+        assert_eq!(
+            (receipt.phase, receipt.code.as_str()),
+            (Phase::Failed, wire::NOT_STARTED)
+        );
+        assert!(receipt.not_started(&original.plan));
+    }
+
+    /// The real original path, without an executor: the runtime's pinned
+    /// image (a script here) receives the exact call, frozen stdin and
+    /// custody descriptor, and writes the CLI's receipt as `hgs send` does.
+    #[test]
+    #[cfg(target_os = "linux")]
+    fn the_pinned_image_runs_the_original_call_and_its_cli_receipt_settles() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("hgs");
+        let seen = dir.path().join("seen");
+        let mut f = Fixture::unexecuted();
+        let receipts = f.config.state.join("input_receipts");
+        std::fs::create_dir(&receipts).unwrap();
+        mode(&receipts, 0o700);
+        std::fs::write(
+            &path,
+            format!(
+                r#"#!/usr/bin/env python3
+import hashlib,json,os,pathlib,sys
+data=sys.stdin.buffer.read()
+request=json.loads(data)
+pathlib.Path({seen:?}).write_text(json.dumps({{"argv":sys.argv[1:],"stdin":data.decode(),"custody":os.environ.get("HGS_DEFERRED_SEND_CUSTODY_FD")}}))
+record={{"request_id":request["request_id"],"name":sys.argv[2],"run_id":request["expected_run_id"],"conversation_id":request["expected_conversation_id"],"digest":hashlib.sha256(data).hexdigest(),"status":"submitted","transport":"terminal"}}
+target=os.path.join({receipts:?},request["request_id"]+".json")
+fd=os.open(target+".tmp",os.O_WRONLY|os.O_CREAT|os.O_EXCL,0o600)
+os.write(fd,json.dumps(record).encode())
+os.close(fd)
+os.rename(target+".tmp",target)
+print(json.dumps(record))
+"#,
+                seen = seen.to_str().unwrap(),
+                receipts = receipts.to_str().unwrap(),
+            ),
+        )
+        .unwrap();
+        mode(&path, 0o700);
+        f.runtime.fixture_image(&path);
+        let original = f.original();
+        assert!(f.admit(&original).accepted);
+        f.until("settled", |f| f.row(&original).receipt.drained);
+        let receipt = f.row(&original).receipt;
+        assert_eq!(
+            (receipt.phase, receipt.code.as_str()),
+            (Phase::Recorded, "")
+        );
+        let seen: Value = serde_json::from_slice(&std::fs::read(&seen).unwrap()).unwrap();
+        assert_eq!(seen["argv"], json!(["send", SESSION, "--json"]));
+        assert_eq!(seen["stdin"], original.intent.original.as_str());
+        assert!(seen["custody"]
+            .as_str()
+            .is_some_and(|fd| fd.parse::<u32>().is_ok()));
+    }
+
+    /// The original child writes a reply, starts a descendant that keeps its
+    /// stdout open and exits. Like `hgs` (adopt_custody), it never lets the
+    /// descendant inherit the custody lock. Only an EOF on the test's accepted
+    /// socket ends the descendant, which writes the CLI's record of the
+    /// request last, as a late submission would.
+    const RETAINING: &str = r#"import os,subprocess,sys
+sys.stdin.buffer.read()
+sys.stdout.buffer.write(b'{}')
+sys.stdout.flush()
+subprocess.Popen([sys.executable,'-c',"import os,socket,sys\nc=socket.socket(socket.AF_UNIX,socket.SOCK_STREAM)\nc.connect(sys.argv[1])\nassert c.recv(1)==b''\nt=sys.argv[2]+'.tmp'\nf=os.open(t,os.O_WRONLY|os.O_CREAT|os.O_EXCL,0o600)\nos.write(f,sys.argv[3].encode())\nos.close(f)\nos.rename(t,sys.argv[2])",sys.argv[1],sys.argv[2],sys.argv[3]],stdin=subprocess.DEVNULL,close_fds=True)
+os._exit(0)"#;
+
+    /// The one connection of the descendant, accepted within a bound.
+    fn accept(
+        listener: &std::os::unix::net::UnixListener,
+        mut turn: impl FnMut(),
+    ) -> std::os::unix::net::UnixStream {
+        let until = Instant::now() + Duration::from_secs(10);
+        loop {
+            match listener.accept() {
+                Ok((stream, _)) => return stream,
+                Err(e) if e.kind() == std::io::ErrorKind::WouldBlock => {
+                    assert!(Instant::now() < until, "the descendant never connected");
+                    turn();
+                    std::thread::sleep(Duration::from_millis(5));
+                }
+                Err(e) => panic!("{e}"),
+            }
+        }
+    }
+
+    #[test]
+    fn a_descendant_pipe_keeps_custody_and_the_receipt_is_read_only_after_its_eof() {
+        use crate::desktop::custody::{self, Observation};
+        let control = tempfile::tempdir().unwrap();
+        let socket = control.path().join("c");
+        let listener = std::os::unix::net::UnixListener::bind(&socket).unwrap();
+        listener.set_nonblocking(true).unwrap();
+        let path = socket.to_str().unwrap().to_owned();
+        // A real original child; its descendant keeps the original stdout
+        // open past the deadline and holds no custody lock of its own.
+        let mut f = Fixture::new(move |state, plan, _, input, lock, resources| {
+            let folder = state.join("input_receipts");
+            std::fs::create_dir(&folder).unwrap();
+            mode(&folder, 0o700);
+            child::run(
+                Path::new("/usr/bin/env"),
+                &[
+                    "python3".into(),
+                    "-c".into(),
+                    RETAINING.into(),
+                    path.clone(),
+                    folder
+                        .join(format!("{}.json", plan.request_id))
+                        .to_str()
+                        .unwrap()
+                        .into(),
+                    cli_record(plan, wire::SUBMITTED).to_string(),
+                ],
+                input,
+                lock,
+                resources,
+                Instant::now() + Duration::from_millis(500),
+                |_| Ok(()),
+            )
+        });
+        let original = f.original();
+        assert!(f.admit(&original).accepted);
+        // Keep the SAME accepted endpoint through the logical end.
+        let release = accept(&listener, || {
+            f.runtime.poll(&mut f.store, Some(f.exclusion.clone()));
+        });
+        f.until("logical end", |f| {
+            f.row(&original).receipt.code == "deferred_send_output_retained"
+        });
+        let row = f.row(&original);
+        assert_eq!(row.receipt.phase, Phase::Unknown);
+        assert!(!row.receipt.drained);
+        let record = row.custody.clone().unwrap();
+        assert!(matches!(
+            custody::probe(&f.location, &record),
+            Observation::Held
+        ));
+        // Neither revoke nor a stop request releases the original resources,
+        // and no receipt is read while they are held.
+        f.revoke();
+        f.runtime.request_stop();
+        for _ in 0..40 {
+            f.runtime.poll(&mut f.store, Some(f.exclusion.clone()));
+            std::thread::sleep(Duration::from_millis(5));
+        }
+        assert!(!f.runtime.drained(), "takeover stays blocked");
+        assert_eq!(ledger::undrained(&f.store.db).unwrap(), 1, "charged");
+        assert!(!f.row(&original).receipt.drained);
+        assert!(matches!(
+            custody::probe(&f.location, &record),
+            Observation::Held
+        ));
+        // EOF is the one explicit release of the descendant, which writes the
+        // CLI's record last, just before its end releases the custody.
+        drop(release);
+        f.until("drained", |f| {
+            f.runtime.drained()
+                && matches!(
+                    custody::probe(&f.location, &record),
+                    Observation::Released { .. }
+                )
+        });
+        assert_eq!(ledger::undrained(&f.store.db).unwrap(), 0);
+        let receipt = f.row(&original).receipt;
+        assert!(receipt.drained);
+        assert_eq!(
+            (receipt.phase, receipt.code.as_str()),
+            (Phase::Recorded, ""),
+            "read only after the physical drain"
+        );
+    }
+
+    #[test]
+    fn a_send_past_its_deadline_is_signalled_and_drains_unknown() {
+        assert_eq!(runtime::DEADLINE, Duration::from_secs(30));
+        let mut f = Fixture::new(|_, _, _, input, lock, resources| {
+            child::run(
+                Path::new("/bin/sh"),
+                &["-c".into(), "cat >/dev/null; exec sleep 30".into()],
+                input,
+                lock,
+                resources,
+                Instant::now() + Duration::from_millis(300),
+                |_| Ok(()),
+            )
+        });
+        let started = Instant::now();
+        let original = f.original();
+        assert!(f.admit(&original).accepted);
+        f.until("settled", |f| f.row(&original).receipt.drained);
+        assert!(started.elapsed() < Duration::from_secs(8));
+        let receipt = f.row(&original).receipt;
+        assert_eq!(
+            (receipt.phase, receipt.code.as_str()),
+            (Phase::Unknown, "deferred_send_timed_out")
+        );
+    }
+
+    #[test]
+    fn the_macos_fence_refuses_before_any_row_lease_or_child() {
+        let mut f = Fixture::new(|_, _, _, _, _, _| panic!("no fenced child"));
+        f.runtime.fixture_mac_fence(true);
+        let original = f.original();
+        let admission = f.admit(&original);
+        assert!(!admission.accepted && !admission.durable);
+        assert_eq!(admission.code, runtime::MAC_UNAVAILABLE);
+        assert!(admission.receipt.is_none());
+        assert!(ledger::load(&f.store.db, &original.plan.request_id)
+            .unwrap()
+            .is_none());
+        assert_eq!(ledger::undrained(&f.store.db).unwrap(), 0);
+        for _ in 0..20 {
+            f.runtime.poll(&mut f.store, Some(f.exclusion.clone()));
+        }
+        assert!(!f.runtime.status()["working"].as_bool().unwrap());
+    }
+
+    #[test]
+    #[cfg(target_os = "linux")]
+    fn a_native_permit_that_expires_while_begin_waits_admits_nothing() {
+        let mut f = Fixture::new(|_, _, _, _, _, _| panic!("expired permit must not execute"));
+        let original = f.original();
+        let authority = ui_authority::Validated::fixture_expiring(
+            &Fixture::request(&original),
+            Instant::now() + Duration::from_millis(150),
+        );
+        let database = f.location.root.join("state.sqlite3");
+        let (ready_tx, ready_rx) = std::sync::mpsc::channel();
+        let writer = std::thread::spawn(move || {
+            let mut db = rusqlite::Connection::open(database).unwrap();
+            let tx = db
+                .transaction_with_behavior(TransactionBehavior::Immediate)
+                .unwrap();
+            ready_tx.send(()).unwrap();
+            std::thread::sleep(Duration::from_millis(300));
+            tx.commit().unwrap();
+        });
+        ready_rx.recv_timeout(Duration::from_secs(2)).unwrap();
+        let answer = f
+            .runtime
+            .frontend(&mut f.store, authority, Some(f.exclusion.clone()));
+        writer.join().unwrap();
+        assert_eq!(answer["accepted"], false, "consumed after it expired");
+        assert_eq!(answer["code"], "deferred_send_unavailable");
+        assert!(ledger::load(&f.store.db, &original.plan.request_id)
+            .unwrap()
+            .is_none());
+    }
+
+    #[test]
+    fn another_scope_or_an_invalid_original_admits_nothing() {
+        let mut f = Fixture::new(|_, _, _, _, _, _| panic!("refused original must not execute"));
+        let mut original = f.original();
+        original.intent.scope.service_epoch = uuid::Uuid::new_v4().to_string();
+        let admission = f.admit(&original);
+        assert!(!admission.accepted);
+        assert_eq!(admission.code, "deferred_send_unavailable");
+        assert!(ledger::load(&f.store.db, &original.plan.request_id)
+            .unwrap()
+            .is_none());
+        let mut original = f.original();
+        original.intent.scope.configuration = "b".repeat(64);
+        assert!(!f.admit(&original).accepted);
+        assert_eq!(ledger::undrained(&f.store.db).unwrap(), 0);
+    }
+
+    #[test]
+    fn a_revoke_after_admission_starts_nothing_and_retires_the_original() {
+        let calls = Arc::new(AtomicUsize::new(0));
+        let called = calls.clone();
+        let mut f = Fixture::new(move |_, _, _, _, _, _| {
+            called.fetch_add(1, Ordering::SeqCst);
+            Ended::Unknown("lost")
+        });
+        let original = f.original();
+        assert!(f.admit(&original).accepted);
+        f.revoke();
+        f.until("retired", |f| f.row(&original).receipt.drained);
+        assert_eq!(calls.load(Ordering::SeqCst), 0);
+        let receipt = f.row(&original).receipt;
+        assert_eq!(
+            (receipt.phase, receipt.code.as_str()),
+            (Phase::Unknown, "deferred_send_interrupted")
+        );
+        assert!(receipt.result(&original.plan).is_none());
+    }
+
+    #[test]
+    fn duplicates_while_running_and_after_a_lost_result_never_send_again() {
+        let calls = Arc::new(AtomicUsize::new(0));
+        let called = calls.clone();
+        let (release_tx, release_rx) = std::sync::mpsc::channel::<()>();
+        let release_rx = std::sync::Mutex::new(release_rx);
+        let mut f = Fixture::new(move |_, _, _, _, _, _| {
+            called.fetch_add(1, Ordering::SeqCst);
+            release_rx
+                .lock()
+                .unwrap()
+                .recv_timeout(Duration::from_secs(5))
+                .unwrap();
+            Ended::Unknown("deferred_send_unobserved")
+        });
+        let original = f.original();
+        assert!(f.admit(&original).accepted);
+        f.until("running child", |_| calls.load(Ordering::SeqCst) == 1);
+        for _ in 0..3 {
+            assert!(f.admit(&original).accepted);
+        }
+        release_tx.send(()).unwrap();
+        f.until("Unknown drained", |f| f.row(&original).receipt.drained);
+        let receipt = f.row(&original).receipt;
+        // The lost result with no CLI record stays Unknown, never unsent.
+        assert_eq!(
+            (receipt.phase, receipt.code.as_str()),
+            (Phase::Unknown, "deferred_send_unobserved")
+        );
+        for _ in 0..3 {
+            assert_eq!(f.admit(&original).receipt.unwrap(), receipt);
+            f.runtime.poll(&mut f.store, Some(f.exclusion.clone()));
+        }
+        f.runtime.request_stop();
+        f.until("drained", |f| f.runtime.drained());
+        assert_eq!(calls.load(Ordering::SeqCst), 1, "only the original send");
+    }
+
+    #[test]
+    fn a_revoked_writer_refuses_admission_and_no_child_starts() {
+        let sent = Arc::new(AtomicUsize::new(0));
+        let count = sent.clone();
+        let mut f = Fixture::new(move |_, _, _, _, _, _| {
+            count.fetch_add(1, Ordering::SeqCst);
+            Ended::Exited { code: 0 }
+        });
+        let original = f.original();
+        f.revoke();
+        let admission = f.admit(&original);
+        assert!(!admission.accepted);
+        for _ in 0..50 {
+            f.runtime.poll(&mut f.store, Some(f.exclusion.clone()));
+            std::thread::sleep(Duration::from_millis(2));
+        }
+        assert_eq!(sent.load(Ordering::SeqCst), 0, "no child after revoke");
+        assert!(ledger::load(&f.store.db, &original.plan.request_id)
+            .unwrap()
+            .is_none());
+    }
+
+    #[test]
+    fn restart_retires_a_queued_send_and_never_reconstructs_execution_consent() {
+        let mut f = Fixture::new(|_, _, _, _, _, _| panic!("recovered send must not execute"));
+        let original = f.original();
+        assert!(f.admit(&original).accepted);
+        f.runtime = runtime::Runtime::new(&f.config, &f.epoch, f.owner.clone()).unwrap();
+        f.runtime.fixture_executor(
+            MACHINE,
+            Arc::new(|_, _, _, _, _| panic!("restart must not execute")),
+        );
+        f.store = Store::open(&f.location, &f.epoch).unwrap();
+        zerus_desktop_ledger::authorize(
+            &mut f.store.db,
+            &uuid::Uuid::new_v4().to_string(),
+            &f.epoch,
+        )
+        .unwrap();
+        f.until("retired", |f| f.row(&original).receipt.drained);
+        let receipt = f.row(&original).receipt;
+        assert_eq!(
+            (receipt.phase, receipt.code.as_str()),
+            (Phase::Unknown, "deferred_send_interrupted")
+        );
+        // The same original again gets only that receipt.
+        let again = f.admit(&original);
+        assert!(again.accepted);
+        assert_eq!(again.receipt.unwrap(), receipt);
+    }
+}

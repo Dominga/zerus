@@ -205,18 +205,36 @@ The first, `deferred_send` (`desktop::deferred_send`, ABI
   are all the plan's and its status is `submitted`. The outcome carries
   that digest. `in_progress`, a duplicate or missing field, or more than
   256 KiB is never an outcome.
-  Failed only at the no-spawn boundary (`deferred_send_not_started`).
+  Failed only at the no-spawn boundary (`deferred_send_not_started`), and
+  only when the drain finds no record of the request: an exact `submitted`
+  record still records it, and any other record leaves it Unknown.
   Everything else after a possibly started child is Unknown and never
   resent: `in_progress`, a missing, corrupt, mismatched, inaccessible or
   replaced receipt, a timeout or a lost worker.
 - **Lookup.** A scoped read-only lookup by session, request ID and plan
   fingerprint.
 
-No actor executes it yet: the native frontend lane carries the request on
-its own ordered lane, and the service refuses it
-(`deferred_send_unsupported`) until the actor lands; an unauthenticated
-hello naming it gets `frontend_authentication_required`, like its siblings.
-Its help marker is not advertised before then.
+The service actor executes it on Linux. The native frontend lane carries the
+request on its own ordered lane. The actor consumes the permit after BEGIN
+IMMEDIATE, under its current lease and scope, and keeps live consent for
+that admission alone: restart, import or reconnect retires a queued original
+(`deferred_send_interrupted`) and never rebuilds consent. Each original runs
+once, through the shared original-child runner: this service's own pinned
+image with the fixed call, the exact stdin and the effect's close-only
+custody lock. The custody, consent, lease and serve-owner loan stay held
+until every original pipe really ends, a descendant's included. The whole
+send, the CLI's lock wait included, has 30 seconds. The child's exit settles
+nothing. After the physical drain, a read-only observer off the actor reads
+the CLI's receipt from the original state root, never through a link, and
+only from an owner-only folder and file within 256 KiB. The actor then
+settles the receipt in the drain's transaction: Recorded from the exact
+`submitted` record, Failed as above, and Unknown otherwise, with the
+receipt's or the child's reason. The same original admitted again gets only
+its own receipt. macOS refuses every original before any row
+(`deferred_send_native_image_unavailable`), Windows refuses it too
+(`deferred_send_unsupported`), and only Linux advertises the help marker. An
+unauthenticated hello naming it gets `frontend_authentication_required`,
+like its siblings.
 
 A draft holds one such identity until it is resolved. A definite outcome
 resolves it, as does a cancellation before its call was dispatched or, for a

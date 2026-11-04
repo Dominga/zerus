@@ -210,7 +210,42 @@ class RemoteLoginShells(unittest.TestCase):
                     self.assertEqual(argv[:2], call[1:3], argv)
                     self.assertEqual(argv[-len(call[3:]):], call[3:], argv)
                 else:
+                    if reference in call:
+                        # The one verified hop is guarded by the reference's machine.
+                        self.assertEqual(argv[:2], ['--expect-machine', '33333333-3333-4333-8333-333333333333'], argv)
                     self.assertEqual(argv[-len(call[1:]):], call[1:], argv)
+
+    def test_a_reference_takes_exactly_one_verified_hop(self):
+        # #1376 review: a reference reaches its computer through one SSH hop the
+        # peer verifies; a guarded call never forwards a reference again.
+        machine = '33333333-3333-4333-8333-333333333333'
+        reference = (f'zerus://session?machine={machine}&host=peer&name=codex%2Fp%2Fa&conversation=c&run=r')
+        executable = self.peer / '.local/bin/hgs'
+        executable.write_text(PEER_HGS.replace("'hooks-health-v1'", "'hooks-health-v1' '  session-reference-selector-v1'"))
+        dry = self.hgs('/bin/sh', '--dry-run', 'kill', reference)
+        self.assertEqual(dry.returncode, 0, dry.stderr)
+        self.assertIn(f'--expect-machine {machine} kill', dry.stdout)
+        self.assertNotIn(' -t ', dry.stdout, 'the hop keeps the SSH options of the command')
+        local = json.loads((self.root / 'home/.config/hgs/swarm/catalog.json').read_text())['node_id']
+        self.assertNotEqual(local, machine)
+        # A guarded call that verified this computer refuses another one's reference.
+        for call in (['--expect-machine', local, 'send', reference, '--json'],
+                     ['--expect-machine', local, '--client', 'peer', 'pause', reference],
+                     ['@test-local', '--expect-machine', local, 'kill', reference]):
+            with self.subTest(call=call):
+                refused = self.hgs('/bin/sh', *call)
+                self.assertEqual(refused.returncode, 1, refused.stdout + refused.stderr)
+                self.assertIn('a guarded call acts only on this computer', refused.stderr)
+                self.assertFalse((self.root / 'ssh-args.json').exists())
+        # The receiving side of a hop that reached another computer refuses it.
+        hop = self.hgs('/bin/sh', '--expect-machine', machine, '--client', 'peer', 'pause', reference)
+        self.assertEqual(hop.returncode, 1, hop.stdout + hop.stderr)
+        self.assertIn('the selected SSH alias does not match', hop.stderr)
+        self.assertFalse((self.root / 'ssh-args.json').exists())
+        # The hop itself: one SSH call to the alias, guarded by the reference's machine.
+        result = self.hgs('/bin/sh', '@peer', 'send', reference, '--json', body='{}')
+        self.assertEqual(result.returncode, 0, result.stderr)
+        self.assertEqual(self.received(), (['--expect-machine', machine, 'send', reference, '--json'], '{}'))
 
     def test_peer_status_reads_the_status_command(self):
         for name, shell in login_shells().items():

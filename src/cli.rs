@@ -558,7 +558,9 @@ fn dispatch_normal(mut args: Vec<String>) -> Result<i32> {
     // An encrypted gateway binds every local native call to the physical
     // machine it advertised. This check also works on Windows, without a
     // shell, stdin rewriting or a second native process.
+    let mut guarded = false;
     if args.first().is_some_and(|a| a == "--expect-machine") {
+        guarded = true;
         let expected = args.get(1).ok_or_else(|| Error::new(2, "Missing expected machine identity"))?;
         if uuid::Uuid::parse_str(expected).ok().is_none_or(|id| id.to_string() != *expected) {
             return Err(Error::new(1,"Mobile target identity changed; refresh computers"));
@@ -570,7 +572,16 @@ fn dispatch_normal(mut args: Vec<String>) -> Result<i32> {
             crate::swarm::local_node_id(&config).map_err(|_| Error::new(1,"Native machine identity is unavailable"))?
         };
         if actual != *expected {
-            return Err(Error::new(1,"Mobile target identity changed; refresh computers"));
+            // A forwarded session reference names the machine it expects; the
+            // SSH alias that carried it reached another one (zerus-ucck P1c).
+            let hop = args.get(guarded_at).is_some_and(|command| {
+                is_reference_call(command, args.get(guarded_at + 1..).unwrap_or_default())
+            });
+            return Err(Error::new(1, if hop {
+                "Session reference belongs to another computer; the selected SSH alias does not match"
+            } else {
+                "Mobile target identity changed; refresh computers"
+            }));
         }
         args.drain(..2);
         let command_at=if args.first().is_some_and(|a|a=="--client") {
@@ -654,16 +665,25 @@ fn dispatch_normal(mut args: Vec<String>) -> Result<i32> {
         }
         let local_id = crate::swarm::local_node_id(&config).map_err(|e| Error::new(1, e.to_string()))?;
         if reference.machine != local_id {
+            // A guarded call, including the one hop below, acts only on the
+            // machine it verified; it never forwards a reference again.
+            if guarded {
+                return Err(Error::new(1, "Session reference belongs to another computer; a guarded call acts only on this computer"));
+            }
             if matches!(command.as_str(), "native-ui" | "__dsh-ui-url") {
                 return Err(Error::new(1, "Open another computer's native UI by name or --session-id"));
             }
-            if !target.is_empty() && !config.is_self(&target) {
-                return remote(&config, &target, command, args, dry);
-            }
-            if config.peers.contains(&reference.host) && !config.is_self(&reference.host) {
-                return remote(&config, &reference.host, command, args, dry);
-            }
-            return Err(Error::new(1, "The referenced computer is not configured here; choose its configured @host"));
+            // Exactly one verified hop: the peer runs the command as a call
+            // guarded by the reference's machine, so a peer that is not that
+            // machine refuses, and the machine that is never forwards it.
+            let host = if !target.is_empty() && !config.is_self(&target) {
+                &target
+            } else if config.peers.contains(&reference.host) && !config.is_self(&reference.host) {
+                &reference.host
+            } else {
+                return Err(Error::new(1, "The referenced computer is not configured here; choose its configured @host"));
+            };
+            return remote_via(&config, host, command, args, dry, Some(&reference.machine));
         }
         if !target.is_empty() && !config.is_self(&target) {
             return Err(Error::new(1, "A local session reference cannot route to another computer"));
@@ -1345,6 +1365,20 @@ fn remote(
     args: &[String],
     global_dry: bool,
 ) -> Result<i32> {
+    remote_via(config, target, command, args, global_dry, None)
+}
+
+/// `remote`, optionally as the one verified hop of a session reference: the
+/// peer runs the command guarded by `--expect-machine MACHINE`, with the same
+/// SSH options the command has without it (zerus-ucck P1c).
+fn remote_via(
+    config: &Config,
+    target: &str,
+    command: &str,
+    args: &[String],
+    global_dry: bool,
+    machine: Option<&str>,
+) -> Result<i32> {
     if target.starts_with('-') || target.chars().any(char::is_whitespace) {
         return Err(Error::new(1, "invalid SSH host alias"));
     }
@@ -1420,8 +1454,8 @@ fn remote(
             let mut all=vec!["--expect-machine".into(),expected.into(),"--client".into(),config.host().into()];
             all.extend_from_slice(&args[1..]);all
         }
-        "session-action-status" => return Err(Error::new(2,"A remote lifecycle receipt read requires --expect-machine ID before session-action-status")),
-        "archives" | "kill" | "terminate" | "pause" | "inspect" | "reference" | "processes" | "worktrees" | "git-status" | "repository" | "dirs" | "project" | "archive" | "rename"
+        "session-action-status" if machine.is_none() => return Err(Error::new(2,"A remote lifecycle receipt read requires --expect-machine ID before session-action-status")),
+        "archives" | "session-action-status" | "kill" | "terminate" | "pause" | "inspect" | "reference" | "processes" | "worktrees" | "git-status" | "repository" | "dirs" | "project" | "archive" | "rename"
         | "send" | "send-now" | "session-action" | "terminal" | "history" | "history-projection" | "interrupt" | "clear-context" | "compact-context" | "answer" | "effort" | "settings" | "search" | "schedules" | "graph" | "wait" | "guide" | "dsh" | "opencode" | "attachment" | "file-read" | "recovery" | "swarm" | "read" | "notifications" | "speech" | "analytics" | "voice" | "hooks" | "--help" => {
             flags = vec![
                 "-o".into(),
@@ -1458,6 +1492,10 @@ fn remote(
         }
     };
     flags.extend(crate::machines::ssh_options(config, target));
+    let remote_args: Vec<String> = match machine {
+        Some(machine) => ["--expect-machine".to_owned(), machine.to_owned()].into_iter().chain(remote_args).collect(),
+        None => remote_args,
+    };
     let remote = if let Some(markers) = selector_markers(command, &args)? {
         // An older peer would read the flag as a session name; it must
         // advertise the selector, and what the command needs already, first.

@@ -1390,6 +1390,52 @@ class SessionIdentity(Harness):
         self.assertIn("names an archived conversation", archived_send.stderr)
 
 
+    # #1376 review (MX6): a reference that names no conversation selects by its
+    # run. Another session takes the name after resolution, before kill binds
+    # its terminal: kill refuses, and the other session's terminal survives.
+    @unittest.skipIf(LEGACY_STATE, "fix introduced by session references")
+    def test_a_run_reference_binds_its_run_before_kill(self):
+        name = self.start()
+        state = self.root / "state"
+        path = state / (hashlib.sha256(name.encode()).hexdigest() + ".json")
+        record = json.loads(path.read_text())
+        # A session whose first message is unconfirmed has no conversation yet.
+        record.pop("conversation_id", None)
+        path.write_text(json.dumps(record) + "\n")
+        uri = json.loads(self.hgs("reference", name, "--json"))["uri"]
+        self.assertNotIn("conversation=", uri)
+        self.assertIn(f"run={record['run_id']}", uri)
+        other = str(uuid.uuid4())
+        taken = self.root / "taken.json"
+        taken.write_text(json.dumps(dict(record, session_id=str(uuid.uuid4()), run_id=other)) + "\n")
+        armed = self.root / "take-the-name"
+        tmux = f"{shlex.quote(TMUX)} -S {shlex.quote(self.socket)} -f /dev/null"
+        original = (self.bin / "tmux").read_text()
+        # kill resolves the reference, then asks tmux whether the name exists:
+        # at that moment, once, another run takes the name and its record.
+        self.script("tmux", f'''#!/bin/sh
+if [ "$1" = has-session ] && rm {shlex.quote(str(armed))} 2>/dev/null; then
+    {tmux} rename-session -t {shlex.quote("=" + name)} claude/p/moved-away
+    {tmux} new-session -d -s {shlex.quote(name)} sleep 300
+    {tmux} set-option -t {shlex.quote("=" + name + ":")} @hgs_run {shlex.quote(other)}
+    cp {shlex.quote(str(taken))} {shlex.quote(str(path))}
+fi
+exec {tmux} "$@"
+''')
+        armed.touch()
+        killed = subprocess.run([str(HGS), "kill", uri], env=self.env, capture_output=True, text=True, timeout=30)
+        self.script("tmux", original)
+        self.assertFalse(armed.exists(), "the name was taken during kill")
+        self.assertEqual(killed.returncode, 1, killed.stdout + killed.stderr)
+        self.assertIn(f"The session reference no longer names {name}", killed.stderr)
+        self.assertEqual(subprocess.run([str(self.bin / "tmux"), "has-session", "-t", f"={name}"],
+                                        env=self.env, capture_output=True).returncode, 0,
+                         "the other session's terminal survives")
+        self.t("kill-session", "-t", f"={name}")
+        self.t("rename-session", "-t", "=claude/p/moved-away", name)
+        path.write_text(json.dumps(record) + "\n")
+
+
 class Lifecycle(Harness):
     def test_directory_browser(self):
         folder = self.root / "browse ' test"

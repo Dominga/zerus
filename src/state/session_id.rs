@@ -232,6 +232,10 @@ mod tests {
         refused_reference(super::super::notifications::current(name).unwrap_err());
         refused_reference(super::super::hook_health::session_report(name, &input).unwrap_err());
         refused_reference(read(name).unwrap_err());
+        // A reference without a conversation selects by its run (#1376 MX6).
+        select_reference(name, "", "", &fresh());
+        refused_reference(read(name).unwrap_err());
+        refused_reference(super::super::notifications::current(name).unwrap_err());
         std::fs::remove_file(record_path(name)).unwrap();
         refused_reference(super::super::journal::inspection(name, 0, None, false).unwrap_err());
         select(name, &fresh());

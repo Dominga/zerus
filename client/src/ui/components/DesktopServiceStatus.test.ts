@@ -166,7 +166,7 @@ describe("Windows first background choice in flight", () => {
     const read = (path: string) => fs.readFileSync(new URL(path, import.meta.url), "utf8");
     const store = read("../../store/desktopService.ts");
     expect(store).toContain('return { label: tr("Turning on background mode"),');
-    expect(store).toContain('healthy: false, retry: false, review: !!retained, ownership: "check" as const, manualRefresh: false, modeReview: false };');
+    expect(store).toContain('healthy: false, retry: false, review: !!retained, inputsReview, ownership: "check" as const, manualRefresh: false, modeReview: false };');
     expect(store).toContain(`if (firstChoicePending(state)) return tr("${PENDING_BODY}");`);
     expect(read("./DesktopServiceStatus.tsx")).toContain('servicePaused(desktopService.state()) === "settings" || firstChoicePending(desktopService.state());');
     expect(read("./DesktopServiceStatus.tsx")).toContain('<h2>{firstChoicePending(desktopService.state()) ? tr("Turning on background mode") : tr("Background work is paused")}</h2>');

@@ -512,12 +512,14 @@ export function serviceStatus(state: DesktopService | undefined) {
   // restarts. Independent reasons keep their own text and review links.
   if (firstChoicePending(state)) {
     const ownership = state.notification_ownership;
-    const reads = pendingReadNotice(state), retained = retainedSourceNotice(state);
+    const reads = pendingReadNotice(state), retained = retainedSourceNotice(state), inputs = heldInputsNotice(state);
     const access = ownership?.pending ? ownershipNotice(ownership) : "";
+    // The same readiness rule as below: no held-copy Review while not ready.
+    const inputsReview = !!inputs && state.connected && !state.code && COMPONENTS.every((name) => state.background[name]?.ready);
     return { label: tr("Turning on background mode"),
-      details: [tr("The new mode choice is unconfirmed. Check its original result; do not make another choice."), reads, retained, access]
+      details: [tr("The new mode choice is unconfirmed. Check its original result; do not make another choice."), reads, retained, inputs, access]
         .filter(Boolean).join("\n"),
-      healthy: false, retry: false, review: !!retained, ownership: "check" as const, manualRefresh: false, modeReview: false };
+      healthy: false, retry: false, review: !!retained, inputsReview, ownership: "check" as const, manualRefresh: false, modeReview: false };
   }
   const manualRefresh = state.executable_upgrade?.state === "manual_refresh_required";
   const paused = servicePaused(state);

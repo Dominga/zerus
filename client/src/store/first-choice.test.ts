@@ -39,6 +39,21 @@ describe("a first background choice in flight keeps independent reasons", async 
     expect(status).toMatchObject({ label: "Turning on background mode", ownership: "check", retry: false });
     expect(status?.details).toContain("Background access is unconfirmed");
   });
+  it("keeps the held message-copy notice, with its Review only while the service is ready", () => {
+    const notReady = serviceStatus(inFlight((state) => {
+      state.connected = true;
+      state.task_message_inputs = { review: 2, full: true } as DesktopService["task_message_inputs"];
+    }));
+    expect(notReady).toMatchObject({ label: "Turning on background mode", ownership: "check", retry: false, inputsReview: false });
+    expect(notReady?.details).toContain("Large task messages are paused: some held message copies need review.");
+    const ready = serviceStatus(inFlight((state) => {
+      state.connected = true;
+      state.code = "";
+      for (const name of Object.keys(state.background)) state.background[name] = { ready: true, code: "running" };
+      state.task_message_inputs = { review: 2, full: true } as DesktopService["task_message_inputs"];
+    }));
+    expect(ready).toMatchObject({ label: "Turning on background mode", ownership: "check", retry: false, inputsReview: true });
+  });
   it("lets manual-refresh guidance lead while the original lookup stays available", () => {
     const state = inFlight((s) => { s.executable_upgrade = { state: "manual_refresh_required" }; });
     expect(firstChoicePending(state)).toBe(false);

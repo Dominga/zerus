@@ -1090,9 +1090,12 @@ fn idle(count: usize) -> Vec<CatalogItem> {
 }
 
 impl Fixture {
-    /// One scan, its inspections settled, then a second passes: the 5 s
-    /// inspection cooldown counts it.
+    /// A live source's heartbeat, one scan with its inspections settled, then
+    /// a second passes: the 5 s inspection cooldown counts it. The heartbeat
+    /// keeps a test's sources current however slow the runner; without it,
+    /// more than `FRESH` of real time made every later scan skip them.
     fn second(&mut self) {
+        self.runtime.sources.heartbeat_fixture(&self.store);
         self.scan();
         self.tick_until(|r| r.jobs.is_empty());
         for (_, at) in self.runtime.recent.iter_mut() {
@@ -1172,6 +1175,8 @@ fn a_pass_ends_where_it_began_so_arrivals_cannot_hide_an_older_row() {
         .unwrap();
     let mut arrived = 20;
     for _ in 0..4 {
+        // zerus-e04p: a loaded runner can spend more than FRESH between scans.
+        f.runtime.sources.age_fixture(Duration::from_secs(16));
         for _ in 0..16 {
             let row = named(&format!("untracked-{arrived}"), "approval", false);
             let json = row.row.to_string();

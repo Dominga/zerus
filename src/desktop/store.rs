@@ -301,11 +301,22 @@ impl Store {
                 "desktop state requires a newer hgs version"
             );
         }
-        // Finish the raw-file check before SQLite acquires any locks. On Unix,
-        // closing any descriptor for this file drops this process's POSIX
-        // locks, including those held by the live SQLite connection.
+        // On Unix, closing any descriptor of this file drops this process's
+        // POSIX locks on it, including those of every live SQLite connection
+        // to it. So the file is created and checked through its path only, and
+        // the connection is bound to that file after the open (zerus-hpat).
+        #[cfg(unix)]
+        let identity = {
+            crate::sqlite_file::create(&path)?;
+            crate::sqlite_file::private(&path)
+                .map_err(|_| anyhow::anyhow!("desktop state must be private single-link regular files"))?
+        };
+        // Windows locks belong to the handle that took them.
+        #[cfg(not(unix))]
         drop(private_file(&path, true)?);
         let mut db = Connection::open_with_flags(&path, flags | OpenFlags::SQLITE_OPEN_READ_WRITE)?;
+        #[cfg(unix)]
+        crate::sqlite_file::bind_private(&db, &path, identity).context("desktop state changed")?;
         super::counts::register(&db)?;
         db.busy_timeout(Duration::from_secs(2))?;
         let version: i64 = db.query_row("PRAGMA user_version", [], |row| row.get(0))?;
@@ -719,6 +730,39 @@ impl Store {
 mod tests {
     use super::*;
     use rusqlite::params;
+    /// zerus-hpat: opening the store again keeps the SQLite locks of a store
+    /// already open in this process, also after a restart: no raw descriptor
+    /// of the live database is closed.
+    #[cfg(unix)]
+    #[test]
+    fn opening_the_store_again_keeps_a_live_store_s_locks() {
+        use crate::sqlite_file::foreign_lock_refused;
+        let temp = tempfile::tempdir().unwrap();
+        let location = Location {
+            root: canonical(&temp.path().join("state/desktop")).unwrap(),
+            configuration: "a".repeat(64),
+        };
+        location.prepare().unwrap();
+        let _owner = location.lock().unwrap();
+        let path = location.root.join("state.sqlite3");
+        let epoch = uuid::Uuid::new_v4().to_string();
+        // The second round is a restart: every earlier store is gone.
+        for round in 0..2 {
+            let live = Store::open(&location, &epoch).unwrap();
+            live.db.execute_batch("BEGIN").unwrap();
+            let _: i64 = live
+                .db
+                .query_row("SELECT count(*) FROM sqlite_master", [], |r| r.get(0))
+                .unwrap();
+            assert!(foreign_lock_refused(&path), "round {round}: the store holds its lock");
+            drop(Store::open(&location, &epoch));
+            assert!(foreign_lock_refused(&path), "round {round}: another open kept the lock");
+            live.db.execute_batch("COMMIT").unwrap();
+            drop(live);
+            assert!(!foreign_lock_refused(&path), "round {round}: the lock went with the store");
+        }
+    }
+
     #[test]
     fn catalog_collection_yields_and_failure_is_local_and_recoverable() {
         let temp = tempfile::tempdir().unwrap();

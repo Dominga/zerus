@@ -146,9 +146,15 @@ impl Store {
         // SQLite NOFOLLOW rejects symlinks in every path component, including
         // macOS's ordinary /var -> /private/var parent. Resolve the verified
         // directory only; keep refusing a symlink at the database itself.
-        let path = crate::platform::canonical(directory)
+        let canonical = crate::platform::canonical(directory).map_err(|e| e.to_string())?;
+        // The canonical folder is the one used from here: check it as well, so
+        // an ancestor changed after the first check never selects another one.
+        if !crate::platform::verify_private(&canonical, crate::platform::Private::Directory)
             .map_err(|e| e.to_string())?
-            .join("index.sqlite3");
+        {
+            return Err("Search index directory must be private and owned by this user".into());
+        }
+        let path = canonical.join("index.sqlite3");
         // A copied/restored database or auxiliary file must not become a new
         // public copy of message text, even if its parent is currently private.
         for name in [

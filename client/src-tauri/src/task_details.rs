@@ -82,6 +82,15 @@ pub async fn task_details(
 
 /// The cached copy of a file a page named, by its digest folder and name, as
 /// `attachments::store_at` keeps it, when its size is the page's.
+///
+/// The size check is enough; the copy is not hashed again. The private cache
+/// is content-addressed: `store_at` names the folder after the SHA-256 of the
+/// bytes it writes, writes them through a temporary file and an atomic rename,
+/// and keeps folders owner-only and the file `0600`. `cached_at` accepts only a
+/// regular file inside the canonical root. A copy in the page's digest folder
+/// therefore holds bytes with the page's digest. The size comparison is a cheap
+/// check against a copy truncated or replaced outside Zerus; hashing it again
+/// would read up to 10 MiB per listed file on every page.
 fn cached(
     root: &std::path::Path,
     fetcher: &Fetcher,

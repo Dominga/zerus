@@ -10,7 +10,7 @@ import { convertFileSrc } from "@tauri-apps/api/core";
 import { attachmentPin, attachmentUnpin, inTauri, openTaskAttachment } from "../../bridge";
 import { notify } from "../../store/actions";
 import { taskDetails, type TaskEntry } from "../../store/taskDetails";
-import { taskFiles } from "../../store/taskFiles";
+import { taskFileCard, taskFiles } from "../../store/taskFiles";
 import type { Fetched } from "../../types";
 import { TaskWorkflow } from "./TaskWorkflow";
 import { TaskTitle } from "./TaskTitle";
@@ -24,36 +24,11 @@ import { assignmentText, assignmentLabel, STAGE_LABEL, stageLabel, type Stage, t
 import { deliveryError, deliveryText, historyAction } from "./task-history-ui";
 import { tr } from "../../i18n";
 
-/**
- * One file of a task. A page names it; a copy already in the cache shows at
- * once, an image is read for its preview, and any other file is read when it
- * is opened.
- */
+/** One file of a task, its reads in `taskFileCard`; a shown copy stays pinned in the cache. */
 function TaskFile(props: { file: Fetched; project: string; task: string }) {
-  const file = props.file, source = file.source;
-  const [copy, setCopy] = createSignal<Fetched | undefined>(file.path ? file : undefined);
-  const [reading, setReading] = createSignal(false);
-  let shown = true;
-  onCleanup(() => { shown = false; });
+  const file = props.file;
+  const { copy, reading, open } = taskFileCard(file, props.project, props.task, { files: taskFiles, open: openTaskAttachment, notify });
   createEffect(() => { const path = copy()?.path; if (path) { attachmentPin(path); onCleanup(() => attachmentUnpin(path)); } });
-  if (!copy() && source && file.mime.startsWith("image/")) {
-    void taskFiles.preview(props.project, props.task, source, () => shown).then((read) => { if (read && shown) setCopy(read); }, () => {});
-  }
-  const open = async () => {
-    if (reading()) return;
-    try {
-      let read = copy();
-      if (!read) {
-        if (!source) return;
-        setReading(true);
-        read = await taskFiles.read(props.project, props.task, source);
-        if (!shown) return;
-        setCopy(read);
-      }
-      const notice = await openTaskAttachment(read.path); if (notice) notify("info", notice);
-    } catch (error) { notify("error", String(error)); }
-    finally { setReading(false); }
-  };
   return <button class="att-card" onClick={() => void open()} title={`Open ${file.name}`} aria-busy={reading()}>
     <Show when={copy()?.thumbnail && inTauri()}><img class="tasks-file-preview" src={convertFileSrc(copy()!.path, "zerus-file")} alt="" /></Show>
     <span>{file.name}</span><span class="muted">{Math.max(1, Math.ceil(file.bytes / 1024))} KiB</span><span>{reading() ? tr("Reading…") : tr("Open →")}</span>

@@ -742,6 +742,12 @@ impl Store {
         #[cfg(not(any(target_os = "linux", target_os = "macos")))]
         let _ = location;
     }
+    /// The deferred sends a live runtime drains itself; Store recovery skips
+    /// them while their token lives.
+    #[cfg(any(target_os = "linux", target_os = "macos"))]
+    pub(super) fn send_owned(&self) -> super::deferred_send::Owned {
+        self.send_custody.owned()
+    }
     #[cfg(all(test, any(target_os = "linux", target_os = "macos")))]
     pub(super) fn retry_operation_custody(&mut self) {
         self.custody.retry_now();

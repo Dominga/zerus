@@ -481,14 +481,15 @@ fn record(tx: &Transaction<'_>, row: &Row, code: &str) -> Result<()> {
 }
 
 /// Settles the receipt at the original's physical drain, from the CLI receipt
-/// read after it. Takes the transaction and the exact acquired lock so it
-/// cannot be released before commit.
+/// read after it. Takes the transaction, the exact acquired lock and the
+/// objects the read used, so none is released before commit.
 #[cfg(any(target_os = "linux", target_os = "macos"))]
 pub(super) fn drained(
     tx: Transaction<'_>,
     row: Row,
     observed: super::super::custody::Observation,
     cli: &Observed,
+    evidence: receipt::Evidence,
 ) -> Result<Receipt> {
     let super::super::custody::Observation::Released { ref record, .. } = observed else {
         anyhow::bail!("deferred send custody is retained");
@@ -532,6 +533,7 @@ pub(super) fn drained(
     }
     state(&tx, &row, &next)?;
     tx.commit()?;
+    drop(evidence);
     drop(observed);
     Ok(next)
 }

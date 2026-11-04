@@ -370,9 +370,6 @@ impl Validated {
         };
         Ok(*intent)
     }
-    /// Only the task message actor calls this after BEGIN IMMEDIATE. Cached
-    /// native Service mode was bound to this exact original request during
-    /// admission.
     /// Only the deferred send actor calls this, after BEGIN IMMEDIATE.
     /// Cached native Service mode was bound to this exact original request
     /// during admission.
@@ -384,6 +381,9 @@ impl Validated {
         };
         Ok(*intent)
     }
+    /// Only the task message actor calls this after BEGIN IMMEDIATE. Cached
+    /// native Service mode was bound to this exact original request during
+    /// admission.
     #[cfg(any(target_os = "linux", target_os = "macos"))]
     pub fn task_message(self) -> Result<zerus_client_core::desktop::task_message::Intent> {
         self.check()?;

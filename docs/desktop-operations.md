@@ -218,23 +218,36 @@ The service actor executes it on Linux. The native frontend lane carries the
 request on its own ordered lane. The actor consumes the permit after BEGIN
 IMMEDIATE, under its current lease and scope, and keeps live consent for
 that admission alone: restart, import or reconnect retires a queued original
-(`deferred_send_interrupted`) and never rebuilds consent. Each original runs
-once, through the shared original-child runner: this service's own pinned
-image with the fixed call, the exact stdin and the effect's close-only
-custody lock. The custody, consent, lease and serve-owner loan stay held
-until every original pipe really ends, a descendant's included. The whole
-send, the CLI's lock wait included, has 30 seconds. The child's exit settles
-nothing. After the physical drain, a read-only observer off the actor reads
-the CLI's receipt from the original state root, never through a link, and
-only from an owner-only folder and file within 256 KiB. The actor then
-settles the receipt in the drain's transaction: Recorded from the exact
-`submitted` record, Failed as above, and Unknown otherwise, with the
-receipt's or the child's reason. The same original admitted again gets only
-its own receipt. macOS refuses every original before any row
-(`deferred_send_native_image_unavailable`), Windows refuses it too
-(`deferred_send_unsupported`), and only Linux advertises the help marker. An
-unauthenticated hello naming it gets `frontend_authentication_required`,
-like its siblings.
+(`deferred_send_interrupted`) and never rebuilds consent. Before any child,
+preparation opens the original receipt store: the CLI's owner-only state
+root, and its receipt folder when it exists, as no-follow, non-blocking
+directory descriptors. The reservation commits in the same actor turn that
+checks the exact lease and row; the child worker then checks the selected
+session itself from that root, its own record (name, terminal agent, run and
+conversation) and the absence of an OpenCode or DeepSeek binding, since the
+name's prefix never authorizes a send; the consent veto runs last, in the
+actual spawn turn. A refusal there never started anything. Each original
+runs once, through the shared original-child runner: this service's own
+pinned image with the fixed call, the exact stdin and the effect's
+close-only custody lock. The custody, consent, lease and serve-owner loan
+stay held until every original pipe really ends, a descendant's included.
+The whole send, the CLI's lock wait included, has 30 seconds. The child's
+exit settles nothing. After the physical drain, the actor's own drain
+worker, holding the serve-owner and consent loans until it physically ends,
+reads the CLI's receipt from those held objects within one never-renewed
+5-second deadline: only an owner-only, single-link file within 256 KiB, its
+version unchanged across the read, and its name, folder and root still the
+original's afterwards. The actor then settles the receipt in the drain's
+transaction, keeping the objects the read used until its commit: Recorded
+from the exact `submitted` record, Failed as above, and Unknown otherwise,
+with the receipt's or the child's reason. A moved, replaced or changing
+store, a late read, and an original of an earlier run, whose store
+observation went with it, are Unknown and never a safe absence. The same
+original admitted again gets only its own receipt. macOS refuses every
+original before any row (`deferred_send_native_image_unavailable`), Windows
+refuses it too (`deferred_send_unsupported`), and only Linux advertises the
+help marker. An unauthenticated hello naming it gets
+`frontend_authentication_required`, like its siblings.
 
 A draft holds one such identity until it is resolved. A definite outcome
 resolves it, as does a cancellation before its call was dispatched or, for a

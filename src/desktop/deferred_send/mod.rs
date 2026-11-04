@@ -14,7 +14,9 @@ mod runtime;
 #[cfg(any(target_os = "linux", target_os = "macos"))]
 pub(crate) use child::adopt_custody;
 #[cfg(any(target_os = "linux", target_os = "macos"))]
-pub(super) use recovery::Recovery;
+pub(super) use recovery::{Owned, Recovery};
+#[cfg(any(target_os = "linux", target_os = "macos"))]
+mod target;
 #[cfg(any(target_os = "linux", target_os = "macos"))]
 pub(super) use runtime::Runtime;
 #[cfg_attr(windows, allow(dead_code))]

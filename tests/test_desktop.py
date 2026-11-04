@@ -1556,9 +1556,11 @@ finally:
     @staticmethod
     def remove_catalog_reason_schema(db):
         # Rewind the later leaves too, never leaving one labelled older: the
-        # schema-27 task message inputs, schema-26 task message, schema-25
-        # termination retention, creation launch/worktree, then the schema-22
-        # catalog approval.
+        # schema-28 deferred send, schema-27 task message inputs, schema-26
+        # task message, schema-25 termination retention, creation
+        # launch/worktree, then the schema-22 catalog approval.
+        db.execute('DROP TABLE desktop_deferred_sends')
+        db.execute('DROP TABLE desktop_deferred_send_budget')
         db.execute('DROP TABLE desktop_task_message_inputs')
         db.execute('DROP TABLE desktop_task_message_input_budget')
         db.execute('DROP TABLE desktop_task_messages')

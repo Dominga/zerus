@@ -67,6 +67,21 @@ fn write_receipt(state: &Path, request: &str, body: &[u8]) -> PathBuf {
     std::fs::rename(&temp, &path).unwrap();
     path
 }
+/// The CLI's own session record of `name` under the state root `state`, as
+/// `hgs` keeps it (the legacy, unrouted path).
+fn session_record(state: &Path, name: &str, agent: &str, run: &str, conversation: &str) {
+    use sha2::Digest;
+    let file = state.join(format!("{:x}.json", sha2::Sha256::digest(name.as_bytes())));
+    let temp = state.join(".record.tmp");
+    std::fs::write(
+        &temp,
+        json!({"name": name, "agent": agent, "run_id": run, "conversation_id": conversation})
+            .to_string(),
+    )
+    .unwrap();
+    mode(&temp, 0o600);
+    std::fs::rename(&temp, file).unwrap();
+}
 fn fixture() -> (tempfile::TempDir, Location, Store, String) {
     let temp = tempfile::tempdir().unwrap();
     let location = Location {
@@ -403,7 +418,14 @@ fn only_the_released_custody_settles_a_send_and_only_its_exact_cli_record_record
             .db
             .transaction_with_behavior(TransactionBehavior::Immediate)
             .unwrap();
-        assert!(ledger::drained(tx, row, observation, &read(&verified.plan)).is_err());
+        assert!(ledger::drained(
+            tx,
+            row,
+            observation,
+            &read(&verified.plan),
+            Default::default()
+        )
+        .is_err());
         drop(held);
         let row = ledger::pending(&store.db).unwrap().unwrap();
         let observation = released(&location, &record);
@@ -411,7 +433,14 @@ fn only_the_released_custody_settles_a_send_and_only_its_exact_cli_record_record
             .db
             .transaction_with_behavior(TransactionBehavior::Immediate)
             .unwrap();
-        let settled = ledger::drained(tx, row, observation, &read(&verified.plan)).unwrap();
+        let settled = ledger::drained(
+            tx,
+            row,
+            observation,
+            &read(&verified.plan),
+            Default::default(),
+        )
+        .unwrap();
         assert_eq!(
             (settled.phase, settled.code.as_str()),
             (phase, code),
@@ -445,6 +474,43 @@ fn only_the_released_custody_settles_a_send_and_only_its_exact_cli_record_record
         );
         assert_eq!(ledger::undrained(&store.db).unwrap(), 0);
     }
+}
+
+/// An original no live runtime holds (an earlier run's) has no original
+/// store observation: Store recovery drains it Unknown and never reads a
+/// receipt, however exact.
+#[test]
+fn an_unheld_original_drains_unknown_without_reading_any_receipt() {
+    let (_temp, location, mut store, epoch) = fixture();
+    let verified = original(&location.configuration, &epoch);
+    let (record, held) = running(&mut store, &location, &verified, &epoch);
+    let state = location.root.parent().unwrap().to_path_buf();
+    write_receipt(
+        &state,
+        &verified.plan.request_id,
+        cli_record(&verified.plan, wire::SUBMITTED)
+            .to_string()
+            .as_bytes(),
+    );
+    drop(held);
+    let _ = released(&location, &record);
+    let until = std::time::Instant::now() + std::time::Duration::from_secs(8);
+    loop {
+        store.recover_operation_custody(&location);
+        let row = ledger::load(&store.db, &verified.plan.request_id)
+            .unwrap()
+            .unwrap();
+        if row.receipt.drained {
+            assert_eq!(
+                (row.receipt.phase, row.receipt.code.as_str()),
+                (Phase::Unknown, super::receipt::UNHELD)
+            );
+            break;
+        }
+        assert!(std::time::Instant::now() < until, "never drained");
+        std::thread::sleep(std::time::Duration::from_millis(20));
+    }
+    assert!(store.creation_recovery_ok());
 }
 
 #[test]
@@ -503,14 +569,26 @@ fn the_lookup_reads_only_its_exact_original() {
     assert!(!lookup.found && lookup.receipt.is_none());
 }
 
+/// A private CLI state root under `parent`, as the CLI keeps it.
+fn state_root(parent: &Path) -> PathBuf {
+    let state = parent.join("state");
+    std::fs::create_dir(&state).unwrap();
+    mode(&state, 0o700);
+    state
+}
+fn observe(state: &Path, plan: &wire::Plan) -> super::receipt::Observed {
+    let roots = super::receipt::Roots::open(state).unwrap();
+    super::receipt::read(&roots, plan, &|| {}).0
+}
+
 /// The observation of the CLI's own receipt (G1 condition 2): only an exact,
-/// private, bounded `submitted` record is a submission.
+/// private, bounded `submitted` record in the original, unchanged store is a
+/// submission.
 #[test]
 fn the_receipt_observation_reads_only_the_exact_private_submitted_record() {
-    use super::receipt::{observe, Observed, MISSING, UNAVAILABLE};
+    use super::receipt::{Observed, MISSING, UNAVAILABLE};
     let temp = tempfile::tempdir().unwrap();
-    let state = temp.path().canonicalize().unwrap().join("state");
-    std::fs::create_dir(&state).unwrap();
+    let state = state_root(&temp.path().canonicalize().unwrap());
     let verified = original(&"a".repeat(64), &uuid::Uuid::new_v4().to_string());
     let plan = &verified.plan;
     let id = &plan.request_id;
@@ -581,10 +659,9 @@ fn the_receipt_observation_reads_only_the_exact_private_submitted_record() {
     );
     write_receipt(&state, id, exact.as_bytes());
     mode(&folder, 0o755);
-    assert_eq!(
-        observe(&state, plan),
-        Observed::Unknown(UNAVAILABLE),
-        "shared folder"
+    assert!(
+        super::receipt::Roots::open(&state).is_err(),
+        "a shared folder is never held"
     );
     mode(&folder, 0o700);
     let elsewhere = temp.path().join("elsewhere.json");
@@ -614,23 +691,231 @@ fn the_receipt_observation_reads_only_the_exact_private_submitted_record() {
         "a FIFO is never opened for a blocking read"
     );
     clear();
-    // A linked folder, then a file in its place.
-    write_receipt(&state, id, exact.as_bytes());
-    let moved = temp.path().join("moved");
-    std::fs::rename(&folder, &moved).unwrap();
-    std::os::unix::fs::symlink(&moved, &folder).unwrap();
-    assert_eq!(
-        observe(&state, plan),
-        Observed::Unknown(UNAVAILABLE),
-        "linked folder"
-    );
-    std::fs::remove_file(&folder).unwrap();
-    std::fs::write(&folder, b"").unwrap();
-    assert_eq!(
-        observe(&state, plan),
-        Observed::Unknown(UNAVAILABLE),
-        "not a folder"
-    );
+    // A linked or shared state root is never held.
+    mode(&state, 0o755);
+    assert!(super::receipt::Roots::open(&state).is_err(), "shared root");
+    mode(&state, 0o700);
+    let linked = temp.path().join("linked");
+    std::os::unix::fs::symlink(&state, &linked).unwrap();
+    assert!(super::receipt::Roots::open(&linked).is_err(), "linked root");
+}
+
+/// review: the original store is the one opened before the child; a moved,
+/// replaced or changing root, folder or record never proves a submission,
+/// however exact its bytes, and is never a safe absence.
+#[test]
+fn only_the_original_unchanged_store_proves_a_submission() {
+    use super::receipt::{read, Observed, Roots, CHANGED, MISSING};
+    let temp = tempfile::tempdir().unwrap();
+    let base = temp.path().canonicalize().unwrap();
+    let verified = original(&"a".repeat(64), &uuid::Uuid::new_v4().to_string());
+    let plan = &verified.plan;
+    let id = plan.request_id.clone();
+    let exact = cli_record(plan, wire::SUBMITTED).to_string();
+    // A fresh store under `parent`/state holding the exact record, and the
+    // store's roots opened before anything changes.
+    let fresh = |parent: &Path, folder: bool| -> (PathBuf, Roots) {
+        std::fs::create_dir_all(parent).unwrap();
+        let state = state_root(parent);
+        if folder {
+            write_receipt(&state, &id, exact.as_bytes());
+        }
+        let roots = Roots::open(&state).unwrap();
+        (state, roots)
+    };
+    let copy = |state: &Path, to: &Path| {
+        std::fs::create_dir(to).unwrap();
+        mode(to, 0o700);
+        write_receipt(to, &id, exact.as_bytes());
+        let _ = state;
+    };
+    // Each case changes the store after the roots were opened.
+    type Change<'a> = Box<dyn Fn(&Path, &Path) + 'a>;
+    let cases: Vec<(&str, bool, Change, &str)> = vec![
+        // desktop-u's negative: the state moved away, and a link at its old
+        // name points to another private store with matching JSON.
+        (
+            "linked root",
+            true,
+            Box::new(|parent, state| {
+                std::fs::rename(state, parent.join("moved")).unwrap();
+                let other = parent.join("other");
+                copy(state, &other);
+                std::os::unix::fs::symlink(&other, state).unwrap();
+            }),
+            CHANGED,
+        ),
+        (
+            "copied root",
+            true,
+            Box::new(|parent, state| {
+                std::fs::rename(state, parent.join("moved")).unwrap();
+                copy(state, state);
+            }),
+            CHANGED,
+        ),
+        (
+            "replaced ancestor",
+            true,
+            Box::new(|parent, state| {
+                let up = parent.parent().unwrap().join(format!(
+                    "{}-moved",
+                    parent.file_name().unwrap().to_str().unwrap()
+                ));
+                std::fs::rename(parent, &up).unwrap();
+                std::fs::create_dir(parent).unwrap();
+                copy(state, state);
+            }),
+            CHANGED,
+        ),
+        (
+            "replaced folder",
+            true,
+            Box::new(|parent, state| {
+                let folder = state.join("input_receipts");
+                std::fs::rename(&folder, parent.join("old-folder")).unwrap();
+                write_receipt(state, &id, exact.as_bytes());
+            }),
+            CHANGED,
+        ),
+        // A safe absence only in the original store.
+        (
+            "absent, root replaced",
+            false,
+            Box::new(|parent, state| {
+                std::fs::rename(state, parent.join("moved")).unwrap();
+                state_root(parent);
+            }),
+            CHANGED,
+        ),
+        (
+            "absent from the held folder, root replaced",
+            true,
+            Box::new(|parent, state| {
+                std::fs::remove_file(state.join("input_receipts").join(format!("{id}.json")))
+                    .unwrap();
+                std::fs::rename(state, parent.join("moved")).unwrap();
+                copy(state, state);
+            }),
+            CHANGED,
+        ),
+        (
+            "absent from the held folder, folder replaced",
+            true,
+            Box::new(|parent, state| {
+                let folder = state.join("input_receipts");
+                std::fs::remove_file(folder.join(format!("{id}.json"))).unwrap();
+                std::fs::rename(&folder, parent.join("old-folder")).unwrap();
+                write_receipt(state, &id, exact.as_bytes());
+            }),
+            CHANGED,
+        ),
+    ];
+    for (index, (name, folder, change, code)) in cases.into_iter().enumerate() {
+        let parent = base.join(format!("case-{index}"));
+        let (state, roots) = fresh(&parent, folder);
+        change(&parent, &state);
+        assert_eq!(
+            read(&roots, plan, &|| {}).0,
+            Observed::Unknown(code),
+            "{name}"
+        );
+    }
+    // The same changes during the read: after the bytes, before the checks.
+    let during: Vec<(&str, Change)> = vec![
+        (
+            "in place, same bytes",
+            Box::new(|_, state| {
+                std::thread::sleep(std::time::Duration::from_millis(20));
+                let path = state.join("input_receipts").join(format!("{id}.json"));
+                let bytes = std::fs::read(&path).unwrap();
+                std::fs::write(&path, bytes).unwrap();
+            }),
+        ),
+        (
+            "in place, appended",
+            Box::new(|_, state| {
+                use std::io::Write;
+                let path = state.join("input_receipts").join(format!("{id}.json"));
+                let mut file = std::fs::OpenOptions::new().append(true).open(path).unwrap();
+                file.write_all(b" ").unwrap();
+            }),
+        ),
+        (
+            "final name moved",
+            Box::new(|_, state| {
+                let folder = state.join("input_receipts");
+                std::fs::rename(
+                    folder.join(format!("{id}.json")),
+                    folder.join("elsewhere.json"),
+                )
+                .unwrap();
+            }),
+        ),
+        (
+            "final name replaced with the same bytes",
+            Box::new(|parent, state| {
+                let other = parent.join("same.json");
+                std::fs::write(&other, exact.as_bytes()).unwrap();
+                mode(&other, 0o600);
+                std::fs::rename(
+                    other,
+                    state.join("input_receipts").join(format!("{id}.json")),
+                )
+                .unwrap();
+            }),
+        ),
+        (
+            "folder replaced",
+            Box::new(|parent, state| {
+                let folder = state.join("input_receipts");
+                std::fs::rename(&folder, parent.join("old-folder")).unwrap();
+                write_receipt(state, &id, exact.as_bytes());
+            }),
+        ),
+        (
+            "root linked",
+            Box::new(|parent, state| {
+                std::fs::rename(state, parent.join("moved")).unwrap();
+                let other = parent.join("other");
+                copy(state, &other);
+                std::os::unix::fs::symlink(&other, state).unwrap();
+            }),
+        ),
+    ];
+    for (index, (name, change)) in during.into_iter().enumerate() {
+        let parent = base.join(format!("during-{index}"));
+        let (state, roots) = fresh(&parent, true);
+        let between = || change(&parent, &state);
+        assert_eq!(
+            read(&roots, plan, &between).0,
+            Observed::Unknown(CHANGED),
+            "{name}"
+        );
+    }
+    // Unchanged, the original store proves it; a folder created after the
+    // roots were opened is read from the held root.
+    let (_, roots) = fresh(&base.join("unchanged"), true);
+    assert!(matches!(
+        read(&roots, plan, &|| {}).0,
+        Observed::Submitted(_)
+    ));
+    // A record renamed into the original folder before the read is how the
+    // CLI itself writes every receipt (in_progress, then submitted): it is
+    // the original folder's record. Only a change during the read refuses.
+    let (state, roots) = fresh(&base.join("rewritten"), true);
+    write_receipt(&state, &id, exact.as_bytes());
+    assert!(matches!(
+        read(&roots, plan, &|| {}).0,
+        Observed::Submitted(_)
+    ));
+    let (state, roots) = fresh(&base.join("later-folder"), false);
+    assert_eq!(read(&roots, plan, &|| {}).0, Observed::Unknown(MISSING));
+    write_receipt(&state, &id, exact.as_bytes());
+    assert!(matches!(
+        read(&roots, plan, &|| {}).0,
+        Observed::Submitted(_)
+    ));
 }
 
 mod actor {
@@ -706,8 +991,10 @@ mod actor {
             std::fs::create_dir(&config.dir).unwrap();
             let location = Location::new(&config).unwrap();
             location.prepare().unwrap();
-            // The CLI's state root is the service root's parent.
+            // The CLI's state root is the service root's parent, where the
+            // selected session's own record is.
             assert_eq!(location.root.parent().unwrap(), config.state);
+            session_record(&config.state, SESSION, "claude", RUN, CONVERSATION);
             let epoch = uuid::Uuid::new_v4().to_string();
             let mut store = Store::open(&location, &epoch).unwrap();
             zerus_desktop_ledger::authorize(
@@ -1299,5 +1586,273 @@ os._exit(0)"#;
         let again = f.admit(&original);
         assert!(again.accepted);
         assert_eq!(again.receipt.unwrap(), receipt);
+    }
+    /// The name's hash, as the CLI names a session's files.
+    fn hashed(name: &str) -> String {
+        use sha2::Digest;
+        format!("{:x}.json", sha2::Sha256::digest(name.as_bytes()))
+    }
+    fn private_file(path: &Path, body: &str) {
+        std::fs::create_dir_all(path.parent().unwrap()).unwrap();
+        std::fs::write(path, body).unwrap();
+        mode(path, 0o600);
+    }
+
+    /// desktop-u (#1393 R4): the name's agent prefix routes a send here but
+    /// never authorizes it. The actual record, backend and run are checked
+    /// last before the child; a refusal there never started anything.
+    #[test]
+    fn the_selected_sessions_actual_record_backend_and_run_are_checked_before_the_child() {
+        type Change = fn(&Path);
+        let cases: [(&str, Change, bool); 8] = [
+            ("the selected record", |_| (), true),
+            (
+                "a routed record",
+                |state| {
+                    let file = hashed(SESSION);
+                    std::fs::rename(state.join(&file), state.join("bindings").join(&file))
+                        .or_else(|_| {
+                            std::fs::create_dir(state.join("bindings"))?;
+                            mode(&state.join("bindings"), 0o700);
+                            std::fs::rename(state.join(&file), state.join("bindings").join(&file))
+                        })
+                        .unwrap();
+                    private_file(&state.join("name_routes").join(&file), "{}");
+                },
+                true,
+            ),
+            (
+                "a DeepSeek binding",
+                |state| private_file(&state.join("dsh/bindings").join(hashed(SESSION)), "{}"),
+                false,
+            ),
+            (
+                "an OpenCode binding",
+                |state| private_file(&state.join("opencode/bindings").join(hashed(SESSION)), "{}"),
+                false,
+            ),
+            (
+                "another run",
+                |state| session_record(state, SESSION, "claude", "run-2", CONVERSATION),
+                false,
+            ),
+            (
+                "another conversation",
+                |state| session_record(state, SESSION, "claude", RUN, "conversation-2"),
+                false,
+            ),
+            (
+                "another agent",
+                |state| session_record(state, SESSION, "codex", RUN, CONVERSATION),
+                false,
+            ),
+            (
+                "no record",
+                |state| std::fs::remove_file(state.join(hashed(SESSION))).unwrap(),
+                false,
+            ),
+        ];
+        for (name, change, runs) in cases {
+            let sent = Arc::new(AtomicUsize::new(0));
+            let count = sent.clone();
+            let mut f = Fixture::new(move |state, plan, _, _, _, _| {
+                count.fetch_add(1, Ordering::SeqCst);
+                submitted(state, plan);
+                Ended::Exited { code: 0 }
+            });
+            change(&f.config.state);
+            let original = f.original();
+            assert!(f.admit(&original).accepted, "{name}");
+            f.until("settled", |f| f.row(&original).receipt.drained);
+            let receipt = f.row(&original).receipt;
+            if runs {
+                assert_eq!(receipt.phase, Phase::Recorded, "{name}");
+                assert_eq!(sent.load(Ordering::SeqCst), 1, "{name}");
+            } else {
+                assert_eq!(
+                    (receipt.phase, receipt.code.as_str()),
+                    (Phase::Failed, wire::NOT_STARTED),
+                    "{name}"
+                );
+                assert_eq!(sent.load(Ordering::SeqCst), 0, "{name}: no child");
+            }
+        }
+    }
+
+    /// review-w D6: a consent stopped after the reservation committed and
+    /// before the spawn starts nothing. The hook runs in the actual final
+    /// spawn turn, after the worker's own checks, so only the runner's
+    /// veto there can refuse.
+    #[test]
+    #[cfg(target_os = "linux")]
+    fn a_stop_revoke_or_source_change_after_reservation_starts_nothing() {
+        for action in ["stop", "revoke", "source"] {
+            let dir = tempfile::tempdir().unwrap();
+            let path = dir.path().join("hgs");
+            let ran = dir.path().join("ran");
+            std::fs::write(
+                &path,
+                format!(
+                    "#!/bin/sh\ntouch {:?}\ncat >/dev/null\n",
+                    ran.to_str().unwrap()
+                ),
+            )
+            .unwrap();
+            mode(&path, 0o700);
+            let mut f = Fixture::unexecuted();
+            f.runtime.fixture_image(&path);
+            let (entered_tx, entered) = std::sync::mpsc::channel::<()>();
+            let (release, released) = std::sync::mpsc::channel::<()>();
+            let entered_tx = std::sync::Mutex::new(entered_tx);
+            let released = std::sync::Mutex::new(released);
+            f.runtime.fixture_spawn_hook(Arc::new(move || {
+                let _ = entered_tx.lock().unwrap().send(());
+                let _ = released
+                    .lock()
+                    .unwrap()
+                    .recv_timeout(Duration::from_secs(10));
+            }));
+            let original = f.original();
+            assert!(f.admit(&original).accepted);
+            let until = Instant::now() + Duration::from_secs(8);
+            while entered.try_recv().is_err() {
+                assert!(
+                    Instant::now() < until,
+                    "{action}: never reached the spawn turn"
+                );
+                f.runtime.poll(&mut f.store, Some(f.exclusion.clone()));
+                std::thread::sleep(Duration::from_millis(2));
+            }
+            // The reservation committed before the worker existed.
+            assert_eq!(f.row(&original).receipt.phase, Phase::Running, "{action}");
+            match action {
+                "stop" => f.runtime.request_stop(),
+                "revoke" => f.revoke(),
+                _ => f
+                    .runtime
+                    .fixture_machine("33333333-3333-4333-8333-333333333333"),
+            }
+            // The actor sees the change and stops the live consent.
+            f.runtime.poll(&mut f.store, Some(f.exclusion.clone()));
+            release.send(()).unwrap();
+            f.until("settled", |f| f.row(&original).receipt.drained);
+            let receipt = f.row(&original).receipt;
+            assert_eq!(
+                (receipt.phase, receipt.code.as_str()),
+                (Phase::Failed, wire::NOT_STARTED),
+                "{action}"
+            );
+            assert!(!ran.exists(), "{action}: no child ever existed");
+        }
+    }
+
+    /// desktop-u P2: a drain worker blocked in its receipt read keeps the
+    /// serve-owner loan and the charge until it physically ends, through a
+    /// stop and the runtime's teardown, and its late result never records.
+    #[test]
+    fn a_blocked_drain_read_keeps_its_loans_and_never_records_late() {
+        let (entered_tx, entered) = std::sync::mpsc::channel::<()>();
+        let (release, released) = std::sync::mpsc::channel::<()>();
+        let entered_tx = std::sync::Mutex::new(entered_tx);
+        let released = std::sync::Mutex::new(released);
+        let mut f = Fixture::new(|state, plan, _, _, _, _| {
+            submitted(state, plan);
+            Ended::Exited { code: 0 }
+        });
+        f.runtime.fixture_read(
+            Some(Arc::new(move || {
+                let _ = entered_tx.lock().unwrap().send(());
+                let _ = released
+                    .lock()
+                    .unwrap()
+                    .recv_timeout(Duration::from_secs(10));
+            })),
+            Duration::from_millis(200),
+        );
+        let original = f.original();
+        assert!(f.admit(&original).accepted);
+        let until = Instant::now() + Duration::from_secs(8);
+        while entered.try_recv().is_err() {
+            assert!(Instant::now() < until, "the read never started");
+            f.runtime.poll(&mut f.store, Some(f.exclusion.clone()));
+            std::thread::sleep(Duration::from_millis(2));
+        }
+        // Blocked: a stop drains nothing and the charge stays.
+        f.runtime.request_stop();
+        for _ in 0..20 {
+            f.runtime.poll(&mut f.store, Some(f.exclusion.clone()));
+            std::thread::sleep(Duration::from_millis(5));
+        }
+        assert!(!f.runtime.drained());
+        assert_eq!(ledger::undrained(&f.store.db).unwrap(), 1, "charged");
+        // Teardown: the worker's own loan outlives the runtime.
+        let torn = std::mem::replace(
+            &mut f.runtime,
+            runtime::Runtime::new(&f.config, &f.epoch, f.owner.clone()).unwrap(),
+        );
+        drop(torn);
+        // The fixture's and the new runtime's copies, plus the worker's.
+        assert!(Arc::strong_count(&f.owner) > 2, "the worker keeps its loan");
+        for _ in 0..20 {
+            f.runtime.poll(&mut f.store, Some(f.exclusion.clone()));
+            std::thread::sleep(Duration::from_millis(5));
+        }
+        assert_eq!(ledger::undrained(&f.store.db).unwrap(), 1, "still charged");
+        assert!(!f.row(&original).receipt.drained);
+        // Released past its deadline: the worker ends, its loan with it, and
+        // nothing records the exact receipt it read late.
+        std::thread::sleep(Duration::from_millis(250));
+        release.send(()).unwrap();
+        f.until("the worker's loan ended", |f| {
+            Arc::strong_count(&f.owner) == 2
+        });
+        f.until("drained", |f| f.row(&original).receipt.drained);
+        let receipt = f.row(&original).receipt;
+        assert_eq!(receipt.phase, Phase::Unknown);
+        assert_eq!(receipt.code, super::super::receipt::UNHELD);
+        assert!(receipt.result(&original.plan).is_none());
+    }
+
+    #[test]
+    fn a_receipt_read_past_its_deadline_is_unknown_however_exact() {
+        let mut f = Fixture::new(|state, plan, _, _, _, _| {
+            submitted(state, plan);
+            Ended::Exited { code: 0 }
+        });
+        f.runtime.fixture_read(
+            Some(Arc::new(|| std::thread::sleep(Duration::from_millis(300)))),
+            Duration::from_millis(100),
+        );
+        let original = f.original();
+        assert!(f.admit(&original).accepted);
+        f.until("settled", |f| f.row(&original).receipt.drained);
+        let receipt = f.row(&original).receipt;
+        assert_eq!(
+            (receipt.phase, receipt.code.as_str()),
+            (Phase::Unknown, super::super::receipt::TIMED_OUT)
+        );
+    }
+    /// Store recovery never drains an original its live runtime holds: only
+    /// the runtime reads its receipt from the original store.
+    #[test]
+    fn store_recovery_leaves_the_runtimes_own_original_to_it() {
+        let mut f = Fixture::new(|state, plan, _, _, _, _| {
+            submitted(state, plan);
+            Ended::Exited { code: 0 }
+        });
+        let original = f.original();
+        assert!(f.admit(&original).accepted);
+        f.until("ended", |f| {
+            f.row(&original).receipt.code == ledger::AWAITING_DRAIN
+        });
+        // Released, owned, not yet probed by the runtime: Store recovery
+        // alone never settles it.
+        for _ in 0..60 {
+            f.store.recover_operation_custody(&f.location);
+            std::thread::sleep(Duration::from_millis(10));
+        }
+        assert!(!f.row(&original).receipt.drained, "left to its runtime");
+        f.until("settled", |f| f.row(&original).receipt.drained);
+        assert_eq!(f.row(&original).receipt.phase, Phase::Recorded);
     }
 }

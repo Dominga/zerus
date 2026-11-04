@@ -552,7 +552,17 @@ class Swarm(unittest.TestCase):
         twins('a').write_text(json.dumps({'swarm_id': a['swarm_id'], 'entries': {a['node_id'] + '\n' + session: twin}}))
         self.assertTrue(self.call('b', 'sync')['a']['ok'])
         self.assertEqual(json.loads(twins('b').read_text())['entries'][a['node_id'] + '\n' + session], twin)
+        # #1413 review (N5): a change on b makes the digests differ, so b and c
+        # really exchange; c, which refuses twin fields, must still sync.
+        before = self.call('b', 'get')
+        desired = copy.deepcopy(before['organization'])
+        desired['projects'][0]['name'] += ' renamed'
+        self.patch('b', before, desired)
+        exchanges = lambda: sum(line.startswith('c ') and 'swarm exchange' in line
+                                for line in (self.root / 'calls').read_text().splitlines())
+        sent = exchanges()
         self.assertTrue(self.call('b', 'sync')['c']['ok'], 'a member without the kind is never sent one')
+        self.assertGreater(exchanges(), sent, 'b and c exchanged')
         self.assertFalse(twins('c').exists())
         for node in 'abc':
             catalog = (self.root / node / 'swarm' / 'catalog.json').read_text()

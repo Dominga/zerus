@@ -351,6 +351,10 @@ impl LockedStore {
         if self.data.twins.swarm_id != self.data.catalog.swarm_id {
             self.data.twins = super::session_ids::Twins::new(&self.data.catalog.swarm_id);
         }
+        // A twin whose name operation was superseded is never read again.
+        if !self.data.twins.entries.is_empty() {
+            self.data.twins.prune(&self.data.catalog);
+        }
         let twins = self.data.twins.bytes()?;
         if twins != self.twins_original {
             let path = self.path.with_file_name(super::session_ids::FILE);
@@ -519,6 +523,25 @@ mod tests {
         assert_eq!(twins.entries.len(), 1);
         let shown = read_snapshot(&config).unwrap();
         assert_eq!(shown["organization"]["projects"][0]["session_ids"], json!([format!("local\n{ID}")]));
+        // #1413 review: a later name move by a writer without twins (here
+        // Catalog::set, as v0.47.0 moves it) supersedes the twin's operation,
+        // and the next save prunes it.
+        {
+            let mut store = LockedStore::load(&config).unwrap();
+            let node = store.data.node_id.clone();
+            let name = Key::Session { machine: node.clone(), session: LABEL.into() };
+            store.data.catalog.set(&node, name, Value::Null).unwrap();
+            store.save().unwrap();
+            assert!(!path.with_file_name(FILE).exists());
+            let versions = store.data.catalog.versions();
+            let mut desired = organization(&[&member]);
+            desired["session_assignments_explicit"] = json!(true);
+            store
+                .data
+                .apply(Patch { base: organization(&[]), desired, versions })
+                .unwrap();
+            store.save().unwrap();
+        }
         // A catalog of another swarm, as after a join, starts with no twins.
         let mut store = LockedStore::load(&config).unwrap();
         assert_eq!(store.data.twins.entries.len(), 1);

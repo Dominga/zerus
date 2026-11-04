@@ -310,7 +310,15 @@ Never copy a library from the build tree: its build-tree `DT_RPATH` is searched
 before `LD_LIBRARY_PATH`, and the installation step removes it.
 
 Keep the previously selected prefix as the rollback, together with every tree
-its compiled paths name, and qualify a new one before selecting it:
+its compiled paths name. The arch 2.54.1 prefixes depend on two trees outside
+themselves. They run their helper processes and injected bundle from the 2.54.1
+base install their libraries came from, and read GTK data from that install's
+`gtk/`. The 0005 library of the Skia rollback was copied from the 2.54.1 build
+tree and keeps a `DT_RPATH` into it; a probe's UI process loaded JavaScriptCore
+from there, byte-identical to the prefix copy. Keep the base install and the
+2.54.1 build tree for as long as either prefix is the rollback.
+
+Qualify a new prefix before selecting it:
 
 - No library in `$PREFIX/lib` or `$PREFIX/gtk/lib` has an `RPATH` or `RUNPATH`
   (`readelf -d`). With `LD_LIBRARY_PATH` and `WEBKIT_EXEC_PATH` set as

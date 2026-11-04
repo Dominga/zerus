@@ -161,6 +161,8 @@ export type EditOutcome = (
 export interface NotificationOwnership {
   /** Local startup recovery presentation; never a service grant. */
   native_recovery?: boolean;
+  /** Native helper observation only; never permission to start a writer. */
+  activation?: { pending: boolean; running: boolean; needs_resume: boolean; code: string };
   status: null | { abi: string; configuration: string; journal: string | null; revision: number;
     state: "passive" | "preparing" | "service" | "draining" | "revoked" | "native" | "identity_changed" | "unavailable";
     rearm_required: boolean; request_id: string | null; owner_epoch: string | null; identity_current: boolean };
@@ -171,6 +173,8 @@ export interface NotificationOwnership {
 }
 /** Desktop service presentation has separate provenance from device-local marks. */
 export interface DesktopService {
+  /** Bounded display reason from the checked original service scope; no authority. */
+  executable_upgrade?: null | { state: "draining" | "manual_refresh_required" };
   /** Native intent/current-scope presentation, never a permission. */
   notification_preferences?: null | {
     status: null | { abi: string; scope: { configuration: string; service_epoch: string };
@@ -196,7 +200,7 @@ export interface DesktopService {
   /** Native frozen-read transfer; completion is durable queueing, not host ACK. */
   pending_read_import?: null | { required: boolean; complete: boolean; running: boolean; code: string; through: number; superseded: number; delivered: false };
   /** Best-effort Staged report only; its outcome never grants or gates service work. */
-  retained_source_import?: null | { required: boolean; complete: boolean; running: boolean; code: string; phase: string | null; creations_capture?: { code: string; paused: boolean; capture_id: string | null }; local_read_capture?: { code: string; paused: boolean; capture_id: string | null; view_ready?: boolean; view_revision?: string }; drafts_capture?: { code: string; writes: boolean; paused: boolean; capture_id: string | null; manifests: number }; worktree_cache_capture?: { code: string; paused: boolean; capture_id: string | null }; worktree_cache_report?: { required: boolean; complete: boolean; running: boolean; code: string; phase: string | null }; local_reads_report?: { required: boolean; complete: boolean; running: boolean; code: string; phase: string | null }; creations_report?: { required: boolean; complete: boolean; running: boolean; code: string; phase: string | null } };
+  retained_source_import?: null | { required: boolean; complete: boolean; running: boolean; code: string; phase: string | null; creations_capture?: { code: string; paused: boolean; capture_id: string | null }; local_read_capture?: { code: string; paused: boolean; capture_id: string | null; view_ready?: boolean; view_revision?: string }; drafts_capture?: { code: string; writes: boolean; paused: boolean; capture_id: string | null; manifests: number }; downloads_capture?: null | { code: string; capture_id: string | null }; worktree_cache_capture?: { code: string; paused: boolean; capture_id: string | null }; worktree_cache_report?: { required: boolean; complete: boolean; running: boolean; code: string; phase: string | null }; local_reads_report?: { required: boolean; complete: boolean; running: boolean; code: string; phase: string | null }; creations_report?: { required: boolean; complete: boolean; running: boolean; code: string; phase: string | null } };
   notification_ownership?: NotificationOwnership;
   code: string;
 }

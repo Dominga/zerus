@@ -8,6 +8,7 @@ mod readiness;
 mod restart;
 mod silent_watch;
 mod source_meta;
+mod upgrade;
 
 pub(super) struct Fixture(pub(super) PathBuf, pub(super) Arc<AtomicBool>);
 

@@ -1,5 +1,5 @@
 import { describe, expect, it, vi } from "vitest";
-import { createDesktopService, createServiceApprovalIntent, pendingReadNotice, retainedSourceNotice, retainedSourceDetails, ownershipNotice, createOwnershipActions } from "./desktopService";
+import { createDesktopService, createServiceApprovalIntent, pendingReadNotice, retainedSourceNotice, retainedSourceDetails, ownershipNotice, createOwnershipActions, serviceStatus } from "./desktopService";
 import { createApprovalOptIn } from "../ui/screens/settings/approval-opt-in";
 import { emptyBatch, isEmptyBatch, type DesktopService, type NotificationOwnership } from "../types";
 import { normalize } from "../bridge";
@@ -191,6 +191,21 @@ describe("desktop service presentation", () => {
     }
     expect(paused.connected).toBe(true);
   });
+  it("shows the download folder's evidence only when it is incomplete", () => {
+    const report = { required: false, complete: true, running: false, code: "retained_import_staged", phase: "published" };
+    const view = (code: string) => serviceView({ retained_source_import: { ...report, downloads_capture: { code, capture_id: null } } });
+    for (const code of ["download_capture_none", "download_capture_captured"]) {
+      expect(retainedSourceNotice(view(code))).toBe("");
+      expect(retainedSourceDetails(view(code))).toBeUndefined();
+    }
+    const refused = view("download_capture_unreadable");
+    expect(retainedSourceNotice(refused)).toContain("Changes to the downloaded files folder are refused");
+    expect(retainedSourceDetails(refused)!.downloads!.next).toContain("Nothing is recaptured or overwritten");
+    const unsupported = view("download_capture_unsupported");
+    expect(retainedSourceNotice(unsupported)).toBe("");
+    expect(retainedSourceDetails(unsupported)!.downloads!.reason).toContain("cannot be recorded, so it is not part of the migration report");
+    expect(retainedSourceDetails(unsupported)!.downloads!.next).toContain("stays incomplete");
+  });
   it("explains the archive and data-directory refusals without changing readiness", () => {
     const report = { required: false, complete: true, running: false, code: "retained_import_staged", phase: "published" };
     const view = (code: string) => serviceView({ retained_source_import: { ...report, creations_capture: { code, paused: true, capture_id: null } } });
@@ -324,6 +339,17 @@ describe("notification ownership presentation", () => {
     expect(ownershipNotice(updated)).not.toContain("revoked");
     const current = view(); current.status = { ...current.status!, state: "service", rearm_required: false, identity_current: true };
     expect(ownershipNotice(current)).toBe("");
+  });
+  it("offers explicit activation for retained passive mode and keeps unknown activation on Check", () => {
+    const current = view(); current.status = { ...current.status!, state: "service", rearm_required: false, identity_current: true };
+    current.activation = { pending: false, running: false, needs_resume: true, code: "activation_required" };
+    expect(ownershipNotice(current)).toContain("explicitly");
+    expect(ownershipNotice({ ...current, pending: true })).toContain("Background access is unconfirmed");
+    const status = { connected: true, code: "explicit_handoff_required", background: {}, notification_ownership: current } as DesktopService;
+    expect(serviceStatus(status)?.ownership).toBe("rearm");
+    current.activation = { pending: true, running: false, needs_resume: true, code: "activation_unconfirmed" };
+    expect(ownershipNotice(current)).toContain("original result");
+    expect(serviceStatus(status)?.ownership).toBe("check");
   });
   it("mount and result lookups never grant or rearm; only the explicit action calls its native route", async () => {
     const send = vi.fn(async () => view());

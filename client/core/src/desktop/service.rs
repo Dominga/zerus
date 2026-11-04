@@ -35,8 +35,31 @@ pub struct Component {
     pub code: String,
 }
 
+/// A closed, fixed-size display reason. It never authorizes a transition.
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(tag = "state", rename_all = "snake_case", deny_unknown_fields)]
+pub enum ExecutableUpgrade {
+    Draining,
+    ManualRefreshRequired,
+}
+impl ExecutableUpgrade {
+    fn parse(value: &Value) -> Option<Self> {
+        if value["code"] != "hgs_replaced" || value["new_admission"] != false {
+            return None;
+        }
+        match value["state"].as_str()? {
+            "draining" => Some(Self::Draining),
+            "manual_refresh_required" => Some(Self::ManualRefreshRequired),
+            _ => None,
+        }
+    }
+}
+
 #[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
 pub struct Snapshot {
+    /// Bounded presentation from this configuration/epoch's checked status.
+    #[serde(default)]
+    pub executable_upgrade: Option<ExecutableUpgrade>,
     /// Native original-intent presentation only, never accepted from Root input.
     #[serde(skip_deserializing)]
     pub notification_preferences: Option<Value>,
@@ -63,6 +86,7 @@ pub struct Snapshot {
 impl Default for Snapshot {
     fn default() -> Self {
         Self {
+            executable_upgrade: None,
             notification_preferences: None,
             notification_ownership: None,
             pending_read_import: None,
@@ -199,6 +223,7 @@ impl State {
         let counts = checked_counts(&value["attention_counts"], epoch).unwrap_or_default();
         self.sources = checked_sources(&value["background_runtime"], epoch);
         self.snapshot = Snapshot {
+            executable_upgrade: ExecutableUpgrade::parse(&value["executable_upgrade"]),
             notification_ownership: None,
             notification_preferences: None,
             connected: true,

@@ -29,7 +29,7 @@ class LinuxPackaging(unittest.TestCase):
                      "hgs_state.py", "packaging/linux/zerus-setup", "packaging/linux/hgs-tray.desktop",
                      "packaging/linux/hgs-tray.service", "scripts/install-mobile-connector-service.py",
                      "scripts/install-linux-desktop-service.py",
-                     "scripts/desktop-revoke-hold.py",
+                     "scripts/desktop-revoke-hold.py", "scripts/desktop-service-activation.py",
                      "docs/licenses/codex-LICENSE.txt", "tray/resources/icons/hgs-zerus-symbolic.svg"):
             self.file("source/" + name)
         for size in (16, 24, 32, 48, 64, 128, 256, 512, 1024):

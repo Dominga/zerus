@@ -452,7 +452,9 @@ It replaces only a width that the handled `session-splitter` family imported
 from these same Qt bytes: the record's hash matches, the value equals the
 splitter conversion and, when the splitter's outcome was recorded, that outcome
 lists `workspace/splitter` as imported. The replaced splitter outcome then
-lists nothing imported. Any other Next width wins. A splitter record from
+lists nothing imported or kept, and a record from before outcomes gets that
+empty outcome, so the report shows no superseded splitter row. Any other Next
+width wins. A splitter record from
 before outcomes were recorded (#1243) leaves value equality as the only
 evidence: a width the person set in Next to exactly the splitter's value
 cannot be told apart and is replaced once by the dock width.

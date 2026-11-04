@@ -15,16 +15,16 @@ use zerus_client_core::{
 pub(crate) const UNAVAILABLE: &str =
     zerus_client_core::source!("Repository cloning is not available from this desktop service.");
 
-struct Read {
-    service: Arc<Service>,
-    scope: wire::Scope,
+pub(super) struct Read {
+    pub(super) service: Arc<Service>,
+    pub(super) scope: wire::Scope,
     generation: u64,
     cancel: Arc<AtomicBool>,
     routing: Arc<relay::Connection>,
     image: Arc<Image>,
 }
 impl Read {
-    fn new(service: Option<Arc<Service>>) -> Result<Arc<Self>, String> {
+    pub(super) fn new(service: Option<Arc<Service>>) -> Result<Arc<Self>, String> {
         let service = service.ok_or(creation::READ_FAILED)?;
         let shared = &service.shared;
         let snapshot = service.snapshot();
@@ -66,7 +66,7 @@ impl Read {
         }
         Ok(value)
     }
-    fn current(&self) -> bool {
+    pub(super) fn current(&self) -> bool {
         let shared = &self.service.shared;
         let snapshot = self.service.snapshot();
         !self.cancel.load(Ordering::Acquire)
@@ -93,7 +93,7 @@ impl Read {
                 .as_ref()
                 .is_some_and(|v| Arc::ptr_eq(v, &self.routing))
     }
-    fn exchange(
+    pub(super) fn exchange(
         self: &Arc<Self>,
         request: Option<Request>,
         input: Value,
@@ -186,12 +186,13 @@ impl Read {
         Ok(result)
     }
     fn supported(self: &Arc<Self>) -> Result<bool, String> {
+        self.supports(wire::HELP_MARKER)
+    }
+    /// The selected CLI advertises this creation kind and frontend requests.
+    pub(super) fn supports(self: &Arc<Self>, kind: &str) -> Result<bool, String> {
         let bytes = self.exchange(None, Value::Null, true, None)?;
         let help = std::str::from_utf8(&bytes).map_err(|_| creation::READ_FAILED)?;
-        for marker in [
-            wire::HELP_MARKER,
-            zerus_client_core::desktop::ui_requests::HELP_MARKER,
-        ] {
+        for marker in [kind, zerus_client_core::desktop::ui_requests::HELP_MARKER] {
             if !help.lines().any(|line| line.trim() == marker) {
                 return Ok(false);
             }

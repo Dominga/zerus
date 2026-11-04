@@ -34,6 +34,8 @@ pub(crate) mod activation;
 
 #[derive(Default)]
 pub(crate) struct Observers {
+    #[cfg(all(test, target_os = "linux"))]
+    pub mode_helpers: Option<PathBuf>,
     pub projections: Vec<Projection>,
     pub notification_controls: Option<crate::desktop_notification_controls::Setup>,
     pub retained_sources: Option<retained_import::Inputs>,
@@ -46,9 +48,11 @@ mod cache;
 mod catalog;
 mod catalog_relay;
 pub(crate) mod creation_clone;
+pub(crate) mod creation_worktree;
 use catalog::catalog_loop;
 mod details;
 pub mod frontend;
+mod mode_transition;
 pub(crate) mod notification_controls;
 mod read_import;
 mod reconnect;
@@ -79,15 +83,20 @@ fn startup_recovery() -> bool {
     STARTUP_RECOVERY.load(Ordering::Acquire) == 1
 }
 
-fn ownership_display(view: crate::desktop_ownership::View) -> Option<Value> {
+fn ownership_display(
+    view: crate::desktop_ownership::View,
+    activation: mode_transition::View,
+) -> Option<Value> {
     let mut value = serde_json::to_value(view).ok()?;
     value["native_recovery"] = json!(startup_recovery());
+    value["activation"] = serde_json::to_value(activation).ok()?;
     Some(value)
 }
 
 #[derive(Clone, Copy, PartialEq, Eq)]
 enum Control {
     Retry(u64),
+    Reconnect(u64),
     Stop,
 }
 
@@ -326,6 +335,7 @@ struct Shared {
     notification_supported: AtomicBool,
     ownership: Arc<crate::desktop_ownership::Controller>,
     ownership_supported: AtomicBool,
+    mode_transition: Arc<mode_transition::Controller>,
     hgs: PathBuf,
     configuration: Mutex<Option<String>>,
     audit_help: audit::help::Cache,
@@ -474,6 +484,8 @@ impl Service {
             drain,
             responder,
             Observers {
+                #[cfg(all(test, target_os = "linux"))]
+                mode_helpers: None,
                 projections,
                 notification_controls: None,
                 retained_sources: None,
@@ -504,6 +516,12 @@ impl Service {
             notification_supported: AtomicBool::new(false),
             ownership,
             ownership_supported: AtomicBool::new(false),
+            mode_transition: {
+                let owner = mode_transition::Controller::new();
+                #[cfg(all(test, target_os = "linux"))]
+                owner.fixture_helpers(observers.mode_helpers);
+                owner
+            },
             hgs,
             relay: Mutex::new(None),
             pump,
@@ -582,6 +600,11 @@ impl Service {
         self.shared.snapshot.copy()
     }
     pub(crate) async fn ownership_rearm(self: &Arc<Self>) -> crate::desktop_ownership::View {
+        // An uncertain activation has its own retained original. Resume never
+        // replaces it with a Rearm or a new manager attempt.
+        if self.shared.mode_transition.pending() || self.shared.ownership.view().pending {
+            return self.ownership_result().await;
+        }
         if self.shared.retained_import.is_some() {
             let relay = self
                 .shared
@@ -612,27 +635,56 @@ impl Service {
                 ),
             }
         }
-        let view = self
-            .shared
-            .ownership
-            .request(
-                Some(zerus_client_core::desktop::ownership::Action::Rearm),
-                None,
-                None,
-            )
-            .await;
+        let view = if self.shared.ownership.granted() {
+            self.shared.ownership.view()
+        } else {
+            self.shared
+                .ownership
+                .request(
+                    Some(zerus_client_core::desktop::ownership::Action::Rearm),
+                    None,
+                    None,
+                )
+                .await
+        };
+        if self.shared.ownership.granted() {
+            let configuration = self
+                .shared
+                .configuration
+                .lock()
+                .unwrap_or_else(PoisonError::into_inner)
+                .clone();
+            if let Some(configuration) = configuration {
+                self.shared
+                    .mode_transition
+                    .activate(self.shared.hgs.clone(), configuration)
+                    .await;
+            }
+        }
         self.shared
             .publish_ownership(crate::desktop_ownership::Phase::Rearm)
             .await;
         if self.shared.ownership.granted() {
             let _ = STARTUP_RECOVERY.compare_exchange(1, 2, Ordering::AcqRel, Ordering::Acquire);
             // Rearm already made its one explicit report attempt above.
-            self.retry_connection();
+            self.wake_connection(true);
         }
         view
     }
     pub(crate) async fn ownership_result(&self) -> crate::desktop_ownership::View {
         let view = self.shared.ownership.request(None, None, None).await;
+        let configuration = self
+            .shared
+            .configuration
+            .lock()
+            .unwrap_or_else(PoisonError::into_inner)
+            .clone();
+        if let Some(configuration) = configuration {
+            self.shared
+                .mode_transition
+                .observe(self.shared.hgs.clone(), configuration)
+                .await;
+        }
         if self.shared.ownership.granted() {
             let _ = STARTUP_RECOVERY.compare_exchange(1, 2, Ordering::AcqRel, Ordering::Acquire);
         }
@@ -659,10 +711,13 @@ impl Service {
         self.retry_connection();
     }
     fn retry_connection(&self) {
+        self.wake_connection(false);
+    }
+    fn wake_connection(&self, read_only: bool) {
         if self.shared.stopped.load(Ordering::Acquire) {
             return;
         }
-        if !startup_recovery() {
+        if !read_only && !startup_recovery() {
             read_import::retry(self.shared.clone());
         }
         if let Some(cancel) = self
@@ -675,8 +730,14 @@ impl Service {
             cancel.store(true, Ordering::Release);
         }
         self.control.send_modify(|control| {
-            if let Control::Retry(n) = control {
-                *control = n.checked_add(1).map_or(Control::Stop, Control::Retry);
+            if let Control::Retry(n) | Control::Reconnect(n) = control {
+                *control = n.checked_add(1).map_or(Control::Stop, |next| {
+                    if read_only {
+                        Control::Reconnect(next)
+                    } else {
+                        Control::Retry(next)
+                    }
+                });
             }
         });
     }
@@ -835,6 +896,7 @@ impl Service {
         self.shared.stopped.store(true, Ordering::Release);
         self.shared.notification_controls.close();
         self.shared.ownership.stop();
+        self.shared.mode_transition.close();
         self.shared.audit_help.clear();
         if let Some(cancel) = self
             .shared
@@ -884,6 +946,7 @@ impl Service {
         let cache_closed = self.shared.cache_rpc.close();
         let creation_closed = self.shared.creation_rpc.close();
         let ownership_closed = self.shared.ownership.close();
+        let mode_closed = self.shared.mode_transition.close();
         let notification_closed = self.shared.notification_controls.close();
         let retained_closed = self
             .shared
@@ -904,6 +967,9 @@ impl Service {
                 == zerus_client_core::desktop::drain::Observation::Idle)
                 && drained;
             let drained = (ownership_closed.wait_until(until)
+                == zerus_client_core::desktop::drain::Observation::Idle)
+                && drained;
+            let drained = (mode_closed.wait_until(until)
                 == zerus_client_core::desktop::drain::Observation::Idle)
                 && drained;
             let drained = (notification_closed.wait_until(until)
@@ -1011,7 +1077,7 @@ impl Shared {
         let view = tauri::async_runtime::spawn_blocking(move || owner.record_view(phase))
             .await
             .unwrap_or_else(|_| self.ownership.view());
-        let view = ownership_display(view);
+        let view = ownership_display(view, self.mode_transition.view());
         let mut current = self.snapshot.lock();
         current.notification_ownership = view;
         self.pump.service(current.clone());
@@ -1033,7 +1099,8 @@ impl Shared {
             .notification_controls
             .view()
             .and_then(|v| serde_json::to_value(v).ok());
-        snapshot.notification_ownership = ownership_display(self.ownership.view());
+        snapshot.notification_ownership =
+            ownership_display(self.ownership.view(), self.mode_transition.view());
         snapshot.pending_read_import = Some(
             self.read_import
                 .lock()
@@ -1345,6 +1412,9 @@ async fn run(shared: Arc<Shared>, mut control: watch::Receiver<Control>) {
     let mut automatic = false;
     loop {
         let requested = *control.borrow_and_update();
+        if matches!(requested, Control::Reconnect(_)) {
+            automatic = true; // The explicit action already settled its one mutation.
+        }
         if requested == Control::Stop || shared.stopped.load(Ordering::Acquire) {
             break;
         }
@@ -1463,6 +1533,12 @@ async fn connection(
     }
     *shared.relay.lock().unwrap_or_else(PoisonError::into_inner) = Some(relay.clone());
     let configuration = preflight(&shared, stop.clone()).await?;
+    // Recover an existing activation before considering any fresh ownership
+    // mutation. Reconnection is always a read, including its helper journal.
+    shared
+        .mode_transition
+        .observe(shared.hgs.clone(), configuration.clone())
+        .await;
     if !automatic && !startup_recovery() {
         let explicit = shared
             .retained_import
@@ -1478,7 +1554,7 @@ async fn connection(
         .await;
     }
     if shared.ownership_supported.load(Ordering::Acquire) {
-        if automatic || startup_recovery() {
+        if automatic || startup_recovery() || shared.mode_transition.pending() {
             // Recovery is read-only until the owner chooses Resume. Reopening a read stream is never a new Grant/Rearm or replay of
             // a retained migration, approval, send or other native intent.
             shared
@@ -1494,6 +1570,7 @@ async fn connection(
     } else {
         shared.ownership.unsupported();
     }
+    mode_transition::startup(&shared, automatic, &configuration).await;
     shared
         .publish_ownership(crate::desktop_ownership::Phase::StartupGrant)
         .await;

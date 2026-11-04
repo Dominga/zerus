@@ -114,6 +114,7 @@ class DesktopRevokeHold(unittest.TestCase):
         library = helper.with_name("desktop-revoke-hold.py")
         shutil.copy2(ROOT / "scripts/install-linux-desktop-service.py", helper)
         shutil.copy2(ROOT / "scripts/desktop-revoke-hold.py", library)
+        shutil.copy2(ROOT / "scripts/desktop-service-activation.py", library.with_name("desktop-service-activation.py"))
         argv = [sys.executable, str(helper), "--help"]
         env = {"HOME": str(self.root), "PATH": "/usr/bin:/bin"}
         result = subprocess.run(argv, cwd=self.root, env=env, capture_output=True, timeout=5)

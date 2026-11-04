@@ -1,5 +1,5 @@
 import { describe, expect, it, vi } from "vitest";
-import { createDesktopService, createServiceApprovalIntent, pendingReadNotice, retainedSourceNotice, retainedSourceDetails, ownershipNotice, createOwnershipActions } from "./desktopService";
+import { createDesktopService, createServiceApprovalIntent, pendingReadNotice, retainedSourceNotice, retainedSourceDetails, ownershipNotice, createOwnershipActions, serviceStatus } from "./desktopService";
 import { createApprovalOptIn } from "../ui/screens/settings/approval-opt-in";
 import { emptyBatch, isEmptyBatch, type DesktopService, type NotificationOwnership } from "../types";
 import { normalize } from "../bridge";
@@ -352,6 +352,17 @@ describe("notification ownership presentation", () => {
     expect(ownershipNotice(updated)).not.toContain("revoked");
     const current = view(); current.status = { ...current.status!, state: "service", rearm_required: false, identity_current: true };
     expect(ownershipNotice(current)).toBe("");
+  });
+  it("offers explicit activation for retained passive mode and keeps unknown activation on Check", () => {
+    const current = view(); current.status = { ...current.status!, state: "service", rearm_required: false, identity_current: true };
+    current.activation = { pending: false, running: false, needs_resume: true, code: "activation_required" };
+    expect(ownershipNotice(current)).toContain("explicitly");
+    expect(ownershipNotice({ ...current, pending: true })).toContain("Background access is unconfirmed");
+    const status = { connected: true, code: "explicit_handoff_required", background: {}, notification_ownership: current } as DesktopService;
+    expect(serviceStatus(status)?.ownership).toBe("rearm");
+    current.activation = { pending: true, running: false, needs_resume: true, code: "activation_unconfirmed" };
+    expect(ownershipNotice(current)).toContain("original result");
+    expect(serviceStatus(status)?.ownership).toBe("check");
   });
   it("mount and result lookups never grant or rearm; only the explicit action calls its native route", async () => {
     const send = vi.fn(async () => view());

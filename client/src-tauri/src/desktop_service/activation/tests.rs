@@ -190,6 +190,8 @@ fn start(
         drain,
         Some(responder),
         Observers {
+            #[cfg(target_os = "linux")]
+            mode_helpers: None,
             projections: vec![],
             notification_controls: None,
             retained_sources: None,

@@ -634,8 +634,11 @@ binding and digest witnesses contain no project names or paths. A lost or unknow
 apply remains observation-only across restart, never an ordinary retrying draft.
 Completion needs a fresh checked catalog and matching live source after the
 original child and its pipes have drained. The Migration report shows key names
-and fixed reasons only. Ambiguous retained history and the 2 MiB whole-input cap
-are explicit blocked outcomes requiring review; neither silently drops data.
+and fixed reasons only. Ambiguous retained history and the 2 MiB proposal cap
+are explicit blocked outcomes requiring review; neither silently drops data. A
+proposal carries no session assignments: both of its sides omit them, so the
+writer leaves every assignment as it is, and the catalog itself is bounded only by
+the 8 MiB `swarm get` read.
 
 If a post-import catalog/configuration read fails, the same worker retries only
 those reads, backing off from 250 ms to a 30 s cap. The reservation remains pending

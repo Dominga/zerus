@@ -24,7 +24,8 @@ core_tests() {
     if [ "$platform" = macos ]; then
         cargo +1.99.1 clippy --locked --manifest-path client/core/Cargo.toml \
             --features macos-native-peer --all-targets -- -D warnings
-        # Negative selection/owned-child tests only. The separate signed-peer
+        # Selection refusals and isolated native original-child controls (fixed
+        # Apple helpers, no genuine Zerus pair positive). The separate signed-peer
         # fixtures stay ignored and receive no signing identity or key access.
         cargo +1.99.1 test --locked --manifest-path client/core/Cargo.toml \
             --features macos-native-peer macos_notify::peer::installation

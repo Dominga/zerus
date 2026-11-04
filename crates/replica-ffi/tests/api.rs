@@ -314,7 +314,18 @@ fn named_cards_have_a_visible_title_but_remain_read_only_in_mobile_abi() {
     let shown = api.get(uuid.clone()).unwrap();
     assert_eq!(shown.text, "Title only");
     assert!(!shown.writable);
-    assert!(api.edit_text(uuid.clone(), "Changed".into()).is_err());
-    assert!(api.set_stage(uuid.clone(), TaskStage::Backlog).is_err());
+    // Every refusal names the update path, as the apps' disabled actions do.
+    for refused in [
+        api.edit_text(uuid.clone(), "Changed".into()),
+        api.set_stage(uuid.clone(), TaskStage::Backlog),
+        api.comment(uuid.clone(), "From the phone".into()),
+    ] {
+        match refused {
+            Err(ReplicaError::Refused(message)) => {
+                assert_eq!(message, "Update Zerus to change this task.")
+            }
+            other => panic!("expected a refusal, got {other:?}"),
+        }
+    }
     assert_eq!(api.get(uuid).unwrap().text, "Title only");
 }

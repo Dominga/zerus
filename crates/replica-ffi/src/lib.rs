@@ -392,9 +392,11 @@ impl TaskStore {
     ) -> Result<TaskInfo> {
         let store = self.store()?;
         let mut task = store.find(reference)?;
+        // Named like the apps' disabled-action reason, so every refusal of a
+        // newer task names the same update path.
         if task.schema() > 2 {
             return Err(ReplicaError::Refused(
-                "This task needs a newer mobile task editor.".into(),
+                "Update Zerus to change this task.".into(),
             ));
         }
         change(&store, &mut task)?;

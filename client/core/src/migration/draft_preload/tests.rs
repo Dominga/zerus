@@ -900,3 +900,25 @@ fn a_receipt_with_an_extra_empty_part_is_refused() {
     );
     assert_eq!(again.status().code, "draft_capture_changed");
 }
+
+/// Every listener hears a status change: the service report and the app's
+/// Saved drafts both follow one capture (zerus-5wmh.66.5.2.1.2.1).
+#[test]
+fn every_status_listener_hears_the_outcome() {
+    use std::sync::atomic::{AtomicUsize, Ordering};
+    let s = Scratch::new();
+    draft(&s.next(), "codex/sample/a", "kept", b"abc", true);
+    let capture = s.capture();
+    let heard: Vec<Arc<AtomicUsize>> = (0..2).map(|_| Arc::new(AtomicUsize::new(0))).collect();
+    for counter in &heard {
+        let counter = counter.clone();
+        capture.hook(Arc::new(move || {
+            counter.fetch_add(1, Ordering::SeqCst);
+        }));
+    }
+    capture.prepare();
+    assert_eq!(capture.status().code, "draft_capture_captured");
+    for counter in &heard {
+        assert_eq!(counter.load(Ordering::SeqCst), 1);
+    }
+}

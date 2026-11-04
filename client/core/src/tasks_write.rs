@@ -877,14 +877,13 @@ pub mod outbox {
         }
         fs::remove_file(&file)
             .map_err(|_| "Could not release the local message recovery record.".to_owned())?;
-        // The handoff marker goes last: a record never outlives its marker.
+        // The record's removal is durable before its markers go: a record
+        // never outlives its handoff marker.
+        sync_parent(&file)?;
         remove(&marker(&file))
             .and_then(|()| remove(&handoff(&file)))
             .map_err(|_| "Could not update message recovery state.".to_owned())?;
-        #[cfg(unix)]
-        fs::File::open(file.parent().expect("outbox parent"))
-            .and_then(|f| f.sync_all())
-            .map_err(|_| "Could not update message recovery state.".to_owned())?;
+        sync_parent(&file)?;
         Ok(true)
     }
 
@@ -901,15 +900,23 @@ pub mod outbox {
             }
             fs::remove_file(&file)
                 .map_err(|_| "Could not release the local message recovery record.".to_owned())?;
+            // The record's removal is durable before its markers go.
+            sync_parent(&file)?;
         }
-        // The handoff marker goes last: a record never outlives its marker.
         remove(&marker(&file))
             .and_then(|()| remove(&handoff(&file)))
             .map_err(|_| "Could not update message recovery state.".to_owned())?;
+        sync_parent(&file)
+    }
+
+    /// Makes the outbox folder's entries durable: an ordering barrier.
+    fn sync_parent(file: &Path) -> Result<(), String> {
         #[cfg(unix)]
         fs::File::open(file.parent().expect("outbox parent"))
             .and_then(|f| f.sync_all())
             .map_err(|_| "Could not update message recovery state.".to_owned())?;
+        #[cfg(not(unix))]
+        let _ = file;
         Ok(())
     }
 }

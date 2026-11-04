@@ -23,6 +23,8 @@ use zerus_client_core::{
 };
 
 const CHANGED: &str = "The selected task changed. Your draft was kept.";
+/// A record handed to the desktop service is checked only by the service.
+const HANDED_OFF: &str = "This message was handed to the desktop service, so only the service can check its result. Its original was kept for review; this check sent nothing.";
 const TOO_LONG: &str = "Message exceeds 64 KiB.";
 #[derive(Clone, Copy, Debug, Deserialize, Serialize, PartialEq)]
 #[serde(rename_all = "snake_case")]
@@ -583,9 +585,16 @@ fn submitted_with_delivery(
             return Err("This task already has a message operation in progress.".into());
         }
         if recover {
-            Some(pending.ok_or(
+            let record = pending.ok_or(
                 "The original message recovery snapshot is unavailable. This check sent nothing.",
-            )?)
+            )?;
+            // A record handed to the desktop service recovers only through
+            // the service's scoped lookup, never this direct check. An
+            // unreadable or foreign handoff marker refuses as well.
+            if outbox::handed_off(store.root(), &slot.project, &slot.task, &record)? {
+                return Err(HANDED_OFF.into());
+            }
+            Some(record)
         } else {
             None
         }
@@ -1140,6 +1149,46 @@ mod tests {
         assert!(outbox::pending(store.root(), "example", ID)
             .unwrap()
             .is_none());
+    }
+    #[test]
+    fn a_record_handed_to_the_service_never_takes_the_direct_recovery() {
+        let root = crate::composer::tests::dir("task-note-handed-off");
+        let store = crate::composer::tests::drafts(&root);
+        let (hub, _) = crate::composer::tests::hub_on(&store);
+        let mut slot = slot(Mode::Note);
+        assert!(submitted(&mut slot, &hub, detail(""), false, &|_| Err(
+            "unknown outcome".to_owned()
+        ))
+        .is_err());
+        let record = outbox::pending(store.root(), "example", ID)
+            .unwrap()
+            .unwrap();
+        outbox::hand_off(store.root(), "example", ID, &record).unwrap();
+        let direct = |_: &TaskCall| -> Result<serde_json::Map<String, Value>, String> {
+            panic!("a handed-off record never takes the direct check")
+        };
+        assert_eq!(
+            submitted(&mut slot, &hub, detail(""), true, &direct),
+            Err(HANDED_OFF.into())
+        );
+        // Unreadable evidence is never taken as an unmarked record.
+        let marker = outbox::path(store.root(), "example", ID).with_extension("service");
+        std::fs::write(&marker, b"unreadable").unwrap();
+        assert!(submitted(&mut slot, &hub, detail(""), true, &direct).is_err());
+        assert_eq!(
+            outbox::pending(store.root(), "example", ID)
+                .unwrap()
+                .as_ref(),
+            Some(&record),
+            "the original stays for review"
+        );
+        // Only a record that was never handed off takes the direct check.
+        std::fs::remove_file(&marker).unwrap();
+        let recover = |call: &TaskCall| {
+            assert!(call.args.iter().any(|a| a == "--recover-only"));
+            Ok(receipt(record["id"].as_str().unwrap()))
+        };
+        assert!(submitted(&mut slot, &hub, detail(""), true, &recover).unwrap());
     }
     #[test]
     fn recovery_of_original_note_keeps_newer_text_and_clears_only_its_delivery_flags() {

@@ -70,10 +70,20 @@ fn intent(scope: &wire::Scope, project: &str, task: &str, record: &Value) -> wir
     }
 }
 
+/// The caller's two outbox steps for one original.
+pub(crate) struct Outbox<'a> {
+    /// Runs once, immediately before the admission request is written: the
+    /// durable handoff marker. If it fails, nothing was sent.
+    pub handoff: &'a dyn Fn() -> Result<(), String>,
+    /// Runs once for every `Unsent` answer, before it is returned, and never
+    /// for any other: only an original that provably never ran is released.
+    pub release: &'a dyn Fn(),
+}
+
 /// Called only by the task editor for the outbox record it reserved in this
 /// same Submit. `fresh` is that Submit's one-use consent, consumed before this
-/// call and never read from JSON. `handoff` runs once, immediately before the
-/// admission request is written; if it fails, nothing was sent.
+/// call and never read from JSON. `outbox` holds its handoff and release
+/// steps.
 ///
 /// A message without fresh consent, one refused before its request (too large
 /// included) or one that stops before its admission request is written was
@@ -87,7 +97,7 @@ pub(crate) fn call(
     task: &str,
     record: &Value,
     fresh: bool,
-    handoff: &dyn Fn() -> Result<(), String>,
+    outbox: Outbox<'_>,
     shutdown: &AtomicBool,
 ) -> MessageAnswer {
     let sent = std::cell::Cell::new(false);
@@ -120,7 +130,7 @@ pub(crate) fn call(
                 Err(_) => return Err(None),
             }
         };
-        handoff().map_err(|_| None)?;
+        (outbox.handoff)().map_err(|_| None)?;
         sent.set(true);
         // A lost or unreadable reply may still have been admitted: only the
         // read-only lookup below can tell.
@@ -145,12 +155,16 @@ pub(crate) fn call(
         }
         wait(&read, &plan, shutdown).ok_or(None)
     })();
-    result.unwrap_or_else(|refusal| match refusal {
+    let answer = result.unwrap_or_else(|refusal| match refusal {
         Some(text) => MessageAnswer::Unsent(text.into()),
         // Nothing reached the service: never Unknown.
         None if !sent.get() => MessageAnswer::Unsent(NOT_SENT.into()),
         None => MessageAnswer::Unconfirmed(UNCONFIRMED.into()),
-    })
+    });
+    if matches!(answer, MessageAnswer::Unsent(_)) {
+        (outbox.release)();
+    }
+    answer
 }
 
 /// Bounded read-only lookups of the exact original until it settles.
@@ -217,6 +231,8 @@ pub(crate) fn check(
     settled(&lookup(&read, &plan)?, &plan)
 }
 
+#[cfg(all(test, unix))]
+mod fixture_tests;
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -248,15 +264,28 @@ mod tests {
             handed.set(handed.get() + 1);
             Ok(())
         };
+        let released = std::cell::Cell::new(0);
+        let release = || released.set(released.get() + 1);
         // No selected service: nothing was sent, with or without consent,
-        // and the handoff never ran.
+        // the handoff never ran and each unsent original was released.
         for fresh in [true, false] {
             assert_eq!(
-                call(None, "example", TASK, &record(), fresh, &handoff, &stopped),
+                call(
+                    None,
+                    "example",
+                    TASK,
+                    &record(),
+                    fresh,
+                    Outbox {
+                        handoff: &handoff,
+                        release: &release,
+                    },
+                    &stopped,
+                ),
                 MessageAnswer::Unsent(NOT_SENT.into())
             );
         }
-        assert_eq!(handed.get(), 0);
+        assert_eq!((handed.get(), released.get()), (0, 2));
         assert_eq!(check(None, "example", TASK, &record()), None);
     }
 

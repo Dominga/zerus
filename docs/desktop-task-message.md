@@ -115,21 +115,26 @@ desktop-service mode lands together with attachments by reference.
 - **Consent.** Only the outbox record reserved by the same explicit Submit is
   sent, and only once. A record from before is never sent again.
 - **Handoff marker.** Before the admission request is written,
-  `tasks_write::outbox::hand_off` durably records that the exact record (its
-  ID and snapshot digest) was handed to the service. The marker is evidence,
-  never permission. A marked record recovers only through the scoped read-only
-  lookup, never through the direct `--recover-only` check. A marked record
-  that the lookup does not find, including after a crash between the marker
-  and the request, stays in review until the user explicitly discards it or
-  confirms sending it again as a new record. An unreadable marker, or one that
-  names another record, is never taken as absent. Releasing or settling the
-  record removes the marker last, in the same durable step.
+  `tasks_write::outbox::hand_off` durably records that the exact record (its ID
+  and snapshot digest) was handed to the service. The marker is evidence, never
+  permission. A marked record recovers only through the scoped read-only
+  lookup, never through the direct `--recover-only` check: the editor's
+  explicit recovery and the recovery policy (`TaskMessageRecovery`) both refuse
+  a present marker, and an unreadable or foreign one too. A marked record that
+  the lookup does not find, including after a crash between the marker and the
+  request, stays in review until the user explicitly discards it or confirms
+  sending it again as a new record. An unreadable marker, or one that names
+  another record, is never taken as absent. Releasing or settling the record
+  removes the marker last, in the same durable step, after a directory sync
+  that makes the record's removal durable first: a record never outlives its
+  marker.
 - **Answers.** Recorded settles like a delivered reply. Unsent means nothing
   ran: the request never left the client, or the exact drained receipt proves
-  that the child never started. Unconfirmed means the original failed or its
-  result is unknown; it is never sent again and never takes the direct path.
-  Direct is the only answer that uses the direct path, after a completed
-  capability probe that shows no support for the kind.
+  that the child never started. Only an Unsent answer releases the original,
+  through the caller's release step, before it is returned. Unconfirmed means
+  the original failed or its result is unknown; it is never sent again and
+  never takes the direct path. Direct is the only answer that uses the direct
+  path, after a completed capability probe that shows no support for the kind.
 
 ## Wire
 

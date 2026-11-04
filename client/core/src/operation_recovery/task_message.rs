@@ -48,6 +48,9 @@ pub enum Review {
     InvalidRecord,
     IdentityChanged,
     MarkerChanged,
+    /// The record was handed to the desktop service: only the service's
+    /// scoped lookup may check it.
+    HandedOff,
     InputChanged,
     Unsupported,
     Historical,
@@ -204,12 +207,19 @@ fn version(value: &Value) -> bool {
 }
 
 impl Original {
+    /// `handoff` is the record's desktop-service handoff marker: `None` only
+    /// when the caller observed that there is none. A present marker, even an
+    /// unreadable or foreign one, is `Some` and refuses this direct check.
     pub fn verify(
         binding: Binding,
         raw: &[u8],
         input: &[u8],
         marker: &[u8],
+        handoff: Option<&[u8]>,
     ) -> Result<Self, Review> {
+        if handoff.is_some() {
+            return Err(Review::HandedOff);
+        }
         if raw.len() > PRIVATE_BYTES || input.len() > PRIVATE_BYTES || marker.len() > 128 {
             return Err(Review::TooLarge);
         }
@@ -547,7 +557,20 @@ mod tests {
     }
     fn original(b: Binding, raw: &[u8], input: &[u8]) -> Original {
         let marker = b.marker_id.as_bytes().to_vec();
-        Original::verify(b, raw, input, &marker).unwrap_or_else(|e| panic!("{e:?}"))
+        Original::verify(b, raw, input, &marker, None).unwrap_or_else(|e| panic!("{e:?}"))
+    }
+    #[test]
+    fn a_record_handed_to_the_desktop_service_is_never_checked_directly() {
+        let (b, raw, input) = fixture(record("queue", ""));
+        let marker = b.marker_id.as_bytes().to_vec();
+        // Any handoff marker, its content readable or not, refuses.
+        for handoff in [&b"{}"[..], b"", b"unreadable"] {
+            assert!(matches!(
+                Original::verify(b.clone(), &raw, &input, &marker, Some(handoff)),
+                Err(Review::HandedOff)
+            ));
+        }
+        assert!(Original::verify(b, &raw, &input, &marker, None).is_ok());
     }
     fn proposal(o: &mut Original) -> Proposal {
         match o.step(Input::LookupRequested, false, false) {
@@ -610,7 +633,7 @@ mod tests {
         let mut other = b.clone();
         other.input_sha256 = sha256(&changed);
         assert!(matches!(
-            Original::verify(other, &raw, &changed, b.marker_id.as_bytes()),
+            Original::verify(other, &raw, &changed, b.marker_id.as_bytes(), None),
             Err(Review::InputChanged)
         ));
     }
@@ -629,7 +652,7 @@ mod tests {
         let (b, raw, pretty) = fixture(value);
         assert_ne!(pretty, canonical);
         assert!(matches!(
-            Original::verify(b.clone(), &raw, &pretty, b.marker_id.as_bytes()),
+            Original::verify(b.clone(), &raw, &pretty, b.marker_id.as_bytes(), None),
             Err(Review::InputChanged)
         ));
     }
@@ -729,24 +752,24 @@ mod tests {
             format!("{}\n", id(2)).into_bytes(),
         ] {
             assert!(matches!(
-                Original::verify(b.clone(), &raw, &input, &marker),
+                Original::verify(b.clone(), &raw, &input, &marker, None),
                 Err(Review::MarkerChanged)
             ));
         }
         let mut bound = b.clone();
         bound.marker_id = id(9);
         assert!(matches!(
-            Original::verify(bound, &raw, &input, id(9).as_bytes()),
+            Original::verify(bound, &raw, &input, id(9).as_bytes(), None),
             Err(Review::MarkerChanged)
         ));
         assert!(matches!(
-            Original::verify(b.clone(), &raw, b"", id(2).as_bytes()),
+            Original::verify(b.clone(), &raw, b"", id(2).as_bytes(), None),
             Err(Review::MissingInput)
         ));
         let mut changed = input.clone();
         changed.push(b' ');
         assert!(matches!(
-            Original::verify(b.clone(), &raw, &changed, id(2).as_bytes()),
+            Original::verify(b.clone(), &raw, &changed, id(2).as_bytes(), None),
             Err(Review::InputChanged)
         ));
         let mut content: Value = serde_json::from_slice(&input).unwrap();
@@ -755,13 +778,13 @@ mod tests {
         let mut bound = b.clone();
         bound.input_sha256 = sha256(&changed);
         assert!(matches!(
-            Original::verify(bound, &raw, &changed, id(2).as_bytes()),
+            Original::verify(bound, &raw, &changed, id(2).as_bytes(), None),
             Err(Review::InputChanged)
         ));
         let mut changed = raw;
         changed.push(b' ');
         assert!(matches!(
-            Original::verify(b, &changed, &input, id(2).as_bytes()),
+            Original::verify(b, &changed, &input, id(2).as_bytes(), None),
             Err(Review::IdentityChanged)
         ));
     }
@@ -779,7 +802,7 @@ mod tests {
                 _ => bound.dispatch_id = "not-canonical".into(),
             }
             assert!(
-                Original::verify(bound, &raw, &input, id(2).as_bytes()).is_err(),
+                Original::verify(bound, &raw, &input, id(2).as_bytes(), None).is_err(),
                 "{key}"
             );
         }
@@ -790,13 +813,13 @@ mod tests {
             let mut value = record("queue", "");
             value["id"] = json!(original);
             let (b, raw, input) = fixture(value);
-            assert!(Original::verify(b, &raw, &input, id(2).as_bytes()).is_err());
+            assert!(Original::verify(b, &raw, &input, id(2).as_bytes(), None).is_err());
         }
         for version in [json!(2), json!(1.0), Value::Null] {
             let mut value = record("queue", "");
             value["version"] = version;
             let (b, raw, input) = fixture(value);
-            assert!(Original::verify(b, &raw, &input, id(2).as_bytes()).is_err());
+            assert!(Original::verify(b, &raw, &input, id(2).as_bytes(), None).is_err());
         }
     }
     #[test]
@@ -809,7 +832,7 @@ mod tests {
             let mut record = record("queue", "");
             record["intent"][path] = value;
             let (b, raw, input) = fixture(record);
-            assert!(Original::verify(b, &raw, &input, id(2).as_bytes()).is_err());
+            assert!(Original::verify(b, &raw, &input, id(2).as_bytes(), None).is_err());
         }
         for value in [
             json!({"text":null}),
@@ -820,7 +843,7 @@ mod tests {
             let mut record = record("queue", "");
             record["intent"]["content"] = value;
             let (b, raw, input) = fixture(record);
-            assert!(Original::verify(b, &raw, &input, id(2).as_bytes()).is_err());
+            assert!(Original::verify(b, &raw, &input, id(2).as_bytes(), None).is_err());
         }
     }
     #[test]
@@ -854,7 +877,7 @@ mod tests {
             bound.source_sha256 = sha256(&bytes);
             assert!(
                 matches!(
-                    Original::verify(bound, &bytes, &input, id(2).as_bytes()),
+                    Original::verify(bound, &bytes, &input, id(2).as_bytes(), None),
                     Err(Review::InvalidRecord)
                 ),
                 "{needle}"
@@ -867,7 +890,7 @@ mod tests {
         let mut bound = b;
         bound.input_sha256 = sha256(&frozen);
         assert!(matches!(
-            Original::verify(bound, &raw, &frozen, id(2).as_bytes()),
+            Original::verify(bound, &raw, &frozen, id(2).as_bytes(), None),
             Err(Review::InvalidRecord)
         ));
         let mut value = record("note", "");
@@ -880,7 +903,7 @@ mod tests {
             .into_bytes();
         b.source_sha256 = sha256(&bytes);
         assert!(matches!(
-            Original::verify(b, &bytes, &input, id(2).as_bytes()),
+            Original::verify(b, &bytes, &input, id(2).as_bytes(), None),
             Err(Review::InvalidRecord)
         ));
     }
@@ -1056,7 +1079,7 @@ mod tests {
                 &vec![0; PRIVATE_BYTES + 1],
                 &input,
                 id(2).as_bytes()
-            ),
+            , None),
             Err(Review::TooLarge)
         ));
         assert!(matches!(
@@ -1065,11 +1088,11 @@ mod tests {
                 &raw,
                 &vec![0; PRIVATE_BYTES + 1],
                 id(2).as_bytes()
-            ),
+            , None),
             Err(Review::TooLarge)
         ));
         assert!(matches!(
-            Original::verify(b.clone(), &raw, &input, &[0; 129]),
+            Original::verify(b.clone(), &raw, &input, &[0; 129], None),
             Err(Review::TooLarge)
         ));
         for value in [

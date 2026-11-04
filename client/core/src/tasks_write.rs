@@ -470,10 +470,10 @@ pub mod outbox {
     /// One message operation per task at a time, within this client.
     static BUSY: Mutex<Option<HashSet<PathBuf>>> = Mutex::new(None);
 
-    struct Turn(PathBuf);
+    pub(crate) struct Turn(PathBuf);
 
     impl Turn {
-        fn take(file: &Path) -> Option<Turn> {
+        pub(crate) fn take(file: &Path) -> Option<Turn> {
             let until = Instant::now() + Duration::from_secs(1);
             loop {
                 {

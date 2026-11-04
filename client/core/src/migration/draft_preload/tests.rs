@@ -90,7 +90,7 @@ fn every_store_is_captured_once_and_reopens_after_restart_unchanged() {
     let first = capture.status();
     assert_eq!(first.code, "draft_capture_captured");
     assert_eq!(first.manifests, 5);
-    let seed: Seed = read_json(&s.slot().join("identity.json")).unwrap().unwrap();
+    let (seed, _): (Seed, _) = read_json(&s.slot().join("identity.json")).unwrap().unwrap();
     let snapshot = Snapshot::open(&s.slot(), &seed).unwrap();
     let classes: Vec<(Store, Class)> = snapshot
         .index
@@ -364,7 +364,7 @@ fn the_capture_records_next_before_saves_queued_with_the_store() {
     let status = capture.status();
     assert_eq!(status.code, "draft_capture_captured");
     assert!(status.writes && !status.paused);
-    let seed: Seed = read_json(&s.slot().join("identity.json")).unwrap().unwrap();
+    let (seed, _): (Seed, _) = read_json(&s.slot().join("identity.json")).unwrap().unwrap();
     let snapshot = Snapshot::open(&s.slot(), &seed).unwrap();
     let entry = &snapshot.index.entries[0];
     let original: Value = serde_json::from_slice(snapshot.bytes(entry)).unwrap();
@@ -508,7 +508,7 @@ fn seed_without_outcome(s: &Scratch) -> Seed {
 }
 
 fn next_texts(s: &Scratch) -> Vec<String> {
-    let seed: Seed = read_json(&s.slot().join("identity.json")).unwrap().unwrap();
+    let (seed, _): (Seed, _) = read_json(&s.slot().join("identity.json")).unwrap().unwrap();
     let snapshot = Snapshot::open(&s.slot(), &seed).unwrap();
     snapshot
         .index
@@ -536,7 +536,7 @@ fn probe_a_an_import_by_an_uncaptured_run_is_never_reported_captured() {
         next_texts(&s).is_empty(),
         "the imported copy is no Next original"
     );
-    let seed: Seed = read_json(&s.slot().join("identity.json")).unwrap().unwrap();
+    let (seed, _): (Seed, _) = read_json(&s.slot().join("identity.json")).unwrap().unwrap();
     let snapshot = Snapshot::open(&s.slot(), &seed).unwrap();
     let next = snapshot
         .index
@@ -660,7 +660,7 @@ fn a_container_over_one_part_is_kept_in_exact_parts_and_reopens() {
             import: true
         }
     );
-    let seed: Seed = read_json(&s.slot().join("identity.json")).unwrap().unwrap();
+    let (seed, _): (Seed, _) = read_json(&s.slot().join("identity.json")).unwrap().unwrap();
     let snapshot = Snapshot::open(&s.slot(), &seed).unwrap();
     assert_eq!(snapshot.index.entries.len(), 17);
     for entry in &snapshot.index.entries {
@@ -798,7 +798,7 @@ fn a_failure_written_now_is_never_superseded_on_windows() {
     let capture = s.capture();
     assert!(!capture.prepare().import);
     assert_eq!(capture.status().code, "draft_capture_unreadable");
-    let failed: Failed = read_json(&s.slot().join("failed.json")).unwrap().unwrap();
+    let (failed, _): (Failed, _) = read_json(&s.slot().join("failed.json")).unwrap().unwrap();
     assert_eq!(failed.version, 2);
     on_windows(true);
     let again = s.capture();
@@ -881,14 +881,15 @@ fn a_receipt_with_an_extra_empty_part_is_refused() {
     draft(&s.next(), "codex/sample/a", "text", b"abc", true);
     assert!(s.capture().prepare().import);
     let empty = disk::create(&s.slot().join("original-1.bin"), b"").unwrap();
-    let mut receipt: Receipt = read_json(&s.slot().join("receipt.json")).unwrap().unwrap();
+    let (mut receipt, _): (Receipt, _) =
+        read_json(&s.slot().join("receipt.json")).unwrap().unwrap();
     receipt.more = vec![empty];
     fs::write(
         s.slot().join("receipt.json"),
         serde_json::to_vec(&receipt).unwrap(),
     )
     .unwrap();
-    let seed: Seed = read_json(&s.slot().join("identity.json")).unwrap().unwrap();
+    let (seed, _): (Seed, _) = read_json(&s.slot().join("identity.json")).unwrap().unwrap();
     assert!(Snapshot::open(&s.slot(), &seed).is_err());
     let again = s.capture();
     assert_eq!(

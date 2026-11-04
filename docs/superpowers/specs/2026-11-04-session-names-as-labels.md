@@ -132,7 +132,7 @@ The owner's answers to questions 1 and 3 and the coordinator's decision on quest
 - **The label index.** `labels/<sha256(label)>.json` (`{version, label, ids}`) lists the sessions stored by ID under a label.
   - It is always a superset (#1430 review, desktop-u G1). The index entry is durable before its record takes the label: it is created there, renamed to it or restored to it. A record write refuses when its index write failed. The record leaves the label, by a rename, an archive or a forget, before its index entry is removed. A durable record therefore always has an index entry, so a verified index is complete for every creation made under the writer lock, and a crash or a concurrent lock-free reader can only see an extra entry, never miss one.
   - Every entry is checked against its record: the same session ID, label and layout, no archive and no rename shadow. A stale entry is dropped by that check and removed by the next writer.
-  - An unreadable, changing or incomplete index never lets a reader select the label's first holder. The reader then scans `sessions/` off every hot path, and that scan is bounded to 2,000 records or 2 seconds, whichever comes first. If completeness still cannot be proven within that bound, the resolution refuses: exit 5, or the closed answer. It never picks the legacy holder.
+  - A missing or hand-deleted `labels/` file is never trusted as empty: it counts as incomplete (coordinator, 2026-11-05). So do an unreadable or changing one, and a present candidate record that is unreadable or replaced, which is never taken as proof of absence. None of them ever lets a reader select the label's first holder. The reader then scans `sessions/` off every hot path, and that scan is bounded to 2,000 records or 2 seconds, whichever comes first. If completeness still cannot be proven within that bound, the resolution refuses: exit 5, or the closed answer. It never picks the legacy holder.
   - The final effect admission of every command revalidates the original it selected.
   - Writers change it under the state writer lock; readers never take that lock. Tests cover a crash between each pair of writes.
   - `ids/<session_id>.json` (P2a) gains a record kind for the ID layout, so `--session-id` and hooks reach such a session in O(1).
@@ -225,7 +225,8 @@ The Qt GUI (`tray/src`) is part of neither the gate nor P3f. It addresses sessio
 The rollback floor for labels that repeat is the first build that contains P3a, P3b and P3c (desktop-u G1, coordinator 2026-11-05):
 - the resolver and the in-place handling of the ID layout (P3a);
 - `terminal_name` routing for every native target, including rename's `Target::Name`, tmux `=NAME` targets and the Windows host registry (P3b);
-- exact selection by expected IDs (P3c).
+- exact selection by expected IDs (P3c);
+- releasing an owned `zerus:` worktree lock on archive and forget, so that no lock lingers after a rollback to the floor.
 
 They stay separate PRs. A computer rolled back from P3e to that floor or later keeps every session that shares a label working, and never writes one to `sha256(label)`, where it would overwrite that label's first holder. Any later native dispatcher, helper or Service actor must also sit at that floor. Only a rollback below the floor after P3e is the "invisible but never deleted" case in the table.
 
@@ -233,7 +234,7 @@ They stay separate PRs. A computer rolled back from P3e to that floor or later k
 | --- | --- | --- |
 | P3a–P3c | Nothing new on disk except `terminal_name` and index entries, which they ignore. Every label is still unique and at its legacy path. | A terminal name can already differ from its label in P3b: it is `label~<id8>` when another terminal, such as an untracked one, holds the label. A build below P3b then finds no pane for that session (v0.47.0's `matches` needs the pane and its run marker) and shows it as not live. It never acts on the other terminal, but its `hgs LABEL` attaches to that terminal. A build below P3b that rewrites the record drops `terminal_name`. |
 | P3d | References with `session` | A build older than P1c-1 cannot parse them. It also lacks the marker, so the gate stays closed until it is updated, and closes again on a rollback. |
-| P3e, labels in use more than once, rolled back below the floor | Only the legacy holder of each label. Sessions in the ID layout are invisible to older builds but never deleted: they are not listed as saved, and a live one shows as an untracked terminal `label~<id>`. | Hooks of a session in the ID layout update nothing: v0.47.0's `read_run` takes the label's record only when its run matches, then scans only `sha256` paths. Such a session cannot be resumed until the computer moves forward again. Nothing is deleted, because no older build writes `sessions/` or `labels/`. To use such a session on the older build, archive it first: an explicit archive by its exact ID, on a compatible build, before the rollback. Archives are keyed by ID, and the older build restores the session under a free label. Nothing archives automatically, terminates an agent, or archives an invisible twin after the rollback. The older build's worktree maintenance scans only the four binding directories, so the checkout of an ID-layout session looks unowned to it. P3e therefore locks such a checkout with `git worktree lock --reason zerus:<session_id>` while the session is live or saved, and unlocks it when the session is archived or forgotten. It locks only a real Git worktree that Zerus created or adopted for that session, never a person's own checkout or a non-Git folder. It never unlocks a lock whose reason is not exactly `zerus:<that session's id>` (coordinator, 2026-11-05). v0.47.0's review reports a locked worktree as blocked ("Locked by Git"), and its automatic removal refuses blocked rows (`worktree_cleanup.rs`: `assess` and `remove_command`). This build treats its own `zerus:` lock as the session's use, and unlocks before a removal the person confirmed. P3e states these rules in `docs/reference.md`. |
+| P3e, labels in use more than once, rolled back below the floor | Only the legacy holder of each label. Sessions in the ID layout are invisible to older builds but never deleted: they are not listed as saved, and a live one shows as an untracked terminal `label~<id>`. | Hooks of a session in the ID layout update nothing: v0.47.0's `read_run` takes the label's record only when its run matches, then scans only `sha256` paths. Such a session cannot be resumed until the computer moves forward again. Nothing is deleted, because no older build writes `sessions/` or `labels/`. To use such a session on the older build, archive it first: an explicit archive by its exact ID, on a compatible build, before the rollback. Archives are keyed by ID, and the older build restores the session under a free label. Nothing archives automatically, terminates an agent, or archives an invisible twin after the rollback. The older build's worktree maintenance scans only the four binding directories, so the checkout of an ID-layout session would look unowned to it; P3e protects it with a Git worktree lock (see the worktree lock). P3e states these rules in `docs/reference.md`. |
 | P3e, other computers | — | A peer or desktop on an older build that names a label held by several sessions, without expected IDs, gets exit 5 from the receiving CLI, which is ambiguity-aware because it is at or above the floor: a refusal, never another session. A computer below the floor sees only each label's first holder and reports no ambiguity. |
 | P3f | Older desktops and phones list every session; rows sharing a label are told apart only by folder and time. | Their actions without expected IDs refuse with exit 5. |
 
@@ -255,7 +256,7 @@ They stay separate PRs. A computer rolled back from P3e to that floor or later k
    - `hgs NAME` reports ambiguity;
    - fork takes the entered name, and the `-2` search goes;
    - DeepSeek and OpenCode follow;
-   - the checkout of an ID-layout session is locked with `git worktree lock --reason zerus:<session_id>` while the session is live or saved, so worktree maintenance below the floor never removes it. Only real Git worktrees Zerus created or adopted for that session are locked, and only a lock with exactly that reason is ever unlocked;
+   - the checkout of an ID-layout session is protected by the worktree lock, under its rules below;
    - `docs/reference.md` states the rollback rules: sessions in the ID layout are invisible to older builds but never deleted; to use one on an older build, archive it first; and its checkout stays locked until it is archived or forgotten.
 
    Preconditions: read delivery selects among sessions that share a label (P3c), and the floor, P3a–P3c, is installed on every computer.
@@ -270,10 +271,31 @@ They stay separate PRs. A computer rolled back from P3e to that floor or later k
 
 P3e merges only after P3a–P3c, the rollback floor for labels that repeat, are installed on every computer, and P3d on every computer of the swarm and on the gateway connector. The fleet gate then opens by itself, computer by computer.
 
+### The worktree lock (P3e; desktop-u and review-q2, coordinator 2026-11-05)
+
+The lock keeps worktree maintenance below the floor from removing the checkout of an ID-layout session; it is a veto for that maintenance only.
+1. **Only owned worktrees.** P3e locks only a linked worktree whose verified Zerus ownership receipt (`worktree_lifecycle::owned`) matches the session's `worktree_owner`. It never locks a custom or existing worktree the person chose, and it runs no Git operation on a plain folder that is not in Git.
+2. **Lock before publication.** The lock is acquired and durably verified before the canonical record is published in, or moved into, the ID layout. A lock that fails, is uncertain or is interrupted never leaves an ID-layout record exposed. A protective lock left over by an interrupted publication stays for review, with no cleanup by age or name.
+3. **Verify at every mutation.** The ownership nonce, object and common-dir binding, and the current lock, are verified at every mutation. A foreign or user lock is never overridden, and `--force` is never used. The exact `zerus:<session_id>` text is necessary for a release, but it is not by itself ownership or permission to remove anything.
+4. **Shared checkouts.** A release considers all live or saved sessions that use the same checkout: forks share the checkout and its `worktree_owner`. Archiving or forgetting one must not remove another's protection. The reason is transferred under the writer and exclusion scope without a gap, or the unsupported shared case refuses. One session per worktree is never assumed, and protection stays when the evidence is unavailable.
+5. **A veto, not consent.** The lock never consents to a deletion. A confirmed removal keeps every existing check: ownership, source, files, other occupants, processes, drain and fingerprint. Releasing the lock never authorises deleting a branch or data, stopping an agent or archiving automatically.
+6. **Release at the floor, and the person's choices.**
+   - P3a–P3c honour `zerus:` locks and release them on archive and forget, so none lingers after a rollback to the floor.
+   - Plain `git worktree remove`, `move` and `prune` refuse a locked checkout, and a checkout deleted by hand keeps its branch pinned until it is unlocked; `docs/reference.md` says so.
+   - Zerus does not lock a checkout again after the person unlocks it: the person chose.
+
+P3e's controls for the lock:
+- a lock that fails or is interrupted before publication;
+- a foreign or replaced lock, and a replaced checkout;
+- two ID-layout sessions sharing a checkout, with one archived;
+- the exact release by the owned last holder;
+- v0.47.0's maintenance, run literally, refusing the locked checkout.
+
 ### Acceptance controls (desktop-u G1)
 
 Each PR lists which of these it covers, and every one is covered by P3e at the latest:
-- a valid but incomplete index, and a crash cut between each pair of writes;
+- a valid but incomplete index, and a cut at every publication and retirement step; the leaf PRs prove the superset and completeness rule with them (desktop-u, standing condition);
+- a present candidate that is unreadable or replaced, which is never proof of absence, and a bounded or unknown result, which never selects the first holder;
 - an ID record that is corrupt, missing or replaced, and duplicate session IDs;
 - two writers choosing one label at once;
 - a rename into an occupied label while the original's input lock or recovery job is held;

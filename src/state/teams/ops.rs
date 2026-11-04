@@ -4111,6 +4111,40 @@ fn finding(team: &mut Team, input: &Value, actor: &Actor, offline: &BTreeSet<Str
     Ok(json!({"status":action,"finding":id,"state":state}))
 }
 
+/// Feedback 2026-11-04 (6): a draft's members after the changes `patches` names
+/// by member id: an object merges into that member (a new id adds one), null
+/// removes it. The lead stays and is not patched here.
+fn patch_members(team: &Team, patches: &serde_json::Map<String, Value>) -> anyhow::Result<Value> {
+    ensure!(!patches.contains_key(&team.lead), "The draft's lead is not changed through members");
+    let mut members: Vec<Value> = team
+        .members
+        .iter()
+        .filter(|member| member.id != team.lead)
+        .map(serde_json::to_value)
+        .collect::<Result<_, _>>()?;
+    for (id, patch) in patches {
+        let at = members.iter().position(|member| member["id"] == id.as_str());
+        match (patch, at) {
+            (Value::Null, Some(at)) => {
+                members.remove(at);
+            }
+            (Value::Null, None) => bail!("The draft has no member {id} to remove"),
+            (Value::Object(fields), Some(at)) => {
+                for (key, value) in fields {
+                    members[at][key] = value.clone();
+                }
+            }
+            (Value::Object(fields), None) => {
+                let mut added = Value::Object(fields.clone());
+                added["id"] = json!(id);
+                members.push(added);
+            }
+            _ => bail!("A member change is an object of fields or null, not {patch}"),
+        }
+    }
+    Ok(Value::Array(members))
+}
+
 /// F5: the owner and the lead edit a draft; the owner creates or discards it.
 fn draft(team: &mut Team, input: &Value, actor: &Actor, offline: &BTreeSet<String>, events: &mut Vec<Event>) -> anyhow::Result<Value> {
     ensure!(team.status == TeamStatus::Draft, "The team is not a draft");
@@ -4142,6 +4176,14 @@ fn draft(team: &mut Team, input: &Value, actor: &Actor, offline: &BTreeSet<Strin
                     }
                     "members" => {
                         let lead = team.member(&team.lead).cloned();
+                        // Feedback 2026-11-04 (6): an object changes only the
+                        // members it names ({"dev":{"model":"opus"}}, null removes
+                        // one, a new id adds it); a list replaces them all.
+                        let value = &match value {
+                            Value::Object(patches) => patch_members(team, patches)?,
+                            Value::Array(_) => value.clone(),
+                            _ => bail!("Members are a list of members, or an object of changes by member id such as {{\"dev\":{{\"model\":\"opus\"}}}}"),
+                        };
                         let mut members: Vec<Member> = value
                             .as_array()
                             .context("Members are a list")?
@@ -4189,7 +4231,21 @@ fn draft(team: &mut Team, input: &Value, actor: &Actor, offline: &BTreeSet<Strin
                             .collect::<anyhow::Result<Vec<_>>>()?;
                         team.tasks = tasks;
                     }
-                    other => bail!("A draft sets name, goal, addendum, settings, members or tasks, not {other}"),
+                    // Feedback 7: the plan mode is set in the draft too: the
+                    // owner chooses it, the lead offers it.
+                    "plan_mode" => {
+                        let mode: PlanMode = serde_json::from_value(value.clone()).context("The plan mode is standard or free")?;
+                        if human {
+                            team.plan_mode = mode;
+                            team.plan_mode_offer = None;
+                        } else {
+                            team.plan_mode_offer = Some(mode);
+                        }
+                    }
+                    "plan_mode_reason" => team.plan_mode_reason = clean(value.as_str().unwrap_or_default().trim(), 500, "A plan mode reason")?,
+                    other => bail!(
+                        "A draft sets name, goal, addendum, settings, members, tasks, plan_mode or plan_mode_reason, not {other}"
+                    ),
                 }
                 changed.push(field.clone());
             }

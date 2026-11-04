@@ -944,6 +944,10 @@ fn draft_get_returns_the_revision_and_preflight() {
     assert_eq!(get["revision"], 1);
     assert_eq!(get["draft"]["revision"], 1);
     assert!(get["preflight"]["errors"].is_array());
+    // Feedback 2026-11-04 (5): the answer carries what the draft holds.
+    assert_eq!(get["fields"]["members"][0]["id"], "lead", "{get}");
+    assert!(get["fields"]["settings"]["max_members"].is_u64(), "{get}");
+    assert!(get["fields"]["tasks"].is_array() && get["fields"]["goal"].is_string(), "{get}");
 }
 
 /// N3/C6: the owner paths that create a team or change the catalog have a

@@ -957,3 +957,33 @@ fn a_swap_changes_the_role_prompt() {
     apply(&mut team, "swap-member", &json!({"member":"dev","prompt":"Review only"}), &Actor::Human, &BTreeSet::new(), &mut Vec::new()).unwrap();
     assert_eq!(team.member("dev").unwrap().prompt, "Review only");
 }
+
+/// Owner feedback 2026-11-04 (6, 7): a draft changes one member without
+/// resending the list, and takes the plan mode.
+#[test]
+fn a_draft_changes_one_member_and_sets_the_plan_mode() {
+    let (mut team, _) = create("t", &json!({"name":"T","lead":{"id":"lead","agent":"claude"}})).unwrap();
+    team.status = TeamStatus::Draft;
+    team.draft = Some(Draft { revision: 1, ..Default::default() });
+    let none = BTreeSet::new();
+    let lead = Actor::Member("lead".into());
+    let update = |team: &mut Team, revision: u64, set: Value, actor: &Actor| {
+        apply(team, "draft", &json!({"action":"update","revision":revision,"set":set}), actor, &none, &mut Vec::new())
+    };
+    update(&mut team, 1, json!({"members":[{"id":"dev","role":"Backend","agent":"claude"},{"id":"qa","role":"QA","agent":"claude"}]}), &lead).unwrap();
+    // One member's model, a new member and a removal, by id.
+    update(&mut team, 2, json!({"members":{"dev":{"model":"opus","account":"additional"},"ux":{"role":"UX","agent":"kimi"},"qa":null}}), &lead).unwrap();
+    let ids: Vec<&str> = team.members.iter().map(|member| member.id.as_str()).collect();
+    assert_eq!(ids, ["lead", "dev", "ux"]);
+    let dev = team.member("dev").unwrap();
+    assert_eq!((dev.role.as_str(), dev.model.as_str(), dev.account.as_str()), ("Backend", "opus", "additional"));
+    let error = update(&mut team, 3, json!({"members":{"qa":null}}), &lead).unwrap_err().to_string();
+    assert!(error.contains("no member qa"), "{error}");
+    let error = update(&mut team, 3, json!({"members":{"dev":{"text":"x"}}}), &lead).unwrap_err().to_string();
+    assert!(error.contains("no field \"text\""), "{error}");
+    // The lead offers a plan mode; the owner chooses it.
+    update(&mut team, 3, json!({"plan_mode":"free","plan_mode_reason":"one-off"}), &lead).unwrap();
+    assert_eq!(team.plan_mode_offer, Some(PlanMode::Free));
+    update(&mut team, 4, json!({"plan_mode":"free"}), &Actor::Human).unwrap();
+    assert_eq!((team.plan_mode, team.plan_mode_offer), (PlanMode::Free, None));
+}

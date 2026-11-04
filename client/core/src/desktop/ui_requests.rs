@@ -31,6 +31,9 @@ pub enum Request {
     CreationLaunch {
         intent: Box<super::creation_launch::Intent>,
     },
+    TaskMessage {
+        intent: Box<super::task_message::Intent>,
+    },
     TaskStartReconcile {
         intent: Box<super::task_start_reconcile::Intent>,
     },
@@ -91,6 +94,7 @@ impl Request {
             Self::CreationClone { intent } => &intent.clone_request_id,
             Self::CreationWorktree { intent } => &intent.worktree_request_id,
             Self::CreationLaunch { intent } => &intent.launch_id,
+            Self::TaskMessage { intent } => &intent.request_id,
             Self::TaskStartReconcile { intent } => &intent.reconcile_id,
             Self::TerminationOutcome { intent } => &intent.request_id,
             Self::NotificationControl { control, .. } => control.request_id(),
@@ -107,6 +111,7 @@ impl Request {
             Self::CreationClone { .. } => "creation_clone",
             Self::CreationWorktree { .. } => "creation_worktree",
             Self::CreationLaunch { .. } => "creation_launch",
+            Self::TaskMessage { .. } => "task_message",
             Self::TaskStartReconcile { .. } => "task_start_reconcile",
             Self::TerminationOutcome { .. } => "termination_outcome",
             Self::NotificationControl { control, .. } => control.operation(),
@@ -123,6 +128,7 @@ impl Request {
             Self::CreationClone { intent } => intent.as_ref().clone().verify().is_ok(),
             Self::CreationWorktree { intent } => intent.as_ref().clone().verify().is_ok(),
             Self::CreationLaunch { intent } => intent.as_ref().clone().verify().is_ok(),
+            Self::TaskMessage { intent } => intent.as_ref().clone().verify().is_ok(),
             Self::TaskStartReconcile { intent } => intent.as_ref().clone().verify().is_ok(),
             Self::TerminationOutcome { intent } => intent.valid(),
             Self::NotificationControl { scope, control } => scope.valid() && control.valid(),
@@ -154,6 +160,35 @@ impl Request {
             Sha256::digest(serde_json::to_vec(self).expect("fixed request fields"))
         )
     }
+}
+
+/// The complete line the `frontend-request` child sends the service for one
+/// envelope: the `desktop-v1` hello around it and its newline. The service
+/// reads at most [`zerus_watch_protocol::CONTROL_LINE_BYTES`] of it.
+pub fn frontend_line(configuration: &str, envelope: &serde_json::Value) -> Vec<u8> {
+    let mut bytes = serde_json::to_vec(&serde_json::json!({
+        "abi": super::service::ABI,
+        "configuration": configuration,
+        "op": "frontend_request",
+        "request": envelope,
+    }))
+    .expect("a JSON line");
+    bytes.push(b'\n');
+    bytes
+}
+
+/// Whether `request` fits that complete line for any attempt and
+/// configuration: both have a fixed length, so the size is exact. A request
+/// that does not fit must never be sent.
+pub fn fits_frontend_line(request: &Request) -> bool {
+    let envelope = Envelope {
+        abi: ABI.into(),
+        attempt: "00000000-0000-4000-8000-000000000000".into(),
+        request: request.clone(),
+    };
+    serde_json::to_value(&envelope).is_ok_and(|envelope| {
+        frontend_line(&"0".repeat(64), &envelope).len() <= zerus_watch_protocol::CONTROL_LINE_BYTES
+    })
 }
 
 #[derive(Clone, Debug, Deserialize, Serialize)]
@@ -255,6 +290,7 @@ impl Cache {
                 | Request::CreationClone { .. }
                 | Request::CreationWorktree { .. }
                 | Request::CreationLaunch { .. }
+                | Request::TaskMessage { .. }
                 | Request::TaskStartReconcile { .. }
                 | Request::TerminationOutcome { .. }
         ) {
@@ -416,6 +452,14 @@ impl Responder {
                 Some(super::ownership::Mode::Service)
             }
             Request::TerminationOutcome { intent } => {
+                if self.ownership_mode.get() != Some(&super::ownership::Mode::Service)
+                    || self.configuration.get() != Some(&intent.scope.configuration)
+                {
+                    return Err(io::ErrorKind::PermissionDenied.into());
+                }
+                Some(super::ownership::Mode::Service)
+            }
+            Request::TaskMessage { intent } => {
                 if self.ownership_mode.get() != Some(&super::ownership::Mode::Service)
                     || self.configuration.get() != Some(&intent.scope.configuration)
                 {

@@ -29,6 +29,7 @@ pub mod relay;
 pub mod server_trust;
 pub mod service;
 pub mod startup;
+pub mod task_message;
 pub mod task_start_reconcile;
 pub mod termination_outcome;
 pub mod ui_requests;

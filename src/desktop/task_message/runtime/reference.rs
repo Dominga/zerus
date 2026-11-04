@@ -423,9 +423,8 @@ impl Runtime {
             if self.holds(&id) {
                 continue;
             }
-            let drained = ledger::load(&store.db, &id)?.is_some_and(|row| row.receipt.drained);
             let record = super::super::inputs::load(&store.db, &id)?;
-            if let (true, Some(identity)) = (drained, record.and_then(|r| r.identity)) {
+            if let Some(identity) = record.and_then(|r| r.identity) {
                 return Ok(Some((id, identity)));
             }
         }

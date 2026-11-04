@@ -49,7 +49,7 @@ QList<Option> options(const QJsonArray &profiles, const QString &host, const QSt
         }
         const bool isCurrent = id == current;
         // A signed-out account has nothing to run with; the current one stays listed.
-        if (!isCurrent && SignedOut.contains(usage.value("status").toString())) continue;
+        if (!isCurrent && SignedOut.contains(AccountUsage::signInStatus(usage))) continue;
         Option option;
         option.id = id; option.current = isCurrent;
         option.label = profile.value("label").toString();

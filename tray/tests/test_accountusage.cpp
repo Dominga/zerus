@@ -1,6 +1,7 @@
 #include <QtTest>
 #include "AccountUsageStore.h"
 #include "AccountUsage.h"
+#include "AccountSwitch.h"
 #include "CacheStatus.h"
 
 static QJsonObject limitWindow(int minutes,double used,qint64 resetIn,const QDateTime &now) {
@@ -10,6 +11,25 @@ static QJsonObject limitWindow(int minutes,double used,qint64 resetIn,const QDat
 class TestAccountUsage : public QObject {
     Q_OBJECT
 private slots:
+    void expiredUsageTokenKeepsVerifiedSignIn() {
+        const QJsonObject data{{"provider","claude"},{"status","expired"},{"auth_status","signed_in"}};
+        QCOMPARE(AccountUsage::launchSummary(data),QString("Usage token expired"));
+        QVERIFY(AccountUsage::launchMeterData(data)["windows"].toArray().isEmpty());
+        QVERIFY(AccountUsage::state(data).contains("signed in"));
+        QVERIFY(!AccountUsage::state(data).contains("sign in again"));
+        auto legacy=data;legacy.remove("auth_status");
+        QCOMPARE(AccountUsage::launchSummary(legacy),QString("Sign-in expired"));
+        QVERIFY(AccountUsage::state(legacy).contains("Native sign-in has expired"));
+        AccountUsage::Button button;button.setData(data);
+        QVERIFY(button.accessibleName().contains("signed in"));
+        const auto options=[&](const QJsonObject &usage){
+            return AccountSwitch::options(QJsonArray{QJsonObject{{"id","work"},{"host","pc"},{"provider","claude"},{"usage",usage}}},
+                "pc","claude","native-claude",false);
+        };
+        QCOMPARE(options(data).size(),1);QVERIFY(options(legacy).isEmpty());
+        auto signedOut=data;signedOut["auth_status"]="signed_out";
+        QVERIFY(options(signedOut).isEmpty());
+    }
     void earlyResetNoticeRequiresFreshCompleteUsageAndKeepsNativeFailureSeparate() {
         const auto now=QDateTime::currentSecsSinceEpoch();
         QJsonObject data{{"status","ok"},{"checked_at",now},{"windows",QJsonArray{

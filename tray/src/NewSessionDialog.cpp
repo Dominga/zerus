@@ -1906,7 +1906,7 @@ void NewSessionDialog::refreshDense()
             :workspaceIcon(key=="sh"?QString("terminal"):key,key=="sh"?t.muted:IdentityBadges::providerColor(key,m_denseDark));
         const int row=denseRow(key);
         const auto usage=row<0?QJsonObject():m_account->item(row)->data(ProfileRole).toJsonObject()["usage"].toObject();
-        const auto status=usage["status"].toString();
+        const auto status=AccountUsage::signInStatus(usage);
         agent.connected=key=="sh"||(row>=0&&!signedOut.contains(status));
         agent.absent=row<0&&key!="sh"&&key!="ollama";
         agent.busy=m_denseSigningIn&&key==m_denseKey;
@@ -1918,7 +1918,7 @@ void NewSessionDialog::refreshDense()
             Account account;account.row=other;
             account.email=data["identity"].toObject()["email"].toString();
             if(account.email.isEmpty())account.email=m_account->item(other)->text().section('\n',0,0);
-            account.connected=!signedOut.contains(data["status"].toString());
+            account.connected=!signedOut.contains(AccountUsage::signInStatus(data));
             for(const auto &windowValue:AccountUsage::launchMeterData(data)["windows"].toArray()){
                 const auto meter=windowValue.toObject();const int minutes=meter["window_minutes"].toInt();
                 if(minutes==300){account.fiveHour=meter["used_percent"].toDouble();account.reset=resetText(meter);}

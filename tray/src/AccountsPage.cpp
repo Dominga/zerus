@@ -168,7 +168,7 @@ private:
 // U25 (spec 9): a profile's sign-in on its machine: "expired", "out"
 // (signed out) or "in" (signed in, configured, or still being checked).
 QString signState(const QJsonObject &member) {
-    const auto usage = member["usage"].toObject(); const auto status = usage["status"].toString();
+    const auto usage = member["usage"].toObject(); const auto status = AccountUsage::signInStatus(usage);
     if (status == "expired") return QStringLiteral("expired");
     if (status == "signed_out" || usage["auth_status"] == "signed_out") return QStringLiteral("out");
     return QStringLiteral("in");
@@ -792,6 +792,7 @@ void AccountsPage::selectionChanged()
     m_identity->setVisible(!m_identity->text().isEmpty());
     m_usage->show();m_usage->setData(info);
     const auto machine = p["machine"].toString(); const auto status = p["usage"].toObject()["status"].toString();
+    const auto authStatus = AccountUsage::signInStatus(p["usage"].toObject());
     const bool signedIn = status == "ok" || status == "expired" || p["usage"].toObject()["auth_status"] == "signed_in";
     m_login->setText(p["provider"] == "dsh" ? (status == "configured" ? tr("Change API key on %1…") : tr("Set API key on %1…")).arg(machine)
         : (signedIn ? tr("Sign in again on %1…") : tr("Sign in on %1…")).arg(machine));
@@ -807,7 +808,7 @@ void AccountsPage::selectionChanged()
         : status == "credentials_locked" ? tr("The login Keychain on %1 is locked. Unlock it in Keychain Access, then refresh.").arg(machine)
         : status == "desktop_session_unavailable" ? tr("Desktop sign-in on %1 is unavailable. Log in to macOS and check the HGS installation.").arg(machine)
         : status == "credentials_unavailable" ? tr("The saved sign-in on %1 could not be used. Check Keychain access or sign in again.").arg(machine)
-        : status == "expired" ? tr("Sign-in expired on %1.").arg(machine)
+        : authStatus == "expired" ? tr("Sign-in expired on %1.").arg(machine)
         : status == "loading" ? tr("Checking sign-in on %1…").arg(machine)
         : signedIn ? tr("Ready on %1.").arg(machine) : tr("Account status is unavailable on %1.").arg(machine));
     if(nativeConfig) {
@@ -853,11 +854,11 @@ void AccountsPage::selectionChanged()
         m_detail->setText(m_detail->text().isEmpty() ? upload : m_detail->text() + QLatin1Char('\n') + upload);
     // U25 (spec 9): an account that cannot be used here says so in warn, and
     // its sign-in becomes the primary action.
-    const bool attention = !online(p["host"].toString()) || status == "signed_out" || status == "expired";
+    const bool attention = !online(p["host"].toString()) || authStatus == "signed_out" || authStatus == "expired";
     if (m_detail->property("pageWarn").toBool() != attention) {
         m_detail->setProperty("pageWarn", attention); m_detail->style()->unpolish(m_detail); m_detail->style()->polish(m_detail);
     }
-    const bool primary = online(p["host"].toString()) && (status == "signed_out" || status == "expired");
+    const bool primary = online(p["host"].toString()) && (authStatus == "signed_out" || authStatus == "expired");
     if (m_login->property("pagePrimary").toBool() != primary) {
         m_login->setProperty("pagePrimary", primary); m_login->style()->unpolish(m_login); m_login->style()->polish(m_login);
     }

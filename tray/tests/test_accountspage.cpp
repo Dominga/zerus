@@ -496,6 +496,7 @@ void TestAccountsPage::claudeSignInAndKeychainStatus_data()
 {
     QTest::addColumn<QString>("status");QTest::addColumn<QString>("authStatus");QTest::addColumn<QString>("message");
     QTest::newRow("quota-unavailable")<<"unavailable"<<"signed_in"<<"Ready on mac.";
+    QTest::newRow("quota-token-expired")<<"expired"<<"signed_in"<<"Ready on mac.";
     QTest::newRow("locked")<<"credentials_locked"<<"credentials_locked"<<"Keychain on mac is locked";
     QTest::newRow("desktop-unavailable")<<"desktop_session_unavailable"<<"desktop_session_unavailable"<<"Desktop sign-in on mac is unavailable";
     QTest::newRow("inaccessible")<<"credentials_unavailable"<<"credentials_unavailable"<<"saved sign-in on mac could not be used";
@@ -512,6 +513,12 @@ void TestAccountsPage::claudeSignInAndKeychainStatus()
     QTRY_VERIFY2(detail->text().contains(message),qPrintable(detail->text()));
     QVERIFY(!page.findChild<QLabel *>("accountIdentity")->text().contains("Sign-in: none"));
     QCOMPARE(page.findChild<QPushButton *>("loginAccount")->text().contains("again"),authStatus=="signed_in");
+    if(authStatus=="signed_in"){
+        QVERIFY(!detail->property("pageWarn").toBool());
+        QVERIFY(!page.findChild<QPushButton *>("loginAccount")->property("pagePrimary").toBool());
+        auto *list=page.findChild<QListWidget *>("accountProfiles");
+        QCOMPARE(list->currentItem()->data(Qt::UserRole+1).toString(),QString("in"));
+    }
 }
 
 void TestAccountsPage::defaultAccountIsMachineScopedAndUsedForNewSessions()

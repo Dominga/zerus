@@ -758,3 +758,18 @@ fn the_lead_relaunches_a_stuck_member_with_lead_restarts_stuck() {
         assert!(error.contains("owner_word"), "{error}");
     });
 }
+
+/// Owner feedback 2026-11-04 (16): "перезапусти их на additional аккаунте"
+/// names every member the lead asked about and pays for one relaunch each.
+#[test]
+fn a_sentence_naming_them_all_relaunches_each_member() {
+    assert!(super::super::owner_word::says_everyone("перезапусти их на additional аккаунте"));
+    assert!(super::super::owner_word::says_everyone("Relaunch them all"));
+    assert!(!super::super::owner_word::says_everyone("перезапусти бэкендера"));
+    let mut team = full_team();
+    for member in &mut team.members {
+        member.error = "start failed".into();
+    }
+    let rule = roster_word_rule(&team, "relaunch", &json!({"member":"m1"}));
+    assert!(rule.names.iter().any(|name| name == "их"), "{:?}", rule.names);
+}

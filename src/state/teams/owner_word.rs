@@ -42,7 +42,13 @@ pub(crate) const SWAP_VERBS: &[&str] = &[
 pub(crate) const MAX_VERBS: &[&str] = &["max", "maximum", "limit", "cap", "лимит", "максимум", "макс", "предел"];
 
 /// U54: what the owner says to relaunch a member's session.
-pub(crate) const RELAUNCH_VERBS: &[&str] = &["relaunch", "restart", "start", "запусти", "запустите", "перезапусти", "перезапустить"];
+pub(crate) const RELAUNCH_VERBS: &[&str] = &["relaunch", "restart", "start", "запусти", "запустите", "перезапусти", "перезапустите", "перезапустить"];
+
+/// Owner feedback 2026-11-04 (16): "перезапусти их на additional аккаунте"
+/// names the members the lead asked about without naming each one. For a
+/// relaunch or a swap, one of these words names every member of the request;
+/// the operation's verb is still required.
+pub(crate) const EVERYONE_WORDS: &[&str] = &["all", "everyone", "everybody", "them", "each", "всех", "все", "их", "каждого", "каждый", "весь"];
 
 /// U49: the words that ask a member to drain, English and Russian.
 pub(crate) const DRAIN_PHRASES: &[&str] = &["drain", "remove", "вывед", "убери", "убрать"];
@@ -146,6 +152,13 @@ pub(crate) fn add_count(text: &str) -> usize {
 /// A sentence that names a role names *this* member's role: "a DeepSeek
 /// frontender" is not a Backend. An agent or model word alone is enough only
 /// when no other role is named.
+/// Feedback 16: whether the owner's sentence names every member at once
+/// ("перезапусти их", "relaunch them all").
+pub(crate) fn says_everyone(text: &str) -> bool {
+    let lowered = text.to_lowercase();
+    EVERYONE_WORDS.iter().any(|word| if word.is_ascii() { has_token(&lowered, word) } else { alias_in(&lowered, word) })
+}
+
 pub(crate) fn names_member(text: &str, role: &str, agent: &str, model: &str) -> bool {
     let lowered = text.to_lowercase();
     let named: Vec<usize> = ROLE_ALIASES

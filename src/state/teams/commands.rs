@@ -3300,7 +3300,11 @@ fn roster_word_rule(team: &Team, op: &str, input: &Value) -> super::owner_word::
                     all: Vec::new(),
                     add: false,
                     verbs: SWAP_VERBS,
-                    names: ids.iter().flat_map(|id| names_for(id)).collect(),
+                    names: ids
+                        .iter()
+                        .flat_map(|id| names_for(id))
+                        .chain(super::owner_word::EVERYONE_WORDS.iter().map(|word| (*word).to_owned()))
+                        .collect(),
                     expect: format!("swap {}", ids.join(", ")),
                 }
             }
@@ -3320,7 +3324,7 @@ fn roster_word_rule(team: &Team, op: &str, input: &Value) -> super::owner_word::
                     all: Vec::new(),
                     add: false,
                     verbs: super::owner_word::RELAUNCH_VERBS,
-                    names: names_for(id),
+                    names: names_for(id).into_iter().chain(super::owner_word::EVERYONE_WORDS.iter().map(|word| (*word).to_owned())).collect(),
                     expect: format!("relaunch {id}"),
                 }
             }
@@ -3405,6 +3409,11 @@ fn check_roster_word(
         (1, format!("scaling {role} by {asked}"))
     } else if op == "drain" {
         (1, "draining the member".to_owned())
+    } else if matches!(op, "relaunch" | "swap-member") && super::owner_word::says_everyone(&word.text) {
+        // Feedback 16: "перезапусти их" pays for one relaunch (or swap) of
+        // each member, never more than the team has.
+        let members = team.members.iter().filter(|member| member.state != MemberState::Removed).count();
+        (members.max(1), if op == "relaunch" { "relaunching the members".to_owned() } else { "swapping the members".to_owned() })
     } else {
         (1, "the roster change".to_owned())
     };

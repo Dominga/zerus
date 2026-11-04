@@ -3031,7 +3031,8 @@ execution ends (a report, cancellation or stage move) acknowledges it; any other
 start is a boundary of its own, and an earlier execution never lends its origin,
 time or receipt to a later one. When merged replicas leave the latest boundary
 with another session than the one holding the task, `conflict` is set. No start,
-child or result is invented. A session's
+child or result is invented. A resume settles only the pauses it observed, so a
+pause that no resume observed keeps the attempt paused. A session's
 Stop, idle time, pause or elapsed time is never an attempt event and never
 moves a task. Attempts are kept beside the history under task schema 6, which a
 reader that does not know them shows read-only. This version reads attempts;

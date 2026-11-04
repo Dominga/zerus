@@ -11,7 +11,9 @@
 //!
 //! The projection is deterministic and independent of merge order: authority
 //! comes from the generation and the attempt's identity, and an attempt's
-//! events count as a set, never as a sequence ordered by wall-clock time. Two
+//! events count as a set, never as a sequence ordered by wall-clock time. A
+//! resume names the exact pauses it observed, so a pause no resume observed
+//! keeps the attempt held, however many other resumes merged. Two
 //! attempts that claim the highest generation (offline replicas each started
 //! one) are reported as a conflict and never resolved by picking a winner.
 //!
@@ -93,6 +95,10 @@ pub struct AttemptEvent {
     pub kind: EventKind,
     pub actor: Actor,
     pub at: i64,
+    /// A resume names the exact pauses it observed and settles only those:
+    /// it never cancels a pause it did not see, even one merged later.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub settles: Vec<String>,
 }
 
 /// Where the current attempt stands.
@@ -176,7 +182,12 @@ pub(crate) fn check_attempt(key: &str, attempt: &Attempt) -> Result<()> {
 }
 
 pub(crate) fn check_event(event: &AttemptEvent) -> Result<()> {
-    if !canonical_uuid(&event.id) || !canonical_uuid(&event.attempt) {
+    if !canonical_uuid(&event.id)
+        || !canonical_uuid(&event.attempt)
+        || (event.kind != EventKind::Resumed && !event.settles.is_empty())
+        || event.settles.len() > MAX_ATTEMPT_EVENTS
+        || !event.settles.iter().all(|id| canonical_uuid(id))
+    {
         return Err(Error::failed("invalid task attempt event"));
     }
     Ok(())
@@ -186,7 +197,10 @@ pub(crate) fn check_event(event: &AttemptEvent) -> Result<()> {
 /// member, so the answer does not depend on the order replicas merged them.
 fn phase_of(attempt: &Attempt, events: &[&AttemptEvent]) -> (Phase, Option<i64>, Option<i64>) {
     let mut seen = std::collections::BTreeSet::new();
-    let (mut paused, mut resumed) = (0usize, 0usize);
+    let (mut pauses, mut settled) = (
+        std::collections::BTreeSet::new(),
+        std::collections::BTreeSet::new(),
+    );
     let mut began_at = (attempt.origin == Origin::Start).then_some(attempt.at);
     let mut progress_at = None;
     let (mut submitted, mut unknown, mut ready, mut cancelled) = (false, false, false, false);
@@ -201,20 +215,22 @@ fn phase_of(attempt: &Attempt, events: &[&AttemptEvent]) -> (Phase, Option<i64>,
             EventKind::Progress => {
                 progress_at = Some(progress_at.map_or(event.at, |at: i64| at.max(event.at)))
             }
-            EventKind::Paused => paused += 1,
-            EventKind::Resumed => resumed += 1,
+            EventKind::Paused => {
+                pauses.insert(event.id.as_str());
+            }
+            EventKind::Resumed => settled.extend(event.settles.iter().map(String::as_str)),
             EventKind::Ready => ready = true,
             EventKind::Cancelled => cancelled = true,
         }
     }
     // A finished attempt takes no further state. A cancellation outranks a
-    // result reported at the same time. Unmatched pauses hold the attempt:
-    // two concurrent pauses need two resumes, which fails safe.
+    // result reported at the same time. Any pause no resume observed holds
+    // the attempt, whatever other resumes merged: an unclear state fails safe.
     let phase = if cancelled {
         Phase::Cancelled
     } else if ready {
         Phase::Ready
-    } else if paused > resumed {
+    } else if pauses.iter().any(|id| !settled.contains(id)) {
         Phase::Paused
     } else if began_at.is_some() {
         Phase::Running
@@ -375,11 +391,15 @@ fn legacy(session: Option<&SessionKey>, log: &[LogEntry], requirement: u64) -> C
     }
 }
 
-/// The generation of a task's next attempt.
-pub fn next_generation(execution: Option<&Execution>) -> u64 {
-    execution
-        .and_then(|e| e.current.as_ref())
-        .map_or(1, |current| current.generation + 1)
+/// The generation of a task's next attempt; refused once generations run out.
+pub fn next_generation(execution: Option<&Execution>) -> Result<u64> {
+    match execution.and_then(|e| e.current.as_ref()) {
+        None => Ok(1),
+        Some(current) => current
+            .generation
+            .checked_add(1)
+            .ok_or_else(|| Error::new("this task has no further attempt generations")),
+    }
 }
 
 /// What a report claims.
@@ -497,6 +517,18 @@ mod tests {
             kind,
             actor: Actor::Person,
             at,
+            settles: Vec::new(),
+        }
+    }
+
+    /// A resume that observed exactly the pauses `settles`.
+    fn resume(n: u128, attempt: &str, settles: &[u128], at: i64) -> AttemptEvent {
+        AttemptEvent {
+            settles: settles
+                .iter()
+                .map(|p| uuid::Uuid::from_u128(*p).to_string())
+                .collect(),
+            ..event(n, attempt, EventKind::Resumed, at)
         }
     }
 
@@ -546,7 +578,7 @@ mod tests {
         assert_eq!((now.began_at, now.progress_at), (Some(230), Some(250)));
         assert_eq!(execution.as_ref().unwrap().attempts, 2);
         assert!(!execution.as_ref().unwrap().conflict);
-        assert_eq!(next_generation(execution.as_ref()), 3);
+        assert_eq!(next_generation(execution.as_ref()).unwrap(), 3);
     }
 
     #[test]
@@ -556,7 +588,7 @@ mod tests {
             event(1, A1, EventKind::Submitted, 10),
             event(2, A1, EventKind::Began, 20),
             event(3, A1, EventKind::Paused, 30),
-            event(4, A1, EventKind::Resumed, 40),
+            resume(4, A1, &[3], 40),
             event(5, A1, EventKind::Paused, 50),
             event(6, A1, EventKind::Progress, 60),
         ];
@@ -611,16 +643,13 @@ mod tests {
             Phase::Running
         );
         // A resumed pause no longer holds the attempt.
-        let resumed = [
-            event(1, A1, EventKind::Paused, 1),
-            event(2, A1, EventKind::Resumed, 2),
-        ];
+        let resumed = [event(1, A1, EventKind::Paused, 1), resume(2, A1, &[1], 2)];
         assert_eq!(phase(&resumed), Phase::Submitted);
-        // Concurrent pauses need as many resumes.
+        // A resume that saw one of two concurrent pauses leaves the other holding.
         let paused = [
             event(1, A1, EventKind::Paused, 1),
             event(2, A1, EventKind::Paused, 1),
-            event(3, A1, EventKind::Resumed, 2),
+            resume(3, A1, &[1], 2),
         ];
         assert_eq!(phase(&paused), Phase::Paused);
         // A finished attempt keeps its outcome; a cancellation outranks a result.
@@ -656,6 +685,58 @@ mod tests {
             (started.phase, started.began_at),
             (Phase::Running, Some(100))
         );
+    }
+
+    #[test]
+    fn a_resume_settles_only_the_pauses_it_observed() {
+        let send = [attempt(A1, 1, Origin::Send, "worker")];
+        let phase = |events: &[AttemptEvent]| {
+            current(&project(Stage::Active, None, &[], &send, events, 1)).phase
+        };
+        let began = event(1, A1, EventKind::Began, 1);
+        // review-n's sequence: two replicas fork the same one-pause state and
+        // each resume it; the merge runs. A later pause still holds the attempt.
+        let forked = [
+            began.clone(),
+            event(2, A1, EventKind::Paused, 2),
+            resume(3, A1, &[2], 3),
+            resume(4, A1, &[2], 3),
+        ];
+        assert_eq!(phase(&forked), Phase::Running);
+        let mut later = forked.to_vec();
+        later.push(event(5, A1, EventKind::Paused, 4));
+        assert_eq!(phase(&later), Phase::Paused);
+        later.push(resume(6, A1, &[5], 5));
+        assert_eq!(phase(&later), Phase::Running);
+        // A resume that observed no pause settles none, before or after.
+        let empty = [
+            began.clone(),
+            resume(2, A1, &[], 2),
+            event(3, A1, EventKind::Paused, 3),
+        ];
+        assert_eq!(phase(&empty), Phase::Paused);
+        // A resume can arrive before the pause it saw; together they settle.
+        let early = [began.clone(), resume(3, A1, &[2], 3)];
+        assert_eq!(phase(&early), Phase::Running);
+        let mut arrived = early.to_vec();
+        arrived.push(event(2, A1, EventKind::Paused, 2));
+        assert_eq!(phase(&arrived), Phase::Running);
+        // Only a resume carries settled pauses, and only pause identities.
+        assert!(check_event(&resume(9, A1, &[2], 1)).is_ok());
+        let mut misplaced = event(9, A1, EventKind::Paused, 1);
+        misplaced.settles = vec![uuid::Uuid::from_u128(2).to_string()];
+        assert!(check_event(&misplaced).is_err());
+        let mut invalid = resume(9, A1, &[], 1);
+        invalid.settles = vec!["pause".into()];
+        assert!(check_event(&invalid).is_err());
+    }
+
+    #[test]
+    fn generations_never_wrap() {
+        let last = [attempt(A1, u64::MAX, Origin::Send, "worker")];
+        let execution = project(Stage::Active, None, &[], &last, &[], 1);
+        assert_eq!(current(&execution).generation, u64::MAX);
+        assert!(next_generation(execution.as_ref()).is_err());
     }
 
     #[test]
@@ -765,8 +846,8 @@ mod tests {
                 "{stage:?}"
             );
         }
-        assert_eq!(next_generation(sent.as_ref()), 1);
-        assert_eq!(next_generation(None), 1);
+        assert_eq!(next_generation(sent.as_ref()).unwrap(), 1);
+        assert_eq!(next_generation(None).unwrap(), 1);
     }
 
     #[test]

@@ -2067,6 +2067,7 @@ mod tests {
                 kind: EventKind::Began,
                 actor: Actor::Agent(worker()),
                 at: 60,
+                settles: Vec::new(),
             }
         }
 

@@ -301,6 +301,13 @@ impl Binding {
         self.valid()
             .then(|| hash(&serde_json::to_vec(self).expect("fixed launch binding")))
     }
+    /// Whether this binding names exactly `plan`: the launch it repeats,
+    /// and the plan's own fingerprint. A declared digest never overrides a
+    /// conflicting original field.
+    pub fn agrees(&self, plan: &Plan) -> bool {
+        self.launch_id == plan.launch_id
+            && plan.fingerprint().as_deref() == Some(self.plan_sha256.as_str())
+    }
 }
 
 pub const REPLY_BYTES: usize = 24 << 10;
@@ -445,9 +452,7 @@ impl Receipt {
     pub fn not_started(&self, plan: &Plan) -> bool {
         self.valid()
             && self.drained
-            && plan
-                .fingerprint()
-                .is_some_and(|fingerprint| fingerprint == self.binding.plan_sha256)
+            && self.binding.agrees(plan)
             && self.phase == Phase::Failed
             && self.launch.is_none()
             && self.code == NOT_STARTED
@@ -465,7 +470,7 @@ impl Receipt {
     /// the session listing still binds it. Queued, Running or Unknown never
     /// means success or failure.
     pub fn result(&self, plan: &Plan) -> Option<Result<(), String>> {
-        if !self.valid() || !self.drained || self.binding.plan_sha256 != plan.fingerprint()? {
+        if !self.valid() || !self.drained || !self.binding.agrees(plan) {
             return None;
         }
         let exited = self.launch.as_ref()?;
@@ -1094,5 +1099,32 @@ mod tests {
         raw["worktree_done"] = json!(true);
         intent.original = serde_json::to_string(&raw).unwrap();
         intent.verify().unwrap();
+    }
+
+    #[test]
+    fn a_receipt_settles_only_when_its_binding_names_the_plan_launch() {
+        let verified = checkpoint().verify().unwrap();
+        let mut not_started = exited(&verified, 1, "");
+        not_started.launch = None;
+        not_started.code = NOT_STARTED.into();
+        for receipt in [
+            exited(&verified, 0, ""),
+            exited(&verified, 2, "hgs: the session already exists"),
+            not_started,
+        ] {
+            assert!(
+                receipt.result(&verified.plan).is_some() || receipt.not_started(&verified.plan)
+            );
+            // The declared plan digest never overrides a conflicting launch,
+            // even when the receipt's own exit agrees with its binding.
+            let mut changed = receipt.clone();
+            changed.binding.launch_id = OTHER.into();
+            if let Some(launch) = changed.launch.as_mut() {
+                launch.launch_id = OTHER.into();
+            }
+            assert!(changed.valid(), "a valid shape");
+            assert!(changed.result(&verified.plan).is_none());
+            assert!(!changed.not_started(&verified.plan));
+        }
     }
 }

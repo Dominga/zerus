@@ -195,13 +195,64 @@ the form like every original.
   exists, it was published but never admitted: it is kept, charged and
   reviewable (`orphaned`). One without an input is released. There is no
   age-based sweep.
-- **Charged records.** In v1, `orphaned` and `failed` records stay charged:
-  there is no release path for them yet, and 64 of them, or 64 MiB, refuse
-  every further reference original. Each such record names its exact input,
-  `task-message-inputs/<request_id>` with the recorded device and inode;
-  neither a person nor a later process may remove or release one by name or
-  age. Removing such an input by hand does not release its charge. An
-  explicit, exact review and release path is zerus-pi2k9.
+- **Charged records.** `orphaned` and `failed` records stay charged until a
+  person reviews and releases one (below); 64 of them, or 64 MiB, refuse every
+  further reference original. Nothing removes or releases one by name or age,
+  and removing an input by hand does not release its charge.
+- **Review and release** (zerus-pi2k9, under G1's conditions).
+  `task_message_inputs` is a read-only page of at most 16 `orphaned` or
+  `failed` records, ordered by creation time and request ID with a stable
+  cursor. Every open-record query (this listing, the sweep's and recovery's)
+  states the open-state partial index's own predicate, so SQLite searches
+  that index and never the retained `removed`/`released` history; at most
+  the 64 charged records are sorted. Each entry carries a fresh observation
+  of its slot,
+  `task-message-inputs/<request_id>`, made off the actor without reading it:
+  absent, a private regular file of this user with one link and its exact
+  version (device, inode, size, mode, links, modification and status times),
+  or unsafe.
+
+  `TaskMessageInputRelease` is a closed native request naming exactly what one
+  review saw. One short transaction rechecks its permit after
+  `BEGIN IMMEDIATE`, with the same Service, configuration and lease. It
+  requires the record in that exact state with its size and digest: an
+  `orphaned` record must have no execution row, and a `failed` one an exactly
+  drained original, with a present object being its recorded one. It claims
+  the record in the one removal slot, which excludes the sweep, admission and
+  a second review, and joins the drain. Preparation, the only writer of new
+  inputs, and a claim exclude each other for any request IDs: no review is
+  claimed while one prepares, and no preparation starts until a claimed
+  review's effect was recorded. A worker that keeps the lease, and with it
+  the serve-owner loan, then does one of two things within a deadline that is
+  never renewed:
+  - **Present slot.** Removes the object only while it is still exactly the
+    reviewed version. Its bytes are read through the opened descriptor and
+    must be the record's size and SHA-256, and the version is rechecked after
+    that read. The held folder and the name's version are observed last;
+    only then are the stop/revoke/lease fence and the deadline checked,
+    immediately before the unlink. The bytes prove the request, not a
+    historical inode: the deletion target is the object the review saw, and
+    an orphan records that object's identity as the one this review removed.
+  - **Absent slot.** Releases the charge only after a complete, error-free scan
+    of the folder (at most 256 entries, 64 MiB hashed in all, 5 s, the
+    enumeration included) finds no copy of those bytes under another name.
+    The scan holds every object it opened: at most 256 descriptors, and the
+    service does not raise its descriptor limit for it, so running out keeps
+    the record as unsafe. Afterwards the folder's own
+    version, its complete set of names and every held object's version must
+    be unchanged, each name must still denote its held object, and the slot
+    must still be absent; any addition, removal, replacement or in-place
+    change keeps the record. The fence and the deadline come after those
+    observations. The scan is a veto, never a proof that the input was
+    destroyed everywhere; a copy found elsewhere is never touched.
+
+  Only after the worker joined does one more transaction record the observed
+  effect, once: `removed` or `released`, uncharged. Anything changed, unsafe
+  or over a bound is kept for a fresh review, and an unobserved effect (a
+  failed folder sync, a lost worker) is unknown. Nothing is retried. A release
+  never changes an execution outcome, a receipt or whether the request may be
+  sent again, and a request ID with any input record never reserves or admits
+  again. macOS answers with its fence; Windows has no inputs.
 - **Records.** `desktop_task_message_inputs` and its budget, added at Store
   schema 27 by merge order, keep one record per input; status reports the
   charged records and bytes.

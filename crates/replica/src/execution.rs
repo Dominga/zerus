@@ -514,6 +514,21 @@ pub(crate) fn project(
     let any_started = phases
         .iter()
         .any(|(_, (phase, ..))| *phase != Phase::NotStarted);
+    // A task In progress whose every recorded attempt never started is still
+    // the execution its history shows: a refused first recorded handoff keeps
+    // the legacy executor working. The next attempt still follows the refused.
+    if !any_started && stage == Stage::Active {
+        let current = legacy(session, binding, log, requirement);
+        let conflict = current.executor.is_some() && current.executor.as_ref() != session;
+        return Some(Execution {
+            requirement,
+            attempts: attempts.len(),
+            current: Some(current),
+            conflict,
+            highest: top,
+            unknown,
+        });
+    }
     let counts = |phase: Phase| !any_started || phase != Phase::NotStarted;
     let generation = phases
         .iter()
@@ -960,8 +975,18 @@ mod tests {
         // Input refused before admission ends the attempt; contradicted by
         // any delivery fact it is Unknown, for a person to review.
         let refused = event(4, A1, EventKind::NotStarted, 2);
+        // A refused send leaves its task To do.
         assert_eq!(
-            phase(&[reserved.clone(), refused.clone()]),
+            current(&project(
+                Stage::Todo,
+                None,
+                None,
+                &[],
+                &send,
+                &[reserved.clone(), refused.clone()],
+                1
+            ))
+            .phase,
             Phase::NotStarted
         );
         for kind in [

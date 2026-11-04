@@ -1260,7 +1260,8 @@ mod tests {
     fn a_receipt_advances_only_the_execution_its_input_was_reserved_for() {
         // review-n and desktop-u on #1391: a changed target, holder or
         // requirement is a different execution; a comment is not.
-        let drifts: [(&str, fn(&mut TaskDoc)); 4] = [
+        type Drift = (&'static str, fn(&mut TaskDoc));
+        let drifts: [Drift; 4] = [
             ("comment", |t| {
                 t.comment("Unrelated note", &Actor::Person, 11).unwrap()
             }),
@@ -1562,6 +1563,68 @@ mod tests {
                 assert_eq!(execution.current.unwrap().phase, Phase::Cancelled);
             }
         }
+    }
+
+    #[test]
+    fn a_refused_first_recorded_handoff_keeps_the_legacy_executor_working() {
+        // review-n on #1391: history before attempts, then the first recorded
+        // attempt is a handoff refused before admission.
+        let mut task = task();
+        task.record_send(&run("api"), "legacy-send", &Actor::Person, 10)
+            .unwrap();
+        task.record_start(&agent("api"), 11).unwrap();
+        task.reserve_attempt(
+            ONE,
+            Origin::Handoff,
+            &run("web"),
+            native("web"),
+            &agent("api"),
+            20,
+        )
+        .unwrap();
+        // While unknown it holds the task, and the handoff's executor is current.
+        assert_eq!(current(&task).executor, Some(run("web")));
+        task.settle_attempt(ONE, Settlement::NotAdmitted, &agent("api"), 21)
+            .unwrap();
+        let execution = task.view().unwrap().execution.unwrap();
+        let now = execution.current.as_ref().unwrap();
+        assert_eq!(
+            (now.legacy, now.executor.clone(), now.request_id.as_str()),
+            (true, Some(run("api")), "legacy-send")
+        );
+        assert_eq!(execution::next_generation(Some(&execution)).unwrap(), 2);
+        // The legacy executor still acknowledges and finishes its work.
+        task.record_start(&agent("api"), 22).unwrap();
+        assert!(task.record_report("Done", &agent("api"), 23).unwrap());
+        // A later handoff follows the refused attempt's generation.
+        let mut again = super::tests::task();
+        again
+            .record_send(&run("api"), "legacy-send", &Actor::Person, 10)
+            .unwrap();
+        again
+            .reserve_attempt(
+                ONE,
+                Origin::Handoff,
+                &run("web"),
+                native("web"),
+                &agent("api"),
+                20,
+            )
+            .unwrap();
+        again
+            .settle_attempt(ONE, Settlement::NotAdmitted, &agent("api"), 21)
+            .unwrap();
+        let next = again
+            .reserve_attempt(
+                TWO,
+                Origin::Handoff,
+                &run("ops"),
+                native("ops"),
+                &agent("api"),
+                22,
+            )
+            .unwrap();
+        assert_eq!(next.generation, 2);
     }
 
     #[test]

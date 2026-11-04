@@ -1017,7 +1017,9 @@ impl TaskDoc {
                     "register the native subagent worker before starting",
                 ));
             }
-            if self.executes_attempts() {
+            // A recorded attempt is acknowledged as one; history without a
+            // started attempt is acknowledged as it always was.
+            if self.current_attempt()?.is_some() {
                 return self.acknowledge_attempt(&view, own, actor, now);
             }
             if view.session.as_ref() != Some(own) {

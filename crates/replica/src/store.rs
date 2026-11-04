@@ -25,6 +25,25 @@ const FOLD_BYTES: u64 = 256 * 1024;
 /// A block: little-endian `u32` length, the first four bytes of the SHA-256
 /// of the payload, then the payload (Loro updates).
 const HEADER: usize = 8;
+/// The change journal: a `gen <UUID>` line, then one changed document per
+/// line (a task UUID, or `project`). A derived index reads it instead of
+/// every task file. It is a hint only: never synced, rewritten under a new
+/// generation once it reaches `CHANGES_LIMIT`, and a reader that meets
+/// another generation or a line it does not expect reads every task file.
+const CHANGES: &str = "changes";
+const CHANGES_LIMIT: u64 = 64 * 1024;
+
+/// What changed since a reader's place in the change journal.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct Changes {
+    /// The journal's generation and the end of its last whole line; a
+    /// reader passes both back next time.
+    pub generation: String,
+    pub offset: u64,
+    /// The documents changed since that place, or `None` when the journal
+    /// cannot tell (another generation, a damaged line): read every task.
+    pub documents: Option<BTreeSet<String>>,
+}
 
 /// A task file that failed to load. It stays on disk and never blocks the others.
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
@@ -185,7 +204,9 @@ impl ProjectStore {
         &self.project
     }
 
-    pub(crate) fn dir(&self) -> &Path {
+    /// The project's folder: derived local caches (such as hgs's task index)
+    /// live beside its documents and are never replicated.
+    pub fn dir(&self) -> &Path {
         &self.dir
     }
 
@@ -198,7 +219,86 @@ impl ProjectStore {
     }
 
     pub fn save_project(&self, doc: &ProjectDoc) -> Result<()> {
-        write_atomic(&self.dir.join("project.loro"), &doc.snapshot()?)
+        write_atomic(&self.dir.join("project.loro"), &doc.snapshot()?)?;
+        self.note_change("project");
+        Ok(())
+    }
+
+    /// Appends `document` to the change journal, starting a new generation
+    /// when the journal is missing or full. Best effort: a lost line is
+    /// found by a reader's periodic check of every task file.
+    pub(crate) fn note_change(&self, document: &str) {
+        let path = self.dir.join(CHANGES);
+        let line = format!("{document}\n");
+        let appended = match fs::symlink_metadata(&path) {
+            Ok(meta) if meta.is_file() && meta.len() < CHANGES_LIMIT => private_options()
+                .append(true)
+                .open(&path)
+                .and_then(|mut file| file.write_all(line.as_bytes()))
+                .is_ok(),
+            _ => false,
+        };
+        if !appended {
+            let fresh = format!("gen {}\n{line}", ids::new_uuid());
+            let _ = write_atomic(&path, fresh.as_bytes());
+        }
+    }
+
+    /// The documents changed since `offset` of journal `generation` (both as
+    /// returned last time; an empty generation the first time).
+    pub fn changes_since(&self, generation: &str, offset: u64) -> Result<Changes> {
+        let bytes = match fs::read(self.dir.join(CHANGES)) {
+            Ok(bytes) => bytes,
+            // No journal and none known: nothing to report since.
+            Err(error) if error.kind() == ErrorKind::NotFound => {
+                return Ok(Changes {
+                    generation: String::new(),
+                    offset: 0,
+                    documents: generation.is_empty().then(BTreeSet::new),
+                });
+            }
+            Err(error) => return Err(error.into()),
+        };
+        // Whole lines only: a line cut short ends the journal for now.
+        let whole = bytes
+            .iter()
+            .rposition(|&b| b == b'\n')
+            .map_or(0, |end| end + 1);
+        let mut lines = bytes[..whole].split_inclusive(|&b| b == b'\n');
+        let header = lines.next().unwrap_or_default();
+        let found = std::str::from_utf8(header)
+            .ok()
+            .and_then(|line| line.strip_suffix('\n')?.strip_prefix("gen "))
+            .filter(|id| ids::is_uuid(id))
+            .unwrap_or_default()
+            .to_owned();
+        let mut changes = Changes {
+            generation: found,
+            offset: whole as u64,
+            documents: None,
+        };
+        let start = header.len() as u64;
+        if changes.generation.is_empty()
+            || changes.generation != generation
+            || offset < start
+            || offset > changes.offset
+        {
+            return Ok(changes);
+        }
+        let mut documents = BTreeSet::new();
+        for line in bytes[offset as usize..whole].split_inclusive(|&b| b == b'\n') {
+            match std::str::from_utf8(line)
+                .ok()
+                .and_then(|l| l.strip_suffix('\n'))
+            {
+                Some(document) if document == "project" || ids::is_uuid(document) => {
+                    documents.insert(document.to_owned());
+                }
+                _ => return Ok(changes),
+            }
+        }
+        changes.documents = Some(documents);
+        Ok(changes)
     }
 
     pub(crate) fn snapshot_path(&self, uuid: &str) -> PathBuf {
@@ -295,6 +395,7 @@ impl ProjectStore {
         }
         task.saved = Some(current);
         task.saved_stage = Some(stage);
+        self.note_change(task.uuid());
         Ok(())
     }
 
@@ -776,5 +877,74 @@ mod tests {
         assert!(other.try_lock_exclusive().is_err());
         drop(store);
         assert!(other.try_lock_exclusive().is_ok());
+    }
+
+    #[test]
+    fn the_change_journal_names_saved_tasks_and_otherwise_says_read_all() {
+        let temp = tempfile::tempdir().unwrap();
+        let store = ProjectStore::open(temp.path(), "example").unwrap();
+        // No journal and none known: nothing changed since.
+        assert_eq!(
+            store.changes_since("", 0).unwrap().documents,
+            Some(BTreeSet::new())
+        );
+        let mut a = new_task(&store, "U");
+        store.save(&mut a).unwrap();
+        // A reader that does not know this generation cannot tell.
+        let first = store.changes_since("", 0).unwrap();
+        assert!(first.documents.is_none() && !first.generation.is_empty());
+        let quiet = store
+            .changes_since(&first.generation, first.offset)
+            .unwrap();
+        assert_eq!(quiet.documents, Some(BTreeSet::new()));
+        let mut b = new_task(&store, "V");
+        store.save(&mut b).unwrap();
+        a.comment("note", &Actor::Person, 2).unwrap();
+        store.save(&mut a).unwrap();
+        let next = store
+            .changes_since(&first.generation, first.offset)
+            .unwrap();
+        let both = BTreeSet::from([a.uuid().to_owned(), b.uuid().to_owned()]);
+        assert_eq!(next.documents, Some(both));
+        // A save that writes nothing notes nothing.
+        store.save(&mut a).unwrap();
+        let place = |c: &Changes| {
+            store
+                .changes_since(&c.generation, c.offset)
+                .unwrap()
+                .documents
+        };
+        assert_eq!(place(&next), Some(BTreeSet::new()));
+        // A cut line is not read yet; once ended, an unexpected line means read all.
+        let path = store.dir().join(CHANGES);
+        let mut file = OpenOptions::new().append(true).open(&path).unwrap();
+        file.write_all(b"not-a-document").unwrap();
+        assert_eq!(place(&next), Some(BTreeSet::new()));
+        file.write_all(b"\n").unwrap();
+        assert!(place(&next).is_none());
+        // Another generation or a place beyond the end means read all.
+        let other = Changes {
+            generation: ids::new_uuid(),
+            ..next.clone()
+        };
+        assert!(place(&other).is_none());
+        let beyond = Changes {
+            offset: next.offset + 4096,
+            ..next.clone()
+        };
+        assert!(place(&beyond).is_none());
+        // A full journal starts a new generation; so does a removed one.
+        fs::write(
+            &path,
+            format!("gen {}\n{}", next.generation, "project\n".repeat(9000)),
+        )
+        .unwrap();
+        store.save_project(&ProjectDoc::new()).unwrap();
+        let rotated = store.changes_since(&next.generation, next.offset).unwrap();
+        assert!(rotated.generation != next.generation && rotated.documents.is_none());
+        assert!(fs::metadata(&path).unwrap().len() < 128);
+        assert_eq!(place(&rotated), Some(BTreeSet::new()));
+        fs::remove_file(&path).unwrap();
+        assert!(place(&rotated).is_none());
     }
 }

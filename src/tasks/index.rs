@@ -1,0 +1,635 @@
+//! A disposable local index of one project's task headers (zerus-cg5h.2): what
+//! paged task lists and per-task lookups read instead of decoding every task
+//! document. The Loro files stay authoritative and every write still goes to
+//! them. The index is never replicated; a missing, damaged or foreign one is
+//! rebuilt silently from the documents, and a read never fails because of it:
+//! callers read the documents instead.
+//!
+//! It is opened and written only while the project's store lock is held, its
+//! connection never outlives that store, and callers never hold two at once,
+//! so nothing else has it open and a damaged one can be removed and rebuilt;
+//! WAL and a busy timeout stay as a second guard. It learns what changed from the store's change
+//! journal, checks every task file's stamp (length, modification time, inode)
+//! at least every 30 seconds for writers that predate the journal, and checks
+//! the files of a page's rows before it serves them.
+use super::*;
+use crate::platform;
+use rusqlite::{params, Connection, ErrorCode, OpenFlags, OptionalExtension};
+use sha2::{Digest, Sha256};
+use std::collections::{BTreeSet, HashMap};
+use std::fs;
+use std::path::Path;
+use std::time::Duration;
+use zerus_replica::ids;
+
+const FILE: &str = "task-index-v1.sqlite3";
+const SCHEMA: i64 = 1;
+/// How often every task file's stamp is checked, for writers that do not
+/// append to the change journal.
+const FULL_CHECK_MS: i64 = 30_000;
+/// Tasks decoded per transaction, so no transaction is long.
+const CHUNK: usize = 256;
+/// The longest damage text kept for a task that does not load.
+const ERROR_BYTES: usize = 512;
+/// The longest prompt text a paged row carries; `get` returns all of it.
+pub(super) const TEXT_BYTES: usize = 2048;
+/// The largest page a list request may ask for.
+pub(super) const MAX_LIMIT: usize = 200;
+/// The damaged tasks a page names; `damaged_total` counts them all.
+pub(super) const DAMAGED_SHOWN: usize = 20;
+/// 256 MiB at 4 KiB pages: a full index is disposed of, not grown.
+const MAX_PAGES: i64 = 65_536;
+
+/// Why the index cannot answer: a damaged index is removed and rebuilt once;
+/// anything else leaves the caller to read the documents.
+#[derive(Debug)]
+pub(super) enum Failure {
+    Damaged,
+    Other,
+}
+
+impl From<rusqlite::Error> for Failure {
+    fn from(error: rusqlite::Error) -> Self {
+        match error.sqlite_error_code() {
+            Some(ErrorCode::DatabaseBusy | ErrorCode::DatabaseLocked) => Self::Other,
+            // A cache: any other SQLite failure, including a missing table
+            // or a full file, is answered by building it again.
+            _ => Self::Damaged,
+        }
+    }
+}
+
+impl From<std::io::Error> for Failure {
+    fn from(_: std::io::Error) -> Self {
+        Self::Other
+    }
+}
+
+impl From<zerus_replica::Error> for Failure {
+    fn from(_: zerus_replica::Error) -> Self {
+        Self::Other
+    }
+}
+
+type Outcome<T> = std::result::Result<T, Failure>;
+
+#[cfg(test)]
+thread_local! {
+    /// Task documents decoded and task files stamped, for the bounded-work tests.
+    pub(super) static DECODED: std::cell::Cell<usize> = const { std::cell::Cell::new(0) };
+    pub(super) static STAMPED: std::cell::Cell<usize> = const { std::cell::Cell::new(0) };
+}
+
+/// A file's length, modification time and inode, or `-` when it is missing.
+fn stamp(path: &Path) -> String {
+    #[cfg(test)]
+    STAMPED.with(|n| n.set(n.get() + 1));
+    let Ok(meta) = fs::metadata(path) else {
+        return "-".into();
+    };
+    let modified = meta
+        .modified()
+        .ok()
+        .and_then(|t| t.duration_since(UNIX_EPOCH).ok())
+        .map_or(0, |d| d.as_nanos());
+    #[cfg(unix)]
+    let inode = std::os::unix::fs::MetadataExt::ino(&meta);
+    #[cfg(not(unix))]
+    let inode = 0;
+    format!("{}:{modified}:{inode}", meta.len())
+}
+
+/// The stamps of a task's snapshot and appended updates.
+fn files(dir: &Path, uuid: &str) -> String {
+    let tasks = dir.join("tasks");
+    format!(
+        "{}|{}",
+        stamp(&tasks.join(format!("{uuid}.loro"))),
+        stamp(&tasks.join(format!("{uuid}.updates")))
+    )
+}
+
+/// `text` cut to at most `bytes` at a character boundary.
+fn cut(text: &str, bytes: usize) -> &str {
+    let mut end = text.len().min(bytes);
+    while !text.is_char_boundary(end) {
+        end -= 1;
+    }
+    &text[..end]
+}
+
+/// A damaged task's error text as the index keeps it.
+pub(super) fn capped_error(error: &str) -> String {
+    cut(error, ERROR_BYTES).to_owned()
+}
+
+/// A row's prompt text capped for a page, marked when it was cut.
+pub(super) fn capped(mut row: Value) -> Value {
+    if let Some(text) = row["text"].as_str() {
+        if text.len() > TEXT_BYTES {
+            row["text"] = json!(cut(text, TEXT_BYTES));
+            row["text_truncated"] = json!(true);
+        }
+    }
+    row
+}
+
+/// What the index keeps of one task.
+enum Derived {
+    Row {
+        stage: &'static str,
+        rank: String,
+        id: String,
+        row: String,
+        sends: Vec<i64>,
+    },
+    Damaged(String),
+}
+
+fn derive(store: &ProjectStore, uuid: &str) -> Derived {
+    #[cfg(test)]
+    DECODED.with(|n| n.set(n.get() + 1));
+    let damaged = |error: String| Derived::Damaged(cut(&error, ERROR_BYTES).to_owned());
+    let task = match store.load(uuid) {
+        Ok(task) => task,
+        Err(error) => return damaged(error.to_string()),
+    };
+    let view = match task.view() {
+        Ok(view) => view,
+        Err(error) => return damaged(error.to_string()),
+    };
+    let (stage, rank, id) = (view.stage.as_str(), view.rank.clone(), view.id.clone());
+    // What `ProjectStore::agent_starts_since` counts.
+    let sends = view
+        .log
+        .iter()
+        .filter(|e| e.kind == "sent" && matches!(e.actor, Actor::Agent(_)))
+        .map(|e| e.at)
+        .collect();
+    match row(view, task.revision()) {
+        Ok(row) => Derived::Row {
+            stage,
+            rank,
+            id,
+            row: capped(row).to_string(),
+            sends,
+        },
+        Err(error) => damaged(error.message),
+    }
+}
+
+/// Where a page is: the first rows, after or before a row's key, or the last rows.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub(super) enum Anchor {
+    Start,
+    After(String, String),
+    Before(String, String),
+    /// The last page.
+    End,
+}
+
+/// One page of a stage, in the stage's order.
+pub(super) struct Page {
+    pub rows: Vec<Value>,
+    /// The zero-based place of the first row in the stage.
+    pub position: usize,
+    pub next: Option<String>,
+    pub previous: Option<String>,
+}
+
+fn scope(project: &str, stage: Stage) -> String {
+    let hash = Sha256::digest(format!("task-list\n{project}\n{}", stage.as_str()));
+    format!("{hash:x}")[..16].to_owned()
+}
+
+/// An opaque list cursor: bound to the project and stage, naming a row's
+/// rank and UUID, so rows added or moved elsewhere never shift it.
+pub(super) fn cursor(project: &str, stage: Stage, rank: &str, uuid: &str) -> String {
+    let rank: String = rank.bytes().map(|b| format!("{b:02x}")).collect();
+    format!("t1.{}.{rank}.{uuid}", scope(project, stage))
+}
+
+pub(super) fn parse_cursor(project: &str, stage: Stage, cursor: &str) -> Result<(String, String)> {
+    let refused = || fail("task list cursor does not match this list");
+    let parts: Vec<&str> = cursor.split('.').collect();
+    let [version, found, rank, uuid] = parts[..] else {
+        return Err(refused());
+    };
+    if version != "t1" || found != scope(project, stage) || rank.len() > 256 || rank.len() % 2 != 0 || !ids::is_uuid(uuid) {
+        return Err(refused());
+    }
+    let bytes = (0..rank.len())
+        .step_by(2)
+        .map(|i| u8::from_str_radix(&rank[i..i + 2], 16))
+        .collect::<std::result::Result<Vec<u8>, _>>()
+        .map_err(|_| refused())?;
+    let rank = String::from_utf8(bytes).map_err(|_| refused())?;
+    Ok((rank, uuid.to_owned()))
+}
+
+pub(super) struct Index<'a> {
+    store: &'a ProjectStore,
+    db: Connection,
+}
+
+/// Removes the index and its SQLite files. Only while the project lock is
+/// held and this process has no connection to it open.
+fn dispose(dir: &Path) {
+    for suffix in ["", "-wal", "-shm", "-journal"] {
+        let _ = fs::remove_file(dir.join(format!("{FILE}{suffix}")));
+    }
+}
+
+fn connect(dir: &Path) -> Outcome<Connection> {
+    // The project folder is private; check its resolved form too, so an
+    // ancestor changed between the two never selects another folder.
+    let canonical = platform::canonical(dir)?;
+    for folder in [dir, canonical.as_path()] {
+        if !platform::verify_private(folder, platform::Private::Directory)? {
+            return Err(Failure::Other);
+        }
+    }
+    for suffix in ["", "-wal", "-shm", "-journal"] {
+        match platform::verify_private(&dir.join(format!("{FILE}{suffix}")), platform::Private::File) {
+            Ok(true) => (),
+            Err(e) if e.kind() == std::io::ErrorKind::NotFound => (),
+            _ => return Err(Failure::Damaged),
+        }
+    }
+    let path = canonical.join(FILE);
+    // Never close a raw descriptor of a live database (zerus-iiee): create
+    // it owner-only, check it by path and bind the connection to that file.
+    #[cfg(unix)]
+    let identity = {
+        crate::sqlite_file::create(&path)?;
+        crate::sqlite_file::private(&path).map_err(|_| Failure::Damaged)?
+    };
+    // Windows locks belong to the handle that took them.
+    #[cfg(not(unix))]
+    {
+        let file = platform::no_follow(platform::private_open(
+            fs::OpenOptions::new().create(true).truncate(false).read(true).write(true),
+        ))
+        .open(&path)?;
+        if !platform::verify_private_file(&file)? {
+            return Err(Failure::Damaged);
+        }
+    }
+    let db = Connection::open_with_flags(
+        &path,
+        OpenFlags::SQLITE_OPEN_READ_WRITE | OpenFlags::SQLITE_OPEN_NO_MUTEX | OpenFlags::SQLITE_OPEN_NOFOLLOW,
+    )?;
+    #[cfg(unix)]
+    crate::sqlite_file::bind_private(&db, &path, identity).map_err(|_| Failure::Damaged)?;
+    db.busy_timeout(Duration::from_secs(2))?;
+    let mode: String = db.query_row("PRAGMA journal_mode=WAL", [], |r| r.get(0))?;
+    if !mode.eq_ignore_ascii_case("wal") {
+        return Err(Failure::Damaged);
+    }
+    db.execute_batch(&format!("PRAGMA synchronous=NORMAL; PRAGMA max_page_count={MAX_PAGES};"))?;
+    let version: i64 = db.query_row("PRAGMA user_version", [], |r| r.get(0))?;
+    let objects: i64 = db.query_row(
+        "SELECT count(*) FROM sqlite_schema WHERE name IN
+            ('meta', 'tasks', 'sends', 'tasks_order', 'tasks_short', 'sends_at', 'sends_uuid')",
+        [],
+        |r| r.get(0),
+    )?;
+    if version != SCHEMA || objects != 7 {
+        // New, or not this schema: start again from the documents.
+        db.execute_batch(&format!(
+            "BEGIN IMMEDIATE;
+            DROP TABLE IF EXISTS meta; DROP TABLE IF EXISTS tasks; DROP TABLE IF EXISTS sends;
+            CREATE TABLE meta(key TEXT PRIMARY KEY, value TEXT NOT NULL);
+            CREATE TABLE tasks(uuid TEXT NOT NULL UNIQUE, files TEXT NOT NULL, stage TEXT, rank TEXT,
+                short_id TEXT, row TEXT, error TEXT);
+            CREATE INDEX tasks_order ON tasks(stage, rank, uuid);
+            CREATE INDEX tasks_short ON tasks(short_id);
+            CREATE TABLE sends(uuid TEXT NOT NULL, at INTEGER NOT NULL);
+            CREATE INDEX sends_at ON sends(at);
+            CREATE INDEX sends_uuid ON sends(uuid);
+            PRAGMA user_version={SCHEMA};
+            COMMIT;"
+        ))?;
+    }
+    Ok(db)
+}
+
+impl<'a> Index<'a> {
+    /// The project's index, brought up to date with its documents; `None`
+    /// when it cannot be used now, and the caller reads the documents.
+    pub(super) fn open(store: &'a ProjectStore) -> Option<Self> {
+        let dir = store.dir();
+        for attempt in 0..2 {
+            let opened = connect(dir).and_then(|db| {
+                let mut index = Self { store, db };
+                index.sync()?;
+                Ok(index)
+            });
+            match opened {
+                Ok(index) => return Some(index),
+                // The connection is closed by now; nothing else has it open.
+                Err(Failure::Damaged) if attempt == 0 => dispose(dir),
+                Err(_) => return None,
+            }
+        }
+        None
+    }
+
+    /// Closes the index; a damaged one is removed, to be built again.
+    pub(super) fn discard(self, failure: &Failure) {
+        let dir = self.store.dir().to_owned();
+        drop(self.db);
+        if matches!(failure, Failure::Damaged) {
+            dispose(&dir);
+        }
+    }
+
+    fn meta(&self, key: &str) -> Outcome<Option<String>> {
+        Ok(self
+            .db
+            .query_row("SELECT value FROM meta WHERE key=?1", [key], |r| r.get(0))
+            .optional()?)
+    }
+
+    /// The index's place in the journal, the task folder's stamp and the
+    /// time of the last full check.
+    fn sync(&mut self) -> Outcome<()> {
+        let dir = self.store.dir().to_owned();
+        let generation = self.meta("generation")?.unwrap_or_default();
+        let offset = self.meta("offset")?.and_then(|v| v.parse().ok()).unwrap_or(0);
+        let checked: i64 = self.meta("checked")?.and_then(|v| v.parse().ok()).unwrap_or(0);
+        let built = self.meta("revision")?.is_some();
+        let folder = stamp(&dir.join("tasks"));
+        let changes = self.store.changes_since(&generation, offset)?;
+        let now = now();
+        let quiet = changes.documents.as_ref().is_some_and(BTreeSet::is_empty);
+        let full = !built
+            || changes.documents.is_none()
+            // The folder changed while the journal says nothing did: a
+            // writer that does not keep the journal.
+            || (quiet && self.meta("folder")?.as_deref() != Some(folder.as_str()))
+            || now < checked
+            || now - checked >= FULL_CHECK_MS;
+        if full {
+            let mut known: HashMap<String, String> = HashMap::new();
+            {
+                let mut query = self.db.prepare("SELECT uuid, files FROM tasks")?;
+                let rows = query.query_map([], |r| Ok((r.get::<_, String>(0)?, r.get::<_, String>(1)?)))?;
+                for row in rows {
+                    let (uuid, files) = row?;
+                    known.insert(uuid, files);
+                }
+            }
+            let mut uuids: BTreeSet<String> = self.store.uuids()?.into_iter().collect();
+            uuids.extend(known.keys().cloned());
+            let uuids: Vec<String> = uuids.into_iter().collect();
+            self.refresh(&uuids, Some(&known))?;
+        } else if let Some(documents) = &changes.documents {
+            let uuids: Vec<String> = documents.iter().filter(|d| ids::is_uuid(d)).cloned().collect();
+            self.refresh(&uuids, None)?;
+        }
+        let tx = self.db.transaction()?;
+        {
+            let mut set = tx.prepare("INSERT OR REPLACE INTO meta VALUES(?1, ?2)")?;
+            set.execute(params!["generation", changes.generation])?;
+            set.execute(params!["offset", changes.offset.to_string()])?;
+            set.execute(params!["folder", folder])?;
+            if full {
+                set.execute(params!["checked", now.to_string()])?;
+            }
+            tx.execute("INSERT OR IGNORE INTO meta VALUES('revision', ?1)", [ids::new_uuid()])?;
+        }
+        tx.commit()?;
+        Ok(())
+    }
+
+    /// Indexes again each of `uuids` whose files changed (`known` holds the
+    /// stamps already read, for a full check), in short transactions; any
+    /// change gives the index a new revision.
+    fn refresh(&mut self, uuids: &[String], known: Option<&HashMap<String, String>>) -> Outcome<()> {
+        let dir = self.store.dir().to_owned();
+        for chunk in uuids.chunks(CHUNK) {
+            let mut work = Vec::new();
+            for uuid in chunk {
+                let now = files(&dir, uuid);
+                let stored = match known {
+                    Some(known) => known.get(uuid).cloned(),
+                    None => self
+                        .db
+                        .query_row("SELECT files FROM tasks WHERE uuid=?1", [uuid], |r| r.get(0))
+                        .optional()?,
+                };
+                if stored.as_deref() == Some(now.as_str()) || (stored.is_none() && now == "-|-") {
+                    continue;
+                }
+                let derived = (now != "-|-").then(|| derive(self.store, uuid));
+                work.push((uuid, now, derived));
+            }
+            if work.is_empty() {
+                continue;
+            }
+            let tx = self.db.transaction()?;
+            for (uuid, files, derived) in work {
+                tx.execute("DELETE FROM tasks WHERE uuid=?1", [uuid])?;
+                tx.execute("DELETE FROM sends WHERE uuid=?1", [uuid])?;
+                match derived {
+                    None => (),
+                    Some(Derived::Damaged(error)) => {
+                        tx.execute(
+                            "INSERT INTO tasks(uuid, files, error) VALUES(?1, ?2, ?3)",
+                            params![uuid, files, error],
+                        )?;
+                    }
+                    Some(Derived::Row { stage, rank, id, row, sends }) => {
+                        tx.execute(
+                            "INSERT INTO tasks(uuid, files, stage, rank, short_id, row) VALUES(?1, ?2, ?3, ?4, ?5, ?6)",
+                            params![uuid, files, stage, rank, id, row],
+                        )?;
+                        for at in sends {
+                            tx.execute("INSERT INTO sends VALUES(?1, ?2)", params![uuid, at])?;
+                        }
+                    }
+                }
+            }
+            tx.execute("INSERT OR REPLACE INTO meta VALUES('revision', ?1)", [ids::new_uuid()])?;
+            tx.commit()?;
+        }
+        Ok(())
+    }
+
+    /// Changes whenever any indexed row changes, including after a rebuild.
+    pub(super) fn revision(&self) -> Outcome<String> {
+        self.meta("revision")?.ok_or(Failure::Damaged)
+    }
+
+    /// One page of `stage`. A page past either end is the nearest whole
+    /// page, so every row stays reachable both ways; only an empty stage has
+    /// none. Each row's files are checked first; a changed task is indexed
+    /// again and the page read again.
+    pub(super) fn page(&mut self, stage: Stage, limit: usize, from: &Anchor) -> Outcome<Page> {
+        let mut from = from.clone();
+        for _ in 0..4 {
+            let rows = self.rows(stage, limit, &from)?;
+            if rows.is_empty() {
+                match from {
+                    Anchor::After(..) => {
+                        from = Anchor::End;
+                        continue;
+                    }
+                    Anchor::Before(..) => {
+                        from = Anchor::Start;
+                        continue;
+                    }
+                    Anchor::Start | Anchor::End => (),
+                }
+            }
+            let dir = self.store.dir().to_owned();
+            let stale: Vec<String> = rows
+                .iter()
+                .filter(|(uuid, _, stored, _)| files(&dir, uuid) != *stored)
+                .map(|(uuid, ..)| uuid.clone())
+                .collect();
+            if !stale.is_empty() {
+                self.refresh(&stale, None)?;
+                continue;
+            }
+            return self.finish(stage, rows);
+        }
+        Err(Failure::Other)
+    }
+
+    #[allow(clippy::type_complexity)]
+    fn rows(&self, stage: Stage, limit: usize, from: &Anchor) -> Outcome<Vec<(String, String, String, String)>> {
+        const ASCENDING: &str = "SELECT uuid, rank, files, row FROM tasks WHERE stage=?1 AND (rank, uuid) > (?2, ?3) ORDER BY rank, uuid LIMIT ?4";
+        const DESCENDING: &str = "SELECT uuid, rank, files, row FROM tasks WHERE stage=?1 AND (rank, uuid) < (?2, ?3) ORDER BY rank DESC, uuid DESC LIMIT ?4";
+        const LAST: &str = "SELECT uuid, rank, files, row FROM tasks WHERE stage=?1 AND ?2 = ?3 ORDER BY rank DESC, uuid DESC LIMIT ?4";
+        let (sql, rank, uuid) = match from {
+            Anchor::Start => (ASCENDING, "", ""),
+            Anchor::After(rank, uuid) => (ASCENDING, rank.as_str(), uuid.as_str()),
+            Anchor::Before(rank, uuid) => (DESCENDING, rank.as_str(), uuid.as_str()),
+            Anchor::End => (LAST, "", ""),
+        };
+        let mut query = self.db.prepare_cached(sql)?;
+        let mut rows = query
+            .query_map(params![stage.as_str(), rank, uuid, limit as i64], |r| {
+                Ok((r.get(0)?, r.get(1)?, r.get(2)?, r.get(3)?))
+            })?
+            .collect::<rusqlite::Result<Vec<(String, String, String, String)>>>()?;
+        if matches!(from, Anchor::Before(..) | Anchor::End) {
+            rows.reverse();
+        }
+        Ok(rows)
+    }
+
+    fn exists(&self, stage: Stage, rank: &str, uuid: &str, after: bool) -> Outcome<bool> {
+        let sql = if after {
+            "SELECT EXISTS(SELECT 1 FROM tasks WHERE stage=?1 AND (rank, uuid) > (?2, ?3))"
+        } else {
+            "SELECT EXISTS(SELECT 1 FROM tasks WHERE stage=?1 AND (rank, uuid) < (?2, ?3))"
+        };
+        Ok(self.db.query_row(sql, params![stage.as_str(), rank, uuid], |r| r.get(0))?)
+    }
+
+    fn before(&self, stage: Stage, rank: &str, uuid: &str) -> Outcome<usize> {
+        let count: i64 = self.db.query_row(
+            "SELECT count(*) FROM tasks WHERE stage=?1 AND (rank, uuid) < (?2, ?3)",
+            params![stage.as_str(), rank, uuid],
+            |r| r.get(0),
+        )?;
+        Ok(count as usize)
+    }
+
+    fn finish(&self, stage: Stage, rows: Vec<(String, String, String, String)>) -> Outcome<Page> {
+        let project = self.store.project_id();
+        let (mut next, mut previous, mut position) = (None, None, 0);
+        if let (Some(first), Some(last)) = (rows.first(), rows.last()) {
+            if self.exists(stage, &last.1, &last.0, true)? {
+                next = Some(cursor(project, stage, &last.1, &last.0));
+            }
+            if self.exists(stage, &first.1, &first.0, false)? {
+                previous = Some(cursor(project, stage, &first.1, &first.0));
+            }
+            position = self.before(stage, &first.1, &first.0)?;
+        }
+        let rows = rows
+            .into_iter()
+            .map(|(_, _, _, row)| serde_json::from_str(&row).map_err(|_| Failure::Damaged))
+            .collect::<Outcome<Vec<Value>>>()?;
+        Ok(Page { rows, position, next, previous })
+    }
+
+    /// The number of loadable tasks in each stage, by stage name.
+    pub(super) fn counts(&self) -> Outcome<BTreeMap<String, usize>> {
+        let mut query = self
+            .db
+            .prepare_cached("SELECT stage, count(*) FROM tasks WHERE stage IS NOT NULL GROUP BY stage")?;
+        let rows = query.query_map([], |r| Ok((r.get::<_, String>(0)?, r.get::<_, i64>(1)?)))?;
+        let mut counts = BTreeMap::new();
+        for row in rows {
+            let (stage, count) = row?;
+            counts.insert(stage, count as usize);
+        }
+        Ok(counts)
+    }
+
+    /// The first damaged tasks by UUID, and how many there are.
+    pub(super) fn damaged(&self) -> Outcome<(Vec<Value>, usize)> {
+        let mut query = self
+            .db
+            .prepare_cached("SELECT uuid, error FROM tasks WHERE error IS NOT NULL ORDER BY uuid LIMIT ?1")?;
+        let shown = query
+            .query_map([DAMAGED_SHOWN as i64], |r| {
+                Ok(json!({"uuid": r.get::<_, String>(0)?, "error": r.get::<_, String>(1)?}))
+            })?
+            .collect::<rusqlite::Result<Vec<_>>>()?;
+        let total: i64 = self
+            .db
+            .query_row("SELECT count(*) FROM tasks WHERE error IS NOT NULL", [], |r| r.get(0))?;
+        Ok((shown, total as usize))
+    }
+
+    /// The UUIDs of the loadable tasks with short ID `id`, and whether any
+    /// task does not load (its short ID cannot be read).
+    pub(super) fn short_id(&self, id: &str) -> Outcome<(Vec<String>, bool)> {
+        let mut query = self.db.prepare_cached("SELECT uuid FROM tasks WHERE short_id=?1")?;
+        let uuids = query
+            .query_map([id], |r| r.get(0))?
+            .collect::<rusqlite::Result<Vec<String>>>()?;
+        let damaged: bool = self
+            .db
+            .query_row("SELECT EXISTS(SELECT 1 FROM tasks WHERE error IS NOT NULL)", [], |r| r.get(0))?;
+        Ok((uuids, damaged))
+    }
+
+    /// The place of task `uuid` in its stage, counting from 1.
+    pub(super) fn place(&self, uuid: &str) -> Outcome<Option<usize>> {
+        let found: Option<(String, String)> = self
+            .db
+            .query_row(
+                "SELECT stage, rank FROM tasks WHERE uuid=?1 AND stage IS NOT NULL",
+                [uuid],
+                |r| Ok((r.get(0)?, r.get(1)?)),
+            )
+            .optional()?;
+        let Some((stage, rank)) = found else {
+            return Ok(None);
+        };
+        let count: i64 = self.db.query_row(
+            "SELECT count(*) FROM tasks WHERE stage=?1 AND (rank, uuid) < (?2, ?3)",
+            params![stage, rank, uuid],
+            |r| r.get(0),
+        )?;
+        Ok(Some(count as usize + 1))
+    }
+
+    /// How many tasks agents started since `since` (Unix milliseconds).
+    pub(super) fn agent_starts_since(&self, since: i64) -> Outcome<usize> {
+        let count: i64 = self
+            .db
+            .query_row("SELECT count(*) FROM sends WHERE at >= ?1", [since], |r| r.get(0))?;
+        Ok(count as usize)
+    }
+}
+
+#[cfg(test)]
+mod tests;

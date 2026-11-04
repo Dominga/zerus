@@ -321,7 +321,14 @@ pub(super) fn forget_scoped(name: &str, id: &str, dry: bool, scope: Option<&sess
         return Ok(());
     }
     if let Some(scope)=scope {scope.changing();}
-    remove_synced(&path(id)?)
+    remove_synced(&path(id)?)?;
+    // The session is gone unless a live binding still carries its ID.
+    if !record_path(name).exists()
+        || read(name).is_ok_and(|live| live["session_id"] != record["session_id"])
+    {
+        retire_session_id(&record);
+    }
+    Ok(())
 }
 
 /// The immutable source of a still-pending restore, before its binding changes.

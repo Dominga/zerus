@@ -1030,11 +1030,19 @@ pub fn dispatch(args: &[String]) -> Result<i32> {
                 return Ok(0);
             }
             let _guard = lock(None)?;
-            if record_path(&args[0]).exists() {
-                rename::remove_legacy(&read(&args[0])?)?;
-            }
+            let forgotten = if record_path(&args[0]).exists() {
+                let record = read(&args[0])?;
+                rename::remove_legacy(&record)?;
+                Some(record)
+            } else {
+                None
+            };
             match std::fs::remove_file(record_path(args.first().ok_or("missing session name")?)) {
-                Ok(()) => {}
+                Ok(()) => {
+                    if let Some(record) = forgotten {
+                        retire_session_id(&record);
+                    }
+                }
                 Err(error) if error.kind() == io::ErrorKind::NotFound => {}
                 Err(error) => return Err(error.to_string()),
             }

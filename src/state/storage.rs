@@ -135,57 +135,181 @@ pub(super) fn read(name: &str) -> Result<Value> {
 /// restore; a fork gets its own. Every record write keeps it.
 ///
 /// An older hgs rebuilds a record on resume or a fresh start from the fields
-/// it knows, dropping this one. A private index keyed by the provider's
-/// conversation, which older versions never touch, therefore restores it: the
-/// current conversation is indexed on every write, and a record without an
-/// ID looks up its current, expected, replaced and cleared conversations
-/// (which older writers keep) before a new ID is minted. Rename, archive and
-/// restore keep the conversation, so the index follows them.
+/// it knows, dropping this one. A private index, which older versions never
+/// touch, therefore restores it. There is one file per provider and original
+/// name (`journal_name`, or the name until a rename pins it), and older
+/// writers keep both. Each file lists at most `INDEX_SESSIONS` sessions with
+/// the conversations their record still names (current, expected, replaced
+/// and cleared). A record without an ID takes the ID of the one entry that
+/// shares a conversation with it. When the index is uncertain or ambiguous,
+/// the record is written without an ID rather than with a guessed one. A
+/// mapping another session already holds is never overwritten.
 pub(super) fn ensure_session_id(record: &mut Value) {
+    let Some(path) = session_index(record) else {
+        if string(record, "session_id").is_empty() {
+            record["session_id"] = json!(uuid::Uuid::new_v4().to_string());
+        }
+        return;
+    };
+    let index = read_index(&path, record);
+    let conversations = conversations(record);
     if string(record, "session_id").is_empty() {
-        let found = conversations(record)
-            .into_iter()
-            .find_map(|conversation| indexed_session(record, &conversation));
-        record["session_id"] =
-            json!(found.unwrap_or_else(|| uuid::Uuid::new_v4().to_string()));
+        let id = match &index {
+            IndexRead::Absent => uuid::Uuid::new_v4().to_string(),
+            IndexRead::Present(index) => {
+                let mut found: Vec<&str> = sessions(index)
+                    .filter(|entry| names_any(entry, &conversations))
+                    .map(|entry| string(entry, "session_id"))
+                    .collect();
+                found.dedup();
+                match found.as_slice() {
+                    [] => uuid::Uuid::new_v4().to_string(),
+                    [id] => (*id).to_owned(),
+                    _ => return,
+                }
+            }
+            IndexRead::Uncertain => return,
+        };
+        record["session_id"] = json!(id);
     }
-    let conversation = string(record, "conversation_id").to_owned();
-    if !conversation.is_empty()
-        && indexed_session(record, &conversation).as_deref() != Some(string(record, "session_id"))
-    {
-        // Best effort: the record itself stays the source of truth.
-        let path = session_index(record, &conversation);
-        let entry = json!({"session_id":record["session_id"],"conversation_id":conversation,
-            "provider":provider(record)});
-        let _ = private_dir(path.parent().unwrap()).and_then(|()| atomic(&path, &entry.to_string()));
+    let index = match index {
+        IndexRead::Absent => json!({"version":1,"provider":provider(record),"identity":identity(record),"sessions":[]}),
+        IndexRead::Present(index) => index,
+        IndexRead::Uncertain => return,
+    };
+    if let Some(updated) = indexed(index, string(record, "session_id"), &conversations) {
+        let _ = private_dir(path.parent().unwrap()).and_then(|()| atomic(&path, &updated.to_string()));
     }
 }
 
-/// The provider whose conversation IDs key the index.
+/// Forgets a removed session's entry; the file goes with its last entry.
+pub(super) fn retire_session_id(record: &Value) {
+    let Some(path) = session_index(record) else { return; };
+    let IndexRead::Present(mut index) = read_index(&path, record) else { return; };
+    let id = string(record, "session_id");
+    let Some(entries) = index["sessions"].as_array_mut() else { return; };
+    let before = entries.len();
+    entries.retain(|entry| string(entry, "session_id") != id);
+    if entries.len() == before {
+        return;
+    }
+    let _ = if entries.is_empty() {
+        archive::remove_synced(&path)
+    } else {
+        atomic(&path, &index.to_string())
+    };
+}
+
+/// A session ID as hgs writes it: a lowercase hyphenated UUID.
+fn canonical_id(id: &str) -> bool {
+    uuid::Uuid::parse_str(id).is_ok_and(|uuid| uuid.hyphenated().to_string() == id)
+}
+
+const INDEX_SESSIONS: usize = 16;
+const INDEX_CONVERSATIONS: usize = 40;
+const INDEX_BYTES: u64 = 128 * 1024;
+
+enum IndexRead {
+    Absent,
+    Present(Value),
+    /// Unreadable, not a regular file, too large or malformed.
+    Uncertain,
+}
+
+/// The provider whose conversation IDs the index names.
 fn provider(record: &Value) -> &str {
     Some(string(record, "agent"))
         .filter(|agent| !agent.is_empty())
         .unwrap_or_else(|| string(record, "backend"))
 }
 
-fn session_index(record: &Value, conversation: &str) -> PathBuf {
-    let key = format!("{}\n{conversation}", provider(record));
-    root()
-        .join("session_ids")
-        .join(format!("{:x}.json", Sha256::digest(key.as_bytes())))
+/// The name a rename pins as `journal_name`: stable across rename, resume and
+/// Clear, and kept by older writers.
+fn identity(record: &Value) -> &str {
+    Some(string(record, "journal_name"))
+        .filter(|name| !name.is_empty())
+        .unwrap_or_else(|| string(record, "name"))
 }
 
-fn indexed_session(record: &Value, conversation: &str) -> Option<String> {
-    let bytes = fs::read(session_index(record, conversation)).ok()?;
-    if bytes.len() > 4096 {
+fn session_index(record: &Value) -> Option<PathBuf> {
+    let (provider, identity) = (provider(record), identity(record));
+    if provider.is_empty() || identity.is_empty() {
         return None;
     }
-    let entry: Value = serde_json::from_slice(&bytes).ok()?;
-    let id = string(&entry, "session_id");
-    (entry["conversation_id"] == conversation
-        && string(&entry, "provider") == provider(record)
-        && uuid::Uuid::parse_str(id).is_ok_and(|uuid| uuid.hyphenated().to_string() == id))
-    .then(|| id.to_owned())
+    let key = format!("{provider}\n{identity}");
+    Some(root().join("session_ids").join(format!("{:x}.json", Sha256::digest(key.as_bytes()))))
+}
+
+/// A bounded read that never follows a link or waits on a FIFO.
+fn read_index(path: &Path, record: &Value) -> IndexRead {
+    use std::io::Read;
+    let mut options = fs::OpenOptions::new();
+    options.read(true);
+    let file = match crate::platform::no_follow(&mut options).open(path) {
+        Ok(file) => file,
+        Err(error) if error.kind() == io::ErrorKind::NotFound => return IndexRead::Absent,
+        Err(_) => return IndexRead::Uncertain,
+    };
+    if !file.metadata().is_ok_and(|metadata| metadata.is_file() && metadata.len() <= INDEX_BYTES) {
+        return IndexRead::Uncertain;
+    }
+    let mut bytes = Vec::new();
+    if file.take(INDEX_BYTES + 1).read_to_end(&mut bytes).is_err() || bytes.len() as u64 > INDEX_BYTES {
+        return IndexRead::Uncertain;
+    }
+    let Ok(index) = serde_json::from_slice::<Value>(&bytes) else {
+        return IndexRead::Uncertain;
+    };
+    let valid_entry = |entry: &Value| {
+        canonical_id(string(entry, "session_id"))
+            && entry["conversations"].as_array().is_some_and(|ids| {
+                ids.len() <= INDEX_CONVERSATIONS && ids.iter().all(|id| id.as_str().is_some_and(|id| !id.is_empty()))
+            })
+    };
+    let valid = index["version"] == 1
+        && string(&index, "provider") == provider(record)
+        && string(&index, "identity") == identity(record)
+        && index["sessions"].as_array().is_some_and(|entries| {
+            entries.len() <= INDEX_SESSIONS && entries.iter().all(valid_entry)
+        });
+    if valid { IndexRead::Present(index) } else { IndexRead::Uncertain }
+}
+
+fn sessions(index: &Value) -> impl Iterator<Item = &Value> {
+    index["sessions"].as_array().into_iter().flatten()
+}
+
+fn names_any(entry: &Value, conversations: &[String]) -> bool {
+    entry["conversations"]
+        .as_array()
+        .is_some_and(|ids| ids.iter().any(|id| id.as_str().is_some_and(|id| conversations.iter().any(|c| c == id))))
+}
+
+/// The index with this session's entry naming exactly `conversations`, or
+/// `None` when nothing changes or another session already holds one of them.
+/// The least recently updated entry goes when the file is full.
+fn indexed(mut index: Value, id: &str, conversations: &[String]) -> Option<Value> {
+    if conversations.is_empty() {
+        return None;
+    }
+    let entries = index["sessions"].as_array_mut()?;
+    if entries.iter().any(|entry| string(entry, "session_id") != id && names_any(entry, conversations)) {
+        return None;
+    }
+    let names = json!(conversations);
+    match entries.iter_mut().find(|entry| string(entry, "session_id") == id) {
+        Some(entry) if entry["conversations"] == names => return None,
+        Some(entry) => {
+            entry["conversations"] = names;
+            entry["updated"] = json!(now());
+        }
+        None => entries.push(json!({"session_id":id,"conversations":names,"updated":now()})),
+    }
+    if entries.len() > INDEX_SESSIONS {
+        entries.sort_by(|a, b| b["updated"].as_f64().unwrap_or(0.0).total_cmp(&a["updated"].as_f64().unwrap_or(0.0)));
+        entries.truncate(INDEX_SESSIONS);
+    }
+    Some(index)
 }
 
 /// The conversations this session's ID may be indexed under, newest first:
@@ -201,7 +325,9 @@ fn conversations(record: &Value) -> Vec<String> {
         ids.extend(cleared.iter().rev().filter_map(Value::as_str).map(str::to_owned));
     }
     ids.retain(|id| !id.is_empty());
-    ids.dedup();
+    let mut seen = std::collections::HashSet::new();
+    ids.retain(|id| seen.insert(id.clone()));
+    ids.truncate(INDEX_CONVERSATIONS);
     ids
 }
 
@@ -525,62 +651,147 @@ mod session_id_tests {
         }
         std::fs::create_dir_all(root()).unwrap();
         let on_disk = |path: &Path| -> Value { serde_json::from_slice(&std::fs::read(path).unwrap()).unwrap() };
+        let id = |record: &Value| string(record, "session_id").to_owned();
+        let claude = |name: &str, conversation: &str, run: &str| {
+            json!({"version":1,"agent":"claude","name":name,"conversation_id":conversation,"run_id":run})
+        };
+        let index_files = || std::fs::read_dir(root().join("session_ids")).map_or(0, |entries| entries.count());
         // Provider saves keep the ID on the caller's record: creation saves
-        // the same record before and after the native call (item 1).
+        // the same record before and after the native call (R2 item 1).
         let mut deepseek = json!({"backend":"dsh","agent":"dsh","name":"dsh/example/one","conversation_id":"session-1","run_id":"run-1"});
         super::super::dsh::save(&mut deepseek).unwrap();
-        let first = string(&deepseek, "session_id").to_owned();
+        let first = id(&deepseek);
         let binding = root().join("dsh/bindings").join(format!("{:x}.json", Sha256::digest(b"dsh/example/one")));
         assert_eq!(string(&on_disk(&binding), "session_id"), first, "kept on the caller's record");
         deepseek["paused"] = json!(false);
         super::super::dsh::save(&mut deepseek).unwrap();
-        assert_eq!(string(&deepseek, "session_id"), first);
+        assert_eq!(id(&deepseek), first);
         let mut opencode = json!({"backend":"opencode","agent":"opencode","name":"opencode/example/one","conversation_id":"ses_1","run_id":"run-2"});
         super::super::opencode::save(&mut opencode).unwrap();
-        let first_opencode = string(&opencode, "session_id").to_owned();
+        let first_opencode = id(&opencode);
         let binding = root().join("opencode/bindings").join(format!("{:x}.json", Sha256::digest(b"opencode/example/one")));
         assert_eq!(string(&on_disk(&binding), "session_id"), first_opencode, "kept on the caller's record");
-        opencode["creation_pending"] = json!(true);
         super::super::opencode::save(&mut opencode).unwrap();
-        assert_eq!(string(&opencode, "session_id"), first_opencode);
-        assert_ne!(first, first_opencode);
-        // An archive write gains an ID like any record write (item 4).
+        assert_eq!(id(&opencode), first_opencode);
+        // An archive write gains an ID like any record write (R2 item 4).
         let archive = root().join("archives").join("archive-1.json");
         std::fs::create_dir_all(archive.parent().unwrap()).unwrap();
-        let mut archived = json!({"version":1,"agent":"claude","name":"claude/example/old","archive_id":"archive-1",
-            "conversation_id":"conversation-archived","run_id":"run-3"});
+        let mut archived = claude("claude/example/old", "conversation-archived", "run-3");
+        archived["archive_id"] = json!("archive-1");
         atomic_record(&archive, &mut archived).unwrap();
         assert!(!string(&on_disk(&archive), "session_id").is_empty());
-        // An older hgs rebuilds the record without the field (item 3): the
-        // conversation index restores it on resume and after a fresh start.
-        let mut live = json!({"version":1,"agent":"claude","name":"claude/example/live","conversation_id":"conversation-1","run_id":"run-4"});
+        // An older hgs rebuilds the record without the field: the index
+        // restores it on resume, after a fresh start and after a rename.
+        let mut live = claude("claude/example/live", "conversation-1", "run-4");
         write(&mut live).unwrap();
-        let session = string(&live, "session_id").to_owned();
-        let mut resumed = json!({"version":1,"agent":"claude","name":"claude/example/live","conversation_id":"conversation-1","run_id":"run-5"});
+        let session = id(&live);
+        let mut resumed = claude("claude/example/live", "conversation-1", "run-5");
         write(&mut resumed).unwrap();
-        assert_eq!(string(&resumed, "session_id"), session, "an older resume");
-        let mut fresh = json!({"version":1,"agent":"claude","name":"claude/example/live","conversation_id":"conversation-2",
-            "run_id":"run-6","cleared_conversations":["conversation-1"]});
+        assert_eq!(id(&resumed), session, "an older resume");
+        let mut fresh = claude("claude/example/live", "conversation-2", "run-6");
+        fresh["cleared_conversations"] = json!(["conversation-1"]);
         write(&mut fresh).unwrap();
-        assert_eq!(string(&fresh, "session_id"), session, "an older fresh start");
-        let mut renamed = json!({"version":1,"agent":"claude","name":"claude/example/renamed","conversation_id":"conversation-2","run_id":"run-6"});
+        assert_eq!(id(&fresh), session, "an older fresh start");
+        let mut renamed = claude("claude/example/renamed", "conversation-2", "run-6");
+        renamed["journal_name"] = json!("claude/example/live");
         write(&mut renamed).unwrap();
-        assert_eq!(string(&renamed, "session_id"), session, "the newer conversation is indexed too");
-        // A fork, another provider's equal conversation ID: another ID.
-        let mut fork = json!({"version":1,"agent":"claude","name":"claude/example/fork","conversation_id":"conversation-3",
-            "run_id":"run-7","fork_parent_id":"conversation-2"});
-        write(&mut fork).unwrap();
-        assert_ne!(string(&fork, "session_id"), session);
-        let mut other = json!({"version":1,"agent":"codex","name":"codex/example/live","conversation_id":"conversation-1","run_id":"run-8"});
+        assert_eq!(id(&renamed), session, "a rename keeps the pinned name");
+        // R3 item 1: other names sharing a conversation are other sessions,
+        // and an older round trip never moves one onto the other's ID.
+        let mut twin = claude("claude/example/twin", "conversation-1", "run-7");
+        write(&mut twin).unwrap();
+        assert_ne!(id(&twin), session);
+        let mut twin_again = claude("claude/example/twin", "conversation-1", "run-8");
+        write(&mut twin_again).unwrap();
+        assert_eq!(id(&twin_again), id(&twin));
+        let mut live_again = claude("claude/example/live", "conversation-2", "run-9");
+        write(&mut live_again).unwrap();
+        assert_eq!(id(&live_again), session);
+        let mut other = json!({"version":1,"agent":"codex","name":"claude/example/live","conversation_id":"conversation-2","run_id":"run-10"});
         write(&mut other).unwrap();
-        assert_ne!(string(&other, "session_id"), session);
-        let mut again = json!({"version":1,"agent":"claude","name":"claude/example/live","conversation_id":"conversation-1","run_id":"run-10"});
-        write(&mut again).unwrap();
-        assert_eq!(string(&again, "session_id"), session, "each provider keeps its own entry");
-        // A record's own ID always wins over the index.
-        let mut own = json!({"version":1,"agent":"claude","name":"claude/example/own","conversation_id":"conversation-1",
-            "run_id":"run-9","session_id":"7d0f6a3e-3c1b-4b8e-9a52-1f2e3d4c5b6a"});
-        write(&mut own).unwrap();
-        assert_eq!(string(&own, "session_id"), "7d0f6a3e-3c1b-4b8e-9a52-1f2e3d4c5b6a");
+        assert_ne!(id(&other), session, "another provider");
+        // A mapping another session holds is never overwritten.
+        let mut conflicting = claude("claude/example/live", "conversation-2", "run-11");
+        conflicting["session_id"] = json!("7d0f6a3e-3c1b-4b8e-9a52-1f2e3d4c5b6a");
+        write(&mut conflicting).unwrap();
+        assert_eq!(id(&conflicting), "7d0f6a3e-3c1b-4b8e-9a52-1f2e3d4c5b6a", "a record's own ID wins");
+        let mut stripped = claude("claude/example/live", "conversation-2", "run-12");
+        write(&mut stripped).unwrap();
+        assert_eq!(id(&stripped), session, "the first mapping stays");
+        // A fork is another session.
+        let mut fork = claude("claude/example/fork", "conversation-3", "run-13");
+        fork["fork_parent_id"] = json!("conversation-2");
+        write(&mut fork).unwrap();
+        assert_ne!(id(&fork), session);
+        // R3 item 3: 128 Clears keep one bounded entry in one file.
+        let before = index_files();
+        let mut cleared: Vec<String> = Vec::new();
+        for n in 0..128 {
+            let mut clear = claude("claude/example/clears", &format!("clear-{n}"), "run-14");
+            let kept = cleared.len().saturating_sub(32);
+            clear["cleared_conversations"] = json!(cleared[kept..]);
+            // Written as an older hgs does, without the field.
+            write(&mut clear).unwrap();
+            cleared.push(format!("clear-{n}"));
+        }
+        assert_eq!(index_files(), before + 1);
+        let clears = claude("claude/example/clears", "clear-127", "run-14");
+        let index = on_disk(&session_index(&clears).unwrap());
+        assert_eq!(index["sessions"].as_array().unwrap().len(), 1, "one session through every Clear");
+        assert!(index["sessions"][0]["conversations"].as_array().unwrap().len() <= INDEX_CONVERSATIONS);
+        // At most INDEX_SESSIONS sessions per name; the oldest entry goes.
+        for n in 0..INDEX_SESSIONS + 4 {
+            let mut many = claude("claude/example/many", &format!("many-{n}"), "run-15");
+            write(&mut many).unwrap();
+        }
+        let many = claude("claude/example/many", "many-0", "run-15");
+        assert_eq!(on_disk(&session_index(&many).unwrap())["sessions"].as_array().unwrap().len(), INDEX_SESSIONS);
+        // A removed session's entry is retired, and the file with its last one.
+        retire_session_id(&live_again);
+        let mut after = claude("claude/example/live", "conversation-2", "run-16");
+        write(&mut after).unwrap();
+        assert_ne!(id(&after), session, "retired");
+        retire_session_id(&after);
+        assert!(!session_index(&after).unwrap().exists());
+        // R3 item 2: an unreadable, linked, blocking or malformed index is
+        // uncertain: the record is written without a guessed ID and the
+        // index is left as it is.
+        let probe = claude("claude/example/probe", "probe-1", "run-17");
+        let path = session_index(&probe).unwrap();
+        type Make<'a> = Box<dyn Fn() + 'a>;
+        let attempts: Vec<(&str, Make<'_>)> = vec![
+            ("corrupt", Box::new(|| std::fs::write(session_index(&claude("claude/example/probe", "", "")).unwrap(), b"{not json").unwrap())),
+            ("oversized", Box::new(|| std::fs::write(session_index(&claude("claude/example/probe", "", "")).unwrap(), vec![b' '; 200 * 1024]).unwrap())),
+            #[cfg(unix)]
+            ("symlink", Box::new(|| {
+                let target = root().join("chosen.json");
+                std::fs::write(&target, json!({"version":1,"provider":"claude","identity":"claude/example/probe",
+                    "sessions":[{"session_id":"11111111-1111-4111-8111-111111111111","conversations":["probe-1"]}]}).to_string()).unwrap();
+                std::os::unix::fs::symlink(&target, session_index(&claude("claude/example/probe", "", "")).unwrap()).unwrap();
+            })),
+            #[cfg(unix)]
+            ("fifo", Box::new(|| {
+                let path = std::ffi::CString::new(session_index(&claude("claude/example/probe", "", "")).unwrap().into_os_string().into_encoded_bytes()).unwrap();
+                assert_eq!(unsafe { libc::mkfifo(path.as_ptr(), 0o600) }, 0);
+            })),
+        ];
+        for (case, make) in attempts {
+            let _ = std::fs::remove_file(&path);
+            make();
+            let before = std::fs::symlink_metadata(&path).unwrap();
+            let started = std::time::Instant::now();
+            let mut record = probe.clone();
+            write(&mut record).unwrap();
+            assert!(started.elapsed() < std::time::Duration::from_secs(2), "{case} never blocks");
+            assert!(record.get("session_id").is_none(), "{case}: no guessed ID");
+            let after = std::fs::symlink_metadata(&path).unwrap();
+            assert_eq!((before.len(), before.file_type()), (after.len(), after.file_type()), "{case}: index untouched");
+            let mut owned = probe.clone();
+            owned["session_id"] = json!("22222222-2222-4222-8222-222222222222");
+            write(&mut owned).unwrap();
+            assert_eq!(id(&owned), "22222222-2222-4222-8222-222222222222", "{case}: an own ID stays");
+            assert_eq!(std::fs::symlink_metadata(&path).unwrap().len(), before.len(), "{case}: never overwritten");
+        }
+        let _ = std::fs::remove_file(&path);
     }
 }

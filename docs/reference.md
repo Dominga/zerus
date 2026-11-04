@@ -268,8 +268,17 @@ rename, pause, archive and restore; a fork is another session with its own.
 A record written by an older hgs gains one the next time this hgs writes any
 of its records, including archives. An older hgs rebuilds a record on resume
 or a fresh start without this field. The next write then restores the same ID
-from a private index under the state directory (`session_ids/`), keyed by the
-provider's conversation, which older versions never touch.
+from a private index under the state directory (`session_ids/`), which older
+versions never touch.
+- Each file covers one provider and original name (the name a rename pins),
+  with at most 16 sessions. Each session lists the conversations its record
+  still names: current, expected, replaced and cleared.
+- A record without an ID takes the ID of the one entry sharing a
+  conversation with it.
+- If the index is unreadable, linked, malformed or ambiguous, the record is
+  written without an ID instead of with a guess. A mapping held by another
+  session is never overwritten.
+- Forgetting a session retires its entry.
 The agent's environment carries it as `HGS_SESSION_ID`, beside `HGS_SESSION`
 (the name at launch) and `HGS_RUN_ID`, and `hgs ls --json` rows and
 inspections include it. Nothing resolves sessions by it yet, and names stay

@@ -2012,6 +2012,7 @@ fn action_in<N: Native>(
     }
     if action == "forget" {
         archive::remove_synced(&binding_path(&old))?;
+        retire_session_id(record);
         history::forget(record);
         return Ok(());
     }

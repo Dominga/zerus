@@ -420,8 +420,8 @@ export function ownershipNotice(view: NotificationOwnership | undefined): string
  * A connected service that runs passive: it reports none of its background work
  * started. "resume": the native activation helper offers the explicit Resume
  * (Linux, macOS). "settings": the platform has no native activation route
- * (activation_platform_manual, Windows) and ownership needs nothing, so the
- * mode is chosen in Settings > About. Presentation only; never authority.
+ * (activation_platform_manual, Windows) and ownership needs nothing; Settings >
+ * About shows the service state. Presentation only; never authority.
  */
 export type PausedAction = "resume" | "settings";
 export function servicePaused(state: DesktopService | undefined): PausedAction | undefined {
@@ -470,8 +470,9 @@ export function serviceStatus(state: DesktopService | undefined) {
     else if (owner) label = ownership === "check" ? tr("Background access unconfirmed") : ownership === "rearm" ? tr("Background access paused") : tr("Background access unavailable");
     else if (paused === "settings") label = tr("Background access paused");
   }
-  // A reason without Retry or Resume: the mode is chosen in Settings.
-  const settings = paused === "settings" ? tr("Zerus runs your sessions through a background service, which stays paused until you turn it on in Settings.") : "";
+  // A reason without Retry or Resume: no in-app action turns background mode on
+  // here yet (zerus-5wmh.66.8.1.15); Settings shows the current state.
+  const settings = paused === "settings" ? tr("Zerus runs your sessions through a background service, which is paused on this computer. Settings shows its current state.") : "";
   const reasons = [notice, pending, retained, manualRefresh ? "" : owner, settings].filter(Boolean);
   return { label, details: reasons.join("\n") || tr("Background service connected"), healthy: !reasons.length,
     retry: !manualRefresh && !!(notice || pending || retained || (owner && !ownership)), review: !!retained, ownership, manualRefresh };

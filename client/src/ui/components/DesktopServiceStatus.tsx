@@ -11,13 +11,13 @@ export const servicePausedEmpty = () => !!servicePaused(desktopService.state()) 
 
 const resume = () => void ownershipActions.rearm().catch(error => toast(tr("Background service"), String(error), "error", true));
 const resumeBlocked = () => ownershipActions.busy() || !!desktopService.state()?.notification_ownership?.running;
-/** Settings > About holds the service mode review and choice. */
+/** Settings > About shows the service state (and, after an interrupted change, its review). */
 const openServiceSettings = () => void import("../screens/settings/sections").then(({ openSettings }) => openSettings("about"));
 
 /**
  * The empty main area while background work is paused. Its one action is
- * Resume where the native helper offers it, otherwise the Settings page where
- * the mode is chosen (Windows).
+ * Resume where the native helper offers it, otherwise the Settings page that
+ * shows the service state (Windows).
  */
 export function PausedServiceDetail() {
   const settings = () => servicePaused(desktopService.state()) === "settings";
@@ -28,7 +28,7 @@ export function PausedServiceDetail() {
         <p>{tr("Zerus runs your sessions through a background service, which stays paused until you resume it.")}</p>
         <button type="button" class="btn primary" disabled={resumeBlocked()} onClick={resume}>{tr("Resume background work")}</button>
       </>}>
-        <p>{tr("Zerus runs your sessions through a background service, which stays paused until you turn it on in Settings.")}</p>
+        <p>{tr("Zerus runs your sessions through a background service, which is paused on this computer. Settings shows its current state.")}</p>
         <button type="button" class="btn primary" onClick={openServiceSettings}>{tr("Open background service settings")}</button>
       </Show>
     </div>

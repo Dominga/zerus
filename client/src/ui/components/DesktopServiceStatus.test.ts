@@ -17,7 +17,7 @@ const passive = (patch: Partial<DesktopService> = {}, ownership: Partial<Notific
   background: notStarted, code: "background_unready", details_available: false,
   notification_ownership: { ...rearm, status: { ...rearm.status!, state: "service", rearm_required: false }, activation, ...ownership }, ...patch });
 
-const SETTINGS_BODY = "Zerus runs your sessions through a background service, which stays paused until you turn it on in Settings.";
+const SETTINGS_BODY = "Zerus runs your sessions through a background service, which is paused on this computer. Settings shows its current state.";
 const windows = (patch: Partial<DesktopService> = {}): DesktopService => ({ ...(structuredClone(windowsPassive) as unknown as DesktopService), ...patch });
 const windowsOwnership = (patch: (view: NotificationOwnership) => NotificationOwnership) => windows({ notification_ownership: patch(windows().notification_ownership!) });
 

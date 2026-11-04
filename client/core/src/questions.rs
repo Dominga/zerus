@@ -521,6 +521,8 @@ pub struct AnswerDraft {
     pub confirm: String,
     pub storage_error: String,
     pub label: String,
+    /// [`StoredDraft::session_label`] of an answer keyed by session ID.
+    pub session_label: String,
     pub page: usize,
     pub sending: bool,
     pub submitted: bool,
@@ -563,6 +565,7 @@ impl AnswerDraft {
             error: loaded.draft.uncertain,
             checkpoint: loaded.draft.checkpoint.as_deref().cloned(),
             label: label.to_owned(),
+            session_label: loaded.draft.session_label.clone(),
             page: state.get("page").and_then(Value::as_u64).unwrap_or(0) as usize,
             answered: state
                 .get("answered")
@@ -626,6 +629,7 @@ impl AnswerDraft {
         }
         let mut stored = StoredDraft {
             label: self.label.clone(),
+            session_label: self.session_label.clone(),
             sending: self.sending,
             uncertain: self.uncertain,
             checkpoint: self.checkpoint.clone().map(Box::new),

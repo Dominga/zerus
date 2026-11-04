@@ -585,6 +585,35 @@ fn actual_reviewed_archive_needs_a_second_confirmation_before_its_only_rearm_and
         running.service.ownership_rearm().await;
         assert!(mutations(&running).is_empty());
         assert_eq!((helpers.effects(), helpers.reviews()), (1, 2));
+        let mode = &running.service.shared.mode_transition;
+        assert!(mode.startup_permitted());
+        let held = mode.gate.admit(Role::Fleet).unwrap();
+        running.service.retry();
+        crate::desktop_service::tests::eventually(
+            "the reviewed connection defers on an unrelated busy read",
+            || {
+                running
+                    .source
+                    .calls()
+                    .iter()
+                    .filter(|c| c["args"] == json!(["desktop", "watch", "--json"]))
+                    .count()
+                    == 2
+            },
+        )
+        .await;
+        assert!(mode.classification_pending());
+        assert!(!mode.startup_permitted());
+        drop(held);
+        crate::desktop_service::tests::eventually(
+            "review classification recovers without scheduling consent",
+            || !mode.classification_pending() && mode.gate.snapshot().unwrap().admitted == 0,
+        )
+        .await;
+        assert!(
+            !mode.startup_permitted(),
+            "only the following B2 confirmation may clear this prior deferral"
+        );
         let choice = confirm_when_idle(
             &running.service.shared.mode_transition,
             ReviewAction::Background,
@@ -606,6 +635,12 @@ fn actual_reviewed_archive_needs_a_second_confirmation_before_its_only_rearm_and
         );
         assert_eq!(mutations(&running), vec!["rearm", "grant"]);
         let count = mutations(&running).len();
+        let watches_before_retry = running
+            .source
+            .calls()
+            .iter()
+            .filter(|c| c["args"] == json!(["desktop", "watch", "--json"]))
+            .count();
         running.service.retry();
         crate::desktop_service::tests::eventually("Retry only reopens the read stream", || {
             running
@@ -614,7 +649,7 @@ fn actual_reviewed_archive_needs_a_second_confirmation_before_its_only_rearm_and
                 .iter()
                 .filter(|c| c["args"] == json!(["desktop", "watch", "--json"]))
                 .count()
-                >= 2
+                > watches_before_retry
         })
         .await;
         assert_eq!(
@@ -949,10 +984,17 @@ fn actual_unconfirmed_grant_offers_only_original_lookup_and_never_activates() {
 
 #[test]
 fn actual_modern_service_first_choice_keeps_its_confirmed_scheduling_continuation() {
+    if crate::test_context::non_agent() {
+        return;
+    }
     let _process = crate::PROCESS_TREE.read().unwrap();
     tauri::async_runtime::block_on(async {
-        for (outcome, previously_deferred) in [("settle", false), ("settle", true), ("lost", true)]
-        {
+        for (outcome, previously_deferred) in [
+            ("settle", false),
+            ("settle", true),
+            ("refused", false),
+            ("lost", true),
+        ] {
             let helpers = Fixture::new();
             let registration = super::first_tests::Fixture::new(outcome, true);
             let running = start_native(
@@ -1029,6 +1071,10 @@ fn actual_modern_service_first_choice_keeps_its_confirmed_scheduling_continuatio
                 assert!(startup, "a confirmed first choice must not require a second Resume; previously deferred={previously_deferred}");
                 assert!(!view.needs_resume, "the settled first choice is not paused");
                 assert!(scheduling);
+            } else if outcome == "refused" {
+                assert!(!settled && !view.pending && !view.active);
+                assert!(startup, "a native pre-manager refusal must not invent a deferral from Prepared's own charge");
+                assert_eq!(view.code, "activation_not_started");
             } else {
                 assert!(!settled && view.pending);
                 assert!(

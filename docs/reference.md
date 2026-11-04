@@ -1042,6 +1042,29 @@ When the open session is terminated or removed, the conversation pane returns
 to **Select a session**. Polling, new sessions and filter changes keep this
 selection empty until you choose a session. Unsent drafts remain in **Saved drafts**.
 
+A desktop draft belongs to its session, not to the session's name. Since
+zerus-ucck P2c, a live or saved session that lists a durable session ID keeps
+its message, subagent, question-answer and voice drafts under that ID, so a
+draft stays with its session across a rename. A draft saved under the name
+before moves to the ID once, when its session opens, and never over a draft
+already there. Archived sessions and sessions without an ID keep their drafts
+under their names. **Saved drafts** shows such a draft by the name its session
+had when the draft was saved, and **Go to session** finds the session by its ID.
+After a downgrade to a desktop build that reads only names, that build opens
+the session with an empty message editor. The draft stays under the session ID,
+because the older build writes only the names it uses itself and never deletes
+it. That build lists it in **Saved drafts** as `id:<session ID>`, without a
+draft mark on the card. A draft typed in the older build stays under the name.
+Back on this build, the composer shows the draft kept under the session ID, and
+the one written under the name stays in **Saved drafts**.
+
+Read marks waiting for a host follow the same rule. A mark is queued under the
+session ID the listing reports for its run, so two sessions that share a name
+keep separate marks; it is still delivered with `hgs read NAME`, guarded by run
+and conversation. A **Needs attention** or review-later mark of a session
+without a conversation is kept under its session ID, and one kept under the
+name moves to it.
+
 The **Active** filter combines sessions currently working or Scheduled, those in
 **Needs attention**, and sessions with unsent text or attachment drafts, counting
 each session once. Desktop and Android use the same filter IDs and membership

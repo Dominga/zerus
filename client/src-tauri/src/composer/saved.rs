@@ -65,6 +65,10 @@ pub struct SavedDraftItem {
     /// key names the machine instead (`ComposerDraftOwner`).
     pub computer: String,
     pub session: String,
+    /// The durable session ID of a draft keyed by it (zerus-ucck P2c-2),
+    /// empty for a key that names its session: the listed row with this ID
+    /// owns the draft, whatever its label is now.
+    pub session_id: String,
     /// The row's accessible text: the owner's parts joined by " / ".
     pub title: String,
     /// What the row shows as its title (Qt's `SessionRoles::Title`).
@@ -134,7 +138,15 @@ pub fn cursor_of(token: &str) -> Option<Cursor> {
 
 /// One Saved drafts row (`showSavedDrafts`, 1257-1300).
 pub(crate) fn item(key: String, summary: &Summary, source: DraftSource) -> SavedDraftItem {
-    let owner = drafts::owner(&key);
+    let mut owner = drafts::owner(&key);
+    // A draft keyed by session ID shows its session's label at the save.
+    if !owner.session_id.is_empty() {
+        owner.session = if summary.session_label.is_empty() {
+            format!("session {}", &owner.session_id[..8])
+        } else {
+            summary.session_label.clone()
+        };
+    }
     let machine = if owner.machine.is_empty() {
         THIS_COMPUTER.to_owned()
     } else {
@@ -211,6 +223,7 @@ pub(crate) fn item(key: String, summary: &Summary, source: DraftSource) -> Saved
         kind: owner.kind,
         computer: owner.machine.clone(),
         session: owner.session.clone(),
+        session_id: owner.session_id.clone(),
         title: title.join(" / "),
         caption,
         machine,
@@ -380,6 +393,7 @@ impl Composers {
             preview: String::new(),
             modified: 0.0,
             attachments: 0,
+            session_label: String::new(),
         };
         ConflictsPage {
             items: conflicts
@@ -1166,6 +1180,58 @@ mod tests {
         );
     }
 
+    /// zerus-ucck P2c-2: a draft keyed by session ID is titled by the label
+    /// its session had at the save, and names that ID for the owner row.
+    #[test]
+    fn a_draft_keyed_by_session_id_shows_its_session_label() {
+        let id = "3f2a9c1d-6b7e-4c2a-9d1f-0a1b2c3d4e5f";
+        let summary = |session_label: &str| Summary {
+            label: String::new(),
+            preview: "hi".into(),
+            modified: 1.0,
+            attachments: 0,
+            session_label: session_label.into(),
+        };
+        let labelled = item(
+            format!("studio\nid:{id}"),
+            &summary("claude/sample-project/review"),
+            DraftSource::Client,
+        );
+        assert_eq!(
+            (
+                labelled.session.as_str(),
+                labelled.session_id.as_str(),
+                labelled.caption.as_str()
+            ),
+            ("claude/sample-project/review", id, "review")
+        );
+        assert_eq!(labelled.title, "claude/sample-project/review / studio");
+        let child = item(
+            format!("studio\nid:{id}\nconv-1\nagent-2"),
+            &summary("claude/p/a"),
+            DraftSource::Client,
+        );
+        assert_eq!(
+            (child.kind, child.session.as_str()),
+            (OwnerKind::Subagent, "claude/p/a")
+        );
+        let unlabelled = item(
+            format!("studio\nid:{id}"),
+            &summary(""),
+            DraftSource::Client,
+        );
+        assert_eq!(unlabelled.session, "session 3f2a9c1d");
+        let named = item(
+            "studio\nclaude/p/a".into(),
+            &summary("ignored"),
+            DraftSource::Client,
+        );
+        assert_eq!(
+            (named.session.as_str(), named.session_id.as_str()),
+            ("claude/p/a", "")
+        );
+    }
+
     #[test]
     fn items_follow_qts_titles() {
         let summary = |preview: &str, attachments: usize| Summary {
@@ -1173,6 +1239,7 @@ mod tests {
             preview: preview.into(),
             modified: 1.0,
             attachments,
+            session_label: String::new(),
         };
         let subagent = item(
             "workstation\nclaude/p/a\nconv-1\nagent-2".into(),

@@ -198,7 +198,7 @@ describe("the app's archived Activity", () => {
     expect(followedFor(key)).toEqual({ value: undefined, settled: true });
     // Its recorded Activity stays read-only, while its own draft opens for editing.
     await flush();
-    expect(mocked.composerOpen).toHaveBeenLastCalledWith({ computer: "", key: `archive:${uuid(1)}`, name: "codex/example/a1", archive_id: uuid(1) });
+    expect(mocked.composerOpen).toHaveBeenLastCalledWith({ computer: "", key: `archive:${uuid(1)}`, name: "codex/example/a1", archive_id: uuid(1), session_id: null });
     reads[0].resolve({ events: [ev(1, "UserPromptSubmit", "Summarize the notes"), ev(2, "Stop", "Done.")], replace_events: false, conversation_id: "conv-a1", run_id: "run-a1", cleared_conversations: [], cursor: 2, summary: {} });
     await flush();
     expect(archiveActivity.events().map((e) => e.seq)).toEqual([1, 2]);
@@ -217,7 +217,7 @@ describe("the app's archived Activity", () => {
     expect(archiveActivity.events()).toEqual([]);
     await flush();
     expect(mocked.activityPort.follow).toHaveBeenCalledWith(expect.objectContaining({ key: "run:run-live" }));
-    expect(mocked.composerOpen).toHaveBeenLastCalledWith({ computer: "", key: "run:run-live", name: "codex/example/live", archive_id: null });
+    expect(mocked.composerOpen).toHaveBeenLastCalledWith({ computer: "", key: "run:run-live", name: "codex/example/live", archive_id: null, session_id: null });
     vi.advanceTimersByTime(10_000);
     expect(reads.length).toBe(2);
   });

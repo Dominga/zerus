@@ -75,7 +75,7 @@ impl Driver {
             match effect {
                 Effect::Save { token, key, draft } => self.saves.push_back((token, key, draft)),
                 Effect::Call { token, call } => self.calls.push_back((token, call)),
-                Effect::Load { token, key } => self.loads.push_back((token, key)),
+                Effect::Load { token, key, .. } => self.loads.push_back((token, key)),
                 Effect::Insert {
                     token,
                     text,
@@ -315,7 +315,7 @@ fn an_interrupted_send_reopens_uncertain_and_cancel_asks_the_computer() {
     let token = effects
         .iter()
         .find_map(|effect| match effect {
-            Effect::Load { token, key } => {
+            Effect::Load { token, key, .. } => {
                 assert_eq!(key, "voice-message-draft\nlocal\nclaude/p/fix");
                 Some(*token)
             }
@@ -1009,4 +1009,44 @@ fn a_recording_that_could_not_be_saved_is_never_sent() {
         driver.composer.notice().1,
         voice_composer::SAVE_RECORDING_FAILED
     );
+}
+
+/// zerus-ucck P2c-2: a session keyed by its durable ID loads its voice draft
+/// from the ID key, first moving one left under its name key.
+#[test]
+fn a_voice_draft_moves_once_from_the_name_key() {
+    let id_key = "local\nid:3f2a9c1d-6b7e-4c2a-9d1f-0a1b2c3d4e5f";
+    let loads = |current: Target| {
+        let next = Arc::new(AtomicU64::new(1));
+        let mut composer = VoiceComposer::new(move || id(next.fetch_add(1, Ordering::SeqCst)));
+        composer
+            .update(current, true, preferences())
+            .into_iter()
+            .filter_map(|effect| match effect {
+                Effect::Load {
+                    key,
+                    legacy,
+                    session,
+                    ..
+                } => Some((key, legacy, session)),
+                _ => None,
+            })
+            .collect::<Vec<_>>()
+    };
+    let by_id = Target {
+        key: id_key.into(),
+        legacy_key: "local\nclaude/p/fix".into(),
+        ..target()
+    };
+    assert_eq!(
+        loads(by_id),
+        [(
+            format!("voice-message-draft\n{id_key}"),
+            "voice-message-draft\nlocal\nclaude/p/fix".to_owned(),
+            "claude/p/fix".to_owned()
+        )]
+    );
+    let by_name = loads(target());
+    assert_eq!(by_name.len(), 1);
+    assert_eq!(by_name[0].1, "", "a name key moves nothing");
 }

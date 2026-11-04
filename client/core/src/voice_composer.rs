@@ -119,6 +119,10 @@ pub enum NoticeKind {
 pub struct Target {
     /// The composer's session key.
     pub key: String,
+    /// The session's name key when `key` names it by session ID: a voice
+    /// draft found there moves once to `key` (zerus-ucck P2c-2).
+    #[serde(default)]
+    pub legacy_key: String,
     pub host: String,
     pub session: String,
     pub run: String,
@@ -219,10 +223,15 @@ pub enum Effect {
     /// Pause other messages' players before recording.
     PauseMessages,
     StopPlayback,
-    /// Load the draft and answer [`VoiceComposer::loaded`].
+    /// Load the draft and answer [`VoiceComposer::loaded`]. A draft under
+    /// `legacy`, the session's name key, first moves once to `key`
+    /// ([`DraftStore::adopt`](crate::drafts::DraftStore::adopt)), labelled
+    /// `session`.
     Load {
         token: u64,
         key: String,
+        legacy: String,
+        session: String,
     },
     /// Save the draft durably (an empty draft clears it) and answer
     /// [`VoiceComposer::saved`]; token 0 needs no answer.
@@ -611,9 +620,15 @@ impl VoiceComposer {
         let token = self.token(Pending::Load {
             generation: self.generation,
         });
+        let legacy = Some(&self.current.legacy_key)
+            .filter(|legacy| !legacy.is_empty() && **legacy != key)
+            .map(|legacy| format!("voice-message-draft\n{legacy}"))
+            .unwrap_or_default();
         self.effects.push(Effect::Load {
             token,
             key: self.storage_key(),
+            legacy,
+            session: self.current.session.clone(),
         });
     }
 
@@ -962,6 +977,11 @@ impl VoiceComposer {
             },
             label: format!("Voice message ({})", self.target.session),
             form_state: form,
+            session_label: if self.target.legacy_key.is_empty() {
+                String::new()
+            } else {
+                self.target.session.clone()
+            },
             ..StoredDraft::default()
         }
     }

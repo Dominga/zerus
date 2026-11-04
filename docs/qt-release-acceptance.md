@@ -378,6 +378,39 @@ reviewable. Grant/watch/catalog/Resume stay independent. This is component/sourc
 coverage, not current checkout identity, creation/cleanup consent, drain or
 installed acceptance; no acceptance row is promoted.
 
+The native draft-store capture from [#1230](https://github.com/ufna/zerus/pull/1230)
+also has a separate Staged publisher in
+[#1279](https://github.com/ufna/zerus/pull/1279). It reads only the committed
+`drafts-preload-v1` receipt, index and original container; it never captures or
+substitutes today's drafts. The schema-1 families distinguish their boundaries:
+
+- `next-drafts-preload`: Next's own store, `next-drafts-before-first-job-v1`.
+- `next-dev-drafts-preload`: the dev stores, `next-dev-drafts-observed-v1`.
+- `qt-drafts-preload`: the Qt store, `qt-drafts-observed-v1`.
+- `next-drafts-preload-provenance`: the receipt and each root's boundary,
+  presence, entry count and completeness, with `historical: true`,
+  `drained: false` and `current_source_complete: false`.
+
+Store families use `draft-preload-entries-v1`; provenance uses
+`draft-preload-provenance-v1`. A store family's SHA binds its ordered index
+entries, capture ID, container SHA and boundary; individual raw-manifest and
+container hashes stay separate. Supported entries carry the unchanged
+`sources::draft_checkpoint` body. Other classes retain classification/hash
+metadata, with their original bytes kept in the private capture. Attachment
+references are stat-only; blob contents are not included. Pages retain the
+existing 64-entry/1 MiB bounds; an oversized entry is refused, never truncated.
+
+A missing receipt, a recorded capture failure or an unverifiable capture
+publishes nothing and remains required/incomplete; publication Retry does not
+replace it with live drafts. An earlier uncaptured Next run omits the Next
+family. Its Qt/dev originals or provenance alone may be saved, but the durable
+binding keeps `partial: true, complete: false` across Retry and restart.
+The fixed `next-drafts-preload-v1` scope and `drafts-retained-import-v1.json`
+journal use the same single report admission and original-result lookup rules.
+Review keeps `drafts_capture` and `drafts_report` separate. This is source
+coverage only: no draft send, blob copy, import, deletion, current completeness,
+drain or installed acceptance is established by the report.
+
 ## macOS
 
 For a coordinator-approved private click fixture, opt in to actual GUI selection

@@ -233,10 +233,13 @@ struct ReviewRefusal {
     #[allow(dead_code)]
     code: String,
 }
-/// The native lane's refusal before the review saw the request.
+/// The native lane's refusal before the review saw the request. The service
+/// always writes `request_id` (null for a release); a missing key is not
+/// this shape.
 #[derive(Deserialize)]
 #[serde(deny_unknown_fields)]
 struct LaneRefusal {
+    #[serde(deserialize_with = "Option::deserialize")]
     request_id: Option<String>,
     accepted: bool,
     durable: bool,
@@ -469,6 +472,10 @@ mod tests {
                 "durable": false, "code": "x"}),
             json!({"request_id": null, "accepted": true, "durable": false, "code": "x"}),
             json!({"request_id": null, "accepted": false, "durable": false, "code": "x", "extra": 1}),
+            json!({"request_id": null, "accepted": false, "durable": true, "code": "x"}),
+            json!({"accepted": false, "durable": false, "code": "x"}),
+            json!({"abi": zerus_client_core::desktop::task_message::ABI, "read_only": false,
+                "code": "x", "release_id": release.release_id}),
             json!({}),
         ] {
             assert_eq!(

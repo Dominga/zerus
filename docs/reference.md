@@ -57,8 +57,34 @@ The CLI verifies the computer UUID, follows a renamed session by its conversatio
 ID, and rejects cleared, forgotten or ambiguous bindings. A conversation reference
 survives resume into a new run; an unconfirmed first-message reference requires
 the original run. A configured peer matching the machine name routes through SSH;
-use `hgs @configured-alias inspect '<reference>'` when its alias differs. A URI
-alone never launches a session or sends input.
+use `hgs @configured-alias inspect '<reference>'` when its alias differs.
+
+A reference identifies a session; it authorizes nothing. Reading it with
+`hgs inspect` never acts on the session. Any other session command does with it
+exactly what it does with the session's name: `hgs send` sends input, and `hgs a`
+may resume a saved session.
+A reference never launches a new session and never addresses a session other
+than the one it names.
+
+Every other command whose first argument is a session also accepts a reference
+there, for example `hgs pause '<reference>'` or `hgs send '<reference>' --json`.
+It resolves the session the reference names, following a rename, and then acts
+under the same checks as `--session-id`. Every record the command reads under
+that name must still carry the reference's conversation (or its run, when it
+names no conversation), and `kill` and `a` bind the terminal to the verified
+run. An archived conversation's reference reaches the commands that take
+`--archive` (`processes`, `reference`, `fork`, `kill`, `rename` and `resume`).
+A child agent's reference stays read-only, for `hgs inspect`. A reference and
+`--session-id` cannot be combined. A reference to another computer routes to its
+configured host, or to `@host`, only after that peer's `hgs --help` lists
+`session-reference-selector-v1`. It takes exactly one verified hop: the peer runs
+the command guarded by the reference's computer UUID (`--expect-machine`), so a
+peer that is another computer refuses it (`the selected SSH alias does not
+match`), and no peer forwards it again. A guarded call itself never routes a
+reference to another computer. A reference may also carry a `session` field,
+the session ID, which is then checked as well. `hgs reference`, `hgs self` and
+message envelopes do not add that field yet, because an older hgs refuses an
+unknown reference field.
 
 `hgs [@host] reference <session> --json [--archive ID] [--agent ID]` returns the
 same URI and readable identity fields. Optional `--run ID --conversation ID`

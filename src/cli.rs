@@ -127,6 +127,8 @@ pub(crate) const USAGE: &str = r#"usage: hgs [@host] <cmd> [project] [-c [ID]] [
        lifecycle-receipt-status-v1
        hgs [@host] <command> --session-id ID ...   select a live or saved session by its durable ID instead of its name
        session-id-selector-v1
+       hgs [@host] <command> 'zerus://session?...' ...   select the session a reference names, on every session command
+       session-reference-selector-v1
        hgs [@host] compact-context <session> --json compact the idle agent context using its native command
        hgs [@host] clear-context <session> --json   clear the idle agent context using its native command
        hgs [@host] interrupt <session> --json   interrupt the current turn, keep the session
@@ -556,7 +558,9 @@ fn dispatch_normal(mut args: Vec<String>) -> Result<i32> {
     // An encrypted gateway binds every local native call to the physical
     // machine it advertised. This check also works on Windows, without a
     // shell, stdin rewriting or a second native process.
+    let mut guarded = false;
     if args.first().is_some_and(|a| a == "--expect-machine") {
+        guarded = true;
         let expected = args.get(1).ok_or_else(|| Error::new(2, "Missing expected machine identity"))?;
         if uuid::Uuid::parse_str(expected).ok().is_none_or(|id| id.to_string() != *expected) {
             return Err(Error::new(1,"Mobile target identity changed; refresh computers"));
@@ -568,7 +572,16 @@ fn dispatch_normal(mut args: Vec<String>) -> Result<i32> {
             crate::swarm::local_node_id(&config).map_err(|_| Error::new(1,"Native machine identity is unavailable"))?
         };
         if actual != *expected {
-            return Err(Error::new(1,"Mobile target identity changed; refresh computers"));
+            // A forwarded session reference names the machine it expects; the
+            // SSH alias that carried it reached another one (zerus-ucck P1c).
+            let hop = args.get(guarded_at).is_some_and(|command| {
+                is_reference_call(command, args.get(guarded_at + 1..).unwrap_or_default())
+            });
+            return Err(Error::new(1, if hop {
+                "Session reference belongs to another computer; the selected SSH alias does not match"
+            } else {
+                "Mobile target identity changed; refresh computers"
+            }));
         }
         args.drain(..2);
         let command_at=if args.first().is_some_and(|a|a=="--client") {
@@ -638,6 +651,62 @@ fn dispatch_normal(mut args: Vec<String>) -> Result<i32> {
         return Ok(1);
     };
     let args = &args[index + 1..];
+    // zerus-ucck P1c: a session reference selects the session it names on every
+    // session command, through the same checks as `--session-id`. `inspect`
+    // keeps its own read-only reference path below.
+    let referenced;
+    let args = if is_reference_call(command, args) {
+        if session_id_flag(command, args)?.is_some() {
+            return Err(Error::new(2, "Select a session by its reference or by --session-id, not both"));
+        }
+        let reference = crate::session_reference::Reference::parse(&args[0])?;
+        if !reference.agent.is_empty() {
+            return Err(Error::new(1, "A child agent's reference is read-only; use hgs inspect"));
+        }
+        let local_id = crate::swarm::local_node_id(&config).map_err(|e| Error::new(1, e.to_string()))?;
+        if reference.machine != local_id {
+            // A guarded call, including the one hop below, acts only on the
+            // machine it verified; it never forwards a reference again.
+            if guarded {
+                return Err(Error::new(1, "Session reference belongs to another computer; a guarded call acts only on this computer"));
+            }
+            if matches!(command.as_str(), "native-ui" | "__dsh-ui-url") {
+                return Err(Error::new(1, "Open another computer's native UI by name or --session-id"));
+            }
+            // Exactly one verified hop: the peer runs the command as a call
+            // guarded by the reference's machine, so a peer that is not that
+            // machine refuses, and the machine that is never forwards it.
+            let host = if !target.is_empty() && !config.is_self(&target) {
+                &target
+            } else if config.peers.contains(&reference.host) && !config.is_self(&reference.host) {
+                &reference.host
+            } else {
+                return Err(Error::new(1, "The referenced computer is not configured here; choose its configured @host"));
+            };
+            return remote_via(&config, host, command, args, dry, Some(&reference.machine));
+        }
+        if !target.is_empty() && !config.is_self(&target) {
+            return Err(Error::new(1, "A local session reference cannot route to another computer"));
+        }
+        local_sessions()?;
+        let name = state::resolve_reference(&reference).map_err(|e| Error::new(1, e))?;
+        state::session_id::select_reference(&name, &reference.session, &reference.conversation, &reference.run);
+        let mut rest = vec![name];
+        rest.extend_from_slice(&args[1..]);
+        if !reference.archive.is_empty() {
+            if !ARCHIVE_COMMANDS.contains(&command.as_str()) {
+                return Err(Error::new(1, format!("The reference names an archived conversation; hgs {command} needs a saved session")));
+            }
+            if has(&rest, "--archive") {
+                return Err(Error::new(2, "The reference already names its archive"));
+            }
+            rest.extend(["--archive".to_owned(), reference.archive.clone()]);
+        }
+        referenced = rest;
+        &referenced[..]
+    } else {
+        args
+    };
     // zerus-ucck P1: `--session-id ID` selects the session the command names
     // first. A peer receives it unchanged, only after advertising it.
     let selected;
@@ -1136,7 +1205,9 @@ fn selector_markers(command: &str, args: &[String]) -> Result<Option<Vec<Marker>
     } else {
         (command, args, Vec::new())
     };
-    if session_id_flag(inner, rest)?.is_none() {
+    let selector = session_id_flag(inner, rest)?.is_some();
+    let reference = is_reference_call(inner, rest);
+    if !selector && !reference {
         return Ok(None);
     }
     match inner {
@@ -1144,7 +1215,12 @@ fn selector_markers(command: &str, args: &[String]) -> Result<Option<Vec<Marker>
         "hooks" => markers.push(Marker::Text("hooks-health-v1")),
         _ => {}
     }
-    markers.push(Marker::Line(SELECTOR));
+    if selector {
+        markers.push(Marker::Line(SELECTOR));
+    }
+    if reference {
+        markers.push(Marker::Line(REFERENCE_SELECTOR));
+    }
     Ok(Some(markers))
 }
 
@@ -1169,6 +1245,21 @@ pub(crate) fn gated(markers: &[Marker], args: &[String]) -> String {
 
 /// Commands whose first argument is a session, which `--session-id` may
 /// select instead (zerus-ucck P1).
+/// Session commands that also take an archived conversation (`--archive ID`),
+/// which an archived session reference selects (zerus-ucck P1c).
+const ARCHIVE_COMMANDS: &[&str] = &["processes", "reference", "fork", "kill", "rename", "resume"];
+
+/// The help line a peer lists once it resolves session references on every
+/// session command (zerus-ucck P1c).
+pub(crate) const REFERENCE_SELECTOR: &str = "session-reference-selector-v1";
+
+/// A session command, other than `inspect`, whose session is a reference.
+fn is_reference_call(command: &str, args: &[String]) -> bool {
+    command != "inspect"
+        && SESSION_COMMANDS.contains(&command)
+        && args.first().is_some_and(|value| value.starts_with("zerus://"))
+}
+
 /// `notify` and `paste` are the tray's and tmux's own entry points, and
 /// `subagent retire` names its session second; they keep names only.
 const SESSION_COMMANDS: &[&str] = &[
@@ -1247,8 +1338,8 @@ fn bound_terminal(session: &str) -> Result<Option<(String, String)>> {
         return Ok(None);
     };
     let changed = || {
-        let id = state::session_id::selected().map(|(_, id)| id).unwrap_or_default();
-        Error::new(1, format!("Session ID {id} no longer names {session}; refresh and retry"))
+        let message = state::session_id::selected().map(|selection| selection.changed());
+        Error::new(1, message.unwrap_or_else(|| format!("{session} changed; refresh and retry")))
     };
     let info = terminal()
         .probe(Target::Name(session), &[PaneField::SessionId, PaneField::RunMarker])
@@ -1273,6 +1364,20 @@ fn remote(
     command: &str,
     args: &[String],
     global_dry: bool,
+) -> Result<i32> {
+    remote_via(config, target, command, args, global_dry, None)
+}
+
+/// `remote`, optionally as the one verified hop of a session reference: the
+/// peer runs the command guarded by `--expect-machine MACHINE`, with the same
+/// SSH options the command has without it (zerus-ucck P1c).
+fn remote_via(
+    config: &Config,
+    target: &str,
+    command: &str,
+    args: &[String],
+    global_dry: bool,
+    machine: Option<&str>,
 ) -> Result<i32> {
     if target.starts_with('-') || target.chars().any(char::is_whitespace) {
         return Err(Error::new(1, "invalid SSH host alias"));
@@ -1349,8 +1454,8 @@ fn remote(
             let mut all=vec!["--expect-machine".into(),expected.into(),"--client".into(),config.host().into()];
             all.extend_from_slice(&args[1..]);all
         }
-        "session-action-status" => return Err(Error::new(2,"A remote lifecycle receipt read requires --expect-machine ID before session-action-status")),
-        "archives" | "kill" | "terminate" | "pause" | "inspect" | "reference" | "processes" | "worktrees" | "git-status" | "repository" | "dirs" | "project" | "archive" | "rename"
+        "session-action-status" if machine.is_none() => return Err(Error::new(2,"A remote lifecycle receipt read requires --expect-machine ID before session-action-status")),
+        "archives" | "session-action-status" | "kill" | "terminate" | "pause" | "inspect" | "reference" | "processes" | "worktrees" | "git-status" | "repository" | "dirs" | "project" | "archive" | "rename"
         | "send" | "send-now" | "session-action" | "terminal" | "history" | "history-projection" | "interrupt" | "clear-context" | "compact-context" | "answer" | "effort" | "settings" | "search" | "schedules" | "graph" | "wait" | "guide" | "dsh" | "opencode" | "attachment" | "file-read" | "recovery" | "swarm" | "read" | "notifications" | "speech" | "analytics" | "voice" | "hooks" | "--help" => {
             flags = vec![
                 "-o".into(),
@@ -1387,6 +1492,10 @@ fn remote(
         }
     };
     flags.extend(crate::machines::ssh_options(config, target));
+    let remote_args: Vec<String> = match machine {
+        Some(machine) => ["--expect-machine".to_owned(), machine.to_owned()].into_iter().chain(remote_args).collect(),
+        None => remote_args,
+    };
     let remote = if let Some(markers) = selector_markers(command, &args)? {
         // An older peer would read the flag as a session name; it must
         // advertise the selector, and what the command needs already, first.
@@ -2771,6 +2880,15 @@ mod tests {
             ["guarded-create-v1", "lifecycle-receipt-status-v1", SELECTOR]);
         assert!(selector_markers("--expect-machine", &args(&[machine, "inspect", "codex/p/a"])).unwrap().is_none());
         assert_eq!(selector_markers("--expect-machine", &args(&[machine, "inspect", "--session-id", "NOT"])).unwrap_err().code, 2);
+        // zerus-ucck P1c: a reference needs the reference selector; inspect
+        // keeps its existing read-only reference path.
+        let reference = "zerus://session?machine=11111111-1111-4111-8111-111111111111&host=peer&name=codex%2Fp%2Fa&conversation=c";
+        assert_eq!(names(selector_markers("send", &args(&[reference, "--json"])).unwrap().unwrap()), [REFERENCE_SELECTOR]);
+        assert_eq!(names(selector_markers("hooks", &args(&[reference, "--json"])).unwrap().unwrap()),
+            ["hooks-health-v1", REFERENCE_SELECTOR]);
+        assert_eq!(names(selector_markers("--expect-machine", &args(&[machine, "send", reference, "--json"])).unwrap().unwrap()),
+            ["guarded-create-v1", REFERENCE_SELECTOR]);
+        assert!(selector_markers("inspect", &args(&[reference])).unwrap().is_none());
         // Everything the CLI forwards to a peer with a selector carries it.
         for command in SESSION_COMMANDS {
             assert!(selector_markers(command, &args(&["--session-id", id])).unwrap().is_some(), "{command}");

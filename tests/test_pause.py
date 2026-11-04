@@ -1282,6 +1282,8 @@ class SessionIdentity(Harness):
         original = path.read_text()
         run, conversation = str(uuid.uuid4()), str(uuid.uuid4())
         request = json.dumps(dict(run_id=run, conversation_id=conversation, muted=True, expected_revision=0))
+        preferences = state / "notifications.json"
+        before = preferences.read_bytes() if preferences.exists() else None
         fd = os.open(state / ".lock", os.O_RDWR | os.O_CREAT, 0o600)
         try:
             fcntl.flock(fd, fcntl.LOCK_EX)
@@ -1301,7 +1303,7 @@ class SessionIdentity(Harness):
         self.assertEqual(muting.wait(timeout=30), 1, out + err)
         self.assertIn(f"Session ID {session} no longer names {name}", err)
         self.assertNotIn("notification_preferences", json.loads(path.read_text()))
-        self.assertFalse(any((state / "notifications").glob("*")) if (state / "notifications").is_dir() else False)
+        self.assertEqual(preferences.read_bytes() if preferences.exists() else None, before)
         path.write_text(original)
 
 
@@ -1325,6 +1327,113 @@ class SessionIdentity(Harness):
         dry = call("--dry-run", "a", "--session-id", session, "--existing", "--run-id", binding["run_id"])
         self.assertEqual(dry.returncode, 0, dry.stderr)
         self.assertIn(f"would open the existing native OpenCode TUI for {name}", dry.stdout)
+
+
+    # zerus-ucck P1c: a session reference selects the session it names on every
+    # session command, through the same checks as --session-id.
+    def test_a_reference_selects_the_session_on_every_command(self):
+        name = self.start()
+        record = self.binding(name)
+        def call(*args):
+            return subprocess.run([str(HGS), *args], env=self.env, capture_output=True, text=True, timeout=30)
+        uri = json.loads(self.hgs("reference", name, "--json"))["uri"]
+        # Emission stays off until every reader parses the session field.
+        self.assertNotIn("session=", uri)
+        self.assertEqual(json.loads(self.hgs("reference", uri, "--json"))["uri"], uri)
+        self.assertEqual(json.loads(self.hgs("reference", f"{uri}&session={record['session_id']}", "--json"))["uri"], uri)
+        wrong = call("reference", f"{uri}&session={uuid.uuid4()}", "--json")
+        self.assertEqual(wrong.returncode, 1, wrong.stdout)
+        self.assertIn("no longer bound to a saved session", wrong.stderr)
+        # Every table command resolves a reference before it acts.
+        table = re.search(r"const SESSION_COMMANDS: &\[&str\] = &\[(.*?)\];", (REPO / "src/cli.rs").read_text(), re.S)
+        unknown = uri.replace(record["conversation_id"], str(uuid.uuid4()))
+        for command in re.findall(r'"([a-z_-]+)"', table.group(1)):
+            if command == "inspect":
+                continue
+            result = call(command, unknown)
+            self.assertEqual(result.returncode, 1, (command, result.stderr))
+            self.assertIn("no longer bound to a saved session", result.stderr, command)
+        # Refusals: a reference and --session-id together, and a child agent's reference.
+        both = call("send", uri, "--session-id", record["session_id"], "--json")
+        self.assertEqual(both.returncode, 2, both.stderr)
+        child = call("send", f"{uri}&agent=worker", "--json")
+        self.assertEqual(child.returncode, 1, child.stderr)
+        self.assertIn("child agent's reference is read-only", child.stderr)
+        # The terminal a reference reaches is bound to its verified run: another
+        # run's terminal under the name is refused and survives.
+        self.t("rename-session", "-t", f"={name}", "claude/p/moved-away")
+        self.t("new-session", "-d", "-s", name, "sleep", "300")
+        self.t("set-option", "-t", f"={name}:", "@hgs_run", "another-run")
+        killed = call("kill", uri)
+        self.assertEqual(killed.returncode, 1, killed.stdout + killed.stderr)
+        self.assertIn(f"The session reference no longer names {name}", killed.stderr)
+        self.assertEqual(subprocess.run([str(self.bin / "tmux"), "has-session", "-t", f"={name}"],
+                                        env=self.env, capture_output=True).returncode, 0)
+        self.t("kill-session", "-t", f"={name}")
+        self.t("rename-session", "-t", "=claude/p/moved-away", name)
+        # It follows a rename, and acts on the session it names.
+        self.hgs("rename", uri, "claude/p/by-reference")
+        self.assertEqual(self.binding("claude/p/by-reference")["session_id"], record["session_id"])
+        self.send_event("claude/p/by-reference", "Stop", last_assistant_message="done")
+        self.hgs("pause", uri)
+        self.assertTrue(self.binding("claude/p/by-reference")["paused"])
+        # An archived conversation's reference reaches commands that take --archive.
+        self.hgs("archive", "claude/p/by-reference")
+        archived = next(json.loads(p.read_text()) for p in (self.root / "state" / "archives").glob("*.json")
+                        if json.loads(p.read_text())["name"] == "claude/p/by-reference")
+        archive_uri = json.loads(self.hgs("reference", "claude/p/by-reference", "--json", "--archive",
+                                          archived["archive_id"]))["uri"]
+        processes = call("processes", archive_uri)
+        self.assertEqual(processes.returncode, 0, processes.stderr)
+        archived_send = call("send", archive_uri, "--json")
+        self.assertEqual(archived_send.returncode, 1, archived_send.stderr)
+        self.assertIn("names an archived conversation", archived_send.stderr)
+
+
+    # #1376 review (MX6): a reference that names no conversation selects by its
+    # run. Another session takes the name after resolution, before kill binds
+    # its terminal: kill refuses, and the other session's terminal survives.
+    @unittest.skipIf(LEGACY_STATE, "fix introduced by session references")
+    def test_a_run_reference_binds_its_run_before_kill(self):
+        name = self.start()
+        state = self.root / "state"
+        path = state / (hashlib.sha256(name.encode()).hexdigest() + ".json")
+        record = json.loads(path.read_text())
+        # A session whose first message is unconfirmed has no conversation yet.
+        record.pop("conversation_id", None)
+        path.write_text(json.dumps(record) + "\n")
+        uri = json.loads(self.hgs("reference", name, "--json"))["uri"]
+        self.assertNotIn("conversation=", uri)
+        self.assertIn(f"run={record['run_id']}", uri)
+        other = str(uuid.uuid4())
+        taken = self.root / "taken.json"
+        taken.write_text(json.dumps(dict(record, session_id=str(uuid.uuid4()), run_id=other)) + "\n")
+        armed = self.root / "take-the-name"
+        tmux = f"{shlex.quote(TMUX)} -S {shlex.quote(self.socket)} -f /dev/null"
+        original = (self.bin / "tmux").read_text()
+        # kill resolves the reference, then asks tmux whether the name exists:
+        # at that moment, once, another run takes the name and its record.
+        self.script("tmux", f'''#!/bin/sh
+if [ "$1" = has-session ] && rm {shlex.quote(str(armed))} 2>/dev/null; then
+    {tmux} rename-session -t {shlex.quote("=" + name)} claude/p/moved-away
+    {tmux} new-session -d -s {shlex.quote(name)} sleep 300
+    {tmux} set-option -t {shlex.quote("=" + name + ":")} @hgs_run {shlex.quote(other)}
+    cp {shlex.quote(str(taken))} {shlex.quote(str(path))}
+fi
+exec {tmux} "$@"
+''')
+        armed.touch()
+        killed = subprocess.run([str(HGS), "kill", uri], env=self.env, capture_output=True, text=True, timeout=30)
+        self.script("tmux", original)
+        self.assertFalse(armed.exists(), "the name was taken during kill")
+        self.assertEqual(killed.returncode, 1, killed.stdout + killed.stderr)
+        self.assertIn(f"The session reference no longer names {name}", killed.stderr)
+        self.assertEqual(subprocess.run([str(self.bin / "tmux"), "has-session", "-t", f"={name}"],
+                                        env=self.env, capture_output=True).returncode, 0,
+                         "the other session's terminal survives")
+        self.t("kill-session", "-t", f"={name}")
+        self.t("rename-session", "-t", "=claude/p/moved-away", name)
+        path.write_text(json.dumps(record) + "\n")
 
 
 class Lifecycle(Harness):

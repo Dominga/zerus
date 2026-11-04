@@ -229,7 +229,7 @@ owner revokes a key by id. Without a key nothing changes.
 
 ## 9. U52: restart a member that crashed
 
-`Settings.restart_crashed: bool`, default false. A member session whose process
+`Settings.restart_crashed: bool`, default true (owner, 2026-11-05; it was false before, and a team stored without it reads true). A member session whose process
 exits while Zerus did not stop, pause or swap it and it is not limited
 (usage limit, H1) is launched again into the same folder and conversation
 (resume), at most 3 times per hour per member (`member.restarts: [at]`, last

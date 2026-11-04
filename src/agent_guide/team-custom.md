@@ -32,6 +32,6 @@ scale, the member for drain.
 
 The owner's gates (U51, U52): an intake key (hgs team intake-key) lets a
 process add up to 5 tasks as one urgent phase, one open phase per key;
-restart_crashed (off) restarts a crashed member 3 times an hour, then it stays
+restart_crashed (on) restarts a crashed member 3 times an hour, then it stays
 stopped - an exit the owner types in the member's terminal counts too, so turn
 it off before stopping a member by hand.

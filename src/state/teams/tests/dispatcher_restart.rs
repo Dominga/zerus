@@ -45,7 +45,8 @@ fn a_crashed_member_is_restarted_only_when_the_team_allows_it() {
     let mut t = team();
     t.members.iter_mut().find(|member| member.id == "dev").unwrap().seen = Some(MemberSeen { at: 1.0, live: true });
     let crashed = stopped("codex/x/dev", "r1", "stopped");
-    // Default off: only the liveness record changes, as today.
+    // Off: only the liveness record changes.
+    t.settings.restart_crashed = false;
     let found = steps(&t, std::slice::from_ref(&crashed), 20.0);
     assert!(found.contains(&Step::Liveness { member: "dev".into(), live: false }), "{found:?}");
     assert!(!found.iter().any(|step| matches!(step, Step::Restart { .. } | Step::CrashStopped { .. })), "{found:?}");

@@ -1650,7 +1650,7 @@ fn an_intake_key_adds_one_urgent_phase_and_no_other_operation() {
         // A team with none of the new fields behaves as today.
         let before = stored();
         assert!(before.intakes.is_empty() && before.intakes_seq == 0, "{before:?}");
-        assert!(!before.settings.restart_crashed);
+        assert!(before.settings.restart_crashed);
         assert!(before.members.iter().all(|member| member.restarts.is_empty() && member.crash.is_none() && !member.crash_told));
         let request = "11111111-2222-4333-8444-555555555551";
         let created = run("intake-key", &json!({"request_id":request,"team":"rv","label":"health watch","by":"human"}), false).unwrap();
@@ -1804,19 +1804,21 @@ fn a_stored_team_without_the_new_fields_loads_and_behaves_as_today() {
     }
     let mut legacy: Team = serde_json::from_value(value).unwrap();
     assert!(legacy.intakes.is_empty() && legacy.intakes_seq == 0);
-    assert!(!legacy.settings.restart_crashed);
+    // Owner, 2026-11-05: restart_crashed is on by default, for old teams too.
+    assert!(legacy.settings.restart_crashed);
     assert!(legacy.members.iter().all(|member| member.restarts.is_empty() && member.crash.is_none() && !member.crash_told));
     // The same plan, hand-out and settings work; none of the new fields is
     // written for a team that does not set them.
     let mut events = Vec::new();
-    ops::apply(&mut legacy, "settings", &json!({"settings":{"restart_crashed":true}}), &Actor::Human, &BTreeSet::new(), &mut events).unwrap();
-    assert!(legacy.settings.restart_crashed);
     let refused = ops::apply(&mut legacy, "settings", &json!({"settings":{"restart_crashed":false}}), &Actor::Member("lead".into()), &BTreeSet::new(), &mut events).unwrap_err();
     assert!(refused.to_string().contains("restart_crashed"), "{refused}");
-    legacy.settings.restart_crashed = false;
+    ops::apply(&mut legacy, "settings", &json!({"settings":{"restart_crashed":false}}), &Actor::Human, &BTreeSet::new(), &mut events).unwrap();
+    assert!(!legacy.settings.restart_crashed);
     let written = serde_json::to_value(&legacy).unwrap();
     assert!(written.get("intakes").is_none() && written.get("intakes_seq").is_none(), "{written}");
-    assert!(written["settings"].get("restart_crashed").is_none(), "{written}");
+    // An explicit off is written and survives a reload.
+    assert_eq!(written["settings"]["restart_crashed"], false, "{written}");
+    assert!(!serde_json::from_value::<Team>(written.clone()).unwrap().settings.restart_crashed);
     assert!(written["members"].as_array().unwrap().iter().all(|member| member.get("restarts").is_none()
         && member.get("crash").is_none() && member.get("crash_told").is_none()), "{written}");
 }

@@ -51,7 +51,7 @@ gains the exact command and, after the answer, who answered.
   request the same way at once; nothing was answered, and the error says so.
 - Owner, 2026-11-05: an agent whose process exited while its terminal stays
   open (`process_state: "exited"`, Agent exited) is a stopped session for the
-  team, never live. `restart_crashed` (still off by default) restarts the lead
+  team, never live. `restart_crashed` (on by default from 2026-11-05, for stored teams too) restarts the lead
   too, and a running team whose lead's session stopped is on the owner's
   attention list at once (`lead_stopped`, action `resume_lead`).
 - Owner, 2026-11-05: the lead's inbox message lists permissions and questions

@@ -181,8 +181,10 @@ pub(crate) struct Settings {
     #[serde(default, skip_serializing_if = "String::is_empty")]
     pub base_branch: String,
     /// U52: a member session that exits on its own is launched again into its
-    /// conversation, at most three times an hour; off by default.
-    #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+    /// conversation, at most three times an hour. On by default (owner,
+    /// 2026-11-05), also for a team stored before, and always written so the
+    /// desktop reads an explicit off.
+    #[serde(default = "default_restart_crashed")]
     pub restart_crashed: bool,
     /// U56: minutes a busy member may go without a session event before Zerus
     /// marks it stuck; 0 (unset) reads the default of 10.
@@ -226,6 +228,10 @@ fn full_tests_ask(value: &FullTests) -> bool {
 #[derive(Clone, Debug, Default, Deserialize, Serialize, PartialEq)]
 pub(crate) struct BranchPerTask {
     pub template: String,
+}
+
+fn default_restart_crashed() -> bool {
+    true
 }
 
 fn default_max_members() -> usize {
@@ -306,7 +312,7 @@ impl Default for Settings {
             land_allowed: false,
             branch_per_task: None,
             base_branch: String::new(),
-            restart_crashed: false,
+            restart_crashed: true,
             stuck_minutes: 0,
             lead_restarts_stuck: false,
             lead_removes_own_pause: false,

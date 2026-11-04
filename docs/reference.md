@@ -1855,7 +1855,7 @@ owner and the lead change a plan, as before.
 
 ### Restarting a crashed member
 
-`Settings.restart_crashed` (off by default, only the owner sets it) launches a
+`Settings.restart_crashed` (on by default, only the owner changes it) launches a
 member's session again into the same folder and conversation when its process
 exits on its own: not a pause, an archive, a usage limit, a swap, or a session
 Zerus has not seen running since its last restart. An exit you type yourself in

@@ -1366,7 +1366,7 @@ pub(crate) fn attention(team: &Team, now: f64) -> Vec<Value> {
     }
     // The owner, 2026-11-05: a running team whose lead's session stopped has
     // nobody to read its reports or hand out its tasks; only the owner can
-    // resume it (or restart_crashed does, when it is on).
+    // resume it (or restart_crashed does, on by default).
     if team.status == TeamStatus::Running {
         if let Some(lead) = team.member(&team.lead).filter(|lead| lead.state == MemberState::Active && lead.session.is_some()) {
             if let Some(seen) = lead.seen.filter(|seen| !seen.live) {
@@ -1781,6 +1781,8 @@ mod tests {
         let mut team = team();
         let now = 5_000.0;
         team.members.iter_mut().find(|member| member.id == "lead").unwrap().seen = Some(MemberSeen { at: now - 120.0, live: false });
+        // Off, the item names the setting that would restart the lead.
+        team.settings.restart_crashed = false;
         let attention = super::attention(&team, now);
         let found = attention.iter().find(|item| item["kind"] == "lead_stopped").expect("the owner sees the stopped lead");
         assert_eq!(found["minutes"], 2);

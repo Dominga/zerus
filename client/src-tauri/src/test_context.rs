@@ -1,15 +1,18 @@
 //! Context for component fixtures, never native caller authentication.
 //! Re-execute the exact test before any fixture/cached mode is constructed;
 //! changing this shared process's environment would invalidate live snapshots.
+//! One failed child fences later isolated fixtures. Read the FIRST
+//! "did not settle successfully" diagnostic; later fences are consequences.
 use std::{
     process::Command,
     sync::{
-        atomic::{AtomicBool, AtomicUsize, Ordering},
+        atomic::{AtomicUsize, Ordering},
         Arc, Condvar, Mutex, Weak,
     },
     time::{Duration, Instant},
 };
-use zerus_client_core::{run, Exit, Invocation};
+use zerus_client_core::run;
+mod process;
 
 const AGENT: [&str; 3] = ["HGS_SESSION", "HGS_SESSION_ID", "HGS_RUN_ID"];
 const LIMIT: usize = 2;
@@ -95,53 +98,30 @@ fn run_case(case: &str, timeout: Duration, configure: impl FnOnce(&mut Command) 
     let resources = Arc::downgrade(&permit);
     let environment = run::FrozenEnvironment::capture().unwrap();
     let until = Instant::now() + timeout;
-    let invocation = Invocation {
-        args: ["--exact", case, "--test-threads=1", "--nocapture"]
-            .map(String::from)
-            .into(),
-        stdin: Some(Vec::new()),
-        // Native barriers keep their 30s watchdog. The new non-agent fixtures
-        // include a maintained 31s native effect, with original 45/60s limits;
-        // their outer watchdog cannot use run_owned's 30s exchange cap.
-        timeout,
-        request_id: None,
-    };
-    let result = run::run_accounted_frozen(
-        &std::env::current_exe().unwrap(),
-        &invocation,
-        &environment,
-        1 << 20,
-        &AtomicBool::new(false),
-        permit,
-        move |command| {
-            configure(command);
-            SPAWNS.fetch_add(1, Ordering::Relaxed);
-            command.spawn()
-        },
-    );
-    let (valid, diagnostic) = match result {
-        Ok(Exit::Code {
-            code,
-            stdout,
-            stderr,
-        }) => (
-            code == 0 && String::from_utf8_lossy(&stdout).contains("1 passed; 0 failed"),
-            format!(
-                "exit {code}: {}",
-                stderr.chars().take(4096).collect::<String>()
-            ),
-        ),
-        _ => (false, "bounded fixture exchange incomplete".into()),
-    };
+    let mut command = Command::new(std::env::current_exe().unwrap());
+    command.args(["--exact", case, "--test-threads=1", "--nocapture"]);
+    environment.apply(&mut command);
+    configure(&mut command);
+    SPAWNS.fetch_add(1, Ordering::Relaxed);
+    // Native's outer watchdog remains 30s. The non-agent fixtures include a
+    // maintained 31s effect with original 45/60s limits and use a 90s outer bound.
+    let mut report = process::run(command, process::Watchdog::new(until), permit);
+    let valid = report.success();
     if valid && settled(&resources, until) {
         return;
+    }
+    if valid && Instant::now() >= until {
+        report.stopped = Some(process::Stopped::TimedOut);
     }
     // An error can return before physical pipe drain. Its Permit stays in the
     // original runner's resources; never free it or keep queued fixtures
     // waiting forever on that uncertain original.
     CHILDREN.0.lock().unwrap().failed = true;
     CHILDREN.1.notify_all();
-    panic!("isolated fixture {case} did not settle successfully: {diagnostic}");
+    panic!(
+        "isolated fixture {case} did not settle successfully: {}",
+        report.diagnostic()
+    );
 }
 fn settled(resources: &Weak<Permit>, until: Instant) -> bool {
     let mut state = CHILDREN.0.lock().unwrap();

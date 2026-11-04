@@ -1,3 +1,4 @@
+import { watchBusyClone } from "./project-clone-status";
 import { For, Show, createSignal, onCleanup, onMount } from "solid-js";
 import { Icon } from "../lib/icons";
 import { enhance } from "./ProjectCatalogDialog";
@@ -20,7 +21,12 @@ export default function ProjectCloneDialog(props: { project: string; preferred?:
   const [url, setUrl] = createSignal(""); const [parent, setParent] = createSignal("~"); const [name, setName] = createSignal("");
   const [project, setProject] = createSignal(props.project); const [newName, setNewName] = createSignal("");
   const [busy, setBusy] = createSignal(false); const [error, setError] = createSignal(""); const [browsing, setBrowsing] = createSignal(false);
-  let gone = false, nameEdited = false, suggestion = 0, dialog!: HTMLDialogElement;
+  let gone = false, closeRequested = false, nameEdited = false, suggestion = 0, dialog!: HTMLDialogElement;
+  let stopFollowing = () => {};
+  const follow = (v: CloneView | undefined) => {
+    stopFollowing();
+    if (v?.busy) stopFollowing = watchBusyClone(() => bridge.projectCloneStatus(v.id), (next) => { if (!gone && view()?.id === v.id) setView(next); });
+  };
   const sync = (v: CloneView) => { if (!gone) { setView(v); setUrl(v.url); setParent(v.parent); setName(v.name); } };
   const locked = () => busy() || !!view()?.locked;
   const destination = () => name() ? `${parent().replace(/\/$/u, "")}/${name()}` : "";
@@ -28,15 +34,15 @@ export default function ProjectCloneDialog(props: { project: string; preferred?:
   const valid = () => !!url().trim() && !!parent().trim() && !!name() && name() !== "." && name() !== ".." && !/[\u0000-\u001f\u007f/\\:*?"<>|]/u.test(name()) && validProject();
   const close = async () => {
     if (view()?.cloning && view()?.busy) return;
-    try { if (view()) await bridge.projectCloneClose(view()!.id); props.close(); }
-    catch (e) {setError(String(e));}
+    try { if (view()) { closeRequested = true; await bridge.projectCloneClose(view()!.id); } props.close(); }
+    catch (e) {closeRequested = false; setError(String(e));}
   };
   onMount(() => { dialog.showModal(); queueMicrotask(() => dialog.querySelector<HTMLElement>("select")?.focus()); });
-  onCleanup(() => { gone = true; if (view()) void bridge.projectCloneClose(view()!.id).catch(() => {}); dialog.close(); if (props.origin.isConnected) props.origin.focus(); });
+  onCleanup(() => { stopFollowing(); gone = true; if (view() && !closeRequested) void bridge.projectCloneClose(view()!.id).catch(() => {}); dialog.close(); if (props.origin.isConnected) props.origin.focus(); });
   const open = async () => {
     const selected = places.find((p) => p.computer === computer()); if (!selected || busy()) return;
     setBusy(true); setError("");
-    try { const v = await bridge.projectCloneOpen(selected); if (!gone) { setPlace(selected); sync(v); nameEdited = !!v.name; queueMicrotask(() => dialog.querySelector<HTMLElement>("#cl-url")?.focus()); } }
+    try { const v = await bridge.projectCloneOpen(selected); if (!gone) { setPlace(selected); sync(v); follow(v); nameEdited = !!v.name; queueMicrotask(() => dialog.querySelector<HTMLElement>("#cl-url")?.focus()); } }
     catch (e) {setError(String(e));} finally {if (!gone) setBusy(false);}
   };
   const changeUrl = async (value: string) => {
@@ -45,12 +51,13 @@ export default function ProjectCloneDialog(props: { project: string; preferred?:
   };
   const step = async (action: "begin" | "check" | "retire") => {
     const v = view(); if (!v || busy() || (action === "begin" && !valid())) return;
+    stopFollowing();
     setBusy(true); setError("");
     let polling = false, watching = true;
     const poll = setInterval(() => {if (!polling) {polling = true; void bridge.projectCloneStatus(v.id).then((next) => {if (!gone && watching) setView(next);}).catch(() => {}).finally(() => {polling = false;});}}, 150);
     try {sync(await bridge.projectCloneStep(v.id, action, {url: url().trim(), parent: parent().trim(), name: name()})); if (action === "retire") nameEdited = true;}
     catch (e) {setError(String(e)); const next = await bridge.projectCloneStatus(v.id).catch(() => null); if (next) sync(next);}
-    finally {watching = false; clearInterval(poll); if (!gone) setBusy(false);}
+    finally {watching = false; clearInterval(poll); if (!gone) { setBusy(false); follow(view()); }}
   };
   const use = async () => {
     const v = view(); if (!v?.ready || !validProject() || busy()) return;

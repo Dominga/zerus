@@ -28,8 +28,14 @@ pub enum Request {
     CreationWorktree {
         intent: Box<super::creation_worktree::Intent>,
     },
+    CreationLaunch {
+        intent: Box<super::creation_launch::Intent>,
+    },
     TaskStartReconcile {
         intent: Box<super::task_start_reconcile::Intent>,
+    },
+    TerminationOutcome {
+        intent: Box<super::termination_outcome::Intent>,
     },
     NotificationControl {
         scope: super::notification_control::Scope,
@@ -84,7 +90,9 @@ impl Request {
         match self {
             Self::CreationClone { intent } => &intent.clone_request_id,
             Self::CreationWorktree { intent } => &intent.worktree_request_id,
+            Self::CreationLaunch { intent } => &intent.launch_id,
             Self::TaskStartReconcile { intent } => &intent.reconcile_id,
+            Self::TerminationOutcome { intent } => &intent.request_id,
             Self::NotificationControl { control, .. } => control.request_id(),
             Self::ActivationWait { request_id }
             | Self::DesktopOwnership { request_id, .. }
@@ -98,7 +106,9 @@ impl Request {
         match self {
             Self::CreationClone { .. } => "creation_clone",
             Self::CreationWorktree { .. } => "creation_worktree",
+            Self::CreationLaunch { .. } => "creation_launch",
             Self::TaskStartReconcile { .. } => "task_start_reconcile",
+            Self::TerminationOutcome { .. } => "termination_outcome",
             Self::NotificationControl { control, .. } => control.operation(),
             Self::DesktopOwnership { .. } => "desktop_ownership",
             Self::ImportPendingReads { .. } => "import_pending_reads",
@@ -112,7 +122,9 @@ impl Request {
         match self {
             Self::CreationClone { intent } => intent.as_ref().clone().verify().is_ok(),
             Self::CreationWorktree { intent } => intent.as_ref().clone().verify().is_ok(),
+            Self::CreationLaunch { intent } => intent.as_ref().clone().verify().is_ok(),
             Self::TaskStartReconcile { intent } => intent.as_ref().clone().verify().is_ok(),
+            Self::TerminationOutcome { intent } => intent.valid(),
             Self::NotificationControl { scope, control } => scope.valid() && control.valid(),
             Self::DesktopOwnership {
                 journal, revision, ..
@@ -242,7 +254,9 @@ impl Cache {
             Request::CacheMaintenance { .. }
                 | Request::CreationClone { .. }
                 | Request::CreationWorktree { .. }
+                | Request::CreationLaunch { .. }
                 | Request::TaskStartReconcile { .. }
+                | Request::TerminationOutcome { .. }
         ) {
             if ownership_mode != Some(super::ownership::Mode::Service) {
                 return Err(io::ErrorKind::PermissionDenied.into());
@@ -385,7 +399,23 @@ impl Responder {
                 }
                 Some(super::ownership::Mode::Service)
             }
+            Request::CreationLaunch { intent } => {
+                if self.ownership_mode.get() != Some(&super::ownership::Mode::Service)
+                    || self.configuration.get() != Some(&intent.scope.configuration)
+                {
+                    return Err(io::ErrorKind::PermissionDenied.into());
+                }
+                Some(super::ownership::Mode::Service)
+            }
             Request::TaskStartReconcile { intent } => {
+                if self.ownership_mode.get() != Some(&super::ownership::Mode::Service)
+                    || self.configuration.get() != Some(&intent.scope.configuration)
+                {
+                    return Err(io::ErrorKind::PermissionDenied.into());
+                }
+                Some(super::ownership::Mode::Service)
+            }
+            Request::TerminationOutcome { intent } => {
                 if self.ownership_mode.get() != Some(&super::ownership::Mode::Service)
                     || self.configuration.get() != Some(&intent.scope.configuration)
                 {
@@ -629,6 +659,75 @@ mod tests {
     }
 
     #[test]
+    fn termination_retention_requires_cached_service_mode_and_exact_configuration() {
+        use crate::desktop::{
+            ownership::Mode,
+            termination_outcome::{Choice, Intent, Scope},
+        };
+        let capture = crate::termination_cleanup::Capture {
+            target: crate::Target {
+                computer: String::new(),
+                name: "codex/example/source".into(),
+                run_id: "run".into(),
+                conversation_id: "conversation".into(),
+            },
+            machine: id(7),
+            root: "/srv/example/work".into(),
+            common_dir: "/srv/example/main/.git".into(),
+            owner_id: "original-owner".into(),
+        };
+        let original =
+            String::from_utf8(capture.invocation(&id(101)).unwrap().stdin.unwrap()).unwrap();
+        let intent = Intent {
+            scope: Scope {
+                configuration: "a".repeat(64),
+                service_epoch: id(4),
+            },
+            confirmation_id: id(102),
+            choice: Choice::RemoveAfterTerminate,
+            request_id: id(101),
+            capture,
+            original,
+        };
+        let mut envelope = envelope(1);
+        envelope.request = Request::TerminationOutcome {
+            intent: Box::new(intent),
+        };
+        let cache = Cache::default();
+        assert!(cache.prepare(envelope.clone()).is_err());
+        assert!(cache
+            .prepare_with_mode(envelope.clone(), Some(Mode::Native))
+            .is_err());
+        let slot = cache
+            .prepare_with_mode(envelope.clone(), Some(Mode::Service))
+            .unwrap();
+        *slot.0.child.lock().unwrap() = Some((24, "synthetic-birth".into()));
+        assert_eq!(
+            cache.evidence(&id(1)).unwrap().ownership_mode,
+            Some(Mode::Service)
+        );
+        let responder = Responder::new(
+            "com.hgdev.hgs-tray".into(),
+            super::super::Build {
+                version: "1.0.0".into(),
+                source_commit: "a".repeat(40),
+                source_dirty: Some(false),
+            },
+            id(8),
+            true,
+            false,
+        );
+        assert!(responder.configure_ownership_mode_once(Mode::Service));
+        assert!(responder.configure_once("b".repeat(64)));
+        assert!(responder
+            .prepare_ui_request(envelope.attempt.clone(), envelope.request.clone())
+            .is_err());
+        let decoded: Result<Envelope, _> =
+            serde_json::from_value(serde_json::to_value(&envelope).unwrap());
+        assert!(decoded.unwrap().valid());
+    }
+
+    #[test]
     fn cache_requires_the_original_native_service_mode() {
         use crate::desktop::{
             cache_maintenance::{Command, Timing},
@@ -737,6 +836,40 @@ mod tests {
         // authority claim can ride along.
         let mut request = serde_json::to_value(&value.request).unwrap();
         request["op"] = "creation_clone".into();
+        assert!(serde_json::from_value::<Request>(request).is_err());
+        for field in ["mode", "confirmed", "role", "execution_consent"] {
+            let mut request = serde_json::to_value(&value.request).unwrap();
+            request[field] = true.into();
+            assert!(serde_json::from_value::<Request>(request).is_err());
+        }
+    }
+
+    #[test]
+    fn launch_evidence_requires_cached_service_mode_and_the_same_configuration() {
+        use crate::desktop::ownership::Mode;
+        let intent = crate::desktop::creation_launch::test_intent();
+        let cache = Cache::default();
+        let mut value = envelope(1);
+        value.request = Request::CreationLaunch {
+            intent: Box::new(intent.clone()),
+        };
+        assert_eq!(value.request.operation(), "creation_launch");
+        assert_eq!(value.request.id(), intent.launch_id);
+        assert!(cache.prepare(value.clone()).is_err());
+        assert!(cache
+            .prepare_with_mode(value.clone(), Some(Mode::Native))
+            .is_err());
+        let slot = cache
+            .prepare_with_mode(value.clone(), Some(Mode::Service))
+            .unwrap();
+        *slot.0.child.lock().unwrap() = Some((25, "synthetic-birth".into()));
+        let evidence = cache.evidence(&id(1)).unwrap();
+        assert_eq!(evidence.ownership_mode, Some(Mode::Service));
+        assert_eq!(evidence.request_id, intent.launch_id);
+        // A clone-shaped body never deserializes as this kind, and no
+        // authority claim can ride along.
+        let mut request = serde_json::to_value(&value.request).unwrap();
+        request["op"] = "creation_worktree".into();
         assert!(serde_json::from_value::<Request>(request).is_err());
         for field in ["mode", "confirmed", "role", "execution_consent"] {
             let mut request = serde_json::to_value(&value.request).unwrap();

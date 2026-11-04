@@ -161,6 +161,8 @@ export type EditOutcome = (
 export interface NotificationOwnership {
   /** Local startup recovery presentation; never a service grant. */
   native_recovery?: boolean;
+  /** Native helper observation only; never permission to start a writer. */
+  activation?: { pending: boolean; running: boolean; needs_resume: boolean; code: string };
   status: null | { abi: string; configuration: string; journal: string | null; revision: number;
     state: "passive" | "preparing" | "service" | "draining" | "revoked" | "native" | "identity_changed" | "unavailable";
     rearm_required: boolean; request_id: string | null; owner_epoch: string | null; identity_current: boolean };
@@ -171,6 +173,8 @@ export interface NotificationOwnership {
 }
 /** Desktop service presentation has separate provenance from device-local marks. */
 export interface DesktopService {
+  /** Bounded display reason from the checked original service scope; no authority. */
+  executable_upgrade?: null | { state: "draining" | "manual_refresh_required" };
   /** Native intent/current-scope presentation, never a permission. */
   notification_preferences?: null | {
     status: null | { abi: string; scope: { configuration: string; service_epoch: string };
@@ -196,7 +200,7 @@ export interface DesktopService {
   /** Native frozen-read transfer; completion is durable queueing, not host ACK. */
   pending_read_import?: null | { required: boolean; complete: boolean; running: boolean; code: string; through: number; superseded: number; delivered: false };
   /** Best-effort Staged report only; its outcome never grants or gates service work. */
-  retained_source_import?: null | { required: boolean; complete: boolean; running: boolean; code: string; phase: string | null; creations_capture?: { code: string; paused: boolean; capture_id: string | null }; creations_report?: { required: boolean; complete: boolean; running: boolean; code: string; phase: string | null } };
+  retained_source_import?: null | { required: boolean; complete: boolean; running: boolean; code: string; phase: string | null; creations_capture?: { code: string; paused: boolean; capture_id: string | null }; local_read_capture?: { code: string; paused: boolean; capture_id: string | null; view_ready?: boolean; view_revision?: string }; drafts_capture?: { code: string; writes: boolean; paused: boolean; capture_id: string | null; manifests: number }; downloads_capture?: null | { code: string; capture_id: string | null }; downloads_report?: { required: boolean; complete: boolean; running: boolean; code: string; phase: string | null }; drafts_report?: { required: boolean; complete: boolean; partial?: boolean; running: boolean; code: string; phase: string | null }; worktree_cache_capture?: { code: string; paused: boolean; capture_id: string | null }; worktree_cache_report?: { required: boolean; complete: boolean; running: boolean; code: string; phase: string | null }; local_reads_report?: { required: boolean; complete: boolean; running: boolean; code: string; phase: string | null }; creations_report?: { required: boolean; complete: boolean; running: boolean; code: string; phase: string | null } };
   notification_ownership?: NotificationOwnership;
   code: string;
 }
@@ -298,6 +302,9 @@ export interface ActivityEvent {
   voice?: Record<string, unknown>;
   /** Codex's question replies of a user event, parsed in Rust (R7's annotate_replies). */
   question_replies?: Reply[];
+  /** A fork's row from the session it began from (that session's journal name):
+   * read-only history before the fork (zerus-b4qk). */
+  inherited_from?: string;
   [field: string]: unknown;
 }
 
@@ -848,6 +855,8 @@ export interface SavedDraftItem {
 }
 /** `next` is an opaque token for the following page. */
 export interface SavedDraftsPage { items: SavedDraftItem[]; next: string | null }
+/** The G3 drafts capture's status (draft_preload::Status), shown in Saved drafts in every mode. */
+export interface DraftCaptureStatus { code: string; capture_id: string | null; manifests: number; writes: boolean; paused: boolean }
 /** The import's conflicts; `next` is the following page's offset. */
 export interface ConflictsPage { items: SavedDraftItem[]; next: number | null }
 export interface SavedDraftDetail { text: string; attachments: number; detail: string; restorable: boolean }

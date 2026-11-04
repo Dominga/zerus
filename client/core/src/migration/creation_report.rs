@@ -1,8 +1,10 @@
-//! A separate creation-group publication record. Historical snapshot binding
-//! only; reuses desktop-import-v1 and never carries Qt/Settings hashes, worker
-//! authority, consent or a mutable creation operation.
+//! Closed historical preload publication journals. Each group has a separate
+//! scope, file and native lock; the original creation format/API stays intact.
+//! Reuses desktop-import-v1 and never carries Qt/Settings hashes, worker
+//! authority, consent or a mutable operation.
 use super::{
-    journal::MAX_ATTEMPTS, preload::Reference, transport::StagedReceipt, SourceError, SourceResult,
+    download_report::Binding, draft_report, journal::MAX_ATTEMPTS, preload::Reference,
+    transport::StagedReceipt, SourceError, SourceResult,
 };
 use serde::{Deserialize, Serialize};
 use std::{
@@ -14,6 +16,95 @@ use zerus_desktop_migration::{sha256, Evidence};
 pub const SCOPE: &str = "next-creations-preload-v1";
 const BYTES: usize = 64 << 10;
 const FILE: &str = "creations-retained-import-v1.json";
+/// Native-only selection: no caller-defined scope, filename or source path.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum Group {
+    Creations,
+    LocalReads,
+    WorktreeCache,
+    /// The download folder's committed original index
+    /// (`download_report`, zerus-5wmh.66.5.2.1.3.1).
+    Downloads,
+    /// The drafts capture's committed original manifests
+    /// (`draft_report`, zerus-5wmh.66.5.2.1.2).
+    Drafts,
+}
+impl Group {
+    pub fn scope(self) -> &'static str {
+        match self {
+            Self::Creations => SCOPE,
+            Self::LocalReads => "next-local-read-marks-preload-v1",
+            Self::WorktreeCache => "next-worktree-cache-preload-v1",
+            Self::Downloads => "next-download-index-preload-v1",
+            Self::Drafts => "next-drafts-preload-v1",
+        }
+    }
+    fn file(self) -> &'static str {
+        match self {
+            Self::Creations => FILE,
+            Self::LocalReads => "local-read-retained-import-v1.json",
+            Self::WorktreeCache => "worktree-cache-retained-import-v1.json",
+            Self::Downloads => "download-index-retained-import-v1.json",
+            Self::Drafts => "drafts-retained-import-v1.json",
+        }
+    }
+    fn lock(self) -> &'static str {
+        match self {
+            Self::Creations => "creations-retained-import-v1.lock",
+            Self::LocalReads => "local-read-retained-import-v1.lock",
+            Self::WorktreeCache => "worktree-cache-retained-import-v1.lock",
+            Self::Downloads => "download-index-retained-import-v1.lock",
+            Self::Drafts => "drafts-retained-import-v1.lock",
+        }
+    }
+}
+/// What a record publishes: a preload capture's reference, the download
+/// folder's evidence binding, or the drafts capture's binding. Untagged, so
+/// a preload record's serialized bytes are exactly as before; no two shapes
+/// share a field set.
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(untagged)]
+pub enum Source {
+    Preload(Reference),
+    Downloads(Binding),
+    Drafts(draft_report::Binding),
+}
+impl Source {
+    pub fn capture_id(&self) -> &str {
+        match self {
+            Self::Preload(reference) => reference.capture_id(),
+            Self::Downloads(binding) => binding.capture_id(),
+            Self::Drafts(binding) => binding.capture_id(),
+        }
+    }
+    pub fn valid(&self) -> bool {
+        match self {
+            Self::Preload(reference) => reference.valid(),
+            Self::Downloads(binding) => binding.valid(),
+            Self::Drafts(binding) => binding.valid(),
+        }
+    }
+    /// Whether what it publishes is the whole family: a drafts capture whose
+    /// Next store showed an earlier uncaptured run stays incomplete.
+    pub fn complete(&self) -> bool {
+        !matches!(self, Self::Drafts(binding) if binding.earlier_run)
+    }
+}
+impl From<Reference> for Source {
+    fn from(reference: Reference) -> Self {
+        Self::Preload(reference)
+    }
+}
+impl From<Binding> for Source {
+    fn from(binding: Binding) -> Self {
+        Self::Downloads(binding)
+    }
+}
+impl From<draft_report::Binding> for Source {
+    fn from(binding: draft_report::Binding) -> Self {
+        Self::Drafts(binding)
+    }
+}
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
 pub enum Phase {
@@ -40,7 +131,7 @@ pub struct Record {
     pub configuration: String,
     pub import_id: String,
     pub created_at: u64,
-    pub source: Reference,
+    pub source: Source,
     pub attempt: u32,
     pub phase: Phase,
     pub expected: Option<StagedReceipt>,
@@ -48,7 +139,12 @@ pub struct Record {
     pub recorded_attempt: Option<u32>,
 }
 impl Record {
-    pub fn new(configuration: String, source: Reference, created_at: u64) -> SourceResult<Self> {
+    pub fn new(
+        configuration: String,
+        source: impl Into<Source>,
+        created_at: u64,
+    ) -> SourceResult<Self> {
+        let source = source.into();
         let record = Self {
             version: 1,
             scope: SCOPE.into(),
@@ -66,10 +162,38 @@ impl Record {
         }
         Ok(record)
     }
-    pub fn new_v2(configuration: String, source: Reference, created_at: u64) -> SourceResult<Self> {
+    pub fn new_v2(
+        configuration: String,
+        source: impl Into<Source>,
+        created_at: u64,
+    ) -> SourceResult<Self> {
         let mut record = Self::new(configuration, source, created_at)?;
         record.version = 2;
         record.recorded_attempt = Some(0);
+        Ok(record)
+    }
+    pub fn new_group(
+        group: Group,
+        configuration: String,
+        source: impl Into<Source>,
+        created_at: u64,
+    ) -> SourceResult<Self> {
+        let source = source.into();
+        let record = Self {
+            version: 2,
+            scope: group.scope().into(),
+            configuration,
+            import_id: source.capture_id().into(),
+            created_at,
+            source,
+            attempt: 0,
+            phase: Phase::Reserved,
+            expected: None,
+            recorded_attempt: Some(0),
+        };
+        if !record.valid() {
+            return Err(SourceError::InvalidMetadata);
+        }
         Ok(record)
     }
     /// Durable evidence that this Attempted record has not passed its commit
@@ -112,14 +236,27 @@ impl Record {
     }
     pub fn valid(&self) -> bool {
         (match self.version {
-            1 => self.recorded_attempt.is_none(),
+            1 => self.scope == SCOPE && self.recorded_attempt.is_none(),
             2 => self.recorded_attempt.is_some_and(|n| {
                 n <= self.attempt
                     && (n == 0) == self.expected.is_none()
                     && (self.phase != Phase::NotCommitted || n == self.attempt)
             }),
             _ => false,
-        }) && self.scope == SCOPE
+        }) && [
+            Group::Creations.scope(),
+            Group::LocalReads.scope(),
+            Group::WorktreeCache.scope(),
+            Group::Downloads.scope(),
+            Group::Drafts.scope(),
+        ]
+        .contains(&self.scope.as_str())
+            // The download scope holds only download bindings, and only it.
+            && matches!(self.source, Source::Downloads(_))
+                == (self.scope == Group::Downloads.scope())
+            // The drafts scope holds only drafts bindings, and only it.
+            && matches!(self.source, Source::Drafts(_))
+                == (self.scope == Group::Drafts.scope())
             && digest(&self.configuration)
             && self.source.valid()
             && self.import_id == self.source.capture_id()
@@ -143,7 +280,8 @@ impl Record {
             })
     }
     fn follows(&self, old: &Self) -> bool {
-        if self.configuration != old.configuration
+        if self.scope != old.scope
+            || self.configuration != old.configuration
             || self.import_id != old.import_id
             || self.source != old.source
             || self.created_at != old.created_at
@@ -200,6 +338,7 @@ pub struct Stored {
     pub sha256: String,
 }
 pub struct Journal {
+    group: Group,
     data: PathBuf,
     configuration: String,
 }
@@ -234,23 +373,31 @@ fn lock(path: &Path) -> SourceResult<crate::fsx::preload::Lock> {
 }
 impl Journal {
     pub fn new(data: &Path, configuration: &str) -> SourceResult<Self> {
+        Self::for_group(Group::Creations, data, configuration)
+    }
+    pub fn for_group(group: Group, data: &Path, configuration: &str) -> SourceResult<Self> {
         if !data.is_absolute() || !digest(configuration) {
             return Err(SourceError::InvalidMetadata);
         }
         Ok(Self {
+            group,
             data: data.into(),
             configuration: configuration.into(),
         })
     }
     pub fn load(&self) -> SourceResult<Option<Stored>> {
-        let Some(bytes) = crate::fsx::read_private_bounded(&self.data.join(FILE), BYTES)
-            .map_err(|_| SourceError::SourceUnreadable)?
+        let Some(bytes) =
+            crate::fsx::read_private_bounded(&self.data.join(self.group.file()), BYTES)
+                .map_err(|_| SourceError::SourceUnreadable)?
         else {
             return Ok(None);
         };
         let record: Record =
             serde_json::from_slice(&bytes).map_err(|_| SourceError::UnsupportedSource)?;
-        if !record.valid() || record.configuration != self.configuration {
+        if !record.valid()
+            || record.scope != self.group.scope()
+            || record.configuration != self.configuration
+        {
             return Err(SourceError::InvalidMetadata);
         }
         Ok(Some(Stored {
@@ -262,13 +409,16 @@ impl Journal {
         self.save(original.record.fence_preparation()?, Some(&original.sha256))
     }
     pub fn save(&self, record: Record, previous: Option<&str>) -> SourceResult<Stored> {
-        if !record.valid() || record.configuration != self.configuration {
+        if !record.valid()
+            || record.scope != self.group.scope()
+            || record.configuration != self.configuration
+        {
             return Err(SourceError::InvalidMetadata);
         }
         // Serialize only this bounded metadata compare/write. No original
         // creation-worker lease or SDK work runs under this native lock, so a
         // concurrent run's save waits for it instead of failing spuriously.
-        let _lock = lock(&self.data.join("creations-retained-import-v1.lock"))?;
+        let _lock = lock(&self.data.join(self.group.lock()))?;
         let current = self.load()?;
         if current.as_ref().map(|s| s.sha256.as_str()) != previous
             || current.as_ref().is_some_and(|s| !record.follows(&s.record))
@@ -280,7 +430,7 @@ impl Journal {
         if bytes.len() > BYTES {
             return Err(SourceError::TooLarge);
         }
-        crate::fsx::write_private_durable(&self.data.join(FILE), &bytes)
+        crate::fsx::write_private_durable(&self.data.join(self.group.file()), &bytes)
             .map_err(|_| SourceError::SourceUnreadable)?;
         let stored = self.load()?.ok_or(SourceError::SourceUnreadable)?;
         if stored.record != record || stored.sha256 != sha256(&bytes) {

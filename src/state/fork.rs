@@ -265,6 +265,10 @@ pub(super) fn start_scoped(
             string(&record, "conversation_id").into(),
         ),
         ("HGS_FORK_SOURCE_NAME", name.into()),
+        // The archived source's own identity, so the fork can inherit its project.
+        ("HGS_FORK_SOURCE_ARCHIVE", archive_id.unwrap_or_default().into()),
+        // The source history the fork's Activity shows (zerus-b4qk).
+        ("HGS_FORK_LINEAGE", journal::fork_lineage(&record)),
         (agent_hint::FORK_REVISION_ENV, agent_hint::fork_revision(&record)),
         ("HGS_TRACKING", "1".into()),
         (

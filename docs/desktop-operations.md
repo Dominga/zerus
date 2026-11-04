@@ -14,8 +14,10 @@ symbolic, not physical worker evidence. Follow-up examples use explicitly
 independent fixture databases, without claiming continuous release or retry of
 an uncertain attempt. Exact old-epoch still-reserved results may settle after
 revoke, while terminal Unknown, changed originals and forged tickets refuse.
-No production actor, task call, callback, timer, custody or current Operations
-admission is qualified; G1 `.22`, G2 `.4.2` and later kinds remain unfinished.
+Those conformance harnesses alone qualify no production actor, task call,
+callback, timer, custody or current Operations admission. The separate guarded
+[Task Start actor](desktop-task-start-reconcile.md) consumes native admission;
+later kinds and the remaining G2 integrations stay separate.
 
 The additional test-only `operations::tests::owned` slice sends the unchanged
 proposed argv and input to fixed private synthetic executables through the
@@ -160,6 +162,19 @@ never claims complete source discovery, drain or G2 coverage.
 
 ## Executing kinds and the exit boundary
 
+The termination-outcome prerequisite shares the maintained CLI's exact
+`session-action-status` owner as `state::observe_lifecycle_receipt`. It takes
+the original request bytes (at most 8 KiB) and uses the same request hash,
+64 KiB private receipt reader and target/archive checks. It never calls
+`attempt`, acquires a writer or creates missing state. Returned observations
+are data, including a later recorded completion; they prove neither current
+checkout ownership nor resource drain and cannot authorize cleanup or retry.
+A future actor must check its typed original/current scope after BEGIN, retain
+it durably and perform receipt I/O off the control thread. That integration is
+not implemented by this prerequisite. Existing Terminate calls keep their
+45-second local and 60-second peer budgets; the 30-second owned-runner cap is
+unchanged, and no new Terminate dispatcher is introduced.
+
 The separate dormant `creation_clone` policy covers only an explicit STATUS
 lookup for an original creation clone in `cloning` or `unknown`. Its expected
 binding keeps the configuration digest, distinct creation/clone UUIDs, physical
@@ -211,6 +226,20 @@ only proposes the original queue/note call once, with the existing 90-second
 timeout, exact original marker and frozen stdin. It never reconstructs missing
 input. Send/reopen and deferred native input remain review-only.
 
+A new task message freezes its one actual `hgs task message` stdin before its
+outbox checkpoint, and the editor sends that same call.
+`outbox::reserve_message` saves the stdin in the same write: a canonical stdin
+(the content's serialization) as its digest `input_sha256`, so the record holds
+one copy of the content; any other as its exact `input` bytes. The complete
+record must fit the 32 MiB record limit, or nothing is written or sent. Reading
+a record (`outbox::decode`) refuses a present but malformed or mismatched
+`input` or `input_sha256`, or both at once, so such a record is never treated
+as legacy and no call is made. `message_call` sends the frozen bytes, recovery
+included, and the policy requires them to equal the retained input. A legacy
+record without either never qualifies for an admitted actor; only the direct
+path still serializes its content. A reservation, reopened or new, is durable
+data about the original, never consent to execute it.
+
 Configuration/project/task are independently retained expected data, not fields
 observed in an outbox record. Raw record and input each stay at most 1 MiB;
 known duplicate fields are refused at every inspected level before projection.
@@ -229,8 +258,10 @@ table/API remains G1's lane, separate from native `desktop-ledger::Kind`.
 
 The [closed native request boundary](desktop-task-start-reconcile.md) carries
 bounded exact producer checkpoints in a distinct TaskStartReconcile lane. Its
-current backend still refuses execution; it adds no worker or general Operations
-permission and leaves the background profile unchanged.
+Linux/macOS actor admits only the fixed, explicitly requested recover-only
+worker under its current native guard. Windows and unsupported originals stay
+refused. This adds no general Operations permission and leaves the background
+profile unchanged.
 
 `Key` separates kind (`task_start_reconcile`), schema 1, configuration,
 project/task and the original request UUID from every reconciliation-attempt

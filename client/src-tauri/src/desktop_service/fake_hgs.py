@@ -94,9 +94,12 @@ def status():
         sources.append(dict(sources[0], computer='broken', incarnation=2))
     if config.get('project_peer'):
         sources.append(dict(sources[0], computer='studio', incarnation=2))
-    return {'abi': 'desktop-v1', 'configuration': 'a' * 64, 'epoch': epoch, 'generation': 1, 'host': 'caption-only',
+    generation = config.get('status_generation', 1)
+    return {'abi': 'desktop-v1', 'configuration': 'a' * 64, 'epoch': epoch, 'generation': generation, 'host': 'caption-only',
+            'executable_upgrade': {'code': 'hgs_replaced', 'state': 'manual_refresh_required', 'new_admission': False}
+            if config.get('manual_upgrade') or (root / 'manual-upgrade').exists() else None,
             'lifecycle': {'abi': 'desktop-lifecycle-v1', 'phase': 'serving', 'ipc_ready': True,
-                          'configuration': 'a' * 64, 'epoch': epoch, 'generation': 1, 'background': background},
+                          'configuration': 'a' * 64, 'epoch': epoch, 'generation': generation, 'background': background},
             'attention_counts': counts, 'automatic_approvals': False, 'catalog_reads': {'changes_abi': abi},
             'background_runtime': {'epoch': epoch, 'display_only': True, 'authority': False, 'state': 'running',
                                    'computers': sources} if not config.get('peer_choices') else None,
@@ -634,6 +637,14 @@ elif args == ['desktop', 'watch', '--json']:
                               'lease': '00000000-0000-4000-8000-000000000003',
                               'limits': {'demands_per_subscriber': 64}}
     frame(0, 'hello', initial)
+    if config.get('manual_upgrade_watch'):
+        wait(root / 'manual-upgrade')
+        if config['manual_upgrade_watch'] == 'status':
+            frame(1, 'status', status())
+            sys.stdin.read()
+        else:
+            frame(1, 'error', {'code': 'hgs_replaced', 'fatal': True})
+        raise SystemExit(0)
     if config.get('silent_watch'):
         # Keep the original watch alive, but send no further frame at all.
         # EOF still belongs to the subscriber that owns this stdin pipe.

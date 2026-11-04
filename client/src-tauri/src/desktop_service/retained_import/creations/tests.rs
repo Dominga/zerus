@@ -1,7 +1,7 @@
 use super::super::tests::Fixture;
 use super::*;
 use std::fs;
-fn source(f: &Fixture) {
+pub(super) fn source(f: &Fixture) {
     zerus_client_core::fsx::write_private_durable(
         &f.root.join("creations.json"),
         br#"{"schema":1,"operations":{},"opaque":"before-load"}"#,
@@ -9,8 +9,8 @@ fn source(f: &Fixture) {
     .unwrap();
     assert!(f.report.inputs.creations.prepare().is_ok());
 }
-fn run(f: &Fixture, explicit: bool) -> Result<(), &'static str> {
-    let charge = f.report.work.admit(Role::Operations).unwrap();
+pub(super) fn run(f: &Fixture, explicit: bool) -> Result<(), &'static str> {
+    let charge = super::super::tests::admit_drained(&f.report);
     f.report.run_creation(
         f.relay.clone(),
         "a".repeat(64),
@@ -27,7 +27,7 @@ fn run_on(
     relay: Arc<zerus_client_core::desktop::relay::Connection>,
     explicit: bool,
 ) -> Result<(), &'static str> {
-    let charge = report.work.admit(Role::Operations).unwrap();
+    let charge = super::super::tests::admit_drained(report);
     report.run_creation(
         relay,
         "a".repeat(64),
@@ -71,7 +71,7 @@ fn advance(
     change(&mut record);
     journal(f).save(record, Some(&stored.sha256)).unwrap()
 }
-fn receipt_for(record: &CreationRecord) -> migration::transport::StagedReceipt {
+pub(super) fn receipt_for(record: &CreationRecord) -> migration::transport::StagedReceipt {
     serde_json::from_value(
         json!({"abi":"desktop-import-v1","published":true,"evidence":"staged",
         "configuration":record.configuration,"import_id":record.import_id,
@@ -297,7 +297,7 @@ fn callback_lock_contention_is_definitely_before_record_and_explicitly_retryable
         assert_eq!(saved.import_id, id);
         let restarted = Report::new(f.report.inputs.clone());
         for explicit in [false, true] {
-            let charge = restarted.work.admit(Role::Operations).unwrap();
+            let charge = super::super::tests::admit_drained(&restarted);
             let result = restarted.run_creation(
                 f.relay.clone(),
                 "a".repeat(64),
@@ -700,7 +700,7 @@ fn recovery_refuses_a_changed_source_configuration_cap_or_metadata() {
     source(&f);
     attempted(&f, true);
     let bytes = journal_bytes(&f);
-    let charge = f.report.work.admit(Role::Operations).unwrap();
+    let charge = super::super::tests::admit_drained(&f.report);
     assert!(f
         .report
         .run_creation(
@@ -755,7 +755,7 @@ fn restarted_capture_and_report_settle_the_original_unknown_without_republishing
     inputs.creations = zerus_client_core::migration::preload::Capture::new(f.root.clone());
     assert!(inputs.creations.prepare().is_ok());
     let restarted = Report::new(inputs);
-    let charge = restarted.work.admit(Role::Operations).unwrap();
+    let charge = super::super::tests::admit_drained(&restarted);
     assert_eq!(
         restarted.run_creation(
             f.relay.clone(),
@@ -803,7 +803,7 @@ fn creation_config_or_snapshot_mismatch_refuses_and_unsupported_is_private_quara
     let f = Fixture::new("busy");
     source(&f);
     assert!(run(&f, false).is_err());
-    let charge = f.report.work.admit(Role::Operations).unwrap();
+    let charge = super::super::tests::admit_drained(&f.report);
     assert!(f
         .report
         .run_creation(

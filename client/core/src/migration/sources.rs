@@ -271,7 +271,7 @@ pub fn next_pending_reads(bytes: &[u8]) -> SourceResult<SourceStream> {
 /// Private pages of at most 64 entries and 1 MiB. An individual oversized
 /// entry is refused, never truncated. This is bounded source assembly, not
 /// a cache or a replacement journal.
-fn pages(
+pub(crate) fn pages(
     mut items: impl Iterator<Item = SourceResult<Value>> + Send + 'static,
 ) -> impl Iterator<Item = SourceResult<Value>> + Send {
     let mut pending = None;

@@ -21,6 +21,18 @@ export default function MachineColorDialog(props: { alias: string; origin?: HTML
   const [vivid, setVivid] = createSignal(initial.vivid);
   const [busy, setBusy] = createSignal(false);
   const valid = () => /^#[\da-f]{6}$/iu.test(hex());
+  const tabColor = () => SWATCHES.find((color) => color === hex().toLowerCase()) ?? SWATCHES[0];
+  const stepSwatch = (event: KeyboardEvent & { currentTarget: HTMLDivElement }) => {
+    if (busy() || event.altKey || event.ctrlKey || event.metaKey) return;
+    const rows = [...event.currentTarget.querySelectorAll<HTMLButtonElement>(".cd-swatch:not(:disabled)")];
+    const at = rows.findIndex((row) => row === event.target);
+    if (at < 0) return;
+    const next = event.key === "ArrowDown" || event.key === "ArrowRight" ? (at + 1) % rows.length
+      : event.key === "ArrowUp" || event.key === "ArrowLeft" ? (at + rows.length - 1) % rows.length
+      : event.key === "Home" ? 0 : event.key === "End" ? rows.length - 1 : undefined;
+    if (next === undefined) return;
+    event.preventDefault(); rows[next].click(); rows[next].focus();
+  };
   const apply = async () => {
     if (busy() || !valid()) return;
     setBusy(true);
@@ -39,8 +51,8 @@ export default function MachineColorDialog(props: { alias: string; origin?: HTML
     <div class="dlg-head"><Icon name="palette" size={18} class="accent" /><h2 id="machine-color-title">{tr("Label color for %1", props.alias)}</h2><span class="grow" /><button class="icon-btn" aria-label={tr("Close")} disabled={busy()} onClick={props.close}><Icon name="x" size={16} /></button></div>
     <div class="dlg-body">
       <div class="cd-preview"><span class="entity mach-label" classList={{ vivid: vivid() }} style={{ "--entity": valid() ? hex() : current().color }}>{props.alias}</span></div>
-      <div class="cd-swatches" role="radiogroup" aria-label={tr("Color")}>
-        <For each={SWATCHES}>{(color) => <button class="cd-swatch" role="radio" aria-checked={hex().toLowerCase() === color} aria-label={color} classList={{ on: hex().toLowerCase() === color }} style={{ "--sw": color }} disabled={busy()} onClick={() => setHex(color)} />}</For>
+      <div class="cd-swatches" role="radiogroup" aria-label={tr("Color")} onKeyDown={stepSwatch}>
+        <For each={SWATCHES}>{(color) => <button class="cd-swatch" role="radio" aria-checked={hex().toLowerCase() === color} tabIndex={!busy() && color === tabColor() ? 0 : -1} aria-label={color} classList={{ on: hex().toLowerCase() === color }} style={{ "--sw": color }} disabled={busy()} onClick={() => setHex(color)} />}</For>
       </div>
       <div class="form-row"><label for="cd-hex">{tr("Hex")}</label><input id="cd-hex" class="field mono" maxLength={7} value={hex()} aria-invalid={!valid()} disabled={busy()} onInput={(event) => setHex(event.currentTarget.value)} /></div>
       <div class="form-row"><label for="cd-style">{tr("Style")}</label><select id="cd-style" class="field" value={vivid() ? "bright" : "soft"} disabled={busy()} onChange={(event) => setVivid(event.currentTarget.value === "bright")}><option value="soft">{tr("Soft fill")}</option><option value="bright">{tr("Bright fill")}</option></select></div>

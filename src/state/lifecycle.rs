@@ -147,7 +147,9 @@ pub(super) fn run(args: &[String]) -> Result<i32> {
     let token = nonempty_env("HGS_RUN_ID").unwrap_or_else(|| uuid::Uuid::new_v4().to_string());
     let pane = backend::current().own_pane()?;
     let cwd = std::env::current_dir().map_err(|e| e.to_string())?;
-    {
+    // The launch's binding is written under the state lock; a fork's inherited
+    // project waits until after it.
+    let fork_project = {
         let _guard = lock(None)?;
         let actual_name = backend::current()
             .pane_info(
@@ -188,14 +190,26 @@ pub(super) fn run(args: &[String]) -> Result<i32> {
             "transcript": null, "startup_kind":startup_kind,"launch_id":nonempty_env("HGS_LAUNCH_ID"), "account_id": nonempty_env("HGS_ACCOUNT_ID"), "agent_home": nonempty_env(home_var(&agent)?), "pid": std::process::id(),
             "process_start": process_start(std::process::id()),
             "supervisor": {"pid": std::process::id(), "start": process_start(std::process::id())}});
+        // A fork starts in its source session's project (zerus-zjsj).
+        let mut fork_source = None;
         if let Some(parent) = nonempty_env("HGS_FORK_PARENT_ID") {
             record["fork_parent_id"] = json!(parent);
             record.as_object_mut().unwrap().remove("launch_id");
-            record["fork_source_name"] =
-                json!(nonempty_env("HGS_FORK_SOURCE_NAME").unwrap_or_default());
+            let source = nonempty_env("HGS_FORK_SOURCE_NAME").unwrap_or_default();
+            record["fork_source_name"] = json!(source);
+            fork_source = Some((source, nonempty_env("HGS_FORK_SOURCE_ARCHIVE")));
+            // The source rows its Activity shows, up to where the fork began.
+            if let Some(lineage) = nonempty_env("HGS_FORK_LINEAGE")
+                .and_then(|lineage| serde_json::from_str::<Value>(&lineage).ok())
+                .filter(Value::is_array)
+            {
+                record["fork_lineage"] = lineage;
+            }
         }
         std::env::remove_var("HGS_FORK_PARENT_ID");
         std::env::remove_var("HGS_FORK_SOURCE_NAME");
+        std::env::remove_var("HGS_FORK_SOURCE_ARCHIVE");
+        std::env::remove_var("HGS_FORK_LINEAGE");
         agent_hint::inherit_fork(&mut record, fork_hint_revision.as_deref());
         if let Some(expected) = expected {
             let previous = read(&name)?;
@@ -236,6 +250,7 @@ pub(super) fn run(args: &[String]) -> Result<i32> {
                 "pending_settings",
                 "fork_parent_id",
                 "fork_source_name",
+                "fork_lineage",
                 "cleared_conversations",
             ] {
                 if let Some(value) = previous.get(key) {
@@ -270,6 +285,16 @@ pub(super) fn run(args: &[String]) -> Result<i32> {
             if let Ok(config) = crate::config::Config::load() {
                 crate::swarm::infer_new_session(&config, &name, &cwd);
             }
+        }
+        fork_source
+            .filter(|(source, _)| !source.is_empty())
+            .map(|(source, archive)| (source, archive, record["conversation_id"].clone()))
+    };
+    // A fork's inherited project waits for a busy catalog outside the state
+    // lock, writing only while this run still holds its binding (zerus-wx3k).
+    if let Some((source, archive, conversation)) = fork_project {
+        if let Ok(config) = crate::config::Config::load() {
+            crate::swarm::inherit_fork_project(&config, &name, &source, archive.as_deref(), &token, &conversation);
         }
     }
     std::env::set_var("HGS_RUN_ID", &token);

@@ -461,9 +461,23 @@ export function buildTranscript(given: readonly ActivityEvent[], summary?: Recor
 /** Journal identity stays intact in the store; only rendered rows adopt a send's key. */
 function transcriptItems(events: readonly ActivityEvent[], summary?: Record<string, unknown>, context = false): TranscriptItem[] {
   const items: TranscriptItem[] = context ? recordedContext(summary) : [];
+  // A fork's history from its sources (zerus-b4qk): each source's rows under
+  // its own label, then a marker where this session's own activity begins.
+  let source: string | undefined, marked = 0;
+  const inherit = () => {
+    if (source) for (const item of items.slice(marked)) if (item.kind !== "context") item.inherited = true;
+    marked = items.length;
+  };
   for (let i = 0; i < events.length;) {
     const e = events[i];
     const id = typeof e.activity_display_key === "string" ? e.activity_display_key : eventKey(e);
+    if (e.inherited_from !== source) {
+      inherit();
+      if (e.inherited_from) items.push({ id: `inherited-${id}`, kind: "context", at: "", body: tr("Inherited from %1: the history this fork began from", e.inherited_from) });
+      else if (source) items.push({ id: `forked-${id}`, kind: "context", at: "", body: tr("Forked here: this session's own activity continues below") });
+      source = e.inherited_from;
+      marked = items.length;
+    }
     const role = messageRole(e);
     const at = timeText(e.at);
     if (e.type === "SessionCleared") {
@@ -514,6 +528,7 @@ function transcriptItems(events: readonly ActivityEvent[], summary?: Record<stri
     const group = [e];
     i++;
     while (i < events.length && group.length < GROUP_LIMIT && events[i].type !== "AgentThinking" && events[i].type !== "SessionCleared"
+      && events[i].inherited_from === e.inherited_from
       && !messageRole(events[i]) && !attention(e) && !attention(events[i])) group.push(events[i++]);
     const tools: string[] = [];
     let calls = 0;
@@ -531,6 +546,7 @@ function transcriptItems(events: readonly ActivityEvent[], summary?: Record<stri
       items.push({ id, kind: "tools", at: timeText(last.at), title, body: shownTools || preview(last.detail), lines, warn: group.some(attention) });
     }
   }
+  inherit();
   return items;
 }
 

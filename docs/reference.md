@@ -1932,6 +1932,8 @@ retain the `+` uncertainty marker. OpenCode child sessions are not shown in this
 version ([OpenCode controls](opencode.md#controls-and-limits)). Inspection reports native
 tracking evidence without changing reply/read identities or restarting agents.
 
+<a id="fork-session"></a>
+
 **Fork session…** creates an independent native conversation in the same folder,
 next to the original session in its group. Files remain shared. The CLI is
 `hgs [@host] fork SESSION [-n NAME] [-d] [--archive ID]`; support depends on the agent.
@@ -1949,6 +1951,37 @@ fork the desktop has not recognized within two minutes is reported as not
 confirmed and Fork is available again; the session may still be starting.
 An hgs older than this behaviour still refuses a name that only an archived
 session holds; update that computer or choose another name.
+
+A fork starts in its source session's project, including a fork of an archived
+session. Once the fork's binding exists, the CLI writes that membership through
+the same catalog owner as other project changes, for the desktop action,
+`hgs fork` and DeepSeek forks alike, and never moves other rows. A source in Inbox,
+in a project that no longer exists or with an unresolved project choice gives the
+fork an explicit Inbox membership. A source without a membership leaves the fork
+without one, so both follow the same default project. A fork name that already
+has a membership keeps it. Without a catalog, or if the catalog stays busy for
+3 seconds, the fork still starts in the default project. That wait happens after
+the fork's binding is saved, without holding the session state or DeepSeek
+binding locks, and the membership is written only while the fork's binding is
+still the same run and conversation. The desktop then places
+the fork right after its original and opens it, once its inspection names the
+source conversation as its parent, even before a Codex fork has a conversation ID
+of its own. With an hgs that predates the parent field it waits for that ID.
+
+A fork's Activity first shows the history it began from, read-only: each source
+session's rows up to the moment of the fork, under an "Inherited from" label
+naming that session, then a "Forked here" marker and the fork's own activity.
+A fork records its sources when it starts (up to four forks back, so a fork of a
+fork shows both); a fork made before this records nothing, so its first
+inspection finds its source's rows up to its creation time and before its own
+first row, and saves that. Each Activity page reads at most one page from each
+of these ranges, however long a source is. Inherited rows are muted and never act as the
+fork's own: they open no attachments, and search finds them only in their source.
+A provider that copies the history into the fork's own transcript adds nothing
+twice, because the fork's messages dated before its creation are not shown. The
+source session is never changed. Rows the journal no longer keeps are not shown.
+The phone history (`hgs history`) shows the same inherited rows as additive
+`Inherited` rows that never count as unread; see `services/mobile/README.md`.
 
 Codex may defer `SessionStart` until the fork's first message. Activity enables
 Send once Zerus verifies that the supervised process owns an independent child
@@ -2031,8 +2064,9 @@ that remain outside the POSIX shared catalog. It does not resolve saved aliases
 or infer from a parent folder. A native project hint must name the same known
 Swarm catalog; a foreign hint never selects a same-ID local project.
 A new tracked CLI session also infers its initial project from that computer's
-existing catalog; resume, fork, adoption,
-manual assignments and explicit unassignment are never reassigned. This optional
+existing catalog; resume, adoption,
+manual assignments and explicit unassignment are never reassigned. A fork
+takes its source's project instead ([Fork session…](#fork-session)). This optional
 metadata step does not initialize a catalog, join a swarm or create a repository.
 The general **New session** action inherits the selected session's project,
 computer and matching project folder. For a linked worktree, a verified catalog
@@ -2583,9 +2617,16 @@ interruption or failure keeps it. A folder that Git no longer tracks but that
 still exists then appears in the repository review (and in a review targeted at
 that worktree, such as the cleanup after Terminate) as a **leftover**
 (`worktree-leftovers-v1`), with a fresh bounded listing of the remaining files,
-the retained branch and current processes or sessions. The cleanup after
+the retained branch and current processes or sessions. Size, manifest and deletion
+blockers share one no-follow walk, bounded by two seconds and 200,000 entries,
+including queued children. Unreadable or protected subtrees and exhausted bounds
+leave `size_complete` false and refuse deletion. The cleanup after
 Terminate keeps such a folder with "Git no longer tracks this folder, but files
-remain" instead of an unverified-folder error. A missing Git
+remain" instead of an unverified-folder error. A targeted review matches the
+worktree's whole path, as given or resolved through links, never a prefix. The
+targeted reviews behind `hgs worktrees inspect` and `remove` therefore also
+resolve that worktree's own record under the rules below, so inspection, otherwise
+read-only, may drop a record whose folder is gone or that Git tracks again. A missing Git
 registration is never treated as proof of deletion, and the removal is never
 retried. **Keep folder, forget record** (`hgs worktrees keep-folder`) checks the
 reviewed leftover again under the repository lock and drops only its record;
@@ -2594,12 +2635,28 @@ request-bound outcome (`worktree-leftover-keep-v1`): `kept` before the record is
 touched, `unconfirmed` once forgetting it may have started. A client reports
 **Nothing changed** only for `kept`; an unreachable computer, a crash or any
 other reply is **Result unknown**. **Delete remaining files**
-(`hgs worktrees delete-leftover`, `worktree-leftover-delete-v1`) needs an
+(`hgs worktrees delete-leftover`, `worktree-leftover-delete-v1`) is disabled on
+macOS pending a verified native guard: XNU may unlink ordinary `._*` files while
+retrying directory removal after an unreviewed folder replaces the checked name.
+A fresh `._*` listing cannot close that race. Review and **Keep folder** remain
+available. The desktop explains the refusal and offers **Open in Finder** for a
+local folder; for a remote Mac, open the displayed folder in Finder on that Mac.
+The CLI refuses before changing permissions, unlinking files or reserving an
+attempt and returns the existing request-bound `kept` / outcome-version 1 reply.
+The shared directory-removal wrapper also refuses both nested and root removals
+on macOS. A future authorized native window must run the ignored
+`state::worktree_cleanup::tests::macos_late_swap_preserves_appledouble_payload_at_root_and_nested_names`
+probe with `--exact --ignored` before re-enablement is considered.
+
+On Linux, deleting the remaining files needs an
 explicit confirmation and the fingerprint of the fresh review the owner saw. It
 checks everything again under the repository and session locks and refuses
 saved or running sessions, other running programs, nested Git repositories,
 special files, folders on another filesystem or owned by another user, and an
-incomplete listing. The narrow manual exception for programs whose folders
+incomplete listing. A failed saved-session inventory (including an unreadable or
+malformed binding) is an explicit blocker, never evidence that no session uses
+the folder. The process-only manual exception cannot override it.
+The narrow manual exception for programs whose folders
 cannot be read works as it does for worktree removal: it is bound to the exact
 leftover path and its fresh-review fingerprint and expires after five minutes,
 the known-use, session, ownership and file protections still apply, and
@@ -2612,23 +2669,65 @@ changes. A filesystem whose mount cannot be identified is refused. The reviewed
 folder itself is part of the confirmed fingerprint (device, inode and mount): it
 is reopened through its parent without following links (folders above it need
 only search permission: Linux opens them as paths and macOS for search), and
-completion is confirmed through that parent. Only after those checks does deletion grant the
+completion is confirmed through that parent. The reviewed root stays open and
+its name is checked against that inode again immediately before final removal.
+This rejects an observable replacement and prevents reuse of its inode number.
+The check and removal are separate: neither [Linux `unlinkat`](https://man7.org/linux/man-pages/man2/unlink.2.html)
+nor [macOS `unlinkat`](https://github.com/apple-oss-distributions/xnu/blob/main/bsd/vfs/vfs_syscalls.c)
+provides an expected-inode argument or directory removal through the open root
+itself. An empty directory swapped into the name between the check and removal
+can still be removed. No userspace traversal enters that replacement. On Linux,
+directory removal refuses a nonempty replacement. On macOS, [XNU may clean up AppleDouble entries and retry directory removal](https://github.com/apple-oss-distributions/xnu/blob/f6217f891ac0bb64f3d375211650a4c1ff8ca1ea/bsd/vfs/vfs_syscalls.c#L10670)
+after `ENOTEMPTY`: its cleanup
+can unlink ordinary files whose names start with `._`, such as `._payload`.
+A late macOS replacement therefore has no empty-only guarantee; its unreviewed
+`._*` files may be removed by the kernel. Renaming the path into quarantine
+would instead move an unreviewed folder and cannot guarantee race-free
+restoration, so it does not supply the missing inode-bound primitive. Only after those checks does deletion grant the
 owner write access to their own folders inside the reviewed tree, which is what
 blocked Git; it never touches the branch. If it
 stops partway, the record stays with the reason and the deletion is never
-retried; review the folder again. Deleting leftover files is available on Linux
-and macOS. A record resolves by itself once its
+retried; review the folder again. Each confirmation is consumed by a durable,
+unique attempt reference before filesystem changes begin. If that reference
+cannot be saved, deletion refuses without changing files. Even if no file
+changed and saving the stopped outcome fails, the old confirmation is no longer
+valid; another attempt needs a fresh review. Deleting leftover files is currently
+available on Linux only. A record resolves by itself once its
 folder is gone, or once a fresh worktree list taken under the repository lock shows
 that Git tracks the worktree again. On Linux and macOS the Git that removes a
 worktree inherits the repository lock (an flock belongs to the open file, and only
 that Git receives it), and hgs releases the lock by closing it, never by an explicit
 unlock. The lock therefore stays taken while that Git, or anything it started, still
 runs, even after hgs is killed, and no review resolves the record in that time. On
-Windows the lock ends with hgs. A leftover whose repository is gone is listed
+Windows the lock ends with hgs. If worktree operations keep reporting that another
+one is running (for example because a custom `git` wrapper left a helper behind),
+`fuser -v` or `lsof` on the repository's `worktree-cache/repo-*.lock` file in the
+hgs state folder shows which process still holds it. A leftover whose repository is gone is listed
 by `hgs worktrees leftovers` and can still be kept; a record whose repository and
-folder are both gone resolves. One review or listing reports at most 32 leftovers
+folder are both gone resolves.
+
+A missing folder or repository counts as gone only on the filesystem that held it.
+Each reservation records that filesystem in a separate private table that older
+CLIs never read: on Linux the device and the `statfs` filesystem ID (derived from
+the filesystem UUID on ext4, btrfs and xfs), on macOS the filesystem ID and mount
+point. A missing path is gone only when the nearest existing folder above it is on
+that same filesystem. A volume that is unmounted, replaced by another one at the
+same place, or that cannot be identified (for example a zero filesystem ID, as on
+some tmpfs and network filesystems) leaves the record uncertain: it stays visible
+and can be kept by hand, and it never resolves by itself. So does a folder or
+repository that was already missing when its removal was reserved, since no
+filesystem could be recorded for it. On btrfs the device is a per-subvolume number that can change
+across remounts and reboots; such records also stay uncertain until kept. A
+block-level clone of a filesystem shares its ID, but mounted at the same place it
+normally has another device, so it is not taken for the original. A bind mount
+whose source is on the same filesystem as the folder above it is the exception:
+once it is unmounted, the missing path is on that same filesystem and counts as
+gone. Records written by an older CLI have no volume row and keep the plain
+missing-path check, as does every record on Windows. One review or listing reports at most 32 leftovers
 within 1 MiB and marks the rest with `leftovers_partial` (review) or `partial`
-(listing); they stay recorded for a later review. The folder catalog
+(listing); they stay recorded for a later review. Verified resolutions of vanished
+records stay committed even if the remaining unresolved records still prevent
+a new removal at the 512-record bound. The folder catalog
 (`hgs worktrees --path`) reports a repository's record count as `leftovers`, read
 through its index on every call, so a reader reviews that repository even when no
 linked worktree is left. At most 512 unresolved records
@@ -4034,12 +4133,30 @@ finishes. A timeout or uncertain result is shown for review and never retried
 automatically. Enabling local Windows sessions has its own confirmation and
 rechecks the original local machine identity and current host status.
 
-**Swarm worker.** Windows has no user service manager. The desktop app runs one
-hidden `hgs.exe swarm worker` and restarts it after an exit. The delay doubles
-from one second up to five minutes and resets after a run of a minute or more. A
-kill-on-close job ends the worker with the app, also after a crash. Without the
-desktop app, run `hgs swarm worker` in a terminal or `hgs swarm sync` when needed.
-`hgs swarm get` reports `worker: {running, current}` as elsewhere.
+**Swarm worker.** In background mode, the durable Windows desktop service runs
+one hidden `hgs.exe swarm worker`, including while the GUI is closed or consumes
+the service. It restarts its own child after an exit, with a delay from one second
+up to five minutes, reset after a run of at least a minute. The child starts
+suspended in its own job before running. Stop and restart retain the original
+process/job and service owner until physical exit and job drain are confirmed;
+unknown cleanup is reported in `swarm_runtime` and prevents a replacement.
+
+`hgs desktop swarm-restart --json` asks an already-running background service to
+restart only its own worker. Passive, stopping and offline services refuse it;
+it never starts the service or GUI, or stops a PID from `worker.json`. Stale-worker
+checks use this same bounded request, with the existing ten-minute attempt limit
+and default-configuration restriction. `hgs swarm get` still reports
+`worker: {running, current}`. The standalone GUI retains its compatibility
+supervisor outside desktop-service mode; `hgs swarm worker` and `hgs swarm sync`
+remain available for manual use.
+
+The explicit restart command has one two-second deadline from process entry,
+including Windows PATH preparation, configuration reads and the pipe exchange.
+An expected-machine guard reads only the existing catalog identity; it never
+initializes or refreshes the store, takes its write lock, or saves metadata.
+On timeout it prints one JSON result with `outcome: "unknown"` and
+`retry_allowed: false`, then exits with code 3. Inspect service status before
+another attempt; the timed-out request is never replayed automatically.
 
 **Desktop app.** It uses the `hgs.exe` next to `hgs-tray.exe`, then the one on
 `PATH`; `--hgs` or `hgs=` in `tray.conf` overrides both, and the Linux and macOS

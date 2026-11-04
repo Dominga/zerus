@@ -5,6 +5,7 @@ import { detailsFromInspection, snapshotOf, type ActionRow } from "../ui/session
 import { forkAvailable, forkProblem, forkTag, freeForkTag } from "../ui/sessions/fork-ui";
 import type { Session } from "../ui/sessions/types";
 import type { Details, Outcome } from "../types";
+import bridged from "../../core/tests/fixtures/inspect-details.json";
 const row = (fields: Partial<Session> = {}) => ({ key: "studio\nrun:r", name: "codex/example/review", computer: "studio", machine: "Studio", state: "running", runId: "r", conversationId: "c", created: 1, ...fields } as Session);
 const details = () => detailsFromInspection({ run_id: "r", conversation_id: "c", fork_supported: true, fork_reason: "Ready" })!;
 const done = { outcome: "done", receipt: null, cleanup: null } as Outcome;
@@ -178,6 +179,73 @@ describe("Fork session", () => {
         dispose();
       });
     } finally { vi.useRealTimers(); }
+  });
+  // The values the desktop bridge really returns (core Details as Tauri sends
+  // them; client/core/tests/details_contract.rs pins the file), not a mocked
+  // inspection: a field the bridge drops would fail here.
+  it("adopts from the bridged inspection: the fork, never a non-fork, an older hgs by exact name", async () => {
+    await createRoot(async (dispose) => {
+      const t = setup(), parent = bridged.fork.fork_parent_id;
+      const source = row({ conversationId: parent });
+      t.setRows([source]);
+      const forks = createForks({ ...t.deps, inspect: async (r: ActionRow) => r.key === source.key ? { ...details(), conversation_id: parent } as Details
+        : (r.name.endsWith("-2") ? bridged.fork : r.key === "older" ? bridged.older_hgs : bridged.not_a_fork) as Details });
+      const submit = () => forks.submit(snapshotOf(source), { ...details(), conversation_id: parent }, "review-fork", t.controller.signal, t.confirm, t.dispatched);
+      await submit();
+      const raced = row({ key: "raced", name: "codex/example/review-fork", runId: "x", conversationId: "x" });
+      const fork = row({ key: "new", name: "codex/example/review-fork-2", runId: "fork-run", conversationId: "fork-conversation" });
+      t.setRows([source, raced]); await ticks();
+      expect(t.select).not.toHaveBeenCalled();
+      t.setRows([source, raced, fork]); await ticks();
+      expect(t.select).toHaveBeenCalledExactlyOnceWith(fork);
+      expect(forks.busy()).toBe(false);
+      // An hgs without the field: trusted for the exact name only.
+      await submit();
+      const older = row({ key: "older", name: "codex/example/review-fork-3", runId: "o", conversationId: "o" });
+      t.setRows([source, raced, fork, older]); await ticks();
+      expect(t.select).toHaveBeenCalledTimes(2);
+      expect(t.select).toHaveBeenLastCalledWith(older);
+      dispose();
+    });
+  });
+  // zerus-zjsj: a Codex fork may have no conversation ID until its first
+  // message. Its bridged fork parent identifies it at once.
+  it("adopts a fork before its first message by its bridged fork parent", async () => {
+    await createRoot(async (dispose) => {
+      const t = setup(), parent = bridged.fork_before_first_message.fork_parent_id;
+      const source = row({ conversationId: parent });
+      t.setRows([source]);
+      const inspect = vi.fn(async (r: ActionRow) => (r.key === source.key ? { ...details(), conversation_id: parent }
+        : r.key === "new" ? bridged.fork_before_first_message : bridged.not_a_fork) as Details);
+      const forks = createForks({ ...t.deps, inspect });
+      await forks.submit(snapshotOf(source), { ...details(), conversation_id: parent }, "review-fork", t.controller.signal, t.confirm, t.dispatched);
+      const quiet = row({ key: "quiet", name: "codex/example/review-fork", runId: "q", conversationId: "" });
+      const fork = row({ key: "new", name: "codex/example/review-fork-2", runId: "fork-run", conversationId: "" });
+      t.setRows([source, quiet, fork]); await ticks();
+      expect(t.select).toHaveBeenCalledExactlyOnceWith(fork);
+      expect(t.place).toHaveBeenCalledExactlyOnceWith(fork, "project", undefined);
+      expect(forks.busy()).toBe(false);
+      dispose();
+    });
+  });
+  it("waits for an older hgs's exact-name fork to get its conversation", async () => {
+    await createRoot(async (dispose) => {
+      const t = setup();
+      await t.submit("review-fork");
+      t.inspect.mockImplementation(async () => bridged.older_hgs as Details);
+      const early = row({ key: "new", name: "codex/example/review-fork", runId: "new", conversationId: "" });
+      t.setRows([t.source, early]); await ticks();
+      expect(t.select).not.toHaveBeenCalled();
+      const inspected = t.inspect.mock.calls.length;
+      // Without its own conversation it is not inspected again on every change.
+      t.setRows([t.source, { ...early }]); await ticks();
+      expect(t.inspect).toHaveBeenCalledTimes(inspected);
+      const ready = { ...early, conversationId: "new-conversation" };
+      t.setRows([t.source, ready]); await ticks();
+      expect(t.select).toHaveBeenCalledExactlyOnceWith(ready);
+      expect(t.forks.busy()).toBe(false);
+      dispose();
+    });
   });
   it.each(["run", "conversation", "offline", "busy", "closed"])("refuses %s changes while its inspection is pending", async (change) => {
     await createRoot(async (dispose) => {

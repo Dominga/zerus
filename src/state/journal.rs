@@ -581,22 +581,208 @@ const MESSAGE_EVENTS_BYTES: usize = 256 * 1024;
 // reader's cursor stays valid when a clear changes the conversation.
 pub(super) const TIMELINE: &str = "name=?1 AND (conversation IS ?2 OR conversation IN (SELECT value FROM json_each(?3)))";
 
+// How many forks back a fork's Activity reaches into its sources (zerus-b4qk).
+const LINEAGE: usize = 4;
+
+// A session's Activity: its own [`TIMELINE`] rows (the scope ?3's `$.earlier`
+// conversations) and each `$.inherited` source's rows of its conversation up
+// to the sequence number where the fork began. Every range is read on its
+// own (name, conversation, seq) index entries, ordered and limited there, so
+// a read touches at most one page per range however long a source is; only
+// those pages are merged. Search and other per-session reads keep
+// [`TIMELINE`]: a source's rows are found in the source, not again in a fork.
+const OWN_RANGE: &str = "name=?1 AND (conversation IS ?2 OR conversation IN (SELECT value FROM json_each(?3, '$.earlier')))";
+
+fn source_range(index: usize) -> String {
+    format!(
+        "name=json_extract(?3, '$.inherited[{index}][0]') AND conversation=json_extract(?3, '$.inherited[{index}][1]') \
+         AND seq<=json_extract(?3, '$.inherited[{index}][2]')"
+    )
+}
+
+/// `seq, payload, own, name` of the Activity rows that also match `extra`,
+/// by `seq` (descending when `newest`), at most `limit` of them.
+fn activity_query(extra: &str, newest: bool, limit: &str) -> String {
+    let order = if newest { "DESC" } else { "ASC" };
+    let branch = |own: u8, range: &str| {
+        format!("SELECT * FROM (SELECT seq, payload, {own} AS own, name FROM events WHERE {range}{extra} ORDER BY seq {order} LIMIT {limit})")
+    };
+    let mut branches = vec![branch(1, OWN_RANGE)];
+    branches.extend((0..LINEAGE).map(|index| branch(0, &source_range(index))));
+    format!(
+        "{} ORDER BY seq {order} LIMIT {limit}",
+        branches.join(" UNION ALL ")
+    )
+}
+
+/// The oldest Activity row: the least of each range's own first row.
+fn activity_oldest() -> &'static str {
+    static QUERY: OnceLock<String> = OnceLock::new();
+    QUERY.get_or_init(|| {
+        let mut branches = vec![format!(
+            "SELECT MIN(seq) AS seq FROM events WHERE {OWN_RANGE}"
+        )];
+        branches.extend(
+            (0..LINEAGE)
+                .map(|index| format!("SELECT MIN(seq) FROM events WHERE {}", source_range(index))),
+        );
+        format!("SELECT MIN(seq) FROM ({})", branches.join(" UNION ALL "))
+    })
+}
+
+/// [`activity_query`] for a page of [`timeline_rows`]: after the cursor ?4,
+/// at most ?5 rows.
+fn activity_page(newest: bool) -> &'static str {
+    static OLDEST: OnceLock<String> = OnceLock::new();
+    static NEWEST: OnceLock<String> = OnceLock::new();
+    let query = if newest { &NEWEST } else { &OLDEST };
+    query.get_or_init(|| activity_query(" AND seq>?4", newest, "?5"))
+}
+
+/// The sources a fork's Activity inherits, oldest first, as `[journal name,
+/// conversation, last sequence number]`: what the fork recorded when it
+/// began, or for a fork recorded before that, what [`derived_lineage`] finds
+/// (which `inspect` saves once, so later reads do not search again).
+pub(super) fn lineage(db: &Connection, record: &Value) -> Vec<Value> {
+    match record["fork_lineage"].as_array() {
+        Some(recorded) => recorded
+            .iter()
+            .filter(|source| valid_source(source))
+            .cloned()
+            .collect(),
+        None => derived_lineage(db, record).unwrap_or_default(),
+    }
+}
+
+/// A fork recorded before its lineage: the source name it recorded, that
+/// conversation's rows up to the fork's creation and before the fork's own
+/// first row. One indexed search backwards from that row. None for a
+/// session that is not such a fork.
+fn derived_lineage(db: &Connection, record: &Value) -> Option<Vec<Value>> {
+    let (source, parent) = (
+        string(record, "fork_source_name"),
+        string(record, "fork_parent_id"),
+    );
+    let created = record["created"].as_f64().unwrap_or(0.0);
+    if source.is_empty() || parent.is_empty() || created <= 0.0 || record["fork_lineage"].is_array()
+    {
+        return None;
+    }
+    let own: Option<i64> = db
+        .query_row(
+            "SELECT MIN(seq) FROM events WHERE name=?1",
+            [journal_name(record)],
+            |row| row.get(0),
+        )
+        .ok()
+        .flatten();
+    let seq: Option<i64> = db
+        .query_row(
+            "SELECT seq FROM events WHERE name=?1 AND conversation=?2 AND seq<?3 \
+             AND CAST(json_extract(payload, '$.at') AS REAL)<=?4 ORDER BY seq DESC LIMIT 1",
+            params![source, parent, own.unwrap_or(i64::MAX), created],
+            |row| row.get(0),
+        )
+        .optional()
+        .ok()?;
+    Some(
+        seq.map(|seq| vec![json!([source, parent, seq])])
+            .unwrap_or_default(),
+    )
+}
+
+/// Saves a derived lineage into the fork's own record. The journal search
+/// runs without the state lock (`inspect` has released it by then); only
+/// [`store_lineage`] takes it, briefly.
+pub(super) fn save_derived_lineage(db: &Connection, record: &mut Value) {
+    let Some(lineage) = derived_lineage(db, record) else {
+        return;
+    };
+    record["fork_lineage"] = json!(lineage);
+    let _ = store_lineage(record, &lineage);
+}
+
+/// Under the state lock: re-reads the saved record and adds only its lineage,
+/// when it still names the same run and has none yet. Whatever another writer
+/// saved in the meantime (a hook, resume or rename) is kept. False when
+/// nothing was written.
+fn store_lineage(record: &Value, lineage: &[Value]) -> Result<bool> {
+    let _guard = lock(None)?;
+    let mut saved = read(string(record, "name"))?;
+    if saved["run_id"] != record["run_id"] || saved["fork_lineage"].is_array() {
+        return Ok(false);
+    }
+    saved["fork_lineage"] = json!(lineage);
+    write(&mut saved)?;
+    Ok(true)
+}
+
+fn valid_source(source: &Value) -> bool {
+    source.as_array().is_some_and(|parts| {
+        parts.len() == 3
+            && parts[0].as_str().is_some_and(|name| !name.is_empty())
+            && parts[1]
+                .as_str()
+                .is_some_and(|conversation| !conversation.is_empty())
+            && parts[2].as_i64().is_some_and(|seq| seq > 0)
+    })
+}
+
+/// What a new fork of `source` inherits: the source's own lineage, then the
+/// source's conversation up to the journal's last row now. At most
+/// [`LINEAGE`] sources, the nearest kept.
+pub(super) fn fork_lineage(source: &Value) -> String {
+    event_db().map_or_else(|_| "[]".into(), |db| lineage_after(&db, source))
+}
+
+fn lineage_after(db: &Connection, source: &Value) -> String {
+    let mut sources = lineage(db, source);
+    let conversation = string(source, "conversation_id");
+    let last = db
+        .query_row("SELECT MAX(seq) FROM events", [], |row| {
+            row.get::<_, Option<i64>>(0)
+        })
+        .ok()
+        .flatten();
+    if let (false, Some(seq)) = (conversation.is_empty(), last) {
+        sources.push(json!([journal_name(source), conversation, seq]));
+    }
+    let keep = sources.len().saturating_sub(LINEAGE);
+    json!(sources[keep..]).to_string()
+}
+
+/// The `?3` scope of the Activity reads for a record.
+pub(super) fn activity_scope(db: &Connection, record: &Value) -> String {
+    json!({"earlier": clear_context::earlier_conversations(record), "inherited": lineage(db, record)}).to_string()
+}
+
+/// Marks a row another conversation's fork source wrote: read-only history the
+/// fork began from, named by that source's journal name.
+fn mark_inherited(event: &mut Value, own: bool, name: &str) {
+    if !own {
+        event["inherited_from"] = json!(name);
+    }
+}
+
 // The activity tail includes tools and children. Keep main public messages in
 // a separate bounded window so a cold reader does not lose its newest prompt
 // merely because that turn has produced more than one hundred tool events.
-fn message_events(db: &Connection, name: &str, conversation: Option<&str>, earlier: &str) -> Result<(Vec<Value>, bool)> {
-    let mut query = db.prepare(&format!("SELECT seq,payload FROM events WHERE {TIMELINE}
-        AND COALESCE(json_extract(payload, '$.agent_id'), '') IN ('', 'main')
-        AND json_extract(payload, '$.type') IN ('SessionCleared','UserPromptSubmit','UserPromptQueued','UserMessage','TurnStarted','QuestionAnswered','AgentMessage','Stop')
-        ORDER BY seq DESC LIMIT 101")).map_err(|e| e.to_string())?;
-    let rows = query.query_map(params![name, conversation, earlier], |row| Ok((row.get::<_, i64>(0)?, row.get::<_, String>(1)?)))
+fn message_events(db: &Connection, name: &str, conversation: Option<&str>, scope: &str) -> Result<(Vec<Value>, bool)> {
+    static QUERY: OnceLock<String> = OnceLock::new();
+    let query = QUERY.get_or_init(|| activity_query(" AND COALESCE(json_extract(payload, '$.agent_id'), '') IN ('', 'main') \
+        AND json_extract(payload, '$.type') IN ('SessionCleared','UserPromptSubmit','UserPromptQueued','UserMessage','TurnStarted','QuestionAnswered','AgentMessage','Stop')", true, "101"));
+    let mut query = db.prepare(query).map_err(|e| e.to_string())?;
+    let rows = query.query_map(params![name, conversation, scope], |row| {
+            Ok((row.get::<_, i64>(0)?, row.get::<_, String>(1)?, row.get::<_, bool>(2)?, row.get::<_, String>(3)?))
+        })
         .map_err(|e| e.to_string())?;
     let (mut events, mut bytes, mut truncated) = (Vec::new(), 2, false);
     for row in rows {
-        let (seq, payload) = row.map_err(|e| e.to_string())?;
+        let (seq, payload, own, source) = row.map_err(|e| e.to_string())?;
         if events.len() == MESSAGE_EVENTS_LIMIT { truncated = true; break; }
         let mut event: Value = serde_json::from_str(&payload).map_err(|e| e.to_string())?;
         event["seq"] = json!(seq);
+        mark_inherited(&mut event, own, &source);
         let size = event.to_string().len() + usize::from(!events.is_empty());
         if bytes + size > MESSAGE_EVENTS_BYTES { truncated = true; break; }
         bytes += size;
@@ -794,32 +980,37 @@ pub(super) fn inspection(name: &str, after: i64, archive_id: Option<&str>, inclu
         output["cache_hint"] = Value::Null;
     }
     let db = event_db()?;
+    // A fork recorded before its lineage finds its source once (zerus-b4qk),
+    // outside the state lock; saving it takes the lock again.
+    if archive_id.is_none() {
+        save_derived_lineage(&db, &mut record);
+    }
     let journal_name = journal_name(&record);
     let conversation = record["conversation_id"].as_str();
     let cleared = clear_context::earlier_conversations(&record);
-    let earlier = cleared.to_string();
     output["cleared_conversations"] = cleared;
+    let scope = activity_scope(&db, &record);
     let oldest: Option<i64> = db
         .query_row(
-            &format!("SELECT MIN(seq) FROM events WHERE {TIMELINE}"),
-            params![journal_name, conversation, earlier],
+            activity_oldest(),
+            params![journal_name, conversation, scope],
             |row| row.get(0),
         )
         .map_err(|e| e.to_string())?;
     let rows = if after > 0 {
-        timeline_rows(&db, journal_name, conversation, &earlier, after, 200, false)?
+        timeline_rows(&db, journal_name, conversation, &scope, after, 200, false)?
     } else {
-        timeline_rows(&db, journal_name, conversation, &earlier, after, 100, true)?
+        timeline_rows(&db, journal_name, conversation, &scope, after, 100, true)?
     };
-    output["cursor"] = json!(rows.last().map(|(seq, _)| *seq).unwrap_or(after));
+    output["cursor"] = json!(rows.last().map(|row| row.seq).unwrap_or(after));
     output["history_truncated"] =
         json!(after > 0 && oldest.map(|seq| after < seq - 1).unwrap_or(false));
     let mut events = Vec::new();
-    for (seq, payload) in rows {
-        events.push(timeline_event(&record, seq, &payload)?);
+    for row in rows {
+        events.push(row.event(&record)?);
     }
     output["events"] = json!(events);
-    let (messages, truncated) = message_events(&db, journal_name, conversation, &earlier)?;
+    let (messages, truncated) = message_events(&db, journal_name, conversation, &scope)?;
     output["message_events"] = json!(messages);
     output["message_events_truncated"] = json!(truncated);
     output["message_events_limit"] = json!(MESSAGE_EVENTS_LIMIT);
@@ -835,18 +1026,52 @@ pub(super) fn inspection(name: &str, after: i64, archive_id: Option<&str>, inclu
     Ok(output)
 }
 
-/// A session timeline's rows after `after`, oldest first: the first `limit`
-/// of them, or with `newest` the last `limit`. `inspection` and `hgs watch`
-/// both read Activity through it and `timeline_event`.
-pub(super) fn timeline_rows(db: &Connection, journal_name: &str, conversation: Option<&str>, earlier: &str,
-    after: i64, limit: usize, newest: bool) -> Result<Vec<(i64, String)>> {
-    let mut statement = db.prepare(&if newest {
-        format!("SELECT seq, payload FROM events WHERE {TIMELINE} AND seq>?4 ORDER BY seq DESC LIMIT ?5")
-    } else { format!("SELECT seq, payload FROM events WHERE {TIMELINE} AND seq>?4 ORDER BY seq LIMIT ?5") }).map_err(|e| e.to_string())?;
-    let mut rows: Vec<(i64, String)> = statement
-        .query_map(params![journal_name, conversation, earlier, after, limit as i64], |row| {
-            Ok((row.get(0)?, row.get(1)?))
-        })
+/// One Activity row: its sequence number and payload, and for a row a fork
+/// inherited, the source's journal name.
+pub(super) struct TimelineRow {
+    pub(super) seq: i64,
+    payload: String,
+    inherited_from: Option<String>,
+}
+
+impl TimelineRow {
+    /// The row as `inspect` returns it.
+    pub(super) fn event(&self, record: &Value) -> Result<Value> {
+        let mut event = timeline_event(record, self.seq, &self.payload)?;
+        if let Some(source) = &self.inherited_from {
+            mark_inherited(&mut event, false, source);
+        }
+        Ok(event)
+    }
+}
+
+/// A session's Activity rows after `after`, oldest first: the first `limit`
+/// of them, or with `newest` the last `limit`. `scope` is [`activity_scope`].
+/// `inspection` and `hgs watch` both read Activity through it.
+pub(super) fn timeline_rows(
+    db: &Connection,
+    journal_name: &str,
+    conversation: Option<&str>,
+    scope: &str,
+    after: i64,
+    limit: usize,
+    newest: bool,
+) -> Result<Vec<TimelineRow>> {
+    let mut statement = db
+        .prepare(activity_page(newest))
+        .map_err(|e| e.to_string())?;
+    let mut rows: Vec<TimelineRow> = statement
+        .query_map(
+            params![journal_name, conversation, scope, after, limit as i64],
+            |row| {
+                let own: bool = row.get(2)?;
+                Ok(TimelineRow {
+                    seq: row.get(0)?,
+                    payload: row.get(1)?,
+                    inherited_from: (!own).then(|| row.get(3)).transpose()?,
+                })
+            },
+        )
         .map_err(|e| e.to_string())?
         .collect::<std::result::Result<_, _>>()
         .map_err(|e| e.to_string())?;
@@ -1575,7 +1800,7 @@ mod attention_regressions {
         insert_message(&db, "other", Some("conversation"), json!({"type":"UserPromptSubmit","agent_id":"","detail":"Other session"}));
         let answer = json!({"type":"QuestionAnswered","agent_id":"main","at":302,"detail":"Literal answer","question_id":"question","question_hash":"hash"});
         let answer_seq = insert_message(&db, "example", Some("conversation"), answer.clone());
-        let (messages, truncated) = message_events(&db, "example", Some("conversation"), "[]").unwrap();
+        let (messages, truncated) = message_events(&db, "example", Some("conversation"), r#"{"earlier":[]}"#).unwrap();
         assert!(!truncated);
         assert_eq!(messages.len(), 2);
         assert_eq!(messages[0]["seq"], seq);
@@ -1584,10 +1809,312 @@ mod attention_regressions {
         assert_eq!(messages[1], expected);
         // A conversation replaced by a confirmed clear stays in the same
         // timeline, in journal order; another session's rows never join it.
-        let (messages, _) = message_events(&db, "example", Some("conversation"), r#"["other"]"#).unwrap();
+        let (messages, _) = message_events(&db, "example", Some("conversation"), r#"{"earlier":["other"]}"#).unwrap();
         assert_eq!(messages.iter().map(|m| m["detail"].as_str().unwrap()).collect::<Vec<_>>(),
             ["Synthetic latest own message", "Other conversation", "Literal answer"]);
     }
+    /// zerus-b4qk: a fork's Activity is its sources' rows up to where it began,
+    /// marked as inherited, then its own; search keeps the fork's own rows.
+    #[test]
+    fn a_fork_shows_its_sources_history_up_to_where_it_began() {
+        let db = message_db();
+        let row = |name: &str, conversation: &str, detail: &str, at: i64| {
+            insert_message(
+                &db,
+                name,
+                Some(conversation),
+                json!({"type":"UserPromptSubmit","agent_id":"","at":at,"detail":detail}),
+            )
+        };
+        row("codex/p/root", "c-root", "root before", 10);
+        row("codex/p/other", "c-other", "another session", 11);
+        let root = json!({"name":"codex/p/root","conversation_id":"c-root"});
+        let first = json!({"name":"codex/p/first","conversation_id":"c-first",
+            "fork_lineage": serde_json::from_str::<Value>(&lineage_after(&db, &root)).unwrap()});
+        row("codex/p/root", "c-root", "root after the first fork", 20);
+        row("codex/p/first", "c-first", "first own", 21);
+        let second = json!({"name":"codex/p/second","conversation_id":"c-second",
+            "fork_lineage": serde_json::from_str::<Value>(&lineage_after(&db, &first)).unwrap()});
+        row(
+            "codex/p/first",
+            "c-first",
+            "first after the second fork",
+            30,
+        );
+        row("codex/p/second", "c-second", "second own", 31);
+        let shown = |record: &Value| -> Vec<(String, Option<String>)> {
+            let scope = activity_scope(&db, record);
+            timeline_rows(
+                &db,
+                string(record, "name"),
+                record["conversation_id"].as_str(),
+                &scope,
+                0,
+                100,
+                false,
+            )
+            .unwrap()
+            .iter()
+            .map(|row| {
+                let event = row.event(record).unwrap();
+                (
+                    event["detail"].as_str().unwrap().to_owned(),
+                    event["inherited_from"].as_str().map(str::to_owned),
+                )
+            })
+            .collect()
+        };
+        let inherited = |detail: &str, from: &str| (detail.to_owned(), Some(from.to_owned()));
+        let own = |detail: &str| (detail.to_owned(), None);
+        assert_eq!(
+            shown(&first),
+            [
+                inherited("root before", "codex/p/root"),
+                own("first own"),
+                own("first after the second fork")
+            ]
+        );
+        // A fork of a fork reaches back through both sources, each up to its fork.
+        assert_eq!(
+            shown(&second),
+            [
+                inherited("root before", "codex/p/root"),
+                inherited("first own", "codex/p/first"),
+                own("second own")
+            ]
+        );
+        let scope = activity_scope(&db, &second);
+        let (messages, _) =
+            message_events(&db, "codex/p/second", Some("c-second"), &scope).unwrap();
+        assert_eq!(
+            messages
+                .iter()
+                .map(|m| (m["detail"].as_str().unwrap(), m["inherited_from"].as_str()))
+                .collect::<Vec<_>>(),
+            [
+                ("root before", Some("codex/p/root")),
+                ("first own", Some("codex/p/first")),
+                ("second own", None)
+            ]
+        );
+        // A fork recorded before the lineage: its source's rows up to its creation.
+        let legacy = json!({"name":"codex/p/legacy","conversation_id":"c-legacy","fork_parent_id":"c-root",
+            "fork_source_name":"codex/p/root","created":15});
+        assert_eq!(shown(&legacy), [inherited("root before", "codex/p/root")]);
+        // Its source's rows stop before its own first row, even one whose time
+        // is before the fork's creation but written after that row.
+        row("codex/p/legacy", "c-legacy", "legacy own", 16);
+        row("codex/p/root", "c-root", "late root row", 12);
+        assert_eq!(
+            shown(&legacy),
+            [inherited("root before", "codex/p/root"), own("legacy own")]
+        );
+        // Not a fork, or a malformed lineage: only its own rows.
+        assert_eq!(
+            shown(&root),
+            [
+                own("root before"),
+                own("root after the first fork"),
+                own("late root row")
+            ]
+        );
+        let broken = json!({"name":"codex/p/first","conversation_id":"c-first","fork_lineage":[["codex/p/root","c-root","7"],"x"]});
+        assert_eq!(
+            shown(&broken),
+            [own("first own"), own("first after the second fork")]
+        );
+        // At most four sources, the nearest kept.
+        let mut deep = root.clone();
+        for depth in 0..6 {
+            let name = format!("codex/p/deep{depth}");
+            row(&name, &format!("c-deep{depth}"), "deep", 40 + depth);
+            deep = json!({"name":name,"conversation_id":format!("c-deep{depth}"),
+                "fork_lineage": serde_json::from_str::<Value>(&lineage_after(&db, &deep)).unwrap()});
+        }
+        let sources = deep["fork_lineage"].as_array().unwrap();
+        assert_eq!(sources.len(), LINEAGE);
+        assert_eq!(sources[LINEAGE - 1][0], "codex/p/deep4");
+    }
+    /// #1235 review R2-1: the lineage search runs unlocked, so a record write
+    /// can land before the save; the save re-reads under the lock and keeps it.
+    #[test]
+    fn saving_a_derived_lineage_keeps_a_concurrent_record_write() {
+        let root = tempfile::tempdir().unwrap();
+        let output = std::process::Command::new(std::env::current_exe().unwrap())
+            .args([
+                "state::journal::attention_regressions::lineage_save_probe",
+                "--exact",
+                "--nocapture",
+            ])
+            .env_clear()
+            .env("PATH", "/usr/bin:/bin")
+            .env("HOME", root.path())
+            .env("HGS_CONFIG_DIR", root.path().join("config"))
+            .env("HGS_STATE_DIR", root.path().join("state"))
+            .env("HGS_TEST_LINEAGE_PROBE", "1")
+            .output()
+            .unwrap();
+        let stdout = String::from_utf8_lossy(&output.stdout);
+        assert!(
+            output.status.success() && stdout.contains("lineage probe passed"),
+            "{stdout}\n{}",
+            String::from_utf8_lossy(&output.stderr)
+        );
+    }
+
+    #[test]
+    fn lineage_save_probe() {
+        if std::env::var_os("HGS_TEST_LINEAGE_PROBE").is_none() {
+            return;
+        }
+        std::fs::create_dir_all(root()).unwrap();
+        let db = event_db().unwrap();
+        db.execute(
+            "INSERT INTO events(name,conversation,payload) VALUES('codex/p/source','c-source',?)",
+            [
+                json!({"type":"UserPromptSubmit","agent_id":"","at":10,"detail":"source"})
+                    .to_string(),
+            ],
+        )
+        .unwrap();
+        let record = json!({"version":1,"name":"codex/p/fork","agent":"codex","run_id":"run-1",
+            "conversation_id":"c-fork","fork_parent_id":"c-source","fork_source_name":"codex/p/source",
+            "created":20,"activity":"idle"});
+        write(&mut record.clone()).unwrap();
+        // The unlocked search, then another writer's change, then the save.
+        let lineage = derived_lineage(&db, &record).unwrap();
+        assert_eq!(lineage, [json!(["codex/p/source", "c-source", 1])]);
+        let mut concurrent = read("codex/p/fork").unwrap();
+        concurrent["activity"] = json!("busy");
+        write(&mut concurrent).unwrap();
+        assert!(store_lineage(&record, &lineage).unwrap());
+        let saved = read("codex/p/fork").unwrap();
+        assert_eq!(
+            (&saved["activity"], &saved["fork_lineage"]),
+            (&json!("busy"), &json!(lineage))
+        );
+        // A new run meanwhile, or a lineage already saved: nothing is written.
+        let mut resumed = saved.clone();
+        resumed["run_id"] = json!("run-2");
+        resumed.as_object_mut().unwrap().remove("fork_lineage");
+        write(&mut resumed).unwrap();
+        assert!(!store_lineage(&record, &lineage).unwrap());
+        assert!(read("codex/p/fork").unwrap().get("fork_lineage").is_none());
+        let mut again = record.clone();
+        again["run_id"] = json!("run-2");
+        assert!(store_lineage(&again, &lineage).unwrap());
+        assert!(!store_lineage(&again, &[]).unwrap());
+        assert_eq!(
+            read("codex/p/fork").unwrap()["fork_lineage"],
+            json!(lineage)
+        );
+        println!("lineage probe passed");
+    }
+
+    /// #1235 review R1: a fork's Activity reads one page per range, never
+    /// every inherited row. SQLite's step count bounds the work, so a source
+    /// of any length costs a fork's page what a page costs the source.
+    #[test]
+    fn a_forks_activity_reads_stay_one_page_per_range() {
+        use rusqlite::StatementStatus;
+        let mut db = message_db();
+        let transaction = db.transaction().unwrap();
+        for at in 0..20_000 {
+            let kind = if at % 2 == 0 {
+                "UserPromptSubmit"
+            } else {
+                "Stop"
+            };
+            transaction.execute("INSERT INTO events(name,conversation,payload) VALUES('codex/p/source','c-source',?)",
+                [json!({"type":kind,"agent_id":"","at":at,"detail":"source"}).to_string()]).unwrap();
+        }
+        transaction.commit().unwrap();
+        let point: i64 = db
+            .query_row("SELECT MAX(seq) FROM events", [], |row| row.get(0))
+            .unwrap();
+        for at in 0..40 {
+            insert_message(
+                &db,
+                "codex/p/fork",
+                Some("c-fork"),
+                json!({"type":"Stop","agent_id":"","at":30_000 + at,"detail":"own"}),
+            );
+        }
+        let fork = json!({"name":"codex/p/fork","conversation_id":"c-fork","fork_lineage":[["codex/p/source","c-source",point]]});
+        let scope = activity_scope(&db, &fork);
+        let steps = |sql: &str, after: Option<(i64, i64)>| {
+            let mut statement = db.prepare(sql).unwrap();
+            let rows = match after {
+                Some((after, limit)) => statement
+                    .query_map(
+                        params!["codex/p/fork", "c-fork", scope, after, limit],
+                        |_| Ok(()),
+                    )
+                    .unwrap()
+                    .count(),
+                None => statement
+                    .query_map(params!["codex/p/fork", "c-fork", scope], |_| Ok(()))
+                    .unwrap()
+                    .count(),
+            };
+            (rows, statement.get_status(StatementStatus::VmStep))
+        };
+        let budget = 40_000;
+        let (rows, newest) = steps(activity_page(true), Some((0, 100)));
+        assert_eq!(rows, 100);
+        let (rows, page) = steps(activity_page(false), Some((point - 500, 200)));
+        assert_eq!(rows, 200);
+        let (_, oldest) = steps(activity_oldest(), None);
+        static WINDOW: OnceLock<String> = OnceLock::new();
+        let window = WINDOW.get_or_init(|| {
+            activity_query(
+                " AND COALESCE(json_extract(payload, '$.agent_id'), '') IN ('', 'main')",
+                true,
+                "101",
+            )
+        });
+        let (rows, messages) = steps(window, None);
+        assert_eq!(rows, 101);
+        for (read, used) in [
+            ("newest page", newest),
+            ("cursor page", page),
+            ("oldest row", oldest),
+            ("message window", messages),
+        ] {
+            assert!(
+                used < budget,
+                "{read}: {used} SQLite steps for one page of a 20000-row source"
+            );
+        }
+        // The same reads still return the right rows across the fork point.
+        let shown = timeline_rows(
+            &db,
+            "codex/p/fork",
+            Some("c-fork"),
+            &scope,
+            point - 2,
+            100,
+            false,
+        )
+        .unwrap();
+        assert_eq!(
+            shown
+                .iter()
+                .map(|row| (row.seq, row.inherited_from.is_some()))
+                .take(3)
+                .collect::<Vec<_>>(),
+            [(point - 1, true), (point, true), (point + 1, false)]
+        );
+        let first: Option<i64> = db
+            .query_row(
+                activity_oldest(),
+                params!["codex/p/fork", "c-fork", scope],
+                |row| row.get(0),
+            )
+            .unwrap();
+        assert_eq!(first, Some(1));
+    }
+
     #[test]
     fn kimi_scheduled_ticks_are_not_replies_while_a_recurring_job_remains() {
         let kimi = json!({"agent":"kimi","name":"example","conversation_id":"conversation"});
@@ -1640,13 +2167,13 @@ mod attention_regressions {
         for index in 0..105 {
             insert_message(&db, "example", None, json!({"type":"UserMessage","at":index,"detail":"Synthetic repeated message"}));
         }
-        let (messages, truncated) = message_events(&db, "example", None, "[]").unwrap();
+        let (messages, truncated) = message_events(&db, "example", None, r#"{"earlier":[]}"#).unwrap();
         assert!(truncated); assert_eq!(messages.len(), MESSAGE_EVENTS_LIMIT);
         assert_eq!(messages[0]["at"], 5); assert_eq!(messages[99]["at"], 104);
         for _ in 0..10 {
             insert_message(&db, "unicode", Some("conversation"), json!({"type":"UserMessage","detail":"🦀".repeat(20_000)}));
         }
-        let (messages, truncated) = message_events(&db, "unicode", Some("conversation"), "[]").unwrap();
+        let (messages, truncated) = message_events(&db, "unicode", Some("conversation"), r#"{"earlier":[]}"#).unwrap();
         assert!(truncated); assert_eq!(messages.len(), 3);
         assert!(json!(messages).to_string().len() <= MESSAGE_EVENTS_BYTES);
     }

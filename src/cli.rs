@@ -66,10 +66,14 @@ pub(crate) const USAGE: &str = r#"usage: hgs [@host] <cmd> [project] [-c [ID]] [
        Desktop ownership ABI: desktop-ownership-v1
        Notification controls ABI: desktop-notification-controls-v1
        Desktop creation clone ABI: desktop-creation-clone-v1
+       Desktop creation worktree ABI: desktop-creation-worktree-v1
+       Desktop creation launch ABI: desktop-creation-launch-v1
+       Desktop task start reconcile ABI: desktop-task-start-reconcile-v1
        Desktop pending read import ABI: desktop-pending-reads-v1
        Desktop activation ABI: desktop-activation-v1
        Desktop maintenance ABI: desktop-maintenance-v1
        Desktop cache maintenance ABI: desktop-cache-maintenance-v1
+       Desktop termination outcome ABI: desktop-termination-outcome-v1
        Desktop startup ABI: desktop-startup-v1
        Desktop logon registration ABI: desktop-logon-task-v1
        Desktop registration mode ABI: desktop-registration-mode-v1
@@ -416,9 +420,16 @@ pub(crate) fn usage() -> &'static str {
 /// Commands that only Unix dispatches: `notify` for the tray, and `clip` and
 /// `paste`, which tmux's C-v binding runs.
 const UNIX_ONLY_COMMANDS: [&str; 3] = ["notify", "clip", "paste"];
-/// Lines for Unix commands/input bindings or the POSIX creation-clone ABI.
+/// Lines for Unix commands/input bindings or the POSIX creation ABIs.
 fn unix_only_usage(line: &str) -> bool {
-    if line.trim() == zerus_client_core::desktop::creation_clone::HELP_MARKER {
+    if [
+        zerus_client_core::desktop::creation_clone::HELP_MARKER,
+        zerus_client_core::desktop::creation_worktree::HELP_MARKER,
+        zerus_client_core::desktop::creation_launch::HELP_MARKER,
+        zerus_client_core::desktop::task_start_reconcile::HELP_MARKER,
+    ]
+    .contains(&line.trim())
+    {
         return true;
     }
     let mut words = line.split_whitespace();
@@ -443,6 +454,24 @@ fn unix_only(command: &str, unix: bool) -> Result<()> {
 /// has no tmux C-v binding, which pulls a peer's image through `hgs paste` and
 /// `hgs clip`, no `hgs notify`, and its dry runs print the session host's
 /// requests, so its text tells of none of them and does not name tmux.
+/// What this computer's `hgs --help` prints. The creation worktree executor
+/// binds Git to a `/proc/self/fd` link, so only Linux advertises its ABI.
+fn help_text() -> Cow<'static, str> {
+    advertised(usage_text(cfg!(unix)), cfg!(target_os = "linux"))
+}
+fn advertised(usage: Cow<'static, str>, linux: bool) -> Cow<'static, str> {
+    if linux {
+        return usage;
+    }
+    let marker = zerus_client_core::desktop::creation_worktree::HELP_MARKER;
+    usage
+        .lines()
+        .filter(|line| line.trim() != marker)
+        .map(|line| format!("{line}\n"))
+        .collect::<String>()
+        .into()
+}
+
 fn usage_text(tmux: bool) -> Cow<'static, str> {
     if tmux {
         return USAGE.into();
@@ -455,7 +484,24 @@ fn usage_text(tmux: bool) -> Cow<'static, str> {
         .into()
 }
 
-pub fn dispatch(mut args: Vec<String>) -> Result<i32> {
+#[cfg(any(windows, test))]
+mod swarm_restart;
+
+pub fn dispatch(args: Vec<String>) -> Result<i32> {
+    dispatch_at(args, Instant::now())
+}
+
+pub(crate) fn dispatch_at(args: Vec<String>, entered: Instant) -> Result<i32> {
+    #[cfg(any(windows, test))]
+    if let Some(request) = swarm_restart::select(&args) {
+        return swarm_restart::dispatch(request, entered);
+    }
+    #[cfg(not(any(windows, test)))]
+    let _ = entered;
+    dispatch_normal(args)
+}
+
+fn dispatch_normal(mut args: Vec<String>) -> Result<i32> {
     if crate::desktop::launchd_command(&args) {
         args.pop();
         return dispatch(args).map_err(|mut error| {
@@ -572,7 +618,7 @@ pub fn dispatch(mut args: Vec<String>) -> Result<i32> {
         }
     }
     let Some(command) = args.get(index) else {
-        eprint!("{}", usage_text(cfg!(unix)));
+        eprint!("{}", help_text());
         return Ok(1);
     };
     let args = &args[index + 1..];
@@ -591,7 +637,7 @@ pub fn dispatch(mut args: Vec<String>) -> Result<i32> {
             if !target.is_empty() && !config.is_self(&target) {
                 return remote(&config, &target, "--help", args, dry);
             }
-            print!("{}", usage_text(cfg!(unix)));
+            print!("{}", help_text());
             println!("Encrypted workspace ABI: guarded-local-v1");
             println!("Desktop creation ABI: guarded-create-v1");
             println!("Account transfer ABI: revision-copy-v1");
@@ -2655,6 +2701,12 @@ mod tests {
         assert_eq!(usage_text(true), USAGE);
         let clone_marker = zerus_client_core::desktop::creation_clone::HELP_MARKER;
         assert!(USAGE.lines().any(|line| line.trim() == clone_marker));
+        let worktree_marker = zerus_client_core::desktop::creation_worktree::HELP_MARKER;
+        assert!(USAGE.lines().any(|line| line.trim() == worktree_marker));
+        let launch_marker = zerus_client_core::desktop::creation_launch::HELP_MARKER;
+        assert!(USAGE.lines().any(|line| line.trim() == launch_marker));
+        let task_marker = zerus_client_core::desktop::task_start_reconcile::HELP_MARKER;
+        assert!(USAGE.lines().any(|line| line.trim() == task_marker));
         // Windows has no `hgs paste`, `hgs clip` or `hgs notify`, no Ctrl+V
         // that pulls a peer's image, and no POSIX creation-clone executor.
         // Its dry runs print the host's requests; every other line stays as is.
@@ -2662,6 +2714,8 @@ mod tests {
         assert!(!neutral.contains("tmux"), "{neutral}");
         assert!(!neutral.contains("Ctrl+V"), "{neutral}");
         assert!(!neutral.lines().any(|line| line.trim() == clone_marker));
+        assert!(!neutral.lines().any(|line| line.trim() == worktree_marker));
+        assert!(!neutral.lines().any(|line| line.trim() == task_marker));
         assert_eq!(
             neutral,
             USAGE
@@ -2682,6 +2736,18 @@ mod tests {
                     ""
                 )
                 .replace(
+                    "       Desktop creation worktree ABI: desktop-creation-worktree-v1\n",
+                    ""
+                )
+                .replace(
+                    "       Desktop creation launch ABI: desktop-creation-launch-v1\n",
+                    ""
+                )
+                .replace(
+                    "       Desktop task start reconcile ABI: desktop-task-start-reconcile-v1\n",
+                    ""
+                )
+                .replace(
                     "  --dry-run  print the tmux/ssh command\n",
                     "  --dry-run  print the session-host/ssh command\n"
                 )
@@ -2689,6 +2755,27 @@ mod tests {
                     "Ctrl+V in a session attached from a peer pulls the image from that box's clipboard.\n",
                     ""
                 )
+        );
+    }
+
+    #[test]
+    fn only_linux_advertises_the_creation_worktree_executor() {
+        let marker = zerus_client_core::desktop::creation_worktree::HELP_MARKER;
+        let clone = zerus_client_core::desktop::creation_clone::HELP_MARKER;
+        assert_eq!(advertised(usage_text(true), true), USAGE);
+        let mac = advertised(usage_text(true), false);
+        assert!(!mac.lines().any(|line| line.trim() == marker));
+        assert!(mac.lines().any(|line| line.trim() == clone), "clone stays POSIX");
+        assert_eq!(
+            mac,
+            USAGE.replace(
+                "       Desktop creation worktree ABI: desktop-creation-worktree-v1\n",
+                ""
+            )
+        );
+        assert_eq!(
+            help_text().lines().any(|line| line.trim() == marker),
+            cfg!(target_os = "linux")
         );
     }
 

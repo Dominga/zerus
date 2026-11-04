@@ -4,13 +4,16 @@ The first creation effect owned by the desktop actor is a local POSIX repository
 clone. Its exact help marker is `Desktop creation clone ABI: desktop-creation-clone-v1`. The selected paired relay must also advertise the
 frontend-request ABI. Windows does not advertise this executor.
 
-A direct Start in the native creation host consumes one fresh admission after
-the existing creation journal write barrier. The closed `CreationClone` request
-carries the exact checkpoint, its revision, creation and clone UUIDs, and current
+Only native consent in the current creation host sends a fresh intent,
+consumed once after the existing creation journal write barrier: a Submit,
+direct or from the task executor's Start (the same New session button, with a
+reserved identity), or the clone step of an explicit Continue setup's chain
+(see [Continue](#continue)). The closed `CreationClone` request carries the
+exact checkpoint, its revision, creation and clone UUIDs, and current
 configuration/service epoch. Native cached Service mode and the original relay
-child authenticate the request. Caller JSON, readiness, notification ownership,
-imported journals and task-reserved creation IDs cannot grant execution consent.
-The existing task-start binding and storage remain independent.
+child authenticate the request. Caller JSON, readiness, notification ownership
+and imported journals cannot grant execution consent. The existing task-start
+binding and storage remain independent.
 
 The actor rechecks the opaque native permit after `BEGIN IMMEDIATE`, then checks
 the actual writer epoch, local native machine source, original service owner and
@@ -40,9 +43,48 @@ this kind's undrained resources.
 `creation_clone_result` is a bounded indexed read with the original creation/clone
 IDs and plan fingerprint, bound to a fresh configuration/service epoch. A missing
 result never authorizes a resend. A lost mutation reply, reconnect, Check or
-recovered journal uses only this lookup. The native host cannot fall back to the
-legacy clone worker in service mode. Its reader may stop when the GUI quits;
+recovered journal uses only this lookup. Its reader may stop when the GUI quits;
 that does not cancel the admitted service job.
+
+A completed probe that finds no clone kind on the selected service sends the
+clone and its status reads down the unchanged direct path, since nothing of
+this kind reached that service; a probe that fails is no such proof. Otherwise
+the native host never falls back to the legacy clone worker in service mode.
+The reducer emits a clone only for a request ID it reserved and persisted in
+this process, so a clone without fresh consent, or one stopped before its
+admission request is written, was never sent. It fails as definitely
+effect-free (`effects_started: false`), its UUID is retired into
+`clone_previous`, and the creation stays resumable instead of Unknown.
+
+## Continue
+
+One explicit Continue setup in the current native host authorizes the
+remaining clone, worktree and launch steps of that creation and its reviewed
+plan, in order (zerus-5wmh.66.4.3.9). The chain is one process-local original
+(`Chain` in `client/src-tauri/src/creations.rs`), never a stored consent flag
+or a renderer-supplied value. Only a Continue that the reducer applies starts
+one. The reducer requires definite clone and worktree predecessors and no
+dispatched launch, so an Unknown original stays lookup-only and never resends
+or rotates its ID.
+- **Binding.** Each step consumes its own binding before its intent: the
+  kind, the step ID (a clone or worktree request reserved after the Continue,
+  or the launch ID reserved before it), a later revision and the reviewed
+  plan's fixed choices (`host`, `machine`, `cmd`, `tag`, `account`, `model`,
+  `effort`, `source`, `url`, `repository_name`, `branch`, `terminal`,
+  `swarm`, `auto`, `repository`). Each intent still needs fresh native proof
+  and current lease and service checks after `BEGIN`. An earlier step's
+  success is not a permit and does not extend a proof deadline, and each step
+  uses the service that is current when it runs.
+- **Order.** The chain moves forward only after the preceding consumed step's
+  definite success (`clone_done`, `worktree_done`). Any mismatch discards the
+  remainder.
+- **Stopping.** Failed, Unknown, Stop, a stopped or recovering creation, a
+  changed plan, source or identity, or a lost host ends the chain. A Submit's
+  unused consent ends the same way. Restart, recovery, import, reconnect and a
+  replayed Continue cannot reconstruct it, and plan edits create a new
+  creation that no old Continue covers.
+
+## Limits and tests
 
 This independent ledger retains at most 4096 IDs and 16 MiB of reserved storage,
 with at most 32 unsettled resource charges and one effect worker. The original

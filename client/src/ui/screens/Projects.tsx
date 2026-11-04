@@ -41,7 +41,7 @@ const disabled = (label: string, icon: string, hint: string): MenuEntry => ({ la
 const NO_FOLDER: Folder = { id: "", key: "", name: "", path: "", computer: "", machine: "" };
 
 /** InlineProjectName in the mockup: commit on Enter/blur, Escape reverts. */
-function ProjectName(props: { project: Project; enabled: boolean; rename(id: string, value: string): Promise<EditOutcome | undefined> | undefined }) {
+function ProjectName(props: { project: Project; enabled: boolean; describedBy?: string; rename(id: string, value: string): Promise<EditOutcome | undefined> | undefined }) {
   const [value, setValue] = createSignal(props.project.name);
   let editing: { id: string; name: string } | undefined;
   createEffect(() => { const p = props.project; if (!editing || p.id !== editing.id) { editing = undefined; setValue(p.name); } });
@@ -54,7 +54,7 @@ function ProjectName(props: { project: Project; enabled: boolean; rename(id: str
     setValue(name);
     void props.rename(started.id, name)?.then((result) => { if (!result || result.outcome === "refused") setValue(props.project.name); });
   };
-  return <input id="proj-name" class="field proj-name" maxLength={80} value={value()} readOnly={!props.enabled}
+  return <input id="proj-name" class="field proj-name" maxLength={80} value={value()} readOnly={!props.enabled} aria-describedby={props.describedBy}
     onFocus={() => { editing = { id: props.project.id, name: props.project.name }; }}
     onInput={(event) => setValue(event.currentTarget.value)} onBlur={commit}
     onKeyDown={(event) => {
@@ -117,7 +117,11 @@ export function ProjectsScreen() {
       void pending.then((result) => { if (result?.outcome === "refused" && moveFocus === saved) moveFocus = undefined; });
     }
   };
-  const editHint = () => organization.grouping().reason ?? undefined;
+  const editHint = () => {
+    const group = organization.grouping();
+    return group.ready ? undefined : group.reason ?? tr(organization.STARTING);
+  };
+  const editDescription = () => editHint() ? "project-edit-readiness" : undefined;
   const [dragging, setDragging] = createSignal<string>();
   const [dropBefore, setDropBefore] = createSignal<string>();
   const endDrag = () => { setDragging(undefined); setDropBefore(undefined); };
@@ -208,7 +212,7 @@ export function ProjectsScreen() {
         <header class="su-head">
           <h1>{tr("Projects")}</h1>
           <span class="grow" />
-          <button class="btn" disabled={!organization.grouping().ready} onClick={(e) => setOverviewOrigin(e.currentTarget)}><Icon name="folder-git-2" size={14} />{tr("Worktrees…")}</button>
+          <button class="btn" disabled={!organization.grouping().ready} aria-describedby={editDescription()} onClick={(e) => setOverviewOrigin(e.currentTarget)}><Icon name="folder-git-2" size={14} />{tr("Worktrees…")}</button>
           <button class="btn" disabled={!view().loaded} onClick={(e) => setSwarmOrigin({ element: e.currentTarget, connect: false })}><Icon name="network" size={14} />{tr("Swarm…")}</button>
         </header>
         <p class="muted proj-hint">{tr("Organize sessions and folders across your computers. A folder can be used by several projects.")}</p>
@@ -226,6 +230,7 @@ export function ProjectsScreen() {
             <input type="checkbox" checked={allSwarm()} onChange={(e) => setAllSwarm(e.currentTarget.checked)} />{tr("All swarm projects")}
           </label>
           <span class="muted" classList={{ danger: view().status_error }}>{view().status}</span>
+          <Show when={editHint()}>{(reason) => <span id="project-edit-readiness" class="muted ell" role="status" title={reason()}>{reason()}</span>}</Show>
         </div>
 
         <div class="proj-split">
@@ -249,7 +254,7 @@ export function ProjectsScreen() {
                 </li>
               ); }}</For>
             </ul>
-            <button class="btn" disabled={!edits.enabled()} title={editHint()} onClick={(event) => edits.openNew(event.currentTarget)}><Icon name="plus" size={14} />{tr("New project…")}</button>
+            <button class="btn" disabled={!edits.enabled()} title={editHint()} aria-describedby={editDescription()} onClick={(event) => edits.openNew(event.currentTarget)}><Icon name="plus" size={14} />{tr("New project…")}</button>
           </aside>
 
           <Show when={project()}>{(p) => (
@@ -257,7 +262,7 @@ export function ProjectsScreen() {
               <div class="form-row">
                 <label for="proj-name">{tr("Name")}</label>
                 <div class="row">
-                  <ProjectName project={p()} enabled={edits.canEdit(p().id)} rename={edits.rename} />
+                  <ProjectName project={p()} enabled={edits.canEdit(p().id)} describedBy={editDescription()} rename={edits.rename} />
                   <span class="dim proj-id">{tr("ID")}</span>
                   <span class="mono proj-id-val" title={tr("Project ID")}>{p().id}</span>
                 </div>
@@ -270,7 +275,7 @@ export function ProjectsScreen() {
                 </div>
               </div>
               <label class="check proj-default" title={editHint()}>
-                <input type="checkbox" checked={p().is_default} disabled={defaultBusy() || !edits.canEdit(p().id)}
+                <input type="checkbox" checked={p().is_default} disabled={defaultBusy() || !edits.canEdit(p().id)} aria-describedby={editDescription()}
                   onChange={(event) => { const checked = event.currentTarget.checked; event.currentTarget.checked = p().is_default; if (checked && !p().is_default) void chooseDefault(p().id); }} />{tr("Default for sessions started outside Zerus")}
               </label>
 
@@ -278,7 +283,7 @@ export function ProjectsScreen() {
                 <div class="row proj-fhead">
                   <h2 class="section-title">{tr("Folders")}</h2>
                   <span class="grow" />
-                  <button class="btn small" disabled={!organization.grouping().ready} onClick={(e) => setCloneOrigin(e.currentTarget)}><Icon name="download" size={12} />{tr("Clone repository…")}</button>
+                  <button class="btn small" disabled={!organization.grouping().ready} aria-describedby={editDescription()} onClick={(e) => setCloneOrigin(e.currentTarget)}><Icon name="download" size={12} />{tr("Clone repository…")}</button>
                   <button class="btn small" disabled={launchButton().disabled} title={launchButton().tip} onClick={launchSelected}><Icon name="plus" size={12} />{tr("New session…")}</button>
                 </div>
                 <div class="su-tablewrap">
@@ -297,9 +302,9 @@ export function ProjectsScreen() {
                   </table>
                 </div>
                 <div class="row proj-factions">
-                  <button class="btn small" disabled={!folderEdits.enabled(p().id)} onClick={(e) => void folderEdits.open(p().id, undefined, e.currentTarget)}>{tr("Add folder…")}</button>
-                  <button class="btn small" disabled={!folderEdits.enabled(p().id, selected()) || !selected()} onClick={(e) => { const f = selected(); if (f) void folderEdits.open(p().id, { ...f }, e.currentTarget); }}>{tr("Edit folder…")}</button>
-                  <button class="btn small" disabled={!folderEdits.enabled(p().id, selected()) || !selected()} title={tr("Remove this folder from the project. Files stay in place.")} onClick={() => { const f = selected(); if (f) void folderEdits.remove(p().id, { ...f }); }}>{tr("Remove folder")}</button>
+                  <button class="btn small" disabled={!folderEdits.enabled(p().id)} aria-describedby={editDescription()} onClick={(e) => void folderEdits.open(p().id, undefined, e.currentTarget)}>{tr("Add folder…")}</button>
+                  <button class="btn small" disabled={!folderEdits.enabled(p().id, selected()) || !selected()} aria-describedby={editDescription()} onClick={(e) => { const f = selected(); if (f) void folderEdits.open(p().id, { ...f }, e.currentTarget); }}>{tr("Edit folder…")}</button>
+                  <button class="btn small" disabled={!folderEdits.enabled(p().id, selected()) || !selected()} title={tr("Remove this folder from the project. Files stay in place.")} aria-describedby={editDescription()} onClick={() => { const f = selected(); if (f) void folderEdits.remove(p().id, { ...f }); }}>{tr("Remove folder")}</button>
                   <span class="grow" />
                   <button class="btn small" disabled={!selected() || selected()?.machine !== machineCards[""]?.host || launchButton().disabled} onClick={() => { const f = selected(); if (f) void folderEdits.openFolder(p().id, { ...f }); }}><Icon name="folder-open" size={12} />{tr("Open folder")}</button>
                 </div>
@@ -307,7 +312,7 @@ export function ProjectsScreen() {
               <div class="su-hsplit" role="separator" aria-orientation="horizontal" title={tr("Drag to resize folders and worktrees.")} onPointerDown={startSplit} />
               <Suspense><ProjectWorktrees folder={selected()} project={p().id} /></Suspense>
               <div class="row proj-foot">
-                <button class="btn danger" disabled={!edits.canEdit(p().id) || view().projects.filter((p) => p.accessible).length < 2} title={editHint()}
+                <button class="btn danger" disabled={!edits.canEdit(p().id) || view().projects.filter((p) => p.accessible).length < 2} title={editHint()} aria-describedby={editDescription()}
                   onClick={(event) => edits.openDelete(p().id, event.currentTarget)}><Icon name="trash" size={14} />{tr("Delete project…")}</button>
               </div>
             </section>

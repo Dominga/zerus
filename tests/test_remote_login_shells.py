@@ -177,6 +177,8 @@ class RemoteLoginShells(unittest.TestCase):
         calls.append(['@peer', '--expect-machine', machine, 'inspect', '--session-id', identity])
         calls.append(['@peer', '--expect-machine', machine, 'session-action-status', '--session-id', identity, '--json'])
         calls.append(['@peer', 'native-ui', '--session-id', identity, '--json'])
+        # The DeepSeek attach alias opens the same native UI (#1355 review R3).
+        calls.append(['@peer', 'a', 'dsh/p/example', '--session-id', identity])
         executable = self.peer / '.local/bin/hgs'
         older = PEER_HGS.replace("'hooks-health-v1'", "'hooks-health-v1' 'Desktop creation ABI: guarded-create-v1' '  lifecycle-receipt-status-v1'")
         executable.write_text(older)
@@ -193,6 +195,8 @@ class RemoteLoginShells(unittest.TestCase):
                 argv = self.received()[0]
                 if call[1] == 'native-ui':
                     self.assertEqual(argv, ['__dsh-ui-url', '--session-id', identity])
+                elif call[1:3] == ['a', 'dsh/p/example']:
+                    self.assertEqual(argv, ['__dsh-ui-url', 'dsh/p/example', '--session-id', identity])
                 elif call[1] == '--expect-machine':
                     self.assertEqual(argv[:2], call[1:3], argv)
                     self.assertEqual(argv[-len(call[3:]):], call[3:], argv)

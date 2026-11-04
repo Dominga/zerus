@@ -1202,6 +1202,66 @@ class SessionIdentity(Harness):
         self.assertEqual(self.binding(name)["session_id"], session)
 
 
+    # #1355 review R3: a terminal action binds its target to the selected run
+    # before its first effect; a name another run took is refused, never acted on.
+    @unittest.skipUnless(sys.platform.startswith("linux"), "lock waiters are read from /proc/locks")
+    def test_terminal_actions_bind_the_selected_run_before_acting(self):
+        import fcntl
+        name = self.start()
+        record = self.binding(name)
+        session = record["session_id"]
+        state = self.root / "state"
+        path = state / (hashlib.sha256(name.encode()).hexdigest() + ".json")
+        original = path.read_text()
+        def call(*args):
+            return subprocess.run([str(HGS), *args], env=self.env, capture_output=True, text=True, timeout=30)
+        def alive(target):
+            return subprocess.run([str(self.bin / "tmux"), "has-session", "-t", f"={target}"],
+                                  env=self.env, capture_output=True).returncode == 0
+        def take_name(run):
+            # Another run's terminal now has the name; the selected one moved away.
+            self.t("rename-session", "-t", f"={name}", "claude/p/moved-away")
+            self.t("new-session", "-d", "-s", name, "sleep", "300")
+            self.t("set-option", "-t", f"={name}:", "@hgs_run", run)
+        def give_back():
+            self.t("kill-session", "-t", f"={name}")
+            self.t("rename-session", "-t", "=claude/p/moved-away", name)
+            path.write_text(original)
+        refused = f"Session ID {session} no longer names {name}"
+        # The name runs another run while the record still carries the ID:
+        # kill and both attach forms refuse before their first effect.
+        take_name("another-run")
+        for args in (["kill"], ["a"], ["a", "--existing"]):
+            result = call(*args, "--session-id", session)
+            self.assertEqual(result.returncode, 1, (args, result.stdout, result.stderr))
+            self.assertIn(refused, result.stderr, args)
+            self.assertTrue(alive(name), args)
+        give_back()
+        # The reviewer's race: kill waits for the state lock after resolution,
+        # while another session takes the name, its terminal and its record.
+        fd = os.open(state / ".lock", os.O_RDWR | os.O_CREAT, 0o600)
+        try:
+            fcntl.flock(fd, fcntl.LOCK_EX)
+            killing = subprocess.Popen([str(HGS), "kill", "--session-id", session], env=self.env,
+                                       stdout=subprocess.PIPE, stderr=subprocess.PIPE, text=True)
+            inode = os.fstat(fd).st_ino
+            self.wait(lambda: any(line.split()[1] == "->" and f":{inode} " in line + " "
+                                  for line in Path("/proc/locks").read_text().splitlines()))
+            other = str(uuid.uuid4())
+            take_name(other)
+            path.write_text(json.dumps(dict(json.loads(original), session_id=str(uuid.uuid4()), run_id=other)) + "\n")
+        finally:
+            fcntl.flock(fd, fcntl.LOCK_UN)
+            os.close(fd)
+        out, err = killing.communicate(timeout=30)
+        self.assertEqual(killing.returncode, 1, out + err)
+        self.assertIn(refused, err)
+        self.assertTrue(alive(name), "the other session's terminal survives")
+        give_back()
+        self.assertTrue(alive(name))
+        self.assertEqual(self.binding(name)["session_id"], session)
+
+
 class Lifecycle(Harness):
     def test_directory_browser(self):
         folder = self.root / "browse ' test"

@@ -741,7 +741,10 @@ fn dispatch_normal(mut args: Vec<String>) -> Result<i32> {
         return crate::native_ui::open(&config, &target, "@account", None, dry);
     }
     if command == "a" && args.first().is_some_and(|v| v.starts_with("dsh/")) {
-        return crate::native_ui::open(&config, &target, &args[0], None, dry);
+        // A DeepSeek attach is its native UI: a remote selector takes the same
+        // gated `__dsh-ui-url` as native-ui (a local one was resolved above).
+        let selector = session_id_flag(command, args)?.map(|(_, id)| id);
+        return crate::native_ui::open(&config, &target, &args[0], selector.as_deref(), dry);
     }
     if command == "download" {
         return crate::download::dispatch(&config, &target, args, dry);
@@ -1222,6 +1225,36 @@ fn select_session(command: &str, args: &[String]) -> Result<Vec<String>> {
     }
 }
 
+/// The terminal of the session `--session-id` selected under `session`, bound
+/// before the first effect: its record, read under the state lock, still
+/// carries the ID, and the name's immutable session ID runs that record's run.
+/// None without a selection; an error when the name now runs anything else
+/// (#1355 review). The caller acts on the immutable ID, never the name.
+fn bound_terminal(session: &str) -> Result<Option<(String, String)>> {
+    let Some(run) = state::session_id::selected_run(session).map_err(|e| Error::new(1, e))? else {
+        return Ok(None);
+    };
+    let changed = || {
+        let id = state::session_id::selected().map(|(_, id)| id).unwrap_or_default();
+        Error::new(1, format!("Session ID {id} no longer names {session}; refresh and retry"))
+    };
+    let info = terminal()
+        .probe(Target::Name(session), &[PaneField::SessionId, PaneField::RunMarker])
+        .ok_or_else(changed)?;
+    let fields = info.fields();
+    if fields.len() != 2
+        || !fields[0]
+            .strip_prefix('$')
+            .is_some_and(|id| !id.is_empty() && id.chars().all(|ch| ch.is_ascii_digit()))
+    {
+        return Err(changed());
+    }
+    if run.is_empty() || fields[1] != run {
+        return Err(changed());
+    }
+    Ok(Some((fields[0].to_owned(), run)))
+}
+
 fn remote(
     config: &Config,
     target: &str,
@@ -1558,6 +1591,12 @@ fn attach_command(config: &Config, args: &[String], client: &str, mut dry: bool)
     if run_id.is_some() && !existing {
         return Err(Error::new(1, "--run-id requires --existing"));
     }
+    // A selected session binds an existing attach to its verified run.
+    let selected_run;
+    if existing && run_id.is_none() && !dry {
+        selected_run = bound_terminal(session)?.map(|(_, run)| run);
+        run_id = selected_run.as_deref();
+    }
     if state::opencode::exists(session) {
         return state::opencode::attach(session, run_id, dry).map_err(|error| Error::new(1, error));
     }
@@ -1616,7 +1655,10 @@ fn attach(config: &Config, session: &str, client: &str, dry: bool) -> Result<i32
             return Ok(rc);
         }
     }
-    attach_target(config, session, client, Target::Name(session), None)
+    match bound_terminal(session)? {
+        Some((id, run)) => attach_target(config, session, client, Target::Session(&id), Some(&run)),
+        None => attach_target(config, session, client, Target::Name(session), None),
+    }
 }
 
 fn attach_target(
@@ -1702,7 +1744,15 @@ fn kill(config: &Config, args: &[String], mut dry: bool) -> Result<i32> {
         return Ok(0);
     }
     if session_exists(session) {
-        let rc = terminal().kill(session)?;
+        let rc = match bound_terminal(session)? {
+            Some((id, _)) => {
+                terminal()
+                    .kill_session(Target::Session(&id))
+                    .map_err(|error| Error::new(1, error))?;
+                0
+            }
+            None => terminal().kill(session)?,
+        };
         if rc != 0 {
             return Ok(rc);
         }

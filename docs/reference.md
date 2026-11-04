@@ -286,7 +286,10 @@ name; arguments after it are the command's own. The value must be the
 lowercase UUID shown by `hgs ls --json`, given once. Resolution only finds the
 session's name: every record the command then reads under that name, live or
 archived, must still carry the ID, so a name another session took meanwhile
-fails with "Session ID ID no longer names NAME" instead of acting on it.
+fails with "Session ID ID no longer names NAME" instead of acting on it. `kill`
+and `a` bind the terminal before their first effect: the name's immutable
+terminal session must run the run that the verified record carries, and they
+then act on that terminal session, never on the name.
 `hgs task` keeps its own `--session-id`, `notify` and `paste` stay the tray's
 and tmux's own entry points, and an agent's own flag after `--` is untouched.
 With `@host` the flag reaches a peer only once its `hgs --help` lists

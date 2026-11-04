@@ -23,6 +23,24 @@ pub(crate) fn select(name: &str, id: &str) {
         Some((name.to_owned(), id.to_owned()));
 }
 
+/// The selected name and ID, when the command was given `--session-id`.
+pub(crate) fn selected() -> Option<(String, String)> {
+    SELECTED.lock().unwrap_or_else(std::sync::PoisonError::into_inner).clone()
+}
+
+/// The run of the session selected under `name`, read under the state lock and
+/// checked against the selected ID; None without a selection for `name`. A
+/// terminal action binds its target to this run before its first effect
+/// (#1355 review).
+pub(crate) fn selected_run(name: &str) -> Result<Option<String>> {
+    if selected().is_none_or(|(selected, _)| selected != name) {
+        return Ok(None);
+    }
+    let _guard = lock(None)?;
+    let record = read(name)?;
+    Ok(Some(string(&record, "run_id").to_owned()))
+}
+
 /// Refuses a record that has the selected name but not the selected ID.
 pub(super) fn verify(record: &Value) -> Result<()> {
     let selected = SELECTED.lock().unwrap_or_else(std::sync::PoisonError::into_inner);

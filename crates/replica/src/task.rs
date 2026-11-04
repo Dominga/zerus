@@ -357,6 +357,15 @@ impl TaskDoc {
             .filter(execution::SessionBinding::valid)
     }
 
+    /// SHA-256 (lowercase hex) of the requirement as it is now: the prompt
+    /// text and its attachments, exactly. Titles and comments are not part
+    /// of it.
+    pub fn requirement_digest(&self) -> Result<String> {
+        let text = self.doc.get_text("text").to_string();
+        let bytes = serde_json::to_vec(&(text, self.attachments()?))?;
+        Ok(format!("{:x}", Sha256::digest(bytes)))
+    }
+
     /// An edit of the requirement, its description or its attachments,
     /// counts the next revision. A receipt for input reserved under an
     /// earlier revision never advances the edited task.

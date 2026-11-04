@@ -260,6 +260,7 @@ impl TaskDoc {
                 target: view.target.clone(),
                 session: view.session.clone(),
                 queued,
+                requirement_digest: self.requirement_digest()?,
             }),
         };
         self.write_attempt(&attempt)?;
@@ -341,7 +342,10 @@ impl TaskDoc {
             // requirement is not the task this input was reserved for.
             && self.view()?.target == delivery.target
             && self.session() == delivery.session
-            && self.requirement() == attempt.requirement;
+            && self.requirement() == attempt.requirement
+            // The exact requirement the request was rendered from: a revision
+            // count alone does not identify it across replicas.
+            && self.requirement_digest()? == delivery.requirement_digest;
         self.push_event(id, EventKind::Submitted, actor, now)?;
         if unchanged {
             self.advance(&attempt, &delivery, actor, now)?;
@@ -1267,7 +1271,10 @@ mod tests {
         // review-n and desktop-u on #1391: a changed target, holder or
         // requirement is a different execution; a comment is not.
         type Drift = (&'static str, fn(&mut TaskDoc));
-        let drifts: [Drift; 6] = [
+        let drifts: [Drift; 7] = [
+            ("rename", |t| {
+                t.set_title("A title", &Actor::Person, 11).unwrap()
+            }),
             ("comment", |t| {
                 t.comment("Unrelated note", &Actor::Person, 11).unwrap()
             }),
@@ -1304,7 +1311,7 @@ mod tests {
             send(&mut task, ONE, "api");
             drift(&mut task);
             let advanced = settle(&mut task, ONE).advanced;
-            assert_eq!(advanced, name == "comment", "{name}");
+            assert_eq!(advanced, matches!(name, "comment" | "rename"), "{name}");
             let view = task.view().unwrap();
             if advanced {
                 assert_eq!(
@@ -1729,6 +1736,56 @@ mod tests {
         let execution = right.view().unwrap().execution.unwrap();
         assert!(execution.conflict);
         assert_eq!(execution.unknown, [ONE]);
+    }
+
+    #[test]
+    fn concurrent_requirement_edits_never_share_the_reserved_requirement() {
+        // review-n on #1391 R3: two replicas each edit the requirement once,
+        // so both count revision 2; only the exact reserved content counts.
+        let file = |data: &str| crate::TaskAttachment {
+            name: "example.txt".into(),
+            mime: "text/plain".into(),
+            data_base64: data.into(),
+            reference: String::new(),
+        };
+        for media in [false, true] {
+            for reverse in [false, true] {
+                let bytes = task().snapshot().unwrap();
+                let mut left = TaskDoc::from_bytes(&bytes).unwrap();
+                let mut right = TaskDoc::from_bytes(&bytes).unwrap();
+                left.doc.set_peer_id(10).unwrap();
+                right.doc.set_peer_id(20).unwrap();
+                if media {
+                    left.set_attachments(&[file("YWJj")], &Actor::Person, 2)
+                        .unwrap();
+                    right
+                        .set_attachments(&[file("eHl6")], &Actor::Person, 2)
+                        .unwrap();
+                } else {
+                    left.edit_text("Left requirement", &Actor::Person, 2)
+                        .unwrap();
+                    right
+                        .edit_text("Right requirement", &Actor::Person, 2)
+                        .unwrap();
+                }
+                assert_eq!((left.requirement(), right.requirement()), (2, 2));
+                send(&mut left, ONE, "api");
+                let own = receipt(&left, ONE);
+                let (left_bytes, right_bytes) =
+                    (left.snapshot().unwrap(), right.snapshot().unwrap());
+                let mut merged = if reverse { right } else { left };
+                merged
+                    .import(if reverse { &left_bytes } else { &right_bytes })
+                    .unwrap();
+                assert_eq!(merged.requirement(), 2);
+                let settled = merged
+                    .settle_attempt(ONE, Settlement::Receipt(&own), &Actor::Person, 20)
+                    .unwrap();
+                assert!(!settled.advanced, "media={media} reverse={reverse}");
+                assert_eq!(merged.stage().unwrap(), Stage::Todo);
+                assert_eq!(current(&merged).phase, Phase::Submitted);
+            }
+        }
     }
 
     #[test]

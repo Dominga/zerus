@@ -120,6 +120,11 @@ pub struct Delivery {
     /// of its content. Its receipt submits these originals and no others.
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub queued: Vec<QueuedMessage>,
+    /// SHA-256 (lowercase hex) of the requirement the request was rendered
+    /// from: the prompt text and its attachments. A receipt advances the task
+    /// only while its requirement is exactly this one; an edit merged from
+    /// any replica, whatever revision it counted, is another requirement.
+    pub requirement_digest: String,
 }
 
 /// A queued message a reserved request includes.
@@ -356,6 +361,7 @@ fn delivery_valid(attempt: &Attempt, delivery: &Delivery) -> bool {
         && bounded(&delivery.revision, false)
         && hex_digest(&delivery.digest)
         && delivery.stage_at >= 0
+        && hex_digest(&delivery.requirement_digest)
         && delivery.queued.len() <= MAX_QUEUED
         && delivery
             .queued

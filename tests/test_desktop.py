@@ -272,7 +272,8 @@ finally:
         status = self.cli('desktop', 'status', '--json')
         self.assertEqual(status['operation_queue']['kinds']['task_message']['undrained'], 0)
         help_text = subprocess.run([str(HGS), '--help'], env=self.env, capture_output=True, text=True).stdout
-        if sys.platform.startswith('linux') or sys.platform == 'darwin':
+        # macOS refuses every original until a qualified child seam exists.
+        if sys.platform.startswith('linux'):
             self.assertIn('Desktop task message ABI: desktop-task-message-v1', help_text)
         else:
             self.assertNotIn('desktop-task-message', help_text)

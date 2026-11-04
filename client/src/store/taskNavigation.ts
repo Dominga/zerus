@@ -37,7 +37,12 @@ if (params.has("task") || params.get("page") === "tasks") createRoot((dispose) =
     const task = tasks.project() === project ? tasks.tasks().find((t) => t.uuid === ref || t.id === ref || t.ref === ref) : undefined;
     if (task && project) { openTask(project, task.uuid); dispose(); }
     // A windowed list loads some rows of each stage: a task named by its UUID
-    // opens anyway, and Task View reads it on its own.
-    else if (project && tasks.project() === project && tasks.windowed() && tasks.loaded() && UUID.test(ref)) { openTask(project, ref.toLowerCase()); dispose(); }
+    // opens anyway, and Task View reads it on its own. A short reference
+    // beyond the window cannot be resolved here, so the board stays open
+    // without it rather than opening it later by surprise.
+    else if (project && tasks.project() === project && tasks.windowed() && tasks.loaded()) {
+      if (UUID.test(ref)) openTask(project, ref.toLowerCase());
+      dispose();
+    }
   });
 });

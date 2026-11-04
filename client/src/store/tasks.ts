@@ -43,12 +43,20 @@ export function createTasks(follow: (project: string | null) => Promise<void>, r
   let whole: Task[] | null = null;
   let sent = Promise.resolve(), generation = 0;
 
-  /** The stages in board order, To do numbered by its position. */
+  /** The stages in board order, each task once, To do numbered by its position. */
   const publish = () => {
     let queue = 0;
-    const ordered = whole ?? STAGES.flatMap((s) => rows[s]);
+    const seen = new Set<string>();
+    const ordered = (whole ?? STAGES.flatMap((s) => rows[s])).filter((t) => !seen.has(t.uuid) && !!seen.add(t.uuid));
     setTasks(ordered.map((t) => t.stage === "todo" ? { ...t, queue: ++queue } : t));
   };
+  /** `found` as the rows of `stage`: the freshest read of those tasks, so no other stage keeps them. */
+  const place = (stage: Stage, found: Task[]) => {
+    const ids = new Set(found.map((t) => t.uuid));
+    rows = Object.fromEntries(STAGES.map((s) => [s, s === stage ? found : rows[s].filter((t) => !ids.has(t.uuid))])) as Record<Stage, Task[]>;
+  };
+  /** Ends every read in flight for `stage`: its page belongs to rows that were replaced. */
+  const abandon = (stage: Stage) => { reads[stage]++; if (loading()[stage]) busy(stage, false); };
   const unique = (values: unknown[], stage?: Stage) => {
     const seen = new Set<string>();
     return values.flatMap((value) => {
@@ -66,13 +74,14 @@ export function createTasks(follow: (project: string | null) => Promise<void>, r
       let found: Task[] = [], after: string | null = null, pages = 0;
       do {
         const page = await readPage(owner!, stage, Math.min(PAGE_LIMIT, want - found.length), after) as Page;
+        // A newer read or project supersedes this one: stop reading.
+        if (at !== generation || mine !== reads[stage]) return;
         const cursor = text(page.page.next) || null;
         found = unique([...found, ...page.tasks], stage);
         // A cursor that does not advance ends the read rather than looping on it.
         after = cursor && cursor !== after ? cursor : null;
       } while (after && found.length < want && ++pages < MAX_REREAD_PAGES);
-      if (at !== generation || mine !== reads[stage]) return;
-      rows = { ...rows, [stage]: found }; next = { ...next, [stage]: after }; publish(); setPageError("");
+      place(stage, found); next = { ...next, [stage]: after }; publish(); setPageError("");
     } catch (e) {
       if (at === generation && mine === reads[stage]) setPageError(String(e));
     } finally {
@@ -84,7 +93,11 @@ export function createTasks(follow: (project: string | null) => Promise<void>, r
     project, tasks, loaded, error, truncated, damaged, windowed, loading, pageError,
     /** A task by UUID: a loaded row, else one read on its own. */
     find: (uuid: string) => tasks().find((t) => t.uuid === uuid) ?? adopted().get(uuid),
-    /** Keeps a task read on its own for the write guards; the oldest goes first. */
+    /**
+     * Keeps a task read on its own for the write guards; the oldest goes
+     * first. Later windows do not refresh it: the guards compare it with an
+     * equally old card, and hgs's own checks of each write are the real guard.
+     */
     adopt(task: Task) {
       const next = new Map(adopted()); next.delete(task.uuid); next.set(task.uuid, task);
       while (next.size > ADOPTED) next.delete(next.keys().next().value!);
@@ -111,7 +124,7 @@ export function createTasks(follow: (project: string | null) => Promise<void>, r
       try {
         const page = await readPage(owner, stage, WINDOW, after) as Page;
         if (at !== generation || mine !== reads[stage]) return;
-        rows = { ...rows, [stage]: unique([...rows[stage], ...page.tasks], stage) };
+        place(stage, unique([...rows[stage], ...page.tasks], stage));
         next = { ...next, [stage]: text(page.page.next) || null };
         extent = { ...extent, [stage]: rows[stage].length };
         publish(); setPageError("");
@@ -130,24 +143,26 @@ export function createTasks(follow: (project: string | null) => Promise<void>, r
           const summary = object(p.window), stages = object(object(summary.window).stages);
           if (Object.keys(stages).length) {
             // A window: each stage's first rows; extended stages keep their
-            // rows and are read again to the extent the user loaded.
-            const first = unique(p.tasks);
+            // rows and are read again to the extent the user loaded. The
+            // window's rows win over any row kept from earlier reads.
+            const first = unique(p.tasks), current = new Set(first.map((t) => t.uuid));
             whole = null; setWindowed(true);
             setTotals(Object.fromEntries(STAGES.map((s) => [s, Number(object(stages[s]).total) || 0])) as Record<Stage, number>);
             for (const s of STAGES) {
               const head = first.filter((t) => t.stage === s), cursor = text(object(stages[s]).next) || null;
               if (extent[s] > head.length && cursor) {
-                const kept = rows[s].filter((t) => !head.some((h) => h.uuid === t.uuid));
+                const kept = rows[s].filter((t) => !current.has(t.uuid));
                 rows = { ...rows, [s]: [...head, ...kept] };
                 void reread(s, extent[s]);
               } else {
+                abandon(s);
                 rows = { ...rows, [s]: head }; next = { ...next, [s]: cursor }; extent = { ...extent, [s]: 0 };
               }
             }
             setTruncated(false);
             setDamaged(Number(summary.damaged_total) || (Array.isArray(p.damaged) ? p.damaged.length : 0));
           } else {
-            setWindowed(false);
+            setWindowed(false); STAGES.forEach(abandon);
             const all = unique(p.tasks.slice(0, TASK_LIMIT));
             whole = all;
             rows = Object.fromEntries(STAGES.map((s) => [s, all.filter((t) => t.stage === s)])) as Record<Stage, Task[]>;

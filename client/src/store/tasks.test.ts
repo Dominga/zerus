@@ -59,6 +59,7 @@ describe("project task stream", () => {
 
 const windowed = (tasks: unknown[], stages: Record<string, { total: number; next: string | null }>, revision = "r1"): TasksOut =>
   list("p1", tasks, { window: { counts: {}, damaged_total: 0, revision, window: { schema: 1, limit: WINDOW, stages } } });
+const todo = (store: ReturnType<typeof createTasks>) => store.tasks().filter((t) => t.stage === "todo").map((t) => t.uuid);
 const stagesOf = (todo: { total: number; next: string | null }) => ({
   review: { total: 0, next: null }, active: { total: 0, next: null }, todo, backlog: { total: 1, next: null }, done: { total: 0, next: null },
 });
@@ -110,6 +111,62 @@ describe("windowed project tasks", () => {
     expect(read).toHaveBeenCalledTimes(3);
     expect(read).toHaveBeenLastCalledWith("p1", "todo", 3, "stuck");
     expect(store.loading().todo).toBe(false);
+  });
+  it("a new window ends a Show more in flight, so no page lands after a head it was not read for", async () => {
+    let finish!: (page: unknown) => void;
+    const read = vi.fn().mockImplementationOnce(() => new Promise((r) => { finish = r; }));
+    const store = createTasks(vi.fn().mockResolvedValue(undefined), read); store.follow("p1");
+    store.apply([windowed([row("t1"), row("t2")], stagesOf({ total: 5, next: "c2" }))]);
+    const pending = store.more("todo");
+    // t0 arrives first in To do: the window's cursor now follows t1, not t2.
+    store.apply([windowed([row("t0"), row("t1")], stagesOf({ total: 6, next: "c1" }), "r2")]);
+    expect(store.loading().todo).toBe(false);
+    finish({ tasks: [row("t3"), row("t4")], page: { next: "c4" } }); await pending;
+    expect(todo(store)).toEqual(["t0", "t1"]);
+    read.mockResolvedValueOnce({ tasks: [row("t2"), row("t3")], page: { next: "c3" } });
+    await store.more("todo");
+    expect(read).toHaveBeenLastCalledWith("p1", "todo", WINDOW, "c1");
+    expect(todo(store)).toEqual(["t0", "t1", "t2", "t3"]);
+  });
+  it("a task that moved stages is shown once, in the window's stage, while and after its old stage is read again", async () => {
+    let fail!: (error: unknown) => void;
+    const read = vi.fn()
+      .mockResolvedValueOnce({ tasks: [row("t3"), row("t4")], page: { next: "c4" } })
+      .mockImplementationOnce(() => new Promise((_, reject) => { fail = reject; }));
+    const store = createTasks(vi.fn().mockResolvedValue(undefined), read); store.follow("p1");
+    store.apply([windowed([row("t1"), row("t2")], stagesOf({ total: 6, next: "c2" }))]);
+    await store.more("todo");
+    // t4 is completed: the next window has it first in Done.
+    store.apply([windowed([row("t4", "done"), row("t1"), row("t2")], { ...stagesOf({ total: 5, next: "c2" }), done: { total: 1, next: null } }, "r2")]);
+    const shown = () => store.tasks().map((t) => [t.uuid, t.stage, t.queue]);
+    expect(shown()).toEqual([["t1", "todo", 1], ["t2", "todo", 2], ["t3", "todo", 3], ["t4", "done", 0]]);
+    fail(new Error("hgs stopped")); await tick();
+    expect(store.pageError()).toContain("hgs stopped");
+    expect(shown()).toEqual([["t1", "todo", 1], ["t2", "todo", 2], ["t3", "todo", 3], ["t4", "done", 0]]);
+  });
+  it("a page read after the window moves a task it shows out of every other stage", async () => {
+    const read = vi.fn().mockResolvedValue({ tasks: [row("d1", "todo")], page: { next: null } });
+    const store = createTasks(vi.fn().mockResolvedValue(undefined), read); store.follow("p1");
+    store.apply([windowed([row("d1", "review"), row("t1")], { ...stagesOf({ total: 2, next: "c1" }), review: { total: 1, next: null } })]);
+    await store.more("todo");
+    expect(store.tasks().map((t) => [t.uuid, t.stage])).toEqual([["t1", "todo"], ["d1", "todo"]]);
+  });
+  it("a superseded re-read stops reading", async () => {
+    const waiting: ((page: unknown) => void)[] = [];
+    const read = vi.fn()
+      .mockResolvedValueOnce({ tasks: [row("t3"), row("t4")], page: { next: "c4" } })
+      .mockImplementation(() => new Promise((r) => { waiting.push(r); }));
+    const store = createTasks(vi.fn().mockResolvedValue(undefined), read); store.follow("p1");
+    store.apply([windowed([row("t1"), row("t2")], stagesOf({ total: 9, next: "c2" }))]);
+    await store.more("todo");
+    store.apply([windowed([row("t1"), row("t2")], stagesOf({ total: 9, next: "c2" }), "r2")]);
+    store.apply([windowed([row("t1"), row("t2")], stagesOf({ total: 9, next: "c2" }), "r3")]);
+    expect(read).toHaveBeenCalledTimes(3);
+    // The first re-read's page comes back short: it does not ask for another.
+    waiting[0]({ tasks: [row("t1")], page: { next: "x1" } }); await tick();
+    expect(read).toHaveBeenCalledTimes(3);
+    waiting[1]({ tasks: [row("t1"), row("t2"), row("t3"), row("t4")], page: { next: "c4" } }); await tick();
+    expect(todo(store)).toEqual(["t1", "t2", "t3", "t4"]); expect(store.loading().todo).toBe(false);
   });
   it("drops a page that arrives after another project was chosen, and reports a failed read", async () => {
     let finish!: (page: unknown) => void;

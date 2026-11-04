@@ -10,7 +10,7 @@ import { computerOffline, orderedRows } from "../../store/catalog";
 import { groupOf, grouping, INBOX } from "../../store/organization";
 import { sessionIdentity, snapshotOf } from "./actions-ui";
 import { tasks } from "../../store/tasks";
-import { taskProject, projectTasks } from "../../store/taskContext";
+import { taskProject } from "../../store/taskContext";
 import "../styles/tasks.css";
 import { object, text } from "../screens/tasks-ui";
 import { homeShort, sessionAccount, sessionGoal, sessionPlan, usageRows } from "./inspector-data";
@@ -32,7 +32,11 @@ import "../styles/inspector.css";
 
 // Keep the always-visible badge eager; load the board only when its tab opens.
 const TasksPanel = lazy(() => import("../screens/Tasks").then((module) => ({ default: module.TasksPanel })));
-function TaskTabBadge() { return <Show when={taskProject() && tasks.loaded()}><span class="tk-tabbadge"><Show when={projectTasks().filter((t) => t.stage === "review").length}>{(n) => <span class="tk-tb review">{n()}</span>}</Show><Show when={projectTasks().filter((t) => t.stage === "todo").length}>{(n) => <span class="tk-tb todo">{n()}</span>}</Show></span></Show>; }
+function TaskTabBadge() {
+  // Each stage's total: a windowed list loads only some of its rows.
+  const count = (stage: "review" | "todo") => tasks.project() === taskProject()?.id ? tasks.total(stage) : 0;
+  return <Show when={taskProject() && tasks.loaded()}><span class="tk-tabbadge"><Show when={count("review")}>{(n) => <span class="tk-tb review">{n()}</span>}</Show><Show when={count("todo")}>{(n) => <span class="tk-tb todo">{n()}</span>}</Show></span></Show>;
+}
 
 const LABEL: Record<InspectorTab, string> = { plan: trNoop("Plan & agents"), details: trNoop("Details"), worktrees: trNoop("Worktrees"), tasks: trNoop("Tasks") };
 const raw = () => selected() ? followedFor(selected()!.key).value : undefined;

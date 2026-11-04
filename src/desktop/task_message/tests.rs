@@ -304,7 +304,20 @@ fn only_the_released_custody_settles_a_message_and_its_reply_never_changes() {
         assert!(ledger::drained(tx, row, observation).is_err());
         drop(held);
         let row = ledger::pending(&store.db).unwrap().unwrap();
-        let observation = custody::probe(&location, &record);
+        // A process another test forks keeps a copy of every descriptor until
+        // its exec closes it, the custody lock's open file description
+        // included: the release is observed once that window passed, as the
+        // drain itself keeps observing.
+        let until = std::time::Instant::now() + std::time::Duration::from_secs(5);
+        let observation = loop {
+            let observation = custody::probe(&location, &record);
+            if matches!(observation, custody::Observation::Released { .. })
+                || std::time::Instant::now() >= until
+            {
+                break observation;
+            }
+            std::thread::sleep(std::time::Duration::from_millis(5));
+        };
         let tx = store
             .db
             .transaction_with_behavior(TransactionBehavior::Immediate)
@@ -632,11 +645,16 @@ mod message_child {
             let original = original(&location.configuration, &epoch);
             let (record, held) = running(&mut store, &location, &original, &epoch);
             let finish = location.root.join("descendant-finished");
-            // The descendant keeps the original stdout for two seconds, then
-            // records its end; it never inherits the custody lock.
+            let release = location.root.join("descendant-release");
+            // The descendant keeps the original stdout until the test releases
+            // it, then records its end; it never inherits the custody lock.
+            // Nothing here races the clock: the deadline only needs to cover
+            // interpreter startup under load, and only the release (or, if
+            // the test failed, 30 seconds) ends it.
             let script = format!(
-                "import subprocess,sys,time\nsubprocess.Popen([sys.executable,'-c',\"import pathlib,sys,time\\ntime.sleep(2)\\npathlib.Path(sys.argv[1]).write_text('finished')\",{}],stdout=sys.stdout,stderr=subprocess.DEVNULL)\nsys.stdout.write('descendant-ready')\nsys.stdout.flush()\ntime.sleep(5)",
-                serde_json::to_string(&finish).unwrap()
+                "import subprocess,sys,time\nsubprocess.Popen([sys.executable,'-c',\"import pathlib,sys,time\\nr=pathlib.Path(sys.argv[2])\\nend=time.time()+30\\nwhile not r.exists() and time.time()<end: time.sleep(0.02)\\npathlib.Path(sys.argv[1]).write_text('finished')\",{},{}],stdout=sys.stdout,stderr=subprocess.DEVNULL)\nsys.stdout.write('descendant-ready')\nsys.stdout.flush()\ntime.sleep(60)",
+                serde_json::to_string(&finish).unwrap(),
+                serde_json::to_string(&release).unwrap()
             );
             child::WAIT_ERROR_AFTER_OUTPUT.with(|armed| armed.set(wait_error));
             let guard: Arc<dyn Send + Sync> = Arc::new(held.clone());
@@ -646,7 +664,7 @@ mod message_child {
                 b"frozen",
                 &held,
                 &guard,
-                Instant::now() + Duration::from_millis(200),
+                Instant::now() + Duration::from_secs(5),
                 |_| Ok(()),
             );
             let expected = if wait_error {
@@ -685,6 +703,7 @@ mod message_child {
                 crate::desktop::custody::probe(&location, &record),
                 crate::desktop::custody::Observation::Held
             ));
+            std::fs::write(&release, b"release").unwrap();
             let until = Instant::now() + Duration::from_secs(10);
             while !drained(&mut store) {
                 assert!(Instant::now() < until, "never drained after the real end");

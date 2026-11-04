@@ -172,22 +172,37 @@ pub(super) fn recover_reserved(tx: &Transaction<'_>, request: &str, published: b
     }
 }
 
+// Every open-record query states the open index's own predicate: SQLite uses
+// a partial index only for a WHERE clause that contains its terms, and
+// without it each read would scan the retained terminal history.
+
+/// Up to `?2` records in state `?1`, oldest first.
+pub(super) const IN_STATE: &str = "SELECT request_id FROM desktop_task_message_inputs
+     WHERE state NOT IN('removed','released') AND state=?1
+     ORDER BY created,request_id LIMIT ?2";
+/// Up to `?1` held records whose original drained, oldest first.
+pub(super) const HELD_DRAINED: &str = "SELECT i.request_id FROM desktop_task_message_inputs i
+     JOIN desktop_task_messages m ON m.request_id=i.request_id
+     WHERE i.state NOT IN('removed','released') AND i.state='held' AND m.drained=1
+     ORDER BY i.created,i.request_id LIMIT ?1";
+/// Up to `?3` reviewable records after the cursor `(?1, ?2)`.
+pub(super) const REVIEWABLE: &str =
+    "SELECT request_id,state,bytes,input_sha256,created,device,inode
+     FROM desktop_task_message_inputs
+     WHERE state NOT IN('removed','released') AND state IN('orphaned','failed')
+       AND (?1 IS NULL OR created>?1 OR (created=?1 AND request_id>?2))
+     ORDER BY created,request_id LIMIT ?3";
+
 /// Up to `limit` records in `state`, oldest first.
 pub(super) fn in_state(db: &rusqlite::Connection, state: &str, limit: u32) -> Result<Vec<String>> {
-    let mut query = db.prepare(
-        "SELECT request_id FROM desktop_task_message_inputs WHERE state=?1 ORDER BY created,request_id LIMIT ?2",
-    )?;
+    let mut query = db.prepare(IN_STATE)?;
     let rows = query.query_map(params![state, limit], |r| r.get(0))?;
     Ok(rows.collect::<std::result::Result<_, _>>()?)
 }
 
 /// Up to `limit` held records whose original drained, oldest first.
 pub(super) fn held_drained(db: &rusqlite::Connection, limit: u32) -> Result<Vec<String>> {
-    let mut query = db.prepare(
-        "SELECT i.request_id FROM desktop_task_message_inputs i
-         JOIN desktop_task_messages m ON m.request_id=i.request_id
-         WHERE i.state='held' AND m.drained=1 ORDER BY i.created,i.request_id LIMIT ?1",
-    )?;
+    let mut query = db.prepare(HELD_DRAINED)?;
     let rows = query.query_map(params![limit], |r| r.get(0))?;
     Ok(rows.collect::<std::result::Result<_, _>>()?)
 }
@@ -204,21 +219,15 @@ pub(super) struct Reviewable {
 }
 
 /// Up to `limit` reviewable records after `after` (creation time, then
-/// request ID). The state predicate uses the open-state index; at most the
-/// budget's 64 charged records are sorted.
+/// request ID). The search uses the open-state index; at most the budget's
+/// 64 charged records are sorted.
 pub(super) fn reviewable(
     db: &rusqlite::Connection,
     after: Option<(i64, &str)>,
     limit: u32,
 ) -> Result<Vec<Reviewable>> {
     let (created, request) = after.map_or((None, ""), |(c, r)| (Some(c), r));
-    let mut query = db.prepare(
-        "SELECT request_id,state,bytes,input_sha256,created,device,inode
-         FROM desktop_task_message_inputs
-         WHERE state IN('orphaned','failed')
-           AND (?1 IS NULL OR created>?1 OR (created=?1 AND request_id>?2))
-         ORDER BY created,request_id LIMIT ?3",
-    )?;
+    let mut query = db.prepare(REVIEWABLE)?;
     let rows = query.query_map(params![created, request, limit], |r| {
         let identity: Option<(i64, i64)> = match (r.get(5)?, r.get(6)?) {
             (Some(d), Some(i)) => Some((d, i)),

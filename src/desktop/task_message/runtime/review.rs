@@ -16,7 +16,6 @@
 use super::*;
 use crate::desktop::fanout::Queue;
 use std::sync::atomic::{AtomicBool, AtomicUsize};
-use std::time::Instant;
 use zerus_client_core::desktop::task_message::review::{
     self as wire_review, Cursor, Entry, List, Outcome, Page, Release, Released, Version,
 };
@@ -222,7 +221,10 @@ impl Runtime {
             release.scope == self.scope && release.valid(),
             "task message input release changed"
         );
-        if self.removal.is_some() || self.holds(&release.request_id) {
+        // The slot excludes the sweep and a second review; a preparation, the
+        // only writer of new inputs, would race the folder scan, so none may
+        // run, for any request ID.
+        if self.removal.is_some() || self.admitting.is_some() || self.holds(&release.request_id) {
             return Ok(Some(BUSY));
         }
         let roots = self
@@ -292,7 +294,7 @@ impl Runtime {
                         work.bytes,
                         &work.input_sha256,
                         &current,
-                        Instant::now() + staging::REMOVAL_TIME,
+                        staging::review_deadline(&work.request_id, staging::REMOVAL_TIME),
                     ),
                     None => staging::release_reviewed(
                         &roots,
@@ -300,6 +302,7 @@ impl Runtime {
                         work.bytes,
                         &work.input_sha256,
                         &current,
+                        staging::review_deadline(&work.request_id, staging::SCAN_TIME),
                     ),
                 };
                 let _ = send.send(effect);

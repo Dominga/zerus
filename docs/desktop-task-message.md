@@ -202,7 +202,11 @@ the form like every original.
 - **Review and release** (zerus-pi2k9, under G1's conditions).
   `task_message_inputs` is a read-only page of at most 16 `orphaned` or
   `failed` records, ordered by creation time and request ID with a stable
-  cursor. Each entry carries a fresh observation of its slot,
+  cursor. Every open-record query (this listing, the sweep's and recovery's)
+  states the open-state partial index's own predicate, so SQLite searches
+  that index and never the retained `removed`/`released` history; at most
+  the 64 charged records are sorted. Each entry carries a fresh observation
+  of its slot,
   `task-message-inputs/<request_id>`, made off the actor without reading it:
   absent, a private regular file of this user with one link and its exact
   version (device, inode, size, mode, links, modification and status times),
@@ -215,21 +219,30 @@ the form like every original.
   `orphaned` record must have no execution row, and a `failed` one an exactly
   drained original, with a present object being its recorded one. It claims
   the record in the one removal slot, which excludes the sweep, admission and
-  a second review, and joins the drain. A worker that keeps the lease, and
-  with it the serve-owner loan, then does one of two things:
+  a second review, and joins the drain. Preparation, the only writer of new
+  inputs, and a claim exclude each other for any request IDs: no review is
+  claimed while one prepares, and no preparation starts until a claimed
+  review's effect was recorded. A worker that keeps the lease, and with it
+  the serve-owner loan, then does one of two things within a deadline that is
+  never renewed:
   - **Present slot.** Removes the object only while it is still exactly the
     reviewed version. Its bytes are read through the opened descriptor and
-    must be the record's size and SHA-256, the version is rechecked after
-    that read, and the stop/revoke/lease fence, the held folder and the
-    name's version are checked again right before the unlink. The bytes
-    prove the request, not a historical inode: the deletion target is the
-    object the review saw, and an orphan records that object's identity as
-    the one this review removed.
+    must be the record's size and SHA-256, and the version is rechecked after
+    that read. The held folder and the name's version are observed last;
+    only then are the stop/revoke/lease fence and the deadline checked,
+    immediately before the unlink. The bytes prove the request, not a
+    historical inode: the deletion target is the object the review saw, and
+    an orphan records that object's identity as the one this review removed.
   - **Absent slot.** Releases the charge only after a complete, error-free scan
-    of the folder (at most 256 entries, 64 MiB hashed, 5 s) finds no copy of
-    those bytes under another name, and the slot is still absent afterwards.
-    The scan is a veto, never a proof that the input was destroyed
-    everywhere; a copy found elsewhere is never touched.
+    of the folder (at most 256 entries, 64 MiB hashed in all, 5 s, the
+    enumeration included) finds no copy of those bytes under another name.
+    The scan holds every object it opened. Afterwards the folder's own
+    version, its complete set of names and every held object's version must
+    be unchanged, each name must still denote its held object, and the slot
+    must still be absent; any addition, removal, replacement or in-place
+    change keeps the record. The fence and the deadline come after those
+    observations. The scan is a veto, never a proof that the input was
+    destroyed everywhere; a copy found elsewhere is never touched.
 
   Only after the worker joined does one more transaction record the observed
   effect, once: `removed` or `released`, uncharged. Anything changed, unsafe

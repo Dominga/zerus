@@ -123,6 +123,12 @@ impl Runtime {
             return Ok(Some(self.refusal(&id, PREPARING)));
         }
         ensure!(self.admitting.is_none(), "task message preparation busy");
+        // A review's folder scan must not see a new input appear: no
+        // preparation starts while one holds its claim, through its record.
+        ensure!(
+            !matches!(self.removal, Some(Slot::Review(_))),
+            "task message input review busy"
+        );
         ensure!(
             self.known_charges(&store.db)?,
             "task message original resources retained"

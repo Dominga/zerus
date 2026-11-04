@@ -678,10 +678,34 @@ pub(super) enum Effect {
 pub(super) enum ReviewPoint {
     /// After the bytes were read through the held descriptor.
     Hashed,
-    /// After every check, right before the unlink.
+    /// After the read's checks, before the final name and folder
+    /// observations.
+    BeforeName,
+    /// After every filesystem observation, before the final fence and
+    /// deadline, which come right before the unlink or the release.
     BeforeUnlink,
-    /// After the absent-slot scan, before its absence recheck.
+    /// After the absent-slot scan, before its final observations.
     Scanned,
+}
+/// Test-only review time limits, by request ID.
+#[cfg(test)]
+pub(super) static REVIEW_TIMES: std::sync::Mutex<Vec<(String, std::time::Duration)>> =
+    std::sync::Mutex::new(Vec::new());
+
+/// The deadline of one review of `request`, fixed when its worker starts and
+/// never renewed: `time` unless a test shortens it.
+pub(super) fn review_deadline(request: &str, time: std::time::Duration) -> Instant {
+    #[cfg(test)]
+    if let Some((_, time)) = REVIEW_TIMES
+        .lock()
+        .unwrap()
+        .iter()
+        .find(|(id, _)| id == request)
+    {
+        return Instant::now() + *time;
+    }
+    let _ = request;
+    Instant::now() + time
 }
 #[cfg(test)]
 type ReviewHook = Box<dyn FnOnce() + Send>;
@@ -752,8 +776,9 @@ fn digest_of(file: &mut File, size: u64, deadline: Instant) -> Option<String> {
 /// Removes the reviewed object at `request`'s slot, only while it is still
 /// exactly the reviewed private object and its bytes are this request's
 /// frozen stdin. `current` is the review's fence (no stop, revoke or lease
-/// replacement), checked after the slow read, next to the unlink, all within
-/// `deadline`, which is never renewed.
+/// replacement). It and `deadline`, which is never renewed, are checked
+/// after the slow read and again after every final filesystem observation,
+/// immediately before the unlink.
 pub(super) fn remove_reviewed(
     roots: &Roots,
     request: &str,
@@ -784,14 +809,14 @@ pub(super) fn remove_reviewed(
     if private_version(&file) != Some(reviewed) || digest.as_deref() != Some(sha256) {
         return Effect::Kept(REVIEW_CHANGED);
     }
-    #[cfg(test)]
-    review_hook(request, ReviewPoint::BeforeUnlink);
     if !current() {
         return Effect::Kept(REVIEW_STOPPED);
     }
     if Instant::now() >= deadline {
         return Effect::Kept(REVIEW_BOUND);
     }
+    #[cfg(test)]
+    review_hook(request, ReviewPoint::BeforeName);
     // The held folder and the current name still denote that same version.
     let named = open_at(
         &roots.inputs.file,
@@ -801,6 +826,16 @@ pub(super) fn remove_reviewed(
     );
     if !roots.current() || named.ok().and_then(|now| private_version(&now)) != Some(reviewed) {
         return Effect::Kept(REVIEW_CHANGED);
+    }
+    #[cfg(test)]
+    review_hook(request, ReviewPoint::BeforeUnlink);
+    // The final fence and deadline, after every observation: nothing but
+    // the unlink follows.
+    if !current() {
+        return Effect::Kept(REVIEW_STOPPED);
+    }
+    if Instant::now() >= deadline {
+        return Effect::Kept(REVIEW_BOUND);
     }
     if unlink_at(&roots.inputs.file, request, 0).is_err() {
         return Effect::Kept(REVIEW_CHANGED);
@@ -822,8 +857,9 @@ unsafe fn errno() -> *mut libc::c_int {
 }
 
 /// The folder's entry names through the held descriptor, at most `limit + 1`
-/// of them (one more proves the bound was reached).
-fn entries(dir: &File, limit: usize) -> io::Result<Vec<String>> {
+/// of them (one more proves the bound was reached), sorted. Reaching
+/// `deadline` ends the read with `TimedOut`.
+fn entries(dir: &File, limit: usize, deadline: Instant) -> io::Result<Vec<String>> {
     // SAFETY: dup returns a new descriptor that fdopendir then owns; closedir
     // releases both, and readdir's pointers are used before the next call.
     unsafe {
@@ -840,6 +876,9 @@ fn entries(dir: &File, limit: usize) -> io::Result<Vec<String>> {
         libc::rewinddir(stream);
         let mut names = Vec::new();
         let result = loop {
+            if Instant::now() >= deadline {
+                break Err(io::ErrorKind::TimedOut.into());
+            }
             *errno() = 0;
             let entry = libc::readdir(stream);
             if entry.is_null() {
@@ -862,8 +901,17 @@ fn entries(dir: &File, limit: usize) -> io::Result<Vec<String>> {
             }
         };
         libc::closedir(stream);
-        result.map(|()| names)
+        result.map(|()| {
+            names.sort_unstable();
+            names
+        })
     }
+}
+
+/// A folder's own version through the held descriptor: any entry added,
+/// removed or renamed changes it.
+fn folder_version(dir: &File) -> Option<Version> {
+    dir.metadata().ok().map(|metadata| version_of(&metadata))
 }
 
 /// Releases a record whose reviewed slot is absent: only while the slot is
@@ -871,12 +919,21 @@ fn entries(dir: &File, limit: usize) -> io::Result<Vec<String>> {
 /// folder finds no copy of exactly these bytes under another name. The scan
 /// is a veto, never a proof of absence everywhere; a copy found elsewhere is
 /// never touched.
+///
+/// The scan holds every object it opened. After the scan, the folder's own
+/// version, its complete set of names and each held object's version must be
+/// unchanged, and each name must still denote its held object; any addition,
+/// removal, replacement or in-place change keeps the record. The review's
+/// claim excludes this service's only writer of new inputs, preparation, in
+/// both directions. `current` and `deadline` are checked again after every
+/// final observation, immediately before the release.
 pub(super) fn release_reviewed(
     roots: &Roots,
     request: &str,
     bytes: u64,
     sha256: &str,
     current: &dyn Fn() -> bool,
+    deadline: Instant,
 ) -> Effect {
     let absent = || {
         roots.current()
@@ -888,13 +945,21 @@ pub(super) fn release_reviewed(
     if !absent() {
         return Effect::Kept(REVIEW_CHANGED);
     }
-    let deadline = Instant::now() + SCAN_TIME;
-    let Ok(names) = entries(&roots.inputs.file, SCAN_ENTRIES) else {
+    let folder = &roots.inputs.file;
+    let Some(before) = folder_version(folder) else {
         return Effect::Kept(REVIEW_UNSAFE);
     };
-    if names.len() > SCAN_ENTRIES {
-        return Effect::Kept(REVIEW_BOUND);
-    }
+    let listed = |deadline| match entries(folder, SCAN_ENTRIES, deadline) {
+        Ok(names) if names.len() > SCAN_ENTRIES => Err(Effect::Kept(REVIEW_BOUND)),
+        Ok(names) => Ok(names),
+        Err(error) if error.kind() == io::ErrorKind::TimedOut => Err(Effect::Kept(REVIEW_BOUND)),
+        Err(_) => Err(Effect::Kept(REVIEW_UNSAFE)),
+    };
+    let names = match listed(deadline) {
+        Ok(names) => names,
+        Err(effect) => return effect,
+    };
+    let mut held = Vec::with_capacity(names.len());
     let mut hashed = 0u64;
     for name in &names {
         if Instant::now() >= deadline {
@@ -903,7 +968,7 @@ pub(super) fn release_reviewed(
         if name == request {
             return Effect::Kept(REVIEW_CHANGED);
         }
-        let mut file = match open_at(&roots.inputs.file, name, libc::O_RDONLY | libc::O_NOCTTY, 0) {
+        let mut file = match open_at(folder, name, libc::O_RDONLY | libc::O_NOCTTY, 0) {
             Ok(file) => file,
             // An entry that went away while the folder was read: churn.
             Err(error) if error.kind() == io::ErrorKind::NotFound => {
@@ -914,29 +979,50 @@ pub(super) fn release_reviewed(
         let Some(version) = private_version(&file) else {
             return Effect::Kept(REVIEW_UNSAFE);
         };
-        if version.size != bytes {
-            continue;
+        if version.size == bytes {
+            hashed += bytes;
+            if hashed > SCAN_BYTES {
+                return Effect::Kept(REVIEW_BOUND);
+            }
+            match digest_of(&mut file, bytes, deadline) {
+                Some(digest) if digest == sha256 => return Effect::Kept(REVIEW_ELSEWHERE),
+                Some(_) => {}
+                None => return Effect::Kept(REVIEW_UNSAFE),
+            }
         }
-        hashed += bytes;
-        if hashed > SCAN_BYTES {
-            return Effect::Kept(REVIEW_BOUND);
-        }
-        match digest_of(&mut file, bytes, deadline) {
-            Some(digest) if digest == sha256 => return Effect::Kept(REVIEW_ELSEWHERE),
-            Some(_) => {}
-            None => return Effect::Kept(REVIEW_UNSAFE),
-        }
-        if private_version(&file) != Some(version) {
-            return Effect::Kept(REVIEW_CHANGED);
-        }
+        held.push((file, version));
     }
     #[cfg(test)]
     review_hook(request, ReviewPoint::Scanned);
+    // The final observations: the same folder version and names, each name
+    // still denoting its held object, and no held object changed.
+    let after = match listed(deadline) {
+        Ok(after) => after,
+        Err(effect) => return effect,
+    };
+    if after != names {
+        return Effect::Kept(REVIEW_CHANGED);
+    }
+    for (name, (file, version)) in names.iter().zip(&held) {
+        let named = open_at(folder, name, libc::O_RDONLY | libc::O_NOCTTY, 0);
+        if private_version(file) != Some(*version)
+            || named.ok().and_then(|now| private_version(&now)) != Some(*version)
+        {
+            return Effect::Kept(REVIEW_CHANGED);
+        }
+    }
+    if folder_version(folder) != Some(before) || !absent() {
+        return Effect::Kept(REVIEW_CHANGED);
+    }
+    #[cfg(test)]
+    review_hook(request, ReviewPoint::BeforeUnlink);
+    // The final fence and deadline, after every observation: nothing but
+    // the release follows.
     if !current() {
         return Effect::Kept(REVIEW_STOPPED);
     }
-    if !absent() {
-        return Effect::Kept(REVIEW_CHANGED);
+    if Instant::now() >= deadline {
+        return Effect::Kept(REVIEW_BOUND);
     }
     Effect::Gone
 }

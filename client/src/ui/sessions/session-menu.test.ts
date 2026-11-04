@@ -11,6 +11,8 @@ vi.hoisted(() => {
   vi.stubGlobal("window", { document: { addEventListener: () => {} }, addEventListener: () => {} });
 });
 vi.mock("../../bridge", () => ({
+  // The task store reads further board pages through this bridge call.
+  readTaskPage: vi.fn(async () => ({ tasks: [], page: { next: null } })),
   // The native workspace store, loaded by the session entry points.
   nativeUiOpen: vi.fn(), nativeUiRetire: vi.fn(async () => {}), nativeUiVisible: vi.fn(async () => {}),
   nativeUiBounds: vi.fn(async () => {}), nativeUiBrowser: vi.fn(async () => {}), onNativeUi: vi.fn(async () => () => {}),

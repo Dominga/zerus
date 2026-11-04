@@ -394,6 +394,7 @@ mod live {
                             zerus_watch_protocol::Subscription {
                                 topic: zerus_watch_protocol::topic::TASKS.into(),
                                 project: Some(next.clone()),
+                                window: Some(zerus_client_core::tasks::WINDOW),
                                 ..Default::default()
                             },
                         )?;

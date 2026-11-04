@@ -1606,6 +1606,7 @@ fn handler() -> impl Fn(tauri::ipc::Invoke) -> bool + Send + Sync + 'static {
         actions::inspect_subagent_activity,
         commands::tasks_follow,
         task_details::task_details,
+        task_details::task_page,
         task_details::task_assign,
         task_details::task_board_action,
         task_details::task_cancel_execution,

@@ -82,6 +82,27 @@ pub async fn task_details(
     .map_err(|e| e.to_string())?
 }
 
+/// One further page of a stage on the board, after the cursor of its window
+/// or of the previous page: `task list --stage --limit --after`, checked.
+#[tauri::command]
+pub async fn task_page(
+    project: String,
+    stage: String,
+    limit: usize,
+    after: Option<String>,
+) -> Result<Value, String> {
+    if crate::actions::blocked() {
+        return Err(crate::screens::REPLAY_NEEDS_HGS.into());
+    }
+    let call = zerus_client_core::tasks::page_call(&project, &stage, limit, after.as_deref())?;
+    tauri::async_runtime::spawn_blocking(move || {
+        let reply = tasks_write::run(&zerus_client_core::default_hgs(), &call)?;
+        zerus_client_core::tasks::checked_page(&reply, &project, &stage, limit)
+    })
+    .await
+    .map_err(|e| e.to_string())?
+}
+
 #[tauri::command]
 pub async fn task_attachment_open(
     fetcher: State<'_, Arc<Fetcher>>,

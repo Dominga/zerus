@@ -12,6 +12,13 @@ const parent = () => toSession("", "run:1", { name: "dsh/example/review", conver
 } });
 
 describe("native child presentation", () => {
+  it("shows ended and unknown children without manufacturing working or completion", () => {
+    const rows = childRows({ ended: { state: "ended", completion_source: "original_process_exit" }, unknown: { state: "working", display_state: "unknown" } });
+    expect(rows.map((row) => [row.id, row.state, row.inactive])).toEqual([["ended", "ended", true], ["unknown", "unknown", false]]);
+    const row = parent();
+    const result = groupRows(input({ members: new Map([["ungrouped", [row]]]), online: () => false }));
+    expect(result.filter((item) => item.type === "child").map((item) => item.type === "child" && item.child.state)).toEqual(["unknown"]);
+  });
   it("uses stable IDs, labels, states and bounded inactive evidence", () => {
     const rows = childRows({ done: { name: "Finished", state: "ready", task: "Earlier result" }, working: { label: "Worker", display_state: "approval" }, group: { group: true, active_count: 0 } }, true);
     expect(rows.map((row) => [row.id, row.name, row.state, row.summary, row.inactive])).toEqual([

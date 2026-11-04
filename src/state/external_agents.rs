@@ -111,6 +111,16 @@ pub(super) fn main_start(record: &Value, event: &Value) -> bool {
     }
 }
 
+fn original_process(record: &Value, source: Caller) -> Option<Value> {
+    if record["pid"].as_u64() == Some(u64::from(source.pid)) { return None; }
+    let before = subagent_lifecycle::capture(record, source.pid)?;
+    // Fresh kernel ancestry between birth observations; a PID or provider name
+    // from hook JSON can never establish this binding.
+    let again = caller(record)?;
+    if again.pid != source.pid || again.provider != source.provider { return None; }
+    (subagent_lifecycle::capture(record, source.pid)? == before).then_some(before)
+}
+
 /// Return a child-scoped event, without touching parent identity, model, or
 /// native transcript. Unknown foreign conversations cannot claim a child.
 pub(super) fn route(record: &mut Value, event: &Value) -> Option<Value> {
@@ -163,7 +173,18 @@ pub(super) fn route(record: &mut Value, event: &Value) -> Option<Value> {
             "started":now(),"transcript":event["transcript_path"],"cwd":event["cwd"],"agent_home":agent_home});
         id
     };
+    let provider = string(&record["subagents"][&id], "provider").to_owned();
+    let starting = event["hook_event_name"] == "SessionStart";
+    let original = if starting || record["subagents"][&id].get("original_process").is_none() {
+        caller(record).filter(|source| source.provider == provider).and_then(|source| original_process(record,source))
+    } else {None};
+    let ended = record["subagents"][&id]["state"] == "ended";
+    let terminal = ["Stop", "SubagentStop", "SessionEnd", "StopFailure"].contains(&string(event,"hook_event_name"));
+    let ignored = ended && !terminal && !(starting && original.is_some());
     let child = &mut record["subagents"][&id];
+    if !ignored && (starting || child.get("original_process").is_none()) {
+        if let Some(original) = original { child["original_process"] = original; }
+    }
     for (from, to) in [
         ("cwd", "cwd"),
         ("transcript_path", "transcript"),
@@ -176,6 +197,8 @@ pub(super) fn route(record: &mut Value, event: &Value) -> Option<Value> {
         }
     }
     let mut scoped = event.clone();
+    // Internal result, always overwritten here rather than trusted from input.
+    scoped["hgs_retired_external_hook"] = json!(ignored);
     scoped["agent_id"] = json!(id);
     // Keep the registered label: a native agent_type such as "default" belongs
     // to the foreign harness, not to the parent provider's profile registry.

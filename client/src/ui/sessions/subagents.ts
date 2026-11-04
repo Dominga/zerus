@@ -9,7 +9,7 @@ export const childState = (child: Record<string, unknown>) => text(child.display
 /** SessionPresentation::inactiveChild, including grouped count evidence. */
 export function childInactive(child: Record<string, unknown>, countsComplete = false): boolean {
   const state = childState(child);
-  const inactive = ["finished", "idle", "ready", "error"].includes(state);
+  const inactive = ["finished", "idle", "ready", "error", "ended"].includes(state);
   if (state && !inactive) return false;
   if (child.group === true) return countsComplete && typeof child.active_count === "number" && child.active_count === 0;
   return inactive;
@@ -22,7 +22,7 @@ export function childRows(map: SubagentMap | undefined, countsComplete = false):
   return Object.entries(map ?? {}).filter(([id, child]) => validId(id) && child && typeof child === "object" && !Array.isArray(child))
     .sort(([a], [b]) => a.localeCompare(b)).map(([id, child]) => {
       const raw = childState(child);
-      const state = raw === "working" ? "working" : ["approval", "input", "attention"].includes(raw) ? "attention" : raw === "error" ? "error" : raw === "paused" ? "paused" : "ready";
+      const state = raw === "working" ? "working" : ["approval", "input", "attention"].includes(raw) ? "attention" : raw === "error" ? "error" : raw === "paused" ? "paused" : raw === "ended" ? "ended" : raw === "unknown" ? "unknown" : "ready";
       const label = typeof child.label === "string" ? child.label : typeof child.name === "string" ? child.name : "";
       const detail = typeof child.detail === "string" ? child.detail : child.task;
       return {

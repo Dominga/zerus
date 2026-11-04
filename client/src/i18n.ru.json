@@ -1000,6 +1000,7 @@
   "Enabling local sessions on this computer…": "Включение локальных сессий на этом компьютере…",
   "End date must be on or after the start date.": "Дата окончания не может быть раньше даты начала.",
   "End-to-end encrypted. Keep this computer online until the phone confirms pairing.": "Сквозное шифрование. Не отключайте этот компьютер от сети, пока телефон не подтвердит сопряжение.",
+  "Ended": "Завершено",
   "English": "English",
   "Enter API key…": "Введите ключ API…",
   "Enter a computer invitation code from an enrolled computer.": "Введите код приглашения с уже подключённого компьютера.",

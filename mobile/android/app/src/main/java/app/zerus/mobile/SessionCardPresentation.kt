@@ -84,7 +84,7 @@ object SessionCardPresentation {
     fun inactiveChild(child: JSONObject, countsComplete: Boolean = false): Boolean {
         val state = childState(child)
         // A failed turn has ended too; its error belongs to the parent's result.
-        val inactive = state == "finished" || state == "idle" || state == "ready" || state == "error"
+        val inactive = state == "finished" || state == "idle" || state == "ready" || state == "error" || state == "ended"
         // Explicit display evidence wins over an older raw turn state or count.
         if (state.isNotEmpty() && !inactive) return false
         if (flag(child, "group")) return countsComplete && (child.opt("active_count") as? Number)?.toDouble() == 0.0
@@ -96,6 +96,7 @@ object SessionCardPresentation {
         "finished", "ready", "idle" -> "Ready"
         "error" -> "Error"
         "paused" -> "Paused"
+        "ended" -> "Ended"
         "approval", "input", "attention" -> "Needs input"
         else -> "Unknown"
     }

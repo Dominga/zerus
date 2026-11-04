@@ -1183,6 +1183,7 @@ pub(super) fn update_activity(record: &mut Value, event: &Value) {
             info.as_object_mut().unwrap().remove("display_state");
         }
         // Any newer child event ends its pending request (hooks.rs sets a new one).
+        info.as_object_mut().unwrap().remove("process_unknown");
         info.as_object_mut().unwrap().remove("attention_id");
         if kind == "PreToolUse" {
             info["current_tool"] = json!(clipped(&event["tool_name"], 120));
@@ -1223,14 +1224,14 @@ pub(super) fn update_activity(record: &mut Value, event: &Value) {
         if children.len() > 64 {
             let remove: Vec<String> = children
                 .iter()
-                .filter(|(_, child)| string(child, "state") == "finished")
+                .filter(|(_, child)| ["finished","ended"].contains(&string(child, "state")))
                 .take(children.len() - 64)
                 .map(|(key, _)| key.clone())
                 .collect();
             for key in remove {
-                children.remove(&key);
-                record["subagents_completed_pruned"] =
-                    json!(record["subagents_completed_pruned"].as_u64().unwrap_or(0) + 1);
+                let ended = children.remove(&key).is_some_and(|child| child["state"] == "ended");
+                let count = if ended {"subagents_ended_pruned"} else {"subagents_completed_pruned"};
+                record[count] = json!(record[count].as_u64().unwrap_or(0) + 1);
             }
         }
         record["subagents"] = json!(children);

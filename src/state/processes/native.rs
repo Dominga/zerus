@@ -437,7 +437,12 @@ fn kimi(record: &Value, jobs: &mut Jobs, live: bool) -> Result<()> {
                         .is_some_and(|birth| at > 0. && (birth - at).abs() < 5.)
                 );
                 if job["observed"] == true {
-                    job["os_pid"] = json!(pid);
+                    if let Some(identity) = crate::platform::process_identity(pid) {
+                        job["os_pid"] = json!(pid);
+                        job["process_birth"] = json!(identity.birth);
+                    } else {
+                        job["observed"] = json!(false);
+                    }
                 }
                 job["exit_code"] = task
                     .get("exitCode")

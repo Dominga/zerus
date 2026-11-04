@@ -1215,7 +1215,7 @@ fn draft_start(input: &Value) -> anyhow::Result<Value> {
         if lead.get("id").is_none() {
             lead["id"] = json!("lead");
         }
-        let member: Member = serde_json::from_value(lead.clone()).context("Invalid lead")?;
+        let member: Member = super::strict::parse(&lead, &[], "The lead", super::strict::LEAD_EXAMPLE)?;
         let adopted = adopted_session(&Team::default(), &member, &store.active_teams(ACTIVE_TEAMS)?, &live_sessions()?)?;
         lead["session"] = serde_json::to_value(&adopted.session)?;
     }
@@ -1376,7 +1376,7 @@ fn draft_start_in(store: &mut Store, request: &str, input: &Value, lead: Value) 
     if lead_value.get("id").is_none() {
         lead_value["id"] = json!("lead");
     }
-    let mut lead: super::model::Member = serde_json::from_value(lead_value).context("Invalid lead")?;
+    let mut lead: super::model::Member = super::strict::parse(&lead_value, &[], "The lead", super::strict::LEAD_EXAMPLE)?;
     ensure!(lead.session.is_some() || !lead.agent.is_empty(), "A draft lead needs an agent or an existing session");
     super::super::iron_rules::validate(&json!(lead.iron_rules))?;
     lead.id = "lead".into();
@@ -2061,7 +2061,7 @@ fn create(input: &Value) -> anyhow::Result<Value> {
         if let Some(record) = caller_record() {
             // A lead creates its own team: its session is the lead's.
             let lead = &mut filled["lead"];
-            ensure!(lead.is_object(), "Describe the lead");
+            ensure!(lead.is_object(), "Describe the lead as \"lead\": {}", super::strict::LEAD_EXAMPLE);
             let session = json!({"name":record["name"],"run_id":record["run_id"],"conversation_id":record["conversation_id"]});
             ensure!(lead["session"].is_null() || lead["session"]["name"] == record["name"], "A session creates only a team it leads");
             lead["session"] = session;
@@ -3039,7 +3039,7 @@ fn adopt_members(store: &Store, team: &Team, members: &mut [Value]) -> anyhow::R
         if !value["session"].is_object() {
             continue;
         }
-        let member: Member = serde_json::from_value(value.clone()).context("Invalid member")?;
+        let member: Member = super::strict::parse(value, &[], "A member", super::strict::MEMBER_EXAMPLE)?;
         let adopted = adopted_session(team, &member, &teams, &sessions)?;
         value["session"] = serde_json::to_value(&adopted.session)?;
         value["directory"] = json!(adopted.directory);

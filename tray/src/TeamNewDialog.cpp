@@ -26,10 +26,22 @@ using namespace TeamUi;
 namespace {
 const QStringList agents{"claude", "codex", "kimi", "dsh", "opencode"};
 const QMap<QString, QString> agentNames{{"claude", "Claude Code"}, {"codex", "Codex"}, {"kimi", "Kimi"}, {"dsh", "DeepSeek"}, {"opencode", "OpenCode"}};
+// Owner report 2026-11-04: a fixed width clipped every member column
+// ("Default a", "y/k3.1-pro", "higl") on a wide window, at 125-150% scaling,
+// with a larger font and for long account or model names, while the rest of
+// the row stayed empty. A width is now the column's minimum; the row's
+// stretch gives it the window's room, and the full value is the tooltip.
 QComboBox *combo(const char *name, int width = 0)
 {
     auto *c = new QComboBox; c->setObjectName(name);
-    if (width) c->setFixedWidth(width);
+    c->setSizeAdjustPolicy(QComboBox::AdjustToMinimumContentsLengthWithIcon); c->setMinimumContentsLength(4);
+    c->setSizePolicy(QSizePolicy::Expanding, QSizePolicy::Fixed);
+    if (width) c->setMinimumWidth(width);
+    QObject::connect(c, &QComboBox::currentTextChanged, c, [c](const QString &text) {
+        c->setToolTip(text);
+        // An editable box shows the start of a long id, not its tail.
+        if (c->lineEdit() && !c->lineEdit()->hasFocus()) c->lineEdit()->setCursorPosition(0);
+    });
     return c;
 }
 // #737: the icons in the theme's text colour (the box's palette is the system's).
@@ -158,7 +170,7 @@ TeamNewDialog::TeamNewDialog(TeamController *teams, HgsClient *client, const QLi
     m_leadModel = combo("teamNewLeadModel"); m_leadModel->setMinimumWidth(160); m_leadModel->setEditable(true);
     m_leadModel->lineEdit()->setPlaceholderText(tr("default model"));
     m_leadEffort = combo("teamNewLeadEffort", 80); fillEfforts(m_leadEffort, "high");
-    leadRow->addWidget(m_leadAgent); leadRow->addWidget(m_leadAccount); leadRow->addWidget(m_leadModel, 1); leadRow->addWidget(m_leadEffort);
+    leadRow->addWidget(m_leadAgent, 2); leadRow->addWidget(m_leadAccount, 3); leadRow->addWidget(m_leadModel, 5); leadRow->addWidget(m_leadEffort, 1);
     form->addRow(tr("Lead"), leadRow);
     auto *existingRow = new QHBoxLayout;
     m_useExisting = new QCheckBox(tr("Use an existing session as lead")); m_useExisting->setObjectName("teamNewUseExisting");
@@ -375,8 +387,16 @@ TeamNewDialog::Row *TeamNewDialog::addRow(const Role *role, const QString &roleN
     row->prompt = role ? role->prompt : QString();
     auto *dup = new QToolButton; dup->setText(QStringLiteral("⧉")); dup->setToolTip(tr("Duplicate")); dup->setAutoRaise(true);
     auto *del = new QToolButton; del->setText(QStringLiteral("✕")); del->setToolTip(tr("Remove")); del->setAutoRaise(true); del->setObjectName("teamNewRemove");
-    for (auto *w : std::initializer_list<QWidget *>{row->role, row->agent, row->account, row->model, row->effort, row->permissions, row->computer, row->worktree, dup, del})
-        h->addWidget(w);
+    // The columns share the row's width; the long ones (model, account, role)
+    // take more of it, the check box and the buttons none.
+    const std::initializer_list<std::pair<QWidget *, int>> columns{
+        {row->role, 3}, {row->agent, 2}, {row->account, 3}, {row->model, 4}, {row->effort, 1},
+        {row->permissions, 2}, {row->computer, 2}, {row->worktree, 0}, {dup, 0}, {del, 0}};
+    for (const auto &[w, stretch] : columns) h->addWidget(w, stretch);
+    for (auto *box : {row->role, row->agent, row->account, row->model, row->effort, row->permissions, row->computer}) {
+        box->setToolTip(box->currentText());
+        if (box->lineEdit()) box->lineEdit()->setCursorPosition(0);
+    }
     v->addLayout(h);
     row->error = new QLabel; row->error->setObjectName("teamNewRowError"); row->error->setWordWrap(true); row->error->hide();
     row->error->setStyleSheet(QStringLiteral("color:%1;").arg(colorsFor(m_dark).danger.name()));

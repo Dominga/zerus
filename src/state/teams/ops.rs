@@ -208,7 +208,13 @@ fn validate_settings(settings: &Settings) -> anyhow::Result<()> {
 }
 
 fn parse_member(value: &Value) -> anyhow::Result<Member> {
-    let mut member: Member = serde_json::from_value(value.clone()).context("Invalid member")?;
+    parse_member_as(value, "A member", super::strict::MEMBER_EXAMPLE)
+}
+
+/// Owner feedback 2026-11-04 (9, 11): an unknown field or a wrong type names
+/// itself, the accepted fields and an example.
+fn parse_member_as(value: &Value, what: &str, example: &str) -> anyhow::Result<Member> {
+    let mut member: Member = super::strict::parse(value, &[], what, example)?;
     member.iron_rules = super::super::iron_rules::validate(&json!(member.iron_rules))?;
     member.id = member_id(&member.id)?;
     member.role = clean_text(&member.role, 60, "A role")?;
@@ -321,7 +327,7 @@ fn clean_output(paths: &mut Vec<String>) -> anyhow::Result<()> {
 }
 
 fn parse_task(value: &Value) -> anyhow::Result<Task> {
-    let mut task: Task = serde_json::from_value(value.clone()).context("Invalid task")?;
+    let mut task: Task = super::strict::parse(value, &[], "A task", super::strict::TASK_EXAMPLE)?;
     ensure!(task.id > 0, "Task numbers start at 1");
     task.title = clean_text(&task.title, 200, "A task title")?;
     ensure!(!task.title.trim().is_empty(), "Task #{} needs a title", task.id);
@@ -422,7 +428,7 @@ fn check_pipeline(choice: &str) -> anyhow::Result<()> {
 pub(crate) fn create(id: &str, input: &Value) -> anyhow::Result<(Team, Vec<Event>)> {
     let name = clean(text(input, "name").trim(), 120, "A team name")?;
     ensure!(!name.is_empty(), "A team name is required");
-    let mut lead = parse_member(&input["lead"]).context("Invalid lead")?;
+    let mut lead = parse_member_as(&input["lead"], "The lead", super::strict::LEAD_EXAMPLE)?;
     if lead.role.is_empty() {
         lead.role = "Lead".into();
     }
@@ -1267,9 +1273,22 @@ fn intake_phase(team: &mut Team, input: &Value, actor: &Actor, offline: &BTreeSe
         // are not the key's: a "pipeline":"none" would skip the owner's gates.
         let source = value.as_object().context("An intake task is an object")?;
         let mut kept = serde_json::Map::new();
-        for key in ["title", "description", "criteria", "files", "assignee", "role"] {
+        for key in ["title", "description", "criteria", "assignee", "role"] {
             if let Some(field) = source.get(key) {
                 kept.insert(key.to_owned(), field.clone());
+            }
+        }
+        // Owner feedback 2026-11-04 (11): a task has no files field, so the
+        // files U51 gives the key were dropped in silence; they are named in
+        // the description instead.
+        if let Some(files) = source.get("files") {
+            let names: Vec<&str> = files.as_array().context("An intake task's files are a list of paths")?.iter().filter_map(Value::as_str).collect();
+            if !names.is_empty() {
+                let description = kept.get("description").and_then(Value::as_str).unwrap_or_default();
+                let joined = format!("{}{}Files: {}", description, if description.is_empty() { "" } else { "
+
+" }, names.join(", "));
+                kept.insert("description".into(), json!(joined));
             }
         }
         if kept.contains_key("assignee") {
@@ -4510,10 +4529,9 @@ fn run_proposal(team: &mut Team, kind: &str, member: &Value, change: &Value, mod
             let members: Vec<Value> = change["members"].as_array().cloned().unwrap_or_else(|| vec![member.clone()]);
             let mut applied = Vec::new();
             for (index, member) in members.into_iter().enumerate() {
-                let mut value = member;
-                value["request_id"] = json!(uuid::Uuid::new_v4().to_string());
                 let _ = index;
-                applied.push(apply(team, "add-member", &json!({"member":value}), &Actor::Human, offline, events)?);
+                let request = uuid::Uuid::new_v4().to_string();
+                applied.push(apply(team, "add-member", &json!({"member":member,"request_id":request}), &Actor::Human, offline, events)?);
             }
             json!({"added":applied.len()})
         }

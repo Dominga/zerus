@@ -23,6 +23,22 @@ const VERSION: &str = "0.2.1-rc.5";
 fn reviewed_harness_version(version: &str) -> bool {
     REVIEWED_VERSIONS.contains(&version)
 }
+/// A refusal made before any binding, host or session exists; the desktop
+/// reads it as a definite creation failure (the session can be created again).
+pub(crate) const NOTHING_STARTED: &str = "(nothing was started; create the session again after the fix)";
+/// Owner report 2026-11-04: the refusal names the installed release, the
+/// reviewed ones and the command that installs the recommended one; nothing
+/// started, so the session can be created again after the install.
+fn harness_version_refusal(installed: Option<&str>) -> String {
+    let found = match installed {
+        Some(version) if !version.is_empty() => format!("DeepSeek Harness {} is installed", version.lines().next().unwrap_or(version)),
+        _ => "the installed DeepSeek Harness did not report its version".to_owned(),
+    };
+    format!(
+        "Zerus supports DeepSeek Harness {}; {found}. Install a supported release with: npm install -g @deepseek-ai/dsh@{VERSION}\n{NOTHING_STARTED}",
+        REVIEWED_VERSIONS.join(" or ")
+    )
+}
 fn compatible_adapter(ping: &Value) -> bool {
     ping["version"] == ADAPTER_VERSION && ping["protocol"] == 1
 }
@@ -681,12 +697,9 @@ fn ensure_host(record: &Value) -> Result<bool> {
     let version = dsh_command().and_then(|mut command| command.arg("--version").output()).map_err(|_| {
         format!("Install the official harness: npm install -g @deepseek-ai/dsh@{VERSION}")
     })?;
-    if !version.status.success()
-        || !reviewed_harness_version(String::from_utf8_lossy(&version.stdout).trim())
-    {
-        return Err(format!(
-            "This adapter requires official @deepseek-ai/dsh@{VERSION}; installed version differs"
-        ));
+    let installed = String::from_utf8_lossy(&version.stdout).trim().to_owned();
+    if !version.status.success() || !reviewed_harness_version(&installed) {
+        return Err(harness_version_refusal(version.status.success().then_some(installed.as_str())));
     }
     let script = dir.join("hgs-bridge.mjs");
     atomic(&dir.join("command-guard.mjs"), COMMAND_GUARD)?;
@@ -1161,9 +1174,11 @@ fn ensure_sandbox_folder(folder: &Path) -> Result<()> {
     }
     let granted = crate::platform::grant_full_control(folder);
     if let Some(problem) = crate::platform::sandbox_folder_problem(folder).map_err(|e| e.to_string())? {
+        // The check runs before any binding or host exists: the desktop
+        // shows a definite refusal, not an unknown creation result.
         return Err(match granted {
-            Err(error) => format!("{problem}\n(hgs could not grant it itself: {error})"),
-            Ok(()) => problem,
+            Err(error) => format!("{problem}\n(hgs could not grant it itself: {error})\n{NOTHING_STARTED}"),
+            Ok(()) => format!("{problem}\n{NOTHING_STARTED}"),
         });
     }
     Ok(())
@@ -3647,5 +3662,19 @@ mod compatibility_tests {
             json!({"protocol":2,"version":"0.2.1-rc.2"}), json!({"protocol":1})] {
             assert!(!compatible_adapter(&ping));
         }
+    }
+}
+
+#[cfg(test)]
+mod harness_refusal_tests {
+    use super::*;
+
+    #[test]
+    fn a_harness_refusal_names_the_installed_release_and_the_fix() {
+        let text = harness_version_refusal(Some("0.2.2-rc.1"));
+        for part in ["0.2.2-rc.1 is installed", "0.2.1-rc.2 or 0.2.1-rc.5", "npm install -g @deepseek-ai/dsh@0.2.1-rc.5", "nothing was started"] {
+            assert!(text.contains(part), "{part} missing: {text}");
+        }
+        assert!(harness_version_refusal(None).contains("did not report its version"));
     }
 }

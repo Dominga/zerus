@@ -19,6 +19,7 @@ pub(crate) mod plan;
 pub(crate) mod profile;
 pub(crate) mod safe_actions;
 pub(crate) mod spans;
+pub(crate) mod strict;
 pub(crate) mod stages;
 pub(crate) mod store;
 pub(crate) mod templates;

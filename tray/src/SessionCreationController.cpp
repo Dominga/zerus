@@ -412,7 +412,11 @@ QString SessionCreationController::forLaunch(const QString &launch) const{
 }
 void SessionCreationController::launchFinished(const QString &launch,bool okay,const QString &error){
     const auto id=forLaunch(launch);if(id.isEmpty()||operation(id).value("state")=="bound"||operation(id).value("launch_id")!=launch)return;
-    if(okay){stage(id,"confirming");persist(id);}else failed(id,error,true);
+    // hgs names a refusal it made before any binding, host or session existed
+    // (DeepSeek's folder rights and harness release checks): that creation
+    // failed for certain and may be retried; any other failure stays unknown.
+    const bool refusedBeforeStart=error.contains(QStringLiteral("(nothing was started; create the session again after the fix)"));
+    if(okay){stage(id,"confirming");persist(id);}else failed(id,error,!refusedBeforeStart);
 }
 void SessionCreationController::ended(const QString &id,const QString &launch,const QString &error){
     if(!owns(id)||operation(id).value("state")=="bound"||operation(id).value("launch_id")!=launch)return;

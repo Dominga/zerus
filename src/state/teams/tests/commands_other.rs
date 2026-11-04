@@ -1683,7 +1683,9 @@ fn an_intake_task_keeps_only_its_plan_fields_and_one_phase_is_open_per_key() {
         .unwrap();
         let saved = stored();
         let task = saved.task(added["tasks"][0].as_u64().unwrap() as u32).unwrap();
-        assert_eq!((task.title.as_str(), task.description.as_str()), ("Fix", "d"));
+        assert_eq!((task.title.as_str(), task.description.as_str()), ("Fix", "d
+
+Files: a"));
         assert_eq!(task.criteria, vec!["c"]);
         assert_eq!(task.assignee, "dev");
         // The owner's plan fields are not the key's; the pipeline resolves
@@ -1815,7 +1817,7 @@ fn a_proposal_allow_could_not_apply_is_refused_when_made() {
         "tasks":[{"id":2,"title":"Follow-up","assignee":"dev","deps":[1]}]});
     let error = ops::apply(&mut team, "propose", &bare, &lead, &BTreeSet::new(), &mut Vec::new()).unwrap_err();
     let error = format!("{error:#}");
-    assert!(error.contains("Allow could not apply") && error.contains("Invalid task"), "{error}");
+    assert!(error.contains("Allow could not apply") && error.contains("A task is invalid"), "{error}");
     assert!(team.proposals.is_empty(), "nothing was proposed");
     // Unknown work is refused too.
     let unknown = json!({"kind":"cancel-tasks","reason":"drop","tasks":[99]});

@@ -93,6 +93,7 @@ private slots:
     void designerStartsFromAProjectWithoutASession();
     void draftIsDecidedWithoutADesignerSession();
     void designerQuestionIsAnsweredInTheWindow();
+    void memberColumnsShareAWideWindow();
 };
 
 void TestTeamsUiNewteam::newTeamStartsTheLeadWithTheTemplate()
@@ -1368,6 +1369,38 @@ else:print('{}')
     QTRY_VERIFY(input->isVisible());
     QTest::qWait(300);
     log.seek(0); QCOMPARE(log.readAll().count('\n'), 1);
+}
+
+// Owner report 2026-11-04: on a wide window every member column kept a fixed
+// width and clipped its value ("Default a", "y/k3.1-pro") while the rest of
+// the row stayed empty.
+void TestTeamsUiNewteam::memberColumnsShareAWideWindow()
+{
+    HgsClient client(FakeCli::program(script()));
+    TeamController controller(&client);
+    controller.refreshCatalog();
+    QTRY_VERIFY(controller.catalogReady());
+    QTemporaryDir folder;
+    TeamNewDialog dialog(&controller, &client, {{QString(), "this computer", true}}, {}, QDir::toNativeSeparators(folder.path()), "Checkout");
+    dialog.resize(700, 700);
+    dialog.show();
+    dialog.findChild<QPushButton *>("teamNewAddMember")->click();
+    QTRY_VERIFY(!dialog.findChildren<QComboBox *>("teamNewModel").isEmpty());
+    auto *model = dialog.findChildren<QComboBox *>("teamNewModel").last();
+    auto *account = dialog.findChildren<QComboBox *>("teamNewAccount").last();
+    QApplication::processEvents();
+    const int narrowModel = model->width(), narrowAccount = account->width();
+    dialog.resize(1600, 700);
+    QTRY_VERIFY2(model->width() > narrowModel + 100, qPrintable(QStringLiteral("model %1 -> %2").arg(narrowModel).arg(model->width())));
+    QVERIFY2(account->width() > narrowAccount + 50, qPrintable(QStringLiteral("account %1 -> %2").arg(narrowAccount).arg(account->width())));
+    // The row's buttons stay beside its columns, not far to the right of them.
+    auto *remove = dialog.findChildren<QToolButton *>("teamNewRemove").last();
+    const int gap = remove->mapTo(&dialog, QPoint()).x() - (model->mapTo(&dialog, QPoint()).x() + model->width());
+    QVERIFY2(gap < dialog.width() / 2, qPrintable(QStringLiteral("gap %1").arg(gap)));
+    // A long id reads whole in the tooltip and from its start in the box.
+    model->setEditText(QStringLiteral("kimi-code/k3.1-pro-highspeed"));
+    QCOMPARE(model->toolTip(), QStringLiteral("kimi-code/k3.1-pro-highspeed"));
+    QCOMPARE(model->lineEdit()->cursorPosition(), 0);
 }
 
 QTEST_MAIN(TestTeamsUiNewteam)

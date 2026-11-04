@@ -159,6 +159,12 @@ config=json.loads((root/'configuration.json').read_text())
 scope=config.get('scope','aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa')
 args=sys.argv[1:]
 if '--help' in args:
+ if config.get('classification_old_help'): print('old helper without classification');sys.exit(0)
+ if config.get('classification_hold_help'):
+  import time
+  (root/'classification-help-entered').touch()
+  until=time.monotonic()+15
+  while not (root/'classification-help-release').exists() and time.monotonic()<until: time.sleep(.005)
  print('Desktop service activation ABI: desktop-service-activation-v1\nreview-activation\nDesktop service mode choice scope ABI: desktop-service-mode-choice-scope-v1');sys.exit(0)
 intent=root/'intent.json'
 stored=json.loads(intent.read_text()) if intent.exists() else None

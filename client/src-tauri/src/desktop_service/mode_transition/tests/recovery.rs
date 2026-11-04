@@ -255,6 +255,10 @@ fn latest_choice_endpoint_incarnation_and_helper_are_rechecked_after_the_slow_re
                 || running.source.0.join("observation-entered").exists(),
             )
             .await;
+            assert!(
+                watches(&running) > 0,
+                "the watch starts before the delayed ownership read"
+            );
             match drift {
                 "passive" => helpers.patch("mode", json!("passive")),
                 "pending" => helpers.patch("pending", json!(uuid::Uuid::new_v4().to_string())),
@@ -366,7 +370,7 @@ fn uncertain_read_retains_the_actual_last_pipe_and_never_publishes_eligibility_l
             })
             .await;
             eventually("the bounded read returned without eligibility", || {
-                watches(&running) > 0
+                watches(&running) > 0 && !running.service.shared.mode_transition.view().running
             })
             .await;
             assert!(!ready(&running));
@@ -378,6 +382,12 @@ fn uncertain_read_retains_the_actual_last_pipe_and_never_publishes_eligibility_l
                 .admit(Role::Fleet)
                 .is_err());
             assert!(effects(&running).is_empty());
+            // Refuse any NEW read after classification recovers, so the
+            // assertion isolates late publication from the ORIGINAL read.
+            let path = running.source.0.join("fixture.json");
+            let mut config: Value = serde_json::from_slice(&fs::read(&path).unwrap()).unwrap();
+            config["observation_abi"] = false.into();
+            fs::write(path, config.to_string()).unwrap();
             drop(release);
             eventually("physical EOF releases the original read charges", || {
                 running
@@ -427,6 +437,144 @@ fn a_new_interruption_restores_the_review_guidance_without_reusing_a_choice() {
         assert!(effects(&running).is_empty());
         assert_eq!(fs::read(helpers.root.join("intent.json")).unwrap(), old);
         assert_eq!((helpers.effects(), helpers.reviews()), (2, 2));
+        running.service.join().await.unwrap();
+    });
+}
+
+#[test]
+fn unknown_modern_classification_keeps_a_read_watch_and_recovers_without_startup_effects() {
+    let _process = crate::PROCESS_TREE.read().unwrap();
+    tauri::async_runtime::block_on(async {
+        for failure in ["missing", "old", "timeout"] {
+            let helpers = Fixture::new();
+            // A default passive selection would activate automatically after
+            // Grant if a background observation accidentally entered startup.
+            helpers.config("default", "passive", false);
+            let helper = helpers
+                .root
+                .join("lib/zerus/install-linux-desktop-service.py");
+            let saved = helper.with_extension("saved");
+            match failure {
+                "missing" => fs::rename(&helper, &saved).unwrap(),
+                "old" => helpers.patch("classification_old_help", true.into()),
+                _ => helpers.patch("classification_hold_help", true.into()),
+            }
+            let running = start_native(&helpers, configuration());
+            let release = Release(helpers.root.join("classification-help-release"));
+            eventually(
+                "an unclassified modern CLI still opens a read-only watch",
+                || {
+                    running.service.snapshot().connected
+                        && watches(&running) > 0
+                        && running
+                            .service
+                            .shared
+                            .report_frame_finished
+                            .load(Ordering::Acquire)
+                            > 0
+                },
+            )
+            .await;
+            assert!(
+                running
+                    .service
+                    .shared
+                    .mode_transition
+                    .classification_pending(),
+                "{failure}"
+            );
+            assert!(!running.service.shared.business_permitted(), "{failure}");
+            assert!(effects(&running).is_empty(), "{failure}");
+            assert_eq!(helpers.effects(), 0, "{failure}");
+            assert!(!running.service.shared.ownership.granted(), "{failure}");
+            if failure == "timeout" {
+                assert!(helpers.root.join("classification-help-entered").exists());
+            }
+            match failure {
+                "missing" => fs::rename(&saved, &helper).unwrap(),
+                "old" => helpers.patch("classification_old_help", false.into()),
+                _ => drop(release),
+            }
+            eventually(
+                "classification recovers in the SAME watch without Retry",
+                || {
+                    !running
+                        .service
+                        .shared
+                        .mode_transition
+                        .classification_pending()
+                        && running.service.shared.mode_transition.view().needs_resume
+                },
+            )
+            .await;
+            assert!(running.service.snapshot().connected);
+            assert_eq!(
+                watches(&running),
+                1,
+                "the read connection never needs replacement"
+            );
+            assert!(!running.service.shared.mode_transition.blocks_resume());
+            assert!(!running.service.shared.mode_transition.startup_permitted());
+            assert!(!running.service.shared.business_scheduling_permitted());
+            assert!(!running.service.shared.ownership.granted());
+            assert!(effects(&running).is_empty(), "{failure}");
+            assert_eq!(helpers.effects(), 0, "{failure}");
+            fs::rename(&helper, &saved).unwrap();
+            running.service.ownership_result().await;
+            assert!(running
+                .service
+                .shared
+                .mode_transition
+                .classification_pending());
+            assert_eq!(watches(&running), 1);
+            fs::rename(&saved, &helper).unwrap();
+            eventually(
+                "a later failed Check recovers without dropping the watch",
+                || {
+                    !running
+                        .service
+                        .shared
+                        .mode_transition
+                        .classification_pending()
+                },
+            )
+            .await;
+            running.service.retry();
+            eventually("Retry stays a read-only connection after recovery", || {
+                watches(&running) >= 2
+            })
+            .await;
+            assert!(effects(&running).is_empty(), "{failure}");
+            assert_eq!(helpers.effects(), 0, "{failure}");
+            running.service.join().await.unwrap();
+        }
+    });
+}
+
+#[test]
+fn a_legacy_cli_without_classification_capability_still_connects() {
+    let _process = crate::PROCESS_TREE.read().unwrap();
+    tauri::async_runtime::block_on(async {
+        let helpers = Fixture::new();
+        fs::remove_file(
+            helpers
+                .root
+                .join("lib/zerus/install-linux-desktop-service.py"),
+        )
+        .unwrap();
+        let mut config = configuration();
+        config["observation_abi"] = false.into();
+        let running = start_native(&helpers, config);
+        eventually(
+            "the legacy read connection retains its compatibility behavior",
+            || watches(&running) > 0 && running.service.snapshot().connected,
+        )
+        .await;
+        assert!(!running
+            .service
+            .shared
+            .mode_transition
+            .classification_pending());
         running.service.join().await.unwrap();
     });
 }

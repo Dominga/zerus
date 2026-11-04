@@ -359,7 +359,6 @@ struct Shared {
     notification_supported: AtomicBool,
     ownership: Arc<crate::desktop_ownership::Controller>,
     ownership_supported: AtomicBool,
-    ownership_observation_supported: AtomicBool,
     mode_transition: Arc<mode_transition::Controller>,
     hgs: PathBuf,
     configuration: Mutex<Option<String>>,
@@ -550,7 +549,6 @@ impl Service {
             notification_supported: AtomicBool::new(false),
             ownership,
             ownership_supported: AtomicBool::new(false),
-            ownership_observation_supported: AtomicBool::new(false),
             mode_transition: {
                 let owner = mode_transition::Controller::new();
                 #[cfg(all(test, target_os = "linux"))]
@@ -650,6 +648,7 @@ impl Service {
         {
             return self.ownership_result().await;
         }
+        self.shared.mode_transition.confirmed_resume();
         if self.shared.retained_import.is_some() {
             let relay = self
                 .shared
@@ -906,6 +905,7 @@ impl Service {
         if !self.shared.read_checks_only()
             && !startup_recovery()
             && !self.shared.mode_transition.blocks_resume()
+            && self.shared.mode_transition.startup_permitted()
         {
             if let Some(report) = &self.shared.retained_import {
                 report.request_retry();
@@ -940,6 +940,7 @@ impl Service {
             && !self.shared.read_checks_only()
             && !startup_recovery()
             && !self.shared.mode_transition.blocks_resume()
+            && self.shared.mode_transition.startup_permitted()
         {
             read_import::retry(self.shared.clone());
         }
@@ -1324,7 +1325,7 @@ impl Shared {
     }
     fn business_scheduling_permitted(&self) -> bool {
         self.business_permitted()
-            && (!self.mode_transition.blocks_resume()
+            && ((!self.mode_transition.blocks_resume() && self.mode_transition.startup_permitted())
                 || self.mode_transition.scheduling_permitted())
     }
     fn publish_retained_import(&self) {
@@ -1669,14 +1670,13 @@ async fn preflight(shared: &Arc<Shared>, stop: Arc<AtomicBool>) -> Result<String
         }),
         Ordering::Release,
     );
-    shared.ownership_observation_supported.store(
-        std::str::from_utf8(&help).ok().is_some_and(|text| {
-            text.lines().any(|line| {
-                line.trim() == zerus_client_core::desktop::ownership::observation::HELP_MARKER
-            })
-        }),
-        Ordering::Release,
-    );
+    if std::str::from_utf8(&help).ok().is_some_and(|text| {
+        text.lines().any(|line| {
+            line.trim() == zerus_client_core::desktop::ownership::observation::HELP_MARKER
+        })
+    }) {
+        shared.mode_transition.require_classification();
+    }
     if !std::str::from_utf8(&help).ok().is_some_and(|help| {
         help.lines().any(|line| line.trim() == HELP)
             && help
@@ -1742,15 +1742,6 @@ async fn preflight(shared: &Arc<Shared>, stop: Arc<AtomicBool>) -> Result<String
         .mode_transition
         .observe(shared.hgs.clone(), configuration.into())
         .await;
-    if shared
-        .ownership_observation_supported
-        .load(Ordering::Acquire)
-        && !shared.mode_transition.observed_selection()
-    {
-        // A modern cold start must not mistake an unreadable review journal
-        // for an unreviewed host and enter startup Grant/import paths.
-        return Err("activation_status_unavailable");
-    }
     shared.publish(state.snapshot().clone());
     Ok(configuration.into())
 }
@@ -1894,7 +1885,8 @@ async fn connection(
     let business = !automatic
         && !startup_recovery()
         && !shared.read_checks_only()
-        && !shared.mode_transition.blocks_resume();
+        && !shared.mode_transition.blocks_resume()
+        && shared.mode_transition.startup_permitted();
     if business {
         let explicit = shared
             .retained_import
@@ -1926,17 +1918,7 @@ async fn connection(
     } else {
         shared.ownership.unsupported();
     }
-    if shared.mode_transition.blocks_resume() && !shared.read_checks_only() && !startup_recovery() {
-        shared
-            .mode_transition
-            .restore_business(
-                shared.ownership.clone(),
-                shared.snapshot.copy(),
-                stop.clone(),
-            )
-            .await;
-    }
-    mode_transition::startup(&shared, automatic, &configuration).await;
+    mode_transition::startup(&shared, !business, &configuration).await;
     shared
         .publish_ownership(crate::desktop_ownership::Phase::StartupGrant)
         .await;
@@ -2001,9 +1983,31 @@ async fn connection(
             configuration.clone(),
         );
         tauri::async_runtime::spawn(async move {
-            if !automatic && !startup_recovery() && !shared.mode_transition.blocks_resume() {
+            // Freeze the preflight decision: a later read-only classification
+            // can never start this original connection's positive recovery.
+            if business && !startup_recovery() && !shared.mode_transition.blocks_resume() {
                 recover_grant(shared, configuration, stop, cancelled).await;
             }
+        })
+    };
+    let classification_ready = Arc::new(Notify::new());
+    let classification_worker = {
+        let (shared, stop, ready, configuration, stopping) = (
+            shared.clone(),
+            stop.clone(),
+            classification_ready.clone(),
+            configuration.clone(),
+            grant_cancel.clone(),
+        );
+        tauri::async_runtime::spawn(async move {
+            mode_transition::classification::connected(
+                shared,
+                configuration,
+                stop,
+                ready,
+                stopping,
+            )
+            .await;
         })
     };
     let mut last_frame = tokio::time::Instant::now();
@@ -2032,6 +2036,7 @@ async fn connection(
                         last_frame = tokio::time::Instant::now();
                         shared.observe_manual_refresh(&configuration, state.snapshot())?;
                         shared.publish(state.snapshot().clone());
+                        if frame["t"] == "hello" { classification_ready.notify_one(); }
                         if state.snapshot().executable_upgrade == Some(service::ExecutableUpgrade::ManualRefreshRequired) {
                             return Err("manual_refresh_required");
                         }
@@ -2118,6 +2123,7 @@ async fn connection(
     shared.details_changed.notify_one();
     drop(stdin);
     let _ = grant_worker.await;
+    let _ = classification_worker.await;
     if let Some(worker) = notification_worker {
         let _ = worker.await;
     }
@@ -2162,6 +2168,7 @@ async fn recover_grant(
             || shared.stopped.load(Ordering::Acquire)
             || shared.read_checks_only()
             || shared.mode_transition.blocks_resume()
+            || !shared.mode_transition.startup_permitted()
         {
             return None;
         }
@@ -2196,7 +2203,10 @@ async fn recover_grant(
             None => {
                 #[cfg(test)]
                 recovery_pause::reached(&shared.hgs).await;
-                if shared.read_checks_only() || shared.mode_transition.blocks_resume() {
+                if shared.read_checks_only()
+                    || shared.mode_transition.blocks_resume()
+                    || !shared.mode_transition.startup_permitted()
+                {
                     return;
                 }
                 shared

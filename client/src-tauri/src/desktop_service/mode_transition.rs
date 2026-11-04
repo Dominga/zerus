@@ -14,6 +14,7 @@ const MARKER: &str = "Desktop service activation ABI: desktop-service-activation
 const CHOICE_MARKER: &str =
     "Desktop service mode choice scope ABI: desktop-service-mode-choice-scope-v1";
 const BYTES: usize = 64 << 10;
+pub(super) mod classification;
 mod review;
 pub(super) use review::{Action as ReviewAction, Prepared, View as ReviewView};
 type Resources = Arc<dyn Send + Sync>;
@@ -45,6 +46,8 @@ struct State {
     review_capable: bool,
     choice_capable: bool,
     business: Option<review::Business>,
+    classification_required: bool,
+    observation_only: bool,
 }
 pub(super) struct Controller {
     state: Mutex<State>,
@@ -84,13 +87,6 @@ impl Controller {
             .unwrap_or_else(PoisonError::into_inner)
             .view
             .clone()
-    }
-    pub(super) fn observed_selection(&self) -> bool {
-        self.state
-            .lock()
-            .unwrap_or_else(PoisonError::into_inner)
-            .selection
-            .is_some()
     }
     pub fn close(&self) -> zerus_client_core::desktop::drain::Closed {
         self.stop.store(true, Ordering::Release);
@@ -459,6 +455,7 @@ impl Controller {
         }
         state.business = None;
         state.selection = None;
+        state.observation_only |= state.classification_required;
         state.view.code = code.into();
         state.view.needs_resume = true;
     }

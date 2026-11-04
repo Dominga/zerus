@@ -281,7 +281,10 @@ impl Controller {
 
     pub(in crate::desktop_service) fn blocks_resume(&self) -> bool {
         let state = self.state.lock().unwrap_or_else(PoisonError::into_inner);
-        state.view.automatic_blocked || state.view.review.is_some() || state.view.pending
+        (state.classification_required && state.selection.is_none())
+            || state.view.automatic_blocked
+            || state.view.review.is_some()
+            || state.view.pending
     }
 
     fn checked_target(&self, display: &View, action: Action) -> Result<Arc<Route>, &'static str> {

@@ -53,6 +53,7 @@ mod store;
 mod swarm_windows;
 #[cfg(any(target_os = "linux", target_os = "macos"))]
 mod task_start_reconcile;
+mod termination_outcome;
 mod transport;
 mod ui_authority;
 mod upgrade;
@@ -857,6 +858,17 @@ fn serve(config: &Config, location: Location, background_mode: bool) -> Result<(
                     } else if hello.op == "frontend_request" {
                         let result = match (authority, &mut background) {
                             (Some(authority), _)
+                                if authority.operation() == "termination_outcome" =>
+                            {
+                                match authority.into_request(&mut frontend_order) {
+                                    Ok(request) => termination_outcome::frontend(&mut store, request),
+                                    Err(_) => frontend_refused(
+                                        hello.request.as_ref(),
+                                        "frontend_identity_expired",
+                                    ),
+                                }
+                            }
+                            (Some(authority), _)
                                 if authority.operation() == "desktop_ownership" =>
                             {
                                 match authority.into_request(&mut frontend_order) {
@@ -980,6 +992,18 @@ fn serve(config: &Config, location: Location, background_mode: bool) -> Result<(
                         frame(&epoch, seq, "response", result)
                     } else if hello.op == "request" {
                         let result = if hello.request.as_ref().is_some_and(|v| {
+                            v["op"] == "termination_outcome_status"
+                        }) {
+                            termination_outcome::query(
+                                &store,
+                                &location.configuration,
+                                hello.request.as_ref().unwrap(),
+                            )
+                        } else if hello.request.as_ref().is_some_and(|v| {
+                            v["op"] == "termination_outcome"
+                        }) {
+                            frontend_refused(hello.request.as_ref(), "frontend_authentication_required")
+                        } else if hello.request.as_ref().is_some_and(|v| {
                             matches!(
                                 v["op"].as_str(),
                                 Some("cache_maintenance_result" | "cache_maintenance_policy")

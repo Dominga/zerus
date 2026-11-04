@@ -179,19 +179,28 @@ class RemoteLoginShells(unittest.TestCase):
         calls.append(['@peer', 'native-ui', '--session-id', identity, '--json'])
         # The DeepSeek attach alias opens the same native UI (#1355 review R3).
         calls.append(['@peer', 'a', 'dsh/p/example', '--session-id', identity])
+        # zerus-ucck P1c: a reference to the peer's session, with @peer and
+        # routed by the reference's own host.
+        reference = ('zerus://session?machine=33333333-3333-4333-8333-333333333333&host=peer'
+                     '&name=codex%2Fp%2Fa&conversation=c&run=r')
+        calls.append(['@peer', 'send', reference, '--json'])
+        calls.append(['routed', 'pause', reference])
         executable = self.peer / '.local/bin/hgs'
         older = PEER_HGS.replace("'hooks-health-v1'", "'hooks-health-v1' 'Desktop creation ABI: guarded-create-v1' '  lifecycle-receipt-status-v1'")
         executable.write_text(older)
+        def run(call):
+            return self.hgs('/bin/sh', *(call[1:] if call[0] == 'routed' else call))
         for call in calls:
             with self.subTest(call=call[1:3], peer='older'):
-                refused = self.hgs('/bin/sh', *call)
+                refused = run(call)
                 self.assertNotEqual(refused.returncode, 0, refused.stdout)
                 self.assertIn('update the selected computer to select sessions by ID', refused.stderr)
                 self.assertFalse((self.peer / 'argv.json').exists())
-        executable.write_text(older.replace("'  lifecycle-receipt-status-v1'", "'  lifecycle-receipt-status-v1' '  session-id-selector-v1'"))
+        executable.write_text(older.replace("'  lifecycle-receipt-status-v1'",
+                                            "'  lifecycle-receipt-status-v1' '  session-id-selector-v1' '  session-reference-selector-v1'"))
         for call in calls:
             with self.subTest(call=call[1:3], peer='current'):
-                self.hgs('/bin/sh', *call)
+                run(call)
                 argv = self.received()[0]
                 if call[1] == 'native-ui':
                     self.assertEqual(argv, ['__dsh-ui-url', '--session-id', identity])

@@ -60,6 +60,22 @@ the original run. A configured peer matching the machine name routes through SSH
 use `hgs @configured-alias inspect '<reference>'` when its alias differs. A URI
 alone never launches a session or sends input.
 
+Every other command whose first argument is a session also accepts a reference
+there, for example `hgs pause '<reference>'` or `hgs send '<reference>' --json`.
+It resolves the session the reference names, following a rename, and then acts
+under the same checks as `--session-id`. Every record the command reads under
+that name must still carry the reference's conversation (or its run, when it
+names no conversation), and `kill` and `a` bind the terminal to the verified
+run. An archived conversation's reference reaches the commands that take
+`--archive` (`processes`, `reference`, `fork`, `kill`, `rename` and `resume`).
+A child agent's reference stays read-only, for `hgs inspect`. A reference and
+`--session-id` cannot be combined. A reference to another computer routes to its
+configured host, or to `@host`, only after that peer's `hgs --help` lists
+`session-reference-selector-v1`. A reference may also carry a `session` field,
+the session ID, which is then checked as well. `hgs reference`, `hgs self` and
+message envelopes do not add that field yet, because an older hgs refuses an
+unknown reference field.
+
 `hgs [@host] reference <session> --json [--archive ID] [--agent ID]` returns the
 same URI and readable identity fields. Optional `--run ID --conversation ID`
 guards ensure a copy action still addresses the selected conversation.

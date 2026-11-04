@@ -9,31 +9,74 @@ pub(crate) const AMBIGUOUS: i32 = 5;
 /// At most this many candidates are listed, newest first.
 const CANDIDATES: usize = 20;
 
-/// The session a `--session-id` command selected: its name when selected and
-/// its ID. Resolution only finds the name; it never authorises the command.
-/// Every later read of a record by that name, live, archived or a DeepSeek or
-/// OpenCode binding, must carry the ID, so a name that another session took
-/// meanwhile is refused under whatever lock the command holds when it reads
-/// its target (#1355 review).
-static SELECTED: std::sync::Mutex<Option<(String, String)>> = std::sync::Mutex::new(None);
+/// What a command selected: the name it resolved, and every identity its
+/// caller supplied, a `--session-id` or a session reference's session,
+/// conversation or run (empty when not supplied). Resolution only finds the
+/// name; it never authorises the command. Every later read of a record by that
+/// name, live, archived or a DeepSeek or OpenCode binding, must carry every
+/// supplied identity, so a name that another session took meanwhile is refused
+/// under whatever lock the command holds when it reads its target (#1355).
+#[derive(Clone)]
+pub(crate) struct Selection {
+    pub name: String,
+    pub session_id: String,
+    pub conversation: String,
+    pub run: String,
+    /// How a refusal names the selector.
+    label: String,
+}
+impl Selection {
+    /// The refusal when a record under the name is no longer this session.
+    pub(crate) fn changed(&self) -> String {
+        format!("{} no longer names {}; refresh and retry", self.label, self.name)
+    }
+    fn agrees(&self, record: &Value) -> bool {
+        [(&self.session_id, "session_id"), (&self.conversation, "conversation_id"), (&self.run, "run_id")]
+            .iter()
+            .all(|(wanted, key)| wanted.is_empty() || string(record, key) == wanted.as_str())
+    }
+}
+static SELECTED: std::sync::Mutex<Option<Selection>> = std::sync::Mutex::new(None);
 
-/// Records the selection for the rest of this command.
-pub(crate) fn select(name: &str, id: &str) {
-    *SELECTED.lock().unwrap_or_else(std::sync::PoisonError::into_inner) =
-        Some((name.to_owned(), id.to_owned()));
+fn set(selection: Selection) {
+    *SELECTED.lock().unwrap_or_else(std::sync::PoisonError::into_inner) = Some(selection);
 }
 
-/// The selected name and ID, when the command was given `--session-id`.
-pub(crate) fn selected() -> Option<(String, String)> {
+/// Records a `--session-id` selection for the rest of this command.
+pub(crate) fn select(name: &str, id: &str) {
+    set(Selection {
+        name: name.into(),
+        session_id: id.into(),
+        conversation: String::new(),
+        run: String::new(),
+        label: format!("Session ID {id}"),
+    });
+}
+
+/// Records a session reference's selection for the rest of this command: its
+/// session ID when the reference carries one, and its conversation, or its
+/// run when it names no conversation (P1c).
+pub(crate) fn select_reference(name: &str, session_id: &str, conversation: &str, run: &str) {
+    set(Selection {
+        name: name.into(),
+        session_id: session_id.into(),
+        conversation: conversation.into(),
+        run: if conversation.is_empty() { run.into() } else { String::new() },
+        label: "The session reference".into(),
+    });
+}
+
+/// The command's selection, when it was given one.
+pub(crate) fn selected() -> Option<Selection> {
     SELECTED.lock().unwrap_or_else(std::sync::PoisonError::into_inner).clone()
 }
 
 /// The run of the session selected under `name`, read under the state lock and
-/// checked against the selected ID; None without a selection for `name`. A
-/// terminal action binds its target to this run before its first effect
-/// (#1355 review).
+/// checked against every supplied identity; None without a selection for
+/// `name`. A terminal action binds its target to this run before its first
+/// effect (#1355 review).
 pub(crate) fn selected_run(name: &str) -> Result<Option<String>> {
-    if selected().is_none_or(|(selected, _)| selected != name) {
+    if selected().is_none_or(|selection| selection.name != name) {
         return Ok(None);
     }
     let _guard = lock(None)?;
@@ -45,19 +88,17 @@ pub(crate) fn selected_run(name: &str) -> Result<Option<String>> {
 /// fall back to whatever untracked terminal now holds the name.
 pub(super) fn verify_absent(name: &str) -> Result<()> {
     match selected() {
-        Some((selected, id)) if selected == name => {
-            Err(format!("Session ID {id} no longer names {name}; refresh and retry"))
-        }
+        Some(selection) if selection.name == name => Err(selection.changed()),
         _ => Ok(()),
     }
 }
 
-/// Refuses a record that has the selected name but not the selected ID.
+/// Refuses a record that has the selected name but not every selected identity.
 pub(super) fn verify(record: &Value) -> Result<()> {
     let selected = SELECTED.lock().unwrap_or_else(std::sync::PoisonError::into_inner);
     match selected.as_ref() {
-        Some((name, id)) if string(record, "name") == name && string(record, "session_id") != id => {
-            Err(format!("Session ID {id} no longer names {name}; refresh and retry"))
+        Some(selection) if string(record, "name") == selection.name && !selection.agrees(record) => {
+            Err(selection.changed())
         }
         _ => Ok(()),
     }
@@ -182,7 +223,18 @@ mod tests {
         let input = json!({"request_id":fresh(),"expected_run_id":other["run_id"],
             "expected_conversation_id":other["conversation_id"]});
         refused(super::super::hook_health::session_report(name, &input).unwrap_err());
+        // A session reference selects by its conversation: a record under the
+        // name with another conversation is refused the same way (P1c).
+        select_reference(name, "", &fresh(), &fresh());
+        let refused_reference = |error: String| {
+            assert!(error.starts_with("The session reference no longer names"), "{error}")
+        };
+        refused_reference(super::super::notifications::current(name).unwrap_err());
+        refused_reference(super::super::hook_health::session_report(name, &input).unwrap_err());
+        refused_reference(read(name).unwrap_err());
         std::fs::remove_file(record_path(name)).unwrap();
+        refused_reference(super::super::journal::inspection(name, 0, None, false).unwrap_err());
+        select(name, &fresh());
         refused(super::super::journal::inspection(name, 0, None, false).unwrap_err());
     }
     #[test]

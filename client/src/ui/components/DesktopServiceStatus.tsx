@@ -1,6 +1,6 @@
 import { Show, createMemo, createSignal } from "solid-js";
 import { Portal } from "solid-js/web";
-import { desktopService, serviceStatus, servicePaused, retryDesktopService, ownershipActions } from "../../store/desktopService";
+import { desktopService, serviceStatus, servicePaused, retryDesktopService, ownershipActions, pausedSettingsBody } from "../../store/desktopService";
 import { catalog } from "../../store/catalog";
 import { toast } from "../../store/ui";
 import { tr } from "../../i18n";
@@ -29,7 +29,7 @@ export function PausedServiceDetail() {
         <p>{tr("Zerus runs your sessions through a background service, which stays paused until you resume it.")}</p>
         <button type="button" class="btn primary" disabled={resumeBlocked()} onClick={resume}>{tr("Resume background work")}</button>
       </>}>
-        <p>{tr("Zerus runs your sessions through a background service, which is paused on this computer. Settings shows its current state.")}</p>
+        <p>{pausedSettingsBody(desktopService.state())}</p>
         <button type="button" class="btn primary" onClick={openServiceSettings}>{tr("Open background service settings")}</button>
       </Show>
     </div>

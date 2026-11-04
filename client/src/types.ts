@@ -172,12 +172,18 @@ export interface ModeReview {
   disposition: "required" | "reboot_required" | "reviewed_unknown";
   passive_available: boolean;
 }
+/** A first explicit background choice offer (Windows). Routing only, never consent. */
+export interface FirstChoiceOffer {
+  configuration: string;
+  selection: string;
+}
 export interface NotificationOwnership {
   /** Local startup recovery presentation; never a service grant. */
   native_recovery?: boolean;
   /** Native helper observation only; never permission to start a writer. */
   activation?: { pending: boolean; running: boolean; needs_resume: boolean; code: string;
-    review?: ModeReview | null; automatic_blocked?: boolean; request_id?: string | null; active?: boolean; business_ready?: boolean };
+    review?: ModeReview | null; automatic_blocked?: boolean; request_id?: string | null; active?: boolean; business_ready?: boolean;
+    first?: FirstChoiceOffer | null };
   status: null | { abi: string; configuration: string; journal: string | null; revision: number;
     state: "passive" | "preparing" | "service" | "draining" | "revoked" | "native" | "identity_changed" | "unavailable";
     rearm_required: boolean; request_id: string | null; owner_epoch: string | null; identity_current: boolean };

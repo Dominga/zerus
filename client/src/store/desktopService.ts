@@ -1,6 +1,6 @@
 import { createSignal } from "solid-js";
 import { invoke } from "@tauri-apps/api/core";
-import type { DesktopService, NotificationOwnership, ModeReview } from "../types";
+import type { DesktopService, NotificationOwnership, ModeReview, FirstChoiceOffer } from "../types";
 import { tr } from "../i18n";
 
 /** Presence of this projection is the startup mode. It never grants writer authority. */
@@ -415,6 +415,27 @@ export function createModeReviewActions(
 export const modeReviewActions = createModeReviewActions(
   (display, action) => invoke("desktop_service_mode_action", { display, action }),
 );
+/** The first explicit background choice (Windows). Only a click invokes it; the
+ * native confirmation and every check happen in Rust. The returned original ID
+ * is kept only to show this choice's own pending or not-started outcome. */
+export function createFirstChoiceActions(
+  run: (display: FirstChoiceOffer) => Promise<{ request_id?: string } | null>,
+) {
+  const [busy, setBusy] = createSignal(false);
+  const [request, setRequest] = createSignal<string>();
+  return { busy, request, async submit(display: FirstChoiceOffer) {
+    if (busy()) return;
+    setBusy(true);
+    try {
+      const result = await run({ ...display });
+      if (result?.request_id) setRequest(result.request_id);
+      return result;
+    } finally { setBusy(false); }
+  } };
+}
+export const firstChoiceActions = createFirstChoiceActions(
+  (display) => invoke("desktop_service_first_choice", { display }),
+);
 const HELPER_UNAVAILABLE = ["activation_helper_unavailable", "activation_helper_update_required", "activation_helper_changed"];
 const COMPONENTS = ["fleet", "presence", "reads", "attention", "approvals"];
 export function ownershipNotice(view: NotificationOwnership | undefined): string {
@@ -464,6 +485,14 @@ export function servicePaused(state: DesktopService | undefined): PausedAction |
     || activation.review || activation.automatic_blocked) return undefined;
   if (activation.needs_resume) return HELPER_UNAVAILABLE.includes(activation.code) ? undefined : "resume";
   return activation.code === "activation_platform_manual" && !ownershipNotice(ownership) ? "settings" : undefined;
+}
+
+/** The Windows paused body: it promises turning background mode on in
+ * Settings only while that first choice is actually offered. */
+export function pausedSettingsBody(state: DesktopService | undefined): string {
+  return state?.notification_ownership?.activation?.first
+    ? tr("Zerus runs your sessions through a background service, which stays paused until you turn it on in Settings.")
+    : tr("Zerus runs your sessions through a background service, which is paused on this computer. Settings shows its current state.");
 }
 
 /** Compact footer presentation; full reasons stay in its accessible tooltip. */
@@ -517,7 +546,7 @@ export function serviceStatus(state: DesktopService | undefined) {
   }
   // A reason without Retry or Resume: no in-app action turns background mode on
   // here yet (zerus-5wmh.66.8.1.15); Settings shows the current state.
-  const settings = paused === "settings" ? tr("Zerus runs your sessions through a background service, which is paused on this computer. Settings shows its current state.") : "";
+  const settings = paused === "settings" ? pausedSettingsBody(state) : "";
   const reasons = [notice, pending, retained, inputs, manualRefresh ? "" : owner, settings].filter(Boolean);
   return { label, details: reasons.join("\n") || tr("Background service connected"), healthy: !reasons.length,
     retry: !manualRefresh && !!(notice || pending || retained || (owner && !ownership)), review: !!retained, inputsReview: reviewable, ownership, manualRefresh, modeReview };

@@ -34,6 +34,16 @@ pub(super) struct View {
     #[serde(skip_serializing_if = "Option::is_none")]
     pub first: Option<first::View>,
 }
+/// One checked status's latch: the durable native latch stays for this
+/// process; an explicit journal loss lasts only while the latest coherent
+/// status reports it, so a later healthy read recovers.
+fn latch(state: &mut State, status: &Value) {
+    state.first_lost = !status["first_choice_lost"].is_null();
+    if !state.first_lost {
+        state.latched |= status["activation_automatic_blocked"] == true;
+    }
+    state.view.automatic_blocked = state.latched || state.first_lost;
+}
 struct Intent {
     id: String,
     configuration: String,
@@ -58,6 +68,10 @@ struct State {
     business: Option<review::Business>,
     first: Option<first::Target>,
     first_capable: bool,
+    /// The durable native latch, sticky for this process. It never includes
+    /// a journal loss, which lasts only while the latest read reports it.
+    latched: bool,
+    first_lost: bool,
 }
 pub(super) struct Controller {
     state: Mutex<State>,
@@ -352,7 +366,7 @@ impl Controller {
             let mut state = self.state.lock().unwrap_or_else(PoisonError::into_inner);
             state.first = None;
             state.view.first = None;
-            state.view.automatic_blocked = true;
+            latch(&mut state, &status);
             state.view.needs_resume = false;
             state.selection = Some(status.clone());
             if state.intent.as_ref().is_none_or(|i| i.complete) {
@@ -384,7 +398,7 @@ impl Controller {
     /// same state, so a later read never undoes an earlier one.
     fn project(&self, status: &Value, windows: bool) {
         let mut state = self.state.lock().unwrap_or_else(PoisonError::into_inner);
-        state.view.automatic_blocked |= status["activation_automatic_blocked"] == true;
+        latch(&mut state, status);
         state.selection = Some(status.clone());
         state.view.active = status["selected_mode"] == "background"
             && status["running_mode"] == "background"
@@ -463,6 +477,25 @@ impl Controller {
         // Missing after this original exchange physically joined proves no
         // helper reservation, not success. It offers another explicit action.
         let mut state = self.state.lock().unwrap_or_else(PoisonError::into_inner);
+        if value["phase"] == "lost" {
+            // The native journal lost an anchored first choice: this original
+            // stays pending (Unknown). Never NotStarted, an offer or a Resume.
+            if state
+                .intent
+                .as_ref()
+                .is_some_and(|i| i.id == id && i.configuration == configuration && !i.complete)
+            {
+                state.first = None;
+                state.view.first = None;
+                state.first_lost = true;
+                state.view.automatic_blocked = true;
+                state.view.pending = true;
+                state.view.request_id = Some(id.into());
+                state.view.needs_resume = false;
+                state.view.code = "activation_first_choice_lost".into();
+            }
+            return;
+        }
         let Some(intent) = state
             .intent
             .as_mut()
@@ -858,7 +891,17 @@ impl Route {
             return None;
         }
         let receipt = &value["receipt"];
-        let phase = if receipt.is_null() {
+        let phase = if value["code"] == "first_choice_lost" {
+            // An explicit journal loss, never an ordinary missing receipt.
+            let lost = value["first_choice_lost"].as_str()?;
+            if !receipt.is_null()
+                || value["outcome"] != "unknown"
+                || !uuid::Uuid::parse_str(lost).is_ok_and(|u| !u.is_nil() && u.to_string() == lost)
+            {
+                return None;
+            }
+            "lost"
+        } else if receipt.is_null() {
             "missing"
         } else {
             if receipt["request"] != id {

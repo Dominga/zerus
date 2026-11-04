@@ -438,6 +438,29 @@ and follow up manually. Registration install and remove keep the anchor exactly
 as they keep the mode record. Only wiping both the config and the state trees
 looks like a fresh profile.
 
+The anchor proves a loss only from outside that loss domain. The CLI, before
+it captures the caller or spawns the helper, and the mode helper again, resolve
+the config folder, the state folder and its desktop folder natively (junctions,
+symlinks, short names and drive aliases of existing folders) and compare them
+by path components with Windows case folding, never by string prefix. When the
+config folder equals or lies inside either one, status reports
+`first_choice_unavailable: "anchor_layout"`, the client offers no first choice,
+and the first-choice form is refused before any anchor, record reservation, UUID
+or manager effect. Nothing repairs or moves such a layout; the ordinary and
+reviewed routes are unchanged.
+
+Status and `mode-result` read the record and its anchor together under the
+registration lock, which every writer holds from anchor publication through its
+record save, so a reader never pairs one commit's anchor with another commit's
+record. While a writer holds the lock, both refuse after the lock's bounded wait
+rather than report a loss. A writer stopped between publishing its anchor and
+saving its record (a crash or power loss in that window) leaves the anchor ahead
+of the record. That is reported as lost: the files alone cannot tell it from a
+wiped journal, so it fails closed. A lost lookup keeps the original pending
+(Unknown) and never becomes NotStarted or a Resume. The client latches on a loss
+only while its latest read reports it; a later coherent healthy read lifts that
+latch, while the durable review latch stays.
+
 ## Private qualification
 
 The Windows unit suite runs the creation-owner regression in one bounded child,

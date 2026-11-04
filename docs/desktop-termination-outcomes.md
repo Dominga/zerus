@@ -113,9 +113,10 @@ own sealed source descriptor for the interpreter.
 The macOS exception is confined to this service-native caller:
 `Context::new` passes through `image::prepare` to `Image::selected`, which
 requires the **same retained** `Arc<relay::Connection>` and its genuine paired
-helper route. Bare, unpaired, broken and feature-disabled selections still
-return `termination_native_image_unavailable`; path-only capture cannot enable
-the Mac adapter. No direct or PATH fallback is admitted.
+helper route. `Image::selected` reports `termination_native_image_unavailable`
+for missing native selection or stale generation, and path-only Mac capture
+remains unsupported. A broken pair can also refuse earlier at relay/preflight;
+those existing failures remain closed. No direct or PATH fallback is admitted.
 
 Every `Context::spawn`, including help/ABI, scope reads, retention and the final
 native call, observes the same owned unreaped child with

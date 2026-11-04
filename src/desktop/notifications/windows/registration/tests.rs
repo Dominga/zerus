@@ -248,3 +248,80 @@ fn a_key_appearing_after_preflight_is_preserved_instead_of_overwritten() {
     assert_eq!(r.0.keys[&p.keys[0].0].values["Other"], "kept");
     assert_eq!(r.0.effects, 1);
 }
+
+#[test]
+fn one_formatter_writes_and_selects_the_exact_registered_command() {
+    let command = expected_command(
+        r"C:\Example\hgs.exe",
+        r"C:\Example\config",
+        r"C:\Example\state",
+    )
+    .unwrap();
+    assert_eq!(
+        command,
+        r#""C:\Example\hgs.exe" --desktop-notification-activation --config-dir C:\Example\config --state-dir C:\Example\state"#
+    );
+    assert!(Plan::new(&"a".repeat(64), "S-1-5-21-1000", &command).is_ok());
+    // Spaces and non-ASCII paths quote exactly as the registry stores them.
+    let spaced = expected_command(
+        r"C:\Users\Тима Example\.local\bin\hgs.exe",
+        r"C:\Users\Тима Example\.config\hgs",
+        r"\\?\C:\Users\Тима Example\state dir",
+    )
+    .unwrap();
+    assert_eq!(
+        spaced,
+        r#""C:\Users\Тима Example\.local\bin\hgs.exe" --desktop-notification-activation --config-dir "C:\Users\Тима Example\.config\hgs" --state-dir "\\?\C:\Users\Тима Example\state dir""#
+    );
+    assert!(expected_command(r"\\server\share\hgs.exe", r"\\server\share\c", r"D:/s").is_ok());
+    for (case, image, config, state) in [
+        ("relative image", r"hgs.exe", r"C:\c", r"C:\s"),
+        ("relative config", r"C:\hgs.exe", r"config", r"C:\s"),
+        ("drive-relative state", r"C:\hgs.exe", r"C:\c", r"C:state"),
+        ("quoted image", r#"C:\a"b\hgs.exe"#, r"C:\c", r"C:\s"),
+        ("control character", r"C:\hgs.exe", "C:\\c\n", r"C:\s"),
+        ("empty", "", r"C:\c", r"C:\s"),
+    ] {
+        assert_eq!(
+            expected_command(image, config, state),
+            Err("registration_command_invalid"),
+            "{case}"
+        );
+    }
+    let long = format!(r"C:\{}", "x".repeat(32767));
+    assert_eq!(
+        expected_command(r"C:\hgs.exe", &long, r"C:\s"),
+        Err("registration_command_too_large")
+    );
+}
+
+#[test]
+fn only_exact_arguments_under_another_quoted_image_name_another_image() {
+    let image = r"C:\Users\Example\.local\bin\hgs.exe";
+    let expected = expected_command(image, r"C:\c", r"C:\s").unwrap();
+    let other = expected_command(r"C:\Other copy\hgs.exe", r"C:\c", r"C:\s").unwrap();
+    assert!(names_other_image(&other, &expected, image));
+    assert!(
+        !names_other_image(&expected, &expected, image),
+        "the same image is not other"
+    );
+    for (case, registered) in [
+        (
+            "other config",
+            expected_command(r"C:\Other\hgs.exe", r"C:\d", r"C:\s").unwrap(),
+        ),
+        (
+            "other state",
+            expected_command(r"C:\Other\hgs.exe", r"C:\c", r"C:\t").unwrap(),
+        ),
+        ("extra argument", format!("{other} --extra")),
+        ("unquoted image", other.replacen('"', "", 2)),
+        (
+            "empty image",
+            other.replacen(r"C:\Other copy\hgs.exe", "", 1),
+        ),
+        ("nothing", String::new()),
+    ] {
+        assert!(!names_other_image(&registered, &expected, image), "{case}");
+    }
+}

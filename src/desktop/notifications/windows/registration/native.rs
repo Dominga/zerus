@@ -376,17 +376,13 @@ pub(super) fn command(
         .context("desktop registration arguments unavailable")?;
     ensure!(args.len() == 7, "desktop registration arguments changed");
     let cli = args[0].as_str().context("selected CLI unavailable")?;
-    let mut command = format!("\"{cli}\"");
-    for arg in [
-        super::super::ACTIVATION_ENTRY,
-        "--config-dir",
+    // The same formatter the service compares with (zerus-mgw2v).
+    let command = super::expected_command(
+        cli,
         args[4].as_str().context("configuration unavailable")?,
-        "--state-dir",
         args[6].as_str().context("state unavailable")?,
-    ] {
-        command.push(' ');
-        command.push_str(&host::spawn::quote_argument(arg));
-    }
+    )
+    .map_err(|reason| anyhow::anyhow!(reason))?;
     let plan =
         Plan::new(&location.configuration, &sid, &command).map_err(|v| anyhow::anyhow!(v))?;
     let _lock = Lock::acquire(&plan.sid)?;

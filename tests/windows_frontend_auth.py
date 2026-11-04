@@ -830,6 +830,85 @@ class WindowsTaskMode(unittest.TestCase):
         self.assertFalse(cancelled['manager_changed'], cancelled)
         self.assertEqual(self.observe()['instances'], before)
 
+    TOAST_KEYS = (r'Software\Classes\AppUserModelId\com.hgdev.hgs-tray',
+                  r'Software\Classes\CLSID\{0F0F70A2-1D40-47D8-AC5E-D6A9B789605F}',
+                  r'Software\Classes\CLSID\{0F0F70A2-1D40-47D8-AC5E-D6A9B789605F}\LocalServer32')
+
+    def toast_registry(self):
+        """Every value of the three owned Toast keys, read-only."""
+        import winreg
+        values = {}
+        for path in self.TOAST_KEYS:
+            try:
+                with winreg.OpenKey(winreg.HKEY_CURRENT_USER, path, 0, winreg.KEY_READ) as key:
+                    index = 0
+                    while True:
+                        try:
+                            name, value, kind = winreg.EnumValue(key, index)
+                        except OSError:
+                            break
+                        values[(path, name)] = (value, kind)
+                        index += 1
+            except FileNotFoundError:
+                values[(path, None)] = None
+        return values
+
+    def set_toast_command(self, command):
+        import winreg
+        with winreg.OpenKey(winreg.HKEY_CURRENT_USER, self.TOAST_KEYS[2], 0, winreg.KEY_SET_VALUE) as key:
+            winreg.SetValueEx(key, '', 0, winreg.REG_SZ, command)
+
+    def attention(self):
+        status = self.cli('desktop', 'status', '--json')['lifecycle']['background']['attention']
+        return dict(code=status.get('code'), ready=status.get('ready'),
+                    error=(status.get('status') or {}).get('error'))
+
+    def toast_registration_names_another_copy(self):
+        """zerus-mgw2v: the explicit Toast registration, then ONE arranged
+        change: LocalServer32 names a second copy of the CLI with exactly the
+        expected arguments (the "second registered copy")."""
+        self.assertFalse(self.cli('desktop', 'notification-registration', 'status', '--json')['registered'],
+                         'the disposable runner must have no Toast registration yet')
+        installed = self.cli('desktop', 'notification-registration', 'install', '--json')
+        self.assertTrue(installed['registered'], installed)
+        original = self.toast_registry()
+        command = original[(self.TOAST_KEYS[2], '')][0]
+        # Keep the product's exact arguments; only the quoted image changes.
+        self.assertTrue(command.startswith('"'), command)
+        image, arguments = command[1:].split('"', 1)
+        self.assertEqual(Path(image).resolve(strict=True), self.cli_image)
+        other = self.root / 'other copy ü' / 'hgs.exe'
+        other.parent.mkdir()
+        shutil.copy2(self.cli_image, other)
+        self.set_toast_command(f'"{other}"' + arguments)
+        return dict(original=original, command=command, arranged=self.toast_registry())
+
+    def attention_refuses_another_copy_then_is_ready(self, toast):
+        """The task-started background service sees the runner's logon HOME,
+        not this fixture's private profile (the F1 mismatch). It selects its
+        own image: the other copy is the closed diagnostic with the registry
+        byte-identical, and the exact registration then makes attention ready."""
+        observed, deadline = None, time.monotonic() + 60
+        while time.monotonic() < deadline:
+            observed = self.attention()
+            if observed['error'] == 'notification_registration_other_image':
+                break
+            time.sleep(1)
+        self.assertEqual(observed['error'], 'notification_registration_other_image', observed)
+        self.assertFalse(observed['ready'], observed)
+        self.assertEqual(self.toast_registry(), toast['arranged'], 'the service never repairs')
+        self.set_toast_command(toast['command'])
+        self.assertEqual(self.toast_registry(), toast['original'])
+        deadline = time.monotonic() + 90
+        while time.monotonic() < deadline:
+            observed = self.attention()
+            if observed['ready'] is True:
+                break
+            time.sleep(1)
+        self.assertTrue(observed['ready'], observed)
+        self.assertIsNone(observed['error'], observed)
+        self.assertEqual(self.toast_registry(), toast['original'])
+
     def first_background_choice_from_plain_passive(self):
         """zerus-yfbd.1: the first explicit background choice, with the
         caller's retained UUID, through the actual installed-frontend caller."""
@@ -1592,8 +1671,10 @@ $later=@{guid=$guid;pid=$q.Id;birth=$q.StartTime.ToFileTimeUtc()};
             self.overlapping_layout_refuses_the_first_choice()
             self.lost_reply_at_held_keeps_its_original()
             self.expired_hold_refuses_at_held()
+            toast = self.toast_registration_names_another_copy()
             background = self.first_background_choice_from_plain_passive()
             self.assertTrue(background['ok'], background)
+            self.attention_refuses_another_copy_then_is_ready(toast)
             self.lost_journal_refuses_every_mode_operation(background)
             self.writer_commit_window_is_unavailable_never_lost(background)
             self.assertNotEqual(background['request_id'], cancelled)

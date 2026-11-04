@@ -579,6 +579,18 @@ stops an idle session host without disabling anything.
   alerts. These commands keep the `com.hgdev.hgs-tray` identity and bind its COM
   activation registration to the exact selected stable CLI/configuration. A
   foreign, partial or changed registration is kept. The worker never repairs it.
+  The background service compares that registration with its own running image
+  and its configuration and state folders, never with a path rebuilt from its
+  own `HOME`. A task started by Task Scheduler sees the logon environment, which
+  can differ from the registering shell's: Git Bash and MSYS set their own
+  `HOME`. This matches the registered command path and arguments; it is not a
+  content or Grant check. When the registration names another CLI image with
+  otherwise exact values, attention reports `notification_registration_other_image`
+  and stays unavailable. It never switches image, reinstalls or retries an
+  effect. `notification-registration install` refuses an existing registration
+  for another image (`foreign_or_incomplete_notification_registration_kept`).
+  Replacing it takes the explicit removal below, run with the same CLI and
+  profile that wrote it, then an install from the CLI the background task runs.
   The three current-user keys are `HKCU\Software\Classes\AppUserModelId\com.hgdev.hgs-tray`,
   `HKCU\Software\Classes\CLSID\{0F0F70A2-1D40-47D8-AC5E-D6A9B789605F}`,
   and `HKCU\Software\Classes\CLSID\{0F0F70A2-1D40-47D8-AC5E-D6A9B789605F}\LocalServer32`.

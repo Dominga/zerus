@@ -12,6 +12,64 @@ const APPLICATION_KEY: &str = r"Software\Classes\AppUserModelId\com.hgdev.hgs-tr
 const ABI_VALUE: &str = "HGSDesktopNotificationABI";
 const CONFIGURATION_VALUE: &str = "HGSDesktopConfiguration";
 pub(in crate::desktop) const MARKER: &str = "desktop-notification-registration-v1";
+/// The fixed Toast activation flag. Cold activation parses only this flag and
+/// cannot acquire or promote the canonical service owner.
+pub(in crate::desktop) const ACTIVATION_ENTRY: &str = "--desktop-notification-activation";
+
+/// The one LocalServer32 command for an image and its configuration. Explicit
+/// registration writes it; the service compares the registry with it exactly.
+/// It matches the registered command path and arguments; it is not a content
+/// or Grant proof. Each path is an absolute Windows path without quotes or
+/// control characters, and the command stays below the registry bound.
+pub(in crate::desktop) fn expected_command(
+    image: &str,
+    config: &str,
+    state: &str,
+) -> Result<String, &'static str> {
+    if ![image, config, state]
+        .iter()
+        .all(|path| absolute(path) && !path.contains('"') && !path.chars().any(char::is_control))
+    {
+        return Err("registration_command_invalid");
+    }
+    let mut command = format!("\"{image}\"");
+    for argument in [
+        ACTIVATION_ENTRY,
+        "--config-dir",
+        config,
+        "--state-dir",
+        state,
+    ] {
+        command.push(' ');
+        command.push_str(&crate::host::spawn::quote_argument(argument));
+    }
+    if command.encode_utf16().count() >= 32767 {
+        return Err("registration_command_too_large");
+    }
+    Ok(command)
+}
+
+/// Diagnostic only: the registered command carries exactly the expected
+/// arguments for ANOTHER quoted image. Never a selection, permission or repair.
+pub(in crate::desktop) fn names_other_image(registered: &str, expected: &str, image: &str) -> bool {
+    let Some(arguments) = expected.strip_prefix(&format!("\"{image}\"")) else {
+        return false;
+    };
+    registered
+        .strip_prefix('"')
+        .and_then(|rest| rest.split_once('"'))
+        .is_some_and(|(other, rest)| !other.is_empty() && other != image && rest == arguments)
+}
+
+/// An absolute Windows path: a drive root, or a UNC or verbatim prefix.
+fn absolute(path: &str) -> bool {
+    let bytes = path.as_bytes();
+    (bytes.len() >= 3
+        && bytes[0].is_ascii_alphabetic()
+        && bytes[1] == b':'
+        && matches!(bytes[2], b'\\' | b'/'))
+        || path.starts_with(r"\\")
+}
 
 #[derive(Clone, Debug, PartialEq, Eq)]
 struct Contents {

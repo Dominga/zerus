@@ -12,13 +12,20 @@ use std::{
 };
 use wire::{Open, Target};
 
-static SERIAL: Mutex<()> = Mutex::new(());
-struct Fixture {
+pub(in crate::desktop::notifications) static SERIAL: Mutex<()> = Mutex::new(());
+pub(in crate::desktop::notifications) struct Fixture {
     _root: tempfile::TempDir,
-    prefix: std::path::PathBuf,
+    pub(in crate::desktop::notifications) prefix: std::path::PathBuf,
 }
 impl Fixture {
     fn new(help: &str) -> Self {
+        Self::for_navigation(help, &open().target, "synthetic-wayland")
+    }
+    pub(in crate::desktop::notifications) fn for_navigation(
+        help: &str,
+        navigation: &Target,
+        activation_token: &str,
+    ) -> Self {
         let root = tempfile::tempdir().unwrap();
         let prefix = root.path().canonicalize().unwrap().join("private install");
         for dir in ["bin", "libexec", "share/hgs"] {
@@ -32,13 +39,14 @@ impl Fixture {
         fs::write(prefix.join("bin/hgs"), b"private CLI image fixture").unwrap();
         fs::set_permissions(prefix.join("bin/hgs"), fs::Permissions::from_mode(0o755)).unwrap();
         fs::write(prefix.join("share/hgs/local-webkit.json"), b"{}").unwrap();
-        // No token/target output or file storage. Shell assertions qualify the
-        // received argv/environment before execing the SAME owned child's ELF.
-        let target = wire::encode_navigation(&open().target).unwrap();
+        // Save only the synthetic selected target; the Wayland token remains
+        // transient. Assert argv/env before execing the SAME owned child's ELF.
+        let target = wire::encode_navigation(navigation).unwrap();
         fs::write(prefix.join("libexec/hgs-tray-launch"), format!(
             "#!/bin/sh\nif [ \"$1\" = --help ]; then printf '%s\\n' '{help}'; exit 0; fi\n\
-            [ \"$#\" = 3 ] && [ \"$1\" = --hgs ] && [ \"$2\" = '{}/bin/hgs' ] && \\\n            [ \"$3\" = --sessions ] && [ \"${{ZERUS_CLIENT_DESKTOP_TARGET-}}\" = '{target}' ] && \\\n            [ \"${{XDG_ACTIVATION_TOKEN-}}\" = synthetic-wayland ] && \\\n            [ \"${{ZERUS_CLIENT_DESKTOP_SERVICE-}}\" = 1 ] && [ -z \"${{HGS_SESSION-}}${{HGS_RUN_ID-}}\" ] || exit 31\n\
-            exec '{}/bin/hgs-tray' 'if={}/fixture-exit' bs=1 count=1 status=none\n", prefix.display(), prefix.display(), prefix.display())).unwrap();
+            [ \"$#\" = 3 ] && [ \"$1\" = --hgs ] && [ \"$2\" = '{}/bin/hgs' ] && \\\n            [ \"$3\" = --sessions ] && [ \"${{ZERUS_CLIENT_DESKTOP_TARGET-}}\" = '{target}' ] && \\\n            [ \"${{XDG_ACTIVATION_TOKEN-}}\" = '{activation_token}' ] && \\\n            [ \"${{ZERUS_CLIENT_DESKTOP_SERVICE-}}\" = 1 ] && [ -z \"${{HGS_SESSION-}}${{HGS_RUN_ID-}}\" ] || exit 31\n\
+            printf '%s\\n' \"$ZERUS_CLIENT_DESKTOP_TARGET\" > '{}/selected-target.json'\n\
+            exec '{}/bin/hgs-tray' 'if={}/fixture-exit' bs=1 count=1 status=none\n", prefix.display(), prefix.display(), prefix.display(), prefix.display())).unwrap();
         fs::set_permissions(
             prefix.join("libexec/hgs-tray-launch"),
             fs::Permissions::from_mode(0o755),
@@ -51,7 +59,7 @@ impl Fixture {
     }
     /// One byte releases the fixture; no autonomous short sleep and no EOF
     /// dependency on unrelated fork-before-exec descriptor aliases.
-    fn hold(&self) -> File {
+    pub(in crate::desktop::notifications) fn hold(&self) -> File {
         let file = OpenOptions::new()
             .read(true)
             .write(true)
@@ -61,7 +69,7 @@ impl Fixture {
         assert!(file.metadata().unwrap().file_type().is_fifo());
         file
     }
-    fn select(&self) -> SelectedFrontend {
+    pub(in crate::desktop::notifications) fn select(&self) -> SelectedFrontend {
         SelectedFrontend::capture(
             self.prefix.join("bin/hgs"),
             self.prefix.join("bin/hgs-tray"),

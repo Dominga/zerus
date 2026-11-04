@@ -236,6 +236,12 @@ impl Report {
         if stop.load(Ordering::Acquire) {
             return Err("stopped");
         }
+        // The download folder's evidence can appear, or become unreadable,
+        // after an earlier run found nothing to publish: every run decides
+        // again. The preload captures are one-time and keep their result.
+        if group == Group::Downloads {
+            self.group_state(group).not_applicable = false;
+        }
         // The original worker resolves this before publishing capture status.
         // This reporter never creates a capture or reads today's live journal.
         let data = self

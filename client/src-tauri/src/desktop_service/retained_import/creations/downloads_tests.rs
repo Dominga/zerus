@@ -152,3 +152,50 @@ fn a_replaced_folder_is_never_adopted_under_the_original_id() {
     assert_eq!(status["import_id"], id);
     assert_eq!(status["phase"], "quarantined");
 }
+
+/// migrate-u P1 on #1264 (zerus-5wmh.66.5.2.1.3.1.1): the folder's
+/// evidence can appear, and become unreadable, after a run found nothing.
+/// The group is then required again and never shown complete.
+#[test]
+fn a_group_found_not_applicable_is_required_again_once_evidence_exists() {
+    let _process = crate::PROCESS_TREE.read().unwrap();
+    let f = Fixture::new("success");
+    plain(&f, "a.txt", b"a");
+    assert_eq!(run(&f, false), Ok(()));
+    let status = f.report.group_status(GROUP);
+    assert_eq!(
+        (status["required"].clone(), status["complete"].clone()),
+        (json!(false), json!(true))
+    );
+    // Next's first change records the original; then it is damaged.
+    assert_eq!(ON.trim(&folder(&f), 0, 2).error, None);
+    let slots = folder(&f).join(".zerus-files-preload-v1");
+    let slot = fs::read_dir(&slots)
+        .unwrap()
+        .next()
+        .unwrap()
+        .unwrap()
+        .path();
+    let mut original = fs::read(slot.join("original.bin")).unwrap();
+    original.push(b' ');
+    fs::write(slot.join("original.bin"), &original).unwrap();
+    assert_eq!(run(&f, true), Err("downloads_import_capture_unavailable"));
+    let status = f.report.group_status(GROUP);
+    assert_eq!(status["required"], true);
+    assert_eq!(status["complete"], false);
+}
+
+#[test]
+fn a_group_found_not_applicable_publishes_once_evidence_exists() {
+    let _process = crate::PROCESS_TREE.read().unwrap();
+    let f = Fixture::new("success");
+    plain(&f, "a.txt", b"a");
+    assert_eq!(run(&f, false), Ok(()));
+    assert_eq!(f.report.group_status(GROUP)["required"], false);
+    assert_eq!(ON.trim(&folder(&f), 0, 2).error, None);
+    assert_eq!(run(&f, true), Ok(()));
+    let status = f.report.group_status(GROUP);
+    assert_eq!(status["required"], true);
+    assert_eq!(status["phase"], "published");
+    assert_eq!(status["complete"], true);
+}

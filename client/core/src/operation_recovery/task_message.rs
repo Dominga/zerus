@@ -1078,8 +1078,9 @@ mod tests {
                 b.clone(),
                 &vec![0; PRIVATE_BYTES + 1],
                 &input,
-                id(2).as_bytes()
-            , None),
+                id(2).as_bytes(),
+                None
+            ),
             Err(Review::TooLarge)
         ));
         assert!(matches!(
@@ -1087,8 +1088,9 @@ mod tests {
                 b.clone(),
                 &raw,
                 &vec![0; PRIVATE_BYTES + 1],
-                id(2).as_bytes()
-            , None),
+                id(2).as_bytes(),
+                None
+            ),
             Err(Review::TooLarge)
         ));
         assert!(matches!(

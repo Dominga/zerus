@@ -308,4 +308,25 @@ describe("setDraftKeys", () => {
       dispose();
     });
   });
+
+  // zerus-ucck P2c-2: a row with a durable ID is marked by its ID key, and by a
+  // draft still under its name key until its composer moves it.
+  it("marks a row with a session ID by either of its keys", () => {
+    createRoot((dispose) => {
+      const id = "3f2a9c1d-6b7e-4c2a-9d1f-0a1b2c3d4e5f";
+      const { catalog, applyBatch, setDraftKeys } = createCatalog();
+      applyBatch(batchOf({ replaces: [{ computer: "mac", rows: [row("run:a", "claude/p/a", { session_id: id }, "mac"), row("run:b", "claude/p/b", {}, "mac")] }] }));
+      expect(catalog.rows[rowId("mac", "run:a")].sessionId).toBe(id);
+      expect(catalog.rows[rowId("mac", "run:b")].sessionId).toBeUndefined();
+      setDraftKeys([`mac\nid:${id}`]);
+      expect(catalog.rows[rowId("mac", "run:a")].draft).toBe(true);
+      setDraftKeys(["mac\nclaude/p/a"]);
+      expect(catalog.rows[rowId("mac", "run:a")].draft).toBe(true);
+      setDraftKeys([`mac\nid:${id}\nconv-1\nagent-2`]);
+      expect(catalog.rows[rowId("mac", "run:a")].draft, "a child's draft").toBe(true);
+      setDraftKeys([`mac\nid:${id.replace("3f", "4f")}`]);
+      expect(catalog.rows[rowId("mac", "run:a")].draft, "another session's ID").toBe(false);
+      dispose();
+    });
+  });
 });

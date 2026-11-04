@@ -3,6 +3,7 @@ import type { AttachmentScope } from "../../store/activitySource";
 import type { FollowTarget } from "../../store/activity";
 import type { ActivityItem, Session } from "./types";
 import { attachments } from "./transcript";
+import { draftKey } from "../../store/draftKeys";
 
 interface Entry { text: string; exact: boolean }
 const plainTerminal = (text: string) => text
@@ -109,7 +110,7 @@ export function queuePresentation(queue: QueueView, session: Session | undefined
   view: Pick<ComposerView, "key" | "subagent" | "local"> | undefined, target: FollowTarget | undefined,
   summary: Record<string, unknown> | undefined, child: boolean) {
   const current = session && !child && !session.archiveId && !view?.subagent
-    && view?.key === `${session.computer}\n${session.name}`
+    && view?.key === draftKey({ computer: session.computer, key: session.catalogKey, name: session.name, archive_id: null, session_id: session.sessionId ?? null })
     && !!queue.run_id && !!queue.conversation_id
     && session.runId === queue.run_id && session.conversationId === queue.conversation_id;
   const host = current && target?.id === session.key && target.computer === session.computer

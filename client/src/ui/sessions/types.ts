@@ -92,6 +92,8 @@ export interface Session {
   turnStarted?: number;
   runId?: string;
   launchId?: string;
+  /** The listing's durable session ID, when canonical: it keys the drafts. */
+  sessionId?: string;
   conversationId?: string;
   /** Exact/fallback device-local density identity, calculated in Rust. */
   compactKeys?: [string, string];

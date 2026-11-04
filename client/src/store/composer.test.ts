@@ -1,6 +1,6 @@
 import { describe, expect, it } from "vitest";
 import { createRoot } from "solid-js";
-import { createComposer, draftKey, EDIT_MS, flushWhenHidden, MAX_TEXT_BYTES, statusLine, TOO_LONG, type ComposerPort, type Images, type Notices } from "./composer";
+import { createComposer, draftKey, nameDraftKey, EDIT_MS, flushWhenHidden, MAX_TEXT_BYTES, statusLine, TOO_LONG, type ComposerPort, type Images, type Notices } from "./composer";
 import { isEmptyBatch, type ComposerView, type SendReply, type SessionRef } from "../types";
 import { normalize } from "../bridge";
 import type { Timers } from "./terminal";
@@ -87,6 +87,21 @@ describe("child draft identity", () => {
     expect(draftKey(SESSION)).toBe(KEY);
     expect(draftKey({ ...SESSION, archive_id: "archive-1" })).toBe(`${KEY}\narchive-1`);
     expect(draftKey({ ...SESSION, subagent: { agent_id: "agent-7", parent_conversation_id: "conv-1" } })).toBe(`${KEY}\nconv-1\nagent-7`);
+  });
+
+  // zerus-ucck P2c-2, as src-tauri `session_draft_key` and `legacy_draft_key`.
+  it("names a live or saved session by its durable ID, never an archived one", () => {
+    const id = "3f2a9c1d-6b7e-4c2a-9d1f-0a1b2c3d4e5f";
+    const byId = { ...SESSION, session_id: id };
+    const idKey = `${SESSION.computer}\nid:${id}`;
+    expect(draftKey(byId)).toBe(idKey);
+    expect(nameDraftKey(byId)).toBe(KEY);
+    expect(draftKey({ ...byId, subagent: { agent_id: "agent-7", parent_conversation_id: "conv-1" } })).toBe(`${idKey}\nconv-1\nagent-7`);
+    expect(draftKey({ ...byId, archive_id: "archive-1" })).toBe(`${KEY}\narchive-1`);
+    expect(draftKey({ ...byId, key: "archive:archive-1" })).toBe(KEY);
+    for (const other of [null, "", "not-a-uuid", id.toUpperCase(), "00000000-0000-0000-0000-000000000000"]) {
+      expect(draftKey({ ...SESSION, session_id: other }), String(other)).toBe(KEY);
+    }
   });
 });
 

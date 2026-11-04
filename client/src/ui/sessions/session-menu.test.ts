@@ -102,7 +102,7 @@ describe("the session menu (Qt showSessionMenu 5266-5382)", () => {
     const entry = (s = live) => sessionMenu(s).find((e) => "label" in e && e.label === "Clear session…") as Extract<MenuEntry, { label: string }>;
     expect(entry()).toMatchObject({ disabled: true, hint: "Checking whether this session can be cleared…" });
     await vi.waitFor(() => expect(entry().disabled).toBe(false));
-    expect(composerClearControl).toHaveBeenCalledWith({ computer: "", key: "run:run-live", name: "codex/example/live", archive_id: null });
+    expect(composerClearControl).toHaveBeenCalledWith({ computer: "", key: "run:run-live", name: "codex/example/live", archive_id: null, session_id: null });
     entry().action?.();
     await vi.waitFor(() => expect(composer.dialog()).toMatchObject({ kind: "clear", control: { run: "run-live" } }));
     expect(selectedKey()).toBe(live.key);

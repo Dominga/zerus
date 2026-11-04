@@ -1166,3 +1166,114 @@ fn an_import_never_replaces_a_held_identity() {
     let kept = load(&DraftStore::open(here), KEY);
     assert_eq!(kept.draft.checkpoint, held.checkpoint);
 }
+
+const SESSION_ID: &str = "3f2a9c1d-6b7e-4c2a-9d1f-0a1b2c3d4e5f";
+
+/// zerus-ucck P2c-2: a session's draft keyed by its name moves once to its
+/// session ID key, as stored, and never over a draft already there.
+#[test]
+fn a_name_key_draft_moves_once_to_its_session_id_key() {
+    let scratch = Scratch::new("adopt");
+    let store = DraftStore::open(scratch.0.join("drafts"));
+    let id_key = format!("studio\nid:{SESSION_ID}");
+    let label = "claude/sample-project/review";
+    assert!(
+        !wait(|done| store.adopt(KEY, &id_key, label, done)),
+        "nothing to move"
+    );
+    let mut held = draft("typed before the upgrade", &[("a.txt", b"kept attachment")]);
+    held.checkpoint = Some(Box::new(checkpoint(3)));
+    save(&store, KEY, held.clone()).unwrap();
+    assert!(
+        !wait(|done| store.adopt(KEY, KEY, label, done)),
+        "a key is not its own legacy"
+    );
+    save(&store, &id_key, draft("already here", &[])).unwrap();
+    assert!(!wait(|done| store.adopt(KEY, &id_key, label, done)));
+    assert_eq!(
+        load(&store, KEY).draft.draft.text,
+        "typed before the upgrade"
+    );
+    assert_eq!(load(&store, &id_key).draft.draft.text, "already here");
+
+    save(&store, &id_key, StoredDraft::default()).unwrap();
+    assert!(wait(|done| store.adopt(KEY, &id_key, label, done)));
+    let moved = load(&store, &id_key).draft;
+    assert_eq!(moved.draft, held.draft);
+    assert_eq!(
+        moved.checkpoint, held.checkpoint,
+        "its reserved input moves with it"
+    );
+    assert_eq!((moved.position, moved.anchor), (3, 1));
+    assert_eq!(moved.session_label, label);
+    assert_eq!(load(&store, KEY).draft, StoredDraft::default());
+    let listed = index(&store);
+    assert_eq!(
+        listed.keys().cloned().collect::<Vec<_>>(),
+        std::slice::from_ref(&id_key)
+    );
+    assert_eq!(listed[&id_key].session_label, label);
+    assert!(
+        !wait(|done| store.adopt(KEY, &id_key, "later", done)),
+        "only once"
+    );
+}
+
+#[test]
+fn a_damaged_name_key_draft_stays_where_it_is() {
+    let scratch = Scratch::new("adopt-damaged");
+    let root = scratch.0.join("drafts");
+    let store = DraftStore::open(root.clone());
+    let id_key = format!("studio\nid:{SESSION_ID}");
+    save(&store, KEY, draft("kept", &[("a.txt", b"kept attachment")])).unwrap();
+    let dir = folder(&root, KEY);
+    for entry in fs::read_dir(&dir).unwrap().flatten() {
+        if entry.file_name().to_string_lossy().ends_with(".bin") {
+            fs::write(entry.path(), b"changed").unwrap();
+        }
+    }
+    let manifest = fs::read(dir.join("draft.json")).unwrap();
+    assert!(!wait(|done| store.adopt(KEY, &id_key, "claude/p/a", done)));
+    assert_eq!(fs::read(dir.join("draft.json")).unwrap(), manifest);
+    assert!(!folder(&root, &id_key).join("draft.json").exists());
+}
+
+#[test]
+fn only_a_draft_keyed_by_session_id_records_its_session_label() {
+    let scratch = Scratch::new("session-label");
+    let root = scratch.0.join("drafts");
+    let store = DraftStore::open(root.clone());
+    let id_key = format!("studio\nid:{SESSION_ID}");
+    save(&store, KEY, draft("by name", &[])).unwrap();
+    let mut by_id = draft("by id", &[]);
+    by_id.session_label = "claude/p/a".into();
+    save(&store, &id_key, by_id).unwrap();
+    let manifest = |key: &str| -> Value {
+        serde_json::from_slice(&fs::read(folder(&root, key).join("draft.json")).unwrap()).unwrap()
+    };
+    assert!(
+        manifest(KEY).get("session_label").is_none(),
+        "a name key keeps its bytes"
+    );
+    assert_eq!(manifest(&id_key)["session_label"], json!("claude/p/a"));
+    assert_eq!(load(&store, &id_key).draft.session_label, "claude/p/a");
+}
+
+#[test]
+fn form_state_alone_moves_and_is_never_overwritten() {
+    let scratch = Scratch::new("adopt-form");
+    let store = DraftStore::open(scratch.0.join("drafts"));
+    let id_key = format!("studio\nid:{SESSION_ID}");
+    let mut chosen = StoredDraft::default();
+    chosen.form_state.insert(
+        "answers".into(),
+        json!([{"id": "q_0", "options": ["opt_0_0"]}]),
+    );
+    save(&store, KEY, chosen.clone()).unwrap();
+    save(&store, &id_key, chosen.clone()).unwrap();
+    assert!(!wait(|done| store.adopt(KEY, &id_key, "claude/p/a", done)));
+    save(&store, &id_key, StoredDraft::default()).unwrap();
+    assert!(wait(|done| store.adopt(KEY, &id_key, "claude/p/a", done)));
+    assert_eq!(load(&store, &id_key).draft.form_state, chosen.form_state);
+    assert!(load(&store, KEY).draft.form_state.is_empty());
+}

@@ -496,6 +496,40 @@ class Swarm(unittest.TestCase):
         before = self.exchanges(); self.call('a', 'sync'); self.call('b', 'sync')
         self.assertEqual(self.exchanges(), before)
 
+    def test_the_cutover_status_names_each_member_s_replica(self):
+        # zerus-cg5h.4 S2b.2 C2: what each member's hello and last exchange
+        # said, information only.
+        self.join('a', 'b'); self.join('b', 'a'); self.join('c', 'b'); self.join('b', 'c')
+        self.converge()
+        task = self.task('a', 'add', '--project', 'a', text='Add rate limiting')['task']
+        self.converge()
+        hello = self.call('b', 'hello')['replica']
+        self.assertEqual(hello['task_schema'], 7)
+        self.assertRegex(hello['store'], r'^[0-9a-f-]{36}$')
+        self.assertEqual(self.call('b', 'hello')['replica']['store'], hello['store'])
+        status = self.task('b', 'cutover', '--project', 'a')
+        members = {m['alias']: m for m in status['members']}
+        self.assertEqual(set(members), {'a', 'c'})
+        for alias in 'ac':
+            self.assertEqual(members[alias]['task_schema'], 7, alias)
+            self.assertRegex(members[alias]['store'], r'^[0-9a-f-]{36}$')
+            self.assertEqual(members[alias]['inventory']['complete'], True, alias)
+        self.assertNotEqual(members['a']['store'], members['c']['store'])
+        self.assertEqual((status['phase'], status['closed']), ('not_cut_over', None))
+        # A cutover written here after the members' last exchange keeps it
+        # open until they exchange again.
+        tasks = next(p for p in (self.root / 'b/state/replica').iterdir() if p.is_dir()) / 'tasks'
+        (tasks / (task['uuid'] + '.managed')).write_text('{"saved":{}}')
+        status = self.task('b', 'cutover', '--project', 'a')
+        self.assertEqual(status['phase'], 'cutting_over')
+        self.assertEqual({k: status['closed'][k] for k in ('member', 'project', 'reason')},
+                         {'member': 'a', 'project': 'a', 'reason': 'inventory_before_cutover'})
+        self.assertIn("predates the latest cutover", status['closed_text'])
+        # A member whose Zerus does not replicate tasks receives none: not eligible.
+        (self.root / 'noreplica-c').touch()
+        self.assertTrue(self.call('b', 'sync')['c']['ok'])
+        self.assertEqual({m['alias'] for m in self.task('b', 'cutover', '--project', 'a')['members']}, {'a'})
+
     def test_a_large_project_travels_in_pages(self):
         self.join('a', 'b'); self.join('b', 'a')
         self.call('a', 'sync'); self.call('b', 'sync')

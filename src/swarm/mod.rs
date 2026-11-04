@@ -12,6 +12,7 @@ mod session_ids;
 pub(crate) use session_project::validate_payload as validate_session_project;
 mod model;
 mod replica;
+mod replica_members;
 mod service;
 /// The running executable and its replacement, for long-lived commands.
 pub(crate) use service::{Executable, Replacement};
@@ -27,6 +28,38 @@ use store::LockedStore;
 #[cfg(unix)]
 pub(crate) use catalog::MOBILE_DELIVERY;
 pub(crate) use replica::{exchange_project as exchange_tasks, replicate};
+pub(crate) use replica_members::Member as ReplicaMember;
+
+/// A verified member that receives the projects' tasks (its hgs speaks the
+/// replica protocol), with what this computer last learned of its replica.
+pub(crate) struct TaskMember {
+    pub alias: String,
+    pub node: String,
+    pub replica: Option<ReplicaMember>,
+}
+
+/// Every member that receives tasks, by alias, read without the lock.
+/// Information only.
+pub(crate) fn task_members(config: &Config) -> Result<Vec<TaskMember>> {
+    let snapshot = store::read_snapshot(config)?;
+    let mut records = replica_members::read(config);
+    let mut members = Vec::new();
+    for (alias, peer) in snapshot["peers"].as_object().into_iter().flatten() {
+        let Some(node) = peer["node"].as_str() else {
+            continue;
+        };
+        if peer["tasks_outdated"] == true {
+            continue;
+        }
+        let replica = records.remove(alias).filter(|record| record.node == node);
+        members.push(TaskMember {
+            alias: alias.clone(),
+            node: node.to_owned(),
+            replica,
+        });
+    }
+    Ok(members)
+}
 #[cfg(unix)]
 pub(crate) use store::replace;
 

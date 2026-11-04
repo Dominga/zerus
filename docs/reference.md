@@ -3088,6 +3088,7 @@ hgs task target orchard/T-a1b2c3 codex/api|any [--host ALIAS]
 hgs task target orchard/T-a1b2c3 new-session|subagent --parent codex/api [--host ALIAS] [--session-id ID]
 hgs task worker orchard/T-a1b2c3 --subagent CHILD_ID --request-id SENT_REQUEST_ID
 hgs task settings --project orchard [--set < settings.json]
+hgs task cutover --project orchard [--hold on|off [--confirm]]
 ```
 
 Plain `task get` retains the complete journal for existing clients. The optional
@@ -3416,7 +3417,21 @@ back an older pair of files that agree with each other, which nothing here
 can tell from a genuine one, and recovery may then accept another copy and
 lose what was written after that backup. Restore the replica root only as a
 whole, never copy task files back one by one, and keep file-level sync tools
-away from it.
+away from it. After restoring a replica root from a backup or copying it to
+another computer, delete its `store-id` file so a new one is created: other
+computers then see a changed store, and the cutover proof (which binds each
+member's verified computer and store) stays closed for it until a fresh,
+complete inventory with it.
+
+The damaged entries of `task list` (and its pages) say what is known here,
+read only: `kept: true` with `kept_reason` (`marked` for a copy cut over
+here, `unreadable_local_data` for torn or unreadable local updates) for a copy
+kept for a person's review whatever copy arrives, or `recovery:
+"depends_on_incoming_copy"` when what happens is decided against each copy
+that arrives; the listing never says a replacement is safe. A refusal names
+the decision against that copy: `kept` with `marked`, `attempt_evidence`,
+`pending` or `unreadable_local_data`, in `hgs` output, exchange refusals and
+the phone's `refused_there`.
 
 The swarm worker
 replicates them with the catalog: after each catalog
@@ -3424,7 +3439,34 @@ sync it compares every project's digest with the member's and exchanges only
 the changes each side lacks, in pages of at most 1 MiB, and a task changed
 here goes out within seconds. Changes made on several computers at once merge.
 A member whose Zerus does not share tasks keeps syncing the catalog and is
-named in the Swarm settings.
+named in the Swarm settings. A hello's replica part also carries
+`task_schema`, the highest task schema that Zerus writes (7, which reads the
+floor; absent in an older one), and `store`, the random identity of its
+replica root (`replica/store-id`, created on first use). This computer keeps
+what each member last advertised and how each project's last exchange with
+it ended (`complete`, or a reason: `unreachable`, `busy`, `refused_documents`,
+`page_budget`, `changed_identity`; equal digests count as complete) in
+`replica-members.json` beside the catalog, information only, pruned with
+membership.
+
+`task cutover --project P` shows the project's cutover to execution attempts
+as this computer knows it, read only and bounded by its members: `phase`
+(`not_cut_over` while no task here has a floor or attempts, `cutting_over`
+while a member keeps it open, `active` otherwise), `hold`, `cut_over_tasks`,
+`last_cutover_write`, every eligible member with its advertised task schema,
+store, when it was seen and its last inventory of the project, and `closed`:
+the first reason it is open as `{member, project, reason, at}` (`unseen`,
+`task_schema` for a member below 7, `no_inventory`, an incomplete exchange's
+reason, or `inventory_before_cutover`), with `closed_text` as prose. Eligible
+members are the project's swarm members that receive its documents: every
+verified member whose Zerus shares tasks. It grants nothing and dispatches
+nothing. `--hold on` sets the project's cutover hold, a replicated value that
+names who set it and when (concurrent changes: the last writer wins). While on,
+no task of the project takes a new floor or a first attempt, where those are
+written (they come with the attempt writer); it never lowers anything, and a
+task that never cut over keeps the legacy Start. Only a person sets or clears it,
+and clearing it takes `--hold off --confirm`. A hold that cannot be read is
+on. Times are in milliseconds.
 
 Phones reach a project's tasks through the mobile relay and the Rust mobile
 connector, which uses two commands of its own. `hgs task digests --json` prints

@@ -2,7 +2,7 @@
 //! version of every document), the updates the other lacks, and importing them.
 //! The inventory is bookkeeping, not a log, so nothing here grows without bound.
 use crate::schema::{SessionKey, Stage};
-use crate::store::{write_atomic, Damaged, ProjectStore};
+use crate::store::{write_atomic, Damaged, Keep, ProjectStore};
 use crate::task::TaskDoc;
 use crate::{ids, Error, Result};
 use loro::VersionVector;
@@ -382,10 +382,7 @@ impl ProjectStore {
                 },
             };
             match &cached.error {
-                Some(error) => damaged.push(Damaged {
-                    uuid: uuid.clone(),
-                    error: error.clone(),
-                }),
+                Some(error) => damaged.push(self.damaged(uuid.as_str(), error.clone())),
                 None => {
                     inventory.tasks.insert(uuid.clone(), cached.version.clone());
                     if let (Some(stage), Some(at)) = (cached.stage, cached.stage_at) {
@@ -476,15 +473,21 @@ impl ProjectStore {
         let mut imported = Imported::default();
         for update in updates {
             let (name, result) = match &update.document {
-                Document::Project => ("project".to_owned(), self.import_project(&update.bytes)),
+                Document::Project => (
+                    "project".to_owned(),
+                    self.import_project(&update.bytes).map_err(Refusal::from),
+                ),
                 Document::Task(uuid) => (uuid.clone(), self.import_task(uuid, &update.bytes)),
             };
             match result {
                 Ok(changed) => imported.changed += usize::from(changed),
-                Err(error) => imported.refused.push(Damaged {
-                    uuid: name,
-                    error: error.to_string(),
-                }),
+                Err(refusal) => {
+                    let refused = Damaged::new(name, refusal.error.to_string());
+                    imported.refused.push(match refusal.kept {
+                        Some(reason) => refused.kept_for(reason),
+                        None => refused,
+                    });
+                }
             }
         }
         Ok(imported)
@@ -501,9 +504,9 @@ impl ProjectStore {
         Ok(true)
     }
 
-    fn import_task(&self, uuid: &str, bytes: &[u8]) -> Result<bool> {
+    fn import_task(&self, uuid: &str, bytes: &[u8]) -> std::result::Result<bool, Refusal> {
         if !ids::is_uuid(uuid) {
-            return Err(Error::new(format!("{uuid:?} is not a task UUID")));
+            return Err(Error::new(format!("{uuid:?} is not a task UUID")).into());
         }
         let stored = self.snapshot_path(uuid).exists() || self.updates_path(uuid).exists();
         let (mut task, replacing) = if stored {
@@ -511,7 +514,7 @@ impl ProjectStore {
                 Ok(mut task) => {
                     let before = task.current_vv();
                     if !task.import_block(bytes) {
-                        return Err(Error::new("the updates could not be applied"));
+                        return Err(Error::new("the updates could not be applied").into());
                     }
                     // Every live import restores the execution schema a merged
                     // lower value replaced, before anything reads or exports it.
@@ -528,13 +531,16 @@ impl ProjectStore {
                 // damaged and closed for a person's review.
                 Err(damaged) => match self.recovered(uuid, bytes) {
                     Recovery::Whole(task) | Recovery::Replaced(task) => (task, true),
-                    Recovery::Unreadable => return Err(damaged),
-                    Recovery::Kept => {
-                        return Err(Error::new(format!(
-                            "the copy here does not load ({damaged}) and may hold execution \
-                             attempts no other copy is shown to hold; it is kept for a person's \
-                             review and nothing is sent for it"
-                        )))
+                    Recovery::Unreadable => return Err(damaged.into()),
+                    Recovery::Kept(reason) => {
+                        return Err(Refusal {
+                            error: Error::new(format!(
+                                "the copy here does not load ({damaged}) and may hold execution \
+                                 attempts no other copy is shown to hold; it is kept for a \
+                                 person's review and nothing is sent for it"
+                            )),
+                            kept: Some(reason),
+                        });
                     }
                 },
             }
@@ -542,20 +548,23 @@ impl ProjectStore {
             // Its files are gone, but the mark says this store cut it over:
             // nothing here can show that another replica's copy holds all of
             // it. Removing the mark is the person's decision to accept one.
-            return Err(Error::new(
-                "the copy here is missing and it recorded execution attempts; it is kept for a \
-                 person's review and nothing is sent for it",
-            ));
+            return Err(Refusal {
+                error: Error::new(
+                    "the copy here is missing and it recorded execution attempts; it is kept for \
+                     a person's review and nothing is sent for it",
+                ),
+                kept: Some(Keep::Marked),
+            });
         } else {
             (TaskDoc::from_bytes(bytes)?, false)
         };
         task.repair_schema()?;
         if task.uuid() != uuid {
-            return Err(Error::new("the update is for another task"));
+            return Err(Error::new("the update is for another task").into());
         }
         let view = task.view()?;
         if view.project != self.project_id() {
-            return Err(Error::new("the task belongs to another project"));
+            return Err(Error::new("the task belongs to another project").into());
         }
         if replacing {
             self.set_aside(uuid)?;
@@ -584,26 +593,33 @@ impl ProjectStore {
         let Ok(mut task) = TaskDoc::from_bytes(bytes) else {
             return Recovery::Unreadable;
         };
+        let marked = self.was_managed(uuid);
         let local = match fs::read(self.updates_path(uuid)) {
             Ok(local) => local,
             Err(error) if error.kind() == ErrorKind::NotFound => Vec::new(),
-            Err(_) => return Recovery::Kept,
+            Err(_) if marked => return Recovery::Kept(Keep::Marked),
+            Err(_) => return Recovery::Kept(Keep::UnreadableLocalData),
         };
         let (found, intact) = crate::store::blocks(&local);
         let applied = found
             .into_iter()
             .all(|(payload, _)| task.import_block(payload));
-        let whole = intact && applied;
-        if !self.was_managed(uuid) {
-            return if whole && !task.execution_managed() {
-                Recovery::Replaced(task)
+        if !marked {
+            return if task.execution_managed() {
+                Recovery::Kept(Keep::AttemptEvidence)
+            } else if !intact {
+                Recovery::Kept(Keep::UnreadableLocalData)
+            } else if !applied {
+                Recovery::Kept(Keep::Pending)
             } else {
-                Recovery::Kept
+                Recovery::Replaced(task)
             };
         }
         match self.fresh_version(uuid) {
-            Some(saved) if whole && task.current_vv().includes_vv(&saved) => Recovery::Whole(task),
-            _ => Recovery::Kept,
+            Some(saved) if intact && applied && task.current_vv().includes_vv(&saved) => {
+                Recovery::Whole(task)
+            }
+            _ => Recovery::Kept(Keep::Marked),
         }
     }
 
@@ -639,8 +655,21 @@ enum Recovery {
     Replaced(TaskDoc),
     /// The other document does not load either.
     Unreadable,
-    /// This copy stays damaged for a person's review.
-    Kept,
+    /// This copy stays damaged for a person's review, and why.
+    Kept(Keep),
+}
+
+/// A document an import refused, and, for a copy here kept for a person's
+/// review, why.
+struct Refusal {
+    error: Error,
+    kept: Option<Keep>,
+}
+
+impl From<Error> for Refusal {
+    fn from(error: Error) -> Self {
+        Self { error, kept: None }
+    }
 }
 
 #[cfg(test)]
@@ -651,7 +680,7 @@ mod tests {
     //! an inventory or exported.
     use super::*;
     use crate::execution::{NativeRequest, Origin, EXECUTION_TASK_SCHEMA};
-    use crate::store::Mark;
+    use crate::store::{Mark, DEPENDS_ON_INCOMING_COPY};
     use crate::{Actor, NewTask, Target};
 
     const ID: &str = "11111111-1111-4111-8111-111111111111";
@@ -1092,8 +1121,9 @@ mod tests {
 
     /// Two imports of `peer` are refused for a person's review, and neither
     /// renames, removes or copies a file.
-    fn kept(store: &ProjectStore, uuid: &str, peer: &[u8]) {
+    fn kept(store: &ProjectStore, uuid: &str, peer: &[u8]) -> String {
         let before = files(store, uuid);
+        let mut reasons = Vec::new();
         for _ in 0..2 {
             let refusals = refused(store, uuid, peer.to_vec());
             assert_eq!(refusals.len(), 1);
@@ -1104,7 +1134,15 @@ mod tests {
             );
             assert!(store.load(uuid).is_err());
             assert_eq!(files(store, uuid), before);
+            // zerus-cg5h.4.2: every refusal names the decision and its
+            // reason; a copy marked here is always kept as `marked`.
+            assert!(refusals[0].kept && refusals[0].recovery.is_none());
+            let reason = refusals[0].kept_reason.as_deref().unwrap();
+            assert_eq!(reason == "marked", store.was_managed(uuid), "{reason}");
+            reasons.push(reason.to_owned());
         }
+        assert_eq!(reasons[0], reasons[1]);
+        reasons.remove(0)
     }
 
     /// A cut-over task's updates file after a fold: one block of no changes.
@@ -1252,6 +1290,20 @@ mod tests {
         damage(&store, &uuid);
         kept(&store, &uuid, &peer);
         assert!(store.tasks().unwrap().1.iter().any(|d| d.uuid == uuid));
+        // zerus-cg5h.4.2: every listing tells the kept copy apart.
+        assert!(store
+            .tasks()
+            .unwrap()
+            .1
+            .iter()
+            .any(|d| d.uuid == uuid && d.kept && d.kept_reason.as_deref() == Some("marked")));
+        assert!(store
+            .inventory()
+            .unwrap()
+            .1
+            .iter()
+            .any(|d| d.uuid == uuid && d.kept && d.kept_reason.as_deref() == Some("marked")));
+        assert_eq!(store.locally_kept(&uuid), Some(Keep::Marked));
 
         // A peer that holds the attempt but not what a later fold took in
         // (here the settlement of its delivery) cannot cover it either.
@@ -2125,7 +2177,17 @@ mod tests {
                 fs::write(store.updates_path(&uuid), updates).unwrap();
             }
             damage(&store, &uuid);
-            kept(&store, &uuid, &peer);
+            // The prefix holds the Unknown: the refusal names that evidence.
+            assert_eq!(kept(&store, &uuid, &peer), "attempt_evidence");
+            // The listing knows only what is local: a torn tail keeps the
+            // copy for every incoming copy; an intact one depends on it.
+            let listed = store.damaged(&uuid, "listed");
+            if torn {
+                assert_eq!(listed.kept_reason.as_deref(), Some("unreadable_local_data"));
+            } else {
+                assert!(!listed.kept);
+                assert_eq!(listed.recovery.as_deref(), Some(DEPENDS_ON_INCOMING_COPY));
+            }
         }
         let plain = |spoil: bool| {
             let dir = tempfile::tempdir().unwrap();
@@ -2146,11 +2208,30 @@ mod tests {
         // A torn tail may have held the cutover, and so may updates that
         // cannot be read at all.
         let (_dir, store, uuid, other) = plain(true);
-        kept(&store, &uuid, &other);
+        assert_eq!(kept(&store, &uuid, &other), "unreadable_local_data");
+        assert_eq!(store.locally_kept(&uuid), Some(Keep::UnreadableLocalData));
         let (_dir, store, uuid, other) = plain(false);
         fs::remove_file(store.updates_path(&uuid)).unwrap();
         fs::create_dir(store.updates_path(&uuid)).unwrap();
-        kept(&store, &uuid, &other);
+        assert_eq!(kept(&store, &uuid, &other), "unreadable_local_data");
+        assert_eq!(store.locally_kept(&uuid), Some(Keep::UnreadableLocalData));
+        // A block whose base the incoming copy lacks is pending: kept against
+        // that copy, while the listing says it depends on the copy.
+        let (_dir, store, uuid, older) = plain(false);
+        let mut here = TaskDoc::from_bytes(&older).unwrap();
+        here.import(&fs::read(store.updates_path(&uuid)).unwrap()[8..])
+            .unwrap();
+        here.comment("Folded here", &Actor::Person, 12).unwrap();
+        let base = here.version();
+        here.comment("After the fold", &Actor::Person, 13).unwrap();
+        write_atomic(&store.snapshot_path(&uuid), b"unreadable snapshot fixture").unwrap();
+        fs::write(
+            store.updates_path(&uuid),
+            crate::store::block_for_test(&here.export_since(&base).unwrap()),
+        )
+        .unwrap();
+        assert_eq!(kept(&store, &uuid, &older), "pending");
+        assert!(store.locally_kept(&uuid).is_none());
         // A copy whose every block applies and shows none gives way, its
         // own blocks merged in.
         let (_dir, store, uuid, other) = plain(false);
@@ -2169,6 +2250,24 @@ mod tests {
         let (_dir, store, uuid, other) = plain(false);
         fs::remove_file(store.updates_path(&uuid)).unwrap();
         assert!(refused(&store, &uuid, other).is_empty());
+        // zerus-cg5h.4.2: ordinary damage is never listed as kept, and it
+        // reads and serializes as before.
+        damage(&store, &uuid);
+        let ordinary = store.tasks().unwrap().1;
+        assert!(ordinary.len() == 1 && !ordinary[0].kept && store.locally_kept(&uuid).is_none());
+        assert!(store.inventory().unwrap().1.iter().all(|d| !d.kept));
+        // The listing never says a replacement is safe: what happens is
+        // decided against each copy that arrives.
+        assert_eq!(
+            serde_json::to_value(&ordinary[0]).unwrap(),
+            serde_json::json!({"uuid": ordinary[0].uuid, "error": ordinary[0].error,
+                               "recovery": "depends_on_incoming_copy"})
+        );
+        let read: Damaged = serde_json::from_value(
+            serde_json::json!({"uuid": ordinary[0].uuid, "error": "older answer"}),
+        )
+        .unwrap();
+        assert!(!read.kept);
     }
 
     /// review-n on #1415 (R2): a mark that is impossible, unreadable or only
@@ -2252,6 +2351,8 @@ mod tests {
             .unwrap()
             .to_string()
             .contains("damaged"));
+        assert!(refusals[0].kept && refusals[0].kept_reason.as_deref() == Some("marked"));
+        assert_eq!(store.locally_kept(&uuid), Some(Keep::Marked));
         assert!(!store.snapshot_path(&uuid).exists());
         // Removing the mark too is the person's decision to accept it.
         fs::remove_file(store.managed_path(&uuid)).unwrap();

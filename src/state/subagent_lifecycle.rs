@@ -120,6 +120,7 @@ pub(super) fn reconcile(record: &mut Value) {
             )
         })
         .collect();
+    let mut changed = false;
     for (id, status) in changes {
         let child = &mut record["subagents"][&id];
         child["process_state"] = json!(status);
@@ -128,32 +129,49 @@ pub(super) fn reconcile(record: &mut Value) {
             child["display_state"] = json!("ended");
             child["completion_source"] = json!("original_process_exit");
             child["current_tool"] = json!("");
-        } else if status == "unknown" && child["display_state"] != "unknown" {
-            child["process_display_state"] = child["display_state"].clone();
-            child["display_state"] = json!("unknown");
-            child["process_unknown"] = json!(true);
-        } else if status == "live" && child["display_state"] == "unknown" {
-            // Only our own temporary process-availability projection is cleared.
-            // Provider Interrupt/StopFailure unknown evidence remains unknown.
-            if child["process_unknown"] == true {
+            changed = true;
+        } else {
+            // Explicit attention wins even when the original is unbound. Also
+            // recover attention hidden by an earlier saved process projection.
+            let attention = ["approval", "input", "attention"]
+                .contains(&string(child, "process_display_state"));
+            if child["display_state"] == "unknown"
+                && child["process_unknown"] == true
+                && (status == "live" || attention)
+            {
                 let previous = child
                     .as_object_mut()
                     .unwrap()
                     .remove("process_display_state");
                 if let Some(previous) = previous.filter(Value::is_string) {
+                    changed |= child["display_state"] != previous;
                     child["display_state"] = previous;
                 } else {
                     child.as_object_mut().unwrap().remove("display_state");
+                    changed = true;
                 }
             }
+            // Uncertain process evidence hides Working, not a pending request,
+            // paused/error display, or the provider's own Unknown evidence.
+            if status == "unknown" && ["", "working"].contains(&string(child, "display_state")) {
+                child["process_display_state"] = child["display_state"].clone();
+                child["display_state"] = json!("unknown");
+                child["process_unknown"] = json!(true);
+                changed = true;
+            }
         }
-        if status != "unknown" {
+        if status != "unknown" || child["display_state"] != "unknown" {
             child["process_unknown"] = json!(false);
             child
                 .as_object_mut()
                 .unwrap()
                 .remove("process_display_state");
         }
+    }
+    // Refreshing process metadata does not own the parent's native turn. Only
+    // an external work/display transition may settle or re-derive that turn.
+    if !changed {
+        return;
     }
     journal::settle_children(record);
     if record["main_done"] == true

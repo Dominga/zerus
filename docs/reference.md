@@ -1904,7 +1904,8 @@ Cross-provider children (for example, Codex launched from Claude) bind their
 original PID and native birth identity to the parent's run and conversation at
 the verified hook caller. If that original exits without a completion event,
 the child shows **Ended** or **Unknown**, never **Working**. Missing or unreadable
-process identity remains unknown; neither a recycled PID nor an old journal
+process identity remains unknown. Explicit pending input/approval stays visible:
+process uncertainty suppresses Working, not attention. Neither a recycled PID nor an old journal
 start establishes current work. Recorded native jobs of such a child become
 unknown unless their own separately verified original process is still live.
 Other confirmed live jobs keep their ordinary **Background** status. Offline

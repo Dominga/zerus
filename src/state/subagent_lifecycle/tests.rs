@@ -124,6 +124,10 @@ fn a_reused_pid_or_wrong_run_never_adopts_the_new_live_process() {
     reconcile(&mut record);
     assert_eq!(record["subagents"][ID]["state"], "ended");
     record["subagents"][ID]["state"] = json!("working");
+    record["subagents"][ID]
+        .as_object_mut()
+        .unwrap()
+        .remove("display_state");
     record["subagents"][ID]["original_process"] = capture(&record, child.0.id()).unwrap();
     record["run_id"] = json!("new-run");
     reconcile(&mut record);
@@ -262,7 +266,7 @@ fn process_availability_recovery_preserves_a_provider_unknown_and_only_clears_ou
 
 #[test]
 #[cfg(unix)]
-fn process_availability_recovery_restores_pending_input_and_approval_without_a_new_event() {
+fn process_uncertainty_never_hides_pending_input_or_approval() {
     let child = sleeper();
     for display in ["input", "approval"] {
         let mut record = record();
@@ -271,9 +275,10 @@ fn process_availability_recovery_restores_pending_input_and_approval_without_a_n
         let start = record["process_start"].clone();
         record["process_start"] = json!("temporarily unverifiable parent");
         reconcile(&mut record);
-        assert_eq!(record["subagents"][ID]["display_state"], "unknown");
+        assert_eq!(record["subagents"][ID]["display_state"], display);
+        assert_eq!(record["subagents"][ID]["process_state"], "unknown");
         reconcile(&mut record);
-        assert_eq!(record["subagents"][ID]["display_state"], "unknown");
+        assert_eq!(record["subagents"][ID]["display_state"], display);
         record["process_start"] = start;
         reconcile(&mut record);
         assert_eq!(record["subagents"][ID]["display_state"], display);
@@ -282,6 +287,70 @@ fn process_availability_recovery_restores_pending_input_and_approval_without_a_n
             "original-attention"
         );
         assert!(record["subagents"][ID]["process_display_state"].is_null());
+    }
+}
+
+#[test]
+fn reading_without_an_external_display_transition_does_not_rederive_the_parent_turn() {
+    for phase in ["working", "idle"] {
+        for state in [None, Some("finished"), Some("working")] {
+            let mut record = record();
+            record["phase"] = json!(phase);
+            if let Some(state) = state {
+                record["subagents"][ID]["external"] = json!(false);
+                record["subagents"][ID]["state"] = json!(state);
+            } else {
+                record["subagents"] = json!({});
+            }
+            let before = record.clone();
+            reconcile(&mut record);
+            assert_eq!(record, before);
+        }
+    }
+}
+
+#[test]
+#[cfg(unix)]
+fn refreshing_an_unchanged_live_original_does_not_rederive_the_parent_turn() {
+    let child = sleeper();
+    let mut record = record();
+    record["subagents"][ID]["original_process"] = capture(&record, child.0.id()).unwrap();
+    record["activity"] = json!("idle");
+    record["phase"] = json!("idle");
+    for _ in 0..2 {
+        reconcile(&mut record);
+        assert_eq!(record["subagents"][ID]["process_state"], "live");
+        assert_eq!(record["activity"], "idle");
+        assert_eq!(record["phase"], "idle");
+    }
+}
+
+#[test]
+fn an_unbound_original_keeps_explicit_attention_including_an_older_saved_projection() {
+    for display in ["approval", "input", "attention", "paused", "error"] {
+        let mut record = record();
+        record["subagents"][ID]["display_state"] = json!(display);
+        for _ in 0..2 {
+            reconcile(&mut record);
+            assert_eq!(record["subagents"][ID]["display_state"], display);
+            assert_eq!(
+                record["subagents"][ID]["attention_id"],
+                "original-attention"
+            );
+        }
+    }
+    for display in ["approval", "input", "attention"] {
+        let mut record = record();
+        record["subagents"][ID]["display_state"] = json!("unknown");
+        record["subagents"][ID]["process_unknown"] = json!(true);
+        record["subagents"][ID]["process_display_state"] = json!(display);
+        reconcile(&mut record);
+        assert_eq!(record["subagents"][ID]["display_state"], display);
+        assert_eq!(record["subagents"][ID]["process_state"], "unknown");
+        assert_eq!(
+            record["subagents"][ID]["attention_id"],
+            "original-attention"
+        );
     }
 }
 

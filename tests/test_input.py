@@ -573,6 +573,11 @@ def pending(*args):
     subprocess.run(['hgs', '__state', 'hook'], input=json.dumps(event), text=True, check=True)
     (root / 'child-hook-finished').write_text('finished')
 signal.signal(signal.SIGUSR1, pending)
+def progressed(*args):
+    event = dict(hook_event_name='PostToolUse', session_id=os.environ['CHILD_CONVERSATION'], tool_name='Bash', tool_use_id='pending')
+    subprocess.run(['hgs', '__state', 'hook'], input=json.dumps(event), text=True, check=True)
+    (root / 'child-hook-progressed').write_text('finished')
+signal.signal(signal.SIGUSR2, progressed)
 (root / 'child-pid').write_text(str(os.getpid()))
 while True: signal.pause()
 ''')
@@ -629,6 +634,11 @@ while True: signal.pause()
         self.assertEqual(json.loads(self.record_path.read_text())['subagents'][child_id]['original_process']['pid'], pid)
         self.assertEqual(retire(request).returncode, 0, 'original receipt must not retire the recovered child')
         request = dict(request, request_id=str(uuid.uuid4()), expected_updated=resumed['updated'])
+        # Finish the explicit attention before testing loss of Working. Unknown
+        # process evidence must not hide an outstanding approval or input.
+        os.kill(pid, signal.SIGUSR2)
+        self.wait_for(lambda: (self.root / 'child-hook-progressed').exists())
+        self.assertIsNone(self.inspect()['subagents'][child_id].get('display_state'))
         from test_watch import Stream
         stream = Stream(self)
         snapshot = stream.next(lambda frame: frame['t'] == 'snapshot' and frame['topic'] == 'catalog' and frame['last'])

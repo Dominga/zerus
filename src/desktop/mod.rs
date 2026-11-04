@@ -928,6 +928,13 @@ fn serve(config: &Config, location: Location, background_mode: bool) -> Result<(
                         frame(&epoch, seq, "status", value)
                     } else if hello.op == "frontend_request" {
                         let result = match (authority, &mut background) {
+                            (Some(authority), _) if authority.operation() == "desktop_ownership_observe" => {
+                                match authority.into_request(&mut frontend_order).and_then(|permit|
+                                    ownership::observation::frontend(&location, &store, &epoch, permit)) {
+                                    Ok(observation) => serde_json::to_value(observation)?,
+                                    Err(_) => frontend_refused(hello.request.as_ref(), "ownership_observation_unavailable"),
+                                }
+                            }
                             (Some(authority), _)
                                 if authority.operation() == "termination_outcome" =>
                             {

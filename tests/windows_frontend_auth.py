@@ -449,9 +449,9 @@ class WindowsTaskMode(unittest.TestCase):
         self.assertLessEqual(len(result.stdout.encode('utf-8')), 65536)
         return json.loads(result.stdout)
 
-    def frontend_call(self, control, prefix):
+    def frontend_call(self, control, prefix, *, frontend=None):
         self.control.write_text(json.dumps(dict(control, cli=str(self.cli_image))), encoding='utf-8')
-        result = subprocess.run([str(self.frontend), '--exact',
+        result = subprocess.run([str(frontend or self.frontend), '--exact',
                                  'instance::tests::evidence::native_frontend_request_fixture', '--nocapture'],
                                 env=dict(self.env, HGS_FRONTEND_TEST_CONTROL=str(self.control)),
                                 capture_output=True, text=True, timeout=40,
@@ -476,6 +476,70 @@ class WindowsTaskMode(unittest.TestCase):
         self.assertTrue(result['accepted'], result)
         self.assertTrue(result['durable'], result)
         self.assertEqual(result['outcome']['state'], 'granted', result)
+
+    def requester_bound_ownership_is_a_native_read(self):
+        """Real current requester + existing actor row; no synthetic auth positive."""
+        lifecycle = self.cli('desktop', 'status', '--json')['lifecycle']
+        ownership = self.cli('desktop', 'ownership-status', '--json')
+        self.assertEqual(ownership['state'], 'service')
+        self.assertTrue(ownership['identity_current'])
+        self.assertFalse(ownership['rearm_required'])
+        path = self.state / 'desktop' / 'windows-registration-mode.json'
+        record = path.read_bytes()
+        instances = self.observe()['instances']
+        def rows():
+            with closing(sqlite3.connect(self.state / 'desktop' / 'state.sqlite3')) as db:
+                return tuple(db.execute('SELECT * FROM desktop_ownership')), tuple(db.execute(
+                    'SELECT request_id,revision,fingerprint,origin,receipt,final FROM desktop_ownership_requests ORDER BY revision'))
+        before = rows()
+        query = dict(request_id=str(uuid.uuid4()), configuration=ownership['configuration'],
+                     journal=ownership['journal'], owner_epoch=ownership['owner_epoch'],
+                     service_epoch=lifecycle['epoch'], generation=lifecycle['generation'])
+        control = dict(case='ownership_observe', configuration=ownership['configuration'], query=query)
+        positive = self.frontend_call(control, 'OWNERSHIP_OBSERVATION ')
+        self.assertTrue(positive['checked'], positive)
+        self.assertEqual(positive['current'], ownership)
+        # A second natively selected image, with identical bytes, is not the
+        # granted Origin. cli_image now names the staged CLI: its sibling is
+        # self.frontend itself, so copying there would not change the requester.
+        # This class runs ONLY on a disposable hosted runner. Use the other
+        # maintained installed-app path, refuse any existing file, and remove
+        # only our exact file and the empty directories we created.
+        other = Path(self.env['LOCALAPPDATA']) / 'Programs' / 'Zerus' / 'hgs-tray.exe'
+        self.assertFalse(other.exists(), 'disposable runner already has a Zerus frontend')
+        created = []
+        parent = other.parent
+        while not parent.exists():
+            created.append(parent)
+            parent = parent.parent
+        original = self.frontend.stat()
+        owned = False
+        try:
+            other.parent.mkdir(parents=True, exist_ok=True)
+            with other.open('xb') as target:
+                owned = True
+                with self.frontend_source.open('rb') as source:
+                    shutil.copyfileobj(source, target)
+            self.assertFalse(os.path.samefile(other, self.frontend))
+            refused = self.frontend_call(control, 'OWNERSHIP_OBSERVATION ', frontend=other)
+            self.assertFalse(refused['checked'], refused)
+            current = self.frontend.stat()
+            self.assertEqual((current.st_dev, current.st_ino, current.st_size, current.st_mtime_ns),
+                             (original.st_dev, original.st_ino, original.st_size, original.st_mtime_ns))
+        finally:
+            if owned:
+                other.unlink()
+            for directory in created:
+                directory.rmdir()
+        for key, value in [('service_epoch', str(uuid.uuid4())),
+                           ('generation', lifecycle['generation'] + 1),
+                           ('owner_epoch', str(uuid.uuid4())), ('journal', str(uuid.uuid4()))]:
+            stale = dict(control, query=dict(query, **{key: value}))
+            self.assertFalse(self.frontend_call(stale, 'OWNERSHIP_OBSERVATION ')['checked'], key)
+        self.assertEqual(rows(), before)
+        self.assertEqual(path.read_bytes(), record)
+        self.assertEqual(self.observe()['instances'], instances)
+        self.assertEqual(self.cli('desktop', 'ownership-status', '--json'), ownership)
 
     def cancel(self, request_id):
         result = self.frontend_call(dict(case='mode_cancel', request_id=request_id), 'MODE_CALLER_RESULT ')
@@ -1513,6 +1577,7 @@ $later=@{guid=$guid;pid=$q.Id;birth=$q.StartTime.ToFileTimeUtc()};
             self.assertIsNone(shell.poll())
             passive = self.recover_initial_start_and_cancel_background_before_a_grant(passive)
             self.grant()
+            self.requester_bound_ownership_is_a_native_read()
             granted = self.cli('desktop', 'ownership-status', '--json')
             no_op = self.mode('passive')
             self.assertTrue(no_op['ok'], no_op)

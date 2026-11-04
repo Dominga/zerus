@@ -708,24 +708,40 @@ fn dispatch_normal(mut args: Vec<String>) -> Result<i32> {
         return Ok(0);
     }
     if command == "native-ui" {
-        let name = require(args, 0, "usage: hgs native-ui <session> [--json]")?;
-        if args.get(1).is_some_and(|v| v == "--json") && !dry {
+        // A local selector was resolved above. A peer resolves its own through
+        // a gated `__dsh-ui-url`; a name alone never stands in for the ID.
+        let mut rest = args.to_vec();
+        let selector = match session_id_flag(command, args)? {
+            Some((at, id)) => {
+                rest.drain(at..at + 2);
+                if !args[..at].iter().any(|arg| !arg.starts_with('-')) {
+                    rest.insert(0, String::new());
+                }
+                Some(id)
+            }
+            None => None,
+        };
+        let name = match selector {
+            Some(_) => rest[0].as_str(),
+            None => require(&rest, 0, "usage: hgs native-ui <session> [--json]")?,
+        };
+        if rest.get(1).is_some_and(|v| v == "--json") && !dry {
             println!(
                 "{}",
-                serde_json::json!({"url":crate::native_ui::address(&config,&target,name)?})
+                serde_json::json!({"url":crate::native_ui::address(&config,&target,name,selector.as_deref())?})
             );
             return Ok(0);
         }
-        return crate::native_ui::open(&config, &target, name, dry);
+        return crate::native_ui::open(&config, &target, name, selector.as_deref(), dry);
     }
     if command == "account"
         && args.first().is_some_and(|v| v == "login")
         && args.get(1).is_some_and(|v| v == "native-dsh")
     {
-        return crate::native_ui::open(&config, &target, "@account", dry);
+        return crate::native_ui::open(&config, &target, "@account", None, dry);
     }
     if command == "a" && args.first().is_some_and(|v| v.starts_with("dsh/")) {
-        return crate::native_ui::open(&config, &target, &args[0], dry);
+        return crate::native_ui::open(&config, &target, &args[0], None, dry);
     }
     if command == "download" {
         return crate::download::dispatch(&config, &target, args, dry);
@@ -1081,13 +1097,71 @@ fn peer_json_archives(config: &Config, peer: &str, archives: bool) -> Value {
     value.insert("sessions".into(), json!([]));
     Value::Object(value)
 }
+/// The help line a peer lists once it resolves `--session-id` (zerus-ucck P1).
+pub(crate) const SELECTOR: &str = "session-id-selector-v1";
+
+/// A help marker a peer lists: a whole line, or text within a line.
+#[derive(Debug)]
+pub(crate) enum Marker {
+    Line(&'static str),
+    Text(&'static str),
+}
+
+/// Every marker a peer must list before it receives `--session-id`, for the
+/// command or for the one a guarded `--expect-machine` call wraps: what that
+/// call needs already, then the selector. None without a selector.
+fn selector_markers(command: &str, args: &[String]) -> Result<Option<Vec<Marker>>> {
+    let (inner, rest, mut markers) = if command == "--expect-machine" {
+        let inner = args.get(1).map(String::as_str).unwrap_or_default();
+        let mut markers = vec![Marker::Text("guarded-create-v1")];
+        if inner == "session-action-status" {
+            markers.push(Marker::Line("lifecycle-receipt-status-v1"));
+        }
+        (inner, args.get(2..).unwrap_or_default(), markers)
+    } else {
+        (command, args, Vec::new())
+    };
+    if session_id_flag(inner, rest)?.is_none() {
+        return Ok(None);
+    }
+    match inner {
+        "notifications" => markers.push(Marker::Line("session-notifications-v1")),
+        "hooks" => markers.push(Marker::Text("hooks-health-v1")),
+        _ => {}
+    }
+    markers.push(Marker::Line(SELECTOR));
+    Ok(Some(markers))
+}
+
+/// A POSIX script that runs `hgs ARGS` on the peer only when the installed
+/// CLI's help lists every marker; otherwise it asks for an update.
+pub(crate) fn gated(markers: &[Marker], args: &[String]) -> String {
+    let probes: Vec<String> = markers
+        .iter()
+        .map(|marker| match marker {
+            Marker::Line(line) => format!(
+                "~/.local/bin/hgs --help 2>/dev/null | grep -qEx '[[:space:]]*{line}[[:space:]]*'"
+            ),
+            Marker::Text(text) => format!("~/.local/bin/hgs --help 2>/dev/null | grep -qF '{text}'"),
+        })
+        .collect();
+    platform::remote_sh(&format!(
+        "if {}; then exec ~/.local/bin/hgs {}; else echo 'hgs: update the selected computer to select sessions by ID' >&2; exit 1; fi",
+        probes.join(" && "),
+        platform::join(args)
+    ))
+}
+
 /// Commands whose first argument is a session, which `--session-id` may
 /// select instead (zerus-ucck P1).
+/// `notify` and `paste` are the tray's and tmux's own entry points, and
+/// `subagent retire` names its session second; they keep names only.
 const SESSION_COMMANDS: &[&str] = &[
-    "inspect", "reference", "processes", "send", "history", "history-projection", "terminal",
-    "session-action", "compact-context", "clear-context", "interrupt", "attachment", "file-read",
-    "answer", "read", "notifications", "fork", "effort", "settings", "schedules", "voice", "hooks",
-    "a", "kill", "rename", "archive", "pause", "resume", "native-ui",
+    "inspect", "reference", "processes", "send", "send-now", "history", "history-projection",
+    "terminal", "session-action", "session-action-status", "compact-context", "clear-context",
+    "interrupt", "attachment", "file-read", "answer", "read", "notifications", "fork", "effort",
+    "settings", "schedules", "voice", "hooks", "a", "kill", "rename", "archive", "terminate",
+    "pause", "resume", "native-ui", "__dsh-ui-url",
 ];
 
 /// The position and value of `--session-id` for a session command, refused
@@ -1130,6 +1204,9 @@ fn select_session(command: &str, args: &[String]) -> Result<Vec<String>> {
             ))
         }
     };
+    // Resolution names the session; the command's own reads under its lock
+    // must still find this ID on the record they act on.
+    state::session_id::select(&name, &id);
     let mut rest = args.to_vec();
     rest.drain(at..at + 2);
     match args[..at].iter().find(|arg| !arg.starts_with('-')) {
@@ -1265,10 +1342,10 @@ fn remote(
         }
     };
     flags.extend(crate::machines::ssh_options(config, target));
-    let remote = if session_id_flag(command, &args)?.is_some() {
+    let remote = if let Some(markers) = selector_markers(command, &args)? {
         // An older peer would read the flag as a session name; it must
-        // advertise the selector first (zerus-ucck P1).
-        platform::remote_sh(&format!("if ~/.local/bin/hgs --help 2>/dev/null | grep -qEx '[[:space:]]*session-id-selector-v1[[:space:]]*'; then exec ~/.local/bin/hgs {}; else echo 'hgs: update the selected computer to select sessions by ID' >&2; exit 1; fi",platform::join(&remote_args)))
+        // advertise the selector, and what the command needs already, first.
+        gated(&markers, &remote_args)
     } else if command == "--expect-machine" && args.get(1).is_some_and(|actual| actual=="session-action-status") {
         // Probe the same executable, without reading the JSON stream. An old
         // peer must never interpret this reader's name as a program to launch.
@@ -1461,7 +1538,7 @@ fn attach_command(config: &Config, args: &[String], client: &str, mut dry: bool)
     const HELP: &str = "usage: hgs a <session> [--existing [--run-id ID]]";
     let session = require(args, 0, HELP)?;
     if state::dsh::exists(session) {
-        return crate::native_ui::open(config, "", session, dry || has(args, "--dry-run"));
+        return crate::native_ui::open(config, "", session, None, dry || has(args, "--dry-run"));
     }
     let mut existing = false;
     let mut run_id = None;
@@ -1715,7 +1792,7 @@ fn fork_session(config: &Config, args: &[String], client: &str, mut dry: bool) -
     if detached || dry {
         Ok(0)
     } else if state::dsh::exists(&target) {
-        crate::native_ui::open(config, "", &target, false)
+        crate::native_ui::open(config, "", &target, None, false)
     } else {
         attach(config, &target, client, false)
     }
@@ -2582,6 +2659,57 @@ fn launch(
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// #1355 review: every command whose usage takes a session first accepts
+    /// `--session-id`; only the tray's and tmux's own entry points do not.
+    #[test]
+    fn every_command_that_takes_a_session_first_accepts_a_session_id() {
+        let pattern = regex::Regex::new(r"hgs (?:\[@host\] |@host )?(?:--expect-machine ID )?([a-z_-]+) <session>").unwrap();
+        let mut usage: Vec<&str> = pattern.captures_iter(USAGE).map(|c| c.get(1).unwrap().as_str()).collect();
+        usage.sort_unstable();
+        usage.dedup();
+        assert!(usage.len() >= 25, "{usage:?}");
+        let internal = ["notify", "paste"];
+        for command in usage.iter().filter(|command| !internal.contains(command)) {
+            assert!(SESSION_COMMANDS.contains(command), "{command}");
+        }
+        // Forms the usage writes without `<session>` first.
+        for command in ["kill", "rename", "archive", "terminate", "pause", "resume", "send-now", "native-ui", "__dsh-ui-url"] {
+            assert!(SESSION_COMMANDS.contains(&command), "{command}");
+        }
+        for command in internal.iter().chain(&["task", "subagent", "ls", "search"]) {
+            assert!(!SESSION_COMMANDS.contains(command), "{command}");
+        }
+    }
+
+    /// #1355 review: a peer receives `--session-id` only after listing the
+    /// selector and what the command, or the command a guarded call wraps,
+    /// needs already.
+    #[test]
+    fn a_selector_needs_every_marker_its_call_needs() {
+        let id = "3f2a9c1d-0b4e-4d6a-9c1d-2e3f4a5b6c7d";
+        let args = |words: &[&str]| words.iter().map(|word| word.to_string()).collect::<Vec<_>>();
+        let names = |markers: Vec<Marker>| -> Vec<&'static str> {
+            markers.into_iter().map(|marker| match marker { Marker::Line(m) | Marker::Text(m) => m }).collect()
+        };
+        assert!(selector_markers("inspect", &args(&["codex/p/a"])).unwrap().is_none());
+        assert_eq!(names(selector_markers("inspect", &args(&["--session-id", id])).unwrap().unwrap()), [SELECTOR]);
+        assert_eq!(names(selector_markers("hooks", &args(&["--session-id", id, "--json"])).unwrap().unwrap()),
+            ["hooks-health-v1", SELECTOR]);
+        assert_eq!(names(selector_markers("notifications", &args(&["--session-id", id, "--json"])).unwrap().unwrap()),
+            ["session-notifications-v1", SELECTOR]);
+        let machine = "11111111-1111-4111-8111-111111111111";
+        assert_eq!(names(selector_markers("--expect-machine", &args(&[machine, "inspect", "--session-id", id])).unwrap().unwrap()),
+            ["guarded-create-v1", SELECTOR]);
+        assert_eq!(names(selector_markers("--expect-machine", &args(&[machine, "session-action-status", "--session-id", id, "--json"])).unwrap().unwrap()),
+            ["guarded-create-v1", "lifecycle-receipt-status-v1", SELECTOR]);
+        assert!(selector_markers("--expect-machine", &args(&[machine, "inspect", "codex/p/a"])).unwrap().is_none());
+        assert_eq!(selector_markers("--expect-machine", &args(&[machine, "inspect", "--session-id", "NOT"])).unwrap_err().code, 2);
+        // Everything the CLI forwards to a peer with a selector carries it.
+        for command in SESSION_COMMANDS {
+            assert!(selector_markers(command, &args(&["--session-id", id])).unwrap().is_some(), "{command}");
+        }
+    }
 
     #[test]
     fn repository_preparation_does_not_admit_session_commands_on_control_consoles() {

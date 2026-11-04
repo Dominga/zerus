@@ -139,6 +139,7 @@ fn read_limit(name: &str, limit: Option<u64>) -> Result<Value> {
     {
         return Err(format!("{name}: invalid saved binding"));
     }
+    session_id::verify(&record)?;
     journal::repair_kimi_main(&mut record);
     journal::repair_claude_internal(&mut record);
     claude_subagents::reconcile(&mut record);

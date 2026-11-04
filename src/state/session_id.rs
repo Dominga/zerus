@@ -9,6 +9,31 @@ pub(crate) const AMBIGUOUS: i32 = 5;
 /// At most this many candidates are listed, newest first.
 const CANDIDATES: usize = 20;
 
+/// The session a `--session-id` command selected: its name when selected and
+/// its ID. Resolution only finds the name; it never authorises the command.
+/// Every later read of a record by that name, live, archived or a DeepSeek or
+/// OpenCode binding, must carry the ID, so a name that another session took
+/// meanwhile is refused under whatever lock the command holds when it reads
+/// its target (#1355 review).
+static SELECTED: std::sync::Mutex<Option<(String, String)>> = std::sync::Mutex::new(None);
+
+/// Records the selection for the rest of this command.
+pub(crate) fn select(name: &str, id: &str) {
+    *SELECTED.lock().unwrap_or_else(std::sync::PoisonError::into_inner) =
+        Some((name.to_owned(), id.to_owned()));
+}
+
+/// Refuses a record that has the selected name but not the selected ID.
+pub(super) fn verify(record: &Value) -> Result<()> {
+    let selected = SELECTED.lock().unwrap_or_else(std::sync::PoisonError::into_inner);
+    match selected.as_ref() {
+        Some((name, id)) if string(record, "name") == name && string(record, "session_id") != id => {
+            Err(format!("Session ID {id} no longer names {name}; refresh and retry"))
+        }
+        _ => Ok(()),
+    }
+}
+
 /// A session ID as hgs writes it: a lowercase hyphenated UUID.
 pub(crate) fn canonical(id: &str) -> bool {
     uuid::Uuid::parse_str(id).is_ok_and(|uuid| uuid.hyphenated().to_string() == id)

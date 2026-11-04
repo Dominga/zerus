@@ -101,6 +101,7 @@ pub(super) fn binding(name: &str) -> Result<Value> {
     {
         return Err("Invalid OpenCode binding".into());
     }
+    session_id::verify(&record)?;
     Ok(record)
 }
 pub(super) fn native_id(id: &str, prefix: &str) -> bool {

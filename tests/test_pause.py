@@ -1143,6 +1143,65 @@ class SessionIdentity(Harness):
         self.assertIn(f"Session ID {session} is claude/p/again, not claude/p/renamed", stale.stderr)
 
 
+    # #1355 review: resolution only names the session. The command's own reads,
+    # under its lock and of archives too, must still find the selected ID.
+    @unittest.skipUnless(sys.platform.startswith("linux"), "lock waiters are read from /proc/locks")
+    def test_a_selected_id_is_checked_where_the_command_acts(self):
+        import fcntl
+        name = self.start()
+        session = self.binding(name)["session_id"]
+        # A saved session: no live pane stands in for its identity.
+        self.send_event(name, "Stop", last_assistant_message="done")
+        self.hgs("pause", name)
+        self.assertTrue(self.binding(name)["paused"])
+        state = self.root / "state"
+        path = lambda who: state / (hashlib.sha256(who.encode()).hexdigest() + ".json")
+        original = path(name).read_text()
+        other = dict(json.loads(original), session_id=str(uuid.uuid4()), run_id=str(uuid.uuid4()))
+        def call(*args):
+            return subprocess.run([str(HGS), *args], env=self.env, capture_output=True, text=True, timeout=30)
+        # The name passes to another session while the rename waits for the lock.
+        fd = os.open(state / ".lock", os.O_RDWR | os.O_CREAT, 0o600)
+        try:
+            fcntl.flock(fd, fcntl.LOCK_EX)
+            renaming = subprocess.Popen([str(HGS), "rename", "--session-id", session, "claude/p/moved"],
+                                        env=self.env, stdout=subprocess.PIPE, stderr=subprocess.PIPE, text=True)
+            inode = os.fstat(fd).st_ino
+            self.wait(lambda: any(line.split()[1] == "->" and f":{inode} " in line + " "
+                                  for line in Path("/proc/locks").read_text().splitlines()))
+            path(name).write_text(json.dumps(other) + "\n")
+        finally:
+            fcntl.flock(fd, fcntl.LOCK_UN)
+            os.close(fd)
+        out, err = renaming.communicate(timeout=30)
+        self.assertEqual(renaming.returncode, 1, out + err)
+        self.assertIn(f"Session ID {session} no longer names {name}", err)
+        self.assertEqual(json.loads(path(name).read_text())["session_id"], other["session_id"])
+        self.assertFalse(path("claude/p/moved").exists())
+        path(name).write_text(original)
+        # An archive under the selected name that carries another ID.
+        archive_id = str(uuid.uuid4())
+        (state / "archives").mkdir(exist_ok=True)
+        archived = state / "archives" / f"{archive_id}.json"
+        archived.write_text(json.dumps(dict(other, archive_id=archive_id, archived_at=1)) + "\n")
+        refused = call("rename", "--session-id", session, "claude/p/other", "--archive", archive_id)
+        self.assertEqual(refused.returncode, 1, refused.stdout + refused.stderr)
+        self.assertIn(f"Session ID {session} no longer names {name}", refused.stderr)
+        self.assertEqual(json.loads(archived.read_text())["name"], name)
+        archived.unlink()
+        # Every command of the table resolves the selector before it acts.
+        table = re.search(r"const SESSION_COMMANDS: &\[&str\] = &\[(.*?)\];", (REPO / "src/cli.rs").read_text(), re.S)
+        unknown = str(uuid.uuid4())
+        for command in re.findall(r'"([a-z_-]+)"', table.group(1)):
+            result = call(command, "--session-id", unknown)
+            self.assertEqual((result.returncode, f"No live or saved session has ID {unknown}" in result.stderr),
+                             (1, True), (command, result.stderr))
+        dry = call("--dry-run", "terminate", "--session-id", session)
+        self.assertEqual(dry.returncode, 0, dry.stderr)
+        self.assertIn(name, dry.stdout + dry.stderr)
+        self.assertEqual(self.binding(name)["session_id"], session)
+
+
 class Lifecycle(Harness):
     def test_directory_browser(self):
         folder = self.root / "browse ' test"

@@ -283,10 +283,16 @@ A command whose first argument is a session also accepts `--session-id ID`
 instead, for example `hgs inspect --session-id ID` or `hgs rename --session-id
 ID NEW-NAME`. A name given before the flag must be that session's current
 name; arguments after it are the command's own. The value must be the
-lowercase UUID shown by `hgs ls --json`, given once.
-`hgs task` keeps its own `--session-id`, and an agent's own flag after `--` is
-untouched. With `@host` the flag reaches a peer only once its `hgs --help`
-lists `session-id-selector-v1`; an older peer is refused with "update the
+lowercase UUID shown by `hgs ls --json`, given once. Resolution only finds the
+session's name: every record the command then reads under that name, live or
+archived, must still carry the ID, so a name another session took meanwhile
+fails with "Session ID ID no longer names NAME" instead of acting on it.
+`hgs task` keeps its own `--session-id`, `notify` and `paste` stay the tray's
+and tmux's own entry points, and an agent's own flag after `--` is untouched.
+With `@host` the flag reaches a peer only once its `hgs --help` lists
+`session-id-selector-v1` and every marker the call needs already, including a
+guarded `--expect-machine` call that wraps the command and `native-ui`, whose
+peer resolves the ID itself; an older peer is refused with "update the
 selected computer". Names stay unique for now. When several sessions later
 share a name, commands exit with status 5 and list the candidates; see
 `docs/superpowers/specs/2026-11-04-session-names-as-labels.md`. Because an

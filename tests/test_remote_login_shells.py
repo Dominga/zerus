@@ -161,6 +161,44 @@ class RemoteLoginShells(unittest.TestCase):
                 self.assertEqual(result.returncode, 0, result.stderr)
                 self.assertEqual(self.received()[0], ['inspect', '--session-id', identity])
 
+    def test_every_selector_call_negotiates_the_selector_with_its_peer(self):
+        # #1355 review: every session command, a guarded call that wraps one and
+        # the native UI's own peer call require the selector; a peer that only
+        # lists what the call needed before never receives the flag.
+        import re
+        identity = '22222222-2222-4222-8222-222222222222'
+        machine = '11111111-1111-4111-8111-111111111111'
+        table = re.search(r'const SESSION_COMMANDS: &\[&str\] = &\[(.*?)\];', (ROOT / 'src/cli.rs').read_text(), re.S)
+        commands = re.findall(r'"([a-z_-]+)"', table.group(1))
+        self.assertIn('terminate', commands)
+        self.assertIn('send-now', commands)
+        # A remote lifecycle receipt read is refused unless a guarded call wraps it.
+        calls = [['@peer', command, '--session-id', identity] for command in commands if command != 'session-action-status']
+        calls.append(['@peer', '--expect-machine', machine, 'inspect', '--session-id', identity])
+        calls.append(['@peer', '--expect-machine', machine, 'session-action-status', '--session-id', identity, '--json'])
+        calls.append(['@peer', 'native-ui', '--session-id', identity, '--json'])
+        executable = self.peer / '.local/bin/hgs'
+        older = PEER_HGS.replace("'hooks-health-v1'", "'hooks-health-v1' 'Desktop creation ABI: guarded-create-v1' '  lifecycle-receipt-status-v1'")
+        executable.write_text(older)
+        for call in calls:
+            with self.subTest(call=call[1:3], peer='older'):
+                refused = self.hgs('/bin/sh', *call)
+                self.assertNotEqual(refused.returncode, 0, refused.stdout)
+                self.assertIn('update the selected computer to select sessions by ID', refused.stderr)
+                self.assertFalse((self.peer / 'argv.json').exists())
+        executable.write_text(older.replace("'  lifecycle-receipt-status-v1'", "'  lifecycle-receipt-status-v1' '  session-id-selector-v1'"))
+        for call in calls:
+            with self.subTest(call=call[1:3], peer='current'):
+                self.hgs('/bin/sh', *call)
+                argv = self.received()[0]
+                if call[1] == 'native-ui':
+                    self.assertEqual(argv, ['__dsh-ui-url', '--session-id', identity])
+                elif call[1] == '--expect-machine':
+                    self.assertEqual(argv[:2], call[1:3], argv)
+                    self.assertEqual(argv[-len(call[3:]):], call[3:], argv)
+                else:
+                    self.assertEqual(argv[-len(call[1:]):], call[1:], argv)
+
     def test_peer_status_reads_the_status_command(self):
         for name, shell in login_shells().items():
             with self.subTest(shell=name):

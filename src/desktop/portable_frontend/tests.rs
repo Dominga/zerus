@@ -845,59 +845,68 @@ fn a_warm_proof_never_outlives_its_record() {
         &scope.running(&original, until()).unwrap()
     ));
     drop(warm);
+    // Each bad record refuses the very next request for the warm GUI, and
+    // again after another failed read: nothing falls back to the cache.
+    let refused = |why: &str| {
+        assert!(scope.running(&original, until()).is_none(), "{why}");
+        assert!(scope.closed(&gui.image, until()).is_none(), "{why}");
+        assert!(scope.running(&original, until()).is_none(), "{why} (again)");
+    };
     let restore = || {
         fs::write(&record, &good).unwrap();
         assert!(scope.running(&original, until()).is_some(), "restored");
     };
-    // Missing.
     fs::remove_file(&record).unwrap();
-    assert!(
-        scope.running(&original, until()).is_none(),
-        "missing record"
-    );
+    refused("missing record");
     publish_into(&home, &binding);
     assert!(scope.running(&original, until()).is_some());
-    // Corrupt.
     fs::write(&record, b"{\"schema\":1").unwrap();
-    assert!(
-        scope.running(&original, until()).is_none(),
-        "corrupt record"
-    );
+    refused("corrupt record");
     restore();
-    // Readable by others.
     icacls(&[
         record.as_os_str(),
         "/grant".as_ref(),
         "*S-1-1-0:(R)".as_ref(),
     ]);
-    assert!(scope.running(&original, until()).is_none(), "unsafe record");
+    refused("unsafe record");
     icacls(&[
         record.as_os_str(),
         "/remove:g".as_ref(),
         "*S-1-1-0".as_ref(),
     ]);
     assert!(scope.running(&original, until()).is_some());
-    // Another CLI object.
     let copy = dir.path().join("other-cli.exe");
     fs::copy(std::env::current_exe().unwrap(), &copy).unwrap();
     publish_into(
         &home,
         &binding_with(&gui.image, &PinnedImage::open(&copy).unwrap()),
     );
-    assert!(scope.running(&original, until()).is_none(), "another CLI");
+    refused("another CLI");
     publish_into(&home, &binding);
-    assert!(scope.running(&original, until()).is_some());
-    // Another app object: only the new one is admitted, never the cached GUI.
+    // Another app object B while A's proof is cached and still borrowed: the
+    // first request for A after the rebind refuses, with no prior request for B.
+    let borrower = scope.running(&original, until()).unwrap();
     let other = dir.path().join("other").join(staging::FRONTEND_IMAGE);
     fs::create_dir_all(other.parent().unwrap()).unwrap();
     fs::write(&other, ORIGINAL).unwrap();
     publish_into(&home, &binding_for(&other));
     assert!(scope.running(&original, until()).is_none(), "changed app");
-    assert!(scope.closed(&other, until()).is_some());
+    assert!(
+        scope.running(&original, until()).is_none(),
+        "changed app (again)"
+    );
     assert_eq!(
         scope.cache.len(),
         0,
         "proofs for the old record are dropped"
     );
+    // B is proven on its own.
+    assert!(scope.closed(&other, until()).is_some());
+    // The borrower admitted earlier keeps its pin until it settles.
+    assert!(borrower.current());
+    let image = gui.image.clone();
     gui.quit();
+    assert!(fs::copy(std::env::current_exe().unwrap(), &image).is_err());
+    drop(borrower);
+    fs::remove_file(&image).unwrap();
 }

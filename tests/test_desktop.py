@@ -298,8 +298,10 @@ finally:
         # close-on-exec before anything else: the Git (or tmux) it starts, and
         # their own children, never hold the creation's custody lock.
         import fcntl
-        fake = self.root / 'custody-bin'
-        fake.mkdir(mode=0o700)
+        # hgs prepends HOME/.local/bin and the package-manager directories to
+        # PATH. A fixture only in the caller's PATH loses to Homebrew Git on
+        # macOS, so use the private user-install directory created by setUp.
+        fake = self.root / '.local/bin'
         record = self.root / 'custody-record'
         git = fake / 'git'
         git.write_text('#!/bin/sh\n'
@@ -323,8 +325,10 @@ finally:
                                     pass_fds=(held,), capture_output=True, text=True, timeout=20)
         finally:
             os.close(held)
-        self.assertIn('closed', record.read_text().split(), result.stderr)
-        self.assertNotIn('open', record.read_text().split())
+        self.assertTrue(record.is_file(), f'Custody Git fixture did not run: {result}')
+        observed = record.read_text().split()
+        self.assertIn('closed', observed, result.stderr)
+        self.assertNotIn('open', observed)
         # The command and its programs have exited: nothing holds the lock,
         # although the program's own child is still running.
         probe = os.open(lock_path, os.O_RDWR)

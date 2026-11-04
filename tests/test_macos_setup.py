@@ -152,7 +152,10 @@ print(result.stdout, end="")
         calls = len(self.launchctl_calls())
         self.run_setup("--autostart", "--workers")
         after = {path: path.stat().st_mtime_ns for path in (self.home / "Library/LaunchAgents").iterdir()}
-        self.assertEqual(before, after)
+        self.assertEqual(before.keys(), after.keys())
+        for path in before:
+            with self.subTest(path=path.name):
+                self.assertEqual(before[path], after[path])
         repeated = self.launchctl_calls()[calls:]
         self.assertFalse([call for call in repeated if call.split()[0] in {"bootout", "kickstart", "bootstrap"}], repeated)
 

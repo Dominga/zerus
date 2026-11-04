@@ -393,7 +393,8 @@ class ModeTransition:
         self.revalidate()
         require(read_definition(self.path) == self.record_identity,
                 "Desktop mode record changed during the transition; kept.")
-        save_record(self.path, record)
+        if self.record_identity is None or json.loads(self.record_identity[0]) != record:
+            save_record(self.path, record)
         self.record_identity = read_definition(self.path)
         require(self.record_identity is not None and json.loads(self.record_identity[0]) == record,
                 "Desktop mode record changed after its write; inspect the original transition.")

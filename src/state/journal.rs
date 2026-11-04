@@ -1,6 +1,7 @@
 use super::*;
 use rusqlite::{params, Connection, OptionalExtension};
 use sha2::Digest;
+#[cfg(not(unix))]
 use std::fs::OpenOptions;
 use std::sync::OnceLock;
 
@@ -216,14 +217,30 @@ fn detail(event: &Value) -> String {
 }
 
 pub(super) fn event_db() -> Result<Connection> {
-    private_dir(&root())?;
-    let path = root().join("events.sqlite3");
+    event_db_at(&root())
+}
+
+fn event_db_at(root: &Path) -> Result<Connection> {
+    private_dir(root)?;
+    let path = root.join("events.sqlite3");
+    // Never close a raw descriptor of the live journal on Unix: it would drop
+    // the SQLite locks of every connection this process has open on it
+    // (zerus-iiee). Create it owner-only if missing, then bind the connection
+    // to the file it found; an existing journal is accepted as before.
+    #[cfg(unix)]
+    let identity = {
+        crate::sqlite_file::create(&path).map_err(|e| e.to_string())?;
+        crate::sqlite_file::existing(&path).map_err(|e| e.to_string())?
+    };
+    #[cfg(not(unix))]
     crate::platform::private_open(
         OpenOptions::new().create(true).truncate(false).read(true).write(true),
     )
     .open(&path)
     .map_err(|e| e.to_string())?;
-    let db = Connection::open(path).map_err(|e| e.to_string())?;
+    let db = Connection::open(&path).map_err(|e| e.to_string())?;
+    #[cfg(unix)]
+    crate::sqlite_file::bind(&db, identity).map_err(|e| e.to_string())?;
     db.busy_timeout(std::time::Duration::from_secs(3))
         .map_err(|e| e.to_string())?;
     db.execute_batch("CREATE TABLE IF NOT EXISTS events (seq INTEGER PRIMARY KEY, name TEXT, conversation TEXT, payload TEXT);
@@ -2610,5 +2627,38 @@ mod attention_regressions {
         let mut claude = json!({"agent":"claude","subagents":{"main":{"state":"working"}}});
         repair_kimi_main(&mut claude);
         assert_eq!(claude["subagents"]["main"]["state"], "working");
+    }
+}
+
+#[cfg(all(test, unix))]
+mod lock_regressions {
+    use super::*;
+    use crate::sqlite_file::foreign_lock_refused;
+    use std::os::unix::fs::PermissionsExt;
+
+    /// zerus-iiee: opening the event journal again, as every hook event does,
+    /// keeps the SQLite locks of a connection already open, also after a
+    /// restart.
+    #[test]
+    fn opening_the_journal_again_keeps_a_live_connection_s_locks() {
+        let temp = tempfile::tempdir().unwrap();
+        let root = temp.path().join("state");
+        let path = root.join("events.sqlite3");
+        // The second round is a restart: every earlier connection is gone.
+        for round in 0..2 {
+            let live = event_db_at(&root).unwrap();
+            live.execute("INSERT INTO events(name,conversation,payload) VALUES('n','c','{}')", [])
+                .unwrap();
+            live.execute_batch("BEGIN").unwrap();
+            let _: i64 = live.query_row("SELECT count(*) FROM events", [], |r| r.get(0)).unwrap();
+            assert!(foreign_lock_refused(&path), "round {round}: the reader holds its lock");
+            drop(event_db_at(&root).unwrap());
+            assert!(foreign_lock_refused(&path), "round {round}: another open kept the lock");
+            live.execute_batch("COMMIT").unwrap();
+            drop(live);
+            assert!(!foreign_lock_refused(&path), "round {round}: the lock went with its connection");
+        }
+        let mode = std::fs::symlink_metadata(&path).unwrap().permissions().mode();
+        assert_eq!(mode & 0o777, 0o600, "created owner-only");
     }
 }

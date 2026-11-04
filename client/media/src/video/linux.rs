@@ -142,17 +142,37 @@ fn side(structure: &gst::StructureRef, field: &str, wanted: i32) -> Option<u32> 
     if let Ok(value) = structure.get::<i32>(field) {
         return u32::try_from(value).ok();
     }
+    // A list of sizes, such as `height={ 480, 360 }`: the one closest to wanted.
+    if let Ok(list) = structure.get::<gst::List>(field) {
+        let closest = list
+            .iter()
+            .filter_map(|value| value.get::<i32>().ok())
+            .min_by_key(|value| value.abs_diff(wanted))?;
+        return u32::try_from(closest).ok();
+    }
     let range = structure.get::<gst::IntRange<i32>>(field).ok()?;
     u32::try_from(wanted.clamp(range.min(), range.max())).ok()
+}
+
+/// Frames in ordinary memory, what the decoder and converter take. A camera
+/// may also offer DMA buffers (`video/x-raw(memory:DMABuf)`,
+/// `format=DMA_DRM`): without that feature such caps name a format no source
+/// produces, and linking the camera fails (zerus-5wmh.66.3.41).
+fn system_memory(structure: &gst::StructureRef, features: &gst::CapsFeaturesRef) -> bool {
+    !features.is_any()
+        && features
+            .iter()
+            .all(|feature| feature == gst::CAPS_FEATURE_MEMORY_SYSTEM_MEMORY)
+        && structure.get::<String>("format").ok().as_deref() != Some("DMA_DRM")
 }
 
 /// The camera formats a device offers, with the caps that fix each.
 fn formats(caps: &gst::Caps) -> Vec<(CameraFormat, gst::Caps, bool)> {
     let mut found = Vec::new();
-    for structure in caps.iter() {
+    for (structure, features) in caps.iter_with_features() {
         let name = structure.name().as_str();
         let jpeg = name == "image/jpeg";
-        if name != "video/x-raw" && !jpeg {
+        if (name != "video/x-raw" && !jpeg) || !system_memory(structure, features) {
             continue;
         }
         let (Some(width), Some(height)) = (
@@ -531,10 +551,12 @@ fn record(
     pipeline
         .add(&camera.element)
         .map_err(|error| error.to_string())?;
+    // A camera that cannot produce the chosen format refuses this link; say
+    // so plainly rather than with GStreamer's element names.
     camera
         .element
         .link(&filter)
-        .map_err(|error| error.to_string())?;
+        .map_err(|_| NO_FORMAT.to_owned())?;
     let audio: gst_app::AppSrc = element(&pipeline, "audio")?;
     let preview: gst_app::AppSink = element(&pipeline, "preview")?;
     let poster_sink: gst_app::AppSink = element(&pipeline, "poster")?;
@@ -696,4 +718,128 @@ fn record(
     events(VideoEvent::Completed { pcm, mp4, meta });
     drop(folder);
     Ok(())
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use std::str::FromStr;
+
+    /// What a Logitech StreamCam offers on Arch with GStreamer 1.28, read
+    /// from gst-device-monitor (zerus-5wmh.66.3.41): DMA-buffer formats come
+    /// first, then MJPEG and plain YUY2/NV12, some with lists of sizes.
+    const STREAMCAM: &str = "\
+        video/x-raw(memory:DMABuf), format=DMA_DRM, drm-format=YUYV, width=2304, height=1296, pixel-aspect-ratio=1/1, framerate=5/1; \
+        video/x-raw(memory:DMABuf), format=DMA_DRM, drm-format={ (string)YUYV, (string)NV12 }, width=1920, height=1080, pixel-aspect-ratio=1/1, framerate={ (fraction)30/1, (fraction)24/1, (fraction)5/1 }; \
+        video/x-raw(memory:DMABuf), format=DMA_DRM, drm-format=YUYV, width=960, height=540, pixel-aspect-ratio=1/1, framerate={ (fraction)30/1, (fraction)24/1, (fraction)5/1 }; \
+        video/x-raw(memory:DMABuf), format=DMA_DRM, drm-format=YUYV, width=848, height=480, pixel-aspect-ratio=1/1, framerate={ (fraction)30/1, (fraction)24/1, (fraction)5/1 }; \
+        video/x-raw(memory:DMABuf), format=DMA_DRM, drm-format={ (string)NV12, (string)YUYV }, width=640, height={ (int)480, (int)360 }, pixel-aspect-ratio=1/1, framerate={ (fraction)30/1, (fraction)24/1, (fraction)5/1 }; \
+        image/jpeg, parsed=true, width=1920, height=1080, pixel-aspect-ratio=1/1, framerate={ (fraction)60/1, (fraction)30/1, (fraction)5/1 }; \
+        image/jpeg, parsed=true, width=848, height=480, pixel-aspect-ratio=1/1, framerate={ (fraction)60/1, (fraction)30/1, (fraction)5/1 }; \
+        image/jpeg, parsed=true, width=640, height={ (int)480, (int)360 }, pixel-aspect-ratio=1/1, framerate={ (fraction)60/1, (fraction)30/1, (fraction)5/1 }; \
+        image/jpeg, parsed=true, width={ (int)424, (int)320 }, height=240, pixel-aspect-ratio=1/1, framerate={ (fraction)60/1, (fraction)30/1, (fraction)5/1 }; \
+        video/x-raw, format=YUY2, width=2304, height=1296, pixel-aspect-ratio=1/1, framerate=5/1; \
+        video/x-raw, format={ (string)YUY2, (string)NV12 }, width=1920, height=1080, pixel-aspect-ratio=1/1, framerate={ (fraction)30/1, (fraction)24/1, (fraction)5/1 }; \
+        video/x-raw, format=YUY2, width=848, height=480, pixel-aspect-ratio=1/1, framerate={ (fraction)30/1, (fraction)24/1, (fraction)5/1 }; \
+        video/x-raw, format={ (string)NV12, (string)YUY2 }, width=640, height={ (int)480, (int)360 }, pixel-aspect-ratio=1/1, framerate={ (fraction)30/1, (fraction)24/1, (fraction)5/1 }";
+
+    fn chosen(caps: &gst::Caps) -> (CameraFormat, gst::Caps, bool) {
+        let offered = formats(caps);
+        let index = closest_format(&offered.iter().map(|(f, _, _)| *f).collect::<Vec<_>>())
+            .expect("a supported format");
+        offered[index].clone()
+    }
+
+    /// Links a source to a capsfilter of `caps` in one pipeline, as `record`
+    /// links the camera to `camcaps`, without changing any state.
+    fn links(source: gst::Element, caps: &gst::Caps) -> bool {
+        let pipeline = gst::Pipeline::new();
+        let filter = gst::ElementFactory::make("capsfilter")
+            .property("caps", caps)
+            .build()
+            .unwrap();
+        pipeline.add_many([&source, &filter]).unwrap();
+        source.link(&filter).is_ok()
+    }
+
+    #[test]
+    fn a_camera_s_dma_buffers_are_never_chosen() {
+        init().unwrap();
+        let caps = gst::Caps::from_str(STREAMCAM).unwrap();
+        let offered = formats(&caps);
+        assert!(!offered.is_empty());
+        for (_, fixed, _) in &offered {
+            let (structure, features) = fixed.iter_with_features().next().unwrap();
+            assert!(system_memory(structure, features), "{fixed}");
+        }
+        // The listed 640x480 is found now; it was skipped, and the DMA-buffer
+        // 848x480 chosen, before.
+        let (format, fixed, jpeg) = chosen(&caps);
+        assert_eq!((format.width, format.height), (640, 480));
+        assert!(jpeg, "MJPEG is offered first at that size: {fixed}");
+    }
+
+    /// The reported failure, without opening the camera: a V4L2 source not
+    /// started offers only its template formats, which never include
+    /// `format=DMA_DRM` in ordinary memory.
+    #[test]
+    fn the_chosen_format_links_to_a_v4l2_source() {
+        init().unwrap();
+        if !found("v4l2src") {
+            eprintln!("skipped: no v4l2src here");
+            return;
+        }
+        let v4l2 = || gst::ElementFactory::make("v4l2src").build().unwrap();
+        let before = gst::Caps::builder("video/x-raw")
+            .field("format", "DMA_DRM")
+            .field("width", 848)
+            .field("height", 480)
+            .field("framerate", gst::Fraction::new(30, 1))
+            .build();
+        assert!(!links(v4l2(), &before), "the caps chosen before never link");
+        let (_, caps, _) = chosen(&gst::Caps::from_str(STREAMCAM).unwrap());
+        assert!(links(v4l2(), &caps), "{caps}");
+    }
+
+    /// The chosen MJPEG and plain formats negotiate through the decoder and
+    /// converter the recording pipeline uses, from a test pattern.
+    #[test]
+    fn the_chosen_formats_negotiate_through_the_pipeline_s_decoder() {
+        init().unwrap();
+        let offered = formats(&gst::Caps::from_str(STREAMCAM).unwrap());
+        for jpeg in [true, false] {
+            let kind: Vec<_> = offered.iter().filter(|(_, _, is)| *is == jpeg).collect();
+            let index =
+                closest_format(&kind.iter().map(|(f, _, _)| *f).collect::<Vec<_>>()).unwrap();
+            let caps = &kind[index].1;
+            let encode = if jpeg { "jpegenc ! " } else { "" };
+            let decode = if jpeg { "jpegdec ! " } else { "" };
+            let pipeline = gst::parse::launch(&format!(
+                "videotestsrc num-buffers=3 ! {encode}capsfilter name=camcaps ! {decode}videoconvert \
+                 ! videorate ! video/x-raw,framerate=24/1 ! fakesink"
+            ))
+            .unwrap()
+            .downcast::<gst::Pipeline>()
+            .unwrap();
+            pipeline
+                .by_name("camcaps")
+                .unwrap()
+                .set_property("caps", caps);
+            pipeline.set_state(gst::State::Playing).unwrap();
+            let message = pipeline
+                .bus()
+                .unwrap()
+                .timed_pop_filtered(
+                    gst::ClockTime::from_seconds(20),
+                    &[gst::MessageType::Eos, gst::MessageType::Error],
+                )
+                .expect("the pipeline ends");
+            pipeline.set_state(gst::State::Null).unwrap();
+            assert_eq!(
+                message.type_(),
+                gst::MessageType::Eos,
+                "{caps}: {message:?}"
+            );
+        }
+    }
 }

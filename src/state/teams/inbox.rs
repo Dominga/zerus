@@ -207,7 +207,10 @@ fn all_items(team: &Team) -> Vec<Item> {
     // card the owner denied is not proposed again.
     let proposed = team.proposals.iter().any(|proposal| proposal["kind"] == "switch-setting" && proposal["change"]["setting"] == "build_broker");
     if active && !team.settings.build_broker && !proposed {
-        if let Some((folder, members)) = super::broker::shared_folders(team).into_iter().next() {
+        // Feedback 19: only a folder with something to build gets the offer.
+        if let Some((folder, members)) =
+            super::broker::shared_folders(team).into_iter().find(|(folder, _)| super::broker::builds(std::path::Path::new(folder)))
+        {
             let names: Vec<String> = members.iter().map(|id| team.name_of(id)).collect();
             items.push(Item {
                 subagents: Value::Null,

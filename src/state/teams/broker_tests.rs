@@ -224,6 +224,9 @@ fn a_build_runs_in_the_snapshot_an_unchanged_tree_once_and_tells_the_other_membe
 #[test]
 fn the_lead_proposes_the_broker_for_a_shared_folder_and_the_owners_allow_sets_it() {
     let dir = project();
+    // A folder that builds (feedback 19: pages and scripts get no offer).
+    fs::write(dir.path().join("Makefile"), "all:
+").unwrap();
     let mut team = team_in(dir.path());
     // Two members in one folder: the lead's item names the switch card.
     let items = crate::state::teams::inbox::items(&team);
@@ -417,4 +420,19 @@ fn a_shared_build_waits_for_the_others_edits_then_runs_in_the_folder_itself() {
     let view = builds_view(&team, crate::state::now());
     let groups = view["folders"][0]["build_folders"].as_array().unwrap();
     assert!(groups.iter().any(|group| group["name"] == "." && group["timeline"].as_array().is_some_and(|items| items.len() == 2)), "{view}");
+}
+
+/// Owner feedback 2026-11-04 (19): pages and scripts build nothing, so the
+/// shared folder gets no broker offer; a project build file does.
+#[test]
+fn only_a_folder_that_builds_is_offered_the_broker() {
+    let dir = tempfile::tempdir().unwrap();
+    std::fs::write(dir.path().join("index.html"), "<p>slides</p>").unwrap();
+    std::fs::write(dir.path().join("render.py"), "print(1)").unwrap();
+    assert!(!super::builds(dir.path()));
+    std::fs::write(dir.path().join("Game.uproject"), "{}").unwrap();
+    assert!(super::builds(dir.path()));
+    let cargo = tempfile::tempdir().unwrap();
+    std::fs::write(cargo.path().join("Cargo.toml"), "[package]").unwrap();
+    assert!(super::builds(cargo.path()));
 }

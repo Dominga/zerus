@@ -929,6 +929,91 @@ Record the accepted conservative first-baseline omission window from
 [#914](https://github.com/ufna/zerus/pull/914); native presentation and click results
 still need their own platform checks above.
 
+### Recorded Windows installer acceptance — 2026-11-04
+
+win-accept-cl ran the #906b installer acceptance on va-kids for integrate head
+`0fca73f54579db2882657d56ca9e08ca399792c8`, CI run
+[41783655673](https://github.com/ufna/zerus/actions/runs/41783655673), attempt 1.
+Every job of that run passed, including Quick checks and the CI gate. Admission
+used the Windows package job `126420804566` and the native job `126420804715`.
+Artifact `13301922603` (`windows-x86_64-<source>`, SHA256
+`c995126af2874080e3ff7fbb76531573caab491bd8fe6c16b496b5e1f8ef6790`) contains:
+
+- the portable ZIP, 36,155,383 bytes, SHA256
+  `6296e44790cddaef14146c4a9cc8fa2d2c1316e981894e288b4024f3180da1ff`;
+- the per-user installer, 24,515,324 bytes, SHA256
+  `d5107b4d8e4c7177df46ff795e60305996baab8032d5a29420fdc8fddd99de36`;
+- `hgs.exe`, 36,961,792 bytes, SHA256
+  `04ddfbaa02d7090164842ba3251626cd3d64117b3bd3cd830372b1de97f2e53a`.
+
+The installer payload has 1,106 files, `desktop: tauri` and version 0.47.0, with
+no Qt DLLs or plugins.
+
+Both cases used the owner's standard console account in session 1 with an
+unelevated token. The console was unlocked; this was checked before each case.
+Kaspersky stayed active and unchanged: it logged no events and its quarantine did
+not change. A one-shot SYSTEM task started each case through `WTSQueryUserToken`.
+Each case used a fresh private stage and fixture profile, its own `HOME`, config
+and state, and the real per-user registration namespace, which each case first
+verified absent. Every product call was waited until it physically exited, with
+its output fully captured.
+
+**Setup case — PASS, 16/16.** A clean per-user `setup.exe` install wrote the
+exact payload and `installation.json`. It registered the passive task in READY
+state and the Toast AUMID/COM keys without starting the service or creating
+durable service state. The staged stable CLI matched the CI `hgs.exe` bytes. The
+Start Menu entry targeted the installed UI, and login stayed opt-in. A
+same-source upgrade with the explicit login choice added only the UI
+`--background` Run value and kept the backend registration. UI-only uninstall
+kept the task, stable CLI and Toast identity. The maintained removals then left
+the task and every Toast key absent. Seeded config, drafts and session files
+survived every step.
+
+**Legacy case — PASS, 22/22.** A clean portable ZIP extraction kept the winget
+layout (`hgs-tray.exe`, `hgs.exe`, connector, ConPTY). Its GUI loader reported
+the exact source, and its maintained commands registered only passive backend
+metadata.
+
+The Qt starting point was a CI-built Qt portable ZIP of
+`c7189d936e1743ed5109a59b5351aaa4eed5391e` (Qt 6.10.3, 615 files, SHA256
+`af133299dff0b39a94db0b985a0c13285736eca9815ed513085793e75960f442`), extracted
+into its own folder. Released Windows builds were only ever portable ZIPs, so the
+upgrade followed the documented route: the Next installer went into its own
+folder. That left the Qt folder byte-identical (615/615) and installed no Qt
+files; seeded config, drafts and session files survived.
+
+The installed Tauri loader reported the exact source. The first start opened its
+own visible WebView2 window; the retained screenshot shows the Sessions screen
+and one connected machine. The native tray menu (Open Zerus, No remote machines,
+Open in, Quit) quit the app within the bound. UI-only uninstall and the
+maintained removals then left the namespace absent.
+
+An earlier attempt installed `setup.exe` over the extracted Qt ZIP folder
+instead. The installer correctly does not sweep a folder it does not own, so
+the Qt files stayed mixed with the Next payload. The owner decided that the
+installer must refuse such a folder (`zerus-5wmh.66.8.1.11`).
+The installed `uninstall\payload.txt` has CR CR LF line endings when CI packages
+it on Windows. The same ordered path list matched; the installer reader is
+unaffected (`zerus-5wmh.66.8.1.10`).
+
+Cleanup after each case removed its temporary task, stage and fixture profile.
+It also removed the Explorer tray-icon record that the test GUI left under the
+owner's `NotifyIconSettings`. A final read-only check found no Zerus task, stage,
+registration, shortcut, notification setting or process. A cold standard-user
+status preflight of `1ba301c5` (CI 41675738074) the same morning also passed:
+`--version`, `desktop registration status` and `desktop notification-registration
+status` returned structured results in 33, 112 and 38 ms. That closed the
+CLI-only hang scope of `.66.3.27.3.2`.
+
+**Owner-account row.** The step-0 inventory found no Zerus or Qt installation and
+no agent CLI on the owner's account. The owner-account upgrade is therefore
+recorded under the 2026-11-03 clean-install exception; it was not exercised on
+the main account.
+
+**Not covered by this record:** upgrade with agents running, notifications and
+clicks, terminal, voice/video, UI/durable parity and Qt rollback. Those rows stay
+unchecked, and this record ticks no broader checkbox.
+
 ## Deletion PR merge gate
 
 The coordinator records per-platform acceptance and any exceptions against the

@@ -26,6 +26,7 @@ pub struct TerminationCleanup(Arc<Inner>);
 #[derive(Default)]
 struct Inner {
     model: Mutex<Model>,
+    pending: Arc<crate::desktop_service::termination_outcome::Pending>,
 }
 #[derive(Default)]
 struct Model {
@@ -56,6 +57,7 @@ impl TerminationCleanup {
 struct Offer {
     id: String,
     capture: Capture,
+    selected: Option<crate::desktop_service::termination_outcome::Selected>,
     at: Instant,
 }
 struct Job {
@@ -788,11 +790,30 @@ pub async fn termination_cleanup_offer(
         .and_then(|m| m.machine_id)
         .filter(|id| zerus_client_core::creation::canonical_uuid(id))
         .ok_or(STATE_CHANGED)?;
-    let capture = tauri::async_runtime::spawn_blocking(move || {
+    let service = if crate::desktop_service::mode() {
+        Some(
+            app.desktop_service()
+                .ok_or(crate::desktop_service::termination_outcome::UNCONFIRMED)?,
+        )
+    } else {
+        None
+    };
+    let (capture, selected) = tauri::async_runtime::spawn_blocking(move || {
+        if let Some(service) = service {
+            let (capture, selected) =
+                crate::desktop_service::termination_outcome::Selected::inspect(
+                    service,
+                    &call_target,
+                    &machine,
+                    Arc::new(_read),
+                )?;
+            return Ok((capture, Some(selected)));
+        }
+        let _read = _read;
         let hgs = default_hgs();
         probe(&hgs, &call_target, &bounded_run)?;
         let value = inspection(&hgs, &call_target, &machine, &bounded_run)?;
-        Capture::from_inspection(&call_target, &machine, &value)
+        Capture::from_inspection(&call_target, &machine, &value).map(|capture| (capture, None))
     })
     .await
     .map_err(|e| e.to_string())??;
@@ -808,6 +829,7 @@ pub async fn termination_cleanup_offer(
     m.offers.push_back(Offer {
         id: id.clone(),
         capture,
+        selected,
         at: Instant::now(),
     });
     Ok(Some(OfferView {
@@ -854,15 +876,30 @@ pub async fn termination_cleanup_confirm(
             })
             .transpose()?;
         m.reserved += 1;
-        (o.capture, delayed)
+        (o.capture, delayed, o.selected)
     };
-    let (capture, delayed) = capture;
+    let (capture, delayed, selected) = capture;
     // A remembered checkbox default never changes the action's admission.
     let _ = settings.0.set(PREF, Value::Bool(true));
-    let outcome = if delayed.is_some() {
-        crate::actions::dispatch_cleanup_reserved(&actions, capture.clone(), delayed).await
-    } else {
-        crate::actions::dispatch_cleanup(&actions, capture.clone()).await
+    let outcome = match (crate::desktop_service::mode(), selected) {
+        (true, Some(selected)) => {
+            match crate::desktop_service::termination_outcome::Confirmation::new(
+                id.clone(),
+                capture.clone(),
+                selected,
+                state.0.pending.clone(),
+            ) {
+                Ok(native) => {
+                    crate::actions::dispatch_cleanup_native(&actions, native, delayed).await
+                }
+                Err(error) => Err(error),
+            }
+        }
+        (false, None) if delayed.is_some() => {
+            crate::actions::dispatch_cleanup_reserved(&actions, capture.clone(), delayed).await
+        }
+        (false, None) => crate::actions::dispatch_cleanup(&actions, capture.clone()).await,
+        _ => Err(STATE_CHANGED.into()),
     };
     let mut m = lock(&state.0.model);
     m.reserved -= 1;

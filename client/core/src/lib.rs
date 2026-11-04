@@ -30,6 +30,7 @@ pub mod external_file;
 pub mod file_download;
 pub mod fleet;
 pub mod fsx;
+pub mod image;
 pub mod input_queue;
 pub mod launch;
 pub mod legacy;

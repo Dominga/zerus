@@ -2205,6 +2205,22 @@ impl Creations {
         self.finish()
     }
 
+    /// The launch never left this client: it had no fresh consent, or it
+    /// stopped before its admission request was written. The unused launch ID
+    /// is retired into the history and a new one reserved; the operation
+    /// fails and stays resumable, so an explicit Continue setup starts the
+    /// agent. Nothing is launched with the replacement ID automatically.
+    pub fn launch_unsent(&mut self, launch: &str, error: &str) -> Vec<Effect> {
+        let Some(id) = self.for_launch(launch) else {
+            return Vec::new();
+        };
+        let value = self.get(&id);
+        if !flag(&value, "launch_dispatched") || text(&value, "state") != "launching" {
+            return Vec::new();
+        }
+        self.ended(&id, launch, error)
+    }
+
     /// The launched session ended without binding: the launch ID is retired
     /// and a new one reserved, and the operation failed with `error`.
     pub fn ended(&mut self, id: &str, launch: &str, error: &str) -> Vec<Effect> {

@@ -20,7 +20,7 @@
 //! Session state is not an input. A native Stop, an idle session, a paused
 //! session or elapsed time is not an attempt event, so none of them can
 //! finish an attempt or move its task.
-use crate::schema::{Actor, LogEntry, SessionKey, Stage};
+use crate::schema::{Actor, LogEntry, SessionKey, Stage, Target};
 use crate::{Error, Result};
 use serde::{Deserialize, Serialize};
 
@@ -88,7 +88,28 @@ pub struct Delivery {
     pub revision: String,
     pub stage: Stage,
     pub stage_at: i64,
+    /// The execution the task selected at the reservation: its target and the
+    /// session holding it. A receipt advances the task only while both are
+    /// unchanged, with the stage and the requirement revision.
+    pub target: Target,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub session: Option<SessionKey>,
+    /// The queued messages the request's bytes include, each with the digest
+    /// of its content. Its receipt submits these originals and no others.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub queued: Vec<QueuedMessage>,
 }
+
+/// A queued message a reserved request includes.
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+pub struct QueuedMessage {
+    pub request_id: String,
+    /// SHA-256 (lowercase hex) of the message's text and attachments.
+    pub digest: String,
+}
+
+/// The most queued messages one request includes.
+pub const MAX_QUEUED: usize = 64;
 
 /// What a native input receipt shows, as read from the executor's managed
 /// receipts by the computer that holds them.
@@ -235,6 +256,11 @@ pub struct Execution {
     /// started; the next attempt follows it.
     #[serde(skip)]
     pub highest: u64,
+    /// Every attempt whose delivery is unknown, in any generation, by
+    /// generation and ID. Each holds the task until its own receipt or the
+    /// person's disposition of that exact attempt settles it.
+    #[serde(skip_serializing_if = "Vec::is_empty")]
+    pub unknown: Vec<String>,
 }
 
 /// A name-only session key bound to its verified run: `from` is the key
@@ -301,12 +327,20 @@ fn delivery_valid(attempt: &Attempt, delivery: &Delivery) -> bool {
         && bounded(&delivery.run_id, false)
         && bounded(&delivery.conversation_id, true)
         && bounded(&delivery.revision, false)
-        && delivery.digest.len() == 64
+        && hex_digest(&delivery.digest)
+        && delivery.stage_at >= 0
+        && delivery.queued.len() <= MAX_QUEUED
         && delivery
-            .digest
+            .queued
+            .iter()
+            .all(|message| canonical_uuid(&message.request_id) && hex_digest(&message.digest))
+}
+
+pub(crate) fn hex_digest(digest: &str) -> bool {
+    digest.len() == 64
+        && digest
             .bytes()
             .all(|b| b.is_ascii_digit() || (b'a'..=b'f').contains(&b))
-        && delivery.stage_at >= 0
 }
 
 pub(crate) fn check_event(event: &AttemptEvent) -> Result<()> {
@@ -412,6 +446,7 @@ pub(crate) fn project(
                 current: Some(current),
                 conflict,
                 highest: 0,
+                unknown: Vec::new(),
             }
         });
     };
@@ -427,6 +462,13 @@ pub(crate) fn project(
     // before it stays current, as a refused handoff leaves the previous
     // executor working. Only when every attempt never started is the latest
     // of them shown.
+    let mut unknown: Vec<&Attempt> = phases
+        .iter()
+        .filter(|(_, (phase, ..))| *phase == Phase::Unknown)
+        .map(|(attempt, _)| *attempt)
+        .collect();
+    unknown.sort_by(|a, b| (a.generation, &a.id).cmp(&(b.generation, &b.id)));
+    let unknown = unknown.into_iter().map(|a| a.id.clone()).collect();
     let any_started = phases
         .iter()
         .any(|(_, (phase, ..))| *phase != Phase::NotStarted);
@@ -462,6 +504,7 @@ pub(crate) fn project(
         }),
         conflict: claims.len() > 1,
         highest: top,
+        unknown,
     })
 }
 

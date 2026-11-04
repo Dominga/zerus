@@ -968,9 +968,9 @@ impl TaskDoc {
             .map(|n| n.ok_or_else(|| Error::new("the considered revision counts from 1")))
             .transpose()?;
         // A report by the exact pinned agent is explicit work evidence even
-        // when it filed the task during an already-running turn; while an
-        // attempt's delivery is unknown it starts nothing.
-        if self.held()?.is_none()
+        // when it filed the task during an already-running turn. A task that
+        // records attempts never begins one implicitly: its executor starts it.
+        if !self.executes_attempts()
             && matches!(self.stage()?, Stage::Todo | Stage::Backlog)
             && matches!((&self.view()?.target, actor), (Target::Session(target), Actor::Agent(own)) if target == own)
         {

@@ -7,8 +7,8 @@
 use super::TaskDoc;
 use crate::execution::{
     self, canonical_uuid, check_attempt, check_event, Attempt, AttemptEvent, CurrentAttempt,
-    Delivery, EventKind, Execution, NativeRequest, Origin, Phase, Receipt, ReportDecision,
-    ReportKind, MAX_ATTEMPTS, MAX_ATTEMPT_EVENTS,
+    Delivery, EventKind, Execution, NativeRequest, Origin, Phase, QueuedMessage, Receipt,
+    ReportDecision, ReportKind, Stale, MAX_ATTEMPTS, MAX_ATTEMPT_EVENTS, MAX_QUEUED,
 };
 use crate::schema::{Actor, SessionKey, Stage, Target, TaskView};
 use crate::{Error, Result};
@@ -59,28 +59,42 @@ impl TaskDoc {
             .filter(|current| !current.legacy))
     }
 
-    /// The current attempt whose delivery is unknown. It holds the task:
-    /// nothing is sent or started for it until its own receipt or the
-    /// person settles it.
-    pub fn held(&self) -> Result<Option<CurrentAttempt>> {
-        Ok(self
-            .current_attempt()?
-            .filter(|current| current.phase == Phase::Unknown))
+    /// Every attempt whose delivery is unknown, in any generation, by
+    /// generation and ID: a conflicting claim the projection did not select
+    /// holds the task as much as the current one.
+    pub fn unknown_deliveries(&self) -> Result<Vec<Attempt>> {
+        let (attempts, _) = self.execution_records()?;
+        let ids = self
+            .execution_now()?
+            .map(|execution| execution.unknown)
+            .unwrap_or_default();
+        Ok(ids
+            .iter()
+            .filter_map(|id| attempts.iter().find(|attempt| &attempt.id == id).cloned())
+            .collect())
+    }
+
+    /// The first attempt whose delivery is unknown. Any of them holds the
+    /// task: nothing is sent or started for it until each one's own receipt
+    /// or the person's disposition of that exact attempt settles it.
+    pub fn held(&self) -> Result<Option<Attempt>> {
+        Ok(self.unknown_deliveries()?.into_iter().next())
     }
 
     pub(super) fn not_held(&self) -> Result<()> {
-        match self.held()? {
-            None => Ok(()),
-            Some(current) => Err(Error::new(format!(
-                "delivery of attempt {} to {} is unknown; nothing is sent or started again. \
-                 Recover it with --recover-only, or the person cancels that attempt",
-                current.id,
-                current
-                    .executor
-                    .as_ref()
-                    .map_or("its executor", |key| key.session.as_str())
-            ))),
+        let unknown = self.unknown_deliveries()?;
+        if unknown.is_empty() {
+            return Ok(());
         }
+        let named: Vec<String> = unknown
+            .iter()
+            .map(|attempt| format!("{} to {}", attempt.id, attempt.executor.session))
+            .collect();
+        Err(Error::new(format!(
+            "delivery of attempt {} is unknown; nothing is sent or started again. \
+             Recover each with --recover-only, or the person cancels that exact attempt",
+            named.join(", ")
+        )))
     }
 
     /// A path that starts an execution without an attempt refuses a task
@@ -180,6 +194,13 @@ impl TaskDoc {
                     "only a task in review or done is reopened",
                 )?;
                 self.not_held()?;
+                // A reopen continues with the session holding the task; a
+                // handoff is what changes its executor.
+                if self.session().as_ref() != Some(executor) {
+                    return Err(Error::new(
+                        "a reopen goes to the session that holds the task; hand it off to change its executor",
+                    ));
+                }
             }
             Origin::Start => {
                 return Err(Error::new("a direct start reserves no native input"));
@@ -191,6 +212,23 @@ impl TaskDoc {
             ));
         }
         let view = self.view()?;
+        // The queued messages the request was rendered with: this task state.
+        let queued: Vec<QueuedMessage> = view
+            .log
+            .iter()
+            .filter(|e| {
+                e.kind == "message" && e.delivery.as_ref().is_some_and(|d| d.state == "queued")
+            })
+            .map(|message| {
+                Ok(QueuedMessage {
+                    request_id: message.request_id.clone().unwrap_or_default(),
+                    digest: message_digest(&message.text, &message.attachments)?,
+                })
+            })
+            .collect::<Result<_>>()?;
+        if queued.len() > MAX_QUEUED {
+            return Err(Error::new("too many queued messages for one request"));
+        }
         let attempt = Attempt {
             id: id.to_owned(),
             generation: execution::next_generation(view.execution.as_ref())?,
@@ -209,6 +247,9 @@ impl TaskDoc {
                 revision: self.revision(),
                 stage: view.stage,
                 stage_at: view.stage_at,
+                target: view.target.clone(),
+                session: view.session.clone(),
+                queued,
             }),
         };
         self.write_attempt(&attempt)?;
@@ -283,10 +324,15 @@ impl TaskDoc {
                         .is_some_and(|c| c.id == attempt.id)
             })
             && self.stage()? == delivery.stage
-            && self.stage_at() == delivery.stage_at;
+            && self.stage_at() == delivery.stage_at
+            // The execution the task selects: a changed target, holder or
+            // requirement is not the task this input was reserved for.
+            && self.view()?.target == delivery.target
+            && self.session() == delivery.session
+            && self.requirement() == attempt.requirement;
         self.push_event(id, EventKind::Submitted, actor, now)?;
         if unchanged {
-            self.advance(&attempt, actor, now)?;
+            self.advance(&attempt, &delivery, actor, now)?;
         }
         self.doc.commit();
         Ok(Settled {
@@ -296,7 +342,13 @@ impl TaskDoc {
 
     /// What a send, handoff or reopen always recorded once its input was
     /// submitted, written now with its receipt.
-    fn advance(&self, attempt: &Attempt, actor: &Actor, now: i64) -> Result<()> {
+    fn advance(
+        &self,
+        attempt: &Attempt,
+        delivery: &Delivery,
+        actor: &Actor,
+        now: i64,
+    ) -> Result<()> {
         let executor = &attempt.executor;
         let fields = self.fields();
         match attempt.origin {
@@ -310,7 +362,7 @@ impl TaskDoc {
                 fields.delete("cancel_reason")?;
                 self.log("sent", actor, now, "", Some(executor))?
                     .insert("request_id", attempt.request_id.as_str())?;
-                self.queued_submitted(&attempt.request_id, actor, now)?;
+                self.queued_included(delivery, &attempt.request_id, actor, now)?;
             }
             Origin::Handoff => {
                 fields.insert(
@@ -324,7 +376,7 @@ impl TaskDoc {
                 fields.delete("worker")?;
                 self.log("sent", actor, now, "handoff", Some(executor))?
                     .insert("request_id", attempt.request_id.as_str())?;
-                self.queued_submitted(&attempt.request_id, actor, now)?;
+                self.queued_included(delivery, &attempt.request_id, actor, now)?;
             }
             Origin::Reopen => {
                 fields.insert("stage", Stage::Active.as_str())?;
@@ -362,18 +414,19 @@ impl TaskDoc {
             ));
         }
         let current = self
-            .held()?
-            .filter(|current| current.id == id)
+            .unknown_deliveries()?
+            .into_iter()
+            .find(|attempt| attempt.id == id)
             .ok_or_else(|| {
                 Error::new(format!(
-                    "attempt {id} is not this task's current attempt with an unknown delivery"
+                    "attempt {id} is not an attempt of this task with an unknown delivery"
                 ))
             })?;
         if !reason.trim().is_empty() {
             crate::schema::check_text(reason, "reason")?;
         }
         self.push_event(&current.id, EventKind::Cancelled, actor, now)?;
-        self.log("cancelled", actor, now, "", current.executor.as_ref())?
+        self.log("cancelled", actor, now, "", Some(&current.executor))?
             .insert("request_id", current.request_id.as_str())?;
         if !reason.trim().is_empty() {
             self.log("comment", actor, now, reason.trim(), None)?;
@@ -457,12 +510,50 @@ impl TaskDoc {
         };
         if decision.moves {
             self.push_event(&current.id, EventKind::Ready, actor, now)?;
+        } else if decision.stale == Some(Stale::Undelivered) && current.phase == Phase::Unknown {
+            // The reserved executor's report while its delivery is unknown is
+            // evidence of activity: it bars recording the input as never
+            // admitted, and after the receipt it never stands in for a result.
+            self.push_event(&current.id, EventKind::Progress, actor, now)?;
         } else if kind == ReportKind::Progress
             && decision.stale.is_none()
             && view.stage == Stage::Active
             && matches!(actor, Actor::Agent(own) if current.executor.as_ref() == Some(own))
         {
             self.push_event(&current.id, EventKind::Progress, actor, now)?;
+        }
+        Ok(())
+    }
+
+    /// The queued messages a settled request included: its frozen originals,
+    /// while each is still queued with the same content. A message queued or
+    /// changed after the reservation stays queued.
+    fn queued_included(
+        &self,
+        delivery: &Delivery,
+        dispatch: &str,
+        actor: &Actor,
+        now: i64,
+    ) -> Result<()> {
+        for message in self.view()?.log.into_iter().filter(|e| {
+            e.kind == "message" && e.delivery.as_ref().is_some_and(|d| d.state == "queued")
+        }) {
+            let id = message.request_id.clone().unwrap_or_default();
+            let digest = message_digest(&message.text, &message.attachments)?;
+            if !delivery
+                .queued
+                .iter()
+                .any(|original| original.request_id == id && original.digest == digest)
+            {
+                continue;
+            }
+            let mut receipt = message.delivery.expect("queued message");
+            receipt.state = "submitted".into();
+            receipt.submitted_id = dispatch.into();
+            receipt.prompt.clear();
+            let entry = self.log("message_delivery", actor, now, "", None)?;
+            entry.insert("request_id", id)?;
+            entry.insert("delivery", serde_json::to_string(&receipt)?)?;
         }
         Ok(())
     }
@@ -482,6 +573,13 @@ impl TaskDoc {
         }
         Ok(())
     }
+}
+
+/// The digest of a message's content: its text and attachments.
+fn message_digest(text: &str, files: &[crate::TaskAttachment]) -> Result<String> {
+    use sha2::{Digest, Sha256};
+    let bytes = serde_json::to_vec(&(text, files))?;
+    Ok(format!("{:x}", Sha256::digest(bytes)))
 }
 
 #[cfg(test)]
@@ -1150,6 +1248,263 @@ mod tests {
                 24
             )
             .is_err());
+    }
+
+    #[test]
+    fn a_receipt_advances_only_the_execution_its_input_was_reserved_for() {
+        // review-n and desktop-u on #1391: a changed target, holder or
+        // requirement is a different execution; a comment is not.
+        let drifts: [(&str, fn(&mut TaskDoc)); 4] = [
+            ("comment", |t| {
+                t.comment("Unrelated note", &Actor::Person, 11).unwrap()
+            }),
+            ("target", |t| {
+                t.set_target(&Target::Session(run("web")), &Actor::Person, 11)
+                    .unwrap()
+            }),
+            ("holder", |t| {
+                t.set_raw_field("session", &serde_json::to_string(&run("web")).unwrap())
+            }),
+            ("requirement", |t| {
+                t.fields().insert("requirement", 2).unwrap();
+                t.doc.commit();
+            }),
+        ];
+        for (name, drift) in drifts {
+            let mut task = task();
+            task.set_target(&Target::Session(run("api")), &Actor::Person, 2)
+                .unwrap();
+            send(&mut task, ONE, "api");
+            drift(&mut task);
+            let advanced = settle(&mut task, ONE).advanced;
+            assert_eq!(advanced, name == "comment", "{name}");
+            let view = task.view().unwrap();
+            if advanced {
+                assert_eq!(
+                    (view.stage, view.session),
+                    (Stage::Active, Some(run("api")))
+                );
+            } else {
+                assert_eq!(view.stage, Stage::Todo, "{name}");
+                assert!(!view.log.iter().any(|e| e.kind == "sent"), "{name}");
+            }
+            // Either way the receipt is attached as that attempt's evidence.
+            assert_ne!(current(&task).phase, Phase::Unknown, "{name}");
+        }
+    }
+
+    #[test]
+    fn a_receipt_submits_only_the_queued_originals_its_request_included() {
+        let queue = |task: &mut TaskDoc, text: &str, at: i64| {
+            let id = uuid::Uuid::new_v4().to_string();
+            let delivery = crate::TaskDelivery {
+                mode: "queue".into(),
+                state: "queued".into(),
+                stage: "todo".into(),
+                stage_at: 1,
+                dispatch_id: String::new(),
+                submitted_id: String::new(),
+                run_id: String::new(),
+                conversation_id: String::new(),
+                prompt: String::new(),
+                error: String::new(),
+            };
+            task.reserve_message(&id, text, &[], &delivery, None, (&Actor::Person, at))
+                .unwrap();
+            id
+        };
+        let state = |task: &TaskDoc, id: &str| {
+            let message = task
+                .view()
+                .unwrap()
+                .log
+                .into_iter()
+                .find(|e| e.kind == "message" && e.request_id.as_deref() == Some(id))
+                .unwrap();
+            let delivery = message.delivery.unwrap();
+            (delivery.state, delivery.submitted_id)
+        };
+        let mut task = task();
+        let included = queue(&mut task, "Use Redis", 2);
+        let attempt = send(&mut task, ONE, "api");
+        let frozen = &attempt.delivery.as_ref().unwrap().queued;
+        assert_eq!(
+            frozen
+                .iter()
+                .map(|m| m.request_id.as_str())
+                .collect::<Vec<_>>(),
+            [included.as_str()]
+        );
+        let later = queue(&mut task, "Added after the request was frozen", 11);
+        settle(&mut task, ONE);
+        assert_eq!(state(&task, &included), ("submitted".into(), ONE.into()));
+        assert_eq!(state(&task, &later), ("queued".into(), String::new()));
+        // An included message another dispatch delivered meanwhile keeps that receipt.
+        let bytes = super::tests::task().snapshot().unwrap();
+        let mut one = TaskDoc::from_bytes(&bytes).unwrap();
+        let shared = queue(&mut one, "Both replicas see this", 2);
+        send(&mut one, ONE, "api");
+        let mut two = TaskDoc::from_bytes(&bytes).unwrap();
+        two.import(&one.snapshot().unwrap()).unwrap();
+        two.record_queued_messages(TWO, &Actor::Person, 12).unwrap();
+        one.import(&two.snapshot().unwrap()).unwrap();
+        settle(&mut one, ONE);
+        assert_eq!(state(&one, &shared), ("submitted".into(), TWO.into()));
+    }
+
+    #[test]
+    fn every_unknown_conflicting_delivery_holds_the_task_until_each_is_settled() {
+        // desktop-u and review-n on #1391: cancelling or settling the selected
+        // claim never disposes of another.
+        let bytes = task().snapshot().unwrap();
+        for (first, second) in [(ONE, TWO), (TWO, ONE)] {
+            for merge_first in [true, false] {
+                let mut a = TaskDoc::from_bytes(&bytes).unwrap();
+                let mut b = TaskDoc::from_bytes(&bytes).unwrap();
+                send(&mut a, first, "api");
+                send(&mut b, second, "web");
+                let (mut merged, other) = if merge_first { (a, b) } else { (b, a) };
+                merged.import(&other.snapshot().unwrap()).unwrap();
+                let execution = merged.view().unwrap().execution.unwrap();
+                assert!(execution.conflict);
+                let mut both = [first.to_owned(), second.to_owned()];
+                both.sort();
+                assert_eq!(execution.unknown, both);
+                merged
+                    .cancel_attempt(first, "", &Actor::Person, 12)
+                    .unwrap();
+                let refused = merged
+                    .reserve_attempt(
+                        THREE,
+                        Origin::Send,
+                        &run("ops"),
+                        native("ops"),
+                        &Actor::Person,
+                        13,
+                    )
+                    .unwrap_err()
+                    .to_string();
+                assert!(refused.contains(second), "{refused}");
+                assert!(merged.record_start(&agent("ops"), 13).is_err());
+                // The other one settles by its own receipt; then a new attempt may begin.
+                let other = receipt(&merged, second);
+                merged
+                    .settle_attempt(second, Settlement::Receipt(&other), &Actor::Person, 14)
+                    .unwrap();
+                assert!(merged.held().unwrap().is_none());
+            }
+        }
+        // A settled selected claim does not license a handoff past an unknown one.
+        let mut a = TaskDoc::from_bytes(&bytes).unwrap();
+        let mut b = TaskDoc::from_bytes(&bytes).unwrap();
+        send(&mut a, ONE, "api");
+        settle(&mut a, ONE);
+        send(&mut b, TWO, "web");
+        a.import(&b.snapshot().unwrap()).unwrap();
+        assert!(a
+            .reserve_attempt(
+                THREE,
+                Origin::Handoff,
+                &run("ops"),
+                native("ops"),
+                &agent("api"),
+                21
+            )
+            .is_err());
+        // An unknown delivery of an earlier generation merged later holds too.
+        let mut c = TaskDoc::from_bytes(&bytes).unwrap();
+        send(&mut c, THREE, "ops");
+        let mut d = TaskDoc::from_bytes(&bytes).unwrap();
+        send(&mut d, ONE, "api");
+        settle(&mut d, ONE);
+        d.record_report("Done", &agent("api"), 30).unwrap();
+        d.set_stage(Stage::Todo, &Actor::Person, 31).unwrap();
+        d.import(&c.snapshot().unwrap()).unwrap();
+        assert_eq!(d.held().unwrap().map(|a| a.id), Some(THREE.to_owned()));
+        assert!(d.sendable().is_err());
+    }
+
+    #[test]
+    fn a_reopen_continues_with_the_session_holding_the_task() {
+        let mut task = task();
+        send(&mut task, ONE, "api");
+        settle(&mut task, ONE);
+        task.record_report("Done", &agent("api"), 21).unwrap();
+        assert!(task
+            .reserve_attempt(
+                TWO,
+                Origin::Reopen,
+                &run("web"),
+                native("web"),
+                &Actor::Person,
+                22
+            )
+            .unwrap_err()
+            .to_string()
+            .contains("hand it off"));
+        task.reserve_attempt(
+            TWO,
+            Origin::Reopen,
+            &run("api"),
+            native("api"),
+            &Actor::Person,
+            22,
+        )
+        .unwrap();
+        assert!(settle(&mut task, TWO).advanced);
+        let view = task.view().unwrap();
+        assert_eq!(view.stage, Stage::Active);
+        assert_eq!(
+            view.session,
+            view.execution.unwrap().current.unwrap().executor
+        );
+    }
+
+    #[test]
+    fn reports_on_an_undelivered_attempt_are_evidence_and_never_begin_another() {
+        // While unknown: recorded as progress evidence, which bars not_started
+        // and never becomes a result after the receipt.
+        for kind in [ReportKind::Ready, ReportKind::Progress] {
+            let mut task = task();
+            task.set_target(&Target::Session(run("api")), &Actor::Person, 2)
+                .unwrap();
+            send(&mut task, ONE, "api");
+            task.report("Work", kind, None, &agent("api"), 11).unwrap();
+            assert!(task
+                .settle_attempt(ONE, Settlement::NotAdmitted, &Actor::Person, 12)
+                .is_err());
+            settle(&mut task, ONE);
+            let now = current(&task);
+            assert_eq!(
+                (now.phase, now.progress_at),
+                (Phase::Submitted, Some(11)),
+                "{kind:?}"
+            );
+            assert!(task.record_report("Done", &agent("api"), 13).unwrap());
+        }
+        // After a refused send: still undelivered, and no new start from it.
+        let mut task = task();
+        task.set_target(&Target::Session(run("api")), &Actor::Person, 2)
+            .unwrap();
+        send(&mut task, ONE, "api");
+        task.settle_attempt(ONE, Settlement::NotAdmitted, &Actor::Person, 11)
+            .unwrap();
+        let decision = task
+            .report("Old work", ReportKind::Ready, None, &agent("api"), 12)
+            .unwrap();
+        assert_eq!(
+            (decision.moves, decision.stale),
+            (false, Some(Stale::Undelivered))
+        );
+        let view = task.view().unwrap();
+        assert_eq!(
+            (view.stage, view.execution.unwrap().attempts),
+            (Stage::Todo, 1)
+        );
+        assert_eq!(current(&task).phase, Phase::NotStarted);
+        // An explicit start is a new attempt.
+        task.record_start(&agent("api"), 13).unwrap();
+        assert_eq!(current(&task).origin, Origin::Start);
     }
 
     #[test]

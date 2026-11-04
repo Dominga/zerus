@@ -198,6 +198,57 @@ class MacDesktopService(unittest.TestCase):
     def mode_record(self):
         return self.command.destination.with_name("." + installer.LABEL + ".zerus-registration.json")
 
+    def test_default_activation_cannot_replace_a_later_explicit_passive_choice(self):
+        self.install()
+        self.assertEqual(self.install(status_only=True)["mode_selection"], "default")
+        self.install(mode="passive")
+        self.command.calls.clear()
+        with self.assertRaisesRegex(installer.Refusal, "Resume"):
+            self.install(mode="background", activation_id=str(uuid.uuid4()), default_only=True)
+        self.assertEqual(self.command.mutations(), [])
+        self.assertEqual(self.install(status_only=True)["selected_mode"], "passive")
+        self.assertIsNone(self.install(status_only=True)["activation_pending"])
+
+    def test_activation_settles_original_and_survives_refresh_without_replay(self):
+        self.install()
+        request = str(uuid.uuid4())
+        result = self.install(mode="background", activation_id=request)
+        self.assertEqual((result["abi"], result["request_id"], result["phase"]),
+                         (installer._activation.ABI, request, "settled"))
+        self.assertEqual(result["result"], {"ok": True, "code": "ready"})
+        self.command.calls.clear()
+        self.assertEqual(self.install(mode="background", activation_id=request), result)
+        self.assertEqual(self.command.mutations(), [])
+        self.install()
+        self.assertEqual(self.install(activation_id=request, activation_status=True), result)
+
+    def test_activation_lost_bootstrap_reply_stays_unknown_and_lookup_only(self):
+        self.install()
+        request = str(uuid.uuid4())
+        def lose_reply():
+            raise installer.Refusal("original bootstrap reply lost")
+        self.command.after_action = ("bootstrap", lose_reply)
+        with self.assertRaisesRegex(installer.Refusal, "reply lost"):
+            self.install(mode="background", activation_id=request)
+        self.command.calls.clear()
+        result = self.install(mode="background", activation_id=request)
+        self.assertEqual((result["phase"], result["result"]), ("unknown", None))
+        self.assertEqual(self.command.mutations(), [])
+        with self.assertRaisesRegex(installer._activation.Refusal, "original_pending"):
+            self.install(mode="background", activation_id=str(uuid.uuid4()))
+        self.assertEqual(self.command.mutations(), [])
+
+    def test_activation_retains_current_grant_across_the_original_manager_steps(self):
+        self.install()
+        request = str(uuid.uuid4())
+        self.command.after_action = ("bootout", self.command.rearm)
+        with self.assertRaisesRegex(installer.Refusal, "Original activation Grant changed"):
+            self.install(mode="background", activation_id=request)
+        self.command.calls.clear()
+        result = self.install(activation_id=request, activation_status=True)
+        self.assertEqual(result["phase"], "unknown")
+        self.assertEqual(self.command.mutations(), [])
+
     def test_explicit_background_requires_native_grant_and_reloads_only_desktop(self):
         self.install()
         self.command.calls.clear()
@@ -208,6 +259,35 @@ class MacDesktopService(unittest.TestCase):
         self.assertEqual([args[1] for args in self.command.mutations()], ["bootout", "bootstrap"])
         self.command.calls.clear()
         self.install(mode="background")
+        self.assertEqual(self.command.mutations(), [])
+
+    def test_default_and_explicit_selection_provenance_survives_updates(self):
+        self.install()
+        self.assertEqual(self.install(status_only=True)["mode_selection"], "default")
+        self.install()
+        self.assertEqual(self.install(status_only=True)["mode_selection"], "default")
+        self.install(mode="passive")
+        self.assertEqual(self.install(status_only=True)["mode_selection"], "explicit")
+        self.install()
+        self.assertEqual(self.install(status_only=True)["mode_selection"], "explicit")
+
+    def test_missing_or_unknown_provenance_never_becomes_a_default_selection(self):
+        self.install()
+        record = json.loads(self.mode_record().read_bytes())
+        record.pop("mode_selection")
+        self.mode_record().write_text(json.dumps(record))
+        original = self.mode_record().read_bytes()
+        self.assertEqual(self.install(status_only=True)["mode_selection"], "retained")
+        self.assertEqual(self.mode_record().read_bytes(), original)
+        self.install()
+        self.assertEqual(self.install(status_only=True)["mode_selection"], "retained")
+        record["mode_selection"] = "automatic"
+        self.mode_record().write_text(json.dumps(record))
+        original = self.mode_record().read_bytes()
+        self.command.calls.clear()
+        with self.assertRaisesRegex(installer.Refusal, "provenance"):
+            self.install(status_only=True)
+        self.assertEqual(self.mode_record().read_bytes(), original)
         self.assertEqual(self.command.mutations(), [])
 
     def test_mode_preserves_paired_backend_runner_and_cli_refresh_selection(self):
@@ -495,6 +575,7 @@ class MacDesktopService(unittest.TestCase):
         scripts.mkdir()
         helper = scripts / "install-macos-desktop-service.py"
         helper.write_bytes((ROOT / "scripts" / helper.name).read_bytes())
+        (scripts / "desktop-service-activation.py").write_bytes((ROOT / "scripts/desktop-service-activation.py").read_bytes())
         module = scripts / "desktop-revoke-hold.py"
         module.write_bytes((ROOT / "scripts" / module.name).read_bytes())
         result = subprocess.run([sys.executable, str(helper), "--help"], cwd=self.root,
@@ -571,6 +652,7 @@ class MacDesktopService(unittest.TestCase):
         self.assertEqual(self.command.destination.read_bytes(), original)
         target = self.root / "foreign-mode-record"
         target.write_text("kept")
+        self.mode_record().unlink()
         self.mode_record().symlink_to(target)
         self.command.calls.clear()
         with self.assertRaises(installer.Refusal):
@@ -745,6 +827,8 @@ class MacDesktopService(unittest.TestCase):
         old = prefix + "<key>ProcessType</key><string>Background</string></dict>" + suffix
         for remove in (False, True):
             with self.subTest(remove=remove):
+                # This case models an older installation with no mode metadata.
+                self.mode_record().unlink(missing_ok=True)
                 path = self.existing(old); self.command.loaded = True
                 self.assertEqual(self.install(remove=remove), "removed" if remove else "ready")
                 self.assertEqual(path.exists(), not remove)

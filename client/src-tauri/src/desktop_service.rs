@@ -34,6 +34,8 @@ pub(crate) mod activation;
 
 #[derive(Default)]
 pub(crate) struct Observers {
+    #[cfg(all(test, target_os = "linux"))]
+    pub mode_helpers: Option<PathBuf>,
     pub projections: Vec<Projection>,
     pub notification_controls: Option<crate::desktop_notification_controls::Setup>,
     pub retained_sources: Option<retained_import::Inputs>,
@@ -51,6 +53,7 @@ pub(crate) mod creation_worktree;
 use catalog::catalog_loop;
 mod details;
 pub mod frontend;
+mod mode_transition;
 pub(crate) mod notification_controls;
 mod read_import;
 mod reconnect;
@@ -81,15 +84,20 @@ fn startup_recovery() -> bool {
     STARTUP_RECOVERY.load(Ordering::Acquire) == 1
 }
 
-fn ownership_display(view: crate::desktop_ownership::View) -> Option<Value> {
+fn ownership_display(
+    view: crate::desktop_ownership::View,
+    activation: mode_transition::View,
+) -> Option<Value> {
     let mut value = serde_json::to_value(view).ok()?;
     value["native_recovery"] = json!(startup_recovery());
+    value["activation"] = serde_json::to_value(activation).ok()?;
     Some(value)
 }
 
 #[derive(Clone, Copy, PartialEq, Eq)]
 enum Control {
     Retry(u64),
+    Reconnect(u64),
     Stop,
 }
 
@@ -322,12 +330,21 @@ impl CatalogDelivery {
     }
 }
 
+/// Immutable checked read identity, independent of transient display state.
+/// It grants no manager, process or writer authority.
+struct ReadOnlyOriginal {
+    configuration: String,
+    epoch: String,
+    generation: u64,
+}
+
 struct Shared {
     creation_rpc: Gate,
     notification_controls: Arc<crate::desktop_notification_controls::Controller>,
     notification_supported: AtomicBool,
     ownership: Arc<crate::desktop_ownership::Controller>,
     ownership_supported: AtomicBool,
+    mode_transition: Arc<mode_transition::Controller>,
     hgs: PathBuf,
     configuration: Mutex<Option<String>>,
     audit_help: audit::help::Cache,
@@ -355,6 +372,9 @@ struct Shared {
     activation_permanent: AtomicBool,
     allowed: bool,
     stopped: AtomicBool,
+    /// Once observed, connection checks cannot retry imports or startup Grant.
+    read_only_reconnect: AtomicBool,
+    read_only_original: OnceLock<ReadOnlyOriginal>,
     cancellation: Mutex<Option<Arc<AtomicBool>>>,
     responder: Option<Arc<zerus_client_core::desktop::Responder>>,
     reads: Mutex<BTreeMap<String, ReadIntent>>,
@@ -476,6 +496,8 @@ impl Service {
             drain,
             responder,
             Observers {
+                #[cfg(all(test, target_os = "linux"))]
+                mode_helpers: None,
                 projections,
                 notification_controls: None,
                 retained_sources: None,
@@ -506,6 +528,12 @@ impl Service {
             notification_supported: AtomicBool::new(false),
             ownership,
             ownership_supported: AtomicBool::new(false),
+            mode_transition: {
+                let owner = mode_transition::Controller::new();
+                #[cfg(all(test, target_os = "linux"))]
+                owner.fixture_helpers(observers.mode_helpers);
+                owner
+            },
             hgs,
             relay: Mutex::new(None),
             pump,
@@ -527,6 +555,8 @@ impl Service {
             activation_permanent: AtomicBool::new(false),
             allowed,
             stopped: AtomicBool::new(false),
+            read_only_reconnect: AtomicBool::new(false),
+            read_only_original: OnceLock::new(),
             cancellation: Mutex::new(None),
             configuration: Mutex::new(None),
             audit_help: audit::help::Cache::default(),
@@ -584,6 +614,11 @@ impl Service {
         self.shared.snapshot.copy()
     }
     pub(crate) async fn ownership_rearm(self: &Arc<Self>) -> crate::desktop_ownership::View {
+        // An uncertain activation has its own retained original. Resume never
+        // replaces it with a Rearm or a new manager attempt.
+        if self.shared.mode_transition.pending() || self.shared.ownership.view().pending {
+            return self.ownership_result().await;
+        }
         if self.shared.retained_import.is_some() {
             let relay = self
                 .shared
@@ -614,27 +649,56 @@ impl Service {
                 ),
             }
         }
-        let view = self
-            .shared
-            .ownership
-            .request(
-                Some(zerus_client_core::desktop::ownership::Action::Rearm),
-                None,
-                None,
-            )
-            .await;
+        let view = if self.shared.ownership.granted() {
+            self.shared.ownership.view()
+        } else {
+            self.shared
+                .ownership
+                .request(
+                    Some(zerus_client_core::desktop::ownership::Action::Rearm),
+                    None,
+                    None,
+                )
+                .await
+        };
+        if self.shared.ownership.granted() {
+            let configuration = self
+                .shared
+                .configuration
+                .lock()
+                .unwrap_or_else(PoisonError::into_inner)
+                .clone();
+            if let Some(configuration) = configuration {
+                self.shared
+                    .mode_transition
+                    .activate(self.shared.hgs.clone(), configuration)
+                    .await;
+            }
+        }
         self.shared
             .publish_ownership(crate::desktop_ownership::Phase::Rearm)
             .await;
         if self.shared.ownership.granted() {
             let _ = STARTUP_RECOVERY.compare_exchange(1, 2, Ordering::AcqRel, Ordering::Acquire);
             // Rearm already made its one explicit report attempt above.
-            self.retry_connection();
+            self.wake_connection(true);
         }
         view
     }
     pub(crate) async fn ownership_result(&self) -> crate::desktop_ownership::View {
         let view = self.shared.ownership.request(None, None, None).await;
+        let configuration = self
+            .shared
+            .configuration
+            .lock()
+            .unwrap_or_else(PoisonError::into_inner)
+            .clone();
+        if let Some(configuration) = configuration {
+            self.shared
+                .mode_transition
+                .observe(self.shared.hgs.clone(), configuration)
+                .await;
+        }
         if self.shared.ownership.granted() {
             let _ = STARTUP_RECOVERY.compare_exchange(1, 2, Ordering::AcqRel, Ordering::Acquire);
         }
@@ -653,18 +717,37 @@ impl Service {
             .clone()
     }
     pub fn retry(&self) {
-        if !startup_recovery() {
+        if !self.shared.read_checks_only() && !startup_recovery() {
             if let Some(report) = &self.shared.retained_import {
                 report.request_retry();
             }
         }
         self.retry_connection();
     }
+    /// A check belongs to the displayed original service and starts no source.
+    pub fn check_status(&self, epoch: &str) -> Result<(), String> {
+        if self.shared.stopped.load(Ordering::Acquire)
+            || self
+                .shared
+                .original_read_scope()
+                .ok()
+                .flatten()
+                .is_none_or(|original| original.epoch != epoch)
+        {
+            return Err("The original background service connection changed. Reopen Settings to check its status.".into());
+        }
+        self.retry_connection();
+        Ok(())
+    }
+
     fn retry_connection(&self) {
+        self.wake_connection(false);
+    }
+    fn wake_connection(&self, read_only: bool) {
         if self.shared.stopped.load(Ordering::Acquire) {
             return;
         }
-        if !startup_recovery() {
+        if !read_only && !self.shared.read_checks_only() && !startup_recovery() {
             read_import::retry(self.shared.clone());
         }
         if let Some(cancel) = self
@@ -677,8 +760,14 @@ impl Service {
             cancel.store(true, Ordering::Release);
         }
         self.control.send_modify(|control| {
-            if let Control::Retry(n) = control {
-                *control = n.checked_add(1).map_or(Control::Stop, Control::Retry);
+            if let Control::Retry(n) | Control::Reconnect(n) = control {
+                *control = n.checked_add(1).map_or(Control::Stop, |next| {
+                    if read_only {
+                        Control::Reconnect(next)
+                    } else {
+                        Control::Retry(next)
+                    }
+                });
             }
         });
     }
@@ -837,6 +926,7 @@ impl Service {
         self.shared.stopped.store(true, Ordering::Release);
         self.shared.notification_controls.close();
         self.shared.ownership.stop();
+        self.shared.mode_transition.close();
         self.shared.audit_help.clear();
         if let Some(cancel) = self
             .shared
@@ -886,6 +976,7 @@ impl Service {
         let cache_closed = self.shared.cache_rpc.close();
         let creation_closed = self.shared.creation_rpc.close();
         let ownership_closed = self.shared.ownership.close();
+        let mode_closed = self.shared.mode_transition.close();
         let notification_closed = self.shared.notification_controls.close();
         let retained_closed = self
             .shared
@@ -906,6 +997,9 @@ impl Service {
                 == zerus_client_core::desktop::drain::Observation::Idle)
                 && drained;
             let drained = (ownership_closed.wait_until(until)
+                == zerus_client_core::desktop::drain::Observation::Idle)
+                && drained;
+            let drained = (mode_closed.wait_until(until)
                 == zerus_client_core::desktop::drain::Observation::Idle)
                 && drained;
             let drained = (notification_closed.wait_until(until)
@@ -975,6 +1069,49 @@ fn admission<T>(lock: &Mutex<T>) -> MutexGuard<'_, T> {
 }
 
 impl Shared {
+    fn read_checks_only(&self) -> bool {
+        self.read_only_original.get().is_some() || self.read_only_reconnect.load(Ordering::Acquire)
+    }
+
+    fn original_read_scope(&self) -> Result<Option<&ReadOnlyOriginal>, &'static str> {
+        if let Some(original) = self.read_only_original.get() {
+            return Ok(Some(original));
+        }
+        if !self.read_only_reconnect.load(Ordering::Acquire) {
+            return Ok(None);
+        }
+        Err("original_service_changed")
+    }
+
+    /// Only checked preflight/stream status can bind the original read scope.
+    fn observe_manual_refresh(
+        &self,
+        configuration: &str,
+        snapshot: &Snapshot,
+    ) -> Result<(), &'static str> {
+        if snapshot.executable_upgrade != Some(service::ExecutableUpgrade::ManualRefreshRequired) {
+            return Ok(());
+        }
+        let epoch = snapshot
+            .epoch
+            .as_deref()
+            .ok_or("original_service_changed")?;
+        let generation = snapshot.generation.ok_or("original_service_changed")?;
+        // A missing binding after the latch is set is never rebuilt from a
+        // later reply, even if that reply presents a healthy replacement.
+        self.original_read_scope()?;
+        let original = self.read_only_original.get_or_init(|| ReadOnlyOriginal {
+            configuration: configuration.into(),
+            epoch: epoch.into(),
+            generation,
+        });
+        if original.configuration != configuration || original.epoch != epoch {
+            return Err("original_service_changed");
+        }
+        self.read_only_reconnect.store(true, Ordering::Release);
+        Ok(())
+    }
+
     fn publish_retained_import(&self) {
         let report = self.retained_import.as_ref().map(|report| report.status());
         let mut snapshot = self.snapshot.lock();
@@ -1013,7 +1150,7 @@ impl Shared {
         let view = tauri::async_runtime::spawn_blocking(move || owner.record_view(phase))
             .await
             .unwrap_or_else(|_| self.ownership.view());
-        let view = ownership_display(view);
+        let view = ownership_display(view, self.mode_transition.view());
         let mut current = self.snapshot.lock();
         current.notification_ownership = view;
         self.pump.service(current.clone());
@@ -1035,7 +1172,8 @@ impl Shared {
             .notification_controls
             .view()
             .and_then(|v| serde_json::to_value(v).ok());
-        snapshot.notification_ownership = ownership_display(self.ownership.view());
+        snapshot.notification_ownership =
+            ownership_display(self.ownership.view(), self.mode_transition.view());
         snapshot.pending_read_import = Some(
             self.read_import
                 .lock()
@@ -1052,12 +1190,25 @@ impl Shared {
         for projection in &self.projections {
             projection(None);
         }
+        let last = self.snapshot.copy();
+        let manual = self.read_checks_only();
+        let original = manual.then(|| self.read_only_original.get()).flatten();
         self.publish(Snapshot {
+            executable_upgrade: manual.then_some(service::ExecutableUpgrade::ManualRefreshRequired),
+            epoch: original.map(|scope| scope.epoch.clone()),
+            generation: original.map(|scope| {
+                if last.epoch.as_deref() == Some(scope.epoch.as_str()) {
+                    last.generation.unwrap_or(scope.generation)
+                } else {
+                    scope.generation
+                }
+            }),
             code: code.into(),
             reconnecting,
             ..Snapshot::default()
         });
     }
+
     fn dirty(&self, computer: &str, source: SourceVersion) -> Result<bool, &'static str> {
         self.catalog_hint(computer, source, None, false)
     }
@@ -1276,6 +1427,7 @@ async fn request(
 }
 
 async fn preflight(shared: &Arc<Shared>, stop: Arc<AtomicBool>) -> Result<String, &'static str> {
+    let original = shared.original_read_scope()?;
     let help = command(shared, vec!["--help".into()], None, stop.clone()).await?;
     shared.notification_supported.store(
         std::str::from_utf8(&help).ok().is_some_and(|text| {
@@ -1330,6 +1482,12 @@ async fn preflight(shared: &Arc<Shared>, stop: Arc<AtomicBool>) -> Result<String
     }
     let mut state = service::State::new(configuration.into())?;
     state.status(&value)?;
+    if original.is_some_and(|scope| {
+        state.snapshot().epoch.as_deref() != Some(scope.epoch.as_str())
+            || scope.configuration != configuration
+    }) {
+        return Err("original_service_changed");
+    }
     *shared
         .configuration
         .lock()
@@ -1338,6 +1496,7 @@ async fn preflight(shared: &Arc<Shared>, stop: Arc<AtomicBool>) -> Result<String
     if let Some(responder) = &shared.responder {
         responder.configure_once(configuration.into());
     }
+    shared.observe_manual_refresh(configuration, state.snapshot())?;
     shared.publish(state.snapshot().clone());
     Ok(configuration.into())
 }
@@ -1347,6 +1506,9 @@ async fn run(shared: Arc<Shared>, mut control: watch::Receiver<Control>) {
     let mut automatic = false;
     loop {
         let requested = *control.borrow_and_update();
+        if matches!(requested, Control::Reconnect(_)) {
+            automatic = true; // The explicit action already settled its one mutation.
+        }
         if requested == Control::Stop || shared.stopped.load(Ordering::Acquire) {
             break;
         }
@@ -1360,7 +1522,7 @@ async fn run(shared: Arc<Shared>, mut control: watch::Receiver<Control>) {
             shared.clone(),
             &mut control,
             stop.clone(),
-            automatic,
+            automatic || shared.read_checks_only(),
             &mut greeted,
         )
         .await;
@@ -1465,6 +1627,17 @@ async fn connection(
     }
     *shared.relay.lock().unwrap_or_else(PoisonError::into_inner) = Some(relay.clone());
     let configuration = preflight(&shared, stop.clone()).await?;
+    if shared.snapshot.copy().executable_upgrade
+        == Some(service::ExecutableUpgrade::ManualRefreshRequired)
+    {
+        return Err("manual_refresh_required");
+    }
+    // Recover an existing activation before considering any fresh ownership
+    // mutation. Reconnection is always a read, including its helper journal.
+    shared
+        .mode_transition
+        .observe(shared.hgs.clone(), configuration.clone())
+        .await;
     if !automatic && !startup_recovery() {
         let explicit = shared
             .retained_import
@@ -1480,7 +1653,7 @@ async fn connection(
         .await;
     }
     if shared.ownership_supported.load(Ordering::Acquire) {
-        if automatic || startup_recovery() {
+        if automatic || startup_recovery() || shared.mode_transition.pending() {
             // Recovery is read-only until the owner chooses Resume. Reopening a read stream is never a new Grant/Rearm or replay of
             // a retained migration, approval, send or other native intent.
             shared
@@ -1496,6 +1669,7 @@ async fn connection(
     } else {
         shared.ownership.unsupported();
     }
+    mode_transition::startup(&shared, automatic, &configuration).await;
     shared
         .publish_ownership(crate::desktop_ownership::Phase::StartupGrant)
         .await;
@@ -1586,7 +1760,11 @@ async fn connection(
                         details::frame(&shared,&frame,&stop).await?;
                         for projection in &shared.projections { projection(Some(&frame)); }
                         last_frame = tokio::time::Instant::now();
+                        shared.observe_manual_refresh(&configuration, state.snapshot())?;
                         shared.publish(state.snapshot().clone());
+                        if state.snapshot().executable_upgrade == Some(service::ExecutableUpgrade::ManualRefreshRequired) {
+                            return Err("manual_refresh_required");
+                        }
                         retained_import::creations::schedule_current(&shared);
                         if frame["t"] == "hello" && notification_worker.is_none()
                             && !startup_recovery()
@@ -1790,6 +1968,20 @@ pub(crate) mod recovery_pause {
 #[tauri::command]
 pub fn desktop_service_mode() -> bool {
     mode()
+}
+
+#[tauri::command]
+pub fn desktop_service_check_status(
+    source: tauri::State<'_, crate::commands::AppState>,
+    epoch: String,
+) -> Result<(), String> {
+    if !mode() {
+        return Err("Background service mode is not enabled.".into());
+    }
+    source
+        .desktop_service()
+        .ok_or("The original background service connection is unavailable. Reopen Zerus to check status.")?
+        .check_status(&epoch)
 }
 
 #[tauri::command]

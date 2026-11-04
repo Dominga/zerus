@@ -65,6 +65,8 @@ mod tests {
             "invalid_service_frame",
             "replay_transport_unavailable",
             "ownership_rearm_required",
+            "manual_refresh_required",
+            "original_service_changed",
             "service_transport_unverified",
             "stopped",
         ] {

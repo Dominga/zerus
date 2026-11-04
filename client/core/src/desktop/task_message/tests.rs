@@ -174,6 +174,37 @@ fn the_complete_service_line_bounds_the_inline_original() {
 }
 
 #[test]
+fn only_the_exact_drained_not_started_original_counts_as_never_sent() {
+    let verified = intent(record("queue", "").to_string()).verify().unwrap();
+    let plan = &verified.plan;
+    let receipt = Receipt {
+        binding: verified.binding.clone(),
+        admission_epoch: EPOCH.into(),
+        revision: 3,
+        phase: Phase::Failed,
+        drained: true,
+        code: NOT_STARTED.into(),
+        outcome: None,
+    };
+    assert!(receipt.valid() && receipt.not_started(plan));
+    // A started child's exit, an Unknown or an undrained original with the
+    // same code, or another original's plan, never counts.
+    let mut exited = receipt.clone();
+    exited.code = EXITED.into();
+    assert!(exited.valid() && !exited.not_started(plan));
+    let mut unknown = receipt.clone();
+    unknown.phase = Phase::Unknown;
+    assert!(unknown.valid() && !unknown.not_started(plan));
+    let mut undrained = receipt.clone();
+    undrained.drained = false;
+    assert!(!undrained.not_started(plan));
+    let other = intent(record("note", DISPATCH).to_string())
+        .verify()
+        .unwrap();
+    assert!(!receipt.not_started(&other.plan));
+}
+
+#[test]
 fn only_the_exact_drained_recorded_outcome_settles() {
     let verified = intent(record("queue", "").to_string()).verify().unwrap();
     let plan = &verified.plan;

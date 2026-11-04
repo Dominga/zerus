@@ -406,6 +406,19 @@ impl Receipt {
                 .verify()
                 .is_ok_and(|v| v.binding == self.binding)
     }
+    /// Whether this exact original's drained receipt proves that its child
+    /// never started: Failed, no outcome and the closed [`NOT_STARTED`] code.
+    /// Nothing ran, so the message counts as never sent.
+    pub fn not_started(&self, plan: &Plan) -> bool {
+        self.valid()
+            && self.drained
+            && plan
+                .fingerprint()
+                .is_some_and(|fingerprint| fingerprint == self.binding.plan_sha256)
+            && self.phase == Phase::Failed
+            && self.outcome.is_none()
+            && self.code == NOT_STARTED
+    }
     /// Only the exact original's drained outcome settles it: Recorded is the
     /// CLI's metadata outcome, Failed a definite refusal. Queued, Running and
     /// Unknown never settle, and nothing here is native delivery.

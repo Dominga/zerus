@@ -849,6 +849,9 @@ const desktop = <T>(command: string, args: Record<string, unknown>): Promise<T> 
 /** Opens the selected session's composer (undefined: none is open); null outside the app. */
 export const composerOpen = (session: SessionRef | undefined) =>
   inTauri() ? invoke<ComposerView | null>("composer_open", { session: session ?? null }) : Promise.resolve(null);
+/** Whether the window is hidden: a hidden window checks no handed-over send. */
+export const composerVisibility = (hidden: boolean) =>
+  inTauri() ? invoke<void>("composer_visibility", { hidden }) : Promise.resolve();
 export const composerEdit = (handle: number, rev: number, epoch: number, text: string, position: number, anchor: number) =>
   desktop<void>("composer_edit", { handle, rev, epoch, text, position, anchor });
 /** The native file picker, then the reads; resolves once they ended. */

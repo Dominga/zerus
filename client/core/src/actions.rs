@@ -803,7 +803,9 @@ pub const ALREADY_ANSWERING: &str = "An answer to this session is already being 
 const MAXIMUM_ANSWER_BYTES: usize = 64 * 1024;
 
 /// `requestSendMessage`'s checks and standard input.
-fn send_input(
+/// The exact stdin of `hgs send <session> --json`: the direct call's, and
+/// the deferred send's original (zerus-5wmh.66.4.4).
+pub fn send_input(
     target: &Target,
     text: &str,
     files: &[Attachment],

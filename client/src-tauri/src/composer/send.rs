@@ -544,6 +544,7 @@ impl Composers {
         self.tick_continuations(now);
         self.retry_answer_saves();
         self.push_check();
+        self.tick_handed(now);
     }
 
     /// Ticks once a second while a composer is open, until the app quits.
@@ -887,11 +888,11 @@ std::thread_local! {
 }
 
 /// How a delivery or continuation ends ([`Composers::finish`]).
-struct End<'a> {
-    ok: bool,
-    detail: &'a str,
-    uncertain: bool,
-    preserve: bool,
+pub(super) struct End<'a> {
+    pub(super) ok: bool,
+    pub(super) detail: &'a str,
+    pub(super) uncertain: bool,
+    pub(super) preserve: bool,
 }
 
 /// A continuation's start or compaction call (zerus-5wmh.66.4.4).
@@ -1503,10 +1504,28 @@ impl Composers {
                 .map(|child| child.agent_id.clone()),
             expected_compaction_id: delivery.compaction.clone(),
         };
-        let dispatch = &self.0.deps.dispatch;
-        let called = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
-            dispatch(target, action, request_id.clone())
-        }));
+        // The desktop service takes it, decided before any offer; once
+        // offered, its answer stands and nothing falls back.
+        let offered =
+            std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| self.offer(&delivery)));
+        let called = match offered {
+            Ok(Some(answer)) => match self.offered(&delivery, answer) {
+                Some(outcome) => Ok(Ok(outcome)),
+                // Handed over: its row keeps sending until a check settles it.
+                None => {
+                    self.push_finished(&request_id, false, true);
+                    return;
+                }
+            },
+            Ok(None) => {
+                let dispatch = &self.0.deps.dispatch;
+                std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+                    dispatch(target, action, request_id.clone())
+                }))
+            }
+            // The offer's thread died: it may have reached the service.
+            Err(panic) => Err(panic),
+        };
         let outcome = match called {
             Ok(Ok(outcome)) => outcome,
             // A2 answers a busy send lane and every refusal before the call as
@@ -1665,7 +1684,7 @@ impl Composers {
     }
 
     /// `finish`'s change to the composer, under the caller's lock.
-    fn finish_in(&self, hub: &mut Hub, key: &str, revision: Option<u64>, end: End<'_>) {
+    pub(super) fn finish_in(&self, hub: &mut Hub, key: &str, revision: Option<u64>, end: End<'_>) {
         let End {
             ok,
             detail,

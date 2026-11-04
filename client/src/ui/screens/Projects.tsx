@@ -119,7 +119,7 @@ export function ProjectsScreen() {
   };
   const editHint = () => {
     const group = organization.grouping();
-    return group.ready ? undefined : group.reason ?? tr(organization.STARTING);
+    return group.ready ? undefined : group.reason ?? tr("Project sync is starting.");
   };
   const editDescription = () => editHint() ? "project-edit-readiness" : undefined;
   const [dragging, setDragging] = createSignal<string>();

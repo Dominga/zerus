@@ -1219,6 +1219,81 @@ fn a_name_key_draft_moves_once_to_its_session_id_key() {
     );
 }
 
+/// #1418 review (review-3): the old key is emptied only after the new one is
+/// durable, so a failed move leaves the name key's draft, reserved input
+/// included. The drafts root is read-only, so the ID key's folder cannot be
+/// created while `private()` would still let the name key be emptied.
+#[cfg(unix)]
+#[test]
+fn a_failed_move_leaves_the_name_key_draft() {
+    use std::os::unix::fs::PermissionsExt;
+    let scratch = Scratch::new("adopt-failed");
+    let root = scratch.0.join("drafts");
+    let store = DraftStore::open(root.clone());
+    let id_key = format!("studio\nid:{SESSION_ID}");
+    let mut held = draft("kept", &[("a.txt", b"kept attachment")]);
+    held.checkpoint = Some(Box::new(checkpoint(3)));
+    save(&store, KEY, held.clone()).unwrap();
+    // The ID key's folder cannot be created; the name key's still can be written.
+    fs::set_permissions(&root, fs::Permissions::from_mode(0o500)).unwrap();
+    let moved = wait(|done| store.adopt(KEY, &id_key, "claude/p/a", done));
+    fs::set_permissions(&root, fs::Permissions::from_mode(0o700)).unwrap();
+    assert!(!moved);
+    let kept = load(&store, KEY).draft;
+    assert_eq!((kept.draft, kept.checkpoint), (held.draft, held.checkpoint));
+    assert!(!folder(&root, &id_key).join("draft.json").exists());
+}
+
+/// #1418 review: a crash between the move's two writes leaves the same draft
+/// at both keys; the next move empties the name key. Different drafts at the
+/// two keys are never merged or chosen between: both stay.
+#[test]
+fn an_interrupted_move_finishes_only_for_the_same_draft() {
+    let scratch = Scratch::new("adopt-interrupted");
+    let store = DraftStore::open(scratch.0.join("drafts"));
+    let id_key = format!("studio\nid:{SESSION_ID}");
+    let mut held = draft("typed before the crash", &[("a.txt", b"kept attachment")]);
+    held.checkpoint = Some(Box::new(checkpoint(3)));
+    save(&store, KEY, held.clone()).unwrap();
+    // The crash: the ID key was written, with the label the move adds; the
+    // name key was not emptied yet.
+    let mut written = held.clone();
+    written.session_label = "claude/sample-project/review".into();
+    save(&store, &id_key, written.clone()).unwrap();
+    assert!(wait(|done| store.adopt(
+        KEY,
+        &id_key,
+        "claude/sample-project/review",
+        done
+    )));
+    assert_eq!(load(&store, KEY).draft, StoredDraft::default());
+    assert_eq!(load(&store, &id_key).draft.draft, held.draft);
+    // A different draft at each key: nothing changes.
+    save(&store, KEY, draft("typed on an older build", &[])).unwrap();
+    assert!(!wait(|done| store.adopt(
+        KEY,
+        &id_key,
+        "claude/sample-project/review",
+        done
+    )));
+    assert_eq!(
+        load(&store, KEY).draft.draft.text,
+        "typed on an older build"
+    );
+    assert_eq!(load(&store, &id_key).draft.draft, held.draft);
+    // The same text with another reserved input is a different draft too.
+    let mut other = held.clone();
+    other.checkpoint = Some(Box::new(checkpoint(4)));
+    save(&store, KEY, other.clone()).unwrap();
+    assert!(!wait(|done| store.adopt(
+        KEY,
+        &id_key,
+        "claude/sample-project/review",
+        done
+    )));
+    assert_eq!(load(&store, KEY).draft.checkpoint, other.checkpoint);
+}
+
 #[test]
 fn a_damaged_name_key_draft_stays_where_it_is() {
     let scratch = Scratch::new("adopt-damaged");
@@ -1270,8 +1345,15 @@ fn form_state_alone_moves_and_is_never_overwritten() {
         json!([{"id": "q_0", "options": ["opt_0_0"]}]),
     );
     save(&store, KEY, chosen.clone()).unwrap();
-    save(&store, &id_key, chosen.clone()).unwrap();
+    // Another answer at the ID key: form state alone is never overwritten.
+    let mut other = StoredDraft::default();
+    other.form_state.insert(
+        "answers".into(),
+        json!([{"id": "q_0", "options": ["opt_0_1"]}]),
+    );
+    save(&store, &id_key, other.clone()).unwrap();
     assert!(!wait(|done| store.adopt(KEY, &id_key, "claude/p/a", done)));
+    assert_eq!(load(&store, &id_key).draft.form_state, other.form_state);
     save(&store, &id_key, StoredDraft::default()).unwrap();
     assert!(wait(|done| store.adopt(KEY, &id_key, "claude/p/a", done)));
     assert_eq!(load(&store, &id_key).draft.form_state, chosen.form_state);

@@ -106,6 +106,17 @@ pub struct StoredDraft {
     pub checkpoint: Option<Box<Checkpoint>>,
 }
 
+/// Whether two stored drafts are the same in everything they store: text,
+/// attachment bytes, cursor, label, form state, delivery flags and reserved
+/// input. Only the session label, which a move adds, may differ.
+fn same_apart_from_label(a: &StoredDraft, b: &StoredDraft) -> bool {
+    let unlabelled = |draft: &StoredDraft| StoredDraft {
+        session_label: String::new(),
+        ..draft.clone()
+    };
+    unlabelled(a) == unlabelled(b)
+}
+
 impl StoredDraft {
     fn is_empty(&self) -> bool {
         self.draft.text.is_empty() && self.draft.attachments.is_empty()
@@ -1017,7 +1028,10 @@ impl DraftStore {
     /// labelled `session_label` when it has no label of its own. The old key
     /// is emptied only after the new one is durable, so a failure leaves both
     /// recoverable and nothing is overwritten: a draft with content, a
-    /// reserved input or form state counts. `done` gets whether it moved.
+    /// reserved input or form state counts. When the ID key already holds the
+    /// same draft, apart from the session label the move adds, a crash cut an
+    /// earlier move short, and the name key is emptied now. `done` gets
+    /// whether it moved or finished a move.
     pub fn adopt(
         &self,
         legacy: &str,
@@ -1035,11 +1049,21 @@ impl DraftStore {
                     return done(false);
                 }
                 let (here, valid) = load_once(&root, &owned);
-                if !valid || here.held() {
+                if !valid {
                     return done(false);
                 }
                 let (mut draft, valid) = load_once(&root, &legacy);
                 if !valid || !draft.held() {
+                    return done(false);
+                }
+                if here.held() {
+                    // A move a crash interrupted after its first write left
+                    // the same draft at both keys: it ends now. Different
+                    // drafts are never merged or chosen between; both stay.
+                    if same_apart_from_label(&here, &draft) {
+                        let _ = save_fenced(&fence, &root, &legacy, &StoredDraft::default());
+                        return done(true);
+                    }
                     return done(false);
                 }
                 if draft.session_label.is_empty() {

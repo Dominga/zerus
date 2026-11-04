@@ -844,8 +844,13 @@ impl Composers {
                 return;
             }
             let mut hub = me.lock();
-            for stored in hub.stored_keys.iter_mut().filter(|k| **k == from) {
-                stored.clone_from(&to);
+            // A finished move may find the ID key listed already.
+            if hub.stored_keys.contains(&to) {
+                hub.stored_keys.retain(|k| *k != from);
+            } else {
+                for stored in hub.stored_keys.iter_mut().filter(|k| **k == from) {
+                    stored.clone_from(&to);
+                }
             }
             hub.local.rename(&from, &to);
             drop(hub);
@@ -2442,6 +2447,48 @@ pub(crate) mod tests {
             read_draft(&saved, KEY).draft.draft.text,
             "typed on the older GUI"
         );
+    }
+
+    /// #1418 review (X8): a name-key composer still held in memory but no
+    /// longer the open row moves when its row is opened with its ID.
+    #[test]
+    fn a_held_name_key_composer_moves_when_its_row_reopens_with_an_id() {
+        let root = dir("adopt-held");
+        let store = drafts(&root);
+        let (c, _) = hub_on(&store);
+        c.open(Some(session()));
+        let view = until(&c, |v| v.loaded);
+        c.edit(
+            view.handle,
+            1,
+            view.text_epoch,
+            "held in memory".into(),
+            0,
+            0,
+        );
+        until(&c, |v| v.text == "held in memory");
+        let other = SessionRef {
+            key: "run:run-2".into(),
+            name: "codex/sample-project/other".into(),
+            ..session()
+        };
+        c.open(Some(other));
+        until(&c, |v| {
+            v.key == "studio\ncodex/sample-project/other" && v.loaded
+        });
+        assert!(c.lock().composers.contains_key(KEY), "still held");
+        c.open(Some(with_id()));
+        let view = until(&c, |v| v.key == ID_KEY && v.loaded && !v.text.is_empty());
+        assert_eq!(view.text, "held in memory");
+        assert!(!c.lock().composers.contains_key(KEY));
+        c.flush();
+        store.flush();
+        let saved = root.join("drafts");
+        assert_eq!(
+            read_draft(&saved, ID_KEY).draft.draft.text,
+            "held in memory"
+        );
+        assert_eq!(read_draft(&saved, KEY).draft.draft.text, "");
     }
 
     #[test]

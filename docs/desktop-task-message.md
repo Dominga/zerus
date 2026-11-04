@@ -30,10 +30,10 @@ before any preparation, row or child: no qualified seam yet attests the code a
 macOS child runs before it receives the private input. Windows answers
 `task_message_unsupported` and advertises nothing.
 
-No client sends the kind yet: the editor still sends every message through its
-direct path. The client path, in desktop-service mode only, is a separate
-slice. It must keep the outcome described in [Oversize
-originals](#oversize-originals).
+The task editor sends a new queue or note through the service in
+desktop-service mode on Linux and macOS (see [Client](#client)); everything
+else keeps its direct path. The client keeps the outcome described in
+[Oversize originals](#oversize-originals).
 
 ## Actor
 
@@ -188,8 +188,14 @@ the form like every original.
 ## Client
 
 `client/src-tauri/src/desktop_service/task_message.rs` sends one original and
-then only reads its result. It has no caller yet: the editor's routing in
-desktop-service mode lands together with attachments by reference.
+then only reads its result. The task editor is its only caller.
+
+- **Routing.** Only Linux and macOS, only in the selected desktop-service
+  mode, and only a new `queue` or `note` from an explicit Submit go to the
+  service; there is no fallback mixing. `send` and `reopen`, description
+  edits, the recovery of an unmarked record and everything outside that mode
+  keep the direct path. A macOS service refuses the kind and does not
+  advertise it, so its completed probe takes the direct path.
 
 - **Consent.** Only the outbox record reserved by the same explicit Submit is
   sent, and only once. A record from before is never sent again.
@@ -214,7 +220,9 @@ desktop-service mode lands together with attachments by reference.
   a present marker, and an unreadable or foreign one too. A marked record that
   the lookup does not find, including after a crash between the marker and the
   request, stays in review until the user explicitly discards it or confirms
-  sending it again as a new record. An unreadable marker, or one that names
+  sending it again as a new record: the editor's reviewed release removes the
+  record and its marker, and the next Submit is a new original with a new
+  identity. Outside desktop-service mode a marked record is only refused. An unreadable marker, or one that names
   another record, is never taken as absent. Releasing or settling the record
   removes the marker last, in the same durable step, after a directory sync
   that makes the record's removal durable first: a record never outlives its
@@ -226,6 +234,16 @@ desktop-service mode lands together with attachments by reference.
   the original failed or its result is unknown; it is never sent again and
   never takes the direct path. Direct is the only answer that uses the direct
   path, after a completed capability probe that shows no support for the kind.
+- **Editor.** Recorded settles like a delivered direct reply: the draft
+  clears if unchanged, then the record and its marker go. Unsent leaves an
+  ordinary draft that can be sent again; for a new original, the release step
+  saves the draft's settled flags durably before it removes the record. On
+  explicit recovery of a marked record, the lookup's not-started receipt does
+  the same in that order, Unconfirmed stays in review, and a missing or
+  unsettled result stays in review with the release-or-check-later text.
+  A record too large even by reference is refused before staging
+  (`TOO_LARGE_REFERENCE`); the inline-only text names the 48 KiB limit only
+  for a service without reference support.
 
 ## Wire
 

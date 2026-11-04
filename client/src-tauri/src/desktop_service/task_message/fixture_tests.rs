@@ -244,6 +244,29 @@ fn an_oversize_original_is_staged_handed_off_and_offered_by_reference() {
         assert_eq!(count(&f.0, "task_message_result"), 1);
         assert_eq!(sent.answer, MessageAnswer::Unconfirmed(UNCONFIRMED.into()));
         assert_eq!(sent.released, 0);
+        // A later check of the same record asks for the same original by
+        // its one plan, sends nothing, and an unsettled result stays open.
+        let checked = {
+            let (service, record) = (service.clone(), record.clone());
+            tauri::async_runtime::spawn_blocking(move || {
+                check(Some(service), "example", TASK, &record)
+            })
+            .await
+            .unwrap()
+        };
+        assert_eq!(checked, None);
+        let queries: Vec<Value> = calls(&f.0)
+            .into_iter()
+            .map(|c| match c["value"].get("request") {
+                Some(request) => request.clone(),
+                None => c["value"].clone(),
+            })
+            .filter(|request| request["op"] == "task_message_result")
+            .map(|request| request["query"].clone())
+            .collect();
+        assert_eq!(queries.len(), 2);
+        assert_eq!(queries[0], queries[1]);
+        assert_eq!(count(&f.0, "task_message"), 1);
         service.join().await.unwrap();
     });
 }
@@ -265,6 +288,28 @@ fn an_oversize_original_that_cannot_be_staged_is_never_sent_and_leaves_no_copy()
             (sent.handoff, sent.released, copies(&f.0, &record)),
             (None, 1, 0)
         );
+        service.join().await.unwrap();
+        // Supported, but too large even by reference: its text alone exceeds
+        // the control frame. Refused before staging, nothing sent.
+        let f = fixture(json!({"message_references": true, "message_staging": true}));
+        staging(&f.0);
+        let (service, _cache) = connected(&f).await;
+        let mut record = with_attachment(70 << 10);
+        record["intent"]["content"]["text"] = json!("x".repeat(70 << 10));
+        record["input_sha256"] = json!(input_digest(&message_input(&record["intent"])));
+        let sent = send(service.clone(), &f.0, record.clone(), true, true).await;
+        assert_eq!(
+            sent.answer,
+            MessageAnswer::Unsent(TOO_LARGE_REFERENCE.into())
+        );
+        assert_eq!(
+            (sent.handoff, sent.released, copies(&f.0, &record)),
+            (None, 1, 0)
+        );
+        assert!(calls(&f.0)
+            .iter()
+            .all(|c| c["value"]["request"]["op"] != "task_message_staging"
+                && c["value"]["op"] != "task_message_staging"));
         service.join().await.unwrap();
         // Supported, but no staging folder is named: never sent.
         let f = fixture(json!({"message_references": true}));

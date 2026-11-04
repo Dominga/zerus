@@ -43,7 +43,7 @@ describe("passive service", () => {
     expect(component).toContain("servicePaused(desktopService.state()) && !Object.keys(catalog.computers).length");
     const detail = component.match(/export function PausedServiceDetail[\s\S]*?\n}\n/)?.[0] ?? "";
     expect(detail).toContain('tr("Background work is paused")');
-    expect(detail).toContain('tr("Resume to activate the service explicitly.")');
+    expect(detail).toContain('tr("Zerus runs your sessions through a background service, which stays paused until you resume it.")');
     expect(detail).toMatch(/class="btn primary" disabled=\{resumeBlocked\(\)\} onClick=\{resume\}>\{tr\("Resume background work"\)\}/);
     expect(component).toContain("const resume = () => void ownershipActions.rearm()");
     expect(component).toContain("ownershipActions.busy() || !!desktopService.state()?.notification_ownership?.running");

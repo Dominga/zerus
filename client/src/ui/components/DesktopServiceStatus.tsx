@@ -17,7 +17,7 @@ export function PausedServiceDetail() {
   return (
     <div class="detail-empty paused-service">
       <h2>{tr("Background work is paused")}</h2>
-      <p>{tr("Resume to activate the service explicitly.")}</p>
+      <p>{tr("Zerus runs your sessions through a background service, which stays paused until you resume it.")}</p>
       <button type="button" class="btn primary" disabled={resumeBlocked()} onClick={resume}>{tr("Resume background work")}</button>
     </div>
   );

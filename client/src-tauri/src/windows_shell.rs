@@ -59,8 +59,9 @@ pub fn choose_hgs(
     choice(stable.clone(), (differs || unbound) && newer, stable)
 }
 
-/// Whether the status binding names `app` and still names the staged CLI.
-/// Informational: the CLI proves the pair itself before admitting the app.
+/// Whether the status binding names `app`, still names the staged CLI and
+/// still holds for the file at the app's path (a same-path replacement does
+/// not). Informational: the CLI proves the pair itself before admitting it.
 #[cfg(any(feature = "live", test))]
 fn bound(frontend: &Value, app: &Path) -> bool {
     let plain = |path: &str| {
@@ -70,6 +71,7 @@ fn bound(frontend: &Value, app: &Path) -> bool {
             .to_ascii_lowercase()
     };
     frontend["cli_current"] == true
+        && frontend["frontend_current"] == true
         && frontend["path"]
             .as_str()
             .is_some_and(|path| plain(path) == plain(&app.to_string_lossy()))
@@ -244,7 +246,7 @@ mod tests {
         let bin = Path::new("C:/Zip/hgs.exe");
         let app = Path::new(r"C:\Zip\hgs-tray.exe");
         let status = json!({"enabled":true,"version":"1.56.0","cli":{"path":"C:/State/hgs.exe","installed":true,"sha256":"same","version":"1.56.0"},
-            "frontend":{"path":r"C:\zip\HGS-TRAY.EXE","cli_current":true}});
+            "frontend":{"path":r"C:\zip\HGS-TRAY.EXE","cli_current":true,"frontend_current":true}});
         // Bound to this app and an unchanged CLI: nothing to do.
         assert!(!choose_hgs(&status, bin, "same", None, Some(app)).refresh);
         assert!(
@@ -260,8 +262,10 @@ mod tests {
         // No binding, another app's, or one for a CLI since replaced: rebind.
         for frontend in [
             json!(null),
-            json!({"path":r"C:\Other\hgs-tray.exe","cli_current":true}),
-            json!({"path":r"C:\Zip\hgs-tray.exe","cli_current":false}),
+            json!({"path":r"C:\Other\hgs-tray.exe","cli_current":true,"frontend_current":true}),
+            json!({"path":r"C:\Zip\hgs-tray.exe","cli_current":false,"frontend_current":true}),
+            // The same path now holds another app (replaced after a quit).
+            json!({"path":r"C:\Zip\hgs-tray.exe","cli_current":true,"frontend_current":false}),
             json!({"path":r"C:\Zip\hgs-tray.exe"}),
         ] {
             let mut unbound = status.clone();

@@ -236,6 +236,7 @@ pub fn install_json(report: &InstallReport, layout: &Layout, version: &str) -> V
         "frontend": report.frontend.as_ref().map(|binding| json!({
             "path": shown(&binding.frontend.path),
             "cli_current": true,
+            "frontend_current": true,
         })),
     })
 }
@@ -304,9 +305,10 @@ pub struct Status {
     /// The image `current` names.
     pub image: Option<Image>,
     pub host: Host,
-    /// The app bound to the staged CLI, and whether the binding still names
-    /// that CLI. Informational only; admission proves the pair itself.
-    pub frontend: Option<(PathBuf, bool)>,
+    /// The app bound to the staged CLI, whether the binding still names that
+    /// CLI, and whether the file at the app's path is still the bound app.
+    /// Informational only; admission proves the pair itself.
+    pub frontend: Option<(PathBuf, bool, bool)>,
 }
 
 impl Status {
@@ -348,9 +350,10 @@ impl Status {
             },
             "image": self.image.as_ref().map(image_json),
             "host": self.host.json(),
-            "frontend": self.frontend.as_ref().map(|(path, current)| json!({
+            "frontend": self.frontend.as_ref().map(|(path, cli, frontend)| json!({
                 "path": shown(path),
-                "cli_current": current,
+                "cli_current": cli,
+                "frontend_current": frontend,
             })),
         })
     }

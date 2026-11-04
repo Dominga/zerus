@@ -77,8 +77,11 @@ the zip's app relays through the stable CLI staged from that zip.
   admits nothing. Neither does a replaced app or CLI, or an edit that keeps
   the app's length and write time.
 - **Rebinding.** The app stages again at start when the binding does not
-  name it, so a moved or newly extracted copy binds itself. Same or newer
-  version only, never a downgrade, and an unchanged CLI is not copied again.
+  name it, no longer names the staged CLI, or names its path while that path
+  now holds another file or other bytes. `session-host status` reports these
+  facts as `cli_current` and `frontend_current`. So a moved, newly extracted
+  or same-path replaced copy binds itself again. Same or newer version only,
+  never a downgrade, and an unchanged CLI is not copied again.
 - **Visibility.** A service reads the binding when it starts. A binding made
   later, for example by a copy of the zip extracted elsewhere, is used from
   the service's next start. An upgrade restarts the service on the new CLI

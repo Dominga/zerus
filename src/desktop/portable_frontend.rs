@@ -27,6 +27,9 @@ use zerus_client_core::desktop::windows::{
 /// The largest app whose digest is read.
 #[cfg(windows)]
 const DIGEST_BYTES: u64 = 256 * 1024 * 1024;
+/// Reading the bound app's digest for `session-host status`.
+#[cfg(windows)]
+const STATUS_TIME: Duration = Duration::from_secs(10);
 /// The one original deadline of a record: the app's ancestry, its digest and
 /// the last check before publication all count against it.
 #[cfg(windows)]
@@ -463,15 +466,26 @@ pub(crate) fn materialize(_: &str) -> Option<PortableScope> {
     None
 }
 
-/// For `session-host status`: the bound app's path, and whether the binding
-/// still names the staged CLI. Informational; it proves nothing.
-pub(crate) fn status(layout: &Layout) -> Option<(PathBuf, bool)> {
+/// For `session-host status`: the bound app's path, whether the binding still
+/// names the staged CLI, and whether the file at that path is still the bound
+/// app (the same object with the recorded digest, read through a pin). The app
+/// stages again at start when either is not so. Informational; admission
+/// proves the pair itself and the record alone admits nothing.
+pub(crate) fn status(layout: &Layout) -> Option<(PathBuf, bool, bool)> {
     let binding = crate::host::staging::read_frontend(&layout.images)?;
     #[cfg(windows)]
-    let current = PinnedImage::open(&layout.cli).is_ok_and(|cli| is(&cli, &binding.cli));
+    let (cli, frontend) = (
+        PinnedImage::open(&layout.cli).is_ok_and(|cli| is(&cli, &binding.cli)),
+        PinnedImage::open(&binding.frontend.path).is_ok_and(|app| {
+            is(&app, &binding.frontend)
+                && app
+                    .sha256(DIGEST_BYTES, Instant::now() + STATUS_TIME)
+                    .is_ok_and(|digest| digest == binding.frontend_sha256)
+        }),
+    );
     #[cfg(not(windows))]
-    let current = false;
-    Some((binding.frontend.path, current))
+    let (cli, frontend) = (false, false);
+    Some((binding.frontend.path, cli, frontend))
 }
 
 #[cfg(all(test, windows))]

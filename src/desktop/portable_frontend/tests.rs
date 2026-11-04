@@ -416,6 +416,69 @@ fn creation_role() {
     }
 }
 
+/// Start `app` (a copy of this test binary named hgs-tray.exe) in `mode`; it
+/// starts the hgs.exe beside it, whose real install may bind it. Returns the
+/// install's report: the published binding, "none" or an error.
+fn bind_through_app(dir: &Path, app: &Path, home: &Path, mode: &str) -> String {
+    let report = dir.join(format!("report-{mode}.txt"));
+    let _ = fs::remove_file(&report);
+    let _ = fs::remove_dir_all(home.join("barrier"));
+    let mut command = run_role(app, "app");
+    command.env(MODE, mode).env(HOME, home).env(REPORT, &report);
+    if mode == "agent" {
+        command.env(AGENT_MARKER, "agent-descended-fixture");
+    } else {
+        command.env_remove(AGENT_MARKER);
+    }
+    assert!(command.status().unwrap().success(), "{mode}");
+    fs::read_to_string(&report).unwrap()
+}
+
+/// A zip folder with copies of this test binary as its app and its hgs.exe.
+fn fixture_zip(dir: &Path) -> PathBuf {
+    let zip = dir.join("zip");
+    fs::create_dir_all(&zip).unwrap();
+    let own = std::env::current_exe().unwrap();
+    let app = zip.join(staging::FRONTEND_IMAGE);
+    fs::copy(&own, &app).unwrap();
+    fs::copy(&own, zip.join(staging::EXECUTABLE)).unwrap();
+    app
+}
+
+#[test]
+fn a_same_path_replacement_is_seen_at_start_and_rebinds_through_the_app_s_own_install() {
+    let dir = tempfile::tempdir().unwrap();
+    let app = fixture_zip(dir.path());
+    let home = dir.path().join("home");
+    let layout = Layout::new(&home.to_string_lossy(), &home.join("config"));
+    let old: FrontendBinding =
+        serde_json::from_str(&bind_through_app(dir.path(), &app, &home, "plain")).unwrap();
+    assert_eq!(
+        status(&layout).map(|(_, cli, app)| (cli, app)),
+        Some((true, true))
+    );
+    // After a quit, another app at the same path (a new object).
+    fs::remove_file(&app).unwrap();
+    fs::copy(std::env::current_exe().unwrap(), &app).unwrap();
+    let (path, cli, current) = status(&layout).unwrap();
+    assert!(path
+        .as_os_str()
+        .eq_ignore_ascii_case(old.frontend.path.as_os_str()));
+    // Same path, unchanged CLI, but not the bound app: the app's start must
+    // stage again, and the old record never names the new object.
+    assert!(cli && !current);
+    assert!(!is(&PinnedImage::open(&app).unwrap(), &old.frontend));
+    // The app's own install binds the new object.
+    let new: FrontendBinding =
+        serde_json::from_str(&bind_through_app(dir.path(), &app, &home, "plain")).unwrap();
+    assert!(is(&PinnedImage::open(&app).unwrap(), &new.frontend));
+    assert_ne!(new.frontend.file_id, old.frontend.file_id);
+    assert_eq!(
+        status(&layout).map(|(_, cli, app)| (cli, app)),
+        Some((true, true))
+    );
+}
+
 #[test]
 fn only_the_app_s_own_install_outside_an_agent_tree_records_a_binding() {
     let dir = tempfile::tempdir().unwrap();
@@ -587,11 +650,20 @@ fn an_inherited_untrusted_ace_refuses_the_candidate_before_the_record_exists() {
     let gui = dir.path().join("zip").join(staging::FRONTEND_IMAGE);
     let binding = binding_for(&gui);
     let source = dir.path().join("source").join(staging::EXECUTABLE);
+    let committed = std::cell::Cell::new(false);
     let outcome = staging::install_bound(&layout, &source, "1.0.0", |_, publish| {
-        publish(&binding, &|| true)?;
+        publish(&binding, &|| {
+            committed.set(true);
+            true
+        })?;
         Ok(Some(binding.clone()))
     });
     assert!(outcome.is_err(), "an unsafe candidate must be refused");
+    // Refused before the commit: the record's name was never published.
+    assert!(
+        !committed.get(),
+        "the commit guard must not run for an unsafe candidate"
+    );
     assert!(
         !record.exists(),
         "nothing was published under the record's name"

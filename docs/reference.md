@@ -5165,7 +5165,10 @@ manages only the owned `com.hgdev.hgs-tray` AUMID/COM registration. Install the
 passive service task first so the selected stable CLI matches the current
 installer. Status is metadata, not native notification readiness. The fixed
 cold activation entry refuses before configuration or owner acquisition. No
-worker repairs registration or enables background consent.
+worker repairs registration or enables background consent. The background
+service checks the registration against its own running image and configuration
+folders, not its `HOME`; another registered image is reported as
+`notification_registration_other_image` and changes nothing.
 
 Explicit removal uses `notification-registration remove --json --request-id UUID`
 only after the original selected service's settled manual revoke with that same

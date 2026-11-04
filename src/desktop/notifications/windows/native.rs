@@ -114,6 +114,7 @@ struct Installation {
     configuration: String,
     sid: String,
     session: u32,
+    image: String,
     command: String,
 }
 impl Installation {
@@ -125,40 +126,7 @@ impl Installation {
         {
             return Err("configuration_changed");
         }
-        // This maintained plan derives the actual token SID and selected stable
-        // CLI; no incoming JSON plan or role assertion is accepted here.
-        let plan = crate::desktop::registration::windows_plan(config, &location)
-            .map_err(|_| "selected_cli_unavailable")?;
-        let cli = plan["argv"][0].as_str().ok_or("selected_cli_unavailable")?;
-        let here =
-            platform::canonical(&std::env::current_exe().map_err(|_| "selected_cli_unavailable")?)
-                .map_err(|_| "selected_cli_unavailable")?;
-        if platform::canonical(std::path::Path::new(cli)).ok().as_ref() != Some(&here)
-            || cli.contains('"')
-        {
-            return Err("selected_cli_changed");
-        }
-        let args = [
-            activation::ENTRY,
-            "--config-dir",
-            plan["argv"][4]
-                .as_str()
-                .ok_or("configuration_unavailable")?,
-            "--state-dir",
-            plan["argv"][6]
-                .as_str()
-                .ok_or("configuration_unavailable")?,
-        ];
-        let command = format!(
-            "\"{cli}\" {}",
-            args.iter()
-                .map(|v| host::spawn::quote_argument(v))
-                .collect::<Vec<_>>()
-                .join(" ")
-        );
-        if command.encode_utf16().count() >= 32767 {
-            return Err("registration_command_too_large");
-        }
+        let (image, command) = selected_command(config)?;
         let sid = host::token::user_sid().map_err(|_| "user_unavailable")?;
         if matches!(sid.as_str(), "S-1-5-18" | "S-1-5-19" | "S-1-5-20")
             || sid.starts_with("S-1-5-80-")
@@ -169,24 +137,61 @@ impl Installation {
             configuration: location.configuration,
             sid,
             session: interactive_session().ok_or("interactive_session_unavailable")?,
+            image,
             command,
         })
     }
     fn check(&self) -> bool {
-        let class = format!(r"Software\Classes\CLSID\{}", activation::CLSID_TEXT);
         host::token::user_sid().ok().as_ref() == Some(&self.sid)
             && interactive_session() == Some(self.session)
-            && registry_string(APPLICATION_KEY, ABI_VALUE).as_deref() == Some(wire::ABI)
-            && registry_string(APPLICATION_KEY, CONFIGURATION_VALUE).as_ref()
-                == Some(&self.configuration)
-            && registry_string(APPLICATION_KEY, "CustomActivator").as_deref()
-                == Some(activation::CLSID_TEXT)
-            && registry_string(APPLICATION_KEY, "DisplayName").as_deref() == Some("Zerus")
-            && registry_string(&class, ABI_VALUE).as_deref() == Some(wire::ABI)
-            && registry_string(&class, CONFIGURATION_VALUE).as_ref() == Some(&self.configuration)
-            && registry_string(&format!(r"{class}\LocalServer32"), "").as_ref()
-                == Some(&self.command)
+            && self.registered(registry_string).is_ok()
     }
+    /// The explicit registration, exactly, read through `read`. Otherwise the
+    /// closed diagnostic: another image under otherwise exact values is
+    /// `notification_registration_other_image`; anything else is unavailable.
+    /// Neither is a selection, permission or repair.
+    fn registered(&self, read: impl Fn(&str, &str) -> Option<String>) -> Result<(), &'static str> {
+        let class = format!(r"Software\Classes\CLSID\{}", activation::CLSID_TEXT);
+        let fixed = read(APPLICATION_KEY, ABI_VALUE).as_deref() == Some(wire::ABI)
+            && read(APPLICATION_KEY, CONFIGURATION_VALUE).as_ref() == Some(&self.configuration)
+            && read(APPLICATION_KEY, "CustomActivator").as_deref() == Some(activation::CLSID_TEXT)
+            && read(APPLICATION_KEY, "DisplayName").as_deref() == Some("Zerus")
+            && read(&class, ABI_VALUE).as_deref() == Some(wire::ABI)
+            && read(&class, CONFIGURATION_VALUE).as_ref() == Some(&self.configuration);
+        let command = read(&format!(r"{class}\LocalServer32"), "");
+        if fixed && command.as_ref() == Some(&self.command) {
+            return Ok(());
+        }
+        if fixed
+            && command.is_some_and(|registered| {
+                super::registration::names_other_image(&registered, &self.command, &self.image)
+            })
+        {
+            return Err("notification_registration_other_image");
+        }
+        Err("notification_registration_unavailable")
+    }
+}
+
+/// The expected Toast command, self-anchored (zerus-mgw2v): this service's own
+/// native canonical image and its actual config and state directories,
+/// normalised by the registration writers' own definition_directories. No
+/// HOME, USERPROFILE, HGS_EXECUTABLE, registry-derived image, sibling search
+/// or fallback selector takes part. It matches the registered command path
+/// and arguments; it is not a content or Grant proof.
+fn selected_command(config: &Config) -> Result<(String, String), &'static str> {
+    let image =
+        platform::canonical(std::env::current_exe().map_err(|_| "selected_cli_unavailable")?)
+            .map_err(|_| "selected_cli_unavailable")?;
+    let image = image.to_str().ok_or("selected_cli_unavailable")?.to_owned();
+    let (config_dir, state_dir) = crate::desktop::registration::definition_directories(config)
+        .map_err(|_| "configuration_unavailable")?;
+    let command = super::registration::expected_command(
+        &image,
+        config_dir.to_str().ok_or("configuration_unavailable")?,
+        state_dir.to_str().ok_or("configuration_unavailable")?,
+    )?;
+    Ok((image, command))
 }
 
 fn escape(value: &str) -> String {
@@ -271,7 +276,10 @@ impl Backend {
     pub fn open(config: &Config, session: &Session, slot: Slot) -> Result<Self, &'static str> {
         let installation = Installation::select(config, session)?;
         if !installation.check() {
-            return Err("notification_registration_unavailable");
+            return Err(installation
+                .registered(registry_string)
+                .err()
+                .unwrap_or("notification_registration_unavailable"));
         }
         unsafe { RoInitialize(RO_INIT_MULTITHREADED) }
             .map_err(|_| "notification_apartment_unavailable")?;

@@ -138,3 +138,200 @@ fn registration_reader_accepts_only_one_bounded_plain_string() {
     drop(key);
     assert_eq!(registry_string(&path, "plain"), None);
 }
+
+fn installation(image: &str) -> Installation {
+    Installation {
+        configuration: "a".repeat(64),
+        sid: "S-1-5-21-1000".into(),
+        session: 1,
+        image: image.into(),
+        command: super::super::registration::expected_command(image, r"C:\c", r"C:\s").unwrap(),
+    }
+}
+fn registry(command: Option<String>) -> BTreeMap<(String, String), String> {
+    let class = format!(r"Software\Classes\CLSID\{}", activation::CLSID_TEXT);
+    let mut values = BTreeMap::new();
+    for (key, name, value) in [
+        (APPLICATION_KEY, ABI_VALUE, wire::ABI.to_owned()),
+        (APPLICATION_KEY, CONFIGURATION_VALUE, "a".repeat(64)),
+        (
+            APPLICATION_KEY,
+            "CustomActivator",
+            activation::CLSID_TEXT.to_owned(),
+        ),
+        (APPLICATION_KEY, "DisplayName", "Zerus".to_owned()),
+        (class.as_str(), ABI_VALUE, wire::ABI.to_owned()),
+        (class.as_str(), CONFIGURATION_VALUE, "a".repeat(64)),
+    ] {
+        values.insert((key.to_owned(), name.to_owned()), value);
+    }
+    if let Some(command) = command {
+        values.insert((format!(r"{class}\LocalServer32"), String::new()), command);
+    }
+    values
+}
+fn verdict(
+    installation: &Installation,
+    values: &BTreeMap<(String, String), String>,
+) -> Result<(), &'static str> {
+    installation.registered(|key, name| values.get(&(key.to_owned(), name.to_owned())).cloned())
+}
+
+#[test]
+fn only_the_exact_registration_is_current_and_other_image_is_a_closed_diagnostic() {
+    let own = installation(r"C:\Users\Example\.local\bin\hgs.exe");
+    let other = installation(r"C:\Other copy\hgs.exe");
+    assert_eq!(verdict(&own, &registry(Some(own.command.clone()))), Ok(()));
+    assert_eq!(
+        verdict(&own, &registry(Some(other.command.clone()))),
+        Err("notification_registration_other_image")
+    );
+    let unavailable = Err("notification_registration_unavailable");
+    let same_image_wrong_config =
+        super::super::registration::expected_command(&own.image, r"C:\d", r"C:\s").unwrap();
+    for (case, values) in [
+        ("absent", BTreeMap::new()),
+        ("no command", registry(None)),
+        ("malformed command", registry(Some("hgs.exe".into()))),
+        (
+            "same image, wrong config",
+            registry(Some(same_image_wrong_config)),
+        ),
+        (
+            "extra argument",
+            registry(Some(format!("{} --extra", own.command))),
+        ),
+        (
+            "other image, extra argument",
+            registry(Some(format!("{} --extra", other.command))),
+        ),
+    ] {
+        assert_eq!(verdict(&own, &values), unavailable, "{case}");
+    }
+    // Another image under a foreign ABI or configuration is not the
+    // diagnostic either; every non-command value must be exact first.
+    let class = format!(r"Software\Classes\CLSID\{}", activation::CLSID_TEXT);
+    for (key, name, value) in [
+        (APPLICATION_KEY.to_owned(), ABI_VALUE, "foreign-abi"),
+        (class.clone(), CONFIGURATION_VALUE, "b"),
+        (APPLICATION_KEY.to_owned(), "DisplayName", "Other"),
+    ] {
+        for command in [own.command.clone(), other.command.clone()] {
+            let mut values = registry(Some(command));
+            values.insert((key.clone(), name.to_owned()), value.to_owned());
+            assert_eq!(verdict(&own, &values), unavailable, "{key} {name}");
+        }
+    }
+    // A registration changed after selection is refused on the next check.
+    let mut values = registry(Some(own.command.clone()));
+    assert_eq!(verdict(&own, &values), Ok(()));
+    values.insert(
+        (format!(r"{class}\LocalServer32"), String::new()),
+        other.command.clone(),
+    );
+    assert!(verdict(&own, &values).is_err());
+}
+
+const SELECTION_CHILD: &str = "HGS_TEST_NOTIFICATION_SELECTION_CHILD";
+const SELECTION: &str =
+    "desktop::notifications::windows::native::tests::the_selected_command_is_this_image_and_configuration_whatever_home_or_executable_say";
+
+#[test]
+fn the_selected_command_is_this_image_and_configuration_whatever_home_or_executable_say() {
+    if let Some(root) = std::env::var_os(SELECTION_CHILD) {
+        // Child: HOME, USERPROFILE and HGS_EXECUTABLE all name another place.
+        let root = std::path::PathBuf::from(root);
+        let config = Config {
+            home: root.join("home").to_str().unwrap().into(),
+            dir: root.join("config dir ü"),
+            state: root.join("state dir ü"),
+            selves: vec![],
+            peers: vec![],
+            base_peers: vec![],
+            peers_from_environment: false,
+            machines: Default::default(),
+            tab: false,
+            tab_colors: String::new(),
+        };
+        let image = platform::canonical(std::env::current_exe().unwrap()).unwrap();
+        let (selected, command) = selected_command(&config).unwrap();
+        assert_eq!(selected, image.to_str().unwrap());
+        assert_eq!(
+            command,
+            super::super::registration::expected_command(
+                &selected,
+                config.dir.to_str().unwrap(),
+                config.state.to_str().unwrap()
+            )
+            .unwrap()
+        );
+        return;
+    }
+    // A link of this test image in a folder with a space and non-ASCII text.
+    let here = std::env::current_exe().unwrap();
+    let temp = tempfile::tempdir_in(here.parent().unwrap()).unwrap();
+    let folder = temp.path().join("Zerus тест image");
+    std::fs::create_dir_all(&folder).unwrap();
+    let image = folder.join("hgs selection.exe");
+    if std::fs::hard_link(&here, &image).is_err() {
+        std::fs::copy(&here, &image).unwrap();
+    }
+    let elsewhere = temp.path().join("elsewhere");
+    let output = std::process::Command::new(&image)
+        .args([SELECTION, "--exact", "--nocapture", "--test-threads=1"])
+        .env(SELECTION_CHILD, temp.path())
+        .env("HOME", &elsewhere)
+        .env("USERPROFILE", &elsewhere)
+        .env("HGS_EXECUTABLE", elsewhere.join(r".local\bin\hgs.exe"))
+        .output()
+        .unwrap();
+    let stdout = String::from_utf8_lossy(&output.stdout);
+    assert!(
+        output.status.success() && stdout.contains("1 passed"),
+        "{stdout}\n{}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+}
+
+#[test]
+fn relative_configuration_formats_exactly_as_the_registration_writer() {
+    // Config::load keeps a relative HGS_CONFIG_DIR; the writer makes the
+    // definition directories absolute, and the selector must match it.
+    let config = Config {
+        home: std::env::temp_dir()
+            .join("selection home")
+            .to_str()
+            .unwrap()
+            .into(),
+        dir: "relative config dir ü".into(),
+        state: "relative state dir".into(),
+        selves: vec![],
+        peers: vec![],
+        base_peers: vec![],
+        peers_from_environment: false,
+        machines: Default::default(),
+        tab: false,
+        tab_colors: String::new(),
+    };
+    let location = Location::new(&config).unwrap();
+    let plan = crate::desktop::registration::windows_plan(&config, &location).unwrap();
+    let (image, command) = selected_command(&config).unwrap();
+    assert_eq!(
+        command,
+        super::super::registration::expected_command(
+            &image,
+            plan["argv"][4].as_str().unwrap(),
+            plan["argv"][6].as_str().unwrap()
+        )
+        .unwrap()
+    );
+    let here = std::env::current_dir().unwrap();
+    assert_eq!(
+        plan["argv"][4],
+        here.join("relative config dir ü").to_str().unwrap()
+    );
+    assert_eq!(
+        plan["argv"][6],
+        here.join("relative state dir").to_str().unwrap()
+    );
+}

@@ -81,7 +81,8 @@ fn an_existing_next_choice_and_order_survive_and_duplicate_paths_keep_the_id() {
     .unwrap();
     let desired = &plan.input()["desired"];
     assert_eq!(desired["default_project"], "next");
-    assert_eq!(desired["project_order"], json!(["next"]));
+    assert!(desired.get("project_order").is_none());
+    assert!(plan.input()["base"].get("project_order").is_none());
     assert_eq!(desired["unknown"], "keep");
     let next = &desired["projects"][0];
     for key in ["id", "name", "color", "sessions", "custom"] {
@@ -93,6 +94,24 @@ fn an_existing_next_choice_and_order_survive_and_duplicate_paths_keep_the_id() {
     assert_eq!(next["folders"][0], folder);
     assert_eq!(next["folders"].as_array().unwrap().len(), 2);
     assert_eq!(plan.evidence.witnesses.len(), 1);
+}
+
+#[test]
+fn a_new_project_never_writes_the_existing_shared_order_register() {
+    let (snapshot, binding) = fixture();
+    let plan = one(&snapshot, binding);
+    assert!(plan.changed());
+    let input = plan.input();
+    for side in ["base", "desired"] {
+        assert!(input[side].get("project_order").is_none(), "{side}");
+        assert_eq!(input[side]["default_project"], "next");
+    }
+    assert_eq!(
+        input["desired"]["projects"][0],
+        input["base"]["projects"][0]
+    );
+    assert_eq!(input["desired"]["projects"].as_array().unwrap().len(), 2);
+    assert_eq!(snapshot["organization"]["project_order"], json!(["next"]));
 }
 
 #[test]

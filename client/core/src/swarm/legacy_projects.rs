@@ -388,7 +388,17 @@ pub fn plan(
         folders.push(folder);
     }
     let changed = desired != snapshot["organization"];
-    let input = json!({"base":edit::shared(&snapshot["organization"]),"desired":edit::shared(&desired),"versions":snapshot["versions"]});
+    let mut base = edit::shared(&snapshot["organization"]);
+    let mut additions = edit::shared(&desired);
+    // Unlike an ordinary desktop edit, an import never writes the shared
+    // order register, including when new projects are added. Root preserves
+    // that register when both sides omit it and appends unnamed projects.
+    for side in [&mut base, &mut additions] {
+        side.as_object_mut()
+            .ok_or(Code::Invalid)?
+            .remove("project_order");
+    }
+    let input = json!({"base":base,"desired":additions,"versions":snapshot["versions"]});
     bytes(&input, MAX_BYTES)?;
     Ok(Plan {
         input,

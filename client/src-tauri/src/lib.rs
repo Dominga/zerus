@@ -184,6 +184,35 @@ fn drafts_root(data_dir: &std::path::Path, replay: bool) -> std::path::PathBuf {
 #[cfg(all(test, unix))]
 pub(crate) static PROCESS_TREE: std::sync::RwLock<()> = std::sync::RwLock::new(());
 
+/// Writes an executable test fixture without this process ever holding it
+/// open for writing. A test thread that forks while such a descriptor is open
+/// passes it to a child that has not exec'd yet, and running the file then
+/// fails with ETXTBSY (zerus-0b9f). The bytes go to a side file that never
+/// runs; a short-lived `cp` creates the executable, so its only writer has
+/// exited before anything runs it. An existing entry is removed first, so a
+/// fixture symlink to a checked-in script is never written through.
+#[cfg(all(test, unix))]
+pub(crate) fn write_executable(path: &std::path::Path, contents: impl AsRef<[u8]>) {
+    use std::os::unix::fs::PermissionsExt;
+    let name = path.file_name().expect("executable name").to_string_lossy();
+    let source = path.with_file_name(format!(".{name}.source"));
+    std::fs::write(&source, contents).unwrap();
+    match std::fs::remove_file(path) {
+        Err(error) if error.kind() != std::io::ErrorKind::NotFound => {
+            panic!("cannot replace {}: {error}", path.display())
+        }
+        _ => {}
+    }
+    let status = std::process::Command::new("/bin/cp")
+        .arg(&source)
+        .arg(path)
+        .status()
+        .unwrap();
+    assert!(status.success(), "cannot write {}", path.display());
+    std::fs::remove_file(&source).unwrap();
+    std::fs::set_permissions(path, std::fs::Permissions::from_mode(0o700)).unwrap();
+}
+
 /// What `run` settled before the app starts.
 pub struct Startup {
     pub identity: identity::Identity,

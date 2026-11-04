@@ -104,7 +104,7 @@ impl Fixture {
         agent
             .env("HGS_RUN_ID", &run)
             .stdin(Stdio::piped())
-            .stdout(Stdio::null())
+            .stdout(Stdio::piped())
             .stderr(Stdio::null());
         #[cfg(target_os = "linux")]
         {
@@ -124,7 +124,17 @@ impl Fixture {
                 });
             }
         }
-        let agent = agent.spawn().unwrap();
+        let mut agent = agent.spawn().unwrap();
+        // spawn() returns before the kernel publishes the new image's
+        // environment, so a capture at once can read no HGS_RUN_ID and decline
+        // preparation (zerus-db04, zerus-spum). The echo proves it runs.
+        {
+            use std::io::{Read, Write};
+            agent.stdin.as_mut().unwrap().write_all(b"ready\n").unwrap();
+            let mut echo = [0; 6];
+            agent.stdout.as_mut().unwrap().read_exact(&mut echo).unwrap();
+            assert_eq!(&echo, b"ready\n");
+        }
         let record = json!({"version":1,"run_identity_version":1,"name":name,"agent":"codex","run_id":run,
             "conversation_id":conversation,"pid":agent.id(),"process_start":platform::process_start_time(agent.id()).unwrap(),
             "supervisor":{"pid":std::process::id(),"start":platform::process_start_time(std::process::id()).unwrap()}});

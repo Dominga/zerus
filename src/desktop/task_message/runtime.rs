@@ -126,7 +126,7 @@ pub(in crate::desktop) struct Runtime {
     /// The one custody-input removal or restart recovery off the actor.
     removal: Option<reference::Removal>,
     /// Published inputs whose admission was refused, for exact removal.
-    refused: Vec<(String, staging::Identity)>,
+    refused: Vec<(String, staging::Expected)>,
 }
 impl Runtime {
     pub fn new(config: &Config, epoch: &str, owner: Arc<platform::FileLock>) -> Result<Self> {

@@ -87,12 +87,14 @@ fn unlink_at(parent: &File, name: &str, flags: libc::c_int) -> io::Result<()> {
     Ok(())
 }
 
-/// One request's staged copies, exactly as this client created them.
+/// One request's staged copies, exactly as this client created them. Each
+/// copy stays open until it is removed: while it is held its inode cannot be
+/// reused, so a file recreated under its name is never taken for it.
 pub struct Staged {
     root: File,
     request: String,
     directory: Identity,
-    files: Vec<(String, Identity)>,
+    files: Vec<(String, File)>,
 }
 
 impl Staged {
@@ -108,9 +110,10 @@ impl Staged {
         if identity(&dir)? != self.directory {
             return Err(io::ErrorKind::InvalidData.into());
         }
-        for (name, expected) in &self.files {
+        for (name, held) in &self.files {
+            let expected = identity(held)?;
             match open_at(&dir, name, libc::O_RDONLY | libc::O_NOCTTY, 0) {
-                Ok(file) if identity(&file)? == *expected => unlink_at(&dir, name, 0)?,
+                Ok(file) if identity(&file)? == expected => unlink_at(&dir, name, 0)?,
                 Ok(_) => return Err(io::ErrorKind::InvalidData.into()),
                 Err(error) if error.kind() == io::ErrorKind::NotFound => {}
                 Err(error) => return Err(error),
@@ -164,13 +167,15 @@ pub fn stage(root: &Path, request: &str, blobs: &[&[u8]]) -> Result<Staged, &'st
             if staged.files.iter().any(|(name, _)| *name == digest) {
                 continue;
             }
-            let mut file = open_at(
+            let file = open_at(
                 &dir,
                 &digest,
                 libc::O_WRONLY | libc::O_CREAT | libc::O_EXCL,
                 0o600,
             )?;
-            staged.files.push((digest, identity(&file)?));
+            // Recorded before its write: a failed write still removes it.
+            staged.files.push((digest, file));
+            let (_, file) = staged.files.last_mut().expect("just recorded");
             file.write_all(blob)?;
             file.sync_all()?;
         }

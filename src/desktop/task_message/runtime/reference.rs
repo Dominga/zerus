@@ -262,7 +262,13 @@ impl Runtime {
             }
         };
         let identity = prepared.input.identity;
-        let staged = prepared.staged.clone();
+        let expected = staging::Expected {
+            identity,
+            bytes: prepared.input.bytes,
+            sha256: prepared.input.sha256.clone(),
+        };
+        let mut prepared = prepared;
+        let staged = std::mem::take(&mut prepared.staged);
         match self.admit_reference(store, authority, verified, &lease, prepared.input) {
             Ok(value) => {
                 self.answer(&queue, seq, value);
@@ -279,7 +285,7 @@ impl Runtime {
             Err(_) => {
                 // Nothing was admitted. The exact published input is removed
                 // before the reservation is released.
-                self.refused.push((id.clone(), identity));
+                self.refused.push((id.clone(), expected));
                 let value = self.refusal(&id, "task_message_unavailable");
                 self.answer(&queue, seq, value);
             }
@@ -373,16 +379,16 @@ impl Runtime {
         let Some(roots) = self.roots.clone() else {
             return Ok(());
         };
-        let next = if let Some((id, identity)) = self.refused.pop() {
-            Some((id, Job::Refused, Some(identity)))
+        let next = if let Some((id, expected)) = self.refused.pop() {
+            Some((id, Job::Refused, Some(expected)))
         } else {
             self.next_drained(store)?
-                .map(|(id, identity)| (id, Job::Drained, Some(identity)))
+                .map(|(id, expected)| (id, Job::Drained, Some(expected)))
                 .or(self
                     .next_reserved(store)?
                     .map(|id| (id, Job::Reserved, None)))
         };
-        let Some((id, job, identity)) = next else {
+        let Some((id, job, expected)) = next else {
             return Ok(());
         };
         let (send, done) = mpsc::sync_channel(1);
@@ -390,8 +396,8 @@ impl Runtime {
         let worker = thread::Builder::new()
             .name("task-message-input".into())
             .spawn(move || {
-                let ok = match identity {
-                    Some(identity) => staging::remove_input(&roots, &request, identity).is_ok(),
+                let ok = match expected {
+                    Some(expected) => staging::remove_input(&roots, &request, &expected).is_ok(),
                     None => staging::input_exists(&roots, &request).unwrap_or(true),
                 };
                 let _ = send.send(ok);
@@ -418,14 +424,21 @@ impl Runtime {
     /// A held input whose original drained physically and that nothing here
     /// holds any more. Only drained originals are considered, so running ones
     /// never hide a newer drained one.
-    fn next_drained(&self, store: &Store) -> Result<Option<(String, staging::Identity)>> {
+    fn next_drained(&self, store: &Store) -> Result<Option<(String, staging::Expected)>> {
         for id in super::super::inputs::held_drained(&store.db, SWEEP)? {
             if self.holds(&id) {
                 continue;
             }
             let record = super::super::inputs::load(&store.db, &id)?;
-            if let Some(identity) = record.and_then(|r| r.identity) {
-                return Ok(Some((id, identity)));
+            if let Some(record) = record {
+                if let Some(identity) = record.identity {
+                    let expected = staging::Expected {
+                        identity,
+                        bytes: record.bytes,
+                        sha256: record.input_sha256,
+                    };
+                    return Ok(Some((id, expected)));
+                }
             }
         }
         Ok(None)

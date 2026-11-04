@@ -59,13 +59,14 @@ pub(super) fn migrate(tx: &Transaction<'_>) -> Result<()> {
 pub(super) struct Record {
     pub(super) state: String,
     pub(super) bytes: u64,
+    pub(super) input_sha256: String,
     pub(super) identity: Option<(u64, u64)>,
 }
 
 pub(super) fn load(db: &rusqlite::Connection, request: &str) -> Result<Option<Record>> {
     Ok(db
         .query_row(
-            "SELECT state,bytes,device,inode FROM desktop_task_message_inputs WHERE request_id=?1",
+            "SELECT state,bytes,device,inode,input_sha256 FROM desktop_task_message_inputs WHERE request_id=?1",
             [request],
             |r| {
                 let identity: Option<(i64, i64)> = match (r.get(2)?, r.get(3)?) {
@@ -75,6 +76,7 @@ pub(super) fn load(db: &rusqlite::Connection, request: &str) -> Result<Option<Re
                 Ok(Record {
                     state: r.get(0)?,
                     bytes: r.get::<_, i64>(1)? as u64,
+                    input_sha256: r.get(4)?,
                     identity: identity.map(|(d, i)| (d as u64, i as u64)),
                 })
             },

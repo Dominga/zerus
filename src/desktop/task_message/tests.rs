@@ -2080,6 +2080,14 @@ mod staging_tests {
     fn input(root: &Path, request: &str) -> PathBuf {
         root.join(staging::INPUTS).join(request)
     }
+    /// The exact custody input a removal expects.
+    fn expected(prepared: &staging::Prepared) -> staging::Expected {
+        staging::Expected {
+            identity: prepared.input.identity,
+            bytes: prepared.input.bytes,
+            sha256: prepared.input.sha256.clone(),
+        }
+    }
 
     #[test]
     fn a_staged_original_prepares_its_exact_input_once_and_never_overwrites_it() {
@@ -2120,10 +2128,10 @@ mod staging_tests {
         );
         staging::remove_staged(&roots, &request, &prepared.staged).unwrap();
         assert!(!dir.exists(), "exactly its copies, then the empty folder");
-        staging::remove_input(&roots, &request, prepared.input.identity).unwrap();
+        staging::remove_input(&roots, &request, &expected(&prepared)).unwrap();
         assert!(!input(&root, &request).exists());
         // Removing what is already gone is not an error.
-        staging::remove_input(&roots, &request, prepared.input.identity).unwrap();
+        staging::remove_input(&roots, &request, &expected(&prepared)).unwrap();
     }
 
     #[test]
@@ -2374,16 +2382,38 @@ mod staging_tests {
         let request = verified.plan.request_id.clone();
         let dir = stage(&root, &request, &blobs);
         let prepared = staging::prepare(&roots, &verified, soon()).unwrap();
-        // Another object under the custody name stays.
-        std::fs::remove_file(input(&root, &request)).unwrap();
-        std::fs::write(input(&root, &request), b"another").unwrap();
-        assert!(staging::remove_input(&roots, &request, prepared.input.identity).is_err());
-        assert!(input(&root, &request).exists());
-        // Another object under a staged name stays, and so does the folder.
+        let wanted = expected(&prepared);
+        let staging::Prepared {
+            input: custody,
+            staged,
+        } = prepared;
+        // Once nothing holds the input, its identity alone proves nothing: a
+        // file recreated under its name may reuse its inode number (ext4
+        // does). Rewritten in place, the same inode holds other bytes and
+        // is never removed.
+        drop(custody);
+        let path = input(&root, &request);
+        let mut other = std::fs::read(&path).unwrap();
+        other[0] ^= 1;
+        {
+            use std::io::Write;
+            let mut file = std::fs::OpenOptions::new().write(true).open(&path).unwrap();
+            file.write_all(&other).unwrap();
+        }
+        assert!(staging::remove_input(&roots, &request, &wanted).is_err());
+        assert_eq!(std::fs::read(&path).unwrap(), other);
+        // And another object of other bytes under the custody name stays.
+        std::fs::remove_file(&path).unwrap();
+        std::fs::write(&path, b"another").unwrap();
+        std::fs::set_permissions(&path, std::fs::Permissions::from_mode(0o600)).unwrap();
+        assert!(staging::remove_input(&roots, &request, &wanted).is_err());
+        assert!(path.exists());
+        // A staged copy is still held, so a file recreated under its name
+        // is another object: it stays, and so does the folder.
         let copy = dir.join(&verified.references[0].sha256);
         std::fs::remove_file(&copy).unwrap();
         std::fs::write(&copy, b"another").unwrap();
-        assert!(staging::remove_staged(&roots, &request, &prepared.staged).is_err());
+        assert!(staging::remove_staged(&roots, &request, &staged).is_err());
         assert!(copy.exists());
         // Anything else in the folder keeps the folder.
         let (_temp, root, roots) = fresh();

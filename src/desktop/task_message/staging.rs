@@ -233,13 +233,15 @@ pub(super) struct Input {
 /// One prepared reference original.
 pub(super) struct Prepared {
     pub(super) input: Input,
-    /// The staged copies it read, by name and identity, for exact removal.
-    pub(super) staged: Vec<(String, Identity)>,
+    /// The staged copies it read, by name, each still open: while a copy is
+    /// held its inode cannot be reused, so a recreated file under its name is
+    /// never taken for it at removal.
+    pub(super) staged: Vec<(String, File)>,
 }
 
 /// Reads one staged attachment: a private regular file of exactly `size`
 /// bytes whose digest is `sha256`.
-fn staged(dir: &File, sha256: &str, size: u64) -> Result<(Vec<u8>, Identity), &'static str> {
+fn staged(dir: &File, sha256: &str, size: u64) -> Result<(Vec<u8>, File), &'static str> {
     let mut file =
         open_at(dir, sha256, libc::O_RDONLY | libc::O_NOCTTY, 0).map_err(|_| UNAVAILABLE)?;
     if !platform::verify_private_file(&file).unwrap_or(false) {
@@ -256,7 +258,7 @@ fn staged(dir: &File, sha256: &str, size: u64) -> Result<(Vec<u8>, Identity), &'
     if bytes.len() as u64 != size || format!("{:x}", Sha256::digest(&bytes)) != sha256 {
         return Err(MISMATCH);
     }
-    Ok((bytes, identity(&file).map_err(|_| UNAVAILABLE)?))
+    Ok((bytes, file))
 }
 
 /// The one preparation of a reference original: reads its staged copies from
@@ -298,14 +300,14 @@ pub(super) fn prepare(
         return Err(UNAVAILABLE);
     }
     let mut blobs = Vec::with_capacity(verified.references.len());
-    let mut copies: Vec<(String, Identity)> = Vec::new();
+    let mut copies: Vec<(String, File)> = Vec::new();
     for reference in &verified.references {
         if expired() {
             return Err(EXPIRED);
         }
-        let (bytes, id) = staged(&dir, &reference.sha256, reference.size)?;
+        let (bytes, file) = staged(&dir, &reference.sha256, reference.size)?;
         if !copies.iter().any(|(name, _)| *name == reference.sha256) {
-            copies.push((reference.sha256.clone(), id));
+            copies.push((reference.sha256.clone(), file));
         }
         blobs.push(bytes);
     }
@@ -374,7 +376,7 @@ pub(super) fn prepare(
         if fault == Some(Fault::Removal) {
             return Err(UNAVAILABLE);
         }
-        let _ = remove_input(roots, request, created);
+        let _ = remove_held(roots, request, &file);
         return Err(if written.is_err() {
             UNAVAILABLE
         } else {
@@ -396,12 +398,12 @@ pub(super) fn prepare(
 }
 
 /// Removes exactly the staged copies a preparation read, each only while its
-/// name still denotes the same object, then the request's directory if it is
-/// empty. Anything else in it stays.
+/// name still denotes the same object as the copy it still holds, then the
+/// request's directory if it is empty. Anything else in it stays.
 pub(super) fn remove_staged(
     roots: &Roots,
     request: &str,
-    staged: &[(String, Identity)],
+    staged: &[(String, File)],
 ) -> io::Result<()> {
     let dir = open_at(
         &roots.staging.file,
@@ -409,9 +411,10 @@ pub(super) fn remove_staged(
         libc::O_RDONLY | libc::O_DIRECTORY,
         0,
     )?;
-    for (name, expected) in staged {
+    for (name, held) in staged {
+        let expected = identity(held)?;
         match open_at(&dir, name, libc::O_RDONLY | libc::O_NOCTTY, 0) {
-            Ok(file) if identity(&file)? == *expected => unlink_at(&dir, name, 0)?,
+            Ok(file) if identity(&file)? == expected => unlink_at(&dir, name, 0)?,
             Ok(_) => return Err(io::ErrorKind::InvalidData.into()),
             Err(error) if error.kind() == io::ErrorKind::NotFound => {}
             Err(error) => return Err(error),
@@ -425,9 +428,47 @@ pub(super) fn remove_staged(
     roots.staging.sync()
 }
 
+/// The exact custody input a removal expects: its recorded identity and the
+/// record's immutable size and digest.
+pub(super) struct Expected {
+    pub(super) identity: Identity,
+    pub(super) bytes: u64,
+    pub(super) sha256: String,
+}
+
 /// Removes the custody input of `request` only while its name still denotes
-/// `expected`. A missing input was already removed.
-pub(super) fn remove_input(roots: &Roots, request: &str, expected: Identity) -> io::Result<()> {
+/// the expected private object with exactly the record's bytes. Once nothing
+/// holds the input, its inode number may be reused by a file created later
+/// under the same name, so the identity alone never proves it. A missing
+/// input was already removed.
+pub(super) fn remove_input(roots: &Roots, request: &str, expected: &Expected) -> io::Result<()> {
+    match open_at(
+        &roots.inputs.file,
+        request,
+        libc::O_RDONLY | libc::O_NOCTTY,
+        0,
+    ) {
+        Ok(mut file) => {
+            let exact = identity(&file)? == expected.identity
+                && platform::verify_private_file(&file)?
+                && file.metadata()?.len() == expected.bytes
+                && content_digest(&mut file, expected.bytes)?.as_deref()
+                    == Some(expected.sha256.as_str());
+            if !exact {
+                return Err(io::ErrorKind::InvalidData.into());
+            }
+            unlink_at(&roots.inputs.file, request, 0)?
+        }
+        Err(error) if error.kind() == io::ErrorKind::NotFound => {}
+        Err(error) => return Err(error),
+    }
+    roots.inputs.sync()
+}
+
+/// Removes the custody input of `request` only while its name still denotes
+/// the object `held` keeps open, whose inode therefore cannot be reused.
+fn remove_held(roots: &Roots, request: &str, held: &File) -> io::Result<()> {
+    let expected = identity(held)?;
     match open_at(
         &roots.inputs.file,
         request,
@@ -440,6 +481,26 @@ pub(super) fn remove_input(roots: &Roots, request: &str, expected: Identity) -> 
         Err(error) => return Err(error),
     }
     roots.inputs.sync()
+}
+
+/// The SHA-256 of exactly `size` bytes read through `file`, or `None` when it
+/// holds another amount.
+fn content_digest(file: &mut File, size: u64) -> io::Result<Option<String>> {
+    let mut hasher = Sha256::new();
+    let mut read = 0u64;
+    let mut buffer = vec![0u8; 64 << 10];
+    loop {
+        let n = file.read(&mut buffer)?;
+        if n == 0 {
+            break;
+        }
+        read += n as u64;
+        if read > size {
+            return Ok(None);
+        }
+        hasher.update(&buffer[..n]);
+    }
+    Ok((read == size).then(|| format!("{:x}", hasher.finalize())))
 }
 
 /// Whether `request` has a custody input: what a restart checks for a

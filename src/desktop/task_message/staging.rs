@@ -49,6 +49,21 @@ pub(super) const EXPIRED: &str = "task_message_preparation_expired";
 pub(super) static DELAYS: std::sync::Mutex<Vec<(String, std::time::Duration)>> =
     std::sync::Mutex::new(Vec::new());
 
+/// Test-only faults after the custody input was published, by request ID.
+#[cfg(test)]
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub(super) enum Fault {
+    /// Its identity cannot be read: the new file stays.
+    Identity,
+    /// Its write fails and so does its removal: the new file stays.
+    Removal,
+    /// The preparing thread panics: the new file stays.
+    Panic,
+}
+#[cfg(test)]
+pub(super) static FAULTS: std::sync::Mutex<Vec<(String, Fault)>> =
+    std::sync::Mutex::new(Vec::new());
+
 /// A device and inode: what a name must still denote.
 pub(super) type Identity = (u64, u64);
 
@@ -288,13 +303,40 @@ pub(super) fn prepare(
             UNAVAILABLE
         }
     })?;
+    // From here on the input may outlive a refusal: the caller keeps its
+    // reservation until the file is known to be gone.
+    #[cfg(test)]
+    let fault = FAULTS
+        .lock()
+        .unwrap()
+        .iter()
+        .find(|(id, _)| id == request)
+        .map(|(_, fault)| *fault);
+    #[cfg(test)]
+    if fault == Some(Fault::Identity) {
+        return Err(UNAVAILABLE);
+    }
     let created = identity(&file).map_err(|_| UNAVAILABLE)?;
+    #[cfg(test)]
+    if fault == Some(Fault::Panic) {
+        panic!("injected preparation panic");
+    }
     let written = file
         .write_all(call.input.as_bytes())
         .and_then(|()| file.sync_all())
         .and_then(|()| roots.inputs.sync());
+    #[cfg(test)]
+    let written = match fault {
+        Some(Fault::Removal) => Err(io::ErrorKind::Other.into()),
+        _ => written,
+    };
     if written.is_err() || expired() {
-        // Exactly the file this call created, never another one.
+        // Exactly the file this call created, never another one. A failed
+        // removal leaves it to the caller's reservation sweep.
+        #[cfg(test)]
+        if fault == Some(Fault::Removal) {
+            return Err(UNAVAILABLE);
+        }
         let _ = remove_input(roots, request, created);
         return Err(if written.is_err() {
             UNAVAILABLE

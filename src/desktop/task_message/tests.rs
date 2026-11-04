@@ -1746,9 +1746,89 @@ mod actor {
             let answer = f.answered(&queue);
             assert_eq!(answer["accepted"], false);
             assert_eq!(answer["code"], staging::UNAVAILABLE);
-            assert_eq!(f.state(&other), "released");
+            // Released only once the sweep saw that no input exists.
+            f.until("released", |f| f.state(&other) == "released");
             assert!(!f.input_path(&other).exists());
             assert_eq!(inputs::totals(&f.store.db).unwrap(), (0, 0));
+            // The same request again: an existing record, a distinct and
+            // non-definite refusal, never a second reservation.
+            let queue = f.send_reference(
+                &other,
+                ui_authority::Validated::fixture(&Fixture::request(&other)),
+            );
+            let answer = f.answered(&queue);
+            assert_eq!(
+                (answer["accepted"].clone(), answer["code"].clone()),
+                (json!(false), json!(staging::EXISTS))
+            );
+            assert_eq!(f.state(&other), "released");
+        }
+
+        /// A preparation that fails after its input was published: the
+        /// identity unread, the removal failed or the worker panicked. The
+        /// input is never left untracked: it becomes an exact orphan, still
+        /// charged, and nothing is admitted.
+        #[test]
+        fn a_preparation_failing_after_publication_keeps_its_input_as_an_exact_orphan() {
+            for fault in [
+                staging::Fault::Identity,
+                staging::Fault::Removal,
+                staging::Fault::Panic,
+            ] {
+                let mut f = Fixture::new(|_, _, _, _, _| panic!("nothing was admitted"));
+                let (original, blobs, _) = f.referenced(&[shot(19, 3000)]);
+                f.stage(&original, &blobs);
+                staging::FAULTS
+                    .lock()
+                    .unwrap()
+                    .push((original.plan.request_id.clone(), fault));
+                let queue = f.send_reference(
+                    &original,
+                    ui_authority::Validated::fixture(&Fixture::request(&original)),
+                );
+                let answer = f.answered(&queue);
+                assert_eq!(answer["accepted"], false, "{fault:?}: {answer}");
+                assert!(f.input_path(&original).exists(), "{fault:?}");
+                f.until("orphaned", |f| f.state(&original) == "orphaned");
+                assert!(f.input_path(&original).exists(), "{fault:?}: kept exactly");
+                assert_eq!(
+                    inputs::totals(&f.store.db).unwrap(),
+                    (1, original.input_len().unwrap()),
+                    "{fault:?}: still charged"
+                );
+                assert!(ledger::load(&f.store.db, &original.plan.request_id)
+                    .unwrap()
+                    .is_none());
+            }
+        }
+
+        /// A second request for an original still being prepared gets its own
+        /// refusal and never a second reservation; the first goes on.
+        #[test]
+        fn a_second_request_during_preparation_is_refused_as_preparing() {
+            let mut f = Fixture::new(|_, _, _, _, _| Ended::NotStarted);
+            let (original, blobs, _) = f.referenced(&[shot(23, 3000)]);
+            f.stage(&original, &blobs);
+            staging::DELAYS
+                .lock()
+                .unwrap()
+                .push((original.plan.request_id.clone(), Duration::from_millis(300)));
+            let first = f.send_reference(
+                &original,
+                ui_authority::Validated::fixture(&Fixture::request(&original)),
+            );
+            let second = f.send_reference(
+                &original,
+                ui_authority::Validated::fixture(&Fixture::request(&original)),
+            );
+            let answer = f.answered(&second);
+            assert_eq!(
+                (answer["accepted"].clone(), answer["code"].clone()),
+                (json!(false), json!("task_message_preparing"))
+            );
+            assert_eq!(f.state(&original), "reserved");
+            assert_eq!(f.answered(&first)["accepted"], true);
+            assert_eq!(f.state(&original), "held");
         }
 
         #[test]

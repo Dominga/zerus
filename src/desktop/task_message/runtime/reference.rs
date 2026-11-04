@@ -13,8 +13,10 @@
 //!   (every resources guard, and with it every original pipe, gone) and no
 //!   consent, preparation or worker of this process holds it. A failed
 //!   removal stays visible and charged.
-//! - After a restart, a reservation whose input exists was published but never
-//!   admitted: it is kept, charged and reviewable (`orphaned`).
+//! - A reservation whose preparation failed, or one left by an earlier process,
+//!   is classified only once nothing here holds it: if its input exists it
+//!   was published but never admitted, and is kept, charged and reviewable
+//!   (`orphaned`); otherwise it is released.
 use super::*;
 use crate::desktop::fanout::Queue;
 use std::time::{Duration, Instant};
@@ -24,6 +26,8 @@ use std::time::{Duration, Instant};
 const PREPARE: Duration = Duration::from_secs(5);
 /// Inputs considered per removal sweep.
 const SWEEP: u32 = 8;
+/// A second request for an original that is still being prepared.
+const PREPARING: &str = "task_message_preparing";
 
 pub(in crate::desktop::task_message) struct Admitting {
     authority: ui_authority::Validated,
@@ -109,6 +113,15 @@ impl Runtime {
             !self.stopping && !self.failed && store.creation_recovery_ok(),
             "task message owner unavailable"
         );
+        // Neither refusal is definite: the first request may still be
+        // admitted, and an earlier record decides on its own.
+        if self
+            .admitting
+            .as_ref()
+            .is_some_and(|a| a.verified.plan.request_id == id)
+        {
+            return Ok(Some(self.refusal(&id, PREPARING)));
+        }
         ensure!(self.admitting.is_none(), "task message preparation busy");
         ensure!(
             self.known_charges(&store.db)?,
@@ -150,6 +163,9 @@ impl Runtime {
                 code: String::new(),
                 receipt: Some(row.receipt),
             })));
+        }
+        if super::super::inputs::load(&store.db, &id)?.is_some() {
+            return Ok(Some(self.refusal(&id, staging::EXISTS)));
         }
         let bytes = verified
             .input_len()
@@ -231,12 +247,11 @@ impl Runtime {
         let prepared = match prepared {
             Some(Ok(prepared)) => prepared,
             failed => {
-                // Preparation removes any input it created: release only.
-                let tx = store
-                    .db
-                    .transaction_with_behavior(TransactionBehavior::Immediate)?;
-                super::super::inputs::release(&tx, &id)?;
-                tx.commit()?;
+                // The input may still exist: its identity unread, its
+                // removal failed or its worker gone. The record stays
+                // reserved and charged; the reservation sweep keeps an
+                // existing input as an exact orphan and releases one that is
+                // gone.
                 let code = match failed {
                     Some(Err(code)) => code,
                     _ => "task_message_unavailable",
@@ -343,8 +358,8 @@ impl Runtime {
                 .transaction_with_behavior(TransactionBehavior::Immediate)?;
             match (removal.job, ok) {
                 (Job::Refused, true) => super::super::inputs::release(&tx, &removal.id)?,
-                // An unremoved refused input stays reserved; a restart then
-                // keeps it as orphaned.
+                // An unremoved refused input stays reserved; the reservation
+                // sweep then keeps it as an exact orphan.
                 (Job::Refused, false) => {}
                 (Job::Drained, true) => super::super::inputs::removed(&tx, &removal.id)?,
                 (Job::Drained, false) => super::super::inputs::failed(&tx, &removal.id)?,
@@ -401,9 +416,10 @@ impl Runtime {
     }
 
     /// A held input whose original drained physically and that nothing here
-    /// holds any more.
+    /// holds any more. Only drained originals are considered, so running ones
+    /// never hide a newer drained one.
     fn next_drained(&self, store: &Store) -> Result<Option<(String, staging::Identity)>> {
-        for id in super::super::inputs::in_state(&store.db, "held", SWEEP)? {
+        for id in super::super::inputs::held_drained(&store.db, SWEEP)? {
             if self.holds(&id) {
                 continue;
             }
@@ -416,7 +432,8 @@ impl Runtime {
         Ok(None)
     }
 
-    /// A reservation left by an earlier process.
+    /// A reservation that nothing here holds: a failed preparation's, or one
+    /// left by an earlier process.
     fn next_reserved(&self, store: &Store) -> Result<Option<String>> {
         Ok(
             super::super::inputs::in_state(&store.db, "reserved", SWEEP)?

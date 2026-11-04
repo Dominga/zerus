@@ -179,6 +179,17 @@ pub(super) fn in_state(db: &rusqlite::Connection, state: &str, limit: u32) -> Re
     Ok(rows.collect::<std::result::Result<_, _>>()?)
 }
 
+/// Up to `limit` held records whose original drained, oldest first.
+pub(super) fn held_drained(db: &rusqlite::Connection, limit: u32) -> Result<Vec<String>> {
+    let mut query = db.prepare(
+        "SELECT i.request_id FROM desktop_task_message_inputs i
+         JOIN desktop_task_messages m ON m.request_id=i.request_id
+         WHERE i.state='held' AND m.drained=1 ORDER BY i.created,i.request_id LIMIT ?1",
+    )?;
+    let rows = query.query_map(params![limit], |r| r.get(0))?;
+    Ok(rows.collect::<std::result::Result<_, _>>()?)
+}
+
 /// The charged records and bytes, for status.
 pub(super) fn totals(db: &rusqlite::Connection) -> Result<(u64, u64)> {
     Ok(db.query_row(

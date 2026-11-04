@@ -428,17 +428,40 @@ fn leftover_decision(row: &Value) -> Vec<String> {
     lines
 }
 
-/// A checkout blocked only because the OS hides some programs' folder paths:
-/// the user may accept that after checking.
+/// A checkout blocked only because the OS hides some programs' folder paths,
+/// or by that and changes the user may also discard: the user may accept that
+/// after checking.
 pub fn process_reviewable(row: &Value) -> bool {
     let reasons = row["reasons"].as_array().cloned().unwrap_or_default();
+    let only_processes = reasons.len() == 1 && text(&reasons[0], "code") == "processes_unavailable";
     text(row, "kind") == "linked"
         && text(row, "verdict") == "blocked"
-        && reasons.len() == 1
-        && text(&reasons[0], "code") == "processes_unavailable"
+        && (only_processes || discardable_with_processes(row))
         && !text(row, "fingerprint").is_empty()
         && !text(row, "process_fingerprint").is_empty()
         && (!local_data(row) || !text(row, "ignored_fingerprint").is_empty())
+}
+
+/// Changes the user may discard in a checkout some hidden programs might
+/// use: its removal needs both the discard and the process consent
+/// (zerus-k2ga). An older hgs never offers this.
+pub fn discardable_with_processes(row: &Value) -> bool {
+    let codes: Vec<_> = row["reasons"]
+        .as_array()
+        .into_iter()
+        .flatten()
+        .map(|reason| text(reason, "code"))
+        .collect();
+    row["discardable_with_process_consent"] == json!(true)
+        && !text(row, "discard_fingerprint").is_empty()
+        && !text(row, "process_fingerprint").is_empty()
+        && codes.contains(&"processes_unavailable")
+        && codes
+            .iter()
+            .any(|code| matches!(*code, "changes" | "untracked"))
+        && codes
+            .iter()
+            .all(|code| matches!(*code, "changes" | "untracked" | "processes_unavailable"))
 }
 
 /// A Zerus-owned checkout that can go after its session ends without asking

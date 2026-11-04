@@ -12,7 +12,8 @@
 //! refusal is reviewed again ("Check again").
 use crate::actions::WorktreeCleanup;
 use crate::worktree_review::{
-    exit_cleanup_ready, local_data, process_reviewable, removable, Removal, Removed,
+    discardable_with_processes, exit_cleanup_ready, local_data, process_reviewable, removable,
+    Removal, Removed,
 };
 use serde::{Deserialize, Serialize};
 use serde_json::Value;
@@ -159,11 +160,12 @@ impl Entry {
     }
 
     fn discardable(&self) -> bool {
-        self.row["discardable"] == Value::Bool(true)
+        (self.row["discardable"] == Value::Bool(true)
             && !self.row["discard_fingerprint"]
                 .as_str()
                 .unwrap_or("")
-                .is_empty()
+                .is_empty())
+            || discardable_with_processes(&self.row)
     }
 
     fn eligible(&self) -> bool {
@@ -962,5 +964,72 @@ mod tests {
             removal.process_fingerprint, "p2",
             "the new review's fingerprint"
         );
+    }
+
+    /// zerus-k2ga: changes beside hidden programs need the discard and the
+    /// process consent together; neither alone starts the removal.
+    #[test]
+    fn a_dirty_checkout_beside_hidden_programs_needs_both_consents() {
+        let mut row = ready_row("o");
+        row["verdict"] = json!("blocked");
+        row["reasons"] = json!([
+            {"code": "changes", "message": "x"},
+            {"code": "processes_unavailable", "message": "y"}
+        ]);
+        row["discardable"] = json!(false);
+        row["discard_fingerprint"] = json!("d1");
+        row["process_fingerprint"] = json!("p1");
+        let reviewed = |row: &Value| {
+            let mut entry = terminated("o");
+            entry.exit_cleanup = false;
+            let mut cleanup = Cleanup::manual(vec![entry]);
+            let Step::Review {
+                host, common_dir, ..
+            } = cleanup.step()
+            else {
+                panic!()
+            };
+            cleanup.reviewed(&host, &common_dir, Ok(&review_of(row.clone())));
+            cleanup
+        };
+        // An hgs that does not offer the combined consent: nothing to accept.
+        let older = reviewed(&row);
+        assert_eq!(older.required(), Consents::default());
+        row["discardable_with_process_consent"] = json!(true);
+        let mut cleanup = reviewed(&row);
+        let required = cleanup.required();
+        assert!(required.discard_changes && required.unchecked_processes);
+        for partial in [
+            Consents {
+                discard_changes: true,
+                ..Consents::default()
+            },
+            Consents {
+                unchecked_processes: true,
+                ..Consents::default()
+            },
+        ] {
+            assert_eq!(cleanup.remove(partial), Step::Idle);
+        }
+        let Step::Remove { removal, .. } = cleanup.remove(Consents {
+            discard_changes: true,
+            unchecked_processes: true,
+            ..Consents::default()
+        }) else {
+            panic!()
+        };
+        assert_eq!(
+            (
+                removal.discard_fingerprint.as_str(),
+                removal.process_fingerprint.as_str()
+            ),
+            ("d1", "p1")
+        );
+        // Another blocker is never accepted with them.
+        row["reasons"]
+            .as_array_mut()
+            .unwrap()
+            .push(json!({"code": "sessions", "message": "z"}));
+        assert_eq!(reviewed(&row).required(), Consents::default());
     }
 }

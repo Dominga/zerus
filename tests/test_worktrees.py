@@ -353,8 +353,9 @@ class Cleanup(Repository,unittest.TestCase):
             self.assertEqual(child.stdout.readline().strip(),'ready');return child
         tree=self.linked('manual');self.age(tree);unknown=protected();row=self.row(tree)
         self.assertEqual(codes(row['reasons']),['processes_unavailable'])
-        self.assertEqual(row['unreadable_processes'][0]['pid'],unknown.pid)
-        self.assertTrue(row['unreadable_processes'][0]['identity']);self.assertRegex(row['process_fingerprint'],r'^v2:[0-9]+:[a-f0-9]{64}$')
+        # A host may hide other programs too (a user's systemd manager).
+        own=next(p for p in row['unreadable_processes'] if p['pid']==unknown.pid)
+        self.assertTrue(own['identity']);self.assertRegex(row['process_fingerprint'],r'^v2:[0-9]+:[a-f0-9]{64}$')
         refused=self.remove(tree,row['fingerprint']);self.assertNotEqual(refused.returncode,0);self.assertTrue(tree.exists())
         stale=self.remove(tree,row['fingerprint'],extra=('--process-fingerprint','0'*64))
         self.assertNotEqual(stale.returncode,0);self.assertIn('confirmation is stale',stale.stderr)
@@ -376,9 +377,11 @@ class Cleanup(Repository,unittest.TestCase):
         self.assertNotEqual(refused.returncode,0)
         for file in (self.root/'state').glob('*.json'):file.unlink()
         (tree/'notes.txt').write_text('retain changes');dirty=self.row(tree)
-        self.assertNotIn('process_fingerprint',dirty)
-        refused=self.remove(tree,dirty['fingerprint'],extra=('--process-fingerprint',changed['process_fingerprint']))
-        self.assertNotEqual(refused.returncode,0);self.assertEqual((tree/'notes.txt').read_text(),'retain changes')
+        # Changes beside hidden processes also need the discard (zerus-k2ga).
+        self.assertFalse(dirty['discardable']);self.assertTrue(dirty['discardable_with_process_consent'])
+        for consent in (changed['process_fingerprint'],dirty['process_fingerprint']):
+            refused=self.remove(tree,dirty['fingerprint'],extra=('--process-fingerprint',consent))
+            self.assertNotEqual(refused.returncode,0);self.assertEqual((tree/'notes.txt').read_text(),'retain changes')
         (tree/'notes.txt').unlink()
         (tree/'target').mkdir();(tree/'target'/'local.txt').write_text('synthetic local data')
         current=self.row(tree)
@@ -388,6 +391,40 @@ class Cleanup(Repository,unittest.TestCase):
             '--ignored-fingerprint',current['ignored_fingerprint']))
         self.assertEqual(allowed.returncode,0,allowed.stderr);self.assertFalse(tree.exists())
         self.assertIn('feature/manual',self.git('-C',str(self.repo),'branch','--list','feature/manual'))
+
+    @unittest.skipUnless(sys.platform == 'linux', 'Linux protected-process review')
+    def test_a_dirty_checkout_beside_hidden_processes_needs_both_explicit_consents(self):
+        # zerus-k2ga: the discard and the bounded process acceptance together,
+        # each refused alone, and never for automatic cleanup or another blocker.
+        child=subprocess.Popen([sys.executable,'-I','-c',
+            'import ctypes,time; assert ctypes.CDLL(None).prctl(4,0,0,0,0)==0; print("ready",flush=True); time.sleep(90)'],
+            cwd=self.root,stdout=subprocess.PIPE,text=True)
+        self.addCleanup(child.stdout.close);self.addCleanup(child.wait);self.addCleanup(lambda: child.poll() is None and child.kill())
+        self.assertEqual(child.stdout.readline().strip(),'ready')
+        tree=self.linked('dirty manual');(tree/'work.txt').write_text('committed');self.commit(tree,'unmerged work',add=True)
+        (tree/'work.txt').write_text('modified');(tree/'notes.txt').write_text('local notes');self.age(tree)
+        row=self.row(tree)
+        self.assertEqual(sorted(codes(row['reasons'])),['changes','processes_unavailable','untracked'])
+        self.assertFalse(row['discardable']);self.assertTrue(row['discardable_with_process_consent'])
+        self.assertRegex(row['process_fingerprint'],r'^v2:[0-9]+:[a-f0-9]{64}$');self.assertTrue(row['discard_fingerprint'])
+        both=('--discard-fingerprint',row['discard_fingerprint'],'--process-fingerprint',row['process_fingerprint'])
+        def kept(result,text):
+            self.assertNotEqual(result.returncode,0);self.assertIn(text,result.stderr)
+            self.assertEqual((tree/'work.txt').read_text(),'modified');self.assertEqual((tree/'notes.txt').read_text(),'local notes')
+        kept(self.remove(tree,row['fingerprint']),'Cannot remove')
+        kept(self.remove(tree,row['fingerprint'],extra=both[:2]),'cannot check whether some running programs')
+        kept(self.remove(tree,row['fingerprint'],extra=both[2:]),'Cannot remove')
+        kept(self.remove(tree,row['fingerprint'],extra=('--automatic',*both)),'')
+        # A known use or a saved session is still a blocker no consent overrides.
+        self.binding('codex/keep',tree);bound=self.row(tree)
+        self.assertNotIn('process_fingerprint',bound);self.assertNotIn('discardable_with_process_consent',bound)
+        kept(self.remove(tree,bound['fingerprint'],extra=('--discard-fingerprint',bound['discard_fingerprint'],'--process-fingerprint',row['process_fingerprint'])),'')
+        for file in (self.root/'state').glob('*.json'):file.unlink()
+        row=self.row(tree);result=self.remove(tree,row['fingerprint'],extra=('--discard-fingerprint',row['discard_fingerprint'],
+            '--process-fingerprint',row['process_fingerprint'],'--delete-branch'))
+        self.assertEqual(result.returncode,0,result.stderr);self.assertFalse(tree.exists())
+        self.assertFalse(json.loads(result.stdout)['branch_deleted'])
+        self.assertTrue(self.git('-C',str(self.repo),'show-ref','refs/heads/feature/dirty-manual'))
 
     @unittest.skipUnless(sys.platform == 'linux', 'Linux protected launch ancestors')
     def test_manual_process_confirmation_survives_separate_protected_launchers(self):

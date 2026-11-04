@@ -311,6 +311,25 @@ fn an_oversize_original_that_cannot_be_staged_is_never_sent_and_leaves_no_copy()
             .all(|c| c["value"]["request"]["op"] != "task_message_staging"
                 && c["value"]["op"] != "task_message_staging"));
         service.join().await.unwrap();
+        // Supported, but a record frozen with its stdin instead of the
+        // canonical digest has no reference form: refused before staging.
+        let f = fixture(json!({"message_references": true, "message_staging": true}));
+        staging(&f.0);
+        let (service, _cache) = connected(&f).await;
+        let mut record = with_attachment(70 << 10);
+        let input = message_input(&record["intent"]);
+        record.as_object_mut().unwrap().remove("input_sha256");
+        record["input"] = json!(input);
+        let sent = send(service.clone(), &f.0, record.clone(), true, true).await;
+        assert_eq!(
+            sent.answer,
+            MessageAnswer::Unsent(TOO_LARGE_REFERENCE.into())
+        );
+        assert_eq!(
+            (sent.handoff, sent.released, copies(&f.0, &record)),
+            (None, 1, 0)
+        );
+        service.join().await.unwrap();
         // Supported, but no staging folder is named: never sent.
         let f = fixture(json!({"message_references": true}));
         staging(&f.0);

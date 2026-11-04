@@ -222,11 +222,11 @@ then only reads its result. The task editor is its only caller.
   request, stays in review until the user explicitly discards it or confirms
   sending it again as a new record: the editor's reviewed release removes the
   record and its marker, and the next Submit is a new original with a new
-  identity. Outside desktop-service mode a marked record is only refused. An unreadable marker, or one that names
-  another record, is never taken as absent. Releasing or settling the record
-  removes the marker last, in the same durable step, after a directory sync
-  that makes the record's removal durable first: a record never outlives its
-  marker.
+  identity. Outside desktop-service mode a marked record is only refused. An
+  unreadable marker, or one that names another record, is never taken as
+  absent. Releasing or settling the record removes the marker last, in the
+  same durable step, after a directory sync that makes the record's removal
+  durable first: a record never outlives its marker.
 - **Answers.** Recorded settles like a delivered reply. Unsent means nothing
   ran: the request never left the client, or the exact drained receipt proves
   that the child never started. Only an Unsent answer releases the original,
@@ -239,8 +239,10 @@ then only reads its result. The task editor is its only caller.
   ordinary draft that can be sent again; for a new original, the release step
   saves the draft's settled flags durably before it removes the record. On
   explicit recovery of a marked record, the lookup's not-started receipt does
-  the same in that order, Unconfirmed stays in review, and a missing or
-  unsettled result stays in review with the release-or-check-later text.
+  the same in that order, but only while the draft still holds that original:
+  an edited draft keeps the record for the explicit reviewed release, which
+  shows it first. Unconfirmed stays in review, and a missing or unsettled
+  result stays in review with the release-or-check-later text.
   A record too large even by reference is refused before staging
   (`TOO_LARGE_REFERENCE`); the inline-only text names the 48 KiB limit only
   for a service without reference support.

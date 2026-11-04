@@ -396,7 +396,9 @@ Install and start:
    Alternatively, download `zerus-<version>-windows-x86_64-setup.exe` from the
    same Stable or Nightly release, verify its own `SHA256SUMS` entry and run it
    as your normal desktop user. The per-user installer contains the same tested
-   ZIP payload, checks the WebView2 prerequisite and
+   ZIP payload, checks the WebView2 prerequisite, installs only into an empty
+   folder or its own earlier installation (it refuses a folder that holds other
+   files, such as an extracted zip; keep a portable copy in its own folder) and
    offers **Start Zerus at login**, off by default. It preserves configuration,
    drafts and native host images when upgrading. Its login choice applies only
    to the desktop app; local agent hosting remains a separate opt-in. Service

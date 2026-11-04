@@ -88,7 +88,7 @@ impl ConsoleFacts {
 impl Caller {
     pub(in crate::desktop) fn capture(scope: &Scope) -> Result<Self> {
         ensure!(
-            ["HGS_SESSION", "HGS_RUN_ID"]
+            ["HGS_SESSION", "HGS_SESSION_ID", "HGS_RUN_ID"]
                 .iter()
                 .all(|key| std::env::var_os(key).is_none()),
             "agent session cannot change desktop mode; use Settings outside Zerus agents"

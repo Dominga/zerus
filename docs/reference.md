@@ -262,6 +262,22 @@ paused: launch the intended conversation with its explicit native ID to bind it.
 
 ### Tracking and durable state
 
+Every session record has a durable `session_id`, a UUID assigned when the
+session is first created. Every write of this hgs keeps it: resume, Clear and
+fresh starts, rename, pause, archive and restore. A fork is another session
+with its own. A record written by an older hgs gains one the next time this
+hgs writes any of its records, including archives.
+
+The ID is stable across writes of this hgs version and later ones. An older
+hgs, after a rollback or in a mixed fleet, rebuilds a record on resume
+without this field; the next write here then assigns a new ID, once.
+Consumers therefore treat `session_id` as a hint and fall back to the run and
+conversation identities.
+The agent's environment carries it as `HGS_SESSION_ID`, beside `HGS_SESSION`
+(the name at launch) and `HGS_RUN_ID`, and `hgs ls --json` rows and
+inspections include it. Nothing resolves sessions by it yet, and names stay
+unique; see `docs/superpowers/specs/2026-11-04-session-names-as-labels.md`.
+
 `hgs session-action-status SESSION --json` reads one original lifecycle receipt.
 Supply the original `session-action` JSON unchanged, including its `request_id`,
 `action`, `expected_run_id`, `expected_conversation_id` and any original action

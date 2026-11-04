@@ -2453,6 +2453,7 @@ fn launch(
             format!("HGS_STATE_DIR={}", config.state.display()),
             format!("HGS_EXECUTABLE={executable}"),
             "HGS_RUN_ID=".into(),
+            "HGS_SESSION_ID=".into(),
             "HGS_EXPECTED_ID=".into(),
             "HGS_ARCHIVE_ID=".into(),
             "HGS_FRESH_REPLACES=".into(),

@@ -147,6 +147,18 @@ fn read_limit(name: &str, limit: Option<u64>) -> Result<Value> {
     Ok(record)
 }
 
+/// A session's durable identity (zerus-ucck P1): assigned when the session is
+/// first created and kept by every write of this hgs, across resume, Clear,
+/// rename, pause, archive and restore; a fork gets its own. An older hgs
+/// rebuilds a record on resume without this field, and the next write here
+/// then assigns a new one once. Consumers treat it as a hint and fall back to
+/// the run and conversation identities.
+pub(super) fn ensure_session_id(record: &mut Value) {
+    if string(record, "session_id").is_empty() {
+        record["session_id"] = json!(uuid::Uuid::new_v4().to_string());
+    }
+}
+
 pub(super) fn write(record: &mut Value) -> Result<()> {
     record["updated"] = json!(now());
     atomic_record(&record_path(string(record, "name")), record)?;
@@ -155,6 +167,7 @@ pub(super) fn write(record: &mut Value) -> Result<()> {
 
 /// Every saved live/archive record write also migrates legacy command text.
 pub(super) fn atomic_record(path: &Path, record: &mut Value) -> Result<()> {
+    ensure_session_id(record);
     processes::compact(record);
     atomic(path, &format!("{record}\n"))
 }
@@ -424,6 +437,135 @@ mod agent_hint_tests {
             }
             #[cfg(windows)]
             assert_eq!(&command[..3], &["/stable/hgs", "--run", "0"]);
+        }
+    }
+}
+
+#[cfg(test)]
+mod session_id_tests {
+    use super::*;
+    /// zerus-ucck P1, #1317 R5: every write of this hgs keeps a session's ID,
+    /// an older writer's strip leads to one new ID, and no two records ever
+    /// share one. The fixture runs in a child process with a private state
+    /// directory.
+    #[test]
+    fn a_session_keeps_one_id_through_every_writer() {
+        let state = tempfile::tempdir().unwrap();
+        let output = std::process::Command::new(std::env::current_exe().unwrap())
+            .args([
+                "--exact",
+                "state::storage::session_id_tests::session_id_writers_fixture",
+                "--ignored",
+                "--test-threads=1",
+            ])
+            .env("HGS_STATE_DIR", state.path())
+            .env("ZERUS_SESSION_ID_WRITERS_FIXTURE", "1")
+            .env_remove("HGS_SESSION")
+            .env_remove("HGS_SESSION_ID")
+            .env_remove("HGS_RUN_ID")
+            .output()
+            .unwrap();
+        let stdout = String::from_utf8_lossy(&output.stdout);
+        assert!(
+            output.status.success() && stdout.contains("test result: ok. 1 passed"),
+            "{stdout}{}",
+            String::from_utf8_lossy(&output.stderr)
+        );
+    }
+    #[test]
+    #[ignore = "run by a_session_keeps_one_id_through_every_writer"]
+    fn session_id_writers_fixture() {
+        if std::env::var_os("ZERUS_SESSION_ID_WRITERS_FIXTURE").is_none() {
+            return;
+        }
+        std::fs::create_dir_all(root()).unwrap();
+        let on_disk = |path: &Path| -> Value { serde_json::from_slice(&std::fs::read(path).unwrap()).unwrap() };
+        let id = |record: &Value| string(record, "session_id").to_owned();
+        let claude = |name: &str, conversation: &str, run: &str| {
+            json!({"version":1,"agent":"claude","name":name,"conversation_id":conversation,"run_id":run,"created":100})
+        };
+        // Every write path of this hgs keeps the ID: records, archives and
+        // both provider saves, which save the caller's record twice.
+        let mut live = claude("claude/example/live", "conversation-1", "run-1");
+        write(&mut live).unwrap();
+        let session = id(&live);
+        assert!(uuid::Uuid::parse_str(&session).is_ok());
+        live["run_id"] = json!("run-2");
+        write(&mut live).unwrap();
+        assert_eq!(id(&live), session);
+        assert_eq!(string(&on_disk(&record_path("claude/example/live")), "session_id"), session);
+        let archive = root().join("archives").join("archive-1.json");
+        std::fs::create_dir_all(archive.parent().unwrap()).unwrap();
+        let mut archived = live.clone();
+        archived["archive_id"] = json!("archive-1");
+        atomic_record(&archive, &mut archived).unwrap();
+        assert_eq!(string(&on_disk(&archive), "session_id"), session, "an archive keeps it");
+        let mut older_archive = claude("claude/example/old", "conversation-old", "run-3");
+        older_archive["archive_id"] = json!("archive-2");
+        atomic_record(&root().join("archives").join("archive-2.json"), &mut older_archive).unwrap();
+        assert!(!id(&older_archive).is_empty(), "an archive of an older record gains one");
+        let mut deepseek = json!({"backend":"dsh","agent":"dsh","name":"dsh/example/one","conversation_id":"session-1","run_id":"run-4"});
+        super::super::dsh::save(&mut deepseek).unwrap();
+        let first = id(&deepseek);
+        let binding = root().join("dsh/bindings").join(format!("{:x}.json", Sha256::digest(b"dsh/example/one")));
+        assert_eq!(string(&on_disk(&binding), "session_id"), first, "kept on the caller's record");
+        deepseek["paused"] = json!(false);
+        super::super::dsh::save(&mut deepseek).unwrap();
+        assert_eq!(id(&deepseek), first);
+        let mut opencode = json!({"backend":"opencode","agent":"opencode","name":"opencode/example/one","conversation_id":"ses_1","run_id":"run-5"});
+        super::super::opencode::save(&mut opencode).unwrap();
+        let first_opencode = id(&opencode);
+        let binding = root().join("opencode/bindings").join(format!("{:x}.json", Sha256::digest(b"opencode/example/one")));
+        assert_eq!(string(&on_disk(&binding), "session_id"), first_opencode, "kept on the caller's record");
+        super::super::opencode::save(&mut opencode).unwrap();
+        assert_eq!(id(&opencode), first_opencode);
+        // Expected: an older hgs rebuilds the record without the field, and
+        // the next write here assigns a new ID once, which then stays.
+        let mut stripped = live.clone();
+        stripped.as_object_mut().unwrap().remove("session_id");
+        write(&mut stripped).unwrap();
+        let reminted = id(&stripped);
+        assert!(!reminted.is_empty() && reminted != session, "one new ID after an older writer");
+        write(&mut stripped).unwrap();
+        assert_eq!(id(&stripped), reminted, "then stable");
+        // A fork is another session with its own ID.
+        let mut fork = claude("claude/example/fork", "conversation-2", "run-6");
+        fork["fork_parent_id"] = json!("conversation-1");
+        write(&mut fork).unwrap();
+        assert!(!id(&fork).is_empty() && id(&fork) != reminted);
+        // No two records ever share an ID: equal names, conversations and
+        // creation seconds, a rename and a reopen in the same second, and
+        // concurrent first writes.
+        let mut seen = std::collections::HashSet::new();
+        for record in [&live, &older_archive, &deepseek, &opencode, &stripped, &fork] {
+            assert!(seen.insert(id(record)), "distinct");
+        }
+        let mut renamed = claude("claude/example/renamed", "conversation-3", "run-7");
+        renamed["journal_name"] = json!("claude/example/same");
+        write(&mut renamed).unwrap();
+        let mut reopened = claude("claude/example/same", "conversation-3", "run-8");
+        write(&mut reopened).unwrap();
+        let mut twin = claude("claude/example/same", "conversation-3", "run-8");
+        twin["archive_id"] = json!("archive-3");
+        atomic_record(&root().join("archives").join("archive-3.json"), &mut twin).unwrap();
+        for record in [&renamed, &reopened, &twin] {
+            assert!(seen.insert(id(record)), "same-second rename, reopen and copy stay distinct");
+        }
+        let written: Vec<String> = std::thread::scope(|scope| {
+            let workers: Vec<_> = (0..32)
+                .map(|n| {
+                    scope.spawn(move || {
+                        let mut record = json!({"version":1,"agent":"claude","name":format!("claude/example/concurrent-{n}"),
+                            "conversation_id":"conversation-shared","run_id":format!("run-{n}"),"created":100});
+                        write(&mut record).unwrap();
+                        string(&record, "session_id").to_owned()
+                    })
+                })
+                .collect();
+            workers.into_iter().map(|worker| worker.join().unwrap()).collect()
+        });
+        for written in written {
+            assert!(seen.insert(written), "concurrent first writes stay distinct");
         }
     }
 }

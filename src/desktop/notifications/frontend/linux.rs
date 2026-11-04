@@ -192,6 +192,7 @@ fn command(selected: &SelectedFrontend, launch: &Launch) -> Result<Command> {
         .arg("--sessions")
         .env(wire::NAVIGATION_ENV, target)
         .env_remove("HGS_SESSION")
+        .env_remove("HGS_SESSION_ID")
         .env_remove("HGS_RUN_ID")
         .env_remove("XDG_ACTIVATION_TOKEN")
         .env("ZERUS_CLIENT_DESKTOP_SERVICE", "1")

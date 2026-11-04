@@ -2148,22 +2148,41 @@ pub(super) fn dispatch_settings(args: &[String]) -> Result<i32> {
         // UI applies this explicit request once Ready; send also applies it
         // before the next idle message. A busy message keeps the currently
         // active settings.
-        let original = record.clone();
-        record["pending_settings"] = json!({"request_id":id,"model":model.id,"effort":effort,"run_id":request.expected_run_id,"conversation_id":request.expected_conversation_id,"receipt_name":name,"receipt_run_id":request.expected_run_id});
-        record["resume_settings"] = json!({"model":model.id,"effort":effort});
-        write(&mut record)?;
-        receipt["pending_settings_id"] = json!(id);
-        receipt["apply_when"] = json!(if running { "ready" } else { "resume" });
-        if let Err(error) = atomic(&receipt_path, &receipt.to_string()) {
-            let mut restore = original;
-            write(&mut restore).map_err(|rollback| {
-                format!("{error}; could not restore previous settings: {rollback}")
-            })?;
-            return Err(error);
-        }
+        let pending = json!({"request_id":id,"model":model.id,"effort":effort,"run_id":request.expected_run_id,"conversation_id":request.expected_conversation_id,"receipt_name":name,"receipt_run_id":request.expected_run_id});
+        let resume = json!({"model":model.id,"effort":effort});
+        schedule_settings(&mut record, pending, resume, || {
+            receipt["pending_settings_id"] = json!(id);
+            receipt["apply_when"] = json!(if running { "ready" } else { "resume" });
+            atomic(&receipt_path, &receipt.to_string())
+        })?;
     }
     println!("{receipt}");
     Ok(0)
+}
+
+/// Saves scheduled settings, then publishes their receipt. When publishing
+/// fails, the previous record is written back. A record an older hgs wrote
+/// gets its session ID before the snapshot, so the rollback keeps the ID the
+/// first write saved instead of assigning another (zerus-ucck, #1317 R6).
+fn schedule_settings(
+    record: &mut Value,
+    pending: Value,
+    resume: Value,
+    publish: impl FnOnce() -> Result<()>,
+) -> Result<()> {
+    ensure_session_id(record);
+    let original = record.clone();
+    record["pending_settings"] = pending;
+    record["resume_settings"] = resume;
+    write(record)?;
+    if let Err(error) = publish() {
+        let mut restore = original;
+        write(&mut restore).map_err(|rollback| {
+            format!("{error}; could not restore previous settings: {rollback}")
+        })?;
+        return Err(error);
+    }
+    Ok(())
 }
 
 // Called under the existing input transaction lock; never a mutation from ls or
@@ -2309,6 +2328,67 @@ pub(super) fn resume_argv(record: &Value, mut args: Vec<String>) -> Vec<String> 
 #[cfg(test)]
 mod tests {
     use super::*;
+    /// #1317 R6: a failed settings receipt writes the previous record back
+    /// with the session ID the first write gave a record an older hgs wrote.
+    /// The fixture runs in a child process with a private state directory.
+    #[test]
+    fn a_failed_settings_receipt_keeps_the_session_id_the_first_write_saved() {
+        let state = tempfile::tempdir().unwrap();
+        let output = std::process::Command::new(std::env::current_exe().unwrap())
+            .args([
+                "--exact",
+                "state::effort::tests::settings_rollback_fixture",
+                "--ignored",
+                "--test-threads=1",
+            ])
+            .env("HGS_STATE_DIR", state.path())
+            .env("ZERUS_SETTINGS_ROLLBACK_FIXTURE", "1")
+            .env_remove("HGS_SESSION")
+            .env_remove("HGS_SESSION_ID")
+            .env_remove("HGS_RUN_ID")
+            .output()
+            .unwrap();
+        let stdout = String::from_utf8_lossy(&output.stdout);
+        assert!(
+            output.status.success() && stdout.contains("test result: ok. 1 passed"),
+            "{stdout}{}",
+            String::from_utf8_lossy(&output.stderr)
+        );
+    }
+    #[test]
+    #[ignore = "run by a_failed_settings_receipt_keeps_the_session_id_the_first_write_saved"]
+    fn settings_rollback_fixture() {
+        if std::env::var_os("ZERUS_SETTINGS_ROLLBACK_FIXTURE").is_none() {
+            return;
+        }
+        fs::create_dir_all(root()).unwrap();
+        let name = "codex/example/legacy";
+        // A busy session saved by an older hgs, without a session ID.
+        let legacy = json!({"version":1,"agent":"codex","name":name,"run_id":"run-1",
+            "conversation_id":"conversation-1","activity":"busy","phase":"working","created":100});
+        atomic(&record_path(name), &legacy.to_string()).unwrap();
+        let mut record = read(name).unwrap();
+        assert_eq!(string(&record, "session_id"), "");
+        let mut first = String::new();
+        let error = schedule_settings(&mut record, json!({"request_id":"one"}), json!({"effort":"low"}), || {
+            let saved = read(name).unwrap();
+            assert_eq!(saved["pending_settings"]["request_id"], "one");
+            first = string(&saved, "session_id").to_owned();
+            Err("receipt publication failed".into())
+        })
+        .unwrap_err();
+        assert_eq!(error, "receipt publication failed");
+        assert!(uuid::Uuid::parse_str(&first).is_ok(), "{first:?}");
+        let restored = read(name).unwrap();
+        assert!(restored["pending_settings"].is_null() && restored["resume_settings"].is_null());
+        assert_eq!(string(&restored, "session_id"), first, "the rollback keeps the first write's ID");
+        // A schedule whose receipt is published keeps it too.
+        let mut record = read(name).unwrap();
+        schedule_settings(&mut record, json!({"request_id":"two"}), json!({"effort":"low"}), || Ok(())).unwrap();
+        let scheduled = read(name).unwrap();
+        assert_eq!(scheduled["pending_settings"]["request_id"], "two");
+        assert_eq!(string(&scheduled, "session_id"), first);
+    }
     #[test]
     fn a_failed_attempt_without_keys_preserves_the_first_message() {
         let mut record = json!({

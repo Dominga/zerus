@@ -5,6 +5,7 @@ use super::{
     store::{LockedStore, Store},
 };
 use crate::config::Config;
+use crate::state::Pinned;
 use serde_json::{json, Value};
 use std::{
     collections::BTreeSet,
@@ -50,9 +51,11 @@ pub(crate) fn infer_new_session(config: &Config, name: &str, directory: &Path) {
 /// the project of its source session (or of the archived source), or Inbox
 /// when that project no longer exists. Never initializes a catalog or replaces
 /// an explicit membership (including a tombstone). Each attempt holds the state
-/// lock only to confirm that `name` is still run `run_id` with `conversation`
-/// and to try the catalog lock once, so a busy catalog never holds the state
-/// lock (zerus-wx3k). Attempts share one 3 s cap; a failure never fails the fork.
+/// lock only to try the provider's binding lock once, confirm that `name` is
+/// still run `run_id` with `conversation`, and try the catalog lock once, so
+/// neither a busy catalog nor a busy provider lock holds the state lock
+/// (zerus-wx3k, zerus-jx5o). Attempts share one 3 s cap; a failure never fails
+/// the fork.
 pub(crate) fn inherit_fork_project(
     config: &Config,
     name: &str,
@@ -81,12 +84,16 @@ pub(crate) fn inherit_fork_project(
             }
             anyhow::Ok(true)
         });
-        // Done, the binding changed, the state lock stayed busy, or a failure.
-        if !matches!(attempt, Ok(Some(Ok(false)))) || Instant::now() >= end {
+        if !retry(&attempt) || Instant::now() >= end {
             return;
         }
         std::thread::sleep(Duration::from_millis(50));
     }
+}
+/// Whether a fork's project attempt may run again: a busy lock or catalog,
+/// with nothing held now. Done, a changed binding or a failure ends it.
+fn retry(attempt: &anyhow::Result<Pinned<anyhow::Result<bool>>>) -> bool {
+    matches!(attempt, Ok(Pinned::Busy | Pinned::Written(Ok(false))))
 }
 /// The fork's membership, or `None` to write nothing. A source without a
 /// membership (or explicitly unassigned) leaves the fork without one, so both
@@ -244,6 +251,17 @@ mod tests {
     use super::*;
     use crate::swarm::catalog::{new_id, Catalog};
     use std::collections::BTreeMap;
+    /// zerus-jx5o: a busy provider lock, state lock or catalog retries
+    /// within the cap; a write, a changed binding or a failure ends it.
+    #[test]
+    fn a_busy_attempt_retries_and_every_other_outcome_ends() {
+        assert!(retry(&Ok(Pinned::Busy)));
+        assert!(retry(&Ok(Pinned::Written(Ok(false)))));
+        assert!(!retry(&Ok(Pinned::Written(Ok(true)))));
+        assert!(!retry(&Ok(Pinned::Changed)));
+        assert!(!retry(&Ok(Pinned::Written(Err(anyhow::anyhow!("save failed"))))));
+        assert!(!retry(&Err(anyhow::anyhow!("lock failed"))));
+    }
     fn store() -> Store {
         Store {
             node_id: new_id(),

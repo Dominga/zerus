@@ -444,6 +444,9 @@ fn the_worker_answers_a_sandboxed_members_read_and_starts_its_run_at_low_integri
         let mut store = Store::open(true).unwrap();
         let mut t = team();
         t.status = TeamStatus::Running;
+        // A DeepSeek member: its run keeps Low integrity (a Codex member's
+        // keeps Codex's sandbox, task #48).
+        t.members.iter_mut().find(|member| member.id == "dev").unwrap().agent = "dsh".into();
         let folder = dir.path().join("work");
         std::fs::create_dir_all(&folder).unwrap();
         t.folder = folder.display().to_string();

@@ -3138,6 +3138,12 @@ fn queues_instead(op: &str) -> bool {
 /// The team's files refuse writes here: SQLite opened them read-only, or the
 /// system denies access (in any language: Windows localizes its message).
 fn read_only(error: &anyhow::Error) -> bool {
+    // Task #48: in a sandbox (Low integrity, or Codex's other user) every
+    // refused write is the sandbox's, whatever the error says (a private
+    // folder check, a localized message): the request waits in the folder.
+    if crate::platform::sandboxed() {
+        return true;
+    }
     let text = format!("{error:#}").to_lowercase();
     ["readonly", "read-only", "access is denied", "permission denied", "os error 5)", "os error 13)", "unable to open database"]
         .iter()

@@ -30,5 +30,6 @@ answer it with a verdict (hgs team report --json); edit none of its files.
 Command and land stages are Zerus', with no member. A role's context_before_task
 may compact or clear your context before a hand-out: it then carries the full
 task text.
+Codex keeps .git read-only: commit with git-commit, not in your shell.
 Build broker on: hgs guide team-broker.
 Anything else still asks the lead.

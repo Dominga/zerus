@@ -248,6 +248,37 @@ impl TaskDoc {
         self.doc.oplog_vv()
     }
 
+    /// The document's version as a canonical map, when its state is every
+    /// change it holds (attached, nothing pending): what a fence compares.
+    pub fn applied_version(&self) -> Option<crate::Version> {
+        let oplog = self.doc.oplog_vv();
+        (oplog == self.doc.state_vv()).then(|| crate::sync::version(&oplog))
+    }
+
+    /// Why this copy cannot be a fence's common version, or none when it
+    /// can: it holds a valid floor, its RAW stored schema is at least the
+    /// execution schema (never `schema()`, which raises a cut-over task over
+    /// a lower merged value an older build still reads), and its state is
+    /// every change it holds (zerus-cg5h.4 S2b.2 C3c2).
+    pub fn fence_ready(&self) -> Option<&'static str> {
+        if self.floor_record().is_none() {
+            Some("no_floor")
+        } else if self.stored_schema() < execution::EXECUTION_TASK_SCHEMA {
+            Some("schema")
+        } else if self.applied_version().is_none() {
+            Some("damaged")
+        } else {
+            None
+        }
+    }
+
+    /// The updates a replica at `version` (canonical) lacks of this task.
+    pub fn export_since_version(&self, version: &crate::Version) -> Result<Vec<u8>> {
+        let canonical = crate::sync::canonical_version(version)
+            .ok_or_else(|| Error::new("the version is not in its canonical form"))?;
+        self.export_since_vv(&crate::sync::vector(&canonical)?)
+    }
+
     /// The operations at the document's frontiers, as updates every copy
     /// that holds this version already has: they import as nothing, add no
     /// change, and differ whenever the version does.
@@ -336,7 +367,10 @@ impl TaskDoc {
         }
     }
 
-    pub(crate) fn stored_schema(&self) -> i64 {
+    /// The schema the document stores, as merged: what an older build reads
+    /// when it decides whether it may write, before any rule of this build
+    /// (`schema` raises it for a cut-over task).
+    pub fn stored_schema(&self) -> i64 {
         integer(&self.meta(), "schema").unwrap_or(0)
     }
 
@@ -1527,6 +1561,91 @@ impl TaskDoc {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// review-n on the C3 design: a copy that never saw the floor, written
+    /// with a later clock, wins the merged schema; `schema()` still reports
+    /// the execution schema for the cut-over task, but the RAW stored value
+    /// an older build reads is lower, so the fence refuses it until a repair.
+    #[test]
+    fn the_fence_reads_the_raw_stored_schema_not_the_raised_one() {
+        let mut task = TaskDoc::create(crate::NewTask {
+            project: "p",
+            id: "T-000001",
+            text: "Add rate limiting",
+            stage: crate::Stage::Todo,
+            target: crate::Target::Any,
+            author: Actor::Person,
+            rank: "V",
+            now: 1,
+        })
+        .unwrap();
+        let before = task.snapshot().unwrap();
+        assert_eq!(task.fence_ready(), Some("no_floor"));
+        assert!(task.floor().unwrap());
+        assert_eq!(task.fence_ready(), None);
+        // A copy from before the floor, edited further, then named: its
+        // schema write comes later than the floor's.
+        let mut stale = TaskDoc::from_bytes(&before).unwrap();
+        for n in 0..20 {
+            stale
+                .comment(&format!("note {n}"), &Actor::Person, 2 + n)
+                .unwrap();
+        }
+        stale
+            .set_title("Rate limiting", &Actor::Person, 30)
+            .unwrap();
+        let mut merged = TaskDoc::from_bytes(&task.snapshot().unwrap()).unwrap();
+        assert!(merged.import_block(&stale.export_since_vv(&merged.current_vv()).unwrap()));
+        assert_eq!(
+            merged.schema(),
+            execution::EXECUTION_TASK_SCHEMA,
+            "a cut-over task reports the execution schema"
+        );
+        assert!(
+            merged.stored_schema() < execution::EXECUTION_TASK_SCHEMA,
+            "the lower write won the merge"
+        );
+        assert_eq!(merged.fence_ready(), Some("schema"));
+        assert!(merged.repair_schema().unwrap());
+        assert_eq!(merged.fence_ready(), None);
+    }
+
+    /// Versions compare as the changes they name: canonical peers with
+    /// positive counts, zero entries dropped, anything else refused.
+    #[test]
+    fn versions_compare_in_their_one_canonical_form() {
+        let version = |pairs: &[(&str, i32)]| -> crate::Version {
+            pairs
+                .iter()
+                .map(|(peer, count)| (peer.to_string(), *count))
+                .collect()
+        };
+        assert_eq!(
+            crate::canonical_version(&version(&[("12", 3), ("7", 0)])),
+            Some(version(&[("12", 3)]))
+        );
+        for invalid in [
+            &[("012", 3)][..],
+            &[("+12", 3)],
+            &[("peer", 3)],
+            &[("12", -1)],
+            &[("18446744073709551616", 1)],
+        ] {
+            assert_eq!(
+                crate::canonical_version(&version(invalid)),
+                None,
+                "{invalid:?}"
+            );
+        }
+        assert!(crate::version_includes(
+            &version(&[("1", 4), ("2", 1)]),
+            &version(&[("1", 3)])
+        ));
+        assert!(!crate::version_includes(
+            &version(&[("1", 2)]),
+            &version(&[("1", 3)])
+        ));
+    }
 
     #[test]
     fn an_identified_session_keeps_ownership_across_renames() {

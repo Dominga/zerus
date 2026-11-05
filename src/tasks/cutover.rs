@@ -177,26 +177,39 @@ fn fence_check(config: &Config, id: &str, name: &str, task: &str, deadline: std:
     check(config, id, name, &uuid, deadline)
 }
 
-/// `--task T --check`: the fence's writer universe for the task, read now
-/// within one budget: every node that may hold it, the route to each, what
-/// its fresh hello showed, and the first reason the fence is closed. It
-/// creates no floor and no attempt, and grants nothing; the proof itself
-/// comes with C3c2 (`proof` is null until then).
+/// `--task T --check`: the fence for the task, proved now within one budget.
+/// It reads every node that may hold the task (the writer universe), then
+/// exchanges the task with each over its verified route until all of them
+/// and this computer hold ONE version with a valid floor and a raw stored
+/// schema of at least 7, then reads the universe again and passes the final
+/// admission without reserving anything. It exchanges and saves the task's
+/// replica data and repairs like a sync; it creates no floor and no attempt,
+/// and grants no send authority.
 fn check(config: &Config, id: &str, name: &str, uuid: &str, deadline: std::time::Instant) -> Result<Value> {
-    let universe = swarm::fence::universe(config, deadline).map_err(fail)?;
-    // A universe complete only after the budget is never reported open.
-    let closed = if std::time::Instant::now() >= deadline {
-        Some(json!({"node": null, "reason": "deadline"}))
+    let (universe, proved) =
+        swarm::fence::prove(config, &swarm::fence::Ssh(config), id, uuid, deadline).map_err(fail)?;
+    let (closed, proof) = match proved {
+        Ok(proof) => match proof.admit(config, deadline, |_, _| Ok(())).map_err(fail)? {
+            Ok(()) => (None, Some(json!({"version": proof.version, "rounds": proof.rounds,
+                                          "nodes": proof.nodes, "admissible": true}))),
+            Err(closed) => (Some(closed), None),
+        },
+        Err(closed) => (Some(closed), None),
+    };
+    // A result complete only after the budget is never reported open.
+    let (closed, proof) = if std::time::Instant::now() >= deadline {
+        (Some(swarm::fence::Closed { node: None, reason: "deadline" }), None)
     } else {
-        universe.closed().map(|(node, reason)| json!({"node": node, "reason": reason}))
+        (closed, proof)
     };
     Ok(json!({
         "project": {"id": id, "name": name},
         "task": uuid,
         "universe": universe,
         "incarnation": universe.incarnation(),
-        "closed": closed,
-        "proof": null,
+        "universe_closed": universe.closed().map(|(node, reason)| json!({"node": node, "reason": reason})),
+        "closed": closed.map(|c| json!({"node": c.node, "reason": c.reason})),
+        "proof": proof,
     }))
 }
 

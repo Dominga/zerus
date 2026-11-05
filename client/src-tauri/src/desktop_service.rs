@@ -356,6 +356,7 @@ impl CatalogDelivery {
 
 /// Immutable checked read identity, independent of transient display state.
 /// It grants no manager, process or writer authority.
+#[derive(Clone)]
 struct ReadOnlyOriginal {
     configuration: String,
     epoch: String,
@@ -981,6 +982,54 @@ impl Service {
             .await;
         serde_json::to_value(self.shared.mode_transition.view())
             .map_err(|_| "activation_view_unavailable".into())
+    }
+    fn refresh_binding(&self) -> Result<ReadOnlyOriginal, &'static str> {
+        self.shared
+            .original_read_scope()?
+            .cloned()
+            .ok_or("refresh_original_unavailable")
+    }
+    async fn refresh_status(&self) -> Result<mode_transition::refresh::View, String> {
+        let original = self.refresh_binding().map_err(str::to_owned)?;
+        Ok(self
+            .shared
+            .mode_transition
+            .observe_refresh(
+                self.shared.hgs.clone(),
+                original.configuration,
+                original.epoch,
+            )
+            .await)
+    }
+    fn refresh_fence(
+        &self,
+        display: &mode_transition::refresh::Offer,
+    ) -> Result<mode_transition::refresh::Fence, &'static str> {
+        let original = self.refresh_binding()?;
+        if original.configuration != display.configuration || original.epoch != display.epoch {
+            return Err("refresh_scope_changed");
+        }
+        let shared = self.shared.clone();
+        Ok(Arc::new(move || {
+            if shared.stopped.load(Ordering::Acquire) {
+                return Err("refresh_scope_changed");
+            }
+            let current = shared
+                .original_read_scope()?
+                .ok_or("refresh_scope_changed")?;
+            if current.configuration != original.configuration
+                || current.epoch != original.epoch
+                || shared
+                    .configuration
+                    .lock()
+                    .unwrap_or_else(PoisonError::into_inner)
+                    .as_deref()
+                    != Some(&original.configuration)
+            {
+                return Err("refresh_scope_changed");
+            }
+            Ok(())
+        }))
     }
     /// Settings choices only: offline and generation-zero computers remain
     /// selectable. These names grant neither freshness nor writer authority.
@@ -2443,6 +2492,55 @@ pub async fn desktop_service_ownership_result(
         .desktop_service()
         .ok_or("ownership_service_mode_required")?;
     Ok(service.ownership_result().await)
+}
+
+/// A bounded observation only. Retry and reconnect never call the refresh operation.
+#[tauri::command]
+pub async fn desktop_service_refresh_status(
+    source: tauri::State<'_, crate::commands::AppState>,
+) -> Result<mode_transition::refresh::View, String> {
+    source
+        .desktop_service()
+        .ok_or("refresh_service_unavailable")?
+        .refresh_status()
+        .await
+}
+
+#[tauri::command]
+pub async fn desktop_service_refresh(
+    app: tauri::AppHandle,
+    source: tauri::State<'_, crate::commands::AppState>,
+    display: mode_transition::refresh::Offer,
+) -> Result<mode_transition::refresh::View, String> {
+    use tauri_plugin_dialog::{DialogExt, MessageDialogButtons, MessageDialogKind};
+    if crate::actions::blocked() {
+        return Err("replay_transport_unavailable".into());
+    }
+    let service = source
+        .desktop_service()
+        .ok_or("refresh_service_unavailable")?;
+    let fence = service.refresh_fence(&display).map_err(str::to_owned)?;
+    let window = crate::main_window(&app).ok_or("The main window is unavailable.")?;
+    let prepared = service.shared.mode_transition.confirm_refresh(display, fence, move |display| {
+        let text = |message: zerus_client_core::text::Text| crate::native_text::render(&message);
+        let title = text(zerus_client_core::text!("Refresh background service"));
+        let body = text(zerus_client_core::text!("Zerus will stop the original background service after its work has drained, then start the updated CLI in the same mode. Background access and the selected mode stay unchanged. After the refresh, close and reopen Zerus to reconnect."));
+        app.dialog().message(format!("{body}\n\n{}: {}\n{}: {}",
+            text(zerus_client_core::text!("Original service")), display.epoch,
+            text(zerus_client_core::text!("Configuration")), display.configuration))
+            .title(title.clone()).parent(&window).kind(MessageDialogKind::Warning)
+            .buttons(MessageDialogButtons::OkCancelCustom(title, text(zerus_client_core::text!("Cancel")))).blocking_show()
+    }).await.map_err(str::to_owned)?;
+    if let Some(prepared) = prepared {
+        service
+            .shared
+            .mode_transition
+            .apply_refresh(prepared)
+            .await
+            .map_err(str::to_owned)
+    } else {
+        Ok(service.shared.mode_transition.refresh_view())
+    }
 }
 
 /// Two distinct native confirmations. The renderer selects only the displayed

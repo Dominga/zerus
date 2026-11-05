@@ -2493,7 +2493,7 @@ mod tests {
                     .join(format!("zerus-cleanup-test-{}.json", uuid::Uuid::new_v4())),
             );
             let target = review();
-            let source = json!({"name":target.name,"run_id":target.run_id,"conversation_id":target.conversation_id,"state":"running","tracked":true,"cmd":"claude","git_worktree":true,"git_root":"/srv/example/work","git_common_dir":"/srv/example/.git","worktree_owner_id":"owner-1"});
+            let source = json!({"name":target.name,"run_id":target.run_id,"conversation_id":target.conversation_id,"runtime_state":"live","tracked":true,"agent":"claude","git_worktree":true,"git_root":"/srv/example/work","git_common_dir":"/srv/example/.git","worktree_owner_id":"owner-1"});
             let capture =
                 Capture::from_inspection(&target, "11111111-1111-4111-8111-111111111111", &source)
                     .unwrap()

@@ -309,6 +309,7 @@ fn execute(config: &Config, args: &[String]) -> Result<Value> {
         "replica-inventory" => replica::inventory(config,serde_json::from_value(input()?)?),
         "replica-exchange" => replica::exchange(config,serde_json::from_value(input()?)?),
         "replica-relay" => fence::relay(config,serde_json::from_value(input()?)?),
+        "replica-task" => fence::task(config,serde_json::from_value(input()?)?),
         "sync" => transport::sync(config),
         "get" | "initialize" | "apply" | "export" | "resolve" | "disconnect" => {
             // Read stdin before taking the lock: slow clients cannot monopolize it.

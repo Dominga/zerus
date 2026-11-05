@@ -106,7 +106,7 @@ if (root/'recovery').exists():
 if args[0]=='inspect':
  name=args[1];tag=name.rsplit('/',1)[-1];counter=root/('inspect-'+tag)
  n=int(counter.read_text())+1 if counter.exists() else 1;counter.write_text(str(n))
- print(json.dumps({'name':name,'run_id':'run-'+tag,'conversation_id':'conv-'+tag,'tracked':True,'state':'running','cmd':'codex','git_worktree':True,'git_root':str(root/'repo'/tag),'git_common_dir':str(root/'repo/.git'),'worktree_owner_id':'replacement' if tag=='changed' and n>1 else 'owner-'+tag}));sys.exit(0)
+ print(json.dumps({'name':name,'run_id':'run-'+tag,'conversation_id':'conv-'+tag,'tracked':True,'runtime_state':'live','agent':'codex','git_worktree':True,'git_root':str(root/'repo'/tag),'git_common_dir':str(root/'repo/.git'),'worktree_owner_id':'replacement' if tag=='changed' and n>1 else 'owner-'+tag}));sys.exit(0)
 if args[0]=='session-action':
  name=args[1];tag=name.rsplit('/',1)[-1];data=json.load(sys.stdin)
  assert data['action']=='terminate' and data['expected_run_id']=='run-'+tag and data['expected_conversation_id']=='conv-'+tag

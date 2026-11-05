@@ -16,6 +16,7 @@ const CHOICE_MARKER: &str =
 const BYTES: usize = 64 << 10;
 pub(super) mod classification;
 mod first;
+pub(super) mod refresh;
 mod review;
 pub(super) use first::{Prepared as FirstPrepared, View as FirstView};
 pub(super) use review::{Action as ReviewAction, Prepared, View as ReviewView};
@@ -75,6 +76,7 @@ struct State {
     /// a journal loss, which lasts only while the latest read reports it.
     latched: bool,
     first_lost: bool,
+    refresh: refresh::State,
 }
 pub(super) struct Controller {
     state: Mutex<State>,

@@ -3600,7 +3600,10 @@ The check reports:
     `too_many_nodes` (more than 256 candidates, from the catalog, every
     visited node's writers and the nodes found over peers, counted as they
     are added). A partial universe is never certified.
-- `proof`: null until the proof itself lands (C3c2).
+- `universe_closed`: the first node that keeps the universe closed, alone;
+- `proof`, when the fence is proved: the common `version`, the `rounds` it
+  took, every node with the store it answered from, and `admissible: true`
+  once the final admission passed (C3c2).
 
 A node whose hello has no replica key, as an older build sends, shares no
 tasks, so it alone is left out. A node whose replica cannot be read sends a
@@ -3608,6 +3611,51 @@ present part instead, and is never left out.
 The nodes behind it are not left out: with no other route they close the fence
 as `unroutable`. The check holds no lock across the network, creates no floor
 and no attempt, and grants nothing.
+
+The proof (C3c2) runs over that universe. Each round sends every node, over
+its verified route, `swarm replica-task` for the task. That request carries
+this computer's version (a canonical map: decimal peers and positive counts,
+compared as the changes they name, never as encoded bytes) and the updates the
+node lacks. The node then:
+- imports them;
+- runs the store's locked schema repair;
+- saves durably;
+- reads the task again from its files;
+- answers with that read: its version, whether its state is every change it
+  holds, its raw stored schema, whether it holds a valid floor, and the updates
+  this computer lacks.
+
+A node answers only from the store its fresh hello over that route showed;
+any other store closes the proof as `changed_identity`. The fence is proved
+when, in ONE round, every node answers exactly this computer's version, with
+nothing more to send. That version must hold a valid floor and a RAW stored
+schema of at least 7 (not the raised one a cut-over task reports), and this
+computer's copy must still hold it when read again afterwards. Answers for
+different versions are never combined. At most three rounds run within the
+budget. The universe is then read again and must be the same incarnation.
+
+The final admission takes the catalog lock, the project lock and the store's
+admission, in that order and within the budget. Under those locks it reads
+again:
+- this computer's membership view, its store and its replica root;
+- the hold, for a task that records no attempt yet;
+- the task: holding the proven version, its floor and its raw stored schema.
+
+Only then would a reservation run; the check runs none. Closed reasons add:
+`no_floor`, `schema`, `damaged`, `not_converged`, `changed_identity`,
+`membership_changed`, `changed_version`, `held`, `malformed`, `busy` and
+`deadline`. It proves the schema barrier only: not exclusive delivery, not
+consent.
+
+Cutover boundary (owner decision, 2026-11-05): once a project's tasks cut
+over, the rollback floor for every computer in that swarm is the first
+floor-aware build. That is the minimum managed-store, writer and importer
+implementation, on every import route, including a phone's answering hgs.
+Running an older CLI or desktop there is unsupported: an older build's
+damaged-task recovery, or a truncated update tail, can bring back a pre-floor
+copy that it would then write. On an activated swarm that floor is the first
+release with the membership incarnation of C3c1 R3 (in practice 0.48.0);
+unreleased intermediate builds are unsupported too.
 
 Phones reach a project's tasks through the mobile relay and the Rust mobile
 connector, which uses two commands of its own. `hgs task digests --json` prints
@@ -5415,6 +5463,24 @@ key). The selection is fixed under the registration lock before the offline
 guard and removed through the same guarded exact removal; the reply adds
 `previous_image: true`. Install and status never take it, and nothing falls back
 after an effect.
+
+Before an admitted Windows notification post, a successful `Setting` getter
+must report Enabled. A real disabled setting refuses as `permission_denied`;
+a getter failure refuses as `getter_failed`. Only `ERROR_NOT_FOUND`
+(`0x80070490`) permits one identity-less initialization attempt per service
+process: a suppressed toast with no session content, a 15-second expiry,
+group `hgs-bootstrap` and a fresh 16-character tag. The worker immediately
+removes that exact tag/group for this AUMID and rechecks `Setting`; only Enabled
+allows the original user notification. Failure, cancellation and worker restart
+never reset the attempt. Status and withdrawal do not initialize an identity,
+and initialization never repairs registry/COM registration or changes consent.
+SuppressPopup prevents a popup banner, not an Action Center entry. Immediate
+exact removal is the normal path. Only if that removal fails may the brand-only
+scratch entry remain until its 15-second expiry. It carries no launch argument
+or delegates: empty activation arguments are rejected, and the cold COM entry
+exits 78 without opening a session or GUI.
+This follows the upstream [identity-less notifier initialization](https://github.com/CommunityToolkit/WindowsCommunityToolkit/blob/c8f76d072df53d3622fb5440d63afb06cb9e7a10/Microsoft.Toolkit.Uwp.Notifications/Toasts/Compat/ToastNotificationManagerCompat.cs)
+used before its [Setting getter](https://github.com/CommunityToolkit/WindowsCommunityToolkit/blob/c8f76d072df53d3622fb5440d63afb06cb9e7a10/Microsoft.Toolkit.Uwp.Notifications/Toasts/Compat/ToastNotifierCompat.cs).
 
 Explicit removal uses `notification-registration remove --json --request-id UUID`
 after a settled `desktop revoke --json --request-id UUID --reason rollback` with

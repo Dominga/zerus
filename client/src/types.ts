@@ -193,6 +193,15 @@ export interface NotificationOwnership {
   running: boolean;
   code: string;
 }
+/** Native refresh selection and result display; never consent or authority. */
+export interface ServiceRefreshView {
+  configuration?: string | null;
+  offer?: null | { configuration: string; epoch: string; selection: string };
+  request_id?: string | null;
+  running: boolean;
+  settled: boolean;
+  code: string;
+}
 /** Desktop service presentation has separate provenance from device-local marks. */
 export interface DesktopService {
   /** Bounded display reason from the checked original service scope; no authority. */

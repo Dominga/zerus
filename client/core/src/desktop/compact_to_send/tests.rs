@@ -654,3 +654,41 @@ fn the_native_request_names_its_reserved_identity() {
         Some(intent.send_request_id.as_str())
     );
 }
+
+/// review-3 (V4): the checkpoint reserves exactly this send. The same
+/// compaction with another reserved send, or today's version 1 form with
+/// none, never verifies: a reload never derives another send ID.
+#[test]
+fn the_checkpoint_reserves_exactly_this_send() {
+    let base = intent();
+    let saved: Checkpoint = serde_json::from_str(&base.checkpoint).unwrap();
+    // The same compaction with another reserved send.
+    let mut other = saved.clone();
+    other.send_request_id = Some("00000000-0000-4000-8000-0000000000ac".into());
+    // Today's version 1 compact-to-send of the same compaction: no send reserved.
+    let mut single = saved.clone();
+    single.version = checkpoint::VERSION;
+    single.send_request_id = None;
+    for broken in [other, single] {
+        assert!(broken.valid());
+        let mut copy = base.clone();
+        copy.checkpoint = serde_json::to_string(&broken).unwrap();
+        assert_eq!(
+            copy.verify().err(),
+            Some("invalid_compact_to_send_checkpoint"),
+            "{broken:?}"
+        );
+    }
+}
+
+/// review-3 (BD): a binding names two distinct requests, checked on its own:
+/// a receipt whose only fault is a binding with one ID for both is invalid.
+#[test]
+fn a_binding_names_two_distinct_requests() {
+    let verified = intent().verify().unwrap();
+    let mut same = receipt(&verified, Step::Running, Step::Queued, false);
+    assert!(same.valid());
+    same.binding.send_request_id = same.binding.compaction_request_id.clone();
+    assert!(!same.binding.valid());
+    assert!(!same.valid());
+}

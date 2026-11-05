@@ -282,6 +282,13 @@ pub enum Change {
         key: String,
         update: TeamsUpdate,
     },
+    /// Task 8: the team revisions of the computer's watch stream (its `team`
+    /// topic), or None while it gives none: the Teams poller of the computer
+    /// then polls. It never reaches the webview.
+    TeamHeads {
+        computer: ComputerId,
+        heads: Option<std::sync::Arc<teams::Heads>>,
+    },
 }
 
 impl Change {
@@ -296,7 +303,8 @@ impl Change {
             | Self::Tasks { computer, .. }
             | Self::Machine { computer, .. }
             | Self::Organization { computer, .. }
-            | Self::Teams { computer, .. } => computer,
+            | Self::Teams { computer, .. }
+            | Self::TeamHeads { computer, .. } => computer,
         }
     }
 }

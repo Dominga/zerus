@@ -18,6 +18,23 @@ pub(crate) fn path() -> PathBuf {
     root().join("teams/teams.sqlite3")
 }
 
+/// Task 8: the heads of the teams at `path` (see [`Store::heads`]); no store
+/// yet is no team.
+pub(crate) fn heads_at(path: &Path, limit: usize) -> anyhow::Result<(Vec<Value>, bool)> {
+    if !path.exists() {
+        return Ok((Vec::new(), false));
+    }
+    Store::open_at(path, false)?.heads(limit)
+}
+
+/// Task 8: the files whose stat changes when a team changes: the store and
+/// its rollback journal.
+pub(crate) fn files(path: &Path) -> Vec<PathBuf> {
+    let mut journal = path.as_os_str().to_owned();
+    journal.push("-journal");
+    vec![path.to_path_buf(), PathBuf::from(journal)]
+}
+
 /// One feed entry to append with a mutation.
 #[derive(Clone, Debug, PartialEq)]
 pub(crate) struct Event {
@@ -373,6 +390,31 @@ impl Store {
         let cut = items.len() as i64 > limit.max(1);
         items.truncate(limit.max(1) as usize);
         Ok((items, cut))
+    }
+
+    /// Task 8: every team's head for the watch stream's `team` topic: its id,
+    /// name, lead, status, revision and the time of its last change, the most
+    /// recently changed first, at most `limit`, and whether more exist. One
+    /// indexed query: the payload is read only for the name and the lead.
+    pub(crate) fn heads(&self, limit: usize) -> anyhow::Result<(Vec<Value>, bool)> {
+        let mut statement = self.db.prepare(
+            "SELECT id,revision,status,updated,json_extract(payload,'$.name'),json_extract(payload,'$.lead')
+             FROM teams ORDER BY updated DESC, id LIMIT ?1",
+        )?;
+        let rows = statement.query_map(params![limit.saturating_add(1) as i64], |row| {
+            Ok(json!({
+                "id": row.get::<_, String>(0)?,
+                "revision": row.get::<_, i64>(1)?,
+                "status": row.get::<_, String>(2)?,
+                "updated": row.get::<_, f64>(3)?,
+                "name": row.get::<_, Option<String>>(4)?.unwrap_or_default(),
+                "lead": row.get::<_, Option<String>>(5)?.unwrap_or_default(),
+            }))
+        })?;
+        let mut heads = rows.collect::<std::result::Result<Vec<_>, _>>()?;
+        let more = heads.len() > limit;
+        heads.truncate(limit);
+        Ok((heads, more))
     }
 
     /// Creates a team. A replay of the same request returns its first receipt.

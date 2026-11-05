@@ -59,6 +59,11 @@ export const taskFormSubmit = (input: import("./store/taskForms").FormSubmit) =>
 export const taskFormCancel = (kind: import("./store/taskForms").FormKind, handle: number, rev: number) => desktop<import("./store/taskEditor").TaskEditorView<import("./store/taskForms").FormKind>>("task_form_cancel", { kind, handle, rev });
 export const assignTask = (project: string, task: string, target: { computer: string; name: string; run_id: string; conversation_id: string } | null, catalogKey: string | null, sessionId: string | null, mode?: "session" | "subagent" | "new_session") => desktop<void>("task_assign", { input: { project, task, target, catalog_key: catalogKey, session_id: sessionId, mode: mode ?? null } });
 export const readTaskDetails = (project: string, task: string, before: string | null) => desktop<unknown>("task_details", { project, task, before });
+/** Teams (src-tauri teams.rs): follows one computer's team list, Waiting and at most one team; nothing stops reading it. */
+export const teamsFollow = (computer: ComputerId, follow: { list: boolean; waiting: boolean; team: string | null }) =>
+  inTauri() ? invoke<void>("teams_follow", { computer, list: follow.list, waiting: follow.waiting, team: follow.team }) : Promise.resolve();
+/** Reads the watched team's feed page before the oldest event shown; false when there is none to read. */
+export const teamsOlder = (computer: ComputerId) => inTauri() ? invoke<boolean>("teams_older", { computer }) : Promise.resolve(false);
 export const openTaskAttachment = (path: string) => desktop<string | null>("task_attachment_open", { path });
 
 /** `next_batch` answers with raw JSON bytes (`ipc::Response`), so large batches skip script evaluation. */

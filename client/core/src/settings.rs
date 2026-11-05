@@ -277,6 +277,24 @@ pub const KEYS: &[Key] = &[
             max: 4096,
         },
     ),
+    // The Team tab's dividers (task 9): the side column's width beside the
+    // canvas, and the members' share of it above the coordinator, in percent.
+    client(
+        "client/teamSideWidth",
+        Kind::Whole {
+            default: 420,
+            min: 340,
+            max: 900,
+        },
+    ),
+    client(
+        "client/teamMembersShare",
+        Kind::Whole {
+            default: 45,
+            min: 15,
+            max: 85,
+        },
+    ),
 ];
 
 /// The setting called `name`: a listed key, a shortcut override, or one of

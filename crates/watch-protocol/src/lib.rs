@@ -35,6 +35,8 @@ pub const GIT_SUBSCRIPTIONS: usize = 64;
 pub const PROCESSES_SUBSCRIPTIONS: usize = 16;
 /// Concurrent tasks subscriptions (projects) per stream.
 pub const TASKS_SUBSCRIPTIONS: usize = 8;
+/// The team heads the `team` topic carries at most (the most recently changed).
+pub const TEAM_ROWS: usize = 1000;
 /// The most events an Activity tail or tail snapshot carries.
 pub const ACTIVITY_TAIL: usize = 100;
 /// The most journal rows one Activity read returns.
@@ -61,6 +63,10 @@ pub mod topic {
     pub const TASKS: &str = "tasks";
     /// The shared project catalog as `hgs swarm get` shows it, as keyed rows.
     pub const ORGANIZATION: &str = "organization";
+    /// Every team's head (id, name, lead, status, revision, updated) as keyed
+    /// rows: a client reads a team again with `hgs team` when its revision
+    /// changes, instead of polling. One per stream.
+    pub const TEAM: &str = "team";
 }
 
 /// Why a catalog key was removed. Clients treat an unknown reason as unknown.

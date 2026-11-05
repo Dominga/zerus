@@ -619,6 +619,11 @@ fn launch(context: tauri::Context<tauri::Wry>, startup: Startup) {
                 app.manage(speech_settings::SpeechPage::default());
                 // Task #6: the Teams views' reads; a replay runs no hgs.
                 app.manage(teams::Teams::new(replay));
+                // Task 8: a stream's team heads reach the computer's poller.
+                let heads_app = app.handle().clone();
+                app.state::<commands::AppState>().pump().on_team_heads(std::sync::Arc::new(move |computer, heads| {
+                    heads_app.state::<teams::Teams>().heads(computer, heads);
+                }));
                 app.manage(termination_cleanup::TerminationCleanup::default());
                 app.manage(worktree_cleanup::WorktreeCleanup::default());
                 app.manage(recovery::start(app.handle()));

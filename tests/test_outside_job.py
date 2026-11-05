@@ -1,10 +1,15 @@
-"""Finite stand-ins for CI timeout cleanup; no Windows/process operations.
+"""Bounded CI cleanup policy and real private utility-tree controls.
 
-The helper is imported only for these pure controls. Every subprocess call is
-replaced before exercising cleanup, and the clock advances only in a stand-in.
+Cleanup policy tests replace subprocesses and the clock. RealUtility starts only
+bounded synthetic children, on Linux and natively in the Windows client gate.
 """
 import importlib.util
 import io
+import json
+import os
+import sys
+import tempfile
+import time
 from pathlib import Path
 import subprocess
 from types import SimpleNamespace
@@ -26,7 +31,7 @@ class Cleanup(unittest.TestCase):
         self.clock = mock.patch.object(outside_job.time, "monotonic", side_effect=lambda: self.now)
         self.clock.start()
         self.addCleanup(self.clock.stop)
-        self.runner = mock.patch.object(outside_job.subprocess, "run", side_effect=self.unexpected)
+        self.runner = mock.patch.object(outside_job, "bounded_run", side_effect=self.unexpected)
         self.run = self.runner.start()
         self.addCleanup(self.runner.stop)
 
@@ -204,11 +209,13 @@ class Cleanup(unittest.TestCase):
                 removals.append(self.value)
         class Follow(io.BytesIO):
             def read(self, *args):
-                case.now = max(case.now, 601)
+                case.assertEqual(args, (outside_job.LOG_CHUNK,))
+                case.now = max(case.now, 631)
                 return super().read(*args)
-        def open_log(path, mode):
-            self.assertEqual((str(path), mode), ("fixture-log", "rb"))
-            return Follow()
+        def open_log(path, mode, **kwargs):
+            self.assertEqual(str(path), "fixture-log")
+            self.assertIn(mode, ("rb", "ab"))
+            return Follow() if mode == "rb" else io.BytesIO()
         def run(argv, **kwargs):
             self.calls.append((argv, kwargs))
             if argv[0] == "powershell" and "Invoke-CimMethod" in argv[-1]:
@@ -220,7 +227,7 @@ class Cleanup(unittest.TestCase):
             if argv[0] == "taskkill":
                 self.now += kwargs["timeout"]
                 raise subprocess.TimeoutExpired(argv, kwargs["timeout"])
-            return subprocess.CompletedProcess(argv, 0)
+            return subprocess.CompletedProcess(argv, 0, stdout="")
         self.run.side_effect = run
         args = SimpleNamespace(child=None, command=["fixture-command"], log="fixture-log",
                                timeout=600, end=[] if custody_only else ["one", "two"], custody_only=custody_only)
@@ -243,13 +250,145 @@ class Cleanup(unittest.TestCase):
             self.assertIn("custody-only timeout", error.getvalue())
             self.assertFalse(any(call[0][0] == "taskkill" for call in self.calls))
         else:
-            self.assertEqual(len(self.calls), 4)  # WMI, one taskkill, both cleanup patterns.
+            self.assertEqual(len(self.calls), 5)  # WMI, diagnostic snapshot, taskkill, both patterns.
             self.assertEqual(sum(call[0][0] == "taskkill" for call in self.calls), 1)
             self.assertIn("taskkill: outcome unknown (TimeoutExpired)", error.getvalue())
         self.assertIn("retained status/work directory fixture-work", error.getvalue())
         self.assertNotIn("ended pid", error.getvalue())
         self.assertEqual(removals, [])
         self.assertIn("fixture-work/spec.json", files)
+
+
+class ChildDeadline(unittest.TestCase):
+    def control(self, custody_only):
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            spec = root / "spec.json"
+            spec.write_text(json.dumps({"argv": ["controlled-test"], "cwd": directory, "env": {},
+                                        "log": str(root / "log"), "status": str(root / "status"),
+                                        "end": [], "deadline": 20, "custody_only": custody_only}))
+            process = mock.Mock()
+            process.wait.return_value = 7
+            if not custody_only:
+                process.wait.side_effect = subprocess.TimeoutExpired("controlled-test", 0)
+            order = []
+            def snapshot(started, log, cleanup):
+                order.append("snapshot")
+                log.write(b"fixed process diagnostic\n")
+            with mock.patch.object(outside_job, "in_job", return_value=False), \
+                    mock.patch.object(outside_job, "join_kill_on_close_job", return_value=42), \
+                    mock.patch.object(outside_job.time, "monotonic", return_value=21), \
+                    mock.patch.object(outside_job.subprocess, "Popen", return_value=process), \
+                    mock.patch.object(outside_job, "report_survivors", side_effect=snapshot), \
+                    mock.patch.object(outside_job, "end_executables", side_effect=lambda *a: order.append("cleanup")):
+                outside_job.child(str(spec))
+            process.wait.assert_called_once_with(timeout=None if custody_only else 0)
+            self.assertEqual((root / "status").read_text(), "7" if custody_only else "124")
+            self.assertEqual(order, ["snapshot", "cleanup", "snapshot"])
+            if not custody_only:
+                self.assertIn("deadline expired", (root / "log").read_text())
+
+    def test_outside_copy_has_its_own_command_deadline_and_diagnostic(self):
+        self.control(False)
+
+    def test_custody_copy_retains_its_unbounded_original_wait(self):
+        self.control(True)
+
+
+class RealUtility(unittest.TestCase):
+    """Real private children, including a grandchild retaining BOTH outputs.
+
+    All fixture children have their own 30-second safety exit even under a bad
+    harness mutation; no recursion, shell, install, account or host service.
+    These run natively in the existing Windows client step as well as on Unix.
+    """
+    def wait_gone(self, pid, seconds=35):
+        end = time.monotonic() + seconds
+        while time.monotonic() < end:
+            if os.name == "nt":
+                gone = outside_job.exited(pid)
+            elif sys.platform == "linux":
+                path = Path(f"/proc/{pid}/stat")
+                try:
+                    gone = path.read_text().split(") ", 1)[1].startswith("Z ")
+                except FileNotFoundError:
+                    gone = True
+            else:
+                try:
+                    os.kill(pid, 0)
+                    gone = False
+                except ProcessLookupError:
+                    gone = True
+            if gone:
+                return
+            time.sleep(0.05)
+        self.fail("private utility grandchild did not exit within its safety bound")
+
+    def control(self, root_exits):
+        with tempfile.TemporaryDirectory(prefix="outside-utility-control-") as directory:
+            pid_file = Path(directory) / "grandchild.json"
+            grandchild = "import os,sys,time;print('grandchild stdout',flush=True);print('grandchild stderr',file=sys.stderr,flush=True);time.sleep(30)"
+            root = ("import subprocess,sys,time,json,pathlib;"
+                    "p=subprocess.Popen([sys.executable,'-u','-c',sys.argv[2]]);"
+                    "pathlib.Path(sys.argv[1]).write_text(json.dumps(p.pid));"
+                    "print('root started',flush=True);"
+                    + ("sys.exit(0)" if root_exits else "time.sleep(30)"))
+            before = time.monotonic()
+            limit = 8 if os.name == "nt" else 2
+            try:
+                if root_exits:
+                    result = outside_job.bounded_run([sys.executable, "-u", "-c", root, str(pid_file), grandchild],
+                                                     timeout=limit, capture_output=True, text=True)
+                    self.assertEqual(result.returncode, 0, result.stderr)
+                    self.assertIn("root started", result.stdout)
+                else:
+                    with self.assertRaises(subprocess.TimeoutExpired):
+                        outside_job.bounded_run([sys.executable, "-u", "-c", root, str(pid_file), grandchild],
+                                                timeout=limit, capture_output=True)
+                self.assertLess(time.monotonic() - before, limit + outside_job.KILL_WAIT + 3)
+                self.assertTrue(pid_file.is_file(), "utility did not reach the real grandchild control")
+                pid = json.loads(pid_file.read_text())
+                self.wait_gone(pid, 3)
+            finally:
+                if pid_file.exists():
+                    # The deliberate mutant's child still has its safety exit.
+                    self.wait_gone(json.loads(pid_file.read_text()))
+
+    def test_success_does_not_wait_for_descendant_output_eof(self):
+        self.control(True)
+
+    def test_timeout_ends_the_whole_utility_tree_without_pipe_drain(self):
+        self.control(False)
+
+    def test_action_eof_never_dispatches_the_utility(self):
+        with tempfile.TemporaryDirectory() as directory:
+            spec = Path(directory) / "action.json"
+            marker = Path(directory) / "must-not-exist"
+            spec.write_text(json.dumps({"argv": [sys.executable, "-c", "import pathlib,sys;pathlib.Path(sys.argv[1]).touch()", str(marker)], "env": {}}))
+            result = subprocess.run([sys.executable, "-I", outside_job.__file__, "--action", str(spec)],
+                                    stdin=subprocess.DEVNULL, capture_output=True, timeout=10)
+            self.assertEqual(result.returncode, 125, result.stderr)
+            self.assertFalse(marker.exists())
+
+
+class Workflow(unittest.TestCase):
+    def test_packages_precede_the_risky_gate_and_diagnostics_are_always_retained(self):
+        text = (Path(__file__).resolve().parents[1] / ".github/workflows/checks.yml").read_text()
+        start = text.index("  windows-desktop:")
+        end = text.index("\n  windows-host:", start)
+        windows = text[start:end]
+        package = windows.index("- name: Retain Windows portable zip and test logs")
+        test = windows.index("- name: Installer upgrade keeps the session host")
+        logs = windows.index("- name: Retain installer survival diagnostics")
+        self.assertLess(package, test)
+        self.assertLess(test, logs)
+        self.assertIn("if: always()", windows[logs:])
+        self.assertIn("name: windows-x86_64-${{ needs.source.outputs.commit }}", windows[package:test])
+        self.assertIn("name: windows-installer-logs-${{ needs.source.outputs.commit }}", windows[logs:])
+        self.assertIn("path: artifacts/test-results/installer*", windows[logs:])
+        self.assertNotIn("continue-on-error", windows[test:logs])
+        self.assertIn("test_outside_job.py", windows)
+        self.assertIn("HGS_TEST_INSTALLER_LOG_DIR", windows[test:logs])
 
 
 if __name__ == "__main__":

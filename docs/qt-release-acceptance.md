@@ -508,6 +508,36 @@ identify the checked summary bytes, not public SDK metadata or owner content:
 | `selected-receipts.json` | 664 | `95ad49391c527b69082ffea7f7f51868e4acdde8b77a87612f53985a9e97f3ca` |
 | `selected-cleanup-status.json` | 406 | `73bcf6e34d938b088268497978f57855e3150d8198502e1edce53aa88581d308` |
 
+### Recorded Mac installed caller trial — 2026-11-05
+
+Macbundle-u reported **BLOCKED** for the coordinator-admitted installed
+candidate `69ef4c5fbf9e4d57dde75a017d685f94b49abd8a`. The dedicated
+Accessibility runner's consumer-tree inspection reached its bound. Correcting
+that ad-hoc runner changed its code identity and invalidated the human grant;
+its self-probe returned `trusted=0`. UI actions stopped and no regrant arrived.
+The genuine Terminate-with-Remove caller was never exercised.
+
+| Subcheck | Result | Scoped evidence |
+|---|---|---|
+| Installed-pair Terminate/Remove | BLOCKED, no attempt | Resume, synthetic target/session/worktree, retention, actual Terminate and removal counts were all zero. No capture, confirmation or Terminate UUID was created. No unknown operation was replayed and no folder was manually deleted. This supplies no actual caller positive for `.66.3.40.4` or #1340. |
+| Required Native restoration and drafts | PASS, producer-reported restoration scope | The consumer normally quit after a stable held-zero barrier. One clean same-source GUI returned through ordinary no-environment LaunchServices, with the consumer flag absent. A fresh Native takeover showed revision 28 and current identity; the original service stayed passive/serving at the same epoch. All 538 draft records were preserved (22 unsent, 319 form-only, held zero). Normal `--sessions` forwarding succeeded. The local catalog was empty before and after; visual and remote-list usability remain unqualified with AX untrusted. |
+| Runtime and retained test artifacts | Settled runtime; artifact cleanup pending | The runner exited and was retired to PID zero, leaving GUI effects unavailable. No synthetic process, worktree or private-service residue remained, and native agents, tmux, DeepSeek and other sessions were untouched. The test app and private evidence remain for the owner to remove the sole TCC entry and for subsequent bounded residue verification. |
+
+The restore proof SHA-256 is
+`7424ee05a4502d89b0b14d9b9ca0525d03d8cbc313e0099e7e692f43ee5b6321`;
+the draft manifest SHA-256 is
+`abe727fb0b175ce5e51dbddc4bb5be0103a6861abfc994090e28256cf74c4f72`.
+Macbundle-u retains the bounded source/status/signature artifacts privately.
+These hashes record the scoped restoration evidence; no SDK metadata, private
+stdin or session body is published here.
+
+The result dependency completed with BLOCKED, not an acceptance PASS.
+`.66.3.40.4` stays in progress, its trial child `.66.3.40.4.1` stays blocked,
+and #1340 still needs the installed-pair positive. Reviewed source and hosted
+native controls from [#1363](https://github.com/ufna/zerus/pull/1363) remain
+separate evidence. A future trial requires its own coordinator-designated
+candidate/window and result correlation. Platform checkboxes remain unchanged.
+
 ## Installed client cutover on Linux and macOS
 
 **Preparation only; no installed case below has been executed or accepted.**

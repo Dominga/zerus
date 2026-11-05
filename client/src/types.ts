@@ -1037,7 +1037,7 @@ export interface TeamWaitingItem {
   detail?: Record<string, unknown> | null;
 }
 
-export interface TeamWaitingView { items: TeamWaitingItem[]; total: number; more: boolean }
+export interface TeamWaitingView { items: TeamWaitingItem[]; total: number; more: boolean; next?: Record<string, unknown> | null }
 
 /** The owner's confirmation of a team action, worded by the core. */
 export interface TeamConfirmation { name: string; title: string; text: string; action: string }

@@ -92,6 +92,8 @@ export const teamRead = (computer: ComputerId, team: string) =>
   inTauri() ? invoke<import("./types").TeamView>("team_read", { computer, team }) : Promise.reject(new Error("Teams need the desktop app."));
 /** Reads the watched team's feed page before the oldest event shown; false when there is none to read. */
 export const teamsOlder = (computer: ComputerId) => inTauri() ? invoke<boolean>("teams_older", { computer }) : Promise.resolve(false);
+/** Task 51: loads the next older Waiting page; false when there is none. */
+export const teamsWaitingOlder = (computer: ComputerId) => inTauri() ? invoke<boolean>("teams_waiting_older", { computer }) : Promise.resolve(false);
 /** Task 41/32: asks the core to read the watched team's profile. */
 export const teamsProfile = (computer: ComputerId) => inTauri() ? invoke<boolean>("teams_profile", { computer }) : Promise.resolve(false);
 /** Task 41: the Tests mode's queue and one bounded result page through the core. */

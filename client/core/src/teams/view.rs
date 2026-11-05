@@ -1018,6 +1018,8 @@ pub struct WaitingView {
     pub total: u64,
     /// More items wait after this page.
     pub more: bool,
+    /// The cursor the next older page sends, as hgs words it.
+    pub next: Option<Value>,
 }
 
 pub fn waiting(value: &Value) -> WaitingView {
@@ -1039,6 +1041,10 @@ pub fn waiting(value: &Value) -> WaitingView {
             .collect(),
         total: count(value, "total"),
         more: value.get("next").is_some_and(|next| !next.is_null()),
+        next: value
+            .get("next")
+            .filter(|next| next.is_object())
+            .cloned(),
     }
 }
 

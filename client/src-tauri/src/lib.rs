@@ -1443,6 +1443,7 @@ fn handler() -> impl Fn(tauri::ipc::Invoke) -> bool + Send + Sync + 'static {
         commands::tasks_follow,
         teams::teams_follow,
         teams::teams_older,
+        teams::teams_waiting_older,
         teams::teams_spans,
         teams::teams_profile,
         teams::team_tests,

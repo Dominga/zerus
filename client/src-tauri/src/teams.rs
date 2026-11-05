@@ -167,6 +167,14 @@ pub fn teams_older(teams: State<'_, Teams>, computer: String) -> Result<bool, St
     Ok(teams.with(&target, TeamsPoller::older))
 }
 
+/// Loads the next older Waiting page; false when there is none or one is
+/// already asked for.
+#[tauri::command]
+pub fn teams_waiting_older(teams: State<'_, Teams>, computer: String) -> Result<bool, String> {
+    let target = self::computer(&computer)?;
+    Ok(teams.with(&target, TeamsPoller::waiting_older))
+}
+
 /// Reads the watched team's time spans after task `after`.
 #[tauri::command]
 pub fn teams_spans(teams: State<'_, Teams>, computer: String, after: u64) -> Result<bool, String> {

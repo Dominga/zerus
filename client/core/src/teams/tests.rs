@@ -376,6 +376,56 @@ fn inbox_waiting_spans_and_profile_project_their_replies() {
     assert!(!profile.losses.is_empty() && !profile.roles.is_empty());
 }
 
+#[test]
+fn waiting_pages_append_new_items_in_order_and_stop_at_the_last() {
+    let start = Instant::now();
+    let mut model = TeamsModel::default();
+    model.follow(
+        TeamsFollow {
+            waiting: true,
+            ..TeamsFollow::default()
+        },
+        start,
+    );
+    let first = json!({
+        "items": [
+            {"id": "a", "kind": "report", "team": TEAM, "title": "A", "since": 3.0},
+            {"id": "b", "kind": "report", "team": TEAM, "title": "B", "since": 2.0}
+        ],
+        "total": 3,
+        "next": {"since": 2.0, "id": "b"}
+    });
+    let out = poll_once(&mut model, start, |_| first.clone());
+    assert_eq!(out.iter().filter(|(key, _)| key == "waiting").count(), 1);
+    assert!(model.request_waiting_older());
+    assert!(!model.request_waiting_older(), "one older page at a time");
+    let second = json!({
+        "items": [
+            {"id": "b", "kind": "report", "team": TEAM, "title": "B", "since": 2.0},
+            {"id": "c", "kind": "report", "team": TEAM, "title": "C", "since": 1.0}
+        ],
+        "total": 3,
+        "next": null
+    });
+    let out = poll_once(&mut model, start + POLL, |_| second.clone());
+    let waiting = out
+        .iter()
+        .find(|(key, _)| key == "waiting")
+        .map(|(_, update)| update.payload())
+        .expect("the older page sends the combined list");
+    assert_eq!(
+        waiting["items"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .map(|item| item["id"].as_str().unwrap())
+            .collect::<Vec<_>>(),
+        ["a", "b", "c"]
+    );
+    assert_eq!(waiting["total"], 3);
+    assert!(!model.request_waiting_older(), "the last page has no cursor");
+}
+
 fn follow_team() -> TeamsFollow {
     TeamsFollow {
         list: true,

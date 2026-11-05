@@ -868,6 +868,23 @@ pub(super) fn task_reply_receipt(name: &str, request: &Value) -> Result<Option<V
 }
 
 pub(super) fn submit(name: &str, input: &[u8], recovery_id: Option<&str>) -> Result<Value> {
+    submit_with(name, input, recovery_id, false)
+}
+
+/// `submit` for a question's answer: it refuses, before any key, when pending
+/// model or effort settings would be typed into the terminal first. Only the
+/// answer's own paste may reach the pane, so a refusal proves nothing was
+/// sent.
+pub(super) fn submit_answer(name: &str, input: &[u8]) -> Result<Value> {
+    submit_with(name, input, None, true)
+}
+
+fn submit_with(
+    name: &str,
+    input: &[u8],
+    recovery_id: Option<&str>,
+    answer: bool,
+) -> Result<Value> {
     let request: Request =
         serde_json::from_slice(input).map_err(|e| format!("invalid send payload: {e}"))?;
     let files = validate(&request)?;
@@ -893,7 +910,11 @@ pub(super) fn submit(name: &str, input: &[u8], recovery_id: Option<&str>) -> Res
         }
         return Err("delivery uncertain: this request may already be in Terminal; do not resend automatically".into());
     }
-    let mut record = effort::apply_pending(name, checked_record(name, &request)?)?;
+    let record = checked_record(name, &request)?;
+    if answer && effort::pending_applies(&record) {
+        return Err("model or effort settings would be typed first; answer this question in Terminal".into());
+    }
+    let mut record = effort::apply_pending(name, record)?;
     if let Some(id) = recovery_id { recovery::check_submission(&record, id)?; }
     checked_send_terminal(&record)?;
     let attachments_root = root.join("attachments");

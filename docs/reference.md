@@ -3496,6 +3496,41 @@ task that never cut over keeps the legacy Start. Only a person sets or clears it
 and clearing it takes `--hold off --confirm`. A hold that cannot be read is
 on. Times are in milliseconds.
 
+`task cutover --project P --task T --check` reads the task's writer universe
+for the fence that the attempt writer will need (zerus-cg5h.4 S2b.2 C3), within
+one 15-second budget counted once. It covers every node that may hold a task
+of the swarm, not only this computer's peers:
+- this computer;
+- every catalog machine not redirected away (each machine that ever joined
+  writes its name there);
+- every node reached over verified peer links.
+
+A node's catalog name is only something to cover. Each node must answer a
+fresh hello over its own route, and that hello's node is checked at every hop.
+A hello's replica part lists the node's verified direct peers (`peers`) and its
+`fence` capability. `swarm replica-relay` forwards one hello, or another relay,
+only to the relaying member's own verified alias for the next node. It passes
+on what is left of the deadline and the hops, and answers with the reply
+checked to come from that node.
+
+The check reports:
+- `universe`: this computer's node, store and replica root, and every node with
+  its route and what its hello showed;
+- `incarnation`: a digest of all that, which changes when any of it does (a
+  replaced store, a new route or node);
+- `closed`: the first node that keeps the fence closed, and why:
+  - `unreachable`, `unverified` (another computer answered), or `unroutable`
+    (a catalog machine that no verified route reaches);
+  - `protocol`, `task_schema` below 7, `store`, or `fence_unsupported`;
+  - `busy` (the catalog lock was not free within the budget), `deadline`, or
+    `too_many_nodes`.
+- `proof`: null until the proof itself lands (C3c2).
+
+A node whose hello has no replica key shares no tasks, so it alone is left out.
+The nodes behind it are not left out: with no other route they close the fence
+as `unroutable`. The check holds no lock across the network, creates no floor
+and no attempt, and grants nothing.
+
 Phones reach a project's tasks through the mobile relay and the Rust mobile
 connector, which uses two commands of its own. `hgs task digests --json` prints
 each project's digest of what a phone holds (the project document and every

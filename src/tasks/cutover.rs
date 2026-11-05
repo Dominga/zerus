@@ -10,15 +10,28 @@ use std::time::UNIX_EPOCH;
 use std::time::Duration;
 use zerus_replica::{Actor, TASK_SCHEMA};
 
+/// One fence check's whole budget, counted once from its start (C3).
+const FENCE_BUDGET: Duration = Duration::from_secs(15);
+
 /// The most task folder entries, and the longest time, one status reads.
 const SCAN_ENTRIES: usize = 200_000;
 const SCAN_TIME: Duration = Duration::from_millis(500);
 
-/// `task cutover --project P [--hold on|off [--confirm]]`.
+/// `task cutover --project P [--hold on|off [--confirm]]`, or
+/// `task cutover --project P --task T --check`.
 pub(super) fn cutover(config: &Config, args: &[String]) -> Result<Value> {
     let who = actor(&machines(config)?.here, args, false)?;
     let (id, name) = project_arg(config, args, &who)?;
     let store = store(config, &id)?;
+    if let Some(task) = option(args, "--task")? {
+        if !flag(args, "--check") || option(args, "--hold")?.is_some() {
+            return Err(fail("--task takes --check, and nothing else"));
+        }
+        let uuid = store.find(task).map_err(fail)?.uuid().to_owned();
+        // No project lock is held across the network.
+        drop(store);
+        return check(config, &id, &name, &uuid);
+    }
     if let Some(hold) = option(args, "--hold")? {
         let on = match hold {
             "on" => true,
@@ -134,6 +147,27 @@ fn closing(member: &TaskMember, project: &str, latest: Option<i64>) -> Option<Va
         return closed("inventory_before_cutover", Some(ms(exchanged.at)));
     }
     None
+}
+
+/// `--task T --check`: the fence's writer universe for the task, read now
+/// within one budget: every node that may hold it, the route to each, what
+/// its fresh hello showed, and the first reason the fence is closed. It
+/// creates no floor and no attempt, and grants nothing; the proof itself
+/// comes with C3c2 (`proof` is null until then).
+fn check(config: &Config, id: &str, name: &str, uuid: &str) -> Result<Value> {
+    let deadline = std::time::Instant::now() + FENCE_BUDGET;
+    let universe = swarm::fence::universe(config, deadline).map_err(fail)?;
+    let closed = universe
+        .closed()
+        .map(|(node, reason)| json!({"node": node, "reason": reason}));
+    Ok(json!({
+        "project": {"id": id, "name": name},
+        "task": uuid,
+        "universe": universe,
+        "incarnation": universe.incarnation(),
+        "closed": closed,
+        "proof": null,
+    }))
 }
 
 /// The first closing reason in words; clients build their own.

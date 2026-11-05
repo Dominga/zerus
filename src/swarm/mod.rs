@@ -3,6 +3,7 @@
 //! locked, atomically replaced store; initialized snapshots read it lock-free.
 mod bootstrap;
 mod catalog;
+pub(crate) mod fence;
 mod launch_project;
 mod infer_project;
 pub(crate) use infer_project::{directory_project, infer_new_session, inherit_fork_project};
@@ -271,6 +272,7 @@ fn execute(config: &Config, args: &[String]) -> Result<Value> {
         "exchange" => transport::exchange(config,serde_json::from_value(input()?)?),
         "replica-inventory" => replica::inventory(config,serde_json::from_value(input()?)?),
         "replica-exchange" => replica::exchange(config,serde_json::from_value(input()?)?),
+        "replica-relay" => fence::relay(config,serde_json::from_value(input()?)?),
         "sync" => transport::sync(config),
         "get" | "initialize" | "apply" | "export" | "resolve" | "disconnect" => {
             // Read stdin before taking the lock: slow clients cannot monopolize it.

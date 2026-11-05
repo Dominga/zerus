@@ -546,6 +546,81 @@ class Swarm(unittest.TestCase):
         self.assertTrue(self.call('b', 'sync')['c']['ok'])
         self.assertEqual({m['alias'] for m in self.task('b', 'cutover', '--project', 'a')['members']}, {'a'})
 
+    def fence_check(self, node, task):
+        return self.task(node, 'cutover', '--project', 'a', '--task', task, '--check')
+
+    def test_the_fence_check_covers_every_writer_over_verified_routes(self):
+        # zerus-cg5h.4 S2b.2 C3c1 (review-n's A-B-C chain): a has only b as a
+        # peer, and c holds a's tasks through b. The writer universe covers c
+        # too, reached through b's relay and verified by its own hello.
+        self.join('a', 'b'); self.join('b', 'a')
+        for n in 'abab':
+            self.call(n, 'sync')
+        task = self.task('a', 'add', '--project', 'a', text='Add rate limiting')['task']
+        ids = {n: self.call(n, 'hello')['node_id'] for n in 'abc'}
+        before = self.fence_check('a', task['id'])
+        self.assertEqual(set(before['universe']['nodes']), {ids['b']})
+        # c joins through b: it is covered, and the incarnation changes.
+        self.join('c', 'b'); self.join('b', 'c')
+        self.converge()
+        self.assertEqual(sorted(self.call('b', 'hello')['replica']['peers']), sorted([ids['a'], ids['c']]))
+        self.assertEqual(self.call('b', 'hello')['replica']['fence'], 1)
+        check = self.fence_check('a', task['id'])
+        nodes = check['universe']['nodes']
+        self.assertEqual(set(nodes), {ids['b'], ids['c']}, check)
+        self.assertEqual(nodes[ids['b']]['route'], [ids['b']])
+        self.assertEqual(nodes[ids['c']]['route'], [ids['b'], ids['c']])
+        for node in nodes.values():
+            self.assertEqual((node['protocol'], node['task_schema'], node['fence'], node['closed']),
+                             (1, 7, 1, None), node)
+            self.assertRegex(node['store'], r'^[0-9a-f-]{36}$')
+        self.assertEqual(nodes[ids['c']]['store'], self.call('c', 'hello')['replica']['store'])
+        self.assertEqual((check['closed'], check['proof'], check['task']), (None, None, task['uuid']))
+        self.assertNotEqual(check['incarnation'], before['incarnation'])
+        self.assertEqual(check['universe']['me']['node'], ids['a'])
+        # A second read of an unchanged universe has the same incarnation.
+        self.assertEqual(self.fence_check('a', task['id'])['incarnation'], check['incarnation'])
+        # A store replaced behind the relay changes it (membership ABA).
+        (self.root / 'c/state/replica/store-id').unlink()
+        changed = self.fence_check('a', task['id'])
+        self.assertNotEqual(changed['incarnation'], check['incarnation'])
+        self.assertEqual(changed['closed'], None)
+        # A node answering as another computer behind the relay is unverified.
+        (self.root / 'spoil-c').write_text(json.dumps({'command': 'hello', 'field': 'node_id',
+                                                        'value': str(uuid.UUID(int=3))}))
+        self.assertEqual(self.fence_check('a', task['id'])['closed'],
+                         {'node': ids['c'], 'reason': 'unverified'})
+        (self.root / 'spoil-c').unlink()
+        # A hop that answers the relay from another store, or names none,
+        # breaks the route's binding to the store its hello showed.
+        for value in [{'value': str(uuid.UUID(int=5))}, {}]:
+            (self.root / 'spoil-b').write_text(json.dumps({'command': 'replica-relay', 'field': 'store', **value}))
+            self.assertEqual(self.fence_check('a', task['id'])['closed'],
+                             {'node': ids['c'], 'reason': 'unverified'}, value)
+        (self.root / 'spoil-b').unlink()
+        # The same for a direct peer, which only this computer checks.
+        (self.root / 'spoil-b').write_text(json.dumps({'command': 'hello', 'field': 'node_id',
+                                                        'value': str(uuid.UUID(int=4))}))
+        self.assertEqual(self.fence_check('a', task['id'])['closed'],
+                         {'node': ids['b'], 'reason': 'unverified'})
+        (self.root / 'spoil-b').unlink()
+        # A node that does not answer keeps the fence closed.
+        (self.root / 'offline-c').touch()
+        self.assertEqual(self.fence_check('a', task['id'])['closed'],
+                         {'node': ids['c'], 'reason': 'unreachable'})
+        (self.root / 'offline-c').unlink()
+        # A hop without task replication excludes only itself: the node
+        # behind it, still a catalog machine, has no route and closes it.
+        (self.root / 'noreplica-b').touch()
+        check = self.fence_check('a', task['id'])
+        nodes = check['universe']['nodes']
+        self.assertEqual((nodes[ids['b']]['no_replica'], nodes[ids['b']]['closed']), (True, None))
+        self.assertEqual((nodes[ids['c']]['route'], nodes[ids['c']]['closed']), ([], 'unroutable'))
+        self.assertEqual(check['closed'], {'node': ids['c'], 'reason': 'unroutable'})
+        (self.root / 'noreplica-b').unlink()
+        # The check runs only with --check, and changes no task.
+        self.assertEqual(self.task('a', 'get', task['id'], '--project', 'a')['task']['stage'], task['stage'])
+
     def test_a_member_whose_hello_fails_has_no_complete_project(self):
         # review-n on #1432: a failed hello records every project known here
         # as unreachable for that member, never leaving an old completion.

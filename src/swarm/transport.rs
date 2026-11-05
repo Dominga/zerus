@@ -49,6 +49,25 @@ pub fn remote(config: &Config, alias: &str, action: &str, input: Option<&Value>)
     run(config, alias, &["swarm", action], input)
 }
 
+/// `remote`, ended at `deadline` (never later than an ordinary call): one
+/// past it fails before it connects, and one still running then is stopped.
+pub fn remote_until(
+    config: &Config,
+    alias: &str,
+    action: &str,
+    input: Option<&Value>,
+    deadline: Instant,
+) -> Result<Value> {
+    let left = deadline
+        .checked_duration_since(Instant::now())
+        .filter(|left| !left.is_zero())
+        .ok_or_else(|| anyhow::anyhow!("no time left to reach {alias}"))?;
+    run_within(config, alias, &["swarm", action], input, left.min(CALL_LIMIT))
+}
+
+/// How long one call to a member may run.
+pub(crate) const CALL_LIMIT: Duration = Duration::from_secs(25);
+
 /// The twins among `values` that parse; the rest are skipped, as derived data.
 fn parsed(values: &[Value]) -> Vec<Twin> {
     values
@@ -71,6 +90,16 @@ fn export(config: &Config, alias: &str) -> Result<Value> {
 /// `hgs WORDS…` on the member behind `alias`, with `input` as JSON on its
 /// standard input; its JSON answer.
 pub fn run(config: &Config, alias: &str, words: &[&str], input: Option<&Value>) -> Result<Value> {
+    run_within(config, alias, words, input, CALL_LIMIT)
+}
+
+fn run_within(
+    config: &Config,
+    alias: &str,
+    words: &[&str],
+    input: Option<&Value>,
+    limit: Duration,
+) -> Result<Value> {
     ensure!(
         config.peers.iter().any(|p| p == alias) && !config.is_self(alias),
         "choose a locally configured remote machine"
@@ -129,7 +158,7 @@ pub fn run(config: &Config, alias: &str, words: &[&str], input: Option<&Value>) 
         if let Some(status) = child.try_wait()? {
             break Some(status);
         }
-        if started.elapsed() > Duration::from_secs(25) {
+        if started.elapsed() > limit {
             let _ = child.kill();
             let _ = child.wait();
             break None;
@@ -166,6 +195,14 @@ pub fn hello(config: &Config, inventory: bool) -> Result<Value> {
         result["known"] = json!(store.data.catalog.operations.keys().collect::<Vec<_>>());
         result["known_twins"] = json!(store.data.twins.known());
     }
+    // The verified direct peers, for the fence's routes (C3c1).
+    let peers: std::collections::BTreeSet<String> = store
+        .data
+        .peers
+        .values()
+        .filter(|peer| !peer.node.is_empty())
+        .map(|peer| peer.node.clone())
+        .collect();
     // Project stores are opened after the catalog lock is released. Tasks
     // that cannot be read never stop the catalog. Only hello reads them.
     drop(store);
@@ -173,7 +210,11 @@ pub fn hello(config: &Config, inventory: bool) -> Result<Value> {
         return Ok(result);
     }
     match replica::hello(config) {
-        Ok(replica) => result["replica"] = replica,
+        Ok(mut replica) => {
+            replica["peers"] = json!(peers);
+            replica["fence"] = json!(super::fence::FENCE);
+            result["replica"] = replica
+        }
         Err(error) => eprintln!("hgs swarm: tasks: {error:#}"),
     }
     Ok(result)

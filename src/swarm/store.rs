@@ -191,25 +191,44 @@ pub struct LockedStore {
     session_ids_original: Vec<u8>,
 }
 
+/// How a catalog load waits for the catalog lock.
+#[derive(Clone, Copy)]
+enum Wait {
+    Blocking,
+    Now,
+    Until(std::time::Instant),
+}
+
 impl LockedStore {
     pub fn load(config: &Config) -> Result<Self> {
-        Self::load_with(config, false, false, true)
+        Self::load_with(config, false, Wait::Blocking, true).map(Self::taken)
+    }
+    /// `load`, waiting for the catalog lock no later than `deadline`: none
+    /// when another command still holds it then, or the deadline has passed.
+    /// A membership change takes this lock, so the fence's final admission
+    /// takes it first (C3).
+    pub fn load_until(config: &Config, deadline: std::time::Instant) -> Result<Option<Self>> {
+        Self::load_with(config, false, Wait::Until(deadline), true)
+    }
+    /// The store of a blocking or immediate load, which always takes the lock.
+    fn taken(store: Option<Self>) -> Self {
+        store.expect("a blocking or immediate catalog load takes the lock or fails")
     }
     /// First-use bootstrap creates only the catalog identity, without inferring
     /// machine names, bindings, projects or session placement from a read.
     pub(super) fn load_bootstrap(config: &Config) -> Result<Self> {
-        Self::load_with(config, false, false, false)
+        Self::load_with(config, false, Wait::Blocking, false).map(Self::taken)
     }
     /// An existing catalog for one scoped metadata operation. Do not stage the
     /// ordinary loader's machine-name/binding refresh as another shared edit.
     pub fn load_scoped(config: &Config) -> Result<Self> {
-        Self::load_with(config, true, false, false)
+        Self::load_with(config, true, Wait::Blocking, false).map(Self::taken)
     }
     /// Optional launch metadata must not wait behind a sync or user edit.
     pub fn try_load_scoped(config: &Config) -> Result<Self> {
-        Self::load_with(config, true, true, false)
+        Self::load_with(config, true, Wait::Now, false).map(Self::taken)
     }
-    fn load_with(config: &Config, scoped: bool, nonblocking: bool, refresh: bool) -> Result<Self> {
+    fn load_with(config: &Config, scoped: bool, wait: Wait, refresh: bool) -> Result<Option<Self>> {
         let dir = config.dir.join("swarm");
         if scoped {
             ensure!(
@@ -228,11 +247,24 @@ impl LockedStore {
                 .write(true),
         )
         .open(dir.join("catalog.lock"))?;
-        let lock = if nonblocking {
-            fs2::FileExt::try_lock_exclusive(&lock)?;
-            platform::FileLock::held(lock)
-        } else {
-            platform::FileLock::exclusive(lock)?
+        let lock = match wait {
+            Wait::Blocking => platform::FileLock::exclusive(lock)?,
+            Wait::Now => {
+                fs2::FileExt::try_lock_exclusive(&lock)?;
+                platform::FileLock::held(lock)
+            }
+            Wait::Until(deadline) => loop {
+                if std::time::Instant::now() >= deadline {
+                    return Ok(None);
+                }
+                match fs2::FileExt::try_lock_exclusive(&lock) {
+                    Ok(()) => break platform::FileLock::held(lock),
+                    Err(error) if platform::lock_contended(&error) => {
+                        std::thread::sleep(std::time::Duration::from_millis(10))
+                    }
+                    Err(error) => return Err(error.into()),
+                }
+            },
         };
         let path = dir.join("catalog.json");
         let original = if scoped {
@@ -319,7 +351,7 @@ impl LockedStore {
                 .catalog
                 .set(&node, Key::machine(&node, "name"), json!(config.host()))?;
         }
-        Ok(loaded)
+        Ok(Some(loaded))
     }
     pub fn save(&mut self) -> Result<()> {
         self.save_catalog_only()?;

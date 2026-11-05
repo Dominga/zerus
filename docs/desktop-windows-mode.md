@@ -156,8 +156,33 @@ qualify the Task Scheduler or installed Settings path.
 already retiring Windows service whose selected CLI was replaced. Ordinary
 same-mode selection and `registration install --json` keep their existing
 behavior. This operation never toggles mode, updates the unchanged definition,
-reinstalls, revokes, Rearms or creates a Grant. The Settings call site and
-installed PC qualification are separate follow-ups.
+reinstalls, revokes, Rearms or creates a Grant. Installed PC qualification
+remains outstanding.
+
+The Service consumer now offers **Settings > About > Service refresh required >
+Refresh background service…** when a bounded native read proves the original
+manual-refresh service and its current identity-current Service Grant. This
+opens a separate native confirmation showing the original epoch and
+configuration. The renderer sends only the displayed selection nonce; the
+full target, including file and process birth identities, stays in native
+memory. The selected helper, current target and immutable consumer binding
+are checked before and after the dialog and immediately before spawn.
+
+The operation uses one original request UUID. A lost reply, **Check result**,
+or a reopened GUI with a durable pending refresh only observes that UUID;
+none replays Stop or RunEx. **Check service status**, Retry, Resume and automatic
+reconnect never invoke refresh. A possible start with missing or unavailable
+original evidence remains unconfirmed and cannot offer a new operation.
+
+After an exact settled receipt, this window keeps its immutable original
+service binding and stays read-only. Close and reopen Zerus to authenticate the
+refreshed endpoint through the ordinary startup path. The refresh receipt does
+not grant business eligibility, clear review/default latches, Rearm, or schedule
+imports. Revoked/blocked/changed-Origin refresh and default-mode native takeover
+remain unsupported (zerus-5wmh.66.3.40.3.4). The availability guidance preserves
+the selected mode and original request instead of offering a reinstall or mode
+toggle. Native installed-Settings and Fast Startup/Restart qualification remain
+outstanding; portable/Linux dialog and transport models are source evidence.
 
 The closed command forms are:
 

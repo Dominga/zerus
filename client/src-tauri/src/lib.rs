@@ -1558,6 +1558,8 @@ fn handler() -> impl Fn(tauri::ipc::Invoke) -> bool + Send + Sync + 'static {
         desktop_service::desktop_service_mode,
         desktop_service::desktop_service_retry,
         desktop_service::desktop_service_check_status,
+        desktop_service::desktop_service_refresh_status,
+        desktop_service::desktop_service_refresh,
         desktop_service::desktop_service_ownership_rearm,
         desktop_service::desktop_service_ownership_result,
         desktop_service::desktop_service_mode_action,

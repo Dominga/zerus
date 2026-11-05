@@ -76,7 +76,22 @@ fn caller() -> Option<Value> {
     if let Some(caller) = TEST_CALLER.with(|caller| caller.borrow().clone()) {
         return caller;
     }
-    caller_record().or_else(dsh_caller)
+    caller_record().or_else(dsh_caller).or_else(sandbox_env_caller)
+}
+
+/// Task #48: Codex's Windows sandbox runs the member's commands as another
+/// Windows user, so the process chain never reaches the session (the owner's
+/// processes are not this user's); the session environment it inherits names
+/// the member. That names only where the request goes: the team worker trusts
+/// the member's folder it is written to (U20), never this claim, and a process
+/// outside a sandbox never takes this way.
+fn sandbox_env_caller() -> Option<Value> {
+    if !crate::platform::foreign_sandbox() {
+        return None;
+    }
+    let name = nonempty_env("HGS_SESSION")?;
+    let run = nonempty_env("HGS_RUN_ID")?;
+    super::storage::read_run(&name, &run).ok()?.filter(|record| record["state"] != "archived")
 }
 
 /// Task #28 (1): a DeepSeek session has no hgs session environment and its
@@ -85,7 +100,11 @@ fn caller() -> Option<Value> {
 /// "not inside a Zerus session". The harness runs every tool command with
 /// the conversation as `DSH_SESSION_ID` (the identity `hgs team` takes for a
 /// dsh member, A3/A4); the caller is this computer's binding of it.
-fn dsh_caller() -> Option<Value> {
+pub(crate) fn dsh_caller() -> Option<Value> {
+    #[cfg(test)]
+    if let Some(conversation) = TEST_DSH_SESSION.with(|value| value.borrow().clone()) {
+        return binding_for(&super::dsh::binding_records(), &conversation);
+    }
     binding_for(&super::dsh::binding_records(), &nonempty_env("DSH_SESSION_ID")?)
 }
 
@@ -235,7 +254,10 @@ fn brokered_read(caller: &Value, args: &[String]) -> Result<i32> {
 /// the member's session is Building while it runs. The command runs at Low
 /// integrity, as the member's own shell does (`low_exec`), with its
 /// temporary files in the member's folder, which its sandbox may write.
-pub(crate) fn start_for_sandbox(id: &str, input: &Value, session: Value, folder: &Path) -> Result<Value> {
+/// Task #48: a Codex member's run runs in Codex's own sandbox instead
+/// (`codex sandbox` on its folder), as its own commands do; it must start in
+/// the member's folder, the one folder that sandbox may write.
+pub(crate) fn start_for_sandbox(id: &str, input: &Value, session: Value, folder: &Path, sandbox: Sandbox) -> Result<Value> {
     if !canonical_uuid(id) {
         return Err("A canonical request_id is required; use a new UUID for every run".into());
     }
@@ -249,20 +271,77 @@ pub(crate) fn start_for_sandbox(id: &str, input: &Value, session: Value, folder:
         return Ok(running_note(&claim));
     }
     let (label, command, cwd, minutes) = fields(input)?;
+    if sandbox == Sandbox::Codex && !within(&cwd, folder) {
+        return Err(format!("a Codex member's run starts in its own folder ({}), the one its sandbox may write", folder.display()));
+    }
     let temp = folder.join(".zerus-team").join("tmp");
     fs::create_dir_all(&temp).map_err(|error| format!("the member's temporary folder: {error}"))?;
     private_dir(&dir())?;
     prune();
     let temp = temp.display().to_string();
-    let claim = json!({"request_id":id,"label":label,"command":command,"cwd":cwd.display().to_string(),
-        "session":session,"started":now(),"timeout_secs":minutes * 60,"source":"hgs_run","integrity":"low",
+    let mut claim = json!({"request_id":id,"label":label,"command":command,"cwd":cwd.display().to_string(),
+        "session":session,"started":now(),"timeout_secs":minutes * 60,"source":"hgs_run",
         "env":{"TEMP":temp,"TMP":temp}});
+    match sandbox {
+        Sandbox::Low => claim["integrity"] = json!("low"),
+        Sandbox::Codex => claim["sandbox"] = json!("codex"),
+    }
     storage::atomic(&running_path(id), &claim.to_string())?;
     if let Err(error) = spawn(id) {
         let _ = fs::remove_file(running_path(id));
         return Err(format!("the runner did not start: {error}"));
     }
     Ok(running_note(&claim))
+}
+
+/// The sandbox a member's own run keeps (tasks #28, #48).
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub(crate) enum Sandbox {
+    /// Low integrity, as a DeepSeek member's confined shell runs.
+    Low,
+    /// Codex's Windows sandbox on the member's folder.
+    Codex,
+}
+
+/// Whether `path` is `folder` or inside it, once both are canonical.
+fn within(path: &Path, folder: &Path) -> bool {
+    match (crate::platform::canonical(path), crate::platform::canonical(folder)) {
+        (Ok(path), Ok(folder)) => path.starts_with(&folder),
+        _ => false,
+    }
+}
+
+/// Task #48: a Codex member's run inside `codex sandbox` on its folder, the
+/// command written to a script in the member's temporary folder (Codex quotes
+/// a command line again, which would change a command with quotes). The
+/// script lies in the member's own folder: the member could change it, but it
+/// runs only in the member's own sandbox, so that gives it nothing.
+fn codex_command(claim: &Value, id: &str) -> Result<Command> {
+    let codex = crate::platform::which("codex").ok_or("the Codex CLI that runs a Codex member's sandbox is not on PATH")?;
+    let cwd = string(claim, "cwd");
+    let temp = claim["env"]["TEMP"].as_str().map(PathBuf::from).unwrap_or_else(|| PathBuf::from(cwd));
+    let script = temp.join(format!("run-{id}.cmd"));
+    fs::write(&script, format!("@echo off\r\n{}\r\n", string(claim, "command"))).map_err(|error| format!("the run's script: {error}"))?;
+    let mut command = Command::new(codex);
+    command.args(codex_sandbox_args(cwd, &script)).current_dir(cwd);
+    if let Some(env) = claim["env"].as_object() {
+        for (key, value) in env {
+            if let Some(value) = value.as_str() {
+                command.env(key, value);
+            }
+        }
+    }
+    Ok(command)
+}
+
+/// `codex sandbox` on the member's folder with Codex's workspace profile, as
+/// its own shell commands run.
+fn codex_sandbox_args(cwd: &str, script: &Path) -> Vec<String> {
+    ["sandbox", "-P", ":workspace", "-C", cwd, "--", "cmd.exe", "/D", "/C"]
+        .into_iter()
+        .map(str::to_owned)
+        .chain([script.display().to_string()])
+        .collect()
 }
 
 /// U47/U48: Zerus starts a pipeline's command or land stage itself, with no
@@ -365,6 +444,8 @@ thread_local! {
     /// The caller a test names: Some(None) is no session, whatever session
     /// runs the tests.
     pub(crate) static TEST_CALLER: std::cell::RefCell<Option<Option<Value>>> = const { std::cell::RefCell::new(None) };
+    /// The DSH_SESSION_ID a test's process carries.
+    pub(crate) static TEST_DSH_SESSION: std::cell::RefCell<Option<String>> = const { std::cell::RefCell::new(None) };
 }
 
 fn spawn(id: &str) -> std::io::Result<()> {
@@ -416,6 +497,8 @@ fn worker(id: &str) -> Result<i32> {
         let mut command = Command::new(std::env::current_exe().map_err(|error| error.to_string())?);
         command.args(["run", "--low-exec", id]).current_dir(string(&claim, "cwd"));
         command
+    } else if claim["sandbox"] == "codex" {
+        codex_command(&claim, id)?
     } else {
         claim_command(&claim)
     };
@@ -591,7 +674,7 @@ fn prune() {
 }
 
 #[cfg(test)]
-mod tests {
+pub(crate) mod tests {
     use super::*;
 
     use crate::state::teams::model::{Member, MemberState, SessionRef, Team, TeamStatus};
@@ -672,7 +755,7 @@ mod tests {
             assert_eq!(queued["input"]["command"], "cargo build");
             // The worker's side.
             HELD_RUNNER.with(|held| held.set(true));
-            let running = start_for_sandbox(id, &queued["input"], session_of(&qa_binding()), folder.path());
+            let running = start_for_sandbox(id, &queued["input"], session_of(&qa_binding()), folder.path(), Sandbox::Low);
             HELD_RUNNER.with(|held| held.set(false));
             assert_eq!(running.unwrap()["status"], "running");
             let claim = read(&running_path(id)).unwrap();
@@ -740,6 +823,152 @@ mod tests {
             let error = as_sandboxed_qa(|| start(&request, false)).unwrap_err();
             assert!(error.contains("only a member of a running team"), "{error}");
             assert!(!teams::outbox::dir(folder.path()).exists());
+        });
+    }
+
+    /// Writes qa's DeepSeek binding where Zerus keeps it.
+    pub(crate) fn write_qa_binding() {
+        use sha2::Digest;
+        let binding = json!({"agent":"dsh","backend":"dsh","name":"dsh/Zerus/zerus-next-for-the-fork-qa",
+            "run_id":"ba3d8c92-041c-4e14-81b2-b2e63f0e7ee7","conversation_id":QA,"cwd":"C:/work/project"});
+        let dir = root().join("dsh").join("bindings");
+        fs::create_dir_all(&dir).unwrap();
+        let name = format!("{:x}.json", sha2::Sha256::digest("dsh/Zerus/zerus-next-for-the-fork-qa".as_bytes()));
+        fs::write(dir.join(name), binding.to_string()).unwrap();
+    }
+
+    /// Task #48: a Codex member's run keeps Codex's sandbox: it starts in the
+    /// member's folder (the one that sandbox may write) or not at all, and
+    /// its claim runs `codex sandbox` on that folder, never Low integrity
+    /// as the owner (which could read the owner's private files).
+    #[test]
+    fn a_codex_members_run_stays_in_codex_sandbox_on_its_folder() {
+        let root = tempfile::tempdir().unwrap();
+        let folder = tempfile::tempdir().unwrap();
+        let elsewhere = tempfile::tempdir().unwrap();
+        with_test_state_root(root.path(), || {
+            let session = json!({"name":"codex/p/dev","run_id":"r-dev","conversation_id":"c-dev"});
+            let request = |_id: &str, cwd: &Path| json!({"label":"cargo test","command":"cargo test \"a b\"","cwd":cwd.display().to_string()});
+            let outside = "88888888-8888-4888-8888-888888888881";
+            let error = start_for_sandbox(outside, &request(outside, elsewhere.path()), session.clone(), folder.path(), Sandbox::Codex).unwrap_err();
+            assert!(error.contains("starts in its own folder"), "{error}");
+            assert!(read(&running_path(outside)).is_none(), "nothing was claimed");
+            let id = "88888888-8888-4888-8888-888888888882";
+            HELD_RUNNER.with(|held| held.set(true));
+            let running = start_for_sandbox(id, &request(id, folder.path()), session, folder.path(), Sandbox::Codex);
+            HELD_RUNNER.with(|held| held.set(false));
+            assert_eq!(running.unwrap()["status"], "running");
+            let claim = read(&running_path(id)).unwrap();
+            assert_eq!((claim["sandbox"].as_str(), claim["integrity"].as_str()), (Some("codex"), None), "{claim}");
+            let script = folder.path().join(".zerus-team").join("tmp").join(format!("run-{id}.cmd"));
+            let args = codex_sandbox_args(string(&claim, "cwd"), &script);
+            assert_eq!(args[..5], ["sandbox", "-P", ":workspace", "-C", string(&claim, "cwd")]);
+            assert_eq!(args[5..8], ["--", "cmd.exe", "/D"]);
+            assert_eq!(args.last().unwrap(), &script.display().to_string());
+        });
+    }
+
+    /// The helper side of the test below: what hgs does as Codex's sandbox
+    /// user before and after task #48.
+    #[test]
+    fn codex_sandbox_helper() {
+        if std::env::var_os("HGS_TEST_CODEX_HELPER").is_none() {
+            return;
+        }
+        let user = std::env::var("USERNAME").unwrap_or_default();
+        let config = match crate::config::Config::load() {
+            Ok(_) => "ok".to_owned(),
+            Err(error) => error.message,
+        };
+        let home = crate::platform::home().unwrap_or_default();
+        let private = fs::read_dir(crate::config::config_dir(&home)).is_err();
+        println!("CODEX48 user={user} foreign={} config={config} private={private}", crate::platform::foreign_sandbox());
+    }
+
+    /// Task #48 (audit #29 P2): as Codex's Windows sandbox user every hgs
+    /// command failed with "Access is denied": it reads the hgs state but not
+    /// the owner's configuration, which every command loaded first. Run here
+    /// in the real `codex sandbox` (where Codex is installed): hgs now knows
+    /// it is a foreign sandbox and loads no configuration of the owner's, which
+    /// stays unreadable to that user.
+    #[cfg(windows)]
+    #[test]
+    fn hgs_runs_as_codex_sandbox_user_and_the_owners_config_stays_private() {
+        let Some(codex) = crate::platform::which("codex") else { return };
+        let workspace = tempfile::tempdir().unwrap();
+        let output = Command::new(codex)
+            .args(["sandbox", "-P", ":workspace", "-C"])
+            .arg(workspace.path())
+            .arg("--")
+            .arg(std::env::current_exe().unwrap())
+            .args(["state::builds::tests::codex_sandbox_helper", "--exact", "--nocapture", "--test-threads=1"])
+            .env("HGS_TEST_CODEX_HELPER", "1")
+            .stdin(Stdio::null())
+            .output()
+            .unwrap();
+        let text = String::from_utf8_lossy(&output.stdout).into_owned();
+        // A machine whose Codex sandbox does not start (no sandbox setup) has
+        // nothing to show here.
+        let Some(line) = text.lines().find(|line| line.starts_with("CODEX48 ")) else { return };
+        if line.contains(&format!("user={}", std::env::var("USERNAME").unwrap_or_default())) {
+            return; // Codex ran it as this user: no sandbox user to test
+        }
+        assert!(line.contains("foreign=true"), "{line}");
+        assert!(line.contains("config=ok"), "the sandbox loads no owner's configuration: {line}");
+        assert!(line.contains("private=true"), "the owner's configuration stays unreadable: {line}");
+    }
+
+    /// Task #34: the caller of a DeepSeek tool command is the binding of its
+    /// DSH_SESSION_ID, read from this computer's bindings; an unknown or
+    /// missing conversation is no caller.
+    #[test]
+    fn a_deepseek_binding_is_found_by_its_conversation() {
+        let root_dir = tempfile::tempdir().unwrap();
+        with_test_state_root(root_dir.path(), || {
+            write_qa_binding();
+            let found = |conversation: Option<&str>| {
+                TEST_DSH_SESSION.with(|value| *value.borrow_mut() = conversation.map(str::to_owned));
+                let found = dsh_caller();
+                TEST_DSH_SESSION.with(|value| *value.borrow_mut() = None);
+                found
+            };
+            assert_eq!(found(Some(QA)).unwrap()["name"], "dsh/Zerus/zerus-next-for-the-fork-qa");
+            assert!(found(Some("session-unknown")).is_none());
+        });
+    }
+
+    /// Task #34 (audit #29 P6): at Low integrity `hgs task list --project
+    /// RogueDod` answered "Access is denied". The read waits in the member's
+    /// folder like `hgs ls`, and the worker's answer is printed; a task
+    /// command that changes something is never brokered.
+    #[test]
+    fn a_sandboxed_members_task_read_is_answered_by_the_worker() {
+        let root = tempfile::tempdir().unwrap();
+        let folder = tempfile::tempdir().unwrap();
+        with_test_state_root(root.path(), || {
+            qa_team(folder.path());
+            let argv = |words: &[&str]| words.iter().map(|word| (*word).to_owned()).collect::<Vec<_>>();
+            assert!(as_sandboxed_qa(|| sandbox_read(&argv(&["task", "add", "--project", "RogueDod"]))).is_none());
+            assert!(as_sandboxed_qa(|| sandbox_read(&argv(&["task", "list"]))).is_none(), "no project named");
+            let worker_folder = folder.path().to_path_buf();
+            let worker = std::thread::spawn(move || {
+                let until = std::time::Instant::now() + Duration::from_secs(20);
+                while std::time::Instant::now() < until {
+                    if let Some((_, request)) = teams::outbox::pending(&worker_folder, 10).unwrap_or_default().into_iter().next() {
+                        let outcome = json!({"status":"ran","request_id":request["request_id"],"exit":0,
+                            "stdout":"{\"project\":{\"name\":\"RogueDod\"},\"tasks\":[]}","stderr":""});
+                        teams::outbox::settle(&worker_folder, &request, &outcome).unwrap();
+                        return Some(request);
+                    }
+                    std::thread::sleep(Duration::from_millis(50));
+                }
+                None
+            });
+            let answer = as_sandboxed_qa(|| sandbox_read(&argv(&["task", "list", "--project", "RogueDod"])));
+            let request = worker.join().unwrap().expect("the task read waited in the member's folder");
+            assert_eq!(answer.expect("a sandboxed task read is brokered"), Ok(0));
+            assert_eq!(request["op"], "read");
+            assert_eq!(request["input"]["argv"], json!(["task", "list", "--project", "RogueDod"]));
         });
     }
 

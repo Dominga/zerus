@@ -1147,6 +1147,15 @@ each other's entries); `qt-build` sets the launcher first in a build folder
 configured without it. A tool not found on `PATH` (or in cargo's bin folder)
 is named at the start of the run's output and the run builds without it.
 
+A build or test template (`cargo-build`, `cargo-test`, `cargo-clippy`,
+`qt-configure`, `qt-build`, `qt-test`) that fails with MSVC's C1083 "Cannot open
+compiler generated file ... Permission denied" or D8050 "failed to get command
+line into debug records" runs once more. These are the failures real-time
+scanning (Microsoft Defender) gives a compiler in a folder it scans. The run's
+output names the folder and asks for its build outputs (`.ci-build`, `target`)
+to be excluded from scanning. No other failure is retried, and a commit or
+merge never is.
+
 Start builds and long tests through Zerus so they show as work:
 `hgs team run` for a team member's templates (`hgs guide team-run`), and
 `hgs run --json [--wait]` with `{request_id, label, command, cwd?,
@@ -5429,15 +5438,30 @@ writes, and the team worker applies what it leaves there on its next tick
   with its temporary files in `<folder>/.zerus-team/tmp`: a member's run never
   runs above its sandbox. `--wait` and `--list` read the run's record as for
   any session.
-- `hgs ls` and `hgs inspect <session>` (with `--skip-processes` or
-  `--after N`) are answered by the worker, which runs the read outside the
-  sandbox and leaves the output in the folder. These reads write, send, start
+- `hgs ls`, `hgs inspect <session>` (with `--skip-processes` or
+  `--after N`), and `hgs task list` or `hgs task get` of a named project
+  (`--project P` or `PROJECT/T-xxxxxx`) are answered by the worker, which runs
+  the read outside the sandbox and leaves the output in the folder. These reads write, send, start
   and attach nothing, and the sandbox already reads every file they read.
   Every other command, such as `send`, `launch` or `attach`, stays closed to a
   sandbox.
 
+**Codex members on Windows.** Codex's Windows sandbox runs a member's commands
+as its own local user (`CodexSandboxOffline`). That user reads the hgs state but
+may write none of it, and may not read the owner's configuration
+(`~/.config/hgs`), which stays the owner's only. hgs recognizes such a process
+because the state belongs to another user and the configuration is unreadable.
+It then loads no configuration (no peers) and takes the same ways as a DeepSeek
+sandbox: team calls, `hgs run` and the reads above wait in the member's folder
+for the team worker. The member is the session its inherited `HGS_SESSION` and
+`HGS_RUN_ID` name; only the folder the request is written to proves it. A Codex
+member's `hgs run` runs in `codex sandbox` on its own folder, never above it:
+the command must start in that folder. Codex keeps `.git` read-only, so its
+commits go through the `git-commit` template.
+
 This needs a running team: a sandboxed DeepSeek session outside a team is told
-so. The worker runs a member's `hgs run` at Low integrity but outside
+so. `hgs self` answers a DeepSeek tool command from the binding of its
+`DSH_SESSION_ID`, in or outside a sandbox. The worker runs a member's `hgs run` at Low integrity but outside
 DeepSeek's own confinement, so the run, like any Low process, may use the
 network and named pipes of Low processes.
 

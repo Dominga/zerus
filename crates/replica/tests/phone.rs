@@ -612,6 +612,8 @@ fn a_damaged_copy_the_phone_cannot_cover_is_kept_for_review() {
         "{}",
         refused[0].error
     );
+    // The phone is told it is kept for review, not ordinary damage.
+    assert!(refused[0].kept);
     assert!(computer.load(task.uuid()).is_err());
     assert_eq!(
         fs::read(task_file(b.path(), task.uuid())).unwrap(),

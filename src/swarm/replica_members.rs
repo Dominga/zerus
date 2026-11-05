@@ -27,8 +27,10 @@ pub struct Member {
     /// The replica protocol its last hello spoke; none when it said none.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub protocol: Option<u64>,
-    /// Its last verified hello carried no replica part at all: it does not
-    /// share tasks, so it holds none of a project's documents.
+    /// Its last verified hello had no replica key at all: it does not share
+    /// tasks, so it holds none of a project's documents. A replica part
+    /// present in a form this cannot read is not this: it stays eligible and
+    /// keeps a cutover open as an unknown protocol.
     #[serde(default, skip_serializing_if = "std::ops::Not::not")]
     pub no_replica: bool,
     /// The highest task schema its last hello advertised; none for an hgs
@@ -118,13 +120,14 @@ pub struct Observed {
 }
 
 impl Observed {
-    /// What the hello `identity` (verified to come from `node`) says.
+    /// What the hello `identity` (verified to come from `node`) says. Only a
+    /// hello without the replica key proves the member shares no tasks.
     pub fn of(node: &str, identity: &Value) -> Self {
         let replica = &identity["replica"];
         Self {
             node: node.to_owned(),
             protocol: replica["protocol"].as_u64(),
-            no_replica: !replica.is_object(),
+            no_replica: identity.get("replica").is_none(),
             task_schema: replica["task_schema"].as_i64(),
             store: replica["store"].as_str().map(str::to_owned),
         }
@@ -450,10 +453,24 @@ mod tests {
         assert_eq!(member.store.as_deref(), Some(A));
     }
 
+    /// review-n on #1432 R2: only an absent replica key proves a member has
+    /// no replica; a present one this cannot read keeps it eligible, as an
+    /// unknown protocol.
     #[test]
-    fn a_hello_without_a_replica_part_establishes_no_replica() {
+    fn only_an_absent_replica_part_proves_the_member_has_no_replica() {
+        let (_dir, config) = fixture();
         let none = Observed::of("node-a", &json!({"schema": 1}));
         assert!(none.no_replica && none.protocol.is_none());
+        assert!(seen(&config, "peer", &none, 10).unwrap());
+        assert!(crate::swarm::task_members(&config).unwrap().is_empty());
+        for value in [Value::Null, json!(false), json!(true), json!(1), json!("unreadable"), json!([]), json!({})] {
+            let present = Observed::of("node-a", &json!({"replica": value}));
+            assert!(!present.no_replica && present.protocol.is_none(), "{value}");
+            assert!(seen(&config, "peer", &present, 20).unwrap());
+            let members = crate::swarm::task_members(&config).unwrap();
+            assert_eq!(members.len(), 1, "{value}: the member stays eligible");
+            assert!(members[0].replica.as_ref().is_some_and(|r| !r.no_replica && r.protocol.is_none()));
+        }
         let other = Observed::of("node-a", &json!({"replica": {"protocol": 2}}));
         assert!(!other.no_replica && other.protocol == Some(2));
     }

@@ -184,9 +184,12 @@ pub fn exchange(config: &Config, request: Request) -> Result<Value> {
         .ok_or_else(|| anyhow::anyhow!("a replica exchange needs the requester's inventory"))?;
     let store = ProjectStore::open(&root(config), &request.project)?;
     let imported = store.import_updates(decode(request.updates)?)?;
-    let (ours, _) = store.inventory()?;
+    let (ours, damaged) = store.inventory()?;
     let (updates, more) = store.updates_for(&ours, &theirs, PAGE)?;
-    Ok(json!({"node_id": node, "imported": imported.changed, "refused": imported.refused, "updates": encode(updates), "more": more}))
+    // How many of its tasks do not load now, after this page: a task
+    // damaged since the inventory the requester read is counted too.
+    Ok(json!({"node_id": node, "imported": imported.changed, "refused": imported.refused,
+              "updates": encode(updates), "more": more, "damaged": damaged.len()}))
 }
 
 /// What a member's hello says it holds, or none when that is not in a form
@@ -230,7 +233,19 @@ pub fn sync_peer(config: &Config, alias: &str, identity: &Value) -> Result<()> {
     if !supported {
         return Ok(());
     }
-    let local = digests(config)?;
+    // This computer's own pass failing is an outcome too: every project
+    // known here is incomplete for this observation, never left complete.
+    let local = match digests(config) {
+        Ok(local) => local,
+        Err(error) => {
+            let outcomes: Vec<(String, Outcome)> = known(config)
+                .into_iter()
+                .map(|project| (project, Err((Incomplete::Busy, false))))
+                .collect();
+            record(config, alias, &observed, &outcomes);
+            return Err(error);
+        }
+    };
     let theirs = theirs(remote);
     let mut projects = known(config);
     projects.extend(local.projects.keys().cloned());
@@ -435,6 +450,11 @@ fn exchange_pages(
             return Err(unreachable(anyhow::anyhow!("{alias} sent an invalid replica exchange")));
         }
         refused |= response["refused"].as_array().is_some_and(|r| !r.is_empty());
+        // The member's count after this page, not only before it.
+        damaged = match (damaged, response["damaged"].as_u64()) {
+            (Some(known), Some(count)) => Some(known || count > 0),
+            _ => None,
+        };
         let mut changed = response["imported"].as_u64().unwrap_or(0) as usize;
         if !updates.is_empty() {
             let Some(store) = open(&root)? else {
@@ -449,6 +469,14 @@ fn exchange_pages(
             refused |= !imported.refused.is_empty();
         }
         if !more_mine && response["more"] != true {
+            // And this computer's count once more, after its own import.
+            if let Some(known) = damaged {
+                let Some(store) = open(&root)? else {
+                    return busy();
+                };
+                let (_, here) = store.inventory().map_err(|e| (Incomplete::Busy, e.into()))?;
+                damaged = Some(known || !here.is_empty());
+            }
             return Ok(match (refused, damaged) {
                 (true, _) => Err((Incomplete::RefusedDocuments, false)),
                 (false, None) => Err((Incomplete::Malformed, true)),
@@ -580,6 +608,32 @@ mod tests {
         remote["replica"]["damaged"] = json!({"p": 1});
         sync_peer(&config, "peer", &remote).unwrap();
         assert_eq!(outcome(&config, "p").reason, Some(Incomplete::DamagedTasks));
+    }
+
+    /// desktop-u on #1432 R2: this computer's own digest pass failing (its
+    /// replica root unreadable) records every project known here as
+    /// incomplete, apart from a per-project busy and a failed hello.
+    #[test]
+    fn a_failed_local_digest_pass_never_keeps_a_prior_complete_inventory() {
+        let (_dir, config) = fixture();
+        add(&config, "p");
+        let mut catalog = LockedStore::load(&config).unwrap();
+        let node = catalog.data.node_id.clone();
+        catalog
+            .data
+            .catalog
+            .set(&node, crate::swarm::catalog::Key::project("p", "alive"), json!(true))
+            .unwrap();
+        catalog.save().unwrap();
+        drop(catalog);
+        complete_before(&config, "p");
+        let path = root(&config);
+        fs::rename(&path, config.state.join("replica-kept")).unwrap();
+        fs::write(&path, b"not a directory").unwrap();
+        assert!(sync_peer(&config, "peer", &hello(json!({}))).is_err());
+        let after = outcome(&config, "p");
+        assert!(!after.complete && !after.exchanged, "{after:?}");
+        assert_eq!(after.reason, Some(Incomplete::Busy));
     }
 
     #[test]

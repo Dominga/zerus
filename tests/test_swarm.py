@@ -550,6 +550,43 @@ class Swarm(unittest.TestCase):
         self.call('b', 'sync')
         self.assertTrue(json.loads(path.read_text())['a']['projects']['a']['complete'])
 
+    def damage_between_inventory_and_exchange(self, owner):
+        """review-n on #1432 R2: a task of `owner` (b remote, a local) is
+        damaged after a healthy inventory and just before the exchange: the
+        exchange is not complete."""
+        self.join('a', 'b'); self.join('b', 'a')
+        for n in 'abab':
+            self.call(n, 'sync')
+        task = self.task(owner, 'add', '--project', 'a', text='Damage between inventory and exchange')
+        project = next(p for p in (self.root / owner / 'state/replica').iterdir()
+                       if p.is_dir() and (p / 'project-id').read_text().strip() == 'a')
+        target = project / 'tasks' / (task['task']['uuid'] + '.loro')
+        self.assertTrue(target.is_file())
+        flag = self.root / 'damage-before-exchange-b'
+        flag.write_text(str(target))
+        ssh = self.root / 'bin/ssh'
+        script = ssh.read_text()
+        needle = "if not (root / ('old-' + alias)).exists():"
+        hook = ("if args[1:2] == ['replica-exchange'] and (root / ('damage-before-exchange-' + alias)).exists():\n"
+                "    trigger = root / ('damage-before-exchange-' + alias)\n"
+                "    pathlib.Path(trigger.read_text()).write_bytes(b'damaged after a healthy inventory')\n"
+                "    trigger.unlink()\n")
+        self.assertIn(needle, script)
+        ssh.write_text(script.replace(needle, hook + needle, 1))
+        self.call('a', 'sync')
+        self.assertFalse(flag.exists(), 'the fixture did not reach the exchange')
+        record = json.loads((self.root / 'a/swarm/replica-members.json').read_text())['b']['projects']['a']
+        damaged = self.task(owner, 'list', '--project', 'a')['damaged']
+        self.assertEqual(len(damaged), 1)
+        self.assertFalse(record['complete'], record)
+        self.assertEqual(record.get('reason'), 'damaged_tasks', record)
+
+    def test_a_task_damaged_there_after_its_inventory_is_not_complete(self):
+        self.damage_between_inventory_and_exchange('b')
+
+    def test_a_task_damaged_here_after_its_inventory_is_not_complete(self):
+        self.damage_between_inventory_and_exchange('a')
+
     def test_a_large_project_travels_in_pages(self):
         self.join('a', 'b'); self.join('b', 'a')
         self.call('a', 'sync'); self.call('b', 'sync')

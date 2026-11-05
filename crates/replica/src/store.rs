@@ -792,6 +792,10 @@ impl ProjectStore {
                 }
             }
         }
+        // The last read and stat count against the time too.
+        if started.elapsed() > time {
+            return Ok(None);
+        }
         Ok(Some((count, latest)))
     }
 
@@ -1838,5 +1842,10 @@ mod tests {
         assert!(latest.is_some());
         assert_eq!(store.cut_over_within(2, long).unwrap(), None);
         assert_eq!(store.cut_over_within(1_000, Duration::ZERO).unwrap(), None);
+        // An empty folder still answers within its time, or not at all.
+        let empty = tempfile::tempdir().unwrap();
+        let none = ProjectStore::open(empty.path(), "q").unwrap();
+        assert_eq!(none.cut_over_within(1_000, long).unwrap(), Some((0, None)));
+        assert_eq!(none.cut_over_within(1_000, Duration::ZERO).unwrap(), None);
     }
 }

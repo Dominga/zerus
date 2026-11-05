@@ -3456,7 +3456,8 @@ sides' whole inventories were exchanged: every page, nothing refused, and no
 task damaged or left out on either side (equal digests of the readable tasks
 alone are an exchanged subset, not a complete project). Otherwise it names a
 reason: `unreachable` (also for every project known here when the member's
-hello fails), `busy`, `refused_documents`, `page_budget`, `changed_identity`,
+hello fails), `busy` (also for every project known here when this computer's
+own pass cannot read its projects), `refused_documents`, `page_budget`, `changed_identity`,
 `damaged_tasks`, `omitted` or `malformed` (an answer this cannot read is never
 taken for an empty, complete one). Every project this computer stores or knows
 alive gets an outcome on each sync.
@@ -3476,7 +3477,9 @@ with `closed_text` as prose. Anything not known as complete keeps it open. The
 count of cut-over tasks has a strict budget (entries and time): past it the
 phase is `unknown` and the reason `scan_budget`. Eligible members are the
 project's swarm members that may hold its documents: every verified member
-except one whose verified hello showed it shares no tasks at all. It grants nothing and dispatches
+except one whose verified hello has no replica key at all; a replica part
+this cannot read keeps the member eligible and the cutover open as an
+unknown protocol. It grants nothing and dispatches
 nothing. `--hold on` sets the project's cutover hold, a replicated value that
 names who set it and when (concurrent changes: the last writer wins). While on,
 no task of the project takes a new floor or a first attempt, where those are

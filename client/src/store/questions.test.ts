@@ -10,7 +10,7 @@ function card(over: Partial<CardView> = {}, revision = 1, epoch = revision): Que
     card: "question\n[\"studio\\nclaude/sample-project/review\",\"tool:t1\",\"h\"]\nrun-1\nconv-1", revision, epoch, asked: "", asked_tip: "", terminal_label: { source: "Open Terminal" }, native_ui: false,
     view: {
       heading: { source: "Agent needs your answer" }, progress: null, pending: { source: "%1 pending", args: [{ kind: "number", value: 1 }] }, pending_tip: { source: "" }, nav: null, tabs_visible: false, page: 0, forms: [],
-      status: { source: "" }, status_error: false, available: true, locked: false, review: false, created_at: 0,
+      status: { source: "" }, status_error: false, available: true, locked: false, read_only: false, review: false, created_at: 0,
       submit: button(), approve: button({ visible: false, label: { source: "Approve once" } }), deny: button({ visible: false, label: { source: "Deny" } }),
       skip: button({ visible: false, label: { source: "Skip" } }), previous: button({ visible: false, label: { source: "← Back" } }), next: button({ visible: false, label: { source: "Next →" } }),
       retry: false, skip_tip: { source: "" }, retry_tip: { source: "" }, ...over,
@@ -118,6 +118,16 @@ describe("question cards", () => {
       'edit 4 {"kind":"text","item":"q_0","text":"Li"}',
       'edit 6 {"kind":"option","item":"q_0","option":"opt_0_0","checked":true}',
     ]);
+    dispose();
+  }));
+
+  it("a card only Terminal can answer takes no edit and no Enter", () => createRoot(async (dispose) => {
+    const f = fakes();
+    const q = createQuestions(f.port, f.clock);
+    q.apply(card({ read_only: true, submit: button({ visible: false, enabled: false }) }));
+    q.edit({ kind: "option", item: "q_0", option: "opt_0_0", checked: true });
+    await q.enter(false);
+    expect(f.calls).toEqual([]);
     dispose();
   }));
 

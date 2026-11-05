@@ -69,7 +69,7 @@ describe("core Text", () => {
   // list exactly CardView's keys; every Text inside renders in Russian.
   const CARD = {
     heading: "text", progress: "text?", pending: "text?", pending_tip: "text", nav: "object?", tabs_visible: "boolean", page: "number",
-    forms: "array", status: "text", status_error: "boolean", available: "boolean", locked: "boolean", review: "boolean", created_at: "number",
+    forms: "array", status: "text", status_error: "boolean", available: "boolean", locked: "boolean", read_only: "boolean", review: "boolean", created_at: "number",
     submit: "object", approve: "object", deny: "object", skip: "object", previous: "object", next: "object", retry: "boolean", skip_tip: "text", retry_tip: "text",
   } as const satisfies Record<keyof CardView, string>;
   function allTexts(value: unknown, out: Text[] = []): Text[] {

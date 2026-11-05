@@ -721,7 +721,8 @@ void QuestionCard::rebuild()
                 if (m_submit->isVisible()) submit();
             });
         }
-        mode->setVisible(!form.options.isEmpty()&&listed&&!m_question.value("plan_review").toBool()); column->addStretch(); scroll->setWidget(page);
+        form.mode = mode; form.modeShown = !form.options.isEmpty()&&listed&&!m_question.value("plan_review").toBool();
+        mode->setVisible(form.modeShown); column->addStretch(); scroll->setWidget(page);
         m_pages->addWidget(formPage); m_forms.append(form);
         const auto header = question.value("header").toString().simplified();
         const auto title = header.isEmpty() ? tr("Question %1").arg(++index) : QString::number(++index) + QStringLiteral(": ") + header.left(32);
@@ -879,15 +880,29 @@ void QuestionCard::updateControls()
     const bool supported = m_question.value("can_answer").toBool();
     static const QSet<QString> terminalOnly{"claude_tool_approval", "kimi_tool_approval", "claude_terminal_choice", "claude_native_question", "claude_terminal_safety", "claude_usage_limit", "startup_terminal_choice"};
     const bool readOnly = !supported && terminalOnly.contains(m_question.value("source").toString());
+    const bool approval=m_question.value("approval").toBool();
+    // Only Terminal can answer it and the card offers no Submit: the options
+    // show as a plain list, without a control that looks selectable.
+    const bool plain = !supported && (readOnly || approval);
+    const auto mark = [](QWidget *widget, const char *name, bool value) {
+        if (!widget || widget->property(name).toBool() == value) return;
+        widget->setProperty(name, value);
+        for (auto *each : widget->findChildren<QWidget *>()) { each->style()->unpolish(each); each->style()->polish(each); }
+        widget->style()->unpolish(widget); widget->style()->polish(widget); widget->update();
+    };
     for (const auto &form : m_forms) {
-        for (auto *button : form.options) button->setEnabled(!locked && !readOnly);
-        if (form.other) form.other->setEnabled(!locked && !readOnly);
+        for (auto *button : form.options) {
+            button->setEnabled(!locked && !plain); button->setVisible(!plain);
+            mark(button->parentWidget(), "readOnly", plain);
+        }
+        if (form.other) { form.other->setEnabled(!locked && !plain); form.other->parentWidget()->setVisible(!plain); }
+        if (form.mode) form.mode->setVisible(form.modeShown && !plain);
         if (form.text) {
             const bool custom = form.options.isEmpty() || (form.other && form.other->isChecked());
-            form.text->setVisible(custom); form.text->setEnabled(custom && !locked && !readOnly);
+            form.text->setVisible(custom && !plain); form.text->setEnabled(custom && !locked && !plain);
         }
     }
-    const bool approval=m_question.value("approval").toBool();
+    mark(m_terminal, "prominent", plain);
     // U19 (#520): a subagent card takes Allow all / Deny, never the list.
     const bool subagents=approval&&SubagentRequest::is(m_question);
     const bool choices=approval&&m_question.value("approval_choices").toBool()&&!subagents;
@@ -1115,6 +1130,8 @@ void QuestionCard::setTheme(bool dark)
         QFrame#questionChoice { background:%8; border:1px solid %3; border-radius:7px; }
         QFrame#questionChoice[checked=true] { background:%4; border-color:%5; }
         QFrame#questionChoice:hover { border-color:%5; }
+        QFrame#questionChoice[readOnly=true], QFrame#questionChoice[readOnly=true]:hover { background:%1; border-color:%3; }
+        QFrame#questionChoice[readOnly=true] QTextBrowser#questionChoiceDescription { background:%1; }
         QCheckBox, QRadioButton { border:0; background:transparent; }
         QCheckBox::indicator, QRadioButton::indicator { width:12px; height:12px; border:1px solid %7; background:%8; }
         QRadioButton::indicator { border-radius:7px; }
@@ -1129,6 +1146,8 @@ void QuestionCard::setTheme(bool dark)
         QPushButton#submitQuestionAnswer:disabled, QPushButton#approveToolRequest:disabled { background:%8; color:%7; border-color:%3; }
         QPushButton#questionOpenTerminal, QPushButton#questionAllowRetry, QPushButton#questionPrevious, QPushButton#questionNext, QPushButton#denyToolRequest { padding:6px 9px; font-size:11px; color:%2; background:%8; border:1px solid %3; border-radius:6px; }
         QPushButton#questionNext { border-color:%5; color:%5; }
+        QPushButton#questionOpenTerminal[prominent=true] { background:%5; color:%6; border-color:%5; font-weight:600; }
+        QPushButton#questionOpenTerminal[prominent=true]:disabled { background:%8; color:%7; border-color:%3; }
         QPushButton#questionPrevious:disabled, QPushButton#questionNext:disabled { color:%7; border-color:%3; }
         QToolButton#questionQueuePrevious, QToolButton#questionQueueNext { color:%2; background:%8; border:1px solid %3; border-radius:5px; padding:0; }
         QToolButton#questionQueuePrevious:hover, QToolButton#questionQueueNext:hover { border-color:%5; }

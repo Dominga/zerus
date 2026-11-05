@@ -700,6 +700,52 @@ fn exchange(path: &Path, request: &str, read_timeout: Duration) -> Result<String
         Err(_) => Err("Native request delivery uncertain: the DeepSeek host did not answer in time".into()),
     }
 }
+/// How long a host start waits for the native host to answer.
+const HOST_START_SECONDS: u64 = 35;
+
+/// Task 22: the pid of a host an earlier start launched that is still running
+/// and was launched within `within` (the time of `host.pid`), so it may only be
+/// slow to answer. A start finding one waits for it instead of launching a
+/// second host beside it. An old pid file or an ended process is no host.
+fn starting_host(dir: &Path, within: Duration) -> Option<u32> {
+    let path = dir.join("host.pid");
+    let pid: u32 = fs::read_to_string(&path).ok()?.trim().parse().ok()?;
+    let age = fs::metadata(&path).ok()?.modified().ok()?.elapsed().unwrap_or_default();
+    if age > within {
+        return None;
+    }
+    // A host this process launched that has ended stays a zombie, which still
+    // looks alive, until it is reaped; another process's pid is left alone.
+    #[cfg(unix)]
+    if let Ok(id) = libc::pid_t::try_from(pid) {
+        let mut status = 0;
+        if id > 0 && unsafe { libc::waitpid(id, &mut status, libc::WNOHANG) } == id {
+            return None;
+        }
+    }
+    crate::platform::process_alive(pid).then_some(pid)
+}
+
+/// Task 22: waits for a host that is starting to answer; `still` says whether
+/// it is still worth waiting for (its process runs).
+fn wait_for_host(record: &Value, deadline: Instant, still: &mut dyn FnMut() -> Result<bool>) -> Result<()> {
+    while Instant::now() < deadline {
+        if let Ok(value) = rpc(record, "ping", json!({})) {
+            if value["protocol"] == 1 {
+                return Ok(());
+            }
+        }
+        if !still()? {
+            return Err(format!(
+                "Official DeepSeek host failed to start. Private log: {}",
+                host_dir(record).join("host.log").display()
+            ));
+        }
+        std::thread::sleep(Duration::from_millis(100));
+    }
+    Err("DeepSeek host is still starting; retry opening the session".into())
+}
+
 fn ensure_host(record: &Value) -> Result<bool> {
     let dir = host_dir(record);
     private_dir(&dir)?;
@@ -716,6 +762,14 @@ fn ensure_host(record: &Value) -> Result<bool> {
         Ok(_) => return Err("The running DeepSeek host is not responding; it has been left running. Retry when it recovers".into()),
         Err(e) if matches!(e.kind(), io::ErrorKind::NotFound | io::ErrorKind::ConnectionRefused) => {},
         Err(e) => return Err(format!("Cannot check the native host: {e}")),
+    }
+    // Task 22: an earlier start's host that has not opened its endpoint yet
+    // is waited for, never doubled by a second host.
+    let recent = Duration::from_secs(4 * HOST_START_SECONDS);
+    if let Some(pid) = starting_host(&dir, recent) {
+        let deadline = Instant::now() + Duration::from_secs(HOST_START_SECONDS);
+        wait_for_host(record, deadline, &mut || Ok(crate::platform::process_alive(pid)))?;
+        return Ok(running_host_block_stale(&dir));
     }
     let version = dsh_command().and_then(|mut command| command.arg("--version").output()).map_err(|_| {
         format!("Install the official harness: npm install -g @deepseek-ai/dsh@{VERSION}")
@@ -797,22 +851,9 @@ fn ensure_host(record: &Value) -> Result<bool> {
     // HGS process must not stop conversations.
     let mut child = crate::platform::spawn_detached(&mut command).map_err(|e| e.to_string())?;
     atomic(&dir.join("host.pid"), &child.id().to_string())?;
-    let deadline = Instant::now() + Duration::from_secs(35);
-    while Instant::now() < deadline {
-        if let Ok(value) = rpc(record, "ping", json!({})) {
-            if value["protocol"] == 1 {
-                return Ok(false);
-            }
-        }
-        if child.try_wait().map_err(|e| e.to_string())?.is_some() {
-            return Err(format!(
-                "Official DeepSeek host failed to start. Private log: {}",
-                dir.join("host.log").display()
-            ));
-        }
-        std::thread::sleep(Duration::from_millis(100));
-    }
-    Err("DeepSeek host is still starting; retry opening the session".into())
+    let deadline = Instant::now() + Duration::from_secs(HOST_START_SECONDS);
+    wait_for_host(record, deadline, &mut || Ok(child.try_wait().map_err(|e| e.to_string())?.is_none()))?;
+    Ok(false)
 }
 
 /// N17: whether a host that was already running was started without the block
@@ -3502,6 +3543,35 @@ mod notification_tests {
         // U22: the block overlay disables the shipped plugin; off leaves dsh alone.
         let blocked = host_overlay(Path::new("state/bridge.mjs"), Path::new("state/socket"), true).to_string();
         assert!(blocked.contains("session-log-deepseek") && blocked.contains("\"enabled\":false"), "{blocked}");
+    }
+
+    /// Task 22: a start that finds the host an earlier start launched still
+    /// running, and launched recently, waits for it instead of launching a
+    /// second host; an ended process or an old pid file is no such host.
+    #[test]
+    fn a_recently_launched_running_host_is_waited_for() {
+        let dir = tempfile::tempdir().unwrap();
+        let within = Duration::from_secs(140);
+        assert_eq!(starting_host(dir.path(), within), None, "no pid file");
+        let pid = dir.path().join("host.pid");
+        std::fs::write(&pid, std::process::id().to_string()).unwrap();
+        assert_eq!(starting_host(dir.path(), within), Some(std::process::id()));
+        // Launched long ago: a pid that may belong to anything now.
+        let old = std::time::SystemTime::now() - Duration::from_secs(3600);
+        std::fs::File::options().write(true).open(&pid).unwrap().set_modified(old).unwrap();
+        assert_eq!(starting_host(dir.path(), within), None);
+        // An ended process.
+        let mut ended = if cfg!(windows) {
+            std::process::Command::new("cmd").args(["/C", "exit 0"]).spawn().unwrap()
+        } else {
+            std::process::Command::new("true").spawn().unwrap()
+        };
+        let id = ended.id();
+        ended.wait().unwrap();
+        std::fs::write(&pid, id.to_string()).unwrap();
+        assert_eq!(starting_host(dir.path(), within), None);
+        std::fs::write(&pid, "not a pid").unwrap();
+        assert_eq!(starting_host(dir.path(), within), None);
     }
 
     /// N17: a host that was already running keeps the block state it started

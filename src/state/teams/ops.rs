@@ -235,6 +235,7 @@ fn parse_member_as(value: &Value, what: &str, example: &str) -> anyhow::Result<M
     );
     member.launch_id.clear();
     member.error.clear();
+    member.host_waits = 0;
     member.inbox = Inbox::default();
     if !member.parent.is_empty() {
         member.parent = member_id(&member.parent)?;
@@ -950,7 +951,7 @@ fn settings(team: &mut Team, input: &Value, actor: &Actor, events: &mut Vec<Even
 /// C4: the settings that decide who approves, how far a team may grow and
 /// what runs without the owner stay the owner's; the lead changes the rest.
 /// Spec 6.1 lets the lead set resume_after_limits too.
-pub(crate) const OWNER_SETTINGS: [&str; 21] = [
+pub(crate) const OWNER_SETTINGS: [&str; 22] = [
     "approval",
     "phase_approval",
     "max_members",
@@ -971,6 +972,8 @@ pub(crate) const OWNER_SETTINGS: [&str; 21] = [
     "restart_crashed",
     // U56: only the owner lets the lead restart a stuck member.
     "lead_restarts_stuck",
+    // Task 24: only the owner lets Zerus interrupt a member's revoked work.
+    "interrupt_revoked",
     // #752: only the owner turns the build broker on.
     "build_broker",
     // U62: the owner's override of the project's test configuration.
@@ -2058,6 +2061,7 @@ fn send_back(team: &mut Team, op: &str, input: &Value, actor: &Actor, events: &m
                             at: at_now,
                             notice: Notice::Pending,
                             refused: 0,
+                            ..Default::default()
                         });
                     }
                     task.status = TaskStatus::Draft;
@@ -2799,6 +2803,42 @@ fn close_questions(task: &mut Task) {
 
 /// The task's open attempt must be revoked before another starts. The
 /// dispatcher interrupts the old worker separately.
+/// Task 24: the member and number of the task's attempt still being worked on
+/// (sent or delivered, not yet reported), read before a revoke ends it.
+fn working_attempt(task: &Task) -> Option<(String, u32)> {
+    task.open_attempt()
+        .filter(|attempt| matches!(attempt.state, AttemptState::Delivering | AttemptState::Delivered | AttemptState::Unconfirmed))
+        .map(|attempt| (attempt.member.clone(), attempt.n))
+}
+
+/// Task 24: a member still working on an attempt that left it hears it at
+/// once, through the #511 N3 stop notice (phase 0); the dispatcher sends it as
+/// soon as the session runs, and interrupts a busy turn first when the owner
+/// set interrupt_revoked. Team 33fbafeb: task 4 was reassigned from core while
+/// core built it, nobody told core, and its next task waited for that turn.
+fn tell_revoked(team: &mut Team, task: u32, working: Option<(String, u32)>, reason: String) {
+    let Some((member, attempt)) = working else { return };
+    if member.is_empty() || member == team.lead {
+        return;
+    }
+    let title = team.task(task).map(|found| found.title.clone()).unwrap_or_default();
+    team.stops.push(StopNotice {
+        id: uuid::Uuid::new_v4().to_string(),
+        task,
+        title,
+        member,
+        attempt,
+        phase: 0,
+        reason,
+        at: now(),
+        notice: Notice::Pending,
+        interrupt: team.settings.interrupt_revoked,
+        ..Default::default()
+    });
+    let excess = team.stops.len().saturating_sub(20);
+    team.stops.drain(..excess);
+}
+
 fn revoke(task: &mut Task, why: &str) -> Option<u32> {
     // Spec 0 (U45, U46, U48): a retry, a reassignment, a take-over or a
     // decision ends a wait for Zerus; the next hand-out prepares again.
@@ -3606,6 +3646,7 @@ fn swap_one(team: &mut Team, input: &Value, id: &str, keep_session: bool, actor:
         }
         member.launch_id.clear();
         member.error.clear();
+        member.host_waits = 0;
         member.seen = None;
         member.settings_applied = false;
         member.pending = None;
@@ -4376,6 +4417,7 @@ pub(crate) fn next_team(team: &Team, goal: &str, name: &str, live: &[super::disp
         // N8: none of the session-bound state of the old team follows.
         member.launch_id.clear();
         member.error.clear();
+        member.host_waits = 0;
         member.settings_applied = false;
         member.asked.clear();
         member.pending = None;
@@ -5109,6 +5151,7 @@ fn reassign(team: &mut Team, input: &Value, actor: &Actor, events: &mut Vec<Even
     let role = team.role_of(target);
     let task = team.task_mut(id).context("Unknown task")?;
     ensure!(!task.status.finished(), "Task #{id} is already decided");
+    let working = working_attempt(task).filter(|(member, _)| member != target);
     let revoked = revoke(task, "reassigned");
     task.assignee = target.to_owned();
     task.pinned = true;
@@ -5121,6 +5164,7 @@ fn reassign(team: &mut Team, input: &Value, actor: &Actor, events: &mut Vec<Even
     if task.status != TaskStatus::Draft {
         task.status = TaskStatus::Pending;
     }
+    tell_revoked(team, id, working, format!("it was reassigned to {role}"));
     events.push(Event::new("reassigned", json!({"by":label,"task":id,"to":role,"revoked_attempt":revoked})));
     Ok(json!({"status":"reassigned","task":id,"revoked_attempt":revoked}))
 }
@@ -5231,9 +5275,11 @@ fn take_over(team: &mut Team, input: &Value, actor: &Actor, events: &mut Vec<Eve
     ensure!(matches!(actor, Actor::Human), "Only you can take over a task");
     let task = team.task_mut(id).context("Unknown task")?;
     ensure!(!task.status.finished() && task.status != TaskStatus::Draft, "Task #{id} cannot be taken over now");
+    let working = working_attempt(task);
     let revoked = revoke(task, "taken over");
     task.assignee.clear();
     task.status = TaskStatus::InProgress;
+    tell_revoked(team, id, working, "the owner took it over".into());
     events.push(Event::new("taken_over", json!({"by":"You","task":id,"revoked_attempt":revoked})));
     Ok(json!({"status":"in_progress","task":id,"revoked_attempt":revoked}))
 }
@@ -5257,11 +5303,13 @@ fn cancel(team: &mut Team, input: &Value, actor: &Actor, events: &mut Vec<Event>
         Some("queued") => task.merge = None,
         _ => {}
     }
+    let working = working_attempt(task);
     let revoked = revoke(task, "cancelled");
     let phase = task.phase;
     let phase_build = task.phase_build;
     task.status = TaskStatus::Cancelled;
     task.fresh_retry = false;
+    tell_revoked(team, id, working, "it was cancelled".into());
     // #759: the tasks it held start once their other dependencies are done;
     // the event and the lead's inbox name them for a re-plan.
     let released = super::plan::waiting_on(team, id);
@@ -5556,12 +5604,14 @@ pub(crate) fn apply(team: &mut Team, op: &str, input: &Value, actor: &Actor, off
                 // and the owner has the same route.
                 member.restart_pending = true;
                 member.error.clear();
+                member.host_waits = 0;
                 member.launch_id.clear();
                 events.push(Event::new("member_restart_requested", json!({"by":by,"member":id})));
                 return Ok(json!({"status":"relaunching","member":id}));
             }
             ensure!(member.session.is_none() && !member.error.is_empty(), "This member's session did not fail to start");
             member.error.clear();
+            member.host_waits = 0;
             member.launch_id.clear();
             events.push(Event::new("relaunch", json!({"by":"You","member":id})));
             Ok(json!({"status":"relaunch","member":id}))

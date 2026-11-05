@@ -443,7 +443,12 @@ void EventStream::failed(const QString &reason)
 
 void EventStream::follow(const QString &name, const QString &runId, const QString &conversationId, qint64 after)
 {
-    if (name == m_followedName && runId == m_followedRun && conversationId == m_followedConversation) return;
+    // A caller that asks from the start again (after 0) for the session it
+    // already follows has dropped what it had (the session was selected anew);
+    // subscribing again brings the snapshot. Otherwise its Activity stayed
+    // empty until the next event (owner, 2026-11-05).
+    if (name == m_followedName && runId == m_followedRun && conversationId == m_followedConversation
+        && !(after == 0 && m_followedAfter > 0)) return;
     m_followedName = name; m_followedRun = runId; m_followedConversation = conversationId; m_followedAfter = after;
     if (live()) sendFollow();
 }

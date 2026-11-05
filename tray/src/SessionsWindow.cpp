@@ -4264,7 +4264,14 @@ void SessionsWindow::inspect()
         if (streamed) streams->follow(entry->host, entry->session.name, entry->session.runId, entry->session.conversationId, m_cursor);
         else streams->unfollowAll();
     }
-    if (streamed) {
+    // Until a first read arrives, every refresh also reads the session directly,
+    // whatever the stream does: Activity and Send never depend on the stream
+    // alone (owner, 2026-11-05: after a restart and a tab switch Activity stayed
+    // empty and Send waited on "Checking the session…").
+    if (streamed && m_details.isEmpty()) {
+        m_inspectionAge.start();
+        m_client.requestInspection(entry->host, entry->session.name, m_cursor, entry->session.archiveId, false);
+    } else if (streamed) {
         m_inspectionAge.start();
         if (processes && m_client.requestInspection(entry->host, entry->session.name, m_cursor, entry->session.archiveId, true)) m_processPollAge.start();
     } else if(m_client.requestInspection(entry->host, entry->session.name, m_cursor, entry->session.archiveId,processes)) {

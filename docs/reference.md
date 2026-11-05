@@ -5909,7 +5909,10 @@ are at most 64 KiB.
 The desktop runs one stream for each computer whose CLI prints the marker.
 While a computer's stream is live, the desktop stops polling that computer's
 listing and follows the selected session's Activity through the stream; the
-Processes tab keeps its own poll interval. When the stream offers the `git`
+Processes tab keeps its own poll interval. Until a newly selected session's
+first read arrives, each refresh also inspects it directly, and selecting the
+followed session anew subscribes again from its latest window, so Activity and
+Send never wait on the stream alone. When the stream offers the `git`
 topic, it also follows the checkout folders of that computer's sessions, the
 selected one first, then shown rows, at most 64, instead of starting
 `git-status` for each every 15 s. A followed value counts as checked every 15 s

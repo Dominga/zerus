@@ -170,6 +170,16 @@ void TestEventStream::listingAndActivityArriveFromTheStream()
         return texts;
     };
     QTRY_COMPARE(details(), (QStringList{"Before.", "Checked."}));
+    // Following again from the cursor changes nothing; following from the start
+    // (the session was selected anew and dropped its Activity) subscribes again
+    // and brings its window back (owner, 2026-11-05).
+    const auto published = activity.size();
+    stream.follow(QStringLiteral("codex/Alpha"), QStringLiteral("r1"), QStringLiteral("c-r1"), 42);
+    QTest::qWait(300);
+    QCOMPARE(activity.size(), published);
+    stream.follow(QStringLiteral("codex/Alpha"), QStringLiteral("r1"), QStringLiteral("c-r1"), 0);
+    QTRY_VERIFY(activity.size() > published);
+    QCOMPARE(activity.last().at(1).toJsonObject().value("run_id").toString(), QStringLiteral("r1"));
     QCOMPARE(guiThreadParses, 0);
     JsonParse::setViolationHandler({});
     stream.stop();

@@ -154,14 +154,43 @@ fn own_project(config: &Config, who: &Actor, missing: &str) -> Result<(String, S
     let Actor::Agent(own) = who else {
         return Err(fail(missing));
     };
-    crate::swarm::session_project(config, &own.session)
-        .map_err(fail)?
-        .ok_or_else(|| {
-            fail(format!(
-                "{} belongs to no project; name one: PROJECT/T-xxxxxx or --project P",
-                own.session
-            ))
-        })
+    if let Some(found) = crate::swarm::session_project(config, &own.session).map_err(fail)? {
+        return Ok(found);
+    }
+    // P4: a team member's worktree is not a catalog session. The team names
+    // the project (project_id, label or team folder), and a member worktree in
+    // a project folder infers it from the folder itself.
+    if let Some((id, label, folder)) = crate::state::teams::project_for_session(&own.session) {
+        for wanted in [id, label] {
+            if wanted.trim().is_empty() {
+                continue;
+            }
+            if let Ok(found) = project(config, &wanted) {
+                return Ok(found);
+            }
+        }
+        if !folder.trim().is_empty() {
+            if let Some(found) = project_from_directory(config, std::path::Path::new(&folder)) {
+                return Ok(found);
+            }
+        }
+    }
+    if let Ok(folder) = std::env::current_dir() {
+        if let Some(found) = project_from_directory(config, &folder) {
+            return Ok(found);
+        }
+    }
+    Err(fail(format!(
+        "{} belongs to no project; name one: PROJECT/T-xxxxxx or --project P",
+        own.session
+    )))
+}
+
+/// The catalog project a folder belongs to, as the initial grouping reads it.
+fn project_from_directory(config: &Config, folder: &std::path::Path) -> Option<(String, String)> {
+    let value = crate::swarm::directory_project(config, folder)?;
+    let id = value["project_id"].as_str()?;
+    project(config, id).ok()
 }
 
 /// `--project P`, or the calling agent's own project.
@@ -1025,6 +1054,46 @@ fn observed_worker(own: &SessionKey, caller: &Value, details: &Value, id: &str, 
 mod tests {
     use super::*;
 
+    #[test]
+    fn a_team_members_session_names_its_teams_project() {
+        let root = tempfile::tempdir().unwrap();
+        crate::state::with_test_state_root(root.path(), || {
+            let mut store = crate::state::teams::store::Store::open(true).unwrap();
+            let mut team = crate::state::teams::model::Team {
+                id: "t".into(),
+                name: "Orbit".into(),
+                lead: "lead".into(),
+                project: "Orbit label".into(),
+                project_id: "orbit".into(),
+                folder: "C:\\work\\orbit".into(),
+                status: crate::state::teams::model::TeamStatus::Running,
+                ..Default::default()
+            };
+            team.members.push(crate::state::teams::model::Member {
+                id: "dev".into(),
+                role: "Backend".into(),
+                agent: "claude".into(),
+                session: Some(crate::state::teams::model::SessionRef {
+                    name: "claude/Zerus-team/dev".into(),
+                    ..Default::default()
+                }),
+                ..Default::default()
+            });
+            store
+                .create(
+                    "11111111-1111-4111-8111-111111111111",
+                    &json!({}),
+                    team,
+                    vec![],
+                )
+                .unwrap();
+            assert_eq!(
+                crate::state::teams::project_for_session("claude/Zerus-team/dev"),
+                Some(("orbit".into(), "Orbit label".into(), "C:\\work\\orbit".into()))
+            );
+            assert_eq!(crate::state::teams::project_for_session("claude/other"), None);
+        });
+    }
     #[test]
     fn worker_registration_requires_the_current_native_roster() {
         let own = SessionKey { machine: "node".into(), session: "codex/coordinator".into(), session_id: "launch_id:parent".into() };

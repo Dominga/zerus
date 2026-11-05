@@ -1,6 +1,6 @@
 import { describe, expect, it } from "vitest";
 import { createRoot } from "solid-js";
-import { createTeams, sessionIs, type TeamsFollow } from "./teamsView";
+import { NOTHING, createTeams, mergeFollows, sessionIs, type TeamsFollow } from "./teamsView";
 import type { TeamList, TeamView } from "../types";
 
 // Task 9: the Teams views as the batches bring them, the team a session
@@ -55,18 +55,50 @@ describe("Teams views", () => {
     const calls: [string, TeamsFollow][] = [];
     let refuse = false;
     const store = createTeams({ follow: async (computer, follow) => { calls.push([computer, follow]); if (refuse) throw new Error("Too many computers"); } });
-    store.follow("", { list: true, waiting: false, team: null });
-    store.follow("", { list: true, waiting: false, team: null });
-    store.follow("", { list: true, waiting: false, team: "t1" });
-    store.follow("", { list: false, waiting: false, team: null });
+    store.follow("", { list: true, waiting: false, team: null, catalog: false });
+    store.follow("", { list: true, waiting: false, team: null, catalog: false });
+    store.follow("", { list: true, waiting: false, team: "t1", catalog: false });
+    store.follow("", { list: false, waiting: false, team: null, catalog: false });
     expect(calls.map(([, follow]) => follow.team ?? (follow.list ? "list" : "none"))).toEqual(["list", "t1", "none"]);
     expect(store.followed().size).toBe(0);
     refuse = true;
-    store.follow("studio", { list: true, waiting: false, team: null });
+    store.follow("studio", { list: true, waiting: false, team: null, catalog: false });
     await new Promise((resolve) => setTimeout(resolve, 0));
     expect(store.followError("studio")).toContain("Too many computers");
     refuse = false;
-    store.follow("studio", { list: true, waiting: false, team: null });
+    store.follow("studio", { list: true, waiting: false, team: null, catalog: false });
     expect(calls).toHaveLength(5);
+  });
+
+  it("the Team tab and the catalog page follow one computer together, as one follow (task 47)", () => {
+    // The core keeps one follow per computer: a second call replaces the
+    // first. The Team tab (the selected session's list and team), Waiting for
+    // you, a team opened by New team and the catalog page merge into one.
+    const tab = { computer: "", list: true, team: "t1" };
+    const catalog = { computer: "", catalog: true };
+    expect(mergeFollows([tab, catalog]).get("")).toEqual({ list: true, waiting: false, team: "t1", catalog: true });
+    expect(mergeFollows([catalog, tab]).get("")).toEqual({ list: true, waiting: false, team: "t1", catalog: true });
+    // Waiting for you joins them; another computer keeps its own follow.
+    const merged = mergeFollows([tab, catalog, { computer: "", waiting: true }, { computer: "studio", list: true }]);
+    expect(merged.get("")).toEqual({ list: true, waiting: true, team: "t1", catalog: true });
+    expect(merged.get("studio")).toEqual({ ...NOTHING, list: true });
+    // A team opened explicitly (New team) is the one team read; a need without one keeps it.
+    expect(mergeFollows([tab, { computer: "", team: "draft-2" }, catalog]).get("")?.team).toBe("draft-2");
+    // Through the store: the catalog page opens while the Team tab shows, and
+    // closes again; each change is one call carrying everything still needed.
+    const calls: TeamsFollow[] = [];
+    const store = createTeams({ follow: async (_, follow) => { calls.push(follow); } });
+    const apply = (needs: Parameters<typeof mergeFollows>[0]) => store.follow("", mergeFollows(needs).get("") ?? NOTHING);
+    apply([tab]);
+    apply([tab, catalog]);
+    apply([tab]);
+    apply([]);
+    expect(calls).toEqual([
+      { list: true, waiting: false, team: "t1", catalog: false },
+      { list: true, waiting: false, team: "t1", catalog: true },
+      { list: true, waiting: false, team: "t1", catalog: false },
+      NOTHING,
+    ]);
+    expect(store.followed().size).toBe(0);
   });
 });

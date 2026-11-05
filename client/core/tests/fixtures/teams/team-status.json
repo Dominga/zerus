@@ -1,0 +1,3605 @@
+{
+ "approved_at": 1793890977.660748,
+ "approved_by": "You",
+ "attention": [],
+ "brief": "sent",
+ "brief_id": "63e7bbc2-ecfc-4abb-8901-716c1bad4ea1",
+ "checks": [],
+ "children": [],
+ "created": 1793889715.3499734,
+ "cycle": [],
+ "findings": {
+  "items": [],
+  "next_cursor": null
+ },
+ "findings_summary": {
+  "deferred": 0,
+  "open": {
+   "critical": 0,
+   "later": 0,
+   "normal": 0
+  }
+ },
+ "folder": "C:\\work\\example",
+ "full_tests": "ask",
+ "full_tests_grant": null,
+ "goal": "Synthetic goal text.",
+ "health": {
+  "chain": 5,
+  "critical_path": 9,
+  "fan_in": [],
+  "parallelism": 2.111111111111111,
+  "per_member": {
+   "core": {
+    "on_critical_path": 0,
+    "tasks": 2
+   },
+   "hgs": {
+    "on_critical_path": 0,
+    "tasks": 1
+   },
+   "merger": {
+    "on_critical_path": 1,
+    "tasks": 4
+   },
+   "qa": {
+    "on_critical_path": 1,
+    "tasks": 2
+   },
+   "ui1": {
+    "on_critical_path": 0,
+    "tasks": 2
+   },
+   "ui2": {
+    "on_critical_path": 0,
+    "tasks": 8
+   }
+  },
+  "starved": [
+   {
+    "blocking": [
+     1,
+     2,
+     5,
+     6,
+     7
+    ],
+    "member": "ui1",
+    "minutes": 2,
+    "role": "Frontend (SolidJS)"
+   }
+  ],
+  "tasks": 19,
+  "totals": {
+   "decided": 8,
+   "tasks": 27
+  },
+  "warnings": [
+   "(9) lane weights differ by more than a third: 1 to 10",
+   "(12) task #27 makes the reviewer implement",
+   "starved: ui1 (Frontend (SolidJS)) idle 2 min without a ready task; Open: #1, #2, #5, #6, #7"
+  ],
+  "widest_ready": 7
+ },
+ "hosts": [
+  {
+   "agent": "dsh",
+   "members": [
+    "ui2",
+    "qa"
+   ],
+   "pid": 27696,
+   "started": 1793891443.8229566
+  }
+ ],
+ "id": "33fbafeb-8291-4eda-a00c-6e1448ec6f20",
+ "inbox": {
+  "told": [
+   "build_broker",
+   "proposal:p1",
+   "proposal:p2",
+   "proposal:p3",
+   "report:25:12919b40-81fa-43f7-b07d-55982c998299:0",
+   "report:4:82f8818e-8a9f-4158-93b5-dffcdc23530c:0"
+  ],
+  "told_at": 1793895084.7238245
+ },
+ "layers": {
+  "1": 0,
+  "10": 2,
+  "11": 3,
+  "12": 3,
+  "13": 4,
+  "14": 5,
+  "15": 1,
+  "16": 3,
+  "17": 5,
+  "18": 0,
+  "19": 0,
+  "2": 0,
+  "20": 0,
+  "21": 0,
+  "22": 0,
+  "23": 0,
+  "24": 0,
+  "25": 0,
+  "26": 0,
+  "27": 1,
+  "3": 0,
+  "4": 0,
+  "5": 1,
+  "6": 1,
+  "7": 2,
+  "8": 1,
+  "9": 2
+ },
+ "lead": "lead",
+ "lead_protocol": "Synthetic lead_protocol text.",
+ "members": [
+  {
+   "account": "",
+   "activity": "idle",
+   "agent": "claude",
+   "branch": "whitewh/main",
+   "computer": "",
+   "directory": "",
+   "effort": "",
+   "error": "",
+   "folder": "shared",
+   "folder_path": "C:\\work\\example",
+   "host_shared": false,
+   "id": "lead",
+   "launch_id": "",
+   "minutes_without_progress": 0,
+   "model": "",
+   "outside_project": false,
+   "permission_answers": [],
+   "permissions": "",
+   "phase": "idle",
+   "project": "D:/Tools/Zerus",
+   "prompt": "Synthetic prompt text.",
+   "question": null,
+   "queue": [],
+   "role": "Lead",
+   "seen": {
+    "at": 1793890980.6679094,
+    "live": true
+   },
+   "seen_activity": "idle",
+   "seen_event_at": 1793895170.6921225,
+   "seen_phase": "idle",
+   "services": [
+    {
+     "command": "C:\\work\\example",
+     "name": "cmd",
+     "since": 1793886487.7922368
+    }
+   ],
+   "session": {
+    "conversation_id": "0322c402-bf9b-4bd7-81fa-680f6c0ff926",
+    "host": "",
+    "name": "claude/Zerus/work-6926cceb",
+    "run_id": "d98bb419-557a-4725-a017-214ecd23595d"
+   },
+   "session_account": "claude-57584158dd",
+   "stage_queue": [],
+   "state": "active",
+   "stuck": null
+  },
+  {
+   "account": "claude-57584158dd",
+   "activity": "busy",
+   "agent": "claude",
+   "branch": "team/33fbafeb/core",
+   "computer": "",
+   "directory": "",
+   "effort": "high",
+   "error": "",
+   "folder": "worktree",
+   "folder_path": "C:\\work\\example",
+   "host_shared": false,
+   "id": "core",
+   "launch_id": "290c1ad7-fdda-4c6d-b644-4d49721d2e4c",
+   "minutes_without_progress": 0,
+   "model": "claude-opus-5-5",
+   "outside_project": false,
+   "permission_answers": [],
+   "permissions": "",
+   "phase": "working",
+   "project": "D:/Tools/Zerus",
+   "prompt": "Synthetic prompt text.",
+   "question": null,
+   "queue": [
+    {
+     "phase": "working",
+     "task": 6
+    }
+   ],
+   "quieted": "da483eda-a37c-45ae-b97b-2645ad6d98a1",
+   "role": "Tauri core (Rust)",
+   "seen": {
+    "at": 1793891013.1345098,
+    "live": true
+   },
+   "seen_activity": "busy",
+   "seen_event_at": 1793895174.6132865,
+   "seen_phase": "working",
+   "session": {
+    "conversation_id": "da483eda-a37c-45ae-b97b-2645ad6d98a1",
+    "host": "",
+    "name": "claude/Zerus-team-33fbafeb-core/zerus-next-for-the-fork-core",
+    "run_id": "830f440e-c015-40cf-9779-a7afa1e46bba"
+   },
+   "session_account": "claude-57584158dd",
+   "stage_queue": [],
+   "state": "active",
+   "stuck": null
+  },
+  {
+   "account": "",
+   "activity": "",
+   "agent": "dsh",
+   "branch": "team/33fbafeb/hgs",
+   "computer": "",
+   "directory": "",
+   "effort": "high",
+   "error": "",
+   "folder": "clone",
+   "folder_path": "C:\\work\\example",
+   "host_shared": false,
+   "id": "hgs",
+   "launch_id": "",
+   "minutes_without_progress": null,
+   "model": "deepseek-flash",
+   "outside_project": false,
+   "permission_answers": [],
+   "permissions": "",
+   "phase": "",
+   "project": "D:/Tools/Zerus-team-33fbafeb-hgs",
+   "prompt": "Synthetic prompt text.",
+   "question": null,
+   "queue": [],
+   "role": "hgs CLI (DeepSeek)",
+   "session": null,
+   "session_account": "",
+   "stage_queue": [],
+   "state": "not_created",
+   "stuck": null
+  },
+  {
+   "account": "claude-57584158dd",
+   "activity": "idle",
+   "agent": "claude",
+   "branch": "team/33fbafeb/ui1",
+   "computer": "",
+   "directory": "",
+   "effort": "medium",
+   "error": "",
+   "folder": "worktree",
+   "folder_path": "C:\\work\\example",
+   "host_shared": false,
+   "id": "ui1",
+   "launch_id": "09e1671f-e482-4294-9008-806c6a4c3dd2",
+   "minutes_without_progress": 3,
+   "model": "claude-opus-5-5",
+   "outside_project": false,
+   "permission_answers": [],
+   "permissions": "",
+   "phase": "idle",
+   "project": "D:/Tools/Zerus",
+   "prompt": "Synthetic prompt text.",
+   "question": null,
+   "queue": [],
+   "quieted": "70cd50d6-7548-482b-96f0-20841337f979",
+   "role": "Frontend (SolidJS)",
+   "seen": {
+    "at": 1793891013.1497102,
+    "live": true
+   },
+   "seen_activity": "idle",
+   "seen_event_at": 1793895037.1170156,
+   "seen_phase": "idle",
+   "services": [
+    {
+     "command": "C:\\work\\example",
+     "name": "socraticode",
+     "since": 1793891002.3166735
+    },
+    {
+     "command": "C:\\work\\example",
+     "name": "cmd",
+     "since": 1793891002.3506415
+    }
+   ],
+   "session": {
+    "conversation_id": "70cd50d6-7548-482b-96f0-20841337f979",
+    "host": "",
+    "name": "claude/Zerus-team-33fbafeb-ui1/zerus-next-for-the-fork-ui1",
+    "run_id": "72ddd41c-fa88-49b5-8301-ca9220aca1be"
+   },
+   "session_account": "claude-57584158dd",
+   "stage_queue": [],
+   "starved_since": 1793895094.9159694,
+   "state": "active",
+   "stuck": null
+  },
+  {
+   "account": "",
+   "activity": "busy",
+   "agent": "dsh",
+   "asked": [
+    "705b6614-911a-498f-bd54-449d03fe7426:6e63394585a0bc0c14afee1dcdde08ab3dd44b137eb3aa47c82bfa7c012a04ba",
+    "b1d1843c-2337-4597-9699-7467b5c35b6f:f80bd6c28ce2247d72c58d4d3dfb49008562950e4343587f0af5b3de137e43f9"
+   ],
+   "branch": "team/33fbafeb/ui2",
+   "computer": "",
+   "directory": "",
+   "effort": "high",
+   "error": "",
+   "folder": "clone",
+   "folder_path": "C:\\work\\example",
+   "host_shared": true,
+   "id": "ui2",
+   "launch_id": "e4a9393d-b271-4e66-b5af-ae521c7b5c2f",
+   "minutes_without_progress": 1,
+   "model": "deepseek-flash",
+   "outside_project": false,
+   "permission_answers": [
+    {
+     "at": 1793892131.639394,
+     "by": "lead",
+     "command": "Synthetic command text.",
+     "decision": "allow",
+     "question_id": "705b6614-911a-498f-bd54-449d03fe7426",
+     "reason": "",
+     "tool": "Approval required"
+    },
+    {
+     "at": 1793892271.9756165,
+     "by": "lead",
+     "command": "Synthetic command text.",
+     "decision": "deny",
+     "question_id": "b1d1843c-2337-4597-9699-7467b5c35b6f",
+     "reason": "",
+     "tool": "Approval required"
+    }
+   ],
+   "permissions": "",
+   "phase": "working",
+   "project": "D:/Tools/Zerus-team-33fbafeb-ui2",
+   "prompt": "Synthetic prompt text.",
+   "question": null,
+   "queue": [
+    {
+     "phase": "working",
+     "task": 1
+    }
+   ],
+   "quieted": "session-f1e13b40-302a-4c2d-a1b4-ceaf301fe327",
+   "role": "Frontend (DeepSeek)",
+   "seen": {
+    "at": 1793891522.3585067,
+    "live": true
+   },
+   "seen_activity": "busy",
+   "seen_event_at": 1793895128.325,
+   "seen_phase": "working",
+   "session": {
+    "conversation_id": "session-f1e13b40-302a-4c2d-a1b4-ceaf301fe327",
+    "host": "",
+    "name": "dsh/Zerus-team-33fbafeb-ui2/zerus-next-for-the-fork-ui2",
+    "run_id": "e3c295e0-c27e-4e68-8600-31873b556cca"
+   },
+   "session_account": "",
+   "settings_applied": true,
+   "stage_queue": [],
+   "state": "active",
+   "stuck": null
+  },
+  {
+   "account": "claude-57584158dd",
+   "activity": "",
+   "agent": "claude",
+   "branch": "whitewh/main",
+   "computer": "",
+   "directory": "",
+   "effort": "high",
+   "error": "",
+   "folder": "shared",
+   "folder_path": "C:\\work\\example",
+   "host_shared": false,
+   "id": "merger",
+   "launch_id": "",
+   "minutes_without_progress": null,
+   "model": "claude-sonnet-5-5",
+   "outside_project": false,
+   "permission_answers": [],
+   "permissions": "",
+   "phase": "",
+   "project": "D:/Tools/Zerus",
+   "prompt": "You are the Reviewer and Merger of this team. For each task: read the members' branches the task names against the documents and contracts it names; report findings by severity with file:line. A blocking finding stops you: report it and merge nothing. Otherwise merge each branch into main with --no-ff, resolve conflicts, run the checks the task names on main, push main, and report the merge commits. You change no source code except conflict resolution. Finish every task with `hgs team report` (hgs guide team).\n\nIn this team 'main' is the integration branch merge/upstream-2026-11-05, checked out at C:\\work\\example",
+   "prompt_snapshot": {
+    "notes": {},
+    "prompt_off": [],
+    "prompt_order": [],
+    "protocol_extra": "",
+    "task_template": ""
+   },
+   "question": null,
+   "queue": [],
+   "role": "Reviewer & Merger",
+   "session": null,
+   "session_account": "claude-57584158dd",
+   "stage_queue": [],
+   "state": "not_created",
+   "stuck": null
+  },
+  {
+   "account": "",
+   "activity": "busy",
+   "agent": "dsh",
+   "branch": "whitewh/main",
+   "computer": "",
+   "directory": "",
+   "effort": "high",
+   "error": "",
+   "folder": "shared",
+   "folder_path": "C:\\work\\example",
+   "host_shared": true,
+   "id": "qa",
+   "launch_id": "6ce62ab7-5c38-426b-aed7-c6c5aefe20de",
+   "minutes_without_progress": 1,
+   "model": "deepseek-flash",
+   "outside_project": false,
+   "permission_answers": [],
+   "permissions": "",
+   "phase": "working",
+   "project": "D:/Tools/Zerus",
+   "prompt": "Synthetic prompt text.",
+   "question": null,
+   "queue": [
+    {
+     "phase": "working",
+     "task": 5
+    }
+   ],
+   "quieted": "session-10e9dd92-4a7a-49be-a139-da281115f842",
+   "role": "QA tester (Windows, DeepSeek)",
+   "seen": {
+    "at": 1793895128.096145,
+    "live": true
+   },
+   "seen_activity": "busy",
+   "seen_event_at": 1793895138.569,
+   "seen_phase": "working",
+   "session": {
+    "conversation_id": "session-10e9dd92-4a7a-49be-a139-da281115f842",
+    "host": "",
+    "name": "dsh/Zerus/zerus-next-for-the-fork-qa",
+    "run_id": "ba3d8c92-041c-4e14-81b2-b2e63f0e7ee7"
+   },
+   "session_account": "",
+   "settings_applied": true,
+   "stage_queue": [],
+   "state": "active",
+   "stuck": null
+  }
+ ],
+ "name": "Zerus Next for the fork",
+ "pending_phase": null,
+ "phase_summary": [
+  {
+   "acceptance": "lead",
+   "auto": false,
+   "barrier": false,
+   "done": 8,
+   "health_line": "path 9 · par 2.1 · 2 warnings",
+   "n": 1,
+   "pause": null,
+   "start_ahead": false,
+   "state": "running",
+   "status": "in_work",
+   "title": "Phase 1",
+   "total": 27
+  }
+ ],
+ "phases": null,
+ "phases_health": {
+  "1": {
+   "chain": 5,
+   "critical_path": 9,
+   "fan_in": [],
+   "parallelism": 2.111111111111111,
+   "per_member": {
+    "core": {
+     "on_critical_path": 0,
+     "tasks": 2
+    },
+    "hgs": {
+     "on_critical_path": 0,
+     "tasks": 1
+    },
+    "merger": {
+     "on_critical_path": 1,
+     "tasks": 4
+    },
+    "qa": {
+     "on_critical_path": 1,
+     "tasks": 2
+    },
+    "ui1": {
+     "on_critical_path": 0,
+     "tasks": 2
+    },
+    "ui2": {
+     "on_critical_path": 0,
+     "tasks": 8
+    }
+   },
+   "tasks": 19,
+   "totals": {
+    "decided": 8,
+    "tasks": 27
+   },
+   "warnings": [
+    "(9) lane weights differ by more than a third: 1 to 10",
+    "(12) task #27 makes the reviewer implement"
+   ],
+   "widest_ready": 7
+  }
+ },
+ "plan_mode": "standard",
+ "plan_mode_offer": null,
+ "plan_mode_reason": "",
+ "project": "ZERUS",
+ "project_id": "02fdf8fc-8a76-4b7d-8e8e-abeee524f80f",
+ "proposals": [
+  {
+   "at": 1793891292.6295998,
+   "by": "Lead",
+   "change": {
+    "phase": 1,
+    "tasks": [
+     {
+      "assignee": "hgs",
+      "criteria": [
+       "Synthetic criteria text.",
+       "Synthetic criteria text.",
+       "Synthetic criteria text."
+      ],
+      "description": "Owner, 2026-11-05 ('we already fixed this bug'): hgs and ui2 (DeepSeek, folder clone) of this team failed to start with 'hgs: Git operation cancelled or timed out'. The clones of C:\\work\\example",
+      "estimate_minutes": 150,
+      "id": 20,
+      "output": [
+       "src/state/worktrees.rs",
+       "src/state/teams/"
+      ],
+      "title": "A clone member of a large repository starts on Windows instead of 'Git operation cancelled or timed out'"
+     }
+    ]
+   },
+   "decided_at": 1793891317.5730429,
+   "goal": null,
+   "hash": "4a86aee1ac0f04ce812cfd1b20d1317357c4d352bb6837fe893a9278ddcd2165",
+   "id": "p1",
+   "kind": "add-to-phase",
+   "member": null,
+   "mode": "",
+   "note": "",
+   "operation_request": "bd7feb94-e7de-45b0-8770-07b2dd66b5ca",
+   "reason": "Synthetic reason text.",
+   "state": "accepted"
+  },
+  {
+   "at": 1793891491.1681435,
+   "by": "Lead",
+   "change": {
+    "phase": 1,
+    "tasks": [
+     {
+      "assignee": "core",
+      "criteria": [
+       "Synthetic criteria text.",
+       "Synthetic criteria text.",
+       "Synthetic criteria text.",
+       "Synthetic criteria text."
+      ],
+      "description": "Synthetic description text.",
+      "estimate_minutes": 480,
+      "id": 21,
+      "output": [
+       "src/state/teams/",
+       "tray/src/Team*",
+       "docs/"
+      ],
+      "title": "URGENT: every owner's-word gate becomes a confirmation dialog (Allow/Reject), never a typed sentence"
+     }
+    ]
+   },
+   "decided_at": 1793891493.778844,
+   "goal": null,
+   "hash": "b2a93c41c14d1f167726ccad0407229f8ae8701d6b7615974f5f486b56ed3054",
+   "id": "p2",
+   "kind": "add-to-phase",
+   "member": null,
+   "mode": "",
+   "note": "",
+   "operation_request": "e375bb01-6b30-4657-a465-a36a43407099",
+   "reason": "Synthetic reason text.",
+   "state": "accepted"
+  },
+  {
+   "at": 1793891754.7665813,
+   "by": "Lead",
+   "change": {
+    "phase": 1,
+    "tasks": [
+     {
+      "assignee": "hgs",
+      "criteria": [
+       "Synthetic criteria text.",
+       "Synthetic criteria text.",
+       "Synthetic criteria text."
+      ],
+      "description": "Synthetic description text.",
+      "estimate_minutes": 150,
+      "id": 22,
+      "output": [
+       "src/state/teams/",
+       "src/dsh/"
+      ],
+      "title": "A DeepSeek member that hits 'DeepSeek host is still starting' starts once the host is up, without a relaunch"
+     },
+     {
+      "assignee": "hgs",
+      "criteria": [
+       "Synthetic criteria text.",
+       "Synthetic criteria text."
+      ],
+      "description": "Synthetic description text.",
+      "estimate_minutes": 120,
+      "id": 23,
+      "output": [
+       "src/state/teams/"
+      ],
+      "title": "Draft task phases survive Create team"
+     },
+     {
+      "assignee": "hgs",
+      "criteria": [
+       "Synthetic criteria text.",
+       "Synthetic criteria text."
+      ],
+      "description": "Synthetic description text.",
+      "estimate_minutes": 150,
+      "id": 24,
+      "output": [
+       "src/state/teams/"
+      ],
+      "title": "A reassigned task stops in the old member's session"
+     },
+     {
+      "assignee": "hgs",
+      "criteria": [
+       "Synthetic criteria text.",
+       "Synthetic criteria text."
+      ],
+      "description": "Synthetic description text.",
+      "estimate_minutes": 90,
+      "id": 25,
+      "output": [
+       "src/state/teams/"
+      ],
+      "title": "Team commands retry a busy team database instead of failing with 'database is locked'"
+     },
+     {
+      "assignee": "hgs",
+      "criteria": [
+       "Synthetic criteria text.",
+       "Synthetic criteria text."
+      ],
+      "description": "Synthetic description text.",
+      "estimate_minutes": 90,
+      "id": 26,
+      "output": [
+       "src/state/teams/"
+      ],
+      "title": "A draft accepts every member setting the catalog allows (folder read_only) and refuses only with the exact field"
+     },
+     {
+      "assignee": "merger",
+      "criteria": [
+       "Synthetic criteria text.",
+       "Merge commits listed",
+       "Batch run results attached"
+      ],
+      "deps": [
+       {
+        "kind": "hard",
+        "task": 18
+       },
+       {
+        "kind": "hard",
+        "task": 20
+       },
+       {
+        "kind": "hard",
+        "task": 21
+       },
+       {
+        "kind": "hard",
+        "task": 22
+       },
+       {
+        "kind": "hard",
+        "task": 23
+       },
+       {
+        "kind": "hard",
+        "task": 24
+       },
+       {
+        "kind": "hard",
+        "task": 25
+       },
+       {
+        "kind": "hard",
+        "task": 26
+       }
+      ],
+      "description": "Synthetic description text.",
+      "estimate_minutes": 180,
+      "id": 27,
+      "title": "Review the reliability fixes with their regression tests, then merge and test them as one batch"
+     }
+    ]
+   },
+   "decided_at": 1793891758.4734688,
+   "goal": null,
+   "hash": "eea1478884f30e158c00c4ba9321198d48144187f8804bff90e85bcc1ba61963",
+   "id": "p3",
+   "kind": "add-to-phase",
+   "member": null,
+   "mode": "",
+   "note": "",
+   "operation_request": "47f9b6f1-ce7e-4fd1-a8a1-f61463259d48",
+   "reason": "Synthetic reason text.",
+   "state": "accepted"
+  },
+  {
+   "at": 1793895087.5196455,
+   "by": "Lead",
+   "change": {
+    "phase": 1,
+    "tasks": [
+     {
+      "assignee": "core",
+      "criteria": [
+       "Synthetic criteria text.",
+       "Synthetic criteria text.",
+       "Synthetic criteria text.",
+       "Synthetic criteria text."
+      ],
+      "description": "Synthetic description text.",
+      "estimate_minutes": 480,
+      "id": 28,
+      "output": [
+       "src/state/builds.rs",
+       "src/host/",
+       "src/state/dsh.rs",
+       "src/state/teams/"
+      ],
+      "pinned": true,
+      "title": "URGENT: a DeepSeek (dsh) member on Windows can use every hgs call a member needs"
+     },
+     {
+      "assignee": "ui1",
+      "criteria": [
+       "Synthetic criteria text.",
+       "Synthetic criteria text."
+      ],
+      "deps": [
+       {
+        "kind": "hard",
+        "task": 25
+       }
+      ],
+      "description": "Synthetic description text.",
+      "estimate_minutes": 360,
+      "id": 29,
+      "output": [
+       "docs/",
+       "src/state/teams/tests/"
+      ],
+      "title": "Audit: every agent kind and folder kind can do a member's job on Windows"
+     },
+     {
+      "assignee": "merger",
+      "criteria": [
+       "Synthetic criteria text.",
+       "Merge commits listed",
+       "Build and affected tests pass",
+       "Install steps for the owner"
+      ],
+      "deps": [
+       {
+        "kind": "hard",
+        "task": 18
+       },
+       {
+        "kind": "hard",
+        "task": 20
+       },
+       {
+        "kind": "hard",
+        "task": 21
+       },
+       {
+        "kind": "hard",
+        "task": 22
+       },
+       {
+        "kind": "hard",
+        "task": 24
+       }
+      ],
+      "description": "Synthetic description text.",
+      "estimate_minutes": 150,
+      "id": 30,
+      "title": "Merge the accepted runtime fixes now so the owner can install them"
+     }
+    ]
+   },
+   "goal": null,
+   "hash": "2b6ebd67366ada737302d22e69433b62ff90eac074b3bdb59bae47381c18cb0b",
+   "id": "p4",
+   "kind": "add-to-phase",
+   "member": null,
+   "mode": "",
+   "operation_request": "8531ede8-1411-402d-afba-a17e24cabaed",
+   "reason": "Synthetic reason text.",
+   "state": "open"
+  }
+ ],
+ "ready": [
+  2,
+  19,
+  23,
+  26
+ ],
+ "revision": 612,
+ "settings": {
+  "all_hard": false,
+  "approval": "review",
+  "background_red_minutes": 30,
+  "blocked_timeout_seconds": 1800,
+  "folder_policy": "lead",
+  "inbox_interval_seconds": 120,
+  "max_members": 6,
+  "remind_lead_minutes": 15,
+  "remind_owner_minutes": 60,
+  "remind_owner_permission_minutes": 10,
+  "report_timeout_seconds": 120,
+  "restart_crashed": true,
+  "start_timeout_seconds": 180
+ },
+ "status": "running",
+ "stuck_scope": [
+  1,
+  2,
+  5,
+  6,
+  7,
+  8,
+  9,
+  10,
+  11,
+  12,
+  13,
+  14,
+  15,
+  16,
+  17,
+  19,
+  23,
+  26,
+  27
+ ],
+ "tasks": [
+  {
+   "assignee": "ui2",
+   "attempts": [
+    {
+     "delivered_at": 1793895128.3402867,
+     "error": "",
+     "id": "426e4525-502b-4bdb-a72f-ddbdc918c51e",
+     "member": "ui2",
+     "n": 1,
+     "no_report": false,
+     "notice": "none",
+     "notice_id": "",
+     "phase": "working",
+     "report": null,
+     "sent_at": 1793895128.1167362,
+     "started_at": 1793895138.408736,
+     "state": "delivered",
+     "turn_ended_at": null
+    }
+   ],
+   "criteria": [
+    "Synthetic criteria text.",
+    "Synthetic criteria text.",
+    "Synthetic criteria text."
+   ],
+   "decided_by": null,
+   "decision_reason": "",
+   "deps": [],
+   "description": "On Windows the panel arrives as the generic read-only claude_terminal_choice card ('Answer this in Terminal.', src/state/claude_approval.rs:629) although the parser knows it (fixture OUTSIDE, answerable through claude_tui in tests). Find why the tool-approval path builds no card for a real Windows session (pending_approval missing in auto mode, visible() or parse() on the Windows screen, or matches() with a C:\\work\\example",
+   "estimate_minutes": 180.0,
+   "estimate_source": "lead",
+   "estimate_spent_minutes": 1.0,
+   "estimate_text": "180 min",
+   "id": 1,
+   "output": [
+    "src/state/claude_approval.rs",
+    "tests/fixtures"
+   ],
+   "phase": 1,
+   "pinned": true,
+   "status": "in_progress",
+   "timing": {
+    "attempts": [
+     {
+      "from": 1793895138.408736,
+      "lead_s": 0,
+      "member": "ui2",
+      "member_s": 10,
+      "n": 1,
+      "state": "delivered",
+      "to": null,
+      "worked_s": 50
+     }
+    ],
+    "running_since": 1793895138.408736,
+    "waits": {
+     "deps_s": 0,
+     "lead_s": 0,
+     "member_s": 4161
+    },
+    "worked_s": 50
+   },
+   "title": "Route Claude's 'Read outside the working directories' approval on Windows as an answerable card",
+   "waits": {
+    "for": "member",
+    "on": [
+     "ui2 (Frontend (DeepSeek))"
+    ],
+    "unblock": "wait for ui2 (Frontend (DeepSeek))"
+   }
+  },
+  {
+   "assignee": "ui2",
+   "attempts": [],
+   "criteria": [
+    "Synthetic criteria text.",
+    "Synthetic criteria text.",
+    "cargo test passes"
+   ],
+   "decided_by": null,
+   "decision_reason": "",
+   "deps": [],
+   "description": "Synthetic description text.",
+   "estimate_minutes": 120.0,
+   "estimate_source": "lead",
+   "estimate_text": "120 min",
+   "id": 2,
+   "output": [
+    "src/state/claude_approval.rs",
+    "tests/fixtures"
+   ],
+   "phase": 1,
+   "pinned": true,
+   "status": "pending",
+   "timing": {
+    "attempts": [],
+    "running_since": null,
+    "waits": {
+     "deps_s": 0,
+     "lead_s": 0,
+     "member_s": 4211
+    },
+    "worked_s": 0
+   },
+   "title": "Recognise Claude choosers whose Esc hint is not 'Esc to cancel' (Claude in Chrome panel)",
+   "waits": {
+    "for": "member",
+    "on": [
+     "ui2 (Frontend (DeepSeek))"
+    ],
+    "unblock": "wait for ui2 (Frontend (DeepSeek))"
+   }
+  },
+  {
+   "assignee": "ui1",
+   "attempts": [
+    {
+     "commits": [
+      {
+       "at": 1793891577.3156128,
+       "by": "Zerus",
+       "files": 12,
+       "sha": "6b4ff06c53d363f8320af51e429262e139f9a582"
+      }
+     ],
+     "decided_at": 1793891674.2423055,
+     "delivered_at": 1793891013.8830118,
+     "error": "",
+     "folder_branch": "team/33fbafeb/ui1",
+     "folder_head": "6b4ff06c53d363f8320af51e429262e139f9a582",
+     "id": "73e261b2-86df-48ad-98f7-1045ddb76395",
+     "member": "ui1",
+     "n": 1,
+     "no_report": false,
+     "notice": "pending",
+     "notice_id": "",
+     "report": {
+      "at": 1793891653.251821,
+      "tests": {
+       "files": 544,
+       "functions_added": {
+        "names": [
+         "client/core/src/account_actions.rs: guards_every_call_and_keeps_labels_as_one_argument",
+         "client/core/src/account_actions.rs: refuses_changed_or_ambiguous_profiles_and_unbound_machines",
+         "client/core/src/account_actions/models.rs: binds_account_provider_and_revision_and_keeps_a_closed_projection"
+        ],
+        "total": 2578
+       },
+       "functions_removed": {
+        "names": [
+         "client/core/src/mobile/tests.rs: the_connector_is_only_asked_for_its_status",
+         "client/core/tests/actions.rs: a_kill_through_the_fake_is_one_call_without_input",
+         "client/src-tauri/src/lifecycle.rs: a_dock_click_restores_only_a_minimised_window"
+        ],
+        "total": 33
+       },
+       "lines_added": 113828,
+       "lines_removed": 2529
+      },
+      "text": "Synthetic text text.",
+      "unstructured": true
+     },
+     "runs": [
+      {
+       "args": {
+        "filter": "question",
+        "manifest": [
+         "client/core/Cargo.toml"
+        ]
+       },
+       "at": 1793891514.9104993,
+       "exit": 0,
+       "ms": 125836,
+       "template": "cargo-test"
+      },
+      {
+       "args": {
+        "filter": "read_only_cards",
+        "manifest": [
+         "client/core/Cargo.toml"
+        ]
+       },
+       "at": 1793891540.1986217,
+       "exit": 0,
+       "ms": 2185,
+       "template": "cargo-test"
+      },
+      {
+       "args": {
+        "message": "Synthetic message text.",
+        "paths": [
+         "client/core/src/questions.rs",
+         "client/core/tests/questions.rs",
+         "client/fixtures/question-card-v1.json"
+        ]
+       },
+       "at": 1793891577.322047,
+       "exit": 0,
+       "ms": 0,
+       "template": "git-commit"
+      }
+     ],
+     "sent_at": 1793891013.510472,
+     "started_at": 1793891018.4709299,
+     "state": "reported",
+     "turn_ended_at": null
+    }
+   ],
+   "criteria": [
+    "Synthetic criteria text.",
+    "Answerable cards are unchanged",
+    "Synthetic criteria text."
+   ],
+   "decided_by": "lead",
+   "decision_reason": "Synthetic decision_reason text.",
+   "deps": [],
+   "description": "Synthetic description text.",
+   "estimate_minutes": 90.0,
+   "estimate_source": "lead",
+   "estimate_text": "90 min",
+   "id": 3,
+   "output": [
+    "tray/src/QuestionCard*",
+    "client/src/ui/sessions/QuestionCard.tsx"
+   ],
+   "phase": 1,
+   "status": "accepted",
+   "timing": {
+    "attempts": [
+     {
+      "from": 1793891018.4709299,
+      "lead_s": 21,
+      "member": "ui1",
+      "member_s": 5,
+      "n": 1,
+      "state": "reported",
+      "to": 1793891653.251821,
+      "worked_s": 635
+     }
+    ],
+    "running_since": null,
+    "waits": {
+     "deps_s": 0,
+     "lead_s": 21,
+     "member_s": 41
+    },
+    "worked_s": 635
+   },
+   "title": "A read-only question card never looks answerable (Qt and Tauri)"
+  },
+  {
+   "assignee": "ui2",
+   "attempts": [
+    {
+     "delivered_at": 1793891013.4902997,
+     "error": "reassigned",
+     "id": "e29f8091-875f-4e9d-b416-ffacd7301e7c",
+     "member": "core",
+     "n": 1,
+     "no_report": false,
+     "notice": "none",
+     "notice_id": "",
+     "report": null,
+     "sent_at": 1793891013.1693487,
+     "started_at": 1793891018.4791448,
+     "state": "revoked",
+     "turn_ended_at": null
+    },
+    {
+     "activity_at": 1793892142.082,
+     "commits": [
+      {
+       "at": 1793894912.6636424,
+       "by": "Zerus",
+       "files": 2,
+       "sha": "1228a2a59bde86154db8a1c3798ff74fdb3f07b4"
+      }
+     ],
+     "decided_at": 1793895098.9779727,
+     "delivered_at": 1793891538.4030533,
+     "error": "",
+     "folder_branch": "team/33fbafeb/ui2",
+     "folder_head": "1228a2a59bde86154db8a1c3798ff74fdb3f07b4",
+     "id": "82f8818e-8a9f-4158-93b5-dffcdc23530c",
+     "member": "ui2",
+     "n": 2,
+     "no_report": false,
+     "notice": "pending",
+     "notice_id": "",
+     "permissions": [
+      {
+       "at": 1793892131.639394,
+       "by": "lead",
+       "command": "Synthetic command text.",
+       "decision": "allow",
+       "question_id": "705b6614-911a-498f-bd54-449d03fe7426",
+       "reason": "",
+       "tool": "Approval required"
+      },
+      {
+       "at": 1793892271.9756165,
+       "by": "lead",
+       "command": "Synthetic command text.",
+       "decision": "deny",
+       "question_id": "b1d1843c-2337-4597-9699-7467b5c35b6f",
+       "reason": "",
+       "tool": "Approval required"
+      }
+     ],
+     "questions": [
+      {
+       "answer": "Synthetic answer text.",
+       "answered_at": 1793892388.1008093,
+       "at": 1793892323.840202,
+       "by": "Lead",
+       "id": "q2",
+       "notice": "sent",
+       "notice_id": "81db5d89-859e-4a01-8db7-0313e4cd27bb",
+       "text": "hgs run refuses for me (exit 1): hgs: hgs run tracks a build as the calling session's work: run it from inside a Zerus session. I used your exact command and cwd: npm run tauri -- build --no-bundle --config target/fork-dev-identity.json in C:\\work\\example"
+      },
+      {
+       "answer": "Synthetic answer text.",
+       "answered_at": 1793892521.8886807,
+       "at": 1793892425.4332738,
+       "by": "Lead",
+       "id": "q3",
+       "notice": "sent",
+       "notice_id": "810e8d38-c98e-425f-b715-265ac8327250",
+       "text": "The build you started (d6ece818-dd79-4c63-86a6-1658bbe07bbb) failed in 1.4 s with exit 2: tauri could not read 'target/fork-dev-identity.json' relative to cwd client (the real path is src-tauri/target/...). I have now put the same config at client/target/fork-dev-identity.json, so your exact command works unchanged; it is gitignored. Please start one more hgs run with a new request_id: {request_id:<new UUID>, label:'tauri dev build (task 4, ui2)', command:'npm run tauri -- build --no-bundle --config target/fork-dev-identity.json', cwd:'C:\\work\\example"
+      },
+      {
+       "answer": "Synthetic answer text.",
+       "answered_at": 1793892522.1503608,
+       "at": 1793892478.6723113,
+       "by": "Lead",
+       "id": "q4",
+       "notice": "sent",
+       "notice_id": "cbeece34-6b4a-4738-aba5-11512d1f806a",
+       "text": "Your second build (a838b2b1-67e0-4168-9d61-b1ffe55049d7) reached beforeBuildCommand and failed because the copied node_modules was partial: Vite could not resolve 'marked'. I ran npm ci in client (101 packages, 6 s, no error), so the dependency is present now. Please start the same hgs run once more with a new request_id (label 'tauri dev build (task 4, ui2)', command 'npm run tauri -- build --no-bundle --config target/fork-dev-identity.json', cwd 'C:\\work\\example"
+      },
+      {
+       "answer": "Synthetic answer text.",
+       "answered_at": 1793893149.4796848,
+       "at": 1793892994.051766,
+       "by": "Lead",
+       "id": "q5",
+       "notice": "sent",
+       "notice_id": "162f9981-cd99-413b-afca-f368ad406b2a",
+       "text": "(retry: the first ask was refused with 'database is locked') Build verified: --build-info prints CFBundleIdentifier dev.zerus.next and ZerusGUI tauri, commit dcea65962. I cannot launch it from the DeepSeek sandbox: a low-integrity child is refused by the local session host ('the session host on this computer runs elevated'), so the app would show no sessions. Please run one hgs run with a new request_id, label 'fork smoke beside Qt (task 4)', cwd 'C:\\work\\example\"C:\\work\\example\" -App \"C:\\work\\example\" -Hgs \"C:\\work\\example\" -Out \"C:\\work\\example\" -PerfSeconds 540. It opens the dev window for at most about 10 minutes, tries CDP and screenshots, falls back to ZERUS_CLIENT_PERF=auto, writes client\\\\artifacts\\\\fork-smoke\\\\result.json, window-activity.png and perf.json, and fails if Qt's PID, Run key or instance lock changed. Send me its request_id."
+      },
+      {
+       "answer": "Synthetic answer text.",
+       "answered_at": 1793893652.4758782,
+       "at": 1793893411.6222918,
+       "by": "Lead",
+       "id": "q6",
+       "notice": "sent",
+       "notice_id": "a758bb31-a339-4cb2-9278-5ae24a158c1b",
+       "text": "Root cause found and fixed. It is not the single-instance lock, settings or Qt: it is the Windows notification-area install. Proof: the app panics with --background too (so no window/webview is involved), and with a private APPDATA the error changes from 'Access is denied (os error 5)' to 'The operation completed successfully (os error 0)' after the data dir exists, which is exactly platform::windows::tray::install's io::Error::last_os_error() when Shell_NotifyIconW returns 0. In this remote/hidden session Explorer's notification area is unavailable to the hgs run child. Fix in client/src-tauri/src/lib.rs: a non-switch (dev) build logs 'zerus-client: no notification-area icon: ...' and continues; the installed switch keeps the tray fatal because it is its only way back. rustfmt --check passes. Please start one hgs run build with a new request_id (no npm ci needed; node_modules is clean), label 'tauri dev build (task 4, ui2, tray fix)', command 'npm run tauri -- build --no-bundle --config D:/Tools/Zerus-team-33fbafeb-ui2/client/target/fork-dev-identity.json', cwd 'C:\\work\\example"
+      },
+      {
+       "answer": "Synthetic answer text.",
+       "answered_at": 1793893790.7505202,
+       "at": 1793893754.1659594,
+       "by": "Lead",
+       "id": "q7",
+       "notice": "sent",
+       "notice_id": "1e74ef99-5ce7-434b-9729-2c2d71372b39",
+       "text": "Tray-fix build is in place (exe 19:47:18; --build-info still dev.zerus.next, ZerusGUI tauri). Ready for the smoke run. Please start one hgs run with a new request_id, label 'fork smoke beside Qt (task 4, tray fix)', cwd 'D:/Tools/Zerus-team-33fbafeb-ui2', timeout_minutes 20, command: powershell -NoProfile -ExecutionPolicy Bypass -File \"D:/Tools/Zerus-team-33fbafeb-ui2/client/src-tauri/target/fork-smoke.ps1\" -App \"D:/Tools/Zerus-team-33fbafeb-ui2/client/src-tauri/target/release/zerus-client.exe\" -Hgs \"C:/work/example\" -Out \"D:/Tools/Zerus-team-33fbafeb-ui2/client/artifacts/fork-smoke\" -PerfSeconds 540. The script now logs the process session, integrity, APPDATA and USERPROFILE, creates the app data dir when it can, falls back to a private profile only if the real one is unwritable, starts the app with RUST_BACKTRACE=1, then tries CDP for session cards and Activity, falls back to ZERUS_CLIENT_PERF=auto, and checks Qt's pid, Run key and instance lock. Send me its request_id; I will read the record and report exactly what it proves and what it cannot."
+      },
+      {
+       "answer": "Synthetic answer text.",
+       "answered_at": 1793894084.4607701,
+       "at": 1793893928.0499024,
+       "by": "Lead",
+       "id": "q8",
+       "notice": "sent",
+       "notice_id": "3ca4ba6f-5960-47f0-a579-9b1048cbb0be",
+       "text": "I rewrote the harness for the perf path only: no CDP and no WEBVIEW2_ADDITIONAL_BROWSER_ARGUMENTS (so Tauri's own browser args stay), and it now calls C:\\work\\example\"D:/Tools/Zerus-team-33fbafeb-ui2/client/src-tauri/target/fork-smoke.ps1\" -App \"D:/Tools/Zerus-team-33fbafeb-ui2/client/src-tauri/target/release/zerus-client.exe\" -Hgs \"C:/work/example\" -Out \"D:/Tools/Zerus-team-33fbafeb-ui2/client/artifacts/fork-smoke\" -PerfSeconds 540. If the child is elevated, WebView2 will refuse and the log will say so; the integrity probe will confirm. Send me the request_id."
+      },
+      {
+       "answer": "Synthetic answer text.",
+       "answered_at": 1793894287.7145414,
+       "at": 1793894178.5707402,
+       "by": "Lead",
+       "id": "q9",
+       "notice": "sent",
+       "notice_id": "71185c83-fc5a-411a-9e50-ca332f64a5b6",
+       "text": "The perf run 19b9840a is still 'running' because the app panics in WebView2 and hangs instead of exiting; the old harness waits its 9 min. Root cause is WebView2's Access Denied in the hgs run child: the log shows the tray fix line, then 'Failed to setup app: ... Access is denied' from Tauri's webview attach, with the window handle already created. WebView2 refuses elevated/non-interactive children. I rewrote the harness to launch the app through Explorer, i.e. as the signed-in user on the interactive desktop (the way the owner runs it): it writes launch-explorer.cmd with ZERUS_CLIENT_PERF=auto and the report path, starts it with explorer.exe, waits for the report or a panic, then checks rows ready/activity events and Qt's pid, Run key and lock. Please start one hgs run with a new request_id, label 'fork smoke via Explorer (task 4)', cwd 'D:/Tools/Zerus-team-33fbafeb-ui2', timeout_minutes 20, command: powershell -NoProfile -ExecutionPolicy Bypass -File \"D:/Tools/Zerus-team-33fbafeb-ui2/client/src-tauri/target/fork-smoke.ps1\" -App \"D:/Tools/Zerus-team-33fbafeb-ui2/client/src-tauri/target/release/zerus-client.exe\" -Hgs \"C:/work/example\" -Out \"D:/Tools/Zerus-team-33fbafeb-ui2/client/artifacts/fork-smoke\" -PerfSeconds 540. This is the path that can see the real UI; if Explorer launches it elevated too, the log will show the same Access Denied and the probe will name the integrity."
+      }
+     ],
+     "report": {
+      "at": 1793895084.3843563,
+      "tests": {
+       "files": 543,
+       "functions_added": {
+        "names": [
+         "client/core/src/account_actions.rs: guards_every_call_and_keeps_labels_as_one_argument",
+         "client/core/src/account_actions.rs: refuses_changed_or_ambiguous_profiles_and_unbound_machines",
+         "client/core/src/account_actions/models.rs: binds_account_provider_and_revision_and_keeps_a_closed_projection"
+        ],
+        "total": 2576
+       },
+       "functions_removed": {
+        "names": [
+         "client/core/src/mobile/tests.rs: the_connector_is_only_asked_for_its_status",
+         "client/core/tests/actions.rs: a_kill_through_the_fake_is_one_call_without_input",
+         "client/src-tauri/src/lifecycle.rs: a_dock_click_restores_only_a_minimised_window"
+        ],
+        "total": 33
+       },
+       "lines_added": 113767,
+       "lines_removed": 2528
+      },
+      "text": "Synthetic text text.",
+      "unstructured": true
+     },
+     "runs": [
+      {
+       "args": {
+        "message": "Synthetic message text.",
+        "paths": [
+         "client/README.md",
+         "client/src-tauri/src/lib.rs"
+        ]
+       },
+       "at": 1793894912.6710472,
+       "exit": 0,
+       "ms": 0,
+       "template": "git-commit"
+      }
+     ],
+     "sent_at": 1793891537.967026,
+     "silent_read_at": 1793892148.3551257,
+     "started_at": 1793891551.9654,
+     "state": "reported",
+     "turn_ended_at": null
+    }
+   ],
+   "criteria": [
+    "Synthetic criteria text.",
+    "Synthetic criteria text.",
+    "Synthetic criteria text."
+   ],
+   "decided_by": "lead",
+   "decision_reason": "Synthetic decision_reason text.",
+   "deps": [],
+   "description": "Synthetic description text.",
+   "estimate_minutes": 150.0,
+   "estimate_source": "lead",
+   "estimate_text": "150 min",
+   "id": 4,
+   "output": [
+    "client/README.md"
+   ],
+   "phase": 1,
+   "pinned": true,
+   "status": "accepted",
+   "timing": {
+    "attempts": [
+     {
+      "from": 1793891018.4791448,
+      "lead_s": 0,
+      "member": "core",
+      "member_s": 5,
+      "n": 1,
+      "state": "revoked",
+      "to": 1793891537.967026,
+      "worked_s": 519
+     },
+     {
+      "from": 1793891551.9654,
+      "lead_s": 917,
+      "member": "ui2",
+      "member_s": 14,
+      "n": 2,
+      "state": "reported",
+      "to": 1793895084.3843563,
+      "worked_s": 2630
+     }
+    ],
+    "running_since": null,
+    "waits": {
+     "deps_s": 0,
+     "lead_s": 917,
+     "member_s": 55
+    },
+    "worked_s": 3149
+   },
+   "title": "Tauri client dev build runs on this Windows computer beside the Qt GUI"
+  },
+  {
+   "assignee": "qa",
+   "attempts": [
+    {
+     "delivered_at": 1793895138.5188115,
+     "error": "",
+     "id": "08310768-28cc-479c-b102-beba917a9632",
+     "member": "qa",
+     "n": 1,
+     "no_report": false,
+     "notice": "none",
+     "notice_id": "",
+     "phase": "working",
+     "report": null,
+     "sent_at": 1793895138.4481387,
+     "started_at": 1793895184.8869376,
+     "state": "delivered",
+     "turn_ended_at": null
+    }
+   ],
+   "criteria": [
+    "Synthetic criteria text.",
+    "Synthetic criteria text."
+   ],
+   "decided_by": null,
+   "decision_reason": "",
+   "deps": [
+    {
+     "kind": "hard",
+     "task": 4
+    }
+   ],
+   "description": "Synthetic description text.",
+   "estimate_minutes": 90.0,
+   "estimate_source": "lead",
+   "estimate_spent_minutes": 1.0,
+   "estimate_text": "90 min",
+   "id": 5,
+   "phase": 1,
+   "status": "in_progress",
+   "timing": {
+    "attempts": [
+     {
+      "from": 1793895184.8869376,
+      "lead_s": 0,
+      "member": "qa",
+      "member_s": 46,
+      "n": 1,
+      "state": "delivered",
+      "to": null,
+      "worked_s": 3
+     }
+    ],
+    "running_since": 1793895184.8869376,
+    "waits": {
+     "deps_s": 4121,
+     "lead_s": 0,
+     "member_s": 86
+    },
+    "worked_s": 3
+   },
+   "title": "Smoke-test the Tauri client on Windows against Qt and list gaps",
+   "waits": {
+    "for": "member",
+    "on": [
+     "qa (QA tester (Windows, DeepSeek))"
+    ],
+    "unblock": "wait for qa (QA tester (Windows, DeepSeek))"
+   }
+  },
+  {
+   "assignee": "core",
+   "attempts": [
+    {
+     "delivered_at": 1793895105.7399676,
+     "error": "",
+     "id": "d600fef2-5728-4551-a966-5b5df5bd858a",
+     "member": "core",
+     "n": 1,
+     "no_report": false,
+     "notice": "none",
+     "notice_id": "",
+     "phase": "working",
+     "report": null,
+     "sent_at": 1793895105.366503,
+     "started_at": 1793895117.1573308,
+     "state": "delivered",
+     "turn_ended_at": null
+    }
+   ],
+   "criteria": [
+    "Synthetic criteria text.",
+    "Synthetic criteria text.",
+    "No parsing in the webview"
+   ],
+   "decided_by": null,
+   "decision_reason": "",
+   "deps": [
+    {
+     "kind": "hard",
+     "task": 4
+    }
+   ],
+   "description": "Synthetic description text.",
+   "estimate_minutes": 360.0,
+   "estimate_source": "lead",
+   "estimate_spent_minutes": 1.0,
+   "estimate_text": "360 min",
+   "id": 6,
+   "output": [
+    "client/core/src/teams",
+    "client/src-tauri/src"
+   ],
+   "phase": 1,
+   "status": "in_progress",
+   "timing": {
+    "attempts": [
+     {
+      "from": 1793895117.1573308,
+      "lead_s": 0,
+      "member": "core",
+      "member_s": 12,
+      "n": 1,
+      "state": "delivered",
+      "to": null,
+      "worked_s": 71
+     }
+    ],
+    "running_since": 1793895117.1573308,
+    "waits": {
+     "deps_s": 4121,
+     "lead_s": 0,
+     "member_s": 18
+    },
+    "worked_s": 71
+   },
+   "title": "Teams read model in client/core: bounded polling of hgs team reads into view models",
+   "waits": {
+    "for": "member",
+    "on": [
+     "core (Tauri core (Rust))"
+    ],
+    "unblock": "wait for core (Tauri core (Rust))"
+   }
+  },
+  {
+   "assignee": "core",
+   "attempts": [],
+   "criteria": [
+    "Synthetic criteria text.",
+    "Synthetic criteria text."
+   ],
+   "decided_by": null,
+   "decision_reason": "",
+   "deps": [
+    {
+     "kind": "hard",
+     "task": 6
+    }
+   ],
+   "description": "Synthetic description text.",
+   "estimate_minutes": 300.0,
+   "estimate_source": "lead",
+   "estimate_text": "300 min",
+   "id": 7,
+   "output": [
+    "client/core/src/teams",
+    "client/src-tauri/src"
+   ],
+   "phase": 1,
+   "status": "pending",
+   "timing": {
+    "attempts": [],
+    "running_since": null,
+    "waits": {
+     "deps_s": 4211,
+     "lead_s": 0,
+     "member_s": 0
+    },
+    "worked_s": 0
+   },
+   "title": "Teams actions through guarded hgs team calls",
+   "waits": {
+    "for": "deps",
+    "on": [
+     6
+    ],
+    "unblock": "accept #6"
+   }
+  },
+  {
+   "assignee": "hgs",
+   "attempts": [],
+   "criteria": [
+    "Synthetic criteria text.",
+    "docs/reference.md Event stream updated"
+   ],
+   "decided_by": null,
+   "decision_reason": "",
+   "deps": [
+    {
+     "kind": "hard",
+     "task": 1
+    },
+    {
+     "kind": "hard",
+     "task": 2
+    }
+   ],
+   "description": "Synthetic description text.",
+   "estimate_minutes": 240.0,
+   "estimate_source": "lead",
+   "estimate_text": "240 min",
+   "id": 8,
+   "output": [
+    "src/watch",
+    "docs/reference.md"
+   ],
+   "phase": 1,
+   "status": "pending",
+   "timing": {
+    "attempts": [],
+    "running_since": null,
+    "waits": {
+     "deps_s": 4211,
+     "lead_s": 0,
+     "member_s": 0
+    },
+    "worked_s": 0
+   },
+   "title": "hgs watch: a team topic so the client stops polling team reads",
+   "waits": {
+    "for": "deps",
+    "on": [
+     1,
+     2
+    ],
+    "unblock": "accept #1"
+   }
+  },
+  {
+   "assignee": "ui1",
+   "attempts": [],
+   "criteria": [
+    "Synthetic criteria text.",
+    "Synthetic criteria text.",
+    "Synthetic criteria text."
+   ],
+   "decided_by": null,
+   "decision_reason": "",
+   "deps": [
+    {
+     "kind": "hard",
+     "task": 6
+    }
+   ],
+   "description": "Synthetic description text.",
+   "estimate_minutes": 420.0,
+   "estimate_source": "lead",
+   "estimate_text": "420 min",
+   "id": 9,
+   "output": [
+    "client/src/ui/teams"
+   ],
+   "phase": 1,
+   "status": "pending",
+   "timing": {
+    "attempts": [],
+    "running_since": null,
+    "waits": {
+     "deps_s": 4211,
+     "lead_s": 0,
+     "member_s": 0
+    },
+    "worked_s": 0
+   },
+   "title": "Team tab: members column and coordinator conversation with an owner-movable divider",
+   "waits": {
+    "for": "deps",
+    "on": [
+     6
+    ],
+    "unblock": "accept #6"
+   }
+  },
+  {
+   "assignee": "ui2",
+   "attempts": [],
+   "criteria": [
+    "Graph and cards match the prototype",
+    "Virtualized for large plans",
+    "vitest covers dependency highlighting"
+   ],
+   "decided_by": null,
+   "decision_reason": "",
+   "deps": [
+    {
+     "kind": "hard",
+     "task": 6
+    }
+   ],
+   "description": "Synthetic description text.",
+   "estimate_minutes": 420.0,
+   "estimate_source": "lead",
+   "estimate_text": "420 min",
+   "id": 10,
+   "output": [
+    "client/src/ui/teams"
+   ],
+   "phase": 1,
+   "status": "pending",
+   "timing": {
+    "attempts": [],
+    "running_since": null,
+    "waits": {
+     "deps_s": 4211,
+     "lead_s": 0,
+     "member_s": 0
+    },
+    "worked_s": 0
+   },
+   "title": "Plan view: task cards, dependency graph and phases",
+   "waits": {
+    "for": "deps",
+    "on": [
+     6
+    ],
+    "unblock": "accept #6"
+   }
+  },
+  {
+   "assignee": "ui1",
+   "attempts": [],
+   "criteria": [
+    "Synthetic criteria text.",
+    "Synthetic criteria text."
+   ],
+   "decided_by": null,
+   "decision_reason": "",
+   "deps": [
+    {
+     "kind": "hard",
+     "task": 7
+    },
+    {
+     "kind": "hard",
+     "task": 9
+    }
+   ],
+   "description": "Synthetic description text.",
+   "estimate_minutes": 360.0,
+   "estimate_source": "lead",
+   "estimate_text": "360 min",
+   "id": 11,
+   "output": [
+    "client/src/ui/teams"
+   ],
+   "phase": 1,
+   "status": "pending",
+   "timing": {
+    "attempts": [],
+    "running_since": null,
+    "waits": {
+     "deps_s": 4211,
+     "lead_s": 0,
+     "member_s": 0
+    },
+    "worked_s": 0
+   },
+   "title": "Reports, proposals and waiting: Accept/Reject, proposal cards, Use last reply, Waiting page and notices",
+   "waits": {
+    "for": "deps",
+    "on": [
+     7,
+     9
+    ],
+    "unblock": "accept #7"
+   }
+  },
+  {
+   "assignee": "ui2",
+   "attempts": [],
+   "criteria": [
+    "Synthetic criteria text.",
+    "Synthetic criteria text.",
+    "Synthetic criteria text."
+   ],
+   "decided_by": null,
+   "decision_reason": "",
+   "deps": [
+    {
+     "kind": "hard",
+     "task": 7
+    },
+    {
+     "kind": "hard",
+     "task": 10
+    }
+   ],
+   "description": "Synthetic description text.",
+   "estimate_minutes": 360.0,
+   "estimate_source": "lead",
+   "estimate_text": "360 min",
+   "id": 12,
+   "output": [
+    "client/src/ui/teams"
+   ],
+   "phase": 1,
+   "status": "pending",
+   "timing": {
+    "attempts": [],
+    "running_since": null,
+    "waits": {
+     "deps_s": 4211,
+     "lead_s": 0,
+     "member_s": 0
+    },
+    "worked_s": 0
+   },
+   "title": "New team tab and team settings",
+   "waits": {
+    "for": "deps",
+    "on": [
+     7,
+     10
+    ],
+    "unblock": "accept #7"
+   }
+  },
+  {
+   "assignee": "ui2",
+   "attempts": [],
+   "criteria": [
+    "Synthetic criteria text.",
+    "Synthetic criteria text."
+   ],
+   "decided_by": null,
+   "decision_reason": "",
+   "deps": [
+    {
+     "kind": "hard",
+     "task": 12
+    }
+   ],
+   "description": "Synthetic description text.",
+   "estimate_minutes": 300.0,
+   "estimate_source": "lead",
+   "estimate_text": "300 min",
+   "id": 13,
+   "output": [
+    "client/src/ui/teams"
+   ],
+   "phase": 1,
+   "status": "pending",
+   "timing": {
+    "attempts": [],
+    "running_since": null,
+    "waits": {
+     "deps_s": 4211,
+     "lead_s": 0,
+     "member_s": 0
+    },
+    "worked_s": 0
+   },
+   "title": "Team catalog editor and designer page",
+   "waits": {
+    "for": "deps",
+    "on": [
+     12
+    ],
+    "unblock": "accept #12"
+   }
+  },
+  {
+   "assignee": "qa",
+   "attempts": [],
+   "criteria": [
+    "Synthetic criteria text.",
+    "No action ran twice or silently failed"
+   ],
+   "decided_by": null,
+   "decision_reason": "",
+   "deps": [
+    {
+     "kind": "hard",
+     "task": 9
+    },
+    {
+     "kind": "hard",
+     "task": 10
+    },
+    {
+     "kind": "hard",
+     "task": 11
+    },
+    {
+     "kind": "hard",
+     "task": 12
+    },
+    {
+     "kind": "hard",
+     "task": 13
+    }
+   ],
+   "description": "Synthetic description text.",
+   "estimate_minutes": 180.0,
+   "estimate_source": "lead",
+   "estimate_text": "180 min",
+   "id": 14,
+   "phase": 1,
+   "status": "pending",
+   "timing": {
+    "attempts": [],
+    "running_since": null,
+    "waits": {
+     "deps_s": 4211,
+     "lead_s": 0,
+     "member_s": 0
+    },
+    "worked_s": 0
+   },
+   "title": "Teams parity check on Windows: Tauri against Qt",
+   "waits": {
+    "for": "deps",
+    "on": [
+     9,
+     10,
+     11,
+     12,
+     13
+    ],
+    "unblock": "accept #9"
+   }
+  },
+  {
+   "assignee": "merger",
+   "attempts": [],
+   "criteria": [
+    "Findings by severity with file:line",
+    "Merge commits listed",
+    "Synthetic criteria text."
+   ],
+   "decided_by": null,
+   "decision_reason": "",
+   "deps": [
+    {
+     "kind": "hard",
+     "task": 1
+    },
+    {
+     "kind": "hard",
+     "task": 2
+    },
+    {
+     "kind": "hard",
+     "task": 3
+    },
+    {
+     "kind": "hard",
+     "task": 4
+    },
+    {
+     "kind": "hard",
+     "task": 18
+    },
+    {
+     "kind": "hard",
+     "task": 19
+    }
+   ],
+   "description": "Synthetic description text.",
+   "estimate_minutes": 60.0,
+   "estimate_source": "lead",
+   "estimate_text": "60 min",
+   "id": 15,
+   "phase": 1,
+   "status": "pending",
+   "timing": {
+    "attempts": [],
+    "running_since": null,
+    "waits": {
+     "deps_s": 4211,
+     "lead_s": 0,
+     "member_s": 0
+    },
+    "worked_s": 0
+   },
+   "title": "Review and merge phase 1 into merge/upstream-2026-11-05 (tasks 1, 2, 3, 4)",
+   "waits": {
+    "for": "deps",
+    "on": [
+     1,
+     2,
+     19
+    ],
+    "unblock": "accept #1"
+   }
+  },
+  {
+   "assignee": "merger",
+   "attempts": [],
+   "criteria": [
+    "Findings by severity with file:line",
+    "Merge commits listed",
+    "Synthetic criteria text."
+   ],
+   "decided_by": null,
+   "decision_reason": "",
+   "deps": [
+    {
+     "kind": "hard",
+     "task": 6
+    },
+    {
+     "kind": "hard",
+     "task": 7
+    },
+    {
+     "kind": "hard",
+     "task": 8
+    }
+   ],
+   "description": "Synthetic description text.",
+   "estimate_minutes": 90.0,
+   "estimate_source": "lead",
+   "estimate_text": "90 min",
+   "id": 16,
+   "phase": 1,
+   "status": "pending",
+   "timing": {
+    "attempts": [],
+    "running_since": null,
+    "waits": {
+     "deps_s": 4211,
+     "lead_s": 0,
+     "member_s": 0
+    },
+    "worked_s": 0
+   },
+   "title": "Review and merge phase 2 into merge/upstream-2026-11-05 (tasks 6, 7, 8)",
+   "waits": {
+    "for": "deps",
+    "on": [
+     6,
+     7,
+     8
+    ],
+    "unblock": "accept #6"
+   }
+  },
+  {
+   "assignee": "merger",
+   "attempts": [],
+   "criteria": [
+    "Findings by severity with file:line",
+    "Merge commits listed",
+    "Synthetic criteria text."
+   ],
+   "decided_by": null,
+   "decision_reason": "",
+   "deps": [
+    {
+     "kind": "hard",
+     "task": 9
+    },
+    {
+     "kind": "hard",
+     "task": 10
+    },
+    {
+     "kind": "hard",
+     "task": 11
+    },
+    {
+     "kind": "hard",
+     "task": 12
+    },
+    {
+     "kind": "hard",
+     "task": 13
+    }
+   ],
+   "description": "Synthetic description text.",
+   "estimate_minutes": 120.0,
+   "estimate_source": "lead",
+   "estimate_text": "120 min",
+   "id": 17,
+   "phase": 1,
+   "status": "pending",
+   "timing": {
+    "attempts": [],
+    "running_since": null,
+    "waits": {
+     "deps_s": 4211,
+     "lead_s": 0,
+     "member_s": 0
+    },
+    "worked_s": 0
+   },
+   "title": "Review and merge phase 3 into merge/upstream-2026-11-05 (tasks 9, 10, 11, 12, 13)",
+   "waits": {
+    "for": "deps",
+    "on": [
+     9,
+     10,
+     11,
+     12,
+     13
+    ],
+    "unblock": "accept #9"
+   }
+  },
+  {
+   "assignee": "core",
+   "attempts": [
+    {
+     "commits": [
+      {
+       "at": 1793892890.4600408,
+       "by": "Zerus",
+       "files": 7,
+       "sha": "5817ec69eb355df684f7902568071409bbab8f07"
+      }
+     ],
+     "decided_at": 1793892983.2372947,
+     "delivered_at": 1793891418.792688,
+     "error": "",
+     "folder_branch": "team/33fbafeb/core",
+     "folder_head": "5817ec69eb355df684f7902568071409bbab8f07",
+     "id": "b74604f8-079e-44ce-ae75-3cc9da3385de",
+     "member": "core",
+     "n": 1,
+     "no_report": false,
+     "notice": "pending",
+     "notice_id": "",
+     "questions": [
+      {
+       "answer": "Synthetic answer text.",
+       "answered_at": 1793891959.3654225,
+       "at": 1793891792.7433515,
+       "by": "Lead",
+       "id": "q1",
+       "notice": "sent",
+       "notice_id": "e17e0b57-cae2-44b0-accc-88e0f16612cc",
+       "text": "Synthetic text text."
+      }
+     ],
+     "report": {
+      "at": 1793892959.4960768,
+      "tests": {
+       "files": 546,
+       "functions_added": {
+        "names": [
+         "client/core/src/account_actions.rs: guards_every_call_and_keeps_labels_as_one_argument",
+         "client/core/src/account_actions.rs: refuses_changed_or_ambiguous_profiles_and_unbound_machines",
+         "client/core/src/account_actions/models.rs: binds_account_provider_and_revision_and_keeps_a_closed_projection"
+        ],
+        "total": 2580
+       },
+       "functions_removed": {
+        "names": [
+         "client/core/src/mobile/tests.rs: the_connector_is_only_asked_for_its_status",
+         "client/core/tests/actions.rs: a_kill_through_the_fake_is_one_call_without_input",
+         "client/src-tauri/src/lifecycle.rs: a_dock_click_restores_only_a_minimised_window"
+        ],
+        "total": 33
+       },
+       "lines_added": 113988,
+       "lines_removed": 2531
+      },
+      "text": "Task #18 done, commit 5817ec69e on team/33fbafeb/core (base dcea65962). Qt tests written but NOT run: this computer has no Qt 6 SDK (see Not checked).\n\nCauses:\n1. Create did nothing (decisive, matches your journal facts 13199/13200). With 7 members over max_members 6, the form disabled Create itself (TeamNewTab::validate: m_members.size() > m_max). hgs's preflight (plan::validate) reported the limit only as a warning, and the draft create (ops::draft \"create\") refuses only preflight errors. So the footer read \"Preflight: ok · N warnings\" beside a disabled button whose only hint was the small reason label. Removing one member lifted the form's block, and the next event was draft_created.\n2. Lead edits could be skipped. applyDraft showed fields only when the read's revision differed from m_revision, the revision the form sends. The form's own save (draft_revision) and a stale refusal (\"Draft revision is N now\") both moved m_revision onto revisions it never read. So the lead's edits made in between (name/goal/members/tasks/settings) never reached the open form until the lead edited again. readDraft also dropped every read while a save was in flight, and the \"kept\" line vanished on the next poll.\n3. Refusals were not clearly visible: a refused create was written into the save line as \"Not saved: ...\", and a failed read was silent.\nNot the cause: the form's save payload. The new Rust test sends it exactly as the form does and hgs accepts it. The draft also binds correctly when started outside the form (openDraft from updateTeamPanel).\n\nChanges:\n- src/state/teams/plan.rs: more members than max_members is a preflight error (kind members), so Preflight, plan approval and draft create all refuse it the same way. docs/reference.md says so.\n- tray/src/TeamNewTab.{h,cpp}: m_appliedRevision (last shown) apart from m_revision (to send). Every unread revision applies all fields the owner is not editing; text compares ignore surrounding whitespace so a just-saved field does not jump. Reads run during a save. Fields kept for the owner stay named until saved.\n- Footer, one line each: \"Not created: <reason>\" (separate m_createError; a save failing under Create says \"the draft did not save first: ...\"), \"Not saved (<fields>): <error>\", \"The lead's edits cannot be read: <error>\".\n- A save with no answer ends after 30 s, says so and is sent again.\n- New \"Show the lead's version\" button: drops the owner's unsaved fields and rereads.\n- Tests: Rust ops_members::a_draft_over_its_member_limit_is_refused_at_create_and_by_the_preflight (the form's first save accepted; over the limit is an error and create is refused naming it; one member fewer creates). plan.rs unit test updated (members moves from warnings to errors). Qt test_teamsui_newteam: draftShowsEveryLeadEditAroundTheOwnersSave (draft started outside the form opens with all fields; a lead edit updates name, goal, addendum, members, tasks and settings; the stale-refusal-then-save case shows the lead's newer goal), draftRefusedSaveKeepsTheOwnersFieldAndSaysSo, draftCreateRefusalAndMemberLimitAreShown. The fake hgs (TeamsUiFixture.h) gains .draftrefuse/.createrefuse.\n\nChecked:\n- cargo-test template with the filters hgs test affected printed (state::teams commands_other, commands_runs, dispatcher subset, inbox, ops_members, owner_waiting, pipeline, plan, timing, waiting): exit 0, no failures (run 97d864e3).\n\nNot checked:\n- Qt build and tests. qt-configure (run 43211cad) failed: CMake cannot find Qt6 (no Qt6Config.cmake; no C:\\work\\example",
+      "unstructured": true
+     },
+     "runs": [
+      {
+       "args": {
+        "bin": "hgs",
+        "filters": [
+         "state::teams::commands::commands_other::",
+         "state::teams::commands::commands_runs::",
+         "state::teams::dispatcher::"
+        ],
+        "skips": [
+         "state::teams::dispatcher::dispatcher_capture::",
+         "state::teams::dispatcher::dispatcher_context::",
+         "state::teams::dispatcher::dispatcher_delivery::"
+        ]
+       },
+       "at": 1793892839.9820194,
+       "exit": 0,
+       "ms": 361269,
+       "template": "cargo-test"
+      },
+      {
+       "args": {},
+       "at": 1793892852.2788775,
+       "exit": 1,
+       "ms": 2313,
+       "template": "qt-configure"
+      },
+      {
+       "args": {
+        "message": "Synthetic message text.",
+        "paths": [
+         "docs/reference.md",
+         "src/state/teams/plan.rs",
+         "src/state/teams/tests/ops_members.rs"
+        ]
+       },
+       "at": 1793892890.4649515,
+       "exit": 0,
+       "ms": 0,
+       "template": "git-commit"
+      }
+     ],
+     "sent_at": 1793891418.420977,
+     "started_at": 1793891423.792969,
+     "state": "reported",
+     "turn_ended_at": null
+    }
+   ],
+   "criteria": [
+    "Synthetic criteria text.",
+    "Synthetic criteria text.",
+    "Synthetic criteria text.",
+    "The cause is named in the report",
+    "Synthetic criteria text."
+   ],
+   "decided_by": "lead",
+   "decision_reason": "Synthetic decision_reason text.",
+   "deps": [],
+   "description": "Synthetic description text.",
+   "estimate_minutes": 180.0,
+   "estimate_source": "lead",
+   "estimate_text": "180 min",
+   "id": 18,
+   "output": [
+    "tray/src/TeamNewTab.cpp",
+    "tray/tests"
+   ],
+   "phase": 1,
+   "pinned": true,
+   "status": "accepted",
+   "timing": {
+    "attempts": [
+     {
+      "from": 1793891423.792969,
+      "lead_s": 190,
+      "member": "core",
+      "member_s": 5,
+      "n": 1,
+      "state": "reported",
+      "to": 1793892959.4960768,
+      "worked_s": 1369
+     }
+    ],
+    "running_since": null,
+    "waits": {
+     "deps_s": 0,
+     "lead_s": 190,
+     "member_s": 446
+    },
+    "worked_s": 1369
+   },
+   "title": "The New team form shows the lead's draft edits (Qt), so the owner can press Create team"
+  },
+  {
+   "assignee": "ui2",
+   "attempts": [],
+   "criteria": [
+    "Synthetic criteria text.",
+    "Synthetic criteria text.",
+    "Synthetic criteria text."
+   ],
+   "decided_by": null,
+   "decision_reason": "",
+   "deps": [],
+   "description": "Synthetic description text.",
+   "estimate_minutes": 150.0,
+   "estimate_source": "lead",
+   "estimate_text": "150 min",
+   "id": 19,
+   "output": [
+    "src/state/effort.rs",
+    "tray/src/TeamNewTab.cpp"
+   ],
+   "phase": 1,
+   "pinned": true,
+   "status": "pending",
+   "timing": {
+    "attempts": [],
+    "running_since": null,
+    "waits": {
+     "deps_s": 0,
+     "lead_s": 0,
+     "member_s": 4211
+    },
+    "worked_s": 0
+   },
+   "title": "DeepSeek members and sessions offer DeepSeek's models (New team shows only 'default')",
+   "waits": {
+    "for": "member",
+    "on": [
+     "ui2 (Frontend (DeepSeek))"
+    ],
+    "unblock": "wait for ui2 (Frontend (DeepSeek))"
+   }
+  },
+  {
+   "added_late": {
+    "at": 1793891317.5657983,
+    "by": "You",
+    "confirm": "add",
+    "request": ""
+   },
+   "assignee": "ui1",
+   "attempts": [
+    {
+     "commits": [
+      {
+       "at": 1793892678.774709,
+       "by": "Zerus",
+       "files": 4,
+       "sha": "4f8628a663f7d05099857535ae0139c7d8b7b281"
+      }
+     ],
+     "decided_at": 1793892790.677909,
+     "delivered_at": 1793891682.0873094,
+     "error": "",
+     "folder_branch": "team/33fbafeb/ui1",
+     "folder_head": "4f8628a663f7d05099857535ae0139c7d8b7b281",
+     "id": "10c50605-8519-4635-90e5-3e8d6d52d13a",
+     "member": "ui1",
+     "n": 1,
+     "no_report": false,
+     "notice": "pending",
+     "notice_id": "",
+     "report": {
+      "at": 1793892761.2710218,
+      "tests": {
+       "files": 547,
+       "functions_added": {
+        "names": [
+         "client/core/src/account_actions.rs: guards_every_call_and_keeps_labels_as_one_argument",
+         "client/core/src/account_actions.rs: refuses_changed_or_ambiguous_profiles_and_unbound_machines",
+         "client/core/src/account_actions/models.rs: binds_account_provider_and_revision_and_keeps_a_closed_projection"
+        ],
+        "total": 2581
+       },
+       "functions_removed": {
+        "names": [
+         "client/core/src/mobile/tests.rs: the_connector_is_only_asked_for_its_status",
+         "client/core/tests/actions.rs: a_kill_through_the_fake_is_one_call_without_input",
+         "client/src-tauri/src/lifecycle.rs: a_dock_click_restores_only_a_minimised_window"
+        ],
+        "total": 33
+       },
+       "lines_added": 114118,
+       "lines_removed": 2546
+      },
+      "text": "Task #20 done. Commit 4f8628a66 on team/33fbafeb/ui1. It is on top of task #3's commit 6b4ff06c5, whose parent is dcea65962. Nothing pushed.\n\nCause (the step that ran out)\n- In src/state/worktrees.rs create(), the clone path ran `git clone` with its own deadline: 300 s, capped by the 315 s total. But the next steps, `git switch -c <branch> <head>` and the `symbolic-ref` confirmation, reused `deadline`. That deadline is `total_deadline.min(now + 5 s)`, computed BEFORE the clone. Once a clone took longer than about 5 s, switch failed at once with \"Git operation cancelled or timed out\". Clones of C:\\work\\example\"not this member's folder\".\n\nDid an earlier fix regress?\n- No. The stale deadline has been there since the clone code was added (c96b63273, 2026-10-26, \"Fork: ... clones\"). No branch in this repository has a different clone/switch deadline: I checked fix/team-setup-feedback, agent-teams-v2, int-fe2, integrate/upstream-2026-11-04 and whitewh/main.\n- U34 (a4f54ac3a, 9d239e298, bb0a13732) is about the DeepSeek sandbox ACL grant (WRITE_DAC/WRITE_OWNER). All three commits are ancestors of this branch, and grant_if_requested is called after the clone as before. So U34 was not lost, and it covers a different failure. The owner's \"we already fixed this\" most likely means U34. If they mean a different fix, it is not in this repository's history.\n\nWhat changed\n- src/state/worktrees.rs create --clone:\n  - Each step has its own deadline: clone 25 min (CLONE_SECONDS), base fetch plus switch 10 min (CHECKOUT_SECONDS), confirmation 30 s. Mobile requests keep their 25 s total.\n  - A destination that exists is finished instead of refused, but only if unfinished_clone() confirms it: it is a folder whose own toplevel and .git are the clone's own, its origin is this repository, refs/heads/<branch> does not exist, and `status --porcelain --untracked-files=no` is empty. If the base commit is missing (the base moved on after the clone), `git fetch origin` runs first. Anything else is still refused with the reason and never changed. A failure now says the clone is kept and that starting the member again finishes it.\n  - The result carries \"resumed\".\n  - I kept `--no-hardlinks` and did not use --shared or --reference. On Windows, a hard link shares the source file's ACL, so the U34 inheritable FullControl grant would reach the lead's repository. A --shared clone depends on the source's objects through alternates (gc/prune) and on the sandbox being able to read them.\n- src/state/teams/dispatcher.rs:\n  - The member branch starts from team.settings.base_branch when set, else from HEAD of the team folder (the lead's branch, as before). This also applies to worktree members.\n  - A local clone member's folder that is a clone of the team repository without the member's branch goes back to `worktrees create`. A remote clone member on another branch does too. A worktree member and foreign folders are still refused.\n  - The hgs call for `worktrees create` may take 40 min; the catalog reads keep 5 min.\n  - Note: launch() calls member_folder synchronously, as before. A slow clone holds that launch for its duration, as the 300 s timeout already did.\n- docs/reference.md: a new \"Members' clones\" paragraph next to the DeepSeek folders section.\n\nTests\n- state::worktrees::tests::a_slow_clone_finishes_on_the_base_branch: a test hook sleeps 6 s after `git clone`, past the old 5 s window. Setup completes on team/x/dev at the `base` branch's commit, not main's, and b.txt is checked out.\n- state::worktrees::tests::an_unfinished_clone_is_finished_on_relaunch: a leftover clone on main.\n  - With a local change: refused and left untouched.\n  - Clean: finished, the base that moved on is fetched, HEAD is the new base commit, resumed=true.\n  - A second create: refused (\"its branch exists already\").\n  - Another repository at the destination: refused.\n- dispatcher_worktrees::an_unfinished_clone_member_is_finished_from_the_base_branch: the leftover clone is handed to create with --clone --base release; with no base_branch the base is HEAD; a finished clone is reused with no call.\n\nHow I checked\n- cargo-test --bin hgs with exactly the filters and skips `hgs test affected` printed (state::worktrees::, all state::teams::dispatcher::*, and so on): exit 0, no failures. The template's output tail shows only compilation, so no per-test lines are visible; exit 0 is the evidence.\n- cargo-build --package hgs (the non-test build, without the test-only clone hook): exit 0, no warnings.\n- Not run:\n  - Python test_worktrees and test_mobile_worktrees_native. They never use --clone, and the non-clone path is unchanged.\n  - Clippy, which the integration runs.\n  - A real clone of C:\\work\\example",
+      "unstructured": true
+     },
+     "runs": [
+      {
+       "args": {
+        "bin": "hgs",
+        "filters": [
+         "state::",
+         "state::teams::broker::tests::",
+         "state::teams::catalog::"
+        ],
+        "skips": [
+         "state::agent_hint::",
+         "state::answer_channel::",
+         "state::archive::"
+        ]
+       },
+       "at": 1793892435.7866154,
+       "exit": 0,
+       "ms": 367077,
+       "template": "cargo-test"
+      },
+      {
+       "args": {
+        "package": "hgs"
+       },
+       "at": 1793892659.5998764,
+       "exit": 0,
+       "ms": 180896,
+       "template": "cargo-build"
+      },
+      {
+       "args": {
+        "message": "Synthetic message text.",
+        "paths": [
+         "docs/reference.md",
+         "src/state/teams/dispatcher.rs",
+         "src/state/teams/tests/dispatcher_worktrees.rs"
+        ]
+       },
+       "at": 1793892678.7811797,
+       "exit": 0,
+       "ms": 0,
+       "template": "git-commit"
+      }
+     ],
+     "sent_at": 1793891681.6617215,
+     "started_at": 1793891693.852713,
+     "state": "reported",
+     "turn_ended_at": null
+    }
+   ],
+   "criteria": [
+    "Synthetic criteria text.",
+    "Synthetic criteria text.",
+    "Synthetic criteria text."
+   ],
+   "decided_by": "lead",
+   "decision_reason": "Synthetic decision_reason text.",
+   "deps": [],
+   "description": "Owner, 2026-11-05 ('we already fixed this bug'): hgs and ui2 (DeepSeek, folder clone) of this team failed to start with 'hgs: Git operation cancelled or timed out'. The clones of C:\\work\\example",
+   "estimate_minutes": 150.0,
+   "estimate_source": "lead",
+   "estimate_text": "150 min",
+   "id": 20,
+   "output": [
+    "src/state/worktrees.rs",
+    "src/state/teams"
+   ],
+   "phase": 1,
+   "pinned": true,
+   "status": "accepted",
+   "timing": {
+    "attempts": [
+     {
+      "from": 1793891693.852713,
+      "lead_s": 29,
+      "member": "ui1",
+      "member_s": 12,
+      "n": 1,
+      "state": "reported",
+      "to": 1793892761.2710218,
+      "worked_s": 1067
+     }
+    ],
+    "running_since": null,
+    "waits": {
+     "deps_s": 0,
+     "lead_s": 29,
+     "member_s": 716
+    },
+    "worked_s": 1067
+   },
+   "title": "A clone member of a large repository starts on Windows instead of 'Git operation cancelled or timed out'"
+  },
+  {
+   "added_late": {
+    "at": 1793891493.7734165,
+    "by": "You",
+    "confirm": "add",
+    "request": ""
+   },
+   "assignee": "core",
+   "attempts": [
+    {
+     "commits": [
+      {
+       "at": 1793894687.251969,
+       "by": "Zerus",
+       "files": 17,
+       "sha": "ea8274a68e96da4aac328476f2f76788ff530203"
+      }
+     ],
+     "decided_at": 1793894809.2787943,
+     "delivered_at": 1793892994.4904995,
+     "error": "",
+     "folder_branch": "team/33fbafeb/core",
+     "folder_head": "ea8274a68e96da4aac328476f2f76788ff530203",
+     "id": "05b2c86e-9dbe-49fc-83af-50a633e7867e",
+     "member": "core",
+     "n": 1,
+     "no_report": false,
+     "notice": "pending",
+     "notice_id": "",
+     "report": {
+      "at": 1793894763.6614647,
+      "tests": {
+       "files": 555,
+       "functions_added": {
+        "names": [
+         "client/core/src/account_actions.rs: guards_every_call_and_keeps_labels_as_one_argument",
+         "client/core/src/account_actions.rs: refuses_changed_or_ambiguous_profiles_and_unbound_machines",
+         "client/core/src/account_actions/models.rs: binds_account_provider_and_revision_and_keeps_a_closed_projection"
+        ],
+        "total": 2586
+       },
+       "functions_removed": {
+        "names": [
+         "client/core/src/mobile/tests.rs: the_connector_is_only_asked_for_its_status",
+         "client/core/tests/actions.rs: a_kill_through_the_fake_is_one_call_without_input",
+         "client/src-tauri/src/lifecycle.rs: a_dock_click_restores_only_a_minimised_window"
+        ],
+        "total": 33
+       },
+       "lines_added": 114321,
+       "lines_removed": 2555
+      },
+      "text": "Synthetic text text.",
+      "unstructured": true
+     },
+     "runs": [
+      {
+       "args": {},
+       "at": 1793893743.5968099,
+       "exit": 0,
+       "ms": 126668,
+       "template": "cargo-build"
+      },
+      {
+       "args": {
+        "bin": "hgs",
+        "filters": [
+         "agent_guide::",
+         "cli::",
+         "state::"
+        ],
+        "skips": [
+         "state::agent_hint::",
+         "state::answer_channel::",
+         "state::archive::"
+        ]
+       },
+       "at": 1793894070.8191566,
+       "exit": 101,
+       "ms": 174120,
+       "template": "cargo-test"
+      },
+      {
+       "args": {
+        "bin": "hgs",
+        "filters": [
+         "state::teams::commands::commands_owner_word::",
+         "state::teams::commands::commands_proposals::",
+         "state::teams::commands::commands_runs::"
+        ]
+       },
+       "at": 1793894328.8913307,
+       "exit": 101,
+       "ms": 124162,
+       "template": "cargo-test"
+      }
+     ],
+     "sent_at": 1793892994.1153371,
+     "started_at": 1793893005.538318,
+     "state": "reported",
+     "turn_ended_at": null
+    }
+   ],
+   "criteria": [
+    "Synthetic criteria text.",
+    "Synthetic criteria text.",
+    "Synthetic criteria text.",
+    "Synthetic criteria text."
+   ],
+   "decided_by": "lead",
+   "decision_reason": "Synthetic decision_reason text.",
+   "deps": [],
+   "description": "Synthetic description text.",
+   "estimate_minutes": 480.0,
+   "estimate_source": "lead",
+   "estimate_text": "480 min",
+   "id": 21,
+   "output": [
+    "src/state/teams",
+    "tray/src/Team*",
+    "docs"
+   ],
+   "phase": 1,
+   "status": "accepted",
+   "timing": {
+    "attempts": [
+     {
+      "from": 1793893005.538318,
+      "lead_s": 46,
+      "member": "core",
+      "member_s": 11,
+      "n": 1,
+      "state": "reported",
+      "to": 1793894763.6614647,
+      "worked_s": 1758
+     }
+    ],
+    "running_since": null,
+    "waits": {
+     "deps_s": 0,
+     "lead_s": 46,
+     "member_s": 2028
+    },
+    "worked_s": 1758
+   },
+   "title": "URGENT: every owner's-word gate becomes a confirmation dialog (Allow/Reject), never a typed sentence"
+  },
+  {
+   "added_late": {
+    "at": 1793891758.4664462,
+    "by": "You",
+    "confirm": "add",
+    "request": ""
+   },
+   "assignee": "ui1",
+   "attempts": [
+    {
+     "commits": [
+      {
+       "at": 1793893433.9317,
+       "by": "Zerus",
+       "files": 6,
+       "sha": "f5d6a4336c0c47aa80823c33082d66128fe9f17b"
+      }
+     ],
+     "decided_at": 1793893564.9199202,
+     "delivered_at": 1793892790.1319797,
+     "error": "",
+     "folder_branch": "team/33fbafeb/ui1",
+     "folder_head": "f5d6a4336c0c47aa80823c33082d66128fe9f17b",
+     "id": "ca2a6092-ed7f-4433-92fc-b651d8ae784a",
+     "member": "ui1",
+     "n": 1,
+     "no_report": false,
+     "notice": "pending",
+     "notice_id": "",
+     "report": {
+      "at": 1793893509.015446,
+      "tests": {
+       "files": 550,
+       "functions_added": {
+        "names": [
+         "client/core/src/account_actions.rs: guards_every_call_and_keeps_labels_as_one_argument",
+         "client/core/src/account_actions.rs: refuses_changed_or_ambiguous_profiles_and_unbound_machines",
+         "client/core/src/account_actions/models.rs: binds_account_provider_and_revision_and_keeps_a_closed_projection"
+        ],
+        "total": 2585
+       },
+       "functions_removed": {
+        "names": [
+         "client/core/src/mobile/tests.rs: the_connector_is_only_asked_for_its_status",
+         "client/core/tests/actions.rs: a_kill_through_the_fake_is_one_call_without_input",
+         "client/src-tauri/src/lifecycle.rs: a_dock_click_restores_only_a_minimised_window"
+        ],
+        "total": 33
+       },
+       "lines_added": 114405,
+       "lines_removed": 2563
+      },
+      "text": "Synthetic text text.",
+      "unstructured": true
+     },
+     "runs": [
+      {
+       "args": {
+        "bin": "hgs",
+        "filters": [
+         "accounts::inspection::",
+         "accounts::model_defaults::",
+         "accounts::permission_catalog::"
+        ],
+        "skips": [
+         "state::agent_hint::",
+         "state::answer_channel::",
+         "state::archive::"
+        ]
+       },
+       "at": 1793893349.2018564,
+       "exit": 0,
+       "ms": 209403,
+       "template": "cargo-test"
+      },
+      {
+       "args": {
+        "bin": "hgs",
+        "filters": [
+         "dispatcher_host_start",
+         "a_recently_launched_running_host"
+        ]
+       },
+       "at": 1793893359.3589675,
+       "exit": 0,
+       "ms": 977,
+       "template": "cargo-test"
+      },
+      {
+       "args": {
+        "bin": "hgs",
+        "filters": [
+         "a_member_whose_deepseek_host_was_still_starting"
+        ]
+       },
+       "at": 1793893416.648806,
+       "exit": 101,
+       "ms": 46414,
+       "template": "cargo-test"
+      }
+     ],
+     "sent_at": 1793892789.6463048,
+     "started_at": 1793892803.3559265,
+     "state": "reported",
+     "turn_ended_at": null
+    }
+   ],
+   "criteria": [
+    "Synthetic criteria text.",
+    "Synthetic criteria text.",
+    "Synthetic criteria text."
+   ],
+   "decided_by": "lead",
+   "decision_reason": "Synthetic decision_reason text.",
+   "deps": [],
+   "description": "Synthetic description text.",
+   "estimate_minutes": 150.0,
+   "estimate_source": "lead",
+   "estimate_text": "150 min",
+   "id": 22,
+   "output": [
+    "src/state/teams",
+    "src/dsh"
+   ],
+   "phase": 1,
+   "pinned": true,
+   "status": "accepted",
+   "timing": {
+    "attempts": [
+     {
+      "from": 1793892803.3559265,
+      "lead_s": 56,
+      "member": "ui1",
+      "member_s": 14,
+      "n": 1,
+      "state": "reported",
+      "to": 1793893509.015446,
+      "worked_s": 706
+     }
+    ],
+    "running_since": null,
+    "waits": {
+     "deps_s": 0,
+     "lead_s": 56,
+     "member_s": 1826
+    },
+    "worked_s": 706
+   },
+   "title": "A DeepSeek member that hits 'DeepSeek host is still starting' starts once the host is up, without a relaunch"
+  },
+  {
+   "added_late": {
+    "at": 1793891758.4664462,
+    "by": "You",
+    "confirm": "add",
+    "request": ""
+   },
+   "assignee": "ui2",
+   "attempts": [],
+   "criteria": [
+    "Synthetic criteria text.",
+    "Synthetic criteria text."
+   ],
+   "decided_by": null,
+   "decision_reason": "",
+   "deps": [],
+   "description": "Synthetic description text.",
+   "estimate_minutes": 120.0,
+   "estimate_source": "lead",
+   "estimate_text": "120 min",
+   "id": 23,
+   "output": [
+    "src/state/teams"
+   ],
+   "phase": 1,
+   "pinned": true,
+   "status": "pending",
+   "timing": {
+    "attempts": [],
+    "running_since": null,
+    "waits": {
+     "deps_s": 0,
+     "lead_s": 0,
+     "member_s": 4211
+    },
+    "worked_s": 0
+   },
+   "title": "Draft task phases survive Create team",
+   "waits": {
+    "for": "member",
+    "on": [
+     "ui2 (Frontend (DeepSeek))"
+    ],
+    "unblock": "wait for ui2 (Frontend (DeepSeek))"
+   }
+  },
+  {
+   "added_late": {
+    "at": 1793891758.4664462,
+    "by": "You",
+    "confirm": "add",
+    "request": ""
+   },
+   "assignee": "ui1",
+   "attempts": [
+    {
+     "commits": [
+      {
+       "at": 1793894386.1631436,
+       "by": "Zerus",
+       "files": 6,
+       "sha": "6adfc6996f1e4abc1d31a2d1cfbe9a4c9720270c"
+      }
+     ],
+     "decided_at": 1793894552.403712,
+     "delivered_at": 1793893540.0704286,
+     "error": "",
+     "folder_branch": "team/33fbafeb/ui1",
+     "folder_head": "6adfc6996f1e4abc1d31a2d1cfbe9a4c9720270c",
+     "id": "186ec9f2-ad06-44f0-adef-648e386bd761",
+     "member": "ui1",
+     "n": 1,
+     "no_report": false,
+     "notice": "pending",
+     "notice_id": "",
+     "report": {
+      "at": 1793894489.8918862,
+      "tests": {
+       "files": 551,
+       "functions_added": {
+        "names": [
+         "client/core/src/account_actions.rs: guards_every_call_and_keeps_labels_as_one_argument",
+         "client/core/src/account_actions.rs: refuses_changed_or_ambiguous_profiles_and_unbound_machines",
+         "client/core/src/account_actions/models.rs: binds_account_provider_and_revision_and_keeps_a_closed_projection"
+        ],
+        "total": 2588
+       },
+       "functions_removed": {
+        "names": [
+         "client/core/src/mobile/tests.rs: the_connector_is_only_asked_for_its_status",
+         "client/core/tests/actions.rs: a_kill_through_the_fake_is_one_call_without_input",
+         "client/src-tauri/src/lifecycle.rs: a_dock_click_restores_only_a_minimised_window"
+        ],
+        "total": 33
+       },
+       "lines_added": 114614,
+       "lines_removed": 2566
+      },
+      "text": "Synthetic text text.",
+      "unstructured": true
+     },
+     "runs": [
+      {
+       "args": {
+        "bin": "hgs",
+        "filters": [
+         "state::",
+         "state::notifications::",
+         "state::subagents_confirm::"
+        ],
+        "skips": [
+         "state::agent_hint::",
+         "state::answer_channel::",
+         "state::archive::"
+        ]
+       },
+       "at": 1793893878.8755739,
+       "exit": 101,
+       "ms": 47356,
+       "template": "cargo-test"
+      },
+      {
+       "args": {
+        "bin": "hgs",
+        "filters": [
+         "state::",
+         "state::notifications::",
+         "state::subagents_confirm::"
+        ],
+        "skips": [
+         "state::agent_hint::",
+         "state::answer_channel::",
+         "state::archive::"
+        ]
+       },
+       "at": 1793894235.4518654,
+       "exit": 0,
+       "ms": 248905,
+       "template": "cargo-test"
+      },
+      {
+       "args": {
+        "bin": "hgs",
+        "filters": [
+         "dispatcher_revoked"
+        ]
+       },
+       "at": 1793894254.082792,
+       "exit": 0,
+       "ms": 1582,
+       "template": "cargo-test"
+      }
+     ],
+     "sent_at": 1793893539.590377,
+     "started_at": 1793893549.6882172,
+     "state": "reported",
+     "turn_ended_at": null
+    }
+   ],
+   "criteria": [
+    "Synthetic criteria text.",
+    "Synthetic criteria text."
+   ],
+   "decided_by": "lead",
+   "decision_reason": "Synthetic decision_reason text.",
+   "deps": [],
+   "description": "Synthetic description text.",
+   "estimate_minutes": 150.0,
+   "estimate_source": "lead",
+   "estimate_text": "150 min",
+   "id": 24,
+   "output": [
+    "src/state/teams"
+   ],
+   "phase": 1,
+   "pinned": true,
+   "status": "accepted",
+   "timing": {
+    "attempts": [
+     {
+      "from": 1793893549.6882172,
+      "lead_s": 63,
+      "member": "ui1",
+      "member_s": 10,
+      "n": 1,
+      "state": "reported",
+      "to": 1793894489.8918862,
+      "worked_s": 940
+     }
+    ],
+    "running_since": null,
+    "waits": {
+     "deps_s": 0,
+     "lead_s": 63,
+     "member_s": 2572
+    },
+    "worked_s": 940
+   },
+   "title": "A reassigned task stops in the old member's session"
+  },
+  {
+   "added_late": {
+    "at": 1793891758.4664462,
+    "by": "You",
+    "confirm": "add",
+    "request": ""
+   },
+   "assignee": "ui1",
+   "attempts": [
+    {
+     "decided_at": 1793895098.8103733,
+     "delivered_at": 1793894538.2074664,
+     "error": "",
+     "folder_branch": "team/33fbafeb/ui1",
+     "folder_head": "305241ffddd4c8be9aa4c0f27936a1e4fdeacd19",
+     "id": "12919b40-81fa-43f7-b07d-55982c998299",
+     "member": "ui1",
+     "n": 1,
+     "no_report": false,
+     "notice": "pending",
+     "notice_id": "",
+     "report": {
+      "at": 1793895026.4640212,
+      "tests": {
+       "files": 552,
+       "functions_added": {
+        "names": [
+         "client/core/src/account_actions.rs: guards_every_call_and_keeps_labels_as_one_argument",
+         "client/core/src/account_actions.rs: refuses_changed_or_ambiguous_profiles_and_unbound_machines",
+         "client/core/src/account_actions/models.rs: binds_account_provider_and_revision_and_keeps_a_closed_projection"
+        ],
+        "total": 2591
+       },
+       "functions_removed": {
+        "names": [
+         "client/core/src/mobile/tests.rs: the_connector_is_only_asked_for_its_status",
+         "client/core/tests/actions.rs: a_kill_through_the_fake_is_one_call_without_input",
+         "client/src-tauri/src/lifecycle.rs: a_dock_click_restores_only_a_minimised_window"
+        ],
+        "total": 33
+       },
+       "lines_added": 114789,
+       "lines_removed": 2572
+      },
+      "text": "Synthetic text text.",
+      "unstructured": true
+     },
+     "runs": [
+      {
+       "args": {
+        "bin": "hgs",
+        "filters": [
+         "state::",
+         "state::builds::",
+         "state::notifications::"
+        ],
+        "skips": [
+         "state::agent_hint::",
+         "state::answer_channel::",
+         "state::archive::"
+        ]
+       },
+       "at": 1793894877.6502378,
+       "exit": 0,
+       "ms": 159609,
+       "template": "cargo-test"
+      },
+      {
+       "args": {
+        "bin": "hgs",
+        "filters": [
+         "state::teams::store::tests::"
+        ]
+       },
+       "at": 1793894939.2683635,
+       "exit": 101,
+       "ms": 48367,
+       "template": "cargo-test"
+      }
+     ],
+     "sent_at": 1793894537.654793,
+     "started_at": 1793894565.574854,
+     "state": "reported",
+     "turn_ended_at": null
+    }
+   ],
+   "criteria": [
+    "Synthetic criteria text.",
+    "Synthetic criteria text."
+   ],
+   "decided_by": "lead",
+   "decision_reason": "Synthetic decision_reason text.",
+   "deps": [],
+   "description": "Synthetic description text.",
+   "estimate_minutes": 90.0,
+   "estimate_source": "lead",
+   "estimate_text": "90 min",
+   "id": 25,
+   "output": [
+    "src/state/teams"
+   ],
+   "phase": 1,
+   "pinned": true,
+   "status": "accepted",
+   "timing": {
+    "attempts": [
+     {
+      "from": 1793894565.574854,
+      "lead_s": 72,
+      "member": "ui1",
+      "member_s": 28,
+      "n": 1,
+      "state": "reported",
+      "to": 1793895026.4640212,
+      "worked_s": 461
+     }
+    ],
+    "running_since": null,
+    "waits": {
+     "deps_s": 0,
+     "lead_s": 72,
+     "member_s": 3588
+    },
+    "worked_s": 461
+   },
+   "title": "Team commands retry a busy team database instead of failing with 'database is locked'"
+  },
+  {
+   "added_late": {
+    "at": 1793891758.4664462,
+    "by": "You",
+    "confirm": "add",
+    "request": ""
+   },
+   "assignee": "ui2",
+   "attempts": [],
+   "criteria": [
+    "Synthetic criteria text.",
+    "Synthetic criteria text."
+   ],
+   "decided_by": null,
+   "decision_reason": "",
+   "deps": [],
+   "description": "Synthetic description text.",
+   "estimate_minutes": 90.0,
+   "estimate_source": "lead",
+   "estimate_text": "90 min",
+   "id": 26,
+   "output": [
+    "src/state/teams"
+   ],
+   "phase": 1,
+   "pinned": true,
+   "status": "pending",
+   "timing": {
+    "attempts": [],
+    "running_since": null,
+    "waits": {
+     "deps_s": 0,
+     "lead_s": 0,
+     "member_s": 4211
+    },
+    "worked_s": 0
+   },
+   "title": "A draft accepts every member setting the catalog allows (folder read_only) and refuses only with the exact field",
+   "waits": {
+    "for": "member",
+    "on": [
+     "ui2 (Frontend (DeepSeek))"
+    ],
+    "unblock": "wait for ui2 (Frontend (DeepSeek))"
+   }
+  },
+  {
+   "added_late": {
+    "at": 1793891758.4664462,
+    "by": "You",
+    "confirm": "add",
+    "request": ""
+   },
+   "assignee": "merger",
+   "attempts": [],
+   "criteria": [
+    "Synthetic criteria text.",
+    "Merge commits listed",
+    "Batch run results attached"
+   ],
+   "decided_by": null,
+   "decision_reason": "",
+   "deps": [
+    {
+     "kind": "hard",
+     "task": 18
+    },
+    {
+     "kind": "hard",
+     "task": 20
+    },
+    {
+     "kind": "hard",
+     "task": 21
+    },
+    {
+     "kind": "hard",
+     "task": 22
+    },
+    {
+     "kind": "hard",
+     "task": 23
+    },
+    {
+     "kind": "hard",
+     "task": 24
+    },
+    {
+     "kind": "hard",
+     "task": 25
+    },
+    {
+     "kind": "hard",
+     "task": 26
+    }
+   ],
+   "description": "Synthetic description text.",
+   "estimate_minutes": 180.0,
+   "estimate_source": "lead",
+   "estimate_text": "180 min",
+   "id": 27,
+   "phase": 1,
+   "status": "pending",
+   "timing": {
+    "attempts": [],
+    "running_since": null,
+    "waits": {
+     "deps_s": 4211,
+     "lead_s": 0,
+     "member_s": 0
+    },
+    "worked_s": 0
+   },
+   "title": "Review the reliability fixes with their regression tests, then merge and test them as one batch",
+   "waits": {
+    "for": "deps",
+    "on": [
+     23,
+     26
+    ],
+    "unblock": "accept #23"
+   }
+  }
+ ],
+ "template": "",
+ "templates": {
+  "enabled": true,
+  "items": [
+   {
+    "args": [
+     "+{toolchain}",
+     "build",
+     "--locked",
+     "--package={package}"
+    ],
+    "id": "cargo-build",
+    "params": [
+     {
+      "kind": "identifier",
+      "name": "toolchain",
+      "required": false
+     },
+     {
+      "kind": "identifier",
+      "name": "package",
+      "required": false
+     },
+     {
+      "kind": "paths",
+      "name": "files",
+      "required": false
+     }
+    ],
+    "program": "cargo",
+    "source": "builtin",
+    "summary": "Synthetic summary text.",
+    "timeout_secs": 1800
+   },
+   {
+    "args": [
+     "+{toolchain}",
+     "test",
+     "--locked",
+     "--package={package}",
+     "--bin={bin}",
+     "{filter}"
+    ],
+    "id": "cargo-test",
+    "params": [
+     {
+      "kind": "identifier",
+      "name": "toolchain",
+      "required": false
+     },
+     {
+      "kind": "identifier",
+      "name": "package",
+      "required": false
+     },
+     {
+      "kind": "identifier",
+      "name": "bin",
+      "required": false
+     },
+     {
+      "kind": "identifier",
+      "name": "filter",
+      "required": false
+     },
+     {
+      "kind": "identifiers",
+      "name": "filters",
+      "required": false
+     },
+     {
+      "kind": "identifiers",
+      "name": "skips",
+      "required": false
+     },
+     {
+      "kind": "paths",
+      "name": "manifest",
+      "required": false
+     },
+     {
+      "kind": "paths",
+      "name": "files",
+      "required": false
+     }
+    ],
+    "program": "cargo",
+    "source": "builtin",
+    "summary": "Synthetic summary text.",
+    "timeout_secs": 1800
+   },
+   {
+    "args": [
+     "+{toolchain}",
+     "clippy",
+     "--locked",
+     "--all-targets",
+     "--package={package}",
+     "--",
+     "-D",
+     "warnings"
+    ],
+    "id": "cargo-clippy",
+    "params": [
+     {
+      "kind": "identifier",
+      "name": "toolchain",
+      "required": false
+     },
+     {
+      "kind": "identifier",
+      "name": "package",
+      "required": false
+     },
+     {
+      "kind": "paths",
+      "name": "files",
+      "required": false
+     }
+    ],
+    "program": "cargo",
+    "source": "builtin",
+    "summary": "Synthetic summary text.",
+    "timeout_secs": 1800
+   },
+   {
+    "args": [
+     "-S",
+     "tray",
+     "-B",
+     ".ci-build/gui",
+     "-G",
+     "Ninja",
+     "-DCMAKE_BUILD_TYPE=Release"
+    ],
+    "id": "qt-configure",
+    "params": [
+     {
+      "kind": "paths",
+      "name": "files",
+      "required": false
+     }
+    ],
+    "program": "cmake",
+    "source": "builtin",
+    "summary": "Synthetic summary text.",
+    "timeout_secs": 600
+   },
+   {
+    "args": [
+     "--build",
+     ".ci-build/gui"
+    ],
+    "id": "qt-build",
+    "params": [
+     {
+      "kind": "identifiers",
+      "name": "targets",
+      "required": false
+     },
+     {
+      "kind": "paths",
+      "name": "files",
+      "required": false
+     }
+    ],
+    "program": "cmake",
+    "source": "builtin",
+    "summary": "Synthetic summary text.",
+    "timeout_secs": 3600
+   },
+   {
+    "args": [],
+    "id": "qt-test",
+    "params": [
+     {
+      "kind": "identifier",
+      "name": "suite",
+      "required": false
+     },
+     {
+      "kind": "identifiers",
+      "name": "suites",
+      "required": false
+     },
+     {
+      "kind": "identifiers",
+      "name": "functions",
+      "required": false
+     },
+     {
+      "kind": "identifier",
+      "name": "shots",
+      "required": false
+     },
+     {
+      "kind": "paths",
+      "name": "files",
+      "required": false
+     }
+    ],
+    "program": ".ci-build/gui/{suite}",
+    "source": "builtin",
+    "summary": "Synthetic summary text.",
+    "timeout_secs": 1800
+   },
+   {
+    "args": [
+     "-p",
+     "mobile/android",
+     ":app:testDebugUnitTest",
+     "--no-daemon"
+    ],
+    "id": "android-test",
+    "params": [],
+    "program": "mobile/android/gradlew",
+    "source": "builtin",
+    "summary": "Synthetic summary text.",
+    "timeout_secs": 3600
+   },
+   {
+    "args": [
+     "-E",
+     "rm",
+     "-rf"
+    ],
+    "id": "clean-build",
+    "params": [
+     {
+      "kind": "paths",
+      "name": "paths",
+      "required": true
+     }
+    ],
+    "program": "cmake",
+    "source": "builtin",
+    "summary": "Synthetic summary text.",
+    "timeout_secs": 600
+   },
+   {
+    "args": [
+     "merge",
+     "--no-edit"
+    ],
+    "id": "git-merge-lead",
+    "params": [],
+    "program": "git",
+    "source": "builtin",
+    "summary": "Synthetic summary text.",
+    "timeout_secs": 300
+   },
+   {
+    "args": [
+     "team",
+     "commit",
+     "--json"
+    ],
+    "id": "git-commit",
+    "params": [
+     {
+      "kind": "text",
+      "name": "message",
+      "required": true
+     },
+     {
+      "kind": "paths",
+      "name": "paths",
+      "required": false
+     }
+    ],
+    "program": "hgs",
+    "source": "builtin",
+    "summary": "Synthetic summary text.",
+    "timeout_secs": 300
+   }
+  ]
+ },
+ "updated": 1793895184.912795,
+ "used_owner_words": [
+  {
+   "change": "the roster change",
+   "event": 120358,
+   "uses": 1
+  },
+  {
+   "change": "the roster change",
+   "event": 120422,
+   "uses": 1
+  }
+ ],
+ "validation": {
+  "errors": [],
+  "health": {
+   "chain": 5,
+   "critical_path": 9,
+   "fan_in": [],
+   "parallelism": 2.111111111111111,
+   "per_member": {
+    "core": {
+     "on_critical_path": 0,
+     "tasks": 2
+    },
+    "hgs": {
+     "on_critical_path": 0,
+     "tasks": 1
+    },
+    "merger": {
+     "on_critical_path": 1,
+     "tasks": 4
+    },
+    "qa": {
+     "on_critical_path": 1,
+     "tasks": 2
+    },
+    "ui1": {
+     "on_critical_path": 0,
+     "tasks": 2
+    },
+    "ui2": {
+     "on_critical_path": 0,
+     "tasks": 8
+    }
+   },
+   "starved": [
+    {
+     "blocking": [
+      1,
+      2,
+      5,
+      6,
+      7
+     ],
+     "member": "ui1",
+     "minutes": 2,
+     "role": "Frontend (SolidJS)"
+    }
+   ],
+   "tasks": 19,
+   "totals": {
+    "decided": 8,
+    "tasks": 27
+   },
+   "warnings": [
+    "(9) lane weights differ by more than a third: 1 to 10",
+    "(12) task #27 makes the reviewer implement",
+    "starved: ui1 (Frontend (SolidJS)) idle 2 min without a ready task; Open: #1, #2, #5, #6, #7"
+   ],
+   "widest_ready": 7
+  },
+  "phases_health": {
+   "1": {
+    "chain": 5,
+    "critical_path": 9,
+    "fan_in": [],
+    "parallelism": 2.111111111111111,
+    "per_member": {
+     "core": {
+      "on_critical_path": 0,
+      "tasks": 2
+     },
+     "hgs": {
+      "on_critical_path": 0,
+      "tasks": 1
+     },
+     "merger": {
+      "on_critical_path": 1,
+      "tasks": 4
+     },
+     "qa": {
+      "on_critical_path": 1,
+      "tasks": 2
+     },
+     "ui1": {
+      "on_critical_path": 0,
+      "tasks": 2
+     },
+     "ui2": {
+      "on_critical_path": 0,
+      "tasks": 8
+     }
+    },
+    "tasks": 19,
+    "totals": {
+     "decided": 8,
+     "tasks": 27
+    },
+    "warnings": [
+     "(9) lane weights differ by more than a third: 1 to 10",
+     "(12) task #27 makes the reviewer implement"
+    ],
+    "widest_ready": 7
+   }
+  },
+  "warnings": [
+   {
+    "kind": "account",
+    "text": "Synthetic text text."
+   }
+  ]
+ },
+ "waiting_for_lead": false
+}

@@ -1,0 +1,557 @@
+{
+ "items": [
+  {
+   "at": 1793893754.1659646,
+   "detail": {
+    "attempt": 2,
+    "by": "Frontend (DeepSeek)",
+    "question": "q7",
+    "task": 4
+   },
+   "kind": "question_asked",
+   "seq": 13317
+  },
+  {
+   "at": 1793893743.5968173,
+   "detail": {
+    "attempt": 1,
+    "exit": 0,
+    "member": "Tauri core (Rust)",
+    "task": 21,
+    "template": "cargo-build",
+    "timed_out": false
+   },
+   "kind": "ran",
+   "seq": 13316
+  },
+  {
+   "at": 1793893652.4759643,
+   "detail": {
+    "attempt": 2,
+    "by": "Lead",
+    "question": "q6",
+    "task": 4
+   },
+   "kind": "question_answered",
+   "seq": 13315
+  },
+  {
+   "at": 1793893564.9202175,
+   "detail": {
+    "attempt": 1,
+    "by": "Lead",
+    "manual": false,
+    "reason": "Synthetic reason text.",
+    "task": 22,
+    "title": "A DeepSeek member that hits 'DeepSeek host is still starting' starts once the host is up, without a relaunch"
+   },
+   "kind": "accepted",
+   "seq": 13314
+  },
+  {
+   "at": 1793893549.6882198,
+   "detail": {
+    "attempt": 1,
+    "member": "Frontend (SolidJS)",
+    "task": 24
+   },
+   "kind": "started",
+   "seq": 13313
+  },
+  {
+   "at": 1793893540.070431,
+   "detail": {
+    "attempt": 1,
+    "task": 24
+   },
+   "kind": "delivered",
+   "seq": 13312
+  },
+  {
+   "at": 1793893539.5936713,
+   "detail": {
+    "attempt": 1,
+    "by": "Lead",
+    "task": 24,
+    "to": "Frontend (SolidJS)"
+   },
+   "kind": "handed_out",
+   "seq": 13311
+  },
+  {
+   "at": 1793893539.5581353,
+   "detail": {
+    "items": 1
+   },
+   "kind": "inbox_told",
+   "seq": 13310
+  },
+  {
+   "at": 1793893509.0156784,
+   "detail": {
+    "attempt": 1,
+    "by": "Frontend (SolidJS)",
+    "human": false,
+    "task": 22,
+    "title": "A DeepSeek member that hits 'DeepSeek host is still starting' starts once the host is up, without a relaunch",
+    "to": "Lead"
+   },
+   "kind": "reported",
+   "seq": 13309
+  },
+  {
+   "at": 1793893433.939433,
+   "detail": {
+    "attempt": 1,
+    "exit": 0,
+    "member": "Frontend (SolidJS)",
+    "task": 22,
+    "template": "git-commit",
+    "timed_out": false
+   },
+   "kind": "ran",
+   "seq": 13308
+  },
+  {
+   "at": 1793893433.9317017,
+   "detail": {
+    "attempt": 1,
+    "files": 6,
+    "member": "Frontend (SolidJS)",
+    "sha": "f5d6a4336c0c47aa80823c33082d66128fe9f17b",
+    "task": 22
+   },
+   "kind": "committed",
+   "seq": 13307
+  },
+  {
+   "at": 1793893416.6488228,
+   "detail": {
+    "attempt": 1,
+    "exit": 101,
+    "member": "Frontend (SolidJS)",
+    "task": 22,
+    "template": "cargo-test",
+    "timed_out": false
+   },
+   "kind": "ran",
+   "seq": 13306
+  },
+  {
+   "at": 1793893412.124979,
+   "detail": {
+    "items": 1
+   },
+   "kind": "inbox_told",
+   "seq": 13305
+  },
+  {
+   "at": 1793893411.6223001,
+   "detail": {
+    "attempt": 2,
+    "by": "Frontend (DeepSeek)",
+    "question": "q6",
+    "task": 4
+   },
+   "kind": "question_asked",
+   "seq": 13304
+  },
+  {
+   "at": 1793893359.3589735,
+   "detail": {
+    "attempt": 1,
+    "exit": 0,
+    "member": "Frontend (SolidJS)",
+    "task": 22,
+    "template": "cargo-test",
+    "timed_out": false
+   },
+   "kind": "ran",
+   "seq": 13303
+  },
+  {
+   "at": 1793893349.201866,
+   "detail": {
+    "attempt": 1,
+    "exit": 0,
+    "member": "Frontend (SolidJS)",
+    "task": 22,
+    "template": "cargo-test",
+    "timed_out": false
+   },
+   "kind": "ran",
+   "seq": 13302
+  },
+  {
+   "at": 1793893149.4797537,
+   "detail": {
+    "attempt": 2,
+    "by": "Lead",
+    "question": "q5",
+    "task": 4
+   },
+   "kind": "question_answered",
+   "seq": 13301
+  },
+  {
+   "at": 1793893093.2095728,
+   "detail": {
+    "items": 1
+   },
+   "kind": "inbox_told",
+   "seq": 13300
+  },
+  {
+   "at": 1793893005.5383193,
+   "detail": {
+    "attempt": 1,
+    "member": "Tauri core (Rust)",
+    "task": 21
+   },
+   "kind": "started",
+   "seq": 13299
+  },
+  {
+   "at": 1793892994.490502,
+   "detail": {
+    "attempt": 1,
+    "task": 21
+   },
+   "kind": "delivered",
+   "seq": 13298
+  },
+  {
+   "at": 1793892994.1178794,
+   "detail": {
+    "attempt": 1,
+    "by": "Lead",
+    "task": 21,
+    "to": "Tauri core (Rust)"
+   },
+   "kind": "handed_out",
+   "seq": 13297
+  },
+  {
+   "at": 1793892994.051772,
+   "detail": {
+    "attempt": 2,
+    "by": "Frontend (DeepSeek)",
+    "question": "q5",
+    "task": 4
+   },
+   "kind": "question_asked",
+   "seq": 13296
+  },
+  {
+   "at": 1793892983.2374237,
+   "detail": {
+    "attempt": 1,
+    "by": "Lead",
+    "manual": false,
+    "reason": "Synthetic reason text.",
+    "task": 18,
+    "title": "The New team form shows the lead's draft edits (Qt), so the owner can press Create team"
+   },
+   "kind": "accepted",
+   "seq": 13295
+  },
+  {
+   "at": 1793892970.4416597,
+   "detail": {
+    "items": 1
+   },
+   "kind": "inbox_told",
+   "seq": 13294
+  },
+  {
+   "at": 1793892959.4962573,
+   "detail": {
+    "attempt": 1,
+    "by": "Tauri core (Rust)",
+    "human": false,
+    "task": 18,
+    "title": "The New team form shows the lead's draft edits (Qt), so the owner can press Create team",
+    "to": "Lead"
+   },
+   "kind": "reported",
+   "seq": 13293
+  },
+  {
+   "at": 1793892890.464956,
+   "detail": {
+    "attempt": 1,
+    "exit": 0,
+    "member": "Tauri core (Rust)",
+    "task": 18,
+    "template": "git-commit",
+    "timed_out": false
+   },
+   "kind": "ran",
+   "seq": 13292
+  },
+  {
+   "at": 1793892890.4600422,
+   "detail": {
+    "attempt": 1,
+    "files": 7,
+    "member": "Tauri core (Rust)",
+    "sha": "5817ec69eb355df684f7902568071409bbab8f07",
+    "task": 18
+   },
+   "kind": "committed",
+   "seq": 13291
+  },
+  {
+   "at": 1793892852.278885,
+   "detail": {
+    "attempt": 1,
+    "exit": 1,
+    "member": "Tauri core (Rust)",
+    "task": 18,
+    "template": "qt-configure",
+    "timed_out": false
+   },
+   "kind": "ran",
+   "seq": 13290
+  },
+  {
+   "at": 1793892839.9820294,
+   "detail": {
+    "attempt": 1,
+    "exit": 0,
+    "member": "Tauri core (Rust)",
+    "task": 18,
+    "template": "cargo-test",
+    "timed_out": false
+   },
+   "kind": "ran",
+   "seq": 13289
+  },
+  {
+   "at": 1793892803.3559287,
+   "detail": {
+    "attempt": 1,
+    "member": "Frontend (SolidJS)",
+    "task": 22
+   },
+   "kind": "started",
+   "seq": 13288
+  },
+  {
+   "at": 1793892790.6780915,
+   "detail": {
+    "attempt": 1,
+    "by": "Lead",
+    "manual": false,
+    "reason": "Synthetic reason text.",
+    "task": 20,
+    "title": "A clone member of a large repository starts on Windows instead of 'Git operation cancelled or timed out'"
+   },
+   "kind": "accepted",
+   "seq": 13287
+  },
+  {
+   "at": 1793892790.1319823,
+   "detail": {
+    "attempt": 1,
+    "task": 22
+   },
+   "kind": "delivered",
+   "seq": 13286
+  },
+  {
+   "at": 1793892789.649874,
+   "detail": {
+    "attempt": 1,
+    "by": "Lead",
+    "task": 22,
+    "to": "Frontend (SolidJS)"
+   },
+   "kind": "handed_out",
+   "seq": 13285
+  },
+  {
+   "at": 1793892777.291981,
+   "detail": {
+    "items": 1
+   },
+   "kind": "inbox_told",
+   "seq": 13284
+  },
+  {
+   "at": 1793892761.2711625,
+   "detail": {
+    "attempt": 1,
+    "by": "Frontend (SolidJS)",
+    "human": false,
+    "task": 20,
+    "title": "A clone member of a large repository starts on Windows instead of 'Git operation cancelled or timed out'",
+    "to": "Lead"
+   },
+   "kind": "reported",
+   "seq": 13283
+  },
+  {
+   "at": 1793892678.7811854,
+   "detail": {
+    "attempt": 1,
+    "exit": 0,
+    "member": "Frontend (SolidJS)",
+    "task": 20,
+    "template": "git-commit",
+    "timed_out": false
+   },
+   "kind": "ran",
+   "seq": 13282
+  },
+  {
+   "at": 1793892678.7747111,
+   "detail": {
+    "attempt": 1,
+    "files": 4,
+    "member": "Frontend (SolidJS)",
+    "sha": "4f8628a663f7d05099857535ae0139c7d8b7b281",
+    "task": 20
+   },
+   "kind": "committed",
+   "seq": 13281
+  },
+  {
+   "at": 1793892659.5998833,
+   "detail": {
+    "attempt": 1,
+    "exit": 0,
+    "member": "Frontend (SolidJS)",
+    "task": 20,
+    "template": "cargo-build",
+    "timed_out": false
+   },
+   "kind": "ran",
+   "seq": 13280
+  },
+  {
+   "at": 1793892522.150425,
+   "detail": {
+    "attempt": 2,
+    "by": "Lead",
+    "question": "q4",
+    "task": 4
+   },
+   "kind": "question_answered",
+   "seq": 13279
+  },
+  {
+   "at": 1793892521.8887427,
+   "detail": {
+    "attempt": 2,
+    "by": "Lead",
+    "question": "q3",
+    "task": 4
+   },
+   "kind": "question_answered",
+   "seq": 13278
+  },
+  {
+   "at": 1793892511.9053326,
+   "detail": {
+    "items": 2
+   },
+   "kind": "inbox_told",
+   "seq": 13277
+  },
+  {
+   "at": 1793892478.6723173,
+   "detail": {
+    "attempt": 2,
+    "by": "Frontend (DeepSeek)",
+    "question": "q4",
+    "task": 4
+   },
+   "kind": "question_asked",
+   "seq": 13276
+  },
+  {
+   "at": 1793892435.7866268,
+   "detail": {
+    "attempt": 1,
+    "exit": 0,
+    "member": "Frontend (SolidJS)",
+    "task": 20,
+    "template": "cargo-test",
+    "timed_out": false
+   },
+   "kind": "ran",
+   "seq": 13275
+  },
+  {
+   "at": 1793892425.4332805,
+   "detail": {
+    "attempt": 2,
+    "by": "Frontend (DeepSeek)",
+    "question": "q3",
+    "task": 4
+   },
+   "kind": "question_asked",
+   "seq": 13274
+  },
+  {
+   "at": 1793892388.1008906,
+   "detail": {
+    "attempt": 2,
+    "by": "Lead",
+    "question": "q2",
+    "task": 4
+   },
+   "kind": "question_answered",
+   "seq": 13273
+  },
+  {
+   "at": 1793892375.0438213,
+   "detail": {
+    "items": 1
+   },
+   "kind": "inbox_told",
+   "seq": 13272
+  },
+  {
+   "at": 1793892323.8402228,
+   "detail": {
+    "attempt": 2,
+    "by": "Frontend (DeepSeek)",
+    "question": "q2",
+    "task": 4
+   },
+   "kind": "question_asked",
+   "seq": 13271
+  },
+  {
+   "at": 1793892271.97562,
+   "detail": {
+    "by": "lead",
+    "decision": "deny",
+    "member": "Frontend (DeepSeek)",
+    "question_id": "b1d1843c-2337-4597-9699-7467b5c35b6f"
+   },
+   "kind": "permission_answered",
+   "seq": 13270
+  },
+  {
+   "at": 1793892246.6718662,
+   "detail": {
+    "items": 1
+   },
+   "kind": "inbox_told",
+   "seq": 13269
+  },
+  {
+   "at": 1793892191.9234872,
+   "detail": {
+    "approval": true,
+    "member": "Frontend (DeepSeek)"
+   },
+   "kind": "question_forwarded",
+   "seq": 13268
+  }
+ ],
+ "next_cursor": 13268
+}

@@ -659,6 +659,63 @@ pub fn offline(location: &Location, command: &Command) -> Result<Value> {
     Ok(response(location, &mut store, command))
 }
 
+/// Fixtures for consumers of the current rollback proof (Toast registration
+/// removal): the actual settled-revoke path and the actual marker writer.
+#[cfg(test)]
+pub(in crate::desktop) mod test_support {
+    use super::*;
+    use zerus_desktop_migration::{Handoff, HANDOFF_FILE};
+
+    /// Settles rollback `id` through the actor's own path. Without a runtime
+    /// epoch or marker the writer stays null, as in a passive-only history.
+    pub(in crate::desktop) fn settle(
+        location: &Location,
+        store: &mut Store,
+        id: &str,
+        runtime_epoch: Option<&str>,
+    ) -> Result<Value> {
+        let command = Command {
+            op: "revoke".into(),
+            request_id: id.into(),
+            reason: Reason::Rollback,
+        };
+        execute_scoped(location, store, &command, None, runtime_epoch, |_| Ok(()))
+    }
+
+    /// Leaves rollback `id` prepared: its drain did not settle.
+    pub(in crate::desktop) fn prepare_only(location: &Location, store: &mut Store, id: &str) {
+        let command = Command {
+            op: "revoke".into(),
+            request_id: id.into(),
+            reason: Reason::Rollback,
+        };
+        assert!(
+            execute_scoped(location, store, &command, None, None, |_| anyhow::bail!(
+                "original drain pending"
+            ))
+            .is_err()
+        );
+    }
+
+    /// Publishes a marker for `writer_epoch` in `phase` ("complete" for a
+    /// granted writer, "revoked" afterwards), created private by the real writer.
+    pub(in crate::desktop) fn marker(location: &Location, writer_epoch: &str, phase: &str) {
+        let marker: Handoff =
+            serde_json::from_value(json!({"version":1,"configuration":location.configuration,
+            "source":"com.hgdev.hgs-tray","import_id":"00000000-0000-4000-8000-000000000001",
+            "writer_epoch":writer_epoch,"phase":phase,
+            "import_record":{"version":1,"sha256":"b".repeat(64)},"automatic_approvals":false}))
+            .unwrap();
+        let lock = location.handoff_lock().unwrap();
+        handoff::write_revoked(location, &lock, &marker).unwrap();
+        std::fs::write(
+            location.root.join(HANDOFF_FILE),
+            serde_json::to_vec(&marker).unwrap(),
+        )
+        .unwrap();
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;

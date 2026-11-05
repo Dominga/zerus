@@ -104,6 +104,32 @@ pub(in crate::desktop) fn database(location: &Location) -> Result<(Connection, V
 }
 
 fn verify(location: &Location, id: &str, lock: &HandoffLock) -> Result<Value> {
+    let (result, verification) = verify_current(location, id, lock)?;
+    // In particular, do not retain a Windows verification handle into Ready:
+    // the passive replacement must be able to write. On Unix the verification
+    // holds no descriptor.
+    #[cfg(windows)]
+    drop(verification);
+    #[cfg(not(windows))]
+    let _ = verification;
+    Ok(result)
+}
+
+/// The CURRENT proof that the exact rollback `id` still governs this state, in
+/// one coherent read-only transaction under the caller's held handoff lock: `id`
+/// is the newest command and settled with its exact receipt; ownership is
+/// revoked and rearm-required with no request or owner epoch; the writer is
+/// revoked with `id`'s epoch; any marker is Revoked and names that writer; and
+/// operation resources are drained. A later grant, rearm, handoff or revoke
+/// supersedes it. It never submits, reconciles, migrates or checkpoints. The
+/// checked database's Verification is returned so a caller can retain it (a
+/// Windows handle without delete sharing) through its own effect.
+pub(in crate::desktop) fn verify_current(
+    location: &Location,
+    id: &str,
+    lock: &HandoffLock,
+) -> Result<(Value, Verification)> {
+    ensure!(canonical_id(id), Declined("invalid_request_id"));
     lock.verify(location)?;
     let (mut db, verification) = database(location)?;
     let tx = db.transaction()?;
@@ -175,15 +201,9 @@ fn verify(location: &Location, id: &str, lock: &HandoffLock) -> Result<Value> {
     );
     let result = receipt(location, &command, &saved)?;
     tx.commit()?;
-    // In particular, do not retain a Windows verification handle or SQLite
-    // connection into Ready: the passive replacement must be able to write.
-    // On Unix the verification holds no descriptor.
+    // The read-only SQLite connection is never retained.
     drop(db);
-    #[cfg(windows)]
-    drop(verification);
-    #[cfg(not(windows))]
-    let _ = verification;
-    Ok(result)
+    Ok((result, verification))
 }
 
 fn acquire(location: &Location, id: &str, until: Instant) -> Result<Held> {

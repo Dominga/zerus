@@ -1200,6 +1200,78 @@ artifact 13380445725). Rows D–H used integrate `58cce17f` with #1441 (CI run
     removed its own History entry within about 1.2 s and retired the mapping.
     Nothing opened or launched afterwards.
 
+### va-kids rows for 0.48.0, continued — 2026-11-05
+
+The same rules apply: private fixture profiles, a fresh stage per row, and
+teardown, guard, cleanup and a residue check after each. The sources are
+integrate `68b2c426` (CI run 41977902432, artifact 13394048639) and integrate
+`af07efb6` (CI run 41989037251, artifact 13399282081).
+
+- **Toast registration removal after a rollback revoke: PASS** on `68b2c426`
+  (`zerus-5wmh.66.3.30.8.5`, #1453). The documented sequence has four steps: the
+  rollback revoke for R, ending only the running task instance, `registration
+  remove`, and `notification-registration remove` with the same R. It removed
+  the Toast keys with no manual removal and kept the desktop database's bytes
+  and mtime: 11/11 after a passive history, 15/15 twice in background mode.
+- **H2 and H3 with the owner present: not observable, because the service
+  refused both posts.** On `68b2c426`, the posts at 10:21 and 10:25 MSK were
+  refused before any banner, and the owner saw none. Unattended diagnosis on
+  `68b2c426` and `58cce17f`:
+  - `ToastNotifier.Setting` for `com.hgdev.hgs-tray` failed with HRESULT
+    `0x80070490` (element not found). The backend read it before any Show and
+    recorded `permission_denied`.
+  - The same `58cce17f` build had delivered at 03:58–04:11Z. The failure
+    persisted after the owner restarted va-kids, with a fresh per-user
+    notification service.
+  - An AUMID without a package identity must show one toast before `Setting`
+    works, so checking it first deadlocked. The fix is #1475
+    (`zerus-5wmh.66.3.30.8.7`, P1). Status hides the refusal code:
+    `zerus-5wmh.66.3.30.15`.
+  - On #1475's exact head `8cf223aa` (CI run 41996514139, artifact
+    13402753346) the unattended diagnosis passed 13/13. `Setting` read
+    `0x80070490` at the settled baseline and **Enabled** after the post. Exactly
+    one user post was Delivered, and its History entry was the only one; no
+    bootstrap scratch entry remained.
+  - The four-step Toast removal then passed 11/11. A fresh stage after it read
+    **Enabled** at the baseline and delivered one post (13/13), so the removal
+    did not make Windows forget the AUMID. What did so on va-kids that morning
+    remains unknown.
+  - The visible banner and its click still need the owner-present H2/H3 run.
+- **One-time import, G3 scope: PASS** (16/16, twice on `af07efb6`). Before Next
+  first started, the fixture held Qt sources: a Qt INI and a Qt main draft in
+  the redirected `APPDATA`, and a legacy per-computer project alias.
+  - The "Upgrading from Qt" notice showed once. **Got it** was saved, and the
+    next two starts showed no notice.
+  - The Qt INI and draft kept their bytes and times. The Qt draft was not
+    restored, and no Next draft carried it.
+  - The legacy project list and the shared account profiles were unchanged.
+  - Observed, not accepted: the legacy alias did not appear in Next's Projects.
+    Projects showed "Project sync unavailable: The saved Qt project
+    organization could not be read…" and "Project sync is not set up on this
+    computer yet…". The Migration report said no report was available. The
+    seeded INI held no real Qt organization, so the first message may come from
+    the seed. The owner wants projects to migrate; Windows support is being
+    sized.
+- **Service refresh after a CLI replacement: PASS** (20/20 on `af07efb6`,
+  `.66.3.40.3.3`, #1467), with a **model** of maintained staging. Staging
+  restages only changed bytes, so the row moved the running CLI to the exact
+  maintained aside name `hgs.exe.old-<seconds>-<8 hex>` and placed an identical
+  copy with a new file ID.
+  - The original service reported `manual_refresh_required`, drained.
+    Settings > About offered **Refresh background service…**, and its separate
+    native dialog was confirmed through its own button.
+  - The original exited, and one new service with a new epoch ran in
+    background mode. After close and reopen, ordinary startup authenticated
+    it: writers on, service ownership, no refresh group.
+  - Nothing was granted, rearmed, reinstalled or toggled.
+  - An earlier fixture with a non-maintained aside name was refused
+    (`refresh_scope_changed`), as the staging contract requires. The hidden
+    native reason is `zerus-5wmh.66.3.40.3.3.2`.
+- **F, Qt rollback: waived by the owner.** The F results above stay as history.
+  The Settings observation of the first `af07efb6` F run is withdrawn. It never
+  reached Settings > About, because the rail's Settings icon has no accessible
+  name, so its "no refresh offer" result proved nothing.
+
 ## Deletion PR merge gate
 
 The coordinator records per-platform acceptance and any exceptions against the

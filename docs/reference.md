@@ -3096,7 +3096,10 @@ an unknown result. **Check again**, **View files**, **Details** and **Keep** pro
 explicit next actions. Review opens only when requested and does not block the
 rest of Zerus. Pending work and retained results are bounded to 64 folders, and
 background batches run sequentially. Closing the review does not cancel an
-accepted removal.
+accepted removal. The notice remains visible through the confirmed action and
+the actual folder-checking/removal phases. Result notices use the normal notice
+timeout; dismissing one does not discard the retained result. The status bar's
+working-folder entry still opens its review.
 
 The original folder is checked on its owning computer. A verified Zerus-created,
 clean, integrated checkout can be removed with tool-declared generated caches

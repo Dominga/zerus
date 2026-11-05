@@ -145,7 +145,7 @@ impl Saved {
     pub fn prepare_new_original(
         self,
         source: Captured,
-        reconcile_id: &str,
+        proposal: &CheckId,
     ) -> Result<Journal, Error> {
         if self.phase() != Phase::Completed
             || self.disk.record.intent.binding.key.request_id == source.binding.key.request_id
@@ -163,6 +163,7 @@ impl Saved {
         {
             return Err(Error::Unavailable);
         }
+        proposal.check_before(Some(&self.disk))?;
         let record = Record {
             schema: 1,
             phase: Phase::Prepared,
@@ -170,7 +171,7 @@ impl Saved {
             previous_cancelled: self.disk.record.previous_cancelled.clone(),
             completion: None,
             intent: source
-                .intent(reconcile_id)
+                .intent(proposal.as_str())
                 .map_err(|_| Error::Unavailable)?,
         };
         let disk = publish(

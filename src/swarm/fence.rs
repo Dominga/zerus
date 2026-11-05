@@ -859,7 +859,14 @@ impl Proof {
             return closed(None, "membership_changed");
         }
         let root = config.state.join("replica");
-        if ProjectStore::store_id(&root).ok() != self.me.store || root.display().to_string() != self.me.root {
+        // The store identity within the same deadline: a creator holding its
+        // lock past it is busy, never waited for (review-n on #1464).
+        let own = match ProjectStore::store_id_until(&root, deadline) {
+            Ok(Some(own)) => Some(own),
+            Ok(None) => return closed(None, "busy"),
+            Err(_) => None,
+        };
+        if own != self.me.store || root.display().to_string() != self.me.root {
             return closed(Some(&self.me.node), "changed_identity");
         }
         let Some(store) = ProjectStore::open_within(&root, &self.project, left(deadline))? else {
@@ -1413,6 +1420,39 @@ mod tests {
         let waited = started.elapsed();
         drop(held);
         assert!(format!("{:#}", refused.unwrap_err()).contains("deadline"));
+        assert!(waited >= Duration::from_millis(100) && waited < Duration::from_secs(2), "{waited:?}");
+    }
+
+    /// review-n on #1464 R2: the final admission reads this computer's
+    /// store identity within its deadline; a creator holding the identity's
+    /// lock past it gives busy within the deadline, never a wait.
+    #[test]
+    fn the_final_admission_never_waits_on_the_store_identity() {
+        use fs2::FileExt;
+        let members = chain_abc();
+        let task = floored(&members, "a");
+        let config = &members.configs["a"];
+        let net = InProcess::new(&members, Faults::default());
+        let proof = prove(config, &net, "p", task.uuid(), soon()).unwrap().1.unwrap();
+        let root = config.state.join("replica");
+        std::fs::remove_file(root.join("store-id")).unwrap();
+        let creator = std::fs::OpenOptions::new()
+            .create(true)
+            .truncate(false)
+            .write(true)
+            .open(root.join("store-id.lock"))
+            .unwrap();
+        creator.lock_exclusive().unwrap();
+        let started = Instant::now();
+        let mut runs = 0;
+        let refused = proof.admit(config, started + Duration::from_millis(100), |_, _| {
+            runs += 1;
+            Ok(())
+        });
+        let waited = started.elapsed();
+        drop(creator);
+        assert_eq!(refused.unwrap().unwrap_err().reason, "busy");
+        assert_eq!(runs, 0);
         assert!(waited >= Duration::from_millis(100) && waited < Duration::from_secs(2), "{waited:?}");
     }
 

@@ -56,7 +56,7 @@ fn the_lead_approves_only_on_the_owners_checked_word() {
     .unwrap();
     // F13: without the owner's sentence the lead cannot approve the plan.
     let refused = approve(&mut team, &json!({}), &Actor::Member("lead".into()), &none, &mut events).unwrap_err().to_string();
-    assert_eq!(refused, "The lead approves only on the owner's word: pass \"owner_word\" with the owner's sentence");
+    assert_eq!(refused, "The lead approves only on the owner's word: propose {\"kind\":\"approve\"} as a card (hgs guide team-propose); the owner allows it with a click");
     let word = json!({"text":"plan approved, go ahead","at":1000.0,"event":2});
     let approved = approve(
         &mut team,
@@ -96,7 +96,7 @@ fn the_lead_approves_only_on_the_owners_checked_word() {
     )
     .unwrap_err()
     .to_string();
-    assert_eq!(refused, "The lead approves a phase only on the owner's word: pass \"owner_word\"");
+    assert_eq!(refused, "The lead approves a phase only on the owner's word: propose {\"kind\":\"approve-phase\"} as a card (hgs guide team-propose); the owner allows it with a click");
     let opened = apply(
         &mut team,
         "approve-phase",

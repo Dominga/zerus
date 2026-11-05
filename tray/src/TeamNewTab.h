@@ -73,6 +73,9 @@ public:
     static void setDraftPollInterval(int milliseconds);
     // The draft fields the form has changed and not yet sent.
     QStringList pendingFields() const { return QStringList(m_dirty.cbegin(), m_dirty.cend()); }
+    // Task #18: how long a save may stay without an answer before the form
+    // says so and sends again.
+    static void setSaveTimeout(int milliseconds);
 protected:
     void resizeEvent(QResizeEvent *event) override;
     void showEvent(QShowEvent *event) override;
@@ -97,7 +100,9 @@ private:
     void touch(const QString &field);
     void flush();
     void readDraft();
-    void applyDraft(const Teams::Team &team);
+    void applyDraft(const Teams::Team &team, const QJsonObject &settings);
+    // Task #18: drops the owner's unsaved fields and shows the lead's version.
+    void useLeadVersion();
     void markSeen(const QString &field);
     void createTeam();
     void discardDraft();
@@ -142,7 +147,7 @@ private:
     QWidget *m_planning = nullptr;
     QString m_planningValue = QStringLiteral("lead");
     QSpinBox *m_max = nullptr;
-    QPushButton *m_addMember = nullptr, *m_create = nullptr, *m_discard = nullptr, *m_start = nullptr;
+    QPushButton *m_addMember = nullptr, *m_create = nullptr, *m_discard = nullptr, *m_start = nullptr, *m_useLead = nullptr;
     QProgressBar *m_progress = nullptr;
     // The protocol addendum, folded: how the lead runs the team.
     QPlainTextEdit *m_protocol = nullptr;
@@ -164,12 +169,20 @@ private:
     // session once it exists, the fields the lead changed and the owner has
     // not seen, the owner's fields not yet sent, and the preflight.
     QString m_draft, m_leadSessionName, m_leadPage = QStringLiteral("chat");
-    qint64 m_revision = 0;
+    // m_revision is the revision a save names (the newest the form knows);
+    // m_appliedRevision the one whose fields the form last showed. Task #18: a
+    // save or a stale refusal moves the first, never the second, so the lead's
+    // edits made meanwhile are still shown by the next read.
+    qint64 m_revision = 0, m_appliedRevision = 0;
     QStringList m_unseen, m_preflightErrors, m_preflightWarnings;
     QSet<QString> m_dirty;
     QJsonObject m_settings;    // the draft's settings as read; the form changes its own fields
     QDateTime m_savedAt;
     QString m_saveError;       // the last refused draft call, until one succeeds
+    // Task #18: why the draft could not be read, or why Create team did not
+    // create; each shows in the footer until the next success.
+    QString m_readError, m_createError;
+    quint64 m_sendSeq = 0;     // the save in flight; one without an answer ends after 30 s
     bool m_starting = false, m_sending = false, m_applying = false, m_creating = false, m_retried = false;
     bool m_createAfterSave = false; // Create team pressed while edits were unsaved
     // Owner feedback 2026-11-04 (1-3): the server's newer revision while the
@@ -177,5 +190,5 @@ private:
     qint64 m_serverRevision = 0;
     QStringList m_keptFields;
     QTimer m_flushTimer, m_pollTimer;
-    static int s_pollInterval;
+    static int s_pollInterval, s_saveTimeout;
 };

@@ -211,7 +211,7 @@ fn a_paused_phase_holds_its_place_until_the_pause_is_removed() {
     let error = apply(&mut on_setting, "settings", &json!({"settings":{"lead_removes_own_pause":true}}), &lead(), &none, &mut events)
         .unwrap_err()
         .to_string();
-    assert_eq!(error, "Only you change the team's lead_removes_own_pause");
+    assert!(error.starts_with("Only you change the team's lead_removes_own_pause: propose it") && error.contains("hgs team propose"), "{error}");
     apply(&mut on_setting, "settings", &json!({"settings":{"lead_removes_own_pause":true}}), &Actor::Human, &none, &mut events).unwrap();
     apply(&mut on_setting, "unpause-phase", &json!({"phase":2}), &lead(), &none, &mut events).unwrap();
     assert!(on_setting.phases[0].pause.is_none());
@@ -251,7 +251,7 @@ fn who_accepts_a_phase_is_the_owners_setting() {
     extend(&mut team, &json!({"tasks":[{"id":3,"title":"A","assignee":"dev"}]}), &lead(), &none, &mut events).unwrap();
     assert_eq!(team.phases[0].acceptance, PhaseAcceptance::Lead);
     let error = apply(&mut team, "settings", &json!({"settings":{"phase_acceptance":"owner"}}), &lead(), &none, &mut events).unwrap_err().to_string();
-    assert_eq!(error, "Only you change the team's phase_acceptance");
+    assert!(error.starts_with("Only you change the team's phase_acceptance: propose it") && error.contains("hgs team propose"), "{error}");
     apply(&mut team, "settings", &json!({"settings":{"phase_acceptance":"owner"}}), &Actor::Human, &none, &mut events).unwrap();
     extend(&mut team, &json!({"tasks":[{"id":4,"title":"B","assignee":"dev"}]}), &lead(), &none, &mut events).unwrap();
     assert_eq!(team.phases[1].acceptance, PhaseAcceptance::Owner);

@@ -710,7 +710,7 @@ fn approve(team: &mut Team, input: &Value, actor: &Actor, offline: &BTreeSet<Str
             || parent_approves(team, actor)
             || owner_word.is_some()
             || (team.settings.approval == Approval::Auto && actor.is_lead(team)),
-        "The lead approves only on the owner's word: pass \"owner_word\" with the owner's sentence"
+        "The lead approves only on the owner's word: propose {{\"kind\":\"approve\"}} as a card (hgs guide team-propose); the owner allows it with a click"
     );
     // U59: choosing at the start is the owner's own act, no proposal needed. A
     // lead's approval or an older client that sends no mode keeps standard.
@@ -993,7 +993,10 @@ fn ensure_lead_settings(old: &Settings, new: &Settings, actor: &Actor, on_word: 
         if field == "max_members" && on_word {
             continue;
         }
-        ensure!(old.get(field) == new.get(field), "Only you change the team's {field}");
+        ensure!(
+            old.get(field) == new.get(field),
+            "Only you change the team's {field}: propose it, {{\"kind\":\"settings\",\"settings\":{{\"{field}\":...}},\"reason\":\"...\"}} | hgs team propose --json, and the owner allows it with a click"
+        );
     }
     Ok(())
 }
@@ -1434,7 +1437,7 @@ fn add_to_phase(team: &mut Team, input: &Value, actor: &Actor, offline: &BTreeSe
     let running = plan::phase_summary(team).iter().any(|phase| phase["n"].as_u64() == Some(u64::from(n)) && phase["state"] == "running");
     ensure!(running, "Phase {n} is not running; add the task to a draft phase or extend the plan");
     let word = verified_word(input)?;
-    ensure!(!actor.is_lead(team) || word.is_some(), "The lead adds a task to a running phase only on your word: pass \"owner_word\"");
+    ensure!(!actor.is_lead(team) || word.is_some(), "The lead adds a task to a running phase only on your word: propose {{\"kind\":\"add-to-phase\"}} as a card (hgs guide team-propose); the owner allows it with a click");
     let at = now();
     team.pending_additions.retain(|pending| addition_fresh(pending, at));
     let by = actor.label(team);
@@ -1492,7 +1495,7 @@ fn add_to_phase(team: &mut Team, input: &Value, actor: &Actor, offline: &BTreeSe
             ensure!(typed == "add" || typed == n.to_string(), "Type \"add\" or \"{n}\" to confirm the addition");
             typed
         }
-        (None, _) => bail!("The lead adds a task to a running phase only on your word: pass \"owner_word\""),
+        (None, _) => bail!("The lead adds a task to a running phase only on your word: propose {{\"kind\":\"add-to-phase\"}} as a card (hgs guide team-propose); the owner allows it with a click"),
     };
     let pending = team.pending_additions.remove(found);
     // #754: the plan may have grown since the warning: the tasks move on to the
@@ -1533,7 +1536,7 @@ fn decide_phase(team: &mut Team, input: &Value, actor: &Actor, approve: bool, of
         // Section 9.3: a parent lead approves its sub-team's phases.
         ensure!(
             matches!(actor, Actor::Human) || parent_approves(team, actor) || owner_word.is_some(),
-            "The lead approves a phase only on the owner's word: pass \"owner_word\""
+            "The lead approves a phase only on the owner's word: propose {{\"kind\":\"approve-phase\"}} as a card (hgs guide team-propose); the owner allows it with a click"
         );
     }
     ensure!(matches!(team.status, TeamStatus::Running | TeamStatus::Paused), "The team is not running");
@@ -1564,7 +1567,7 @@ fn decide_phase(team: &mut Team, input: &Value, actor: &Actor, approve: bool, of
         } else if accepted {
             ensure!(
                 matches!(actor, Actor::Human) || parent_approves(team, actor) || owner_word.is_some(),
-                "Only you discard an accepted phase; the lead does it on your word: pass \"owner_word\""
+                "Only you discard an accepted phase; the lead does it on your word: propose {{\"kind\":\"discard-phase\"}} as a card (hgs guide team-propose); the owner allows it with a click"
             );
         }
     }
@@ -1742,7 +1745,7 @@ fn ensure_owner_or_word(team: &Team, actor: &Actor, input: &Value, n: u32, what:
     ensure!(actor.is_lead(team), "Only the lead or you change phase {n}");
     ensure!(
         verified_word(input)?.is_some(),
-        "The lead {what} only on the owner's word: pass \"owner_word\" with the owner's sentence naming phase {n} and the change"
+        "The lead {what} only on the owner's word: propose the change of phase {n} as a card (hgs guide team-propose); the owner allows it with a click"
     );
     Ok(())
 }
@@ -1807,7 +1810,7 @@ fn unpause_phase(team: &mut Team, input: &Value, actor: &Actor, events: &mut Vec
         ensure!(!pause.owner, "The owner paused phase {n}; only the owner removes that pause");
         ensure!(
             team.settings.lead_removes_own_pause || owner_word.is_some(),
-            "The lead removes its pause of phase {n} only on the owner's word: pass \"owner_word\" with the owner's sentence naming phase {n} (the owner may set lead_removes_own_pause)"
+            "The lead removes its pause of phase {n} only on the owner's word: propose {{\"kind\":\"unpause-phase\",\"phase\":{n}}} as a card (hgs guide team-propose); the owner allows it with a click (the owner may set lead_removes_own_pause)"
         );
     }
     let by = actor.label(team);
@@ -1896,7 +1899,7 @@ pub(crate) fn settle_acceptance(team: &mut Team, events: &mut Vec<Event>) {
 /// does it on the owner's word naming the phase. The phase is Done, and the
 /// phases after it may start.
 fn accept_phase_as_owner(team: &mut Team, input: &Value, actor: &Actor, events: &mut Vec<Event>) -> anyhow::Result<Value> {
-    ensure!(matches!(actor, Actor::Human) || actor.is_lead(team), "Only you accept a phase; the lead does it on your word");
+    ensure!(matches!(actor, Actor::Human) || actor.is_lead(team), "Only you accept a phase; the lead does it on your word: propose {{\"kind\":\"accept-phase\"}} as a card (hgs guide team-propose); the owner allows it with a click");
     ensure!(matches!(team.status, TeamStatus::Running | TeamStatus::Paused), "The team is not running");
     let n = phase_number(input)?;
     let at = team.phases.iter().position(|phase| phase.n == n).with_context(|| format!("Unknown phase {n}"))?;
@@ -1952,7 +1955,7 @@ fn return_to_draft(team: &mut Team, input: &Value, actor: &Actor, events: &mut V
     ensure!(owner_word.is_none() || actor.is_lead(team), "Only the lead acts on the owner's word");
     ensure!(
         matches!(actor, Actor::Human) || parent_approves(team, actor) || owner_word.is_some(),
-        "Only you return a phase to a draft; the lead does it on your word: pass \"owner_word\""
+        "Only you return a phase to a draft; the lead does it on your word: propose {{\"kind\":\"return-to-draft\"}} as a card (hgs guide team-propose); the owner allows it with a click"
     );
     ensure!(matches!(team.status, TeamStatus::Running | TeamStatus::Paused), "The team is not running");
     let n = phase_number(input)?;
@@ -3484,7 +3487,7 @@ fn swap_member(team: &mut Team, input: &Value, actor: &Actor, events: &mut Vec<E
     ensure!(
         matches!(actor, Actor::Human)
             || (actor.is_lead(team) && input["roster_word"].as_bool() == Some(true)),
-        "Only you swap a member; the lead needs your word"
+        "Only you swap a member; the lead needs your word: propose {{\"kind\":\"swap-member\"}} as a card (hgs guide team-propose); the owner allows it with a click"
     );
     ensure!(
         matches!(team.status, TeamStatus::Planning | TeamStatus::Running | TeamStatus::Paused),
@@ -4417,8 +4420,10 @@ fn propose(team: &mut Team, input: &Value, actor: &Actor, events: &mut Vec<Event
     let kind = text(input, "kind").to_owned();
     ensure!(
         ["add-member", "remove-member", "swap-member", "next-goal", "switch-plan-mode",
-         "add-to-phase", "cancel-tasks", "discard-phase", "question", "switch-setting"].contains(&kind.as_str()),
-        "A proposal adds or removes members, adds tasks to a running phase, cancels tasks, discards a phase, starts the next goal, switches the plan mode or a setting, or asks you a question"
+         "add-to-phase", "cancel-tasks", "discard-phase", "question", "switch-setting", "iron-rules"].contains(&kind.as_str())
+            || OWNER_OPS.contains(&kind.as_str()),
+        "A proposal is one of: add-member, remove-member, swap-member, next-goal, switch-plan-mode, add-to-phase, cancel-tasks, discard-phase, question, switch-setting, iron-rules, {}",
+        OWNER_OPS.join(", ")
     );
     let reason = clean(text(input, "reason").trim(), 2000, "A proposal reason")?;
     // #740: a question carries its own words; any other proposal its reason.
@@ -4463,6 +4468,20 @@ fn propose(team: &mut Team, input: &Value, actor: &Actor, events: &mut Vec<Event
         }
         "question" => question_change(input)?,
         "swap-member" => swap_change(team, input)?,
+        // Task #21: an owner-gated operation the owner allows with a click.
+        op if OWNER_OPS.contains(&op) => owner_op_change(team, op, input)?,
+        "iron-rules" => iron_rules_change(input)?,
+        // Task #21: the owner settings beyond the build broker go through the
+        // settings operation the card names.
+        "switch-setting" if text(input, "setting") != "build_broker" && OWNER_VALUE_SETTINGS.contains(&text(input, "setting")) => {
+            let setting = text(input, "setting").to_owned();
+            ensure!(input.get("value").is_some_and(|value| !value.is_null()), "A switch proposal names its value");
+            let mut settings = serde_json::Map::new();
+            settings.insert(setting, input["value"].clone());
+            let change = owner_op_change(team, "settings", &json!({"settings":settings}))?;
+            json!({"setting":text(input, "setting"),"value":input["value"],"op":"settings","input":change["input"],
+                   "summary":change["summary"],"lines":change["lines"]})
+        }
         "switch-setting" => {
             // #752: a switch card names one owner setting the lead may propose
             // and the value Allow sets.
@@ -4494,6 +4513,14 @@ fn propose(team: &mut Team, input: &Value, actor: &Actor, events: &mut Vec<Event
         let mut trial = team.clone();
         let mut ignored = Vec::new();
         run_proposal(&mut trial, &kind, &member, &change, &mode, "", "", &BTreeSet::new(), &mut ignored)
+            .map_err(|error| anyhow::anyhow!("Allow could not apply this proposal: {error:#}"))?;
+    }
+    // Task #21: an owner operation is tried as the owner's own request.
+    if OWNER_OPS.contains(&kind.as_str()) {
+        let mut trial = team.clone();
+        let mut value = change["input"].clone();
+        value["team"] = json!(team.id);
+        apply(&mut trial, &kind, &value, &Actor::Human, &BTreeSet::new(), &mut Vec::new())
             .map_err(|error| anyhow::anyhow!("Allow could not apply this proposal: {error:#}"))?;
     }
     let id = format!("p{}", team.proposals.len() + 1);
@@ -4701,7 +4728,17 @@ fn run_proposal(team: &mut Team, kind: &str, member: &Value, change: &Value, mod
             ));
             json!({"status":"switched","plan_mode":mode})
         }
+        "switch-setting" if change["op"] == "settings" => {
+            let mut value = change["input"].clone();
+            value["team"] = json!(team.id);
+            apply(team, "settings", &value, &Actor::Human, offline, events)?
+        }
         "switch-setting" => switch_setting(team, change, id, reason, events)?,
+        op if OWNER_OPS.contains(&op) => {
+            let mut value = change["input"].clone();
+            value["team"] = json!(team.id);
+            apply(team, op, &value, &Actor::Human, offline, events)?
+        }
         _ => bail!("A next-goal proposal is accepted with hgs team next-goal"),
     };
     Ok(result)
@@ -4709,6 +4746,175 @@ fn run_proposal(team: &mut Team, kind: &str, member: &Value, change: &Value, mod
 
 /// #752: the owner settings a lead may propose to switch, each a flag.
 pub(crate) const SWITCHES: [&str; 1] = ["build_broker"];
+
+/// Task #21 (owner, 2026-11-05): every operation the lead may run only on the
+/// owner's word is also a proposal kind. The card shows the exact change; the
+/// owner's Allow runs it as the owner's own `hgs team <op>`, once, under the
+/// proposal's request id; Reject changes nothing. A typed word stays accepted
+/// as a fallback, but no flow needs one.
+pub(crate) const OWNER_OPS: [&str; 14] = [
+    "relaunch",
+    "scale",
+    "drain",
+    "approve",
+    "approve-phase",
+    "return-to-draft",
+    "edit-draft",
+    "move-phase",
+    "unpause-phase",
+    "phase-acceptance",
+    "accept-phase",
+    "extend",
+    "settings",
+    // U62: one full test run, bound to its release.
+    "full-tests",
+];
+
+/// Task #21: owner settings a switch card sets through the settings operation
+/// (besides the build broker's flag).
+pub(crate) const OWNER_VALUE_SETTINGS: [&str; 3] = ["base_branch", "full_tests", "max_members"];
+
+/// The request fields a card never carries: who asks, its identity and any
+/// owner word, which the owner's Allow replaces.
+const CARD_RESERVED: [&str; 13] = [
+    "kind", "reason", "team", "request_id", "by", "attempt", "input", "owner_word", "owner_word_checked", "owner_word_event",
+    "owner_word_change", "owner_word_count", "roster_word",
+];
+
+/// Task #21: the change of an owner-operation card: the operation, its input
+/// (`"input":{...}`, or the proposal's own fields), and what the card says.
+fn owner_op_change(team: &Team, op: &str, input: &Value) -> anyhow::Result<Value> {
+    let mut given = match input.get("input") {
+        Some(Value::Object(fields)) => Value::Object(fields.clone()),
+        Some(other) if !other.is_null() => bail!("A proposal's \"input\" is the operation's request object"),
+        _ => {
+            let mut fields = input.as_object().cloned().unwrap_or_default();
+            fields.retain(|key, _| !CARD_RESERVED.contains(&key.as_str()));
+            Value::Object(fields)
+        }
+    };
+    if let Some(fields) = given.as_object_mut() {
+        fields.retain(|key, _| !CARD_RESERVED.contains(&key.as_str()));
+        // A team revision moves with every change, the proposal's own too;
+        // the phase operations read "revision" as their own and keep it.
+        if !matches!(op, "edit-draft" | "move-phase" | "discard-phase" | "extend") {
+            fields.remove("revision");
+        }
+    }
+    if op == "settings" {
+        ensure!(given.get("settings").is_some_and(Value::is_object) || given.get("members_update").is_some(),
+            "A settings proposal names \"settings\" (or \"members_update\"), such as {{\"kind\":\"settings\",\"settings\":{{\"max_members\":8}},\"reason\":\"...\"}}");
+    }
+    let (summary, lines) = describe_owner_op(team, op, &given);
+    Ok(json!({"op":op,"input":given,"summary":summary,"lines":lines}))
+}
+
+/// Task #21: what an owner-operation card says, in words the owner reads at a
+/// glance: the title and the lines under it.
+fn describe_owner_op(team: &Team, op: &str, input: &Value) -> (String, Vec<String>) {
+    let member = |key: &str| {
+        let id = text(input, key);
+        if id.is_empty() { "a member".to_owned() } else if team.member(id).is_some() { team.name_of(id) } else { id.to_owned() }
+    };
+    let n = input["phase"].as_u64().unwrap_or_default();
+    let phase = |n: u64| match team.phases.iter().find(|found| u64::from(found.n) == n).map(|found| found.title.trim().to_owned()) {
+        Some(title) if !title.is_empty() => format!("phase {n} ({title})"),
+        _ => format!("phase {n}"),
+    };
+    let mut lines = Vec::new();
+    let title = match op {
+        "relaunch" => format!("Relaunch {}", member("member")),
+        "drain" if input["draining"].as_bool() == Some(false) => format!("Keep {} (stop its drain)", member("member")),
+        "drain" => {
+            lines.push("It finishes its open work, takes nothing new, then its session is paused and it leaves the team.".to_owned());
+            format!("Drain {}", member("member"))
+        }
+        "scale" => {
+            let what: Vec<&str> = ["agent", "model", "effort", "account"].iter().map(|key| text(input, key)).filter(|value| !value.is_empty()).collect();
+            let count = input["count"].as_u64().unwrap_or_default();
+            if !what.is_empty() {
+                lines.push(what.join(", "));
+            }
+            format!("Add {count} × {}", text(input, "role").trim())
+        }
+        "approve" => {
+            lines.push(format!("{} tasks, {} members", team.tasks.len(), team.capped_members()));
+            "Approve the plan and run it".to_owned()
+        }
+        "approve-phase" => format!("Approve {}", phase(n)),
+        "return-to-draft" => format!("Return {} to a draft", phase(n)),
+        "edit-draft" => {
+            let changed = input["tasks_update"].as_array().map(Vec::len).unwrap_or_default();
+            if changed > 0 {
+                lines.push(format!("{changed} task changes"));
+            }
+            format!("Change {}", phase(n))
+        }
+        "move-phase" => format!("Move {} {}", phase(n), text(input, "position")).trim().to_owned(),
+        "unpause-phase" => format!("Remove the pause of {}", phase(n)),
+        "phase-acceptance" => format!("{} is accepted by {}", phase(n), input["acceptance"].as_str().unwrap_or("the default")),
+        "accept-phase" => {
+            if !text(input, "comment").is_empty() {
+                lines.push(text(input, "comment").chars().take(300).collect());
+            }
+            format!("Accept {}", phase(n))
+        }
+        "extend" => {
+            for task in input["tasks"].as_array().into_iter().flatten().take(20) {
+                lines.push(text(task, "title").chars().take(200).collect());
+            }
+            let count = input["tasks"].as_array().map(Vec::len).unwrap_or_default();
+            if n > 0 { format!("Add {count} tasks to {}", phase(n)) } else { format!("Add a phase of {count} tasks") }
+        }
+        "full-tests" if text(input, "release").trim().is_empty() || input["revoke"].as_bool() == Some(true) => {
+            "Revoke the full test run".to_owned()
+        }
+        "full-tests" => format!("Allow one full test run for {}", text(input, "release").trim()),
+        "settings" => {
+            let old = serde_json::to_value(&team.settings).unwrap_or_default();
+            for (field, value) in input["settings"].as_object().into_iter().flatten() {
+                let before = &old[field];
+                lines.push(if before.is_null() { format!("{field}: {value}") } else { format!("{field}: {before} → {value}") });
+            }
+            for update in input["members_update"].as_array().into_iter().flatten() {
+                let fields: Vec<&str> = update.as_object().into_iter().flatten().map(|(key, _)| key.as_str()).filter(|key| *key != "id").collect();
+                lines.push(format!("{}: {}", member_name(team, text(update, "id")), fields.join(", ")));
+            }
+            "Change the team's settings".to_owned()
+        }
+        other => other.to_owned(),
+    };
+    (title, lines)
+}
+
+fn member_name(team: &Team, id: &str) -> String {
+    if team.member(id).is_some() { team.name_of(id) } else { id.to_owned() }
+}
+
+/// Task #21: a card for the project's or a member session's iron rules
+/// (`hgs rules set`), checked now and set by the owner's Allow.
+fn iron_rules_change(input: &Value) -> anyhow::Result<Value> {
+    let mut given = match input.get("input") {
+        Some(Value::Object(fields)) => Value::Object(fields.clone()),
+        _ => {
+            let mut fields = input.as_object().cloned().unwrap_or_default();
+            fields.retain(|key, _| !CARD_RESERVED.contains(&key.as_str()));
+            Value::Object(fields)
+        }
+    };
+    if let Some(fields) = given.as_object_mut() {
+        fields.retain(|key, _| !CARD_RESERVED.contains(&key.as_str()));
+    }
+    let scope = text(&given, "scope").to_owned();
+    ensure!(matches!(scope.as_str(), "project" | "session"), "An iron-rules proposal names its scope, project or session");
+    let rules = super::super::iron_rules::validate(&given["rules"])?;
+    ensure!(given["expected_revision"].as_u64().is_some(), "An iron-rules proposal names the expected_revision it read");
+    let target = if scope == "project" { text(&given, "project").to_owned() } else { text(&given, "name").to_owned() };
+    ensure!(!target.is_empty(), "An iron-rules proposal names its project or session");
+    let summary = if scope == "project" { format!("Set the project's iron rules ({target})") } else { format!("Set the iron rules of {target}") };
+    let lines: Vec<String> = if rules.is_empty() { vec!["No rules".to_owned()] } else { rules.clone() };
+    Ok(json!({"op":"iron-rules","input":given,"summary":summary,"lines":lines}))
+}
 
 /// #752: Allow of a switch card sets the one setting it names.
 pub(crate) fn switch_setting(team: &mut Team, change: &Value, id: &str, reason: &str, events: &mut Vec<Event>) -> anyhow::Result<Value> {
@@ -5338,7 +5544,7 @@ pub(crate) fn apply(team: &mut Team, op: &str, input: &Value, actor: &Actor, off
                 matches!(actor, Actor::Human)
                     || (actor.is_lead(team)
                         && (input["roster_word"].as_bool() == Some(true) || (team.settings.lead_restarts_stuck && stuck))),
-                "Only you relaunch a member; the lead needs your word, or the owner's setting lead_restarts_stuck for a stuck member (hgs team settings with {{\"lead_restarts_stuck\":true}})"
+                "Only you relaunch a member; the lead proposes {{\"kind\":\"relaunch\",\"member\":\"ID\"}} as a card (hgs guide team-propose); the owner allows it with a click, or the owner's setting lead_restarts_stuck for a stuck member (hgs team settings with {{\"lead_restarts_stuck\":true}})"
             );
             let id = member_id;
             let by = actor.label(team);
@@ -5525,7 +5731,7 @@ pub(crate) fn apply(team: &mut Team, op: &str, input: &Value, actor: &Actor, off
             ensure!(
                 matches!(actor, Actor::Human)
                     || (actor.is_lead(team) && input["roster_word"].as_bool() == Some(true)),
-                "Only you remove a member; the lead needs your word"
+                "Only you remove a member; the lead needs your word: propose {{\"kind\":\"remove-member\"}} as a card (hgs guide team-propose); the owner allows it with a click"
             );
             let id = text(input, "member").to_owned();
             ensure!(id != team.lead, "The lead cannot be removed");

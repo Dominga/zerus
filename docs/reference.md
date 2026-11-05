@@ -1461,7 +1461,8 @@ leads and tasks are parsed strictly: an unknown field is refused with its name,
 the accepted fields and an example, and a wrong type with serde's reason. A
 task's text is `description`. A member without `account` starts on its
 computer's default account for its agent, which the preflight names.
-`max_members` counts the members besides the lead.
+`max_members` counts the members besides the lead; more members than that is a
+preflight error, so a plan, an approval and a draft's create are refused with it.
 
 `draft get` answers the draft's `fields` (name, goal, addendum, settings,
 members, tasks and plan mode). A draft update sets only the fields it names;
@@ -1667,6 +1668,35 @@ option or the owner's own words; the proposal becomes `answered` with `answer`,
 and the lead's inbox carries it with the question. Waiting for you lists the
 question and answers it in place, as it does a lead's own open AskUserQuestion
 (`hgs team answer` with the question's id and hash).
+
+Every change the lead may make only with the owner's consent is a card the
+owner answers with Allow or Reject (task #21, owner 2026-11-05); no flow needs a
+typed sentence. Besides the kinds above, a proposal's kind may be one of the
+owner-gated operations `relaunch`, `scale`, `drain`, `approve`, `approve-phase`,
+`return-to-draft`, `edit-draft`, `move-phase`, `unpause-phase`,
+`phase-acceptance`, `accept-phase`, `extend`, `settings` and `full-tests`, with
+the operation's own fields beside `kind` and `reason` (or in `"input":{...}`):
+
+```sh
+{"request_id":"<uuid>","team":"<id>","kind":"relaunch","member":"hgs",
+ "reason":"its session failed to start"} | hgs team propose --json
+{"request_id":"<uuid>","team":"<id>","kind":"settings","settings":{"max_members":8},
+ "reason":"two more testers"} | hgs team propose --json
+```
+
+The proposal's `change` keeps `op`, the checked `input`, and the `summary` and
+`lines` the card shows. Allow runs that operation as the owner's own `hgs team
+<op>` (the same checks, adoption, budgets and side effects) under the
+proposal's stored request id, so a retried Allow answers its receipt and never
+applies the change twice; Reject changes nothing. `proposal_decided` names the
+`op`, the `summary` and the `request` it ran under, beside the operation's own
+events by You. A `switch-setting` card also sets `base_branch`, `full_tests` or
+`max_members` through the settings operation, and `iron-rules` (with `scope`
+project or session, its `project` or session `name`, run and conversation ids,
+`rules` and `expected_revision`) sets those rules as `hgs rules set` does. A
+typed owner word stays a fallback: its quote may be part of the owner's
+message, one message pays once for each member it names, and the check reads
+the lead session's main messages, not its last 200 events of any kind.
 
 Integration and a build are ordinary lead tasks, not a phase barrier. The owner
 or the lead adds the build for the open phase (`hgs team integrate-build`) and

@@ -66,6 +66,10 @@ int TeamNewTab::s_pollInterval = 2000;
 
 void TeamNewTab::setDraftPollInterval(int milliseconds) { s_pollInterval = milliseconds; }
 
+int TeamNewTab::s_saveTimeout = 30000;
+
+void TeamNewTab::setSaveTimeout(int milliseconds) { s_saveTimeout = milliseconds; }
+
 TeamNewTab::TeamNewTab(TeamController *teams, HgsClient *client, const QList<Computer> &computers, const Coordinator &coordinator,
                        const QString &project, QWidget *parent)
     : QWidget(parent), m_teams(teams), m_client(client), m_computers(computers), m_coordinator(coordinator), m_project(project)
@@ -92,10 +96,16 @@ TeamNewTab::TeamNewTab(TeamController *teams, HgsClient *client, const QList<Com
     m_progress = new QProgressBar; m_progress->setRange(0, 0); m_progress->setFixedSize(120, 4); m_progress->setTextVisible(false); m_progress->hide();
     m_discard = button(tr("Discard draft"), "teamNewDiscard");
     m_create = button(tr("Create team"), "teamNewCreate", true);
+    // Task #18: the owner's unsaved fields hide the lead's; this shows the
+    // lead's version instead, on the owner's click only.
+    m_useLead = button(tr("Show the lead's version"), "teamNewUseLead");
+    m_useLead->setToolTip(tr("Drop your unsaved changes and show the draft as the lead last saved it"));
+    m_useLead->hide();
     fh->addWidget(m_summary, 1); fh->addWidget(m_preflight); fh->addWidget(m_progress); fh->addWidget(m_reason);
-    fh->addWidget(m_discard); fh->addWidget(m_create);
+    fh->addWidget(m_useLead); fh->addWidget(m_discard); fh->addWidget(m_create);
     outer->addWidget(footer);
     connect(m_create, &QPushButton::clicked, this, [this] { createTeam(); });
+    connect(m_useLead, &QPushButton::clicked, this, [this] { useLeadVersion(); });
     connect(m_discard, &QPushButton::clicked, this, [this] { discardDraft(); });
 
     // Accounts per computer, for the account combos and the signed-in check.
@@ -814,7 +824,7 @@ void TeamNewTab::renderUnseen()
 void TeamNewTab::validate()
 {
     // B6: a combo signal may reach validate before the last widgets exist.
-    if (!m_folderPolicy || !m_name || !m_create || !m_start || !m_goal) return;
+    if (!m_folderPolicy || !m_name || !m_create || !m_useLead || !m_start || !m_goal) return;
     const Colors c = colorsFor(m_dark);
     const QString folder = m_folder->text().trimmed();
     // #744: never a stat on this thread. Until the worker answers, what depends
@@ -891,20 +901,34 @@ void TeamNewTab::validate()
     m_reason->setStyleSheet(QStringLiteral("color:%1;").arg((drafting ? c.danger : c.muted).name()));
     m_reason->setVisible(!reason.isEmpty() && !m_creating);
     if (!m_creating) {
-        QString summary;
-        if (!m_saveError.isEmpty()) summary = QStringLiteral("<span style='color:%1;'>%2</span>").arg(c.danger.name(), tr("Not saved: %1").arg(m_saveError.toHtmlEscaped()));
-        else if (!drafting) summary = QStringLiteral("<span style='color:%1;'>%2</span>").arg(c.muted.name(), tr("Nothing is created until you press <b>Start planning</b>."));
+        // Task #18: every refusal stays in sight, each on its own line: a create
+        // hgs refused, a save it refused and a read that failed.
+        QStringList lines;
+        const auto line = [&lines](const QColor &color, const QString &text) {
+            lines << QStringLiteral("<span style='color:%1;'>%2</span>").arg(color.name(), text);
+        };
+        if (!m_createError.isEmpty()) line(c.danger, tr("Not created: %1").arg(m_createError.toHtmlEscaped()));
+        if (!m_saveError.isEmpty()) {
+            const QStringList unsent(m_dirty.cbegin(), m_dirty.cend());
+            QStringList sorted = unsent; sorted.sort();
+            line(c.danger, sorted.isEmpty() ? tr("Not saved: %1").arg(m_saveError.toHtmlEscaped())
+                                            : tr("Not saved (%1): %2").arg(sorted.join(QStringLiteral(", ")).toHtmlEscaped(), m_saveError.toHtmlEscaped()));
+        }
+        if (!m_readError.isEmpty()) line(c.danger, tr("The lead's edits cannot be read: %1").arg(m_readError.toHtmlEscaped()));
+        if (!drafting) line(c.muted, tr("Nothing is created until you press <b>Start planning</b>."));
         else {
             const QString saved = m_savedAt.isValid() ? tr("Draft saved %1").arg(QLocale().toString(m_savedAt.time(), QLocale::ShortFormat)) : tr("Draft");
-            summary = QStringLiteral("<span style='color:%1;'>%2 · rev %3</span>").arg(c.muted.name(), saved).arg(m_revision);
+            line(c.muted, QStringLiteral("%1 · rev %2").arg(saved).arg(qMax(m_revision, m_serverRevision)));
             // Feedback 1: the lead's newer revision is shown except the fields
             // the owner is still changing; the line names them.
             if (!m_keptFields.isEmpty())
-                summary += QStringLiteral("<br><span style='color:%1;'>%2</span>").arg(c.warn.name(),
-                    tr("Revision %1 from the lead is shown except your unsaved %2, which are sent on top of it").arg(m_serverRevision).arg(m_keptFields.join(QStringLiteral(", ")).toHtmlEscaped()));
+                line(c.warn, tr("Revision %1 from the lead is shown except your unsaved %2, which are sent on top of it").arg(m_serverRevision).arg(m_keptFields.join(QStringLiteral(", ")).toHtmlEscaped()));
         }
-        m_summary->setText(summary);
+        m_summary->setText(lines.join(QStringLiteral("<br>")));
     }
+    // Task #18: the owner's unsaved fields that hide the lead's version, or
+    // that do not save, can be dropped for the lead's version.
+    m_useLead->setVisible(drafting && !m_creating && !m_dirty.isEmpty() && (!m_keptFields.isEmpty() || !m_saveError.isEmpty()));
     // The preflight of the draft: ok, or its errors and warnings.
     m_preflight->setVisible(drafting);
     QStringList parts;
@@ -1041,10 +1065,27 @@ void TeamNewTab::flush()
     QJsonObject set;
     for (const auto &field : draftFields) if (m_dirty.contains(field)) set.insert(field, fieldValue(field));
     m_sending = true;
+    const quint64 seq = ++m_sendSeq;
     validate();
+    // Task #18: a save that never answers ends here, says so and goes again;
+    // a stuck save held every later save and Create team.
+    QTimer::singleShot(s_saveTimeout, this, [this, seq, draft = m_draft] {
+        if (seq != m_sendSeq || !m_sending || draft != m_draft) return;
+        m_sending = false; ++m_sendSeq;
+        m_saveError = tr("the draft did not answer within %1 seconds; it is sent again").arg(s_saveTimeout / 1000);
+        if (m_createAfterSave) {
+            m_createAfterSave = false; m_create->setText(tr("Create team"));
+            m_createError = tr("the draft did not save first: %1").arg(m_saveError);
+        }
+        validate();
+        m_flushTimer.start();
+    });
     const QJsonObject input{{"action", "update"}, {"team", m_draft}, {"revision", m_revision}, {"set", set}};
-    m_teams->call(QStringLiteral("draft"), input, [this, guard = QPointer<TeamNewTab>(this), set, draft = m_draft](bool ok, const QJsonObject &result, const QString &error) {
+    m_teams->call(QStringLiteral("draft"), input, [this, guard = QPointer<TeamNewTab>(this), set, seq, draft = m_draft](bool ok, const QJsonObject &result, const QString &error) {
         if (!guard) return;
+        // The answer of a save the timeout already ended: the next read and
+        // the save sent since decide.
+        if (seq != m_sendSeq) return;
         // Feedback 2026-11-04 (1-3): a send whose answer arrived after the tab
         // moved to another draft still ends; a stuck send held every later
         // save, every read of the lead's edits and Create team.
@@ -1053,11 +1094,16 @@ void TeamNewTab::flush()
         if (!ok) {
             // Someone wrote first: the owner's edit still wins, against the
             // revision the refusal names. Once; then the next read decides.
+            // Only the revision to send moves: the fields of that revision
+            // are shown by the next read (task #18).
             static const QRegularExpression stale(QStringLiteral("Draft revision is (\\d+) now"));
             const auto match = stale.match(error);
             if (match.hasMatch() && !m_retried) { m_retried = true; m_revision = match.captured(1).toLongLong(); flush(); return; }
             m_retried = false; m_saveError = error;
-            if (m_createAfterSave) { m_createAfterSave = false; m_create->setText(tr("Create team")); }
+            if (m_createAfterSave) {
+                m_createAfterSave = false; m_create->setText(tr("Create team"));
+                m_createError = tr("the draft did not save first: %1").arg(error);
+            }
             validate();
             // The edits stay to be sent: try again later rather than leave
             // Create team waiting on a save nothing retries.
@@ -1068,6 +1114,8 @@ void TeamNewTab::flush()
         m_revision = result.value("draft_revision").toInteger(m_revision + 1);
         // A field changed again while this went out stays to be sent.
         for (auto it = set.constBegin(); it != set.constEnd(); ++it) if (fieldValue(it.key()) == it.value()) m_dirty.remove(it.key());
+        // A saved field is no longer kept over the lead's version.
+        m_keptFields.removeIf([this](const QString &f) { return !m_dirty.contains(f); });
         if (result.value("unseen").isArray()) { m_unseen.clear(); for (const auto &f : result.value("unseen").toArray()) m_unseen << f.toString(); }
         m_savedAt = QDateTime::currentDateTime();
         renderUnseen(); validate();
@@ -1080,7 +1128,8 @@ void TeamNewTab::flush()
 void TeamNewTab::openDraft(const QString &team)
 {
     if (team.isEmpty() || team == m_draft) return;
-    m_draft = team; m_revision = 0; m_dirty.clear(); m_saveError.clear();
+    m_draft = team; m_revision = m_appliedRevision = 0; m_dirty.clear(); m_keptFields.clear();
+    m_saveError.clear(); m_readError.clear(); m_createError.clear();
     renderLead(); validate();
     readDraft();
     if (isVisible()) m_pollTimer.start(s_pollInterval);
@@ -1089,15 +1138,19 @@ void TeamNewTab::openDraft(const QString &team)
 void TeamNewTab::readDraft()
 {
     if (m_draft.isEmpty()) return;
-    m_teams->call(QStringLiteral("status"), {{"team", m_draft}}, [this, guard = QPointer<TeamNewTab>(this), draft = m_draft](bool ok, const QJsonObject &result, const QString &) {
-        if (!guard || draft != m_draft || !ok || m_sending) return;
-        // The settings as stored; the form changes only its own fields.
-        if (!m_dirty.contains("settings")) m_settings = result.value("settings").toObject();
-        applyDraft(Teams::parse(result));
+    m_teams->call(QStringLiteral("status"), {{"team", m_draft}}, [this, guard = QPointer<TeamNewTab>(this), draft = m_draft](bool ok, const QJsonObject &result, const QString &error) {
+        if (!guard || draft != m_draft) return;
+        // Task #18: a read that fails says so; it never passed silently.
+        if (!ok) { if (m_readError != error) { m_readError = error; validate(); } return; }
+        m_readError.clear();
+        // A save in flight no longer holds the read back: the fields it sends
+        // stay the owner's until it is answered, and the lead's other edits
+        // show at once.
+        applyDraft(Teams::parse(result), result.value("settings").toObject());
     }, false);
 }
 
-void TeamNewTab::applyDraft(const Teams::Team &team)
+void TeamNewTab::applyDraft(const Teams::Team &team, const QJsonObject &settings)
 {
     if (team.id != m_draft) return;
     if (!team.draft()) {
@@ -1111,16 +1164,26 @@ void TeamNewTab::applyDraft(const Teams::Team &team)
     // Revisions only grow: a read that left before the last update is old.
     if (team.draftRevision < m_revision) return;
     m_serverRevision = team.draftRevision;
-    m_keptFields.clear();
-    if (team.draftRevision != m_revision)
-        for (const auto &field : m_dirty) m_keptFields << field;
+    // Task #18: the fields are shown for every revision the form has not shown
+    // yet, also when its own save or a stale refusal already named that
+    // revision; comparing with the revision to send skipped the lead's edits
+    // made meanwhile. Fields kept for the owner stay named until they are saved
+    // or dropped.
+    const bool newer = team.draftRevision != m_appliedRevision;
+    m_keptFields.removeIf([this](const QString &field) { return !m_dirty.contains(field); });
+    if (newer && m_appliedRevision > 0)
+        for (const auto &field : draftFields) if (m_dirty.contains(field) && !m_keptFields.contains(field)) m_keptFields << field;
     if (const auto *lead = team.member(team.lead)) m_leadSessionName = lead->session;
-    if (team.draftRevision != m_revision) {
+    if (newer) {
         // The lead's edits, except the fields the owner is changing now.
         m_applying = true;
-        if (!m_dirty.contains("name") && m_name->text() != team.name) m_name->setText(team.name);
-        if (!m_dirty.contains("goal") && m_goal->toPlainText() != team.goal) m_goal->setPlainText(team.goal);
-        if (!m_dirty.contains("addendum") && m_protocol->toPlainText() != team.leadProtocol) {
+        // The settings as stored; the form changes only its own fields.
+        if (!m_dirty.contains("settings")) m_settings = settings;
+        // The form sends its texts trimmed: a text that differs only there is
+        // the one just saved, and is left alone so the cursor stays.
+        if (!m_dirty.contains("name") && m_name->text().trimmed() != team.name.trimmed()) m_name->setText(team.name);
+        if (!m_dirty.contains("goal") && m_goal->toPlainText().trimmed() != team.goal.trimmed()) m_goal->setPlainText(team.goal);
+        if (!m_dirty.contains("addendum") && m_protocol->toPlainText().trimmed() != team.leadProtocol.trimmed()) {
             m_protocol->setPlainText(team.leadProtocol);
             if (!team.leadProtocol.isEmpty()) m_protocolEdited = true;
         }
@@ -1143,7 +1206,8 @@ void TeamNewTab::applyDraft(const Teams::Team &team)
             renderMembers();
         }
         if (!m_dirty.contains("tasks")) { m_tasks = team.tasks; renderPlan(); }
-        m_revision = team.draftRevision;
+        m_revision = qMax(m_revision, team.draftRevision);
+        m_appliedRevision = team.draftRevision;
         m_applying = false;
     }
     m_unseen = team.draftUnseen;
@@ -1169,17 +1233,20 @@ void TeamNewTab::createTeam()
 {
     validate();
     if (!m_create->isEnabled()) return;
+    // A new press asks again: the last refusal goes until hgs answers.
+    m_createError.clear();
     // Unsaved edits go out first; the create follows the save that clears them.
     if (m_sending || !m_dirty.isEmpty()) {
         m_createAfterSave = true;
         m_create->setText(tr("Saving…"));
+        validate();
         flush();
         // Feedback 2: a save that does not finish says so instead of leaving
         // Create team waiting with nothing sent.
-        QTimer::singleShot(30000, this, [this, guard = QPointer<TeamNewTab>(this), draft = m_draft] {
+        QTimer::singleShot(s_saveTimeout, this, [this, guard = QPointer<TeamNewTab>(this), draft = m_draft] {
             if (!guard || draft != m_draft || !m_createAfterSave || m_creating) return;
             m_createAfterSave = false; m_create->setText(tr("Create team"));
-            if (m_saveError.isEmpty()) m_saveError = tr("the draft did not save within 30 seconds, so Create team was not sent; press it again");
+            m_createError = tr("the draft did not save within %1 seconds, so Create team was not sent; press it again").arg(s_saveTimeout / 1000);
             validate();
         });
         return;
@@ -1194,11 +1261,29 @@ void TeamNewTab::createTeam()
         [this, guard = QPointer<TeamNewTab>(this)](bool ok, const QJsonObject &result, const QString &error) {
             if (!guard) return;
             m_creating = false; m_progress->hide(); m_create->setText(tr("Create team"));
-            if (!ok) { m_saveError = error; validate(); return; }
+            // Task #18: hgs refused the create; its reason is the form's, not a
+            // save's, and stays until the next press. The draft is read again,
+            // so its preflight names the same errors.
+            if (!ok) { m_createError = error.isEmpty() ? tr("hgs refused without a reason") : error; validate(); readDraft(); return; }
             const QString id = result.value("team").toString(m_draft);
             resetDraft();
             if (created) created(id);
         });
+}
+
+void TeamNewTab::useLeadVersion()
+{
+    if (m_draft.isEmpty() || m_dirty.isEmpty()) return;
+    // The owner's unsaved fields go; the next read shows the lead's version of
+    // every field, as a newly opened draft does.
+    m_flushTimer.stop();
+    // A save still in flight answers for fields that are no longer the owner's.
+    if (m_sending) { m_sending = false; ++m_sendSeq; }
+    m_dirty.clear(); m_keptFields.clear(); m_saveError.clear(); m_retried = false;
+    m_appliedRevision = 0;
+    if (m_createAfterSave) { m_createAfterSave = false; m_create->setText(tr("Create team")); }
+    validate();
+    readDraft();
 }
 
 void TeamNewTab::discardDraft()
@@ -1232,8 +1317,8 @@ void TeamNewTab::discardDraft()
 void TeamNewTab::resetDraft()
 {
     m_pollTimer.stop(); m_flushTimer.stop();
-    m_draft.clear(); m_leadSessionName.clear(); m_revision = 0;
-    m_dirty.clear(); m_unseen.clear(); m_preflightErrors.clear(); m_preflightWarnings.clear();
-    m_tasks.clear(); m_settings = {}; m_saveError.clear(); m_savedAt = {};
+    m_draft.clear(); m_leadSessionName.clear(); m_revision = m_appliedRevision = m_serverRevision = 0;
+    m_dirty.clear(); m_keptFields.clear(); m_unseen.clear(); m_preflightErrors.clear(); m_preflightWarnings.clear();
+    m_tasks.clear(); m_settings = {}; m_saveError.clear(); m_readError.clear(); m_createError.clear(); m_savedAt = {};
     renderLead(); renderPlan(); renderUnseen(); renderMembers();
 }

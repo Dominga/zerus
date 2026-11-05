@@ -28,6 +28,17 @@ QString kindLabel(const QString &kind)
     if (kind == "discard-phase") return TeamProposalCards::tr("Phase");
     if (kind == "question") return TeamProposalCards::tr("Question");
     if (kind == "switch-setting") return TeamProposalCards::tr("Setting");
+    // Task #21: every owner-gated operation is a card too.
+    if (kind == "relaunch") return TeamProposalCards::tr("Relaunch");
+    if (kind == "scale") return TeamProposalCards::tr("Members");
+    if (kind == "drain") return TeamProposalCards::tr("Drain");
+    if (kind == "approve" || kind == "approve-phase") return TeamProposalCards::tr("Approval");
+    if (kind == "return-to-draft" || kind == "edit-draft" || kind == "move-phase" || kind == "unpause-phase" || kind == "phase-acceptance"
+        || kind == "accept-phase" || kind == "extend")
+        return TeamProposalCards::tr("Phase");
+    if (kind == "settings") return TeamProposalCards::tr("Setting");
+    if (kind == "iron-rules") return TeamProposalCards::tr("Iron rules");
+    if (kind == "full-tests") return TeamProposalCards::tr("Tests");
     return kind;
 }
 
@@ -340,6 +351,9 @@ bool TeamProposalCards::ask(const View &view)
         title = tr("Cancel tasks?"); text = tr("%1?\n%2").arg(view.what, view.lines.join(QLatin1Char('\n'))); action = tr("Cancel tasks");
     } else if (view.kind == "discard-phase") {
         title = tr("Discard phase?"); text = tr("%1? Its tasks are cancelled and the later phases close up.").arg(view.what); action = tr("Discard");
+    } else if (view.kind == "drain") {
+        // Task #21: a drain removes the member once its open work is done.
+        title = tr("Drain member?"); text = tr("%1? %2").arg(view.what, view.lines.join(QLatin1Char(' '))); action = tr("Drain");
     } else return true;
     const QScopedValueRollback<bool> asking(m_asking, true);
     if (confirm) return confirm(title, text, action);

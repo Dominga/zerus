@@ -405,7 +405,9 @@ fn the_owners_word_adds_a_member_by_role_and_raises_a_full_cap() {
     let now = crate::state::now();
     let sentence = "может еще одного дипсик бэкендера добавим?";
     let frontend = "может еще одного фронтендера добавим?";
-    let stale = "еще одного дипсик бэкендера добавим";
+    // Task #21: a quote may be part of a fresh message, so the stale one has
+    // words of its own.
+    let stale = "давай добавим еще дипсик бэкендера";
     let relayed = "[Zerus team · from: Zerus] should we add a backend?";
     owner_word_events(dir.path(), &[
         (now - 60.0, sentence),

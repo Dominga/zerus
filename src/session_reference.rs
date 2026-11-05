@@ -218,7 +218,8 @@ fn print(reference: &Reference, as_json: bool, extra: Value) -> cli::Result<i32>
 }
 
 /// `hgs self`: the reference of the agent whose process runs this CLI, under
-/// its current name. Only verified native ancestry identifies the caller.
+/// its current name. Verified native ancestry identifies the caller, or for a
+/// DeepSeek tool command (task #34) the binding of its DSH_SESSION_ID.
 pub(crate) fn current(config: &Config, args: &[String]) -> cli::Result<i32> {
     let as_json = match args {
         [] => false,
@@ -233,7 +234,7 @@ pub(crate) fn current(config: &Config, args: &[String]) -> cli::Result<i32> {
 /// The reference and provider of the live agent whose process runs this CLI,
 /// under its current name; `None` when no agent's ancestry owns it.
 fn caller(config: &Config) -> cli::Result<Option<(Reference, String)>> {
-    let Some(record) = state::session_graph::caller_record() else {
+    let Some(record) = self_record() else {
         return Ok(None);
     };
     let text = |key: &str| record[key].as_str().unwrap_or_default().to_owned();
@@ -247,6 +248,15 @@ fn caller(config: &Config) -> cli::Result<Option<(Reference, String)>> {
         agent: String::new(),
     };
     Ok(Some((reference, text("agent"))))
+}
+
+/// The calling agent's record. Task #34: a DeepSeek tool command has no hgs
+/// session environment and runs under the shared DeepSeek host, so ancestry
+/// never names it ("hgs self: no live Zerus session owns this process"); its
+/// harness exports the conversation as DSH_SESSION_ID, whose binding is the
+/// session, as `hgs run` and `hgs team` take it.
+fn self_record() -> Option<serde_json::Value> {
+    state::session_graph::caller_record().or_else(state::dsh_caller_record)
 }
 
 /// The text a guarded send of the calling agent delivers: `text` inside one
@@ -347,6 +357,29 @@ pub(crate) fn inspect(config: &Config, reference: &Reference) -> cli::Result<Val
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// Task #34 (audit #29 P6): `hgs self` from a DeepSeek tool command said
+    /// "no live Zerus session owns this process": it has no hgs session
+    /// environment and no hgs process above it. The binding of its
+    /// DSH_SESSION_ID is its session now.
+    #[test]
+    fn hgs_self_takes_a_deepseek_tool_commands_binding() {
+        let root = tempfile::tempdir().unwrap();
+        state::with_test_state_root(root.path(), || {
+            if state::session_graph::caller_record().is_some() {
+                return; // run inside a real session: its own record answers first
+            }
+            assert!(self_record().is_none(), "no session and no DeepSeek conversation");
+            state::builds_test_support::write_qa_binding();
+            state::builds_test_support::set_dsh_session(Some("session-10e9dd92-4a7a-49be-a139-da281115f842"));
+            let found = self_record();
+            state::builds_test_support::set_dsh_session(None);
+            let found = found.expect("the DeepSeek binding is the caller");
+            assert_eq!(found["name"], "dsh/Zerus/zerus-next-for-the-fork-qa");
+            assert_eq!(found["run_id"], "ba3d8c92-041c-4e14-81b2-b2e63f0e7ee7");
+        });
+    }
+
     #[test]
     fn strict_uri_round_trip_and_ambiguous_fields() {
         let reference = Reference {

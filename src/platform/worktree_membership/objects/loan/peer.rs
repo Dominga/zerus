@@ -91,10 +91,23 @@ pub(crate) struct Peer {
     image: Image,
 }
 impl Peer {
-    pub(crate) fn pin(pid: u32, birth: &str, until: Instant) -> io::Result<Self> {
+    pub(crate) fn pin(
+        pid: u32,
+        birth: &str,
+        parent: u32,
+        audit: Option<&[u32; 8]>,
+        until: Instant,
+    ) -> io::Result<Self> {
         check(until)?;
+        if audit.is_some() {
+            return Err(invalid());
+        }
         let before = crate::platform::process_identity(pid).ok_or_else(invalid)?;
-        if pid == std::process::id() || before.birth != birth {
+        if pid == std::process::id()
+            || before.birth != birth
+            || parent == 0
+            || before.parent != parent
+        {
             return Err(invalid());
         }
         let pin = PinnedProcess::pin(pid, birth).map_err(io::Error::other)?;
@@ -120,9 +133,10 @@ impl Peer {
         stream: &UnixStream,
         pid: u32,
         birth: &str,
+        audit: Option<&[u32; 8]>,
         until: Instant,
     ) -> io::Result<Self> {
-        let peer = Self::pin(pid, birth, until)?;
+        let peer = Self::pin(pid, birth, std::process::id(), audit, until)?;
         peer.current(stream, until)?;
         Ok(peer)
     }
@@ -150,6 +164,9 @@ impl Peer {
             .map(|state| state == ProcessState::Exited)
             .map_err(io::Error::other)
     }
+}
+pub(crate) fn own_audit() -> io::Result<Option<[u32; 8]>> {
+    Ok(None)
 }
 
 #[cfg(test)]

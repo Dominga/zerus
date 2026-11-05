@@ -96,10 +96,20 @@ fn emit(out: &mut impl Write, reply: &Reply) -> Result<()> {
         .map_err(failed)
 }
 
-/// Not dispatched yet. The native owner must supply its guarded original
-/// child, Source/environment/Actions custody and actual-join factory first.
-/// Keeping the control loop private prevents an incomplete caller from being
-/// mistaken for stop/Force support on an older or unqualified frontend.
+/// Only custody DATA is implemented here. This command neither schedules an
+/// effect nor advertises a stop/Force capability. Native callers must separately
+/// retain Source/Actions and supply their actual-join control provenance.
+pub(super) fn run(args: &[String]) -> Result<i32> {
+    if args != ["--json"] {
+        return Err(
+            "usage: hgs worktrees program-holder --json (private custody stream on stdin)".into(),
+        );
+    }
+    let config = crate::config::Config::load().map_err(failed)?;
+    serve(&config, io::stdin().as_raw_fd(), &mut io::stdout().lock())?;
+    Ok(0)
+}
+
 fn serve(config: &crate::config::Config, input: RawFd, out: &mut impl Write) -> Result<()> {
     let mut reader = Reader::default();
     let Control::Open {
@@ -139,7 +149,10 @@ fn serve(config: &crate::config::Config, input: RawFd, out: &mut impl Write) -> 
             manifest: Box::new(manifest.clone()),
             holder: NativeChild {
                 pid: std::process::id(),
+                parent: original.parent,
                 birth: original.birth,
+                audit: crate::platform::worktree_membership::objects::loan::peer::own_audit()
+                    .map_err(failed)?,
             },
             socket: socket.to_str().ok_or(INVALID)?.into(),
         },
@@ -188,8 +201,14 @@ fn serve(config: &crate::config::Config, input: RawFd, out: &mut impl Write) -> 
                     }
                     let deadline =
                         until.min(Instant::now() + Duration::from_millis(remaining_millis));
-                    let original =
-                        Peer::pin(borrower.pid, &borrower.birth, deadline).map_err(failed)?;
+                    let original = Peer::pin(
+                        borrower.pid,
+                        &borrower.birth,
+                        borrower.parent,
+                        borrower.audit.as_ref(),
+                        deadline,
+                    )
+                    .map_err(failed)?;
                     holder
                         .arm(&input, original, now() as u64, deadline)
                         .map_err(failed)?;

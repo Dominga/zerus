@@ -190,6 +190,8 @@ pub(crate) const USAGE: &str = r#"usage: hgs [@host] <cmd> [project] [-c [ID]] [
        hgs [@host] worktrees review --path PATH [--worktree WORKTREE] [--json]   cleanup verdicts and fingerprints
        hgs [@host] worktrees programs --json   bounded read-only native program manifest (stdin)
        Worktree programs ABI: worktree-programs-v1
+       hgs [@host] worktrees program-holder --json   bounded read-only native checkout custody (stdin)
+       Worktree program custody ABI: worktree-program-custody-v1
        hgs [@host] worktrees policy get|set --json   worktree-maintenance-v1 (host-local cleanup rules)
        hgs [@host] worktrees sweep --json   one bounded automatic cleanup step
        hgs [@host] worktrees inspect --path WORKTREE --common-dir DIR [--file RELATIVE_PATH] [--json]   bounded read-only changes
@@ -446,6 +448,9 @@ pub(crate) fn usage() -> &'static str {
 const UNIX_ONLY_COMMANDS: [&str; 3] = ["notify", "clip", "paste"];
 /// Lines for Unix commands/input bindings or the POSIX creation ABIs.
 fn unix_only_usage(line: &str) -> bool {
+    if line.contains("worktrees program-holder ") {
+        return true;
+    }
     if [
         zerus_client_core::desktop::creation_clone::HELP_MARKER,
         zerus_client_core::desktop::creation_worktree::HELP_MARKER,
@@ -458,6 +463,7 @@ fn unix_only_usage(line: &str) -> bool {
         zerus_client_core::desktop::deferred_answer::UPDATE_PHASE_MARKER,
         zerus_client_core::desktop::compact_to_send::HELP_MARKER,
         zerus_client_core::desktop::task_start_reconcile::HELP_MARKER,
+        zerus_client_core::worktree_programs::custody::HELP_MARKER,
     ]
     .contains(&line.trim())
     {

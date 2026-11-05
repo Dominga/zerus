@@ -382,6 +382,12 @@ pub(super) fn catalog_until(path: &Path, refresh: bool, deadline: Instant) -> Va
 
 pub(super) fn dispatch(args: &[String]) -> Result<i32> {
     let action = args.first().map(String::as_str);
+    if action == Some("program-holder") {
+        #[cfg(any(target_os = "linux", target_os = "macos"))]
+        return super::worktree_programs::hold(&args[1..]);
+        #[cfg(not(any(target_os = "linux", target_os = "macos")))]
+        return Err("Native worktree custody is unavailable on this computer".into());
+    }
     if let Some(
         action @ ("create" | "status" | "cancel" | "review" | "inspect" | "remove" | "keep-folder"
         | "leftovers" | "delete-leftover" | "policy" | "sweep" | "programs"),

@@ -1,3 +1,5 @@
+//! Native custody fixtures only. Self-reported Mac test tokens exercise kernel
+//! correlation, not paired live-code proof or any stop/Force authority.
 use super::*;
 use std::{
     io::{Read, Write},
@@ -19,6 +21,14 @@ fn original_helper_fixture() {
         return;
     };
     let socket = UnixStream::connect(path).unwrap();
+    #[cfg(target_os = "macos")]
+    super::super::transport::send(
+        &socket,
+        &serde_json::to_vec(&own_audit().unwrap()).unwrap(),
+        &[],
+        until(),
+    )
+    .unwrap();
     let mut byte = [0];
     if std::io::stdin().read(&mut byte).unwrap() == 1 {
         if byte == *b"E" {
@@ -68,6 +78,7 @@ impl Drop for OwnedChild {
 pub(crate) struct Fixture {
     pub(crate) child: OwnedChild,
     pub(crate) socket: UnixStream,
+    pub(crate) audit: Option<[u32; 8]>,
     _dir: tempfile::TempDir,
 }
 impl Fixture {
@@ -113,9 +124,20 @@ impl Fixture {
             }
             std::thread::sleep(Duration::from_millis(1));
         };
+        #[cfg(target_os = "macos")]
+        let audit = if program == "original" {
+            let (bytes, fds) = super::super::transport::receive(&socket, until()).unwrap();
+            assert!(fds.is_empty());
+            serde_json::from_slice(&bytes).unwrap()
+        } else {
+            None
+        };
+        #[cfg(target_os = "linux")]
+        let audit = None;
         Self {
             child,
             socket,
+            audit,
             _dir: dir,
         }
     }
@@ -123,7 +145,14 @@ impl Fixture {
         let birth = crate::platform::process_identity(self.child.id())
             .unwrap()
             .birth;
-        Peer::original(&self.socket, self.child.id(), &birth, until()).unwrap()
+        Peer::original(
+            &self.socket,
+            self.child.id(),
+            &birth,
+            self.audit.as_ref(),
+            until(),
+        )
+        .unwrap()
     }
     pub(crate) fn expect_loan(
         &mut self,
@@ -154,15 +183,25 @@ impl Drop for Fixture {
 }
 
 #[test]
+#[cfg(target_os = "linux")]
 fn the_native_socket_birth_and_exact_executing_image_are_all_required() {
     let fixture = Fixture::start("original");
     let peer = fixture.original();
     assert!(!peer.exited().unwrap());
     peer.current(&fixture.socket, until()).unwrap();
+    assert!(Peer::pin(
+        fixture.child.id(),
+        &peer.original.birth,
+        std::process::id() + 1,
+        None,
+        until()
+    )
+    .is_err());
     assert!(Peer::original(
         &fixture.socket,
         fixture.child.id(),
         "another birth",
+        None,
         until()
     )
     .is_err());
@@ -170,6 +209,7 @@ fn the_native_socket_birth_and_exact_executing_image_are_all_required() {
         &fixture.socket,
         std::process::id(),
         &peer.original.birth,
+        None,
         until()
     )
     .is_err());
@@ -178,8 +218,47 @@ fn the_native_socket_birth_and_exact_executing_image_are_all_required() {
     let birth = crate::platform::process_identity(other.child.id())
         .unwrap()
         .birth;
-    assert!(Peer::original(&other.socket, other.child.id(), &birth, until()).is_err());
+    assert!(Peer::original(&other.socket, other.child.id(), &birth, None, until()).is_err());
     assert!(peer.current(&other.socket, until()).is_err());
+}
+
+#[test]
+#[cfg(target_os = "macos")]
+fn a_missing_foreign_or_different_exec_generation_never_binds_the_original_socket() {
+    let fixture = Fixture::start("original");
+    let peer = fixture.original();
+    peer.current(&fixture.socket, until()).unwrap();
+    let birth = &peer.original.birth;
+    assert!(Peer::pin(
+        fixture.child.id(),
+        birth,
+        std::process::id() + 1,
+        fixture.audit.as_ref(),
+        until()
+    )
+    .is_err());
+    assert!(Peer::pin(fixture.child.id(), birth, std::process::id(), None, until()).is_err());
+    let other = Fixture::start("original");
+    assert!(peer.current(&other.socket, until()).is_err());
+    assert!(Peer::pin(
+        fixture.child.id(),
+        birth,
+        std::process::id(),
+        other.audit.as_ref(),
+        until()
+    )
+    .is_err());
+    let mut wrong = fixture.audit.unwrap();
+    wrong[7] ^= 1; // public audit_token_t pidversion word; native BSM validates it
+    assert!(Peer::pin(
+        fixture.child.id(),
+        birth,
+        std::process::id(),
+        Some(&wrong),
+        until()
+    )
+    .is_err());
+    assert!(!peer.exited().unwrap());
 }
 
 #[test]

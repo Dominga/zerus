@@ -142,10 +142,10 @@ impl Manifest {
 }
 
 #[cfg(test)]
-mod tests {
+pub(crate) mod tests {
     use super::*;
     const UUID: &str = "11111111-1111-4111-8111-111111111111";
-    pub(super) fn manifest() -> Manifest {
+    pub(crate) fn manifest() -> Manifest {
         Manifest {
             abi: ABI.into(),
             id: UUID.into(),

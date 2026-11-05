@@ -5,6 +5,9 @@ use super::{stop::Input, Discovery, Manifest};
 use crate::creation::canonical_uuid;
 use serde::{Deserialize, Serialize};
 
+#[cfg(any(target_os = "linux", target_os = "macos"))]
+pub use crate::run::worktree_custody::{Error, Owner};
+
 pub const ABI: &str = "worktree-program-custody-v1";
 pub const HELP_MARKER: &str = "Worktree program custody ABI: worktree-program-custody-v1";
 pub const FRAME_BYTES: usize = super::stop::INPUT_LIMIT + 4096;
@@ -64,11 +67,18 @@ impl Binding {
 #[serde(deny_unknown_fields)]
 pub struct NativeChild {
     pub pid: u32,
+    pub parent: u32,
     pub birth: String,
+    /// Mac: the exact token from the native own-original-child code check.
+    /// Linux uses its original executing object and has no audit token. These
+    /// serialized words are DATA; the private owner supplies their provenance.
+    pub audit: Option<[u32; 8]>,
 }
 impl NativeChild {
     pub fn valid(&self) -> bool {
         self.pid > 1
+            && self.parent > 0
+            && self.parent != self.pid
             && !self.birth.is_empty()
             && self.birth.len() <= 128
             && !self.birth.chars().any(char::is_control)
@@ -242,7 +252,9 @@ mod tests {
                 input: Box::new(input.clone()),
                 borrower: NativeChild {
                     pid: 2,
-                    birth: "native".into()
+                    parent: 3,
+                    birth: "native".into(),
+                    audit: None,
                 },
                 remaining_millis: invalid
             }
@@ -253,7 +265,9 @@ mod tests {
             input: Box::new(input.clone()),
             borrower: NativeChild {
                 pid: 2,
+                parent: 3,
                 birth: "native".into(),
+                audit: None,
             },
             remaining_millis: PHASE_MILLIS,
         };
@@ -264,7 +278,9 @@ mod tests {
             manifest: Box::new(input.manifest.clone()),
             holder: NativeChild {
                 pid: 2,
+                parent: 3,
                 birth: "native".into(),
+                audit: None,
             },
             socket: "/tmp/example/original".into(),
         };

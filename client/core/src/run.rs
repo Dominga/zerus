@@ -4,6 +4,8 @@ mod hidden;
 #[cfg(unix)]
 pub mod rendezvous;
 pub(crate) mod startup;
+#[cfg(any(target_os = "linux", target_os = "macos"))]
+pub(crate) mod worktree_custody;
 #[cfg(windows)]
 pub use hidden::{HiddenError, ProcessIdentity};
 

@@ -8,13 +8,16 @@ use zerus_client_core::{termination_cleanup::Capture, worktree_programs as wire}
 const INVALID: &str =
     "The working folder or its programs changed. Review the original session again.";
 
-#[cfg(target_os = "linux")]
-#[allow(dead_code)] // Private native caller wiring follows the custody controls.
+#[cfg(any(target_os = "linux", target_os = "macos"))]
 mod holding;
 // Original data reservations/results only. The live native permit and held
 // checkout source are separate; a journal row can never reconstruct them.
 #[allow(dead_code)]
 mod journal;
+
+pub(super) fn hold(args: &[String]) -> Result<i32> {
+    holding::run(args)
+}
 
 fn original(capture: &Capture) -> Result<Value> {
     let record = read_bounded(&capture.target.name, 1 << 20)?;

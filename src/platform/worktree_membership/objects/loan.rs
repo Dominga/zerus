@@ -4,11 +4,14 @@ use super::*;
 use std::os::fd::{AsFd, BorrowedFd, OwnedFd};
 use zerus_client_core::worktree_programs::{DirectoryId, Manifest};
 
-pub(crate) mod transport;
+#[cfg(any(target_os = "linux", target_os = "macos"))]
+pub(crate) mod holder;
 #[cfg(target_os = "linux")]
 pub(crate) mod peer;
-#[cfg(target_os = "linux")]
-pub(crate) mod holder;
+#[cfg(target_os = "macos")]
+#[path = "loan/peer_macos.rs"]
+pub(crate) mod peer;
+pub(crate) mod transport;
 
 pub(crate) const MAX_FDS: usize = MAX_DEPTH + 1;
 pub(crate) const MAX_FRAME: usize = 64 << 10;

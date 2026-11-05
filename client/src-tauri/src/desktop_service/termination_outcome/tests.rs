@@ -143,7 +143,7 @@ fn accounted_read_cannot_release_input_if_scope_changes_during_observation() {
     });
 }
 
-fn fixture(config: Value) -> Fixture {
+pub(super) fn fixture(config: Value) -> Fixture {
     let f = Fixture::new(config);
     std::fs::remove_file(f.0.join("hgs")).unwrap();
     std::fs::write(
@@ -168,7 +168,7 @@ fn fixture(config: Value) -> Fixture {
     .unwrap();
     f
 }
-fn capture() -> Capture {
+pub(super) fn capture() -> Capture {
     Capture {
         target: Target {
             computer: String::new(),
@@ -182,7 +182,7 @@ fn capture() -> Capture {
         owner_id: "original-owner".into(),
     }
 }
-async fn connected(f: &Fixture) -> (Arc<Service>, CacheServer) {
+pub(super) async fn connected(f: &Fixture) -> (Arc<Service>, CacheServer) {
     let responder = responder();
     assert!(responder
         .configure_ownership_mode_once(zerus_client_core::desktop::ownership::Mode::Service));

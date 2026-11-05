@@ -106,6 +106,14 @@ pub(super) struct Birth {
     seconds: u64,
     microseconds: u64,
 }
+impl Birth {
+    pub(super) fn parent(&self) -> u32 {
+        self.parent
+    }
+    pub(super) fn binding(&self) -> String {
+        format!("{}:{}", self.seconds, self.microseconds)
+    }
+}
 pub(super) fn birth(child: &mut Child) -> Result<Birth, Refusal> {
     if child.try_wait().map_err(|_| Refusal::Child)?.is_some() {
         return Err(Refusal::ChildExited);

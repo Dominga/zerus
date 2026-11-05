@@ -8,6 +8,7 @@
 //! and the "Event stream" section of `docs/reference.md`.
 
 pub mod account_actions;
+pub mod account_switch;
 pub mod actions;
 pub mod analytics;
 pub mod approvals;

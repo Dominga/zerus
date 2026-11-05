@@ -1443,6 +1443,27 @@ pub fn accounts_view(
     Ok(state.accounts(force))
 }
 
+/// Task 69: moves one running session to another account of its agent, the
+/// owner's confirmed choice (`hgs switch-account`). The session is local; a
+/// peer's account is changed on that peer.
+#[tauri::command]
+pub async fn session_switch_account(
+    session: String,
+    account: String,
+    request: String,
+) -> Result<serde_json::Value, String> {
+    tauri::async_runtime::spawn_blocking(move || {
+        zerus_client_core::account_switch::switch(
+            &zerus_client_core::default_hgs(),
+            &session,
+            &account,
+            &request,
+        )
+    })
+    .await
+    .map_err(|error| error.to_string())?
+}
+
 #[tauri::command(async)]
 pub fn account_filters_view(
     state: State<'_, Screens>,

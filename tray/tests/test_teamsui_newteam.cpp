@@ -1100,7 +1100,16 @@ void TestTeamsUiNewteam::newTeamTabOffersDeepSeeksModels()
     QTRY_COMPARE(tab.findChildren<QFrame *>("teamNewMemberRow").at(0)->findChild<QComboBox *>("teamNewModel")->currentText(),
                  QStringLiteral("deepseek-official/deepseek-flash"));
     // No account list was lost to the model replies on the shared client.
+    // Task 46: every row's account box is found on the tab, and the pointer is
+    // checked before use (a missing one crashed the whole suite).
+    const auto accounts = tab.findChildren<QComboBox *>("teamNewAccount");
+    QVERIFY(accounts.size() >= 2);
+    for (auto *account : accounts) {
+        QVERIFY(account);
+        QVERIFY(account->count() >= 1);
+    }
     auto *account = tab.findChildren<QFrame *>("teamNewMemberRow").at(1)->findChild<QComboBox *>("teamNewAccount");
+    QVERIFY(account);
     QVERIFY(account->count() >= 1);
 }
 

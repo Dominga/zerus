@@ -1,0 +1,33 @@
+--- a/gdk/wayland/gdkwindow-wayland.c
++++ b/gdk/wayland/gdkwindow-wayland.c
+@@ -1749,6 +1749,8 @@
+   GdkFrameClock *frame_clock = gdk_window_get_frame_clock (window);
+   GdkWindowState new_state;
+   gboolean suspended;
++  int previous_width = window->width;
++  int previous_height = window->height;
+   int width = impl->pending.width;
+   int height = impl->pending.height;
+   gboolean fixed_size;
+@@ -1897,9 +1899,18 @@
+       new_state & GDK_WINDOW_STATE_FOCUSED)
+     gdk_wayland_window_update_dialogs (window);
+
+-  impl->pending_commit = TRUE;
+-  gdk_frame_clock_request_phase (frame_clock,
+-                                 GDK_FRAME_CLOCK_PHASE_AFTER_PAINT);
++  /* A resized configure must be committed with its resized buffer. In
++   * particular, thawing a GL-frozen clock may finish the previous frame's
++   * after-paint before the newly requested layout/paint. An empty commit
++   * there would acknowledge this configure using the old window geometry,
++   * making the real resize look spontaneous to the compositor. State-only
++   * configures still need an after-paint commit when nothing was repainted.
++   */
++  impl->pending_commit = (window->width == previous_width &&
++                          window->height == previous_height);
++  if (impl->pending_commit)
++    gdk_frame_clock_request_phase (frame_clock,
++                                   GDK_FRAME_CLOCK_PHASE_AFTER_PAINT);
+ }
+
+ static void

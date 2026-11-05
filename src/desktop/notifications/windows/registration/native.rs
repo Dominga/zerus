@@ -281,11 +281,11 @@ fn fingerprint(path: &Path) -> Result<[u8; 32]> {
     );
     Ok(hash.finalize().into())
 }
+/// Removal is admitted offline only: the held owner.lock, then handoff lock and
+/// any current rollback proof live in `offline` through the registry effect.
 struct RemovalGuard {
-    _owner: Option<platform::FileLock>,
-    _handoff: crate::desktop::store::HandoffLock,
-    _request_id: String,
-    _runtime_epoch: Option<String>,
+    offline: super::removal::Offline,
+    request_id: String,
 }
 impl RemovalGuard {
     fn verified(location: &Location, id: &str) -> Result<Self> {
@@ -333,30 +333,18 @@ impl RemovalGuard {
             // supply its actual matching witness before this path is enabled.
             bail!("active Windows notification removal awaits integrated Runtime drain; registration kept");
         }
-        // No missing endpoint is treated as a stopped owner. The actual OS lock
-        // must be acquired; existing state cannot be replaced with a baseline.
-        location.prepare()?;
-        let owner = location.lock()?;
-        let held = location.handoff_lock()?;
-        for name in [
-            "state.sqlite3",
-            "state.sqlite3-wal",
-            "state.sqlite3-shm",
-            "state.sqlite3-journal",
-            zerus_desktop_migration::HANDOFF_FILE,
-        ] {
-            match std::fs::symlink_metadata(location.root.join(name)) {
-                Err(error) if error.kind()==std::io::ErrorKind::NotFound=>(),
-                _=>bail!("retained desktop state requires its original settled service receipt; registration kept"),
-            }
-        }
-        // Verified absent-service/no-state is not a live Runtime drain receipt.
+        // Offline: the actual owner.lock, then the handoff lock, and for
+        // existing state the current settled rollback of this exact request.
+        // Neither the no-state route nor that proof is a live Runtime drain
+        // receipt; the online path above stays refused.
         Ok(Self {
-            _owner: Some(owner),
-            _handoff: held,
-            _request_id: id.into(),
-            _runtime_epoch: None,
+            offline: super::removal::Offline::acquire(location, id)?,
+            request_id: id.into(),
         })
+    }
+    /// Effect admission, right before the registry removal.
+    fn admit(&self, location: &Location) -> Result<()> {
+        self.offline.admit(location, &self.request_id)
     }
 }
 pub(super) fn command(
@@ -396,7 +384,7 @@ pub(super) fn command(
             .context("install the maintained desktop registration before Toast registration")?;
         ensure!(fingerprint(&cli)?==fingerprint(&std::env::current_exe()?)?,"selected CLI differs; install the maintained desktop registration before Toast registration");
     }
-    let _removal = if operation == "remove" {
+    let removal = if operation == "remove" {
         Some(RemovalGuard::verified(
             &location,
             request_id.context("remove requires the retained original revoke request UUID")?,
@@ -405,6 +393,9 @@ pub(super) fn command(
         ensure!(request_id.is_none(), "unexpected revoke request UUID");
         None
     };
+    if let Some(guard) = &removal {
+        guard.admit(&location)?;
+    }
     let reply = plan.apply(&mut registry, operation).map_err(|failure| {
         anyhow::anyhow!(
             "{}{}",

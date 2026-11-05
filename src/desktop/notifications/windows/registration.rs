@@ -4,6 +4,8 @@ use std::collections::{BTreeMap, BTreeSet};
 
 #[cfg(windows)]
 mod native;
+#[cfg(any(windows, test))]
+mod removal;
 #[cfg(test)]
 mod tests;
 

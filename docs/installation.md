@@ -601,19 +601,30 @@ stops an idle session host without disabling anything.
   Root service attachment and native alert/click acceptance remain separate.
 
   UI-only uninstall preserves this backend registration. Explicit backend
-  removal first needs a settled manual revoke with a fresh UUID retained for
-  that operation: `hgs.exe desktop revoke --json --request-id UUID --reason manual`.
-  Then use `hgs.exe desktop notification-registration remove --json --request-id UUID`
-  with that **same** UUID, followed by `hgs.exe desktop registration remove --json`.
-  The Toast command only queries the original revoke; it does not issue or replay
-  it. It requires the selected configuration, original runtime epoch and all
-  accepted/durable/revoked/checkpointed fields. Busy, changed, missing or unknown
-  evidence keeps the registration and stable CLI. An absent service with retained
-  state is unavailable rather than substituted with a new baseline. Verified
-  no-service/no-state is a separate path, not a live-runtime drain claim. Active
-  removal currently refuses while Windows Runtime drain attachment is missing;
-  a generic service receipt, component fixture or CLI exit zero is insufficient. Native notification-history
-  deletion is not asserted.
+  removal uses one sequence in passive and background mode alike, with a fresh
+  UUID retained for the whole operation:
+  1. `hgs.exe desktop revoke --json --request-id UUID --reason rollback`, until it
+     reports accepted, durable, revoked and checkpointed.
+  2. `hgs.exe desktop registration remove --json`, so the task no longer starts at
+     sign-in. It does not stop a running service.
+  3. Stop the running service through its owner: sign out of Windows and back in,
+     or end only the running `hgs-desktop` task in Task Scheduler. Never end other
+     processes.
+  4. `hgs.exe desktop notification-registration remove --json --request-id UUID`
+     with that **same** UUID.
+
+  The Toast command removes only while no service runs: it holds the service's
+  own lock and handoff lock until the registry change is done. Without desktop
+  state nothing more is needed. With existing state it needs the CURRENT
+  settled rollback of that exact UUID: the newest command, the writer still
+  revoked under that rollback, any handoff marker revoked for the same writer,
+  and no undrained operation. A later grant, mode change, handoff or another
+  revoke supersedes it; start again with a new UUID. The command never issues,
+  resumes or replays a revoke, and never migrates, checkpoints or deletes state.
+  Busy, changed, missing, pending or unknown evidence keeps the registration.
+  While the service runs, removal still refuses until the Windows Runtime drain
+  attachment is integrated. Toasts already in the notification center may stay;
+  removal does not withdraw them.
 - Without SSH connection sharing, every poll of every machine is a full SSH
   handshake: about 150 ms per machine on a LAN. The app lists this computer at
   most once every 15 seconds, or every 5 seconds with local sessions enabled.

@@ -395,6 +395,17 @@ impl Validated {
         };
         Ok(*intent)
     }
+    /// Only the compact-to-send actor calls this, after BEGIN IMMEDIATE.
+    /// Cached native Service mode was bound to this exact original request
+    /// during admission.
+    #[cfg(any(target_os = "linux", target_os = "macos"))]
+    pub fn compact_to_send(self) -> Result<zerus_client_core::desktop::compact_to_send::Intent> {
+        self.check()?;
+        let Request::CompactToSend { intent } = self.0 else {
+            anyhow::bail!("not a compact-to-send");
+        };
+        Ok(*intent)
+    }
     /// Only the task message actor calls this after BEGIN IMMEDIATE. Cached
     /// native Service mode was bound to this exact original request during
     /// admission.

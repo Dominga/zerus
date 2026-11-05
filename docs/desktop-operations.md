@@ -393,9 +393,32 @@ frozen stdin names that compaction:
   compaction's identity. A send that may have started is unknown. The lookup
   is read-only and keyed by the compaction request and the plan fingerprint.
 
-The request has its own ordered lane and is refused by the service
-(`compact_to_send_unsupported`) until its actor lands; no help marker is
-advertised yet.
+The request has its own ordered lane. On Linux the service actor runs the
+compaction the way it runs a deferred send:
+- Admission happens after BEGIN IMMEDIATE, under the current lease and scope,
+  with live consent for that admission alone.
+- The `compact_receipts` folder and the state root are opened before the
+  child.
+- The compaction's custody is reserved durably before it can spawn.
+- In the spawn turn, the selected session's own record and the consent veto
+  are checked last.
+- The original `hgs compact-context <session> --json` runs once through the
+  shared original-child runner.
+- After the physical drain, the receipt is read from the held objects within
+  one never-renewed 5-second deadline.
+
+A reserved child counts as never started only from the runner's no-spawn
+result together with a safe absence of any record of it. Restart, revoke or a
+lost preparation retires the operation (`compact_to_send_interrupted`). A
+child never reserved is then recorded as never started from the ledger. A
+reserved one keeps its custody for the read-only drain, and Store recovery
+drains an earlier run's Unknown without reading any receipt.
+
+This slice ends after the compaction: the send is recorded as never started
+(`compact_to_send_send_unavailable`), and no help marker is advertised. The
+wait for the compaction to complete and the send follow. macOS refuses every
+original before any row (`compact_to_send_native_image_unavailable`) and
+Windows refuses it too (`compact_to_send_unsupported`).
 
 A draft holds one such identity until it is resolved. A definite outcome
 resolves it, as does a cancellation before its call was dispatched or, for a

@@ -46,6 +46,8 @@ pub(super) struct Runtime {
     #[cfg(any(target_os = "linux", target_os = "macos"))]
     answer: super::deferred_answer::Runtime,
     #[cfg(any(target_os = "linux", target_os = "macos"))]
+    compact: super::compact_to_send::Runtime,
+    #[cfg(any(target_os = "linux", target_os = "macos"))]
     task_start: super::task_start_reconcile::Runtime,
 }
 
@@ -87,6 +89,8 @@ impl Runtime {
         #[cfg(any(target_os = "linux", target_os = "macos"))]
         let answer = super::deferred_answer::Runtime::new(config, epoch, owner.clone())?;
         #[cfg(any(target_os = "linux", target_os = "macos"))]
+        let compact = super::compact_to_send::Runtime::new(config, epoch, owner.clone())?;
+        #[cfg(any(target_os = "linux", target_os = "macos"))]
         let task_start = super::task_start_reconcile::Runtime::new(config, epoch, owner.clone())?;
         match fleet::Runtime::start(config, epoch) {
             Ok(fleet) => Ok(Self {
@@ -116,6 +120,8 @@ impl Runtime {
                 send,
                 #[cfg(any(target_os = "linux", target_os = "macos"))]
                 answer,
+                #[cfg(any(target_os = "linux", target_os = "macos"))]
+                compact,
                 #[cfg(any(target_os = "linux", target_os = "macos"))]
                 task_start,
             }),
@@ -172,6 +178,8 @@ impl Runtime {
                     #[cfg(any(target_os = "linux", target_os = "macos"))]
                     self.answer.observe(&event);
                     #[cfg(any(target_os = "linux", target_os = "macos"))]
+                    self.compact.observe(&event);
+                    #[cfg(any(target_os = "linux", target_os = "macos"))]
                     self.task_start.observe(&event);
                     self.delivery.observe(store, &event);
                     self.maintenance.observe(store, &event);
@@ -204,6 +212,8 @@ impl Runtime {
                     #[cfg(any(target_os = "linux", target_os = "macos"))]
                     self.answer.reject(&event);
                     #[cfg(any(target_os = "linux", target_os = "macos"))]
+                    self.compact.reject(&event);
+                    #[cfg(any(target_os = "linux", target_os = "macos"))]
                     self.task_start.reject(&event);
                     self.maintenance.reject(&event);
                     self.attention.reject_event(&event);
@@ -230,6 +240,8 @@ impl Runtime {
         self.send.poll(store, self.notifications.handoff());
         #[cfg(any(target_os = "linux", target_os = "macos"))]
         self.answer.poll(store, self.notifications.handoff());
+        #[cfg(any(target_os = "linux", target_os = "macos"))]
+        self.compact.poll(store, self.notifications.handoff());
         #[cfg(any(target_os = "linux", target_os = "macos"))]
         self.task_start.poll(store, self.notifications.handoff());
         // Disabled discovery must not accumulate permanent edge/baseline rows.
@@ -316,8 +328,12 @@ impl Runtime {
             #[cfg(not(any(target_os = "linux", target_os = "macos")))]
             return json!({"request_id":authority.id(),"accepted":false,"durable":false,"code":"deferred_answer_unsupported"});
         }
-        // Its actor has not landed: the request is recognized and refused.
         if authority.operation() == "compact_to_send" {
+            #[cfg(any(target_os = "linux", target_os = "macos"))]
+            return self
+                .compact
+                .frontend(store, authority, self.notifications.handoff());
+            #[cfg(not(any(target_os = "linux", target_os = "macos")))]
             return json!({"request_id":authority.id(),"accepted":false,"durable":false,"code":"compact_to_send_unsupported"});
         }
         // A recognized native request is still not executing-kind admission.
@@ -414,6 +430,7 @@ impl Runtime {
             value["task_message_runtime"] = self.message.status();
             value["deferred_send_runtime"] = self.send.status();
             value["deferred_answer_runtime"] = self.answer.status();
+            value["compact_to_send_runtime"] = self.compact.status();
             value["lifecycle"]["background"]["operations"] =
                 value["creation_clone_runtime"].clone();
             value["task_start_reconcile_runtime"] = self.task_start.status();
@@ -548,6 +565,8 @@ impl Runtime {
         #[cfg(any(target_os = "linux", target_os = "macos"))]
         self.answer.request_stop();
         #[cfg(any(target_os = "linux", target_os = "macos"))]
+        self.compact.request_stop();
+        #[cfg(any(target_os = "linux", target_os = "macos"))]
         self.task_start.request_stop();
         if let Some(presence) = &self.presence {
             presence.request_stop();
@@ -588,6 +607,8 @@ impl Runtime {
         #[cfg(any(target_os = "linux", target_os = "macos"))]
         self.answer.poll(store, self.notifications.handoff());
         #[cfg(any(target_os = "linux", target_os = "macos"))]
+        self.compact.poll(store, self.notifications.handoff());
+        #[cfg(any(target_os = "linux", target_os = "macos"))]
         self.task_start.poll(store, self.notifications.handoff());
         if self.notifications.drained() {
             self.attention.request_stop();
@@ -613,6 +634,7 @@ impl Runtime {
                 && self.message.drained()
                 && self.send.drained()
                 && self.answer.drained()
+                && self.compact.drained()
                 && self.task_start.drained();
         }
         #[cfg(windows)]

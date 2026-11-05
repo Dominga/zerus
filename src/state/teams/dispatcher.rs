@@ -3037,7 +3037,13 @@ fn file_in_project(team: &Team, computer: &str, session: &SessionRef) {
 /// The folder the member works in: the team's (or its own) folder, or a new
 /// worktree or clone of it, created now.
 fn member_folder(team: &Team, member: &Member) -> anyhow::Result<String> {
-    member_folder_with(team, member, &|host, args| hgs(host, args, None, Duration::from_secs(300)))
+    member_folder_with(team, member, &|host, args| {
+        // Task 20: `worktrees create --clone` of a large repository takes
+        // minutes on Windows (its clone step alone may take 25); the
+        // catalog reads stay short.
+        let minutes = if args.get(1) == Some(&"create") { 40 } else { 5 };
+        hgs(host, args, None, Duration::from_secs(minutes * 60))
+    })
 }
 
 /// `member_folder` with the `hgs` call it makes (`run(computer, args)`), so the
@@ -3071,15 +3077,22 @@ fn member_folder_with(team: &Team, member: &Member, run: &dyn Fn(&str, &[&str]) 
     }
     // C12: the member's own worktree or clone from an earlier start (a
     // relaunch, a swap) is used again; any other folder there is refused.
+    // Task 20: a clone whose create ran out of time after `git clone` has no
+    // branch of the member's yet; `worktrees create` finishes it (and checks
+    // there that it is such a clone) instead of the member failing again.
+    let clone = member.folder == MemberFolder::Clone;
     if remote {
         if let Some(found) = remote_checkout(run, &member.computer, &destination)? {
+            let unfinished = clone && !found.is_empty() && found != branch;
             anyhow::ensure!(
-                found == branch,
+                found == branch || unfinished,
                 "{destination} already exists on {} and is not this member's folder ({})",
                 member.computer,
                 if found.is_empty() { "no checkout of its own".to_owned() } else { format!("on {found}, not {branch}") }
             );
-            return Ok(destination);
+            if !unfinished {
+                return Ok(destination);
+            }
         }
     } else if Path::new(&destination).exists() {
         // A failed create may leave its empty reservation: it goes.
@@ -3087,13 +3100,22 @@ fn member_folder_with(team: &Team, member: &Member, run: &dyn Fn(&str, &[&str]) 
         if empty {
             std::fs::remove_dir(&destination)?;
         } else {
-            if let Some(problem) = folder_problem(&destination, &folder, Some(&branch)) {
+            let Some(problem) = folder_problem(&destination, &folder, Some(&branch)) else {
+                return Ok(destination);
+            };
+            let unfinished = clone
+                && folder_problem(&destination, &folder, None).is_none()
+                && git_at(&destination, &["rev-parse", "--verify", "--quiet", &format!("refs/heads/{branch}")]).is_none();
+            if !unfinished {
                 anyhow::bail!("{destination} already exists and is not this member's folder: {problem}");
             }
-            return Ok(destination);
         }
     }
-    let mut args: Vec<&str> = vec!["worktrees", "create", "--path", &folder, "--branch", &branch, "--destination", &destination, "--base", "HEAD", "--json"];
+    // Task 20: the member's branch starts from the team's base branch when
+    // one is set (U48), else from the HEAD of the team's folder (the lead's
+    // branch), never from a clone's default branch.
+    let base = if team.settings.base_branch.is_empty() { "HEAD".to_owned() } else { team.settings.base_branch.clone() };
+    let mut args: Vec<&str> = vec!["worktrees", "create", "--path", &folder, "--branch", &branch, "--destination", &destination, "--base", &base, "--json"];
     if member.folder == MemberFolder::Clone {
         args.insert(2, "--clone");
     }

@@ -5324,6 +5324,18 @@ inbox — says `the DeepSeek sandbox needs full control of <folder>` with the
 one-line fix `icacls "<folder>" /grant *<SID>:(OI)(CI)F`. A member never repairs
 ACLs itself: it reports the exact error to the Lead.
 
+**Members' clones.** A clone member's folder is made by `hgs worktrees create
+--clone`: a full `git clone --local --no-hardlinks` of the team's repository (no
+hard links, because the folder's ACL grant would reach the source's files), then
+the member's branch, started from the team's base branch when one is set, else
+from the HEAD of the team's folder. The clone has its own 25-minute deadline and
+the checkout of the branch its own 10 minutes, so a large repository on Windows
+no longer fails with `Git operation cancelled or timed out`. When the clone
+finished but the branch was not made, the clone is kept: starting the member
+again finishes it (fetching the base when it moved on), provided the folder is a
+clone of this repository with no changes and without that branch. Any other
+folder there is refused, never changed.
+
 **DeepSeek session-log upload.** Zerus starts and resumes DeepSeek sessions with
 the official session-log upload off, unless the owner turns the block off in
 Settings. The promise is checked, not assumed: a session whose own records still

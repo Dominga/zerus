@@ -599,6 +599,53 @@ fn a_clone_member_of_the_teams_repository_starts() {
 }
 
 #[test]
+fn an_unfinished_clone_member_is_finished_from_the_base_branch() {
+    // Task 20: a clone whose create ran out of time after `git clone` is on
+    // the clone's default branch without the member's branch. A relaunch
+    // asks `worktrees create` again (which finishes such a clone) instead of
+    // refusing the folder, and the branch starts from the team's base branch.
+    let dir = tempfile::tempdir().unwrap();
+    set_git_ceiling(&dir.path().display().to_string());
+    let repo = folder_repo(dir.path(), "project");
+    let member = Member { id: "dev".into(), role: "Backend".into(), agent: "dsh".into(), folder: MemberFolder::Clone, ..Default::default() };
+    let mut team = folder_team(&repo, member.clone());
+    team.settings.base_branch = "release".into();
+    let destination = member_folder_path(&team, &member).unwrap();
+    let cloned = std::process::Command::new("git")
+        .args(["clone", "--local", "--no-hardlinks", "--quiet", &repo.display().to_string(), &destination])
+        .status()
+        .unwrap();
+    assert!(cloned.success());
+    let calls = std::cell::RefCell::new(Vec::<Vec<String>>::new());
+    let run = |_: &str, args: &[&str]| -> anyhow::Result<Output> {
+        calls.borrow_mut().push(args.iter().map(|arg| arg.to_string()).collect());
+        // What `worktrees create` does with the unfinished clone it finds.
+        Ok(std::process::Command::new("git").arg("-C").arg(&destination).args(["switch", "--quiet", "-c", "team/abcdef12/dev"]).output()?)
+    };
+    assert_eq!(member_folder_with(&team, &member, &run).unwrap(), destination);
+    let calls = calls.into_inner();
+    assert_eq!(calls.len(), 1);
+    let base = calls[0].iter().position(|arg| arg == "--base").map(|at| calls[0][at + 1].as_str());
+    assert_eq!(base, Some("release"));
+    assert!(calls[0].iter().any(|arg| arg == "--clone"));
+    assert_eq!(folder_facts(&destination).1, "team/abcdef12/dev");
+    // Without a base branch the team folder's HEAD (the lead's branch) is the base.
+    team.settings.base_branch.clear();
+    let other = Member { id: "qa".into(), ..member.clone() };
+    team.members.push(other.clone());
+    let seen = std::cell::RefCell::new(String::new());
+    member_folder_with(&team, &other, &|_, args| {
+        *seen.borrow_mut() = args[args.iter().position(|arg| *arg == "--base").unwrap() + 1].to_owned();
+        local_create(args)
+    })
+    .unwrap();
+    assert_eq!(*seen.borrow(), "HEAD");
+    // A clone of the member's that has its branch is never handed to create again.
+    let error = member_folder_with(&team, &member, &|_, _| anyhow::bail!("no call"));
+    assert_eq!(error.unwrap(), destination);
+}
+
+#[test]
 fn an_existing_member_folder_is_reused_and_a_foreign_one_refused() {
     // C12: a relaunch or a swap starts the member again in its own worktree
     // or clone; a foreign folder at that path is refused, an empty

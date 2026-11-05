@@ -282,9 +282,15 @@ fn before_stop(
     }
 }
 
-pub(super) fn effect(runtime: Runtime<'_>, request: &str, target: Target) -> Result<Value> {
+pub(super) fn effect(
+    runtime: Runtime<'_>,
+    request: &str,
+    target: Target,
+    overall: Instant,
+) -> Result<Value> {
     let timing = Timing::new();
-    let until = Budget::Preflight.deadline(Instant::now());
+    let deadlines = journal::budget::Deadlines::new(Instant::now(), overall)?;
+    let until = deadlines.until();
     target.validate()?;
     ensure!(
         target.configuration == runtime.location.configuration,
@@ -379,6 +385,7 @@ pub(super) fn effect(runtime: Runtime<'_>, request: &str, target: Target) -> Res
         replacement: scope.replacement_image,
         ready: None,
         timing,
+        deadlines,
     };
     if let Err(error) = journal::engine::run(&mut session, &mut record, reserved) {
         return Err(error.context(format!(
@@ -404,15 +411,22 @@ struct OriginalSession<'a> {
     replacement: String,
     ready: Option<instances::Running>,
     timing: Timing,
+    deadlines: journal::budget::Deadlines,
+}
+fn checked_fence(fence: &mut Fence<'_>, deadlines: &journal::budget::Deadlines) -> Result<()> {
+    deadlines.check(Instant::now())?;
+    fence.check()?;
+    deadlines.check(Instant::now())
 }
 impl journal::engine::Session for OriginalSession<'_> {
     type Started = instances::Starting;
-    fn phase(&mut self, phase: Budget) {
-        self.fence.phase(phase);
+    fn phase(&mut self, phase: Budget) -> Result<()> {
+        self.fence.until = self.deadlines.enter(phase, Instant::now())?;
         self.timing.phase(phase, self.fence.until);
+        Ok(())
     }
     fn check(&mut self) -> Result<()> {
-        self.fence.check()?;
+        checked_fence(&mut self.fence, &self.deadlines)?;
         self.original.image_files_current()?;
         instances::definition_current(
             self.native,
@@ -423,7 +437,7 @@ impl journal::engine::Session for OriginalSession<'_> {
         if let Some(ready) = &self.ready {
             ready.readiness(self.fence.location, self.plan, self.fence.until)?;
         }
-        self.fence.check()
+        checked_fence(&mut self.fence, &self.deadlines)
     }
     fn save(&mut self, record: &Record) -> Result<()> {
         let location = self.fence.location;
@@ -471,7 +485,7 @@ impl journal::engine::Session for OriginalSession<'_> {
         stop::offer(
             record,
             &self.original,
-            &mut || self.fence.check(),
+            &mut || checked_fence(&mut self.fence, &self.deadlines),
             |original, check| {
                 before_stop(
                     &StopScope {
@@ -497,7 +511,7 @@ impl journal::engine::Session for OriginalSession<'_> {
         );
         stop::checked(
             &mut self.original,
-            &mut || self.fence.check(),
+            &mut || checked_fence(&mut self.fence, &self.deadlines),
             |original, check| {
                 before_stop(
                     &StopScope {
@@ -525,7 +539,7 @@ impl journal::engine::Session for OriginalSession<'_> {
             self.fence.until,
             Some(self.original.process_exited()),
         );
-        self.fence.check()?;
+        checked_fence(&mut self.fence, &self.deadlines)?;
         self.original.image_files_current()?;
         self.timing
             .mark("exit.definition.begin", self.fence.until, None);
@@ -554,7 +568,7 @@ impl journal::engine::Session for OriginalSession<'_> {
             result.as_ref().ok().copied(),
         );
         let result = result?;
-        self.fence.check()?;
+        checked_fence(&mut self.fence, &self.deadlines)?;
         Ok(result)
     }
     fn start(&mut self) -> Result<Self::Started> {
@@ -566,7 +580,7 @@ impl journal::engine::Session for OriginalSession<'_> {
             self.plan,
             &wanted(self.plan)?,
             self.fence.until,
-            &mut || self.fence.check(),
+            &mut || checked_fence(&mut self.fence, &self.deadlines),
         );
         self.timing.mark("runex.end", self.fence.until, None);
         result
@@ -598,7 +612,7 @@ impl journal::engine::Session for OriginalSession<'_> {
             .as_ref()
             .context("Original readiness unavailable.")?
             .readiness(self.fence.location, self.plan, self.fence.until)?;
-        self.fence.check()?;
+        checked_fence(&mut self.fence, &self.deadlines)?;
         drop(self.fence.exclusion.take());
         self.check()
     }

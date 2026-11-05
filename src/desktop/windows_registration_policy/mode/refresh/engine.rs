@@ -5,7 +5,7 @@ use std::{thread, time::Duration};
 
 pub(in crate::desktop) trait Session {
     type Started;
-    fn phase(&mut self, phase: Budget);
+    fn phase(&mut self, phase: Budget) -> Result<()>;
     fn check(&mut self) -> Result<()>;
     fn save(&mut self, record: &Record) -> Result<()>;
     fn hold(&mut self) -> Result<()>;
@@ -49,7 +49,7 @@ pub(in crate::desktop) fn run<S: Session>(
         "Fresh original refresh reservation changed."
     );
     session.check()?;
-    session.phase(Budget::Hold);
+    session.phase(Budget::Hold)?;
     session.check()?;
     session.hold()?;
     while !session.drained()? {
@@ -59,7 +59,7 @@ pub(in crate::desktop) fn run<S: Session>(
     record.advance(Phase::Prepared, Phase::Held)?;
     session.save(record)?;
     session.check()?;
-    session.phase(Budget::Stop);
+    session.phase(Budget::Stop)?;
     session.pause(&request);
     session.offer_stop(record)?;
     session.stop()?;
@@ -70,14 +70,14 @@ pub(in crate::desktop) fn run<S: Session>(
     record.advance(Phase::StopOffered, Phase::Stopped)?;
     session.save(record)?;
     session.check()?;
-    session.phase(Budget::Start);
+    session.phase(Budget::Start)?;
     record.advance(Phase::Stopped, Phase::StartOffered)?;
     session.save(record)?;
     let mut started = session.start()?;
     record.pending.as_mut().expect("reserved").started = Some(S::guid(&started).into());
     session.save(record)?;
     session.check()?;
-    session.phase(Budget::Readiness);
+    session.phase(Budget::Readiness)?;
     let ready = loop {
         session.check()?;
         if let Some(ready) = session.ready(&mut started)? {
@@ -88,7 +88,7 @@ pub(in crate::desktop) fn run<S: Session>(
     record.advance(Phase::StartOffered, Phase::Ready)?;
     session.save(record)?;
     session.check()?;
-    session.phase(Budget::Release);
+    session.phase(Budget::Release)?;
     session.release()?;
     session.check()?;
     record.finish_refresh(&request, ready)?;

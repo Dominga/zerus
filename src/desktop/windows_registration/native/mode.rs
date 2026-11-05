@@ -829,6 +829,9 @@ fn finish_choice(record: &mut Record, id: &str, desired: Mode, ready: &instances
 }
 
 fn operation(args: &[String]) -> Result<Value> {
+    // Includes frame/config/caller/lock/COM work before the refresh engine.
+    // The parent's existing owned-child timeout remains the outer hard bound.
+    let refresh_overall = Instant::now() + Budget::exchange_timeout();
     ensure!(args.len() == 1, "Invalid mode helper arguments.");
     let length: usize = args[0].parse()?;
     ensure!(length.to_string() == args[0], "Invalid mode helper length.");
@@ -967,7 +970,7 @@ fn operation(args: &[String]) -> Result<Value> {
             "Invalid original refresh UUID.");
         let target = policy::mode::refresh::Target::decode(&serde_json::to_vec(&request["target"])?)?;
         return refresh::effect(Runtime { config:&config,location:&location,native:&mut native,
-            scheduler:&scheduler,admission:&admission,passive:&passive,background:&background },id,target);
+            scheduler:&scheduler,admission:&admission,passive:&passive,background:&background },id,target,refresh_overall);
     }
     if op == "review" {
         let id = request["request_id"].as_str().context("Original transition UUID required.")?;

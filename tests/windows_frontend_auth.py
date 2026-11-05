@@ -1720,6 +1720,9 @@ $later=@{guid=$guid;pid=$q.Id;birth=$q.StartTime.ToFileTimeUtc()};
             new_request = str(uuid.uuid4())
             refreshed = self.refresh_call('mode_refresh', new_request, target)
             self.assertTrue(refreshed['ok'], refreshed)
+            self.assertEqual((refreshed['read_only'], refreshed['changed'], refreshed['manager_changed']),
+                             (False, True, True), 'native positive must complete the engine, not reconcile a late receipt: ' + str(refreshed))
+            self.assertIsNone(refreshed.get('original_exchange_error'), refreshed)
             receipt = refreshed['receipt']
             self.assertEqual((receipt['request'], receipt['phase']), (new_request, 'settled'))
             self.assertEqual(receipt['scope']['mode'], 'passive')
@@ -1762,6 +1765,9 @@ $later=@{guid=$guid;pid=$q.Id;birth=$q.StartTime.ToFileTimeUtc()};
             self.assertEqual((target['mode'], target['original']), ('background', background_original))
             refreshed = self.refresh_call('mode_refresh', str(uuid.uuid4()), target)
             self.assertTrue(refreshed['ok'], refreshed)
+            self.assertEqual((refreshed['read_only'], refreshed['changed'], refreshed['manager_changed']),
+                             (False, True, True), 'native positive must complete the engine, not reconcile a late receipt: ' + str(refreshed))
+            self.assertIsNone(refreshed.get('original_exchange_error'), refreshed)
             receipt = refreshed['receipt']
             self.assertEqual((receipt['phase'], receipt['scope']['mode'], receipt['original']),
                              ('settled', 'background', background_original))

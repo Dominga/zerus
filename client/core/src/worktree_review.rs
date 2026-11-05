@@ -442,6 +442,49 @@ pub fn process_reviewable(row: &Value) -> bool {
         && (!local_data(row) || !text(row, "ignored_fingerprint").is_empty())
 }
 
+pub const PERMISSION_DENIALS_ABI: &str = "worktree-process-permission-denials-v1";
+pub const PERMISSION_DENIALS_PREFIX: &str = "permission-denials-only-v1:";
+
+/// Native complete-roster classification, not a consent or generic status code.
+/// Older helpers and an incomplete/error sample do not supply this evidence.
+pub fn permission_denials_complete(row: &Value) -> bool {
+    let coverage = &row["process_coverage"];
+    coverage["abi"] == PERMISSION_DENIALS_ABI
+        && coverage["complete"] == true
+        && coverage["open_files_checked"] == true
+        && row["unreadable_processes"].as_array().is_some_and(|rows| {
+            coverage["permission_denials"].as_u64() == Some(rows.len() as u64)
+                && rows.iter().all(|process| {
+                    process["pid"]
+                        .as_u64()
+                        .is_some_and(|pid| pid > 0 && pid <= u32::MAX as u64)
+                        && process["identity"]
+                            .as_str()
+                            .is_some_and(|id| !id.is_empty())
+                        && ["cwd", "executable", "files"]
+                            .iter()
+                            .all(|key| process[key].is_boolean())
+                        && ["cwd", "executable", "files"]
+                            .iter()
+                            .any(|key| process[key] == true)
+                })
+        })
+}
+
+/// Presentation/readiness for an already-confirmed native Remove origin only.
+/// Keep the original row/proof for the separate Root revalidation at the effect.
+pub fn without_permission_denials(row: &Value) -> Value {
+    let mut shown = row.clone();
+    shown["unreadable_processes"] = json!([]);
+    if let Some(reasons) = shown["reasons"].as_array_mut() {
+        reasons.retain(|reason| reason["code"] != "processes_unavailable");
+        if reasons.is_empty() && shown["verdict"] == "blocked" {
+            shown["verdict"] = json!("review");
+        }
+    }
+    shown
+}
+
 /// Changes the user may discard in a checkout some hidden programs might
 /// use: its removal needs both the discard and the process consent
 /// (zerus-k2ga), so only a surface that asks for both offers it (the cleanup

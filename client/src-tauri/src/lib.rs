@@ -980,8 +980,16 @@ fn launch(context: tauri::Context<tauri::Wry>, startup: Startup) {
                 #[cfg(windows)]
                 {
                     let conf = desk::tray_conf();
-                    platform::windows::tray::install(app.handle(), conf.as_deref())?;
                     let identity = app.state::<identity::Identity>().inner().clone();
+                    // A dev build still works without a notification area (a
+                    // remote session or an Explorer that is not up yet); the
+                    // installed switch keeps its tray as the only way back.
+                    if let Err(error) = platform::windows::tray::install(app.handle(), conf.as_deref()) {
+                        if identity.is_switch() {
+                            return Err(error.into());
+                        }
+                        eprintln!("zerus-client: no notification-area icon: {error}");
+                    }
                     let posts = !desktop_service::mode() && (!identity.is_switch() || app.try_state::<desktop_ownership::NativeReady>().is_some()) && identity.notifications(identity::flag("ZERUS_CLIENT_NOTIFICATIONS"), replay);
                     let switch = identity.is_switch();
                     let attention = posts.then(|| {

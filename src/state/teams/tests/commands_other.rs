@@ -281,6 +281,19 @@ fn adding_a_member_whose_folder_breaks_the_policy_is_refused() {
     });
 }
 
+/// Task #48: in a sandbox every refused store write is the sandbox's, whatever
+/// the error says (Codex's other user meets a private-folder check, not a
+/// read-only database), so the member's request waits in its folder.
+#[test]
+fn a_sandbox_queues_whatever_blocked_its_write() {
+    let error = anyhow::anyhow!("Missing team store parent: the folder is not private to this user");
+    assert!(!super::read_only(&error), "outside a sandbox an unrelated error is the error");
+    crate::platform::set_test_sandboxed(Some(true));
+    let queued = super::read_only(&error);
+    crate::platform::set_test_sandboxed(None);
+    assert!(queued);
+}
+
 /// Task #28 (5): team 33fbafeb's dsh member asked for a worktree got one; its
 /// sandbox could not write the git metadata (in the main checkout's `.git`),
 /// and the preflight only warned. A dsh member's own folder is a clone now,

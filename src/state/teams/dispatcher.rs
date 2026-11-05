@@ -7209,7 +7209,10 @@ fn sandbox_request(member: &Member, folder: &Path, request: &Value) -> Value {
     match request["op"].as_str() {
         Some("session-run") => {
             let session = json!({"name":session.name,"run_id":session.run_id,"conversation_id":session.conversation_id});
-            super::super::builds::start_for_sandbox(id, &request["input"], session, folder).unwrap_or_else(refused)
+            // Task #48: a Codex member's run keeps Codex's sandbox, any
+            // other sandboxed member's Low integrity.
+            let sandbox = if member.agent == "codex" { super::super::builds::Sandbox::Codex } else { super::super::builds::Sandbox::Low };
+            super::super::builds::start_for_sandbox(id, &request["input"], session, folder, sandbox).unwrap_or_else(refused)
         }
         _ => {
             let argv: Vec<String> =

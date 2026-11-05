@@ -5446,6 +5446,19 @@ writes, and the team worker applies what it leaves there on its next tick
   Every other command, such as `send`, `launch` or `attach`, stays closed to a
   sandbox.
 
+**Codex members on Windows.** Codex's Windows sandbox runs a member's commands
+as its own local user (`CodexSandboxOffline`). That user reads the hgs state but
+may write none of it, and may not read the owner's configuration
+(`~/.config/hgs`), which stays the owner's only. hgs recognizes such a process
+because the state belongs to another user and the configuration is unreadable.
+It then loads no configuration (no peers) and takes the same ways as a DeepSeek
+sandbox: team calls, `hgs run` and the reads above wait in the member's folder
+for the team worker. The member is the session its inherited `HGS_SESSION` and
+`HGS_RUN_ID` name; only the folder the request is written to proves it. A Codex
+member's `hgs run` runs in `codex sandbox` on its own folder, never above it:
+the command must start in that folder. Codex keeps `.git` read-only, so its
+commits go through the `git-commit` template.
+
 This needs a running team: a sandboxed DeepSeek session outside a team is told
 so. `hgs self` answers a DeepSeek tool command from the binding of its
 `DSH_SESSION_ID`, in or outside a sandbox. The worker runs a member's `hgs run` at Low integrity but outside

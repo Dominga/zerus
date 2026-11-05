@@ -3112,6 +3112,21 @@ A replacement checkout at the same path or branch is kept for manual review;
 older sessions without a launch ownership record also require review. Fresh
 removal fingerprints include the ownership nonce, so replacing a checkout after
 review cannot inherit its removal consent.
+
+On Linux and macOS, `worktrees programs --json` provides read-only native
+discovery for an original live session and its verified launch-owned checkout.
+Its closed stdin object contains `capture`; the bounded reply binds the exact
+capture, configuration, boot and checkout directory object to the complete list
+of observed program PIDs and native birth identities. This is data, never a stop
+permit. The command sends no signals and changes no cleanup or Force authority.
+It refuses an incomplete or changing census, changed ownership, ambiguous hard
+links, nested mounts, or a custodian using the checkout. The discovery budget is
+five seconds, 64 programs, 65,536 filesystem objects and 8 MiB of retained relative
+names; the wire reply is capped at 64 KiB and expires after five minutes. Actual
+permission denials are omitted only from this explicit-Remove discovery; a
+readable cwd or open file still establishes membership. The existing generic
+worktree review and background cleanup keep their conservative process policy.
+
 After the original confirmation closes, cleanup runs in the background only
 following exact successful termination. A compact workspace notice shows progress,
 then **Working folder removed**, **Working folder kept** with a short reason, or

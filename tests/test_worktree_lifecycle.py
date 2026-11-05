@@ -31,6 +31,56 @@ class WorktreeLifecycle(test_pause.Harness):
     def archives(self):
         return [json.loads(p.read_text()) for p in (self.root/'state/archives').glob('*.json')]
 
+    def program_capture(self, name):
+        record=self.binding(name);owner=record['worktree_owner']
+        machine=json.loads(self.hgs('dirs','--creation',str(self.project)))['computer_id']
+        return {'target':{'computer':'','name':name,'run_id':record['run_id'],'conversation_id':record['conversation_id']},
+                'machine':machine,'root':owner['path'],'common_dir':owner['common_dir'],'owner_id':owner['id']}
+
+    def program_manifest(self, capture, cwd=None):
+        return subprocess.run([str(test_pause.HGS),'worktrees','programs','--json'],input=json.dumps({'capture':capture}),
+                              env=self.env,text=True,capture_output=True,timeout=10,cwd=cwd)
+
+    def test_program_manifest_is_read_only_and_finds_native_cwd_and_open_files(self):
+        name=self.start('claude');capture=self.program_capture(name)
+        # exec completion establishes the actual cwd/FDs; no readiness sleep.
+        cwd=subprocess.Popen(['/bin/sleep','300'],cwd=self.project,env=self.env,stdin=subprocess.DEVNULL)
+        held=open(self.project/'tracked','rb')
+        opened=subprocess.Popen(['/bin/sleep','300'],cwd=self.root,env=self.env,stdin=held)
+        held.close()
+        self.addCleanup(lambda:self.settle_program(cwd));self.addCleanup(lambda:self.settle_program(opened))
+        before=sorted(p.relative_to(self.project).as_posix() for p in self.project.rglob('*'))
+        result=self.program_manifest(capture);self.assertEqual(result.returncode,0,result.stderr)
+        value=json.loads(result.stdout);self.assertEqual(value['abi'],'worktree-programs-v1')
+        self.assertEqual(value['capture'],capture);self.assertEqual(value['expires']-value['issued'],300)
+        pids=[p['pid'] for p in value['programs']];self.assertEqual(pids,sorted(set(pids)))
+        self.assertIn(cwd.pid,pids);self.assertIn(opened.pid,pids)
+        self.assertIsNone(cwd.poll());self.assertIsNone(opened.poll())
+        self.assertEqual(before,sorted(p.relative_to(self.project).as_posix() for p in self.project.rglob('*')))
+        self.assertEqual(self.archives(),[]);self.assertTrue(self.binding(name))
+
+    @staticmethod
+    def settle_program(process):
+        if process.poll() is None:process.kill()
+        process.wait(timeout=5)
+
+    def test_program_manifest_refuses_changed_original_and_replaced_ownership(self):
+        name=self.start('claude');capture=self.program_capture(name)
+        changed=dict(capture);changed['owner_id']='22222222-2222-4222-8222-222222222222'
+        self.assertNotEqual(self.program_manifest(changed).returncode,0)
+        changed=dict(capture,target=dict(capture['target'],run_id='33333333-3333-4333-8333-333333333333'))
+        self.assertNotEqual(self.program_manifest(changed).returncode,0)
+        marker=Path(self.git('-C',str(self.project),'rev-parse','--absolute-git-dir'))/'zerus-owner.json'
+        marker.write_text('{replaced')
+        self.assertNotEqual(self.program_manifest(capture).returncode,0)
+        self.assertEqual(marker.read_text(),'{replaced');self.assertTrue(self.project.exists());self.assertEqual(self.archives(),[])
+
+    def test_program_manifest_never_publishes_an_offer_from_inside_its_own_target(self):
+        name=self.start('claude');capture=self.program_capture(name)
+        result=self.program_manifest(capture,cwd=self.project)
+        self.assertNotEqual(result.returncode,0);self.assertIn('needed to settle',result.stderr)
+        self.assertTrue(self.project.exists());self.assertEqual(self.archives(),[]);self.assertTrue(self.binding(name))
+
     def command(self,*args):
         result=subprocess.run([str(test_pause.HGS),*args],env=self.env,text=True,capture_output=True,timeout=40)
         self.assertEqual(result.returncode,0,result.stdout+result.stderr)

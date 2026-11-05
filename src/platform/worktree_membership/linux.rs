@@ -4,63 +4,64 @@ use std::{
     path::{Path, PathBuf},
 };
 
+use std::io::Read;
+
+fn read(path: &Path) -> std::io::Result<String> {
+    let mut bytes = Vec::new();
+    fs::File::open(path)?.take(65537).read_to_end(&mut bytes)?;
+    if bytes.len() > 65536 {
+        return Err(std::io::Error::other("process metadata exceeds its bound"));
+    }
+    String::from_utf8(bytes).map_err(std::io::Error::other)
+}
+fn identity(path: &Path) -> std::io::Result<(String, bool, u32)> {
+    let raw = read(&path.join("stat"))?;
+    let fields: Vec<_> = raw
+        .rsplit_once(") ")
+        .ok_or_else(|| std::io::Error::other("invalid process identity"))?
+        .1
+        .split_whitespace()
+        .collect();
+    let start = fields
+        .get(19)
+        .ok_or_else(|| std::io::Error::other("invalid process start"))?;
+    let parent = fields
+        .get(1)
+        .ok_or_else(|| std::io::Error::other("invalid process parent"))?
+        .parse()
+        .map_err(std::io::Error::other)?;
+    Ok((
+        (*start).to_owned(),
+        matches!(fields.first(), Some(&"Z" | &"X")),
+        parent,
+    ))
+}
+fn ancestors(
+    deadline: std::time::Instant,
+) -> std::io::Result<std::collections::BTreeMap<u32, String>> {
+    let mut rows = std::collections::BTreeMap::new();
+    let mut pid = std::process::id();
+    while pid != 0 {
+        if rows.len() >= 128 || std::time::Instant::now() >= deadline || rows.contains_key(&pid) {
+            return Err(std::io::Error::other("incomplete invocation ancestry"));
+        }
+        let (start, exited, parent) = identity(&PathBuf::from(format!("/proc/{pid}")))?;
+        if exited {
+            return Err(std::io::Error::other("exited invocation ancestor"));
+        }
+        rows.insert(pid, start);
+        pid = parent;
+    }
+    Ok(rows)
+}
+
 pub(in crate::platform) fn sample(
     deadline: std::time::Instant,
 ) -> std::result::Result<super::WorktreeProcesses, String> {
-    use std::io::Read;
     let deadline = deadline.min(std::time::Instant::now() + std::time::Duration::from_secs(2));
     let uid = unsafe { libc::getuid() };
     let error =
         || "Running process coverage is incomplete; review the worktree manually".to_owned();
-    fn read(path: &Path) -> std::io::Result<String> {
-        let mut bytes = Vec::new();
-        fs::File::open(path)?.take(65537).read_to_end(&mut bytes)?;
-        if bytes.len() > 65536 {
-            return Err(std::io::Error::other("process metadata exceeds its bound"));
-        }
-        String::from_utf8(bytes).map_err(std::io::Error::other)
-    }
-    fn identity(path: &Path) -> std::io::Result<(String, bool, u32)> {
-        let raw = read(&path.join("stat"))?;
-        let fields: Vec<_> = raw
-            .rsplit_once(") ")
-            .ok_or_else(|| std::io::Error::other("invalid process identity"))?
-            .1
-            .split_whitespace()
-            .collect();
-        let start = fields
-            .get(19)
-            .ok_or_else(|| std::io::Error::other("invalid process start"))?;
-        let parent = fields
-            .get(1)
-            .ok_or_else(|| std::io::Error::other("invalid process parent"))?
-            .parse()
-            .map_err(std::io::Error::other)?;
-        Ok((
-            (*start).to_owned(),
-            matches!(fields.first(), Some(&"Z" | &"X")),
-            parent,
-        ))
-    }
-    fn ancestors(
-        deadline: std::time::Instant,
-    ) -> std::io::Result<std::collections::BTreeMap<u32, String>> {
-        let mut rows = std::collections::BTreeMap::new();
-        let mut pid = std::process::id();
-        while pid != 0 {
-            if rows.len() >= 128 || std::time::Instant::now() >= deadline || rows.contains_key(&pid)
-            {
-                return Err(std::io::Error::other("incomplete invocation ancestry"));
-            }
-            let (start, exited, parent) = identity(&PathBuf::from(format!("/proc/{pid}")))?;
-            if exited {
-                return Err(std::io::Error::other("exited invocation ancestor"));
-            }
-            rows.insert(pid, start);
-            pid = parent;
-        }
-        Ok(rows)
-    }
     let invocation = ancestors(deadline).map_err(|_| error())?;
     let entries = fs::read_dir("/proc").map_err(|_| error())?;
     let boot = read(Path::new("/proc/sys/kernel/random/boot_id")).map_err(|_| error())?;
@@ -192,6 +193,144 @@ fn files(process: &Path, deadline: std::time::Instant) -> io::Result<Files> {
     Ok(out)
 }
 
+/// Unlike the generic review's display paths, native object observations can
+/// establish membership for the explicit program manifest. Opening /proc
+/// magic links as O_PATH never opens a FIFO/device for IO or trusts its name.
+fn native_object(path: &Path) -> io::Result<objects::Object> {
+    use std::os::{
+        fd::{AsRawFd, FromRawFd},
+        unix::ffi::OsStrExt,
+    };
+    let path = std::ffi::CString::new(path.as_os_str().as_bytes())?;
+    let fd = unsafe { libc::open(path.as_ptr(), libc::O_PATH | libc::O_CLOEXEC) };
+    if fd < 0 {
+        return Err(io::Error::last_os_error());
+    }
+    let file = unsafe { fs::File::from_raw_fd(fd) };
+    let mut value = unsafe { std::mem::zeroed() };
+    if unsafe { libc::fstat(file.as_raw_fd(), &mut value) } != 0 {
+        return Err(io::Error::last_os_error());
+    }
+    Ok(objects::object(&value))
+}
+
+pub(super) fn member(
+    process: &Path,
+    inventory: &objects::Inventory,
+    deadline: Instant,
+) -> io::Result<bool> {
+    let mut found = false;
+    bounded(0, deadline)?;
+    match native_object(&process.join("cwd")) {
+        Ok(id) => found |= inventory.contains(id),
+        Err(e) if denied(&e) => {}
+        Err(e) => return Err(e),
+    }
+    let fds = match fs::read_dir(process.join("fd")) {
+        Ok(fds) => fds,
+        Err(e) if denied(&e) => return Ok(found),
+        Err(e) => return Err(e),
+    };
+    for (count, fd) in fds.enumerate() {
+        bounded(count, deadline)?;
+        match native_object(&fd?.path()) {
+            Ok(id) => found |= inventory.contains(id),
+            Err(e) if denied(&e) || e.kind() == io::ErrorKind::NotFound => {}
+            Err(e) => return Err(e),
+        }
+    }
+    Ok(found)
+}
+
+pub(super) fn programs(
+    inventory: &objects::Inventory,
+    deadline: Instant,
+) -> io::Result<Vec<zerus_client_core::worktree_programs::Program>> {
+    let uid = unsafe { libc::getuid() };
+    let invocation = ancestors(deadline)?;
+    let mut rows = Vec::new();
+    for (count, entry) in fs::read_dir("/proc")?.enumerate() {
+        if count >= 32_768 || Instant::now() >= deadline {
+            return Err(limit());
+        }
+        let entry = entry?;
+        let Some(pid) = entry
+            .file_name()
+            .to_str()
+            .and_then(|value| value.parse::<u32>().ok())
+        else {
+            continue;
+        };
+        // The observer deliberately holds the root FD; it is never a signal target.
+        // The action owner separately checks its own cwd, image and data resources.
+        if pid <= 1 || pid == std::process::id() {
+            continue;
+        }
+        let process = entry.path();
+        let inspect = || -> io::Result<Option<zerus_client_core::worktree_programs::Program>> {
+            let status = read(&process.join("status"))?;
+            let uids: Vec<u32> = status
+                .lines()
+                .find_map(|line| line.strip_prefix("Uid:"))
+                .ok_or_else(limit)?
+                .split_whitespace()
+                .map(str::parse)
+                .collect::<Result<_, _>>()
+                .map_err(io::Error::other)?;
+            if uids.len() != 4 {
+                return Err(limit());
+            }
+            if !uids.contains(&uid) {
+                return Ok(None);
+            }
+            let before = identity(&process)?;
+            if before.1 {
+                return Ok(None);
+            }
+            let membership = member(&process, inventory, deadline);
+            let after = identity(&process)?;
+            if after.1 {
+                return Ok(None);
+            }
+            if before != after {
+                return Err(limit());
+            }
+            if !membership? {
+                return Ok(None);
+            }
+            if invocation.get(&pid) == Some(&before.0) {
+                return Err(io::Error::other(
+                    "a program in the checkout is needed to settle this action",
+                ));
+            }
+            let name = read(&process.join("comm"))?;
+            let label = name.trim().to_owned();
+            if label.is_empty() || label.len() > 512 || label.chars().any(char::is_control) {
+                return Err(limit());
+            }
+            Ok(Some(zerus_client_core::worktree_programs::Program {
+                pid,
+                birth: before.0,
+                label,
+            }))
+        };
+        match inspect() {
+            Ok(Some(row)) => rows.push(row),
+            Ok(None) => {}
+            Err(e) if e.kind() == io::ErrorKind::NotFound && !process.exists() => {}
+            Err(e) => return Err(e),
+        }
+        if rows.len() > zerus_client_core::worktree_programs::MAX_PROGRAMS {
+            return Err(limit());
+        }
+    }
+    if ancestors(deadline)? != invocation {
+        return Err(limit());
+    }
+    rows.sort_by_key(|row| row.pid);
+    Ok(rows)
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -212,5 +351,41 @@ mod tests {
             sample.paths.contains(&path),
             "open-file membership must not be inferred from cwd only"
         );
+    }
+
+    #[test]
+    fn native_manifest_uses_the_held_file_object_not_a_prefix_or_replaced_name() {
+        let parent = tempfile::tempdir().unwrap();
+        let root = parent.path().join("work");
+        fs::create_dir(&root).unwrap();
+        let inside = root.join("original");
+        let outside = parent.path().join("work-with-similar-name");
+        fs::write(&inside, b"original").unwrap();
+        fs::write(&outside, b"other").unwrap();
+        let until = || Instant::now() + std::time::Duration::from_secs(3);
+        let scope = objects::Scope::open(&root, until()).unwrap();
+        let original = fs::File::open(&inside).unwrap();
+        let id = native_object(&PathBuf::from(format!(
+            "/proc/self/fd/{}",
+            std::os::fd::AsRawFd::as_raw_fd(&original)
+        )))
+        .unwrap();
+        assert!(scope.inventory(until()).unwrap().contains(id));
+        let inventory = scope.inventory(until()).unwrap();
+        drop(scope); // The observer's intentional root pin is not test evidence.
+        assert!(member(Path::new("/proc/self"), &inventory, until()).unwrap());
+        fs::rename(&inside, parent.path().join("moved-away")).unwrap();
+        fs::write(&inside, b"replacement").unwrap();
+        let scope = objects::Scope::open(&root, until()).unwrap();
+        let inventory = scope.inventory(until()).unwrap();
+        drop(scope);
+        assert!(!inventory.contains(id));
+        assert!(!member(Path::new("/proc/self"), &inventory, until()).unwrap());
+        std::os::unix::fs::symlink(&outside, root.join("outside-alias")).unwrap();
+        let _other = fs::File::open(root.join("outside-alias")).unwrap();
+        let scope = objects::Scope::open(&root, until()).unwrap();
+        let inventory = scope.inventory(until()).unwrap();
+        drop(scope);
+        assert!(!member(Path::new("/proc/self"), &inventory, until()).unwrap());
     }
 }

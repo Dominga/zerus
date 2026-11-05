@@ -4,7 +4,7 @@ use super::*;
 use std::{
     cell::{Cell, RefCell},
     io::{Read, Write},
-    os::fd::AsRawFd,
+    os::fd::{AsRawFd, FromRawFd},
     process::{Command, Stdio},
     rc::Rc,
     time::{Duration, Instant},
@@ -14,7 +14,15 @@ type Hook = Box<dyn FnOnce(&mut Child)>;
 unsafe extern "C" {
     fn mach_port_type(task: u32, name: u32, kind: *mut u32) -> i32;
 }
-thread_local! { static AFTER: RefCell<Option<Hook>> = const { RefCell::new(None) }; }
+thread_local! {
+    static AFTER: RefCell<Option<Hook>> = const { RefCell::new(None) };
+    static AFTER_REVALIDATION: RefCell<Option<Hook>> = const { RefCell::new(None) };
+}
+pub(super) fn after_revalidation(child: &mut Child) {
+    if let Some(hook) = AFTER_REVALIDATION.with_borrow_mut(Option::take) {
+        hook(child);
+    }
+}
 pub(super) fn after_first_check(child: &mut Child) {
     if let Some(hook) = AFTER.with_borrow_mut(Option::take) {
         hook(child);
@@ -24,6 +32,7 @@ struct HookReset;
 impl Drop for HookReset {
     fn drop(&mut self) {
         AFTER.with_borrow_mut(|hook| *hook = None);
+        AFTER_REVALIDATION.with_borrow_mut(|hook| *hook = None);
     }
 }
 fn hook(hook: impl FnOnce(&mut Child) + 'static) -> HookReset {
@@ -340,10 +349,76 @@ fn native_reaped_child_and_an_extracted_input_never_get_observed() {
     child.0.stdin = other.0.stdin.take();
     assert_eq!(
         observe(&mut child.0, &expected("/bin/cat"), || Ok(())),
-        Err(Refusal::Child)
+        Err(Refusal::ChildExited)
     );
     assert!(child.0.stdin.is_none());
     other.finish();
+}
+
+#[test]
+fn native_fast_helper_exit_is_reported_after_revalidation_without_accepting_input() {
+    let tree = super::super::tests::Tree::new();
+    // Hold the public fixture gate until revalidation starts, then let it
+    // finish like --help. Its actual exit before birth is observed through
+    // THIS Child, never inferred from elapsed time or a supplied PID.
+    let mut child = Owned(
+        Command::new("/bin/sh")
+            .args(["-c", "IFS= read -r gate; exit 0"])
+            .current_dir(&tree.0)
+            .stdin(Stdio::piped())
+            .stdout(Stdio::piped())
+            .spawn()
+            .unwrap(),
+    );
+    assert!(child.0.try_wait().unwrap().is_none());
+    assert!(child.0.stdin.is_some());
+    // An owned CLOEXEC copy sends only a public test synchronization byte.
+    // The original input stays in Child and must still close on refusal.
+    let fd = unsafe {
+        libc::fcntl(
+            child.0.stdin.as_ref().unwrap().as_raw_fd(),
+            libc::F_DUPFD_CLOEXEC,
+            0,
+        )
+    };
+    assert!(fd >= 0);
+    let mut gate = unsafe { std::fs::File::from_raw_fd(fd) };
+    let exited = Rc::new(Cell::new(false));
+    let seen = exited.clone();
+    AFTER_REVALIDATION.with_borrow_mut(|slot| {
+        assert!(slot
+            .replace(Box::new(move |child| {
+                let until = Instant::now() + Duration::from_secs(3);
+                loop {
+                    if let Some(exit) = child.try_wait().unwrap() {
+                        assert!(exit.success());
+                        seen.set(true);
+                        break;
+                    }
+                    assert!(Instant::now() < until);
+                    std::thread::sleep(Duration::from_millis(5));
+                }
+            }))
+            .is_none());
+    });
+    let _reset = HookReset;
+    let mut revalidated = 0;
+    let result = observe(&mut child.0, &expected("/bin/sh"), || {
+        revalidated += 1;
+        gate.write_all(b"release\n").unwrap();
+        Ok(())
+    });
+    assert_eq!(revalidated, 1);
+    assert!(exited.get());
+    assert_eq!(result, Err(Refusal::ChildExited));
+    assert_eq!(
+        crate::desktop::relay::OriginalHelperFailure::from(result.unwrap_err()).code(),
+        "original_child_exited"
+    );
+    assert!(
+        child.0.stdin.is_none(),
+        "refused original input is still closed"
+    );
 }
 
 #[test]

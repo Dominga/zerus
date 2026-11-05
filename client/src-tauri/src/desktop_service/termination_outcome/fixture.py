@@ -1,5 +1,5 @@
 # Synthetic CLI prefix. Real native cache children; fake actor/Terminate replies.
-import sys, os
+import sys, os, json
 # The private fixture source embeds its own data root; execution may be sealed.
 __file__ = FIXTURE_SOURCE
 from pathlib import Path
@@ -13,10 +13,16 @@ if args[:1] == ['--expect-machine']:
     args = args[2:]
 else:
     machine = None
+offer_case = json.loads((root / 'fixture.json').read_text()).get('termination_offer_case')
+if args[:2] == ['desktop', 'status'] and offer_case == 'status':
+    print(json.dumps(dict(abi='desktop-v1', running=True, configuration='b' * 64, epoch='00000000-0000-4000-8000-000000000001')))
+    sys.exit(0)
 if args == ['--help']:
     print('guarded-create-v1')
-    print('scoped native lifecycle action')
-    print('Desktop termination outcome ABI: desktop-termination-outcome-v1')
+    if offer_case != 'lifecycle':
+        print('scoped native lifecycle action')
+    if offer_case != 'abi':
+        print('Desktop termination outcome ABI: desktop-termination-outcome-v1')
     print('Desktop frontend request ABI: desktop-ui-request-v1')
 elif args[:1] in [['inspect'], ['session-action']] or args[:2] in [['desktop', 'frontend-request']]:
     import hashlib, json, os, socket, time
@@ -39,11 +45,17 @@ elif args[:1] in [['inspect'], ['session-action']] or args[:2] in [['desktop', '
     def digest(value):
         return hashlib.sha256(json.dumps(value, separators=(',', ':'), ensure_ascii=False).encode()).hexdigest()
     if args[:1] == ['inspect']:
+        if offer_case == 'inspect_exit':
+            print('private fixture stderr must not reach a diagnostic', file=sys.stderr)
+            sys.exit(7)
+        if offer_case == 'inspect_json':
+            print('private fixture body must not reach a diagnostic')
+            sys.exit(0)
         target = capture['target']
         changed = config.get('termination_changed_capture') and (root / 'termination-retained').exists()
         print(json.dumps(dict(name=target['name'], run_id=target['run_id'], conversation_id=target['conversation_id'],
             runtime_state='live', tracked=True, agent='codex', git_worktree=True,
-            git_root=capture['root'], git_common_dir=capture['common_dir'],
+            git_root='relative' if offer_case == 'capture' else capture['root'], git_common_dir=capture['common_dir'],
             worktree_owner_id='replacement-owner' if changed else capture['owner_id'])), flush=True)
     elif args[:1] == ['session-action']:
         assert machine == capture['machine']

@@ -27,6 +27,12 @@ thread_local! {
     static REFUSED_OBSERVER: std::cell::RefCell<Option<RefusedObserver>> = const { std::cell::RefCell::new(None) };
     static AFTER_OBSERVATION: std::cell::RefCell<Option<RefusedObserver>> = const { std::cell::RefCell::new(None) };
     static AFTER_BINDING: std::cell::RefCell<Option<RefusedObserver>> = const { std::cell::RefCell::new(None) };
+    static AFTER_CAPTURE: std::cell::RefCell<Option<Box<dyn FnOnce()>>> = const { std::cell::RefCell::new(None) };
+}
+pub(super) fn after_capture() {
+    if let Some(hook) = AFTER_CAPTURE.with_borrow_mut(Option::take) {
+        hook();
+    }
 }
 pub(super) fn after_image_observation(child: &mut std::process::Child) {
     if let Some(observer) = AFTER_OBSERVATION.with_borrow_mut(Option::take) {
@@ -60,6 +66,7 @@ fn accounted_read_cannot_release_input_if_scope_changes_during_observation() {
             let key = crate::actions::Lane::key(&capture().target, &Action::Terminate);
             let hold = actions.begin(key.clone(), &Action::Terminate).unwrap();
             let context = Context::new_supported(service.clone(), Arc::new(hold)).unwrap();
+            context.trace.phase(Phase::InspectRead);
             let checked = context.clone();
             let check_actions = actions.clone();
             let check_key = key.clone();
@@ -119,6 +126,14 @@ fn accounted_read_cannot_release_input_if_scope_changes_during_observation() {
             assert!(!std::path::Path::new(&format!("/proc/{pid}")).exists());
             assert!(context.rejected.load(Ordering::Acquire));
             assert!(!context.busy.load(Ordering::Acquire));
+            let detail = context
+                .trace
+                .finish::<()>(Err(UNCONFIRMED.into()))
+                .unwrap_err();
+            assert!(
+                detail.ends_with("Removal check: inspect_read / context_after_observation."),
+                "{detail}"
+            );
             drop(context);
             assert!(actions.begin(key, &Action::Terminate).is_some());
             assert!(effects(&calls(&f)).is_empty());
@@ -992,5 +1007,118 @@ fn an_in_place_rewrite_after_the_last_spawn_check_cannot_replace_native_code() {
             if serde_json::from_slice::<Value>(&stdout).unwrap()["status"] == "completed"));
         assert!(!replacement);
         assert_eq!(native_calls, 1);
+    });
+}
+
+#[test]
+fn read_only_offer_diagnostics_pin_real_refusal_stages_without_effects_or_child_text() {
+    let _process = crate::PROCESS_TREE.read().unwrap();
+    tauri::async_runtime::block_on(async {
+        for (case, expected) in [
+            ("abi", "abi_probe / abi_marker"),
+            ("status", "service_scope / status_scope"),
+            ("lifecycle", "lifecycle_probe / check_refused"),
+            ("inspect_exit", "inspect_read / child_exit"),
+            ("inspect_json", "inspect_read / check_refused"),
+            ("capture", "capture / check_refused"),
+            ("final", "final_offer_current / context_current"),
+        ] {
+            let f = fixture(json!({}));
+            let (service, _cache) = connected(&f).await;
+            // Change reply DATA only after the real connection is ready. The
+            // retained executable remains the same immutable Linux snapshot.
+            let temporary = f.0.join("fixture-diagnostic.json");
+            std::fs::write(
+                &temporary,
+                json!({"termination_offer_case": case}).to_string(),
+            )
+            .unwrap();
+            std::fs::rename(temporary, f.0.join("fixture.json")).unwrap();
+            let checked = service.clone();
+            let original = capture();
+            let result = tauri::async_runtime::spawn_blocking(move || {
+                if case == "final" {
+                    let cancel = checked.shared.cancellation.lock().unwrap().clone().unwrap();
+                    AFTER_CAPTURE.with_borrow_mut(|hook| {
+                        *hook = Some(Box::new(move || cancel.store(true, Ordering::Release)));
+                    });
+                }
+                let result =
+                    inspect_fixture(checked, &original.target, &original.machine, Arc::new(()));
+                AFTER_CAPTURE.with_borrow_mut(|hook| {
+                    hook.take();
+                });
+                result
+            })
+            .await
+            .unwrap();
+            let detail = result
+                .err()
+                .expect("the actual read-only offer must refuse");
+            assert_eq!(detail, format!("{UNCONFIRMED}\nRemoval check: {expected}."));
+            for private in [
+                "private fixture",
+                "/srv/example",
+                "original-run",
+                "original-owner",
+            ] {
+                assert!(!detail.contains(private), "{detail}");
+            }
+            assert!(requests(&calls(&f), "termination_outcome").is_empty());
+            assert!(effects(&calls(&f)).is_empty());
+            service.join().await.unwrap();
+        }
+    });
+}
+
+#[test]
+fn disconnected_offer_context_is_diagnostic_without_spawning_a_native_effect() {
+    let _process = crate::PROCESS_TREE.read().unwrap();
+    tauri::async_runtime::block_on(async {
+        let f = fixture(json!({}));
+        let (service, _pump) = f.start(false);
+        let original = capture();
+        let detail = inspect_fixture(
+            service.clone(),
+            &original.target,
+            &original.machine,
+            Arc::new(()),
+        )
+        .err()
+        .expect("disallowed context cannot inspect");
+        assert_eq!(
+            detail,
+            format!("{UNCONFIRMED}\nRemoval check: context_prepare / disallowed.")
+        );
+        assert!(effects(&calls(&f)).is_empty());
+        service.join().await.unwrap();
+    });
+}
+
+#[test]
+fn offer_physical_finish_diagnostic_keeps_the_original_rpc_charge_until_real_release() {
+    let _process = crate::PROCESS_TREE.read().unwrap();
+    tauri::async_runtime::block_on(async {
+        let f = fixture(json!({}));
+        let (service, _cache) = connected(&f).await;
+        let context = Context::new_supported(service.clone(), Arc::new(())).unwrap();
+        context.trace.phase(Phase::AbiProbe);
+        let held = context.start_call().unwrap();
+        assert!(context.busy.load(Ordering::Acquire));
+        assert!(service.shared.rpc.snapshot().unwrap().count(Role::Fleet) > 0);
+        assert!(context.finish_call().is_err());
+        let detail = context
+            .trace
+            .finish::<()>(Err(UNCONFIRMED.into()))
+            .unwrap_err();
+        assert_eq!(
+            detail,
+            format!("{UNCONFIRMED}\nRemoval check: abi_probe / physical_finish.")
+        );
+        assert!(context.busy.load(Ordering::Acquire));
+        drop(held);
+        assert!(!context.busy.load(Ordering::Acquire));
+        assert!(effects(&calls(&f)).is_empty());
+        service.join().await.unwrap();
     });
 }

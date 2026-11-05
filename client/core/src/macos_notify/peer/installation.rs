@@ -29,6 +29,9 @@ pub enum Refusal {
     SelfChanged,
     GenerationChanged,
     Child,
+    /// The existing owned-child birth check observed actual exit. Diagnostic
+    /// only: an exited original is still refused and never supplies authority.
+    ChildExited,
     Peer(super::Refusal),
 }
 

@@ -8,7 +8,7 @@ const REASONS = {
   legacy_projects_changed: () => tr("The computer or project catalog changed. It is checked again the next time Zerus starts."),
   legacy_projects_history: () => tr("Earlier project changes prevent automatic import. Review the existing projects manually."),
   legacy_projects_invalid_folders: () => tr("Some legacy folders are invalid. Existing projects and the source are kept."),
-  legacy_projects_windows_unsupported: () => tr("Legacy Windows folders require device-local import and were not shared."),
+  legacy_projects_windows_unsupported: () => tr("These folders are on a Windows computer and were not imported. Add them again in Projects on that Windows computer."),
   legacy_projects_read_blocked: () => tr("The fresh project catalog or computer configuration could not be verified. Reads retry automatically; the original import will not be applied again."),
   legacy_projects_pending: () => tr("The original import has not been confirmed. It will not be applied again."),
 };

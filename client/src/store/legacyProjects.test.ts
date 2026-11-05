@@ -11,7 +11,7 @@ describe("legacy project migration report", () => {
     const blocked = legacyProjectRow(report("blocked", ["legacy_projects_history", "legacy_projects_windows_unsupported"]))!;
     expect(blocked.status).toBe("Needs review");
     expect(blocked.reasons[0].text).toContain("manually");
-    expect(blocked.reasons[1].text).toContain("not shared");
+    expect(blocked.reasons[1]).toEqual({ code: "legacy_projects_windows_unsupported", text: "These folders are on a Windows computer and were not imported. Add them again in Projects on that Windows computer." });
     expect(blocked.keys).toEqual(["projects", "folders"]);
   });
   it("does not show an empty family as an earlier import", () => {

@@ -5389,15 +5389,17 @@ writes, and the team worker applies what it leaves there on its next tick
   with its temporary files in `<folder>/.zerus-team/tmp`: a member's run never
   runs above its sandbox. `--wait` and `--list` read the run's record as for
   any session.
-- `hgs ls` and `hgs inspect <session>` (with `--skip-processes` or
-  `--after N`) are answered by the worker, which runs the read outside the
-  sandbox and leaves the output in the folder. These reads write, send, start
+- `hgs ls`, `hgs inspect <session>` (with `--skip-processes` or
+  `--after N`), and `hgs task list` or `hgs task get` of a named project
+  (`--project P` or `PROJECT/T-xxxxxx`) are answered by the worker, which runs
+  the read outside the sandbox and leaves the output in the folder. These reads write, send, start
   and attach nothing, and the sandbox already reads every file they read.
   Every other command, such as `send`, `launch` or `attach`, stays closed to a
   sandbox.
 
 This needs a running team: a sandboxed DeepSeek session outside a team is told
-so. The worker runs a member's `hgs run` at Low integrity but outside
+so. `hgs self` answers a DeepSeek tool command from the binding of its
+`DSH_SESSION_ID`, in or outside a sandbox. The worker runs a member's `hgs run` at Low integrity but outside
 DeepSeek's own confinement, so the run, like any Low process, may use the
 network and named pipes of Low processes.
 

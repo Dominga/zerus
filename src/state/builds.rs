@@ -85,7 +85,11 @@ fn caller() -> Option<Value> {
 /// "not inside a Zerus session". The harness runs every tool command with
 /// the conversation as `DSH_SESSION_ID` (the identity `hgs team` takes for a
 /// dsh member, A3/A4); the caller is this computer's binding of it.
-fn dsh_caller() -> Option<Value> {
+pub(crate) fn dsh_caller() -> Option<Value> {
+    #[cfg(test)]
+    if let Some(conversation) = TEST_DSH_SESSION.with(|value| value.borrow().clone()) {
+        return binding_for(&super::dsh::binding_records(), &conversation);
+    }
     binding_for(&super::dsh::binding_records(), &nonempty_env("DSH_SESSION_ID")?)
 }
 
@@ -365,6 +369,8 @@ thread_local! {
     /// The caller a test names: Some(None) is no session, whatever session
     /// runs the tests.
     pub(crate) static TEST_CALLER: std::cell::RefCell<Option<Option<Value>>> = const { std::cell::RefCell::new(None) };
+    /// The DSH_SESSION_ID a test's process carries.
+    pub(crate) static TEST_DSH_SESSION: std::cell::RefCell<Option<String>> = const { std::cell::RefCell::new(None) };
 }
 
 fn spawn(id: &str) -> std::io::Result<()> {
@@ -591,7 +597,7 @@ fn prune() {
 }
 
 #[cfg(test)]
-mod tests {
+pub(crate) mod tests {
     use super::*;
 
     use crate::state::teams::model::{Member, MemberState, SessionRef, Team, TeamStatus};
@@ -740,6 +746,71 @@ mod tests {
             let error = as_sandboxed_qa(|| start(&request, false)).unwrap_err();
             assert!(error.contains("only a member of a running team"), "{error}");
             assert!(!teams::outbox::dir(folder.path()).exists());
+        });
+    }
+
+    /// Writes qa's DeepSeek binding where Zerus keeps it.
+    pub(crate) fn write_qa_binding() {
+        use sha2::Digest;
+        let binding = json!({"agent":"dsh","backend":"dsh","name":"dsh/Zerus/zerus-next-for-the-fork-qa",
+            "run_id":"ba3d8c92-041c-4e14-81b2-b2e63f0e7ee7","conversation_id":QA,"cwd":"C:/work/project"});
+        let dir = root().join("dsh").join("bindings");
+        fs::create_dir_all(&dir).unwrap();
+        let name = format!("{:x}.json", sha2::Sha256::digest("dsh/Zerus/zerus-next-for-the-fork-qa".as_bytes()));
+        fs::write(dir.join(name), binding.to_string()).unwrap();
+    }
+
+    /// Task #34: the caller of a DeepSeek tool command is the binding of its
+    /// DSH_SESSION_ID, read from this computer's bindings; an unknown or
+    /// missing conversation is no caller.
+    #[test]
+    fn a_deepseek_binding_is_found_by_its_conversation() {
+        let root_dir = tempfile::tempdir().unwrap();
+        with_test_state_root(root_dir.path(), || {
+            write_qa_binding();
+            let found = |conversation: Option<&str>| {
+                TEST_DSH_SESSION.with(|value| *value.borrow_mut() = conversation.map(str::to_owned));
+                let found = dsh_caller();
+                TEST_DSH_SESSION.with(|value| *value.borrow_mut() = None);
+                found
+            };
+            assert_eq!(found(Some(QA)).unwrap()["name"], "dsh/Zerus/zerus-next-for-the-fork-qa");
+            assert!(found(Some("session-unknown")).is_none());
+        });
+    }
+
+    /// Task #34 (audit #29 P6): at Low integrity `hgs task list --project
+    /// RogueDod` answered "Access is denied". The read waits in the member's
+    /// folder like `hgs ls`, and the worker's answer is printed; a task
+    /// command that changes something is never brokered.
+    #[test]
+    fn a_sandboxed_members_task_read_is_answered_by_the_worker() {
+        let root = tempfile::tempdir().unwrap();
+        let folder = tempfile::tempdir().unwrap();
+        with_test_state_root(root.path(), || {
+            qa_team(folder.path());
+            let argv = |words: &[&str]| words.iter().map(|word| (*word).to_owned()).collect::<Vec<_>>();
+            assert!(as_sandboxed_qa(|| sandbox_read(&argv(&["task", "add", "--project", "RogueDod"]))).is_none());
+            assert!(as_sandboxed_qa(|| sandbox_read(&argv(&["task", "list"]))).is_none(), "no project named");
+            let worker_folder = folder.path().to_path_buf();
+            let worker = std::thread::spawn(move || {
+                let until = std::time::Instant::now() + Duration::from_secs(20);
+                while std::time::Instant::now() < until {
+                    if let Some((_, request)) = teams::outbox::pending(&worker_folder, 10).unwrap_or_default().into_iter().next() {
+                        let outcome = json!({"status":"ran","request_id":request["request_id"],"exit":0,
+                            "stdout":"{\"project\":{\"name\":\"RogueDod\"},\"tasks\":[]}","stderr":""});
+                        teams::outbox::settle(&worker_folder, &request, &outcome).unwrap();
+                        return Some(request);
+                    }
+                    std::thread::sleep(Duration::from_millis(50));
+                }
+                None
+            });
+            let answer = as_sandboxed_qa(|| sandbox_read(&argv(&["task", "list", "--project", "RogueDod"])));
+            let request = worker.join().unwrap().expect("the task read waited in the member's folder");
+            assert_eq!(answer.expect("a sandboxed task read is brokered"), Ok(0));
+            assert_eq!(request["op"], "read");
+            assert_eq!(request["input"]["argv"], json!(["task", "list", "--project", "RogueDod"]));
         });
     }
 

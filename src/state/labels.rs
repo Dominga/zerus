@@ -681,13 +681,13 @@ mod tests {
         session_id::select(shared, &twin_id);
         assert_eq!(read(shared).unwrap()["run_id"], "run-twin");
         session_id::clear();
-        let (text, value) = resolve_label(shared).unwrap_err();
+        let (text, value) = resolve_label(shared, LabelGuard::None).unwrap_err();
         assert!(
             text.starts_with("2 sessions on this computer are named claude/example/shared"),
             "{text}"
         );
         assert_eq!(value.unwrap()["total"], 2);
-        resolve_label(alone).unwrap();
+        resolve_label(alone, LabelGuard::None).unwrap();
         assert_eq!(session_id::selected().unwrap().session_id, alone_id);
         session_id::clear();
 
@@ -895,6 +895,14 @@ mod tests {
         control("cuts");
     }
 
+    /// zerus-ucck P3c: while the ambiguity of a label is deferred to the
+    /// command's guard, every reader of the label refuses, one written later
+    /// included, with the ambiguity report; the guard selects its session.
+    #[test]
+    fn a_deferred_ambiguity_refuses_every_reader_until_the_guard_selects() {
+        control("deferred");
+    }
+
     /// #1445 review (desktop-u): the terminal route of a label keeps the
     /// command's selection. A selected record that vanishes, or a dangling
     /// link where a record should be, refuses; only a name with no record
@@ -954,7 +962,7 @@ mod tests {
         let (twin, id) = by_id(label, "run-twin");
         assert!(manifest().is_some_and(|manifest| manifest.contains_key(&key(label))));
         let ambiguous = || {
-            let (text, _) = resolve_label(label).unwrap_err();
+            let (text, _) = resolve_label(label, LabelGuard::None).unwrap_err();
             assert!(text.starts_with("2 sessions on this computer are named"), "{text}");
         };
         match case.as_str() {
@@ -990,7 +998,7 @@ mod tests {
                 let own = storage::id_record_path(&id).unwrap();
                 std::fs::remove_file(&own).unwrap();
                 std::os::unix::fs::symlink(root().join("missing-target"), &own).unwrap();
-                assert!(resolve_label(label).is_err());
+                assert!(resolve_label(label, LabelGuard::None).is_err());
                 assert!(candidates(label).is_err());
                 assert!(storage::label_taken(label));
             }
@@ -1161,6 +1169,36 @@ mod tests {
                 let legacy = storage::label_record_path("claude/example/linked");
                 std::os::unix::fs::symlink(root().join("missing"), &legacy).unwrap();
                 assert!(terminal_of("claude/example/linked").is_err(), "a dangling link at a label's path");
+            }
+            "deferred" => {
+                resolve_label(label, LabelGuard::Request).unwrap();
+                // Every reader: the label's path, the twin's own path, records.
+                assert!(read(label).unwrap_err().starts_with("2 sessions on this computer are named"));
+                assert!(storage::read_label(label).is_err());
+                assert!(storage::read_id(&id).is_err());
+                assert!(storage::records().unwrap().iter().all(|record| record["name"] != label));
+                assert!(session_id::refused().is_some());
+                // The guard selects exactly the session that carries it.
+                expect(label, "run-twin", "").unwrap();
+                assert_eq!(read(label).unwrap()["session_id"], id.as_str());
+                session_id::clear();
+                // No identity at all, or one several carry, refuses; one that
+                // none carries leaves the command's own stale refusal.
+                resolve_label(label, LabelGuard::Request).unwrap();
+                assert!(expect(label, "", "").is_err());
+                resolve_label(label, LabelGuard::Request).unwrap();
+                expect(label, "run-nobody", "").unwrap();
+                assert_eq!(read(label).unwrap()["run_id"], "run-first");
+                assert!(resolve_label(label, LabelGuard::Given { run: "run-first".into(), conversation: String::new() }).is_ok());
+                assert_eq!(read(label).unwrap()["run_id"], "run-first");
+                session_id::clear();
+                assert!(resolve_label(label, LabelGuard::None).is_err());
+                // An empty guard never selects, not even when only one of the
+                // sessions is left by the time it is read.
+                resolve_label(label, LabelGuard::Request).unwrap();
+                let own = storage::id_record_path(&id).unwrap();
+                std::fs::remove_file(&own).unwrap();
+                assert!(expect(label, "", "").is_err());
             }
             other => panic!("unknown control {other}"),
         }

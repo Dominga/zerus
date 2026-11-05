@@ -99,6 +99,9 @@ fn validate(request: &Request) -> Result<()> {
     }
 }
 fn checked(name: &str, request: &Request) -> Result<Value> {
+    // zerus-ucck P3c: the request's identities select among sessions that
+    // share the label.
+    expect(name, &request.expected_run_id, &request.expected_conversation_id)?;
     if opencode::exists(name) {return Err(backend::OPENCODE_TERMINAL.text().into());}
     if dsh::exists(name) {
         return Err(backend::DEEPSEEK_TERMINAL.text().into());

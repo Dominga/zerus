@@ -272,6 +272,9 @@ fn checked_input(
     conversation_id: &str,
     allow_working: bool,
 ) -> Result<Value> {
+    // zerus-ucck P3c: the request's identities select among sessions that
+    // share the label.
+    expect(name, run_id, conversation_id)?;
     let record = read(name)?;
     if string(&record, "run_id") != run_id || string(&record, "conversation_id") != conversation_id
     {

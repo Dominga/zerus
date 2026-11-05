@@ -43,6 +43,45 @@ impl Selection {
 }
 static SELECTED: std::sync::Mutex<Option<Selection>> = std::sync::Mutex::new(None);
 
+/// A label several sessions share, named by a command whose guard arrives
+/// with its request (zerus-ucck P3c): its ambiguity report, held until the
+/// command's guard selects one of them ([`super::expect`]).
+struct Deferred {
+    name: String,
+    report: (String, Value),
+}
+static DEFERRED: std::sync::Mutex<Option<Deferred>> = std::sync::Mutex::new(None);
+/// The ambiguity report a read refused with, for the command's exit status 5.
+static REFUSED: std::sync::Mutex<Option<(String, Value)>> = std::sync::Mutex::new(None);
+
+/// Defers the ambiguity of `name` to the command's guard.
+pub(crate) fn defer(name: &str, text: String, value: Value) {
+    *DEFERRED.lock().unwrap_or_else(std::sync::PoisonError::into_inner) =
+        Some(Deferred { name: name.into(), report: (text, value) });
+}
+
+/// Takes the deferred ambiguity of `name`, when there is one.
+pub(super) fn take_deferred(name: &str) -> Option<(String, Value)> {
+    let mut deferred = DEFERRED.lock().unwrap_or_else(std::sync::PoisonError::into_inner);
+    if deferred.as_ref().is_some_and(|deferred| deferred.name == name) {
+        return deferred.take().map(|deferred| deferred.report);
+    }
+    None
+}
+
+/// Records `report` as this command's refusal and returns its text.
+pub(super) fn refuse(report: (String, Value)) -> String {
+    let text = report.0.clone();
+    *REFUSED.lock().unwrap_or_else(std::sync::PoisonError::into_inner) = Some(report);
+    text
+}
+
+/// The ambiguity report this command refused with, if any: the CLI exits
+/// with [`AMBIGUOUS`] and prints its value under `--json`.
+pub(crate) fn refused() -> Option<(String, Value)> {
+    REFUSED.lock().unwrap_or_else(std::sync::PoisonError::into_inner).clone()
+}
+
 fn set(selection: Selection) {
     *SELECTED.lock().unwrap_or_else(std::sync::PoisonError::into_inner) = Some(selection);
 }
@@ -111,8 +150,24 @@ pub(super) fn verify_absent(name: &str) -> Result<()> {
     }
 }
 
-/// Refuses a record that has the selected name but not every selected identity.
+/// Refuses a record that has the selected name but not every selected
+/// identity, and, while the ambiguity of its label is deferred to the
+/// command's guard and nothing selected one of its sessions, any record under
+/// that label (P3c): every reader of a label refuses then, never settling on
+/// one of the sessions that share it.
 pub(super) fn verify(record: &Value) -> Result<()> {
+    let name = string(record, "name");
+    let deferred = DEFERRED
+        .lock()
+        .unwrap_or_else(std::sync::PoisonError::into_inner)
+        .as_ref()
+        .filter(|deferred| deferred.name == name)
+        .map(|deferred| deferred.report.clone());
+    if let Some(report) = deferred {
+        if selected().is_none_or(|selection| selection.name != name) {
+            return Err(refuse(report));
+        }
+    }
     let selected = SELECTED.lock().unwrap_or_else(std::sync::PoisonError::into_inner);
     match selected.as_ref() {
         Some(selection) if string(record, "name") == selection.name && !selection.agrees(record) => {

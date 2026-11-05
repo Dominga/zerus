@@ -586,8 +586,7 @@ pub(super) fn pause_scoped(names: &[String], dry: bool, scope: Option<&session_a
             .map(|record| string(record, "name").to_owned())
             .collect();
         names.sort();
-        names.dedup();
-        names
+        distinct_labels(names)?
     } else {
         names.to_vec()
     };
@@ -669,6 +668,20 @@ fn resume_spec(
         archive_id,
         None,
     )
+}
+
+/// The labels `--all` acts on, one session each (zerus-ucck P3c). A label
+/// that several of those sessions share refuses: `--all` acts on sessions,
+/// and a label cannot name one of them; pause or resume each with
+/// `--session-id`. `names` is sorted.
+fn distinct_labels(names: Vec<String>) -> Result<Vec<String>> {
+    if let Some(pair) = names.windows(2).find(|pair| pair[0] == pair[1]) {
+        return Err(format!(
+            "{}: several sessions share this label; act on each with --session-id",
+            pair[0]
+        ));
+    }
+    Ok(names)
 }
 
 /// The terminal a launch of `record` takes (zerus-ucck P3b): its label when
@@ -947,7 +960,8 @@ pub(super) fn resume_scoped(names: &[String], dry: bool, scope: Option<&session_
                 stopped.push(string(&record, "name").to_owned());
             }
         }
-        stopped
+        stopped.sort();
+        distinct_labels(stopped)?
     } else {
         names.to_vec()
     };
@@ -1077,6 +1091,15 @@ fn verify_requested(record: &Value, snapshot: &Snapshot, requested: &str) -> Res
 
 #[cfg(all(test, unix))]
 mod tests {
+    /// zerus-ucck P3c: `--all` acts on sessions; a label that several of them
+    /// share cannot name one, so it refuses.
+    #[test]
+    fn all_refuses_a_label_several_sessions_share() {
+        let names = |names: &[&str]| names.iter().map(|name| name.to_string()).collect::<Vec<_>>();
+        assert_eq!(distinct_labels(names(&["a", "b"])).unwrap(), names(&["a", "b"]));
+        assert!(distinct_labels(names(&["a", "a", "b"])).unwrap_err().contains("--session-id"));
+    }
+
     /// zerus-ucck P3b (D2): a launch mints the first free name of its label,
     /// `label~<id8>` and `label~<id>`, and refuses when all are taken; it never
     /// takes an occupied one.

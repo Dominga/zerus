@@ -444,6 +444,9 @@ pub(super) fn dispatch(args: &[String]) -> Result<i32> {
         return Err(USAGE.into());
     }
     let request = parse(&stdin_json()?)?;
+    // zerus-ucck P3c: the mark's run and conversation select among sessions
+    // that share the label; with several, or none named, it refuses (exit 5).
+    expect(name, &request.run, &request.conversation)?;
     // Capture the native view in writer order: a waiting older reader must
     // not overwrite a newer mark using a snapshot from before that write.
     let _guard = lock(Some(&root().join("read-marks.lock")))?;

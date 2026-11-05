@@ -2092,6 +2092,9 @@ pub(super) fn dispatch_settings(args: &[String]) -> Result<i32> {
         println!("{text}");
         return Ok(0);
     }
+    // zerus-ucck P3c: the request's identities select among sessions that
+    // share the label.
+    expect(name, &request.expected_run_id, &request.expected_conversation_id)?;
     let mut record = read(name)?;
     if string(&record, "run_id") != request.expected_run_id
         || string(&record, "conversation_id") != request.expected_conversation_id

@@ -366,6 +366,9 @@ where
         }
         return Ok(old);
     }
+    // zerus-ucck P3c: the request's identities select among sessions that
+    // share the label, before anything is claimed.
+    expect(name, &request.expected_run_id, &request.expected_conversation_id)?;
     atomic(path, &receipt(request, name, hash, "claimed").to_string())?;
     let scope = Scope {
         name: name.into(),

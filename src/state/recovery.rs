@@ -1099,6 +1099,9 @@ fn scoped_action(request: Value) -> Result<()> {
         return Err("Unknown scoped recovery action".into());
     }
     let name = string(&request, "name");
+    // zerus-ucck P3c: the name arrives in the request, so it is resolved here:
+    // its identities select among sessions that share the label.
+    select_by(name, string(&request, "expected_run_id"), string(&request, "expected_conversation_id"))?;
     let directory = absolute_root()?.join("recovery_receipts");
     private_dir(&directory)?;
     let path = directory.join(format!("{}.json", string(&request, "request_id")));

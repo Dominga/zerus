@@ -815,13 +815,27 @@ pub(crate) fn task_bindings() -> Result<Vec<Value>> {
     task_bindings_in(&root())
 }
 
+/// How a session command carries the identities it expects (zerus-ucck P3c).
+pub(crate) enum LabelGuard {
+    /// It carries none: a label several sessions share is refused at once.
+    None,
+    /// Given on its command line: they select now.
+    Given { run: String, conversation: String },
+    /// They arrive with its request, read later: the choice waits for them
+    /// ([`expect`]), and every read of the label refuses until then.
+    Request,
+}
+
 /// zerus-ucck P3a: a label a command names without a selection, resolved
 /// among its candidates. A label whose only holder is in the ID layout selects
 /// that session, so every read of the label in this command reaches it. A
-/// label several sessions share is the ambiguity report: its text, and its
-/// `--json` value, with exit status 5. A candidate set that cannot be proven
-/// complete is refused the same way, never settled on the label's first holder.
-pub(crate) fn resolve_label(name: &str) -> std::result::Result<(), (String, Option<Value>)> {
+/// label several sessions share is decided by the command's `guard` (P3c):
+/// its expected run, and conversation when given, select the one session that
+/// carries them; with none, or with several left, it is the ambiguity report,
+/// its text and its `--json` value, with exit status 5. A candidate set that
+/// cannot be proven complete is refused the same way, never settled on the
+/// label's first holder.
+pub(crate) fn resolve_label(name: &str, guard: LabelGuard) -> std::result::Result<(), (String, Option<Value>)> {
     labels::repair();
     let candidates = labels::candidates(name).map_err(|error| (error, None))?;
     match (candidates.first, candidates.by_id.as_slice()) {
@@ -831,27 +845,100 @@ pub(crate) fn resolve_label(name: &str) -> std::result::Result<(), (String, Opti
             Ok(())
         }
         _ => {
-            let snapshot = live().unwrap_or_default();
-            let state = |record: &Value| {
-                if matches(record, panes_of(&snapshot, record)) { "live" } else { "saved" }
-            };
-            let mut listed: Vec<Value> = Vec::new();
-            if candidates.first {
-                if let Ok(record) = storage::read_label(name) {
-                    listed.push(json!({"session_id":record["session_id"],"run_id":record["run_id"],
-                        "conversation_id":record["conversation_id"],"state":state(&record),
-                        "cwd":record["cwd"],"created":record["created"]}));
+            let report = ambiguity_report(name, &candidates);
+            match guard {
+                LabelGuard::None => Err((report.0, Some(report.1))),
+                LabelGuard::Given { run, conversation } => {
+                    select_among(name, &run, &conversation, report).map_err(|(text, value)| (text, Some(value)))
+                }
+                LabelGuard::Request => {
+                    session_id::defer(name, report.0, report.1);
+                    Ok(())
                 }
             }
-            for record in &candidates.by_id {
-                listed.push(json!({"session_id":record["session_id"],"run_id":record["run_id"],
-                    "conversation_id":record["conversation_id"],"state":"saved",
-                    "cwd":record["cwd"],"created":record["created"]}));
-            }
-            let (text, value) = session_id::ambiguity(name, listed);
-            Err((text, Some(value)))
         }
     }
+}
+
+/// zerus-ucck P3c: for a command that is not resolved at dispatch, such as
+/// `hgs hooks NAME` or a scoped recovery action, the identities its request
+/// expects select among the sessions that share `name`, as at dispatch.
+pub(crate) fn select_by(name: &str, run: &str, conversation: &str) -> Result<()> {
+    resolve_label(name, LabelGuard::Given { run: run.into(), conversation: conversation.into() })
+        .map_err(|(text, value)| session_id::refuse((text, value.unwrap_or(Value::Null))))
+}
+
+/// zerus-ucck P3c: the identities a command's request expects, `run` and
+/// `conversation`, select among the sessions that share `name` when its
+/// ambiguity was deferred to them. Exactly one carrying them is selected;
+/// none leaves the command's own check to refuse the stale target; several,
+/// or no identity at all, is the ambiguity report (exit status 5). Without a
+/// deferred ambiguity this does nothing.
+pub(crate) fn expect(name: &str, run: &str, conversation: &str) -> Result<()> {
+    let Some(report) = session_id::take_deferred(name) else {
+        return Ok(());
+    };
+    select_among(name, run, conversation, report).map_err(session_id::refuse)
+}
+
+fn select_among(
+    name: &str,
+    run: &str,
+    conversation: &str,
+    report: (String, Value),
+) -> std::result::Result<(), (String, Value)> {
+    if run.is_empty() && conversation.is_empty() {
+        return Err(report);
+    }
+    let candidates = labels::candidates(name).map_err(|error| (error, report.1.clone()))?;
+    let mut records = Vec::new();
+    if candidates.first {
+        records.push(storage::read_label(name).map_err(|error| (error, report.1.clone()))?);
+    }
+    records.extend(candidates.by_id);
+    let chosen: Vec<&Value> = records
+        .iter()
+        .filter(|record| {
+            (run.is_empty() || string(record, "run_id") == run)
+                && (conversation.is_empty() || string(record, "conversation_id") == conversation)
+        })
+        .collect();
+    match chosen.as_slice() {
+        [] => Ok(()),
+        [one] => {
+            let id = string(one, "session_id");
+            if session_id::canonical(id) {
+                session_id::select(name, id);
+            } else {
+                session_id::select_reference(name, "", string(one, "conversation_id"), string(one, "run_id"));
+            }
+            Ok(())
+        }
+        _ => Err(report),
+    }
+}
+
+/// The ambiguity report of a label several sessions share: its text and its
+/// `--json` value.
+fn ambiguity_report(name: &str, candidates: &labels::Candidates) -> (String, Value) {
+    let snapshot = live().unwrap_or_default();
+    let state = |record: &Value| {
+        if matches(record, panes_of(&snapshot, record)) { "live" } else { "saved" }
+    };
+    let mut listed: Vec<Value> = Vec::new();
+    if candidates.first {
+        if let Ok(record) = storage::read_label(name) {
+            listed.push(json!({"session_id":record["session_id"],"run_id":record["run_id"],
+                "conversation_id":record["conversation_id"],"state":state(&record),
+                "cwd":record["cwd"],"created":record["created"]}));
+        }
+    }
+    for record in &candidates.by_id {
+        listed.push(json!({"session_id":record["session_id"],"run_id":record["run_id"],
+            "conversation_id":record["conversation_id"],"state":"saved",
+            "cwd":record["cwd"],"created":record["created"]}));
+    }
+    session_id::ambiguity(name, listed)
 }
 
 /// The durable session ID of this computer's live or saved session `name`,

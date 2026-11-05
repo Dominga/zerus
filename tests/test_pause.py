@@ -1351,6 +1351,54 @@ class SessionIdentity(Harness):
         self.assertEqual(self.binding(name), {})
 
 
+    # zerus-ucck P3c: on a label two sessions share, the identities a command
+    # carries select the one session that has them: on its command line, or in
+    # its request. A command with none refuses with the ambiguity report (exit
+    # 5), and identities nobody carries leave the command's own stale refusal.
+    def test_a_shared_label_is_resolved_by_the_identities_a_command_carries(self):
+        name = self.start(tag="shared")
+        self.send_event(name, "Stop", last_assistant_message="done")
+        self.hgs("pause", name)
+        session, held = self.move_to_id_layout(name)
+        state = self.root / "state"
+        label = state / (hashlib.sha256(name.encode()).hexdigest() + ".json")
+        first = dict(held(), session_id=str(uuid.uuid4()), run_id=str(uuid.uuid4()),
+                     conversation_id=str(uuid.uuid4()))
+        first.pop("layout")
+        label.write_text(json.dumps(first) + "\n")
+        first_bytes = label.read_bytes()
+        twin = held()
+        def call(*args, request=None):
+            return subprocess.run([str(HGS), *args], env=self.env, capture_output=True, text=True,
+                                  timeout=20, input=json.dumps(request) if request is not None else "")
+        for args in (["inspect", name], ["pause", name], ["terminate", name]):
+            result = call(*args)
+            self.assertEqual(result.returncode, 5, (args, result.stdout, result.stderr))
+            self.assertIn("2 sessions on this computer are named", result.stderr)
+        def mark(record):
+            return dict(run_id=record["run_id"], conversation_id=record["conversation_id"],
+                        reply_id=None, attention_signature=None)
+        for record in (twin, first):
+            result = call("read", name, "--json", request=mark(record))
+            self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
+            self.assertNotEqual(json.loads(result.stdout).get("error"), "not_found", result.stdout)
+        nobody = call("read", name, "--json", request=mark(dict(twin, run_id=str(uuid.uuid4()))))
+        self.assertNotEqual(nobody.returncode, 5, nobody.stdout + nobody.stderr)
+        # Identities that several of them carry select none: the command
+        # refuses with the ambiguity report, exit 5, and its value under --json.
+        label.write_text(json.dumps(dict(first, run_id=twin["run_id"],
+                                         conversation_id=twin["conversation_id"])) + "\n")
+        both = call("read", name, "--json", request=mark(twin))
+        label.write_bytes(first_bytes)
+        self.assertEqual(both.returncode, 5, both.stdout + both.stderr)
+        self.assertEqual(json.loads(both.stdout.splitlines()[-1])["error"], "ambiguous_session", both.stdout)
+        # A command-line guard: terminate acts on exactly the twin.
+        self.hgs("terminate", name, "--expected-run-id", twin["run_id"])
+        self.assertFalse((state / "sessions" / f"{session}.json").exists())
+        self.assertEqual(label.read_bytes(), first_bytes)
+        archived = [json.loads(p.read_text()) for p in (state / "archives").glob("*.json")]
+        self.assertIn(session, [entry.get("session_id") for entry in archived])
+
     # #1445 review (review-q2): a terminal name whose pane and run are not the
     # record's never makes a session live or hides it. A rename of a paused
     # session clears its old terminal name; a stale one, as the first P3b

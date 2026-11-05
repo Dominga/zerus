@@ -456,6 +456,7 @@ fn observe_dispatch(name: &str) -> Result<i32> {
     if request.expected_run_id.is_empty() || request.question_id.is_empty() {
         return Err("question identities are required".into());
     }
+    expect(name, &request.expected_run_id, &request.expected_conversation_id)?;
     let record = read(name)?;
     // The answer path's own identity and availability rule, read only.
     let current = string(&record, "run_id") == request.expected_run_id
@@ -674,6 +675,9 @@ fn startup_question_id(id: &str) -> bool {
 }
 
 fn matching_record(name: &str, request: &AnswerRequest) -> Result<Value> {
+    // zerus-ucck P3c: the request's identities select among sessions that
+    // share the label.
+    expect(name, &request.expected_run_id, &request.expected_conversation_id)?;
     let record = read(name)?;
     if string(&record, "run_id") != request.expected_run_id
         || string(&record, "conversation_id") != request.expected_conversation_id

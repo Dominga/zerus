@@ -1585,9 +1585,18 @@ $later=@{guid=$guid;pid=$q.Id;birth=$q.StartTime.ToFileTimeUtc()};
             control['request_id'] = request
         if target is not None:
             control['target'] = target
+        started = time.monotonic_ns()
+        utc_ms = time.time_ns() // 1_000_000
         result = self.frontend_call(control, 'MODE_CALLER_RESULT ')
         self.assertEqual(result['code'], 0, result)
-        return json.loads(result['stdout'])
+        reply = json.loads(result['stdout'])
+        if case == 'mode_refresh':
+            print('REFRESH_CALL_TIMING ' + json.dumps(dict(
+                request=request, utc_ms=utc_ms, elapsed_ms=(time.monotonic_ns() - started) // 1_000_000,
+                outcome=reply.get('outcome'), phase=reply.get('pending_transition', {}).get('phase')
+                    if isinstance(reply.get('pending_transition'), dict) else None,
+                timing=reply.get('timing'), original_exchange_error=reply.get('original_exchange_error'))), flush=True)
+        return reply
 
     def refresh_info_drained(self):
         # Observe the required EOF/Permit settlement, including prior status

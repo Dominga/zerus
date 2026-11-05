@@ -2,6 +2,8 @@
 //! durable result. No mode toggle, definition UPDATE, reinstall or revoke lane.
 use super::*;
 use policy::mode::refresh::{self as journal, Ready, Scope, Target};
+mod timing;
+use timing::Timing;
 
 const ANCHOR_BYTES: usize = 1024;
 fn anchor_path(config: &Config, location: &Location) -> std::path::PathBuf {
@@ -136,13 +138,10 @@ fn marker(config: &Config, binary: &str) -> Result<()> {
     Ok(())
 }
 pub(super) fn view(location: &Location, record: &Record, request: &str) -> Value {
-    let receipt = record.refreshes.iter().find(|r| r.request == request);
-    json!({"abi":MODE_ABI,"refresh_abi":journal::ABI,"schema":1,
-        "configuration":location.configuration,"request_id":request,"read_only":true,
-        "receipt":receipt,"pending":record.pending.as_ref().filter(|p|p.request_id == request),
-        "outcome":receipt.map(|r|r.phase).unwrap_or(policy::mode::review::ChoicePhase::Unknown),
-        "changed":false,"manager_changed":false,"authority_changed":false,
-        "activation_automatic_blocked":!record.reviewed.is_empty() || record.pending.as_ref().is_some_and(|p|p.review.is_some())})
+    let mut value =
+        journal::observation::read(Some(record), &location.configuration, request, None);
+    value["abi"] = MODE_ABI.into();
+    value
 }
 /// Returned only by an original-ID read; no runtime is selected or completed.
 pub(super) fn result(config: &Config, location: &Location, request: &str) -> Result<Value> {
@@ -157,7 +156,13 @@ pub(super) fn result(config: &Config, location: &Location, request: &str) -> Res
         &sid,
     )?;
     let (record, loss) = super::journal(&sid, config, location, &plan)?;
-    let mut reply = view(location, &record, request);
+    let mut reply = journal::observation::read(
+        Some(&record),
+        &location.configuration,
+        request,
+        loss.as_deref(),
+    );
+    reply["abi"] = MODE_ABI.into();
     if let Some(lost) = loss {
         reply["receipt"] = Value::Null;
         reply["outcome"] = "unknown".into();
@@ -165,6 +170,26 @@ pub(super) fn result(config: &Config, location: &Location, request: &str) -> Res
         reply["lost_original"] = lost.into();
     }
     Ok(reply)
+}
+
+pub(super) fn after_error(
+    config: &Config,
+    location: &Location,
+    request: &Value,
+    error: &str,
+) -> Value {
+    let id = request["request_id"].as_str().unwrap_or("");
+    let mut observed = match result(config, location, id) {
+        Ok(value) => value,
+        Err(lookup) => {
+            let mut value = journal::observation::read(None, &location.configuration, id, Some(id));
+            value["original_lookup_error"] = format!("{lookup:#}").into();
+            value
+        }
+    };
+    observed["abi"] = MODE_ABI.into();
+    observed["operation"] = request["operation"].clone();
+    journal::observation::after_error(observed, error)
 }
 
 /// Under the retained registration lock. This read creates no original intent,
@@ -216,21 +241,37 @@ pub(super) fn info(runtime: Runtime<'_>) -> Result<Value> {
         "pending":null,"read_only":true,"changed":false,"manager_changed":false,"authority_changed":false}))
 }
 
-fn before_stop(
-    native: &Native,
-    location: &Location,
-    plan: &Plan,
-    original: &instances::Running,
+struct StopScope<'a> {
+    native: &'a Native,
+    location: &'a Location,
+    plan: &'a Plan,
     until: Instant,
+}
+fn before_stop(
+    scope: &StopScope<'_>,
+    original: &instances::Running,
     check: &mut impl FnMut() -> Result<()>,
+    timing: &Timing,
 ) -> Result<()> {
+    let StopScope {
+        native,
+        location,
+        plan,
+        until,
+    } = *scope;
     // The preceding observer's real EOF can arrive just before the actor
     // releases its connection charge. Poll that observation under THIS Stop
     // deadline; selection/caller/Grant failures still refuse immediately.
     loop {
-        check()?;
+        // check_original_selection itself brackets the reads with this SAME
+        // fence. No intervening I/O needs a duplicate check at its entry.
+        timing.mark("stop.selection.begin", until, None);
         instances::check_original_selection(native, plan, &wanted(plan)?, original, until, check)?;
-        if original.retirement_drained(location, plan, until)? {
+        timing.mark("stop.selection.end", until, None);
+        timing.mark("stop.drain.begin", until, None);
+        let drained = original.retirement_drained(location, plan, until)?;
+        timing.mark("stop.drain.end", until, Some(drained));
+        if drained {
             return check();
         }
         ensure!(
@@ -242,6 +283,7 @@ fn before_stop(
 }
 
 pub(super) fn effect(runtime: Runtime<'_>, request: &str, target: Target) -> Result<Value> {
+    let timing = Timing::new();
     let until = Budget::Preflight.deadline(Instant::now());
     target.validate()?;
     ensure!(
@@ -336,9 +378,16 @@ pub(super) fn effect(runtime: Runtime<'_>, request: &str, target: Target) -> Res
         original,
         replacement: scope.replacement_image,
         ready: None,
+        timing,
     };
-    journal::engine::run(&mut session, &mut record, reserved)?;
+    if let Err(error) = journal::engine::run(&mut session, &mut record, reserved) {
+        return Err(error.context(format!(
+            "Original refresh timing: {}",
+            session.timing.snapshot()
+        )));
+    }
     let mut reply = view(location, &record, request);
+    reply["timing"] = session.timing.snapshot();
     reply["read_only"] = false.into();
     reply["changed"] = true.into();
     reply["manager_changed"] = true.into();
@@ -354,11 +403,13 @@ struct OriginalSession<'a> {
     original: instances::Running,
     replacement: String,
     ready: Option<instances::Running>,
+    timing: Timing,
 }
 impl journal::engine::Session for OriginalSession<'_> {
     type Started = instances::Starting;
     fn phase(&mut self, phase: Budget) {
         self.fence.phase(phase);
+        self.timing.phase(phase, self.fence.until);
     }
     fn check(&mut self) -> Result<()> {
         self.fence.check()?;
@@ -377,7 +428,13 @@ impl journal::engine::Session for OriginalSession<'_> {
     fn save(&mut self, record: &Record) -> Result<()> {
         let location = self.fence.location;
         let plan = self.plan;
-        save(location, plan, record, &mut || self.check())
+        let mut fence = 0;
+        save(location, plan, record, &mut || {
+            fence += 1;
+            self.timing
+                .mark(&format!("save.fence.{fence}"), self.fence.until, None);
+            self.check()
+        })
     }
     fn hold(&mut self) -> Result<()> {
         self.check()?;
@@ -390,8 +447,13 @@ impl journal::engine::Session for OriginalSession<'_> {
     }
     fn drained(&mut self) -> Result<bool> {
         self.check()?;
-        self.original
-            .retirement_drained(self.fence.location, self.plan, self.fence.until)
+        self.timing.mark("retirement.begin", self.fence.until, None);
+        let value =
+            self.original
+                .retirement_drained(self.fence.location, self.plan, self.fence.until)?;
+        self.timing
+            .mark("retirement.end", self.fence.until, Some(value));
+        Ok(value)
     }
     fn pause(&mut self, request: &str) {
         #[cfg(debug_assertions)]
@@ -410,7 +472,19 @@ impl journal::engine::Session for OriginalSession<'_> {
             record,
             &self.original,
             &mut || self.fence.check(),
-            |original, check| before_stop(native, location, plan, original, until, check),
+            |original, check| {
+                before_stop(
+                    &StopScope {
+                        native,
+                        location,
+                        plan,
+                        until,
+                    },
+                    original,
+                    check,
+                    &self.timing,
+                )
+            },
             |record, check| save(location, plan, record, check),
         )
     }
@@ -424,30 +498,78 @@ impl journal::engine::Session for OriginalSession<'_> {
         stop::checked(
             &mut self.original,
             &mut || self.fence.check(),
-            |original, check| before_stop(native, location, plan, original, until, check),
-            |original, check| original.stop(check),
+            |original, check| {
+                before_stop(
+                    &StopScope {
+                        native,
+                        location,
+                        plan,
+                        until,
+                    },
+                    original,
+                    check,
+                    &self.timing,
+                )
+            },
+            |original, check| {
+                self.timing.mark("stop.call.begin", until, None);
+                let result = original.stop(check);
+                self.timing.mark("stop.call.end", until, None);
+                result
+            },
         )
     }
     fn stopped(&mut self) -> Result<bool> {
-        self.check()?;
-        instances::stopped(
+        self.timing.mark(
+            "exit.original",
+            self.fence.until,
+            Some(self.original.process_exited()),
+        );
+        self.fence.check()?;
+        self.original.image_files_current()?;
+        self.timing
+            .mark("exit.definition.begin", self.fence.until, None);
+        // Validate the current owned definition ONCE, then use that SAME
+        // checked task for GUID disappearance. The previous self.check() plus
+        // instances::stopped() performed this slow COM read twice per poll.
+        let selected = instances::definition_current(
             self.native,
             self.plan,
             &wanted(self.plan)?,
-            &self.original,
             self.fence.until,
-        )
+        )?;
+        self.timing
+            .mark("exit.definition.end", self.fence.until, None);
+        self.timing.mark(
+            "exit.guid.begin",
+            self.fence.until,
+            Some(self.original.process_exited()),
+        );
+        let result = self
+            .original
+            .exited(self.native, &selected, self.fence.until);
+        self.timing.mark(
+            "exit.guid.end",
+            self.fence.until,
+            result.as_ref().ok().copied(),
+        );
+        let result = result?;
+        self.fence.check()?;
+        Ok(result)
     }
     fn start(&mut self) -> Result<Self::Started> {
         self.check()?;
-        instances::start(
+        self.timing.mark("runex.begin", self.fence.until, None);
+        let result = instances::start(
             self.native,
             self.fence.location,
             self.plan,
             &wanted(self.plan)?,
             self.fence.until,
             &mut || self.fence.check(),
-        )
+        );
+        self.timing.mark("runex.end", self.fence.until, None);
+        result
     }
     fn guid(started: &Self::Started) -> &str {
         started.id()

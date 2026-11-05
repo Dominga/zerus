@@ -27,6 +27,7 @@ struct Model {
     released: bool,
     fail_stop: bool,
     fail_start: bool,
+    fail_final_post_persist: bool,
     trace: Vec<String>,
 }
 impl Model {
@@ -50,6 +51,7 @@ impl Model {
             released: false,
             fail_stop: false,
             fail_start: false,
+            fail_final_post_persist: false,
             trace: Vec::new(),
         }
     }
@@ -88,7 +90,25 @@ impl Session for Model {
     fn save(&mut self, record: &Record) -> Result<()> {
         let root = self.root.path().to_owned();
         let bytes = record.encode(&self.plan)?;
-        windows_mode_stop::publish(&root, &mut || self.check(), || Ok(bytes))
+        let final_save = record.pending.is_none()
+            && record
+                .refreshes
+                .last()
+                .is_some_and(|r| r.phase == ChoicePhase::Settled);
+        let mut calls = 0;
+        windows_mode_stop::publish(
+            &root,
+            &mut || {
+                calls += 1;
+                self.check()?;
+                ensure!(
+                    !(final_save && self.fail_final_post_persist && calls == 3),
+                    "modeled final post-persist fence failed"
+                );
+                Ok(())
+            },
+            || Ok(bytes),
+        )
     }
     fn hold(&mut self) -> Result<()> {
         self.check()
@@ -291,4 +311,47 @@ fn the_local_reservation_is_bound_to_the_entire_original_record_and_configuratio
     );
     assert_eq!((model.stops, model.starts, model.released), (0, 0, false));
     assert!(model.trace.is_empty());
+}
+
+#[test]
+fn a_final_post_persist_failure_reads_the_original_settled_result_never_a_refusal() {
+    let mut model = Model::new();
+    let (mut record, token) = reserved(&mut model);
+    let id = record.pending.as_ref().unwrap().request_id.clone();
+    model.fail_final_post_persist = true;
+    let error = run(&mut model, &mut record, token).unwrap_err();
+    assert!(
+        error.to_string().contains("final post-persist"),
+        "{error:#}"
+    );
+    assert_eq!((model.stops, model.starts, model.released), (1, 1, true));
+    let durable = model.durable();
+    assert!(durable.pending.is_none());
+    let receipt = durable.refreshes[0].clone();
+    assert_eq!(receipt.phase, ChoicePhase::Settled);
+    let observed = observation::read(Some(&durable), &durable.configuration, &id, None);
+    let recovered = observation::after_error(observed, &error.to_string());
+    assert_eq!(
+        recovered["receipt"],
+        serde_json::to_value(&receipt).unwrap()
+    );
+    assert_eq!(recovered["request_id"], id);
+    assert_eq!(recovered["outcome"], "settled");
+    assert_eq!(recovered["read_only"], true);
+    assert_eq!(recovered["ok"], true);
+    assert!(recovered["changed"].is_null() && recovered["manager_changed"].is_null());
+    for (record, loss) in [(Some(&durable), Some(id.as_str())), (None, None)] {
+        let observed = observation::read(record, &durable.configuration, &id, loss);
+        let recovered = observation::after_error(observed, &error.to_string());
+        assert_eq!(recovered["outcome"], "unknown");
+        assert_eq!(recovered["request_id"], id);
+        assert_eq!(recovered["ok"], false);
+        assert!(recovered["receipt"].is_null());
+        assert!(recovered["changed"].is_null() && recovered["manager_changed"].is_null());
+    }
+    assert_eq!(
+        (model.stops, model.starts, model.released),
+        (1, 1, true),
+        "observation re-executed an effect"
+    );
 }

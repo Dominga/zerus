@@ -51,6 +51,7 @@ impl Target {
 }
 
 pub(in crate::desktop) mod engine;
+pub(in crate::desktop) mod observation;
 
 /// A fresh local reservation, not a native permit. Decoding a record cannot
 /// recreate it; the actual session must still own all native proofs/resources.

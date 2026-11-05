@@ -271,6 +271,10 @@ impl Running {
     pub(super) fn image_files_current(&self) -> Result<()> {
         self.service.image.check_files()
     }
+    /// Diagnostic observation of the SAME retained kernel process, no PID lookup.
+    pub(super) fn process_exited(&self) -> bool {
+        self.service.process.exited()
+    }
     pub(super) fn retirement_drained(&self, location: &Location, plan: &Plan, until: Instant) -> Result<bool> {
         self.check()?;
         let value = self.service.status(location, plan, until)?;
@@ -478,11 +482,11 @@ pub(super) fn original(
 }
 
 /// Definition-only read; it obtains no later task instance/process capability.
-pub(super) fn definition_current(native: &Native, plan: &Plan, wanted: &Shape, until: Instant) -> Result<()> {
+pub(super) fn definition_current(native: &Native, plan: &Plan, wanted: &Shape, until: Instant) -> Result<IRegisteredTask> {
     ensure!(Instant::now() < until, "Owned definition deadline expired.");
-    task(&native.folder, plan, wanted)?;
+    let selected = task(&native.folder, plan, wanted)?;
     ensure!(Instant::now() < until, "Owned definition deadline expired.");
-    Ok(())
+    Ok(selected)
 }
 
 pub(super) fn stopped(

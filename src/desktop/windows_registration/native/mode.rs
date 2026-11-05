@@ -117,6 +117,9 @@ pub(in crate::desktop::windows_registration) fn command(
     reply["operation"] = request["operation"].clone();
     reply["requested_mode"] = request["mode"].clone();
     if reply["error"].is_string() {
+        if matches!(request["operation"].as_str(), Some("refresh" | "refresh_cancel")) {
+            return Ok(refresh::after_error(config, location, &request, reply["error"].as_str().expect("error")));
+        }
         reply["configuration"] = location.configuration.clone().into();
         reply["task_name"] = plan["task_name"].clone();
         reply["ok"] = false.into();
@@ -405,7 +408,6 @@ impl Fence<'_> {
             "Mode transition deadline reached; retain its original UUID."
         );
         self.admission.check()?;
-        if let Some(grant) = &self.grant { grant.check(self.location)?; }
         let held = platform::FileIdentity::of(&self.source)?;
         let (_, current) = instances::selected_image(self.image)?;
         ensure!(
@@ -430,7 +432,13 @@ impl Fence<'_> {
                 }
             }
         }
-        if self.background {
+        // The retained guard checks the SAME database/Origin/incarnation and
+        // current Service state. Do that stronger read at final admission;
+        // reading it earlier AND then rereading a Boolean duplicated database
+        // I/O at every publication/Stop fence without adding a condition.
+        if let Some(grant) = &self.grant {
+            grant.check(self.location)?;
+        } else if self.background {
             ensure!(
                 ownership::registration_granted(self.location)?,
                 "Grant or Rearm from Zerus Settings is required before background mode."

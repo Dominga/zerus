@@ -204,6 +204,16 @@ effect was offered, uncertainty stays Unknown and uses the original Review/boot
 barrier; no phase is downgraded. Refresh receipts neither rewrite historical
 mode-choice receipts nor open the consumer's business or scheduling gates.
 
+A failed final fence, directory sync or reply can occur after the settled
+refresh receipt is published. Refresh error recovery reads that SAME UUID and
+the independent loss evidence: it returns the exact read-only receipt or
+Unknown, with uncertain effect fields. An empty pending slot never proves that
+no Stop/RunEx occurred. A bounded timing trace records phase/operation wall and
+monotonic timestamps, remaining budget and retained-process exit observations;
+these diagnostics are never admission or cleanup evidence. Exit polling
+validates the current owned definition once and uses that same checked task
+for GUID disappearance, under the original Stop deadline.
+
 This first controller supports a current, identity-current Service Grant only.
 Revoked, blocked, changed-origin and unsupported actors are explicitly refused;
 refresh cannot obtain a Grant through retirement. In particular, it does not

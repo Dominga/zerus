@@ -5304,8 +5304,9 @@ after an effect.
 
 Explicit removal uses `notification-registration remove --json --request-id UUID`
 after a settled `desktop revoke --json --request-id UUID --reason rollback` with
-that same UUID, the task's `registration remove`, and a stop of the running
-service through its owner (sign-out, or ending only that task). Removal is
+that same UUID, a stop of the running service through its owner (ending only
+that task, or a sign-out after the task's `registration remove`), and the
+task's `registration remove`. Removal is
 offline only. It holds the actual `owner.lock` and then the handoff lock through
 the exact registry change; a missing endpoint, stopped task or PID is never the
 exclusion. Without desktop state nothing more is needed. A sidecar or marker

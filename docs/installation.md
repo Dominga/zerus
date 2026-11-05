@@ -610,11 +610,11 @@ stops an idle session host without disabling anything.
   UUID retained for the whole operation:
   1. `hgs.exe desktop revoke --json --request-id UUID --reason rollback`, until it
      reports accepted, durable, revoked and checkpointed.
-  2. `hgs.exe desktop registration remove --json`, so the task no longer starts at
-     sign-in. It does not stop a running service.
-  3. Stop the running service through its owner: sign out of Windows and back in,
-     or end only the running `hgs-desktop` task in Task Scheduler. Never end other
-     processes.
+  2. Stop the running service through its owner: end only the running
+     `hgs-desktop` task in Task Scheduler. Never end other processes.
+  3. `hgs.exe desktop registration remove --json`, so the task no longer starts at
+     sign-in. It does not stop a running service: when step 2 is not possible,
+     run this step first, then sign out of Windows and back in.
   4. `hgs.exe desktop notification-registration remove --json --request-id UUID`
      with that **same** UUID.
 

@@ -20,6 +20,8 @@ use zerus_client_core::desktop::{
 const RECEIPTS: i64 = 4096;
 const RECORD_BYTES: usize = 8192;
 
+pub(super) mod observation;
+
 /// Captured from the authenticated canonical process and cached native Build,
 /// never decoded from a request. Serialization is private store data only.
 #[derive(Clone, Debug, Deserialize, Serialize, PartialEq, Eq)]
@@ -219,6 +221,16 @@ impl RegistrationGrant {
     #[cfg(windows)]
     pub(super) fn incarnation(&self) -> (String, String) {
         (self.original.journal.clone(), self.original.owner_epoch.clone())
+    }
+    /// History fence for an original refresh, never a reconstructed Grant.
+    /// Recheck the SAME checked database/incarnation/Origin before copying it.
+    pub(super) fn refresh_binding(&self, location: &Location) -> Result<String> {
+        use sha2::{Digest, Sha256};
+        self.check(location)?;
+        let bytes = serde_json::to_vec(&(1u8, self.database.identity()?,
+            &self.original.configuration, &self.original.journal,
+            &self.original.owner_epoch, &self.original.origin))?;
+        Ok(format!("{:x}", Sha256::digest(bytes)))
     }
     pub(super) fn capture(location: &Location) -> Result<Option<Self>> {
         let (row, database) = registration_row(location)?;

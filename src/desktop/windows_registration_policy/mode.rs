@@ -4,6 +4,8 @@ use serde::{Deserialize, Serialize};
 use std::time::{Duration, Instant};
 
 pub(in crate::desktop) const RECORD_BYTES: usize = 8192;
+pub(in crate::desktop) mod first;
+pub(in crate::desktop) mod refresh;
 pub(in crate::desktop) mod review;
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]
@@ -125,11 +127,13 @@ pub(in crate::desktop) struct Pending {
     pub consumer: Option<review::Consumer>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub review: Option<review::Disposition>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub refresh: Option<refresh::Scope>,
 }
 impl Pending {
     fn prepared(request_id: String, desired: Mode, original: Option<ObservedInstance>) -> Self {
         Self { request_id, desired, phase: Phase::Prepared, original, started: None,
-            consumer: None, review: None }
+            consumer: None, review: None, refresh: None }
     }
 }
 
@@ -147,6 +151,10 @@ pub(in crate::desktop) struct Record {
     pub reviewed: Vec<review::Archive>,
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub choices: Vec<review::Receipt>,
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub first_choices: Vec<first::Receipt>,
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub refreshes: Vec<refresh::Receipt>,
 }
 impl Record {
     pub fn empty(plan: &Plan) -> Result<Self> {
@@ -164,6 +172,8 @@ impl Record {
             completed: None,
             reviewed: Vec::new(),
             choices: Vec::new(),
+            first_choices: Vec::new(),
+            refreshes: Vec::new(),
         })
     }
     pub fn decode(bytes: &[u8], plan: &Plan) -> Result<Self> {
@@ -205,6 +215,8 @@ impl Record {
             "Invalid completed transition UUID."
         );
         value.check_reviews()?;
+        value.check_first()?;
+        value.check_refreshes()?;
         Ok(value)
     }
     pub fn encode(&self, plan: &Plan) -> Result<Vec<u8>> {
@@ -219,7 +231,8 @@ impl Record {
         self.ensure_review_slot()?;
         ensure!(canonical_id(&id) && self.completed.as_deref() != Some(id.as_str())
             && self.cancelled.as_deref() != Some(id.as_str())
-            && !self.reviewed.iter().any(|a|a.original.request_id == id), "A NEW original request UUID is required.");
+            && !self.reviewed.iter().any(|a|a.original.request_id == id)
+            && !self.refreshes.iter().any(|r| r.request == id), "A NEW original request UUID is required.");
         ensure!(self.pending.is_none(), "An original transition is pending; inspect it or explicitly cancel its exact UUID before a new choice.");
         if let Some(original) = &original {
             original.validate()?;
@@ -249,6 +262,14 @@ impl Record {
                 | (Phase::Updated, Phase::StartOffered)
                 | (Phase::StartOffered, Phase::Ready)
         );
+        let allowed = if pending.refresh.is_some() {
+            matches!((expected, next),
+                (Phase::Prepared, Phase::Held)
+                | (Phase::Held, Phase::StopOffered)
+                | (Phase::StopOffered, Phase::Stopped)
+                | (Phase::Stopped, Phase::StartOffered)
+                | (Phase::StartOffered, Phase::Ready))
+        } else { allowed };
         ensure!(allowed, "A manager effect cannot be replayed or skipped.");
         pending.phase = next;
         Ok(())
@@ -272,15 +293,18 @@ impl Record {
     /// Service-grant checks under the installer lock. No native side effect.
     pub fn cancel(&mut self, request_id: &str) -> Result<()> {
         self.cancellation_requires_grant(request_id)?;
+        let refresh = self.pending_refresh();
         self.choice_phase(request_id, review::ChoicePhase::Refused)?;
-        self.cancelled = Some(request_id.into());
+        if !refresh { self.cancelled = Some(request_id.into()); }
         self.pending = None;
         Ok(())
     }
     /// Select metadata for a read-only native observation, never permission to
     /// discard it. The caller must bind this GUID to the ready requested mode.
     pub fn ready_cancellation(&self, request_id: &str) -> Result<&Pending> {
-        ensure!(!self.choices.iter().any(|c| c.request == request_id),
+        ensure!(!self.pending_refresh(), "An original refresh is lookup-only after an offered effect; review its original UUID.");
+        ensure!(!self.choices.iter().any(|c| c.request == request_id)
+            && !self.first_choices.iter().any(|c| c.request == request_id),
             "Use Review interrupted mode change for this original; cancellation cannot discard its unknown custody.");
         let pending = self
             .pending

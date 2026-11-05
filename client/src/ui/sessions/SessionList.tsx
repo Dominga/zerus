@@ -182,7 +182,7 @@ function clearReadFor(s: Session) {
     if (!catalog.rows[s.key] || !online) {
       clearRead = { id, checking: false };
     } else {
-      const session: SessionRef = { computer: s.computer, key: s.catalogKey, name: s.name, archive_id: s.archiveId ?? null };
+      const session: SessionRef = { computer: s.computer, key: s.catalogKey, name: s.name, archive_id: s.archiveId ?? null, session_id: s.sessionId ?? null };
       const read = clearRead;
       read.pending = composerClearControl(session).then((control) => {
         read.checking = false;
@@ -216,7 +216,7 @@ function clearEntry(s: Session, prepared?: ClearRead): MenuEntry {
       if (catalog.rows[s.key]?.state !== s.state) { notify("error", tr(STATE_CHANGED), true); return; }
       if (selected) { composer.openClear(); return; }
       if (!read?.control?.enabled || clearRead?.id !== read.id) return;
-      const session: SessionRef = { computer: s.computer, key: s.catalogKey, name: s.name, archive_id: s.archiveId ?? null };
+      const session: SessionRef = { computer: s.computer, key: s.catalogKey, name: s.name, archive_id: s.archiveId ?? null, session_id: s.sessionId ?? null };
       const control = read.control;
       setSelectedKey(s.key);
       setSubagentOpen(undefined);

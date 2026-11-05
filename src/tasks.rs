@@ -19,6 +19,7 @@ use zerus_replica::{
 
 mod answers;
 mod cancellation;
+mod cutover;
 mod dispatch;
 mod mobile;
 mod phone;
@@ -38,7 +39,7 @@ fn paste_uncertain(message: &str) -> bool {
     message.starts_with(SENT_UNRECORDED) || message.starts_with("delivery uncertain")
 }
 
-const USAGE: &str = "usage: hgs task list --project P [--stage S] | list --project P --stage S --limit 1..200 [--after CURSOR|--before CURSOR] [--if-revision R] | get REF [--history-limit 1..80 [--history-before CURSOR] [--attachments metadata]] | attachment REF --file N [--entry ID] | add --project P [--backlog] [--start] [--target SESSION|any [--host ALIAS]] [--title TITLE [--request-id UUID]] [--position N] | edit REF | rename REF | move REF --top|--before REF|--after REF|--position N | stage REF backlog|todo|done | target REF SESSION|any|new-session|subagent [--parent SESSION] [--host ALIAS] | send REF [--session SESSION [--host ALIAS]] | start-plan REF --json | start-deliver REF --json [--recover-only] | cancel REF [--reason TEXT] | cancel-execution REF --json (guard JSON on stdin) | handoff REF --session SESSION [--host ALIAS] | start REF | report REF [--progress|--ready] [--considered REV] | comment REF [--content-json] | message REF --request-id UUID --mode queue|send|reopen|note [--expect-dispatch ID] [--content-json] | worker REF --subagent ID --request-id REQUEST | settings --project P [--set] | digests --json | exchange --json | mobile-send|mobile-cancel|mobile-done --json
+const USAGE: &str = "usage: hgs task list --project P [--stage S] | list --project P --stage S --limit 1..200 [--after CURSOR|--before CURSOR] [--if-revision R] | get REF [--history-limit 1..80 [--history-before CURSOR] [--attachments metadata]] | attachment REF --file N [--entry ID] | add --project P [--backlog] [--start] [--target SESSION|any [--host ALIAS]] [--title TITLE [--request-id UUID]] [--position N] | edit REF | rename REF | move REF --top|--before REF|--after REF|--position N | stage REF backlog|todo|done | target REF SESSION|any|new-session|subagent [--parent SESSION] [--host ALIAS] | send REF [--session SESSION [--host ALIAS]] | start-plan REF --json | start-deliver REF --json [--recover-only] | cancel REF [--reason TEXT] | cancel-execution REF --json (guard JSON on stdin) | handoff REF --session SESSION [--host ALIAS] | start REF | report REF [--progress|--ready] [--considered REV] | comment REF [--content-json] | message REF --request-id UUID --mode queue|send|reopen|note [--expect-dispatch ID] [--content-json] | worker REF --subagent ID --request-id REQUEST | settings --project P [--set] | cutover --project P [--hold on|off [--confirm]] | digests --json | exchange --json | mobile-send|mobile-cancel|mobile-done --json
   REF is T-xxxxxx with --project P, or PROJECT/T-xxxxxx; texts and --set settings are read from stdin;
   a change an agent makes prints one line, and --json prints the task";
 
@@ -134,7 +135,12 @@ fn flag(args: &[String], name: &str) -> bool {
 
 /// The project's catalog ID and current name, by ID or name.
 fn project(config: &Config, wanted: &str) -> Result<(String, String)> {
-    let projects = crate::swarm::projects(config).map_err(fail)?;
+    project_in(&crate::swarm::projects(config).map_err(fail)?, wanted)
+}
+
+/// The project `wanted` (an ID, or a name only one project has) names among
+/// `projects`.
+fn project_in(projects: &[(String, String)], wanted: &str) -> Result<(String, String)> {
     if let Some(found) = projects.iter().find(|(id, _)| id == wanted) {
         return Ok(found.clone());
     }
@@ -505,6 +511,7 @@ fn execute(config: &Config, args: &[String]) -> Result<Value> {
             change(config, action, args)
         }
         "settings" => settings(config, args),
+        "cutover" => cutover::cutover(config, args),
         // The phone's exchange through the relay; both take exactly --json.
         "digests" | "exchange" if args.len() == 1 && args[0] == "--json" => {
             if action == "digests" {
@@ -672,6 +679,7 @@ fn documents(store: &ProjectStore) -> Result<Documents> {
     }
     for damaged in &damaged {
         hash.update(format!("{}\n{}", damaged.uuid, damaged.error));
+        hash.update(serde_json::to_vec(damaged).unwrap_or_default());
     }
     let revision = format!("documents-{:x}", hash.finalize());
     Ok(Documents { rows, counts, damaged, revision })
@@ -718,7 +726,7 @@ fn page_of(docs: &Documents, project: &str, stage: Stage, limit: usize, anchor: 
         .damaged
         .iter()
         .take(index::DAMAGED_SHOWN)
-        .map(|d| json!({"uuid": d.uuid, "error": index::capped_error(&d.error)}))
+        .map(index::damaged_row)
         .collect();
     page_reply(stage, limit, page, start, next, previous, &docs.counts, (shown, docs.damaged.len()), docs.revision.clone())
 }
@@ -1459,6 +1467,42 @@ mod tests {
             assert_eq!((done.moves, done.stale), (true, None), "{name}");
             assert_eq!(task.stage().unwrap(), Stage::Review);
         }
+    }
+
+    /// zerus-ucck P2b: a session created with an ID journal keeps the label it
+    /// was launched with, so a name-only task an older hgs made for that label
+    /// still reaches it after a rename.
+    #[test]
+    fn a_name_only_task_reaches_a_renamed_session_by_its_launch_label() {
+        let state = tempfile::tempdir().unwrap();
+        let root = state.path();
+        let file = |n: u8| format!("{n:064x}.json");
+        let journal = "session:3f2a9c1d-0b4e-4d6a-9c1d-2e3f4a5b6c7d";
+        let renamed = json!({"version":1,"name":"codex/renamed","run_id":"run-1","launch_id":"launch-1",
+            "journal_name":journal,"launch_label":"codex/launched"});
+        saved(root, &file(1), renamed);
+        let other = json!({"version":1,"name":"codex/other","run_id":"run-2","launch_label":"codex/shared"});
+        saved(root, &file(2), other);
+        let third = json!({"version":1,"name":"codex/third","run_id":"run-3","launch_label":"codex/shared"});
+        saved(root, &file(3), third);
+        let machines = Machines {
+            here: "node-here".into(),
+            selves: vec![],
+            peers: BTreeMap::new(),
+            bindings: crate::state::task_bindings_in(root).unwrap(),
+        };
+        let routed = |session: &str| {
+            let key = SessionKey {
+                machine: "node-here".into(),
+                session: session.into(),
+                session_id: String::new(),
+            };
+            machines.resolve(&key).map(|key| key.session)
+        };
+        assert_eq!(routed("codex/launched"), Some("codex/renamed".to_owned()));
+        // A label two sessions were launched with stays ambiguous.
+        assert_eq!(routed("codex/shared"), None);
+        assert_eq!(routed("codex/renamed"), Some("codex/renamed".to_owned()));
     }
 
     #[test]

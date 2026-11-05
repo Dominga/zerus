@@ -332,3 +332,11 @@ pub(super) fn totals(db: &rusqlite::Connection) -> Result<(u64, u64)> {
         |r| Ok((r.get::<_, i64>(0)? as u64, r.get::<_, i64>(1)? as u64)),
     )?)
 }
+
+/// The records a person may review, for status: `orphaned` and `failed`
+/// alone, through the open-state index and within the 64 charged records.
+pub(super) const REVIEW_COUNT: &str = "SELECT count(*) FROM desktop_task_message_inputs
+     WHERE state NOT IN('removed','released') AND state IN('orphaned','failed')";
+pub(super) fn review_count(db: &rusqlite::Connection) -> Result<u64> {
+    Ok(db.query_row(REVIEW_COUNT, [], |r| r.get::<_, i64>(0))? as u64)
+}

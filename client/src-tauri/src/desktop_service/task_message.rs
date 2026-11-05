@@ -316,7 +316,7 @@ fn plan(scope: &wire::Scope, project: &str, task: &str, record: &Value) -> Optio
 }
 
 #[cfg(all(test, unix))]
-mod fixture_tests;
+pub(in crate::desktop_service) mod fixture_tests;
 #[cfg(test)]
 mod tests {
     use super::*;

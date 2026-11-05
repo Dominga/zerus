@@ -544,6 +544,8 @@ impl Composers {
         self.tick_continuations(now);
         self.retry_answer_saves();
         self.push_check();
+        self.tick_handed(now);
+        self.tick_handed_answers(now);
     }
 
     /// Ticks once a second while a composer is open, until the app quits.
@@ -887,11 +889,11 @@ std::thread_local! {
 }
 
 /// How a delivery or continuation ends ([`Composers::finish`]).
-struct End<'a> {
-    ok: bool,
-    detail: &'a str,
-    uncertain: bool,
-    preserve: bool,
+pub(super) struct End<'a> {
+    pub(super) ok: bool,
+    pub(super) detail: &'a str,
+    pub(super) uncertain: bool,
+    pub(super) preserve: bool,
 }
 
 /// A continuation's start or compaction call (zerus-5wmh.66.4.4).
@@ -1503,10 +1505,30 @@ impl Composers {
                 .map(|child| child.agent_id.clone()),
             expected_compaction_id: delivery.compaction.clone(),
         };
-        let dispatch = &self.0.deps.dispatch;
-        let called = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
-            dispatch(target, action, request_id.clone())
-        }));
+        // The desktop service takes it, decided before any offer; once
+        // offered, its answer stands and nothing falls back.
+        let offered =
+            std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| self.offer(&delivery)));
+        // The service's own uncertain line replaces the direct path's prefix.
+        let service = matches!(offered, Ok(Some(_)));
+        let called = match offered {
+            Ok(Some(answer)) => match self.offered(&delivery, answer) {
+                Some(outcome) => Ok(Ok(outcome)),
+                // Handed over: its row keeps sending until a check settles it.
+                None => {
+                    self.push_finished(&request_id, false, true);
+                    return;
+                }
+            },
+            Ok(None) => {
+                let dispatch = &self.0.deps.dispatch;
+                std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+                    dispatch(target, action, request_id.clone())
+                }))
+            }
+            // The offer's thread died: it may have reached the service.
+            Err(panic) => Err(panic),
+        };
         let outcome = match called {
             Ok(Ok(outcome)) => outcome,
             // A2 answers a busy send lane and every refusal before the call as
@@ -1517,11 +1539,22 @@ impl Composers {
                 detail: "The send ended abnormally.".into(),
             },
         };
-        let detail = self.lock().local.finished(&key, &request_id, &outcome);
+        self.delivered(&delivery, &outcome, service);
+    }
+
+    /// Records the end of `delivery`'s one call in its row and its draft;
+    /// `service`: the desktop service's own line, shown as is.
+    pub(super) fn delivered(&self, delivery: &Delivery, outcome: &Outcome, service: bool) {
+        let (key, request_id) = (&delivery.key, &delivery.request_id);
+        let detail = if service {
+            self.lock().local.finished_as_is(key, request_id, outcome)
+        } else {
+            self.lock().local.finished(key, request_id, outcome)
+        };
         let ok = matches!(outcome, Outcome::Done { .. });
         let uncertain = matches!(outcome, Outcome::Uncertain { .. });
-        self.push_finished(&request_id, ok, uncertain);
-        self.ended(&delivery, ok, &detail, uncertain);
+        self.push_finished(request_id, ok, uncertain);
+        self.ended(delivery, ok, &detail, uncertain);
         // `finishMessage`: the open session is read again (`inspect()`).
         if self.lock().open_key.as_deref() == Some(key.as_str()) {
             self.refresh_details();
@@ -1665,7 +1698,7 @@ impl Composers {
     }
 
     /// `finish`'s change to the composer, under the caller's lock.
-    fn finish_in(&self, hub: &mut Hub, key: &str, revision: Option<u64>, end: End<'_>) {
+    pub(super) fn finish_in(&self, hub: &mut Hub, key: &str, revision: Option<u64>, end: End<'_>) {
         let End {
             ok,
             detail,
@@ -2478,7 +2511,7 @@ impl Composers {
             Some(retry) => message_digest(&retry.text, &retry.attachments),
             None => message_digest(&composer.draft.text, &composer.draft.attachments),
         };
-        let checkpoint = Checkpoint::reserve(Intent {
+        let intent = Intent {
             kind: if start {
                 Kind::ResumeToSend
             } else {
@@ -2496,7 +2529,15 @@ impl Composers {
             }),
             retry_of: retry.map(|r| r.id),
             consent: false,
-        });
+        };
+        // A compaction also reserves the send it waits for (version 2), so
+        // the desktop service can take the whole compact-to-send; the
+        // direct path reserves its send again when it sends.
+        let checkpoint = if start {
+            Checkpoint::reserve(intent)
+        } else {
+            Checkpoint::reserve_compact_to_send(intent).expect("a compaction's checkpoint")
+        };
         let request_id = checkpoint.request_id.clone();
         composer.checkpoint = Some(checkpoint);
         let stored = composer.stored();
@@ -2661,6 +2702,12 @@ impl Composers {
                 if !id.is_empty() {
                     pending.call = Call::Running;
                 }
+            }
+            // The desktop service takes the whole compact-to-send, decided
+            // before any offer; once offered, nothing falls back.
+            if !start && !id.is_empty() && me.hand_compaction(&owned, revision) {
+                me.changed();
+                return;
             }
             let dispatch = &me.0.deps.dispatch;
             let request = id.clone();
@@ -2839,7 +2886,7 @@ impl Composers {
     /// identity: the draft, if it still holds exactly that identity, shows
     /// its end as a plain error again. An uncertain one leaves it held until
     /// the user allows a retry.
-    fn settle_orphan(&self, hub: &mut Hub, request: &str, definite: bool) {
+    pub(super) fn settle_orphan(&self, hub: &mut Hub, request: &str, definite: bool) {
         let Some(at) = hub.orphans.iter().position(|o| o.request == request) else {
             return;
         };
@@ -2869,7 +2916,7 @@ impl Composers {
     /// (4531, 4768), and the composer ends only while it still waits for
     /// this one, so a late cancel never ends a newer continuation or the
     /// delivery that followed.
-    fn cancel(&self, key: &str, start: bool, revision: u64, text: &str) {
+    pub(super) fn cancel(&self, key: &str, start: bool, revision: u64, text: &str) {
         let pending = {
             let mut hub = self.lock();
             let Some(pending) = take_pending(&mut hub, key, start, revision) else {
@@ -6549,6 +6596,163 @@ mod continuations {
             vec![true, true],
             "both uncertain continuations must retain the original identity"
         );
+    }
+
+    /// zerus-1wchz: a compaction `hgs` may have typed ends uncertain, so the
+    /// draft keeps that call's identity and Send stays locked until Allow
+    /// retry; a refusal before any input still ends definitely and frees the
+    /// draft. The real core classifier decides each end.
+    #[test]
+    fn a_compaction_that_may_have_typed_keeps_its_identity_until_allow_retry() {
+        use zerus_client_core::actions::{classify, invocation};
+        type Case = (&'static str, fn() -> Exit, bool, &'static str);
+        let cases: [Case; 9] = [
+            (
+                "start",
+                || Exit::StartFailed("hgs is missing".into()),
+                false,
+                "hgs is missing",
+            ),
+            (
+                "refused",
+                || Exit::Code {
+                    code: 1,
+                    stdout: Vec::new(),
+                    stderr: "hgs: The session is no longer ready\n".into(),
+                },
+                false,
+                "hgs: The session is no longer ready",
+            ),
+            (
+                "typed",
+                || {
+                    Exit::Code {
+                    code: 1,
+                    stdout: Vec::new(),
+                    stderr: "hgs: Compact delivery uncertain: pane gone. Check Terminal before retrying\n".into(),
+                }
+                },
+                true,
+                "hgs: Compact delivery uncertain: pane gone. Check Terminal before retrying",
+            ),
+            (
+                "duplicate",
+                || {
+                    Exit::Code {
+                    code: 1,
+                    stdout: Vec::new(),
+                    stderr: "hgs: This compact was already attempted. Check Terminal before trying again\n".into(),
+                }
+                },
+                true,
+                "hgs: This compact was already attempted. Check Terminal before trying again",
+            ),
+            (
+                "peer",
+                || Exit::Code {
+                    code: 255,
+                    stdout: Vec::new(),
+                    stderr: "ssh: connection closed\n".into(),
+                },
+                true,
+                "ssh: connection closed",
+            ),
+            (
+                "timeout",
+                || Exit::TimedOut,
+                true,
+                "Request timed out. Check Terminal before retrying.",
+            ),
+            (
+                "write",
+                || Exit::WriteFailed,
+                true,
+                "Transfer failed. Check Terminal before retrying.",
+            ),
+            (
+                "abnormal",
+                || Exit::Abnormal {
+                    stderr: "signal 9\n".into(),
+                },
+                true,
+                "signal 9",
+            ),
+            (
+                "acknowledgement",
+                || Exit::Code {
+                    code: 0,
+                    stdout: b"{}".to_vec(),
+                    stderr: String::new(),
+                },
+                true,
+                "Invalid acknowledgement. Check Terminal before retrying.",
+            ),
+        ];
+        for (name, exit, uncertain, detail) in cases {
+            let root = dir(&format!("typed-compact-{name}"));
+            let store = drafts(&root);
+            let (c, fake) = send_hub_on(&store);
+            *lock(&fake.outcome) = Box::new(move |action, id| match action {
+                Action::CompactContext => {
+                    let target = Target {
+                        computer: String::new(),
+                        name: "claude/example/review".into(),
+                        run_id: "run-1".into(),
+                        conversation_id: "conv-1".into(),
+                    };
+                    let inv = invocation(&target, action, id).unwrap();
+                    classify(&target, action, &inv, exit())
+                }
+                _ => receipt(action, id),
+            });
+            let seen = record_checkpoints(&fake, &root);
+            let view = opened(&c, cold());
+            let SendReply::Cold { token, .. } =
+                c.send_message(view.handle, 1, view.text_epoch, "compact me".into(), 0, 0)
+            else {
+                panic!("{name}: no cold question")
+            };
+            let compact = Answer::Cold {
+                action: ColdAction::Compact,
+            };
+            assert_eq!(c.answer(token, compact), SendReply::Sending, "{name}");
+            let view = until(&c, |v| !v.sending && !v.compacting && v.status_error);
+            store.flush();
+            let held = on_disk(&root);
+            let first = lock(&seen)[0].1.clone();
+            assert_eq!(view.uncertain, uncertain, "{name}");
+            let again = |rev| {
+                let view = c.current().unwrap();
+                c.send_message(view.handle, rev, view.text_epoch, "compact me".into(), 0, 0)
+            };
+            if uncertain {
+                assert_eq!(
+                    view.status,
+                    zerus_client_core::local_messages::uncertain_detail(detail),
+                    "{name}"
+                );
+                assert_eq!(
+                    held.map(|checkpoint| checkpoint.request_id),
+                    Some(first),
+                    "{name}: the draft keeps the compaction's identity"
+                );
+                assert_eq!(again(2), SendReply::Busy, "{name}: locked");
+                c.allow_retry(view.handle);
+                assert!(!c.current().unwrap().uncertain, "{name}");
+                assert!(
+                    matches!(again(3), SendReply::Cold { .. }),
+                    "{name}: Allow retry frees it"
+                );
+            } else {
+                assert_eq!(view.status, detail, "{name}");
+                assert!(held.is_none(), "{name}: no identity kept");
+                assert!(
+                    matches!(again(2), SendReply::Cold { .. }),
+                    "{name}: a definite refusal frees the draft"
+                );
+            }
+            assert_eq!(lock(&seen).len(), 1, "{name}: one call");
+        }
     }
 
     /// review-n's #1316 probe (zerus-5wmh.66.4.4).

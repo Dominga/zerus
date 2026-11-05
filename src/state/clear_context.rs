@@ -78,8 +78,11 @@ pub(super) fn carry_fresh_start(previous: &Value, record: &mut Value) {
     if earlier.len() > CLEARED_CONVERSATIONS { earlier.drain(..earlier.len() - CLEARED_CONVERSATIONS); }
     if !earlier.is_empty() { record["cleared_conversations"] = json!(earlier); }
     if let Some(anchor) = previous.get("journal_name") { record["journal_name"] = anchor.clone(); }
-    // A clear starts another conversation of the same session.
+    if let Some(label) = previous.get("launch_label") { record["launch_label"] = label.clone(); }
+    // A clear starts another conversation of the same session, written where
+    // that session lives: a session in the ID layout stays there (P3a).
     if let Some(id) = previous.get("session_id") { record["session_id"] = id.clone(); }
+    if let Some(layout) = previous.get("layout") { record["layout"] = layout.clone(); }
 }
 
 // Earlier conversations of this session's Activity, oldest first. Only
@@ -573,7 +576,7 @@ fn checked_chooser(name: &str, request: &Request) -> Result<Value> {
     if string(&record,"run_id")!=request.expected_run_id || string(&record,"conversation_id")!=request.expected_conversation_id {
         return Err("session identity changed; refresh before clearing".into());
     }
-    if !matches(&record,live()?.get(name)) || !process_alive(&record) {
+    if !matches(&record,panes_of(&live()?,&record)) || !process_alive(&record) {
         return Err("the exact agent process is no longer running; resume it explicitly".into());
     }
     if !dismissable(&record,true) {return Err("Claude is no longer waiting in a chooser; refresh before clearing".into());}
@@ -621,6 +624,9 @@ pub(super) fn dispatch(args: &[String]) -> Result<i32> {
     let name=&args[0];
     if opencode::exists(name) {return Err("OpenCode context reset is not supported by this adapter".into());}
     if dsh::exists(name) {return Err("This DeepSeek harness does not expose a native context reset. Use its native UI.".into());}
+    // zerus-ucck P3c: the request's identities select among sessions that
+    // share the label, before the first read.
+    expect(name, &request.expected_run_id, &request.expected_conversation_id)?;
     let mut guard=Some(lock(None)?);
     let current=read(name)?;
     // A resume before its deferred SessionStart is verified as for its first message.
@@ -643,7 +649,7 @@ pub(super) fn dispatch(args: &[String]) -> Result<i32> {
     if record["pending_settings"].is_object() {return Err("Wait for the pending model settings before clearing context".into());}
     let path=absolute_root()?.join("clear_receipts").join(format!("{uuid}.json"));
     if path.exists() {return Err("This clear was already attempted. Check Terminal before trying again".into());}
-    recovery::cancel_for_input(name)?;
+    recovery::cancel_for_input(&record)?;
     record["clear_context_request"]=json!({"request_id":request.request_id,"run_id":request.expected_run_id,
         "conversation_id":request.expected_conversation_id,"at":now()});
     if resuming && !string(&record,"restore_archive_id").is_empty() {
@@ -704,29 +710,45 @@ pub(super) fn dispatch(args: &[String]) -> Result<i32> {
         Ok(())
     })();
     drop(guard); // SessionStart hooks must be able to commit the new identity.
-    result.map_err(|e:String|format!("Clear delivery uncertain: {e}. Check Terminal before retrying"))?;
-    let deadline=Instant::now()+Duration::from_secs(4);
-    let mut status="submitted";
-    loop {
-        let mut current=read(name)?;
-        if current["run_id"]!=record["run_id"] || current["pid"]!=record["pid"] {break;}
-        if !string(&current,"conversation_id").is_empty() && current["conversation_id"]!=record["conversation_id"] {
-            status="confirmed";break;
-        }
-        {
-            let _guard=lock(None)?;
-            current=read(name)?;
-            if current["run_id"]==record["run_id"] && current["pid"]==record["pid"]
-                && (observe_terminal(&mut current).unwrap_or(false) || awaiting_start(&current)) {
-                status="confirmed";break;
+
+    // From the typed command on, every error may follow input (zerus-1wchz).
+    let uncertain =
+        |e: String| format!("Clear delivery uncertain: {e}. Check Terminal before retrying");
+    result.map_err(uncertain)?;
+    let status = (|| -> Result<&str> {
+        let deadline = Instant::now() + Duration::from_secs(4);
+        loop {
+            let mut current = read(name)?;
+            if current["run_id"] != record["run_id"] || current["pid"] != record["pid"] {
+                return Ok("submitted");
             }
+            if !string(&current, "conversation_id").is_empty()
+                && current["conversation_id"] != record["conversation_id"]
+            {
+                return Ok("confirmed");
+            }
+            {
+                let _guard = lock(None)?;
+                current = read(name)?;
+                if current["run_id"] == record["run_id"]
+                    && current["pid"] == record["pid"]
+                    && (observe_terminal(&mut current).unwrap_or(false) || awaiting_start(&current))
+                {
+                    return Ok("confirmed");
+                }
+            }
+            if Instant::now() >= deadline {
+                return Ok("submitted");
+            }
+            std::thread::sleep(Duration::from_millis(80));
         }
-        if Instant::now()>=deadline {break;}
-        std::thread::sleep(Duration::from_millis(80));
-    }
+    })()
+    .map_err(uncertain)?;
     let receipt=json!({"request_id":request.request_id,"name":name,"run_id":request.expected_run_id,
         "conversation_id":request.expected_conversation_id,"status":status});
-    atomic(&path,&receipt.to_string())?;println!("{receipt}");Ok(0)
+    atomic(&path, &receipt.to_string()).map_err(uncertain)?;
+    println!("{receipt}");
+    Ok(0)
 }
 #[cfg(test)] mod tests {
     use super::*;
@@ -1036,11 +1058,13 @@ pub(super) fn dispatch(args: &[String]) -> Result<i32> {
         }
     }
     #[test] fn fresh_starts_continue_the_activity_timeline_like_a_clear() {
-        let previous=json!({"run_id":"old-run","conversation_id":"second","cleared_conversations":["first"],"journal_name":"anchor"});
+        let previous=json!({"run_id":"old-run","conversation_id":"second","cleared_conversations":["first"],"journal_name":"anchor",
+            "launch_label":"codex/p/launched"});
         let mut record=json!({"run_id":"run","conversation_id":null});
         carry_fresh_start(&previous,&mut record);
         assert_eq!(earlier_conversations(&record),json!(["first","second"]));
         assert_eq!(record["journal_name"],"anchor");
+        assert_eq!(record["launch_label"],"codex/p/launched");
         observe_start(&mut record,&json!({"session_id":"third","source":"startup"}));
         record["conversation_id"]=json!("third");
         assert!(record["fresh_from"].is_null());

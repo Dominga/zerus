@@ -31,12 +31,20 @@ pub enum Operation {
     TaskMessage,
     #[serde(skip)] // Native input review only; never generic policy dispatch or receipts.
     TaskMessageInputRelease,
+    #[serde(skip)] // Native deferred send owner only; never generic policy dispatch or receipts.
+    DeferredSend,
+    #[serde(skip)] // Native deferred answer owner only; never generic policy dispatch or receipts.
+    DeferredAnswer,
+    #[serde(skip)] // Native compact-to-send owner only; never generic policy dispatch or receipts.
+    CompactToSend,
     #[serde(skip)] // Native TaskStart boundary only, never generic renderer JSON.
     TaskStartReconcile,
     #[serde(skip)] // Separate native notification controller, never generic policy JSON.
     NotificationControl,
     #[serde(skip)] // Separate native ownership controller, never a generic policy request.
     DesktopOwnership,
+    #[serde(skip)] // Closed native observation, never a policy operation or Grant receipt.
+    DesktopOwnershipObserve,
     #[serde(skip)] // Fixed native startup producer only, never JS row/path input.
     ImportPendingReads,
     #[serde(skip)] // The ephemeral consumer is separate from durable policy requests.
@@ -54,9 +62,13 @@ impl Operation {
             Request::CreationLaunch { .. } => Self::CreationLaunch,
             Request::TaskMessage { .. } => Self::TaskMessage,
             Request::TaskMessageInputRelease { .. } => Self::TaskMessageInputRelease,
+            Request::DeferredSend { .. } => Self::DeferredSend,
+            Request::DeferredAnswer { .. } => Self::DeferredAnswer,
+            Request::CompactToSend { .. } => Self::CompactToSend,
             Request::TaskStartReconcile { .. } => Self::TaskStartReconcile,
             Request::NotificationControl { .. } => Self::NotificationControl,
             Request::DesktopOwnership { .. } => Self::DesktopOwnership,
+            Request::DesktopOwnershipObserve { .. } => Self::DesktopOwnershipObserve,
             Request::ImportPendingReads { .. } => Self::ImportPendingReads,
             Request::ActivationWait { .. } => Self::ActivationWait,
             Request::AutomaticApprovals { .. } => Self::AutomaticApprovals,
@@ -72,9 +84,13 @@ impl Operation {
             Self::CreationLaunch => "creation_launch",
             Self::TaskMessage => "task_message",
             Self::TaskMessageInputRelease => "task_message_input_release",
+            Self::DeferredSend => "deferred_send",
+            Self::DeferredAnswer => "deferred_answer",
+            Self::CompactToSend => "compact_to_send",
             Self::TaskStartReconcile => "task_start_reconcile",
             Self::NotificationControl => "notification_controls",
             Self::DesktopOwnership => "desktop_ownership",
+            Self::DesktopOwnershipObserve => "desktop_ownership_observe",
             Self::ImportPendingReads => "import_pending_reads",
             Self::ActivationWait => "activation_wait",
             Self::AutomaticApprovals => "automatic_approvals",
@@ -117,6 +133,9 @@ enum Receipt {
 }
 impl Frontend {
     fn begin(&self, operation: Operation, requested: Option<Request>) -> Begin {
+        if let Some(request @ Request::DesktopOwnershipObserve { .. }) = &requested {
+            return Begin::Immediate(refused(request, "native_observation_required"));
+        }
         let mut state = self.state.lock().unwrap_or_else(PoisonError::into_inner);
         if let Some(old) = state.operations.get_mut(&operation) {
             if let Some(request) = &requested {
@@ -569,11 +588,15 @@ fn submission_ready(snapshot: &Snapshot, request: &Request) -> bool {
     if matches!(
         request,
         Request::NotificationControl { .. }
+            | Request::DesktopOwnershipObserve { .. }
             | Request::CreationClone { .. }
             | Request::CreationWorktree { .. }
             | Request::CreationLaunch { .. }
             | Request::TaskMessage { .. }
             | Request::TaskMessageInputRelease { .. }
+            | Request::DeferredSend { .. }
+            | Request::DeferredAnswer { .. }
+            | Request::CompactToSend { .. }
             | Request::TaskStartReconcile { .. }
             | Request::TerminationOutcome { .. }
     ) {
@@ -725,6 +748,9 @@ fn lookup(
             | Request::CreationLaunch { .. }
             | Request::TaskMessage { .. }
             | Request::TaskMessageInputRelease { .. }
+            | Request::DeferredSend { .. }
+            | Request::DeferredAnswer { .. }
+            | Request::CompactToSend { .. }
             | Request::TaskStartReconcile { .. }
             | Request::TerminationOutcome { .. }
     ) {
@@ -765,6 +791,9 @@ fn lookup_receipt(request: &Request, id: &str, value: Value) -> Result<Receipt, 
             | Request::CreationLaunch { .. }
             | Request::TaskMessage { .. }
             | Request::TaskMessageInputRelease { .. }
+            | Request::DeferredSend { .. }
+            | Request::DeferredAnswer { .. }
+            | Request::CompactToSend { .. }
             | Request::TaskStartReconcile { .. }
             | Request::TerminationOutcome { .. }
     ) {
@@ -829,6 +858,9 @@ fn checked(request: &Request, mut value: Value, lookup: bool) -> Option<(Value, 
             | Request::CreationLaunch { .. }
             | Request::TaskMessage { .. }
             | Request::TaskMessageInputRelease { .. }
+            | Request::DeferredSend { .. }
+            | Request::DeferredAnswer { .. }
+            | Request::CompactToSend { .. }
             | Request::TaskStartReconcile { .. }
             | Request::TerminationOutcome { .. }
     ) {
@@ -887,6 +919,7 @@ fn checked(request: &Request, mut value: Value, lookup: bool) -> Option<(Value, 
             true
         }
         Request::DesktopOwnership { .. }
+        | Request::DesktopOwnershipObserve { .. }
         | Request::ActivationWait { .. }
         | Request::CacheMaintenance { .. }
         | Request::NotificationControl { .. }
@@ -895,6 +928,9 @@ fn checked(request: &Request, mut value: Value, lookup: bool) -> Option<(Value, 
         | Request::CreationLaunch { .. }
         | Request::TaskMessage { .. }
         | Request::TaskMessageInputRelease { .. }
+        | Request::DeferredSend { .. }
+        | Request::DeferredAnswer { .. }
+        | Request::CompactToSend { .. }
         | Request::TaskStartReconcile { .. }
         | Request::TerminationOutcome { .. } => return None,
         Request::AutomaticApprovals { enabled, .. } => {

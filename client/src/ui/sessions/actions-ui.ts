@@ -13,7 +13,7 @@ import { tr, trNoop } from "../../i18n";
 export type ActionRow = Pick<Session,
   | "key" | "computer" | "name" | "machine" | "cmd" | "state" | "tracked" | "resumable" | "activity" | "processState"
   | "archiveId" | "attention" | "unread" | "sharedRead" | "allowed" | "archiveReason" | "terminateReason" | "forgetReason" | "phase"
-  | "runId" | "conversationId" | "replyId" | "attentionSignature" | "created" | "fingerprint"
+  | "runId" | "conversationId" | "replyId" | "attentionSignature" | "created" | "fingerprint" | "sessionId"
   | "cwdPath" | "terminalSupported" | "terminalReported" | "terminalAttachSupported" | "terminalAttachReported"
   | "muted" | "sharedNotifications" | "notificationRevision" | "notificationConflict">;
 

@@ -4,12 +4,14 @@ use super::*;
 use crate::desktop::{protocol, store::Location, transport};
 use std::{
     fs::File,
-    io::{BufReader, Write},
-    path::{Path, PathBuf},
+    io::{BufReader, Read, Write},
+    path::Path,
     sync::Arc,
     time::Duration,
 };
 use zerus_client_core::desktop::windows::process::Original;
+
+mod image;
 
 fn task(folder: &ITaskFolder, plan: &Plan, wanted: &Shape) -> Result<IRegisteredTask> {
     let task = unsafe { folder.GetTask(&BSTR::from(&plan.name)) }?;
@@ -112,9 +114,7 @@ pub(super) fn selected_image(path: &Path) -> Result<(File, crate::platform::File
 
 struct Service {
     process: Arc<Original>,
-    _image: File,
-    image: crate::platform::FileIdentity,
-    selected: PathBuf,
+    image: image::Loaded,
     epoch: String,
     generation: u64,
 }
@@ -184,13 +184,10 @@ impl Service {
         // The original instance/pipe/kernel binding above selects this exact
         // runtime. An installer may have moved its image aside during upgrade;
         // retain that image independently of the replacement's selected file.
-        let (image, identity) = selected_image(Path::new(&process.image))?;
-        let selected = PathBuf::from(&process.image);
+        let image = image::Loaded::capture(&process.handle(), Path::new(&plan.argv[0]), until)?;
         let value = Self {
             process,
-            _image: image,
-            image: identity,
-            selected,
+            image,
             epoch: epoch.into(),
             generation,
         };
@@ -199,6 +196,9 @@ impl Service {
         Ok(Some(value))
     }
     fn exchange(&self, location: &Location, plan: &Plan, until: Instant) -> Result<()> {
+        self.status(location, plan, until).map(|_| ())
+    }
+    fn status(&self, location: &Location, plan: &Plan, until: Instant) -> Result<Value> {
         self.check()?;
         let mut stream =
             transport::connect(location)?.context("Original desktop pipe disconnected.")?;
@@ -212,8 +212,13 @@ impl Service {
         stream.set_read_timeout(Some(remaining.min(crate::desktop::TIMEOUT)))?;
         stream.set_write_timeout(Some(remaining.min(crate::desktop::TIMEOUT)))?;
         stream.write_all(&protocol::encode(&json!({"abi":crate::desktop::ABI,"configuration":location.configuration,"op":"status"}))?)?;
-        let bytes = protocol::line(&mut BufReader::new(stream), protocol::FRAME_BYTES)?
+        let mut reader = BufReader::new(stream);
+        let bytes = protocol::line(&mut reader, protocol::FRAME_BYTES)?
             .context("Original desktop pipe ended before its reply.")?;
+        let remaining = until.checked_duration_since(Instant::now())
+            .context("Original status EOF deadline expired.")?;
+        reader.get_ref().set_read_timeout(Some(remaining.min(crate::desktop::TIMEOUT)))?;
+        ensure!(reader.read(&mut [0])? == 0, "Original status pipe has extra output; drain unconfirmed.");
         let reply: Value = serde_json::from_slice(&bytes)?;
         let life = &reply["value"]["lifecycle"];
         let mode = if plan.argv.last().is_some_and(|v| v == "--background") {
@@ -222,7 +227,7 @@ impl Service {
             "passive"
         };
         ensure!(
-            reply["abi"] == crate::desktop::ABI
+            reply["abi"] == crate::desktop::ABI && reply["t"] == "status"
                 && life["configuration"] == location.configuration
                 && life["epoch"] == self.epoch
                 && life["generation"].as_u64() == Some(self.generation)
@@ -232,19 +237,13 @@ impl Service {
                 && life["abi"] == "desktop-lifecycle-v1",
             "Original desktop pipe reply changed."
         );
-        self.check()
+        self.check()?;
+        ensure!(Instant::now() < until, "Original status deadline expired.");
+        Ok(reply["value"].clone())
     }
     fn check(&self) -> Result<()> {
         ensure!(self.process.current(), "Original desktop process changed.");
-        let actual = crate::platform::FileIdentity::of(&self._image)?;
-        let (_, selected) = selected_image(&self.selected)?;
-        ensure!(
-            actual.device == self.image.device
-                && actual.inode == self.image.inode
-                && selected.device == self.image.device
-                && selected.inode == self.image.inode,
-            "Original desktop image changed."
-        );
+        self.image.check(&self.process.handle())?;
         ensure!(self.process.current(), "Original desktop process changed.");
         Ok(())
     }
@@ -261,6 +260,27 @@ pub(super) struct Running {
     stopped: bool,
 }
 impl Running {
+    /// Read-only observations of these retained pins; no process is reopened.
+    pub(super) fn refresh_images(&self) -> Result<(String, String)> {
+        self.check()?;
+        let (old, new) = self.service.image.ids();
+        let encode = |(volume, file): zerus_client_core::desktop::windows::image::FileId|
+            format!("{volume:016x}{file:032x}");
+        Ok((encode(old), encode(new)))
+    }
+    pub(super) fn image_files_current(&self) -> Result<()> {
+        self.service.image.check_files()
+    }
+    /// Diagnostic observation of the SAME retained kernel process, no PID lookup.
+    pub(super) fn process_exited(&self) -> bool {
+        self.service.process.exited()
+    }
+    pub(super) fn retirement_drained(&self, location: &Location, plan: &Plan, until: Instant) -> Result<bool> {
+        self.check()?;
+        let value = self.service.status(location, plan, until)?;
+        self.check()?;
+        policy::mode::refresh::drained(&value)
+    }
     pub(super) fn scope(&self) -> (String, u64) {
         (self.service.epoch.clone(), self.service.generation)
     }
@@ -461,6 +481,14 @@ pub(super) fn original(
     }
 }
 
+/// Definition-only read; it obtains no later task instance/process capability.
+pub(super) fn definition_current(native: &Native, plan: &Plan, wanted: &Shape, until: Instant) -> Result<IRegisteredTask> {
+    ensure!(Instant::now() < until, "Owned definition deadline expired.");
+    let selected = task(&native.folder, plan, wanted)?;
+    ensure!(Instant::now() < until, "Owned definition deadline expired.");
+    Ok(selected)
+}
+
 pub(super) fn stopped(
     native: &Native,
     plan: &Plan,
@@ -471,11 +499,13 @@ pub(super) fn stopped(
     original.exited(native, &task(&native.folder, plan, wanted)?, until)
 }
 
-pub(super) fn stop_original(
+/// Read the SAME retained original under the caller's registration lock.
+/// Refusal is not absence and never acquires a later instance or Stop ability.
+pub(super) fn check_original_selection(
     native: &Native,
     plan: &Plan,
     wanted: &Shape,
-    original: &mut Running,
+    original: &Running,
     until: Instant,
     fence: &mut impl FnMut() -> Result<()>,
 ) -> Result<()> {
@@ -486,7 +516,24 @@ pub(super) fn stop_original(
         values.len() == 1 && guid(&values[0])? == original.guid,
         "Original task selection changed before stop."
     );
-    original.stop(fence)
+    original.check()?;
+    fence()
+}
+
+pub(super) fn stop_original(
+    native: &Native,
+    plan: &Plan,
+    wanted: &Shape,
+    original: &mut Running,
+    until: Instant,
+    fence: &mut impl FnMut() -> Result<()>,
+) -> Result<()> {
+    super::mode::stop::checked(
+        original,
+        fence,
+        |original, fence| check_original_selection(native, plan, wanted, original, until, fence),
+        |original, fence| original.stop(fence),
+    )
 }
 
 pub(super) fn replace(

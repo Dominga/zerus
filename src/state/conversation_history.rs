@@ -136,6 +136,9 @@ fn validate(r: &Request) -> Result<()> {
     Ok(())
 }
 fn record(name: &str, r: &Request) -> Result<Value> {
+    // zerus-ucck P3c: the request's identities select among sessions that
+    // share the label.
+    expect(name, &r.expected_run_id, &r.expected_conversation_id)?;
     let value = if opencode::exists(name) {
         if r.archive_id.is_some() {return Err("OpenCode has no archive history".into());} opencode::binding(name)?
     } else if dsh::exists(name) {
@@ -836,7 +839,7 @@ fn inherited(db: &Connection, parent: &Value, r: &Request, existed: bool) -> Res
                 continue;
             }
             row["seq"] = json!(seq);
-            row["inherited_from"] = json!(name);
+            row["inherited_from"] = json!(journal::lineage_label(parent, name));
             add(db, &canonical, row, "inherited")?;
         }
         if let Some((seq, _)) = rows.last() {

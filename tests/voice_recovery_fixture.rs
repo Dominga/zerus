@@ -65,7 +65,18 @@ fn voice_step(
         steps += 1;
         assert!(steps <= 128, "bounded voice effects");
         let next = match effect {
-            Effect::Load { token, key } => composer.loaded(token, Some(load(store, &key))),
+            Effect::Load {
+                token,
+                key,
+                legacy,
+                session,
+            } => {
+                // As the driver does: a draft under the name key moves once first.
+                if !legacy.is_empty() {
+                    store.adopt(&legacy, &key, &session, |_| {});
+                }
+                composer.loaded(token, Some(load(store, &key)))
+            }
             Effect::Save { token, key, draft } => {
                 let (tx, rx) = mpsc::channel();
                 store.save_durable(&key, draft, move |v| {

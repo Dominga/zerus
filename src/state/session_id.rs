@@ -22,6 +22,11 @@ pub(crate) struct Selection {
     pub session_id: String,
     pub conversation: String,
     pub run: String,
+    /// Whether the selection was verified, when made, as the session in the
+    /// ID layout under `name` (#1437 review). Its fixed `sessions/<id>.json`
+    /// then stays the command's route for that name, even if the file
+    /// vanishes: a read then refuses instead of reaching the label's holder.
+    pub id_layout: bool,
     /// How a refusal names the selector.
     label: String,
 }
@@ -38,6 +43,45 @@ impl Selection {
 }
 static SELECTED: std::sync::Mutex<Option<Selection>> = std::sync::Mutex::new(None);
 
+/// A label several sessions share, named by a command whose guard arrives
+/// with its request (zerus-ucck P3c): its ambiguity report, held until the
+/// command's guard selects one of them ([`super::expect`]).
+struct Deferred {
+    name: String,
+    report: (String, Value),
+}
+static DEFERRED: std::sync::Mutex<Option<Deferred>> = std::sync::Mutex::new(None);
+/// The ambiguity report a read refused with, for the command's exit status 5.
+static REFUSED: std::sync::Mutex<Option<(String, Value)>> = std::sync::Mutex::new(None);
+
+/// Defers the ambiguity of `name` to the command's guard.
+pub(crate) fn defer(name: &str, text: String, value: Value) {
+    *DEFERRED.lock().unwrap_or_else(std::sync::PoisonError::into_inner) =
+        Some(Deferred { name: name.into(), report: (text, value) });
+}
+
+/// Takes the deferred ambiguity of `name`, when there is one.
+pub(super) fn take_deferred(name: &str) -> Option<(String, Value)> {
+    let mut deferred = DEFERRED.lock().unwrap_or_else(std::sync::PoisonError::into_inner);
+    if deferred.as_ref().is_some_and(|deferred| deferred.name == name) {
+        return deferred.take().map(|deferred| deferred.report);
+    }
+    None
+}
+
+/// Records `report` as this command's refusal and returns its text.
+pub(super) fn refuse(report: (String, Value)) -> String {
+    let text = report.0.clone();
+    *REFUSED.lock().unwrap_or_else(std::sync::PoisonError::into_inner) = Some(report);
+    text
+}
+
+/// The ambiguity report this command refused with, if any: the CLI exits
+/// with [`AMBIGUOUS`] and prints its value under `--json`.
+pub(crate) fn refused() -> Option<(String, Value)> {
+    REFUSED.lock().unwrap_or_else(std::sync::PoisonError::into_inner).clone()
+}
+
 fn set(selection: Selection) {
     *SELECTED.lock().unwrap_or_else(std::sync::PoisonError::into_inner) = Some(selection);
 }
@@ -49,8 +93,32 @@ pub(crate) fn select(name: &str, id: &str) {
         session_id: id.into(),
         conversation: String::new(),
         run: String::new(),
+        id_layout: in_id_layout_under(name, id),
         label: format!("Session ID {id}"),
     });
+}
+
+/// Records the session that the identities a command expects selected among
+/// several sharing `name` (zerus-ucck P3c): its session ID, when it has one,
+/// and both supplied identities, run and conversation, kept together. Every
+/// later read must still carry each of them, on the selected session's fixed
+/// route (#1454 review). Without a session ID, no session carried them: every
+/// record under `name` is then refused as changed, and no reader reaches the
+/// label's first holder or another candidate's route.
+pub(crate) fn select_guarded(name: &str, id: &str, run: &str, conversation: &str) {
+    set(Selection {
+        name: name.into(),
+        session_id: id.into(),
+        conversation: conversation.into(),
+        run: run.into(),
+        id_layout: in_id_layout_under(name, id),
+        label: "The expected session".into(),
+    });
+}
+
+/// Whether `id` is, right now, the session in the ID layout under `name`.
+fn in_id_layout_under(name: &str, id: &str) -> bool {
+    canonical(id) && storage::read_id(id).is_ok_and(|record| string(&record, "name") == name)
 }
 
 /// Records a session reference's selection for the rest of this command: its
@@ -62,8 +130,15 @@ pub(crate) fn select_reference(name: &str, session_id: &str, conversation: &str,
         session_id: session_id.into(),
         conversation: conversation.into(),
         run: if conversation.is_empty() { run.into() } else { String::new() },
+        id_layout: in_id_layout_under(name, session_id),
         label: "The session reference".into(),
     });
+}
+
+/// Forgets the selection (tests only: a command never drops its own).
+#[cfg(all(test, unix))]
+pub(crate) fn clear() {
+    *SELECTED.lock().unwrap_or_else(std::sync::PoisonError::into_inner) = None;
 }
 
 /// The command's selection, when it was given one.
@@ -93,8 +168,24 @@ pub(super) fn verify_absent(name: &str) -> Result<()> {
     }
 }
 
-/// Refuses a record that has the selected name but not every selected identity.
+/// Refuses a record that has the selected name but not every selected
+/// identity, and, while the ambiguity of its label is deferred to the
+/// command's guard and nothing selected one of its sessions, any record under
+/// that label (P3c): every reader of a label refuses then, never settling on
+/// one of the sessions that share it.
 pub(super) fn verify(record: &Value) -> Result<()> {
+    let name = string(record, "name");
+    let deferred = DEFERRED
+        .lock()
+        .unwrap_or_else(std::sync::PoisonError::into_inner)
+        .as_ref()
+        .filter(|deferred| deferred.name == name)
+        .map(|deferred| deferred.report.clone());
+    if let Some(report) = deferred {
+        if selected().is_none_or(|selection| selection.name != name) {
+            return Err(refuse(report));
+        }
+    }
     let selected = SELECTED.lock().unwrap_or_else(std::sync::PoisonError::into_inner);
     match selected.as_ref() {
         Some(selection) if string(record, "name") == selection.name && !selection.agrees(record) => {
@@ -110,20 +201,42 @@ pub(crate) fn canonical(id: &str) -> bool {
 }
 
 /// The current names of the live or saved sessions whose durable ID is `id`:
-/// one, or none. One scan of the bindings, as `hgs ls` reads them, for one
-/// explicit CLI call; P2's `sessions/<id>` layout makes it a lookup. Never put
-/// it on a polling, status or watch path before that.
+/// one, or none. A verified hit of the ID index (P2a) is one read; a miss or
+/// a stale entry scans the bindings once, as `hgs ls` reads them, and repairs
+/// the entry. Duplicate IDs, which no writer of this hgs makes, are therefore
+/// reported only by that scan.
 pub(crate) fn names_of(id: &str) -> Result<Vec<String>> {
     if !canonical(id) {
         return Err("A session ID is a lowercase UUID; copy it from hgs ls --json".into());
     }
-    let mut names: Vec<String> = records()?
+    if let Some(found) = session_index::find(id) {
+        return Ok(vec![found.name]);
+    }
+    session_index::scanned();
+    use session_index::Kind;
+    let found: Vec<(String, Kind)> = records()?
         .into_iter()
-        .chain(dsh::binding_records())
-        .chain(opencode::binding_records())
-        .filter(|record| string(record, "session_id") == id && string(record, "archive_id").is_empty())
-        .map(|record| string(&record, "name").to_owned())
+        .map(|record| {
+            let kind = if storage::in_id_layout(&record) { Kind::IdRecord } else { Kind::Record };
+            (record, kind)
+        })
+        .chain(
+            dsh::binding_records()
+                .into_iter()
+                .map(|record| (record, Kind::DeepSeek)),
+        )
+        .chain(
+            opencode::binding_records()
+                .into_iter()
+                .map(|record| (record, Kind::OpenCode)),
+        )
+        .filter(|(record, _)| {
+            string(record, "session_id") == id && string(record, "archive_id").is_empty()
+        })
+        .map(|(record, kind)| (string(&record, "name").to_owned(), kind))
         .collect();
+    session_index::repair(id, &found);
+    let mut names: Vec<String> = found.into_iter().map(|(name, _)| name).collect();
     names.sort();
     names.dedup();
     Ok(names)
@@ -132,9 +245,9 @@ pub(crate) fn names_of(id: &str) -> Result<Vec<String>> {
 /// The report for a name several sessions share: the text lines and the
 /// `--json` value. Candidates carry `session_id`, `run_id`,
 /// `conversation_id`, `state` (live or saved), `cwd`, `created` and an
-/// optional `reference`, never transcript content. P2's label index calls it
-/// when a name matches more than one session; until P3 names stay unique.
-#[cfg_attr(not(test), allow(dead_code))]
+/// optional `reference`, never transcript content. Label resolution
+/// (`resolve_label`, zerus-ucck P3a) reports it when a label matches more than
+/// one live or saved session; until P3e no writer makes that happen.
 pub(crate) fn ambiguity(name: &str, mut candidates: Vec<Value>) -> (String, Value) {
     let total = candidates.len();
     candidates.sort_by(|a, b| {

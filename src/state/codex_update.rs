@@ -152,7 +152,7 @@ fn snapshot(record: &Value, screen: &str) -> Option<(Value, usize)> {
 pub(super) fn current(record: &Value) -> Option<Value> {
     if !eligible(record) { return None; }
     let panel = parse(&kimi_tui_choice::capture(record).ok()?)?;
-    if !process_alive(record) || !matches(record, live().ok()?.get(string(record, "name"))) { return None; }
+    if !process_alive(record) || !matches(record, panes_of(&live().ok()?, record)) { return None; }
     input::checked_terminal(record, false).ok()?;
     card(record, &panel)
 }

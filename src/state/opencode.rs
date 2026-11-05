@@ -114,7 +114,9 @@ pub(super) fn native_id(id: &str, prefix: &str) -> bool {
 /// Saves the binding, keeping its durable session ID on the caller's record.
 pub(super) fn save(record: &mut Value) -> Result<()> {
     ensure_session_id(record);
-    atomic(&binding_path(string(record, "name")), &record.to_string())
+    atomic(&binding_path(string(record, "name")), &record.to_string())?;
+    session_index::note(record, session_index::Kind::OpenCode);
+    Ok(())
 }
 pub(crate) fn config_home() -> PathBuf {
     nonempty_env("OPENCODE_CONFIG_DIR")
@@ -416,7 +418,7 @@ pub(crate) fn launch(
     }
     let _writer = lock(None)?;
     let _guard = lock_bindings()?;
-    if record_path(name).exists() || live()?.contains_key(name) {
+    if storage::label_taken(name) || live()?.contains_key(name) {
         return Err(
             "This name belongs to an existing terminal session; it was left untouched".into(),
         );
@@ -1688,23 +1690,31 @@ pub(crate) fn interrupt(record: &Value) -> Result<()> {
     interrupt_with(&running_service()?, &original)
 }
 /// Core of `interrupt`: success when OpenCode says it interrupted the turn or
-/// the session is no longer running.
+/// the session is no longer running. From the POST on, OpenCode may have
+/// stopped the turn, so every error says so (zerus-1wchz).
 fn interrupt_with(native: &dyn Native, record: &Value) -> Result<()> {
-    let reply = native.raw("POST", &session_path(record, "/interrupt"), Some(&json!({})))?;
-    let said = reply.body["interrupted"] == true || reply.body["data"]["interrupted"] == true;
-    if successful(&reply) && said {
-        return Ok(());
-    }
-    // A failed lookup never counts as "not running".
-    if let Ok(active) = active_sessions(native) {
-        if active.get(string(record, "conversation_id")).is_none() {
+    (|| {
+        let reply = native.raw(
+            "POST",
+            &session_path(record, "/interrupt"),
+            Some(&json!({})),
+        )?;
+        let said = reply.body["interrupted"] == true || reply.body["data"]["interrupted"] == true;
+        if successful(&reply) && said {
             return Ok(());
         }
-    }
-    Err(format!(
-        "OpenCode did not confirm the interruption ({})",
-        refusal_reason(&reply)
-    ))
+        // A failed lookup never counts as "not running".
+        if let Ok(active) = active_sessions(native) {
+            if active.get(string(record, "conversation_id")).is_none() {
+                return Ok(());
+            }
+        }
+        Err(format!(
+            "OpenCode did not confirm the interruption ({})",
+            refusal_reason(&reply)
+        ))
+    })()
+    .map_err(|error: String| format!("Interrupt delivery uncertain: {error}"))
 }
 const NOT_QUEUED: &str = "This message is no longer queued";
 /// The message a `remove_queued` request may name: `msg_` and 1-124 ASCII
@@ -4155,12 +4165,32 @@ mod tests {
             ("POST /api/session/ses_A/interrupt", 200, json!({"interrupted": false})),
             ("GET /api/session/active", 200, json!({"data": {"ses_A": {}}})),
         ]);
-        assert!(interrupt_with(&running, &bound()).is_err());
+        // Every end after the POST may have stopped the turn (zerus-1wchz).
+        let error = interrupt_with(&running, &bound()).unwrap_err();
+        assert!(
+            error.starts_with("Interrupt delivery uncertain: OpenCode did not confirm"),
+            "{error}"
+        );
         let unknown = seen(vec![
             ("POST /api/session/ses_A/interrupt", 500, json!({"message": "down"})),
             ("GET /api/session/active", 500, json!({"message": "down"})),
         ]);
-        assert!(interrupt_with(&unknown, &bound()).is_err());
+        let error = interrupt_with(&unknown, &bound()).unwrap_err();
+        assert!(
+            error.starts_with("Interrupt delivery uncertain: "),
+            "{error}"
+        );
+        // A reply lost after the POST went out.
+        struct Lost;
+        impl Native for Lost {
+            fn raw(&self, _: &str, _: &str, _: Option<&Value>) -> Result<Response> {
+                Err("connection reset by peer".into())
+            }
+        }
+        assert_eq!(
+            interrupt_with(&Lost, &bound()).unwrap_err(),
+            "Interrupt delivery uncertain: connection reset by peer"
+        );
     }
     #[test]
     fn a_queued_message_is_removed_only_while_stopped_and_still_queued() {

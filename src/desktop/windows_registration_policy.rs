@@ -7,6 +7,7 @@ pub(super) const CAP: usize = 64 * 1024;
 pub(super) mod hold;
 pub(super) mod mode;
 pub(super) mod running;
+pub(super) mod image;
 
 /// Read only the original length-delimited request; never wait for pipe EOF.
 /// The caller's original process runner owns the deadline and physical wait.

@@ -184,6 +184,9 @@ fn drafts_root(data_dir: &std::path::Path, replay: bool) -> std::path::PathBuf {
 #[cfg(all(test, unix))]
 pub(crate) static PROCESS_TREE: std::sync::RwLock<()> = std::sync::RwLock::new(());
 
+#[cfg(all(test, unix, feature = "live"))]
+mod test_context;
+
 /// Writes an executable test fixture without this process ever holding it
 /// open for writing. A test thread that forks while such a descriptor is open
 /// passes it to a child that has not exec'd yet, and running the file then
@@ -823,7 +826,8 @@ fn launch(context: tauri::Context<tauri::Wry>, startup: Startup) {
                     &app.state::<identity::Identity>().bundle_id, replay,
                 );
                 organization.seed_runs(qt_source.clone());
-                organization.recover_qt(qt_source,app.state::<settings::Store>().0.clone());
+                organization.recover_qt(qt_source.clone(),app.state::<settings::Store>().0.clone());
+                organization.import_legacy_projects(qt_source,app.state::<settings::Store>().0.clone());
                 // Before any start of the source (the menu bar's below, or the webview's).
                 app.state::<commands::AppState>().set_organization(organization.clone());
                 let screens = screens::Screens::tauri(app.handle().clone(), pump.clone());
@@ -882,9 +886,8 @@ fn launch(context: tauri::Context<tauri::Wry>, startup: Startup) {
                     }));
                 }
                 app.manage(composer::saved::DraftCapture(capture.clone()));
-                // The switch build takes Qt's and the dev app's drafts once,
-                // right after the capture (zerus-5wmh.13.1); the dev identity
-                // and a replay never import.
+                // Keep Next's existing interim draft import and writer fence.
+                // The core startup importer excludes Qt under the 0.48 policy.
                 if seeds_qt {
                     zerus_client_core::drafts::import_at_start(&drafts);
                 }
@@ -903,12 +906,9 @@ fn launch(context: tauri::Context<tauri::Wry>, startup: Startup) {
                     })
                     .flatten()
                     .map(|now| (now, std::time::Instant::now()));
-                // Saved drafts reads Qt's store and the dev app's, never
-                // writing to them; a replay lists neither.
-                let qt_drafts = composer::qt_store(
-                    drafts.root(),
-                    (!replay).then(zerus_client_core::drafts::qt_root).flatten(),
-                );
+                // Qt drafts are not imported or offered for recovery. The
+                // existing Next dev stores are separate interim client data.
+                let qt_drafts = None;
                 let dev_drafts = if replay {
                     Vec::new()
                 } else {
@@ -1002,6 +1002,74 @@ fn launch(context: tauri::Context<tauri::Wry>, startup: Startup) {
                 app.manage(task_executor::TaskExecutors::start(app.handle()));
                 let composers = app.state::<composer::Composers>();
                 app.state::<actions::Actions>().on_writes(composers.changed_hook());
+                // Sends the desktop service takes (deferred_send) on Linux and
+                // macOS in desktop-service mode; every other Send stays direct.
+                #[cfg(any(target_os = "linux", target_os = "macos"))]
+                if desktop_service::mode() {
+                    let (sending, checking) = (app.handle().clone(), app.handle().clone());
+                    composers.set_deferred(composer::DeferredRoute {
+                        send: std::sync::Arc::new(move |session, checkpoint, stdin| {
+                            let service = sending.state::<commands::AppState>().desktop_service();
+                            desktop_service::deferred_send::call(
+                                service,
+                                session,
+                                checkpoint,
+                                stdin,
+                                &std::sync::atomic::AtomicBool::new(false),
+                            )
+                        }),
+                        check: std::sync::Arc::new(move |plan| {
+                            let service = checking.state::<commands::AppState>().desktop_service();
+                            desktop_service::deferred_send::check(service, plan)
+                        }),
+                    });
+                    // "Compact and continue" the service takes whole
+                    // (compact_to_send), the same way; every other one stays
+                    // direct.
+                    let (compacting, checking) = (app.handle().clone(), app.handle().clone());
+                    composers.set_compact(composer::CompactRoute {
+                        offer: std::sync::Arc::new(
+                            move |session, checkpoint, compaction, stdin, handing| {
+                                let service =
+                                    compacting.state::<commands::AppState>().desktop_service();
+                                desktop_service::compact_to_send::call(
+                                    service,
+                                    session,
+                                    checkpoint,
+                                    compaction,
+                                    stdin,
+                                    handing,
+                                    &std::sync::atomic::AtomicBool::new(false),
+                                )
+                            },
+                        ),
+                        check: std::sync::Arc::new(move |plan| {
+                            let service = checking.state::<commands::AppState>().desktop_service();
+                            desktop_service::compact_to_send::check(service, plan)
+                        }),
+                    });
+                    // Question answers the service takes (deferred_answer),
+                    // the same way; every other answer stays direct.
+                    let (answering, checking) = (app.handle().clone(), app.handle().clone());
+                    composers.set_answer_route(composer::AnswerRoute {
+                        send: std::sync::Arc::new(move |session, checkpoint, pinned, stdin| {
+                            let service =
+                                answering.state::<commands::AppState>().desktop_service();
+                            desktop_service::deferred_answer::call(
+                                service,
+                                session,
+                                checkpoint,
+                                pinned,
+                                stdin,
+                                &std::sync::atomic::AtomicBool::new(false),
+                            )
+                        }),
+                        check: std::sync::Arc::new(move |plan| {
+                            let service = checking.state::<commands::AppState>().desktop_service();
+                            desktop_service::deferred_answer::check(service, plan)
+                        }),
+                    });
+                }
                 // The composer's session part once a second (the cache chip)
                 // and the inspect fallback; it sleeps while no composer is open.
                 composers.start_ticker();
@@ -1085,15 +1153,7 @@ fn launch(context: tauri::Context<tauri::Wry>, startup: Startup) {
                     let attention = identity::notifier_runs(posts, bundled)
                         .then(|| {
                             let path = dir.join(desk::ATTENTION_FILE);
-                            // Qt's edges seed the switch bundle's first start
-                            // (Decision 11): its `attention/observed`, which the
-                            // defaults domain keeps as `attention.observed`.
-                            let switch = identity.is_switch();
-                            Box::new(move || {
-                                desk::Attention::load(path, || {
-                                    switch.then(|| platform::macos::qt_default_data("attention.observed")).flatten()
-                                })
-                            }) as desk::LoadAttention
+                            Box::new(move || desk::Attention::load(path, || None)) as desk::LoadAttention
                         });
                     let notifies = attention.is_some();
                     desk::start(app.handle(), &pump, dir.clone(), desk::load_mode(&dir, conf.as_deref()), attention);
@@ -1119,10 +1179,7 @@ fn launch(context: tauri::Context<tauri::Wry>, startup: Startup) {
                     let switch = identity.is_switch();
                     let attention = posts.then(|| {
                         let path = dir.join(desk::ATTENTION_FILE);
-                        Box::new(move || desk::Attention::load(path, || {
-                            switch.then(|| platform::linux_notify::qt_values().ok().flatten()
-                                .and_then(|values| values.get("attention/observed").map(|v| v.to_text().into_bytes()))).flatten()
-                        })) as desk::LoadAttention
+                        Box::new(move || desk::Attention::load(path, || None)) as desk::LoadAttention
                     });
                     desk::start(app.handle(), &pump, dir.clone(), desk::load_linux_mode(&dir, conf.as_deref()), attention);
                     if let Some(target) = navigation {
@@ -1150,11 +1207,7 @@ fn launch(context: tauri::Context<tauri::Wry>, startup: Startup) {
                     let switch = identity.is_switch();
                     let attention = posts.then(|| {
                         let path = dir.join(desk::ATTENTION_FILE);
-                        Box::new(move || desk::Attention::load(path, || {
-                            if !switch { return None; }
-                            zerus_client_core::settings::QtStore::here().and_then(|store| store.snapshot().ok().flatten())
-                                .and_then(|snapshot| snapshot.values.get("attention/observed").map(|v| v.to_text().into_bytes()))
-                        })) as desk::LoadAttention
+                        Box::new(move || desk::Attention::load(path, || None)) as desk::LoadAttention
                     });
                     desk::start(app.handle(), &pump, dir.clone(), desk::load_windows_mode(&dir, conf.as_deref()), attention);
                     // The service posts the toast and grants foreground; this GUI only routes the click.
@@ -1520,13 +1573,18 @@ fn handler() -> impl Fn(tauri::ipc::Invoke) -> bool + Send + Sync + 'static {
         desktop_service::desktop_service_mode,
         desktop_service::desktop_service_retry,
         desktop_service::desktop_service_check_status,
+        desktop_service::desktop_service_refresh_status,
+        desktop_service::desktop_service_refresh,
         desktop_service::desktop_service_ownership_rearm,
         desktop_service::desktop_service_ownership_result,
         desktop_service::desktop_service_mode_action,
+        desktop_service::desktop_service_first_choice,
         desktop_service::notification_controls::desktop_notification_preferences_set,
         desktop_service::notification_controls::desktop_notification_preferences_check,
         desktop_service::desktop_service_read_marks,
         desktop_service::desktop_service_automatic_approvals,
+        desktop_service::task_message_inputs::desktop_service_task_message_inputs,
+        desktop_service::task_message_inputs::desktop_service_task_message_input_release,
         desktop_service::frontend::desktop_service_maintenance_configure,
         desktop_service::frontend::desktop_service_maintenance_configuration,
         desktop_service::frontend::desktop_service_frontend_result,
@@ -1545,7 +1603,10 @@ fn handler() -> impl Fn(tauri::ipc::Invoke) -> bool + Send + Sync + 'static {
         settings::skins::user_skin_import,
         settings::skins::user_skins_open,
         settings::settings_get,
+        settings::qt_upgrade_notice,
+        settings::qt_upgrade_notice_ack,
         settings::settings_qt_preferences,
+        settings::settings_legacy_projects,
         settings::settings_set,
         desk::desk_take_pending,
         window_layer::window_layer_state,
@@ -1615,6 +1676,7 @@ fn handler() -> impl Fn(tauri::ipc::Invoke) -> bool + Send + Sync + 'static {
         actions::inspect_subagent_activity,
         commands::tasks_follow,
         task_details::task_details,
+        task_details::task_reference,
         task_details::task_page,
         task_details::task_attachment_read,
         task_details::task_assign,
@@ -1750,6 +1812,7 @@ fn handler() -> impl Fn(tauri::ipc::Invoke) -> bool + Send + Sync + 'static {
         terminal::terminal_drop,
         terminal::terminal_shown,
         composer::composer_open,
+        composer::composer_visibility,
         composer::composer_edit,
         composer::composer_pick,
         composer::composer_attach,

@@ -37,9 +37,11 @@ pub(super) fn remove_fixture(db: &rusqlite::Connection) {
     db.execute_batch("DROP TABLE desktop_task_messages; DROP TABLE desktop_task_message_budget;")
         .unwrap();
 }
-/// Test rewind of the custody-input records alone (schema 27 to 26).
+/// Test rewind of the custody-input records (schema 27 to 26), the later
+/// deferred send leaf first.
 #[cfg(test)]
 pub(super) fn remove_inputs_fixture(db: &rusqlite::Connection) {
+    super::deferred_send::remove_fixture(db);
     db.execute_batch(
         "DROP TABLE desktop_task_message_inputs; DROP TABLE desktop_task_message_input_budget;",
     )
@@ -57,8 +59,13 @@ pub(super) fn undrained(db: &rusqlite::Connection) -> anyhow::Result<u64> {
 pub(super) fn summary(db: &rusqlite::Connection) -> anyhow::Result<serde_json::Value> {
     let mut summary = ledger::summary(db)?;
     // The reference form's custody inputs carry their own storage charge.
+    // `review` counts the held copies a person may review; `full` says no
+    // further input fits, so large messages are paused until one is released.
     let (rows, bytes) = inputs::totals(db)?;
-    summary["inputs"] = serde_json::json!({"charged": rows, "bytes": bytes});
+    let review = inputs::review_count(db)?;
+    let full = rows >= inputs::ROWS as u64 || bytes >= inputs::BYTES as u64;
+    summary["inputs"] = serde_json::json!({"charged": rows, "bytes": bytes,
+        "review": review, "full": full});
     Ok(summary)
 }
 pub(super) fn startup(db: &mut rusqlite::Connection) -> anyhow::Result<()> {

@@ -81,15 +81,16 @@ fn exact_previous_store_upgrade_adds_only_the_independent_message_leaf() {
             .unwrap(),
         crate::desktop::store::SCHEMA
     );
-    // Its own two tables, then the task message input leaf's two.
-    assert_eq!(tables(&store.db), before + 2 + 2);
+    // Its own two tables, the task message input leaf's two, then the
+    // deferred send, deferred answer and compact-to-send leaves' two each.
+    assert_eq!(tables(&store.db), before + 2 + 2 + 2 + 2 + 2);
     assert_eq!(ledger::undrained(&store.db).unwrap(), 0);
 }
 
 #[test]
 fn the_input_upgrade_adds_only_its_two_tables_with_no_charge() {
     assert_eq!(INPUTS_SCHEMA - 1, SCHEMA);
-    assert_eq!(INPUTS_SCHEMA, crate::desktop::store::SCHEMA);
+    assert_eq!(INPUTS_SCHEMA + 1, crate::desktop::deferred_send::SCHEMA);
     let (_temp, location, store, _) = fixture();
     remove_inputs_fixture(&store.db);
     store
@@ -99,7 +100,9 @@ fn the_input_upgrade_adds_only_its_two_tables_with_no_charge() {
     let before = tables(&store.db);
     drop(store);
     let store = Store::open(&location, &uuid::Uuid::new_v4().to_string()).unwrap();
-    assert_eq!(tables(&store.db), before + 2);
+    // Its own two tables, then the deferred send, deferred answer and
+    // compact-to-send leaves' two each.
+    assert_eq!(tables(&store.db), before + 2 + 2 + 2 + 2);
     assert_eq!(inputs::totals(&store.db).unwrap(), (0, 0));
 }
 
@@ -585,7 +588,7 @@ print("custody: inherited" if f"{seen.st_dev}:{seen.st_ino}" == want else "custo
                 b"",
                 &held,
                 &guard(),
-                Instant::now() + Duration::from_millis(300),
+                Instant::now() + Duration::from_millis(1500),
                 |_| Ok(())
             ),
             Ended::Unknown("task_message_timed_out")
@@ -836,7 +839,7 @@ os._exit(0)"#;
                 b"",
                 &held,
                 &guard,
-                Instant::now() + Duration::from_millis(500),
+                Instant::now() + Duration::from_millis(1500),
                 |_| Ok(())
             ),
             Ended::Unknown("task_message_output_retained")
@@ -1297,7 +1300,7 @@ mod actor {
                 input,
                 lock,
                 resources,
-                Instant::now() + Duration::from_millis(500),
+                Instant::now() + Duration::from_millis(1500),
                 |_| Ok(()),
             )
         });
@@ -2072,7 +2075,7 @@ mod actor {
                     input,
                     lock,
                     resources,
-                    Instant::now() + Duration::from_millis(500),
+                    Instant::now() + Duration::from_millis(1500),
                     |_| Ok(()),
                 )
             });
@@ -2347,6 +2350,54 @@ mod actor {
                 assert!(ledger::load(&f.store.db, &original.plan.request_id)
                     .unwrap()
                     .is_none());
+            }
+
+            #[test]
+            fn status_counts_the_reviewable_copies_and_a_full_budget() {
+                let inputs_status = |f: &Fixture| {
+                    crate::desktop::task_message::summary(&f.store.db).unwrap()["inputs"].clone()
+                };
+                let mut f = Fixture::new(|_, _, _, _, _| panic!("nothing runs"));
+                assert_eq!(
+                    inputs_status(&f),
+                    json!({"charged": 0, "bytes": 0, "review": 0, "full": false})
+                );
+                let original = f.orphan(35, 1);
+                let other = f.orphan(37, 2);
+                let bytes = original.input_len().unwrap() + other.input_len().unwrap();
+                assert_eq!(
+                    inputs_status(&f),
+                    json!({"charged": 2, "bytes": bytes, "review": 2, "full": false})
+                );
+                // A held record is charged but not for review.
+                f.store
+                    .db
+                    .execute(
+                        "UPDATE desktop_task_message_inputs SET state='held',device=1,inode=1
+                         WHERE request_id=?1",
+                        [&other.plan.request_id],
+                    )
+                    .unwrap();
+                assert_eq!(inputs_status(&f)["review"], 1);
+                // Either cap reached pauses every further input.
+                for (rows, bytes) in [(inputs::ROWS, 1), (2, inputs::BYTES)] {
+                    f.store
+                        .db
+                        .execute(
+                            "UPDATE desktop_task_message_input_budget SET rows=?1,bytes=?2",
+                            [rows, bytes],
+                        )
+                        .unwrap();
+                    assert_eq!(inputs_status(&f)["full"], true, "{rows} {bytes}");
+                }
+                f.store
+                    .db
+                    .execute(
+                        "UPDATE desktop_task_message_input_budget SET rows=?1,bytes=?2",
+                        [inputs::ROWS - 1, inputs::BYTES - 1],
+                    )
+                    .unwrap();
+                assert_eq!(inputs_status(&f)["full"], false);
             }
 
             #[test]
@@ -2861,11 +2912,12 @@ mod actor {
                 let cursor = (2000i64, a.plan.request_id.clone());
                 let first: [&dyn ToSql; 3] = [&None::<i64>, &"", &17];
                 let next: [&dyn ToSql; 3] = [&cursor.0, &cursor.1, &17];
-                let queries: [(&str, &str, &[&dyn ToSql]); 4] = [
+                let queries: [(&str, &str, &[&dyn ToSql]); 5] = [
                     ("first page", inputs::REVIEWABLE, &first),
                     ("cursor page", inputs::REVIEWABLE, &next),
                     ("in state", inputs::IN_STATE, &[&"reserved", &4]),
                     ("held drained", inputs::HELD_DRAINED, &[&4]),
+                    ("review count", inputs::REVIEW_COUNT, &[]),
                 ];
                 for (name, sql, params) in queries {
                     let mut plan = f
@@ -3837,5 +3889,87 @@ mod staging_tests {
         std::fs::write(dir.join("unrelated"), b"kept").unwrap();
         staging::remove_staged(&roots, &request, &prepared.staged).unwrap();
         assert!(dir.join("unrelated").exists() && dir.exists());
+    }
+}
+
+/// desktop-u's G1 on #1433: this kind's child runner checks the
+/// never-renewed deadline last before the spawn and before any input.
+#[cfg(any(target_os = "linux", target_os = "macos"))]
+mod spent_deadline {
+    use crate::desktop::original_child::{crossed, OFFERED, SPAWNED};
+    use std::path::Path;
+    use std::sync::Arc;
+    use std::time::{Duration, Instant};
+    use zerus_client_core::run::custody::InheritedLock;
+
+    pub(super) fn custody() -> Arc<InheritedLock> {
+        InheritedLock::try_lock(tempfile::tempfile().unwrap()).unwrap()
+    }
+    pub(super) fn resources() -> Arc<dyn Send + Sync> {
+        Arc::new(())
+    }
+    pub(super) fn cat() -> &'static Path {
+        Path::new("/bin/cat")
+    }
+    pub(super) fn clear() {
+        SPAWNED.with(|spawned| spawned.set(None));
+        OFFERED.with(|offered| offered.set(None));
+    }
+    pub(super) fn spawned() -> Option<u32> {
+        SPAWNED.with(|spawned| spawned.take())
+    }
+    pub(super) fn expired() -> Instant {
+        Instant::now() - Duration::from_millis(1)
+    }
+    pub(super) fn soon() -> Instant {
+        Instant::now() + Duration::from_secs(20)
+    }
+
+    #[test]
+    fn a_task_message_child_never_starts_once_its_deadline_is_spent() {
+        use super::super::child::{run, Ended};
+        clear();
+        let ended = run(
+            cat(),
+            &[],
+            b"task",
+            &custody(),
+            &resources(),
+            expired(),
+            |_| Ok(()),
+        );
+        assert_eq!(ended, Ended::NotStarted);
+        assert_eq!(spawned(), None);
+        let ended = crossed(|deadline, check| {
+            clear();
+            run(
+                cat(),
+                &[],
+                b"task",
+                &custody(),
+                &resources(),
+                deadline,
+                check,
+            )
+        });
+        assert_eq!(ended, Ended::NotStarted);
+        assert_eq!(spawned(), None, "no child once the last check spent it");
+        clear();
+        let ended = run(
+            cat(),
+            &[],
+            b"task",
+            &custody(),
+            &resources(),
+            soon(),
+            |_| Ok(()),
+        );
+        assert_eq!(
+            ended,
+            Ended::Exited {
+                code: 0,
+                stdout: b"task".to_vec()
+            }
+        );
     }
 }

@@ -33,6 +33,10 @@ use zerus_client_core::{Action, Outcome, Target};
 use super::send::{outcome_of, Context};
 use super::{ComposerEvent, Composers, Hub, SessionRef};
 
+mod handed;
+pub(crate) use handed::restart_answer_checks;
+pub use handed::AnswerRoute;
+
 /// At most this many answer drafts stay in memory; Qt keeps every one.
 const HELD: usize = 64;
 /// At most this many remembered choices among optional cards.
@@ -100,6 +104,11 @@ pub(crate) struct Answers {
     pub(crate) cold: Option<ColdAsk>,
     /// The answer under way per session key, by card (`m_answersInFlight`).
     pub(crate) in_flight: HashMap<String, String>,
+    /// The answers the desktop service still reported in progress, by card:
+    /// held without Allow retry and checked again (zerus-5wmh.66.4.7).
+    pub(crate) handed: HashMap<String, handed::HandedAnswer>,
+    /// The cards whose one lookup after a reload ran.
+    pub(crate) probed: HashSet<String>,
     next_token: u64,
     /// Runs once between `sync_moving`'s two lock sections (tests only).
     #[cfg(test)]
@@ -198,6 +207,26 @@ fn asked(created: f64) -> (String, String) {
     )
 }
 
+/// Whose session an answer draft names, when that session is keyed by ID.
+#[derive(Clone, Copy)]
+struct Owner<'a> {
+    /// The session's name key.
+    legacy: Option<&'a str>,
+    /// Its label; empty for a session keyed by name.
+    session: &'a str,
+}
+
+impl<'a> Owner<'a> {
+    /// The answer's name key, and the label it carries.
+    fn of(self, question: &Question) -> (Option<String>, &'a str) {
+        (
+            self.legacy
+                .and_then(|legacy| rules::store_key(legacy, question)),
+            self.session,
+        )
+    }
+}
+
 impl Composers {
     /// The open session's cards as Qt chooses them, without side effects.
     fn selection(&self, hub: &Hub, ctx: &Context, navigation: i32) -> Option<(Selection, String)> {
@@ -286,7 +315,18 @@ impl Composers {
             hub.answers.shown = None;
             return false;
         };
-        let label = rules::label(&ctx.key);
+        // An answer keyed by session ID is named, and moved once from its
+        // name key, as its session's composer is (zerus-ucck P2c-2).
+        let legacy = super::legacy_draft_key(&ctx.session);
+        let label = rules::label(legacy.as_deref().unwrap_or(&ctx.key));
+        let owner = Owner {
+            legacy: legacy.as_deref(),
+            session: if legacy.is_some() {
+                &ctx.session.name
+            } else {
+                ""
+            },
+        };
         listed.extend(
             rules::pending(&details)
                 .iter()
@@ -300,7 +340,7 @@ impl Composers {
             let Some(key) = rules::store_key(&ctx.key, &q) else {
                 continue;
             };
-            self.ensure_answer(hub, &key, &label);
+            self.ensure_answer(hub, &key, &label, owner.of(&q));
             let Some(draft) = hub.answers.drafts.get_mut(&key) else {
                 continue;
             };
@@ -325,7 +365,7 @@ impl Composers {
         let Some(key) = rules::store_key(&ctx.key, &question) else {
             return false;
         };
-        self.ensure_answer(hub, &key, &label);
+        self.ensure_answer(hub, &key, &label, owner.of(&question));
         let mut seeded = false;
         if !hub.answers.loading.contains(&key) {
             if let Some(draft) = hub.answers.drafts.get_mut(&key) {
@@ -352,17 +392,21 @@ impl Composers {
     }
 
     /// Loads a card's draft that is not in memory (`ensureDraft`, 282-309).
-    fn ensure_answer(&self, hub: &mut Hub, key: &str, label: &str) {
+    /// `owner`: the answer's name key and its session's label, when it is
+    /// keyed by session ID.
+    fn ensure_answer(&self, hub: &mut Hub, key: &str, label: &str, owner: (Option<String>, &str)) {
         hub.answers.order.retain(|k| k != key);
         hub.answers.order.push_back(key.to_owned());
         // The app quits: the store takes no more work (`exit`, lib.rs).
         if hub.closed || hub.answers.drafts.contains_key(key) {
             return;
         }
+        let (legacy, session) = owner;
         hub.answers.drafts.insert(
             key.to_owned(),
             AnswerDraft {
                 label: label.to_owned(),
+                session_label: session.to_owned(),
                 ..AnswerDraft::default()
             },
         );
@@ -370,16 +414,38 @@ impl Composers {
         hub.answers.next_load += 1;
         let ticket = hub.answers.next_load;
         hub.answers.loads.insert(key.to_owned(), ticket);
+        if let Some(legacy) = legacy {
+            // A name-key answer still held here moves too when nothing is
+            // under way for it (#1418 review): its stored copy is then
+            // current, so it leaves memory and moves on disk before the ID
+            // key loads. One that is loading, saving, failed or sending
+            // stays, and moves once it is evicted.
+            let answers = &mut hub.answers;
+            let settled = answers.drafts.get(&legacy).is_some_and(|d| !d.sending)
+                && !answers.loading.contains(&legacy)
+                && !answers.unsaved.contains(&legacy)
+                && !answers.failed.contains(&legacy)
+                && !answers.in_flight.values().any(|card| *card == legacy);
+            if settled {
+                answers.drafts.remove(&legacy);
+                answers.order.retain(|k| *k != legacy);
+                answers.saves.remove(&legacy);
+                answers.loads.remove(&legacy);
+            }
+            if !hub.answers.drafts.contains_key(&legacy) {
+                self.0.store.adopt(&legacy, key, session, |_| {});
+            }
+        }
         let me = self.clone();
-        let (owned, label) = (key.to_owned(), label.to_owned());
+        let (owned, label, session) = (key.to_owned(), label.to_owned(), session.to_owned());
         self.0.store.load(key, move |loaded| {
-            me.answer_loaded(&owned, ticket, &label, &loaded)
+            me.answer_loaded(&owned, ticket, &label, &session, &loaded)
         });
     }
 
     /// The draft loaded: the shown card takes its answers. Qt rebuilds the
     /// form without restarting the review (289-301), so only the epoch moves.
-    fn answer_loaded(&self, key: &str, ticket: u64, label: &str, loaded: &Loaded) {
+    fn answer_loaded(&self, key: &str, ticket: u64, label: &str, session: &str, loaded: &Loaded) {
         let mut hub = self.lock();
         // A load whose mark a restore cleared, or that a later ensure of the
         // same key replaced, read an older store: it counts for nothing.
@@ -391,9 +457,11 @@ impl Composers {
         }
         hub.answers.loading.remove(key);
         hub.answers.loads.remove(key);
-        hub.answers
-            .drafts
-            .insert(key.to_owned(), AnswerDraft::from_loaded(loaded, label));
+        let mut draft = AnswerDraft::from_loaded(loaded, label);
+        if draft.session_label.is_empty() {
+            draft.session_label = session.to_owned();
+        }
+        hub.answers.drafts.insert(key.to_owned(), draft);
         if hub
             .answers
             .shown
@@ -420,6 +488,7 @@ impl Composers {
                 || answers.loading.contains(&key)
                 || answers.failed.contains(&key)
                 || answers.unsaved.contains(&key)
+                || answers.handed.contains_key(&key)
                 || answers.drafts.get(&key).is_some_and(|d| d.sending);
             if keep {
                 i += 1;
@@ -430,6 +499,11 @@ impl Composers {
             answers.saves.remove(&key);
             answers.loads.remove(&key);
         }
+        // A reload's lookup needs its draft: a mark whose draft is gone can
+        // never ask again, so it goes too and the set stays bounded.
+        answers
+            .probed
+            .retain(|key| answers.drafts.contains_key(key));
     }
 
     /// Saves a card's draft (`saveDraft`, 709-739); `durable` for the save
@@ -548,7 +622,9 @@ impl Composers {
             available: reason.is_none(),
             unavailable_reason: reason.unwrap_or_default().to_owned(),
             loading: hub.answers.loading.contains(&key) || !hub.answers.drafts.contains_key(&key),
-            in_flight: hub.answers.in_flight.values().any(|card| *card == key),
+            // A handed answer is locked like one under way: no Allow retry.
+            in_flight: hub.answers.in_flight.values().any(|card| *card == key)
+                || hub.answers.handed.contains_key(&key),
             pending: selection.pending,
             queue_index: selection.index,
             queue_count: selection.optional.len(),
@@ -561,7 +637,12 @@ impl Composers {
             .map(|(_, texts)| texts.clone())
             .unwrap_or_default();
         let view = QuestionView {
-            answering: hub.answers.in_flight.contains_key(&ctx.key),
+            answering: hub.answers.in_flight.contains_key(&ctx.key)
+                || hub
+                    .answers
+                    .handed
+                    .values()
+                    .any(|handed| handed.answering.key == ctx.key),
             card: key,
             revision: hub.answers.revision,
             epoch: hub.answers.epoch,
@@ -643,8 +724,12 @@ impl Composers {
     /// Allow retry on the card (256-259), after the user checked Terminal.
     pub fn question_allow_retry(&self, card: &str) {
         let mut hub = self.lock();
-        // Qt's Allow retry acts on the shown card (`m_key`, 256-259).
-        if hub.closed || self.shown_question(&hub, card).is_none() {
+        // Qt's Allow retry acts on the shown card (`m_key`, 256-259). An
+        // answer the desktop service still sends has none.
+        if hub.closed
+            || self.shown_question(&hub, card).is_none()
+            || hub.answers.handed.contains_key(card)
+        {
             return;
         }
         let Some(draft) = hub.answers.drafts.get_mut(card) else {
@@ -1046,6 +1131,20 @@ impl Composers {
                 outcome_of(Ok(Err(crate::actions::BUSY.to_owned())), ALREADY_ANSWERING),
             );
         }
+        // The desktop service takes it when it can; once offered, nothing
+        // goes the direct way. An offer that panicked may have reached it.
+        match std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+            self.offer_answer(&answering)
+        })) {
+            Ok(Some(answer)) => return self.answer_offered(&answering, answer),
+            Ok(None) => {}
+            Err(_) => {
+                return self.answer_unconfirmed(
+                    &answering,
+                    crate::desktop_service::deferred_answer::UNCONFIRMED,
+                )
+            }
+        }
         let target = Target {
             computer: answering.session.computer.clone(),
             name: answering.session.name.clone(),
@@ -1066,11 +1165,36 @@ impl Composers {
     /// `finishQuestion` (5177-5186) and the receipt's follow-ups (1156-1186):
     /// the card says how it ended. Nothing is sent again by itself.
     fn answer_finished(&self, a: &Answering, outcome: Outcome) {
+        self.answer_ended(a, outcome, false, true);
+    }
+
+    /// An answer's end that a later check or a reload's lookup observed: the
+    /// same card state and notice, but never an Open Terminal, which only
+    /// the click that asked for it may bring (zerus-5wmh.66.4.7.2).
+    pub(super) fn answer_observed(&self, a: &Answering, outcome: Outcome) {
+        self.answer_ended(a, outcome, false, false);
+    }
+
+    /// An answer the desktop service could not confirm: uncertain, with the
+    /// service's whole `line` as is (zerus-5wmh.66.4.7).
+    fn answer_unconfirmed(&self, a: &Answering, line: &str) {
+        self.answer_ended(
+            a,
+            Outcome::Uncertain {
+                detail: line.to_owned(),
+            },
+            true,
+            false,
+        );
+    }
+
+    fn answer_ended(&self, a: &Answering, outcome: Outcome, as_is: bool, click: bool) {
         let mut hub = self.lock();
         // Only this answer's own entry: another card's of the session stays.
         if hub.answers.in_flight.get(&a.key) == Some(&a.card) {
             hub.answers.in_flight.remove(&a.key);
         }
+        hub.answers.handed.remove(&a.card);
         let open = hub.open_key.as_deref() == Some(a.key.as_str());
         let open_run = open
             .then(|| {
@@ -1100,12 +1224,13 @@ impl Composers {
                     ));
                 }
                 Outcome::Failed { detail } => draft.set_error(detail, false),
+                Outcome::Uncertain { detail } if as_is => draft.set_unconfirmed(detail),
                 Outcome::Uncertain { detail } => draft.set_error(detail, true),
             }
         }
         self.save_answer(&mut hub, &a.card, false, None);
         if let Some(follow) = follow {
-            if follow.open_terminal {
+            if follow.open_terminal && click {
                 self.event(&mut hub, ComposerEvent::OpenTerminal { key: a.key.clone() });
             }
             if let Some(text) = follow.notice {
@@ -1449,6 +1574,96 @@ pub(crate) mod tests {
         assert_eq!(
             (again.revision, again.epoch),
             (rebuilt.revision, rebuilt.epoch)
+        );
+    }
+
+    /// zerus-ucck P2c-2: an answer draft follows its session's composer to
+    /// the session ID key, once, labelled by the session's name.
+    #[test]
+    fn an_answer_draft_moves_once_to_its_session_id_key() {
+        let root = dir("q-adopt");
+        let store = drafts(&root);
+        saved_choice(&store, "opt_0_0");
+        let (c, _) = send_hub_on(&store);
+        let id = "3f2a9c1d-6b7e-4c2a-9d1f-0a1b2c3d4e5f";
+        c.open(Some(SessionRef {
+            session_id: Some(id.into()),
+            ..session()
+        }));
+        c.observe(&state(asking(vec![card_json("tool:t1")])));
+        let view = with_card(&c);
+        let id_key = store_key("tool:t1").replace(
+            "studio\\nclaude/sample-project/review",
+            &format!("studio\\nid:{id}"),
+        );
+        assert_eq!(view.question.as_ref().unwrap().card, id_key);
+        assert_eq!(checked(&view), [true, false]);
+        store.flush();
+        let saved = root.join("drafts");
+        assert!(read_draft(&saved, &store_key("tool:t1"))
+            .draft
+            .form_state
+            .is_empty());
+        let moved = read_draft(&saved, &id_key).draft;
+        assert_eq!(moved.session_label, "claude/sample-project/review");
+        // Its next save names the session, not its ID.
+        let held = c.lock().answers.drafts[&id_key].clone();
+        assert_eq!(
+            (held.label.as_str(), held.session_label.as_str()),
+            (
+                "studio / claude/sample-project/review (question answer)",
+                "claude/sample-project/review"
+            )
+        );
+    }
+
+    /// #1418 review: an answer chosen while its row had no ID, still held in
+    /// memory, moves to the ID key when the row gains one.
+    #[test]
+    fn a_held_answer_moves_when_its_row_gains_an_id() {
+        let root = dir("q-held");
+        let store = drafts(&root);
+        let (c, _) = send_hub_on(&store);
+        c.open(Some(session()));
+        c.observe(&state(asking(vec![card_json("tool:t1")])));
+        let (card, epoch) = shown(&c);
+        assert_eq!(card, store_key("tool:t1"));
+        c.question_edit(
+            &card,
+            epoch,
+            Edit::Option {
+                item: "q_0".into(),
+                option: "opt_0_1".into(),
+                checked: true,
+            },
+        );
+        until(&c, |v| checked(v) == [false, true]);
+        store.flush();
+        until(&c, |_| c.lock().answers.unsaved.is_empty());
+        assert!(
+            c.lock().answers.drafts.contains_key(&card),
+            "held in memory"
+        );
+        let id = "3f2a9c1d-6b7e-4c2a-9d1f-0a1b2c3d4e5f";
+        c.open(Some(SessionRef {
+            session_id: Some(id.into()),
+            ..session()
+        }));
+        let id_key = store_key("tool:t1").replace(
+            "studio\\nclaude/sample-project/review",
+            &format!("studio\\nid:{id}"),
+        );
+        let view = until(&c, |v| {
+            v.question.as_ref().is_some_and(|q| q.card == id_key) && checked(v) == [false, true]
+        });
+        assert_eq!(view.question.unwrap().card, id_key);
+        assert!(!c.lock().answers.drafts.contains_key(&card));
+        store.flush();
+        let saved = root.join("drafts");
+        assert!(read_draft(&saved, &card).draft.form_state.is_empty());
+        assert_eq!(
+            read_draft(&saved, &id_key).draft.session_label,
+            "claude/sample-project/review"
         );
     }
 

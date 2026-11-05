@@ -23,6 +23,7 @@ const ProjectCloneDialog = lazy(() => import("./ProjectCloneDialog"));
 const ProjectFolderDialog = lazy(() => import("./ProjectFolderDialog"));
 import { catalogName, createCatalogEdits } from "./project-catalog";
 import { tr } from "../../i18n";
+import { legacyProjectStatus } from "../../store/legacyProjects";
 
 // Projects (ProjectsDialog.cpp), ported from design/webui/src/screens/Projects.tsx:
 // the shared project catalog the Sessions list groups by (the organization
@@ -119,7 +120,7 @@ export function ProjectsScreen() {
   };
   const editHint = () => {
     const group = organization.grouping();
-    return group.ready ? undefined : group.reason ?? tr("Project sync is starting.");
+    return group.ready ? undefined : legacyProjectStatus(group.reason ?? tr("Project sync is starting."));
   };
   const editDescription = () => editHint() ? "project-edit-readiness" : undefined;
   const [dragging, setDragging] = createSignal<string>();
@@ -230,7 +231,7 @@ export function ProjectsScreen() {
           <label class="check" title={tr("Include projects on computers without a configured connection here.")}>
             <input type="checkbox" checked={allSwarm()} onChange={(e) => setAllSwarm(e.currentTarget.checked)} />{tr("All swarm projects")}
           </label>
-          <span class="muted" classList={{ danger: view().status_error }}>{view().status}</span>
+          <span class="muted" classList={{ danger: view().status_error }}>{legacyProjectStatus(view().status)}</span>
           <Show when={editHint()}>{(reason) => <span id="project-edit-readiness" class="muted ell" role="status" title={reason()}>{reason()}</span>}</Show>
         </div>
 

@@ -30,6 +30,9 @@ mod operations;
 // One bounded original-child runner for the launch and task message leaves.
 #[cfg(any(target_os = "linux", target_os = "macos"))]
 mod original_child;
+// The CLI state store one deferred original holds and reads.
+#[cfg(any(target_os = "linux", target_os = "macos"))]
+mod original_store;
 mod owner;
 mod ownership;
 mod pending_reads;
@@ -55,6 +58,10 @@ mod startup_stdio;
 mod store;
 #[cfg(windows)]
 mod swarm_windows;
+/// The deferred send leaf (zerus-5wmh.66.4.4, slice 3).
+pub(crate) mod compact_to_send;
+pub(crate) mod deferred_answer;
+pub(crate) mod deferred_send;
 pub(crate) mod task_message;
 #[cfg(any(target_os = "linux", target_os = "macos"))]
 mod task_start_reconcile;
@@ -66,6 +73,9 @@ mod upgrade;
 mod windows_registration;
 #[cfg(any(windows, test))]
 mod windows_registration_policy;
+#[cfg(all(test, not(windows)))]
+#[path = "windows_registration/native/mode/stop.rs"]
+mod windows_mode_stop;
 
 use crate::{cli, config::Config, platform};
 use anyhow::{ensure, Context, Result};
@@ -95,7 +105,7 @@ pub(crate) mod creation_test {
     }
 }
 
-const USAGE: &str = "usage: hgs desktop serve [--config-dir DIR --state-dir DIR] [--background] | status [--json] | startup --json | owner-status --json | ownership-status --json | ownership-result --json | swarm-restart --json (Windows) | watch --json | feed --json | request --json | catalog-relay --json | registration --json [--background] | registration install|remove|status --json (Windows) | registration install --mode background|passive --json [--after-review UUID --request-id NEW_UUID] (Windows) | registration cancel-rollback --json --request-id UUID (Windows) | registration review-mode --json --request-id UUID (Windows) | registration mode-result --json --request-id UUID (Windows) | notification-registration install|status --json | notification-registration remove --json --request-id UUID (Windows) | revoke --json [--request-id UUID] [--reason rollback] | import-evidence --json | import-status --json --import-id UUID";
+const USAGE: &str = "usage: hgs desktop serve [--config-dir DIR --state-dir DIR] [--background] | status [--json] | startup --json | owner-status --json | ownership-status --json | ownership-result --json | swarm-restart --json (Windows) | watch --json | feed --json | request --json | catalog-relay --json | registration --json [--background] | registration install|remove|status --json (Windows) | registration install --mode background|passive --json [--after-review UUID --request-id NEW_UUID] (Windows) | registration install --mode background --json --request-id NEW_UUID (Windows first choice) | registration cancel-rollback --json --request-id UUID (Windows) | registration review-mode --json --request-id UUID (Windows) | registration mode-result --json --request-id UUID (Windows) | notification-registration install|status --json | notification-registration remove --json --request-id UUID (Windows) | revoke --json [--request-id UUID] [--reason rollback] | import-evidence --json | import-status --json --import-id UUID";
 const HEARTBEAT: Duration = Duration::from_secs(10);
 pub const STARTUP_REFUSED: i32 = 78;
 
@@ -274,6 +284,25 @@ pub fn dispatch(config: &Config, target: &str, args: &[String], dry: bool) -> cl
                     )
                 }
             }
+            ["registration", "refresh-info", "--json"] => {
+                #[cfg(windows)]
+                { println!("{}", windows_registration::refresh_info(config,&location)?); Ok(()) }
+                #[cfg(not(windows))]
+                { anyhow::bail!("Original-instance refresh is available only on Windows.") }
+            }
+            ["registration", "refresh", "--json", "--request-id", id, "--scope", target] => {
+                #[cfg(windows)]
+                { println!("{}", windows_registration::refresh_command(config,&location,id,target)?); Ok(()) }
+                #[cfg(not(windows))]
+                { let _=(id,target); anyhow::bail!("Original-instance refresh is available only on Windows.") }
+            }
+            ["registration", op @ ("refresh-result" | "cancel-refresh"), "--json", "--request-id", id] => {
+                #[cfg(windows)]
+                { println!("{}", if *op == "refresh-result" { windows_registration::refresh_result(config,&location,id)? }
+                    else { windows_registration::cancel_refresh(config,&location,id)? }); Ok(()) }
+                #[cfg(not(windows))]
+                { let _=(op,id); anyhow::bail!("Original-instance refresh is available only on Windows.") }
+            }
             ["registration", "install", "--mode", mode, "--json"] => {
                 #[cfg(windows)]
                 {
@@ -317,6 +346,12 @@ pub fn dispatch(config: &Config, target: &str, args: &[String], dry: bool) -> cl
                 { println!("{}", windows_registration::mode_result(config, &location, id)?); Ok(()) }
                 #[cfg(not(windows))]
                 { let _ = id; anyhow::bail!("Use the maintained Unix helper to read its original activation.") }
+            }
+            ["registration", "install", "--mode", "background", "--json", "--request-id", request] => {
+                #[cfg(windows)]
+                { println!("{}", windows_registration::first_choice(config, &location, request)?); Ok(()) }
+                #[cfg(not(windows))]
+                { let _ = request; anyhow::bail!("Use the maintained platform installer to select desktop mode.") }
             }
             ["registration", "install", "--mode", mode, "--json", "--after-review", reviewed, "--request-id", request] => {
                 #[cfg(windows)]
@@ -920,6 +955,13 @@ fn serve(config: &Config, location: Location, background_mode: bool) -> Result<(
                         frame(&epoch, seq, "status", value)
                     } else if hello.op == "frontend_request" {
                         let result = match (authority, &mut background) {
+                            (Some(authority), _) if authority.operation() == "desktop_ownership_observe" => {
+                                match authority.into_request(&mut frontend_order).and_then(|permit|
+                                    ownership::observation::frontend(&location, &store, &epoch, permit)) {
+                                    Ok(observation) => serde_json::to_value(observation)?,
+                                    Err(_) => frontend_refused(hello.request.as_ref(), "ownership_observation_unavailable"),
+                                }
+                            }
                             (Some(authority), _)
                                 if authority.operation() == "termination_outcome" =>
                             {
@@ -1173,6 +1215,24 @@ fn serve(config: &Config, location: Location, background_mode: bool) -> Result<(
                         } else if hello
                             .request
                             .as_ref()
+                            .is_some_and(|v| v["op"] == "deferred_send_result")
+                        {
+                            deferred_send::query(&store, hello.request.as_ref().unwrap())
+                        } else if hello
+                            .request
+                            .as_ref()
+                            .is_some_and(|v| v["op"] == "deferred_answer_result")
+                        {
+                            deferred_answer::query(&store, hello.request.as_ref().unwrap())
+                        } else if hello
+                            .request
+                            .as_ref()
+                            .is_some_and(|v| v["op"] == "compact_to_send_result")
+                        {
+                            compact_to_send::query(&store, hello.request.as_ref().unwrap())
+                        } else if hello
+                            .request
+                            .as_ref()
                             .is_some_and(|v| v["op"] == "task_message_staging")
                         {
                             task_message::staging_route(
@@ -1230,6 +1290,9 @@ fn serve(config: &Config, location: Location, background_mode: bool) -> Result<(
                                         | "creation_launch"
                                         | "task_message"
                                         | "task_message_input_release"
+                                        | "deferred_send"
+                                        | "deferred_answer"
+                                        | "compact_to_send"
                                         | "task_start_reconcile"
                                 )
                             )

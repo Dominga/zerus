@@ -301,16 +301,34 @@ Consumers therefore treat `session_id` as a hint and fall back to the run and
 conversation identities.
 The agent's environment carries it as `HGS_SESSION_ID`, beside `HGS_SESSION`
 (the name at launch) and `HGS_RUN_ID`, and `hgs ls --json` rows and
-inspections include it. A hook prefers the record that carries the agent's
-`HGS_SESSION_ID`; when none does, for example after an older hgs rewrote the
-record, the run identity alone decides, as before.
+inspections include it. A hook first resolves the agent's `HGS_SESSION_ID`
+through the ID index, under whatever label the session carries now. Failing
+that, it prefers the record that carries the ID; when none does, for example
+after an older hgs rewrote the record, the run identity alone decides, as
+before.
+
+A session this hgs creates keeps its history under its durable ID. Its
+Activity, read marks and notification preferences are keyed by
+`journal_name`, which is `session:<session_id>`, and `launch_label` keeps the
+label it was launched with. Rename, resume, Clear, Start fresh and restore
+keep both. A later write here can give the session a new ID after an older hgs
+dropped it; the journal stays where it is. A `--fresh` launch over a saved,
+confirmed conversation of the label is a new session with its own journal; only
+a retry of an unconfirmed attempt continues that attempt's journal. A session created
+before keeps the history of its label, pinned at its first rename. hgs v0.47.0
+and later read `journal_name` and keep it on every one of those paths.
 
 A command whose first argument is a session also accepts `--session-id ID`
 instead, for example `hgs inspect --session-id ID` or `hgs rename --session-id
 ID NEW-NAME`. A name given before the flag must be that session's current
 name; arguments after it are the command's own. The value must be the
-lowercase UUID shown by `hgs ls --json`, given once. Resolution only finds the
-session's name: every record the command then reads under that name, live or
+lowercase UUID shown by `hgs ls --json`, given once. Resolution reads the
+verified index `ids/<session_id>.json` under the state directory, which names
+the session's current label. A missing or stale entry costs one scan of the
+records, which repairs it when the state lock is free. Hooks never repair, and
+an index this process cannot write is left alone. An older hgs ignores the
+index. Resolution only
+finds the session's name: every record the command then reads under that name, live or
 archived, must still carry the ID, so a name another session took meanwhile
 fails with "Session ID ID no longer names NAME" instead of acting on it. `kill`
 and `a` bind the terminal before their first effect: the name's immutable
@@ -332,6 +350,68 @@ longer found treats the session as changed and never retries the call: its next
 action uses the refreshed listing, with the name and its expected run and
 conversation identities when the row lists no ID.
 
+A session's terminal has its own name, kept in the record as `terminal_name`
+(zerus-ucck P3b). A launch gives the terminal the session's label when no
+terminal session has that name, so `tmux attach -t LABEL` reaches the session
+as before. A record an older hgs wrote has no `terminal_name`; its terminal is
+its label. A tmux session that hgs never started, such as one opened by hand,
+may already hold the label of a saved session. A resume or Start fresh then
+names the session's terminal `LABEL~<first 8 characters of its session ID>`,
+or `LABEL~<session ID>` when that is taken too, and refuses when both are.
+Earlier hgs skipped such a resume as already live. In that case `tmux attach -t
+LABEL` reaches the other tmux session, while `hgs LABEL`, `hgs a LABEL`, `hgs
+kill LABEL`, pause, terminate and every other command act on the session's
+own terminal, after checking its pane and run as before; none of them touches
+the other tmux session. `hgs ls` lists the session under its label. A rename
+moves a live session's terminal to the new name and records it; when the move
+fails, nothing changes. A rename of a stopped or paused session clears its
+terminal name, so its next launch names one anew. A session is live only in
+its own terminal, with its pane and run, or while a launch of its own label
+holds that terminal; a tmux session another launch started under its terminal
+name never makes it live and never hides it from `hgs ls`. When hgs cannot
+read a terminal's environment to tell whose launch it is, it refuses and
+starts nothing. A new launch, fork, rename or restore still refuses a label
+that any tmux session holds. A build older than this one finds no pane for a
+session whose terminal is named otherwise, shows it as not live and drops
+`terminal_name` when it rewrites the record.
+
+When several sessions share a label (zerus-ucck P3c), a command picks one by
+the identities it carries. These come from its command line
+(`--expected-run-id`, `--run`, `--run-id`, `--expected-conversation-id`,
+`--conversation`) or from its JSON request (`expected_run_id` and
+`expected_conversation_id`; `run_id` and `conversation_id` for `hgs read` and
+`hgs notifications`).
+- Exactly one session carrying them is the one, and every later read in that
+  command still checks both identities against it.
+- None carrying them is refused as a changed session (exit status 1). The
+  command then reads none of the sessions under that label.
+- With several, or with no identities at all, the command exits with status 5
+  and lists the candidates (as JSON under `--json`). This holds for `inspect`,
+  `pause`, `rename`, `archive`, `kill` and others that take no identities.
+- `--session-id` and references always select exactly.
+- `pause --all` and `resume --all` refuse a label that several sessions share;
+  act on each with `--session-id`.
+
+When a session leaves, hgs releases its own Git worktree lock. A session
+leaves by an archive, by `terminate` with or without `--forget`, or by
+forgetting its archive. Its own lock is one whose reason is exactly
+`zerus:<session ID>`, on the checkout Zerus created for that session.
+- hgs never touches a person's own lock, another session's, or any lock on a
+  folder Zerus did not create.
+- The lock stays in three cases:
+  - another live or saved session uses the checkout;
+  - the checkout's Zerus ownership cannot be verified;
+  - the sessions that might use it cannot all be read.
+
+  hgs then says on standard error why it kept the lock, and the archive
+  stands.
+- The release never forces Git. It sets the lock aside and checks its text,
+  and removes it only when the text is exactly that session's. Anything else
+  is put back, never over a lock that appeared meanwhile. A lock left aside by
+  a crash is put back by the next hgs command.
+
+Nothing in this version creates such a lock.
+
 The desktop client adds `--session-id` only to explicit actions: send, send
 now, answer, queued-message removal, clear and compact, interrupt, model
 settings, pause, resume, start fresh, rename, fork, archive, terminate, kill
@@ -341,7 +421,9 @@ answer is kept for ten minutes. Reads, polls, history, status, watch, terminal
 input and read marks keep the name until a label index exists. Confirmed
 delayed and worktree-cleanup end actions keep their scoped envelope, which
 already names the exact run and conversation. A refused ID shows as a changed
-session.
+session, but only when the CLI refused it while resolving it: another name, no
+session or several sessions. A later read's "no longer names", which can
+follow an effect, keeps the action's own result.
 
 `hgs session-action-status SESSION --json` reads one original lifecycle receipt.
 Supply the original `session-action` JSON unchanged, including its `request_id`,
@@ -1021,6 +1103,29 @@ to open it.
 When the open session is terminated or removed, the conversation pane returns
 to **Select a session**. Polling, new sessions and filter changes keep this
 selection empty until you choose a session. Unsent drafts remain in **Saved drafts**.
+
+A desktop draft belongs to its session, not to the session's name. Since
+zerus-ucck P2c, a live or saved session that lists a durable session ID keeps
+its message, subagent, question-answer and voice drafts under that ID, so a
+draft stays with its session across a rename. A draft saved under the name
+before moves to the ID once, when its session opens, and never over a draft
+already there. Archived sessions and sessions without an ID keep their drafts
+under their names. **Saved drafts** shows such a draft by the name its session
+had when the draft was saved, and **Go to session** finds the session by its ID.
+After a downgrade to a desktop build that reads only names, that build opens
+the session with an empty message editor. The draft stays under the session ID,
+because the older build writes only the names it uses itself and never deletes
+it. That build lists it in **Saved drafts** as `id:<session ID>`, without a
+draft mark on the card. A draft typed in the older build stays under the name.
+Back on this build, the composer shows the draft kept under the session ID, and
+the one written under the name stays in **Saved drafts**.
+
+Read marks waiting for a host follow the same rule. A mark is queued under the
+session ID the listing reports for its run, so two sessions that share a name
+keep separate marks; it is still delivered with `hgs read NAME`, guarded by run
+and conversation. A **Needs attention** or review-later mark of a session
+without a conversation is kept under its session ID, and one kept under the
+name moves to it.
 
 The **Active** filter combines sessions currently working or Scheduled, those in
 **Needs attention**, and sessions with unsent text or attachment drafts, counting
@@ -2255,6 +2360,23 @@ local transport bindings. `hgs swarm export` exports only shared fields. Origina
 Zerus settings stay in `workspace/organizationBeforeSwarm`; import/merge backups
 use `~/.config/hgs/swarm/backup-*.json`.
 
+A session's project is shared by its label and, since zerus-ucck P2c, also by
+its durable session ID. Every writer of a membership on the session's own
+computer, `swarm apply` included, adds an ID twin: the session ID and the
+exact label membership operation it mirrors. Twins live beside the catalog in
+`swarm/session-id-twins.json`, never in `catalog.json`, so an older hgs on the
+same computer, and every peer that does not list the `session_id` kind, never
+reads one; only members that list the kind exchange them. `swarm get` lists
+the ID form as `projects[].session_ids` ("machine\nsession ID") only while the
+operation a twin mirrors is still the selected label membership, so any later
+move by label, from any hgs or desktop, hides it. `swarm get` also reports
+`membership_by_id {ready, missing}`. It is ready when every machine of the
+catalog is this computer or a peer whose last sync listed the kind; any other
+machine fails closed. A desktop reads the ID form only when it is ready. The
+label form is still written and read everywhere else. `swarm export --kinds`
+takes the kinds its requester parses on stdin; without them it exports only
+the kinds hgs v0.47.0 parses.
+
 On a computer without a Qt settings store, the first `hgs swarm get` or initial
 `organization` watch subscription may initialize an empty catalog. It derives
 no projects, folder links or session assignments from names. The client still
@@ -3028,6 +3150,7 @@ hgs task target orchard/T-a1b2c3 codex/api|any [--host ALIAS]
 hgs task target orchard/T-a1b2c3 new-session|subagent --parent codex/api [--host ALIAS] [--session-id ID]
 hgs task worker orchard/T-a1b2c3 --subagent CHILD_ID --request-id SENT_REQUEST_ID
 hgs task settings --project orchard [--set < settings.json]
+hgs task cutover --project orchard [--hold on|off [--confirm]]
 ```
 
 Plain `task get` retains the complete journal for existing clients. The optional
@@ -3055,7 +3178,7 @@ selected inspector without transferring the journal or adding a polling loop.
 
 Task views (`task get`, history pages and list rows) include an `execution`
 object for a task that is In progress or recorded execution attempts:
-`requirement` (the task's requirement revision, from 1), `attempts`, `current`
+`requirement` (the task's requirement revision, from 1; each edit of its prompt or attachments counts the next one, a rename or comment does not), `attempts`, `current`
 and, when two attempts claim the same generation, `conflict: true`, which
 nothing resolves automatically. `current` is the attempt the task's execution is
 about: its `id` and `generation`, `origin` (`send`, `start`, `handoff` or
@@ -3075,13 +3198,27 @@ same computer, before any change; the task keeps it until its next send or
 start. Only that run is then the executor: a name alone never names one, so
 another run that holds the name is not, and a holder an older build bound
 without recording it reads as a conflict. When merged replicas leave the latest boundary with another session
-than the one holding the task, `conflict` is set. No start,
-child or result is invented. A resume settles only the pauses it observed, so a
+than the one holding the task, `conflict` is set. Each attempt freezes the history
+entries of the task's executions so far (`sent`, `resumed`); a send or reopen
+it settles names its request. An execution entry neither frozen nor named, such
+as a send an older build recorded concurrently, is listed in `unexplained`, sets
+`conflict` and holds any new delivery until the person reviews that exact entry.
+No start, child or result is invented. A resume settles only the pauses it observed, so a
 pause that no resume observed keeps the attempt paused. A session's
 Stop, idle time, pause or elapsed time is never an attempt event and never
-moves a task. Attempts are kept beside the history under task schema 6, which a
-reader that does not know them shows read-only. This version reads attempts and
-guards reports against the current execution; recording attempts comes later.
+moves a task. Attempts are kept beside the history under task schema 7, which a
+reader that does not know them shows read-only: that includes the builds that
+already read schema 6 but know no floor. The stored schema is one merged
+value, so an older replica's concurrent upgrade can leave a lower one; this
+version raises it again for a task with attempts in every write and every live
+import, and before a task is read for an inventory, so the raised value is what
+other replicas receive. That repair is a new change, not proof that an older
+replica did nothing before it. A task can also take a floor before its first
+attempt: a cutover record that keeps schema 7 the same way, so a reader that
+does not know attempts or the floor refuses to write it, while every path that would start
+it without an attempt refuses it as cutting over. A floor this version cannot
+read still counts. This version reads attempts and guards reports against the
+current execution; recording attempts and floors comes later.
 
 Plain `task list` still returns every task for existing clients. With `--stage`
 and `--limit` (1–200) it returns one page of that stage in the same order and
@@ -3297,13 +3434,228 @@ bindings yet, so there `--host` is refused and other computers read null.
 Tasks are Loro documents below `HGS_STATE_DIR/replica`, one directory per
 project; a task file that fails to load is listed under `damaged` and left in
 place until another computer of the swarm sends its copy, which replaces it;
-the damaged file stays beside it as `<file>.damaged-<time>`. The swarm worker
+a copy of the damaged file stays beside it as `<file>.damaged-<time>`. A task
+this computer saved with attempts or a floor gets a mark, `<uuid>.managed`,
+naming the version this computer last saved and the exact first block of
+the updates file after the snapshot, sealed by a digest of its whole content
+so that a mark changed in any way cannot be read. The mark is rewritten before every save
+of such a task makes it durable (one small extra write per save), and every
+fold opens a new updates file with the operations at the document's
+frontiers, which every copy already holds, so it adds no change and differs
+from fold to fold. A copy whose files hold less than its mark records (they
+were cut short, a save did not finish, or an older Zerus wrote them so), or
+whose mark cannot be read, is damaged, not read without those changes:
+nothing sends, writes or folds it, not even a copy read before, until a person
+reviews it or a copy that covers the mark arrives. Files that hold more than the mark records (an older
+Zerus folded or appended) raise the mark to what they hold when the task is
+read, before anything lists, inventories or sends it. A task with only its
+mark left is still listed under `damaged`. Saves of a task go through one
+store in turn: a copy read before a later save of the same task is merged
+into what is saved, never written over it, and the mark never moves back. Its damaged copy is replaced only when the mark is readable and
+still describes the files (an older Zerus that folded or rewrote them, or a
+mark restored from before a later fold, leaves it stale), every
+update saved here applies, and the other copy merged with them holds that
+version, so no attempt fact is lost. A copy without a mark is replaced only
+when every update saved here applies and the result shows no attempts or
+floor. Otherwise the copy is kept: it stays under `damaged`, nothing is sent
+for it, and each copy another computer or a phone sends is refused and named
+in that exchange's refusals, not kept for later. A person reviews it: moving
+both damaged files (`<uuid>.loro` and `<uuid>.updates`) away keeps it refused
+while the mark remains, and removing the mark as well accepts the next copy
+sent, which may lack attempts. Any
+entry at the mark's path counts as a mark, even one that cannot be read.
+
+What this recovery supports, alone or combined: running an older Zerus
+after a rollback (its importer may fold, append or rewrite the task files as
+it always did), a crash at any point, damaged or truncated files, and an
+unreadable or dangling mark; in each it stays correct or keeps the copy. It
+also supports restoring or copying the whole replica root as one consistent
+older state, an ordinary rollback of local data: other computers supply the
+newer changes again. It does not support replacing, restoring or copying
+individual files under the replica root (a task's snapshot, updates or mark)
+from a backup or another computer while the rest stays newer, by any means,
+including file-level backup and sync tools: such a partial restore can put
+back an older pair of files that agree with each other, which nothing here
+can tell from a genuine one, and recovery may then accept another copy and
+lose what was written after that backup. Restore the replica root only as a
+whole, never copy task files back one by one, and keep file-level sync tools
+away from it. After restoring a replica root from a backup or copying it to
+another computer, delete its `store-id` file so a new one is created: other
+computers then see a changed store, and the cutover proof (which binds each
+member's verified computer and store) stays closed for it until a fresh,
+complete inventory with it.
+
+The damaged entries of `task list` (and its pages) say what is known here,
+read only: `kept: true` with `kept_reason` (`marked` for a copy cut over
+here, `unreadable_local_data` for torn or unreadable local updates) for a copy
+kept for a person's review whatever copy arrives, or `recovery:
+"depends_on_incoming_copy"` when what happens is decided against each copy
+that arrives; the listing never says a replacement is safe. A refusal names
+the decision against that copy: `kept` with `marked`, `attempt_evidence`,
+`pending` or `unreadable_local_data`, in `hgs` output, exchange refusals and
+the phone's `refused_there`.
+
+The swarm worker
 replicates them with the catalog: after each catalog
 sync it compares every project's digest with the member's and exchanges only
 the changes each side lacks, in pages of at most 1 MiB, and a task changed
 here goes out within seconds. Changes made on several computers at once merge.
 A member whose Zerus does not share tasks keeps syncing the catalog and is
-named in the Swarm settings.
+named in the Swarm settings. A hello's replica part also carries
+`task_schema`, the highest task schema that Zerus writes (7, which reads the
+floor; absent in an older one), `store`, the random identity of its replica
+root (`replica/store-id`, created once under a lock), and for each project
+it read how many tasks do not load (`damaged`, 0 included) and which it left
+out this time (`omitted`, busy or unreadable). This computer keeps what each member's last
+verified hello showed (its computer, replica protocol, task schema and store)
+and how each project's last exchange with it ended in
+`replica-members.json` beside the catalog, information only. Each record is
+bound to that exact observation: a changed store, protocol or schema retires
+the completions recorded under the old one, an outcome that arrives for an
+observation that is no longer the member's is refused, and a member's record
+goes at the membership change itself. Every `replica-inventory` and
+`replica-exchange` reply names the store that answered, read as it answers: a
+reply from another store than the hello showed (its replica root was replaced
+since) ends that exchange as `changed_identity`, and one that names no store in
+a form this reads still exchanges documents but is `malformed`. A project is `complete` only when both
+sides' whole inventories were exchanged: every page, nothing refused, and no
+task damaged or left out on either side (equal digests of the readable tasks
+alone are an exchanged subset, not a complete project). Otherwise it names a
+reason: `unreachable` (also for every project known here when the member's
+hello fails), `busy` (also for every project known here when this computer's
+own pass cannot read its projects), `refused_documents`, `page_budget`, `changed_identity`,
+`damaged_tasks`, `omitted` or `malformed`. Absence or unreadability is never
+evidence of success: a project map, damaged count, refusal list or import
+count that is missing or in a form this does not read is `malformed`, never
+taken for an empty one. An exchange reply whose pages do not read stops the
+exchange; a reply whose evidence does not read (a member before this one sends
+no damaged counts) still exchanges documents and stays `malformed`. Every
+project this computer stores or knows alive gets an outcome on each sync.
+
+`task cutover --project P` shows the project's cutover to execution attempts
+as this computer knows it, read only and bounded by its members: `phase`
+(`not_cut_over` while no task here has a floor or attempts, `cutting_over`
+while a member keeps it open, `active` otherwise, `unknown` past its count's
+budget), `hold`, `cut_over_tasks`,
+`last_cutover_write`, every eligible member with its advertised task schema,
+store, when it was seen and its last inventory of the project, and `closed`:
+the first reason it is open as `{member, project, reason, at}` (`unseen`,
+`protocol` for another or no replica protocol, `task_schema` for a member below
+7, `store` for a missing or invalid store identity, `no_inventory`, an
+incomplete exchange's reason or `incomplete`, or `inventory_before_cutover`),
+with `closed_text` as prose. Anything not known as complete keeps it open. The
+count of cut-over tasks has a strict budget (entries and time): past it the
+phase is `unknown` and the reason `scan_budget`. Eligible members are the
+project's swarm members that may hold its documents: every verified member
+except one whose verified hello has no replica key at all; a replica part
+this cannot read keeps the member eligible and the cutover open as an
+unknown protocol. It grants nothing and dispatches
+nothing. `--hold on` sets the project's cutover hold, a replicated value that
+names who set it and when (concurrent changes: the last writer wins). While on,
+no task of the project takes a new floor or a first attempt, where those are
+written (they come with the attempt writer); it never lowers anything, and a
+task that never cut over keeps the legacy Start. Only a person sets or clears it,
+and clearing it takes `--hold off --confirm`. A hold that cannot be read is
+on. Times are in milliseconds.
+
+`task cutover --project P --task T --check` reads the task's writer universe
+for the fence that the attempt writer will need (zerus-cg5h.4 S2b.2 C3), within
+one 15-second budget counted once from the command's entry. This computer's
+identity, the project's name and lock, every call (from its spawn to its
+parsed answer) and the result all count against it, and nothing is reported
+open after it. The check needs `--project`. It covers every node that may hold a task
+of the swarm, not only this computer's peers:
+- this computer;
+- every catalog machine not redirected away (each machine that ever joined
+  writes its name there);
+- every node reached over verified peer links.
+
+A node's catalog name is only something to cover. Each node must answer a
+fresh hello over its own route, and that hello's node is checked at every hop.
+A hello's replica part lists the node's verified direct peers (`peers`) and its
+`fence` capability. `swarm replica-relay` forwards one hello, or another relay,
+only to the relaying member's own verified alias for the next node. It passes
+on what is left of the deadline and the hops, and answers with the reply
+checked to come from that node. Its budget starts when the request arrives:
+its catalog lock, its store identity and the forwarded call all count
+against it, and it never answers after it.
+
+The check reports:
+- `universe`: this computer's node, store and replica root, and every node with
+  its route and what its hello showed;
+- `incarnation`: a digest of all that, which changes when any of it does (a
+  replaced store, a new route or node, or any enrolment or disconnection:
+  each computer keeps `swarm/membership.json`, an epoch and a generation that
+  rises, durably before the catalog publishes the change, whenever its peers
+  change, including a change an older build made, which the next read
+  records);
+- `closed`: the first node that keeps the fence closed, and why:
+  - `unreachable`, `unverified` (another computer answered), or `unroutable`
+    (a catalog machine that no verified route reaches);
+  - `protocol`, `task_schema` below 7, `store`, or `fence_unsupported`;
+  - `unavailable` (the node's own replica cannot be read now: its hello sends
+    an explicit unavailable part, and it stays a writer);
+  - `busy` (the catalog lock was not free within the budget), `deadline`,
+    `discovery_bound` (a node still unseen beyond 16 hops), or
+    `too_many_nodes` (more than 256 candidates, from the catalog, every
+    visited node's writers and the nodes found over peers, counted as they
+    are added). A partial universe is never certified.
+- `universe_closed`: the first node that keeps the universe closed, alone;
+- `proof`, when the fence is proved: the common `version`, the `rounds` it
+  took, every node with the store it answered from, and `admissible: true`
+  once the final admission passed (C3c2).
+
+A node whose hello has no replica key, as an older build sends, shares no
+tasks, so it alone is left out. A node whose replica cannot be read sends a
+present part instead, and is never left out.
+The nodes behind it are not left out: with no other route they close the fence
+as `unroutable`. The check holds no lock across the network, creates no floor
+and no attempt, and grants nothing.
+
+The proof (C3c2) runs over that universe. Each round sends every node, over
+its verified route, `swarm replica-task` for the task. That request carries
+this computer's version (a canonical map: decimal peers and positive counts,
+compared as the changes they name, never as encoded bytes) and the updates the
+node lacks. The node then:
+- imports them;
+- runs the store's locked schema repair;
+- saves durably;
+- reads the task again from its files;
+- answers with that read: its version, whether its state is every change it
+  holds, its raw stored schema, whether it holds a valid floor, and the updates
+  this computer lacks.
+
+A node answers only from the store its fresh hello over that route showed;
+any other store closes the proof as `changed_identity`. The fence is proved
+when, in ONE round, every node answers exactly this computer's version, with
+nothing more to send. That version must hold a valid floor and a RAW stored
+schema of at least 7 (not the raised one a cut-over task reports), and this
+computer's copy must still hold it when read again afterwards. Answers for
+different versions are never combined. At most three rounds run within the
+budget. The universe is then read again and must be the same incarnation.
+
+The final admission takes the catalog lock, the project lock and the store's
+admission, in that order and within the budget. Under those locks it reads
+again:
+- this computer's membership view, its store and its replica root;
+- the hold, for a task that records no attempt yet;
+- the task: holding the proven version, its floor and its raw stored schema.
+
+Only then would a reservation run; the check runs none. Closed reasons add:
+`no_floor`, `schema`, `damaged`, `not_converged`, `changed_identity`,
+`membership_changed`, `changed_version`, `held`, `malformed`, `busy` and
+`deadline`. It proves the schema barrier only: not exclusive delivery, not
+consent.
+
+Cutover boundary (owner decision, 2026-11-05): once a project's tasks cut
+over, the rollback floor for every computer in that swarm is the first
+floor-aware build. That is the minimum managed-store, writer and importer
+implementation, on every import route, including a phone's answering hgs.
+Running an older CLI or desktop there is unsupported: an older build's
+damaged-task recovery, or a truncated update tail, can bring back a pre-floor
+copy that it would then write. On an activated swarm that floor is the first
+release with the membership incarnation of C3c1 R3 (in practice 0.48.0);
+unreleased intermediate builds are unsupported too.
 
 Phones reach a project's tasks through the mobile relay and the Rust mobile
 connector, which uses two commands of its own. `hgs task digests --json` prints
@@ -3321,6 +3673,16 @@ what `send` and `cancel` do and answer only the task's stage (a refusal says
 `hgs task mobile-done --json` answers a page of at most 50 Done tasks, newest
 first, with how many there are and how many from the last 7 days. See
 `services/mobile/relay/README.md`.
+
+The phone apps edit only tasks at schema 2 or below, and none of their edits
+changes the stored schema. The exchange imports a phone's changes and raises a
+task that records attempts back to the execution schema before it answers, so
+a phone that receives a task's attempts receives that schema with them and
+shows the task read-only from then on. Its earlier offline edits merge as
+ordinary concurrent edits; they add no attempt fact and never stand for a
+delivery, a refusal or a cancellation. Send now and Cancel from a phone run the
+same checks as `send` and `cancel`, including the hold of an attempt whose
+delivery is unknown.
 
 Agents use the same `hgs task` commands in their own shell. A command run inside
 an agent session acts as that session when it proves it as `hgs self` does (the
@@ -5102,17 +5464,47 @@ manages only the owned `com.hgdev.hgs-tray` AUMID/COM registration. Install the
 passive service task first so the selected stable CLI matches the current
 installer. Status is metadata, not native notification readiness. The fixed
 cold activation entry refuses before configuration or owner acquisition. No
-worker repairs registration or enables background consent.
+worker repairs registration or enables background consent. The background
+service checks the registration against its own running image and configuration
+folders, not its `HOME`; another registered image is reported as
+`notification_registration_other_image` and changes nothing. That diagnostic is
+never removal authority. Only `notification-registration remove`, after a fully
+read mismatch with the current image's registration, may select an earlier
+image's registration instead. The registered command must be byte for byte what
+this build writes for that absolute image with the CURRENT configuration and
+state folders, and all three keys must match this build's exact contents for it
+(same SID and configuration hash, this ABI marker, no extra or missing value or
+key). The selection is fixed under the registration lock before the offline
+guard and removed through the same guarded exact removal; the reply adds
+`previous_image: true`. Install and status never take it, and nothing falls back
+after an effect.
 
 Explicit removal uses `notification-registration remove --json --request-id UUID`
-only after the original selected service's settled manual revoke with that same
-UUID. The authenticated current-service reply must match configuration and
-original runtime epoch and have accepted/durable/revoked/checkpointed all true.
-Lost replies authorize read-only `revoke_status`, never a new revoke UUID.
-Unknown or retained offline state stays for inspection. UI-only uninstall keeps
-the service task, staged CLI and Toast identity; its separate UI login entry is
-removed normally. Active removal currently remains unavailable until root Windows Runtime drain
-attachment is integrated; metadata removal does not claim native history deletion.
+after a settled `desktop revoke --json --request-id UUID --reason rollback` with
+that same UUID, a stop of the running service through its owner (ending only
+that task, or a sign-out after the task's `registration remove`), and the
+task's `registration remove`. Removal is
+offline only. It holds the actual `owner.lock` and then the handoff lock through
+the exact registry change; a missing endpoint, stopped task or PID is never the
+exclusion. Without desktop state nothing more is needed. A sidecar or marker
+without its database refuses. Existing state, also from a passive-only history,
+needs the CURRENT proof of the shared read-only rollback check in one checked
+transaction:
+- the UUID is the newest command, settled with its exact receipt;
+- ownership is revoked and rearm-required with no request or owner epoch;
+- the writer is revoked under that rollback's writer;
+- any marker is Revoked for the same writer;
+- operations are drained.
+
+A later grant, rearm, handoff or revoke supersedes the proof, and removal never
+submits or reconciles a revoke. The checked database is retained, and the proof
+is checked again right before the registry effect. The read-only lookup may
+leave SQLite's reader sidecars (an empty `-wal` and the `-shm` index) next to a
+cleanly stopped database; the database itself is not modified. UI-only
+uninstall keeps the service task, staged CLI and Toast identity; its separate UI
+login entry is removed normally. While the service runs, removal remains
+unavailable until root Windows Runtime drain attachment is integrated. Metadata
+removal does not claim native history deletion.
 
 The proposed service names are `hgs-desktop.service` (systemd user),
 `com.hgdev.hgs-desktop` (LaunchAgent), and `hgs-desktop` (per-user Windows logon

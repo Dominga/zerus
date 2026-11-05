@@ -272,12 +272,15 @@ fn checked_input(
     conversation_id: &str,
     allow_working: bool,
 ) -> Result<Value> {
+    // zerus-ucck P3c: the request's identities select among sessions that
+    // share the label.
+    expect(name, run_id, conversation_id)?;
     let record = read(name)?;
     if string(&record, "run_id") != run_id || string(&record, "conversation_id") != conversation_id
     {
         return Err("session identity changed; refresh before sending".into());
     }
-    if !matches(&record, live()?.get(name)) || !process_alive(&record) {
+    if !matches(&record, panes_of(&live()?, &record)) || !process_alive(&record) {
         return Err("the exact agent process is no longer running; resume it explicitly".into());
     }
     if claude_approval::current(&record).is_some() {
@@ -703,7 +706,8 @@ fn terminal_check(record: &Value, empty: bool, sending: bool) -> Result<()> {
     let terminal = backend::current();
     let claim = backend::InputClaim {
         pane,
-        name: string(record, "name"),
+        // The pane's session is the record's own terminal (P3b).
+        name: terminal_name(record),
         run_id: string(record, "run_id"),
         agent: string(record, "agent"),
         pid: record["pid"].as_u64(),
@@ -868,6 +872,18 @@ pub(super) fn task_reply_receipt(name: &str, request: &Value) -> Result<Option<V
 }
 
 pub(super) fn submit(name: &str, input: &[u8], recovery_id: Option<&str>) -> Result<Value> {
+    submit_with(name, input, recovery_id, false)
+}
+
+/// `submit` for a question's answer: it refuses, before any key, when pending
+/// model or effort settings would be typed into the terminal first. Only the
+/// answer's own paste may reach the pane, so a refusal proves nothing was
+/// sent.
+pub(super) fn submit_answer(name: &str, input: &[u8]) -> Result<Value> {
+    submit_with(name, input, None, true)
+}
+
+fn submit_with(name: &str, input: &[u8], recovery_id: Option<&str>, answer: bool) -> Result<Value> {
     let request: Request =
         serde_json::from_slice(input).map_err(|e| format!("invalid send payload: {e}"))?;
     let files = validate(&request)?;
@@ -893,7 +909,11 @@ pub(super) fn submit(name: &str, input: &[u8], recovery_id: Option<&str>) -> Res
         }
         return Err("delivery uncertain: this request may already be in Terminal; do not resend automatically".into());
     }
-    let mut record = effort::apply_pending(name, checked_record(name, &request)?)?;
+    let record = checked_record(name, &request)?;
+    if answer && effort::pending_applies(&record) {
+        return Err("model or effort settings would be typed first; answer this question in Terminal".into());
+    }
+    let mut record = effort::apply_pending(name, record)?;
     if let Some(id) = recovery_id { recovery::check_submission(&record, id)?; }
     checked_send_terminal(&record)?;
     let attachments_root = root.join("attachments");
@@ -948,7 +968,7 @@ pub(super) fn submit(name: &str, input: &[u8], recovery_id: Option<&str>) -> Res
     }
     if let Some(id) = recovery_id { recovery::check_submission(&read(name)?, id)?; }
     let submitted_at = now();
-    if recovery_id.is_none() { recovery::cancel_for_input(name)?; }
+    if recovery_id.is_none() { recovery::cancel_for_input(&record)?; }
     let mut receipt = json!({"request_id":request_id,"name":name,"run_id":request.expected_run_id,
         "conversation_id":string(&record,"conversation_id"),"first_message":string(&record,"conversation_id").is_empty(),"digest":digest,"status":"in_progress",
         "submitted_at":submitted_at,"submitted_text":text,"text":request.text.trim(),"attachments":paths,"transport":"terminal"});
@@ -976,7 +996,7 @@ pub(super) fn submit(name: &str, input: &[u8], recovery_id: Option<&str>) -> Res
         if string(&record, "agent") == "codex" {
             settle_codex_paste(terminal, pane, &pasted);
         }
-        if !process_alive(&record) || !matches(&record, live()?.get(name)) {
+        if !process_alive(&record) || !matches(&record, panes_of(&live()?, &record)) {
             return Err("agent changed after paste".into());
         }
         checked_terminal(&record, false)?;

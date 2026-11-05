@@ -1,5 +1,6 @@
+import { showQtUpgradeNotice } from "./store/qtUpgrade";
 import { DesktopServiceStatus } from "./ui/components/DesktopServiceStatus";
-import { desktopService, serviceStatus, servicePaused } from "./store/desktopService";
+import { desktopService, serviceStatus, servicePaused, firstChoicePending } from "./store/desktopService";
 import { CleanupChip } from "./ui/screens/CleanupChip";
 import { worktreeReviewDialog } from "./store/worktreeCleanup";
 import { cleanupDialog } from "./store/terminationCleanup";
@@ -82,7 +83,7 @@ function StatusBar(props: { mode: () => BridgeMode | "starting" }) {
   const summary = createMemo(() => tr("%1 of %2 machines connected", live(), computers().length) + (problems().length ? tr(", %1 offline", problems().map((c) => label(c.id)).join(", ")) : ""));
   return (
     <footer class="statusbar">
-      <Show when={computers().length} fallback={<Show when={!servicePaused(desktopService.state())}><span>{props.mode() === "starting" ? tr("Starting…") : tr("Connecting…")}</span></Show>}>
+      <Show when={computers().length} fallback={<Show when={!servicePaused(desktopService.state()) && !firstChoicePending(desktopService.state())}><span>{props.mode() === "starting" ? tr("Starting…") : tr("Connecting…")}</span></Show>}>
         {connectionError() ? (
           <>
             <span class="danger">
@@ -122,6 +123,7 @@ function zoom(scale: number) {
 }
 
 export function App(props: { mode: () => BridgeMode | "starting" }) {
+  createEffect(() => { if (props.mode() === "tauri") void showQtUpgradeNotice(); });
   installUiLanguage();
   createEffect(() => { document.documentElement.lang = uiLanguage(); });
   createEffect(() => applySkin(skin()));

@@ -22,7 +22,8 @@ export interface ViewRow {
   /**
    * The listing's durable session ID, when canonical. The Rust dispatcher
    * reads it from its own copy of the row for explicit actions; the webview
-   * never passes it.
+   * never passes it for one. It passes it only in a composer's SessionRef,
+   * where it keys the drafts.
    */
   session_id?: string;
   title?: string;
@@ -172,18 +173,33 @@ export interface ModeReview {
   disposition: "required" | "reboot_required" | "reviewed_unknown";
   passive_available: boolean;
 }
+/** A first explicit background choice offer (Windows). Routing only, never consent. */
+export interface FirstChoiceOffer {
+  configuration: string;
+  selection: string;
+}
 export interface NotificationOwnership {
   /** Local startup recovery presentation; never a service grant. */
   native_recovery?: boolean;
   /** Native helper observation only; never permission to start a writer. */
   activation?: { pending: boolean; running: boolean; needs_resume: boolean; code: string;
-    review?: ModeReview | null; automatic_blocked?: boolean; request_id?: string | null; active?: boolean; business_ready?: boolean };
+    review?: ModeReview | null; automatic_blocked?: boolean; request_id?: string | null; active?: boolean; business_ready?: boolean;
+    first?: FirstChoiceOffer | null };
   status: null | { abi: string; configuration: string; journal: string | null; revision: number;
     state: "passive" | "preparing" | "service" | "draining" | "revoked" | "native" | "identity_changed" | "unavailable";
     rearm_required: boolean; request_id: string | null; owner_epoch: string | null; identity_current: boolean };
   request_id: string | null;
   pending: boolean;
   running: boolean;
+  code: string;
+}
+/** Native refresh selection and result display; never consent or authority. */
+export interface ServiceRefreshView {
+  configuration?: string | null;
+  offer?: null | { configuration: string; epoch: string; selection: string };
+  request_id?: string | null;
+  running: boolean;
+  settled: boolean;
   code: string;
 }
 /** Desktop service presentation has separate provenance from device-local marks. */
@@ -211,6 +227,8 @@ export interface DesktopService {
     computers: { computer: string; complete: boolean; online: boolean; total: number | null; attention: number | null }[];
   };
   automatic_approvals: boolean | null;
+  /** Held task message copies a person may review; display only, never a release. */
+  task_message_inputs?: null | { review: number; full: boolean };
   details_available: boolean;
   /** Native frozen-read transfer; completion is durable queueing, not host ACK. */
   pending_read_import?: null | { required: boolean; complete: boolean; running: boolean; code: string; through: number; superseded: number; delivered: false };
@@ -396,6 +414,8 @@ export interface ReadMark {
   conversation_id: string;
   reply_id: string | null;
   attention_signature: string | null;
+  /** The durable session ID the Rust queue keys the mark by, when its row lists one (zerus-ucck P2c-2b). */
+  session_id?: string | null;
 }
 
 /** A computer's machine card from its `catalog.meta` (client/core `machine.rs`); an older host leaves fields null. */
@@ -761,12 +781,14 @@ export interface QueueView { id: string; text: string; hint: string; can_send_no
 export interface ComposerView {
   handle: number; key: string; subagent?: { agent_id: string; send_supported: boolean; hint: string } | null; loaded: boolean; rev: number; text_epoch: number; text: string; position: number; anchor: number;
   attachments: AttachmentView[]; removed: string | null; attaching: boolean; sending: boolean; recording?: boolean; waiting: string | null; uncertain: boolean;
+  /** The desktop service still sends this draft's message: no Allow retry, and its status is not an error. */
+  delivery_pending?: boolean;
   status: string; status_error: boolean; can_send: boolean; send_label: Text; available: boolean; unavailable_reason: string; block_reason: string | null;
   attachments_available: boolean; attachments_reason: string; session_status: string; session_status_error: boolean; session_blocks_input: boolean;
   /** The open session's last read failed (Qt's m_inspectError). */
   inspect_error: boolean;
   cache: Chip; cache_warning: string; cache_details: string; context: ContextChip; local: LocalMessage[];
-  cancel_send: boolean; compacting: boolean; clear: ClearControl;
+  cancel_send: boolean; cancel_locked?: boolean; compacting: boolean; clear: ClearControl;
   /** The agent's question card shown in the composer (A2). */
   question: QuestionView | null;
   /** False while a required card stands in for the editor and the action row (Qt's setInputVisible). */
@@ -813,7 +835,8 @@ export type Inspect = { kind: "native_ui" } | { kind: "terminal" } | { kind: "re
 /** One exact native child; sends still name the parent run and conversation. */
 export interface SubagentRef { agent_id: string; parent_conversation_id: string }
 /** The session or child a composer belongs to (src-tauri `SessionRef`): `key` is the parent catalog key. */
-export interface SessionRef { computer: ComputerId; key: string; name: string; archive_id: string | null; subagent?: SubagentRef }
+/** `session_id`: the row's durable ID, which keys its drafts (src-tauri `session_draft_key`). */
+export interface SessionRef { computer: ComputerId; key: string; name: string; archive_id: string | null; subagent?: SubagentRef; session_id?: string | null }
 /** The detail tab that shows, for the composer's inspect retry (Qt's poll interval). */
 export type ComposerTab = "activity" | "terminal" | "native" | "processes";
 /** A file of an Activity message, as the journal lists it. */
@@ -868,6 +891,8 @@ export interface SavedDraftItem {
   key: string; kind: DraftOwnerKind;
   /** The key's machine: a host alias, "" for this computer; a subagent key names the machine. */
   computer: string; session: string;
+  /** The durable ID of a draft keyed by it; "" for a key that names its session. */
+  session_id: string;
   /** The owner's parts joined by " / " (the row's accessible text). */
   title: string;
   /** What the row shows as its title. */

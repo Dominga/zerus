@@ -106,7 +106,7 @@ pub(in crate::desktop) struct ChoiceScope {
     pub generation: u64,
 }
 impl ChoiceScope {
-    fn valid(&self) -> bool {
+    pub(super) fn valid(&self) -> bool {
         [&self.journal, &self.owner_epoch, &self.service_epoch]
             .iter()
             .all(|s| canonical_id(s))
@@ -116,7 +116,16 @@ impl ChoiceScope {
 
 impl Record {
     pub fn choice(&self, choice: Option<&Choice>) -> Result<Option<String>> {
+        ensure!(!self.pending_refresh(), "An original refresh is pending; only its original-ID result, pre-manager cancellation or explicit Review is available.");
         if self.reviewed.is_empty() && choice.is_none() {
+            // An ordinary frame never adopts or continues a pending FIRST
+            // choice, not even before its manager effects: that original is
+            // read by its own UUID, cancelled at a closed pre-manager boundary
+            // or reviewed.
+            ensure!(
+                !self.pending_first(),
+                "A first mode choice is pending; read its original mode-result, cancel it before any manager effect, or review it by its original UUID. This request cannot continue it."
+            );
             return Ok(None);
         }
         let last = self
@@ -124,7 +133,9 @@ impl Record {
             .last()
             .context("No original review selects this choice.")?;
         let choice = choice.context("After review, confirm a NEW mode choice with --after-review UUID --request-id NEW_UUID.")?;
-        ensure!(self.choices.len() < CHOICES && !self.choices.iter().any(|c| c.request == choice.request),
+        ensure!(self.choices.len() < CHOICES && !self.choices.iter().any(|c| c.request == choice.request)
+            && !self.first_choices.iter().any(|c| c.request == choice.request)
+            && !self.refreshes.iter().any(|c| c.request == choice.request),
             "Original choice was already offered or history is full; read its original mode-result, never replay it.");
         ensure!(canonical_id(&choice.request) && choice.reviewed == last.original.request_id
             && self.completed.as_deref() != Some(choice.request.as_str())
@@ -159,10 +170,23 @@ impl Record {
             );
             receipt.phase = phase;
         }
+        if let Some(receipt) = self.first_choices.iter_mut().find(|c| c.request == request) {
+            ensure!(
+                receipt.phase == ChoicePhase::Unknown || receipt.phase == phase,
+                "Original first choice already has a terminal receipt."
+            );
+            receipt.phase = phase;
+        }
+        if let Some(receipt) = self.refreshes.iter_mut().find(|c| c.request == request) {
+            ensure!(phase == ChoicePhase::Refused && receipt.phase == ChoicePhase::Unknown,
+                "Refresh settlement requires its own original-bound readiness.");
+            receipt.phase = phase;
+        }
         Ok(())
     }
 
     pub fn complete(&mut self, request: &str) -> Result<()> {
+        ensure!(!self.pending_refresh(), "A mode completion cannot settle an original refresh.");
         ensure!(
             self.pending
                 .as_ref()
@@ -184,6 +208,13 @@ impl Record {
                 receipt.desired == Mode::Background && receipt.phase == ChoicePhase::Unknown,
                 "Current background choice identity changed."
             );
+            receipt.scope = Some(scope.clone());
+        }
+        if let Some(receipt) = self.first_choices.iter_mut().find(|c| c.request == request) {
+            ensure!(
+                receipt.desired == Mode::Background && receipt.phase == ChoicePhase::Unknown,
+                "Current background choice identity changed."
+            );
             receipt.scope = Some(scope);
         }
         self.complete(request)
@@ -201,7 +232,7 @@ impl Record {
     /// any offered phase before interruption. Size-only models below use the
     /// largest accepted UUID, integer and phase encodings, never evidence or a
     /// native permission. Both the barrier and immutable archive must fit.
-    fn review_capacity(&self, pending: &Pending) -> Result<usize> {
+    pub(super) fn review_capacity(&self, pending: &Pending) -> Result<usize> {
         let uuid = "ffffffff-ffff-ffff-ffff-ffffffffffff";
         let identity = Boot {
             machine: uuid.into(),
@@ -241,18 +272,37 @@ impl Record {
         // scope. Reserve that reachable layout too, before any manager effect.
         model.reviewed = self.reviewed.clone();
         model.completed = Some(pending.request_id.clone());
+        let largest_scope = ChoiceScope {
+            journal: uuid.into(),
+            owner_epoch: uuid.into(),
+            service_epoch: uuid.into(),
+            generation: u64::MAX,
+        };
         if let Some(receipt) = model
             .choices
             .iter_mut()
             .find(|c| c.request == pending.request_id && c.desired == Mode::Background)
         {
             receipt.phase = ChoicePhase::Settled;
-            receipt.scope = Some(ChoiceScope {
-                journal: uuid.into(),
-                owner_epoch: uuid.into(),
-                service_epoch: uuid.into(),
-                generation: u64::MAX,
-            });
+            receipt.scope = Some(largest_scope.clone());
+        }
+        if let Some(receipt) = model
+            .first_choices
+            .iter_mut()
+            .find(|c| c.request == pending.request_id && c.desired == Mode::Background)
+        {
+            receipt.phase = ChoicePhase::Settled;
+            receipt.scope = Some(largest_scope);
+        }
+        // A refresh keeps its own original scope and grows only its exact new
+        // readiness receipt at completion. This is byte reservation, not native
+        // evidence; model every field that can grow before a terminal save.
+        if let Some(receipt) = model.refreshes.iter_mut().find(|r| r.request == pending.request_id) {
+            receipt.phase = ChoicePhase::Settled;
+            receipt.ready = Some(refresh::Ready {
+                instance: ObservedInstance { guid: format!("urn:uuid:{uuid}"), pid: u32::MAX,
+                    birth: u64::MAX, epoch: uuid.into() }, generation: u64::MAX });
+            model.cancelled = Some(uuid.into());
         }
         Ok(barrier.max(reviewed).max(serde_json::to_vec(&model)?.len()))
     }

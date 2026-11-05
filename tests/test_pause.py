@@ -939,7 +939,9 @@ class Harness(unittest.TestCase):
         state = self.root / "state"
         # Reused pre-upgrade names can have a canonical binding in bindings/;
         # the old physical slot is reserved for the running legacy supervisor.
-        for p in [*state.glob("*.json"), *(state / "bindings").glob("*.json")]:
+        # A session in the ID layout lives in sessions/<id>.json (P3a).
+        for p in [*state.glob("*.json"), *(state / "bindings").glob("*.json"),
+                  *(state / "sessions").glob("*.json")]:
             r = json.loads(p.read_text())
             if r.get("name") == name and not r.get("rename_shadow"):
                 return r
@@ -994,6 +996,32 @@ class Harness(unittest.TestCase):
         return subprocess.run(command, env=env,
                               input=json.dumps(event), text=True, capture_output=True, check=True)
 
+    def move_to_id_layout(self, name):
+        """Moves the saved session `name` into the ID layout by hand, as a later
+        build will for a label in use (zerus-ucck P3): its label-index entry
+        first, then sessions/<id>.json and its ids/ entry, and the label's path
+        last. Returns its session ID and a reader of its new file."""
+        state = self.root / "state"
+        digest = hashlib.sha256(name.encode()).hexdigest()
+        label = state / f"{digest}.json"
+        record = json.loads(label.read_text())
+        session = record["session_id"]
+        for folder in ("labels", "sessions", "ids"):
+            (state / folder).mkdir(exist_ok=True)
+        index = (json.dumps(dict(version=1, label=name, ids=[session])) + "\n").encode()
+        (state / "labels" / f"{digest}.json").write_bytes(index)
+        # Then its manifest entry, when there is a manifest (#1437 review).
+        manifest = state / "labels" / ".complete"
+        if manifest.exists():
+            proof = json.loads(manifest.read_text())
+            proof["labels"][digest] = hashlib.sha256(index).hexdigest()
+            manifest.write_text(json.dumps(proof) + "\n")
+        moved = state / "sessions" / f"{session}.json"
+        moved.write_text(json.dumps(dict(record, layout="id")) + "\n")
+        (state / "ids" / f"{session}.json").write_text(json.dumps(dict(version=1, name=name, kind="id")) + "\n")
+        label.unlink()
+        return session, lambda: json.loads(moved.read_text())
+
     def saved_v1(self, agent="claude", base=None, tag="legacy"):
         """A pre-migration record, independent of the current writer's schema."""
         name, sid = f"{agent}/p/{tag}", str(uuid.uuid4())
@@ -1017,6 +1045,92 @@ class Harness(unittest.TestCase):
 class SessionIdentity(Harness):
     """zerus-ucck P1: the durable session ID. A class of its own keeps the
     pinned Lifecycle bodies unchanged (test_pause_signal_trace_source)."""
+
+    # zerus-ucck P2b: a new session keeps its history under its durable ID
+    # and the label it was launched with. Rename, pause and resume, a fresh
+    # start, an older writer's re-minted ID, archive and restore all keep that
+    # one journal, and no event is ever keyed by a label.
+    def test_a_new_session_keeps_its_history_under_its_id(self):
+        name = self.start(tag="journal")
+        first = self.binding(name)
+        journal = "session:" + first["session_id"]
+        self.assertEqual((first["journal_name"], first["launch_label"]), (journal, name))
+
+        def keys():
+            db = sqlite3.connect(self.root / "state/events.sqlite3")
+            try:
+                return {row[0] for row in db.execute("SELECT DISTINCT name FROM events")}
+            finally:
+                db.close()
+
+        def seqs(label):
+            return {event["seq"] for event in json.loads(self.hgs("inspect", label))["events"]}
+
+        def kept(label):
+            record = self.binding(label)
+            self.assertEqual((record["journal_name"], record["launch_label"]), (journal, name), label)
+            self.assertLessEqual(before, seqs(label), label)
+
+        self.wait(lambda: journal in keys())
+        before = seqs(name)
+        self.assertTrue(before)
+        renamed = "claude/p/journal-renamed"
+        self.hgs("rename", name, renamed)
+        kept(renamed)
+        self.hgs("pause", renamed)
+        self.resume(renamed)
+        kept(renamed)
+        self.hgs("pause", renamed)
+        conversation, run = self.binding(renamed)["conversation_id"], self.binding(renamed)["run_id"]
+        self.hgs("resume", renamed, "--fresh", "--expected-run-id", run, "-d")
+        self.wait(lambda: self.binding(renamed).get("conversation_id") not in (None, conversation))
+        kept(renamed)
+        # An older writer drops the ID; the re-minted one keeps the journal.
+        path = self.root / "state" / (hashlib.sha256(renamed.encode()).hexdigest() + ".json")
+        older = json.loads(path.read_text()); older.pop("session_id"); path.write_text(json.dumps(older) + "\n")
+        self.hgs("pause", renamed)
+        self.assertNotEqual(self.binding(renamed)["session_id"], first["session_id"])
+        kept(renamed)
+        self.hgs("archive", renamed)
+        archived = next(json.loads(p.read_text()) for p in (self.root / "state" / "archives").glob("*.json")
+                        if json.loads(p.read_text())["name"] == renamed)
+        self.assertEqual((archived["journal_name"], archived["launch_label"]), (journal, name))
+        self.hgs("resume", renamed, "--archive", archived["archive_id"], "-d")
+        self.wait(lambda: self.binding(renamed).get("activity") == "idle")
+        kept(renamed)
+        self.assertNotIn(name, keys())
+        self.assertNotIn(renamed, keys())
+
+    # #1408 review: `--fresh` over a saved, confirmed conversation is a new
+    # session with its own ID journal and launch label, and a name-only task
+    # for the replaced session's launch label never routes to it.
+    def test_a_fresh_launch_over_a_confirmed_session_is_a_new_session(self):
+        first = self.start(tag="w")
+        launched = self.binding(first)
+        self.hgs("rename", first, "claude/p/one")
+        self.hgs("pause", "claude/p/one")
+        old = self.binding("claude/p/one")
+        self.assertEqual((old["journal_name"], old["launch_label"]), ("session:" + launched["session_id"], first))
+        self.hgs("claude", "p", "-n", "one", "-d", "--fresh")
+        self.wait(lambda: self.binding("claude/p/one").get("conversation_id") not in (None, old["conversation_id"]))
+        fresh = self.binding("claude/p/one")
+        self.assertNotEqual(fresh["session_id"], old["session_id"])
+        self.assertEqual((fresh["journal_name"], fresh["launch_label"]),
+                         ("session:" + fresh["session_id"], "claude/p/one"))
+        catalog = {"projects": [{"id": "project-1", "name": "orchard", "color": "#123456",
+                                 "folders": [], "sessions": []}]}
+        initialized = subprocess.run([str(HGS), "swarm", "initialize"], input=json.dumps(catalog), env=self.env,
+                                     text=True, capture_output=True, timeout=30)
+        self.assertEqual(initialized.returncode, 0, initialized.stderr)
+
+        def target(label):
+            added = subprocess.run([str(HGS), "task", "add", "--project", "orchard", "--target", label],
+                                   input="Route me", env=self.env, text=True, capture_output=True, timeout=30)
+            self.assertEqual(added.returncode, 0, added.stdout + added.stderr)
+            return json.loads(added.stdout)["task"]["target"]["session"]
+
+        self.assertEqual(target(first), first, "the replaced session's launch label routes nowhere new")
+        self.assertEqual(target("claude/p/one"), "claude/p/one")
 
     # zerus-ucck P1: one durable session ID across pause and resume, a fresh
     # conversation, rename, archive and restore (a fork gets its own: see
@@ -1081,6 +1195,301 @@ class SessionIdentity(Harness):
         self.hgs("pause", legacy["name"])
         self.resume(legacy["name"])
         self.assertEqual(self.binding(legacy["name"])["session_id"], gained)
+
+    # zerus-ucck P3a: a session a later build moved into the ID layout, beside
+    # the label's first holder at its own path, is resumed, renamed and started
+    # fresh in place. Its supervisor and its agent's hooks write
+    # sessions/<id>.json, and the first holder stays byte-identical. An
+    # archive drops the layout; a restore needs a free label and is written
+    # at its path, as today.
+    def test_a_session_in_the_id_layout_stays_in_place(self):
+        name = self.start(tag="by-id")
+        self.send_event(name, "Stop", last_assistant_message="done")
+        self.hgs("pause", name)
+        session, held = self.move_to_id_layout(name)
+        state = self.root / "state"
+        label = lambda who: state / (hashlib.sha256(who.encode()).hexdigest() + ".json")
+        index = lambda who: state / "labels" / (hashlib.sha256(who.encode()).hexdigest() + ".json")
+        moved = state / "sessions" / f"{session}.json"
+        first = dict(held(), session_id=str(uuid.uuid4()), run_id=str(uuid.uuid4()),
+                     conversation_id=str(uuid.uuid4()))
+        first.pop("layout")
+        label(name).write_text(json.dumps(first) + "\n")
+        first_bytes = label(name).read_bytes()
+        def in_place(who):
+            record = held()
+            self.assertEqual((record["name"], record["session_id"], record["layout"]), (who, session, "id"))
+            self.assertEqual(json.loads(index(who).read_text())["ids"], [session])
+        # The label two sessions share names neither; its ID names the twin.
+        self.hgs("inspect", name, rc=5)
+        self.assertEqual(json.loads(self.hgs("inspect", "--session-id", session))["session_id"], session)
+        # #1437 review: commands that find their own session (hooks) are not
+        # resolved, an option's value is never a label, and an archive ID
+        # already selects exactly.
+        def call(*args):
+            # `hooks NAME --json` reads its request on stdin: give it none.
+            return subprocess.run([str(HGS), *args], env=self.env, capture_output=True, text=True,
+                                  timeout=20, input="")
+        for args in (["hooks", "--account", name, "--json"], ["hooks", name, "--json"]):
+            self.assertNotEqual(call(*args).returncode, 5, args)
+        archive_id = str(uuid.uuid4())
+        archived = dict(first, session_id=str(uuid.uuid4()), run_id=str(uuid.uuid4()), archive_id=archive_id,
+                        archived_at=time.time(), state="archived")
+        (state / "archives").mkdir(exist_ok=True)
+        (state / "archives" / f"{archive_id}.json").write_text(json.dumps(archived) + "\n")
+        self.assertEqual(json.loads(self.hgs("inspect", name, "--archive", archive_id))["run_id"], archived["run_id"])
+        (state / "archives" / f"{archive_id}.json").unlink()
+        # Resume by ID: the supervisor selects the twin, never the first holder.
+        previous = held()["run_id"]
+        self.hgs("resume", "--session-id", session, "-d")
+        self.wait(lambda: held()["run_id"] != previous and held().get("activity") == "idle"
+                  and not held().get("expected_id"))
+        in_place(name)
+        self.assertEqual(label(name).read_bytes(), first_bytes)
+        launched = json.loads((self.root / "argv.jsonl").read_text().splitlines()[-1])
+        self.assertEqual(launched["hgs_session_id"], session)
+        record = held()
+        def hook(prompt, who):
+            event = dict(session_id=record["conversation_id"], hook_event_name="UserPromptSubmit", prompt=prompt)
+            self.hook(event, dict(self.env, HGS_SESSION=who, HGS_RUN_ID=record["run_id"], HGS_SESSION_ID=session))
+        prompts = lambda: [e["detail"] for e in json.loads(self.hgs("inspect", "--session-id", session))["events"]
+                           if e["type"] == "UserPromptSubmit"]
+        hook("by its ID", name)
+        self.assertEqual(prompts(), ["by its ID"])
+        # Rename, live and by ID: the run keeps its record, and a hook still
+        # naming the shared label reaches it through ids/.
+        renamed = "claude/p/by-id-renamed"
+        self.hgs("rename", "--session-id", session, renamed)
+        in_place(renamed)
+        self.assertFalse(label(renamed).exists(), "nothing at the new label's path")
+        self.assertFalse(index(name).exists())
+        self.assertEqual(held()["run_id"], record["run_id"])
+        hook("after the rename", name)
+        self.assertEqual(prompts(), ["by its ID", "after the rename"])
+        self.assertEqual(label(name).read_bytes(), first_bytes)
+        # Start fresh keeps the session, and so its place.
+        self.send_event(renamed, "Stop", last_assistant_message="done")
+        self.hgs("pause", renamed)
+        conversation, run = held()["conversation_id"], held()["run_id"]
+        self.hgs("resume", renamed, "--fresh", "--expected-run-id", run, "-d")
+        self.wait(lambda: held().get("conversation_id") not in (None, conversation))
+        in_place(renamed)
+        self.assertFalse(label(renamed).exists())
+        # Archive: the session's record and both index entries go.
+        self.wait(lambda: held().get("activity") == "idle")
+        self.send_event(renamed, "Stop", last_assistant_message="done")
+        self.hgs("pause", renamed)
+        self.hgs("archive", renamed)
+        self.assertFalse(moved.exists())
+        self.assertFalse(index(renamed).exists())
+        self.assertFalse((state / "ids" / f"{session}.json").exists())
+        self.assertFalse(label(renamed).exists())
+        archived = next(json.loads(p.read_text()) for p in (state / "archives").glob("*.json")
+                        if json.loads(p.read_text())["session_id"] == session)
+        self.assertNotIn("layout", archived)
+        # Restore: at the free label's own path, with the same ID, even from
+        # an archive that still says it was in the ID layout.
+        kept = state / "archives" / f"{archived['archive_id']}.json"
+        kept.write_text(json.dumps(dict(archived, layout="id")) + "\n")
+        self.hgs("resume", renamed, "--archive", archived["archive_id"], "-d")
+        self.wait(lambda: self.binding(renamed).get("activity") == "idle")
+        restored = json.loads(label(renamed).read_text())
+        self.assertEqual(restored["session_id"], session)
+        self.assertNotIn("layout", restored)
+        self.assertFalse(moved.exists())
+        self.assertEqual(label(name).read_bytes(), first_bytes)
+
+
+    # zerus-ucck P3b: a terminal that hgs never started may hold a saved
+    # session's label. Resume then mints the session its own terminal name,
+    # label~<id8>, and every command acts on that terminal, never the other.
+    def test_a_resume_beside_an_untracked_terminal_takes_its_own_name(self):
+        name = self.start(tag="held")
+        session = self.binding(name)["session_id"]
+        self.send_event(name, "Stop", last_assistant_message="done")
+        self.hgs("pause", name)
+        own = f"{name}~{session[:8]}"
+        # A terminal some hgs launch started, such as this session's own
+        # resume still starting, keeps a resume away: never a second agent.
+        self.t("new-session", "-d", "-s", name, "-e", f"HGS_SESSION={name}", "sleep 600")
+        run = self.binding(name)["run_id"]
+        self.hgs("resume", name, "-d")
+        self.assertEqual(self.binding(name)["run_id"], run)
+        self.assertNotEqual(subprocess.run([str(self.bin / "tmux"), "has-session", "-t", "=" + own],
+                                           env=self.env, capture_output=True).returncode, 0)
+        self.t("kill-session", "-t", "=" + name)
+        self.t("new-session", "-d", "-s", name, "sleep 600")
+        self.resume(name)
+        record = self.binding(name)
+        self.assertEqual((record["session_id"], record["terminal_name"]), (session, own))
+        self.t("has-session", "-t", "=" + own)
+        self.t("has-session", "-t", "=" + name)
+        rows = json.loads(self.hgs("ls", "--local", "--json"))["sessions"]
+        mine = [row for row in rows if row.get("session_id") == session]
+        self.assertEqual(len(mine), 1, rows)
+        self.assertEqual((mine[0]["name"], mine[0]["tag"], mine[0]["run_id"]), (name, "held", record["run_id"]))
+        self.assertEqual(json.loads(self.hgs("inspect", name))["run_id"], record["run_id"])
+        self.assertIn("=" + own, self.hgs("kill", name, "--dry-run"))
+        # Pause stops the session's own terminal; the other one stays, and
+        # `--all` pauses sessions, not every terminal.
+        self.send_event(name, "Stop", last_assistant_message="done")
+        self.hgs("pause", "--all")
+        self.assertTrue(self.binding(name)["paused"])
+        self.t("has-session", "-t", "=" + name)
+        # A stale terminal name whose terminal is now another's: not live.
+        self.t("new-session", "-d", "-s", own, "sleep 600")
+        rows = json.loads(self.hgs("ls", "--local", "--json"))["sessions"]
+        self.assertFalse([row for row in rows if row.get("session_id") == session and row.get("run_id")
+                          and row.get("state") not in ("paused", "stopped")], rows)
+        # Both names taken: the whole session ID.
+        self.resume(name)
+        self.assertEqual(self.binding(name)["terminal_name"], f"{name}~{session}")
+        # Kill ends the session's own terminal only.
+        self.hgs("kill", name)
+        self.t("has-session", "-t", "=" + name)
+        self.t("has-session", "-t", "=" + own)
+        self.assertEqual(self.binding(name), {})
+
+
+    # zerus-ucck P3c: on a label two sessions share, the identities a command
+    # carries select the one session that has them: on its command line, or in
+    # its request. A command with none refuses with the ambiguity report (exit
+    # 5), and identities nobody carries leave the command's own stale refusal.
+    def test_a_shared_label_is_resolved_by_the_identities_a_command_carries(self):
+        name = self.start(tag="shared")
+        self.send_event(name, "Stop", last_assistant_message="done")
+        self.hgs("pause", name)
+        session, held = self.move_to_id_layout(name)
+        state = self.root / "state"
+        label = state / (hashlib.sha256(name.encode()).hexdigest() + ".json")
+        first = dict(held(), session_id=str(uuid.uuid4()), run_id=str(uuid.uuid4()),
+                     conversation_id=str(uuid.uuid4()))
+        first.pop("layout")
+        label.write_text(json.dumps(first) + "\n")
+        first_bytes = label.read_bytes()
+        twin = held()
+        def call(*args, request=None):
+            return subprocess.run([str(HGS), *args], env=self.env, capture_output=True, text=True,
+                                  timeout=20, input=json.dumps(request) if request is not None else "")
+        for args in (["inspect", name], ["pause", name], ["terminate", name]):
+            result = call(*args)
+            self.assertEqual(result.returncode, 5, (args, result.stdout, result.stderr))
+            self.assertIn("2 sessions on this computer are named", result.stderr)
+        def mark(record):
+            return dict(run_id=record["run_id"], conversation_id=record["conversation_id"],
+                        reply_id=None, attention_signature=None)
+        for record in (twin, first):
+            result = call("read", name, "--json", request=mark(record))
+            self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
+            self.assertNotEqual(json.loads(result.stdout).get("error"), "not_found", result.stdout)
+        # A run that none of them carries selects none and reopens none: the
+        # stale refusal, exit 1, and the first holder's marks stay untouched
+        # (#1454 review).
+        marks = state / "read-marks.json"
+        marks_before = marks.read_bytes() if marks.exists() else None
+        nobody = call("read", name, "--json", request=mark(dict(first, run_id=str(uuid.uuid4()))))
+        self.assertEqual(nobody.returncode, 1, nobody.stdout + nobody.stderr)
+        self.assertIn("refresh and retry", nobody.stderr)
+        self.assertEqual(marks.read_bytes() if marks.exists() else None, marks_before)
+        # Identities that several of them carry select none: the command
+        # refuses with the ambiguity report, exit 5, and its value under --json.
+        label.write_text(json.dumps(dict(first, run_id=twin["run_id"],
+                                         conversation_id=twin["conversation_id"])) + "\n")
+        both = call("read", name, "--json", request=mark(twin))
+        label.write_bytes(first_bytes)
+        self.assertEqual(both.returncode, 5, both.stdout + both.stderr)
+        self.assertEqual(json.loads(both.stdout.splitlines()[-1])["error"], "ambiguous_session", both.stdout)
+        # A command-line guard: terminate acts on exactly the twin.
+        self.hgs("terminate", name, "--expected-run-id", twin["run_id"])
+        self.assertFalse((state / "sessions" / f"{session}.json").exists())
+        self.assertEqual(label.read_bytes(), first_bytes)
+        archived = [json.loads(p.read_text()) for p in (state / "archives").glob("*.json")]
+        self.assertIn(session, [entry.get("session_id") for entry in archived])
+
+    # #1445 review (review-q2): a terminal name whose pane and run are not the
+    # record's never makes a session live or hides it. A rename of a paused
+    # session clears its old terminal name; a stale one, as the first P3b
+    # head left it, held by another session's launch, changes nothing either.
+    def test_another_sessions_terminal_never_hides_a_renamed_session(self):
+        old = self.start(tag="old")
+        session = self.binding(old)["session_id"]
+        self.send_event(old, "Stop", last_assistant_message="done")
+        self.hgs("pause", old)
+        renamed = "claude/p/renamed"
+        self.hgs("rename", old, renamed)
+        self.assertNotIn("terminal_name", self.binding(renamed))
+        path = self.root / "state" / (hashlib.sha256(renamed.encode()).hexdigest() + ".json")
+        path.write_text(json.dumps(dict(json.loads(path.read_text()), terminal_name=old)) + "\n")
+        other = self.start(tag="old")
+        self.assertNotEqual(self.binding(other)["session_id"], session)
+        rows = json.loads(self.hgs("ls", "--local", "--json"))["sessions"]
+        mine = [row for row in rows if row.get("session_id") == session]
+        self.assertEqual([(row["name"], row.get("state")) for row in mine], [(renamed, "paused")], rows)
+        self.resume(renamed)
+        self.assertEqual(self.binding(renamed)["terminal_name"], renamed)
+        self.hgs("kill", renamed)
+        self.t("has-session", "-t", "=" + other)
+        self.assertTrue(self.binding(other)["conversation_id"])
+
+    # #1445 review: the session's own launch may start under any name a launch
+    # of it can mint, not only its recorded terminal name (here one a suffixed
+    # run left). A launch of its label holding any of them keeps a resume away.
+    def test_a_starting_launch_under_any_minted_name_keeps_resume_away(self):
+        name = self.start(tag="minted")
+        self.send_event(name, "Stop", last_assistant_message="done")
+        self.hgs("pause", name)
+        before = self.binding(name)
+        path = self.root / "state" / (hashlib.sha256(name.encode()).hexdigest() + ".json")
+        stale = f"{name}~{before['session_id'][:8]}"
+        path.write_text(json.dumps(dict(json.loads(path.read_text()), terminal_name=stale)) + "\n")
+        self.t("new-session", "-d", "-s", name, "-e", f"HGS_SESSION={name}", "sleep 600")
+        self.hgs("resume", name, "-d")
+        self.assertEqual(self.binding(name)["run_id"], before["run_id"])
+        for minted in (stale, f"{name}~{before['session_id']}"):
+            self.assertNotEqual(subprocess.run([str(self.bin / "tmux"), "has-session", "-t", "=" + minted],
+                                               env=self.env, capture_output=True).returncode, 0)
+
+    # #1445 review (desktop-u): a terminal environment that cannot be read is
+    # never proof that hgs did not start it. A resume beside a terminal some
+    # launch marked refuses when the environment read fails, at the first
+    # check or only at the final one under the lock, and starts nothing.
+    def test_an_unreadable_launch_environment_never_starts_a_second_resume(self):
+        name = self.start(tag="env-unavailable")
+        self.send_event(name, "Stop", last_assistant_message="done")
+        self.hgs("pause", name)
+        before = self.binding(name)
+        own = f"{name}~{before['session_id'][:8]}"
+        self.t("new-session", "-d", "-s", name, "-e", f"HGS_SESSION={name}", "sleep 600")
+        original = (self.bin / "tmux").read_text()
+        calls = self.root / "show-environment-calls"
+        # A marked launch read at the first check; then an unmarked terminal,
+        # read healthily at the first check and unreadable at the final one.
+        for healthy in (0, 1):
+            if healthy:
+                self.t("kill-session", "-t", "=" + name)
+                self.t("new-session", "-d", "-s", name, "sleep 600")
+            calls.write_text("")
+            (self.bin / "tmux").write_text(
+                "#!/bin/sh\n"
+                'if [ "$1" = show-environment ]; then\n'
+                f"  echo x >> {shlex.quote(str(calls))}\n"
+                f"  if [ \"$(wc -l < {shlex.quote(str(calls))})\" -gt {healthy} ]; then\n"
+                "    echo 'fixture environment unreadable' >&2\n    exit 63\n  fi\nfi\n"
+                + original.split("\n", 1)[1])
+            result = subprocess.run([str(HGS), "resume", name, "-d"], env=self.env,
+                                    capture_output=True, text=True, timeout=20, input="")
+            (self.bin / "tmux").write_text(original)
+            self.assertGreater(len(calls.read_text().splitlines()), healthy, "the read was reached")
+            self.assertNotEqual(result.returncode, 0, result.stdout + result.stderr)
+            self.assertIn("cannot be read", result.stderr)
+            self.assertNotEqual(subprocess.run([str(self.bin / "tmux"), "has-session", "-t", "=" + own],
+                                               env=self.env, capture_output=True).returncode, 0)
+            self.assertEqual(self.binding(name)["run_id"], before["run_id"])
+        # Readable again: the marked launch still keeps the resume away.
+        self.t("kill-session", "-t", "=" + name)
+        self.t("new-session", "-d", "-s", name, "-e", f"HGS_SESSION={name}", "sleep 600")
+        self.hgs("resume", name, "-d")
+        self.assertEqual(self.binding(name)["run_id"], before["run_id"])
 
 
     # zerus-ucck P1b: --session-id selects the session a command names first,
@@ -3041,6 +3450,60 @@ os.execvp("codex", ["codex", *sys.argv[1:]])
         self.assert_launcher_runs(failed["run_id"], self.binding(name)["run_id"])
         argv = json.loads((self.root / "launcher-runs.jsonl").read_text().splitlines()[-1])["argv"]
         self.assertEqual(argv[argv.index("resume"):argv.index("resume") + 2], ["resume", requested])
+
+    # zerus-ucck P2b (#1408 review): a retry of an unconfirmed attempt keeps
+    # that attempt's journal and launch label, through either arm of
+    # attempts::retryable; its new run still gets a session ID of its own.
+    def test_a_retry_continues_the_failed_attempt_s_journal(self):
+        self.gate.write_text("7")
+        name = self.launch()
+        failed = self.wait_failed(name)
+        self.assertEqual(failed["journal_name"], "session:" + failed["session_id"])
+        self.gate.unlink()
+        self.assertEqual(self.launch(), name)
+        self.wait(lambda: self.binding(name).get("conversation_id"))
+        retried = self.binding(name)
+        self.assertNotEqual(retried["session_id"], failed["session_id"])
+        self.assertEqual((retried["journal_name"], retried["launch_label"]),
+                         (failed["journal_name"], failed["launch_label"]))
+
+    # zerus-ucck P3a: a retry over an unconfirmed attempt that a later build
+    # left in the ID layout gets its own ID at the label's path; the attempt
+    # is preserved as before, and its record goes with its index entries, so
+    # no stale twin stays.
+    def test_a_retry_replaces_an_attempt_in_the_id_layout(self):
+        self.gate.write_text("7")
+        name = self.launch()
+        failed = self.wait_failed(name)
+        session, _ = self.move_to_id_layout(name)
+        state = self.root / "state"
+        digest = hashlib.sha256(name.encode()).hexdigest()
+        self.gate.unlink()
+        self.assertEqual(self.launch(), name)
+        self.wait(lambda: self.binding(name).get("conversation_id"))
+        retried = json.loads((state / f"{digest}.json").read_text())
+        self.assertNotEqual(retried["session_id"], session)
+        self.assertNotIn("layout", retried)
+        self.assertEqual(retried["journal_name"], failed["journal_name"])
+        self.assertFalse((state / "sessions" / f"{session}.json").exists())
+        self.assertFalse((state / "labels" / f"{digest}.json").exists())
+        self.assertFalse((state / "ids" / f"{session}.json").exists())
+        self.assertEqual([record["run_id"] for record in self.attempts()], [failed["run_id"]])
+
+    def test_a_retry_of_a_requested_id_continues_its_journal(self):
+        requested = str(uuid.uuid4())
+        self.gate.write_text("7")
+        name = self.launch("-c", requested)
+        failed = self.wait_failed(name)
+        self.assertEqual((failed["requested_id"], failed["expected_id"]), (requested, requested))
+        self.gate.unlink()
+        self.hgs("codex", "-n", "dashboard", "-c", requested, "-d", cwd=self.project)
+        self.wait(lambda: self.binding(name).get("conversation_id") == requested and
+                  self.binding(name).get("activity") == "idle")
+        retried = self.binding(name)
+        self.assertEqual((retried["journal_name"], retried["launch_label"]),
+                         (failed["journal_name"], failed["launch_label"]))
+        self.assertEqual([record["run_id"] for record in self.attempts()], [failed["run_id"]])
 
     def test_repeated_failed_attempts_are_preserved_separately(self):
         failed = []

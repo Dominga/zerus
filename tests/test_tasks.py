@@ -456,6 +456,64 @@ class TaskCommands(Fixture):
         listing = self.hgs("list", "--project", "orchard")
         self.assertEqual(len(listing["tasks"]), 1)
         self.assertEqual(len(listing["damaged"]), 1)
+        self.assertNotIn("kept", listing["damaged"][0])
+        self.assertEqual(listing["damaged"][0]["recovery"], "depends_on_incoming_copy")
+
+    def test_a_damaged_task_cut_over_here_is_listed_as_kept_for_review(self):
+        # zerus-cg5h.4.2: a copy this computer cut over to execution attempts
+        # (its mark beside the files) is told apart from damage whose
+        # recovery depends on the copy that arrives; torn local updates are
+        # kept too. What is shown is only what is known here.
+        project = None
+        uuids = {}
+        for name in ("Kept", "Ordinary", "Torn"):
+            task = self.add(name)
+            project = project or next(p for p in (self.state / "replica").iterdir() if p.is_dir())
+            (project / "tasks" / (task["uuid"] + ".loro")).write_bytes(b"broken")
+            uuids[name] = task["uuid"]
+        (project / "tasks" / (uuids["Kept"] + ".managed")).write_text('{"snapshot":{}}')
+        (project / "tasks" / (uuids["Torn"] + ".updates")).write_bytes(b"\x07")
+        expected = {
+            uuids["Kept"]: {"kept": True, "kept_reason": "marked"},
+            uuids["Ordinary"]: {"recovery": "depends_on_incoming_copy"},
+            uuids["Torn"]: {"kept": True, "kept_reason": "unreadable_local_data"},
+        }
+        for listing in (self.hgs("list", "--project", "orchard"),
+                        self.hgs("list", "--project", "orchard", "--stage", "todo", "--limit", "5")):
+            rows = {d["uuid"]: {k: v for k, v in d.items() if k not in ("uuid", "error")}
+                    for d in listing["damaged"]}
+            self.assertEqual(rows, expected)
+        # Removing the mark is read at once.
+        (project / "tasks" / (uuids["Kept"] + ".managed")).unlink()
+        page = self.hgs("list", "--project", "orchard", "--stage", "todo", "--limit", "5")
+        row = next(d for d in page["damaged"] if d["uuid"] == uuids["Kept"])
+        self.assertEqual(row.get("recovery"), "depends_on_incoming_copy")
+        self.assertNotIn("kept", row)
+
+
+    def test_the_cutover_status_and_a_person_s_hold(self):
+        # zerus-cg5h.4 S2b.2 C2: information only; the hold is a person's.
+        task = self.add("Add rate limiting")
+        status = self.hgs("cutover", "--project", "orchard")
+        self.assertEqual((status["phase"], status["cut_over_tasks"], status["members"], status["closed"]),
+                         ("not_cut_over", 0, [], None))
+        self.assertEqual(status["hold"], {"on": False, "by": None, "at": None})
+        self.assertIn("only a person", self.hgs("cutover", "--project", "orchard", "--hold", "on",
+                                               ok=False, session="codex/api"))
+        held = self.hgs("cutover", "--project", "orchard", "--hold", "on")["hold"]
+        self.assertEqual((held["on"], held["by"]["kind"]), (True, "person"))
+        self.assertIsInstance(held["at"], int)
+        # Clearing it needs an explicit confirmation.
+        self.assertIn("--confirm", self.hgs("cutover", "--project", "orchard", "--hold", "off", ok=False))
+        self.assertTrue(self.hgs("cutover", "--project", "orchard")["hold"]["on"])
+        self.assertFalse(self.hgs("cutover", "--project", "orchard", "--hold", "off", "--confirm")["hold"]["on"])
+        self.assertIn("on or off", self.hgs("cutover", "--project", "orchard", "--hold", "maybe", ok=False))
+        # A task cut over here, with no other member, is active.
+        project = next(p for p in (self.state / "replica").iterdir() if p.is_dir())
+        (project / "tasks" / (task["uuid"] + ".managed")).write_text('{"saved":{}}')
+        status = self.hgs("cutover", "--project", "orchard")
+        self.assertEqual((status["phase"], status["cut_over_tasks"], status["closed"]), ("active", 1, None))
+        self.assertIsInstance(status["last_cutover_write"], int)
 
 
 class AgentIdentity(Fixture):

@@ -35,7 +35,7 @@ use zerus_client_core::details::{
     Details, SubagentIdentity,
 };
 use zerus_client_core::marks::{AttentionMarks, Mark};
-use zerus_client_core::readmarks::{ReadMark, ReadMarks};
+use zerus_client_core::readmarks::{Queued, ReadMark, ReadMarks};
 use zerus_client_core::reads::{self, ArchivePage};
 use zerus_client_core::session_selector::{self, selected_invocation};
 use zerus_client_core::shell::{current_shell, open_command};
@@ -303,10 +303,15 @@ impl Actions {
     /// A target without a run, or a run the listing no longer shows, has none
     /// and keeps its name and run form.
     fn listed_session_id(&self, target: &Target) -> Option<String> {
+        self.run_session_id(&target.computer, &target.run_id)
+    }
+
+    /// The durable session ID the listing reports for `computer`'s exact run.
+    fn run_session_id(&self, computer: &str, run: &str) -> Option<String> {
         self.termination_pump
             .get()?
             .upgrade()?
-            .run_session_id(&target.computer, &target.run_id)
+            .run_session_id(computer, run)
     }
 
     /// Sets, once, what runs whenever a write mark appears or goes: the
@@ -471,11 +476,22 @@ impl Actions {
     /// (`ReadMarkStore::add`), wakes the delivery worker and returns what is
     /// pending. No file I/O: the worker writes the marks before it sends any
     /// ([`Actions::flush_marks`]).
-    pub fn queue_marks(&self, marks: Vec<ReadMark>) -> Result<Vec<ReadMark>, String> {
+    ///
+    /// Each mark is queued under the durable session ID the listing reports
+    /// for its exact run (zerus-ucck P2c-2b), read from Rust's own rows
+    /// before the queue is locked; the webview never supplies one.
+    pub fn queue_marks(&self, marks: Vec<ReadMark>) -> Result<Vec<Queued>, String> {
         let _admission = self.admit_marks()?;
+        let identified: Vec<_> = marks
+            .into_iter()
+            .map(|mark| {
+                let id = self.run_session_id(&mark.computer, &mark.run_id);
+                (mark, id)
+            })
+            .collect();
         let (added, pending) = {
             let mut store = self.marks.lock().unwrap_or_else(PoisonError::into_inner);
-            (store.add_all(marks), store.pending())
+            (store.add_identified(identified), store.queued())
         };
         self.wake.notify();
         if added {
@@ -519,6 +535,14 @@ impl Actions {
         if dropped {
             self.listener.changed();
         }
+    }
+
+    /// The marks not settled yet, with their session IDs.
+    pub(crate) fn queued_marks(&self) -> Vec<Queued> {
+        self.marks
+            .lock()
+            .unwrap_or_else(PoisonError::into_inner)
+            .queued()
     }
 
     /// The marks not settled yet.
@@ -592,7 +616,12 @@ impl Actions {
                 .iter()
                 .map(|out| out.row.name.as_str())
                 .collect();
-            changed |= marks.drop_unlisted(&replace.computer.0, &names);
+            let ids: HashSet<&str> = replace
+                .rows
+                .iter()
+                .filter_map(|out| out.row.session_id.as_deref())
+                .collect();
+            changed |= marks.drop_unlisted(&replace.computer.0, &names, &ids);
         }
         drop(marks);
         if changed {
@@ -1524,19 +1553,25 @@ async fn dispatch_reserved_original(
     {
         // Admission precedes both persistence and the native read effect.
         let _admission = state.admit_marks()?;
+        // Queued under the session ID the listing reports for the run, as
+        // queue_read_marks does (#1421 review), read before the queue lock.
+        let session_id = state.run_session_id(&target.computer, &target.run_id);
         // Saved before the call, so the mark survives a crash during it.
         state
             .marks
             .lock()
             .unwrap_or_else(PoisonError::into_inner)
-            .add(ReadMark {
-                computer: target.computer.clone(),
-                name: target.name.clone(),
-                run_id: target.run_id.clone(),
-                conversation_id: target.conversation_id.clone(),
-                reply_id: reply_id.clone(),
-                attention_signature: attention_signature.clone(),
-            });
+            .add_with_id(
+                ReadMark {
+                    computer: target.computer.clone(),
+                    name: target.name.clone(),
+                    run_id: target.run_id.clone(),
+                    conversation_id: target.conversation_id.clone(),
+                    reply_id: reply_id.clone(),
+                    attention_signature: attention_signature.clone(),
+                },
+                session_id,
+            );
     }
     // Building the call may read dropped files, so it runs off the async
     // workers with the call itself.
@@ -2125,7 +2160,7 @@ pub fn copy_command(computer: String, name: String, archive_id: Option<String>) 
 
 /// Read marks the host has not shown yet, for the store to apply optimistically.
 #[tauri::command]
-pub fn pending_read_marks(state: State<'_, Actions>) -> Vec<ReadMark> {
+pub fn pending_read_marks(state: State<'_, Actions>) -> Vec<Queued> {
     if crate::desktop_service::mode() {
         // Service rows get indexed retained overlays at next_batch instead of
         // mirroring the complete frozen queue into the webview a second time.
@@ -2135,7 +2170,7 @@ pub fn pending_read_marks(state: State<'_, Actions>) -> Vec<ReadMark> {
         .marks
         .lock()
         .unwrap_or_else(PoisonError::into_inner)
-        .pending()
+        .queued()
 }
 
 /// Queues read marks for their hosts (`FleetState::queueRead`): each is merged
@@ -2147,7 +2182,7 @@ pub fn pending_read_marks(state: State<'_, Actions>) -> Vec<ReadMark> {
 pub fn queue_read_marks(
     state: State<'_, Actions>,
     marks: Vec<ReadMark>,
-) -> Result<Vec<ReadMark>, String> {
+) -> Result<Vec<Queued>, String> {
     if crate::desktop_service::mode() {
         return Err("Use the background service read-intent route.".into());
     }
@@ -2458,7 +2493,7 @@ mod tests {
                     .join(format!("zerus-cleanup-test-{}.json", uuid::Uuid::new_v4())),
             );
             let target = review();
-            let source = json!({"name":target.name,"run_id":target.run_id,"conversation_id":target.conversation_id,"state":"running","tracked":true,"cmd":"claude","git_worktree":true,"git_root":"/srv/example/work","git_common_dir":"/srv/example/.git","worktree_owner_id":"owner-1"});
+            let source = json!({"name":target.name,"run_id":target.run_id,"conversation_id":target.conversation_id,"runtime_state":"live","tracked":true,"agent":"claude","git_worktree":true,"git_root":"/srv/example/work","git_common_dir":"/srv/example/.git","worktree_owner_id":"owner-1"});
             let capture =
                 Capture::from_inspection(&target, "11111111-1111-4111-8111-111111111111", &source)
                     .unwrap()
@@ -3009,6 +3044,122 @@ mod tests {
         let weak = pump.downgrade();
         actions.set_termination_pump(pump);
         assert!(weak.upgrade().is_none());
+    }
+
+    /// zerus-ucck P2c-2b: a queued mark takes the session ID the listing
+    /// reports for its exact run, so two sessions that share a label keep
+    /// their own marks; a run the listing does not show stays by name.
+    #[test]
+    fn read_marks_are_queued_by_the_listed_session_id() {
+        use zerus_client_core::{Change, ComputerStatus};
+        let path =
+            std::env::temp_dir().join(format!("zerus-marks-by-id-{}.json", std::process::id()));
+        let _ = std::fs::remove_file(&path);
+        let actions = Actions::new(path.clone());
+        let pump = crate::pump::Pump::default();
+        let computer = ComputerId::from("mac");
+        pump.push(Change::Computer {
+            computer: computer.clone(),
+            status: ComputerStatus::Live,
+        });
+        let ids = [
+            "3f2a9c1d-6b7e-4c2a-9d1f-0a1b2c3d4e5f",
+            "7be01d44-6b7e-4c2a-9d1f-0a1b2c3d4e5f",
+        ];
+        for (run, id) in [("run-a", ids[0]), ("run-b", ids[1])] {
+            pump.push(Change::Upsert {
+                computer: computer.clone(),
+                key: format!("run:{run}"),
+                row: ViewRow {
+                    name: "claude/sample-project/review".into(),
+                    run_id: Some(run.into()),
+                    session_id: Some(id.into()),
+                    state: "running".into(),
+                    ..Default::default()
+                },
+            });
+        }
+        actions.set_termination_pump(pump.clone());
+        let mark = |run: &str, reply: &str| ReadMark {
+            computer: "mac".into(),
+            name: "claude/sample-project/review".into(),
+            run_id: run.into(),
+            conversation_id: format!("conv-{run}"),
+            reply_id: Some(reply.into()),
+            attention_signature: None,
+        };
+        let queued = actions
+            .queue_marks(vec![
+                mark("run-a", "r1"),
+                mark("run-b", "r2"),
+                mark("run-gone", "r3"),
+            ])
+            .unwrap();
+        let mut found: Vec<_> = queued
+            .iter()
+            .map(|q| (q.mark.run_id.as_str(), q.session_id.as_deref()))
+            .collect();
+        found.sort();
+        assert_eq!(
+            found,
+            [
+                ("run-a", Some(ids[0])),
+                ("run-b", Some(ids[1])),
+                ("run-gone", None)
+            ]
+        );
+        let _ = std::fs::remove_file(&path);
+        drop(pump);
+    }
+
+    /// #1421 review (1): an explicit Mark read is queued, and saved before
+    /// its call, under the session ID the listing reports for its run.
+    #[test]
+    fn an_explicit_mark_read_is_queued_by_the_listed_session_id() {
+        use zerus_client_core::{Change, ComputerStatus};
+        let target = Target {
+            computer: "studio".into(),
+            ..review()
+        };
+        let path =
+            std::env::temp_dir().join(format!("zerus-markread-by-id-{}.json", std::process::id()));
+        let _ = std::fs::remove_file(&path);
+        let actions = Actions::new(path.clone());
+        let pump = crate::pump::Pump::default();
+        let computer = ComputerId::from("studio");
+        pump.push(Change::Computer {
+            computer: computer.clone(),
+            status: ComputerStatus::Live,
+        });
+        pump.push(Change::Upsert {
+            computer,
+            key: format!("run:{}", target.run_id),
+            row: ViewRow {
+                name: target.name.clone(),
+                run_id: Some(target.run_id.clone()),
+                session_id: Some(SELECTED.into()),
+                state: "running".into(),
+                ..Default::default()
+            },
+        });
+        actions.set_termination_pump(pump.clone());
+        // The host cannot be reached: the saved mark stays to be retried.
+        let (outcome, _) = selector_dispatch(
+            &actions,
+            &target,
+            Action::MarkRead {
+                reply_id: Some("r1".into()),
+                attention_signature: None,
+            },
+            exit(0, "usage\n", ""),
+            exit(255, "", "ssh: connect to host studio: Connection refused"),
+        );
+        let queued = ReadMarks::load(path.clone()).queued();
+        assert_eq!(queued.len(), 1, "{outcome:?}");
+        assert_eq!(queued[0].session_id.as_deref(), Some(SELECTED));
+        assert_eq!(queued[0].mark.name, target.name);
+        let _ = std::fs::remove_file(&path);
+        drop(pump);
     }
 
     /// zerus-ucck P1c fixture: a live computer listing `target`'s run under
@@ -4012,7 +4163,8 @@ mod tests {
             ])
             .unwrap();
         let expected = vec![mark("claude/sample-project/review", Some("r1"), Some("s1"))];
-        assert_eq!(pending, expected);
+        let marks: Vec<ReadMark> = pending.into_iter().map(|queued| queued.mark).collect();
+        assert_eq!(marks, expected);
         assert_eq!(actions.pending_marks(), expected);
         // The command does no file I/O; the worker flushes before it sends.
         assert!(!path.exists());

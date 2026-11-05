@@ -263,7 +263,7 @@ export function SessionDetail() {
               <Switch>
                 <Match when={detailTab() === "activity"}>
                   <div class="activity-wrap" classList={{ "has-goal": !!goal().objective }} style={columnStyle()}>
-                    <Show when={goal().objective}><button class="goal-pill" onClick={() => openInspector("plan")}><Icon name="circle-dot" size={13} /><b>{tr("Pursuing goal")}</b><span class="ell">{goal().objective}</span><span class="grow" /><span>{tr("Details")}</span><Icon name="chevron-right" size={12} /></button></Show>
+                    <Show when={goal().objective}><button class="goal-pill" onClick={() => openInspector("plan")}><Icon name="circle-dot" size={13} /><b>{goal().caption}</b><span class="ell">{goal().objective}</span><span class="grow" /><span>{tr("Details")}</span><Icon name="chevron-right" size={12} /></button></Show>
                     <ActivityView source={activitySourceFor(selected()!.key)} />
                     {/* Child Activity stays read-only; its own composer opens only when the inspection supports send. */}
                     <Show when={!subagentOpen()}>

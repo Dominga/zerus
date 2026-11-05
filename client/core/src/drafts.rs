@@ -45,13 +45,14 @@ pub fn dir(replay: bool) -> &'static str {
 }
 
 pub const NOT_RESTORED: &str =
-    "Could not restore this draft completely. Saved files have been kept locally.";
+    crate::source!("Could not restore this draft completely. Saved files have been kept locally.");
 pub const INTERRUPTED: &str =
-    "Delivery was interrupted. Check Activity or Terminal before sending again.";
+    crate::source!("Delivery was interrupted. Check Activity or Terminal before sending again.");
 /// A reloaded draft that holds a reserved deferred input but was not saved
 /// while sending (a continuation's start or compaction may have run): it
 /// stays uncertain until the user allows a retry (zerus-5wmh.66.4.4).
-pub const UNCONFIRMED: &str = "Delivery is not confirmed. Check Terminal before retrying.";
+pub const UNCONFIRMED: &str =
+    crate::source!("Delivery is not confirmed. Check Terminal before retrying.");
 pub const ALREADY_EXISTS: &str =
     "Another draft already exists here. Recover the previous one from Saved drafts.";
 /// A write refused for this run: the store's earlier drafts could not be
@@ -66,6 +67,19 @@ const CHECKPOINT: &str = "deferred_input";
 /// Saved drafts skips larger manifests.
 pub(crate) const MAX_MANIFEST: u64 = 1024 * 1024;
 const PREVIEW_CHARS: usize = 200;
+/// The session part of a draft key for a session with a durable ID
+/// (`machine\nid:<session_id>`), zerus-ucck P2c-2. Session names never hold
+/// `:` (tmux turns it into `_`), so the part never names a session.
+pub const SESSION_ID_PREFIX: &str = "id:";
+
+/// A draft key's session part: `id:<session_id>` when the session carries a
+/// canonical durable ID, else its name, as every key was before.
+pub fn session_part(name: &str, session_id: Option<&str>) -> String {
+    match session_id.filter(|id| crate::creation::canonical_uuid(id)) {
+        Some(id) => format!("{SESSION_ID_PREFIX}{id}"),
+        None => name.to_owned(),
+    }
+}
 
 /// One stored draft: the composer's text and attachments and what Qt keeps
 /// with them.
@@ -79,6 +93,10 @@ pub struct StoredDraft {
     pub label: String,
     /// The owner's form fields, such as a task's title.
     pub form_state: Map<String, Value>,
+    /// The session's label at the save of a draft keyed by session ID:
+    /// Saved drafts names the draft by it while its session is not listed.
+    /// Empty for every other key, whose manifest then keeps its exact bytes.
+    pub session_label: String,
     /// Saved while the message was being sent.
     pub sending: bool,
     pub uncertain: bool,
@@ -87,6 +105,17 @@ pub struct StoredDraft {
     /// Data only: nothing sends from it, and an imported or recovered draft
     /// never carries one.
     pub checkpoint: Option<Box<Checkpoint>>,
+}
+
+/// Whether two stored drafts are the same in everything they store: text,
+/// attachment bytes, cursor, label, form state, delivery flags and reserved
+/// input. Only the session label, which a move adds, may differ.
+fn same_apart_from_label(a: &StoredDraft, b: &StoredDraft) -> bool {
+    let unlabelled = |draft: &StoredDraft| StoredDraft {
+        session_label: String::new(),
+        ..draft.clone()
+    };
+    unlabelled(a) == unlabelled(b)
 }
 
 impl StoredDraft {
@@ -98,6 +127,12 @@ impl StoredDraft {
     /// an unresolved deferred input even without content.
     fn occupied(&self) -> bool {
         !self.is_empty() || self.checkpoint.is_some()
+    }
+
+    /// Anything a one-time move carries or must never overwrite: content, a
+    /// reserved input, or form state such as an answer's chosen options.
+    fn held(&self) -> bool {
+        self.occupied() || !self.form_state.is_empty()
     }
 }
 
@@ -121,6 +156,9 @@ pub struct Summary {
     /// The manifest's modification time, in seconds since the epoch.
     pub modified: f64,
     pub attachments: usize,
+    /// [`StoredDraft::session_label`].
+    #[serde(default)]
+    pub session_label: String,
 }
 
 /// Whose conversation a draft key names. Message, subagent, question-answer,
@@ -152,6 +190,10 @@ pub struct Owner {
     pub subagent: String,
     pub project: String,
     pub task: String,
+    /// The durable session ID of a key whose session part is
+    /// `id:<session_id>`; [`Owner::session`] then holds that part.
+    #[serde(default)]
+    pub session_id: String,
 }
 
 /// The owner of a draft key (`ComposerDraftStore::owner`).
@@ -212,6 +254,12 @@ pub fn owner(key: &str) -> Owner {
         session: parts[1].into(),
         ..Owner::default()
     };
+    if let Some(id) = parts[1].strip_prefix(SESSION_ID_PREFIX) {
+        if !crate::creation::canonical_uuid(id) {
+            return Owner::default();
+        }
+        result.session_id = id.into();
+    }
     if parts.len() == 4 {
         if parts[3].is_empty() {
             return Owner::default();
@@ -347,6 +395,10 @@ fn save_direct(root: &Path, key: &str, draft: &StoredDraft) -> Result<(), String
         "sending": draft.sending, "uncertain": draft.uncertain,
         "attachments": attachments,
     });
+    // Only a draft keyed by session ID adds its session's label.
+    if !draft.session_label.is_empty() {
+        manifest["session_label"] = json!(draft.session_label);
+    }
     // Only a reserved deferred input adds its field: every other manifest
     // keeps its exact earlier bytes.
     if let Some(checkpoint) = &draft.checkpoint {
@@ -425,6 +477,7 @@ fn load_once(root: &Path, key: &str) -> (StoredDraft, bool) {
             .and_then(Value::as_object)
             .cloned()
             .unwrap_or_default(),
+        session_label: text("session_label"),
         sending: flag("sending"),
         uncertain: flag("uncertain"),
         checkpoint: None,
@@ -568,18 +621,21 @@ fn summary(root: &Path, folder: &str, modified_ns: u64) -> Option<(String, Summa
                 .collect()
         })
         .unwrap_or_default();
-    let label = object
-        .get("label")
-        .and_then(Value::as_str)
-        .unwrap_or("")
-        .into();
+    let field = |name: &str| {
+        object
+            .get(name)
+            .and_then(Value::as_str)
+            .unwrap_or("")
+            .into()
+    };
     Some((
         key.to_owned(),
         Summary {
-            label,
+            label: field("label"),
             preview,
             modified: modified_ns as f64 / 1e9,
             attachments,
+            session_label: field("session_label"),
         },
     ))
 }
@@ -966,6 +1022,64 @@ impl DraftStore {
         );
     }
 
+    /// The one-time move of a session's draft from its name key to its
+    /// session ID key (zerus-ucck P2c-2), on the writer like a rename: only
+    /// when `key` holds nothing and `legacy` holds a valid draft. The draft
+    /// moves as stored, with its delivery state and reserved input, and is
+    /// labelled `session_label` when it has no label of its own. The old key
+    /// is emptied only after the new one is durable, so a failure leaves both
+    /// recoverable and nothing is overwritten: a draft with content, a
+    /// reserved input or form state counts. When the ID key already holds the
+    /// same draft, apart from the session label the move adds, a crash cut an
+    /// earlier move short, and the name key is emptied now. `done` gets
+    /// whether it moved or finished a move.
+    pub fn adopt(
+        &self,
+        legacy: &str,
+        key: &str,
+        session_label: &str,
+        done: impl FnOnce(bool) + Send + 'static,
+    ) {
+        let (root, fence) = (self.root.clone(), self.fence.clone());
+        let (legacy, owned, label) = (legacy.to_owned(), key.to_owned(), session_label.to_owned());
+        self.writer.enqueue(
+            key,
+            false,
+            Box::new(move || {
+                if legacy.is_empty() || legacy == owned {
+                    return done(false);
+                }
+                let (here, valid) = load_once(&root, &owned);
+                if !valid {
+                    return done(false);
+                }
+                let (mut draft, valid) = load_once(&root, &legacy);
+                if !valid || !draft.held() {
+                    return done(false);
+                }
+                if here.held() {
+                    // A move a crash interrupted after its first write left
+                    // the same draft at both keys: it ends now. Different
+                    // drafts are never merged or chosen between; both stay.
+                    if same_apart_from_label(&here, &draft) {
+                        let _ = save_fenced(&fence, &root, &legacy, &StoredDraft::default());
+                        return done(true);
+                    }
+                    return done(false);
+                }
+                if draft.session_label.is_empty() {
+                    draft.session_label = label;
+                }
+                if save_fenced(&fence, &root, &owned, &draft).is_err() {
+                    return done(false);
+                }
+                // The draft is durable at its new key: the old copy goes.
+                let _ = save_fenced(&fence, &root, &legacy, &StoredDraft::default());
+                done(true)
+            }),
+        );
+    }
+
     /// Copies a draft from Qt's store into this one ("Recover"); Qt's copy
     /// stays. A nonempty draft here is never overwritten.
     pub fn recover(
@@ -1210,12 +1324,14 @@ pub fn import_sources(own: &Path, qt: Option<PathBuf>, dev: Vec<PathBuf>) -> Vec
     .collect()
 }
 
-/// Queues the one-time import of Qt's and the dev app's drafts as the job
+/// Queues the one-time import of the Next dev app's drafts as the job
 /// the store runs next. Call it right after the store opens, before anything
 /// reads it: loads and pages run on the same writer after it, so every read
 /// sees the imported drafts. The report goes to the marker and a log line.
 pub fn import_at_start(store: &DraftStore) {
-    let sources = import_sources(store.root(), qt_root(), dev_roots());
+    // Qt drafts are deliberately excluded by the 0.48.0 upgrade policy.
+    // Next's own interim stores remain eligible; neither source is removed.
+    let sources = import_sources(store.root(), None, dev_roots());
     store.import(sources, |_| {});
 }
 
@@ -1466,6 +1582,50 @@ mod tests {
             (OwnerKind::Question, "claude/p/a")
         );
         assert_eq!(owner("lonely").kind, OwnerKind::Unknown);
+        // zerus-ucck P2c-2: a session keyed by its durable ID.
+        let id = "3f2a9c1d-6b7e-4c2a-9d1f-0a1b2c3d4e5f";
+        for (key, kind) in [
+            (format!("studio\nid:{id}"), OwnerKind::Message),
+            (
+                format!("studio\nid:{id}\nconv-1\nagent-2"),
+                OwnerKind::Subagent,
+            ),
+            (
+                format!("voice-message-draft\nstudio\nid:{id}"),
+                OwnerKind::Voice,
+            ),
+            (
+                format!("question\n[\"studio\\nid:{id}\",\"q-1\"]\nanswer"),
+                OwnerKind::Question,
+            ),
+        ] {
+            let parsed = owner(&key);
+            assert_eq!(
+                (
+                    parsed.kind,
+                    parsed.session_id.as_str(),
+                    parsed.machine.as_str()
+                ),
+                (kind, id, "studio"),
+                "{key:?}"
+            );
+        }
+        assert_eq!(owner("studio\nclaude/p/a").session_id, "");
+        for bad in [
+            "id:",
+            "id:3F2A9C1D-6B7E-4C2A-9D1F-0A1B2C3D4E5F",
+            "id:not-a-uuid",
+        ] {
+            assert_eq!(
+                owner(&format!("studio\n{bad}")).kind,
+                OwnerKind::Unknown,
+                "{bad}"
+            );
+        }
+        assert_eq!(session_part("claude/p/a", Some(id)), format!("id:{id}"));
+        for other in [None, Some(""), Some("3F2A9C1D-6B7E-4C2A-9D1F-0A1B2C3D4E5F")] {
+            assert_eq!(session_part("claude/p/a", other), "claude/p/a");
+        }
         assert_eq!(owner("a\n\nb").kind, OwnerKind::Unknown);
         assert_eq!(owner("a\nb\nc\nd\ne").kind, OwnerKind::Unknown);
     }

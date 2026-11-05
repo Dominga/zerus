@@ -212,6 +212,9 @@ pub(crate) struct Original {
     directory: File,
     filename: String,
     routed: bool,
+    /// The session ID the record was read by, for an executor in the ID
+    /// layout; it is read the same way on every later check.
+    by_id: Option<String>,
     binding: Binding,
     process: Process,
     supervisor: Process,
@@ -247,7 +250,24 @@ impl Original {
             "executor root unavailable"
         );
         let filename = format!("{:x}.json", Sha256::digest(name.as_bytes()));
-        let (record, routed) = read(&directory, &filename)?;
+        // An executor in the ID layout (zerus-ucck P3a) is read by its ID.
+        let (record, routed, by_id) = match read_in_id_layout(&directory, name, executor)? {
+            Some((record, id)) => {
+                // The label's own record counts with the ID layout's (#1437
+                // review): it must not bind this executor as well.
+                if let Some((legacy, _)) = optional_read(&directory, &filename)? {
+                    ensure!(
+                        !binds(&legacy, name, executor),
+                        "executor binds more than one session"
+                    );
+                }
+                (record, false, Some(id))
+            }
+            None => {
+                let (record, routed) = read(&directory, &filename)?;
+                (record, routed, None)
+            }
+        };
         let binding = binding(&record)?;
         ensure!(
             binding.name == name
@@ -269,6 +289,7 @@ impl Original {
             directory,
             filename,
             routed,
+            by_id,
             binding,
             process,
             supervisor,
@@ -287,7 +308,7 @@ impl Original {
                 && now.ino() == original.ino(),
             "executor root replaced"
         );
-        let (record, routed) = read(&self.directory, &self.filename)?;
+        let (record, routed) = reread(&self.directory, &self.filename, self.by_id.as_deref())?;
         ensure!(
             routed == self.routed && binding(&record)? == self.binding,
             "executor binding changed"
@@ -356,20 +377,152 @@ fn environment(pid: u32) -> Result<Vec<u8>> {
     }
     Ok(rest.to_vec())
 }
-fn read(directory: &File, filename: &str) -> Result<(Value, bool)> {
-    fn optional(parent: &File, leaf: &str, directory: bool) -> Result<Option<File>> {
-        match open(parent, leaf, directory) {
-            Ok(file) => Ok(Some(file)),
-            Err(error)
-                if error
-                    .downcast_ref::<std::io::Error>()
-                    .is_some_and(|e| e.kind() == std::io::ErrorKind::NotFound) =>
-            {
-                Ok(None)
-            }
-            Err(error) => Err(error),
+/// An optional fixed entry under `parent`: None only when it is verifiably
+/// absent. Permission, links and every other error stay errors, so they can
+/// never select a different saved binding.
+fn optional(parent: &File, leaf: &str, directory: bool) -> Result<Option<File>> {
+    match open(parent, leaf, directory) {
+        Ok(file) => Ok(Some(file)),
+        Err(error)
+            if error
+                .downcast_ref::<std::io::Error>()
+                .is_some_and(|e| e.kind() == std::io::ErrorKind::NotFound) =>
+        {
+            Ok(None)
+        }
+        Err(error) => Err(error),
+    }
+}
+
+/// At most [`RECORD_BYTES`] of `file`, or an error.
+fn bounded(file: &mut File) -> Result<Vec<u8>> {
+    bounded_to(file, RECORD_BYTES)
+}
+
+/// The label-index manifest's bound, as the CLI bounds it.
+const MANIFEST_BYTES: u64 = 16 << 20;
+
+/// At most `limit` bytes of `file`, or an error.
+fn bounded_to(file: &mut File, limit: u64) -> Result<Vec<u8>> {
+    ensure!(file.metadata()?.len() <= limit, "executor record too large");
+    let mut bytes = Vec::new();
+    file.take(limit + 1).read_to_end(&mut bytes)?;
+    ensure!(bytes.len() as u64 <= limit, "executor record too large");
+    Ok(bytes)
+}
+
+/// The executor's record in the ID layout (zerus-ucck P3a), found through
+/// its label's index entry `labels/<sha256(label)>.json`: the one listed
+/// session whose `sessions/<id>.json` binds this executor's run, conversation
+/// and session. None when the label has no entry or no listed session binds
+/// it, so the label's own path is read instead; two that bind it are an error.
+fn read_in_id_layout(
+    directory: &File,
+    name: &str,
+    executor: &Executor,
+) -> Result<Option<(Value, String)>> {
+    // The label index names candidates only while its manifest proves them
+    // (#1437 review). With no `sessions/` there is no ID layout at all.
+    let manifest = match optional(directory, "labels", true)? {
+        Some(labels) => optional(&labels, ".complete", false)?
+            .map(|mut file| bounded_to(&mut file, MANIFEST_BYTES))
+            .transpose()?
+            .map(|bytes| (labels, bytes)),
+        None => None,
+    };
+    let Some((labels, manifest)) = manifest else {
+        ensure!(
+            optional(directory, "sessions", true)?.is_none(),
+            "executor label index cannot be proven"
+        );
+        return Ok(None);
+    };
+    // The CLI's own proof (`state::prove_label_index`): no entry means no
+    // session in the ID layout; a present entry needs its file to hash to it
+    // and list one or more canonical IDs, else the proof refuses.
+    let key = format!("{:x}", Sha256::digest(name.as_bytes()));
+    let ids = crate::state::prove_label_index(name, &manifest, || {
+        optional(&labels, &format!("{key}.json"), false)
+            .ok()
+            .flatten()
+            .and_then(|mut file| bounded(&mut file).ok())
+    })
+    .context("executor label index cannot be proven")?;
+    let mut found = None;
+    for id in ids {
+        // A listed session whose file is gone is a stale entry.
+        let Some(record) = read_by_id(directory, &id)? else {
+            continue;
+        };
+        if binds(&record, name, executor) {
+            ensure!(found.is_none(), "executor binds more than one session");
+            found = Some((record, id));
         }
     }
+    Ok(found)
+}
+
+/// Whether `record` binds `executor` under the label `name`.
+fn binds(record: &Value, name: &str, executor: &Executor) -> bool {
+    binding(record).is_ok_and(|binding| {
+        binding.name == name
+            && binding.run == executor.run_id
+            && binding.conversation == executor.conversation_id
+            && binding.session == executor.session_id
+    })
+}
+
+/// The label's own record, as [`read`] reads it; None only when it verifiably
+/// does not exist.
+fn optional_read(directory: &File, filename: &str) -> Result<Option<(Value, bool)>> {
+    match read(directory, filename) {
+        Ok(found) => Ok(Some(found)),
+        Err(error)
+            if error
+                .downcast_ref::<std::io::Error>()
+                .is_some_and(|e| e.kind() == std::io::ErrorKind::NotFound) =>
+        {
+            Ok(None)
+        }
+        Err(error) => Err(error),
+    }
+}
+
+/// The record at `sessions/<id>.json`, when there is one: it must say it is
+/// in the ID layout and carry that exact ID. None when it is absent.
+fn read_by_id(directory: &File, id: &str) -> Result<Option<Value>> {
+    if !crate::state::session_id::canonical(id) {
+        return Ok(None);
+    }
+    let Some(sessions) = optional(directory, "sessions", true)? else {
+        return Ok(None);
+    };
+    let Some(mut file) = optional(&sessions, &format!("{id}.json"), false)? else {
+        return Ok(None);
+    };
+    let bytes = bounded(&mut file)?;
+    let _: RecordFields = serde_json::from_slice(&bytes)?;
+    let record: Value = serde_json::from_slice(&bytes)?;
+    ensure!(
+        crate::state::is_id_layout_record(&record, id),
+        "executor record does not match its ID"
+    );
+    Ok(Some(record))
+}
+
+/// The executor's record, read where it was first found: by its session ID
+/// in the ID layout, where it must still be, or else at its label's path.
+fn reread(directory: &File, filename: &str, by_id: Option<&str>) -> Result<(Value, bool)> {
+    match by_id {
+        Some(id) => Ok((
+            read_by_id(directory, id)?.context("executor record left the ID layout")?,
+            false,
+        )),
+        None => read(directory, filename),
+    }
+}
+
+fn read(directory: &File, filename: &str) -> Result<(Value, bool)> {
     // Only verified absence selects the legacy namespace. Permission, links
     // and all other errors cannot silently select a different saved binding.
     let routed = optional(directory, "name_routes", true)?
@@ -382,16 +535,7 @@ fn read(directory: &File, filename: &str) -> Result<(Value, bool)> {
         None
     };
     let mut file = open(folder.as_ref().unwrap_or(directory), filename, false)?;
-    ensure!(
-        file.metadata()?.len() <= RECORD_BYTES,
-        "executor record too large"
-    );
-    let mut bytes = Vec::new();
-    (&mut file).take(RECORD_BYTES + 1).read_to_end(&mut bytes)?;
-    ensure!(
-        bytes.len() as u64 <= RECORD_BYTES,
-        "executor record too large"
-    );
+    let bytes = bounded(&mut file)?;
     let _: RecordFields = serde_json::from_slice(&bytes)?;
     Ok((serde_json::from_slice(&bytes)?, routed))
 }
@@ -711,6 +855,134 @@ mod tests {
             let bytes = record.to_string();
             fs::write(f.path(), format!("{{\"{key}\":{value},{}", &bytes[1..])).unwrap();
             assert!(f.capture().is_err(), "{key}");
+        }
+    }
+    /// zerus-ucck P3a: an executor in the ID layout is found through its
+    /// label's index entry and read by its session ID on every later check.
+    /// The label's first holder, at the label's own path, never stands in.
+    #[test]
+    fn an_executor_in_the_id_layout_is_read_by_its_id_throughout() {
+        let mut f = Fixture::new();
+        let mut first = f.record.clone();
+        first["session_id"] = json!(uuid::Uuid::new_v4().to_string());
+        first["run_id"] = json!(uuid::Uuid::new_v4().to_string());
+        fs::write(f.path(), serde_json::to_vec(&first).unwrap()).unwrap();
+        let private = |path: &Path, bytes: &[u8]| {
+            fs::write(path, bytes).unwrap();
+            fs::set_permissions(path, fs::Permissions::from_mode(0o600)).unwrap();
+        };
+        for folder in ["sessions", "labels"] {
+            fs::create_dir(f.root.path().join(folder)).unwrap();
+            fs::set_permissions(f.root.path().join(folder), fs::Permissions::from_mode(0o700)).unwrap();
+        }
+        let id = uuid::Uuid::new_v4().to_string();
+        let own = f.root.path().join("sessions").join(format!("{id}.json"));
+        let index = f.root.path().join("labels").join(f.path().file_name().unwrap());
+        f.record["session_id"] = json!(id);
+        private(&own, &serde_json::to_vec(&f.record).unwrap());
+        assert!(f.capture().is_err(), "the label's holder binds another run");
+        let text = json!({"version":1,"label":"private-task-executor","ids":[id]}).to_string();
+        private(&index, text.as_bytes());
+        assert!(f.capture().is_err(), "an index no manifest proves is refused");
+        // The manifest lists the label with its file's digest (#1437 review).
+        let key = index.file_stem().unwrap().to_str().unwrap().to_owned();
+        let manifest = f.root.path().join("labels").join(".complete");
+        private(&manifest, json!({"version":1,"labels":{}}).to_string().as_bytes());
+        assert!(f.capture().is_err(), "a label the manifest omits is read at its own path");
+        let digest = format!("{:x}", Sha256::digest(text.as_bytes()));
+        private(&manifest, json!({"version":1,"labels":{&key: digest}}).to_string().as_bytes());
+        assert!(f.capture().is_err(), "a file there without the layout is refused");
+        f.record["layout"] = json!("id");
+        private(&own, &serde_json::to_vec(&f.record).unwrap());
+        let original = f.capture().unwrap();
+        f.record["activity"] = json!("working");
+        private(&own, &serde_json::to_vec(&f.record).unwrap());
+        original.current(until()).unwrap();
+        // The label's own record counts too: when it binds the executor as
+        // well, the proof refuses (#1437 review).
+        let mut double = f.record.clone();
+        double.as_object_mut().unwrap().remove("layout");
+        double["session_id"] = json!(uuid::Uuid::new_v4().to_string());
+        fs::write(f.path(), serde_json::to_vec(&double).unwrap()).unwrap();
+        assert!(f.capture().is_err(), "two sessions bind the executor");
+        fs::write(f.path(), serde_json::to_vec(&first).unwrap()).unwrap();
+        f.capture().unwrap();
+        // A changed index no longer matches its manifest entry, even when it
+        // still lists the executor.
+        let stale = uuid::Uuid::new_v4().to_string();
+        private(&index, json!({"version":1,"label":"private-task-executor","ids":[id, stale]}).to_string().as_bytes());
+        assert!(f.capture().is_err(), "an index its manifest no longer proves");
+        private(&index, text.as_bytes());
+        fs::remove_file(&own).unwrap();
+        assert!(original.current(until()).is_err(), "never the label's first holder");
+    }
+    /// #1437 review: while `sessions/` exists, the executor proof needs the
+    /// manifest's word that its label has no session in the ID layout.
+    #[test]
+    fn an_executor_is_refused_while_no_manifest_proves_its_label() {
+        let f = Fixture::new();
+        f.capture().unwrap();
+        let sessions = f.root.path().join("sessions");
+        fs::create_dir(&sessions).unwrap();
+        fs::set_permissions(&sessions, fs::Permissions::from_mode(0o700)).unwrap();
+        assert!(f.capture().is_err());
+        let labels = f.root.path().join("labels");
+        fs::create_dir(&labels).unwrap();
+        fs::set_permissions(&labels, fs::Permissions::from_mode(0o700)).unwrap();
+        assert!(f.capture().is_err());
+        let manifest = labels.join(".complete");
+        fs::write(&manifest, json!({"version":1,"labels":{}}).to_string()).unwrap();
+        fs::set_permissions(&manifest, fs::Permissions::from_mode(0o600)).unwrap();
+        f.capture().unwrap();
+    }
+    /// #1437 review (desktop-u, R3): the executor proof reads the label index
+    /// through the CLI's own proof. A listed label's file must list one or more
+    /// canonical IDs; any other shape refuses and is never "no candidates".
+    #[test]
+    fn an_executor_refuses_every_malformed_listed_index() {
+        let f = Fixture::new();
+        f.capture().unwrap();
+        let private = |path: &Path, bytes: &[u8]| {
+            fs::create_dir_all(path.parent().unwrap()).unwrap();
+            fs::set_permissions(path.parent().unwrap(), fs::Permissions::from_mode(0o700)).unwrap();
+            fs::write(path, bytes).unwrap();
+            fs::set_permissions(path, fs::Permissions::from_mode(0o600)).unwrap();
+        };
+        let id = uuid::Uuid::new_v4().to_string();
+        let mut twin = f.record.clone();
+        twin["session_id"] = json!(id);
+        twin["layout"] = json!("id");
+        twin["run_id"] = json!(uuid::Uuid::new_v4().to_string());
+        private(&f.root.path().join("sessions").join(format!("{id}.json")), twin.to_string().as_bytes());
+        let name = "private-task-executor";
+        let key = format!("{:x}", Sha256::digest(name.as_bytes()));
+        let prove = |index: Value| {
+            let bytes = index.to_string();
+            private(&f.root.path().join("labels").join(format!("{key}.json")), bytes.as_bytes());
+            let digest = format!("{:x}", Sha256::digest(bytes.as_bytes()));
+            private(
+                &f.root.path().join("labels").join(".complete"),
+                json!({"version":1,"labels":{&key: digest}}).to_string().as_bytes(),
+            );
+        };
+        prove(json!({"version":1,"label":name,"ids":[id]}));
+        f.capture().unwrap();
+        for ids in [
+            None,
+            Some(Value::Null),
+            Some(json!({})),
+            Some(json!([])),
+            Some(json!([1])),
+            Some(json!(["not-an-id"])),
+            Some(json!([id, "not-an-id"])),
+            Some(json!([id, 1])),
+        ] {
+            let mut index = json!({"version":1,"label":name});
+            if let Some(ids) = ids.clone() {
+                index["ids"] = ids;
+            }
+            prove(index);
+            assert!(f.capture().is_err(), "a listed index with ids {ids:?}");
         }
     }
 }

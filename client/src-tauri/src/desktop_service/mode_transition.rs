@@ -14,7 +14,11 @@ const MARKER: &str = "Desktop service activation ABI: desktop-service-activation
 const CHOICE_MARKER: &str =
     "Desktop service mode choice scope ABI: desktop-service-mode-choice-scope-v1";
 const BYTES: usize = 64 << 10;
+pub(super) mod classification;
+mod first;
+pub(super) mod refresh;
 mod review;
+pub(super) use first::{Prepared as FirstPrepared, View as FirstView};
 pub(super) use review::{Action as ReviewAction, Prepared, View as ReviewView};
 type Resources = Arc<dyn Send + Sync>;
 
@@ -85,6 +89,19 @@ pub(super) struct View {
     pub automatic_blocked: bool,
     pub request_id: Option<String>,
     pub active: bool,
+    /// A first explicit background choice offer (Windows, zerus-yfbd.1).
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub first: Option<first::View>,
+}
+/// One checked status's latch: the durable native latch stays for this
+/// process; an explicit journal loss lasts only while the latest coherent
+/// status reports it, so a later healthy read recovers.
+fn latch(state: &mut State, status: &Value) {
+    state.first_lost = !status["first_choice_lost"].is_null();
+    if !state.first_lost {
+        state.latched |= status["activation_automatic_blocked"] == true;
+    }
+    state.view.automatic_blocked = state.latched || state.first_lost;
 }
 struct Intent {
     id: String,
@@ -92,6 +109,12 @@ struct Intent {
     route: Arc<Route>,
     complete: bool,
     joined: bool,
+    /// A first explicit choice (zerus-yfbd.1): only a closed no-spawn fact
+    /// or an exact refused receipt ends it as not started.
+    first: bool,
+    /// The original effect child was never spawned (pin or spawn-time
+    /// refusal before the process existed). Never inferred from a join.
+    no_spawn: bool,
 }
 #[derive(Default)]
 struct State {
@@ -102,6 +125,15 @@ struct State {
     review_capable: bool,
     choice_capable: bool,
     business: Option<review::Business>,
+    classification_required: bool,
+    observation_only: bool,
+    first: Option<first::Target>,
+    first_capable: bool,
+    /// The durable native latch, sticky for this process. It never includes
+    /// a journal loss, which lasts only while the latest read reports it.
+    latched: bool,
+    first_lost: bool,
+    refresh: refresh::State,
 }
 pub(super) struct Controller {
     state: Mutex<State>,
@@ -109,6 +141,8 @@ pub(super) struct Controller {
     stop: AtomicBool,
     #[cfg(all(test, target_os = "linux"))]
     helper_directory: Mutex<Option<PathBuf>>,
+    #[cfg(all(test, target_os = "linux"))]
+    windows_fixture: Mutex<Option<PathBuf>>,
 }
 impl Controller {
     pub fn new() -> Arc<Self> {
@@ -118,13 +152,32 @@ impl Controller {
             stop: AtomicBool::new(false),
             #[cfg(all(test, target_os = "linux"))]
             helper_directory: Mutex::new(None),
+            #[cfg(all(test, target_os = "linux"))]
+            windows_fixture: Mutex::new(None),
         })
     }
     #[cfg(all(test, target_os = "linux"))]
     pub(super) fn fixture_helpers(&self, directory: Option<PathBuf>) {
         *self.helper_directory.lock().unwrap() = directory;
     }
+    /// A Windows-shaped route over a fake registration CLI, so the
+    /// first-choice controller runs on Linux CI. Test-only.
+    #[cfg(all(test, target_os = "linux"))]
+    pub(super) fn fixture_windows(&self, cli: Option<PathBuf>) {
+        *self.windows_fixture.lock().unwrap() = cli;
+    }
     fn select_route(&self, ordinary: &std::path::Path) -> Result<Route, &'static str> {
+        #[cfg(all(test, target_os = "linux"))]
+        if let Some(cli) = self.windows_fixture.lock().unwrap().clone() {
+            let relay = Arc::new(zerus_client_core::desktop::relay::Connection::select(&cli)?);
+            return Ok(Route {
+                relay,
+                helper: cli.clone(),
+                cli,
+                windows: true,
+                files: Vec::new(),
+            });
+        }
         #[cfg(all(test, target_os = "linux"))]
         if let Some(directory) = self.helper_directory.lock().unwrap().clone() {
             let relay = Arc::new(zerus_client_core::desktop::relay::Connection::select(
@@ -136,11 +189,21 @@ impl Controller {
         Route::select(ordinary)
     }
     pub fn view(&self) -> View {
-        self.state
-            .lock()
-            .unwrap_or_else(PoisonError::into_inner)
-            .view
-            .clone()
+        let state = self.state.lock().unwrap_or_else(PoisonError::into_inner);
+        let mut view = state.view.clone();
+        // Classification may recover eligibility, but the deferred connection
+        // still needs the existing explicit Resume before scheduling work.
+        if state.observation_only
+            && !view.pending
+            && !view.automatic_blocked
+            && view.review.is_none()
+            && state.selection.as_ref().is_some_and(|s| {
+                s["selected_mode"] == "background" && s["running_mode"] == "background"
+            })
+        {
+            view.needs_resume = true;
+        }
+        view
     }
     pub fn close(&self) -> zerus_client_core::desktop::drain::Closed {
         self.stop.store(true, Ordering::Release);
@@ -179,12 +242,12 @@ impl Controller {
         configuration: String,
         activate: bool,
         default_only: bool,
-    ) {
+    ) -> bool {
         let Ok(charge) = self.gate.admit(Role::Fleet) else {
-            return;
+            return false;
         };
         if self.stop.load(Ordering::Acquire) {
-            return;
+            return false;
         }
         self.state
             .lock()
@@ -192,15 +255,14 @@ impl Controller {
             .view
             .running = true;
         let owner = self.clone();
-        let _ = tauri::async_runtime::spawn_blocking(move || {
+        let joined = tauri::async_runtime::spawn_blocking(move || {
             owner.run(ordinary, configuration, activate, default_only, charge)
         })
-        .await;
-        self.state
-            .lock()
-            .unwrap_or_else(PoisonError::into_inner)
-            .view
-            .running = false;
+        .await
+        .is_ok();
+        let mut state = self.state.lock().unwrap_or_else(PoisonError::into_inner);
+        state.view.running = false;
+        joined && state.selection.is_some()
     }
     fn run(
         self: &Arc<Self>,
@@ -268,6 +330,12 @@ impl Controller {
             .unwrap_or_else(PoisonError::into_inner)
             .choice_capable =
             std::str::from_utf8(&help).is_ok_and(|s| s.lines().any(|l| l.trim() == CHOICE_MARKER));
+        self.state
+            .lock()
+            .unwrap_or_else(PoisonError::into_inner)
+            .first_capable = route.windows
+            && std::str::from_utf8(&help)
+                .is_ok_and(|s| s.lines().any(|l| l.trim() == first::MARKER));
         let Some(status) = self.status(route.clone(), &configuration, resources.clone()) else {
             return;
         };
@@ -332,6 +400,8 @@ impl Controller {
             route,
             complete: false,
             joined: false,
+            first: false,
+            no_spawn: false,
         });
         state.view.pending = true;
         state.view.request_id = state.intent.as_ref().map(|i| i.id.clone());
@@ -356,19 +426,24 @@ impl Controller {
                 return None;
             }
         };
-        if status["schema"] != 1
-            || status["configuration"] != configuration
-            || !matches!(
-                status["selected_mode"].as_str(),
-                Some("passive" | "background")
-            )
-            || !matches!(
-                status["mode_selection"].as_str(),
-                Some("default" | "explicit" | "retained")
-            )
-        {
+        if !valid_status(&status, configuration) {
             self.failed("activation_status_unavailable");
             return None;
+        }
+        if route.windows && !status["first_choice_lost"].is_null() {
+            // The native journal lost an anchored first choice: explicitly
+            // unavailable. Never an offer, a Resume or an inferred NotStarted;
+            // an own unsettled intent keeps its pending original ID.
+            let mut state = self.state.lock().unwrap_or_else(PoisonError::into_inner);
+            state.first = None;
+            state.view.first = None;
+            latch(&mut state, &status);
+            state.view.needs_resume = false;
+            state.selection = Some(status.clone());
+            if state.intent.as_ref().is_none_or(|i| i.complete) {
+                state.view.code = "activation_first_choice_lost".into();
+            }
+            return Some(status);
         }
         let capable = self
             .state
@@ -383,26 +458,54 @@ impl Controller {
                 return None;
             }
         }
+        self.project(&status, route.windows);
+        if route.windows {
+            self.record_first(route, configuration, &status);
+        }
+        Some(status)
+    }
+    /// The view one checked registration status leaves. Every path that reads
+    /// it (observe, Check result, reconnect, before an activation) projects the
+    /// same state, so a later read never undoes an earlier one.
+    fn project(&self, status: &Value, windows: bool) {
         let mut state = self.state.lock().unwrap_or_else(PoisonError::into_inner);
-        state.view.automatic_blocked |= status["activation_automatic_blocked"] == true;
+        latch(&mut state, status);
         state.selection = Some(status.clone());
         state.view.active = status["selected_mode"] == "background"
             && status["running_mode"] == "background"
             && status["ipc_ready"] == true
             && status["pending_restart"] == false;
-        state.view.needs_resume = !route.windows
+        state.view.needs_resume = !windows
             && state.view.review.is_none()
             && !state.view.automatic_blocked
             && status["selected_mode"] == "passive";
         if state.intent.is_none() {
+            // Windows ordinary activation is the maintained manual route: an
+            // activation attempt reaches the same code before any effect. Only
+            // a plain passive selection says so; an interrupted record, a latch
+            // or any transition keeps its own presentation.
+            let manual = windows
+                && state.view.review.is_none()
+                && !state.view.automatic_blocked
+                && status["selected_mode"] == "passive"
+                && status["running_mode"] == "passive"
+                && status["pending_restart"] == false
+                && status["transition"].is_null()
+                && status["activation_pending"].is_null();
             state.view.code = if state.view.needs_resume {
                 "activation_required"
+            } else if manual {
+                "activation_platform_manual"
             } else {
                 ""
             }
             .into();
         }
-        Some(status)
+    }
+    /// One checked status, as `status()` projects it after its native read.
+    #[cfg(test)]
+    pub(super) fn project_for_test(&self, status: &Value, windows: bool) {
+        self.project(status, windows);
     }
     fn lookup(
         self: &Arc<Self>,
@@ -445,6 +548,25 @@ impl Controller {
         // Missing after this original exchange physically joined proves no
         // helper reservation, not success. It offers another explicit action.
         let mut state = self.state.lock().unwrap_or_else(PoisonError::into_inner);
+        if value["phase"] == "lost" {
+            // The native journal lost an anchored first choice: this original
+            // stays pending (Unknown). Never NotStarted, an offer or a Resume.
+            if state
+                .intent
+                .as_ref()
+                .is_some_and(|i| i.id == id && i.configuration == configuration && !i.complete)
+            {
+                state.first = None;
+                state.view.first = None;
+                state.first_lost = true;
+                state.view.automatic_blocked = true;
+                state.view.pending = true;
+                state.view.request_id = Some(id.into());
+                state.view.needs_resume = false;
+                state.view.code = "activation_first_choice_lost".into();
+            }
+            return;
+        }
         let Some(intent) = state
             .intent
             .as_mut()
@@ -452,7 +574,14 @@ impl Controller {
         else {
             return;
         };
-        let absent = intent.joined && value["phase"] == "missing" && value["result"].is_null();
+        // A first choice may have run Stop/Update/RunEx before its journal
+        // went missing: a join settles resources, it does not prove no start.
+        let closed = if intent.first {
+            intent.no_spawn
+        } else {
+            intent.joined
+        };
+        let absent = closed && value["phase"] == "missing" && value["result"].is_null();
         intent.complete = settled || refused || absent;
         state.view.pending = !(settled || refused || absent);
         state.view.needs_resume = !settled && state.view.review.is_none();
@@ -465,14 +594,15 @@ impl Controller {
         }
         .into();
     }
-    /// The view the platform-manual route leaves (Windows), for projection
-    /// tests on other platforms.
-    #[cfg(all(test, not(windows)))]
+    /// The code a Windows activation attempt leaves before any effect.
+    #[cfg(test)]
     pub(super) fn platform_manual_for_test(&self) {
         self.failed("activation_platform_manual");
     }
     fn failed(&self, code: &str) {
         let mut state = self.state.lock().unwrap_or_else(PoisonError::into_inner);
+        // Any failed read closes a first-choice offer until a checked status.
+        state.first = None;
         if code == "activation_platform_manual" {
             // No native activation route on this platform: nothing to resume
             // here. The code stays visible so the client can say where the
@@ -483,7 +613,10 @@ impl Controller {
             };
             return;
         }
+        state.view.first = None;
         state.business = None;
+        state.selection = None;
+        state.observation_only |= state.classification_required;
         state.view.code = code.into();
         state.view.needs_resume = true;
     }
@@ -502,7 +635,19 @@ impl Controller {
         resources: Resources,
         id: &str,
     ) -> Option<Vec<u8>> {
-        let (result, joined) = self.exchange_bytes(route, args, resources, Duration::from_secs(30));
+        self.call_effect_checked(route, args, resources, id, None)
+    }
+    /// `veto` runs at the mutating child's spawn, after every earlier check.
+    fn call_effect_checked(
+        self: &Arc<Self>,
+        route: Arc<Route>,
+        args: Vec<String>,
+        resources: Resources,
+        id: &str,
+        veto: Option<Arc<dyn Fn() -> Result<(), &'static str> + Send + Sync>>,
+    ) -> Option<Vec<u8>> {
+        let (result, joined) =
+            self.exchange_bytes(route, args, resources, Duration::from_secs(30), veto);
         if let Some(intent) = self
             .state
             .lock()
@@ -512,6 +657,7 @@ impl Controller {
             .filter(|i| i.id == id)
         {
             intent.joined = joined;
+            intent.no_spawn = matches!(result, Err(OwnedError::StartFailed));
         }
         match result {
             Ok(bytes) => Some(bytes),
@@ -528,7 +674,7 @@ impl Controller {
         resources: Resources,
         timeout: Duration,
     ) -> Option<Vec<u8>> {
-        match self.exchange_bytes(route, args, resources, timeout).0 {
+        match self.exchange_bytes(route, args, resources, timeout, None).0 {
             Ok(bytes) => Some(bytes),
             Err(_) => {
                 self.failed("activation_unconfirmed");
@@ -542,6 +688,7 @@ impl Controller {
         args: Vec<String>,
         resources: Resources,
         timeout: Duration,
+        veto: Option<Arc<dyn Fn() -> Result<(), &'static str> + Send + Sync>>,
     ) -> (Result<Vec<u8>, OwnedError>, bool) {
         let inv = Invocation {
             args,
@@ -566,6 +713,9 @@ impl Controller {
             &self.stop,
             move |command| {
                 selected.check().map_err(std::io::Error::other)?;
+                if let Some(veto) = &veto {
+                    veto().map_err(std::io::Error::other)?;
+                }
                 #[cfg(windows)]
                 {
                     use std::os::windows::process::CommandExt;
@@ -607,6 +757,21 @@ struct Route {
     #[cfg(unix)]
     files: Vec<(std::fs::File, PathBuf, std::fs::Metadata, bool)>,
 }
+/// The supported registration status shape for this configuration. Every
+/// read that can admit or veto an effect checks it, including the final one.
+fn valid_status(status: &Value, configuration: &str) -> bool {
+    status["schema"] == 1
+        && status["configuration"] == configuration
+        && matches!(
+            status["selected_mode"].as_str(),
+            Some("passive" | "background")
+        )
+        && matches!(
+            status["mode_selection"].as_str(),
+            Some("default" | "explicit" | "retained")
+        )
+}
+
 impl Route {
     fn select(ordinary: &std::path::Path) -> Result<Self, &'static str> {
         #[cfg(not(any(target_os = "linux", target_os = "macos", windows)))]
@@ -799,7 +964,17 @@ impl Route {
             return None;
         }
         let receipt = &value["receipt"];
-        let phase = if receipt.is_null() {
+        let phase = if value["code"] == "first_choice_lost" {
+            // An explicit journal loss, never an ordinary missing receipt.
+            let lost = value["first_choice_lost"].as_str()?;
+            if !receipt.is_null()
+                || value["outcome"] != "unknown"
+                || !uuid::Uuid::parse_str(lost).is_ok_and(|u| !u.is_nil() && u.to_string() == lost)
+            {
+                return None;
+            }
+            "lost"
+        } else if receipt.is_null() {
             "missing"
         } else {
             if receipt["request"] != id {
@@ -904,6 +1079,22 @@ impl Route {
         args.extend(["--activation-id".into(), id.into(), "--json".into()]);
         args
     }
+    /// The first-choice form; offered only on the Windows route.
+    fn first_arguments(&self, id: &str) -> Vec<String> {
+        [
+            "desktop",
+            "registration",
+            "install",
+            "--mode",
+            "background",
+            "--json",
+            "--request-id",
+            id,
+        ]
+        .into_iter()
+        .map(str::to_owned)
+        .collect()
+    }
     fn choice_arguments(&self, reviewed: &str, id: &str, action: ReviewAction) -> Vec<String> {
         if self.windows {
             return [
@@ -982,6 +1173,10 @@ pub(super) async fn startup(shared: &Arc<Shared>, automatic: bool, configuration
     }
 }
 
+#[cfg(all(test, target_os = "linux"))]
+mod first_tests;
+#[cfg(test)]
+mod projection_tests;
 #[cfg(all(test, target_os = "linux"))]
 mod tests;
 

@@ -1968,7 +1968,10 @@ fn apply_settings(
     receipt_path: &Path,
     receipt: &mut Value,
 ) -> Result<Value> {
-    let _driving = startup_choice::driving(name)?;
+    // The lock is the session's own, keyed by its verified record (#1437
+    // review); the record and its terminal are checked once it is held.
+    let owner = input::checked_settings(name, &request.expected_run_id, &request.expected_conversation_id)?;
+    let _driving = startup_choice::driving(&owner)?;
     let mut record = checked(name, request, true)?;
     let current = settings(&record, true);
     receipt["status"] = json!("in_progress");
@@ -2089,6 +2092,9 @@ pub(super) fn dispatch_settings(args: &[String]) -> Result<i32> {
         println!("{text}");
         return Ok(0);
     }
+    // zerus-ucck P3c: the request's identities select among sessions that
+    // share the label.
+    expect(name, &request.expected_run_id, &request.expected_conversation_id)?;
     let mut record = read(name)?;
     if string(&record, "run_id") != request.expected_run_id
         || string(&record, "conversation_id") != request.expected_conversation_id
@@ -2110,7 +2116,7 @@ pub(super) fn dispatch_settings(args: &[String]) -> Result<i32> {
         return Err("pending settings target changed; refresh before applying".into());
     }
     let running = process_alive(&record);
-    if running && !matches(&record, live()?.get(name)) {
+    if running && !matches(&record, panes_of(&live()?, &record)) {
         return Err(
             "the tracked terminal identity changed; refresh before changing settings".into(),
         );
@@ -2187,11 +2193,16 @@ fn schedule_settings(
 
 // Called under the existing input transaction lock; never a mutation from ls or
 // inspect. It deliberately does nothing while the agent is still working.
+/// Whether [`apply_pending`] would type pending settings into the terminal.
+pub(super) fn pending_applies(record: &Value) -> bool {
+    record["pending_settings"].is_object() && ready(record)
+}
+
 pub(super) fn apply_pending(name: &str, record: Value) -> Result<Value> {
-    let pending = &record["pending_settings"];
-    if !pending.is_object() || !ready(&record) {
+    if !pending_applies(&record) {
         return Ok(record);
     }
+    let pending = &record["pending_settings"];
     if string(pending, "run_id") != string(&record, "run_id")
         || string(pending, "conversation_id") != string(&record, "conversation_id")
     {

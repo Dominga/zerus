@@ -22,7 +22,7 @@ use std::ffi::c_void;
 
 pub(super) const CLSID: GUID = GUID::from_u128(0x0f0f70a2_1d40_47d8_ac5e_d6a9b789605f);
 pub(super) const CLSID_TEXT: &str = super::registration::CLASS_ID;
-pub(in crate::desktop) const ENTRY: &str = "--desktop-notification-activation";
+pub(in crate::desktop) const ENTRY: &str = super::registration::ACTIVATION_ENTRY;
 
 /// A cold COM launch has no original Runtime/Endpoint. Lifecycle parsing may
 /// call this fixed entry, but it cannot acquire/promote the canonical service.

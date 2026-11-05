@@ -225,6 +225,23 @@ native caller owns the offer and connection checks; completion below allows a
 genuinely new delivery without clearing an unsettled original.
 
 
+### Native issuance of a new Check ID
+
+New Check IDs come only from an opaque native `CheckId`, never a renderer field
+or a freely supplied string. Its read-only ID can be used for the existing exact
+envelope preflight. A first proposal may initialize only an empty slot; a later
+proposal comes from the current CancelledBeforeOffer or Completed journal and
+retains that actual file handle, full native version and bytes hash. Adoption
+rechecks the same original under the metadata flock. A retained older proposal
+cannot be applied after another discard cycle or an identical-byte replacement.
+
+No cancellation history is appended and the stored schema stays unchanged.
+Existing Prepared and OfferedUnknown IDs remain immutable: reopening observes
+them rather than adopting an unused proposed ID. Completed metadata permits a
+separate Check only for a genuinely new task delivery. Proposals are data, not
+consent, admission, execution or drain proof, and are never serialized/rebuilt
+after restart. Missing history and every offered/unknown replay remain refused.
+
 ## Bounded publication recovery
 
 Each new journal writer uses one fixed `.reconcile.tmp` candidate per task and

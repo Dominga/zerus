@@ -196,7 +196,7 @@ export function SavedDraftsDialog() {
       return;
     }
     if (item.kind === "message") {
-      const key = draftKey({ computer: row.computer, key: row.catalogKey, name: row.name, archive_id: row.archiveId ?? null });
+      const key = draftKey({ computer: row.computer, key: row.catalogKey, name: row.name, archive_id: row.archiveId ?? null, session_id: row.sessionId ?? null });
       void focusMessageEditor(key);
     }
   };

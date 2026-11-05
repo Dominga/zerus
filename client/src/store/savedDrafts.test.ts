@@ -9,7 +9,7 @@ vi.mock("../ui/sessions/SessionCard", () => ({
 }));
 
 const item = (key: string, source: DraftSource = "client", extra: Partial<SavedDraftItem> = {}): SavedDraftItem => ({
-  key, kind: "message", computer: "", session: key.split("\n")[1] ?? "", title: key.replaceAll("\n", " / "), caption: key, machine: "this computer",
+  key, kind: "message", computer: "", session: key.split("\n")[1] ?? "", session_id: "", title: key.replaceAll("\n", " / "), caption: key, machine: "this computer",
   meta: "", detail: "first line", modified: 1_793_000_000, attachments: 0, source, archived: false, ...extra,
 });
 const detail = (text: string, extra: Partial<SavedDraftDetail> = {}): SavedDraftDetail => ({ text, attachments: 0, detail: "0 attachments", restorable: true, ...extra });
@@ -234,6 +234,11 @@ describe("Saved drafts (MessageComposer.cpp:1230-1387)", () => {
     expect(draftOwnerRow(message, [row({ computer: "studio" })]), "another computer's row").toBeUndefined();
     expect(draftOwnerRow({ ...message, archived: true }, [row({})])).toBeUndefined();
     expect(draftOwnerRow({ ...message, kind: "unknown" }, [row({})])).toBeUndefined();
+    // zerus-ucck P2c-2: a draft keyed by session ID belongs to the row with that ID, whatever its label.
+    const id = "3f2a9c1d-6b7e-4c2a-9d1f-0a1b2c3d4e5f";
+    const byId = item(`\nid:${id}`, "client", { session: "claude/p/old-label", session_id: id });
+    expect(draftOwnerRow(byId, [row({ sessionId: id, catalogKey: "run:renamed", name: "claude/p/new-label" })])?.catalogKey).toBe("run:renamed");
+    expect(draftOwnerRow(byId, [row({ name: "claude/p/old-label" })]), "a row named like it is another session").toBeUndefined();
     // A subagent key names the machine; the alias's row wins over a machine-name match.
     const subagent = item("studio\nclaude/p/a\nconv\nagent", "client", { kind: "subagent", computer: "studio", session: "claude/p/a" });
     expect(draftOwnerRow(subagent, [row({ computer: "", catalogKey: "run:machine" })])?.catalogKey).toBe("run:machine");

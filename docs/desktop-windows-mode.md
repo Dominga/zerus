@@ -134,10 +134,131 @@ database, or a stale frontend image. A same-origin Grant reconnect that keeps
 the ownership incarnation is allowed. This guard cannot be reconstructed from
 status or a receipt, cannot Grant/Rearm, and is not runtime launch authority.
 
+The retained native task now pins its loaded image with the shared executable
+pinning code and the kernel's `ProcessImageFileMapping` check, using the SAME
+held process handle. The selected replacement and the loaded old file are kept
+separately, including their normalized ancestor pins. If a stable-CLI update
+moved the old executable aside, discovery inspects only maintained
+`hgs.exe.old-<seconds>-<random>` names in the pinned selected directory, with at
+most 256 directory entries and the existing phase deadline. A pathname, an
+alias or identical bytes do not prove the mapping. Unavailable evidence or an
+exhausted directory/deadline bound refuses without selecting another process.
+These pins last through the original native consumer's checks and release.
+
 These are source prerequisites for an explicit refresh control, not that control
 itself. Ordinary same-mode selection still does nothing. Native Windows PC
 qualification remains outstanding; portable tests and Linux actor models do not
 qualify the Task Scheduler or installed Settings path.
+
+## Explicit original-instance refresh controller
+
+`desktop-registration-refresh-v1` adds a distinct same-mode refresh for an
+already retiring Windows service whose selected CLI was replaced. Ordinary
+same-mode selection and `registration install --json` keep their existing
+behavior. This operation never toggles mode, updates the unchanged definition,
+reinstalls, revokes, Rearms or creates a Grant. Installed PC qualification
+remains outstanding.
+
+The Service consumer now offers **Settings > About > Service refresh required >
+Refresh background service…** when a bounded native read proves the original
+manual-refresh service and its current identity-current Service Grant. This
+opens a separate native confirmation showing the original epoch and
+configuration. The renderer sends only the displayed selection nonce; the
+full target, including file and process birth identities, stays in native
+memory. The selected helper, current target and immutable consumer binding
+are checked before and after the dialog and immediately before spawn.
+
+The operation uses one original request UUID. A lost reply, **Check result**,
+or a reopened GUI with a durable pending refresh only observes that UUID;
+none replays Stop or RunEx. **Check service status**, Retry, Resume and automatic
+reconnect never invoke refresh. A possible start with missing or unavailable
+original evidence remains unconfirmed and cannot offer a new operation.
+
+After an exact settled receipt, this window keeps its immutable original
+service binding and stays read-only. Close and reopen Zerus to authenticate the
+refreshed endpoint through the ordinary startup path. The refresh receipt does
+not grant business eligibility, clear review/default latches, Rearm, or schedule
+imports. Revoked/blocked/changed-Origin refresh and default-mode native takeover
+remain unsupported (zerus-5wmh.66.3.40.3.4). The availability guidance preserves
+the selected mode and original request instead of offering a reinstall or mode
+toggle. Native installed-Settings and Fast Startup/Restart qualification remain
+outstanding; portable/Linux dialog and transport models are source evidence.
+
+The closed command forms are:
+
+```text
+hgs desktop registration refresh-info --json
+hgs desktop registration refresh --json --request-id NEW_UUID --scope TARGET_JSON
+hgs desktop registration refresh-result --json --request-id SAME_UUID
+hgs desktop registration cancel-refresh --json --request-id SAME_UUID
+```
+
+`TARGET_JSON` is the bounded `target` object from `refresh-info`, retained
+without changing its original/configuration/selection/image/Grant fields. It
+is selection data, not permission. The operation captures its own actual native
+Caller and checked current Service Grant, and requires the same original COM
+instance, process birth, pipe epoch/generation, images and owned definition.
+A changed target refuses before a new reservation. The caller is the existing
+genuine installed/portable frontend or the maintained foreground classic-console
+route; JSON roles and Windows Terminal/ConPTY do not replace that proof.
+
+The primary mode journal holds the distinct refresh scope and original UUID in
+its single pending slot. Before any manager effect it reserves bytes for the
+largest completion, review barrier and archive. A separate private anchor outside
+the state loss domain keeps a missing/replaced journal from becoming a fresh
+request. An unavailable anchor, an overlapping layout, an eight-archive bound
+or the shared 8 KiB record limit refuses. Keep both records and the selected
+mode; inspect the original result. There is no maintained history rollover or
+loss-reset operation.
+
+The controller keeps the original Caller, Grant/database/Origin, both image
+pins and handoff exclusion. Runtime, owner loans, pipe connections and durable
+operations must drain on the authenticated original endpoint before Stop.
+The status observer reads through real EOF. The original selection is checked
+before StopOffered, at the writer's entry/pre-persist/post-persist callbacks and
+again before the original COM Stop; the existing Stop deadline is never renewed.
+Only physical exit and original GUID disappearance permit one RunEx of the
+unchanged selected definition. Its first native process/COM objects, exact
+loaded replacement and endpoint stay retained through readiness and final save.
+
+An existing UUID is result-only, including Prepared, Held and lost replies. No
+result read adopts a runtime, repeats an effect, or converts readiness into old
+completion. A pre-manager cancellation changes only that original's metadata,
+with the existing native caller/configuration/passive-Grant checks. After an
+effect was offered, uncertainty stays Unknown and uses the original Review/boot
+barrier; no phase is downgraded. Refresh receipts neither rewrite historical
+mode-choice receipts nor open the consumer's business or scheduling gates.
+
+A failed final fence, directory sync or reply can occur after the settled
+refresh receipt is published. Refresh error recovery reads that SAME UUID and
+the independent loss evidence: it returns the exact read-only receipt or
+Unknown, with uncertain effect fields. An empty pending slot never proves that
+no Stop/RunEx occurred. A bounded timing trace records phase/operation wall and
+monotonic timestamps, remaining budget and retained-process exit observations;
+these diagnostics are never admission or cleanup evidence. Exit polling
+validates the current owned definition once and uses that same checked task
+for GUID disappearance, under the original Stop deadline.
+
+Refresh allocates the ordinary two-second Stop allowance plus its unused
+two-second Update allowance to ONE four-second Stop deadline, captured once
+at Stop entry. It performs no Update or Rollback phase and cannot spend those
+allowances again. Preflight 2 + Hold 3 + Stop 4 + Start 2 + Readiness 8 + Release 2
+is 21 seconds, plus the existing three-second exchange/cleanup allowance, inside
+the unchanged 30-second original-helper/runner bound. A declared overall
+deadline begins at helper entry; every phase is clipped to it. Checks, debug
+pause, physical-exit/GUID polls and Stopped publication all spend the same Stop
+deadline. Expiry never renews it or authorizes another start. Ordinary mode,
+first-choice and post-review choice budgets are unchanged.
+
+This first controller supports a current, identity-current Service Grant only.
+Revoked, blocked, changed-origin and unsupported actors are explicitly refused;
+refresh cannot obtain a Grant through retirement. In particular, it does not
+fix the revoked-service return-to-Next case in either GUI mode, including the
+default native-takeover path (zerus-5wmh.66.3.40.3.4). An IPC-only blocked-state
+transition needs its own native admission/startup proof and G1 review. Native
+Task Scheduler/Caller tests on a disposable runner, portable transition models
+and Linux actor controls remain separate from installed Settings and the
+owner-gated Fast Startup/Restart qualification.
 
 ## Original task and rollback custody
 
@@ -282,6 +403,16 @@ the obsolete saved rollback metadata:
 hgs desktop registration cancel-rollback --json --request-id UUID
 ```
 
+Before publishing `StopOffered`, the helper rechecks the same retained original
+instance, task definition/owner/ACL and authenticated process/pipe under the
+registration lock. A refusal proven before publication stays at `Held` and can
+use the explicit cancellation above. The original Stop deadline includes these
+reads and any debug hold; it is not renewed. A post-persist check failure,
+directory-sync uncertainty or lost save reply remains `StopOffered`/Unknown.
+The immediate selection and original-instance checks before COM Stop remain.
+Historical offered records are never downgraded. Status, Retry and reconnect
+do not cancel, and Settings currently has no Held-cancellation action.
+
 Cancellation checks the original pending UUID and native caller twice. It can
 discard any pre-manager record for either mode, including stale background
 preparation after a restart. Passive rollback additionally requires a current
@@ -393,6 +524,74 @@ record, discard an archive or rotate a pending UUID. The dedicated capability ma
 `Desktop registration mode review ABI: desktop-registration-mode-review-v1`.
 Native PC and installed Settings qualification remain outstanding.
 
+## First explicit background choice
+
+A plain passive registration has one more explicit form, for an in-app
+Settings choice (zerus-yfbd.1):
+
+```powershell
+$firstRequest = [guid]::NewGuid().ToString()
+hgs desktop registration install --mode background --json --request-id $firstRequest
+hgs desktop registration mode-result --json --request-id $firstRequest
+```
+
+The CLI advertises
+`Desktop registration first mode choice ABI: desktop-registration-mode-first-choice-v1`.
+The form admits only background, from a selected **and** actually running
+passive task. It is refused while any original transition is pending,
+interrupted, reviewed or archived: that history keeps its own Review route,
+whatever the caller asks for. The caller, current Service Grant, original
+instance, endpoint and selected image are checked as for any switch, again at
+every effect boundary; no automatic, default or passive request uses this form.
+
+The caller's UUID is reserved durably as the transition's original ID before
+the first manager effect, with byte headroom for its completion scope, a later
+review barrier and archive. Its receipt is distinct from a reviewed choice and
+names no reviewed original. A repeated UUID only reads the original result; it
+never stops, updates or starts again. A lost reply after a possible start stays
+Unknown and is looked up by that same UUID. Only a closed not-started boundary
+(an explicit pre-manager cancellation) records a refusal and allows a fresh
+choice. An interrupted first choice records consumer and boot evidence like any
+transition and takes the ordinary Review route above.
+
+The latest reserved first choice is also kept in an independent anchor,
+`<HGS_CONFIG_DIR>/windows-first-choice-<configuration>.json`, written durably
+before the mode record that reserves it. The anchor lives in the config tree,
+outside the desktop state folder that holds the mode record and the Service
+Grant. Every mode status, operation and result cross-checks the two: when the
+record no longer shows the anchored choice (missing, emptied or replaced
+journal, or a wiped state folder), has first-choice history without its anchor,
+or names another latest choice, the first choice is **lost**, never "never
+written". Status reports `first_choice_lost` and latches automatic activation,
+every mode operation refuses without a new ID, and `mode-result` stays Unknown.
+There is no maintained clear or reset for a lost first choice; keep both files
+and follow up manually. Registration install and remove keep the anchor exactly
+as they keep the mode record. Only wiping both the config and the state trees
+looks like a fresh profile.
+
+The anchor proves a loss only from outside that loss domain. The CLI, before
+it captures the caller or spawns the helper, and the mode helper again, resolve
+the config folder, the state folder and its desktop folder natively (junctions,
+symlinks, short names and drive aliases of existing folders) and compare them
+by path components with Windows case folding, never by string prefix. When the
+config folder equals or lies inside either one, status reports
+`first_choice_unavailable: "anchor_layout"`, the client offers no first choice,
+and the first-choice form is refused before any anchor, record reservation, UUID
+or manager effect. Nothing repairs or moves such a layout; the ordinary and
+reviewed routes are unchanged.
+
+Status and `mode-result` read the record and its anchor together under the
+registration lock, which every writer holds from anchor publication through its
+record save, so a reader never pairs one commit's anchor with another commit's
+record. While a writer holds the lock, both refuse after the lock's bounded wait
+rather than report a loss. A writer stopped between publishing its anchor and
+saving its record (a crash or power loss in that window) leaves the anchor ahead
+of the record. That is reported as lost: the files alone cannot tell it from a
+wiped journal, so it fails closed. A lost lookup keeps the original pending
+(Unknown) and never becomes NotStarted or a Resume. The client latches on a loss
+only while its latest read reports it; a later coherent healthy read lifts that
+latch, while the durable review latch stays.
+
 ## Private qualification
 
 The Windows unit suite runs the creation-owner regression in one bounded child,
@@ -455,3 +654,36 @@ this scope remain read-only and require another separately confirmed choice
 with the updated maintained CLI. None of these observations authorize refresh,
 Rearm, cleanup, or adoption of another task/process. Native dialogs, installed
 Settings and Fast Startup/Restart behavior still require PC qualification.
+
+
+## Eligibility after a settled reviewed background choice
+
+A later Service consumer start or reconnect can restore business eligibility
+without another mode dialog. It reads the exact durable new choice UUID and
+reviewed original UUID, verifies that this is still the latest applicable
+settled background choice, and obtains a separate current native ownership
+observation. The old completion's service epoch and generation remain historical;
+a restarted service must authenticate its current endpoint independently while
+retaining the same Grant journal and owner epoch.
+
+The closed `desktop-ownership-observation-v1` exchange compares the requesting
+frontend's authenticated native Origin with the existing actor's granted row in
+one read transaction. It checks the actual database object and current service
+epoch and generation. A display status, receipt or supplied identity cannot
+construct the native observation. An old helper without this read capability,
+a different frontend Origin, a later passive or interrupted choice, revoke,
+Rearm, replaced registration/image/database, cancellation or unavailable proof
+leaves the consumer read-only. No service is installed or started to obtain
+that proof. Read workers keep their original child, image and pipe resources
+through physical settlement, including an uncertain or timed-out exchange.
+
+Restoration changes eligibility only. It creates no Grant, Rearm, import or
+manager operation, including from the first watch frame, Retry, backoff and
+scheduler wakes. A separately authorized normal action still needs its existing
+native admission. The original unknown result and permanent automatic mode
+activation latch remain unchanged. The interrupted-change section disappears
+only while both the applicable settled choice and current native observation
+validate; a newer interruption brings its guidance back.
+
+Portable/Linux transport controls and hosted Windows tests are source evidence.
+Installed Settings and native PC qualification remain separate.

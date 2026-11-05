@@ -81,9 +81,11 @@ fn valid_process_consent(proof: &str, row: &Value, common: &Path, at: u64) -> bo
 }
 
 /// Folders a Zerus session record refers to.
-struct Reference {
-    name: String,
-    folders: Vec<PathBuf>,
+pub(super) struct Reference {
+    pub(super) name: String,
+    pub(super) folders: Vec<PathBuf>,
+    /// The ID of the checkout ownership recorded at the session's launch.
+    pub(super) owner: String,
 }
 
 struct Context {
@@ -151,15 +153,16 @@ fn reference(record: &Value) -> Reference {
     Reference {
         name: string(record, "name").to_owned(),
         folders,
+        owner: string(&record["worktree_owner"], "id").to_owned(),
     }
 }
 
-fn bindings() -> Result<Vec<Reference>> {
+pub(super) fn bindings() -> Result<Vec<Reference>> {
     // Ordinary catalog reads tolerate broken records. Deletion cannot interpret
     // a skipped or unreadable record as proof that no session uses the folder.
     let mut result = Vec::new();
     let mut count = 0;
-    for directory in ["", "bindings", "dsh/bindings", "opencode/bindings"] {
+    for directory in storage::BINDING_DIRS {
         let folder = root().join(directory);
         let files = match fs::read_dir(&folder) {
             Ok(files) => files,
@@ -176,9 +179,7 @@ fn bindings() -> Result<Vec<Reference>> {
                 .file_stem()
                 .and_then(|s| s.to_str())
                 .unwrap_or_default();
-            if !(directory.contains('/')
-                || stem.len() == 64 && stem.bytes().all(|b| b.is_ascii_hexdigit()))
-            {
+            if !storage::binding_stem(directory, stem) {
                 continue;
             }
             count += 1;
@@ -193,8 +194,12 @@ fn bindings() -> Result<Vec<Reference>> {
             if string(&value, "name").is_empty() {
                 return Err("Invalid saved session identity".into());
             }
+            // A session in the ID layout is its own record: its label's path
+            // may hold another session (P3a), whose folders are not its own.
             let value = if directory.contains('/') {
                 value
+            } else if directory == "sessions" {
+                storage::read_id(stem)?
             } else {
                 read(string(&value, "name"))?
             };

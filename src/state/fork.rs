@@ -204,8 +204,8 @@ pub(super) fn start_scoped(
         return Err("source session changed; refresh before forking".into());
     }
     let snapshot = live()?;
-    let live_pane = archive_id.is_none() && snapshot.contains_key(name);
-    if live_pane && (!matches(&record, snapshot.get(name)) || !process_alive(&record)) {
+    let live_pane = archive_id.is_none() && terminal_live(&snapshot, &record)?;
+    if live_pane && (!matches(&record, panes_of(&snapshot, &record)) || !process_alive(&record)) {
         return Err("source process no longer matches its tracked session".into());
     }
     if let Some(reason) = unavailable(&record, live_pane) {
@@ -247,8 +247,11 @@ pub(super) fn start_scoped(
     let hint_environment = crate::config::agent_hint_environment(agent);
     let launch = supervisor_command(&record, &executable, argv, &hint_environment);
     let new_run=uuid::Uuid::new_v4().to_string();
+    let lineage = journal::fork_lineage(&record);
     let mut environment = BTreeMap::from([
         ("HGS_SESSION", target.clone()),
+        // A fork's terminal is its own new label (zerus-ucck P3b).
+        ("HGS_TERMINAL_NAME", target.clone()),
         ("HGS_AGENT", agent.into()),
         (
             "HGS_STATE_DIR",
@@ -269,7 +272,12 @@ pub(super) fn start_scoped(
         // The archived source's own identity, so the fork can inherit its project.
         ("HGS_FORK_SOURCE_ARCHIVE", archive_id.unwrap_or_default().into()),
         // The source history the fork's Activity shows (zerus-b4qk).
-        ("HGS_FORK_LINEAGE", journal::fork_lineage(&record)),
+        ("HGS_FORK_LINEAGE", lineage.clone()),
+        // The labels its sources had, where a journal is not one (P2b).
+        (
+            "HGS_FORK_LINEAGE_LABELS",
+            journal::fork_lineage_labels(&record, &lineage),
+        ),
         (agent_hint::FORK_REVISION_ENV, agent_hint::fork_revision(&record)),
         ("HGS_TRACKING", "1".into()),
         (

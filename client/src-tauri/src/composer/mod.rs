@@ -25,10 +25,15 @@
 
 pub mod fetch;
 pub mod files;
+pub mod handed;
 pub mod questions;
 pub mod queue;
 pub mod saved;
 pub mod send;
+#[cfg(any(target_os = "linux", target_os = "macos"))]
+pub use handed::{CompactRoute, DeferredRoute};
+#[cfg(any(target_os = "linux", target_os = "macos"))]
+pub use questions::AnswerRoute;
 #[cfg(feature = "media")]
 mod voice;
 
@@ -42,7 +47,7 @@ use serde::{Deserialize, Serialize};
 use serde_json::{Map, Value};
 use zerus_client_core::attachments::{self, Attachment, Draft, FileRead, Selection};
 use zerus_client_core::cache::Chip;
-use zerus_client_core::drafts::{DraftStore, IndexPage, Loaded, StoredDraft, ALREADY_EXISTS};
+use zerus_client_core::drafts::{self, DraftStore, IndexPage, Loaded, StoredDraft, ALREADY_EXISTS};
 use zerus_client_core::local_messages::{LocalMessage, LocalMessages};
 use zerus_client_core::operation_recovery::deferred_input::Checkpoint;
 use zerus_client_core::send::{CompactSend, StartSend};
@@ -201,6 +206,11 @@ pub struct SessionRef {
     pub archive_id: Option<String>,
     #[serde(default)]
     pub subagent: Option<SubagentRef>,
+    /// The row's durable session ID, when it lists one: its drafts are then
+    /// keyed by it (zerus-ucck P2c-2), so they follow the session, not its
+    /// label.
+    #[serde(default)]
+    pub session_id: Option<String>,
 }
 
 impl SessionRef {
@@ -233,19 +243,31 @@ pub fn draft_key(computer: &str, name: &str, archive: Option<&str>) -> String {
 }
 
 /// Qt's child key is `machine\nsession\nparent conversation\nagent ID`.
+/// A live or saved session with a durable ID names it as `id:<session_id>`
+/// in both (zerus-ucck P2c-2); an archived session keeps its name and archive
+/// ID, as before.
 pub fn session_draft_key(session: &SessionRef) -> String {
+    let id = session
+        .session_id
+        .as_deref()
+        .filter(|_| !session.archived());
+    keyed(session, &drafts::session_part(&session.name, id))
+}
+
+/// The name key [`session_draft_key`] used before the session ID was known:
+/// the draft found there moves once to the ID key.
+pub(crate) fn legacy_draft_key(session: &SessionRef) -> Option<String> {
+    let legacy = keyed(session, &session.name);
+    (legacy != session_draft_key(session)).then_some(legacy)
+}
+
+fn keyed(session: &SessionRef, part: &str) -> String {
     session.subagent.as_ref().map_or_else(
-        || {
-            draft_key(
-                &session.computer,
-                &session.name,
-                session.archive_id.as_deref(),
-            )
-        },
+        || draft_key(&session.computer, part, session.archive_id.as_deref()),
         |child| {
             format!(
                 "{}\n{}\n{}\n{}",
-                session.computer, session.name, child.parent_conversation_id, child.agent_id
+                session.computer, part, child.parent_conversation_id, child.agent_id
             )
         },
     )
@@ -292,6 +314,9 @@ pub struct ComposerView {
     pub recording: bool,
     pub waiting: Option<String>,
     pub uncertain: bool,
+    /// The desktop service still sends this draft's message: no Allow
+    /// retry, and the status is not an error.
+    pub delivery_pending: bool,
     pub status: String,
     pub status_error: bool,
     pub can_send: bool,
@@ -329,6 +354,9 @@ pub struct ComposerView {
     /// "Cancel send": a start or a compaction waits to send this draft
     /// (`SessionsWindow.cpp:3763`).
     pub cancel_send: bool,
+    /// Cancel send stays shown but locked, with its reason as the title:
+    /// the desktop service holds this "Compact and continue".
+    pub cancel_locked: bool,
     /// A compaction waits to send this draft (compact-to-send).
     pub compacting: bool,
     /// Clear session and the cache popover's Clear context (`clearContext`).
@@ -350,6 +378,9 @@ pub(crate) struct Composer {
     pub(crate) position: i64,
     pub(crate) anchor: i64,
     pub(crate) label: String,
+    /// [`StoredDraft::session_label`]: the label of the session an ID-keyed
+    /// draft belongs to, as last opened.
+    pub(crate) session_label: String,
     pub(crate) form_state: Map<String, Value>,
     pub(crate) rev: u64,
     pub(crate) text_epoch: u64,
@@ -393,6 +424,11 @@ pub(crate) struct Composer {
     /// compaction. Kept while its outcome is uncertain and loaded back as
     /// data; nothing sends from it.
     pub(crate) checkpoint: Option<Checkpoint>,
+    /// The desktop service still reported this draft's send in progress:
+    /// it is checked again, read-only (zerus-5wmh.66.4.4).
+    pub(crate) handed: Option<handed::Handed>,
+    /// A reload's one lookup of the held identity ran.
+    pub(crate) probed: bool,
 }
 
 impl Composer {
@@ -405,6 +441,7 @@ impl Composer {
             position: 0,
             anchor: 0,
             label: String::new(),
+            session_label: String::new(),
             form_state: Map::new(),
             rev: 0,
             text_epoch: 0,
@@ -427,6 +464,8 @@ impl Composer {
             delivering: None,
             digests: None,
             checkpoint: None,
+            handed: None,
+            probed: false,
         }
     }
 
@@ -455,6 +494,7 @@ impl Composer {
             anchor: self.anchor,
             label: self.label.clone(),
             form_state: self.form_state.clone(),
+            session_label: self.session_label.clone(),
             sending: self.sending,
             uncertain: self.uncertain,
             checkpoint: self.checkpoint.clone().map(Box::new),
@@ -586,6 +626,8 @@ pub(crate) struct Hub {
     pub(crate) queue: queue::Queue,
     /// Events for the next batch (`composer_events`), at most 16.
     pub(crate) events: VecDeque<ComposerEvent>,
+    /// The window is hidden: a handed-over send is not checked.
+    pub(crate) hidden: bool,
 }
 
 impl Hub {
@@ -617,6 +659,13 @@ pub(crate) struct Shared {
     changes: AtomicU64,
     /// Wakes the ticker, which sleeps while no composer is open.
     opened: Condvar,
+    /// The selected desktop service's deferred send route, if any.
+    pub(crate) deferred: Mutex<Option<Arc<handed::DeferredRoute>>>,
+    /// The selected service's compact-to-send route: Linux and macOS in
+    /// desktop-service mode only.
+    pub(crate) compact: Mutex<Option<Arc<handed::CompactRoute>>>,
+    /// Its deferred answer route, if any.
+    pub(crate) answer_route: Mutex<Option<Arc<questions::AnswerRoute>>>,
     /// The ticker sleeps (tests wait for it).
     #[cfg(test)]
     parked: std::sync::atomic::AtomicBool,
@@ -670,6 +719,9 @@ impl Composers {
             deps,
             changes: AtomicU64::new(0),
             opened: Condvar::new(),
+            deferred: Mutex::new(None),
+            compact: Mutex::new(None),
+            answer_route: Mutex::new(None),
             #[cfg(test)]
             parked: Default::default(),
         }));
@@ -720,7 +772,10 @@ impl Composers {
     }
 
     /// Opens the selected session's composer (None closes it). The same
-    /// catalog row under a new name is a rename: its draft moves (`renameDraft`).
+    /// catalog row under a new draft key, such as a new name, is a rename:
+    /// its draft moves (`renameDraft`). A session keyed by its durable ID
+    /// keeps its key across a rename; its draft under the name key moves
+    /// once to the ID key (zerus-ucck P2c-2).
     pub fn open(&self, session: Option<SessionRef>) -> Option<ComposerView> {
         let mut hub = self.lock();
         let next = session.as_ref().map(session_draft_key);
@@ -737,6 +792,7 @@ impl Composers {
             return None;
         };
         let key = session_draft_key(&session);
+        let legacy = legacy_draft_key(&session);
         let child_open = session.subagent.is_some();
         let renamed = hub
             .open
@@ -744,10 +800,18 @@ impl Composers {
             .filter(|old| {
                 old.computer == session.computer
                     && old.key == session.key
-                    && old.name != session.name
                     && old.subagent == session.subagent
             })
-            .and_then(|_| hub.open_key.clone());
+            .and_then(|_| hub.open_key.clone())
+            .filter(|old| old != &key)
+            // The name key's draft, still held, moves like a rename.
+            .or_else(|| {
+                legacy.clone().filter(|old| {
+                    hub.composers
+                        .get(old)
+                        .is_some_and(|c| c.loaded && (c.has_content() || c.checkpoint.is_some()))
+                })
+            });
         let child_changed =
             hub.open.as_ref().and_then(|old| old.subagent.as_ref()) != session.subagent.as_ref();
         if hub.followed.computer != session.computer
@@ -770,13 +834,25 @@ impl Composers {
         if let Some((pending, _)) = hub.compacts.get_mut(&key) {
             pending.session = session.clone();
         }
+        let name = session.name.clone();
         hub.open = Some(session);
         hub.open_key = Some(key.clone());
+        // A held send of this session is checked again at once.
+        Self::restart_checks(&mut hub, self.now());
         self.0.opened.notify_all();
         if let Some(old) = renamed {
             self.rename(&mut hub, &old, &key);
         }
+        if let Some(old) = legacy
+            .as_ref()
+            .filter(|old| !hub.composers.contains_key(&key) && !hub.composers.contains_key(*old))
+        {
+            self.adopt(old, &key, &name);
+        }
         self.ensure(&mut hub, &key);
+        if let Some(composer) = hub.composers.get_mut(&key).filter(|_| legacy.is_some()) {
+            composer.session_label = name;
+        }
         hub.order.retain(|k| k != &key);
         hub.order.push_back(key.clone());
         self.trim(&mut hub);
@@ -788,6 +864,30 @@ impl Composers {
             self.refresh_details();
         }
         view
+    }
+
+    /// The store's one-time move of a draft from its name key to its session
+    /// ID key, queued before the ID key's load so that load sees it.
+    fn adopt(&self, legacy: &str, key: &str, label: &str) {
+        let me = self.clone();
+        let (from, to) = (legacy.to_owned(), key.to_owned());
+        self.0.store.adopt(legacy, key, label, move |moved| {
+            if !moved {
+                return;
+            }
+            let mut hub = me.lock();
+            // A finished move may find the ID key listed already.
+            if hub.stored_keys.contains(&to) {
+                hub.stored_keys.retain(|k| *k != from);
+            } else {
+                for stored in hub.stored_keys.iter_mut().filter(|k| **k == from) {
+                    stored.clone_from(&to);
+                }
+            }
+            hub.local.rename(&from, &to);
+            drop(hub);
+            me.changed();
+        });
     }
 
     /// Loads a composer that is not in memory (`ensureDraftLoaded`).
@@ -821,6 +921,9 @@ impl Composers {
         composer.position = stored.position;
         composer.anchor = stored.anchor;
         composer.label = stored.label;
+        if composer.session_label.is_empty() {
+            composer.session_label = stored.session_label;
+        }
         composer.form_state = stored.form_state;
         composer.uncertain = stored.uncertain || stored.sending || loaded.notice.is_some();
         // Its original identity, as data: a reload never continues it.
@@ -1321,6 +1424,7 @@ impl Composers {
         composer.error = false;
         composer.notice.clear();
         composer.checkpoint = None;
+        composer.handed = None;
         self.save(composer);
         // Its late answers resolve nothing now: their tracking goes.
         let key = composer.key.clone();
@@ -1571,7 +1675,8 @@ impl Composers {
             error.clone()
         } else if let Some(waiting) = &composer.waiting {
             waiting.clone()
-        } else if composer.error || composer.uncertain {
+        } else if composer.error || composer.uncertain || composer.handed.is_some() {
+            // A held original shows the service's line from its hand-over.
             composer.notice.clone()
         } else {
             String::new()
@@ -1597,6 +1702,10 @@ impl Composers {
             || (status == session.session_status && session.session_status_error);
         // Qt's `locked` includes the session status's lock (1149).
         let locked = composer.busy() || !composer.loaded || session.session_blocks_input;
+        let compact_handed = composer
+            .handed
+            .as_ref()
+            .is_some_and(handed::Handed::compacts);
         Some(ComposerView {
             handle: composer.handle,
             key: composer.key.clone(),
@@ -1639,6 +1748,7 @@ impl Composers {
             recording: composer.recording_owner.is_some(),
             waiting: composer.waiting.clone(),
             uncertain: composer.uncertain,
+            delivery_pending: composer.handed.is_some(),
             status,
             status_error,
             can_send: composer.loaded
@@ -1670,7 +1780,9 @@ impl Composers {
             context: session.context,
             local: hub.local.rows(&composer.key).to_vec(),
             cancel_send: hub.compacts.contains_key(key)
-                || hub.start.as_ref().is_some_and(|(p, _)| p.key == key),
+                || hub.start.as_ref().is_some_and(|(p, _)| p.key == key)
+                || compact_handed,
+            cancel_locked: compact_handed,
             compacting: hub.compacts.contains_key(key),
             clear: session.clear,
             question,
@@ -1689,6 +1801,13 @@ pub fn composer_open(
     session: Option<SessionRef>,
 ) -> Option<ComposerView> {
     state.open(session)
+}
+
+/// The webview's page visibility: a hidden window checks no handed-over
+/// send (zerus-5wmh.66.4.4).
+#[tauri::command]
+pub fn composer_visibility(state: State<'_, Composers>, hidden: bool) {
+    state.set_hidden(hidden);
 }
 
 #[tauri::command(rename_all = "snake_case")]
@@ -1962,6 +2081,7 @@ pub(crate) mod tests {
             name: "claude/sample-project/review".into(),
             archive_id: None,
             subagent: None,
+            session_id: None,
         }
     }
 
@@ -2218,6 +2338,248 @@ pub(crate) mod tests {
         );
         store.flush();
         assert_eq!(read_draft(&root.join("drafts"), KEY).draft.draft.text, "");
+    }
+
+    const SESSION_ID: &str = "3f2a9c1d-6b7e-4c2a-9d1f-0a1b2c3d4e5f";
+    const ID_KEY: &str = "studio\nid:3f2a9c1d-6b7e-4c2a-9d1f-0a1b2c3d4e5f";
+
+    fn with_id() -> SessionRef {
+        SessionRef {
+            session_id: Some(SESSION_ID.into()),
+            ..session()
+        }
+    }
+
+    fn stored(text: &str) -> StoredDraft {
+        let mut draft = StoredDraft::default();
+        draft.draft.text = text.into();
+        draft
+    }
+
+    /// zerus-ucck P2c-2: a live or saved session with a durable ID keys its
+    /// drafts by it; archived sessions and rows without one keep their keys.
+    #[test]
+    fn a_session_id_names_the_session_in_its_draft_keys() {
+        assert_eq!(session_draft_key(&with_id()), ID_KEY);
+        assert_eq!(legacy_draft_key(&with_id()).as_deref(), Some(KEY));
+        assert_eq!(legacy_draft_key(&session()), None);
+        let child = SessionRef {
+            subagent: Some(SubagentRef {
+                agent_id: "agent-2".into(),
+                parent_conversation_id: "conv-1".into(),
+            }),
+            ..with_id()
+        };
+        assert_eq!(
+            session_draft_key(&child),
+            format!("{ID_KEY}\nconv-1\nagent-2")
+        );
+        assert_eq!(
+            legacy_draft_key(&child).as_deref(),
+            Some("studio\nclaude/sample-project/review\nconv-1\nagent-2")
+        );
+        let archived = SessionRef {
+            key: "archive:archive-7".into(),
+            archive_id: Some("archive-7".into()),
+            ..with_id()
+        };
+        assert_eq!(session_draft_key(&archived), format!("{KEY}\narchive-7"));
+        assert_eq!(legacy_draft_key(&archived), None);
+        for other in ["", "not-a-uuid", "3F2A9C1D-6B7E-4C2A-9D1F-0A1B2C3D4E5F"] {
+            let row = SessionRef {
+                session_id: Some(other.into()),
+                ..session()
+            };
+            assert_eq!(
+                (session_draft_key(&row), legacy_draft_key(&row)),
+                (KEY.into(), None)
+            );
+        }
+    }
+
+    #[test]
+    fn a_draft_under_the_name_key_moves_once_and_follows_a_rename() {
+        let root = dir("adopt");
+        let store = drafts(&root);
+        store.save_durable(KEY, stored("typed before the upgrade"), |_| {});
+        let (c, _) = hub_on(&store);
+        c.open(Some(with_id()));
+        let view = until(&c, |v| v.loaded);
+        assert_eq!(
+            (view.key.as_str(), view.text.as_str()),
+            (ID_KEY, "typed before the upgrade")
+        );
+        store.flush();
+        let saved = root.join("drafts");
+        assert_eq!(read_draft(&saved, KEY).draft.draft.text, "");
+        assert_eq!(
+            read_draft(&saved, ID_KEY).draft.session_label,
+            "claude/sample-project/review"
+        );
+        // A rename keeps the key: nothing moves, and the next save names it.
+        let renamed = SessionRef {
+            name: "claude/sample-project/renamed".into(),
+            ..with_id()
+        };
+        c.open(Some(renamed));
+        let view = until(&c, |v| v.loaded);
+        assert_eq!(view.key, ID_KEY);
+        assert!(view.status != ALREADY_EXISTS, "{view:?}");
+        c.edit(
+            view.handle,
+            1,
+            view.text_epoch,
+            "after the rename".into(),
+            0,
+            0,
+        );
+        until(&c, |v| v.text == "after the rename");
+        c.flush();
+        store.flush();
+        let draft = read_draft(&saved, ID_KEY).draft;
+        assert_eq!(draft.draft.text, "after the rename");
+        assert_eq!(draft.session_label, "claude/sample-project/renamed");
+        assert_eq!(
+            read_draft(&saved, "studio\nclaude/sample-project/renamed").draft,
+            StoredDraft::default()
+        );
+    }
+
+    /// A downgrade to a GUI that reads only name keys (simulated by a run
+    /// whose rows list no session ID): its composer opens empty, nothing it
+    /// does touches the ID-keyed draft, and the next run of this build finds
+    /// that draft again. What the older GUI typed stays under the name key,
+    /// for Saved drafts, because the move never overwrites.
+    #[test]
+    fn a_downgrade_leaves_the_id_keyed_draft_for_the_next_upgrade() {
+        let root = dir("downgrade");
+        let store = drafts(&root);
+        store.save_durable(KEY, stored("typed before the upgrade"), |_| {});
+        let (upgraded, _) = hub_on(&store);
+        upgraded.open(Some(with_id()));
+        until(&upgraded, |v| {
+            v.loaded && v.text == "typed before the upgrade"
+        });
+        upgraded.flush();
+        drop(upgraded);
+        let (older, _) = hub_on(&store);
+        older.open(Some(session()));
+        let view = until(&older, |v| v.loaded);
+        assert_eq!((view.key.as_str(), view.text.as_str()), (KEY, ""));
+        older.edit(
+            view.handle,
+            1,
+            view.text_epoch,
+            "typed on the older GUI".into(),
+            0,
+            0,
+        );
+        until(&older, |v| v.text == "typed on the older GUI");
+        older.flush();
+        drop(older);
+        store.flush();
+        let saved = root.join("drafts");
+        assert_eq!(
+            read_draft(&saved, ID_KEY).draft.draft.text,
+            "typed before the upgrade"
+        );
+        let (again, _) = hub_on(&store);
+        again.open(Some(with_id()));
+        let view = until(&again, |v| v.loaded);
+        assert_eq!(
+            (view.key.as_str(), view.text.as_str()),
+            (ID_KEY, "typed before the upgrade")
+        );
+        store.flush();
+        assert_eq!(
+            read_draft(&saved, KEY).draft.draft.text,
+            "typed on the older GUI"
+        );
+    }
+
+    /// #1418 review (X8): a name-key composer still held in memory but no
+    /// longer the open row moves when its row is opened with its ID.
+    #[test]
+    fn a_held_name_key_composer_moves_when_its_row_reopens_with_an_id() {
+        let root = dir("adopt-held");
+        let store = drafts(&root);
+        let (c, _) = hub_on(&store);
+        c.open(Some(session()));
+        let view = until(&c, |v| v.loaded);
+        c.edit(
+            view.handle,
+            1,
+            view.text_epoch,
+            "held in memory".into(),
+            0,
+            0,
+        );
+        until(&c, |v| v.text == "held in memory");
+        let other = SessionRef {
+            key: "run:run-2".into(),
+            name: "codex/sample-project/other".into(),
+            ..session()
+        };
+        c.open(Some(other));
+        until(&c, |v| {
+            v.key == "studio\ncodex/sample-project/other" && v.loaded
+        });
+        assert!(c.lock().composers.contains_key(KEY), "still held");
+        c.open(Some(with_id()));
+        let view = until(&c, |v| v.key == ID_KEY && v.loaded && !v.text.is_empty());
+        assert_eq!(view.text, "held in memory");
+        assert!(!c.lock().composers.contains_key(KEY));
+        c.flush();
+        store.flush();
+        let saved = root.join("drafts");
+        assert_eq!(
+            read_draft(&saved, ID_KEY).draft.draft.text,
+            "held in memory"
+        );
+        assert_eq!(read_draft(&saved, KEY).draft.draft.text, "");
+    }
+
+    #[test]
+    fn a_row_that_gains_its_session_id_moves_its_open_draft() {
+        let root = dir("adopt-open");
+        let store = drafts(&root);
+        let (c, _) = hub_on(&store);
+        c.open(Some(session()));
+        let view = until(&c, |v| v.loaded);
+        c.edit(
+            view.handle,
+            1,
+            view.text_epoch,
+            "typed by name".into(),
+            0,
+            0,
+        );
+        c.open(Some(with_id()));
+        let view = until(&c, |v| v.key == ID_KEY && v.loaded);
+        assert_eq!(view.text, "typed by name");
+        store.flush();
+        let saved = root.join("drafts");
+        assert_eq!(read_draft(&saved, KEY).draft.draft.text, "");
+        assert_eq!(read_draft(&saved, ID_KEY).draft.draft.text, "typed by name");
+    }
+
+    #[test]
+    fn a_draft_at_the_session_id_key_is_never_replaced_by_the_name_key() {
+        let root = dir("adopt-kept");
+        let store = drafts(&root);
+        store.save_durable(KEY, stored("by name"), |_| {});
+        store.save_durable(ID_KEY, stored("by id"), |_| {});
+        let (c, _) = hub_on(&store);
+        c.open(Some(with_id()));
+        let view = until(&c, |v| v.loaded);
+        assert_eq!(view.text, "by id");
+        store.flush();
+        let saved = root.join("drafts");
+        assert_eq!(
+            read_draft(&saved, KEY).draft.draft.text,
+            "by name",
+            "kept for Saved drafts"
+        );
     }
 
     #[test]

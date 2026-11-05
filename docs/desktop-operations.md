@@ -172,12 +172,306 @@ question for an answer, a resume's start choice, and the CLI receipt family
 Restart, import or reconnect never rebuild executable consent from it, and
 nothing sends from it. Imported and recovered drafts never carry one. A
 present but invalid field leaves the draft not restored, never read as absent.
-Executing kinds that reconcile its receipt remain a later slice.
+
+The executing kinds that reconcile these receipts come one at a time (slice 3).
+The first, `deferred_send` (`desktop::deferred_send`, ABI
+`desktop-deferred-send-v1`), defines its closed wire:
+- **Intent.** The local session, the reserved request ID, the checkpoint's
+  exact JSON and the exact `hgs send <session> --json` stdin.
+- **Verification.** Strict typed decoding, so unknown or duplicate keys
+  refuse, as the CLI's own decoder does. The intent must be a `send`
+  checkpoint whose request ID, run and conversation the stdin repeats, and
+  whose message digest the stdin's text and decoded attachments reproduce.
+  A plain send only: no subagent target or compaction. v1 refuses any `@`
+  or other-machine session, and any session but a terminal agent's (Codex,
+  Claude, Kimi): an OpenCode or DeepSeek send goes to its own native backend
+  and receipts, so it stays on the direct path, decided before any offer
+  (`deferred_send_agent_refused`). The CLI's own send rules are mirrored, so an
+  original the CLI would refuse never spawns: a run, a non-empty message
+  within 64 KiB without control characters, no `/` or `!` command, at most
+  eight attachments with valid names, types and labels, each 10 MiB and
+  20 MiB in total. An intent whose service line does not fit the control
+  frame stays on the direct path, decided before any offer.
+- **Plan and binding.** The fixed `send <session> --json` call. The plan's
+  input digest is the SHA-256 of the exact stdin, which is the digest the
+  CLI's receipt records.
+- **Receipt.** Recorded only from the CLI's own matching `submitted`
+  receipt: a submission to the terminal, never proof the agent read it.
+  The wire owns the matching rule (`Outcome::from_receipt`). The CLI keys
+  `input_receipts/<request_id>.json` by request ID alone and keeps an
+  earlier `submitted` record when a later submit of that ID with other
+  content or another session is refused. So a record matches only when its
+  session (`name`), run, conversation, stdin digest and terminal transport
+  are all the plan's and its status is `submitted`. The outcome carries
+  that digest. `in_progress`, a duplicate or missing field, or more than
+  256 KiB is never an outcome.
+  Failed only at the no-spawn boundary (`deferred_send_not_started`), and
+  only when the drain finds no record of the request: an exact `submitted`
+  record still records it, and any other record leaves it Unknown.
+  Everything else after a possibly started child is Unknown and never
+  resent: `in_progress`, a missing, corrupt, mismatched, inaccessible or
+  replaced receipt, a timeout or a lost worker.
+- **Lookup.** A scoped read-only lookup by session, request ID and plan
+  fingerprint.
+
+The service actor executes it on Linux. The native frontend lane carries the
+request on its own ordered lane. The actor consumes the permit after BEGIN
+IMMEDIATE, under its current lease and scope, and keeps live consent for
+that admission alone: restart, import or reconnect retires a queued original
+(`deferred_send_interrupted`) and never rebuilds consent. Before any child,
+preparation opens the original receipt store: the CLI's owner-only state
+root, and its receipt folder when it exists, as no-follow, non-blocking
+directory descriptors. The reservation commits in the same actor turn that
+checks the exact lease and row; the child worker then checks the selected
+session itself from that root, its own record (name, terminal agent, run and
+conversation) and the absence of an OpenCode or DeepSeek binding, since the
+name's prefix never authorizes a send; the consent veto runs last, in the
+actual spawn turn. A refusal there never started anything. Each original
+runs once, through the shared original-child runner: this service's own
+pinned image with the fixed call, the exact stdin and the effect's
+close-only custody lock. The custody, consent, lease and serve-owner loan
+stay held until every original pipe really ends, a descendant's included.
+The whole send, the CLI's lock wait included, has 30 seconds. The child's
+exit settles nothing. After the physical drain, the actor's own drain
+worker, holding the serve-owner and consent loans until it physically ends,
+reads the CLI's receipt from those held objects within one never-renewed
+5-second deadline: only an owner-only, single-link file within 256 KiB, its
+version unchanged across the read, and its name, folder and root still the
+original's afterwards. The actor then settles the receipt in the drain's
+transaction, keeping the objects the read used until its commit: Recorded
+from the exact `submitted` record, Failed as above, and Unknown otherwise,
+with the receipt's or the child's reason. A moved, replaced or changing
+store, a late read, and an original of an earlier run, whose store
+observation went with it, are Unknown and never a safe absence. The same
+original admitted again gets only its own receipt. macOS refuses every
+original before any row (`deferred_send_native_image_unavailable`), Windows
+refuses it too (`deferred_send_unsupported`), and only Linux advertises the
+help marker. An unauthenticated hello naming it gets
+`frontend_authentication_required`, like its siblings.
+
+The second kind, `deferred_answer` (`desktop::deferred_answer`, ABI
+`desktop-deferred-answer-v1`), defines its closed wire for one `hgs answer
+<session> --json` to a question card:
+- **Intent.** The local session, the reserved request ID, the checkpoint's
+  exact JSON, the question's consent identity as the person saw it at the
+  click (`pinned`, exactly the closed `CONSENT_FIELDS` projection) and the
+  exact stdin.
+- **Verification.** Strict typed decoding of the checkpoint and the stdin,
+  as the CLI decodes it. The checkpoint must be a valid `answer` checkpoint
+  of this request whose identity hash is that of `pinned`; `pinned`, the
+  checkpoint and the stdin name the same question, question hash, run and
+  conversation. The stdin's answers are exactly the client's answer items,
+  and the checkpoint's message digest is theirs. An empty conversation is
+  accepted only for the CLI's own startup question identities. v1 refuses
+  any `@` or other-machine session and any session but a terminal agent's,
+  and offers only the sources whose `rejected` receipt proves that nothing
+  was delivered: Claude permission mode, resume, usage limit and folder
+  trust, Codex hooks trust, update, rate limit and folder trust, and Kimi
+  folder trust, cache hint, plan review, tool approval and wire questions.
+  Codex asynchronous questions and goal resume, Claude hook questions and
+  Claude tool approvals stay on the direct path
+  (`deferred_answer_source_refused`), as do OpenCode and DeepSeek
+  (`deferred_answer_agent_refused`), decided before any offer.
+- **Plan and binding.** The fixed `answer <session> --json` call. The plan's
+  input digest is the SHA-256 of the raw stdin, which is the digest the
+  CLI's receipt records. Before its child the actor compares `pinned` again
+  with the native current question read from the original store
+  (`consent_current`); that fresh observation, never `pinned` alone, decides
+  source and transport. The observation is `hgs answer <session> --observe
+  --json` (stdin: the question ID and the expected run and conversation).
+  It gives `found` and the question's consent identity as `hgs inspect`
+  shows it, rebuilt only from these sources' pure reads: it never fits a
+  clipped panel, takes a lock, lists Claude's approval queue or writes a
+  receipt, cache or any other file. A question it cannot see without an
+  effect, or of another run, is not found, and the answer does not start.
+- **Receipt.** Recorded only from the CLI's own exact
+  `question_receipts/<request_id>.json` record of this session, run,
+  conversation, question, question hash and stdin digest with status
+  `answered` or `submitted` (Codex's asynchronous submission, not the
+  provider's completion). Its `open_terminal` flag is only data for an
+  explicit Open Terminal action. For Codex's update question (a
+  `codex-update:` ID, which only the `codex_update` source may have), the
+  record's `codex_update` phase travels in the outcome, strictly paired: it
+  is present if and only if the answer is Update now (`answered` with
+  `open_terminal`). Absence is the only "none"; `installing` or `exited` is
+  the receipt's own observation, and `exited` does not prove the update
+  succeeded. Any other value or shape, a phase on another status or answer,
+  or Update now without one is Unknown (`deferred_answer_receipt_phase`),
+  and the serialized outcome, receipt and lookup keep the same pairing.
+  Failed only at the no-spawn boundary
+  (`deferred_answer_not_started`) or from the exact `rejected` record
+  (`deferred_answer_rejected`). Everything else after a possibly started
+  child is Unknown and never resent.
+- **Lookup.** A scoped read-only lookup by session, request ID and plan
+  fingerprint.
+
+The service actor executes it on Linux, as it executes a deferred send:
+the same native lane, admission after BEGIN IMMEDIATE under the current
+lease and scope, live consent for that admission alone (restart, import or
+reconnect retires a queued original as `deferred_answer_interrupted`), the
+original receipt store opened before any child (here the `question_receipts`
+folder), the reservation, the selected session's own record checked from
+that root, and the consent veto last in the actual spawn turn. Between the
+session check and the original child, the worker observes the native
+current question without any effect: `hgs answer <session> --observe
+--json` runs from this service's pinned image in its own process group,
+with its frozen stdin, no custody and its own 10-second deadline inside the
+answer's 30 seconds. The held state root and the selected session must be
+unchanged after its reply too. Only a reply that finds the question with
+exactly the pinned consent identity of a v1 source starts the original
+child; no reply, a failed or late one, a malformed or larger one, another
+identity or another source starts nothing, and the answer fails as never
+started. The original `hgs answer <session> --json` then runs once through
+the shared original-child runner with the exact stdin and the effect's
+close-only custody lock. After the physical drain, the drain worker reads
+the CLI's own `question_receipts/<request_id>.json` from the held objects,
+by the deferred send's rules, within the same never-renewed 5-second
+deadline. It settles Recorded from the exact `answered` or `submitted`
+record, Failed from the exact `rejected` record (`deferred_answer_rejected`)
+or at the no-spawn boundary when no record exists
+(`deferred_answer_not_started`), and Unknown otherwise; an original of an
+earlier run is Unknown however exact its record. macOS refuses every
+original before any row (`deferred_answer_native_image_unavailable`),
+Windows refuses it too (`deferred_answer_unsupported`), and only Linux
+advertises the help marker. Linux also advertises
+`desktop-deferred-answer-update-phase-v1`. The client offers a Codex update
+answer only to a service with that line, checked on the same route before
+any offer, and keeps it direct otherwise. A Recorded update answer shows its
+phase notice. Only the click that asked may open Terminal: a later check or
+a reload's lookup only observes, and never opens Terminal, answers or offers
+again. An unauthenticated hello naming the kind gets
+`frontend_authentication_required`, like its siblings.
+
+The observation fails closed by design. A Kimi panel that the person's
+inspection fitted but that is clipped again when the observation reads it
+gives no card, or one without a transport, so the answer does not start.
+Kimi's cache hint includes its idle time in the question's hash, so a
+redraw between the click and the observation changes the identity and
+refuses. Claude's resume prompt keeps `can_answer` outside the hash, but
+that is not a consent field and does not matter.
+The third kind, `compact_to_send` (`desktop::compact_to_send`, ABI
+`desktop-deferred-compact-to-send-v1`), defines its closed wire for one cold
+Compact and send: one `hgs compact-context <session> --json` and then, only
+in the same live admitted operation, one `hgs send <session> --json` whose
+frozen stdin names that compaction:
+- **Checkpoint.** A version 2 `compact_to_send` checkpoint reserves both
+  request IDs, the compaction's (`request_id`) and the send's
+  (`send_request_id`), distinct canonical UUIDs saved together with the draft
+  before the offer. Version 2 is exactly that pair, and a reload never derives
+  another send ID. A version 1 checkpoint keeps today's direct semantics.
+- **Intent.** The local session, both request IDs, the checkpoint's exact
+  JSON and the exact stdin of each child.
+- **Verification.** Strict typed decoding of the checkpoint and both stdins.
+  The compaction's stdin is the CLI's own three fields. The send's stdin is
+  held to the deferred send's rules (`deferred_send::frozen`), and its
+  `expected_compaction_id` must be this compaction: the CLI checks it again
+  under its input lock before the first input byte. One session, run and
+  non-empty conversation run across the checkpoint and both stdins, and the
+  checkpoint's message digest is the send's. Only a local terminal agent's
+  session is taken: DeepSeek and OpenCode (`compact_to_send_agent_refused`),
+  another computer and an original larger than the control frame stay direct,
+  decided before any offer. A plain deferred send still refuses
+  `expected_compaction_id`.
+- **Plan and binding.** The two fixed calls and both raw stdin digests. The
+  operation's key is its compaction request; another send under it conflicts.
+- **Receipts.** Each child has its own step: Queued, Running (durably
+  reserved, so it may have started), Recorded, NotStarted or Unknown. The
+  compaction is Recorded only from the exact `compact_receipts` record of its
+  request, session, run and conversation with status `submitted`; the
+  `in_progress` placeholder, `uncertain` and anything else are not. The send
+  is Recorded only by the deferred send's own `input_receipts` rule.
+  NotStarted (`compact_to_send_not_started`) is only for a child the
+  operation's own ledger proves never crossed its reservation. Exit codes,
+  stderr and a refusal printed after a possible start never decide. The send
+  never runs after a compaction that never started, and never before the
+  compaction settled. Evidence only moves forward (`Receipt::follows`): a
+  settled child never changes, so nothing can overwrite a recorded compaction
+  or send.
+- **Settlement and lookup.** Only the drained receipt settles. The send's
+  exact receipt means sent. Neither child started means nothing ran. A send
+  that never started after a compaction that ran or may have leaves the
+  compaction's identity. A send that may have started is unknown. The lookup
+  is read-only and keyed by the compaction request and the plan fingerprint.
+
+The request has its own ordered lane. On Linux the service actor runs the
+compaction the way it runs a deferred send:
+- Admission happens after BEGIN IMMEDIATE, under the current lease and scope,
+  with live consent for that admission alone.
+- The `compact_receipts` folder and the state root are opened before the
+  child.
+- The compaction's custody is reserved durably before it can spawn.
+- In the spawn turn, after its wait, the selected session's own record is
+  read again from the held state root, then the consent veto runs. The
+  runner's deadline check comes last.
+- The original `hgs compact-context <session> --json` runs once through the
+  shared original-child runner.
+- After the physical drain, the receipt is read from the held objects within
+  one never-renewed 5-second deadline.
+
+A reserved child counts as never started only from the runner's no-spawn
+result together with a read of the held store that finds no record of it.
+An original no runtime holds is never read, so it stays Unknown. Restart,
+revoke or a lost preparation retires the operation
+(`compact_to_send_interrupted`). A child never reserved is then recorded as
+never started from the ledger. A reserved one keeps its custody for the
+read-only drain. Store recovery drains an earlier run's Unknown without
+reading any receipt, and records a send never reserved as never started
+(`compact_to_send_interrupted`): no runtime is left to continue it.
+
+A compaction that never started also ends the send. After one that ran or
+may have, the same live operation waits, and only it: a restart never resumes
+a wait. The wait has one budget of 600 seconds from the compaction's drain,
+never renewed, inside the operation's own deadline of 690 seconds from
+admission.
+
+Off the actor, with the operation's loans, each read checks the selected
+session's own record from the held original root, with the root checked
+before and after. It continues only while that record's
+`compact_context_request` names this request, run and conversation:
+- `completed`, not superseded, on a session whose activity and phase are both
+  idle: the send may start;
+- `submitted`, `compacting`, or completed while the session is busy: read
+  again;
+- anything else ends the wait without the send (`compact_to_send_slot_ended`).
+
+The slot is a continuation condition only. Hooks carry no request ID, so a
+`/compact` typed in Terminal meanwhile completes it too, and the compaction
+keeps what its own receipt proved.
+
+These end the wait without the send:
+- a stop, a revoke or a lost source (`compact_to_send_vetoed`);
+- another session record (`compact_to_send_session_changed`);
+- a replaced root (`compact_to_send_root_changed`);
+- the budget (`compact_to_send_wait_expired`);
+- the deadline (`compact_to_send_chain_expired`).
+
+The send was then never reserved, so the ledger proves it never started.
+
+Once the slot completes:
+- The send's `input_receipts` folder is opened under the same held root,
+  never resolved again.
+- Its custody is reserved.
+- In its spawn turn, after its wait, the session's own record and the slot
+  are read again from the held root, then the consent veto runs. The
+  runner's deadline, bounded by the operation's own, comes last.
+- The original `hgs send <session> --json` runs once with its frozen stdin,
+  whose `expected_compaction_id` the CLI checks again under its input lock.
+- The send is Recorded only from its exact `submitted` input receipt; a
+  refusal printed after a possible start stays Unknown.
+
+Linux advertises `desktop-deferred-compact-to-send-v1`. macOS refuses every
+original before any row (`compact_to_send_native_image_unavailable`) and
+Windows refuses it too (`compact_to_send_unsupported`).
 
 A draft holds one such identity until it is resolved. A definite outcome
 resolves it, as does a cancellation before its call was dispatched or, for a
 start or compaction, the session seen ready for the send. An uncertain outcome
-keeps it. Once its call is dispatched, a Cancel send, an interruption or a time
+keeps it. A compaction, like an interrupt, a clear or an answer, types into the
+agent, so its outcome is definite only when `hgs` never started or refused
+before any input (exit 1 without "delivery uncertain"). A timeout, a broken
+transfer, any other exit, a mismatched acknowledgement and a refusal naming an
+earlier attempt of the same request are uncertain. `hgs` reports every failure
+after the typed command, Enter or Escape as "delivery uncertain". Once its call is dispatched, a Cancel send, an interruption or a time
 limit keeps it too, and the call's own late answer then decides: a definite one
 resolves it, an uncertain one keeps it. Only calls still in flight are tracked
 for that late answer, at most 32; past that the oldest goes, and its draft

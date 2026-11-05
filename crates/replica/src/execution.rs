@@ -20,12 +20,15 @@
 //! Session state is not an input. A native Stop, an idle session, a paused
 //! session or elapsed time is not an attempt event, so none of them can
 //! finish an attempt or move its task.
-use crate::schema::{Actor, LogEntry, SessionKey, Stage};
+use crate::schema::{Actor, LogEntry, SessionKey, Stage, Target};
 use crate::{Error, Result};
 use serde::{Deserialize, Serialize};
 
-/// The schema of a task that records attempts.
-pub const EXECUTION_TASK_SCHEMA: i64 = 6;
+/// The schema of a task that records attempts or took a floor. It is above
+/// every released or interim build's schema (5 before execution attempts,
+/// 6 in the builds that read attempts without the floor), so each of them
+/// reads such a task as newer and refuses to write it.
+pub const EXECUTION_TASK_SCHEMA: i64 = 7;
 /// The most attempts one task records.
 pub const MAX_ATTEMPTS: usize = 256;
 /// The most attempt events one task records.
@@ -62,6 +65,144 @@ pub struct Attempt {
     pub requirement: u64,
     pub actor: Actor,
     pub at: i64,
+    /// The native input a send, handoff or reopen reserved before any input.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub delivery: Option<Delivery>,
+    /// The history entries of the task's earlier executions (`sent` and
+    /// `resumed`) when this attempt began, by history entry ID: the baseline
+    /// that explains them. One no attempt froze or names is unexplained.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub frontier: Option<Vec<String>>,
+}
+
+/// The cutover a task took before its first attempt: the execution schema it
+/// was raised to, and the exact operation that raised it (the writing peer
+/// and that operation's counter), which a replica holds once its version of
+/// the task counts beyond it. Older builds never write it, so it survives a
+/// lower schema value winning a merge.
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+pub struct Floor {
+    pub schema: i64,
+    /// The writing peer, in decimal: a Loro peer ID does not fit a JSON number.
+    pub peer: String,
+    pub counter: i32,
+}
+
+/// The most history entries one attempt's frontier names.
+pub const MAX_FRONTIER: usize = 1024;
+
+impl Attempt {
+    /// SHA-256 (lowercase hex) of the attempt's immutable original contents.
+    /// Two records written under one ID by concurrent replicas differ here,
+    /// so a receipt or other fact about one never settles the other.
+    pub fn fingerprint(&self) -> String {
+        use sha2::{Digest, Sha256};
+        let original = (
+            &self.id,
+            self.generation,
+            self.origin,
+            &self.executor,
+            &self.request_id,
+            self.requirement,
+            &self.actor,
+            self.at,
+            &self.delivery,
+        );
+        // A later field joins the fingerprint only when present, so a record
+        // written before it keeps the fingerprint its facts name.
+        let bytes = match &self.frontier {
+            None => serde_json::to_vec(&original),
+            Some(frontier) => serde_json::to_vec(&(original, frontier)),
+        }
+        .expect("an attempt serializes");
+        format!("{:x}", Sha256::digest(bytes))
+    }
+}
+
+/// The exact native request an input-backed attempt reserved, frozen in the
+/// task before any input: what its receipt must show, and the task as the
+/// reservation saw it. Only that original receipt proves the delivery; a run
+/// resolved later never does.
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+pub struct Delivery {
+    /// The computer whose managed receipts hold the request's receipt.
+    pub machine: String,
+    /// The native session name the request was resolved to.
+    pub name: String,
+    /// The run the request expected.
+    pub run_id: String,
+    /// The conversation the request expected; empty when it opens one.
+    #[serde(default, skip_serializing_if = "String::is_empty")]
+    pub conversation_id: String,
+    /// SHA-256 (lowercase hex) of the exact request bytes.
+    pub digest: String,
+    /// The task's revision, stage and stage time at the reservation.
+    pub revision: String,
+    pub stage: Stage,
+    pub stage_at: i64,
+    /// The execution the task selected at the reservation: its target and the
+    /// session holding it. A receipt advances the task only while both are
+    /// unchanged, with the stage and the requirement revision.
+    pub target: Target,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub session: Option<SessionKey>,
+    /// The queued messages the request's bytes include, each with the digest
+    /// of its content. Its receipt submits these originals and no others.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub queued: Vec<QueuedMessage>,
+    /// SHA-256 (lowercase hex) of the requirement the request was rendered
+    /// from: the prompt text and its attachments. A receipt advances the task
+    /// only while its requirement is exactly this one; an edit merged from
+    /// any replica, whatever revision it counted, is another requirement.
+    pub requirement_digest: String,
+}
+
+/// A queued message a reserved request includes.
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+pub struct QueuedMessage {
+    pub request_id: String,
+    /// SHA-256 (lowercase hex) of the message's text and attachments.
+    pub digest: String,
+}
+
+/// The most queued messages one request includes.
+pub const MAX_QUEUED: usize = 64;
+
+/// What a native input receipt shows, as read from the executor's managed
+/// receipts by the computer that holds them.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct Receipt {
+    pub request_id: String,
+    pub name: String,
+    pub run_id: String,
+    pub conversation_id: String,
+    pub first_message: bool,
+    pub digest: String,
+    /// Only "submitted" proves the input; "in_progress" may or may not be in.
+    pub submitted: bool,
+}
+
+/// The native parts of a reservation; the task adds its own state.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct NativeRequest {
+    pub machine: String,
+    pub name: String,
+    pub run_id: String,
+    pub conversation_id: String,
+    pub digest: String,
+}
+
+impl Delivery {
+    /// Whether `receipt` is this reservation's own submitted receipt.
+    pub fn proves(&self, request_id: &str, receipt: &Receipt) -> bool {
+        receipt.submitted
+            && receipt.request_id == request_id
+            && receipt.name == self.name
+            && receipt.run_id == self.run_id
+            && receipt.conversation_id == self.conversation_id
+            && receipt.first_message == self.conversation_id.is_empty()
+            && receipt.digest == self.digest
+    }
 }
 
 /// What an attempt event records.
@@ -84,6 +225,11 @@ pub enum EventKind {
     Ready,
     /// The attempt was cancelled.
     Cancelled,
+    /// The native input was never admitted: a closed boundary before any
+    /// input, seen by the writer that reserved it, or an exact durable
+    /// refusal. Never inferred from a missing or unclear receipt.
+    #[serde(rename = "not_started")]
+    NotStarted,
 }
 
 /// One fact about an attempt. The same fact merged from two replicas has one
@@ -99,6 +245,11 @@ pub struct AttemptEvent {
     /// it never cancels a pause it did not see, even one merged later.
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub settles: Vec<String>,
+    /// The fingerprint of the exact attempt record this fact is about
+    /// (`Attempt::fingerprint`). A fact about another record under the same
+    /// ID never counts for this one.
+    #[serde(default, skip_serializing_if = "String::is_empty")]
+    pub of: String,
 }
 
 /// Where the current attempt stands.
@@ -116,6 +267,9 @@ pub enum Phase {
     /// The executor reported a result for review.
     Ready,
     Cancelled,
+    /// The native input was never admitted; nothing reached the executor.
+    #[serde(rename = "not_started")]
+    NotStarted,
     /// The task is In progress, but no send or start shows who executes it.
     Unconfirmed,
 }
@@ -160,6 +314,71 @@ pub struct Execution {
     /// automatically, and reports cannot move the task while it lasts.
     #[serde(skip_serializing_if = "std::ops::Not::not")]
     pub conflict: bool,
+    /// The highest generation any attempt claims, including one that never
+    /// started; the next attempt follows it.
+    #[serde(skip)]
+    pub highest: u64,
+    /// Every attempt whose delivery is unknown, in any generation, by
+    /// generation and ID. Each holds the task until its own receipt or the
+    /// person's disposition of that exact attempt settles it.
+    #[serde(skip_serializing_if = "Vec::is_empty")]
+    pub unknown: Vec<String>,
+    /// History entries of an execution (`sent`, `resumed`) that no attempt
+    /// explains, by history entry ID: neither frozen in an attempt's frontier
+    /// nor naming an attempt's request, nor reviewed by the person. Each makes
+    /// the task a conflict and holds new delivery until the person reviews it.
+    #[serde(skip_serializing_if = "Vec::is_empty")]
+    pub unexplained: Vec<String>,
+}
+
+/// The execution entries no attempt explains (`Execution::unexplained`), in
+/// history order. Only a task whose attempts froze a frontier is checked.
+pub(crate) fn unexplained(log: &[LogEntry], ids: &[String], attempts: &[Attempt]) -> Vec<String> {
+    use std::collections::BTreeSet;
+    if !attempts.iter().any(|attempt| attempt.frontier.is_some()) {
+        return Vec::new();
+    }
+    let frozen: BTreeSet<&str> = attempts
+        .iter()
+        .flat_map(|attempt| attempt.frontier.iter().flatten())
+        .map(String::as_str)
+        .collect();
+    // An attempt explains the entry its settlement wrote: its request, the
+    // fingerprint of its exact record and its executor, never the request
+    // ID alone, which a concurrent writer could reuse for another executor.
+    let originals: Vec<(&str, String, &SessionKey)> = attempts
+        .iter()
+        .filter(|attempt| !attempt.request_id.is_empty())
+        .map(|attempt| {
+            (
+                attempt.request_id.as_str(),
+                attempt.fingerprint(),
+                &attempt.executor,
+            )
+        })
+        .collect();
+    let named = |entry: &LogEntry| {
+        originals.iter().any(|(request, fingerprint, executor)| {
+            entry.request_id.as_deref() == Some(*request)
+                && entry.of.as_deref() == Some(fingerprint.as_str())
+                && entry.session.as_ref() == Some(*executor)
+        })
+    };
+    let reviewed: BTreeSet<&str> = log
+        .iter()
+        .filter(|entry| entry.kind == "reviewed" && entry.actor == Actor::Person)
+        .filter_map(|entry| entry.reviews.as_deref())
+        .collect();
+    log.iter()
+        .zip(ids)
+        .filter(|(entry, id)| {
+            matches!(entry.kind.as_str(), "sent" | "resumed")
+                && !frozen.contains(id.as_str())
+                && !reviewed.contains(id.as_str())
+                && !named(entry)
+        })
+        .map(|(_, id)| id.clone())
+        .collect()
 }
 
 /// A name-only session key bound to its verified run: `from` is the key
@@ -205,10 +424,48 @@ pub(crate) fn check_attempt(key: &str, attempt: &Attempt) -> Result<()> {
         || attempt.executor.machine.is_empty()
         || attempt.request_id.len() > 128
         || attempt.request_id.chars().any(char::is_control)
+        || attempt
+            .delivery
+            .as_ref()
+            .is_some_and(|d| !delivery_valid(attempt, d))
+        || attempt.frontier.as_ref().is_some_and(|frontier| {
+            frontier.len() > MAX_FRONTIER
+                || frontier
+                    .iter()
+                    .any(|id| id.is_empty() || id.len() > 128 || id.chars().any(char::is_control))
+        })
     {
         return Err(Error::failed("invalid task attempt"));
     }
     Ok(())
+}
+
+fn delivery_valid(attempt: &Attempt, delivery: &Delivery) -> bool {
+    let bounded = |text: &str, empty: bool| {
+        (empty || !text.is_empty()) && text.len() <= 256 && !text.chars().any(char::is_control)
+    };
+    attempt.origin != Origin::Start
+        && attempt.request_id == attempt.id
+        && delivery.machine == attempt.executor.machine
+        && bounded(&delivery.name, false)
+        && bounded(&delivery.run_id, false)
+        && bounded(&delivery.conversation_id, true)
+        && bounded(&delivery.revision, false)
+        && hex_digest(&delivery.digest)
+        && delivery.stage_at >= 0
+        && hex_digest(&delivery.requirement_digest)
+        && delivery.queued.len() <= MAX_QUEUED
+        && delivery
+            .queued
+            .iter()
+            .all(|message| canonical_uuid(&message.request_id) && hex_digest(&message.digest))
+}
+
+pub(crate) fn hex_digest(digest: &str) -> bool {
+    digest.len() == 64
+        && digest
+            .bytes()
+            .all(|b| b.is_ascii_digit() || (b'a'..=b'f').contains(&b))
 }
 
 pub(crate) fn check_event(event: &AttemptEvent) -> Result<()> {
@@ -217,6 +474,7 @@ pub(crate) fn check_event(event: &AttemptEvent) -> Result<()> {
         || (event.kind != EventKind::Resumed && !event.settles.is_empty())
         || event.settles.len() > MAX_ATTEMPT_EVENTS
         || !event.settles.iter().all(|id| canonical_uuid(id))
+        || (!event.of.is_empty() && !hex_digest(&event.of))
     {
         return Err(Error::failed("invalid task attempt event"));
     }
@@ -225,7 +483,10 @@ pub(crate) fn check_event(event: &AttemptEvent) -> Result<()> {
 
 /// What the recorded events say about one attempt. Each kind counts as a set
 /// member, so the answer does not depend on the order replicas merged them.
-fn phase_of(attempt: &Attempt, events: &[&AttemptEvent]) -> (Phase, Option<i64>, Option<i64>) {
+/// An attempt's phase, with when it began and last reported progress.
+type Projected = (Phase, Option<i64>, Option<i64>);
+
+fn phase_of(attempt: &Attempt, events: &[&AttemptEvent]) -> Projected {
     let mut seen = std::collections::BTreeSet::new();
     let (mut pauses, mut settled) = (
         std::collections::BTreeSet::new(),
@@ -233,14 +494,14 @@ fn phase_of(attempt: &Attempt, events: &[&AttemptEvent]) -> (Phase, Option<i64>,
     );
     let mut began_at = (attempt.origin == Origin::Start).then_some(attempt.at);
     let mut progress_at = None;
-    let (mut submitted, mut unknown, mut ready, mut cancelled) = (false, false, false, false);
+    let (mut submitted, mut ready, mut cancelled, mut not_started) = (false, false, false, false);
     for event in events {
         if !seen.insert(event.id.as_str()) {
             continue;
         }
         match event.kind {
             EventKind::Submitted => submitted = true,
-            EventKind::Unknown => unknown = true,
+            EventKind::Unknown => {}
             EventKind::Began => began_at = Some(began_at.map_or(event.at, |at| at.min(event.at))),
             EventKind::Progress => {
                 progress_at = Some(progress_at.map_or(event.at, |at: i64| at.max(event.at)))
@@ -251,24 +512,35 @@ fn phase_of(attempt: &Attempt, events: &[&AttemptEvent]) -> (Phase, Option<i64>,
             EventKind::Resumed => settled.extend(event.settles.iter().map(String::as_str)),
             EventKind::Ready => ready = true,
             EventKind::Cancelled => cancelled = true,
+            EventKind::NotStarted => not_started = true,
         }
     }
+    // Only its own submitted receipt shows that a send, handoff or reopen
+    // reached its executor. Until then a start, progress or result reported
+    // for it is evidence, never a lifted hold. Input refused before it could
+    // be admitted ends the attempt, unless another fact says otherwise: such
+    // a contradiction is Unknown, for a person to review.
+    let input = attempt.origin != Origin::Start;
+    let evidence = submitted || ready || progress_at.is_some() || (input && began_at.is_some());
     // A finished attempt takes no further state. A cancellation outranks a
     // result reported at the same time. Any pause no resume observed holds
     // the attempt, whatever other resumes merged: an unclear state fails safe.
     let phase = if cancelled {
         Phase::Cancelled
+    } else if not_started && evidence {
+        Phase::Unknown
+    } else if not_started {
+        Phase::NotStarted
+    } else if input && !submitted {
+        Phase::Unknown
     } else if ready {
         Phase::Ready
     } else if pauses.iter().any(|id| !settled.contains(id)) {
         Phase::Paused
     } else if began_at.is_some() {
         Phase::Running
-    } else if submitted || !unknown {
-        // A send, handoff or reopen is recorded after its submission.
-        Phase::Submitted
     } else {
-        Phase::Unknown
+        Phase::Submitted
     };
     (phase, began_at, progress_at)
 }
@@ -299,14 +571,78 @@ pub(crate) fn project(
                 attempts: 0,
                 current: Some(current),
                 conflict,
+                highest: 0,
+                unknown: Vec::new(),
+                unexplained: Vec::new(),
             }
         });
     };
-    let mut claims: Vec<&Attempt> = attempts.iter().filter(|a| a.generation == top).collect();
-    claims.sort_by(|a, b| a.id.cmp(&b.id));
-    let attempt = claims[0];
-    let own: Vec<&AttemptEvent> = events.iter().filter(|e| e.attempt == attempt.id).collect();
-    let (phase, began_at, progress_at) = phase_of(attempt, &own);
+    // Facts count only for the exact record they name. A fact about another
+    // record written under the same ID (two replicas reserved one UUID with
+    // different contents) leaves this one rebound: a conflict for review,
+    // held as Unknown until the person cancels it, never settled by the
+    // other original's receipt.
+    let mut rebound = std::collections::BTreeSet::new();
+    let phases: Vec<(&Attempt, Projected)> = attempts
+        .iter()
+        .map(|attempt| {
+            let fingerprint = attempt.fingerprint();
+            let (own, foreign): (Vec<&AttemptEvent>, Vec<&AttemptEvent>) = events
+                .iter()
+                .filter(|e| e.attempt == attempt.id)
+                .partition(|e| e.of.is_empty() || e.of == fingerprint);
+            let mut projected = phase_of(attempt, &own);
+            if !foreign.is_empty() && projected.0 != Phase::Cancelled {
+                rebound.insert(attempt.id.as_str());
+                projected.0 = Phase::Unknown;
+            }
+            (attempt, projected)
+        })
+        .collect();
+    // An attempt whose input was never admitted is not an execution: the one
+    // before it stays current, as a refused handoff leaves the previous
+    // executor working. Only when every attempt never started is the latest
+    // of them shown.
+    let mut unknown: Vec<&Attempt> = phases
+        .iter()
+        .filter(|(_, (phase, ..))| *phase == Phase::Unknown)
+        .map(|(attempt, _)| *attempt)
+        .collect();
+    unknown.sort_by(|a, b| (a.generation, &a.id).cmp(&(b.generation, &b.id)));
+    let unknown = unknown.into_iter().map(|a| a.id.clone()).collect();
+    let any_started = phases
+        .iter()
+        .any(|(_, (phase, ..))| *phase != Phase::NotStarted);
+    // A task In progress whose every recorded attempt never started is still
+    // the execution its history shows: a refused first recorded handoff keeps
+    // the legacy executor working. The next attempt still follows the refused.
+    if !any_started && stage == Stage::Active {
+        let current = legacy(session, binding, log, requirement);
+        let conflict = current.executor.is_some() && current.executor.as_ref() != session;
+        return Some(Execution {
+            requirement,
+            attempts: attempts.len(),
+            current: Some(current),
+            conflict,
+            highest: top,
+            unknown,
+            unexplained: Vec::new(),
+        });
+    }
+    let counts = |phase: Phase| !any_started || phase != Phase::NotStarted;
+    let generation = phases
+        .iter()
+        .filter(|(_, (phase, ..))| counts(*phase))
+        .map(|(a, _)| a.generation)
+        .max()
+        .unwrap_or(top);
+    let mut claims: Vec<_> = phases
+        .iter()
+        .filter(|(a, (phase, ..))| a.generation == generation && counts(*phase))
+        .collect();
+    claims.sort_by(|a, b| a.0.id.cmp(&b.0.id));
+    let (attempt, (phase, began_at, progress_at)) = claims[0];
+    let (attempt, phase, began_at, progress_at) = (*attempt, *phase, *began_at, *progress_at);
     Some(Execution {
         requirement,
         attempts: attempts.len(),
@@ -323,7 +659,10 @@ pub(crate) fn project(
             progress_at,
             legacy: false,
         }),
-        conflict: claims.len() > 1,
+        conflict: claims.len() > 1 || rebound.contains(attempt.id.as_str()),
+        highest: top,
+        unknown,
+        unexplained: Vec::new(),
     })
 }
 
@@ -442,13 +781,10 @@ fn legacy<'a>(
 
 /// The generation of a task's next attempt; refused once generations run out.
 pub fn next_generation(execution: Option<&Execution>) -> Result<u64> {
-    match execution.and_then(|e| e.current.as_ref()) {
-        None => Ok(1),
-        Some(current) => current
-            .generation
-            .checked_add(1)
-            .ok_or_else(|| Error::new("this task has no further attempt generations")),
-    }
+    execution
+        .map_or(0, |e| e.highest)
+        .checked_add(1)
+        .ok_or_else(|| Error::new("this task has no further attempt generations"))
 }
 
 /// What a report claims.
@@ -472,6 +808,9 @@ pub enum Stale {
     Finished,
     /// Two attempts claim the task; a person resolves it.
     Conflict,
+    /// The current attempt's delivery is unknown or was refused: a report
+    /// from its executor is evidence and lifts nothing.
+    Undelivered,
 }
 
 impl Stale {
@@ -481,6 +820,7 @@ impl Stale {
             Self::OtherAttempt => "other_attempt",
             Self::Finished => "finished",
             Self::Conflict => "conflict",
+            Self::Undelivered => "undelivered",
         }
     }
 
@@ -514,6 +854,19 @@ pub fn decide_report(
         moves: false,
         stale,
     };
+    // Its executor's report for an attempt whose delivery is unknown or was
+    // never admitted is evidence in any stage: it starts and moves nothing.
+    if let (Actor::Agent(own), Some(execution)) = (actor, execution) {
+        let held = execution.current.as_ref().is_some_and(|current| {
+            !execution.conflict
+                && current.executor.as_ref() == Some(own)
+                && matches!(current.phase, Phase::Unknown | Phase::NotStarted)
+                && attempt.is_none_or(|id| id == current.id)
+        });
+        if held {
+            return recorded(Some(Stale::Undelivered));
+        }
+    }
     if stage != Stage::Active {
         return recorded(None);
     }
@@ -572,6 +925,8 @@ mod tests {
             requirement: 1,
             actor: Actor::Person,
             at: 100 * generation as i64,
+            delivery: None,
+            frontier: None,
         }
     }
 
@@ -583,6 +938,7 @@ mod tests {
             actor: Actor::Person,
             at,
             settles: Vec::new(),
+            of: String::new(),
         }
     }
 
@@ -609,6 +965,8 @@ mod tests {
             delivery: None,
             stale: None,
             considered: None,
+            reviews: None,
+            of: None,
         }
     }
 
@@ -688,65 +1046,103 @@ mod tests {
     #[test]
     fn phases_follow_delivery_start_pause_and_finish_evidence() {
         let send = [attempt(A1, 1, Origin::Send, "worker")];
-        let phase = |events: &[AttemptEvent]| {
-            current(&project(Stage::Active, None, None, &[], &send, events, 1)).phase
+        let now = |events: &[AttemptEvent]| {
+            current(&project(Stage::Active, None, None, &[], &send, events, 1)).clone()
         };
-        assert_eq!(phase(&[]), Phase::Submitted);
+        let phase = |events: &[AttemptEvent]| now(events).phase;
+        let reserved = event(1, A1, EventKind::Unknown, 1);
+        let receipt = event(2, A1, EventKind::Submitted, 2);
+        // Only the request's own receipt shows that it was delivered.
+        assert_eq!(phase(&[]), Phase::Unknown);
+        assert_eq!(phase(std::slice::from_ref(&reserved)), Phase::Unknown);
         assert_eq!(
-            phase(&[event(1, A1, EventKind::Unknown, 1)]),
-            Phase::Unknown
-        );
-        assert_eq!(
-            phase(&[
-                event(1, A1, EventKind::Unknown, 1),
-                event(2, A1, EventKind::Submitted, 2)
-            ]),
+            phase(&[reserved.clone(), receipt.clone()]),
             Phase::Submitted
         );
+        // Before it, a start, progress or result is evidence that lifts nothing.
+        for kind in [EventKind::Began, EventKind::Progress, EventKind::Ready] {
+            let claimed = [reserved.clone(), event(3, A1, kind, 3)];
+            assert_eq!(phase(&claimed), Phase::Unknown, "{kind:?}");
+        }
+        assert_eq!(
+            now(&[reserved.clone(), event(3, A1, EventKind::Began, 3)]).began_at,
+            Some(3)
+        );
         assert_eq!(
             phase(&[
-                event(1, A1, EventKind::Unknown, 1),
-                event(2, A1, EventKind::Began, 2)
+                reserved.clone(),
+                receipt.clone(),
+                event(3, A1, EventKind::Began, 3)
             ]),
             Phase::Running
         );
-        // A resumed pause no longer holds the attempt.
-        let resumed = [event(1, A1, EventKind::Paused, 1), resume(2, A1, &[1], 2)];
+        // Input refused before admission ends the attempt; contradicted by
+        // any delivery fact it is Unknown, for a person to review.
+        let refused = event(4, A1, EventKind::NotStarted, 2);
+        // A refused send leaves its task To do.
+        assert_eq!(
+            current(&project(
+                Stage::Todo,
+                None,
+                None,
+                &[],
+                &send,
+                &[reserved.clone(), refused.clone()],
+                1
+            ))
+            .phase,
+            Phase::NotStarted
+        );
+        for kind in [
+            EventKind::Submitted,
+            EventKind::Began,
+            EventKind::Progress,
+            EventKind::Ready,
+        ] {
+            let both = [reserved.clone(), refused.clone(), event(5, A1, kind, 3)];
+            assert_eq!(phase(&both), Phase::Unknown, "{kind:?}");
+        }
+        assert_eq!(
+            phase(&[
+                reserved.clone(),
+                refused.clone(),
+                event(5, A1, EventKind::Cancelled, 3)
+            ]),
+            Phase::Cancelled
+        );
+        // After the receipt: a resumed pause no longer holds the attempt.
+        let resumed = [
+            receipt.clone(),
+            event(6, A1, EventKind::Paused, 3),
+            resume(7, A1, &[6], 4),
+        ];
         assert_eq!(phase(&resumed), Phase::Submitted);
         // A resume that saw one of two concurrent pauses leaves the other holding.
         let paused = [
-            event(1, A1, EventKind::Paused, 1),
-            event(2, A1, EventKind::Paused, 1),
-            resume(3, A1, &[1], 2),
+            receipt.clone(),
+            event(6, A1, EventKind::Paused, 3),
+            event(8, A1, EventKind::Paused, 3),
+            resume(7, A1, &[6], 4),
         ];
         assert_eq!(phase(&paused), Phase::Paused);
         // A finished attempt keeps its outcome; a cancellation outranks a result.
         assert_eq!(
             phase(&[
-                event(1, A1, EventKind::Ready, 1),
-                event(2, A1, EventKind::Began, 2)
+                receipt.clone(),
+                event(9, A1, EventKind::Ready, 3),
+                event(10, A1, EventKind::Began, 4)
             ]),
             Phase::Ready
         );
         assert_eq!(
             phase(&[
-                event(1, A1, EventKind::Ready, 1),
-                event(2, A1, EventKind::Cancelled, 1)
+                receipt,
+                event(9, A1, EventKind::Ready, 3),
+                event(11, A1, EventKind::Cancelled, 3)
             ]),
             Phase::Cancelled
         );
-        assert_eq!(
-            phase(&[
-                event(1, A1, EventKind::Paused, 1),
-                event(2, A1, EventKind::Ready, 2)
-            ]),
-            Phase::Ready
-        );
-        // Another attempt's events do not count.
-        assert_eq!(
-            phase(&[event(1, A2, EventKind::Ready, 1)]),
-            Phase::Submitted
-        );
+        // A direct start reserves no input: it is running from the start.
         let start = [attempt(A1, 1, Origin::Start, "worker")];
         let started = current(&project(Stage::Active, None, None, &[], &start, &[], 1)).clone();
         assert_eq!(
@@ -759,7 +1155,10 @@ mod tests {
     fn a_resume_settles_only_the_pauses_it_observed() {
         let send = [attempt(A1, 1, Origin::Send, "worker")];
         let phase = |events: &[AttemptEvent]| {
-            current(&project(Stage::Active, None, None, &[], &send, events, 1)).phase
+            // The delivered attempt these pauses are about.
+            let mut all = vec![event(90, A1, EventKind::Submitted, 0)];
+            all.extend_from_slice(events);
+            current(&project(Stage::Active, None, None, &[], &send, &all, 1)).phase
         };
         let began = event(1, A1, EventKind::Began, 1);
         // review-n's sequence: two replicas fork the same one-pause state and
@@ -1127,13 +1526,14 @@ mod tests {
             attempt(A1, 1, Origin::Send, "old"),
             attempt(A2, 2, Origin::Handoff, "worker"),
         ];
+        let delivered = event(1, A2, EventKind::Submitted, 1);
         let running = project(
             Stage::Active,
             None,
             None,
             &[],
             &attempts,
-            &[event(1, A2, EventKind::Began, 1)],
+            &[delivered.clone(), event(2, A2, EventKind::Began, 1)],
             1,
         );
         let report = |actor: &Actor, kind, named: Option<&str>| {
@@ -1183,7 +1583,7 @@ mod tests {
                 None,
                 &[],
                 &attempts,
-                &[event(9, A2, finish, 9)],
+                &[delivered.clone(), event(9, A2, finish, 9)],
                 1,
             );
             let decision = decide_report(
@@ -1195,6 +1595,55 @@ mod tests {
             );
             assert_eq!(decision.stale, Some(Stale::Finished), "{finish:?}");
         }
+        // While the handoff's delivery is unknown, the new executor's report is
+        // evidence in any stage; the previous one is still another executor.
+        let held = project(
+            Stage::Active,
+            None,
+            None,
+            &[],
+            &attempts,
+            &[event(3, A2, EventKind::Unknown, 1)],
+            1,
+        );
+        for stage in [Stage::Active, Stage::Todo, Stage::Review] {
+            for kind in [ReportKind::Ready, ReportKind::Progress] {
+                let decision = decide_report(stage, held.as_ref(), &worker, kind, None);
+                assert_eq!(
+                    decision,
+                    ReportDecision {
+                        moves: false,
+                        stale: Some(Stale::Undelivered)
+                    },
+                    "{stage:?} {kind:?}"
+                );
+            }
+        }
+        assert_eq!(
+            decide_report(Stage::Active, held.as_ref(), &old, ReportKind::Ready, None).stale,
+            Some(Stale::OtherExecutor)
+        );
+        assert_eq!(
+            decide_report(
+                Stage::Active,
+                held.as_ref(),
+                &worker,
+                ReportKind::Ready,
+                Some(A1)
+            )
+            .stale,
+            Some(Stale::OtherAttempt)
+        );
+        assert!(
+            decide_report(
+                Stage::Active,
+                held.as_ref(),
+                &Actor::Person,
+                ReportKind::Ready,
+                None
+            )
+            .moves
+        );
         // Outside In progress a report only adds to the history.
         for stage in [Stage::Todo, Stage::Review, Stage::Done] {
             let decision = decide_report(stage, running.as_ref(), &worker, ReportKind::Ready, None);

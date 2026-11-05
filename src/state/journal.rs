@@ -676,8 +676,10 @@ pub(super) fn lineage(db: &Connection, record: &Value) -> Vec<Value> {
 
 /// A fork recorded before its lineage: the source name it recorded, that
 /// conversation's rows up to the fork's creation and before the fork's own
-/// first row. One indexed search backwards from that row. None for a
-/// session that is not such a fork.
+/// first row. One indexed search backwards from that row, under the source's
+/// label and, when that finds nothing, under the journal of the saved session
+/// that holds the label and had that conversation (a source journalled by its
+/// ID, zerus-ucck P2b). None for a session that is not such a fork.
 fn derived_lineage(db: &Connection, record: &Value) -> Option<Vec<Value>> {
     let (source, parent) = (
         string(record, "fork_source_name"),
@@ -696,43 +698,74 @@ fn derived_lineage(db: &Connection, record: &Value) -> Option<Vec<Value>> {
         )
         .ok()
         .flatten();
-    let seq: Option<i64> = db
-        .query_row(
+    let last = |journal: &str| -> Option<Option<i64>> {
+        db.query_row(
             "SELECT seq FROM events WHERE name=?1 AND conversation=?2 AND seq<?3 \
              AND CAST(json_extract(payload, '$.at') AS REAL)<=?4 ORDER BY seq DESC LIMIT 1",
-            params![source, parent, own.unwrap_or(i64::MAX), created],
+            params![journal, parent, own.unwrap_or(i64::MAX), created],
             |row| row.get(0),
         )
         .optional()
-        .ok()?;
+        .ok()
+    };
+    let mut found = last(source)?.map(|seq| (source.to_owned(), seq));
+    if found.is_none() {
+        let holder = read(source).ok().filter(|holder| {
+            string(holder, "conversation_id") == parent
+                || clear_context::earlier_conversations(holder)
+                    .as_array()
+                    .is_some_and(|earlier| earlier.iter().any(|id| id == parent))
+        });
+        if let Some(journal) = holder
+            .as_ref()
+            .map(journal_name)
+            .filter(|journal| *journal != source)
+        {
+            found = last(journal)?.map(|seq| (journal.to_owned(), seq));
+        }
+    }
     Some(
-        seq.map(|seq| vec![json!([source, parent, seq])])
+        found
+            .map(|(journal, seq)| vec![json!([journal, parent, seq])])
             .unwrap_or_default(),
     )
 }
 
-/// Saves a derived lineage into the fork's own record. The journal search
-/// runs without the state lock (`inspect` has released it by then); only
-/// [`store_lineage`] takes it, briefly.
+/// Saves a derived lineage into the fork's own record, with the label of a
+/// source whose journal is not its label. The journal search runs without the
+/// state lock (`inspect` has released it by then); only [`store_lineage`]
+/// takes it, briefly.
 pub(super) fn save_derived_lineage(db: &Connection, record: &mut Value) {
     let Some(lineage) = derived_lineage(db, record) else {
         return;
     };
+    let source = string(record, "fork_source_name").to_owned();
+    let labels = lineage
+        .first()
+        .and_then(|entry| entry[0].as_str())
+        .filter(|journal| *journal != source)
+        .map(|journal| json!({journal: source}));
     record["fork_lineage"] = json!(lineage);
-    let _ = store_lineage(record, &lineage);
+    if let Some(labels) = &labels {
+        record["fork_lineage_labels"] = labels.clone();
+    }
+    let _ = store_lineage(record, &lineage, labels.as_ref());
 }
 
 /// Under the state lock: re-reads the saved record and adds only its lineage,
 /// when it still names the same run and has none yet. Whatever another writer
 /// saved in the meantime (a hook, resume or rename) is kept. False when
 /// nothing was written.
-fn store_lineage(record: &Value, lineage: &[Value]) -> Result<bool> {
+fn store_lineage(record: &Value, lineage: &[Value], labels: Option<&Value>) -> Result<bool> {
     let _guard = lock(None)?;
     let mut saved = read(string(record, "name"))?;
     if saved["run_id"] != record["run_id"] || saved["fork_lineage"].is_array() {
         return Ok(false);
     }
     saved["fork_lineage"] = json!(lineage);
+    if let Some(labels) = labels {
+        saved["fork_lineage_labels"] = labels.clone();
+    }
     write(&mut saved)?;
     Ok(true)
 }
@@ -771,13 +804,59 @@ fn lineage_after(db: &Connection, source: &Value) -> String {
     json!(sources[keep..]).to_string()
 }
 
+/// What a new fork of `source` names its inherited sources by: the label each
+/// had when the fork began, keyed by journal name, for the sources in
+/// `lineage` ([`fork_lineage`]) whose journal is not their label (zerus-ucck
+/// P2b). The lineage itself stays `[journal name, conversation, sequence]`,
+/// so a build that ignores the labels still reads the same rows.
+pub(super) fn fork_lineage_labels(source: &Value, lineage: &str) -> String {
+    let journals: std::collections::BTreeSet<String> = serde_json::from_str::<Vec<Value>>(lineage)
+        .unwrap_or_default()
+        .iter()
+        .filter_map(|entry| entry[0].as_str().map(str::to_owned))
+        .collect();
+    let mut labels = serde_json::Map::new();
+    if let Some(inherited) = source["fork_lineage_labels"].as_object() {
+        for (journal, label) in inherited {
+            if journals.contains(journal) && label.as_str().is_some_and(|label| !label.is_empty()) {
+                labels.insert(journal.clone(), label.clone());
+            }
+        }
+    }
+    let (journal, name) = (journal_name(source), string(source, "name"));
+    if journal != name && !name.is_empty() && journals.contains(journal) {
+        labels.insert(journal.to_owned(), json!(name));
+    }
+    Value::Object(labels).to_string()
+}
+
+/// The label an inherited source of the fork `record` had when the fork
+/// began: from its `fork_lineage_labels`; for its direct source (the last
+/// lineage entry) without one, as a build that dropped the labels leaves it,
+/// the `fork_source_name` it recorded; else the journal name, which is that
+/// label for every source before P2b.
+pub(super) fn lineage_label<'a>(record: &'a Value, journal: &'a str) -> &'a str {
+    let nonempty = |value: &'a Value| value.as_str().filter(|label| !label.is_empty());
+    if let Some(label) = nonempty(&record["fork_lineage_labels"][journal]) {
+        return label;
+    }
+    let direct = record["fork_lineage"]
+        .as_array()
+        .and_then(|lineage| lineage.last())
+        .and_then(|entry| entry[0].as_str());
+    match nonempty(&record["fork_source_name"]) {
+        Some(source) if direct == Some(journal) => source,
+        _ => journal,
+    }
+}
+
 /// The `?3` scope of the Activity reads for a record.
 pub(super) fn activity_scope(db: &Connection, record: &Value) -> String {
     json!({"earlier": clear_context::earlier_conversations(record), "inherited": lineage(db, record)}).to_string()
 }
 
 /// Marks a row another conversation's fork source wrote: read-only history the
-/// fork began from, named by that source's journal name.
+/// fork began from, named by the label that source had ([`lineage_label`]).
 fn mark_inherited(event: &mut Value, own: bool, name: &str) {
     if !own {
         event["inherited_from"] = json!(name);
@@ -787,7 +866,7 @@ fn mark_inherited(event: &mut Value, own: bool, name: &str) {
 // The activity tail includes tools and children. Keep main public messages in
 // a separate bounded window so a cold reader does not lose its newest prompt
 // merely because that turn has produced more than one hundred tool events.
-fn message_events(db: &Connection, name: &str, conversation: Option<&str>, scope: &str) -> Result<(Vec<Value>, bool)> {
+fn message_events(db: &Connection, name: &str, conversation: Option<&str>, scope: &str, record: &Value) -> Result<(Vec<Value>, bool)> {
     static QUERY: OnceLock<String> = OnceLock::new();
     let query = QUERY.get_or_init(|| activity_query(" AND COALESCE(json_extract(payload, '$.agent_id'), '') IN ('', 'main') \
         AND json_extract(payload, '$.type') IN ('SessionCleared','UserPromptSubmit','UserPromptQueued','UserMessage','TurnStarted','QuestionAnswered','AgentMessage','Stop')", true, "101"));
@@ -802,7 +881,7 @@ fn message_events(db: &Connection, name: &str, conversation: Option<&str>, scope
         if events.len() == MESSAGE_EVENTS_LIMIT { truncated = true; break; }
         let mut event: Value = serde_json::from_str(&payload).map_err(|e| e.to_string())?;
         event["seq"] = json!(seq);
-        mark_inherited(&mut event, own, &source);
+        mark_inherited(&mut event, own, lineage_label(record, &source));
         let size = event.to_string().len() + usize::from(!events.is_empty());
         if bytes + size > MESSAGE_EVENTS_BYTES { truncated = true; break; }
         bytes += size;
@@ -846,12 +925,14 @@ pub(super) fn inspection(name: &str, after: i64, archive_id: Option<&str>, inclu
     } else {
         read(name)?
     };
-    let (snapshot, names) = live_sessions()?;
+    let (snapshot, mut names) = live_sessions()?;
+    // The session's own terminal (P3b), never another under its label.
     let panes = if archive_id.is_some() {
         None
     } else {
-        snapshot.get(name)
+        panes_of(&snapshot, &record)
     };
+    workspace::relabel(&mut names, terminal_name(&record), name);
     if panes.is_some() && !matches(&record, panes) {
         drop(_guard);
         return Ok(untracked(workspace::snapshot_cwds(&names)));
@@ -1031,7 +1112,8 @@ pub(super) fn inspection(name: &str, after: i64, archive_id: Option<&str>, inclu
         events.push(row.event(&record)?);
     }
     output["events"] = json!(events);
-    let (messages, truncated) = message_events(&db, journal_name, conversation, &scope)?;
+    let (messages, truncated) =
+        message_events(&db, journal_name, conversation, &scope, &record)?;
     output["message_events"] = json!(messages);
     output["message_events_truncated"] = json!(truncated);
     output["message_events_limit"] = json!(MESSAGE_EVENTS_LIMIT);
@@ -1060,7 +1142,7 @@ impl TimelineRow {
     pub(super) fn event(&self, record: &Value) -> Result<Value> {
         let mut event = timeline_event(record, self.seq, &self.payload)?;
         if let Some(source) = &self.inherited_from {
-            mark_inherited(&mut event, false, source);
+            mark_inherited(&mut event, false, lineage_label(record, source));
         }
         Ok(event)
     }
@@ -1652,6 +1734,37 @@ pub(super) fn settle_children(record: &mut Value) {
 mod attention_regressions {
     use super::*;
 
+    /// zerus-ucck P2b: a fork names its inherited sources by the labels they
+    /// had, kept apart from the three-part lineage older builds read.
+    #[test]
+    fn a_fork_keeps_the_labels_of_sources_journalled_by_id() {
+        let id = "session:3f2a9c1d-0b4e-4d6a-9c1d-2e3f4a5b6c7d";
+        let source = json!({"name":"codex/p/root","journal_name":id,
+            "fork_lineage_labels":{"session:old":"codex/p/older","session:gone":"codex/p/dropped"}});
+        let lineage = json!([
+            ["session:old", "c-old", 3],
+            ["codex/p/plain", "c-plain", 4],
+            [id, "c-root", 9]
+        ])
+        .to_string();
+        let labels: Value = serde_json::from_str(&fork_lineage_labels(&source, &lineage)).unwrap();
+        let expected = json!({"session:old":"codex/p/older", id:"codex/p/root"});
+        assert_eq!(labels, expected);
+        let fork = json!({"fork_lineage_labels": labels});
+        assert_eq!(lineage_label(&fork, id), "codex/p/root");
+        assert_eq!(lineage_label(&fork, "codex/p/plain"), "codex/p/plain");
+        assert_eq!(lineage_label(&Value::Null, id), id);
+        // A build that dropped the labels: the direct source falls back to the
+        // label it recorded; an ancestor keeps its journal name.
+        let dropped = json!({"fork_source_name": "codex/p/root",
+            "fork_lineage": [["session:old", "c-old", 3], [id, "c-root", 9]]});
+        assert_eq!(lineage_label(&dropped, id), "codex/p/root");
+        assert_eq!(lineage_label(&dropped, "session:old"), "session:old");
+        let plain = json!({"name":"codex/p/plain"});
+        let lineage = json!([["codex/p/plain", "c-plain", 4]]).to_string();
+        assert_eq!(fork_lineage_labels(&plain, &lineage), "{}");
+    }
+
     #[test]
     fn native_kimi_turn_identity_retains_zero_without_inventing_ids_for_other_hooks() {
         let record = json!({"agent":"kimi"});
@@ -1823,7 +1936,7 @@ mod attention_regressions {
         insert_message(&db, "other", Some("conversation"), json!({"type":"UserPromptSubmit","agent_id":"","detail":"Other session"}));
         let answer = json!({"type":"QuestionAnswered","agent_id":"main","at":302,"detail":"Literal answer","question_id":"question","question_hash":"hash"});
         let answer_seq = insert_message(&db, "example", Some("conversation"), answer.clone());
-        let (messages, truncated) = message_events(&db, "example", Some("conversation"), r#"{"earlier":[]}"#).unwrap();
+        let (messages, truncated) = message_events(&db, "example", Some("conversation"), r#"{"earlier":[]}"#, &Value::Null).unwrap();
         assert!(!truncated);
         assert_eq!(messages.len(), 2);
         assert_eq!(messages[0]["seq"], seq);
@@ -1832,7 +1945,7 @@ mod attention_regressions {
         assert_eq!(messages[1], expected);
         // A conversation replaced by a confirmed clear stays in the same
         // timeline, in journal order; another session's rows never join it.
-        let (messages, _) = message_events(&db, "example", Some("conversation"), r#"{"earlier":["other"]}"#).unwrap();
+        let (messages, _) = message_events(&db, "example", Some("conversation"), r#"{"earlier":["other"]}"#, &Value::Null).unwrap();
         assert_eq!(messages.iter().map(|m| m["detail"].as_str().unwrap()).collect::<Vec<_>>(),
             ["Synthetic latest own message", "Other conversation", "Literal answer"]);
     }
@@ -1908,7 +2021,7 @@ mod attention_regressions {
         );
         let scope = activity_scope(&db, &second);
         let (messages, _) =
-            message_events(&db, "codex/p/second", Some("c-second"), &scope).unwrap();
+            message_events(&db, "codex/p/second", Some("c-second"), &scope, &Value::Null).unwrap();
         assert_eq!(
             messages
                 .iter()
@@ -2010,7 +2123,7 @@ mod attention_regressions {
         let mut concurrent = read("codex/p/fork").unwrap();
         concurrent["activity"] = json!("busy");
         write(&mut concurrent).unwrap();
-        assert!(store_lineage(&record, &lineage).unwrap());
+        assert!(store_lineage(&record, &lineage, None).unwrap());
         let saved = read("codex/p/fork").unwrap();
         assert_eq!(
             (&saved["activity"], &saved["fork_lineage"]),
@@ -2021,12 +2134,12 @@ mod attention_regressions {
         resumed["run_id"] = json!("run-2");
         resumed.as_object_mut().unwrap().remove("fork_lineage");
         write(&mut resumed).unwrap();
-        assert!(!store_lineage(&record, &lineage).unwrap());
+        assert!(!store_lineage(&record, &lineage, None).unwrap());
         assert!(read("codex/p/fork").unwrap().get("fork_lineage").is_none());
         let mut again = record.clone();
         again["run_id"] = json!("run-2");
-        assert!(store_lineage(&again, &lineage).unwrap());
-        assert!(!store_lineage(&again, &[]).unwrap());
+        assert!(store_lineage(&again, &lineage, None).unwrap());
+        assert!(!store_lineage(&again, &[], None).unwrap());
         assert_eq!(
             read("codex/p/fork").unwrap()["fork_lineage"],
             json!(lineage)
@@ -2190,13 +2303,13 @@ mod attention_regressions {
         for index in 0..105 {
             insert_message(&db, "example", None, json!({"type":"UserMessage","at":index,"detail":"Synthetic repeated message"}));
         }
-        let (messages, truncated) = message_events(&db, "example", None, r#"{"earlier":[]}"#).unwrap();
+        let (messages, truncated) = message_events(&db, "example", None, r#"{"earlier":[]}"#, &Value::Null).unwrap();
         assert!(truncated); assert_eq!(messages.len(), MESSAGE_EVENTS_LIMIT);
         assert_eq!(messages[0]["at"], 5); assert_eq!(messages[99]["at"], 104);
         for _ in 0..10 {
             insert_message(&db, "unicode", Some("conversation"), json!({"type":"UserMessage","detail":"🦀".repeat(20_000)}));
         }
-        let (messages, truncated) = message_events(&db, "unicode", Some("conversation"), r#"{"earlier":[]}"#).unwrap();
+        let (messages, truncated) = message_events(&db, "unicode", Some("conversation"), r#"{"earlier":[]}"#, &Value::Null).unwrap();
         assert!(truncated); assert_eq!(messages.len(), 3);
         assert!(json!(messages).to_string().len() <= MESSAGE_EVENTS_BYTES);
     }

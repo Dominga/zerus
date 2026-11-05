@@ -131,14 +131,16 @@ unless the prefix also contains a `gtk/` override. That override must contain
 both GTK3 and GDK3 libraries under `gtk/lib`; a partial override is rejected.
 To retain a private WebKit build with system GTK, select a separate prefix
 containing only its `lib/` and `libexec/` directories (symlinks are supported).
-The patch set, build commands and qualification checks for the private arch
-stack are in the
+WebKit still runs its helper processes and injected bundle from the directory
+it was installed to, so build each prefix for its final path and keep that
+installation in place. The patch set, build commands and qualification checks
+for the private arch stack are in the
 [WebKitGTK display pacing design](superpowers/specs/2026-10-28-webkitgtk-display-pacing.md#building-the-private-prefix).
 The installer saves the selection in `~/.local/share/hgs/local-webkit.json`
 (`$HGS_INSTALL_PREFIX/share/hgs/local-webkit.json` for an isolated install).
 Later preview installs retain it without the variable. The local service and
 desktop entry use `~/.local/libexec/hgs-tray-launch`; it selects these libraries
-and processes only for Zerus Next, leaving the real `hgs-tray` binary available
+only for Zerus Next, leaving the real `hgs-tray` binary available
 to the maintained updater and its rollback checks. If the stack disappears or
 is incomplete, the next launch uses system libraries. Qt and older Zerus Next
 rollback builds also use system libraries. Published packages continue using stock WebKitGTK.
@@ -596,6 +598,23 @@ stops an idle session host without disabling anything.
   alerts. These commands keep the `com.hgdev.hgs-tray` identity and bind its COM
   activation registration to the exact selected stable CLI/configuration. A
   foreign, partial or changed registration is kept. The worker never repairs it.
+  The background service compares that registration with its own running image
+  and its configuration and state folders, never with a path rebuilt from its
+  own `HOME`. A task started by Task Scheduler sees the logon environment, which
+  can differ from the registering shell's: Git Bash and MSYS set their own
+  `HOME`. This matches the registered command path and arguments; it is not a
+  content or Grant check. When the registration names another CLI image with
+  otherwise exact values, attention reports `notification_registration_other_image`
+  and stays unavailable. It never switches image, reinstalls or retries an
+  effect. `notification-registration install` refuses an existing registration
+  for another image (`foreign_or_incomplete_notification_registration_kept`).
+  Replacing it takes the explicit removal below, then an install from the CLI
+  the background task runs. After a reinstall to another path, the removal also
+  takes the registration of the earlier CLI image when it is exactly what this
+  build writes for that image with the same configuration and state folders;
+  the reply then reports `previous_image: true`. Another configuration or state,
+  an older registration format, extra or missing values or keys never qualify.
+  The earlier image is only compared, never started or read.
   The three current-user keys are `HKCU\Software\Classes\AppUserModelId\com.hgdev.hgs-tray`,
   `HKCU\Software\Classes\CLSID\{0F0F70A2-1D40-47D8-AC5E-D6A9B789605F}`,
   and `HKCU\Software\Classes\CLSID\{0F0F70A2-1D40-47D8-AC5E-D6A9B789605F}\LocalServer32`.
@@ -606,19 +625,30 @@ stops an idle session host without disabling anything.
   Root service attachment and native alert/click acceptance remain separate.
 
   UI-only uninstall preserves this backend registration. Explicit backend
-  removal first needs a settled manual revoke with a fresh UUID retained for
-  that operation: `hgs.exe desktop revoke --json --request-id UUID --reason manual`.
-  Then use `hgs.exe desktop notification-registration remove --json --request-id UUID`
-  with that **same** UUID, followed by `hgs.exe desktop registration remove --json`.
-  The Toast command only queries the original revoke; it does not issue or replay
-  it. It requires the selected configuration, original runtime epoch and all
-  accepted/durable/revoked/checkpointed fields. Busy, changed, missing or unknown
-  evidence keeps the registration and stable CLI. An absent service with retained
-  state is unavailable rather than substituted with a new baseline. Verified
-  no-service/no-state is a separate path, not a live-runtime drain claim. Active
-  removal currently refuses while Windows Runtime drain attachment is missing;
-  a generic service receipt, component fixture or CLI exit zero is insufficient. Native notification-history
-  deletion is not asserted.
+  removal uses one sequence in passive and background mode alike, with a fresh
+  UUID retained for the whole operation:
+  1. `hgs.exe desktop revoke --json --request-id UUID --reason rollback`, until it
+     reports accepted, durable, revoked and checkpointed.
+  2. Stop the running service through its owner: end only the running
+     `hgs-desktop` task in Task Scheduler. Never end other processes.
+  3. `hgs.exe desktop registration remove --json`, so the task no longer starts at
+     sign-in. It does not stop a running service: when step 2 is not possible,
+     run this step first, then sign out of Windows and back in.
+  4. `hgs.exe desktop notification-registration remove --json --request-id UUID`
+     with that **same** UUID.
+
+  The Toast command removes only while no service runs: it holds the service's
+  own lock and handoff lock until the registry change is done. Without desktop
+  state nothing more is needed. With existing state it needs the CURRENT
+  settled rollback of that exact UUID: the newest command, the writer still
+  revoked under that rollback, any handoff marker revoked for the same writer,
+  and no undrained operation. A later grant, mode change, handoff or another
+  revoke supersedes it; start again with a new UUID. The command never issues,
+  resumes or replays a revoke, and never migrates, checkpoints or deletes state.
+  Busy, changed, missing, pending or unknown evidence keeps the registration.
+  While the service runs, removal still refuses until the Windows Runtime drain
+  attachment is integrated. Toasts already in the notification center may stay;
+  removal does not withdraw them.
 - Without SSH connection sharing, every poll of every machine is a full SSH
   handshake: about 150 ms per machine on a LAN. The app lists this computer at
   most once every 15 seconds, or every 5 seconds with local sessions enabled.

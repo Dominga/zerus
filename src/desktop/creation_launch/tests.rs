@@ -68,9 +68,10 @@ fn exact_previous_store_upgrade_adds_only_the_independent_launch_leaf() {
             .unwrap(),
         crate::desktop::store::SCHEMA
     );
-    // Its own two tables, then the termination outcome, task message and task
-    // message input leaves.
-    assert_eq!(tables(&store.db), before + 2 + 1 + 2 + 2);
+    // Its own two tables, then the termination outcome, task message, task
+    // message input, deferred send, deferred answer and compact-to-send
+    // leaves.
+    assert_eq!(tables(&store.db), before + 2 + 1 + 2 + 2 + 2 + 2 + 2);
     assert_eq!(ledger::undrained(&store.db).unwrap(), 0);
 }
 
@@ -262,7 +263,19 @@ fn only_the_released_original_custody_settles_a_launch_and_its_exit_never_change
         assert!(ledger::drained(tx, row, observation).is_err());
         drop(held);
         let row = ledger::pending(&store.db).unwrap().unwrap();
-        let observation = custody::probe(&location, &record);
+        // A child that another test thread forks meanwhile shares the lock's
+        // open file description until it execs: wait, bounded, for that copy
+        // to close instead of probing once.
+        let until = std::time::Instant::now() + std::time::Duration::from_secs(10);
+        let observation = loop {
+            let observation = custody::probe(&location, &record);
+            if !matches!(observation, custody::Observation::Held)
+                || std::time::Instant::now() >= until
+            {
+                break observation;
+            }
+            std::thread::sleep(std::time::Duration::from_millis(10));
+        };
         let tx = store
             .db
             .transaction_with_behavior(TransactionBehavior::Immediate)
@@ -1160,5 +1173,49 @@ mod actor {
         f.until("retired", |f| f.row(&original).receipt.drained);
         assert_eq!(f.row(&original).receipt.phase, Phase::Unknown);
         assert_eq!(f.row(&original).receipt.code, "creation_interrupted");
+    }
+}
+
+/// desktop-u's G1 on #1433: this kind's child runner checks the
+/// never-renewed deadline last before the spawn and before any input.
+#[cfg(any(target_os = "linux", target_os = "macos"))]
+mod spent_deadline {
+    use crate::desktop::original_child::{OFFERED, SPAWNED};
+    use std::path::Path;
+    use std::sync::Arc;
+    use std::time::{Duration, Instant};
+    use zerus_client_core::run::custody::InheritedLock;
+
+    pub(super) fn custody() -> Arc<InheritedLock> {
+        InheritedLock::try_lock(tempfile::tempfile().unwrap()).unwrap()
+    }
+    pub(super) fn cat() -> &'static Path {
+        Path::new("/bin/cat")
+    }
+    pub(super) fn clear() {
+        SPAWNED.with(|spawned| spawned.set(None));
+        OFFERED.with(|offered| offered.set(None));
+    }
+    pub(super) fn spawned() -> Option<u32> {
+        SPAWNED.with(|spawned| spawned.take())
+    }
+    pub(super) fn expired() -> Instant {
+        Instant::now() - Duration::from_millis(1)
+    }
+    pub(super) fn soon() -> Instant {
+        Instant::now() + Duration::from_secs(20)
+    }
+
+    #[test]
+    fn a_launch_child_never_starts_once_its_deadline_is_spent() {
+        use super::super::child::{run, Ended};
+        clear();
+        assert_eq!(run(cat(), &[], &custody(), expired()), Ended::NotStarted);
+        assert_eq!(spawned(), None);
+        clear();
+        assert!(matches!(
+            run(cat(), &[], &custody(), soon()),
+            Ended::Exited { code: 0, .. }
+        ));
     }
 }

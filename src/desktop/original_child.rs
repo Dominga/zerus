@@ -193,6 +193,13 @@ thread_local! {
     pub(in crate::desktop) static SPAWNED: std::cell::Cell<Option<u32>> = const { std::cell::Cell::new(None) };
     /// Runs once on this thread after the final check, right before spawn.
     pub(in crate::desktop) static AFTER_FINAL_CHECK: std::cell::RefCell<Option<Box<dyn FnOnce()>>> = const { std::cell::RefCell::new(None) };
+    /// Runs once on this thread right after the spawn, before any input.
+    pub(in crate::desktop) static AFTER_SPAWN: std::cell::RefCell<Option<Box<dyn FnOnce()>>> = const { std::cell::RefCell::new(None) };
+    /// Runs once on this thread as part of an input read, after its bytes
+    /// arrived: a slow source.
+    pub(in crate::desktop) static INPUT_READ: std::cell::RefCell<Option<Box<dyn FnOnce()>>> = const { std::cell::RefCell::new(None) };
+    /// How many input bytes the last child on this thread was offered.
+    pub(in crate::desktop) static OFFERED: std::cell::Cell<Option<usize>> = const { std::cell::Cell::new(None) };
 }
 
 /// An original output pipe.
@@ -255,6 +262,31 @@ pub(in crate::desktop) fn run(
     deadline: Instant,
     final_check: impl FnOnce(&mut Command) -> std::io::Result<()>,
 ) -> Ended {
+    start(program, args, spec, Some(custody), deadline, final_check)
+}
+
+/// Runs a child that holds no custody, by the same rules: a read without
+/// any effect of its own (the deferred answer's observation), which no
+/// drain waits for. It inherits no lock and names none in `spec`'s variable.
+#[cfg_attr(target_os = "macos", allow(dead_code))]
+pub(in crate::desktop) fn run_unheld(
+    program: &Path,
+    args: &[String],
+    spec: Spec<'_>,
+    deadline: Instant,
+    final_check: impl FnOnce(&mut Command) -> std::io::Result<()>,
+) -> Ended {
+    start(program, args, spec, None, deadline, final_check)
+}
+
+fn start(
+    program: &Path,
+    args: &[String],
+    spec: Spec<'_>,
+    custody: Option<&Arc<InheritedLock>>,
+    deadline: Instant,
+    final_check: impl FnOnce(&mut Command) -> std::io::Result<()>,
+) -> Ended {
     let Spec {
         custody_env,
         input,
@@ -281,12 +313,14 @@ pub(in crate::desktop) fn run(
             Stdio::null()
         })
         .stdout(Stdio::piped())
-        .stderr(Stdio::piped())
-        .env(custody_env, custody.as_raw_fd().to_string());
+        .stderr(Stdio::piped());
+    if let Some(custody) = custody {
+        command.env(custody_env, custody.as_raw_fd().to_string());
+    }
     let spawned = {
         let _turn = platform::spawn_turn();
         custody
-            .inherit(&mut command)
+            .map_or(Ok(()), |custody| custody.inherit(&mut command))
             .and_then(|()| final_check(&mut command))
             .and_then(|()| {
                 #[cfg(test)]
@@ -300,6 +334,11 @@ pub(in crate::desktop) fn run(
                 if let Some(hook) = AFTER_FINAL_CHECK.with(|hook| hook.borrow_mut().take()) {
                     hook();
                 }
+                // The never-renewed deadline, last before the spawn: a budget
+                // the checks or the wait for this turn spent starts nothing.
+                if Instant::now() >= deadline {
+                    return Err(std::io::ErrorKind::TimedOut.into());
+                }
                 command.spawn()
             })
     };
@@ -310,6 +349,10 @@ pub(in crate::desktop) fn run(
     };
     #[cfg(test)]
     SPAWNED.with(|spawned| spawned.set(Some(child.id())));
+    #[cfg(test)]
+    if let Some(hook) = AFTER_SPAWN.with(|hook| hook.borrow_mut().take()) {
+        hook();
+    }
     // The frozen stdin, written without blocking inside the same drain loop,
     // so neither side can block the other and no writer outlives this call.
     let mut chunk = vec![0u8; if input.is_some() { 64 << 10 } else { 0 }];
@@ -357,6 +400,17 @@ pub(in crate::desktop) fn run(
                     stdin = None;
                     break;
                 };
+                #[cfg(test)]
+                if let Some(hook) = INPUT_READ.with(|hook| hook.borrow_mut().take()) {
+                    hook();
+                }
+                // The never-renewed deadline, after the read and right before
+                // each write, its retries included: no byte is offered once it
+                // passed, however it was spent. A child that exists is then
+                // killed below, and its result stays Unknown.
+                if Instant::now() >= deadline {
+                    break;
+                }
                 match pipe.write(next) {
                     Ok(0) => {
                         stdin = None;
@@ -474,6 +528,8 @@ pub(in crate::desktop) fn run(
         std::thread::sleep(Duration::from_millis(5));
     };
     drop(stdin);
+    #[cfg(test)]
+    OFFERED.with(|offered| offered.set(Some(written)));
     // A descendant may still hold an original output pipe: with a guard, it
     // keeps that guard until the pipe's real end, separately from the result
     // returned here; without one, the pipe closes now.
@@ -487,5 +543,206 @@ pub(in crate::desktop) fn run(
             Ended::Unknown(unwritten)
         }
         ended => ended,
+    }
+}
+
+/// A last check in the spawn turn that `deadline` crosses: it notes whether
+/// the deadline was still ahead when it ran, then waits past it. The turn
+/// is held only until the deadline, never long.
+#[cfg(test)]
+fn crossing_check(
+    deadline: Instant,
+    ahead: Arc<std::sync::atomic::AtomicBool>,
+) -> impl FnOnce(&mut Command) -> std::io::Result<()> {
+    move |_| {
+        ahead.store(
+            Instant::now() < deadline,
+            std::sync::atomic::Ordering::SeqCst,
+        );
+        while Instant::now() <= deadline {
+            std::thread::sleep(Duration::from_millis(2));
+        }
+        Ok(())
+    }
+}
+
+/// Runs `attempt` with a short deadline that its last check crosses, until
+/// one run's check began before the deadline, and returns that run's
+/// result: a turn that came only after the deadline (other tests' spawns)
+/// proves nothing about the last check, so it is tried again.
+#[cfg(test)]
+pub(in crate::desktop) fn crossed<T>(
+    mut attempt: impl FnMut(Instant, Box<dyn FnOnce(&mut Command) -> std::io::Result<()>>) -> T,
+) -> T {
+    for _ in 0..40 {
+        let ahead = Arc::new(std::sync::atomic::AtomicBool::new(false));
+        let deadline = Instant::now() + Duration::from_millis(50);
+        let result = attempt(deadline, Box::new(crossing_check(deadline, ahead.clone())));
+        if ahead.load(std::sync::atomic::Ordering::SeqCst) {
+            return result;
+        }
+    }
+    panic!("the spawn turn never came before a 50 ms deadline");
+}
+
+/// Sleeps until `deadline` has passed.
+#[cfg(test)]
+pub(in crate::desktop) fn past(deadline: Instant) {
+    while Instant::now() <= deadline {
+        std::thread::sleep(Duration::from_millis(5));
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    const TEST_CODES: Codes = Codes {
+        unobserved: "test_unobserved",
+        unreadable: "test_unreadable",
+        signalled: "test_signalled",
+        timed_out: "test_timed_out",
+        retained: "test_retained",
+    };
+    fn spec(input: &[u8]) -> Spec<'_> {
+        Spec {
+            custody_env: "HGS_TEST_ORIGINAL_CUSTODY_FD",
+            input: Input::Frozen {
+                stdin: Stdin::Bytes(input),
+                unwritten: "test_unwritten",
+            },
+            output: Output::Stdout {
+                bytes: 4096,
+                too_large: "test_too_large",
+            },
+            codes: TEST_CODES,
+            retain: None,
+        }
+    }
+    fn custody() -> Arc<InheritedLock> {
+        InheritedLock::try_lock(tempfile::tempfile().unwrap()).unwrap()
+    }
+    fn cat(deadline: Instant, check: impl FnOnce(&mut Command) -> std::io::Result<()>) -> Ended {
+        SPAWNED.with(|spawned| spawned.set(None));
+        OFFERED.with(|offered| offered.set(None));
+        run(
+            Path::new("/bin/cat"),
+            &[],
+            spec(b"private input"),
+            &custody(),
+            deadline,
+            check,
+        )
+    }
+
+    /// desktop-u's G1 on #1433: the never-renewed deadline is checked last
+    /// before the spawn, so a spent budget never creates a child.
+    #[test]
+    fn a_spent_deadline_starts_no_child() {
+        // Already expired at the call.
+        let ended = cat(Instant::now() - Duration::from_millis(1), |_| Ok(()));
+        assert_eq!(ended, Ended::NotStarted);
+        assert_eq!(SPAWNED.with(|spawned| spawned.take()), None);
+        // Spent by the last check inside the spawn turn.
+        let ended = crossed(|deadline, check| cat(deadline, check));
+        assert_eq!(ended, Ended::NotStarted);
+        assert_eq!(SPAWNED.with(|spawned| spawned.take()), None);
+        // The same for a child that holds no custody.
+        SPAWNED.with(|spawned| spawned.set(None));
+        let ended = run_unheld(
+            Path::new("/bin/cat"),
+            &[],
+            spec(b"private input"),
+            Instant::now() - Duration::from_millis(1),
+            |_| Ok(()),
+        );
+        assert_eq!(ended, Ended::NotStarted);
+        assert_eq!(SPAWNED.with(|spawned| spawned.take()), None);
+    }
+
+    /// A deadline that passes after the spawn offers no input: the child is
+    /// killed, and its result stays Unknown.
+    #[test]
+    fn no_input_is_offered_past_the_deadline() {
+        // A budget that outlasts any wait for the spawn turn, spent right
+        // after the spawn, outside the turn.
+        let deadline = Instant::now() + Duration::from_secs(3);
+        AFTER_SPAWN.with(|hook| *hook.borrow_mut() = Some(Box::new(move || past(deadline))));
+        let ended = cat(deadline, |_| Ok(()));
+        assert_eq!(ended, Ended::Unknown("test_timed_out"));
+        assert!(SPAWNED.with(|spawned| spawned.take()).is_some());
+        assert_eq!(OFFERED.with(|offered| offered.take()), Some(0));
+        assert!(AFTER_SPAWN.with(|hook| hook.borrow().is_none()));
+    }
+
+    /// desktop-u's G1 on #1433 R2: a source read that spends the deadline
+    /// inside the write loop offers no more input, so the deadline is checked
+    /// after the read. A real file and child; the hook only makes the read
+    /// slow, and no guard is skipped.
+    #[test]
+    fn a_slow_input_read_offers_nothing_past_the_deadline() {
+        use std::io::Write;
+        for (slow, offered) in [(true, 0), (false, 13)] {
+            // A budget that outlasts any wait for the spawn turn.
+            let deadline = Instant::now() + Duration::from_secs(3);
+            let mut file = tempfile::tempfile().unwrap();
+            file.write_all(b"private input").unwrap();
+            let guard: Arc<dyn Send + Sync> = Arc::new(());
+            SPAWNED.with(|spawned| spawned.set(None));
+            OFFERED.with(|offered| offered.set(None));
+            INPUT_READ.with(|hook| {
+                *hook.borrow_mut() = Some(Box::new(move || {
+                    if slow {
+                        past(deadline)
+                    }
+                }))
+            });
+            let ended = run(
+                Path::new("/bin/cat"),
+                &[],
+                Spec {
+                    input: Input::Frozen {
+                        stdin: Stdin::File(&file, 13),
+                        unwritten: "test_unwritten",
+                    },
+                    retain: Some(Retain {
+                        guard: &guard,
+                        reader: "test-input-read",
+                    }),
+                    ..spec(b"")
+                },
+                &custody(),
+                deadline,
+                |_| Ok(()),
+            );
+            assert!(SPAWNED.with(|spawned| spawned.take()).is_some());
+            assert!(INPUT_READ.with(|hook| hook.borrow().is_none()));
+            assert_eq!(OFFERED.with(|o| o.take()), Some(offered), "slow {slow}");
+            if offered == 0 {
+                assert_eq!(ended, Ended::Unknown("test_timed_out"));
+            } else {
+                assert_eq!(
+                    ended,
+                    Ended::Exited {
+                        code: 0,
+                        output: b"private input".to_vec()
+                    }
+                );
+            }
+        }
+    }
+
+    /// Within its budget, the same child runs and reads all of its input.
+    #[test]
+    fn a_child_within_its_deadline_runs() {
+        let ended = cat(Instant::now() + Duration::from_secs(20), |_| Ok(()));
+        assert_eq!(
+            ended,
+            Ended::Exited {
+                code: 0,
+                output: b"private input".to_vec()
+            }
+        );
+        assert_eq!(OFFERED.with(|offered| offered.take()), Some(13));
     }
 }

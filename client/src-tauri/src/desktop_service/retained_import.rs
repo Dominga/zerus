@@ -55,6 +55,12 @@ impl Inputs {
             qt: QtStore::here(),
         })
     }
+    /// The native owners retain their existing Next preload guards. The
+    /// projects/accounts-only upgrade never starts runtime import publication.
+    /// This is fixed release policy, not a webview-selected permission switch.
+    pub(crate) fn for_runtime_report(self) -> Option<Self> {
+        None
+    }
 }
 struct Captured {
     qt: CapturedQt,
@@ -491,7 +497,9 @@ pub(super) async fn before_grant(
     stop: Arc<AtomicBool>,
     explicit: bool,
 ) {
-    if !shared.business_permitted() { return; }
+    if !shared.business_scheduling_permitted() {
+        return;
+    }
     let _ = attempt(
         shared,
         relay.clone(),

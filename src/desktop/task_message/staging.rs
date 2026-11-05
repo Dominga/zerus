@@ -647,7 +647,7 @@ pub(super) const SCAN_BYTES: u64 = 64 << 20;
 pub(super) const SCAN_TIME: std::time::Duration = std::time::Duration::from_secs(5);
 
 /// The object is not what the review saw: a fresh review decides.
-pub(super) const REVIEW_CHANGED: &str = "task_message_input_changed";
+pub(super) const REVIEW_CHANGED: &str = zerus_client_core::desktop::task_message::review::CHANGED;
 /// A copy of the same bytes exists under another name: never released.
 pub(super) const REVIEW_ELSEWHERE: &str = "task_message_input_elsewhere";
 /// Something unsafe or unreadable in the folder: never released.

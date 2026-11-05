@@ -264,6 +264,10 @@ fn worktree_cache_configuration_and_same_byte_snapshot_replacement_refuse_withou
 #[cfg(target_os = "linux")]
 #[test]
 fn worktree_cache_group_waits_for_the_shared_slot_and_never_gates_grant_or_catalog() {
+    #[cfg(unix)]
+    if crate::test_context::non_agent() {
+        return;
+    }
     use crate::desktop_service::tests::eventually;
     let _process = crate::PROCESS_TREE.read().unwrap();
     type Pause = fn(&migration::preload::Capture);

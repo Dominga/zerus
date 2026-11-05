@@ -102,6 +102,9 @@ impl Fixture {
             answer: crate::desktop::deferred_answer::Runtime::new(&config, &epoch, owner.clone())
                 .unwrap(),
             #[cfg(any(target_os = "linux", target_os = "macos"))]
+            compact: crate::desktop::compact_to_send::Runtime::new(&config, &epoch, owner.clone())
+                .unwrap(),
+            #[cfg(any(target_os = "linux", target_os = "macos"))]
             task_start: crate::desktop::task_start_reconcile::Runtime::new(
                 &config,
                 &epoch,
@@ -379,10 +382,10 @@ fn compact_to_send_intent(
     }
 }
 
-/// zerus-5wmh.66.4.8: until its actor lands, a compact-to-send is
-/// recognized and refused on every platform, before any row or child.
+/// zerus-5wmh.66.4.8: a compact-to-send reaches its actor, which refuses
+/// it without a lease before any row or child.
 #[test]
-fn a_compact_to_send_is_recognized_and_refused_until_its_actor_lands() {
+fn a_compact_to_send_reaches_its_actor_which_refuses_without_a_lease() {
     let mut f = Fixture::new();
     let intent = compact_to_send_intent(
         f.location.configuration.clone(),
@@ -393,11 +396,32 @@ fn a_compact_to_send_is_recognized_and_refused_until_its_actor_lands() {
         intent: Box::new(intent.clone()),
     };
     let authority = crate::desktop::ui_authority::Validated::fixture(&serde_json::json!(request));
+    let answer = f.runtime.frontend_request(&mut f.store, authority);
+    #[cfg(any(target_os = "linux", target_os = "macos"))]
+    {
+        let admission: zerus_client_core::desktop::compact_to_send::Admission =
+            serde_json::from_value(answer).unwrap();
+        assert_eq!(admission.request_id, intent.request_id);
+        assert!(!admission.accepted && !admission.durable && admission.receipt.is_none());
+        #[cfg(target_os = "linux")]
+        assert_eq!(admission.code, "compact_to_send_unavailable");
+        #[cfg(target_os = "macos")]
+        assert_eq!(admission.code, "compact_to_send_native_image_unavailable");
+    }
+    #[cfg(windows)]
     assert_eq!(
-        f.runtime.frontend_request(&mut f.store, authority),
+        answer,
         serde_json::json!({"request_id": intent.request_id, "accepted": false,
             "durable": false, "code": "compact_to_send_unsupported"})
     );
+    let rows: i64 = f
+        .store
+        .db
+        .query_row("SELECT count(*) FROM desktop_compact_to_sends", [], |r| {
+            r.get(0)
+        })
+        .unwrap();
+    assert_eq!(rows, 0);
 }
 
 #[test]

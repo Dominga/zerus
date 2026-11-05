@@ -59,6 +59,7 @@ mod store;
 #[cfg(windows)]
 mod swarm_windows;
 /// The deferred send leaf (zerus-5wmh.66.4.4, slice 3).
+pub(crate) mod compact_to_send;
 pub(crate) mod deferred_answer;
 pub(crate) mod deferred_send;
 pub(crate) mod task_message;
@@ -1223,6 +1224,12 @@ fn serve(config: &Config, location: Location, background_mode: bool) -> Result<(
                             .is_some_and(|v| v["op"] == "deferred_answer_result")
                         {
                             deferred_answer::query(&store, hello.request.as_ref().unwrap())
+                        } else if hello
+                            .request
+                            .as_ref()
+                            .is_some_and(|v| v["op"] == "compact_to_send_result")
+                        {
+                            compact_to_send::query(&store, hello.request.as_ref().unwrap())
                         } else if hello
                             .request
                             .as_ref()

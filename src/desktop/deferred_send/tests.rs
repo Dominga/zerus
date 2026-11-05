@@ -125,8 +125,8 @@ fn exact_previous_store_upgrade_adds_only_the_independent_send_leaf() {
             .unwrap(),
         crate::desktop::store::SCHEMA
     );
-    // This leaf, then the later deferred answer leaf.
-    assert_eq!(tables(&store.db), before + 4);
+    // This leaf, then the later deferred answer and compact-to-send leaves.
+    assert_eq!(tables(&store.db), before + 2 + 2 + 2);
     assert_eq!(ledger::undrained(&store.db).unwrap(), 0);
     assert_eq!(
         store.operation_status()["kinds"]["deferred_send"]["undrained"],

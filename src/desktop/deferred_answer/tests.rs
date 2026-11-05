@@ -149,7 +149,6 @@ fn exact_previous_store_upgrade_adds_only_the_independent_answer_leaf() {
         crate::desktop::deferred_send::SCHEMA,
         "rebase this test onto the actual merge-order predecessor"
     );
-    assert_eq!(SCHEMA, crate::desktop::store::SCHEMA);
     let (_temp, location, store, _) = fixture();
     remove_fixture(&store.db);
     store
@@ -166,7 +165,8 @@ fn exact_previous_store_upgrade_adds_only_the_independent_answer_leaf() {
             .unwrap(),
         crate::desktop::store::SCHEMA
     );
-    assert_eq!(tables(&store.db), before + 2);
+    // Its own two tables, then the compact-to-send leaf's two.
+    assert_eq!(tables(&store.db), before + 2 + 2);
     assert_eq!(ledger::undrained(&store.db).unwrap(), 0);
     assert_eq!(
         store.operation_status()["kinds"]["deferred_answer"]["undrained"],

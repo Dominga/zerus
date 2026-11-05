@@ -204,7 +204,6 @@ impl Inbox {
 pub struct DeskState {
     sender: Mutex<InputSender>,
     _attention_owner: attention_barrier::Owner,
-    dir: PathBuf,
     inbox: Mutex<Inbox>,
     /// Zerus is the active app: the tracker's foreground test.
     focused: Arc<AtomicBool>,
@@ -333,12 +332,7 @@ pub type LoadAttention = Box<dyn FnOnce() -> Attention + Send>;
 /// Taps the pump, hears this device's marks change and starts the desk
 /// thread. Call before the fleet starts, so the first catalog reaches the menu
 /// bar; `attention` when this build posts notifications.
-pub fn start(
-    app: &AppHandle,
-    pump: &crate::pump::Pump,
-    dir: PathBuf,
-    attention: Option<LoadAttention>,
-) {
+pub fn start(app: &AppHandle, pump: &crate::pump::Pump, attention: Option<LoadAttention>) {
     let (sender, inputs, owner) = attention_barrier::channel(attention.is_some());
     let attention = attention.map(|load| owner.track(load));
     let tap = sender.clone();
@@ -366,7 +360,6 @@ pub fn start(
     app.manage(DeskState {
         sender: Mutex::new(sender),
         _attention_owner: owner,
-        dir,
         inbox: Mutex::new(Inbox::default()),
         focused: Arc::clone(&focused),
     });
@@ -1117,9 +1110,6 @@ pub fn open_updates(app: &AppHandle) {
     });
 }
 
-fn open(app: &AppHandle, target: OpenSession) {
-    open_if(app, target, || true);
-}
 fn open_if(app: &AppHandle, target: OpenSession, current: impl Fn() -> bool + Send + 'static) {
     let handle = app.clone();
     let _ = app.run_on_main_thread(move || {

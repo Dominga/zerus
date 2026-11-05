@@ -263,9 +263,19 @@ impl Observed {
     }
 }
 
+/// Release the last native object a backend owns, then leave its apartment.
+/// Releasing a WinRT object after RoUninitialize faults the process
+/// (0xC0000005), so this order is the contract (zerus-1an7q).
+fn release_then_uninitialize<T>(owned: &mut Option<T>, uninitialize: impl FnOnce()) {
+    drop(owned.take());
+    uninitialize();
+}
+
 pub(super) struct Backend {
     installation: Installation,
-    notifier: ToastNotifier,
+    /// Released by shutdown() inside the apartment, before RoUninitialize;
+    /// absent afterwards, and every use refuses then (zerus-1an7q).
+    notifier: Option<ToastNotifier>,
     slot: Slot,
     registration: activation::Registration,
     observed: BTreeMap<String, Observed>,
@@ -292,7 +302,7 @@ impl Backend {
                 .map_err(|_| "notification_activator_unavailable")?;
             Ok(Self {
                 installation,
-                notifier,
+                notifier: Some(notifier),
                 slot,
                 registration,
                 observed: BTreeMap::new(),
@@ -315,7 +325,11 @@ impl Backend {
             return false;
         }
         if self.apartment {
-            unsafe { RoUninitialize() };
+            // The activator is revoked, every observed toast is detached and
+            // dropped, and no delegate or class object retains the slot. The
+            // notifier is the last native object here: release it inside the
+            // apartment, then leave it (zerus-1an7q).
+            release_then_uninitialize(&mut self.notifier, || unsafe { RoUninitialize() });
             self.apartment = false;
         }
         true
@@ -372,7 +386,10 @@ impl Native for Backend {
             // permission was disabled after its original Show.
             return Ok(());
         };
-        if self.notifier.Setting().ok() != Some(NotificationSetting::Enabled) {
+        let Some(notifier) = self.notifier.as_ref() else {
+            return Err(Refusal::NotReady);
+        };
+        if notifier.Setting().ok() != Some(NotificationSetting::Enabled) {
             return Err(Refusal::PermissionDenied);
         }
         self.observed
@@ -462,7 +479,11 @@ impl Native for Backend {
     }
     fn post(&mut self, command: &Command, _: &NativeId) -> Result<NativeId, ()> {
         let value = self.observed.get(&command.binding.request_id).ok_or(())?;
-        self.notifier.Show(&value.toast).map_err(|_| ())?;
+        self.notifier
+            .as_ref()
+            .ok_or(())?
+            .Show(&value.toast)
+            .map_err(|_| ())?;
         Ok(NativeId::Windows {
             tag: value.toast.Tag().map_err(|_| ())?.to_string(),
             group: value.toast.Group().map_err(|_| ())?.to_string(),

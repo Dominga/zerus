@@ -329,3 +329,42 @@ fn named_cards_have_a_visible_title_but_remain_read_only_in_mobile_abi() {
     }
     assert_eq!(api.get(uuid).unwrap().text, "Title only");
 }
+
+/// zerus-cg5h.4 S2b.2 C1: a task hgs cut over to the execution schema before
+/// its first attempt is read-only in the apps, which edit only schema <= 2.
+#[test]
+fn a_floored_task_is_read_only_in_the_apps() {
+    use zerus_replica::{ProjectStore, Stage};
+    let root = tempfile::tempdir().unwrap();
+    let apps = store(&root);
+    let task = apps
+        .add(
+            "Add rate limiting".into(),
+            TaskStage::Todo,
+            TaskTarget::AnySession,
+            TaskPosition::End,
+        )
+        .unwrap();
+    assert!(task.writable);
+    {
+        let hgs = ProjectStore::open(root.path(), "project-1").unwrap();
+        let mut doc = hgs.load(&task.uuid).unwrap();
+        assert!(doc.floor().unwrap());
+        assert_eq!(doc.stage().unwrap(), Stage::Todo);
+        hgs.save(&mut doc).unwrap();
+    }
+    let floored = apps.get(task.uuid.clone()).unwrap();
+    assert!(!floored.writable);
+    match apps.comment(task.uuid.clone(), "From the phone".into()) {
+        Err(ReplicaError::Refused(message)) => {
+            assert!(message.contains("Update Zerus"), "{message}")
+        }
+        other => panic!("expected a refusal, got {other:?}"),
+    }
+    match apps.set_stage(task.uuid, TaskStage::Backlog) {
+        Err(ReplicaError::Refused(message)) => {
+            assert!(message.contains("Update Zerus"), "{message}")
+        }
+        other => panic!("expected a refusal, got {other:?}"),
+    }
+}

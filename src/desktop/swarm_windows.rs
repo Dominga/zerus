@@ -32,6 +32,8 @@ struct Shared {
     done: AtomicBool,
     #[cfg(test)]
     hold_cleanup: AtomicBool,
+    #[cfg(test)]
+    diagnostic: Mutex<Option<Arc<tests::diagnostics::Context>>>,
 }
 struct Controls {
     stop: OwnedHandle,
@@ -86,6 +88,8 @@ impl Runtime {
                 done: AtomicBool::new(false),
                 #[cfg(test)]
                 hold_cleanup: AtomicBool::new(false),
+                #[cfg(test)]
+                diagnostic: Mutex::new(None),
             }),
             thread: None,
             stopping: false,
@@ -263,6 +267,8 @@ fn command(
         .stdin(Stdio::null())
         .stdout(Stdio::null())
         .stderr(Stdio::null());
+    #[cfg(test)]
+    tests::diagnostics::capture(launch, &mut command)?;
     // The caller retains the image pin through process creation below.
     // Passing a command alone must not accidentally shorten that custody.
     Ok((image, command))
@@ -282,11 +288,14 @@ fn cleanup(custody: &mut Custody, shared: &Shared, notice: Duration) {
     let until = Instant::now() + notice;
     loop {
         let exited = unsafe { WaitForSingleObject(child.as_raw_handle(), 0) } == WAIT_OBJECT_0;
-        let empty = child.wait_tree(Duration::ZERO).unwrap_or(false);
+        let tree = child.wait_tree(Duration::ZERO);
         #[cfg(test)]
         let held = shared.hold_cleanup.load(Ordering::Acquire);
         #[cfg(not(test))]
         let held = false;
+        #[cfg(test)]
+        tests::diagnostics::sample(shared, exited, &tree, held);
+        let empty = tree.unwrap_or(false);
         if exited && empty && !held {
             let _ = child.wait();
             custody.child = None;
@@ -331,6 +340,8 @@ fn run(
         });
         match command(config, launch).and_then(|(_image, mut c)| platform::spawn_hidden(&mut c)) {
             Ok(child) => {
+                #[cfg(test)]
+                tests::diagnostics::created(shared, &child);
                 let pid = child.id();
                 custody.child = Some(child);
                 set(shared, |s| {

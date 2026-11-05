@@ -26,7 +26,11 @@ const FILE: &str = "task-index-v1.sqlite3";
 /// 2: the histories of recently read tasks as well (slice B). 3: rows and
 /// history headers carry the task's execution (zerus-cg5h.4), so rows cached
 /// without it are built again rather than mixed with rows that have it.
-const SCHEMA: i64 = 3;
+const ROWS: i64 = 3;
+/// The index's version: its rows' shape and the replica's mark format, since
+/// a row remembers whether its task loaded, which the mark decides. An index
+/// made under another mark rule (before the seal, for one) is built again.
+const SCHEMA: i64 = ROWS * 1000 + zerus_replica::MARK_FORMAT;
 /// The histories kept: the most recently read tasks.
 const HISTORIES: i64 = 16;
 /// The one-task history cache this index replaces.
@@ -107,10 +111,23 @@ thread_local! {
 /// A file's length, modification time and inode, or `-` when it is missing,
 /// and whether it is settled: modified at least `SETTLE_MS` before `now`.
 fn stamp_at(path: &Path, now: i64) -> (String, bool) {
+    entry_stamp(fs::metadata(path), now)
+}
+
+/// A stamp of the entry itself, not what it links to: a dangling mark
+/// changes it too.
+fn link_stamp_at(path: &Path, now: i64) -> (String, bool) {
+    entry_stamp(fs::symlink_metadata(path), now)
+}
+
+/// A file's stamp when it is not there.
+const MISSING: &str = "-";
+
+fn entry_stamp(meta: std::io::Result<fs::Metadata>, now: i64) -> (String, bool) {
     #[cfg(test)]
     STAMPED.with(|n| n.set(n.get() + 1));
-    let Ok(meta) = fs::metadata(path) else {
-        return ("-".into(), true);
+    let Ok(meta) = meta else {
+        return (MISSING.into(), true);
     };
     let modified = meta
         .modified()
@@ -129,17 +146,23 @@ fn stamp(path: &Path) -> String {
     stamp_at(path, 0).0
 }
 
-/// The stamps of a task's snapshot and appended updates, and whether both
-/// are settled.
+/// The stamps of a task's snapshot, appended updates and mark, and whether
+/// all are settled: a change to the mark alone is a change of the task.
 fn stamped(dir: &Path, uuid: &str, now: i64) -> (String, bool) {
     let tasks = dir.join("tasks");
     let (snapshot, a) = stamp_at(&tasks.join(format!("{uuid}.loro")), now);
     let (updates, b) = stamp_at(&tasks.join(format!("{uuid}.updates")), now);
-    (format!("{snapshot}|{updates}"), a && b)
+    let (mark, c) = link_stamp_at(&tasks.join(format!("{uuid}.managed")), now);
+    (format!("{snapshot}|{updates}|{mark}"), a && b && c)
 }
 
 fn files(dir: &Path, uuid: &str) -> String {
     stamped(dir, uuid, 0).0
+}
+
+/// Whether stamps from `stamped` say every file of the task is gone.
+fn gone(stamps: &str) -> bool {
+    stamps.split('|').all(|part| part == MISSING)
 }
 
 /// `text` cut to at most `bytes` at a character boundary.
@@ -559,11 +582,11 @@ impl<'a> Index<'a> {
                     Some(known) => known.get(uuid).cloned(),
                     None => stored.as_ref().map(|s| s.0.clone()),
                 };
-                let unchanged = stamps.as_deref() == Some(now.as_str()) || (stamps.is_none() && now == "-|-");
+                let unchanged = stamps.as_deref() == Some(now.as_str()) || (stamps.is_none() && gone(&now));
                 if unchanged && !noted.is_some_and(|noted| noted.contains(uuid)) {
                     continue;
                 }
-                let derived = (now != "-|-").then(|| derive(self.store, uuid));
+                let derived = (!gone(&now)).then(|| derive(self.store, uuid));
                 // Read again to the same row: only its stamps and time change.
                 let same = match (&derived, &stored) {
                     (Some(Derived::Row { row, .. }), Some((_, Some(old), None))) => row == old,

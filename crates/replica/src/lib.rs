@@ -25,6 +25,6 @@ pub use schema::{
     Actor, LogEntry, SessionKey, Stage, Target, TaskDelivery, TaskView, TaskWorker, MAX_DOCUMENT,
     MAX_TEXT, SCHEMA,
 };
-pub use store::{Changes, Damaged, Position, ProjectStore};
+pub use store::{Changes, Damaged, Position, ProjectStore, MARK_FORMAT};
 pub use sync::{Document, DonePage, DoneRow, Imported, Inventory, Update, Version};
 pub use task::{NewTask, Settled, Settlement, TaskDoc};

@@ -10,9 +10,10 @@ use crate::schema::{Actor, Stage};
 use crate::task::TaskDoc;
 use crate::{ids, rank, Error, Result};
 use fs2::FileExt;
+use loro::VersionVector;
 use serde::{Deserialize, Serialize};
 use sha2::{Digest, Sha256};
-use std::collections::BTreeSet;
+use std::collections::{BTreeMap, BTreeSet};
 use std::fs::{self, File, OpenOptions};
 use std::io::{ErrorKind, Write};
 use std::path::{Path, PathBuf};
@@ -163,6 +164,14 @@ pub struct ProjectStore {
     /// Serializes this instance's read-modify-write of the change journal:
     /// a store is shared between threads, and `save` takes `&self`.
     journal: std::sync::Mutex<()>,
+    /// One save at a time through this store, so a save's check of what is
+    /// durable and its write are one step: the project lock keeps other
+    /// processes out, this keeps this one's threads in turn.
+    admission: std::sync::Mutex<()>,
+    /// The version of each task this store last read from or wrote to its
+    /// files. A document whose base is older is merged into the files'
+    /// current state before it is saved, never written over it.
+    durable: std::sync::Mutex<std::collections::HashMap<String, VersionVector>>,
 }
 
 fn private_options() -> OpenOptions {
@@ -200,6 +209,12 @@ fn checksum(payload: &[u8]) -> [u8; 4] {
     Sha256::digest(payload)[..4].try_into().expect("four bytes")
 }
 
+/// A block as this store writes it, for fixtures of other writers.
+#[cfg(test)]
+pub(crate) fn block_for_test(payload: &[u8]) -> Vec<u8> {
+    block(payload)
+}
+
 fn block(payload: &[u8]) -> Vec<u8> {
     let mut out = Vec::with_capacity(HEADER + payload.len());
     out.extend_from_slice(&(payload.len() as u32).to_le_bytes());
@@ -208,9 +223,146 @@ fn block(payload: &[u8]) -> Vec<u8> {
     out
 }
 
+/// The managed mark: what this store last saved of a task cut over to the
+/// execution schema, written before each save makes it durable. `saved` is
+/// the version vector the task's files then hold, by decimal peer; `opening`
+/// is the SHA-256 of the first block of the updates file that follows the
+/// snapshot, header and payload. Every fold of such a task opens that file
+/// with the operations at the document's frontiers: a block every copy
+/// already holds, so it imports as nothing in this build and older ones,
+/// and one that differs whenever the version does. A writer that folds or
+/// rewrites the files without this mark (an older build), or a mark restored
+/// from before a later fold, leaves the opening apart from the files; files
+/// cut short leave them holding less than `saved`. On disk it carries a
+/// `seal`, the SHA-256 of its whole canonical content, so a change to any
+/// field (a flipped bit included) makes it unreadable and keeps the copy.
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+pub(crate) struct Mark {
+    pub(crate) saved: Option<BTreeMap<String, i32>>,
+    #[serde(default)]
+    pub(crate) opening: Option<String>,
+}
+
+/// The format of the mark and its seal. Every cache that remembers whether
+/// a task loads (the inventory cache, the task index) names it, so a change
+/// to what makes a mark readable makes them read every task again.
+pub const MARK_FORMAT: i64 = 1;
+
+/// The mark as written: its fields and their seal.
+#[derive(Serialize, Deserialize)]
+struct SealedMark {
+    saved: Option<BTreeMap<String, i32>>,
+    #[serde(default)]
+    opening: Option<String>,
+    #[serde(default)]
+    seal: Option<String>,
+}
+
+impl Mark {
+    /// The digest over the mark's canonical content (its fields in order,
+    /// the peers sorted).
+    fn seal(&self) -> Result<String> {
+        let mut hasher = Sha256::new();
+        hasher.update(format!("zerus-task-mark-{MARK_FORMAT}\n").as_bytes());
+        hasher.update(serde_json::to_vec(self)?);
+        Ok(format!("{:x}", hasher.finalize()))
+    }
+
+    fn sealed(&self) -> Result<Vec<u8>> {
+        Ok(serde_json::to_vec(&SealedMark {
+            saved: self.saved.clone(),
+            opening: self.opening.clone(),
+            seal: Some(self.seal()?),
+        })?)
+    }
+
+    /// A mark read back; none unless its seal matches its content.
+    fn unsealed(bytes: &[u8]) -> Option<Mark> {
+        let sealed: SealedMark = serde_json::from_slice(bytes).ok()?;
+        let mark = Mark {
+            saved: sealed.saved,
+            opening: sealed.opening,
+        };
+        (sealed.seal? == mark.seal().ok()?).then_some(mark)
+    }
+
+    /// The mark for files that hold `saved`, whose updates file opens with
+    /// `first` (header and payload).
+    pub(crate) fn new(saved: &VersionVector, first: &[u8]) -> Self {
+        Self {
+            saved: Some(
+                saved
+                    .iter()
+                    .map(|(peer, counter)| (peer.to_string(), *counter))
+                    .collect(),
+            ),
+            opening: Some(digest(first)),
+        }
+    }
+
+    /// The saved version it records, when it records a possible one: the
+    /// files hold the task's creation, so an empty version or a peer counted
+    /// at zero or below is unreadable.
+    pub(crate) fn version(&self) -> Option<VersionVector> {
+        let saved = self.saved.as_ref().filter(|s| !s.is_empty())?;
+        saved
+            .iter()
+            .map(|(peer, counter)| Some((peer.parse().ok()?, (*counter > 0).then_some(*counter)?)))
+            .collect()
+    }
+
+    /// Whether it names `first` as the first block of the updates file.
+    fn opens_with(&self, first: &[u8]) -> bool {
+        self.opening.as_deref() == Some(digest(first).as_str())
+    }
+}
+
+fn digest(bytes: &[u8]) -> String {
+    format!("{:x}", Sha256::digest(bytes))
+}
+
+/// The first block of an updates file, header and payload; none when the
+/// file is missing or its first block is cut short.
+fn first_block(path: &Path) -> Result<Option<Vec<u8>>> {
+    let mut file = match File::open(path) {
+        Ok(file) => file,
+        Err(error) if error.kind() == ErrorKind::NotFound => return Ok(None),
+        Err(error) => return Err(error.into()),
+    };
+    let size = file.metadata()?.len();
+    let mut block = vec![0u8; HEADER];
+    match std::io::Read::read_exact(&mut file, &mut block) {
+        Ok(()) => {}
+        Err(error) if error.kind() == ErrorKind::UnexpectedEof => return Ok(None),
+        Err(error) => return Err(error.into()),
+    }
+    let length = u32::from_le_bytes(block[..4].try_into().expect("four bytes")) as u64;
+    // A length past the file is a cut block, never an allocation.
+    if length == 0 || HEADER as u64 + length > size {
+        return Ok(None);
+    }
+    block.resize(HEADER + length as usize, 0);
+    std::io::Read::read_exact(&mut file, &mut block[HEADER..])?;
+    Ok(Some(block))
+}
+
+/// What a load knows of a task's mark.
+enum Marked {
+    No,
+    Unreadable,
+    Saved(VersionVector),
+}
+
+#[cfg(test)]
+thread_local! {
+    /// Runs inside an observation, between its read and its stamps.
+    pub(crate) static OBSERVING: std::cell::RefCell<Option<Box<dyn FnMut()>>> =
+        const { std::cell::RefCell::new(None) };
+}
+
 /// The intact blocks with their end offsets, and whether the whole input was
 /// intact. A short, empty or mismatched block ends the list.
-fn blocks(bytes: &[u8]) -> (Vec<(&[u8], usize)>, bool) {
+pub(crate) fn blocks(bytes: &[u8]) -> (Vec<(&[u8], usize)>, bool) {
     let mut out = Vec::new();
     let mut at = 0;
     while at < bytes.len() {
@@ -293,6 +445,8 @@ impl ProjectStore {
             project: project.into(),
             _lock: lock,
             journal: std::sync::Mutex::new(()),
+            admission: std::sync::Mutex::new(()),
+            durable: std::sync::Mutex::new(std::collections::HashMap::new()),
         }))
     }
 
@@ -415,12 +569,71 @@ impl ProjectStore {
         self.dir.join("tasks").join(format!("{uuid}.updates"))
     }
 
+    /// Beside a task's files: present once this store saved it cut over to the
+    /// execution schema (attempts or a floor), recording the version its
+    /// snapshot holds. It outlives a damaged copy, so that copy is never
+    /// replaced by another replica's whole document that lacks part of it.
+    pub(crate) fn managed_path(&self, uuid: &str) -> PathBuf {
+        self.dir.join("tasks").join(format!("{uuid}.managed"))
+    }
+
+    /// Whether this store ever saved the task cut over to the execution
+    /// schema. Any entry at the mark's path counts, even one that cannot be
+    /// read or a dangling link: only its verified absence means unmarked.
+    pub fn was_managed(&self, uuid: &str) -> bool {
+        !matches!(
+            fs::symlink_metadata(self.managed_path(uuid)),
+            Err(error) if error.kind() == ErrorKind::NotFound
+        )
+    }
+
+    /// The task's mark; none when it is missing or cannot be read.
+    pub(crate) fn mark(&self, uuid: &str) -> Option<Mark> {
+        Mark::unsealed(&fs::read(self.managed_path(uuid)).ok()?)
+    }
+
+    /// Whether the task is marked, and the version its mark says this store
+    /// saved: a single read of the mark, then a check of its path only
+    /// when there is nothing to read.
+    fn marked(&self, uuid: &str) -> Marked {
+        let path = self.managed_path(uuid);
+        match fs::read(&path) {
+            Ok(bytes) => Mark::unsealed(&bytes)
+                .and_then(|mark| mark.version())
+                .map_or(Marked::Unreadable, Marked::Saved),
+            Err(error) if error.kind() == ErrorKind::NotFound => {
+                match fs::symlink_metadata(&path) {
+                    Err(error) if error.kind() == ErrorKind::NotFound => Marked::No,
+                    _ => Marked::Unreadable,
+                }
+            }
+            Err(_) => Marked::Unreadable,
+        }
+    }
+
+    /// Writes the mark. Every listing stamps it with the task's files, so
+    /// a save that fails after its mark still reaches them.
+    pub(crate) fn write_mark(&self, uuid: &str, mark: &Mark) -> Result<()> {
+        write_atomic(&self.managed_path(uuid), &mark.sealed()?)
+    }
+
+    /// The version this store last saved, as the mark records it, only while
+    /// the updates file still opens with the exact block the mark names: no
+    /// other writer folded or rewrote the files, and no later fold of this
+    /// store replaced them, since the mark was written.
+    pub(crate) fn fresh_version(&self, uuid: &str) -> Option<VersionVector> {
+        let mark = self.mark(uuid)?;
+        let first = first_block(&self.updates_path(uuid)).ok()??;
+        mark.opens_with(&first).then(|| mark.version()).flatten()
+    }
+
     pub fn uuids(&self) -> Result<Vec<String>> {
         let mut uuids = BTreeSet::new();
         for entry in fs::read_dir(self.dir.join("tasks"))? {
             let path = entry?.path();
             let extension = path.extension().and_then(|e| e.to_str());
-            if matches!(extension, Some("loro" | "updates")) {
+            // A mark alone is a task too: kept for review, never invisible.
+            if matches!(extension, Some("loro" | "updates" | "managed")) {
                 if let Some(stem) = path
                     .file_stem()
                     .and_then(|s| s.to_str())
@@ -433,15 +646,26 @@ impl ProjectStore {
         Ok(uuids.into_iter().collect())
     }
 
+    /// Reads the task, in turn with this store's saves.
     pub fn load(&self, uuid: &str) -> Result<TaskDoc> {
+        let _admitted = self
+            .admission
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner());
+        self.load_admitted(uuid)
+    }
+
+    fn load_admitted(&self, uuid: &str) -> Result<TaskDoc> {
         let mut task = TaskDoc::from_bytes(&fs::read(self.snapshot_path(uuid))?)?;
         if task.uuid() != uuid {
             return Err(Error::failed("the task file does not match its name"));
         }
+        let mut first = None;
         match fs::read(self.updates_path(uuid)) {
             Ok(bytes) => {
                 let (found, intact) = blocks(&bytes);
                 task.needs_fold = !intact;
+                first = found.first().map(|(_, end)| bytes[..*end].to_vec());
                 for (payload, end) in found {
                     if !task.import_block(payload) {
                         task.needs_fold = true;
@@ -453,14 +677,140 @@ impl ProjectStore {
             Err(error) if error.kind() == ErrorKind::NotFound => {}
             Err(error) => return Err(error.into()),
         }
+        // A copy this store cut over holds at least what its mark says was
+        // saved (one small read); less is files cut short, a save that never
+        // finished, or an older build that wrote them so, and the copy is
+        // damaged rather than read without those changes. A mark that cannot
+        // be read proves nothing, so it keeps the copy too.
+        match self.marked(uuid) {
+            Marked::No => {}
+            Marked::Unreadable => {
+                return Err(Error::failed(
+                    "the copy here was cut over to execution attempts and its mark cannot be read",
+                ))
+            }
+            Marked::Saved(saved) => {
+                if !task.current_vv().includes_vv(&saved) {
+                    return Err(Error::failed(
+                        "the copy here holds less than this computer saved: its files were cut \
+                         short or a save did not finish",
+                    ));
+                }
+                // The files hold more than the mark, or open with another
+                // block (an older build folded or appended): the mark is
+                // raised to what they hold before anything is read from
+                // them, so nothing is acknowledged or sent beyond it. It
+                // only rises, and names no opening when the files have none.
+                let raised = match &first {
+                    Some(first) => Mark::new(&task.current_vv(), first),
+                    None => Mark {
+                        opening: None,
+                        ..Mark::new(&task.current_vv(), &[])
+                    },
+                };
+                if self.mark(uuid).as_ref() != Some(&raised) {
+                    self.write_mark(uuid, &raised)?;
+                }
+            }
+        }
         // A task that cannot be shown is damaged: listed apart, never blocking the rest.
         task.view()?;
         task.saved = Some(task.current_vv());
         task.saved_stage = Some(task.stage()?);
+        self.durable(uuid, task.current_vv());
         Ok(task)
     }
 
+    fn durable(&self, uuid: &str, version: VersionVector) {
+        self.durable
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner())
+            .insert(uuid.to_owned(), version);
+    }
+
+    /// Saves the task. A document read from this store before a later save
+    /// of the same task is first merged into the files' current state: its
+    /// own new changes are applied there, and every change saved since is
+    /// kept. The mark of a cut-over task never moves back.
     pub fn save(&self, task: &mut TaskDoc) -> Result<()> {
+        let _admitted = self
+            .admission
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner());
+        self.save_locked(task)
+    }
+
+    /// Reads a task, saves it when its execution schema needs the repair, and
+    /// stamps its files with `stamp`, all in one admission: the version read
+    /// and the stamps taken are one observation, which no save of this store
+    /// comes between.
+    pub(crate) fn observe<S>(&self, uuid: &str, stamp: impl FnOnce() -> S) -> (Result<TaskDoc>, S) {
+        let _admitted = self
+            .admission
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner());
+        let loaded = self.load_admitted(uuid).and_then(|mut task| {
+            if task.repair_schema()? {
+                self.save_locked(&mut task)?;
+            }
+            Ok(task)
+        });
+        #[cfg(test)]
+        OBSERVING.with(|hook| {
+            if let Some(hook) = hook.borrow_mut().as_mut() {
+                hook();
+            }
+        });
+        (loaded, stamp())
+    }
+
+    fn save_locked(&self, task: &mut TaskDoc) -> Result<()> {
+        let durable = self
+            .durable
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner())
+            .get(task.uuid())
+            .cloned();
+        if let (Some(base), Some(durable)) = (task.saved.clone(), durable) {
+            if base != durable {
+                let changes = task.export_since_vv(&base)?;
+                let mut current = self.load_admitted(task.uuid())?;
+                if !current.import_block(&changes) {
+                    return Err(Error::new(
+                        "this task changed here meanwhile and these changes do not apply to it; \
+                         read it again",
+                    ));
+                }
+                current.repair_schema()?;
+                *task = current;
+            }
+        }
+        // Classified under this admission, whatever the document's base: a
+        // mark that is present but cannot be read keeps the copy for a
+        // person's review, and nothing here rewrites it.
+        match self.marked(task.uuid()) {
+            Marked::No => {}
+            Marked::Unreadable => {
+                return Err(Error::new(
+                    "this task was cut over to execution attempts here and its mark cannot be \
+                     read; it is kept for a person's review and nothing is written for it",
+                ))
+            }
+            Marked::Saved(saved) => {
+                if !task.current_vv().includes_vv(&saved) {
+                    return Err(Error::new(
+                        "this copy holds less than this computer already saved of the task; \
+                         read it again",
+                    ));
+                }
+            }
+        }
+        self.save_admitted(task)?;
+        self.durable(task.uuid(), task.current_vv());
+        Ok(())
+    }
+
+    fn save_admitted(&self, task: &mut TaskDoc) -> Result<()> {
         let snapshot = self.snapshot_path(task.uuid());
         let updates = self.updates_path(task.uuid());
         let current = task.current_vv();
@@ -480,20 +830,45 @@ impl ProjectStore {
         if !fold && task.saved.as_ref() == Some(&current) {
             return Ok(());
         }
+        let managed = task.execution_managed();
+        // A fold of a cut-over task opens its updates file with the
+        // operations at the frontiers; any other save appends the changes.
+        let next = if fold {
+            managed
+                .then(|| task.export_frontier().map(|bytes| block(&bytes)))
+                .transpose()?
+        } else {
+            let saved = task.saved.as_ref().expect("checked above");
+            Some(block(&task.export_since_vv(saved)?))
+        };
+        // The mark precedes the files it describes, on every save of a
+        // cut-over task (one small durable write each): after a crash between
+        // them it names a version or a block they do not hold, which only
+        // keeps a later recovery from going ahead.
+        if managed {
+            let ours = next.as_deref().expect("a cut-over save writes a block");
+            let existing = if fold { None } else { first_block(&updates)? };
+            let mark = Mark::new(&current, existing.as_deref().unwrap_or(ours));
+            if self.mark(task.uuid()).as_ref() != Some(&mark) {
+                self.write_mark(task.uuid(), &mark)?;
+            }
+        }
         if fold {
             // The snapshot first: a crash before the removal leaves updates
             // the snapshot already contains, and importing them again is harmless.
             write_atomic(&snapshot, &task.snapshot()?)?;
-            match fs::remove_file(&updates) {
-                Ok(()) => {}
-                Err(error) if error.kind() == ErrorKind::NotFound => {}
-                Err(error) => return Err(error.into()),
+            match &next {
+                Some(first) => write_atomic(&updates, first)?,
+                None => match fs::remove_file(&updates) {
+                    Ok(()) => {}
+                    Err(error) if error.kind() == ErrorKind::NotFound => {}
+                    Err(error) => return Err(error.into()),
+                },
             }
-            task.saved_len = 0;
+            task.saved_len = next.as_ref().map_or(0, |first| first.len() as u64);
             task.needs_fold = false;
         } else {
-            let saved = task.saved.clone().expect("checked above");
-            let bytes = block(&task.export_since_vv(&saved)?);
+            let bytes = next.expect("an append writes a block");
             let mut file = private_options().create(true).append(true).open(&updates)?;
             file.write_all(&bytes)?;
             file.sync_all()?;
@@ -524,7 +899,10 @@ impl ProjectStore {
     /// A task by its UUID or its short ID.
     pub fn find(&self, reference: &str) -> Result<TaskDoc> {
         if ids::is_uuid(reference) {
-            if !self.snapshot_path(reference).exists() && !self.updates_path(reference).exists() {
+            if !self.snapshot_path(reference).exists()
+                && !self.updates_path(reference).exists()
+                && !self.was_managed(reference)
+            {
                 return Err(Error::new(format!("no task {reference} in this project")));
             }
             return self

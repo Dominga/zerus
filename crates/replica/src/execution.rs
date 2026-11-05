@@ -24,8 +24,11 @@ use crate::schema::{Actor, LogEntry, SessionKey, Stage, Target};
 use crate::{Error, Result};
 use serde::{Deserialize, Serialize};
 
-/// The schema of a task that records attempts.
-pub const EXECUTION_TASK_SCHEMA: i64 = 6;
+/// The schema of a task that records attempts or took a floor. It is above
+/// every released or interim build's schema (5 before execution attempts,
+/// 6 in the builds that read attempts without the floor), so each of them
+/// reads such a task as newer and refuses to write it.
+pub const EXECUTION_TASK_SCHEMA: i64 = 7;
 /// The most attempts one task records.
 pub const MAX_ATTEMPTS: usize = 256;
 /// The most attempt events one task records.
@@ -70,6 +73,19 @@ pub struct Attempt {
     /// that explains them. One no attempt froze or names is unexplained.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub frontier: Option<Vec<String>>,
+}
+
+/// The cutover a task took before its first attempt: the execution schema it
+/// was raised to, and the exact operation that raised it (the writing peer
+/// and that operation's counter), which a replica holds once its version of
+/// the task counts beyond it. Older builds never write it, so it survives a
+/// lower schema value winning a merge.
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+pub struct Floor {
+    pub schema: i64,
+    /// The writing peer, in decimal: a Loro peer ID does not fit a JSON number.
+    pub peer: String,
+    pub counter: i32,
 }
 
 /// The most history entries one attempt's frontier names.

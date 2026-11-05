@@ -2187,11 +2187,16 @@ fn schedule_settings(
 
 // Called under the existing input transaction lock; never a mutation from ls or
 // inspect. It deliberately does nothing while the agent is still working.
+/// Whether [`apply_pending`] would type pending settings into the terminal.
+pub(super) fn pending_applies(record: &Value) -> bool {
+    record["pending_settings"].is_object() && ready(record)
+}
+
 pub(super) fn apply_pending(name: &str, record: Value) -> Result<Value> {
-    let pending = &record["pending_settings"];
-    if !pending.is_object() || !ready(&record) {
+    if !pending_applies(&record) {
         return Ok(record);
     }
+    let pending = &record["pending_settings"];
     if string(pending, "run_id") != string(&record, "run_id")
         || string(pending, "conversation_id") != string(&record, "conversation_id")
     {

@@ -1,6 +1,7 @@
 import { For, Show, createMemo, createSignal, type JSX } from "solid-js";
 import { createVirtualizer } from "@tanstack/solid-virtual";
 import { Icon } from "../lib/icons";
+import { tr } from "../../i18n";
 import type { PlanGraph, TeamView } from "./types";
 import {
   CARD_H,
@@ -63,6 +64,15 @@ function memberModel(team: TeamView, assignee: string): string {
   return member?.model || member?.agent || "";
 }
 
+function statusLabel(kind: string): string {
+  if (kind === "done") return tr("Done");
+  if (kind === "running") return tr("Running");
+  if (kind === "approved") return tr("Approved");
+  if (kind === "draft") return tr("Draft");
+  if (kind === "paused") return tr("Paused");
+  return tr("Open");
+}
+
 export function PlanView(props: PlanViewProps): JSX.Element {
   const [collapsed, setCollapsed] = createSignal<Set<number>>(
     new Set(props.team.phases.filter((phase) => phase.status === "done").map((phase) => phase.n)),
@@ -112,6 +122,7 @@ export function PlanView(props: PlanViewProps): JSX.Element {
         style={{ "min-width": `${Math.max(phase.width, 320)}px` }}
         role="button"
         tabindex="0"
+        aria-label={tr("Phase %1", phase.phase.n)}
         aria-expanded={!isCollapsed}
         onClick={() => toggle(phase.phase.n)}
         onKeyDown={(event) => {
@@ -123,23 +134,23 @@ export function PlanView(props: PlanViewProps): JSX.Element {
       >
         <Icon name={isCollapsed ? "chevron-right" : "chevron-down"} size={14} />
         <span class="pt-pn">{phase.phase.n}</span>
-        <b class="pt-phase-title">{phase.phase.title || `Phase ${phase.phase.n}`}</b>
-        <span class={`pt-chip pt-chip-${status.kind}`}>{status.label}</span>
+        <b class="pt-phase-title">{phase.phase.title || tr("Phase %1", phase.phase.n)}</b>
+        <span class={`pt-chip pt-chip-${status.kind}`}>{statusLabel(status.kind)}</span>
         <Show when={phase.phase.acceptance}>
           <span class="pt-acceptance">{short(phase.phase.acceptance, 80)}</span>
         </Show>
         <Show when={phase.phase.auto}>
-          <span class="pt-chip pt-chip-auto">Auto</span>
+          <span class="pt-chip pt-chip-auto">{tr("Auto")}</span>
         </Show>
         <Show when={phase.phase.barrier}>
-          <span class="pt-chip pt-chip-barrier">Barrier</span>
+          <span class="pt-chip pt-chip-barrier">{tr("Barrier")}</span>
         </Show>
         <span class="pt-grow" />
         <Show when={phase.phase.health}>
           <span class="pt-health">{short(phase.phase.health, 60)}</span>
         </Show>
         <Show when={total > 0}>
-          <span class="pt-progress" aria-label={`${done} of ${total}`}>
+          <span class="pt-progress" aria-label={tr("%1 of %2", done, total)}>
             <For each={Array.from({ length: Math.min(12, total) }, (_, index) => index < Math.round((done / total) * Math.min(12, total)))}>
               {(on) => <i class={on ? "on" : ""} />}
             </For>
@@ -149,7 +160,7 @@ export function PlanView(props: PlanViewProps): JSX.Element {
           </span>
         </Show>
         <Show when={phaseNeedsApproval(phase.phase)}>
-          <span class="pt-approval">Needs approval</span>
+          <span class="pt-approval">{tr("Needs approval")}</span>
           <Show when={props.onApprovePhase}>
             <button
               type="button"
@@ -159,7 +170,7 @@ export function PlanView(props: PlanViewProps): JSX.Element {
                 props.onApprovePhase?.(phase.phase.n);
               }}
             >
-              Approve
+              {tr("Approve")}
             </button>
           </Show>
           <Show when={props.onDiscardPhase}>
@@ -171,7 +182,7 @@ export function PlanView(props: PlanViewProps): JSX.Element {
                 props.onDiscardPhase?.(phase.phase.n);
               }}
             >
-              Discard
+              {tr("Discard")}
             </button>
           </Show>
         </Show>
@@ -184,7 +195,7 @@ export function PlanView(props: PlanViewProps): JSX.Element {
     const state = task ? tone(task.status) : "pending";
     const blocks = task ? externalDeps(phase.phase.n, task, byId()) : [];
     const waits = task?.waits?.trim();
-    const attempt = task?.attempts ? `attempt ${task.attempts}` : "";
+    const attempt = task?.attempts ? tr("Attempt %1", task.attempts) : "";
     const stateText = task?.attempt_state?.trim() || "";
     const classes = ["pt-card", `pt-card-${state}`];
     const litNow = lit();
@@ -197,7 +208,7 @@ export function PlanView(props: PlanViewProps): JSX.Element {
         style={{ left: `${placed.x}px`, top: "0px" }}
         data-task={placed.node.id}
         data-lit={litNow ? (litNow.has(placed.node.id) ? "lit" : "dim") : "none"}
-        aria-label={`Task ${placed.node.id}: ${placed.node.title || task?.title || ""}`}
+        aria-label={tr("Task %1: %2", placed.node.id, placed.node.title || task?.title || "")}
         onPointerEnter={() => setHover(placed.node.id)}
         onFocus={() => setHover(placed.node.id)}
         onBlur={() => setHover(null)}
@@ -206,13 +217,13 @@ export function PlanView(props: PlanViewProps): JSX.Element {
         <span class="pt-card-l1">
           <span class={`pt-dot pt-dot-${state}`} />
           <span class="pt-id">#{placed.node.id}</span>
-          <span class="pt-title">{placed.node.title || task?.title || `Task ${placed.node.id}`}</span>
+          <span class="pt-title">{placed.node.title || task?.title || tr("Task %1", placed.node.id)}</span>
           <Show when={task?.pinned}>
-            <span class="pt-badge">Pinned</span>
+            <span class="pt-badge">{tr("Pinned")}</span>
           </Show>
         </span>
         <span class="pt-card-l2">
-          <span class="pt-role">{placed.node.role || task?.assignee || "Unassigned"}</span>
+          <span class="pt-role">{placed.node.role || task?.assignee || tr("Unassigned")}</span>
           <Show when={memberModel(props.team, task?.assignee ?? "")}>
             <span class="pt-model">{memberModel(props.team, task?.assignee ?? "")}</span>
           </Show>
@@ -221,13 +232,13 @@ export function PlanView(props: PlanViewProps): JSX.Element {
           </Show>
           <span class="pt-grow" />
           <Show when={blocks.length > 0}>
-            <span class="pt-deps" title="Depends on tasks in other phases">
+            <span class="pt-deps" title={tr("Depends on tasks in other phases")}>
               ↤{blocks.map((id) => `#${id}`).join(" ")}
             </span>
           </Show>
         </span>
         <span class="pt-card-l3">
-          <Show when={waits} fallback={<span class="pt-muted">{placed.node.ready ? "ready" : short(placed.node.status, 24)}</span>}>
+          <Show when={waits} fallback={<span class="pt-muted">{placed.node.ready ? tr("ready") : short(placed.node.status, 24)}</span>}>
             <span class="pt-waits">{short(waits!, 76)}</span>
           </Show>
         </span>
@@ -264,22 +275,22 @@ export function PlanView(props: PlanViewProps): JSX.Element {
     const phase = phaseOf(task.id);
     const blocks = props.team.tasks.filter((candidate) => candidate.deps.some((dep) => dep.task === task.id));
     return (
-      <aside class="pt-detail" aria-label={`Task ${task.id}`}>
+      <aside class="pt-detail" aria-label={tr("Task %1: %2", task.id, task.title)}>
         <div class="pt-detail-head">
           <span class={`pt-dot pt-dot-${tone(task.status)}`} />
           <span class="pt-id">#{task.id}</span>
           <b>{task.title}</b>
           <span class="pt-grow" />
-          <button type="button" class="icon-btn small" aria-label="Close task" onClick={() => setSelected(null)}>
+          <button type="button" class="icon-btn small" aria-label={tr("Close task")} onClick={() => setSelected(null)}>
             <Icon name="x" size={14} />
           </button>
         </div>
         <div class="pt-detail-meta">
           <span class="pt-chip">{short(task.status || "pending", 24)}</span>
-          <span class="pt-chip">Phase {phase?.phase.n ?? task.phase}</span>
-          <span class="pt-chip">{task.assignee || "Unassigned"}</span>
+          <span class="pt-chip">{tr("Phase %1", phase?.phase.n ?? task.phase)}</span>
+          <span class="pt-chip">{task.assignee || tr("Unassigned")}</span>
           <Show when={task.estimate_minutes > 0}>
-            <span class="pt-chip">{task.estimate_minutes} min</span>
+            <span class="pt-chip">{tr("%1 min", task.estimate_minutes)}</span>
           </Show>
         </div>
         <Show when={task.waits}>
@@ -287,13 +298,13 @@ export function PlanView(props: PlanViewProps): JSX.Element {
         </Show>
         <Show when={task.deps.length > 0}>
           <div class="pt-detail-section">
-            <span class="pt-detail-label">Depends on</span>
+            <span class="pt-detail-label">{tr("Depends on")}</span>
             <div class="pt-detail-links">
               <For each={task.deps}>
                 {(dep) => (
                   <button type="button" class="pt-link" onClick={() => open(dep.task)}>
                     #{dep.task}
-                    <Show when={!dep.hard}> soft</Show>
+                    <Show when={!dep.hard}> {tr("soft")}</Show>
                   </button>
                 )}
               </For>
@@ -302,7 +313,7 @@ export function PlanView(props: PlanViewProps): JSX.Element {
         </Show>
         <Show when={blocks.length > 0}>
           <div class="pt-detail-section">
-            <span class="pt-detail-label">Blocks</span>
+            <span class="pt-detail-label">{tr("Blocks")}</span>
             <div class="pt-detail-links">
               <For each={blocks}>{(blocked) => <button type="button" class="pt-link" onClick={() => open(blocked.id)}>#{blocked.id}</button>}</For>
             </div>
@@ -310,7 +321,7 @@ export function PlanView(props: PlanViewProps): JSX.Element {
         </Show>
         <Show when={externalBlocks(phase?.phase.n ?? task.phase, task.id, props.team.tasks).length > 0}>
           <div class="pt-detail-section">
-            <span class="pt-detail-label">Other phases wait</span>
+            <span class="pt-detail-label">{tr("Other phases wait")}</span>
             <div class="pt-detail-links">
               <For each={externalBlocks(phase?.phase.n ?? task.phase, task.id, props.team.tasks)}>
                 {(id) => <button type="button" class="pt-link" onClick={() => open(id)}>#{id}</button>}
@@ -320,32 +331,28 @@ export function PlanView(props: PlanViewProps): JSX.Element {
         </Show>
         <Show when={task.output.length > 0}>
           <div class="pt-detail-section">
-            <span class="pt-detail-label">Report</span>
+            <span class="pt-detail-label">{tr("Report")}</span>
             <For each={task.output.slice(-3)}>{(line) => <p class="pt-detail-p">{short(line, 400)}</p>}</For>
           </div>
         </Show>
         <Show when={task.decided_by}>
-          <p class="pt-detail-note">Decided by {task.decided_by}</p>
+          <p class="pt-detail-note">{tr("Decided by %1", task.decided_by)}</p>
         </Show>
       </aside>
     );
   };
 
   return (
-    <section class={`pt-plan${props.class ? ` ${props.class}` : ""}`} aria-label="Plan">
+    <section class={`pt-plan${props.class ? ` ${props.class}` : ""}`} aria-label={tr("Plan")}>
       <header class="pt-plan-bar">
-        <span class="pt-seg">
-          <span class="on">Graph</span>
-          <span>Board</span>
-          <span>Layers</span>
-        </span>
+        <span class="pt-plan-mode">{tr("Graph")}</span>
         <span class="pt-grow" />
         <span class="pt-plan-summary">
-          <span>{phases().length} {phases().length === 1 ? "phase" : "phases"}</span>
-          <span>{props.team.tasks.length} tasks</span>
+          <span>{tr("Phases: %1", phases().length)}</span>
+          <span>{tr("Tasks: %1", props.team.tasks.length)}</span>
         </span>
-        <button type="button" class="btn ghost small" onClick={collapseAll}>Collapse all</button>
-        <button type="button" class="btn ghost small" onClick={expandAll}>Expand all</button>
+        <button type="button" class="btn ghost small" onClick={collapseAll}>{tr("Collapse all")}</button>
+        <button type="button" class="btn ghost small" onClick={expandAll}>{tr("Expand all")}</button>
       </header>
       <div class="pt-plan-body">
         <div class="pt-plan-scroll" ref={scroller} onPointerLeave={() => setHover(null)}>

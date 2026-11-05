@@ -452,6 +452,19 @@ fn only_the_released_custody_settles_the_compaction_and_only_its_exact_cli_recor
         })
     };
     let unknown = |code: &'static str| -> Read { Box::new(move |_| Observed::Unknown(code)) };
+    // An absence exists only as a read of a held store that has no receipt.
+    let missing = || -> Read {
+        Box::new(|plan| {
+            let temp = tempfile::tempdir().unwrap();
+            let state = state_root(&temp.path().canonicalize().unwrap());
+            let folder = state.join(super::receipt::COMPACTION_FOLDER);
+            std::fs::create_dir(&folder).unwrap();
+            mode(&folder, 0o700);
+            let observed = observe(&state, plan);
+            assert!(matches!(observed, Observed::Missing(_)), "{observed:?}");
+            observed
+        })
+    };
     use Step::*;
     let cases: Vec<(Ending, Read, Step, &str, Settled)> = vec![
         // The exit proves nothing; only the CLI's own record decides.
@@ -478,7 +491,7 @@ fn only_the_released_custody_settles_the_compaction_and_only_its_exact_cli_recor
         ),
         (
             Ending::Exited,
-            unknown(MISSING),
+            missing(),
             Unknown,
             MISSING,
             Settled::NotSent { compacted: false },
@@ -515,10 +528,19 @@ fn only_the_released_custody_settles_the_compaction_and_only_its_exact_cli_recor
         // exists; then the send never follows either.
         (
             Ending::NotStarted,
-            unknown(MISSING),
+            missing(),
             NotStarted,
             wire::NOT_STARTED,
             Settled::NotStarted,
+        ),
+        // A missing receipt's code that no held read produced proves
+        // nothing.
+        (
+            Ending::NotStarted,
+            unknown(MISSING),
+            Unknown,
+            MISSING,
+            Settled::NotSent { compacted: false },
         ),
         (
             Ending::NotStarted,
@@ -530,7 +552,7 @@ fn only_the_released_custody_settles_the_compaction_and_only_its_exact_cli_recor
         // The child's own reason stays unless its exact record exists.
         (
             Ending::Unknown,
-            unknown(MISSING),
+            missing(),
             Unknown,
             "compact_to_send_timed_out",
             Settled::NotSent { compacted: false },
@@ -660,6 +682,51 @@ fn restart_keeps_a_reserved_compaction_for_its_drain_and_never_reads_an_unheld_r
     );
 }
 
+/// Store recovery settles an original no live runtime holds as Unknown
+/// (UNHELD), never as never started, even when its spawn turn recorded the
+/// pre-child result: it holds no receipt store to prove that no other
+/// dispatch ran the request.
+#[test]
+fn store_recovery_never_proves_an_unheld_pre_child_result() {
+    use super::receipt::UNHELD;
+    let (_temp, location, mut store, epoch) = fixture();
+    let verified = original(&location.configuration, &epoch);
+    let (_record, held) = running(&mut store, &location, &verified, &epoch);
+    let tx = store
+        .db
+        .transaction_with_behavior(TransactionBehavior::Immediate)
+        .unwrap();
+    let row = ledger::load(&tx, &verified.plan.compaction_request_id)
+        .unwrap()
+        .unwrap();
+    ledger::not_started(&tx, &row).unwrap();
+    tx.commit().unwrap();
+    drop(held);
+    let until = std::time::Instant::now() + std::time::Duration::from_secs(10);
+    let receipt = loop {
+        store.recover_operation_custody(&location);
+        let row = ledger::load(&store.db, &verified.plan.compaction_request_id)
+            .unwrap()
+            .unwrap();
+        if row.receipt.drained {
+            break row.receipt;
+        }
+        assert!(
+            std::time::Instant::now() < until,
+            "recovery never settled it"
+        );
+        std::thread::sleep(std::time::Duration::from_millis(5));
+    };
+    assert_eq!(
+        (receipt.compaction.step, receipt.compaction.code.as_str()),
+        (Step::Unknown, UNHELD)
+    );
+    assert_eq!(
+        receipt.result(&verified.plan),
+        Some(Settled::NotSent { compacted: false })
+    );
+}
+
 /// desktop-u R1 negatives: an unreadable reservation is no proof that a
 /// child never started; it stops recovery instead.
 #[test]
@@ -753,7 +820,7 @@ fn observe(state: &Path, plan: &wire::Plan) -> super::receipt::Observed {
 
 #[test]
 fn the_receipt_observation_reads_only_the_exact_private_submitted_record() {
-    use super::receipt::{Observed, CHANGED, MISSING};
+    use super::receipt::{Observed, CHANGED};
     let temp = tempfile::tempdir().unwrap();
     let state = state_root(&temp.path().canonicalize().unwrap());
     let verified = original(&"a".repeat(64), &uuid::Uuid::new_v4().to_string());
@@ -761,7 +828,7 @@ fn the_receipt_observation_reads_only_the_exact_private_submitted_record() {
     let id = &plan.compaction_request_id;
     write_receipt(&state, id, b"{}");
     std::fs::remove_file(state.join("compact_receipts").join(format!("{id}.json"))).unwrap();
-    assert_eq!(observe(&state, plan), Observed::Unknown(MISSING));
+    assert!(matches!(observe(&state, plan), Observed::Missing(_)));
     write_receipt(
         &state,
         id,
@@ -1248,13 +1315,14 @@ print(json.dumps(record))
             .is_some_and(|fd| fd.parse::<u32>().is_ok()));
     }
 
-    /// A stop, a revoke or a changed source after the reservation committed
-    /// starts nothing: the consent veto runs last in the spawn turn, and with
-    /// no record of the request both children never started.
+    /// A stop, a revoke, a changed source or a changed target record after
+    /// the reservation committed starts nothing: the target and consent
+    /// vetoes run last in the spawn turn, and with no record of the request
+    /// both children never started.
     #[test]
     #[cfg(target_os = "linux")]
-    fn a_stop_revoke_or_source_change_after_reservation_starts_nothing() {
-        for action in ["stop", "revoke", "source"] {
+    fn a_stop_revoke_source_or_target_change_after_reservation_starts_nothing() {
+        for action in ["stop", "revoke", "source", "target"] {
             let dir = tempfile::tempdir().unwrap();
             let path = dir.path().join("hgs");
             let ran = dir.path().join("ran");
@@ -1300,9 +1368,12 @@ print(json.dumps(record))
             match action {
                 "stop" => f.runtime.request_stop(),
                 "revoke" => f.revoke(),
-                _ => f
+                "source" => f
                     .runtime
                     .fixture_machine("33333333-3333-4333-8333-333333333333"),
+                // desktop-u G1: only the selected session's run changes, in
+                // the final turn after every earlier read.
+                _ => session_record(&f.config.state, SESSION, "claude", "run-2", CONVERSATION),
             }
             f.runtime.poll(&mut f.store, Some(f.exclusion.clone()));
             release.send(()).unwrap();

@@ -40,9 +40,18 @@ pub(super) enum Observed {
     /// The exact send's receipt is `submitted`.
     #[allow(dead_code)] // The send's read lands with its child.
     Sent(deferred_send::Outcome),
+    /// The original store this drain held was read and holds no receipt of
+    /// the request. Only a read here constructs it, so no caller can claim
+    /// an absence it never read.
+    Missing(Absence),
     /// Anything else, for the named reason. Never resent.
     Unknown(&'static str),
 }
+
+/// A held store's read found no receipt. Its field is private to this
+/// module: a path that never read a held store cannot make one.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub(super) struct Absence(());
 
 /// Reads the compaction's receipt from `roots` after the physical drain.
 /// `between` runs after the bytes are read and before they are checked
@@ -59,7 +68,7 @@ pub(super) fn compaction(roots: &Roots, plan: &Plan, between: &dyn Fn()) -> (Obs
             Ok(outcome) => Observed::Compacted(outcome),
             Err(code) => Observed::Unknown(code),
         },
-        Err(Failure::Missing) => Observed::Unknown(MISSING),
+        Err(Failure::Missing) => Observed::Missing(Absence(())),
         Err(Failure::Unavailable) => Observed::Unknown(UNAVAILABLE),
         Err(Failure::Changed) => Observed::Unknown(CHANGED),
     };

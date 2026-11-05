@@ -655,7 +655,9 @@ pub(super) fn drained(
             };
             Step::Recorded
         }
-        (_, Observed::Unknown(receipt::MISSING)) if not_started => {
+        // Only a read of the held store makes an absence: an unheld or
+        // unread original is Unknown whatever its spawn turn recorded.
+        (_, Observed::Missing(_)) if not_started => {
             set(&mut next, child, Step::NotStarted, wire::NOT_STARTED);
             Step::NotStarted
         }
@@ -663,12 +665,20 @@ pub(super) fn drained(
             set(&mut next, child, Step::Unknown, wire::RECEIPT_MISMATCH);
             Step::Unknown
         }
-        (_, Observed::Unknown(code)) => {
+        (_, Observed::Missing(_) | Observed::Unknown(_)) => {
             // The receipt's reason, unless the child already named a more
             // specific one. An unconfirmed pre-child result is the
             // receipt's: another dispatch may hold the request.
-            let code = reason.as_deref().unwrap_or(code);
-            set(&mut next, child, Step::Unknown, code);
+            let read = match cli {
+                Observed::Unknown(code) => code,
+                _ => receipt::MISSING,
+            };
+            set(
+                &mut next,
+                child,
+                Step::Unknown,
+                reason.as_deref().unwrap_or(read),
+            );
             Step::Unknown
         }
     };

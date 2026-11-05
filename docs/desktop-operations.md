@@ -400,15 +400,17 @@ compaction the way it runs a deferred send:
 - The `compact_receipts` folder and the state root are opened before the
   child.
 - The compaction's custody is reserved durably before it can spawn.
-- In the spawn turn, the selected session's own record and the consent veto
-  are checked last.
+- In the spawn turn, after its wait, the selected session's own record is
+  read again from the held state root, then the consent veto runs. The
+  runner's deadline check comes last.
 - The original `hgs compact-context <session> --json` runs once through the
   shared original-child runner.
 - After the physical drain, the receipt is read from the held objects within
   one never-renewed 5-second deadline.
 
 A reserved child counts as never started only from the runner's no-spawn
-result together with a safe absence of any record of it. Restart, revoke or a
+result together with a read of the held store that finds no record of it.
+An original no runtime holds is never read, so it stays Unknown. Restart, revoke or a
 lost preparation retires the operation (`compact_to_send_interrupted`). A
 child never reserved is then recorded as never started from the ledger. A
 reserved one keeps its custody for the read-only drain, and Store recovery

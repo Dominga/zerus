@@ -431,26 +431,20 @@ impl Runtime {
                         thread::Builder::new()
                             .name("compact-to-send".into())
                             .spawn(move || {
-                                // The selected session's actual backend and run;
-                                // the consent veto runs again in the final spawn
-                                // turn.
-                                let value = if selected.cancel.load(Ordering::Acquire)
-                                    || !target::current(&store_roots, &selected.original.plan)
-                                {
-                                    Ended::NotStarted
-                                } else {
-                                    compact(
-                                        &selected,
-                                        &lock,
-                                        &guard,
-                                        #[cfg(target_os = "linux")]
-                                        image,
-                                        #[cfg(test)]
-                                        executor,
-                                        #[cfg(test)]
-                                        hook,
-                                    )
-                                };
+                                // The target and the consent veto run in the
+                                // final spawn turn, from these retained roots.
+                                let value = compact(
+                                    &selected,
+                                    &store_roots,
+                                    &lock,
+                                    &guard,
+                                    #[cfg(target_os = "linux")]
+                                    image,
+                                    #[cfg(test)]
+                                    executor,
+                                    #[cfg(test)]
+                                    hook,
+                                );
                                 let _ = done_send.send(value);
                             });
                     match spawned {
@@ -828,6 +822,7 @@ impl Runtime {
 /// here never started.
 fn compact(
     consent: &Consent,
+    roots: &Roots,
     lock: &Arc<InheritedLock>,
     resources: &Arc<dyn Send + Sync>,
     #[cfg(target_os = "linux")] image: Option<Arc<Pin>>,
@@ -844,7 +839,7 @@ fn compact(
         if let Some(hook) = &hook {
             hook();
         }
-        if consent.cancel.load(Ordering::Acquire) {
+        if !target::current(roots, plan) || consent.cancel.load(Ordering::Acquire) {
             return Ended::NotStarted;
         }
         return executor(plan, &args, input, lock, resources);
@@ -864,9 +859,15 @@ fn compact(
                 if let Some(hook) = &hook {
                     hook();
                 }
-                // Last before the spawn: a consent stopped since the worker
-                // began (a revoke, a lost source, a stop) starts nothing.
-                if consent.cancel.load(Ordering::Acquire) || !image.current() {
+                // Last before the spawn, after every slow check and the turn
+                // wait: the selected session's actual record, read again
+                // from the retained original roots, then a consent stopped
+                // since the worker began (a revoke, a lost source, a stop).
+                // The runner's own deadline check follows.
+                if !target::current(roots, plan)
+                    || consent.cancel.load(Ordering::Acquire)
+                    || !image.current()
+                {
                     return Err(std::io::ErrorKind::PermissionDenied.into());
                 }
                 image.inherit(command)
@@ -875,7 +876,7 @@ fn compact(
     }
     // No pinned image (a unit-test image, or one already gone), and macOS,
     // whose admission refuses first: nothing starts.
-    let _ = (args, input, lock, resources);
+    let _ = (roots, args, input, lock, resources);
     #[cfg(test)]
     let _ = hook;
     Ended::NotStarted

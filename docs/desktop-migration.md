@@ -653,6 +653,8 @@ Only missing POSIX links are added. Existing locations in any project preserve
 renames and moves; Next fields, defaults, order, assignments and tombstones win.
 Windows lists refuse with `legacy_projects_windows_unsupported` rather than send
 Windows paths to the POSIX shared writer.
+The Migration report asks the person to add those folders again in Projects on
+that Windows computer, because their list is not imported.
 
 The separate private `legacy_project_lists_v1` family is bounded and records one
 reservation per physical computer before dispatch. Its original catalog/route

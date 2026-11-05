@@ -17,8 +17,7 @@ sandbox, in the member's own folder, with a bounded time and output:
   git-commit {message, paths?}  Zerus commits your work on your branch
 On Windows the Qt templates load Visual Studio and Qt; do not wrap them in
 your own vcvars batch. Shots stay in your folder: name their path in the report.
-Codex on Windows: its sandbox keeps .git read-only, so commit only with
-git-commit; the Store pwsh cannot start there: use powershell.exe.
+Codex on Windows: .git is read-only; commit with git-commit, use powershell.exe.
 Ask for one as the member (identity as report; a sandbox needs no approval):
   {"request_id":"UUID","team":"ID","attempt":"ATTEMPT",
    "template":"cargo-test","args":{"bin":"hgs","filter":"teams"}} | hgs team run --json

@@ -75,6 +75,10 @@ ready review PR, not permission to merge or deploy. **#906b remains draft until
 Windows PC (va-kids) acceptance** and then removes the retained `tray/` tree and
 Windows Qt pieces. Windows PC testing does not gate #906a. Use the existing
 candidate installation, never either deletion branch, for acceptance.
+**Owner decision (2026-11-05): every acceptance row without recorded evidence is
+waived** (Mac notifications/clicks `.66.3.30.2.4`, voice/video, menu bar/lifecycle,
+terminal and service registration/readiness, and UI/durable parity on all three
+platforms); the platform tables mark them "WAIVED — owner 2026-11-05".
 **Owner decision (2026-11-05): Qt rollback is waived on every platform** ("откат
 на Qt не нужен совсем"). No Qt rollback or Qt round trip is prepared or run; the
 rows below that relied on the round trip were re-planned by the coordinator.
@@ -232,7 +236,7 @@ acceptance. Do not install a test binary by hand.
 | [x] Tray/lifecycle — exercised functional route | PASS for the exercised route on `8e74aa884`: an actual tray-menu Quit exited the GUI while the same background backend stayed serving; one maintained GUI-unit start produced one tray object; a second background invocation kept that GUI's PID/birth. See the [Arch unattended record](#recorded-arch-notification-media-and-unattended-results--2026-11-05). | G4 `.66.6`, `.66.3.31` |
 | [x] Terminal — exercised owner cases | PASS: existing-session upgrade survival and the short-window space/non-ASCII folder, actual shell argv/cwd, prompt, paste and PTY resize 52×103 → 45×71. The cancelled test-shell reattach-after-client-exit case remains automated; no worktree was created. | inventory “Terminal and process lifetime”; G7 `.66.2`, native terminal contracts |
 | [x] Voice/video — capture, preview and discard | Microphone: PASS for capture, stopped preview, audible playback and owner-confirmed discard. Camera: capture/control/discard PASS, with P2 playback-quality observation `zerus-6ioin`. Both on `8e74aa884`; see the [Arch media record](#recorded-arch-notification-media-and-unattended-results--2026-11-05). Transcription and recording recovery across exit stay open automated subcases (coordinator, 2026-11-05). | G2 `.66.4.5`, inventory “Voice, video and speech providers” |
-| [ ] UI/durable parity | Exercise each inventory responsibility with its target owner: bounded Activity/archive/search/tasks pages, organization writes, creation/recovery, read marks and manual questions. Use the [installed client cutover runbook](#installed-client-cutover-on-linux-and-macos) for service and intent cases. Approval opt-in starts off; generic/agent callers cannot enable it. | G1–G4/G7; [#884](https://github.com/ufna/zerus/pull/884), `.66.3.32`, `.66.3.35`, `.66.3.38` |
+| WAIVED — owner 2026-11-05 | UI/durable parity: waived by owner 2026-11-05 (no recorded evidence). | G1–G4/G7; [#884](https://github.com/ufna/zerus/pull/884), `.66.3.32`, `.66.3.35`, `.66.3.38` |
 | WAIVED — owner 2026-11-05 | Qt rollback is waived by owner 2026-11-05 ("откат на Qt не нужен совсем"): no Qt rollback or Qt round trip is prepared or run on any platform. | `.66.3.31`, `tray/update-installed.py`; desktop-u |
 
 Linux notification acceptance also requires the root service attachment
@@ -815,12 +819,12 @@ existing privacy identity, signature, installed path and one verified rollback c
 | [x] Upgrade with agents running — coordinator re-plan | COVERED (coordinator, 2026-11-05) by the maintained owner-account Next→Next queue rollouts `7ae0c2bf6` → `7a60dceeb` → `0f6017973`, with native processes untouched and drafts kept; see the [gate matrix](#deletion-gate-matrix--2026-11-04). Existing Qt users' Qt→Next path is covered by the CI install/package checks and `test_macos_switch_updater`; an owner-account Qt→Next run is waived with the Qt rollback. | `.12.6`, [#871](https://github.com/ufna/zerus/pull/871), `tray/update-installed.py` |
 | [x] Terminate and Remove worktree (`.66.3.40.4`) | PASS — the installed-pair Terminate-and-Removed positive on the maintained signed pair `a9d5b41f8` (#1504): one original confirmation, Terminate completed, archive retained, folder removed, branch kept, original processes gone; verified by macbundle-u. See the [Mac Terminate-and-Removed record](#recorded-mac-installed-terminate-and-removed-positive--source-a9d5b41f). | `.66.3.40.4`, [#1504](https://github.com/ufna/zerus/pull/1504); macbundle-u |
 | [x] One-time import — approved shared coverage | Covered by the coordinator-approved Windows fixture/CI plus INI/plist/Core/CLI evidence above; no owner-GUI swap or Mac-native import claim. Preserve the explicit Windows legacy-list and later-repair limits. | G3 `.66.5.2.1`, `.66.5.3`, [#870](https://github.com/ufna/zerus/pull/870) |
-| [ ] Service registration/readiness | Through explicit `zerus-setup`, inspect the Aqua `com.hgdev.hgs-desktop` LaunchAgent and actual `desktop status`; close Next and verify background duties continue. Foreign/custom definitions are refused. | `.66.3.27.2`, [#882](https://github.com/ufna/zerus/pull/882); macbundle-u/desktop-u |
-| [ ] Notifications/clicks | With Next closed, post one service-owned alert through the signed host; check badge, exact-session click, stale click refusal and lock/idle behavior. Existing notification permission remains attached to the public app identity. | `.66.3.30.2/.3/.4`, [#913](https://github.com/ufna/zerus/pull/913) signed host, [#907](https://github.com/ufna/zerus/pull/907) ledger, [#914](https://github.com/ufna/zerus/pull/914) discovery; [#891](https://github.com/ufna/zerus/pull/891) is extraction only |
-| [ ] Menu bar/lifecycle | Check icon/menu, reopen, Dock/menu-bar policy, second instance, Services/Hide/Show All and draft-safe Quit; agents and service remain independent. | G4 `.66.6`, `.66.3.31`, inventory native shell/menu rows |
-| [ ] Terminal | Open exact session/folder in the configured Terminal path, with quotes/spaces/non-ASCII; accept only the expected Apple Events consent. Check resize/paste and session survival after UI exit. | inventory Mac terminal rows; native terminal contracts |
-| [ ] Voice/video | Exercise real microphone/camera consent, short preview/transcription, cancel/hide and exit recovery. Check public privacy identity; never import an old device ID or replay uncertain delivery. | G2 `.66.4.5`, inventory media/privacy rows |
-| [ ] UI/durable parity | Apply the same complete inventory responsibility walk as Linux, including bounded details/tasks, archived reads, creation recovery and default-off approvals with authenticated frontend-only enablement. Use the [installed client cutover runbook](#installed-client-cutover-on-linux-and-macos). | G1–G4/G7, `.66.3.31/.32/.35/.38` |
+| WAIVED — owner 2026-11-05 | Service registration/readiness: waived by owner 2026-11-05 (no recorded evidence). | `.66.3.27.2`, [#882](https://github.com/ufna/zerus/pull/882); macbundle-u/desktop-u |
+| WAIVED — owner 2026-11-05 | Notifications/clicks: waived by owner 2026-11-05 (no recorded evidence). | `.66.3.30.2/.3/.4`, [#913](https://github.com/ufna/zerus/pull/913) signed host, [#907](https://github.com/ufna/zerus/pull/907) ledger, [#914](https://github.com/ufna/zerus/pull/914) discovery; [#891](https://github.com/ufna/zerus/pull/891) is extraction only |
+| WAIVED — owner 2026-11-05 | Menu bar/lifecycle: waived by owner 2026-11-05 (no recorded evidence). | G4 `.66.6`, `.66.3.31`, inventory native shell/menu rows |
+| WAIVED — owner 2026-11-05 | Terminal: waived by owner 2026-11-05 (no recorded evidence). | inventory Mac terminal rows; native terminal contracts |
+| WAIVED — owner 2026-11-05 | Voice/video: waived by owner 2026-11-05 (no recorded evidence). | G2 `.66.4.5`, inventory media/privacy rows |
+| WAIVED — owner 2026-11-05 | UI/durable parity: waived by owner 2026-11-05 (no recorded evidence). | G1–G4/G7, `.66.3.31/.32/.35/.38` |
 | WAIVED — owner 2026-11-05 | Qt rollback is waived by owner 2026-11-05: no Qt rollback or Qt round trip is prepared or run on any platform. | `.66.3.31`, updater rollback and defaults-snapshot checks |
 
 ### Recorded Mac native-host subchecks — source `f1833dec`
@@ -1324,7 +1328,7 @@ Do not touch unrelated desktop/apps/settings.
 | [x] Tray/lifecycle — fixture profile | PASS (12/12) on integrate `861e0baf`; see the [va-kids `861e0baf` record](#va-kids-unattended-rows-on-861e0baf--2026-11-05). Private fixture-profile evidence (owner decision 4); the row reruns once on the final release candidate (`zerus-5wmh.66.8.1.1.6`). | [#874](https://github.com/ufna/zerus/pull/874), `.66.6.15` |
 | [x] Terminal — fixture profile | PASS (9/9) on integrate `861e0baf`; see the [va-kids `861e0baf` record](#va-kids-unattended-rows-on-861e0baf--2026-11-05). Private fixture-profile evidence (owner decision 4); the row reruns once on the final release candidate (`zerus-5wmh.66.8.1.1.6`). | `.52`, `.66.6.15`, Windows native contracts; fixes-u |
 | [x] Voice/video — documented refusal | PASS for the documented visible refusal (2/2): local Windows voice refuses visibly, on `faa4d324`; see the [va-kids latest-artifacts record](#va-kids-rows-on-the-latest-integrate-artifacts-owner-decision-4). Private fixture-profile evidence (owner decision 4); the row reruns once on the final release candidate (`zerus-5wmh.66.8.1.1.6`). | G2 `.66.4.5`, inventory voice/media rows |
-| [x] UI/durable parity — fixture profile | PASS (20/20) on integrate `861e0baf`; see the [va-kids `861e0baf` record](#va-kids-unattended-rows-on-861e0baf--2026-11-05). Private fixture-profile evidence (owner decision 4); the row reruns once on the final release candidate (`zerus-5wmh.66.8.1.1.6`). | G1–G4/G7, `.66.3.31/.32/.35/.37/.38` |
+| [x] UI/durable parity — fixture profile | PASS (20/20) on integrate `861e0baf`, and also within the owner's 2026-11-05 waiver; see the [va-kids `861e0baf` record](#va-kids-unattended-rows-on-861e0baf--2026-11-05). Private fixture-profile evidence (owner decision 4); the row reruns once on the final release candidate (`zerus-5wmh.66.8.1.1.6`). | G1–G4/G7, `.66.3.31/.32/.35/.37/.38` |
 | WAIVED — owner 2026-11-05 | Qt rollback is waived by owner 2026-11-05: no Qt rollback or Qt round trip is prepared or run on any platform. | `.66.3.31`, `.66.7.3`; desktop-u/fleet-c |
 
 ### Recorded Windows registration subcheck — 2026-11-02
@@ -1803,16 +1807,13 @@ contain.
 
 ## Deletion PR merge gate
 
-**Rows without recorded evidence (coordinator review, 2026-11-05).** Every other
-platform row above is ticked with its evidence, waived or covered. These rows
-have no recorded evidence; the coordinator takes them to the owner (waive, or one
-short Mac session after #1340 is rolled out):
-
-- Linux: UI/durable parity.
-- macOS: service registration/readiness; notifications/clicks
-  (`.66.3.30.2.4`); menu bar/lifecycle; terminal; voice/video; UI/durable parity.
-- Windows: notifications/clicks. Delivery and withdrawal are recorded (13/13 on
-  `8cf223aa`, H4 PASS), but no click was observed (H3).
+**Owner waiver and gate state (2026-11-05).** The owner waived every row that had
+no recorded evidence (see the decision at the top). With the evidence ticked
+above, the #906a gate, complete macOS and Linux acceptance records, is met. One
+va-kids row is neither evidenced nor in that waiver: **Windows notifications/
+clicks**. Delivery and withdrawal are recorded (13/13 on `8cf223aa`, H4 PASS),
+but no click was observed (H3). The #906b gate needs that row accepted on this
+evidence or waived.
 
 The coordinator records per-platform acceptance and any exceptions against the
 inventory; unmet G1–G5/G7 responsibilities remain blockers. The owner approved

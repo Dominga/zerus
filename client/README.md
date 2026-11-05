@@ -1167,6 +1167,15 @@ owner sends an earlier one again). The answer's `outcome`:
 
 After `done` or `uncertain` the computer's followed views are read at once.
 
+Pause and Stop name every sub-team below the team and their member sessions:
+the walk follows the team's `children` and each listed team's `parent`
+(`src/ui/teams/actions.ts`). Cancel and Reassign of a task delegated to a
+sub-team ask, after Cancel's own question, whether that sub-team stops or
+keeps running, and send `subteam: "stop"` or `"keep"`, as Qt's
+subteamChoice does. The team history's lines (`src/ui/teams/history.ts`)
+word the feed events as Qt's feedLine does; an event without its own line
+shows its kind.
+
 ### Catalog editor and Team designer
 
 The catalog editor (`src/ui/teams/TeamCatalogEditor.tsx`) has the controls of

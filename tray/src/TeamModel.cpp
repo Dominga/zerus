@@ -2229,6 +2229,16 @@ FeedLine feedLine(const Team &team, const QJsonObject &event)
     else if (k == "notice_unconfirmed") { t = tr("Report for %1 may not have reached the Lead").arg(ref); line.tone = Tone::Warn; }
     else if (k == "member_started") t = tr("Session started · %1").arg(d.value("session").toString());
     else if (k == "launch_failed") { t = tr("Session failed to start: %1").arg(d.value("error").toString()); line.tone = Tone::Danger; }
+    // Task 52: a start that waits for its host (task 22), and a member woken
+    // when its own team run settled (task 36).
+    else if (k == "launch_waiting") {
+        t = tr("The host is still starting; starting again (%1 of %2)").arg(d.value("wait").toInt()).arg(d.value("of").toInt());
+        line.tone = Tone::Muted;
+    }
+    else if (k == "run_settled_woken") {
+        if (d.value("delivered").toBool(true)) t = tr("Woke %1: its run settled · %2%3").arg(d.value("member").toString(), ref, attempt);
+        else { t = tr("Its run settled, but waking %1 was refused · %2%3").arg(d.value("member").toString(), ref, attempt); line.tone = Tone::Warn; }
+    }
     else if (k == "relaunch") t = tr("Start %1 again").arg(d.value("member").toString());
     else if (k == "member_paused") t = tr("Paused %1").arg(d.value("member").toString());
     else if (k == "member_resumed") t = tr("Resumed %1").arg(d.value("member").toString());

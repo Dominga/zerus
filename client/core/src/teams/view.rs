@@ -160,6 +160,9 @@ pub struct TeamSummary {
     pub pending_phase: Option<u64>,
     pub updated: f64,
     pub revision: u64,
+    /// Task 52: the team whose task this sub-team came from ("" for a team
+    /// with no parent), so a tree action counts the whole tree from the list.
+    pub parent: String,
 }
 
 impl TeamSummary {
@@ -216,6 +219,7 @@ pub fn list(value: &Value) -> TeamList {
                 pending_phase: item.get("pending_phase").and_then(Value::as_u64),
                 updated: number(item, "updated"),
                 revision: count(item, "revision"),
+                parent: item.get("parent").map(|parent| name(parent, "team")).unwrap_or_default(),
             }
         })
         .collect();
@@ -298,6 +302,8 @@ pub struct TaskView {
     pub pipeline_run: Option<PipelineRunView>,
     /// Task 40: the task delegates to a sub-team (`subteam`).
     pub subteam: bool,
+    /// Task 52: that sub-team's id, for Cancel's and Reassign's question.
+    pub subteam_team: String,
 }
 
 /// Task 40: a task's pipeline run (`pipeline_run`): its stage kinds in order,
@@ -571,6 +577,7 @@ fn task(value: &Value) -> TaskView {
         pipeline: name(value, "pipeline"),
         pipeline_run: pipeline_run(value),
         subteam: value.get("subteam").is_some_and(Value::is_object),
+        subteam_team: value.get("subteam").map(|subteam| name(subteam, "team")).unwrap_or_default(),
     }
 }
 

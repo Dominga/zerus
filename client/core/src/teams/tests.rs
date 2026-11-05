@@ -374,6 +374,22 @@ fn task_40_status_carries_held_tasks_pipelines_widenings_and_sub_teams() {
         Some((0, "review", "rev"))
     );
     assert!(view.tasks[1].held && view.tasks[1].pipeline_run.is_none() && !view.tasks[1].subteam);
+    // Task 52: the delegated task names its sub-team for Cancel's question.
+    assert_eq!((api.subteam_team.as_str(), view.tasks[1].subteam_team.as_str()), ("s1", ""));
+}
+
+/// Task 52: the list names each team's parent, so a tree action's impact
+/// walks every level; a team with no parent, or an older hgs, says "".
+#[test]
+fn task_52_the_list_names_each_teams_parent() {
+    let list = view::list(&json!({"items":[
+        {"id":"root","name":"Root","status":"running","lead":"lead","members":[],"parent":null},
+        {"id":"s1","name":"Sub","status":"running","lead":"lead","members":[],"parent":{"team":"root","task":2}},
+        {"id":"s2","name":"Deeper","status":"running","lead":"lead","members":[],"parent":{"team":"s1","task":1}},
+        {"id":"old","name":"Older hgs","status":"running","lead":"lead","members":[]}
+    ]}));
+    let parents: Vec<(&str, &str)> = list.teams.iter().map(|team| (team.id.as_str(), team.parent.as_str())).collect();
+    assert_eq!(parents, [("root", ""), ("s1", "root"), ("s2", "s1"), ("old", "")]);
 }
 
 #[test]

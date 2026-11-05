@@ -263,7 +263,19 @@ fn only_the_released_original_custody_settles_a_launch_and_its_exit_never_change
         assert!(ledger::drained(tx, row, observation).is_err());
         drop(held);
         let row = ledger::pending(&store.db).unwrap().unwrap();
-        let observation = custody::probe(&location, &record);
+        // A child that another test thread forks meanwhile shares the lock's
+        // open file description until it execs: wait, bounded, for that copy
+        // to close instead of probing once.
+        let until = std::time::Instant::now() + std::time::Duration::from_secs(10);
+        let observation = loop {
+            let observation = custody::probe(&location, &record);
+            if !matches!(observation, custody::Observation::Held)
+                || std::time::Instant::now() >= until
+            {
+                break observation;
+            }
+            std::thread::sleep(std::time::Duration::from_millis(10));
+        };
         let tx = store
             .db
             .transaction_with_behavior(TransactionBehavior::Immediate)

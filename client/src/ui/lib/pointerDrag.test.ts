@@ -7,9 +7,12 @@ function host() {
   const frames = new Map<number, () => void>();
   const timers: (() => void)[] = [];
   let next = 1;
+  // A Window accepts the boolean capture shorthand. Node 24's EventTarget
+  // removes listeners only with an options object; preserve the Window API.
+  const options = <T extends EventListenerOptions>(value?: boolean | T) => typeof value === "boolean" ? { capture: value } : value;
   const win = {
-    addEventListener: target.addEventListener.bind(target),
-    removeEventListener: target.removeEventListener.bind(target),
+    addEventListener: (type: string, listener: EventListenerOrEventListenerObject, value?: boolean | AddEventListenerOptions) => target.addEventListener(type, listener, options(value)),
+    removeEventListener: (type: string, listener: EventListenerOrEventListenerObject, value?: boolean | EventListenerOptions) => target.removeEventListener(type, listener, options(value)),
     requestAnimationFrame: (callback: () => void) => { frames.set(next, callback); return next++; },
     cancelAnimationFrame: (handle: number) => { frames.delete(handle); },
     setTimeout: (callback: () => void) => { timers.push(callback); return 0; },
@@ -36,6 +39,20 @@ function recorder(start = true) {
 }
 
 describe("an in-page pointer drag (macOS and Windows webviews)", () => {
+  it("the Window double removes only the matching listener/capture and preserves once", () => {
+    const h = host(); let calls = 0;
+    const listener = () => { calls++; };
+    h.win.addEventListener("fixture", listener, true);
+    h.win.addEventListener("fixture", listener, false);
+    h.fire("fixture"); expect(calls).toBe(2);
+    h.win.removeEventListener("fixture", listener, true);
+    h.fire("fixture"); expect(calls).toBe(3);
+    h.win.removeEventListener("fixture", listener, false);
+    h.fire("fixture"); expect(calls).toBe(3);
+    h.win.addEventListener("fixture", listener, { capture: true, once: true });
+    h.fire("fixture"); expect(calls).toBe(4);
+    h.fire("fixture"); expect(calls).toBe(4);
+  });
   it("is a click until the pointer moves past the threshold", () => {
     const h = host(), r = recorder();
     pointerDrag(down(), r.drag, h.win);

@@ -637,7 +637,7 @@ fn swapping_a_member_keeps_its_work_and_continues_the_open_attempt() {
     let error = apply(&mut team, "swap-member", &json!({"member":"dev"}), &Actor::Member("lead".into()), &none, &mut events)
         .unwrap_err()
         .to_string();
-    assert_eq!(error, "Only you swap a member; the lead needs your word");
+    assert_eq!(error, "Only you swap a member; the lead needs your word: propose {\"kind\":\"swap-member\"} as a card (hgs guide team-propose); the owner allows it with a click");
 }
 
 #[test]

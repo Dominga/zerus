@@ -1361,6 +1361,9 @@ QString proposalText(const Team &team, const Team::Proposal &proposal)
     for (const auto *key : {"agent", "model", "effort", "account"})
         if (const auto value = object.value(QLatin1String(key)).toString(); !value.isEmpty()) how << value;
     const auto change = proposal.change.toObject();
+    // Task #21: a card for an owner-gated operation says what hgs wrote for
+    // it (relaunch, scale, drain, approvals, phase changes, settings, rules).
+    if (change.contains(QLatin1String("op")) && !change.value("summary").toString().isEmpty()) return change.value("summary").toString();
     if (proposal.kind == "add-member") {
         const auto members = proposedMembers(proposal);
         if (members.size() > 1) return tr("Add %1 members").arg(members.size());
@@ -1404,6 +1407,11 @@ QStringList proposalChanges(const Team &team, const Team::Proposal &proposal)
 {
     QStringList lines;
     const auto change = proposal.change.toObject();
+    // Task #21: the lines hgs wrote for an owner-operation card, as they are.
+    if (change.contains(QLatin1String("op"))) {
+        for (const auto &line : change.value("lines").toArray()) if (!line.toString().isEmpty()) lines << line.toString();
+        return lines;
+    }
     const auto taskLine = [&team](int id) {
         const auto *task = team.task(id);
         return task ? tr("#%1 %2 (%3)").arg(id).arg(task->title, statusLabel(task->status)) : tr("#%1").arg(id);

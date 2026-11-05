@@ -1167,6 +1167,43 @@ owner sends an earlier one again). The answer's `outcome`:
 
 After `done` or `uncertain` the computer's followed views are read at once.
 
+Pause and Stop name every sub-team below the team and their member sessions:
+the walk follows the team's `children` and each listed team's `parent`
+(`src/ui/teams/actions.ts`). Cancel and Reassign of a task delegated to a
+sub-team ask, after Cancel's own question, whether that sub-team stops or
+keeps running, and send `subteam: "stop"` or `"keep"`, as Qt's
+subteamChoice does. The team history's lines (`src/ui/teams/history.ts`)
+word the feed events as Qt's feedLine does; an event without its own line
+shows its kind.
+
+### Catalog editor and Team designer
+
+The catalog editor (`src/ui/teams/TeamCatalogEditor.tsx`) has the controls of
+Qt's `TeamCatalogEditor`: Open Team designer, Import…, Export…, Revert, Save
+catalog, Discard draft and Apply, and the Roles, Templates, Routing (with Try
+it), Rules and Pipelines tabs. The core keeps the working copy
+(`core/src/teams/catalog_edit.rs`): the webview draws the fields of its schema
+and sends typed edits, which the core checks before anything changes; fields
+the editor does not show stay as they were. Deleting a role, template or
+pipeline changes what names it, as Qt does, and the confirmation names it.
+
+- Save catalog sends `hgs team catalog set` with the version the copy was read
+  at and a request id. A newer saved version refuses it; the editor reads that
+  version and keeps the items edited here (Qt's rebase). An unknown outcome is
+  sent again only by the owner, with the same request id.
+- Import reads a JSON file of at most 1 MiB (an export, or a `catalog get`
+  reply) into the working copy; nothing is written until Save. Export writes
+  the working copy.
+- Revert, deletions, Reset planning rules, Apply and Discard draft ask first,
+  with Cancel focused.
+
+The Team designer page (`src/ui/teams/TeamDesigner.tsx`) shows the running
+local `…/team-designer` session's conversation and its draft's proposals. Its
+project follows the selected local session (the session's project, else the
+second segment of its name, and its folder) unless a designer already runs.
+Start sends `hgs team catalog designer` with the folder, the first message as
+the goal, the agent, model and effort, and the project's name.
+
 ## Composer and Send
 
 The composer keeps the text protocol in Rust and the webview in sync: edits

@@ -333,6 +333,75 @@ fn a_status_projects_the_team_tab_and_its_plan_graph() {
 }
 
 #[test]
+fn task_40_status_carries_held_tasks_pipelines_widenings_and_sub_teams() {
+    let status = json!({"id":"t1","name":"Checkout","status":"planning","lead":"lead",
+        "members":[{"id":"lead","role":"Lead"},{"id":"api","role":"Backend","profile_widening":{"from":"auto","to":"bypass"}}],
+        "tasks":[{"id":1,"title":"API","status":"in_review","held":false,"pipeline":"code","subteam":{"team":"s1"},
+                  "pipeline_run":{"name":"Code","accept":"lead","round":1,"max_rounds":3,
+                      "stages":[{"kind":"review"},{"kind":"test"}],
+                      "runs":[{"stage":0,"kind":"review","member":"rev","state":"delivered"}]}},
+                 {"id":2,"title":"Docs","status":"pending","held":true}],
+        "children":[{"team":"s1","name":"Sub","status":"running","done":0,"total":2}]});
+    let view = super::view::team(&status);
+    assert_eq!(
+        view.widenings,
+        vec![json!({"member":"api","role":"Backend","from":"auto","to":"bypass"})]
+    );
+    assert_eq!(
+        view.children,
+        vec![json!({"team":"s1","name":"Sub","status":"running"})]
+    );
+    let api = &view.tasks[0];
+    assert!(api.subteam && !api.held && api.pipeline == "code");
+    let run = api.pipeline_run.as_ref().unwrap();
+    assert_eq!(
+        (run.stages.clone(), run.accept.as_str(), run.max_rounds),
+        (vec!["review".to_owned(), "test".to_owned()], "lead", 3)
+    );
+    assert_eq!(
+        run.open
+            .as_ref()
+            .map(|open| (open.stage, open.kind.as_str(), open.member.as_str())),
+        Some((0, "review", "rev"))
+    );
+    assert!(view.tasks[1].held && view.tasks[1].pipeline_run.is_none() && !view.tasks[1].subteam);
+    // Task 52: the delegated task names its sub-team for Cancel's question.
+    assert_eq!((api.subteam_team.as_str(), view.tasks[1].subteam_team.as_str()), ("s1", ""));
+}
+
+/// Task 52: the list names each team's parent, so a tree action's impact
+/// walks every level; a team with no parent, or an older hgs, says "".
+#[test]
+fn task_52_the_list_names_each_teams_parent() {
+    let list = view::list(&json!({"items":[
+        {"id":"root","name":"Root","status":"running","lead":"lead","members":[],"parent":null},
+        {"id":"s1","name":"Sub","status":"running","lead":"lead","members":[],"parent":{"team":"root","task":2}},
+        {"id":"s2","name":"Deeper","status":"running","lead":"lead","members":[],"parent":{"team":"s1","task":1}},
+        {"id":"old","name":"Older hgs","status":"running","lead":"lead","members":[]}
+    ]}));
+    let parents: Vec<(&str, &str)> = list.teams.iter().map(|team| (team.id.as_str(), team.parent.as_str())).collect();
+    assert_eq!(parents, [("root", ""), ("s1", "root"), ("s2", "s1"), ("old", "")]);
+}
+
+#[test]
+fn task_55_a_task_carries_its_newest_attempts_open_questions() {
+    let status = json!({"id":"t1","name":"Checkout","status":"running","lead":"lead","members":[{"id":"lead"}],
+        "tasks":[{"id":15,"title":"Asks","status":"in_progress","assignee":"tester","attempts":[
+            {"n":1,"questions":[{"id":"q0","text":"Old","at":1}]},
+            {"n":2,"questions":[{"id":"q1","text":"Keep the old field?","at":1720,"answer":"","answered_at":null},
+                                {"id":"q2","text":"Answered","at":1730,"answer":"Yes","answered_at":1740}]}]}]});
+    let view = view::team(&status);
+    assert_eq!(
+        view.tasks[0].questions,
+        vec![view::QuestionView {
+            id: "q1".into(),
+            text: "Keep the old field?".into(),
+            at: 1720.0
+        }]
+    );
+}
+
+#[test]
 fn a_draft_projects_the_new_team_form() {
     let value = fixture("status-draft");
     let team = view::team(&value);
@@ -372,7 +441,58 @@ fn inbox_waiting_spans_and_profile_project_their_replies() {
         (27, None, false)
     );
     let profile = view::profile(TEAM, &fixture("profile"));
-    assert!(profile.profile["losses"].is_object() && profile.profile["summary"].is_object());
+    assert_eq!((profile.tasks, profile.accepted), (27, 8));
+    assert!(!profile.losses.is_empty() && !profile.roles.is_empty());
+}
+
+#[test]
+fn waiting_pages_append_new_items_in_order_and_stop_at_the_last() {
+    let start = Instant::now();
+    let mut model = TeamsModel::default();
+    model.follow(
+        TeamsFollow {
+            waiting: true,
+            ..TeamsFollow::default()
+        },
+        start,
+    );
+    let first = json!({
+        "items": [
+            {"id": "a", "kind": "report", "team": TEAM, "title": "A", "since": 3.0},
+            {"id": "b", "kind": "report", "team": TEAM, "title": "B", "since": 2.0}
+        ],
+        "total": 3,
+        "next": {"since": 2.0, "id": "b"}
+    });
+    let out = poll_once(&mut model, start, |_| first.clone());
+    assert_eq!(out.iter().filter(|(key, _)| key == "waiting").count(), 1);
+    assert!(model.request_waiting_older());
+    assert!(!model.request_waiting_older(), "one older page at a time");
+    let second = json!({
+        "items": [
+            {"id": "b", "kind": "report", "team": TEAM, "title": "B", "since": 2.0},
+            {"id": "c", "kind": "report", "team": TEAM, "title": "C", "since": 1.0}
+        ],
+        "total": 3,
+        "next": null
+    });
+    let out = poll_once(&mut model, start + POLL, |_| second.clone());
+    let waiting = out
+        .iter()
+        .find(|(key, _)| key == "waiting")
+        .map(|(_, update)| update.payload())
+        .expect("the older page sends the combined list");
+    assert_eq!(
+        waiting["items"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .map(|item| item["id"].as_str().unwrap())
+            .collect::<Vec<_>>(),
+        ["a", "b", "c"]
+    );
+    assert_eq!(waiting["total"], 3);
+    assert!(!model.request_waiting_older(), "the last page has no cursor");
 }
 
 fn follow_team() -> TeamsFollow {
@@ -410,6 +530,8 @@ fn replies(read: &TeamRead) -> Value {
         TeamRead::Spans { .. } => fixture("spans"),
         TeamRead::Profile { .. } => fixture("profile"),
         TeamRead::Catalog => fixture("catalog"),
+        TeamRead::CatalogRoute { .. } => serde_json::json!({"rule": null, "template": null}),
+        TeamRead::TestQueue { .. } | TeamRead::TestResults { .. } => json!({"items":[]}),
     }
 }
 

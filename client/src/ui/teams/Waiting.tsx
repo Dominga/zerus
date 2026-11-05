@@ -3,10 +3,12 @@ import { tr } from "../../i18n";
 import { Icon } from "../lib/icons";
 import { toast } from "../../store/notices";
 import { answeredWaiting, memberRow, showWaiting, teams, waiting } from "../../store/teams";
+import { teamsWaitingOlder } from "../../bridge";
+import { waitingNotices } from "../../store/waitingNotices";
 import { setDetailTab, setPage, setSelectedKey } from "../../store/ui";
 import { ProposalCardList, useModel, windowPort } from "./ProposalCards";
 import {
-  BANNER_ROWS, WaitingAnswer, WaitingNotices, acceptanceSummary, approves, opensCard, toolOffer, waitingActionLabel, waitingAge,
+  BANNER_ROWS, WaitingAnswer, acceptanceSummary, approves, opensCard, toolOffer, waitingActionLabel, waitingAge,
   waitingCount, waitingFields, waitingKindIcon, waitingKindLabel, type QuestionChoice,
 } from "./decisions";
 import type { TeamWaitingItem } from "../../types";
@@ -32,11 +34,9 @@ export function openTeam(item: TeamWaitingItem) {
   setDetailTab("team");
 }
 
-const notices = new WaitingNotices();
-
 /** Notifies each new item once while Waiting for you is shown. */
-function announce(items: readonly TeamWaitingItem[]) {
-  for (const notice of notices.observe(items)) toast(notice.title, notice.body, "info");
+function announce(items: readonly TeamWaitingItem[], complete: boolean) {
+  for (const notice of waitingNotices().observe(items, complete)) toast(notice.title, notice.body, "info");
 }
 
 /** The answer of one item, in its row. */
@@ -201,7 +201,16 @@ export function WaitingPage() {
   onCleanup(showWaiting());
   const view = () => waiting();
   const failure = () => teams.failure("", "waiting") ?? teams.followError("");
-  createEffect(() => { const items = view()?.items; if (items) announce(items); });
+  const [loading, setLoading] = createSignal(false);
+  createEffect(() => { const items = view()?.items; if (items) announce(items, !view()?.more); });
+  const older = async () => {
+    setLoading(true);
+    try {
+      await teamsWaitingOlder("");
+    } finally {
+      setLoading(false);
+    }
+  };
   return (
     <section class="team-waiting-page" aria-label={tr("Waiting for you")}>
       <header class="team-waiting-header">
@@ -213,7 +222,11 @@ export function WaitingPage() {
       <div class="team-waiting-list">
         <Show when={view()} fallback={<p class="dim team-empty">{tr("Reading what waits for you…")}</p>}>
           <For each={view()!.items} fallback={<p class="dim team-empty">{tr("Nothing waits for you")}</p>}>{(item) => <Row item={item} />}</For>
-          <Show when={view()!.more}><p class="dim team-empty">{tr("Older items are in the list of each team.")}</p></Show>
+          <Show when={view()!.more}>
+            <button type="button" class="btn ghost small" disabled={loading()} onClick={() => void older()}>
+              {tr("Show older")}
+            </button>
+          </Show>
         </Show>
       </div>
     </section>
@@ -225,7 +238,7 @@ export function WaitingBanner() {
   onCleanup(showWaiting());
   const [open, setOpen] = createSignal(false);
   const items = () => waiting()?.items ?? [];
-  createEffect(() => announce(items()));
+  createEffect(() => announce(items(), !waiting()?.more));
   return (
     <Show when={items().length > 0}>
       <div class="team-waiting-banner" role="region" aria-label={tr("Waiting for you")}>

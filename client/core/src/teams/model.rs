@@ -150,6 +150,8 @@ pub struct TeamsModel {
     due: BTreeMap<Slot, Instant>,
     queued: VecDeque<TeamRead>,
     feed: Feed,
+    /// The Waiting pages loaded from the newest; older pages append here.
+    waiting: WaitingView,
     /// The digest of the last update sent per key.
     shown: BTreeMap<String, u64>,
     /// Task 8: the team revisions the computer's watch stream gives; None
@@ -216,6 +218,7 @@ impl TeamsModel {
             self.end("list", &mut out);
         }
         if !self.follow.waiting {
+            self.waiting = WaitingView::default();
             self.end("waiting", &mut out);
         }
         if !self.follow.catalog {
@@ -258,6 +261,15 @@ impl TeamsModel {
             team,
             before: Some(before),
         })
+    }
+
+    /// Asks for the next older Waiting page. False when the loaded list has
+    /// no cursor or that page is already queued.
+    pub fn request_waiting_older(&mut self) -> bool {
+        let Some(before) = self.waiting.next.clone() else {
+            return false;
+        };
+        self.queue(TeamRead::Waiting { before: Some(before) })
     }
 
     /// Asks for the watched team's spans after task `after`.
@@ -398,6 +410,9 @@ impl TeamsModel {
             TeamRead::Spans { team, .. } => team_key("spans", team),
             TeamRead::Profile { team } => team_key("profile", team),
             TeamRead::Catalog => "catalog".into(),
+            TeamRead::CatalogRoute { .. } => "route".into(),
+            TeamRead::TestQueue { team } => team_key("tests-queue", team),
+            TeamRead::TestResults { team, .. } => team_key("tests", team),
         }
     }
 
@@ -451,11 +466,26 @@ impl TeamsModel {
                 TeamsUpdate::List(Arc::new(view::list(&value))),
                 &mut out,
             ),
-            TeamRead::Waiting { .. } => self.send(
-                "waiting".into(),
-                TeamsUpdate::Waiting(Arc::new(view::waiting(&value))),
-                &mut out,
-            ),
+            TeamRead::Waiting { before } => {
+                let page = view::waiting(&value);
+                if before.is_none() {
+                    self.waiting = page;
+                } else {
+                    let seen: std::collections::HashSet<String> =
+                        self.waiting.items.iter().map(|item| item.id.clone()).collect();
+                    self.waiting
+                        .items
+                        .extend(page.items.into_iter().filter(|item| !seen.contains(&item.id)));
+                    self.waiting.next = page.next;
+                    self.waiting.total = page.total;
+                    self.waiting.more = page.more;
+                }
+                self.send(
+                    "waiting".into(),
+                    TeamsUpdate::Waiting(Arc::new(self.waiting.clone())),
+                    &mut out,
+                );
+            }
             TeamRead::Status { team } => {
                 let shown = view::team(&value);
                 let graph = view::graph(&value, &shown);
@@ -513,6 +543,10 @@ impl TeamsModel {
                 TeamsUpdate::Catalog(Arc::new(view::catalog(&value))),
                 &mut out,
             ),
+            // Asked once by the editor's Try it, never polled.
+            TeamRead::CatalogRoute { .. } => {}
+            // Test pages are read on request by the Tests mode, not polled.
+            TeamRead::TestQueue { .. } | TeamRead::TestResults { .. } => {}
         }
         out
     }

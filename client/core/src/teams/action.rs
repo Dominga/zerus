@@ -155,8 +155,37 @@ pub enum TeamAction {
     Retry {
         task: u64,
     },
-    /// Task 11: finishes a team whose tasks are all decided.
-    Finish,
+    /// Task 11/40: finishes a team whose tasks are all decided, with the
+    /// owner's summary for the lead (hgs requires one, at most 4000 chars).
+    Finish {
+        #[serde(default)]
+        summary: String,
+    },
+    /// Task 40: drops a plan in Planning (Discard plan); the team stops.
+    Discard,
+    /// Task 40: parks a pending task with its reason until it is released.
+    Hold {
+        task: u64,
+        reason: String,
+    },
+    /// Task 40: ends a task's open pipeline stage (skip-stage) with a reason.
+    SkipStage {
+        task: u64,
+        reason: String,
+    },
+    /// Task 40: sends a task in a pipeline back to its implementer.
+    SendBack {
+        task: u64,
+        reason: String,
+    },
+    /// Task 40: moves a task that has not started to another phase, against
+    /// the plan revision it was read at.
+    MoveTask {
+        task: u64,
+        phase: u64,
+        #[serde(default)]
+        revision: Option<u64>,
+    },
     /// Starts a draft team (no team id yet): its folder, name, lead and
     /// template as New team's Start planning sends them.
     DraftStart {
@@ -195,16 +224,45 @@ pub enum TeamAction {
         reason: String,
     },
     /// The owner's settings patch, merged by `hgs team settings`: only the
-    /// fields that differ from the team's current settings.
-    Settings { settings: Value },
+    /// fields that differ from the team's current settings, plus any member
+    /// updates (their iron rules) sent in the same call.
+    Settings {
+        settings: Value,
+        #[serde(default)]
+        members_update: Vec<Value>,
+    },
     /// The designer's change, left for the owner to keep or reject.
-    CatalogPropose { change: Value },
+    CatalogPropose {
+        change: Value,
+    },
     /// The owner's decision on one catalog proposal: keep, reject or undo.
-    CatalogDecide { proposal: String, decision: String },
+    CatalogDecide {
+        proposal: String,
+        decision: String,
+    },
     /// Writes the kept proposals as the next catalog version.
     CatalogApply,
     /// Ends the catalog draft, undecided changes included.
     CatalogDiscard,
+    /// Task #44: Save catalog: the edited catalog as the next version, over
+    /// the version it was read at (`hgs team catalog set`), as Qt's editor
+    /// saves it (`super::catalog_edit`).
+    CatalogSet { version: u64, catalog: Value },
+    /// Task #44: starts the Team designer's conversation for a project
+    /// (`hgs team catalog designer`), with the owner's first message as its
+    /// goal and the agent Qt's page offers.
+    CatalogDesigner {
+        folder: String,
+        goal: String,
+        #[serde(default)]
+        agent: String,
+        #[serde(default)]
+        model: String,
+        #[serde(default)]
+        effort: String,
+        #[serde(default)]
+        project: String,
+    },
 }
 
 /// What the owner is asked before a destructive action or an approval.
@@ -334,7 +392,12 @@ impl TeamAction {
             Self::DecideTool { .. } => "decide-tool",
             Self::Release { .. } => "release",
             Self::Retry { .. } => "retry",
-            Self::Finish => "finish",
+            Self::Finish { .. } => "finish",
+            Self::Discard => "discard",
+            Self::Hold { .. } => "hold",
+            Self::SkipStage { .. } => "skip-stage",
+            Self::SendBack { .. } => "send-back",
+            Self::MoveTask { .. } => "move-task",
             Self::DraftStart { .. }
             | Self::DraftUpdate { .. }
             | Self::DraftSeen { .. }
@@ -344,7 +407,9 @@ impl TeamAction {
             Self::CatalogPropose { .. }
             | Self::CatalogDecide { .. }
             | Self::CatalogApply
-            | Self::CatalogDiscard => "catalog",
+            | Self::CatalogDiscard
+            | Self::CatalogSet { .. }
+            | Self::CatalogDesigner { .. } => "catalog",
         }
     }
 
@@ -355,6 +420,8 @@ impl TeamAction {
             Self::CatalogDecide { .. } => Some("decide"),
             Self::CatalogApply => Some("apply"),
             Self::CatalogDiscard => Some("discard"),
+            Self::CatalogSet { .. } => Some("set"),
+            Self::CatalogDesigner { .. } => Some("designer"),
             _ => None,
         }
     }
@@ -370,6 +437,8 @@ impl TeamAction {
                 | Self::CatalogDecide { .. }
                 | Self::CatalogApply
                 | Self::CatalogDiscard
+                | Self::CatalogSet { .. }
+                | Self::CatalogDesigner { .. }
         )
     }
 
@@ -427,7 +496,31 @@ impl TeamAction {
                     .as_deref()
                     .map_or(Ok(()), |choice| word(choice, "sub-team choice"))
             }
-            Self::Pause | Self::Resume | Self::Stop | Self::Archive | Self::Finish => Ok(()),
+            Self::Pause | Self::Resume | Self::Stop | Self::Archive | Self::Discard => Ok(()),
+            Self::Finish { summary } => {
+                if summary.trim().is_empty() {
+                    return Err("A summary is required.".into());
+                }
+                plain(summary, "A summary", 4000)
+            }
+            Self::Hold { task: id, reason }
+            | Self::SkipStage { task: id, reason }
+            | Self::SendBack { task: id, reason } => {
+                task(*id)?;
+                if reason.trim().is_empty() {
+                    return Err("Say why.".into());
+                }
+                plain(reason, "A reason", TEXT_CHARS)
+            }
+            Self::MoveTask {
+                task: id, phase, ..
+            } => {
+                task(*id)?;
+                if *phase == 0 {
+                    return Err("Not a phase number.".into());
+                }
+                Ok(())
+            }
             Self::Answer {
                 member,
                 question_id,
@@ -520,8 +613,13 @@ impl TeamAction {
             }
             Self::DraftCreate { .. } => Ok(()),
             Self::DraftDiscard { reason, .. } => plain(reason, "A reason", 2000),
-            Self::Settings { settings } => {
-                if !settings.as_object().is_some_and(|fields| !fields.is_empty()) {
+            Self::Settings {
+                settings,
+                members_update,
+            } => {
+                if !settings.as_object().is_some_and(|fields| !fields.is_empty())
+                    && members_update.is_empty()
+                {
                     return Err("A settings change names the fields it sets.".into());
                 }
                 Ok(())
@@ -532,10 +630,7 @@ impl TeamAction {
                 }
                 Ok(())
             }
-            Self::CatalogDecide {
-                proposal,
-                decision,
-            } => {
+            Self::CatalogDecide { proposal, decision } => {
                 word(proposal, "proposal id")?;
                 if !matches!(decision.as_str(), "keep" | "reject" | "undo") {
                     return Err("A catalog decision is keep, reject or undo.".into());
@@ -543,6 +638,31 @@ impl TeamAction {
                 Ok(())
             }
             Self::CatalogApply | Self::CatalogDiscard => Ok(()),
+            Self::CatalogSet { catalog, .. } => {
+                if !catalog.as_object().is_some_and(|fields| fields.contains_key("roles") || fields.contains_key("templates")) {
+                    return Err("A catalog to save has roles and templates.".into());
+                }
+                if catalog.to_string().len() > 240 * 1024 {
+                    return Err("The catalog is too large to save.".into());
+                }
+                Ok(())
+            }
+            Self::CatalogDesigner { folder, goal, agent, model, effort, project } => {
+                if folder.trim().is_empty() || folder.chars().any(char::is_control) || folder.chars().count() > 1000 {
+                    return Err("Choose a project with a folder on this computer first.".into());
+                }
+                plain(goal, "The goal", TEXT_CHARS)?;
+                if goal.trim().is_empty() {
+                    return Err("Describe the work for the designer.".into());
+                }
+                if !agent.is_empty() && !matches!(agent.as_str(), "claude" | "codex" | "kimi" | "dsh" | "opencode") {
+                    return Err("The designer runs as Claude, Codex, Kimi, DeepSeek or OpenCode.".into());
+                }
+                for (value, what) in [(model, "A model"), (effort, "An effort"), (project, "A project")] {
+                    plain(value, what, 200)?;
+                }
+                Ok(())
+            }
         }
     }
 
@@ -626,7 +746,25 @@ impl TeamAction {
                     put("subteam", json!(choice));
                 }
             }
-            Self::Pause | Self::Resume | Self::Stop | Self::Archive | Self::Finish => {}
+            Self::Pause | Self::Resume | Self::Stop | Self::Archive | Self::Discard => {}
+            Self::Finish { summary } => put("summary", json!(summary.trim())),
+            Self::Hold { task, reason }
+            | Self::SkipStage { task, reason }
+            | Self::SendBack { task, reason } => {
+                put("task", json!(task));
+                put("reason", json!(reason.trim()));
+            }
+            Self::MoveTask {
+                task,
+                phase,
+                revision,
+            } => {
+                put("task", json!(task));
+                put("phase", json!(phase));
+                if let Some(revision) = revision {
+                    put("revision", json!(revision));
+                }
+            }
             Self::Answer {
                 member,
                 question_id,
@@ -744,20 +882,38 @@ impl TeamAction {
                     put("reason", json!(reason));
                 }
             }
-            Self::Settings { settings } => {
-                put("settings", settings.clone());
+            Self::Settings {
+                settings,
+                members_update,
+            } => {
+                if settings.as_object().is_some_and(|fields| !fields.is_empty()) {
+                    put("settings", settings.clone());
+                }
+                if !members_update.is_empty() {
+                    put("members_update", json!(members_update));
+                }
             }
             Self::CatalogPropose { change } => {
                 put("change", change.clone());
             }
-            Self::CatalogDecide {
-                proposal,
-                decision,
-            } => {
+            Self::CatalogDecide { proposal, decision } => {
                 put("proposal", json!(proposal));
                 put("decision", json!(decision));
             }
             Self::CatalogApply | Self::CatalogDiscard => {}
+            Self::CatalogSet { version, catalog } => {
+                put("version", json!(version));
+                put("catalog", catalog.clone());
+            }
+            Self::CatalogDesigner { folder, goal, agent, model, effort, project } => {
+                put("folder", json!(folder));
+                put("goal", json!(goal));
+                for (key, value) in [("agent", agent), ("model", model), ("effort", effort), ("project", project)] {
+                    if !value.is_empty() {
+                        put(key, json!(value));
+                    }
+                }
+            }
         }
         input
     }
@@ -785,7 +941,13 @@ impl TeamAction {
                 ),
                 "Stop team",
             )),
-            Self::Finish => Some(ask(
+            Self::Discard => Some(ask(
+                "teamDiscardConfirm",
+                "Discard plan?",
+                format!("Discard the plan of {name}? The team stops before any member starts."),
+                "Discard plan",
+            )),
+            Self::Finish { .. } => Some(ask(
                 "teamFinishConfirm",
                 "Finish team?",
                 format!("Finish {name}? Every task is decided; the team is done and hands out nothing more."),
@@ -925,8 +1087,13 @@ pub fn prepare(call: &TeamCall) -> Result<(Invocation, String), TeamOutcome> {
     let invocation = Invocation {
         args,
         stdin: Some(Value::Object(input).to_string().into_bytes()),
-        // Qt's requestTeam: 15 s here, 45 s on a peer.
-        timeout: Duration::from_secs(if call.computer.is_empty() { 15 } else { 45 }),
+        // Qt's requestTeam: 15 s here, 45 s on a peer. Task #44: the
+        // designer starts an agent session, which hgs gives 120 s.
+        timeout: Duration::from_secs(match (&call.action, call.computer.is_empty()) {
+            (TeamAction::CatalogDesigner { .. }, _) => 150,
+            (_, true) => 15,
+            (_, false) => 45,
+        }),
         request_id: Some(request_id.clone()),
     };
     Ok((invocation, request_id))

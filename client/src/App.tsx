@@ -33,6 +33,9 @@ import { SessionUsageStrip } from "./ui/components/SessionUsageStrip";
 import { fleetRefresh, type BridgeMode } from "./bridge";
 import { installUiLanguage, tr, uiLanguage } from "./i18n";
 import { WaitingPage } from "./ui/teams/Waiting";
+import { NewTeamPage } from "./ui/teams/NewTeamPage";
+import { CatalogPage } from "./ui/teams/CatalogPage";
+import { TeamDesigner } from "./ui/teams/TeamDesigner";
 import { TeamConfirmDialog } from "./ui/teams/TeamConfirmDialog";
 
 // The client shell: the rail, the pages and the status bar.
@@ -171,6 +174,9 @@ export function App(props: { mode: () => BridgeMode | "starting" }) {
           <Match when={page() === "projects"}><ProjectsScreen /></Match>
           <Match when={page() === "settings"}><Suspense><SettingsScreen /></Suspense></Match>
           <Match when={page() === "waiting"}><WaitingPage /></Match>
+          <Match when={page() === "newteam"}><NewTeamPage /></Match>
+          <Match when={page() === "catalog"}><CatalogPage /></Match>
+          <Match when={page() === "designer"}><TeamDesigner onClose={() => setPage("sessions")} /></Match>
         </Switch>
       </main>
       <StatusBar mode={props.mode} />

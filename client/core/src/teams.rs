@@ -20,13 +20,16 @@
 //! feed's [`FEED_KEPT`] events, and the caps of [`view`] on members, tasks,
 //! proposals and items.
 pub mod action;
+pub mod catalog_edit;
 pub mod heads;
 pub mod model;
 pub mod poller;
 pub mod read;
+pub mod role_models;
 pub mod view;
 
 pub use action::{TeamAction, TeamCall, TeamOutcome};
+pub use catalog_edit::{CatalogEdit, CatalogEditor, CatalogEditorView};
 pub use heads::{Heads, TeamHeads};
 pub use model::{TeamsFollow, TeamsModel, TeamsUpdate, FEED_KEPT, POLL, STREAM_POLL};
 pub use poller::TeamsPoller;

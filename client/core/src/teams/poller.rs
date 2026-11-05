@@ -102,6 +102,11 @@ impl TeamsPoller {
         self.ask(TeamsModel::request_older)
     }
 
+    /// Loads the next older Waiting page.
+    pub fn waiting_older(&self) -> bool {
+        self.ask(TeamsModel::request_waiting_older)
+    }
+
     /// Reads the watched team's spans after task `after`.
     pub fn spans(&self, after: u64) -> bool {
         self.ask(|model| model.request_spans(after))

@@ -16,6 +16,7 @@ import type { ComputerId, TeamView } from "../../types";
 export const windowPort: DecisionPort = {
   send: (call) => teamAction(call),
   confirm: (confirmation) => teamConfirm.ask(confirmation),
+  choose: (choice) => teamConfirm.askChoice(choice),
   read: (computer, team) => teamRead(computer, team),
 };
 

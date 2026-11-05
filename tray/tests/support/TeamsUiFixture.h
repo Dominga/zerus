@@ -888,6 +888,9 @@ elif a[:2]==['team','decide-proposal']:
  if os.path.exists(__file__+'.proposalrefuse'):print(open(__file__+'.proposalrefuse').read(),file=sys.stderr);sys.exit(1)
  status=open(__file__+'.proposalstatus').read() if os.path.exists(__file__+'.proposalstatus') else ('accepted' if body.get('accept') else 'rejected')
  print(json.dumps({'status':status,'proposal':body.get('proposal')}))
+elif a[:2]==['team','reply'] and os.path.exists(__file__+'.replyrefuse'):
+ # Task 55: `.replyrefuse` refuses the owner's answer with its words.
+ print(open(__file__+'.replyrefuse').read(),file=sys.stderr);sys.exit(1)
 elif a[:2]==['team','edit-draft'] and os.path.exists(__file__+'.editrefuse'):
  # U63: `.editrefuse` refuses an edit with its text, as the store does.
  print(open(__file__+'.editrefuse').read(),file=sys.stderr);sys.exit(1)

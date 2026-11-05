@@ -174,10 +174,12 @@ fn own_project(config: &Config, who: &Actor, missing: &str) -> Result<(String, S
                 return Ok(found);
             }
         }
-    }
-    if let Ok(folder) = std::env::current_dir() {
-        if let Some(found) = project_from_directory(config, &folder) {
-            return Ok(found);
+        // Only a team member may infer its project from the process folder;
+        // other sessions keep the old refusal.
+        if let Ok(current) = std::env::current_dir() {
+            if let Some(found) = project_from_directory(config, &current) {
+                return Ok(found);
+            }
         }
     }
     Err(fail(format!(

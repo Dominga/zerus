@@ -1,5 +1,5 @@
 import { tr } from "../../i18n";
-import type { ComputerId, TeamAction, TeamCall, TeamConfirmation, TeamMemberQuestion, TeamMemberView, TeamOutcome, TeamProposalView, TeamView, TeamWaitingItem } from "../../types";
+import type { ComputerId, TeamAction, TeamCall, TeamChoice, TeamConfirmation, TeamMemberQuestion, TeamMemberView, TeamOutcome, TeamProposalView, TeamView, TeamWaitingItem } from "../../types";
 
 // The owner's decisions on a team (task 11), ported from Qt's
 // TeamProposalCard.cpp, TeamWaitingAnswer.cpp, TeamWaitingPage.cpp and
@@ -21,6 +21,8 @@ export interface DecisionPort {
   send(call: TeamCall): Promise<TeamOutcome>;
   /** Asks the owner; true only for the confirming button (Cancel is focused). */
   confirm(confirmation: TeamConfirmation): Promise<boolean>;
+  /** Task 52: asks the owner to choose one answer; undefined is Cancel (Cancel is focused). */
+  choose?(choice: TeamChoice): Promise<string | undefined>;
   /** Reads one team once (bridge.teamRead). */
   read(computer: ComputerId, team: string): Promise<TeamView>;
 }
@@ -711,7 +713,8 @@ export class WaitingAnswer {
   /** A held task, a step Zerus could not take, a finished team. */
   release() { return this.send({ kind: "release", task: waitingFields(this.item).task }, false); }
   retry() { return this.send({ kind: "retry", task: waitingFields(this.item).task }, false); }
-  finishTeam() { return this.send({ kind: "finish" }, false); }
+  /** Finish needs the owner's summary for the lead (hgs requires one). */
+  finishTeam(summary: string) { return summary.trim() ? this.send({ kind: "finish", summary: summary.trim() }, false) : Promise.resolve(undefined); }
 
   /** A proposal answered in its row: once hgs took it, the row leaves. */
   async decide(allow: boolean) {

@@ -49,8 +49,8 @@ const TEAM: TeamView = {
   updated: 0,
   waiting_for_lead: false,
   members: [
-    { id: "lead", role: "Lead", agent: "claude", model: "claude-opus", effort: "high", account: "", computer: "", folder: "", state: "active", activity: "", phase: "", error: "", lead: true, queue: [], live: true, stuck: false, question: false, host_shared: false, minutes_without_progress: 0 },
-    { id: "backend", role: "Backend", agent: "deepseek", model: "deepseek-v4", effort: "high", account: "", computer: "", folder: "", state: "active", activity: "", phase: "", error: "", lead: false, queue: [], live: true, stuck: false, question: false, host_shared: false, minutes_without_progress: 0 },
+    { id: "lead", role: "Lead", agent: "claude", model: "claude-opus", effort: "high", account: "", computer: "", folder: "", state: "active", activity: "", phase: "", error: "", lead: true, queue: [], live: true, stuck: false, question: false, host_shared: false, minutes_without_progress: 0, session: null },
+    { id: "backend", role: "Backend", agent: "deepseek", model: "deepseek-v4", effort: "high", account: "", computer: "", folder: "", state: "active", activity: "", phase: "", error: "", lead: false, queue: [], live: true, stuck: false, question: false, host_shared: false, minutes_without_progress: 0, session: null },
   ],
   tasks: [
     task(1, 1, [], "done"),
@@ -68,6 +68,13 @@ const TEAM: TeamView = {
   ready: [],
   cycle: [],
   truncated: false,
+  pending_phase: null,
+  settings: {},
+  proposals: [],
+  attention: [],
+  validation: { errors: [], warnings: [] },
+  health: { critical_path: 0, parallelism: 0, warnings: [] },
+  draft: null,
 };
 
 const LAYERS: Record<number, number> = { 1: 0, 2: 1, 3: 2, 5: 2, 4: 3, 6: 4 };

@@ -1,5 +1,6 @@
 import type { TeamWaitingItem } from "../types";
 import { tr } from "../i18n";
+import { teamWaitingNotify } from "../bridge";
 
 // Task 51: one desktop notification for each Waiting item seen for the first
 // time, withdrawn when it is answered or no longer waits (Qt's
@@ -19,31 +20,13 @@ export interface WaitingNotificationPort {
 
 export const waitingToken = (item: Pick<TeamWaitingItem, "id">) => `team-waiting:${item.id}`;
 
-const notifications = (): typeof Notification | undefined =>
-  typeof globalThis !== "undefined" && "Notification" in globalThis ? globalThis.Notification : undefined;
-const open = new Map<string, Notification>();
-
-/** The webview's OS notifications; no-ops where the API or permission is absent. */
-export const browserNotifications: WaitingNotificationPort = {
+/** The client's native notifier; no-ops outside the desktop app. */
+export const desktopNotifications: WaitingNotificationPort = {
   post(notice) {
-    const NotificationCtor = notifications();
-    if (!NotificationCtor) return;
-    if (NotificationCtor.permission === "granted") {
-      const posted = new NotificationCtor(notice.title, { body: notice.body, tag: notice.token });
-      open.set(notice.token, posted);
-      return;
-    }
-    if (NotificationCtor.permission === "default") {
-      void NotificationCtor.requestPermission().then((permission) => {
-        if (permission !== "granted") return;
-        const posted = new NotificationCtor(notice.title, { body: notice.body, tag: notice.token });
-        open.set(notice.token, posted);
-      });
-    }
+    void teamWaitingNotify([notice], []).catch(() => undefined);
   },
   withdraw(token) {
-    open.get(token)?.close();
-    open.delete(token);
+    void teamWaitingNotify([], [token]).catch(() => undefined);
   },
 };
 
@@ -93,6 +76,6 @@ export class WaitingNotices {
 /** The window's one notice set, shared by the banner, page and answers. */
 let shared: WaitingNotices | undefined;
 export function waitingNotices(): WaitingNotices {
-  shared ??= new WaitingNotices(browserNotifications);
+  shared ??= new WaitingNotices(desktopNotifications);
   return shared;
 }

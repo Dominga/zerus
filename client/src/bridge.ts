@@ -94,6 +94,9 @@ export const teamRead = (computer: ComputerId, team: string) =>
 export const teamsOlder = (computer: ComputerId) => inTauri() ? invoke<boolean>("teams_older", { computer }) : Promise.resolve(false);
 /** Task 51: loads the next older Waiting page; false when there is none. */
 export const teamsWaitingOlder = (computer: ComputerId) => inTauri() ? invoke<boolean>("teams_waiting_older", { computer }) : Promise.resolve(false);
+/** Task 51: raises or clears Waiting item notifications through the native notifier. */
+export const teamWaitingNotify = (raised: { token: string; title: string; body: string }[], cleared: string[]) =>
+  inTauri() ? invoke<void>("team_waiting_notify", { raised, cleared }) : Promise.resolve();
 /** Task 41/32: asks the core to read the watched team's profile. */
 export const teamsProfile = (computer: ComputerId) => inTauri() ? invoke<boolean>("teams_profile", { computer }) : Promise.resolve(false);
 /** Task 41: the Tests mode's queue and one bounded result page through the core. */

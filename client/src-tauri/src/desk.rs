@@ -1061,6 +1061,22 @@ fn deliver(app: &AppHandle, changes: Changes) {
     let _ = (app, changes);
 }
 
+/// Withdraws, then posts, the Waiting page's item notices through the same
+/// native path as attention notices.
+pub fn deliver_waiting(
+    app: &AppHandle,
+    cleared: Vec<String>,
+    raised: Vec<zerus_client_core::attention::Notice>,
+) {
+    deliver(
+        app,
+        Changes {
+            raised,
+            cleared,
+        },
+    );
+}
+
 fn publish(app: &AppHandle, desk: &Desk, mode: OpenMode) {
     #[cfg(target_os = "linux")]
     crate::platform::linux_tray::offer(

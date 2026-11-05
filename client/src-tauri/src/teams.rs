@@ -182,6 +182,35 @@ pub fn teams_spans(teams: State<'_, Teams>, computer: String, after: u64) -> Res
     Ok(teams.with(&target, |poller| poller.spans(after)))
 }
 
+/// Task 51: the Waiting page's item notifications, through the client's
+/// native notifier (the same path as attention notices).
+#[derive(serde::Deserialize)]
+pub struct WaitingNotice {
+    token: String,
+    title: String,
+    body: String,
+}
+
+#[tauri::command]
+pub fn team_waiting_notify(
+    app: tauri::AppHandle,
+    raised: Vec<WaitingNotice>,
+    cleared: Vec<String>,
+) {
+    crate::desk::deliver_waiting(
+        &app,
+        cleared,
+        raised
+            .into_iter()
+            .map(|notice| zerus_client_core::attention::Notice {
+                token: notice.token,
+                title: notice.title,
+                body: notice.body,
+            })
+            .collect(),
+    );
+}
+
 /// Reads the watched team's profile.
 #[tauri::command]
 pub fn teams_profile(teams: State<'_, Teams>, computer: String) -> Result<bool, String> {

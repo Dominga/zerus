@@ -217,6 +217,143 @@ pub enum Position {
     After(String),
 }
 
+/// One load or save at a time through a store, in turn. An untimed entry
+/// waits for its turn; a timed one waits until its deadline and is refused
+/// then, before anything is read or written. A panic inside releases it.
+#[derive(Default)]
+struct Admission {
+    held: std::sync::Mutex<bool>,
+    freed: std::sync::Condvar,
+}
+
+struct Turn<'a>(&'a Admission);
+
+impl Admission {
+    fn enter(&self) -> Turn<'_> {
+        let mut held = self
+            .held
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        while *held {
+            held = self
+                .freed
+                .wait(held)
+                .unwrap_or_else(std::sync::PoisonError::into_inner);
+        }
+        *held = true;
+        Turn(self)
+    }
+
+    /// None once `deadline` has passed, whether or not another holds it.
+    fn enter_until(&self, deadline: Instant) -> Option<Turn<'_>> {
+        let mut held = self
+            .held
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        loop {
+            let left = deadline
+                .checked_duration_since(Instant::now())
+                .filter(|left| !left.is_zero())?;
+            if !*held {
+                break;
+            }
+            held = self
+                .freed
+                .wait_timeout(held, left)
+                .unwrap_or_else(std::sync::PoisonError::into_inner)
+                .0;
+        }
+        *held = true;
+        Some(Turn(self))
+    }
+}
+
+impl Drop for Turn<'_> {
+    fn drop(&mut self) {
+        *self
+            .0
+            .held
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner) = false;
+        // Every waiter checks again: one whose deadline passed as it woke
+        // never keeps the turn from the others.
+        self.0.freed.notify_all();
+    }
+}
+
+/// A store's admission, held until dropped: its loads and saves come in
+/// turn with every other load and save through the store, and nothing else
+/// comes between them. A shared-store caller takes it with
+/// `ProjectStore::admit_until`, so it never waits past its own deadline.
+///
+/// One call at a time: the guard is not `Sync`, and its load and save take
+/// it by `&mut`, so two loads or saves through one admission never run at
+/// once (review-n and desktop-u on #1446). While it is held, the store's
+/// own `load` and `save` wait for it; use the guard's.
+///
+/// ```no_run
+/// # fn check(store: &zerus_replica::ProjectStore, a: &mut zerus_replica::TaskDoc,
+/// #          b: &mut zerus_replica::TaskDoc) -> zerus_replica::Result<()> {
+/// let deadline = std::time::Instant::now() + std::time::Duration::from_secs(1);
+/// let mut admitted = store.admit_until(deadline).expect("the store is free");
+/// admitted.save(a)?;
+/// admitted.save(b)
+/// # }
+/// ```
+///
+/// It is never shared between threads:
+///
+/// ```compile_fail,E0277
+/// # fn check(store: &zerus_replica::ProjectStore) {
+/// fn shared<T: Sync>(_: &T) {}
+/// let admitted = store.admit_until(std::time::Instant::now()).unwrap();
+/// shared(&admitted);
+/// # }
+/// ```
+///
+/// nor used through a shared reference, even on one thread:
+///
+/// ```compile_fail,E0596
+/// # fn check(store: &zerus_replica::ProjectStore) {
+/// let admitted = store.admit_until(std::time::Instant::now()).unwrap();
+/// let grant = &admitted;
+/// let _ = grant.load("a");
+/// # }
+/// ```
+///
+/// so two threads never save through one admission (desktop-u's case;
+/// either rule alone refuses it):
+///
+/// ```compile_fail,E0277
+/// # fn check(store: &zerus_replica::ProjectStore, a: &mut zerus_replica::TaskDoc,
+/// #          b: &mut zerus_replica::TaskDoc) {
+/// let admitted = store.admit_until(std::time::Instant::now()).unwrap();
+/// let grant = &admitted;
+/// std::thread::scope(|scope| {
+///     scope.spawn(move || grant.load("a"));
+///     scope.spawn(move || grant.load("b"));
+/// });
+/// # }
+/// ```
+pub struct Admitted<'a> {
+    store: &'a ProjectStore,
+    _turn: Turn<'a>,
+    /// Not `Sync`: a shared `&Admitted` never reaches another thread.
+    _one_call: std::marker::PhantomData<std::cell::Cell<()>>,
+}
+
+impl Admitted<'_> {
+    /// `ProjectStore::load`, inside this admission.
+    pub fn load(&mut self, uuid: &str) -> Result<TaskDoc> {
+        self.store.load_admitted(uuid)
+    }
+
+    /// `ProjectStore::save`, inside this admission.
+    pub fn save(&mut self, task: &mut TaskDoc) -> Result<()> {
+        self.store.save_locked(task)
+    }
+}
+
 pub struct ProjectStore {
     dir: PathBuf,
     project: String,
@@ -227,7 +364,7 @@ pub struct ProjectStore {
     /// One save at a time through this store, so a save's check of what is
     /// durable and its write are one step: the project lock keeps other
     /// processes out, this keeps this one's threads in turn.
-    admission: std::sync::Mutex<()>,
+    admission: Admission,
     /// The version of each task this store last read from or wrote to its
     /// files. A document whose base is older is merged into the files'
     /// current state before it is saved, never written over it.
@@ -553,7 +690,7 @@ impl ProjectStore {
             project: project.into(),
             _lock: lock,
             journal: std::sync::Mutex::new(()),
-            admission: std::sync::Mutex::new(()),
+            admission: Admission::default(),
             durable: std::sync::Mutex::new(std::collections::HashMap::new()),
         }))
     }
@@ -820,11 +957,20 @@ impl ProjectStore {
 
     /// Reads the task, in turn with this store's saves.
     pub fn load(&self, uuid: &str) -> Result<TaskDoc> {
-        let _admitted = self
-            .admission
-            .lock()
-            .unwrap_or_else(|poisoned| poisoned.into_inner());
+        let _turn = self.admission.enter();
         self.load_admitted(uuid)
+    }
+
+    /// This store's admission, waiting for it no later than `deadline`.
+    /// None when another load or save still holds it then, or the deadline
+    /// has already passed: nothing was read or written (zerus-cg5h.4.4).
+    pub fn admit_until(&self, deadline: Instant) -> Option<Admitted<'_>> {
+        let turn = self.admission.enter_until(deadline)?;
+        Some(Admitted {
+            store: self,
+            _turn: turn,
+            _one_call: std::marker::PhantomData,
+        })
     }
 
     fn load_admitted(&self, uuid: &str) -> Result<TaskDoc> {
@@ -905,10 +1051,7 @@ impl ProjectStore {
     /// own new changes are applied there, and every change saved since is
     /// kept. The mark of a cut-over task never moves back.
     pub fn save(&self, task: &mut TaskDoc) -> Result<()> {
-        let _admitted = self
-            .admission
-            .lock()
-            .unwrap_or_else(|poisoned| poisoned.into_inner());
+        let _turn = self.admission.enter();
         self.save_locked(task)
     }
 
@@ -917,10 +1060,7 @@ impl ProjectStore {
     /// and the stamps taken are one observation, which no save of this store
     /// comes between.
     pub(crate) fn observe<S>(&self, uuid: &str, stamp: impl FnOnce() -> S) -> (Result<TaskDoc>, S) {
-        let _admitted = self
-            .admission
-            .lock()
-            .unwrap_or_else(|poisoned| poisoned.into_inner());
+        let _turn = self.admission.enter();
         let loaded = self.load_admitted(uuid).and_then(|mut task| {
             if task.repair_schema()? {
                 self.save_locked(&mut task)?;
@@ -1530,6 +1670,212 @@ mod tests {
         assert!(other.try_lock_exclusive().is_err());
         drop(store);
         assert!(other.try_lock_exclusive().is_ok());
+    }
+
+    /// The task's snapshot, updates and mark, byte for byte (None when absent).
+    fn files_of(store: &ProjectStore, uuid: &str) -> Vec<Option<Vec<u8>>> {
+        [
+            store.snapshot_path(uuid),
+            store.updates_path(uuid),
+            store.managed_path(uuid),
+        ]
+        .iter()
+        .map(|path| fs::read(path).ok())
+        .collect()
+    }
+
+    /// zerus-cg5h.4.4: a shared-store caller waits for the admission no
+    /// later than its deadline; refused, it has read and written nothing,
+    /// and the holder's work and later callers are unaffected.
+    #[test]
+    fn a_timed_admission_is_refused_at_its_deadline_and_writes_nothing() {
+        use std::sync::mpsc::channel;
+        let root = tempfile::tempdir().unwrap();
+        let store = ProjectStore::open(root.path(), "p1").unwrap();
+        let mut task = new_task(&store, "V");
+        store.save(&mut task).unwrap();
+        let uuid = task.uuid().to_owned();
+        let before = files_of(&store, &uuid);
+        let (store, uuid) = (&store, uuid.as_str());
+        let (held, holding) = channel();
+        let (release, released) = channel::<()>();
+        let (refusal, waited) = std::thread::scope(|scope| {
+            let holder = scope.spawn(move || {
+                let mut admitted = store
+                    .admit_until(Instant::now() + Duration::from_secs(30))
+                    .unwrap();
+                held.send(()).unwrap();
+                released.recv().unwrap();
+                // The holder's own save inside its admission still lands.
+                let mut mine = admitted.load(uuid).unwrap();
+                mine.comment("by the holder", &Actor::Person, 3).unwrap();
+                admitted.save(&mut mine).unwrap();
+            });
+            holding.recv().unwrap();
+            let started = Instant::now();
+            let refusal = store
+                .admit_until(started + Duration::from_millis(150))
+                .map(|_| ());
+            let waited = started.elapsed();
+            let unchanged = files_of(store, uuid) == before;
+            release.send(()).unwrap();
+            holder.join().unwrap();
+            assert!(unchanged, "a refused admission changed the task's files");
+            (refusal, waited)
+        });
+        // An exhausted deadline is refused even when nothing holds the store.
+        assert!(
+            store.admit_until(Instant::now()).is_none(),
+            "an exhausted deadline entered"
+        );
+        assert!(
+            refusal.is_none(),
+            "the admission entered while another held it"
+        );
+        assert!(
+            waited >= Duration::from_millis(150),
+            "refused early: {waited:?}"
+        );
+        assert!(
+            waited < Duration::from_secs(5),
+            "waited past its deadline: {waited:?}"
+        );
+        assert_eq!(
+            comments(&store.load(uuid).unwrap()),
+            vec!["by the holder".to_owned()]
+        );
+        // Free, it enters within its deadline, and its load and save are one turn.
+        let mut admitted = store
+            .admit_until(Instant::now() + Duration::from_secs(5))
+            .unwrap();
+        let mut task = admitted.load(uuid).unwrap();
+        task.comment("timed", &Actor::Person, 4).unwrap();
+        admitted.save(&mut task).unwrap();
+        drop(admitted);
+        assert_eq!(
+            comments(&store.load(uuid).unwrap()),
+            vec!["by the holder".to_owned(), "timed".to_owned()]
+        );
+    }
+
+    /// A timed caller that waits until its turn enters as soon as the holder
+    /// leaves, and an untimed load or save waiting beside it is never left
+    /// waiting after a timed caller gave up. A panic inside releases it.
+    #[test]
+    fn the_admission_passes_on_in_turn_and_survives_a_panic() {
+        use std::sync::mpsc::channel;
+        let root = tempfile::tempdir().unwrap();
+        let store = ProjectStore::open(root.path(), "p1").unwrap();
+        let mut task = new_task(&store, "V");
+        store.save(&mut task).unwrap();
+        let uuid = task.uuid().to_owned();
+        let (store, uuid) = (&store, uuid.as_str());
+        let (held, holding) = channel();
+        let (release, released) = channel::<()>();
+        let (done, finished) = channel();
+        std::thread::scope(|scope| {
+            scope.spawn(move || {
+                let _admitted = store
+                    .admit_until(Instant::now() + Duration::from_secs(30))
+                    .unwrap();
+                held.send(()).unwrap();
+                released.recv().unwrap();
+            });
+            holding.recv().unwrap();
+            // An untimed load waits behind the holder ...
+            scope.spawn(move || {
+                let loaded = store.load(uuid).is_ok();
+                done.send(loaded).unwrap();
+            });
+            // ... while a timed caller gives up first,
+            let gave_up = store
+                .admit_until(Instant::now() + Duration::from_millis(50))
+                .is_none();
+            // and a timed caller with time left enters once the holder leaves.
+            let waiting = scope.spawn(move || {
+                store
+                    .admit_until(Instant::now() + Duration::from_secs(10))
+                    .map(|mut admitted| admitted.load(uuid).is_ok())
+            });
+            std::thread::sleep(Duration::from_millis(50));
+            // Released before anything is asserted, so a failure never
+            // leaves the holder waiting.
+            release.send(()).unwrap();
+            let entered = waiting.join().unwrap();
+            let loaded = finished.recv_timeout(Duration::from_secs(10));
+            assert!(
+                gave_up,
+                "a timed caller entered while another held the store"
+            );
+            assert_eq!(entered, Some(true));
+            assert_eq!(loaded, Ok(true));
+        });
+        let panicked = std::thread::scope(|scope| {
+            scope
+                .spawn(move || {
+                    let _admitted = store
+                        .admit_until(Instant::now() + Duration::from_secs(5))
+                        .unwrap();
+                    panic!("inside the admission");
+                })
+                .join()
+        });
+        assert!(panicked.is_err());
+        assert!(store
+            .admit_until(Instant::now() + Duration::from_secs(1))
+            .is_some());
+        let mut task = store.load(uuid).unwrap();
+        task.comment("after the panic", &Actor::Person, 5).unwrap();
+        store.save(&mut task).unwrap();
+    }
+
+    /// desktop-u on #1446: one admission holds several reads, a recheck and
+    /// more than one save of a cut-over task in turn, and every save lands.
+    #[test]
+    fn one_admission_reads_rechecks_and_saves_in_turn() {
+        let root = tempfile::tempdir().unwrap();
+        let store = ProjectStore::open(root.path(), "p1").unwrap();
+        let mut task = new_task(&store, "V");
+        assert!(task.floor().unwrap());
+        store.save(&mut task).unwrap();
+        let uuid = task.uuid().to_owned();
+        let mut admitted = store
+            .admit_until(Instant::now() + Duration::from_secs(5))
+            .unwrap();
+        let first = admitted.load(&uuid).unwrap();
+        let recheck = admitted.load(&uuid).unwrap();
+        assert!(first.floor_record().is_some());
+        assert_eq!(first.version(), recheck.version());
+        let mut a = TaskDoc::from_bytes(&first.snapshot().unwrap()).unwrap();
+        a.comment("first in the turn", &Actor::Person, 2).unwrap();
+        admitted.save(&mut a).unwrap();
+        // A copy forked before that save is refused, never written over it.
+        let mut stale = TaskDoc::from_bytes(&recheck.snapshot().unwrap()).unwrap();
+        stale
+            .comment("from a stale copy", &Actor::Person, 3)
+            .unwrap();
+        assert_eq!(
+            admitted.save(&mut stale).unwrap_err().kind(),
+            ErrorKind::Refused
+        );
+        // Read again inside the same turn, it saves.
+        let mut b = admitted.load(&uuid).unwrap();
+        b.comment("second in the turn", &Actor::Person, 4).unwrap();
+        admitted.save(&mut b).unwrap();
+        let after = admitted.load(&uuid).unwrap();
+        drop(admitted);
+        let expected = vec![
+            "first in the turn".to_owned(),
+            "second in the turn".to_owned(),
+        ];
+        assert_eq!(comments(&after), expected);
+        let reloaded = store.load(&uuid).unwrap();
+        assert_eq!(comments(&reloaded), expected);
+        assert!(reloaded.floor_record().is_some());
+        assert!(
+            store.managed_path(&uuid).exists(),
+            "the cut-over task keeps its mark"
+        );
     }
 
     #[test]

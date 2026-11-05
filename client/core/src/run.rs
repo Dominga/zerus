@@ -1,6 +1,8 @@
 //! Runs one [`Invocation`] and reports how it ended as an [`Exit`].
 #[cfg(any(windows, test))]
 mod hidden;
+#[cfg(unix)]
+pub mod rendezvous;
 pub(crate) mod startup;
 #[cfg(windows)]
 pub use hidden::{HiddenError, ProcessIdentity};
@@ -32,7 +34,7 @@ pub fn run(hgs: &Path, inv: &Invocation) -> Exit {
 }
 
 /// [`run`] with extra environment variables for the child. The agent's
-/// attribution (`HGS_SESSION`, `HGS_RUN_ID`) is never passed on: the client
+/// attribution (`HGS_SESSION`, `HGS_SESSION_ID`, `HGS_RUN_ID`) is never passed on: the client
 /// acts for the person even when it was started from an agent's shell.
 ///
 /// A failed stdin write is a failure to deliver only while the child keeps
@@ -159,6 +161,100 @@ pub fn run_accounted(
     cancel: &AtomicBool,
     resources: Arc<dyn Send + Sync>,
 ) -> Result<Exit, Stopped> {
+    accounted(
+        hgs,
+        inv,
+        parent_env,
+        stdout_cap,
+        cancel,
+        resources,
+        Pipes::default(),
+    )
+}
+
+/// Routing data only. This neither selects a program nor authorizes a call.
+/// Preserve non-Unicode values and the original working directory; never log it.
+#[derive(Clone, PartialEq, Eq)]
+pub struct FrozenEnvironment {
+    values: Vec<(std::ffi::OsString, std::ffi::OsString)>,
+    directory: std::path::PathBuf,
+}
+impl FrozenEnvironment {
+    pub fn capture() -> std::io::Result<Self> {
+        let mut values = Vec::new();
+        let mut bytes = 0usize;
+        for (key, value) in std::env::vars_os() {
+            let size = key
+                .as_encoded_bytes()
+                .len()
+                .saturating_add(value.as_encoded_bytes().len());
+            bytes = bytes.saturating_add(size);
+            if values.len() == 1024 || size > 65536 || bytes > 1 << 20 {
+                return Err(std::io::ErrorKind::InvalidData.into());
+            }
+            values.push((key, value));
+        }
+        let mut values = crate::child_environment::restored(values);
+        values.retain(|(key, _)| key != "HGS_SESSION" && key != "HGS_RUN_ID");
+        values.sort();
+        Ok(Self {
+            values,
+            directory: std::env::current_dir()?,
+        })
+    }
+    pub fn current(&self) -> bool {
+        Self::capture().is_ok_and(|now| &now == self)
+    }
+    pub fn apply(&self, command: &mut Command) {
+        command
+            .env_clear()
+            .envs(self.values.iter().cloned())
+            .current_dir(&self.directory)
+            .env_remove("HGS_SESSION")
+            .env_remove("HGS_RUN_ID");
+    }
+}
+
+/// The existing accounted runner with fixed routing environment and the
+/// caller's original-image spawn hook. Timeouts are unchanged (no 30s cap).
+/// Resources remain charged through actual child and pipe lifetime, including
+/// a bounded error return. Neither this API nor its environment grants consent.
+pub fn run_accounted_frozen(
+    hgs: &Path,
+    inv: &Invocation,
+    environment: &FrozenEnvironment,
+    stdout_cap: usize,
+    cancel: &AtomicBool,
+    resources: Arc<dyn Send + Sync>,
+    spawn: impl FnOnce(&mut Command) -> std::io::Result<Child> + Send + 'static,
+) -> Result<Exit, Stopped> {
+    let environment = environment.clone();
+    accounted(
+        hgs,
+        inv,
+        &[],
+        stdout_cap,
+        cancel,
+        resources,
+        Pipes {
+            clear_environment: true,
+            spawn: Some(Box::new(move |command| {
+                environment.apply(command);
+                spawn(command)
+            })),
+            ..Pipes::default()
+        },
+    )
+}
+fn accounted(
+    hgs: &Path,
+    inv: &Invocation,
+    parent_env: &[(&str, &str)],
+    stdout_cap: usize,
+    cancel: &AtomicBool,
+    resources: Arc<dyn Send + Sync>,
+    mut pipes: Pipes,
+) -> Result<Exit, Stopped> {
     if cancel.load(Ordering::Acquire) {
         return Err(Stopped::Cancelled);
     }
@@ -167,20 +263,12 @@ pub fn run_accounted(
         resources: Some(resources.clone()),
         exited: child_exited.clone(),
     };
-    let result = run_inner(
-        hgs,
-        inv,
-        parent_env,
-        &[],
-        stdout_cap,
-        Some(cancel),
-        Pipes {
-            readers: Some(resources),
-            retain_all: true,
-            child_exited: Some(child_exited.clone()),
-            ..Pipes::default()
-        },
-    );
+    let result = run_inner(hgs, inv, parent_env, &[], stdout_cap, Some(cancel), {
+        pipes.readers = Some(resources);
+        pipes.retain_all = true;
+        pipes.child_exited = Some(child_exited.clone());
+        pipes
+    });
     if matches!(result, Ok(Exit::StartFailed(_))) {
         child_exited.store(true, Ordering::Release);
     }
@@ -233,6 +321,9 @@ struct Pipes {
     clear_environment: bool,
     #[cfg(any(windows, test))]
     hidden_stop: Option<Arc<hidden::State>>,
+    /// Runs in the writer thread right after it signals completion.
+    #[cfg(test)]
+    after_written: Option<Box<dyn FnOnce() + Send>>,
 }
 
 struct StopContext {
@@ -616,6 +707,7 @@ fn run_inner(
     }
     command
         .env_remove("HGS_SESSION")
+        .env_remove("HGS_SESSION_ID")
         .env_remove("HGS_RUN_ID")
         .stdin(
             if consumed && pipes.input.is_none() && inv.stdin.is_none() {
@@ -651,8 +743,9 @@ fn run_inner(
     } else {
         None
     };
+    #[cfg(test)]
+    let after_written = pipes.after_written;
     thread::spawn(move || {
-        let _input = input_guard;
         let ok = match (stdin, pipes.input, input) {
             (Some(pipe), Some(write), _) => write(pipe),
             (Some(mut pipe), None, Some(bytes)) => {
@@ -660,7 +753,14 @@ fn run_inner(
             }
             _ => true,
         };
+        // The pipe is closed: release the group before signalling, as the
+        // readers do, so a completed exchange holds no hidden admission.
+        drop(input_guard);
         let _ = write_tx.send(ok);
+        #[cfg(test)]
+        if let Some(hook) = after_written {
+            hook();
+        }
     });
     let (done_tx, done_rx) = mpsc::channel();
     let over = Arc::new(AtomicBool::new(false));
@@ -941,6 +1041,139 @@ fn reader(
 }
 
 #[cfg(test)]
+mod frozen_tests {
+    use super::*;
+    const MARKER: &str = "ZERUS_FROZEN_RUN_CHILD";
+    #[test]
+    fn child() {
+        let Some(mode) = std::env::var(MARKER).ok() else {
+            return;
+        };
+        if mode == "wait" {
+            thread::sleep(Duration::from_secs(31));
+            println!("original invocation timeout preserved");
+            return;
+        }
+        assert_eq!(mode, "environment");
+        for key in ["PATH", "Path", "path"] {
+            assert!(
+                std::env::var_os(key).is_none(),
+                "fixture PATH alias remains"
+            );
+        }
+        assert_eq!(std::env::var_os("ZERUS_FROZEN_EMPTY"), Some("".into()));
+        assert_eq!(std::env::var_os("HGS_SESSION"), None);
+        assert_eq!(std::env::var_os("HGS_RUN_ID"), None);
+        let raw = std::env::var_os("ZERUS_FROZEN_RAW").unwrap();
+        assert!(raw.to_str().is_none());
+        assert_eq!(
+            std::env::current_dir().unwrap().canonicalize().unwrap(),
+            std::path::PathBuf::from(std::env::var_os("ZERUS_FROZEN_DIR").unwrap())
+                .canonicalize()
+                .unwrap()
+        );
+        println!("frozen native environment preserved");
+    }
+    fn call(environment: &FrozenEnvironment) -> Exit {
+        let invocation = Invocation {
+            args: [
+                "--exact",
+                "run::frozen_tests::child",
+                "--nocapture",
+                "--test-threads=1",
+            ]
+            .map(String::from)
+            .to_vec(),
+            stdin: None,
+            timeout: Duration::from_secs(45),
+            request_id: None,
+        };
+        run_accounted_frozen(
+            &std::env::current_exe().unwrap(),
+            &invocation,
+            environment,
+            4096,
+            &AtomicBool::new(false),
+            Arc::new(()),
+            |command| command.spawn(),
+        )
+        .unwrap()
+    }
+    #[test]
+    fn a_real_child_receives_exact_frozen_native_values_and_absence() {
+        let mut environment = FrozenEnvironment::capture().unwrap();
+        assert!(environment.current());
+        // Windows environment keys are case insensitive. Exercise its usual
+        // mixed-case spelling on Unix too; the fixture must remove every alias.
+        environment
+            .values
+            .push(("Path".into(), "fixed fixture sentinel".into()));
+        environment
+            .values
+            .push(("path".into(), "fixed fixture sentinel".into()));
+        environment
+            .values
+            .retain(|(key, _)| !key.as_encoded_bytes().eq_ignore_ascii_case(b"PATH"));
+        environment
+            .values
+            .push((MARKER.into(), "environment".into()));
+        environment
+            .values
+            .push(("ZERUS_FROZEN_EMPTY".into(), "".into()));
+        #[cfg(unix)]
+        let raw = {
+            use std::os::unix::ffi::OsStringExt;
+            std::ffi::OsString::from_vec(vec![0xff])
+        };
+        #[cfg(windows)]
+        let raw = {
+            use std::os::windows::ffi::OsStringExt;
+            std::ffi::OsString::from_wide(&[0xd800])
+        };
+        environment.values.push(("ZERUS_FROZEN_RAW".into(), raw));
+        environment.directory = std::env::temp_dir().canonicalize().unwrap();
+        #[cfg(unix)]
+        let _alias = {
+            use std::os::unix::fs::DirBuilderExt;
+            struct Remove(std::path::PathBuf);
+            impl Drop for Remove {
+                fn drop(&mut self) {
+                    let _ = std::fs::remove_dir_all(&self.0);
+                }
+            }
+            let root =
+                std::env::temp_dir().join(format!("zerus-frozen-cwd-{}", uuid::Uuid::new_v4()));
+            std::fs::DirBuilder::new()
+                .mode(0o700)
+                .create(&root)
+                .unwrap();
+            let owned = Remove(root);
+            let alias = owned.0.join("working-directory");
+            std::os::unix::fs::symlink(&environment.directory, &alias).unwrap();
+            environment.directory = alias;
+            owned
+        };
+        environment.values.push((
+            "ZERUS_FROZEN_DIR".into(),
+            environment.directory.as_os_str().to_owned(),
+        ));
+        let exit = call(&environment);
+        assert!(
+            matches!(&exit, Exit::Code {code:0, stdout, ..}
+            if String::from_utf8_lossy(stdout).contains("frozen native environment preserved")),
+            "bounded fixed-fixture child result: {exit:?}"
+        );
+    }
+    #[test]
+    fn the_native_runner_still_allows_an_original_over_thirty_seconds() {
+        let mut environment = FrozenEnvironment::capture().unwrap();
+        environment.values.push((MARKER.into(), "wait".into()));
+        assert!(matches!(call(&environment), Exit::Code {code:0, stdout, ..}
+            if String::from_utf8_lossy(&stdout).contains("original invocation timeout preserved")));
+    }
+}
+
+#[cfg(test)]
 mod owned_charge_tests {
     use super::*;
 
@@ -1018,11 +1251,15 @@ mod stream_tests {
 
     #[test]
     fn streamed_eof_and_both_exact_output_limits_are_preserved() {
-        let code = "import sys,os; assert sys.stdin.buffer.read() == b'bounded input'; assert 'HGS_SESSION' not in os.environ; sys.stdout.write('x'*16384); sys.stderr.write('y'*16384)";
+        let code = "import sys,os; assert sys.stdin.buffer.read() == b'bounded input'; assert not {'HGS_SESSION', 'HGS_SESSION_ID', 'HGS_RUN_ID'} & set(os.environ); sys.stdout.write('x'*16384); sys.stderr.write('y'*16384)";
         let exit = run_streamed(
             Path::new("python3"),
             &python(code, Duration::from_secs(5)),
-            &[("HGS_SESSION", "discard")],
+            &[
+                ("HGS_SESSION", "discard"),
+                ("HGS_SESSION_ID", "discard"),
+                ("HGS_RUN_ID", "discard"),
+            ],
             16384,
             |mut pipe| pipe.write_all(b"bounded input").is_ok(),
         )
@@ -1109,6 +1346,42 @@ mod stream_tests {
             thread::sleep(Duration::from_millis(5));
         }
         assert!(weak.upgrade().is_none());
+    }
+
+    // A completed exchange returns only after every pipe thread signalled; a
+    // writer that still held the group then kept the caller's admission
+    // charged, and the next admission was refused with Capacity.
+    #[test]
+    fn a_completed_retained_exchange_leaves_no_admission_held_by_its_writer() {
+        let resource = Arc::new(());
+        let weak = Arc::downgrade(&resource);
+        let (resume, held) = mpsc::channel::<()>();
+        let exit = run_inner(
+            Path::new("python3"),
+            &python("import sys; sys.stdin.read()", Duration::from_secs(5)),
+            &[],
+            &[],
+            1024,
+            None,
+            Pipes {
+                input: Some(Box::new(|mut pipe| pipe.write_all(b"input").is_ok())),
+                require_complete: true,
+                readers: Some(resource),
+                child_exited: Some(Arc::new(AtomicBool::new(false))),
+                // Keep the writer thread alive past its signal.
+                after_written: Some(Box::new(move || {
+                    let _ = held.recv_timeout(Duration::from_secs(5));
+                })),
+                ..Pipes::default()
+            },
+        )
+        .unwrap();
+        assert!(matches!(exit, Exit::Code { code: 0, .. }), "{exit:?}");
+        assert!(
+            weak.upgrade().is_none(),
+            "the writer still held the admission after the exchange completed"
+        );
+        resume.send(()).unwrap();
     }
 
     #[test]

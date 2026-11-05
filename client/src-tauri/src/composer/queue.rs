@@ -561,6 +561,7 @@ mod tests {
             name: "codex/sample-project/other".into(),
             archive_id: None,
             subagent: None,
+            session_id: None,
         }));
         assert_eq!(
             c.take_events(),
@@ -1229,6 +1230,7 @@ mod tests {
             name: "claude/sample-project/other".into(),
             archive_id: None,
             subagent: None,
+            session_id: None,
         }));
         let mut second = state(queued("❯ other", true));
         second.activity[0].key = "run:run-2".into();
@@ -1278,6 +1280,7 @@ mod tests {
                 name: "claude/sample-project/other".into(),
                 archive_id: None,
                 subagent: None,
+                session_id: None,
             }));
             let mut other = state(queued("❯ other", true));
             other.activity[0].key = "run:run-2".into();

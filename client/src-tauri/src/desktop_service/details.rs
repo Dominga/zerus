@@ -31,13 +31,38 @@ struct Retirement {
     recovery: Option<(Key, bool)>,
 }
 struct Source {
+    online: bool,
     generation: u64,
     serial: u64,
     state: CatalogState,
     pending: BTreeSet<String>,
     seen: BTreeSet<String>,
+    retry: reconnect::Backoff,
+    retry_at: Option<tokio::time::Instant>,
 }
 impl Hub {
+    pub(super) fn local_identity_ready(&self, generation: u64) -> bool {
+        self.sources
+            .get("")
+            .filter(|s| s.generation == generation)
+            .and_then(|s| s.state.hello())
+            .is_some_and(|hello| !hello.host.is_empty())
+    }
+    pub(super) fn project_row(
+        &self,
+        computer: &ComputerId,
+        generation: u64,
+        value: &Value,
+    ) -> zerus_client_core::ViewRow {
+        match self
+            .sources
+            .get(&computer.0)
+            .filter(|source| source.generation == generation)
+        {
+            Some(source) => source.state.project_row(computer, value),
+            None => CatalogState::new().project_row(computer, value),
+        }
+    }
     fn follow(&mut self, computer: &str, spec: Subscription) -> Result<(), String> {
         let key = Key::new(computer, &spec).map_err(str::to_owned)?;
         if let Some(entry) = self
@@ -211,11 +236,14 @@ impl Hub {
         self.sources.insert(
             computer.into(),
             Source {
+                online: true,
                 generation,
                 serial: self.next_source,
                 state: CatalogState::new(),
                 pending: BTreeSet::from(["hello".into(), "meta".into()]),
                 seen: BTreeSet::new(),
+                retry: reconnect::Backoff::default(),
+                retry_at: None,
             },
         );
         Ok(())
@@ -225,6 +253,28 @@ impl Hub {
         if let Some((id, record)) = self.retiring.iter_mut().find(|(_, record)| record.pending) {
             record.pending = false;
             return Some((lease, Work::Unfollow(id.clone())));
+        }
+        // Source identity must be ready before a slow detail follow can block
+        // the local catalog. These are two bounded reads per generation.
+        for (computer, source) in &mut self.sources {
+            if !source.online
+                || source
+                    .retry_at
+                    .is_some_and(|at| at > tokio::time::Instant::now())
+            {
+                continue;
+            }
+            if let Some(part) = source.pending.pop_first() {
+                return Some((
+                    lease,
+                    Work::Source {
+                        computer: computer.clone(),
+                        generation: source.generation,
+                        serial: source.serial,
+                        part,
+                    },
+                ));
+            }
         }
         if let Some(entry) = self
             .routes
@@ -243,20 +293,44 @@ impl Hub {
                 },
             ));
         }
-        for (computer, source) in &mut self.sources {
-            if let Some(part) = source.pending.pop_first() {
-                return Some((
-                    lease,
-                    Work::Source {
-                        computer: computer.clone(),
-                        generation: source.generation,
-                        serial: source.serial,
-                        part,
-                    },
-                ));
-            }
-        }
         None
+    }
+
+    fn retry_source(&mut self, computer: &str, generation: u64, serial: u64, part: &str) {
+        if let Some(source) = self.sources.get_mut(computer).filter(|source| {
+            source.generation == generation
+                && source.serial == serial
+                && !source.seen.contains(part)
+        }) {
+            source.pending.insert(part.into());
+            source.retry_at = source
+                .retry
+                .next("service_unavailable", false)
+                .map(|delay| tokio::time::Instant::now() + delay);
+        }
+    }
+    pub(super) fn source_state(
+        &mut self,
+        computer: &str,
+        generation: u64,
+        online: bool,
+    ) -> Result<(), &'static str> {
+        self.source(computer, generation)?;
+        if let Some(source) = self
+            .sources
+            .get_mut(computer)
+            .filter(|source| source.generation == generation)
+        {
+            source.online = online;
+        }
+        Ok(())
+    }
+    fn retry_at(&self) -> Option<tokio::time::Instant> {
+        self.sources
+            .values()
+            .filter(|source| source.online && !source.pending.is_empty())
+            .filter_map(|source| source.retry_at)
+            .min()
     }
 }
 enum Work {
@@ -486,7 +560,11 @@ pub(super) async fn frame(
         if value["removed"] == true {
             hub.sources.remove(computer);
         } else {
-            hub.source(computer, value["generation"].as_u64().unwrap_or(0))?;
+            hub.source_state(
+                computer,
+                value["generation"].as_u64().unwrap_or(0),
+                value["online"] == true,
+            )?;
         }
         shared.details_changed.notify_one();
         return Ok(());
@@ -548,6 +626,11 @@ pub(super) async fn frame(
             source.pending.remove(part);
             source.seen.insert(part.into());
             let changes = source.state.apply(&ComputerId(computer.into()), &native);
+            source.retry.reset();
+            source.retry_at = None;
+            if part == "hello" {
+                shared.catalog_identity_ready(computer, generation);
+            }
             Some((
                 lease,
                 Target::Source {
@@ -603,13 +686,22 @@ pub(super) async fn run(shared: Arc<Shared>, stop: Arc<AtomicBool>) -> Result<()
         if stop.load(Ordering::Acquire) {
             return Ok(());
         }
-        let work = shared
-            .details
-            .lock()
-            .unwrap_or_else(PoisonError::into_inner)
-            .next();
+        let (work, retry_at) = {
+            let mut hub = shared
+                .details
+                .lock()
+                .unwrap_or_else(PoisonError::into_inner);
+            (hub.next(), hub.retry_at())
+        };
         let Some((lease, work)) = work else {
-            shared.details_changed.notified().await;
+            if let Some(at) = retry_at {
+                tokio::select! {
+                    _ = shared.details_changed.notified() => (),
+                    _ = tokio::time::sleep_until(at) => (),
+                }
+            } else {
+                shared.details_changed.notified().await;
+            }
             continue;
         };
         let id = uuid::Uuid::new_v4().to_string();
@@ -658,7 +750,18 @@ pub(super) async fn run(shared: Arc<Shared>, stop: Arc<AtomicBool>) -> Result<()
         }
         if response["accepted"] != true {
             // Refused metadata does not revoke unrelated native detail routes.
-            if matches!(work, Work::Source { .. }) {
+            if let Work::Source {
+                computer,
+                generation,
+                serial,
+                part,
+            } = &work
+            {
+                shared
+                    .details
+                    .lock()
+                    .unwrap_or_else(PoisonError::into_inner)
+                    .retry_source(computer, *generation, *serial, part);
                 continue;
             }
             if let Work::Follow { key, id, .. } = &work {
@@ -723,6 +826,11 @@ pub(super) async fn run(shared: Arc<Shared>, stop: Arc<AtomicBool>) -> Result<()
                     || response["online"] != true
                     || response["value"].is_null()
                 {
+                    shared
+                        .details
+                        .lock()
+                        .unwrap_or_else(PoisonError::into_inner)
+                        .retry_source(&computer, generation, serial, &part);
                     continue;
                 }
                 let changes = {
@@ -739,8 +847,11 @@ pub(super) async fn run(shared: Arc<Shared>, stop: Arc<AtomicBool>) -> Result<()
                         continue;
                     };
                     if part == "meta" && source.state.hello().is_none() {
+                        source.pending.insert(part);
                         continue;
                     }
+                    source.retry.reset();
+                    source.retry_at = None;
                     source.seen.insert(part.clone());
                     source.state.source_metadata(
                         &ComputerId(computer.clone()),
@@ -753,13 +864,16 @@ pub(super) async fn run(shared: Arc<Shared>, stop: Arc<AtomicBool>) -> Result<()
                     &stop,
                     lease,
                     Target::Source {
-                        computer,
+                        computer: computer.clone(),
                         generation,
                         serial,
                     },
                     changes,
                 )
                 .await?;
+                if part == "hello" {
+                    shared.catalog_identity_ready(&computer, generation);
+                }
             }
             Work::Follow { id, .. } => {
                 if response["id"] != id {
@@ -856,7 +970,15 @@ async fn failed(
                 }
                 None
             }
-            Work::Source { .. } => None,
+            Work::Source {
+                computer,
+                generation,
+                serial,
+                part,
+            } => {
+                hub.retry_source(computer, *generation, *serial, part);
+                None
+            }
         }
     };
     if let Some((gate, changes)) = delivery {

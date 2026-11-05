@@ -9,7 +9,7 @@ pub(super) fn shutdown_requested() -> bool {
 
 pub(super) fn spawn(argv: &[String], name: &str, run_id: &str) -> Result<Child> {
     let _guard = lock(None)?;
-    let mut record = read_run(name, run_id)?.ok_or("session changed while launching agent")?;
+    let mut record = read_own_run(name, run_id)?.ok_or("session changed while launching agent")?;
     // Windows finds the program and reads npm shims itself (spec D8).
     let child = crate::platform::agent_command(argv)
         .and_then(|mut command| command.spawn())
@@ -31,7 +31,7 @@ pub(super) fn wait(child: &mut Child) -> Result<ExitStatus> {
 
 pub(super) fn finish(name: &str, run_id: &str, child_id: u32, status: ExitStatus) -> Result<()> {
     let _guard = lock(None)?;
-    let Some(mut record) = read_run(name, run_id)? else {
+    let Some(mut record) = read_own_run(name, run_id)? else {
         return Ok(());
     };
     if record["pid"].as_u64() != Some(child_id.into()) {

@@ -1,0 +1,10 @@
+<!doctype html>
+<html lang="en"><head><meta charset="utf-8"><title>Zerus Activity resize regression (synthetic)</title></head>
+<body><div id="root"></div><script>
+window.activityResizeObserverWarnings = 0;
+for (const type of ["error", "unhandledrejection"]) window.addEventListener(type, event => {
+  // Report WebKit's deferred ResizeObserver delivery diagnostic in the metrics.
+  if (event.message === "ResizeObserver loop completed with undelivered notifications.") { window.activityResizeObserverWarnings++; event.preventDefault(); return; }
+  window.webkit.messageHandlers.result.postMessage(JSON.stringify({failures: [String(event.error || event.reason || event.message)]}));
+});
+</script><script type="module" src="../src/perf/activityResizeSmoke.tsx"></script></body></html>

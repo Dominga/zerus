@@ -18,6 +18,165 @@ fn hook(kind: &str, call: &str, response: Value) -> Value {
 }
 
 #[test]
+fn long_commands_have_byte_bounded_previews_and_full_text_digests() {
+    let r = record("codex");
+    let command = format!("cat <<'EOF'\n{}\nEOF", "Ж🦀 heredoc\n".repeat(2000));
+    let job = new_job(&r, "main", "call", &command, 1.);
+    assert!(string(&job, "command").len() <= 512);
+    assert!(string(&job, "command").ends_with('…'));
+    assert_eq!(job["command_truncated"], true);
+    assert_eq!(
+        job["command_digest"],
+        format!("{:x}", Sha256::digest(command.as_bytes()))
+    );
+    let other = new_job(&r, "main", "call", &(command + "different suffix"), 1.);
+    assert_eq!(job["id"], other["id"]);
+    assert_eq!(job["command"], other["command"]);
+    assert_ne!(job["command_digest"], other["command_digest"]);
+}
+
+#[test]
+fn command_previews_back_up_inside_multibyte_utf8_code_points() {
+    let r = record("codex");
+    for (character, count, kept) in [("é", 257, 254), ("€", 172, 169), ("🦀", 129, 127)] {
+        let command = character.repeat(count);
+        assert!(
+            !command.is_char_boundary(509),
+            "fixture must cut inside a code point"
+        );
+        let job = new_job(&r, "main", "call", &command, 1.);
+        assert_eq!(job["command"], format!("{}…", character.repeat(kept)));
+        assert!(string(&job, "command").len() <= 512);
+        assert_eq!(job["command_truncated"], true);
+        assert_eq!(
+            job["command_digest"],
+            format!("{:x}", Sha256::digest(command.as_bytes()))
+        );
+    }
+}
+
+#[test]
+fn legacy_commands_load_and_migrate_on_a_record_write_without_changing_job_state() {
+    let tmp = tempfile::tempdir().unwrap();
+    let path = tmp.path().join("record.json");
+    let command = format!("python <<'EOF'\n{}\nEOF", "heredoc body\n".repeat(1100));
+    let mut r = record("codex");
+    let jobs: serde_json::Map<String, Value> = (0..MAX_JOBS).map(|i| {
+        (format!("job-{i}"), json!({"id":format!("job-{i}"),"call_id":format!("call-{i}"),"command":command,
+            "run_id":r["run_id"],"conversation_id":r["conversation_id"],"status":"running","background":true,
+            "observed":true,"native_id":format!("native-{i}"),"output":"retained output","capabilities":{"output":true,"stop":false}}))
+    }).collect();
+    r["shell_jobs"] = json!(jobs);
+    let original = r.to_string();
+    assert!(original.len() > 1 << 20);
+    std::fs::write(&path, &original).unwrap();
+    let mut loaded: Value = serde_json::from_str(&std::fs::read_to_string(&path).unwrap()).unwrap();
+    let before = projection(
+        &serde_json::from_value(loaded["shell_jobs"].clone()).unwrap(),
+        vec![],
+        false,
+    );
+    assert_eq!(
+        std::fs::read_to_string(&path).unwrap(),
+        original,
+        "reading must not rewrite a legacy record"
+    );
+    atomic_record(&path, &mut loaded).unwrap();
+    assert!(std::fs::metadata(&path).unwrap().len() < 128 * 1024);
+    let saved: Value = serde_json::from_str(&std::fs::read_to_string(&path).unwrap()).unwrap();
+    assert_eq!(saved, loaded);
+    for (key, old) in r["shell_jobs"].as_object().unwrap() {
+        let job = &loaded["shell_jobs"][key];
+        assert!(string(job, "command").len() <= 512);
+        assert_eq!(
+            job["command_digest"],
+            format!("{:x}", Sha256::digest(command.as_bytes()))
+        );
+        for field in [
+            "id",
+            "call_id",
+            "run_id",
+            "conversation_id",
+            "status",
+            "background",
+            "observed",
+            "native_id",
+            "output",
+            "capabilities",
+        ] {
+            assert_eq!(job[field], old[field], "{field}");
+        }
+    }
+    let after = projection(
+        &serde_json::from_value(saved["shell_jobs"].clone()).unwrap(),
+        vec![],
+        false,
+    );
+    for field in [
+        "items",
+        "active_count",
+        "live_count",
+        "unknown_count",
+        "notes",
+        "complete",
+    ] {
+        assert_eq!(before[field], after[field], "{field}");
+    }
+    atomic_record(&path, &mut loaded).unwrap();
+    assert_eq!(
+        loaded, saved,
+        "a second write must retain the original full-text digests"
+    );
+    let mut empty = record("codex");
+    atomic_record(&path, &mut empty).unwrap();
+    assert!(empty.get("shell_jobs").is_none());
+}
+
+#[test]
+fn shared_command_projection_preserves_processes_wire_contract() {
+    let contract: Value = serde_json::from_str(include_str!(
+        "../../../mobile/android/app/src/test/resources/process-command-contract.json"
+    ))
+    .unwrap();
+    for case in contract["cases"].as_array().unwrap() {
+        let expected = &case["processes"];
+        let mut legacy = expected["items"][0].clone();
+        legacy["command"] = case["command_input"].clone();
+        legacy.as_object_mut().unwrap().remove("command_digest");
+        legacy.as_object_mut().unwrap().remove("command_truncated");
+        let jobs = Jobs::from([("job-a".into(), legacy)]);
+        let projected = projection(&jobs, vec![], false);
+        for (field, value) in expected.as_object().unwrap() {
+            assert_eq!(&projected[field], value, "{}: {field}", case["name"]);
+        }
+        let mut r = record("codex");
+        r["run_id"] = json!("run-a");
+        r["conversation_id"] = json!("conversation-a");
+        let mut event = hook(
+            "PostToolUse",
+            "call-a",
+            json!({"session_id":"native-a","output":"actual output"}),
+        );
+        event["tool_input"]["command"] = case["command_input"].clone();
+        observe(&mut r, &event);
+        let saved = &r["shell_jobs"][id(&r, "main", "call-a")];
+        for field in [
+            "command",
+            "command_digest",
+            "command_truncated",
+            "status",
+            "background",
+            "capabilities",
+        ] {
+            assert_eq!(saved[field], expected["items"][0][field], "{field}");
+        }
+        assert_eq!(saved["observed"], false);
+        assert_eq!(saved["output"], "actual output");
+        assert_eq!(saved["native_id"], "native-a");
+    }
+}
+
+#[test]
 fn completion_without_tool_name_requires_existing_exact_call() {
     let mut r = record("codex");
     observe(&mut r, &hook("PreToolUse", "call-a", Value::Null));

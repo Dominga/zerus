@@ -178,6 +178,52 @@ class Catalog(unittest.TestCase):
             self.assertEqual(db.execute('SELECT count(*) FROM desktop_catalog_rows').fetchone()[0], 300)
             self.assertEqual(db.execute('SELECT count(*) FROM desktop_maintenance').fetchone()[0], 1)
 
+    def test_change_items_keep_native_removal_reasons_and_schema_twenty_upgrades(self):
+        # zerus-ic13: native deltas page removals before upserts, so a
+        # replacement can span frames. The journal keeps its native reason.
+        service, _ = self.serve()
+        process, _, frames = self.feed()
+        hello = dict(v=1, t='hello', seq=1, machine_id='example-machine', host='example', hgs_version='1.56.0',
+                     stream='example-stream', heartbeat_ms=10000, max_frame_bytes=1 << 20, topics=['catalog'],
+                     limits=dict(activity_subscriptions=16, page_bytes=512 << 10, queue_bytes=4 << 20,
+                                 activity_tail=100, activity_read=200, control_line_bytes=64 << 10))
+
+        def watch(frame):
+            self.send(process, frames, dict(t='watch', computer='peer', generation=1, frame=frame))
+
+        watch(hello)
+        watch(dict(v=1, t='snapshot', seq=2, topic='catalog', items=[self.item(n) for n in (1, 2, 3)],
+                   page=0, last=True, cursor=1))
+        first = self.page()
+        watch(dict(v=1, t='delta', seq=3, topic='catalog', upsert=[], cursor=2,
+                   remove=[dict(key=self.item(1)['key'], reason='replaced'),
+                           dict(key=self.item(2)['key'], reason='unknown-future-reason'),
+                           dict(key=self.item(3)['key'])]))
+        watch(dict(v=1, t='delta', seq=4, topic='catalog', upsert=[self.item(4)], remove=[], cursor=3))
+        request = dict(op='catalog_changes', request_id=str(uuid.uuid4()), computer='peer',
+                       epoch=first['epoch'], incarnation=first['incarnation'], generation=first['generation'],
+                       projection=first['projection'], since_revision=first['start_revision'])
+        changes = self.cli('desktop', 'request', '--json', data=request)
+        self.assertEqual(changes['changes_abi'], 'desktop-catalog-changes-v1')
+        self.assertEqual(changes['items'], [
+            dict(op='remove', revision='1', key=self.item(1)['key'], row=None, reason='replaced'),
+            dict(op='remove', revision='1', key=self.item(2)['key'], row=None),
+            dict(op='remove', revision='1', key=self.item(3)['key'], row=None),
+            dict(op='upsert', revision='2', **self.item(4)),
+        ])
+        self.stop(service)
+        process.stdin.close()
+        process.wait(timeout=5)
+        with closing(sqlite3.connect(self.desktop / 'state.sqlite3')) as db, db:
+            kernel.Desktop.remove_catalog_reason_schema(db)
+            db.execute('PRAGMA user_version=20')
+        _, status = self.serve()
+        self.assertEqual(status['schema'], kernel.SCHEMA)
+        with closing(sqlite3.connect(self.desktop / 'state.sqlite3')) as db:
+            self.assertIn('reason', [r[1] for r in db.execute('PRAGMA table_info(desktop_catalog_changes)')])
+            self.assertEqual(db.execute('SELECT count(*) FROM desktop_catalog_changes WHERE reason IS NOT NULL').fetchone()[0], 0)
+        self.assertEqual(len(self.page()['items']), 1)
+
     def test_large_valid_singleton_and_corrupt_encoded_key_keep_service_alive(self):
         service, status = self.serve()
         process, _, frames = self.feed()

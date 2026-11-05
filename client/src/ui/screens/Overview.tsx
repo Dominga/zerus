@@ -7,10 +7,10 @@ import { UsageMeters } from "../components/UsageMeter";
 import { AgentBadge, MachineBadge, SessionCard } from "../sessions/SessionCard";
 import type { Session } from "../sessions/types";
 import type { Account } from "../../types";
-import { agentKind, catalog, orderedRows } from "../../store/catalog";
+import { agentKind, catalog, plainComputers, plainRows } from "../../store/catalog";
 import { machineCards, requestMachine } from "../../store/machines";
 import { accountsPage, loadAccounts, setAccountMachine, setRequestedProfile } from "../../store/accounts";
-import { createOverview, type MachineCardModel, type OverviewStats } from "../../store/overview";
+import { createOverview, overviewStats, type MachineCardModel, type OverviewStats } from "../../store/overview";
 import { setMachineFilter, setPage, setProjectFilter, setAccountFilter, setFolderFilter, setSelectedKey, setStateFilter, type StateFilter } from "../../store/ui";
 import { flag, num, setSetting } from "../../store/settings";
 import { accountTooltip, clock, summaryText, usageLoading, windowsAt } from "../lib/usage";
@@ -216,7 +216,9 @@ function OverviewEdge(props: { right?: boolean }) {
 
 export function OverviewScreen() {
   let scroller: HTMLDivElement | undefined;
-  const ov = createOverview(orderedRows, () => catalog.computers, () => machineCards);
+  // Plain rows for the tiles and the live order, one dependency per batch;
+  // each live card renders its store row (zerus-5wmh.66.50).
+  const ov = createOverview(plainRows, plainComputers, () => machineCards, overviewStats, (s) => catalog.rows[s.key] ?? s);
   // Ages, resets and pace re-render every 15 s while shown (DashboardPage.cpp:322); nothing else runs on a timer.
   const now = useNow(15_000);
   const view = accountsPage;

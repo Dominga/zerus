@@ -180,6 +180,60 @@ fn options<'a>(
     Ok(result)
 }
 
+/// The help line (`cli::USAGE`) once [`selects_session`] holds (zerus-ucck
+/// P1c-2b); the connector reads it.
+#[cfg(test)]
+const SESSION_ID_MARKER: &str = "mobile-peer-session-id-v1";
+
+/// The scoped JSON commands whose session a phone mutation may also select
+/// by ID.
+const SESSION_ID_COMMANDS: &[&str] = &[
+    "send",
+    "send-now",
+    "answer",
+    "interrupt",
+    "settings",
+    "clear-context",
+    "compact-context",
+    "session-action",
+];
+
+/// The `session-action` actions that may; restore never does.
+const SESSION_ID_ACTIONS: &[&str] = &[
+    "pause",
+    "resume",
+    "rename",
+    "fork",
+    "archive",
+    "forget",
+    "terminate",
+    "remove_queued",
+];
+
+/// A listed command's `[session, --session-id, ID, --json]` with a canonical
+/// session ID, for a live session only: never an archived conversation, and
+/// a `session-action` only for a listed action. The selection itself is the
+/// CLI's own (`--session-id`), verified at every reader.
+fn selects_session(op: &str, rest: &[String], payload: Option<&Value>) -> bool {
+    let [name, flag, id, json] = rest else {
+        return false;
+    };
+    SESSION_ID_COMMANDS.contains(&op)
+        && session(name)
+        && flag == "--session-id"
+        && crate::state::session_id::canonical(id)
+        && uuid(id)
+        && json == "--json"
+        && payload.is_some_and(|payload| {
+            payload.get("archive_id").is_none()
+                && (op != "session-action"
+                    || payload
+                        .get("action")
+                        .and_then(Value::as_str)
+                        .is_some_and(|action| SESSION_ID_ACTIONS.contains(&action)))
+        })
+}
+
 fn scoped(payload: &Option<Value>) -> Result<()> {
     let value = payload
         .as_ref()
@@ -577,7 +631,8 @@ fn validate(request: &LocalRequest) -> Result<()> {
         "history" | "history-projection" | "terminal" | "session-action" | "send" | "send-now" | "settings" | "answer"
         | "interrupt" | "clear-context" | "compact-context" | "effort" | "file-read" => {
             ensure!(
-                rest.len() == 2 && session(&rest[0]) && rest[1] == "--json",
+                (rest.len() == 2 && session(&rest[0]) && rest[1] == "--json")
+                    || selects_session(op, rest, request.payload.as_ref()),
                 "native operation requires scoped JSON"
             );
             scoped(&request.payload)?;
@@ -852,7 +907,7 @@ fn transport(
     };
     let bytes = serde_json::to_vec(&envelope)?;
     ensure!(bytes.len() <= MAX_BYTES, "mobile request is too large");
-    let mut command = Command::new(std::env::current_exe()?);
+    let mut command = Command::new(crate::self_exec::current()?);
     command.args(["swarm", "__mobile-peer-transport", "--json"]);
     capture_control(command, &bytes, deadline, cap, CaptureMode::Supervisor)
 }
@@ -888,7 +943,7 @@ fn supervise() -> Result<i32> {
                 envelope.via.is_empty() && envelope.request.is_none(),
                 "invalid local identity transport"
             );
-            let mut command = Command::new(std::env::current_exe()?);
+            let mut command = Command::new(crate::self_exec::current()?);
             command.args(["swarm", "__mobile-peer-identity", "--json"]);
             (command, vec![], 4096)
         }
@@ -1346,6 +1401,139 @@ mod tests {
 
     fn scope() -> Value {
         json!({"request_id":ID,"expected_run_id":"run","expected_conversation_id":"conversation"})
+    }
+
+    /// zerus-ucck P1c-2b: a listed scoped command may select its live session
+    /// by a canonical ID in exactly one position; nothing else changes.
+    #[test]
+    fn a_session_id_is_accepted_only_after_the_session_of_listed_live_operations() {
+        const SESSION: &str = "3f2a9c1d-0b4e-4d6a-9c1d-2e3f4a5b6c7d";
+        fn selected(op: &str) -> [&str; 5] {
+            [op, "codex/project", "--session-id", SESSION, "--json"]
+        }
+        let action = |name: &str| {
+            let mut payload = scope();
+            payload["action"] = json!(name);
+            payload
+        };
+        for op in [
+            "send",
+            "send-now",
+            "answer",
+            "interrupt",
+            "settings",
+            "clear-context",
+            "compact-context",
+        ] {
+            assert!(
+                validate(&request(&selected(op), Some(scope()))).is_ok(),
+                "{op}"
+            );
+            // An archived conversation never selects by ID.
+            let mut archived = scope();
+            archived["archive_id"] = json!(ID);
+            assert!(
+                validate(&request(&selected(op), Some(archived))).is_err(),
+                "{op}"
+            );
+            assert!(validate(&request(&selected(op), None)).is_err(), "{op}");
+        }
+        for name in [
+            "pause",
+            "resume",
+            "rename",
+            "fork",
+            "archive",
+            "forget",
+            "terminate",
+            "remove_queued",
+        ] {
+            assert!(
+                validate(&request(&selected("session-action"), Some(action(name)))).is_ok(),
+                "{name}"
+            );
+            let mut archived = action(name);
+            archived["archive_id"] = json!(ID);
+            assert!(
+                validate(&request(&selected("session-action"), Some(archived))).is_err(),
+                "{name}"
+            );
+        }
+        for name in ["restore", "", "unknown"] {
+            assert!(
+                validate(&request(&selected("session-action"), Some(action(name)))).is_err(),
+                "{name}"
+            );
+        }
+        assert!(validate(&request(&selected("session-action"), Some(scope()))).is_err());
+        // Reads, Terminal and the other scoped commands keep the name form.
+        for op in [
+            "history",
+            "history-projection",
+            "terminal",
+            "effort",
+            "file-read",
+        ] {
+            assert!(
+                validate(&request(&selected(op), Some(scope()))).is_err(),
+                "{op}"
+            );
+        }
+        // Only a canonical ID, once, right after the session.
+        for argv in [
+            vec![
+                "send",
+                "codex/project",
+                "--session-id",
+                &SESSION.to_uppercase(),
+                "--json",
+            ],
+            vec![
+                "send",
+                "codex/project",
+                "--session-id",
+                "not-an-id",
+                "--json",
+            ],
+            vec![
+                "send",
+                "codex/project",
+                "--session-id",
+                "00000000-0000-0000-0000-000000000000",
+                "--json",
+            ],
+            vec!["send", "codex/project", "--session-id", "", "--json"],
+            vec!["send", "codex/project", "--json", "--session-id", SESSION],
+            vec!["send", "--session-id", SESSION, "codex/project", "--json"],
+            vec!["send", "--session-id", SESSION, "--json"],
+            vec!["send", "codex/project", "--session-id", SESSION],
+            vec![
+                "send",
+                "codex/project",
+                "--session-id",
+                SESSION,
+                "--session-id",
+                SESSION,
+                "--json",
+            ],
+            vec!["send", "codex/project", "--session", SESSION, "--json"],
+            vec!["send", "@peer", "--session-id", SESSION, "--json"],
+            vec!["send", "-x", "--session-id", SESSION, "--json"],
+        ] {
+            assert!(
+                validate(&request(&argv, Some(scope()))).is_err(),
+                "{argv:?}"
+            );
+        }
+        // The name form is unchanged.
+        assert!(validate(&request(
+            &["send", "codex/project", "--json"],
+            Some(scope())
+        ))
+        .is_ok());
+        assert!(crate::cli::usage()
+            .lines()
+            .any(|line| line.trim() == SESSION_ID_MARKER));
     }
 
     #[test]

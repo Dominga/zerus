@@ -13,24 +13,11 @@ in each file; the original Apache-2.0 license is
 retained in `docs/licenses/codex-LICENSE.txt`, which is also shipped with packages.
 No native Codex executable is bundled.
 
-`tray/vendor/libvterm` contains libvterm 0.3.3 under MIT. Its original copyright
-notice and complete license are retained in `tray/vendor/libvterm/LICENSE`;
-source provenance and archive checksum are in `UPSTREAM.md` beside it.
-
-`tray/vendor/md4c` contains the md4c 0.5.2 Markdown parser and entity table
-under MIT. Its original license is retained in `tray/vendor/md4c/LICENSE.md`;
-source provenance and archive checksum are in `UPSTREAM.md` beside it.
-
-`tray/vendor/qrcodegen` contains the Nayuki QR Code generator 1.8.0 (C++) under
-MIT, which draws the phone pairing code. Its license is retained in
-`tray/vendor/qrcodegen/LICENSE`; source provenance and file checksums are in
-`UPSTREAM.md` beside it.
-
 ## GitHub logo
 
 The About page uses the [GitHub mark from Primer Octicons](
 https://github.com/primer/octicons/blob/97825f832c98f817867f770d084c08e3edc6f78c/icons/mark-github-16.svg). Its complete MIT license and GitHub copyright notice are retained
-in `tray/resources/icons/github-mark.svg`, including the embedded Qt resource.
+in `tray/resources/icons/github-mark.svg`.
 
 ## Web client design mockup
 
@@ -61,19 +48,10 @@ The desktop client in `client/` locks its Rust dependencies in
 from crates.io, where its source code is available; its bundles carry the notices
 of every crate they ship, from the crates or from `packaging/rust-licenses`.
 
-The legacy Qt GUI links Qt 6 (Widgets, Network and Multimedia), and on Linux the KDE
-Frameworks KStatusNotifierItem, KWindowSystem and KIdleTime. These retain their
-own licenses. On Linux, the optional embedded DeepSeek native UI plugin
-(`libhgs-tray-native-ui.so`) links Qt WebEngine, which includes Chromium and
-additional third-party components. See the
-[Qt WebEngine licensing documentation](https://doc.qt.io/qt-6.8/qtwebengine-licensing.html)
-and the notices supplied by the exact Qt distribution used to build the application.
-
 The Arch package ships Zerus Next and dynamically links system GTK3,
 WebKitGTK 4.1, JavaScriptCoreGTK, ALSA and GStreamer. It does not bundle those
 libraries, Qt/KDE or Chromium; their system distributions supply notices and
-corresponding source. The Linux Qt source-build fallback is kept separately
-until Linux acceptance and is not part of the Arch package.
+corresponding source.
 `scripts/collect-licenses.py` includes the host-target Cargo notices for `hgs`,
 the connector, and the client with its media/video features, together with
 Zerus MIT and the Codex data notice. Its client/media and client/core locks
@@ -81,20 +59,10 @@ supplement `client/src-tauri/Cargo.lock`. A missing dependency notice fails
 packaging. Review source/relinking obligations when linkage or bundled
 components change. MIT licensing of Zerus does not relicense its dependencies.
 
-The Windows portable zip is different: it bundles Qt 6 for MSVC, including Qt
-Multimedia with its audio runtime, next to the application. It contains no Qt
-WebEngine or Chromium. These are separate, replaceable DLLs. Qt is used under the GNU LGPL
-version 3; its third-party components retain their own licenses, and the zip's
-`README.txt` names the exact Qt source archive and Git tag. The zip carries
-the SPDX documents supplied
-with the exact Qt installation, which name the license and copyright of each Qt
-module and of the third-party code inside it (libjpeg-turbo, FreeType, HarfBuzz,
-libpng, zlib and others), and `packaging/windows/licenses` with the text of every
-standard license and exception those documents name. Based in part on the work of the Independent JPEG Group
-and of the FreeType Team. The zip also carries the Rust, libvterm, md4c and Codex
-notices and the Microsoft Visual C++ runtime DLLs, redistributed with the
-application from Visual Studio's redistributable folder. Next to `hgs.exe` it
-carries Microsoft's ConPTY, the unmodified x64 `conpty.dll` and `OpenConsole.exe`
+The Windows portable zip ships Zerus Next and its actual Rust/frontend notices,
+with the Microsoft Visual C++ runtime DLLs from Visual Studio's redistributable
+folder. WebView2 uses the separately installed Evergreen runtime. It deploys no
+Qt runtime. Next to `hgs.exe` it carries Microsoft's ConPTY, the unmodified x64 `conpty.dll` and `OpenConsole.exe`
 from the NuGet package `Microsoft.Windows.Console.ConPTY` 1.25.260930003 (built
 from [Windows Terminal](https://github.com/microsoft/terminal)), under MIT. Its
 license, from that repository's `LICENSE` (tag `v1.25.2733.0`, unchanged since
@@ -106,24 +74,13 @@ with each license and is retained in `docs/licenses/conpty-NOTICE.md` and shippe
 as `licenses/conpty-NOTICE.md`. `packaging/windows/conpty.json` pins the package
 and both files by SHA-256, and no other file of the package is shipped. It contains no Windows
 system library, such as ICU or the Direct3D shader compiler, no Windows SDK shader
-compiler and no software OpenGL fallback. `scripts/package-windows.py` fails when
-the Qt documents are missing or name a license without a shipped text, and when
-the bundle contains one of those libraries.
+compiler and no software OpenGL fallback. `scripts/package-windows.py` rejects obsolete Qt runtime payloads in new packages.
 
-The macOS application distributed through the Homebrew cask is different: it
-bundles the official Qt 6.11.2 frameworks and plugins it needs (including Qt SVG
-and Qt Multimedia) as unmodified, dynamically linked and replaceable Qt components
-under LGPL-3.0-only. It contains no Qt WebEngine or Chromium. Third-party audio components retain their own license notices.
-`Zerus.app/Contents/Resources/licenses/qt` contains the LGPL-3.0 and GPL-3.0
-texts, Qt's official SPDX documents for every bundled module, including its
-third-party components, and the location of the exact Qt sources. It also
-includes the standard license and exception texts those documents name;
-custom LicenseRef texts remain in the documents. This conservative coverage
-includes alternatives and optional components in the module metadata, without
-asserting that each component is compiled. The parent `licenses` folder carries
-the Zerus, libvterm, md4c, Codex and Cargo dependency notices.
-`scripts/check-macos-bundle.py` rejects missing notices and Qt identifiers without
-their texts.
+The macOS application is the signed/notarized Tauri `Zerus.app`. Its
+`Contents/Resources/licenses` folder carries the Zerus/Codex, Cargo and frontend
+notices for its actual dependencies. No Qt frameworks or plugins are bundled.
+Previously published releases remain immutable with their original notices;
+read-only compatibility validators do not authorize newly packaging Qt.
 
 The CLI's `rusqlite` build includes SQLite through `libsqlite3-sys`. The collected
 notices also preserve its upstream public-domain dedication, separate from the

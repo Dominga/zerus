@@ -3,15 +3,20 @@
 //! locked, atomically replaced store; initialized snapshots read it lock-free.
 mod bootstrap;
 mod catalog;
+pub(crate) mod fence;
 mod launch_project;
 mod infer_project;
-pub(crate) use infer_project::{directory_project, infer_new_session};
+pub(crate) use infer_project::{directory_project, infer_new_session, inherit_fork_project};
 mod session_project;
+mod session_ids;
 #[cfg(unix)]
 pub(crate) use session_project::validate_payload as validate_session_project;
 mod model;
 mod replica;
+mod replica_members;
 mod service;
+/// The running executable and its replacement, for long-lived commands.
+pub(crate) use service::{Executable, Replacement};
 mod store;
 mod transport;
 
@@ -24,6 +29,43 @@ use store::LockedStore;
 #[cfg(unix)]
 pub(crate) use catalog::MOBILE_DELIVERY;
 pub(crate) use replica::{exchange_project as exchange_tasks, replicate};
+pub(crate) use replica::PROTOCOL as REPLICA_PROTOCOL;
+#[cfg(test)]
+pub(crate) use replica_members::Incomplete;
+pub(crate) use replica_members::Member as ReplicaMember;
+
+/// A verified member that receives the projects' tasks (its hgs speaks the
+/// replica protocol), with what this computer last learned of its replica.
+pub(crate) struct TaskMember {
+    pub alias: String,
+    pub node: String,
+    pub replica: Option<ReplicaMember>,
+}
+
+/// Every member that may hold the projects' tasks, by alias, read without
+/// the lock. Only a member whose verified hello established that it shares
+/// no tasks at all is left out; an unknown or another replica protocol stays
+/// in (and keeps a cutover open). Information only.
+pub(crate) fn task_members(config: &Config) -> Result<Vec<TaskMember>> {
+    let snapshot = store::read_snapshot(config)?;
+    let mut records = replica_members::read(config);
+    let mut members = Vec::new();
+    for (alias, peer) in snapshot["peers"].as_object().into_iter().flatten() {
+        let Some(node) = peer["node"].as_str() else {
+            continue;
+        };
+        let replica = records.remove(alias).filter(|record| record.node == node);
+        if replica.as_ref().is_some_and(|record| record.no_replica) {
+            continue;
+        }
+        members.push(TaskMember {
+            alias: alias.clone(),
+            node: node.to_owned(),
+            replica,
+        });
+    }
+    Ok(members)
+}
 #[cfg(unix)]
 pub(crate) use store::replace;
 
@@ -138,6 +180,42 @@ pub(crate) fn projects(config: &Config) -> Result<Vec<(String, String)>> {
         .collect())
 }
 
+/// The catalog lock, held for a test until dropped.
+#[cfg(test)]
+pub(crate) fn lock_catalog_for_tests(config: &Config) -> impl Sized {
+    LockedStore::load(config).expect("a test catalog")
+}
+
+/// This computer's identity and the catalog's projects (ID, name), read in
+/// one catalog admission waited for no later than `deadline`: none when the
+/// catalog is busy past it. For a command whose whole budget starts at its
+/// entry (the fence check).
+/// This computer's node and the catalog's projects (ID, name).
+pub(crate) type IdentityAndProjects = (String, Vec<(String, String)>);
+
+pub(crate) fn identity_and_projects_until(
+    config: &Config,
+    deadline: std::time::Instant,
+) -> Result<Option<IdentityAndProjects>> {
+    let Some(mut store) = LockedStore::load_until(config, deadline)? else {
+        return Ok(None);
+    };
+    let id = uuid::Uuid::parse_str(&store.data.node_id)?;
+    ensure!(
+        !id.is_nil() && id.to_string() == store.data.node_id,
+        "invalid persisted machine identity"
+    );
+    store.save()?;
+    let snapshot = store.snapshot(config);
+    let projects = snapshot["organization"]["projects"]
+        .as_array()
+        .into_iter()
+        .flatten()
+        .filter_map(|p| Some((p["id"].as_str()?.to_owned(), p["name"].as_str().unwrap_or_default().to_owned())))
+        .collect();
+    Ok(Some((store.data.node_id.clone(), projects)))
+}
+
 /// The live catalog project (ID, name) that this computer's session `name`
 /// belongs to, if any.
 pub(crate) fn session_project(config: &Config, name: &str) -> Result<Option<(String, String)>> {
@@ -230,10 +308,14 @@ fn execute(config: &Config, args: &[String]) -> Result<Value> {
         "exchange" => transport::exchange(config,serde_json::from_value(input()?)?),
         "replica-inventory" => replica::inventory(config,serde_json::from_value(input()?)?),
         "replica-exchange" => replica::exchange(config,serde_json::from_value(input()?)?),
+        "replica-relay" => fence::relay(config,serde_json::from_value(input()?)?),
+        "replica-task" => fence::task(config,serde_json::from_value(input()?)?),
         "sync" => transport::sync(config),
         "get" | "initialize" | "apply" | "export" | "resolve" | "disconnect" => {
             // Read stdin before taking the lock: slow clients cannot monopolize it.
-            let request = if matches!(action,"initialize"|"apply"|"resolve") { input()? } else { Value::Null };
+            // `export --kinds` reads the kinds its requester parses.
+            let kinds_requested = action == "export" && args.iter().any(|arg| arg == "--kinds");
+            let request = if matches!(action,"initialize"|"apply"|"resolve") || kinds_requested { input()? } else { Value::Null };
             if action == "initialize" && args.iter().any(|arg|arg == "--g3-status") {
                 ensure!(args == ["initialize", "--g3-status", "--json"], "usage: hgs swarm initialize --g3-status --json");
                 return bootstrap::g3_status(config, request);
@@ -242,12 +324,18 @@ fn execute(config: &Config, args: &[String]) -> Result<Value> {
                 ensure!(args == ["initialize", "--g3", "--json"], "usage: hgs swarm initialize --g3 --json");
                 Some(bootstrap::G3Import::parse(request.clone())?)
             } else { None };
+            let g3_bootstrap = if action == "initialize" && args.iter().any(|arg|arg == "--g3-bootstrap") {
+                ensure!(args == ["initialize", "--g3-bootstrap", "--json"], "usage: hgs swarm initialize --g3-bootstrap --json");
+                Some(bootstrap::G3Bootstrap::parse(request.clone())?)
+            } else { None };
+            let export_kinds = request["kinds"].clone();
             let mut store = LockedStore::load(config)?;
             let previous: std::collections::BTreeSet<_> = store.data.catalog.operations.keys().cloned().collect();
             match action {
                 "get" => { bootstrap::maybe(&mut store, config)?; }
                 "initialize" => {
                     if let Some(import) = &g3 { import.initialize(&mut store)?; }
+                    else if let Some(first) = &g3_bootstrap { first.bootstrap(&mut store)?; }
                     else { bootstrap::initialize(&mut store, &request)?; }
                 }
                 "apply" => { ensure!(store.data.imported,"initialize the local project catalog first"); store.data.apply(serde_json::from_value(request)?)?; }
@@ -261,9 +349,13 @@ fn execute(config: &Config, args: &[String]) -> Result<Value> {
                 _ => {}
             }
             if action != "initialize" { store.save()?; }
-            if action == "export" { return Ok(json!({"schema":1,"node_id":store.data.node_id,"initialized":store.data.imported,"catalog":store.data.catalog})); }
+            if action == "export" {
+                return Ok(json!({"schema":1,"node_id":store.data.node_id,"initialized":store.data.imported,
+                    "catalog":catalog::exported(&store.data.catalog, &export_kinds)}));
+            }
             let mut snapshot = store.snapshot(config);
             if let Some(import) = &g3 { snapshot["g3_import"] = import.receipt(); }
+            if let Some(first) = &g3_bootstrap { snapshot["g3_bootstrap"] = first.receipt(); }
             snapshot["worker"] = worker.unwrap_or_else(|| service::status(config)).json();
             let mut written: std::collections::BTreeMap<String,Vec<String>> = std::collections::BTreeMap::new();
             for op in store.data.catalog.operations.values().filter(|op| !previous.contains(&op.id)) {

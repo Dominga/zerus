@@ -23,6 +23,7 @@ import { exitFlush } from "./store/exitFlush";
 import { startMotion } from "./ui/motion";
 import { platform } from "./store/shortcuts";
 import { loadMarkdown } from "./ui/sessions/markdown";
+import { startWindowTheme } from "./skin/window";
 
 const [mode, setMode] = createSignal<BridgeMode | "starting">("starting");
 
@@ -43,7 +44,8 @@ void startBridge(receive).then(setMode, (error) => console.error("Zerus Next: th
 startDrops();
 
 // Load the bounded device-local skin library once; no directory poller.
-void import("./skin/user").then(m => m.loadUserSkins());
+const skinLibrary = import("./skin/user").then(m => m.loadUserSkins());
+void startWindowTheme(skinLibrary).catch(error => console.error("Zerus Next: initial window theme failed", error));
 
 // The second frame after load reached the page: a DMA-BUF start worked, so its crash marker goes.
 if (inTauri()) {

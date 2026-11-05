@@ -140,7 +140,7 @@ pub(super) fn owner(event: &Value, sid: &str, panes: &Snapshot) -> Result<Option
         None => {
             let mut holding = records()?.into_iter().filter(|record| {
                 string(record, "agent") == "claude"
-                    && matches(record, panes.get(string(record, "name")))
+                    && matches(record, panes_of(panes, record))
                     && parked(record).as_deref() == Some(job.as_str())
             });
             let found = match (holding.next(), holding.next()) {

@@ -34,7 +34,7 @@ use zerus_client_core::marks::Mark;
 use zerus_client_core::menubar::{
     tray_conf_value, Apply, Desk, DeviceMarks, Entry, Face, Gate, OpenMode,
 };
-use zerus_client_core::readmarks::ReadMark;
+use zerus_client_core::readmarks::Queued;
 use zerus_client_core::shell;
 use zerus_client_core::text::Text;
 use zerus_client_core::{text, Change, ComputerId};
@@ -61,7 +61,6 @@ pub use attention_barrier::InputSender;
 
 pub enum DeskInput {
     Change(Box<Change>),
-    Mode(OpenMode),
     /// This device's attention marks or its pending read marks changed: the
     /// desk reads them again (`FleetState::setReadState`).
     Marks,
@@ -76,10 +75,11 @@ pub enum DeskInput {
         token: String,
         activation: String,
     },
-    #[cfg(any(target_os = "linux", target_os = "macos"))]
+    #[cfg(any(target_os = "linux", target_os = "macos", windows))]
     ServiceClicked(Box<crate::desktop_service::activation::Delivery>),
     /// Public launch/instance navigation data, not callback/writer authority.
-    #[cfg(target_os = "linux")]
+    /// The Wayland activation token is Linux-only; Windows always passes None.
+    #[cfg(any(target_os = "linux", windows))]
     Navigate {
         target: zerus_client_core::desktop::activation::Target,
         activation: Option<String>,
@@ -204,8 +204,6 @@ impl Inbox {
 pub struct DeskState {
     sender: Mutex<InputSender>,
     _attention_owner: attention_barrier::Owner,
-    mode: Mutex<OpenMode>,
-    dir: PathBuf,
     inbox: Mutex<Inbox>,
     /// Zerus is the active app: the tracker's foreground test.
     focused: Arc<AtomicBool>,
@@ -258,21 +256,6 @@ pub fn terminal_settings(dir: &Path) -> zerus_client_core::terminal_launch::Sett
     }
 }
 
-#[cfg(target_os = "linux")]
-pub fn load_linux_mode(dir: &Path, tray_conf: Option<&str>) -> OpenMode {
-    std::fs::read(dir.join(MODE_FILE))
-        .ok()
-        .and_then(|bytes| serde_json::from_slice::<Saved>(&bytes).ok())
-        .map(|saved| saved.open_mode)
-        .filter(|mode| OpenMode::LINUX.contains(mode))
-        .or_else(|| {
-            tray_conf
-                .and_then(|text| tray_conf_value(text, "open-mode"))
-                .and_then(|value| OpenMode::from_linux_config(&value))
-        })
-        .unwrap_or(OpenMode::Automatic)
-}
-
 /// Windows uses Qt's auto/tab/window/console/clipboard modes.
 pub fn load_windows_mode(dir: &Path, tray_conf: Option<&str>) -> OpenMode {
     std::fs::read(dir.join(MODE_FILE))
@@ -292,7 +275,10 @@ pub fn load_windows_mode(dir: &Path, tray_conf: Option<&str>) -> OpenMode {
         .unwrap_or(OpenMode::Automatic)
 }
 
-pub fn save_mode(dir: &Path, mode: OpenMode) -> std::io::Result<()> {
+/// Writes a saved mode, for the loaders' tests: nothing writes one now that
+/// the menu has no "Open in" (the owner, 0.48.0); a saved one is still read.
+#[cfg(test)]
+fn save_mode(dir: &Path, mode: OpenMode) -> std::io::Result<()> {
     write_private(
         &dir.join(MODE_FILE),
         &serde_json::to_vec(&Saved { open_mode: mode })?,
@@ -346,13 +332,7 @@ pub type LoadAttention = Box<dyn FnOnce() -> Attention + Send>;
 /// Taps the pump, hears this device's marks change and starts the desk
 /// thread. Call before the fleet starts, so the first catalog reaches the menu
 /// bar; `attention` when this build posts notifications.
-pub fn start(
-    app: &AppHandle,
-    pump: &crate::pump::Pump,
-    dir: PathBuf,
-    mode: OpenMode,
-    attention: Option<LoadAttention>,
-) {
+pub fn start(app: &AppHandle, pump: &crate::pump::Pump, attention: Option<LoadAttention>) {
     let (sender, inputs, owner) = attention_barrier::channel(attention.is_some());
     let attention = attention.map(|load| owner.track(load));
     let tap = sender.clone();
@@ -380,15 +360,13 @@ pub fn start(
     app.manage(DeskState {
         sender: Mutex::new(sender),
         _attention_owner: owner,
-        mode: Mutex::new(mode),
-        dir,
         inbox: Mutex::new(Inbox::default()),
         focused: Arc::clone(&focused),
     });
     let handle = app.clone();
     std::thread::Builder::new()
         .name("zerus-client-desk".into())
-        .spawn(move || run(handle, inputs, mode, attention, focused))
+        .spawn(move || run(handle, inputs, attention, focused))
         .expect("the desk thread starts");
 }
 
@@ -543,12 +521,12 @@ pub fn observe_round(
 struct Click {
     target: Map<String, Value>,
     deadline: Instant,
-    #[cfg(any(target_os = "linux", target_os = "macos"))]
+    #[cfg(any(target_os = "linux", target_os = "macos", windows))]
     service: Option<Box<crate::desktop_service::activation::Delivery>>,
-    #[cfg(any(target_os = "linux", target_os = "macos"))]
+    #[cfg(any(target_os = "linux", target_os = "macos", windows))]
     exact: Option<zerus_client_core::desktop::activation::Target>,
 }
-#[cfg(any(target_os = "linux", target_os = "macos"))]
+#[cfg(any(target_os = "linux", target_os = "macos", windows))]
 fn resolve_service(
     target: &zerus_client_core::desktop::activation::Target,
     desk: &Desk,
@@ -578,7 +556,7 @@ fn resolve_service(
 /// What one round reads from the app, and the status item it offers.
 pub struct Context<'a> {
     /// Offers the status item its face, tooltip, menu and badge.
-    pub publish: &'a mut dyn FnMut(&Desk, OpenMode),
+    pub publish: &'a mut dyn FnMut(&Desk),
     pub now: Instant,
     /// Seconds since the epoch, the tracker's clock.
     pub unix: i64,
@@ -597,15 +575,13 @@ pub struct Context<'a> {
 pub struct Outcome {
     /// The round offered the status item again.
     pub publish: bool,
-    /// An "Open in" choice to save.
-    pub save_mode: Option<OpenMode>,
     /// A notification was clicked: open the window (`showSessions`).
     pub show: bool,
     #[cfg(target_os = "linux")]
     pub activation: Option<String>,
-    #[cfg(any(target_os = "linux", target_os = "macos"))]
+    #[cfg(any(target_os = "linux", target_os = "macos", windows))]
     completion: Option<crate::desktop_service::activation::Completion>,
-    #[cfg(any(target_os = "linux", target_os = "macos"))]
+    #[cfg(any(target_os = "linux", target_os = "macos", windows))]
     expected: Option<ExactSession>,
     /// Banners to withdraw, then post.
     pub changes: Changes,
@@ -622,7 +598,6 @@ pub struct Outcome {
 /// clicked notification.
 pub struct DeskLoop {
     pub desk: Desk,
-    mode: OpenMode,
     pub attention: Option<Attention>,
     click: Option<Click>,
     swept: Instant,
@@ -631,10 +606,9 @@ pub struct DeskLoop {
 }
 
 impl DeskLoop {
-    pub fn new(mode: OpenMode, attention: Option<Attention>, now: Instant) -> Self {
+    pub fn new(attention: Option<Attention>, now: Instant) -> Self {
         Self {
             desk: Desk::default(),
-            mode,
             attention,
             click: None,
             swept: now,
@@ -663,10 +637,10 @@ impl DeskLoop {
     /// window opens.
     pub fn start(
         &mut self,
-        publish: &mut dyn FnMut(&Desk, OpenMode),
+        publish: &mut dyn FnMut(&Desk),
         marks: &mut dyn FnMut() -> Option<DeviceMarks>,
     ) {
-        publish(&self.desk, self.mode);
+        publish(&self.desk);
         if let Some(marks) = marks() {
             self.desk.set_marks(marks);
         }
@@ -692,11 +666,6 @@ impl DeskLoop {
                         outcome.publish = true;
                     }
                 }
-                DeskInput::Mode(chosen) => {
-                    self.mode = chosen;
-                    outcome.save_mode = Some(chosen);
-                    outcome.publish = true;
-                }
                 DeskInput::Marks => marks = true,
                 DeskInput::Updates { version, restart } => {
                     if self.desk.set_updates(version, restart) {
@@ -709,9 +678,9 @@ impl DeskLoop {
                         self.click = Some(Click {
                             target,
                             deadline: cx.now + CLICK_WAIT,
-                            #[cfg(any(target_os = "linux", target_os = "macos"))]
+                            #[cfg(any(target_os = "linux", target_os = "macos", windows))]
                             service: None,
-                            #[cfg(any(target_os = "linux", target_os = "macos"))]
+                            #[cfg(any(target_os = "linux", target_os = "macos", windows))]
                             exact: None,
                         });
                         outcome.show = true;
@@ -732,7 +701,7 @@ impl DeskLoop {
                         outcome.activation = (!activation.is_empty()).then_some(activation);
                     }
                 }
-                #[cfg(any(target_os = "linux", target_os = "macos"))]
+                #[cfg(any(target_os = "linux", target_os = "macos", windows))]
                 DeskInput::ServiceClicked(delivery)
                     if self.attention_completions && delivery.current() =>
                 {
@@ -754,12 +723,17 @@ impl DeskLoop {
                         service: Some(delivery),
                     });
                 }
-                #[cfg(target_os = "linux")]
+                #[cfg(any(target_os = "linux", windows))]
                 DeskInput::Navigate { target, activation }
                     if self.attention_completions && target.valid() =>
                 {
                     outcome.show = true;
-                    outcome.activation = activation;
+                    #[cfg(target_os = "linux")]
+                    {
+                        outcome.activation = activation;
+                    }
+                    #[cfg(windows)]
+                    let _ = activation;
                     self.click = Some(Click {
                         target: Map::new(),
                         deadline: cx.now + CLICK_WAIT,
@@ -783,8 +757,10 @@ impl DeskLoop {
                 }
                 DeskInput::Clicked(_) | DeskInput::Failed { .. } => {}
                 #[cfg(target_os = "linux")]
-                DeskInput::LinuxClicked { .. } | DeskInput::Navigate { .. } => {}
-                #[cfg(any(target_os = "linux", target_os = "macos"))]
+                DeskInput::LinuxClicked { .. } => {}
+                #[cfg(any(target_os = "linux", windows))]
+                DeskInput::Navigate { .. } => {}
+                #[cfg(any(target_os = "linux", target_os = "macos", windows))]
                 DeskInput::ServiceClicked(_) => {}
             }
         }
@@ -798,7 +774,7 @@ impl DeskLoop {
             }
         }
         if outcome.publish {
-            (cx.publish)(&self.desk, self.mode);
+            (cx.publish)(&self.desk);
         }
         if let Some(attention) = self.attention.as_mut() {
             if self.observing_attention && cx.now >= self.swept + SWEEP {
@@ -825,7 +801,7 @@ impl DeskLoop {
         }
         // A live stream is the current listing Qt asks for at the click; a
         // stale one waits for its rows up to `CLICK_WAIT` (`TrayAgent.cpp:188-192`).
-        #[cfg(any(target_os = "linux", target_os = "macos"))]
+        #[cfg(any(target_os = "linux", target_os = "macos", windows))]
         if self
             .click
             .as_ref()
@@ -837,18 +813,18 @@ impl DeskLoop {
         if let Some(click) = &self.click {
             let resolution =
                 attention::resolve(&click.target, &self.desk, cx.now >= click.deadline);
-            #[cfg(any(target_os = "linux", target_os = "macos"))]
+            #[cfg(any(target_os = "linux", target_os = "macos", windows))]
             let resolution = click.exact.as_ref().map_or(resolution, |target| {
                 resolve_service(target, &self.desk, cx.now >= click.deadline)
             });
             match resolution {
                 Resolution::Open { computer, key } => {
                     outcome.open = Some((computer, key));
-                    #[cfg(any(target_os = "linux", target_os = "macos"))]
+                    #[cfg(any(target_os = "linux", target_os = "macos", windows))]
                     if let Some(delivery) = &click.service {
                         outcome.completion = Some(delivery.completion());
                     }
-                    #[cfg(any(target_os = "linux", target_os = "macos"))]
+                    #[cfg(any(target_os = "linux", target_os = "macos", windows))]
                     if let Some(target) = &click.exact {
                         outcome.expected = Some(ExactSession {
                             run: target.run.clone(),
@@ -858,7 +834,7 @@ impl DeskLoop {
                     self.click = None;
                 }
                 Resolution::Gone(name) => {
-                    #[cfg(any(target_os = "linux", target_os = "macos"))]
+                    #[cfg(any(target_os = "linux", target_os = "macos", windows))]
                     if let Some(delivery) = &click.service {
                         outcome.completion = Some(delivery.completion());
                     }
@@ -889,14 +865,14 @@ impl MarksCache {
     pub fn device(
         &mut self,
         read: impl FnOnce(Option<u64>) -> Option<crate::actions::MarkMaps>,
-        pending: Vec<ReadMark>,
+        pending: Vec<Queued>,
     ) -> DeviceMarks {
         if let Some((version, marks, replies)) = read(self.version) {
             self.version = Some(version);
             self.marks = marks;
             self.replies = replies;
         }
-        DeviceMarks::new(self.marks.clone(), self.replies.clone(), pending)
+        DeviceMarks::with_queued(self.marks.clone(), self.replies.clone(), pending)
     }
 }
 
@@ -906,7 +882,7 @@ fn device_marks(app: &AppHandle, cache: &mut MarksCache) -> Option<DeviceMarks> 
     let attention = app.try_state::<crate::actions::Attention>()?;
     let pending = app
         .try_state::<crate::actions::Actions>()
-        .map(|actions| actions.pending_marks())
+        .map(|actions| actions.queued_marks())
         .unwrap_or_default();
     Some(cache.device(|seen| attention.marks_since(seen), pending))
 }
@@ -919,13 +895,12 @@ fn optional_questions(app: &AppHandle) -> bool {
 fn run(
     app: AppHandle,
     inputs: Receiver<attention_barrier::Message>,
-    mode: OpenMode,
     attention: Option<LoadAttention>,
     focused: Arc<AtomicBool>,
 ) {
-    let mut state = DeskLoop::new(mode, None, Instant::now());
+    let mut state = DeskLoop::new(None, Instant::now());
     let mut cache = MarksCache::default();
-    state.start(&mut |desk, mode| publish(&app, desk, mode), &mut || {
+    state.start(&mut |desk| publish(&app, desk), &mut || {
         device_marks(&app, &mut cache)
     });
     state.attention = attention.map(|load| load());
@@ -948,7 +923,7 @@ fn run(
         let outcome = state.round(
             &mut batch,
             &mut Context {
-                publish: &mut |desk, mode| publish(&app, desk, mode),
+                publish: &mut |desk| publish(&app, desk),
                 now: Instant::now(),
                 unix: unix_now(),
                 focused: focused.load(Ordering::Relaxed),
@@ -968,17 +943,13 @@ fn run(
 /// Does what a round asked after it offered the status item, in Qt's order:
 /// banners, then the window.
 fn apply(app: &AppHandle, outcome: Outcome) {
-    if let Some(mode) = outcome.save_mode {
-        // Task 4: the desk thread saves the choice, off the main thread.
-        store_mode(app, mode);
-    }
     deliver(app, outcome.changes);
     if outcome.show {
         let handle = app.clone();
-        #[cfg(any(target_os = "linux", target_os = "macos"))]
+        #[cfg(any(target_os = "linux", target_os = "macos", windows))]
         let completion = outcome.completion.clone();
         let _ = app.run_on_main_thread(move || {
-            #[cfg(any(target_os = "linux", target_os = "macos"))]
+            #[cfg(any(target_os = "linux", target_os = "macos", windows))]
             if completion
                 .as_ref()
                 .is_some_and(|completion| !completion.current())
@@ -994,7 +965,7 @@ fn apply(app: &AppHandle, outcome: Outcome) {
         });
     }
     if let Some((computer, key)) = outcome.open {
-        #[cfg(any(target_os = "linux", target_os = "macos"))]
+        #[cfg(any(target_os = "linux", target_os = "macos", windows))]
         let completion = outcome.completion.clone();
         open_if(
             app,
@@ -1002,13 +973,13 @@ fn apply(app: &AppHandle, outcome: Outcome) {
                 computer: computer.0,
                 key,
                 attention: true,
-                #[cfg(any(target_os = "linux", target_os = "macos"))]
+                #[cfg(any(target_os = "linux", target_os = "macos", windows))]
                 expected: outcome.expected,
-                #[cfg(not(any(target_os = "linux", target_os = "macos")))]
+                #[cfg(not(any(target_os = "linux", target_os = "macos", windows)))]
                 expected: None,
             },
             move || {
-                #[cfg(any(target_os = "linux", target_os = "macos"))]
+                #[cfg(any(target_os = "linux", target_os = "macos", windows))]
                 if completion
                     .as_ref()
                     .is_some_and(|completion| !completion.current())
@@ -1020,10 +991,10 @@ fn apply(app: &AppHandle, outcome: Outcome) {
         );
     }
     for text in outcome.notices {
-        #[cfg(any(target_os = "linux", target_os = "macos"))]
+        #[cfg(any(target_os = "linux", target_os = "macos", windows))]
         let completion = outcome.completion.clone();
         window_notice_if(app, "Zerus", &text, move || {
-            #[cfg(any(target_os = "linux", target_os = "macos"))]
+            #[cfg(any(target_os = "linux", target_os = "macos", windows))]
             if completion
                 .as_ref()
                 .is_some_and(|completion| !completion.current())
@@ -1061,13 +1032,13 @@ fn deliver(app: &AppHandle, changes: Changes) {
     let _ = (app, changes);
 }
 
-fn publish(app: &AppHandle, desk: &Desk, mode: OpenMode) {
+fn publish(app: &AppHandle, desk: &Desk) {
     #[cfg(target_os = "linux")]
     crate::platform::linux_tray::offer(
         app,
         desk.face(),
         crate::native_text::lines(&desk.tooltip()),
-        desk.menu(mode),
+        desk.menu(),
         desk.badge(),
     );
     #[cfg(target_os = "macos")]
@@ -1075,7 +1046,7 @@ fn publish(app: &AppHandle, desk: &Desk, mode: OpenMode) {
         let (face, tooltip, menu, badge) = (
             desk.face(),
             crate::native_text::lines(&desk.tooltip()),
-            desk.menu(mode),
+            desk.menu(),
             desk.badge(),
         );
         let handle = app.clone();
@@ -1088,11 +1059,11 @@ fn publish(app: &AppHandle, desk: &Desk, mode: OpenMode) {
         app,
         desk.face(),
         crate::native_text::lines(&desk.tooltip()),
-        desk.menu(mode),
+        desk.menu(),
         desk.badge(),
     );
     #[cfg(not(any(target_os = "macos", target_os = "linux", windows)))]
-    let _ = (app, desk, mode);
+    let _ = (app, desk);
 }
 
 /// What the webview could not take yet; its page asks once, with the number
@@ -1126,19 +1097,6 @@ pub fn page_loaded(webview: &tauri::Webview) {
     }
 }
 
-/// Opens the window on a session's row (`TrayAgent.cpp:214-216`).
-pub fn open_session(app: &AppHandle, computer: &ComputerId, key: &str) {
-    open(
-        app,
-        OpenSession {
-            computer: computer.0.clone(),
-            key: key.to_owned(),
-            attention: false,
-            expected: None,
-        },
-    );
-}
-
 pub fn open_updates(app: &AppHandle) {
     let handle = app.clone();
     let _ = app.run_on_main_thread(move || {
@@ -1152,9 +1110,6 @@ pub fn open_updates(app: &AppHandle) {
     });
 }
 
-fn open(app: &AppHandle, target: OpenSession) {
-    open_if(app, target, || true);
-}
 fn open_if(app: &AppHandle, target: OpenSession, current: impl Fn() -> bool + Send + 'static) {
     let handle = app.clone();
     let _ = app.run_on_main_thread(move || {
@@ -1231,144 +1186,6 @@ pub fn tray_notify(title: &str, body: &str) {
     }
 }
 
-/// A running session's entry: Terminal.app or the clipboard, as "Open in"
-/// says (`TrayAgent::activateSessionWith`, `TrayAgent.cpp:631-659`). A copy
-/// is confirmed every time (`ClipboardBackend::open`); a failure of either
-/// shows the command to run by hand.
-#[cfg(target_os = "linux")]
-pub use crate::platform::linux_tray::open_running;
-
-#[cfg(windows)]
-pub use crate::platform::windows::tray::open_running;
-
-#[cfg(not(any(target_os = "linux", windows)))]
-pub fn open_running(app: &AppHandle, computer: &ComputerId, name: &str) {
-    let hgs = zerus_client_core::default_hgs();
-    let command = shell::open_command(
-        &hgs.to_string_lossy(),
-        &computer.0,
-        name,
-        None,
-        shell::current_shell(),
-    );
-    let mode = app
-        .try_state::<DeskState>()
-        .map(|state| *lock(&state.mode))
-        .unwrap_or_default();
-    let opened = match mode {
-        OpenMode::Terminal
-        | OpenMode::Automatic
-        | OpenMode::Tab
-        | OpenMode::Window
-        | OpenMode::Console => open_in_terminal(&command),
-        OpenMode::Clipboard => {
-            use tauri_plugin_clipboard_manager::ClipboardExt;
-            shell::copyable(&command)
-                .and_then(|()| {
-                    app.clipboard()
-                        .write_text(command.clone())
-                        .map_err(|error| {
-                            format!("cannot put the command on the clipboard ({error})")
-                        })
-                })
-                .map(|()| {
-                    tray_notify(
-                        "Zerus: copied to the clipboard",
-                        &shell::notification_text(&command),
-                    )
-                })
-        }
-    };
-    if let Err(error) = opened {
-        tray_notify(
-            "Zerus: the terminal did not open",
-            &format!("{error}\n\nCommand: {command}\nRun it in a terminal by hand."),
-        );
-    }
-}
-
-/// `osascript` with Qt's Terminal.app script, detached (`MacBackend::open`).
-fn open_in_terminal(command: &str) -> Result<(), String> {
-    detached_script("osascript", &shell::terminal_app_script(command))
-}
-
-/// Starts `program -e script` from HOME without waiting for it. Qt reports
-/// only that it could not start (`MacBackend.cpp:61-65`); the reason goes to
-/// the log.
-fn detached_script(program: &str, script: &str) -> Result<(), String> {
-    let home = std::env::var_os("HOME").unwrap_or_else(|| "/".into());
-    let spawned = crate::child_environment::command(program)
-        .arg("-e")
-        .arg(script)
-        .current_dir(home)
-        .stdin(Stdio::null())
-        .stdout(Stdio::null())
-        .stderr(Stdio::null())
-        .spawn();
-    match spawned {
-        Ok(mut child) => {
-            std::thread::spawn(move || {
-                let _ = child.wait();
-            });
-            Ok(())
-        }
-        Err(error) => {
-            eprintln!("zerus-client: {program}: {error}");
-            Err("cannot start osascript".to_owned())
-        }
-    }
-}
-
-/// Takes `chosen` unless it is the mode already in use (`TrayAgent::setOpenMode`
-/// returns early on the checked entry). Returns whether it changed.
-fn choose(current: &mut OpenMode, chosen: OpenMode) -> bool {
-    if *current == chosen {
-        return false;
-    }
-    *current = chosen;
-    true
-}
-
-/// The "Open in" choice: applied at once (`TrayAgent::setOpenMode`). The desk
-/// thread saves it, so the main thread never waits for the disk.
-pub fn set_mode(app: &AppHandle, mode: OpenMode) {
-    let Some(state) = app.try_state::<DeskState>() else {
-        return;
-    };
-    if !choose(&mut lock(&state.mode), mode) {
-        return;
-    }
-    let _ = lock(&state.sender).send(DeskInput::Mode(mode));
-}
-
-#[cfg(any(target_os = "linux", windows))]
-pub fn current_mode(app: &AppHandle) -> OpenMode {
-    app.try_state::<DeskState>()
-        .map(|state| *lock(&state.mode))
-        .unwrap_or(OpenMode::Automatic)
-}
-
-/// Saves a chosen mode; Qt's notice when it cannot (`TrayAgent.cpp:864-872`).
-fn mode_saved(dir: &Path, mode: OpenMode) -> Result<(), Notice> {
-    save_mode(dir, mode).map_err(|error| Notice {
-        title: "Zerus: mode applied, but not saved".to_owned(),
-        text: format!(
-            "New sessions already open the new way, but the choice could not be written to {}: {error}",
-            dir.join(MODE_FILE).display()
-        ),
-    })
-}
-
-/// On the desk thread: saves the mode `set_mode` applied.
-fn store_mode(app: &AppHandle, mode: OpenMode) {
-    let Some(dir) = app.try_state::<DeskState>().map(|state| state.dir.clone()) else {
-        return;
-    };
-    if let Err(notice) = mode_saved(&dir, mode) {
-        tray_notify(&notice.title, &notice.text);
-    }
-}
-
 /// What a menu entry does when chosen (Qt's `TrayMenu` signals).
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub enum MenuAction {
@@ -1376,16 +1193,6 @@ pub enum MenuAction {
     Open,
     Updates,
     Restart,
-    /// A running session opens or is copied; a saved one opens its row.
-    Session {
-        computer: ComputerId,
-        key: String,
-        name: String,
-        running: bool,
-        tty: String,
-    },
-    /// An "Open in" mode (`openModeChosen`).
-    Mode(OpenMode),
     Refresh,
     Quit,
 }
@@ -1398,17 +1205,12 @@ pub enum Item {
         id: String,
         text: String,
     },
-    /// A line that cannot be chosen: a computer's header or its state.
+    /// A line that cannot be chosen: a computer's sessions count or state.
     Label {
         id: String,
         text: String,
     },
     Separator,
-    /// The "Open in" submenu: each mode's id, the mode and whether it is checked.
-    OpenIn {
-        id: String,
-        modes: Vec<(String, OpenMode, bool)>,
-    },
 }
 
 /// What one offer changes.
@@ -1491,10 +1293,6 @@ impl Bar {
     /// The native items of a new menu, Qt's texts (`TrayMenu::rebuild`) in
     /// the interface language.
     pub fn layout(&mut self, entries: &[Entry]) -> Vec<Item> {
-        self.layout_modes(entries, &OpenMode::ALL)
-    }
-
-    pub fn layout_modes(&mut self, entries: &[Entry], offered: &[OpenMode]) -> Vec<Item> {
         self.generation += 1;
         let mut actions = HashMap::new();
         let mut items = Vec::with_capacity(entries.len());
@@ -1521,38 +1319,6 @@ impl Bar {
                     id: id.clone(),
                     text: render(text),
                 },
-                Entry::Session {
-                    computer,
-                    key,
-                    name,
-                    text,
-                    running,
-                    tty,
-                } => chosen_by(
-                    text,
-                    MenuAction::Session {
-                        computer: computer.clone(),
-                        key: key.clone(),
-                        name: name.clone(),
-                        running: *running,
-                        tty: tty.clone(),
-                    },
-                ),
-                Entry::OpenIn(chosen) => {
-                    let modes = offered
-                        .iter()
-                        .copied()
-                        .map(|mode| {
-                            let item = format!("{id}-{}", mode.label());
-                            actions.insert(item.clone(), MenuAction::Mode(mode));
-                            (item, mode, mode == *chosen)
-                        })
-                        .collect();
-                    Item::OpenIn {
-                        id: id.clone(),
-                        modes,
-                    }
-                }
                 Entry::Refresh => chosen_by(&text!("Refresh"), MenuAction::Refresh),
                 Entry::Quit => chosen_by(&text!("Quit"), MenuAction::Quit),
             });
@@ -1738,7 +1504,7 @@ mod tests {
             let start = Instant::now();
             let attention = Attention::load(dir.join(ATTENTION_FILE), || None);
             Self {
-                state: DeskLoop::new(OpenMode::Terminal, Some(attention), start),
+                state: DeskLoop::new(Some(attention), start),
                 start,
                 focused: false,
                 optional: false,
@@ -1761,7 +1527,7 @@ mod tests {
             let outcome = self.state.round(
                 inputs,
                 &mut Context {
-                    publish: &mut |desk, _| {
+                    publish: &mut |desk| {
                         steps
                             .borrow_mut()
                             .push(format!("publish {}", desk.attention()))
@@ -1857,13 +1623,13 @@ mod tests {
         let mut row = asking("claude/p/a");
         row.attention_fingerprint = "fp-1".into();
         let marks = acknowledged(&row);
-        let mut state = DeskLoop::new(OpenMode::Clipboard, None, Instant::now());
+        let mut state = DeskLoop::new(None, Instant::now());
         let steps = std::cell::RefCell::new(Vec::new());
         state.start(
-            &mut |desk, mode| {
+            &mut |desk| {
                 steps
                     .borrow_mut()
-                    .push(format!("publish {} {:?}", desk.computers().len(), mode))
+                    .push(format!("publish {}", desk.computers().len()))
             },
             &mut || {
                 steps.borrow_mut().push("marks".into());
@@ -1872,7 +1638,7 @@ mod tests {
         );
         assert_eq!(
             steps.into_inner(),
-            ["publish 0 Clipboard", "marks"],
+            ["publish 0", "marks"],
             "ruling 1: the empty menu goes out before anything is read"
         );
         // Ruling 2: the first row already counts this device's marks.
@@ -1880,7 +1646,7 @@ mod tests {
         state.round(
             live("", vec![row]),
             &mut Context {
-                publish: &mut |desk, _| offered.push(desk.attention()),
+                publish: &mut |desk| offered.push(desk.attention()),
                 now: Instant::now(),
                 unix: 1000,
                 focused: false,
@@ -1904,13 +1670,16 @@ mod tests {
                 },
             )])
         };
-        let pending = |run: &str| ReadMark {
-            computer: "mac".into(),
-            name: "claude/p/a".into(),
-            run_id: run.into(),
-            conversation_id: "conv-a".into(),
-            reply_id: Some("r1".into()),
-            attention_signature: None,
+        let pending = |run: &str| Queued {
+            mark: zerus_client_core::readmarks::ReadMark {
+                computer: "mac".into(),
+                name: "claude/p/a".into(),
+                run_id: run.into(),
+                conversation_id: "conv-a".into(),
+                reply_id: Some("r1".into()),
+                attention_signature: None,
+            },
+            session_id: None,
         };
         let mut asked = Vec::new();
         let first = cache.device(
@@ -1922,7 +1691,7 @@ mod tests {
         );
         assert_eq!(
             first,
-            DeviceMarks::new(mark(true), BTreeMap::new(), vec![pending("run-1")])
+            DeviceMarks::with_queued(mark(true), BTreeMap::new(), vec![pending("run-1")])
         );
         // A read mark changed alone: the attention maps are not copied again.
         let second = cache.device(
@@ -1934,7 +1703,7 @@ mod tests {
         );
         assert_eq!(
             second,
-            DeviceMarks::new(mark(true), BTreeMap::new(), vec![pending("run-2")])
+            DeviceMarks::with_queued(mark(true), BTreeMap::new(), vec![pending("run-2")])
         );
         let third = cache.device(
             |seen| {
@@ -2003,11 +1772,11 @@ mod tests {
         // A restart reads it: the same edge posts no second banner, and Qt's
         // state is not even read.
         let restarted = Attention::load(path.clone(), || panic!("Qt's state read"));
-        let mut thread = DeskLoop::new(OpenMode::Terminal, Some(restarted), Instant::now());
+        let mut thread = DeskLoop::new(Some(restarted), Instant::now());
         let outcome = thread.round(
             live("", vec![asking("claude/p/a")]),
             &mut Context {
-                publish: &mut |_, _| {},
+                publish: &mut |_| {},
                 now: Instant::now(),
                 unix: 2000,
                 focused: false,
@@ -2237,12 +2006,12 @@ mod tests {
     #[test]
     fn marks_count_while_no_tracker_runs() {
         let start = Instant::now();
-        let mut state = DeskLoop::new(OpenMode::Terminal, None, start);
+        let mut state = DeskLoop::new(None, start);
         let mut row = asking("claude/p/a");
         row.attention_fingerprint = "fp-1".into();
         let marks = acknowledged(&row);
         let mut cx = Context {
-            publish: &mut |_, _| {},
+            publish: &mut |_| {},
             now: Instant::now(),
             unix: 1000,
             focused: false,
@@ -2261,7 +2030,7 @@ mod tests {
         );
     }
 
-    #[cfg(target_os = "linux")]
+    #[cfg(any(target_os = "linux", windows))]
     #[test]
     fn startup_navigation_waits_for_exact_identity_and_never_creates_a_callback_receipt() {
         let dir = scratch("startup-navigation");
@@ -2280,6 +2049,7 @@ mod tests {
         );
         assert!(initial.show);
         assert!(initial.open.is_none());
+        #[cfg(target_os = "linux")]
         assert_eq!(initial.activation.as_deref(), Some("synthetic-wayland"));
         assert!(initial.completion.is_none());
         let mut row = asking("renamed/exact-target");
@@ -2302,7 +2072,7 @@ mod tests {
         let _ = std::fs::remove_dir_all(dir);
     }
 
-    #[cfg(any(target_os = "linux", target_os = "macos"))]
+    #[cfg(any(target_os = "linux", target_os = "macos", windows))]
     #[test]
     fn service_click_requires_both_original_run_and_conversation_without_name_fallback() {
         let mut desk = Desk::default();
@@ -2670,35 +2440,6 @@ mod tests {
         }
     }
 
-    #[test]
-    fn a_mode_that_cannot_be_saved_gives_qts_notice() {
-        let dir = scratch("unsaved");
-        assert_eq!(mode_saved(&dir, OpenMode::Clipboard), Ok(()));
-        assert_eq!(load_mode(&dir, None), OpenMode::Clipboard);
-        // A file where the data directory should be.
-        let file = dir.join("not-a-directory");
-        std::fs::write(&file, b"").unwrap();
-        let notice = mode_saved(&file, OpenMode::Terminal).unwrap_err();
-        assert_eq!(notice.title, "Zerus: mode applied, but not saved");
-        assert!(
-            notice.text.starts_with(&format!(
-                "New sessions already open the new way, but the choice could not be written to {}: ",
-                file.join(MODE_FILE).display()
-            )),
-            "{}",
-            notice.text
-        );
-        let _ = std::fs::remove_dir_all(&dir);
-    }
-
-    #[test]
-    fn an_osascript_that_cannot_start_reads_like_qt() {
-        assert_eq!(
-            detached_script("/nonexistent/zerus-osascript", "return"),
-            Err("cannot start osascript".to_owned())
-        );
-    }
-
     fn target(key: &str) -> OpenSession {
         OpenSession {
             computer: "studio".into(),
@@ -2784,15 +2525,6 @@ mod tests {
         );
         assert_eq!(inbox.take(new).open, Some(target("b")));
         assert_eq!(inbox.page(), new);
-    }
-
-    #[test]
-    fn choosing_the_mode_already_chosen_changes_nothing() {
-        // `TrayAgent::setOpenMode` returns early: no new backend, no write.
-        let mut mode = OpenMode::Terminal;
-        assert!(!choose(&mut mode, OpenMode::Terminal));
-        assert!(choose(&mut mode, OpenMode::Clipboard));
-        assert_eq!(mode, OpenMode::Clipboard);
     }
 
     fn offer(bar: &mut Bar, total: usize, badge: Option<&str>) -> Offered {
@@ -2882,120 +2614,57 @@ mod tests {
         assert_eq!(offer(&mut bar, 2, None).badge, Some(None));
     }
 
-    fn session(key: &str, name: &str, running: bool) -> Entry {
-        Entry::Session {
-            computer: ComputerId::from("studio"),
-            key: key.into(),
-            name: name.into(),
-            text: Text::verbatim(name),
-            running,
-            tty: String::new(),
-        }
-    }
-
     fn id(item: &Item) -> &str {
         match item {
-            Item::Action { id, .. } | Item::Label { id, .. } | Item::OpenIn { id, .. } => id,
+            Item::Action { id, .. } | Item::Label { id, .. } => id,
             Item::Separator => "",
         }
     }
 
+    /// The owner's 0.48.0 menu: Open Zerus, one line per computer, Quit; no
+    /// session rows and no "Open in" (nothing a click could open).
     #[test]
-    fn the_menu_follows_qt_and_each_entry_names_its_action() {
+    fn the_menu_shows_computers_as_lines_and_no_sessions() {
         let mut bar = Bar::default();
         let items = bar.layout(&[
             Entry::Open,
             Entry::Separator,
-            Entry::Label(Text::verbatim("studio")),
-            session("run:a", "claude/sample-project/a", true),
-            session("run:b", "codex/sample-project/b", false),
+            Entry::Label(text!("%1 here", 12usize)),
+            Entry::Label(text!("%1 on %2", 5usize, "studio")),
             Entry::Separator,
-            Entry::OpenIn(OpenMode::Clipboard),
             Entry::Quit,
         ]);
         let texts: Vec<&str> = items
             .iter()
             .map(|item| match item {
                 Item::Action { text, .. } | Item::Label { text, .. } => text.as_str(),
-                Item::OpenIn { .. } => "Open in",
                 Item::Separator => "-",
             })
             .collect();
         assert_eq!(
             texts,
-            [
-                "Open Zerus",
-                "-",
-                "studio",
-                "claude/sample-project/a",
-                "codex/sample-project/b",
-                "-",
-                "Open in",
-                "Quit"
-            ]
+            ["Open Zerus", "-", "12 here", "5 on studio", "-", "Quit"]
         );
         assert!(
             matches!(items[2], Item::Label { .. }),
-            "a header cannot be chosen"
+            "a computer's line cannot be chosen"
         );
         assert_eq!(bar.action(id(&items[0])), Some(MenuAction::Open));
-        assert_eq!(
-            bar.action(id(&items[3])),
-            Some(MenuAction::Session {
-                computer: ComputerId::from("studio"),
-                key: "run:a".into(),
-                name: "claude/sample-project/a".into(),
-                running: true,
-                tty: String::new(),
-            })
-        );
-        assert!(matches!(
-            bar.action(id(&items[4])),
-            Some(MenuAction::Session { running: false, .. })
-        ));
         assert_eq!(bar.action(id(&items[2])), None);
-        let Item::OpenIn { modes, .. } = &items[6] else {
-            panic!("Open in is a submenu")
-        };
-        let shown: Vec<(&str, bool)> = modes
-            .iter()
-            .map(|(_, mode, checked)| (mode.label(), *checked))
-            .collect();
-        assert_eq!(
-            shown,
-            [("Terminal.app", false), ("Clipboard", true)],
-            "Qt's macOS modes, the chosen one checked"
-        );
-        for (id, mode, _) in modes {
-            assert_eq!(bar.action(id), Some(MenuAction::Mode(*mode)));
-        }
-        assert_eq!(bar.action(id(&items[7])), Some(MenuAction::Quit));
+        assert_eq!(bar.action(id(&items[3])), None);
+        assert_eq!(bar.action(id(&items[5])), Some(MenuAction::Quit));
     }
 
     #[test]
     fn a_click_names_what_the_shown_menu_showed() {
         let mut bar = Bar::default();
-        let first = bar.layout(&[
-            Entry::Open,
-            session("run:a", "claude/sample-project/a", true),
-            Entry::Quit,
-        ]);
+        let first = bar.layout(&[Entry::Open, Entry::Restart, Entry::Quit]);
         bar.began();
         assert!(bar.ended());
         // The menu closed with a pending change; two rebuilds may run before the click arrives.
-        bar.layout(&[
-            Entry::Open,
-            session("run:b", "claude/sample-project/b", true),
-            Entry::Quit,
-        ]);
-        let last = bar.layout(&[
-            Entry::Quit,
-            session("run:c", "claude/sample-project/c", true),
-        ]);
-        assert!(matches!(
-            bar.action(id(&first[1])),
-            Some(MenuAction::Session { key, .. }) if key == "run:a"
-        ));
+        bar.layout(&[Entry::Open, Entry::Quit]);
+        let last = bar.layout(&[Entry::Quit, Entry::Open]);
+        assert_eq!(bar.action(id(&first[1])), Some(MenuAction::Restart));
         assert_eq!(
             bar.action(id(&first[2])),
             Some(MenuAction::Quit),
@@ -3008,27 +2677,5 @@ mod tests {
             None,
             "a menu shown since replaces the old one"
         );
-    }
-
-    #[test]
-    fn a_tray_action_keeps_the_shown_tty_when_the_listing_changes() {
-        let mut bar = Bar::default();
-        let mut entry = session("run:a", "sh/sample-project", true);
-        if let Entry::Session { computer, tty, .. } = &mut entry {
-            *computer = ComputerId::local();
-            *tty = "/dev/pts/7".into();
-        }
-        let first = bar.layout(&[entry.clone()]);
-        bar.began();
-        assert!(bar.ended());
-        if let Entry::Session { tty, .. } = &mut entry {
-            *tty = "/dev/pts/8".into();
-        }
-        bar.layout(&[entry]);
-        assert!(
-            matches!(bar.action(id(&first[0])), Some(MenuAction::Session { tty, .. }) if tty == "/dev/pts/7")
-        );
-        bar.began();
-        assert_eq!(bar.action(id(&first[0])), None);
     }
 }

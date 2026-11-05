@@ -12,7 +12,8 @@
 //! refusal is reviewed again ("Check again").
 use crate::actions::WorktreeCleanup;
 use crate::worktree_review::{
-    exit_cleanup_ready, local_data, process_reviewable, removable, Removal, Removed,
+    discardable_with_processes, exit_cleanup_ready, local_data, process_reviewable, removable,
+    Removal, Removed,
 };
 use serde::{Deserialize, Serialize};
 use serde_json::Value;
@@ -62,6 +63,10 @@ pub fn removal_button(checked: bool) -> &'static str {
         "Stop and archive"
     }
 }
+
+/// Why a folder whose removal stopped partway stays.
+pub const LEFTOVER: &str =
+    "Git no longer tracks this folder, but files remain. Review them in Projects > Worktrees.";
 
 /// After the dialog the session must still be the one asked about.
 pub const STATE_CHANGED: &str = "The session state changed. Open its actions again.";
@@ -155,27 +160,56 @@ impl Entry {
     }
 
     fn discardable(&self) -> bool {
-        self.row["discardable"] == Value::Bool(true)
+        (self.row["discardable"] == Value::Bool(true)
             && !self.row["discard_fingerprint"]
                 .as_str()
                 .unwrap_or("")
-                .is_empty()
+                .is_empty())
+            || discardable_with_processes(&self.row)
     }
 
-    fn eligible(&self) -> bool {
+    /// Whether an explicit removal may target this folder now. Every desktop
+    /// dialog shows exactly these folders as ready, so what it counts and what
+    /// [`Cleanup::remove`] removes cannot drift apart.
+    pub fn eligible(&self) -> bool {
         !self.terminal()
             && self.verified
             && (removable(&self.row) || self.discardable() || process_reviewable(&self.row))
     }
 
-    /// Ready for the background pass: verified, ready for exit cleanup, and
-    /// owned by the same checkout owner recorded at launch.
-    fn automatic_ready(&self) -> bool {
+    /// The native original Done+Remove scope may exclude only classified reads.
+    /// A retained row or an ordinary review cannot reconstruct that origin.
+    fn ignores_permission_denials(&self, confirmed_remove: bool) -> bool {
+        confirmed_remove
+            && self.verified
+            && self.exit_cleanup
+            && !self.expected_owner_id.is_empty()
+            && self.row["ownership_id"].as_str() == Some(self.expected_owner_id.as_str())
+            && crate::worktree_review::permission_denials_complete(&self.row)
+            && self.row["unreadable_processes"]
+                .as_array()
+                .is_some_and(|rows| !rows.is_empty())
+    }
+
+    /// Ready for the original exit pass, with the same launch ownership and
+    /// every file, session and readable process protection still enforced.
+    fn automatic_ready(&self, confirmed_remove: bool) -> bool {
+        let row = if self.ignores_permission_denials(confirmed_remove)
+            && self.row["process_fingerprint"]
+                .as_str()
+                .is_some_and(|s| !s.is_empty())
+        {
+            std::borrow::Cow::Owned(crate::worktree_review::without_permission_denials(
+                &self.row,
+            ))
+        } else {
+            std::borrow::Cow::Borrowed(&self.row)
+        };
         self.eligible()
             && self.exit_cleanup
             && !self.expected_owner_id.is_empty()
             && self.row["ownership_id"].as_str() == Some(self.expected_owner_id.as_str())
-            && exit_cleanup_ready(&self.row)
+            && exit_cleanup_ready(&row)
     }
 }
 
@@ -306,7 +340,11 @@ impl Cleanup {
         }
         let automatic = !self.auto_scheduled
             && (self.background
-                || (!self.entries.is_empty() && self.entries.iter().all(Entry::automatic_ready)));
+                || (!self.entries.is_empty()
+                    && self
+                        .entries
+                        .iter()
+                        .all(|entry| entry.automatic_ready(false))));
         if automatic {
             self.auto_scheduled = true;
             return self.start(true, Consents::default());
@@ -333,23 +371,36 @@ impl Cleanup {
         match reply {
             Ok(data) => {
                 let target = entry.path().to_owned();
-                let rows: Vec<&Value> = if host == entry.host
+                let same = host == entry.host
                     && common_dir == entry.common_dir
                     && data["state"] == "ok"
-                    && data["common_dir"].as_str() == Some(entry.common_dir.as_str())
-                {
-                    data["worktrees"]
+                    && data["common_dir"].as_str() == Some(entry.common_dir.as_str());
+                let matching = |key: &str| -> Vec<&Value> {
+                    if !same {
+                        return Vec::new();
+                    }
+                    data[key]
                         .as_array()
                         .into_iter()
                         .flatten()
                         .filter(|row| row["path"].as_str() == Some(target.as_str()))
                         .collect()
-                } else {
-                    Vec::new()
                 };
+                let rows = matching("worktrees");
+                let leftovers = matching("leftovers");
                 if rows.len() == 1 {
                     entry.row = rows[0].clone();
                     entry.verified = true;
+                } else if rows.is_empty()
+                    && leftovers.len() == 1
+                    && leftovers[0]["kind"] == "leftover"
+                    && leftovers[0]["verdict"] == "partially_removed"
+                {
+                    // Git stopped tracking the folder while files remain: never
+                    // removable here, kept for review where leftovers are handled.
+                    entry.row = leftovers[0].clone();
+                    entry.verified = true;
+                    entry.detail = LEFTOVER.into();
                 } else {
                     entry.review_error =
                         "Could not verify this folder. Check again after reconnecting.".into();
@@ -377,7 +428,8 @@ impl Cleanup {
         for entry in self.entries.iter().filter(|entry| entry.eligible()) {
             required.local_files |= local_data(&entry.row);
             required.discard_changes |= entry.discardable();
-            required.unchecked_processes |= process_reviewable(&entry.row);
+            required.unchecked_processes |= !entry.ignores_permission_denials(self.background)
+                && (process_reviewable(&entry.row) || discardable_with_processes(&entry.row));
         }
         required
     }
@@ -413,7 +465,10 @@ impl Cleanup {
                 self.index += 1;
                 continue;
             }
-            if self.stop || !entry.eligible() || (automatic && !entry.automatic_ready()) {
+            if self.stop
+                || !entry.eligible()
+                || (automatic && !entry.automatic_ready(self.background))
+            {
                 entry.status = Some(Status::Kept);
                 if self.stop {
                     entry.verified = false;
@@ -440,9 +495,17 @@ impl Cleanup {
                 } else {
                     String::new()
                 },
-                process_fingerprint: if !automatic
+                process_fingerprint: if entry.ignores_permission_denials(self.background)
+                    && !text("process_fingerprint").is_empty()
+                {
+                    format!(
+                        "{}{}",
+                        crate::worktree_review::PERMISSION_DENIALS_PREFIX,
+                        text("process_fingerprint")
+                    )
+                } else if !automatic
                     && consents.unchecked_processes
-                    && process_reviewable(row)
+                    && (process_reviewable(row) || discardable_with_processes(row))
                 {
                     text("process_fingerprint")
                 } else {
@@ -521,6 +584,18 @@ impl Cleanup {
         }
     }
 
+    /// Only this in-memory original Done+Remove operation hides excluded reads.
+    /// Retained/imported/manual rows cannot acquire that origin from status.
+    pub fn presentation_row<'a>(&self, entry: &'a Entry) -> std::borrow::Cow<'a, Value> {
+        if entry.ignores_permission_denials(self.background) {
+            std::borrow::Cow::Owned(crate::worktree_review::without_permission_denials(
+                &entry.row,
+            ))
+        } else {
+            std::borrow::Cow::Borrowed(&entry.row)
+        }
+    }
+
     /// Why the first kept folder stayed.
     pub fn retained_reason(&self) -> Option<String> {
         let entry = self
@@ -541,8 +616,8 @@ impl Cleanup {
         if !entry.review_error.is_empty() {
             return Some(first(&entry.review_error));
         }
-        let row = &entry.row;
-        let has = |code: &str| crate::worktree_review::has_reason(row, &[code]);
+        let row = self.presentation_row(entry);
+        let has = |code: &str| crate::worktree_review::has_reason(&row, &[code]);
         Some(if has("processes") {
             "A running program uses the folder.".into()
         } else if has("sessions") {
@@ -551,14 +626,14 @@ impl Cleanup {
             "Some running programs could not be checked.".into()
         } else if entry.discardable() {
             "Uncommitted changes need review.".into()
-        } else if local_data(row) {
+        } else if local_data(&row) {
             "Local files need review.".into()
         } else if entry.expected_owner_id.is_empty()
             || row["ownership_id"].as_str() != Some(entry.expected_owner_id.as_str())
         {
             "Checkout ownership needs review.".into()
         } else {
-            crate::worktree_review::summary(row)
+            crate::worktree_review::summary(&row)
                 .join(" ")
                 .chars()
                 .take(180)
@@ -593,6 +668,162 @@ mod tests {
             None,
         )
         .unwrap()
+    }
+
+    fn denied_row() -> Value {
+        let mut row = ready_row("owner-1");
+        row["verdict"] = json!("blocked");
+        row["reasons"] = json!([{"code":"processes_unavailable","message":"hidden paths"}]);
+        row["process_fingerprint"] = json!("v2:1000:original-proof");
+        row["unreadable_processes"] = json!([{"pid":7,"command":"protected","identity":"original-birth","cwd":true,"executable":false,"files":true}]);
+        row["process_coverage"] = json!({"abi":crate::worktree_review::PERMISSION_DENIALS_ABI,
+            "complete":true,"open_files_checked":true,"permission_denials":1});
+        row
+    }
+
+    #[test]
+    fn original_done_remove_uses_only_the_strict_permission_denial_proof() {
+        let mut cleanup = Cleanup::after_termination(vec![terminated("owner-1")]);
+        assert!(matches!(cleanup.step(), Step::Review { .. }));
+        let row = denied_row();
+        let Step::Remove { removal, .. } = cleanup.reviewed(
+            "studio",
+            "/home/example/repo/.git",
+            Ok(&review_of(row.clone())),
+        ) else {
+            panic!("original confirmed Remove should ignore classified permission denials");
+        };
+        assert_eq!(
+            removal.process_fingerprint,
+            format!(
+                "{}v2:1000:original-proof",
+                crate::worktree_review::PERMISSION_DENIALS_PREFIX
+            )
+        );
+        assert!(!removal.delete_branch);
+        assert!(removal.preserve_archive_restore);
+        assert_eq!(
+            cleanup.entries[0].row, row,
+            "the original Root row/proof is unchanged"
+        );
+        let visible = cleanup.presentation_row(&cleanup.entries[0]);
+        assert_eq!(visible["unreadable_processes"], json!([]));
+        assert!(visible["reasons"].as_array().unwrap().is_empty());
+    }
+
+    #[test]
+    fn permission_denial_scope_never_comes_from_manual_or_retained_status() {
+        let row = denied_row();
+        let mut manual = Cleanup::manual(vec![terminated("owner-1")]);
+        assert!(matches!(manual.step(), Step::Review { .. }));
+        assert_eq!(
+            manual.reviewed(
+                "studio",
+                "/home/example/repo/.git",
+                Ok(&review_of(row.clone()))
+            ),
+            Step::Idle
+        );
+        assert!(manual.required().unchecked_processes);
+        assert_eq!(
+            manual.presentation_row(&manual.entries[0])["unreadable_processes"],
+            row["unreadable_processes"]
+        );
+        let mut original = Cleanup::after_termination(vec![terminated("owner-1")]);
+        original.entries[0].status = Some(Status::Unconfirmed);
+        original.entries[0].verified = true;
+        original.entries[0].row = row;
+        assert_eq!(
+            original.step(),
+            Step::Done,
+            "unknown removal remains terminal"
+        );
+        let retained = Cleanup::retained(original.entries.clone());
+        assert!(
+            !retained.presentation_row(&retained.entries[0])["unreadable_processes"]
+                .as_array()
+                .unwrap()
+                .is_empty()
+        );
+    }
+
+    #[test]
+    fn access_denials_do_not_hide_other_blockers_or_incomplete_evidence() {
+        let mutations: Vec<(&str, Value)> = vec![
+            ("old/generic uncertainty", Value::Null),
+            (
+                "incomplete",
+                json!({"abi":crate::worktree_review::PERMISSION_DENIALS_ABI,"complete":false,"open_files_checked":true,"permission_denials":1}),
+            ),
+            (
+                "files not checked",
+                json!({"abi":crate::worktree_review::PERMISSION_DENIALS_ABI,"complete":true,"open_files_checked":false,"permission_denials":1}),
+            ),
+            (
+                "mismatched count",
+                json!({"abi":crate::worktree_review::PERMISSION_DENIALS_ABI,"complete":true,"open_files_checked":true,"permission_denials":2}),
+            ),
+        ];
+        for (label, coverage) in mutations {
+            let mut cleanup = Cleanup::after_termination(vec![terminated("owner-1")]);
+            let mut row = denied_row();
+            row["process_coverage"] = coverage;
+            assert!(matches!(cleanup.step(), Step::Review { .. }));
+            assert!(
+                !matches!(
+                    cleanup.reviewed("studio", "/home/example/repo/.git", Ok(&review_of(row))),
+                    Step::Remove { .. }
+                ),
+                "{label}"
+            );
+        }
+        for process in [
+            json!({"pid":7}),
+            json!({"pid":7,"identity":"original-birth","cwd":false,"executable":false,"files":false}),
+            json!({"pid":7,"identity":"original-birth","cwd":true,"executable":false}),
+            json!({"pid":0,"identity":"original-birth","cwd":true,"executable":false,"files":false}),
+        ] {
+            let mut cleanup = Cleanup::after_termination(vec![terminated("owner-1")]);
+            let mut row = denied_row();
+            row["unreadable_processes"] = json!([process]);
+            assert!(matches!(cleanup.step(), Step::Review { .. }));
+            assert!(!matches!(
+                cleanup.reviewed("studio", "/home/example/repo/.git", Ok(&review_of(row))),
+                Step::Remove { .. }
+            ));
+        }
+        for reason in [
+            "processes",
+            "sessions",
+            "status_unavailable",
+            "changes",
+            "locked",
+        ] {
+            let mut cleanup = Cleanup::after_termination(vec![terminated("owner-1")]);
+            let mut row = denied_row();
+            row["reasons"]
+                .as_array_mut()
+                .unwrap()
+                .push(json!({"code":reason}));
+            assert!(matches!(cleanup.step(), Step::Review { .. }));
+            assert!(
+                !matches!(
+                    cleanup.reviewed("studio", "/home/example/repo/.git", Ok(&review_of(row))),
+                    Step::Remove { .. }
+                ),
+                "{reason}"
+            );
+        }
+        let mut cleanup = Cleanup::after_termination(vec![terminated("another-owner")]);
+        assert!(matches!(cleanup.step(), Step::Review { .. }));
+        assert!(!matches!(
+            cleanup.reviewed(
+                "studio",
+                "/home/example/repo/.git",
+                Ok(&review_of(denied_row()))
+            ),
+            Step::Remove { .. }
+        ));
     }
 
     #[test]
@@ -744,6 +975,57 @@ mod tests {
         );
     }
 
+    // zerus-ty94 #2: a targeted review reports the folder's own leftover after
+    // a removal stopped partway. It is kept with that reason, never removed and
+    // never shown as an unverified folder; another folder's leftover is not it.
+    #[test]
+    fn a_partially_removed_folder_is_kept_with_its_own_reason() {
+        let leftover = |path: &str| {
+            json!({"path": path, "kind": "leftover", "verdict": "partially_removed",
+                   "common_dir": "/home/example/repo/.git", "fingerprint": "f2", "deletable": true,
+                   "reasons": [], "removal": {"path": path, "status": "partial"}})
+        };
+        let reply = |path: &str| {
+            json!({"state": "ok", "common_dir": "/home/example/repo/.git", "worktrees": [],
+                   "leftovers": [leftover(path)]})
+        };
+        let mut cleanup = Cleanup::after_termination(vec![terminated("owner-1")]);
+        let Step::Review {
+            host, common_dir, ..
+        } = cleanup.step()
+        else {
+            panic!()
+        };
+        assert_eq!(
+            cleanup.reviewed(&host, &common_dir, Ok(&reply("/home/example/repo-work-1"))),
+            Step::Idle,
+            "a leftover is never removed here"
+        );
+        assert_eq!(cleanup.count(Status::Kept), 1);
+        assert_eq!(cleanup.retained_reason().as_deref(), Some(LEFTOVER));
+        assert!(cleanup.entries[0].review_error.is_empty());
+        assert_eq!(cleanup.entries[0].row["kind"], "leftover");
+        // Another folder's leftover, or one from another repository, is not this one.
+        for other in [reply("/home/example/repo-work-2"), {
+            let mut value = reply("/home/example/repo-work-1");
+            value["common_dir"] = json!("/other/.git");
+            value
+        }] {
+            let mut cleanup = Cleanup::after_termination(vec![terminated("owner-1")]);
+            let Step::Review {
+                host, common_dir, ..
+            } = cleanup.step()
+            else {
+                panic!()
+            };
+            cleanup.reviewed(&host, &common_dir, Ok(&other));
+            assert_eq!(
+                cleanup.retained_reason().as_deref(),
+                Some("Could not verify this folder. Check again after reconnecting.")
+            );
+        }
+    }
+
     #[test]
     fn an_unknown_outcome_is_never_replayed() {
         let mut cleanup = Cleanup::after_termination(vec![terminated("owner-1")]);
@@ -831,6 +1113,74 @@ mod tests {
         assert_eq!(cleanup.step(), Step::Done);
     }
 
+    /// Every dialog counts exactly `Entry::eligible`: a removed or unknown
+    /// folder is never a target, and a verified refusal needs a fresh review
+    /// before another removal (no retry without Check again).
+    #[test]
+    fn only_a_freshly_verified_folder_that_is_not_settled_is_eligible() {
+        let reviewed = || {
+            let mut entry = terminated("o");
+            entry.exit_cleanup = false;
+            entry.verified = true;
+            entry.row = ready_row("o");
+            entry
+        };
+        assert!(reviewed().eligible());
+        for settled in [Status::Removed, Status::Unconfirmed] {
+            let mut entry = reviewed();
+            entry.status = Some(settled);
+            assert!(!entry.eligible(), "{settled:?} is never a target (U4)");
+        }
+        let mut entry = reviewed();
+        entry.verified = false;
+        assert!(
+            !entry.eligible(),
+            "an unverified folder is never a target (U2)"
+        );
+        // Probe PV: after a verified refusal, Remove again without Check again
+        // stays idle; only a fresh review admits the folder again.
+        let mut cleanup = Cleanup::manual(vec![{
+            let mut entry = terminated("o");
+            entry.exit_cleanup = false;
+            entry
+        }]);
+        let Step::Review {
+            host, common_dir, ..
+        } = cleanup.step()
+        else {
+            panic!()
+        };
+        cleanup.reviewed(&host, &common_dir, Ok(&review_of(ready_row("o"))));
+        let Step::Remove { .. } = cleanup.remove(Consents::default()) else {
+            panic!()
+        };
+        assert_eq!(
+            cleanup.removed(&Removed::Refused {
+                reply: json!({"status": "kept"}),
+                detail: "Folder kept.".into()
+            }),
+            Step::Idle
+        );
+        assert!(!cleanup.entries[0].eligible());
+        assert_eq!(
+            cleanup.remove(Consents::default()),
+            Step::Idle,
+            "no retry without a fresh review"
+        );
+        cleanup.review_remaining();
+        let Step::Review {
+            host, common_dir, ..
+        } = cleanup.step()
+        else {
+            panic!()
+        };
+        cleanup.reviewed(&host, &common_dir, Ok(&review_of(ready_row("o"))));
+        assert!(matches!(
+            cleanup.remove(Consents::default()),
+            Step::Remove { .. }
+        ));
+    }
+
     #[test]
     fn a_manual_removal_uses_only_the_consents_given() {
         let unchecked = |fingerprint: &str| {
@@ -894,5 +1244,80 @@ mod tests {
             removal.process_fingerprint, "p2",
             "the new review's fingerprint"
         );
+    }
+
+    /// zerus-k2ga: changes beside hidden programs need the discard and the
+    /// process consent together; neither alone starts the removal.
+    #[test]
+    fn a_dirty_checkout_beside_hidden_programs_needs_both_consents() {
+        let mut row = ready_row("o");
+        row["verdict"] = json!("blocked");
+        row["reasons"] = json!([
+            {"code": "changes", "message": "x"},
+            {"code": "processes_unavailable", "message": "y"}
+        ]);
+        row["discardable"] = json!(false);
+        row["discard_fingerprint"] = json!("d1");
+        row["process_fingerprint"] = json!("p1");
+        let reviewed = |row: &Value| {
+            let mut entry = terminated("o");
+            entry.exit_cleanup = false;
+            let mut cleanup = Cleanup::manual(vec![entry]);
+            let Step::Review {
+                host, common_dir, ..
+            } = cleanup.step()
+            else {
+                panic!()
+            };
+            cleanup.reviewed(&host, &common_dir, Ok(&review_of(row.clone())));
+            cleanup
+        };
+        // An hgs that does not offer the combined consent: nothing to accept.
+        let older = reviewed(&row);
+        assert_eq!(older.required(), Consents::default());
+        row["discardable_with_process_consent"] = json!(true);
+        let mut cleanup = reviewed(&row);
+        let required = cleanup.required();
+        assert!(required.discard_changes && required.unchecked_processes);
+        for partial in [
+            Consents {
+                discard_changes: true,
+                ..Consents::default()
+            },
+            Consents {
+                unchecked_processes: true,
+                ..Consents::default()
+            },
+        ] {
+            assert_eq!(cleanup.remove(partial), Step::Idle);
+        }
+        let Step::Remove { removal, .. } = cleanup.remove(Consents {
+            discard_changes: true,
+            unchecked_processes: true,
+            ..Consents::default()
+        }) else {
+            panic!()
+        };
+        assert_eq!(
+            (
+                removal.discard_fingerprint.as_str(),
+                removal.process_fingerprint.as_str()
+            ),
+            ("d1", "p1")
+        );
+        // Local files outside Git need their own reviewed fingerprint (V2).
+        let mut local = row.clone();
+        local["ignored_count"] = json!(1);
+        local["ignored_fingerprint"] = json!("");
+        assert_eq!(reviewed(&local).required(), Consents::default());
+        local["ignored_fingerprint"] = json!("i1");
+        let required = reviewed(&local).required();
+        assert!(required.local_files && required.discard_changes && required.unchecked_processes);
+        // Another blocker is never accepted with them.
+        row["reasons"]
+            .as_array_mut()
+            .unwrap()
+            .push(json!({"code": "sessions", "message": "z"}));
+        assert_eq!(reviewed(&row).required(), Consents::default());
     }
 }

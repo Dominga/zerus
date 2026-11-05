@@ -12,13 +12,18 @@ use zerus_desktop_migration::{canonical, configuration, HANDOFF_LOCK};
 #[path = "maintenance.rs"]
 pub(crate) mod maintenance;
 
-pub const SCHEMA: i64 = super::cache_effects::SCHEMA;
+pub const SCHEMA: i64 = super::compact_to_send::SCHEMA;
 pub struct HandoffLock {
     _lock: platform::FileLock,
     root: PathBuf,
     configuration: String,
 }
 impl HandoffLock {
+    /// The identity of the exact lock file object held.
+    #[cfg_attr(not(any(windows, test)), allow(dead_code))]
+    pub fn identity(&self) -> std::io::Result<platform::FileIdentity> {
+        self._lock.identity()
+    }
     pub fn verify(&self, location: &Location) -> Result<()> {
         ensure!(
             self.root == location.root && self.configuration == location.configuration,
@@ -252,8 +257,44 @@ pub(super) fn operation_undrained(db: &Connection) -> Result<u64> {
     } else {
         0
     };
+    let worktrees = if version >= super::creation_worktree::SCHEMA {
+        super::creation_worktree::undrained(db)?
+    } else {
+        0
+    };
+    let launches = if version >= super::creation_launch::SCHEMA {
+        super::creation_launch::undrained(db)?
+    } else {
+        0
+    };
+    let messages = if version >= super::task_message::SCHEMA {
+        super::task_message::undrained(db)?
+    } else {
+        0
+    };
+    let sends = if version >= super::deferred_send::SCHEMA {
+        super::deferred_send::undrained(db)?
+    } else {
+        0
+    };
+    let answers = if version >= super::deferred_answer::SCHEMA {
+        super::deferred_answer::undrained(db)?
+    } else {
+        0
+    };
+    let compactions = if version >= super::compact_to_send::SCHEMA {
+        super::compact_to_send::undrained(db)?
+    } else {
+        0
+    };
     task.checked_add(clones)
         .and_then(|count| count.checked_add(cache))
+        .and_then(|count| count.checked_add(worktrees))
+        .and_then(|count| count.checked_add(launches))
+        .and_then(|count| count.checked_add(messages))
+        .and_then(|count| count.checked_add(sends))
+        .and_then(|count| count.checked_add(answers))
+        .and_then(|count| count.checked_add(compactions))
         .context("operation resource total overflow")
 }
 
@@ -269,6 +310,18 @@ pub struct Store {
     custody: super::custody::Recovery,
     #[cfg(any(target_os = "linux", target_os = "macos"))]
     creation_custody: super::creation_clone::Recovery,
+    #[cfg(any(target_os = "linux", target_os = "macos"))]
+    worktree_custody: super::creation_worktree::Recovery,
+    #[cfg(any(target_os = "linux", target_os = "macos"))]
+    launch_custody: super::creation_launch::Recovery,
+    #[cfg(any(target_os = "linux", target_os = "macos"))]
+    message_custody: super::task_message::Recovery,
+    #[cfg(any(target_os = "linux", target_os = "macos"))]
+    send_custody: super::deferred_send::Recovery,
+    #[cfg(any(target_os = "linux", target_os = "macos"))]
+    answer_custody: super::deferred_answer::Recovery,
+    #[cfg(any(target_os = "linux", target_os = "macos"))]
+    compact_custody: super::compact_to_send::Recovery,
 }
 impl Store {
     pub fn open(location: &Location, epoch: &str) -> Result<Self> {
@@ -285,8 +338,26 @@ impl Store {
                 "desktop state requires a newer hgs version"
             );
         }
-        let _file = private_file(&path, true)?;
+        // On Unix, closing any descriptor of this file drops this process's
+        // POSIX locks on it, including those of every live SQLite connection
+        // to it. So the file is created and checked through its path only, and
+        // the connection is bound to that file after the open (zerus-hpat).
+        #[cfg(unix)]
+        let identity = {
+            crate::sqlite_file::create(&path)?;
+            crate::sqlite_file::private(&path)
+                .map_err(|_| anyhow::anyhow!("desktop state must be private single-link regular files"))?
+        };
+        // Windows locks belong to the handle that took them.
+        #[cfg(not(unix))]
+        drop(private_file(&path, true)?);
+        #[cfg(all(test, unix))]
+        around_open(&path, false);
         let mut db = Connection::open_with_flags(&path, flags | OpenFlags::SQLITE_OPEN_READ_WRITE)?;
+        #[cfg(all(test, unix))]
+        around_open(&path, true);
+        #[cfg(unix)]
+        crate::sqlite_file::bind_private(&db, &path, identity).context("desktop state changed")?;
         super::counts::register(&db)?;
         db.busy_timeout(Duration::from_secs(2))?;
         let version: i64 = db.query_row("PRAGMA user_version", [], |row| row.get(0))?;
@@ -428,6 +499,74 @@ impl Store {
             tx.pragma_update(None, "user_version", super::cache_effects::SCHEMA)?;
             tx.commit()?;
         }
+        if version < super::attention::SCHEMA {
+            let tx = db.transaction()?;
+            super::attention::migrate_retention(&tx)?;
+            tx.pragma_update(None, "user_version", super::attention::SCHEMA)?;
+            tx.commit()?;
+        }
+        if version < super::catalog_read::SCHEMA {
+            let tx = db.transaction()?;
+            zerus_desktop_catalog::changes::migrate_reasons(&tx)?;
+            tx.pragma_update(None, "user_version", super::catalog_read::SCHEMA)?;
+            tx.commit()?;
+        }
+        if version < super::delivery::SCHEMA {
+            // Adds the column and indexes only; the delivery scan derives the
+            // flag of existing rows later in bounded batches.
+            let tx = db.transaction()?;
+            zerus_desktop_catalog::approvals::migrate(&tx)?;
+            tx.pragma_update(None, "user_version", super::delivery::SCHEMA)?;
+            tx.commit()?;
+        }
+        if version < super::creation_worktree::SCHEMA {
+            let tx = db.transaction()?;
+            super::creation_worktree::migrate(&tx)?;
+            tx.pragma_update(None, "user_version", super::creation_worktree::SCHEMA)?;
+            tx.commit()?;
+        }
+        if version < super::creation_launch::SCHEMA {
+            let tx = db.transaction()?;
+            super::creation_launch::migrate(&tx)?;
+            tx.pragma_update(None, "user_version", super::creation_launch::SCHEMA)?;
+            tx.commit()?;
+        }
+        if version < super::termination_outcome::SCHEMA {
+            let tx = db.transaction()?;
+            super::termination_outcome::migrate(&tx)?;
+            tx.pragma_update(None, "user_version", super::termination_outcome::SCHEMA)?;
+            tx.commit()?;
+        }
+        if version < super::task_message::SCHEMA {
+            let tx = db.transaction()?;
+            super::task_message::migrate(&tx)?;
+            tx.pragma_update(None, "user_version", super::task_message::SCHEMA)?;
+            tx.commit()?;
+        }
+        if version < super::task_message::INPUTS_SCHEMA {
+            let tx = db.transaction()?;
+            super::task_message::migrate_inputs(&tx)?;
+            tx.pragma_update(None, "user_version", super::task_message::INPUTS_SCHEMA)?;
+            tx.commit()?;
+        }
+        if version < super::deferred_send::SCHEMA {
+            let tx = db.transaction()?;
+            super::deferred_send::migrate(&tx)?;
+            tx.pragma_update(None, "user_version", super::deferred_send::SCHEMA)?;
+            tx.commit()?;
+        }
+        if version < super::deferred_answer::SCHEMA {
+            let tx = db.transaction()?;
+            super::deferred_answer::migrate(&tx)?;
+            tx.pragma_update(None, "user_version", super::deferred_answer::SCHEMA)?;
+            tx.commit()?;
+        }
+        if version < super::compact_to_send::SCHEMA {
+            let tx = db.transaction()?;
+            super::compact_to_send::migrate(&tx)?;
+            tx.pragma_update(None, "user_version", super::compact_to_send::SCHEMA)?;
+            tx.commit()?;
+        }
         // Opening Store follows acquisition of the real exclusive serve owner.
         // Cache workers are in-process and retain it through all actual I/O.
         let tx = db.transaction()?;
@@ -445,7 +584,14 @@ impl Store {
         .is_err();
         let operation_recovery_error =
             zerus_desktop_ledger::operations::recover_batch(&mut db, epoch).is_err();
-        let creation_recovery_error = super::creation_clone::startup(&mut db).is_err();
+        // Either creation kind failing recovery pauses creation admission.
+        let creation_recovery_error = super::creation_clone::startup(&mut db).is_err()
+            | super::creation_worktree::startup(&mut db).is_err()
+            | super::creation_launch::startup(&mut db).is_err()
+            | super::task_message::startup(&mut db).is_err()
+            | super::deferred_send::startup(&mut db).is_err()
+            | super::deferred_answer::startup(&mut db).is_err()
+            | super::compact_to_send::startup(&mut db).is_err();
         let tx = db.transaction()?;
         tx.execute(
             "UPDATE service SET generation=generation+1, epoch=?1 WHERE id=1",
@@ -468,6 +614,18 @@ impl Store {
             custody: super::custody::Recovery::default(),
             #[cfg(any(target_os = "linux", target_os = "macos"))]
             creation_custody: super::creation_clone::Recovery::default(),
+            #[cfg(any(target_os = "linux", target_os = "macos"))]
+            worktree_custody: super::creation_worktree::Recovery::default(),
+            #[cfg(any(target_os = "linux", target_os = "macos"))]
+            launch_custody: super::creation_launch::Recovery::default(),
+            #[cfg(any(target_os = "linux", target_os = "macos"))]
+            message_custody: super::task_message::Recovery::default(),
+            #[cfg(any(target_os = "linux", target_os = "macos"))]
+            send_custody: super::deferred_send::Recovery::default(),
+            #[cfg(any(target_os = "linux", target_os = "macos"))]
+            answer_custody: super::deferred_answer::Recovery::default(),
+            #[cfg(any(target_os = "linux", target_os = "macos"))]
+            compact_custody: super::compact_to_send::Recovery::default(),
         })
     }
     pub fn checkpoint(&self) -> Result<()> {
@@ -500,20 +658,35 @@ impl Store {
     }
     pub fn operation_status(&self) -> serde_json::Value {
         let clone = super::creation_clone::summary(&self.db);
+        let worktree = super::creation_worktree::summary(&self.db);
+        let launch = super::creation_launch::summary(&self.db);
+        let message = super::task_message::summary(&self.db);
+        let send = super::deferred_send::summary(&self.db);
+        let answer = super::deferred_answer::summary(&self.db);
+        let compact = super::compact_to_send::summary(&self.db);
         let mut status = match zerus_desktop_ledger::operations::totals(&self.db).and_then(
             |totals| {
+                let summary = |value: &Result<serde_json::Value>| match value {
+                    Ok(value) => Ok(value.clone()),
+                    Err(_) => Err(anyhow::anyhow!("creation summary unavailable")),
+                };
                 Ok((
                     totals,
                     operation_undrained(&self.db)?,
-                    clone
-                        .as_ref()
-                        .map_err(|_| anyhow::anyhow!("creation summary unavailable"))?,
+                    summary(&clone)?,
+                    summary(&worktree)?,
+                    summary(&launch)?,
+                    summary(&message)?,
+                    summary(&send)?,
+                    summary(&answer)?,
+                    summary(&compact)?,
                 ))
             },
         ) {
-            Ok((totals, undrained, clone)) => {
-                serde_json::json!({"unsettled":totals.unsettled+clone["unsettled"].as_u64().unwrap_or(0),"undrained":undrained,
-                "kinds":{"task_start_reconcile":{"unsettled":totals.unsettled,"undrained":totals.undrained},"creation_clone":clone},
+            Ok((totals, undrained, clone, worktree, launch, message, send, answer, compact)) => {
+                let unsettled = |v: &serde_json::Value| v["unsettled"].as_u64().unwrap_or(0);
+                serde_json::json!({"unsettled":totals.unsettled+unsettled(&clone)+unsettled(&worktree)+unsettled(&launch)+unsettled(&message)+unsettled(&send)+unsettled(&answer)+unsettled(&compact),"undrained":undrained,
+                "kinds":{"task_start_reconcile":{"unsettled":totals.unsettled,"undrained":totals.undrained},"creation_clone":clone,"creation_worktree":worktree,"creation_launch":launch,"task_message":message,"deferred_send":send,"deferred_answer":answer,"compact_to_send":compact},
                 "admissions_paused":true,"recovery_error":self.operation_recovery_error || self.creation_recovery_error})
             }
             Err(_) => {
@@ -554,13 +727,23 @@ impl Store {
             status["resource_custody"]["revoke_request_id"] = request.into();
             status["resource_custody"]["remediation"] = super::revoke::OPERATION_REMEDIATION.into();
         }
-        if clone
-            .as_ref()
-            .ok()
-            .is_some_and(|v| v["undrained"].as_u64().is_some_and(|n| n > 0))
+        let retained = |summary: &Result<serde_json::Value>| {
+            summary
+                .as_ref()
+                .ok()
+                .is_some_and(|v| v["undrained"].as_u64().is_some_and(|n| n > 0))
+        };
+        if retained(&clone)
+            || retained(&worktree)
+            || retained(&launch)
+            || retained(&message)
+            || retained(&send)
+            || retained(&answer)
+            || retained(&compact)
         {
             let task = status["resource_custody"].take();
             status["resource_custody"] = serde_json::json!({"state":"retained","creation_clone":clone.ok(),
+                "creation_worktree":worktree.ok(),"creation_launch":launch.ok(),"task_message":message.ok(),"deferred_send":send.ok(),"deferred_answer":answer.ok(),"compact_to_send":compact.ok(),
                 "task_start_reconcile":task,"remediation":super::revoke::OPERATION_REMEDIATION});
         }
         status
@@ -572,6 +755,10 @@ impl Store {
     pub fn creation_recovery_ok(&self) -> bool {
         !self.creation_recovery_error
     }
+    #[cfg(any(target_os = "linux", target_os = "macos"))]
+    pub fn operation_recovery_ok(&self) -> bool {
+        !self.operation_recovery_error && !self.creation_recovery_error
+    }
     pub fn recover_operation_custody(&mut self, location: &Location) {
         #[cfg(any(target_os = "linux", target_os = "macos"))]
         if self.custody.tick(location, &mut self.db).is_err() {
@@ -581,8 +768,50 @@ impl Store {
         if self.creation_custody.tick(location, &mut self.db).is_err() {
             self.creation_recovery_error = true;
         }
+        #[cfg(any(target_os = "linux", target_os = "macos"))]
+        if self.worktree_custody.tick(location, &mut self.db).is_err() {
+            self.creation_recovery_error = true;
+        }
+        #[cfg(any(target_os = "linux", target_os = "macos"))]
+        if self.launch_custody.tick(location, &mut self.db).is_err() {
+            self.creation_recovery_error = true;
+        }
+        #[cfg(any(target_os = "linux", target_os = "macos"))]
+        if self.message_custody.tick(location, &mut self.db).is_err() {
+            self.creation_recovery_error = true;
+        }
+        #[cfg(any(target_os = "linux", target_os = "macos"))]
+        if self.send_custody.tick(location, &mut self.db).is_err() {
+            self.creation_recovery_error = true;
+        }
+        #[cfg(any(target_os = "linux", target_os = "macos"))]
+        if self.answer_custody.tick(location, &mut self.db).is_err() {
+            self.creation_recovery_error = true;
+        }
+        #[cfg(any(target_os = "linux", target_os = "macos"))]
+        if self.compact_custody.tick(location, &mut self.db).is_err() {
+            self.creation_recovery_error = true;
+        }
         #[cfg(not(any(target_os = "linux", target_os = "macos")))]
         let _ = location;
+    }
+    /// The deferred sends a live runtime drains itself; Store recovery skips
+    /// them while their token lives.
+    #[cfg(any(target_os = "linux", target_os = "macos"))]
+    pub(super) fn send_owned(&self) -> super::deferred_send::Owned {
+        self.send_custody.owned()
+    }
+    /// The deferred answers a live runtime drains itself; Store recovery
+    /// skips them while their token lives.
+    #[cfg(any(target_os = "linux", target_os = "macos"))]
+    pub(super) fn answer_owned(&self) -> super::deferred_answer::Owned {
+        self.answer_custody.owned()
+    }
+    /// The compact-to-sends a live runtime drains itself; Store recovery
+    /// skips them while their token lives.
+    #[cfg(any(target_os = "linux", target_os = "macos"))]
+    pub(super) fn compact_owned(&self) -> super::compact_to_send::Owned {
+        self.compact_custody.owned()
     }
     #[cfg(all(test, any(target_os = "linux", target_os = "macos")))]
     pub(super) fn retry_operation_custody(&mut self) {
@@ -629,10 +858,99 @@ impl Store {
     }
 }
 
+/// The swap test's hook: runs after the private check (`false`) and after
+/// SQLite's open (`true`).
+#[cfg(all(test, unix))]
+type AroundOpen = Box<dyn FnMut(&Path, bool)>;
+
+#[cfg(all(test, unix))]
+thread_local! {
+    static AROUND_OPEN: std::cell::RefCell<Option<AroundOpen>> = const { std::cell::RefCell::new(None) };
+}
+
+#[cfg(all(test, unix))]
+fn around_open(path: &Path, opened: bool) {
+    AROUND_OPEN.with(|hook| {
+        if let Some(hook) = hook.borrow_mut().as_mut() {
+            hook(path, opened);
+        }
+    });
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
     use rusqlite::params;
+
+    /// review-q's S2 on #1349, the A-B-A swap: the path names the checked
+    /// database A at the private check and again at the bind, but SQLite
+    /// opened B in between. Only `bind_private` (SQLite's HAS_MOVED) can tell.
+    #[cfg(unix)]
+    #[test]
+    fn opening_refuses_a_database_swapped_in_during_the_open() {
+        let temp = tempfile::tempdir().unwrap();
+        let location = Location {
+            root: canonical(&temp.path().join("state/desktop")).unwrap(),
+            configuration: "a".repeat(64),
+        };
+        location.prepare().unwrap();
+        let _owner = location.lock().unwrap();
+        let epoch = uuid::Uuid::new_v4().to_string();
+        drop(Store::open(&location, &epoch).unwrap());
+        let aside = |name: &str| temp.path().join(name);
+        AROUND_OPEN.with(|hook| {
+            *hook.borrow_mut() = Some(Box::new(move |path: &Path, opened: bool| {
+                let aside = |name: &str| path.parent().unwrap().parent().unwrap().parent().unwrap().join(name);
+                if opened {
+                    std::fs::rename(path, aside("b.sqlite3")).unwrap();
+                    std::fs::rename(aside("a.sqlite3"), path).unwrap();
+                } else {
+                    std::fs::rename(path, aside("a.sqlite3")).unwrap();
+                    crate::sqlite_file::create(path).unwrap();
+                }
+            }));
+        });
+        let swapped = Store::open(&location, &epoch);
+        AROUND_OPEN.with(|hook| hook.borrow_mut().take());
+        let error = format!("{:#}", swapped.err().expect("the swapped-in database is refused"));
+        assert!(error.contains("desktop state changed"), "{error}");
+        // A is back at its path, unchanged, and opens again.
+        assert!(aside("b.sqlite3").exists());
+        Store::open(&location, &epoch).unwrap();
+    }
+    /// zerus-hpat: opening the store again keeps the SQLite locks of a store
+    /// already open in this process, also after a restart: no raw descriptor
+    /// of the live database is closed.
+    #[cfg(unix)]
+    #[test]
+    fn opening_the_store_again_keeps_a_live_store_s_locks() {
+        use crate::sqlite_file::foreign_lock_refused;
+        let temp = tempfile::tempdir().unwrap();
+        let location = Location {
+            root: canonical(&temp.path().join("state/desktop")).unwrap(),
+            configuration: "a".repeat(64),
+        };
+        location.prepare().unwrap();
+        let _owner = location.lock().unwrap();
+        let path = location.root.join("state.sqlite3");
+        let epoch = uuid::Uuid::new_v4().to_string();
+        // The second round is a restart: every earlier store is gone.
+        for round in 0..2 {
+            let live = Store::open(&location, &epoch).unwrap();
+            live.db.execute_batch("BEGIN").unwrap();
+            let _: i64 = live
+                .db
+                .query_row("SELECT count(*) FROM sqlite_master", [], |r| r.get(0))
+                .unwrap();
+            assert!(foreign_lock_refused(&path), "round {round}: the store holds its lock");
+            drop(Store::open(&location, &epoch));
+            assert!(foreign_lock_refused(&path), "round {round}: another open kept the lock");
+            live.db.execute_batch("COMMIT").unwrap();
+            drop(live);
+            assert!(!foreign_lock_refused(&path), "round {round}: the lock went with the store");
+        }
+    }
+
     #[test]
     fn catalog_collection_yields_and_failure_is_local_and_recoverable() {
         let temp = tempfile::tempdir().unwrap();

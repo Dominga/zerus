@@ -28,7 +28,6 @@ if [ "$(uname -s)" = "Darwin" ]; then
 # =============================== macOS =======================================
 LABEL="com.hgdev.hgs-tray"
 APP_DEST="${HOME}/Applications/hgs-tray.app"
-BUILD_APP="${SCRIPT_DIR}/build/hgs-tray.app"
 PLIST_SRC="${SCRIPT_DIR}/packaging/${LABEL}.plist"
 PLIST_DEST="${HOME}/Library/LaunchAgents/${LABEL}.plist"
 RELOAD=0
@@ -65,30 +64,27 @@ bundle_cdhash() {
     codesign -d --verbose=4 "$1" 2>&1 | sed -n 's/^CDHash=//p'
 }
 
-# --- 0. which GUI -------------------------------------------------------------
-# Fresh installs and upgrades build Zerus Next. HGS_MAC_GUI=qt remains an explicit
-# fallback until Mac acceptance; update-installed.py keeps Qt as the rollback copy
-# when switching to the client (docs/macos-distribution.md#tauri-client-switch).
+# Qt source builds are retired after the platform acceptance gate.
 GUI="${HGS_MAC_GUI:-client}"
-case "${GUI}" in qt|client) ;; *) echo "HGS_MAC_GUI must be qt or client" >&2; exit 1 ;; esac
-DESKTOP_ARGS=()
-if [ "${GUI}" = "client" ]; then
-    # Capture the root build before the GUI changes CARGO_TARGET_DIR. The SSH
-    # wrapper supplies its retained native build explicitly; never sign that file.
-    LOCAL_CLI_BUILD="${HGS_MAC_CLI_BUILD:-${CARGO_TARGET_DIR:-${SCRIPT_DIR}/../target}/release/hgs}"
-    python3 "${SCRIPT_DIR}/prepare-local-macos.py" --check-cli \
-        --hgs "${LOCAL_CLI_BUILD}" --runner-hgs "${HGS_BIN}"
+if [ "${GUI}" != client ]; then
+    echo "hgs-tray: HGS_MAC_GUI must be client; Qt builds are retired." >&2
+    exit 1
 fi
+DESKTOP_ARGS=()
+# Capture the root build before the GUI changes CARGO_TARGET_DIR. The SSH
+# wrapper supplies its retained native build explicitly; never sign that file.
+LOCAL_CLI_BUILD="${HGS_MAC_CLI_BUILD:-${CARGO_TARGET_DIR:-${SCRIPT_DIR}/../target}/release/hgs}"
+python3 "${SCRIPT_DIR}/prepare-local-macos.py" --check-cli \
+    --hgs "${LOCAL_CLI_BUILD}" --runner-hgs "${HGS_BIN}"
 
 # --- 1. build -----------------------------------------------------------------
 echo "[1/4] Building..."
-if [ "${GUI}" = "client" ]; then
     CLIENT_DIR="$(cd "${SCRIPT_DIR}/../client" && pwd)"
     NPM="$(find_tool npm)" || { echo "hgs-tray: npm not found (brew install node)" >&2; exit 1; }
     export PATH="${HOME}/.cargo/bin:$(dirname "${NPM}"):${PATH}"
     export RUSTUP_TOOLCHAIN="${RUSTUP_TOOLCHAIN:-1.99.1}"
     # The bundle is taken from client/src-tauri/target below, whatever the caller's
-    # CARGO_TARGET_DIR; one JOBS bounds this build and the Qt one alike.
+    # CARGO_TARGET_DIR; JOBS bounds this build.
     export CARGO_TARGET_DIR="${CLIENT_DIR}/src-tauri/target"
     export CARGO_BUILD_JOBS="${CARGO_BUILD_JOBS:-${JOBS}}"
     (cd "${CLIENT_DIR}" && "${NPM}" ci --no-audit --no-fund)
@@ -104,28 +100,6 @@ if [ "${GUI}" = "client" ]; then
     # ZERUS_DEV_BUILD_NUMBER reaches the client's build.rs through the environment.
     (cd "${CLIENT_DIR}" && "${NPM}" exec -- tauri build --config "${SWITCH_CONFIG}" --bundles app ${FEATURES[@]+"${FEATURES[@]}"})
     BUILD_APP="${CLIENT_DIR}/src-tauri/target/release/bundle/macos/Zerus.app"
-else
-    CMAKE="$(find_tool cmake)" || { echo "hgs-tray: cmake not found (brew install cmake)" >&2; exit 1; }
-    BREW="$(find_tool brew)"   || { echo "hgs-tray: brew not found -- Qt6 comes from it" >&2; exit 1; }
-    # An Xcode or Command Line Tools update removes the SDK a cached configuration
-    # names, and Qt's imported targets then fail to configure. Start from a clean
-    # cache when any cached SDK is gone; sources and build outputs stay.
-    stale_sdk() {
-        local sdk
-        [ -f "$1" ] || return 1
-        while IFS= read -r sdk; do
-            [ -d "${sdk}" ] || return 0
-        done < <(grep -o '/[^][;:"=]*\.sdk' "$1" | sort -u)
-        return 1
-    }
-    if stale_sdk "${SCRIPT_DIR}/build/CMakeCache.txt"; then
-        echo "      Cached macOS SDK is gone (Xcode or Command Line Tools updated); reconfiguring."
-        rm -rf "${SCRIPT_DIR}/build/CMakeCache.txt" "${SCRIPT_DIR}/build/CMakeFiles"
-    fi
-    "${CMAKE}" -B "${SCRIPT_DIR}/build" -S "${SCRIPT_DIR}" \
-        -DCMAKE_PREFIX_PATH="$("${BREW}" --prefix qt)" -DCMAKE_BUILD_TYPE=Release
-    "${CMAKE}" --build "${SCRIPT_DIR}/build" -j"${JOBS}"
-fi
 
 # --- 2. .app bundle -------------------------------------------------------------
 echo "[2/4] Installing the .app bundle to ~/Applications..."
@@ -133,25 +107,19 @@ echo "[2/4] Installing the .app bundle to ~/Applications..."
 # copy receives the public identity and compatible certificate before replacement.
 LOCAL_STAGE="$(mktemp -d "${TMPDIR:-/tmp}/zerus-source-install.XXXXXX")"
 trap 'rm -rf "${LOCAL_STAGE}"' EXIT
-if [ "${GUI}" = "client" ]; then
-    python3 "${SCRIPT_DIR}/prepare-local-macos.py" --app "${BUILD_APP}" \
-        --hgs "${LOCAL_CLI_BUILD}" --runner-hgs "${HGS_BIN}" \
-        --output "${LOCAL_STAGE}/hgs-tray.app" --installed "${APP_DEST}"
-    # The parent remains private; the installed bundle has its normal app mode.
-    chmod 755 "${LOCAL_STAGE}/hgs-tray.app"
-    python3 "${SCRIPT_DIR}/prepare-local-macos.py" --check-cli \
-        --hgs "${LOCAL_CLI_BUILD}" --runner-hgs "${HGS_BIN}"
-    if [ "$(bundle_cdhash "${LOCAL_STAGE}/hgs-tray.app/Contents/MacOS/hgs")" != \
-         "$(bundle_cdhash "${APP_DEST}/Contents/MacOS/hgs")" ]; then
-        DESKTOP_ARGS+=(--restart)
-    fi
-    DESKTOP_ARGS+=(--runner-hgs "${HGS_BIN}")
-    DESKTOP_HGS="${APP_DEST}/Contents/MacOS/hgs"
-else
-    ditto "${BUILD_APP}" "${LOCAL_STAGE}/hgs-tray.app"
-    python3 "${SCRIPT_DIR}/sign-local-macos.py" "${LOCAL_STAGE}/hgs-tray.app" "${APP_DEST}"
-    DESKTOP_HGS="${HGS_BIN}"
+python3 "${SCRIPT_DIR}/prepare-local-macos.py" --app "${BUILD_APP}" \
+    --hgs "${LOCAL_CLI_BUILD}" --runner-hgs "${HGS_BIN}" \
+    --output "${LOCAL_STAGE}/hgs-tray.app" --installed "${APP_DEST}"
+# The parent remains private; the installed bundle has its normal app mode.
+chmod 755 "${LOCAL_STAGE}/hgs-tray.app"
+python3 "${SCRIPT_DIR}/prepare-local-macos.py" --check-cli \
+    --hgs "${LOCAL_CLI_BUILD}" --runner-hgs "${HGS_BIN}"
+if [ "$(bundle_cdhash "${LOCAL_STAGE}/hgs-tray.app/Contents/MacOS/hgs")" != \
+     "$(bundle_cdhash "${APP_DEST}/Contents/MacOS/hgs")" ]; then
+    DESKTOP_ARGS+=(--restart)
 fi
+DESKTOP_ARGS+=(--runner-hgs "${HGS_BIN}")
+DESKTOP_HGS="${APP_DEST}/Contents/MacOS/hgs"
 BUILD_APP="${LOCAL_STAGE}/hgs-tray.app"
 # The numbered Dev guard before anything is replaced (docs/reference.md); without
 # the live update, also no switch between Qt and the client.
@@ -201,12 +169,17 @@ fi
 echo "[4/4] Loading ${LABEL}..."
 if [ "${UPDATE}" = "1" ]; then
     # Quits a running GUI, swaps the bundle and bootstraps the current LaunchAgent.
-    python3 "${SCRIPT_DIR}/update-installed.py" "${BUILD_APP}" "${APP_DEST}"
+    # The updater refreshes the installed paired backend BEFORE starting the
+    # GUI, including rollback/recovery starts. Keep the selected runner intact.
+    python3 "${SCRIPT_DIR}/update-installed.py" --refresh-macos-desktop "${HGS_BIN}" "${BUILD_APP}" "${APP_DEST}"
     RELOAD=0
 fi
-# The selected signed service image is in the INSTALLED pair, never the staging
-# copy. Only a real backend change reloads this owned service, not native agents.
-python3 "${SCRIPT_DIR}/../scripts/install-macos-desktop-service.py" "${DESKTOP_HGS}" ${DESKTOP_ARGS[@]+"${DESKTOP_ARGS[@]}"}
+# A successful updater refresh is authoritative, including when no GUI was
+# running. Repeating DESKTOP_ARGS --restart here would restart the backend AFTER
+# GUI bootstrap. Other install paths still refresh before their first GUI load.
+if [ "${UPDATE}" != "1" ]; then
+    python3 "${SCRIPT_DIR}/../scripts/install-macos-desktop-service.py" "${DESKTOP_HGS}" ${DESKTOP_ARGS[@]+"${DESKTOP_ARGS[@]}"}
+fi
 # launchctl list печатает "PID<TAB>Status<TAB>Label"; PID "-" значит, что агент
 # зарегистрирован, но не работает (Status -- код его последнего выхода).
 AGENT_PID="$(launchctl list 2>/dev/null | awk -v l="${LABEL}" '$3 == l { print $1 }')"
@@ -220,11 +193,7 @@ fi
 # Живой агент, у которого ничего не поменялось, не трогается вовсе -- ровно как
 # `systemctl --user enable --now` на активном юните в linux-ветке.
 
-if [ "${GUI}" = "client" ]; then
-    HINT_SELFTEST="Check without the menu bar:  ${APP_DEST}/Contents/MacOS/hgs-tray --build-info"
-else
-    HINT_SELFTEST="Check without the menu bar:  ${APP_DEST}/Contents/MacOS/hgs-tray --selftest --hgs ${HGS_BIN}"
-fi
+HINT_SELFTEST="Check without the menu bar:  ${APP_DEST}/Contents/MacOS/hgs-tray --build-info"
 HINT_STATUS="Agent status:                launchctl list | grep ${LABEL}"
 HINT_LOG="Agent stderr:                ${LOG_FILE}"
 
@@ -233,15 +202,15 @@ else
 # =============================== Linux =======================================
 PREFIX="${HGS_INSTALL_PREFIX:-${HOME}/.local}"
 BIN_DEST="${PREFIX}/bin/hgs-tray"
-BUILD_BIN="${SCRIPT_DIR}/build/hgs-tray"
 SCRATCH=0
 if [ -n "${HGS_INSTALL_PREFIX:-}" ]; then SCRATCH=1; fi
 LIVE="${RESTART_RUNNING}"
 if [ "${SCRATCH}" = "1" ]; then LIVE=0; fi
-# Fresh installs and upgrades use Zerus Next. Qt remains an explicit fallback
-# until Linux acceptance: HGS_LINUX_GUI=qt ./tray/install.sh.
 GUI="${HGS_LINUX_GUI:-client}"
-case "${GUI}" in qt|client) ;; *) echo "HGS_LINUX_GUI must be qt or client" >&2; exit 1 ;; esac
+if [ "${GUI}" != client ]; then
+    echo "hgs-tray: HGS_LINUX_GUI must be client; Qt builds are retired." >&2
+    exit 1
+fi
 if [ "${GUI}" = "client" ] && [ "${LIVE}" = "1" ]; then
     if [ -x "${PREFIX}/bin/hgs" ]; then
         HGS_BIN="${PREFIX}/bin/hgs"
@@ -257,7 +226,6 @@ fi
 
 # --- 1. build -----------------------------------------------------------------
 echo "[1/4] Building..."
-if [ "${GUI}" = "client" ]; then
     CLIENT_DIR="$(cd "${SCRIPT_DIR}/../client" && pwd)"
     NPM="$(command -v npm)" || { echo "hgs-tray: npm not found" >&2; exit 1; }
     export PATH="${HOME}/.cargo/bin:$(dirname "${NPM}"):${PATH}"
@@ -279,10 +247,6 @@ if [ "${GUI}" = "client" ]; then
     # ZERUS_DEV_BUILD_NUMBER reaches the client's build.rs through the environment.
     (cd "${CLIENT_DIR}" && "${NPM}" exec -- tauri build --config "${CLIENT_DIR}/src-tauri/tauri.switch.linux.conf.json" --no-bundle ${FEATURES[@]+"${FEATURES[@]}"})
     BUILD_BIN="${CARGO_TARGET_DIR}/release/hgs-tray"
-else
-    cmake -B "${SCRIPT_DIR}/build" -S "${SCRIPT_DIR}" -DCMAKE_BUILD_TYPE=Release
-    cmake --build "${SCRIPT_DIR}/build" -j"${JOBS}"
-fi
 
 # --- 2. binary ------------------------------------------------------------------
 echo "[2/4] Installing binary to ${PREFIX}/bin..."
@@ -310,23 +274,6 @@ if ! cmp -s "${BUILD_BIN}" "${BIN_DEST}" 2>/dev/null; then
         RELOAD=1
     fi
     CHANGED=1
-fi
-
-# The optional embedded DeepSeek native UI belongs to Qt. Client installs keep
-# it for the one-command Qt rollback; Qt installs maintain it as before.
-PLUGIN_BUILD="${SCRIPT_DIR}/build/plugins/libhgs-tray-native-ui.so"
-PLUGIN_DEST="${PREFIX}/lib/hgs-tray/plugins/libhgs-tray-native-ui.so"
-if [ "${GUI}" = "qt" ]; then
-    if [ -f "${PLUGIN_BUILD}" ]; then
-        if ! cmp -s "${PLUGIN_BUILD}" "${PLUGIN_DEST}" 2>/dev/null; then
-            install -Dm755 "${PLUGIN_BUILD}" "${PLUGIN_DEST}.new"
-            mv -f "${PLUGIN_DEST}.new" "${PLUGIN_DEST}"
-            CHANGED=1
-        fi
-    elif [ -e "${PLUGIN_DEST}" ]; then
-        rm -f "${PLUGIN_DEST}"
-        CHANGED=1
-    fi
 fi
 
 # --- 3. systemd --user unit + autostart .desktop -------------------------------
@@ -424,7 +371,7 @@ if [ "${SCRATCH}" = "1" ]; then
 else
     if [ "${GUI}" = "client" ] && [ "${LIVE}" = "1" ]; then
         SERVICE_HELPER="${PREFIX}/lib/zerus/install-linux-desktop-service.py"
-        for SERVICE_SOURCE in desktop-revoke-hold.py install-linux-desktop-service.py; do
+        for SERVICE_SOURCE in desktop-service-activation.py desktop-revoke-hold.py install-linux-desktop-service.py; do
             SERVICE_DEST="${PREFIX}/lib/zerus/${SERVICE_SOURCE}"
             if ! cmp -s "${SCRIPT_DIR}/../scripts/${SERVICE_SOURCE}" "${SERVICE_DEST}"; then
                 install -Dm755 "${SCRIPT_DIR}/../scripts/${SERVICE_SOURCE}" "${SERVICE_DEST}.new"

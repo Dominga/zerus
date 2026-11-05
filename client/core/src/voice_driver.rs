@@ -81,12 +81,13 @@ pub enum Out {
         key: String,
         message: Value,
     },
-    /// Insert the transcript at the draft position recorded when Send or
-    /// Check was pressed, save the draft, and answer [`Input::Inserted`].
+    /// Recheck the exact draft revision and insertion UUID, save the inserted
+    /// transcript without sending it, and answer [`Input::Inserted`].
     Insert {
         token: u64,
         text: String,
         id: String,
+        revision: u64,
     },
     /// Open the microphone recovery dialog.
     PermissionRecovery,
@@ -445,7 +446,15 @@ impl Loop {
                 Effect::CancelRecorder => self.capture.cancel(),
                 Effect::PauseMessages => (self.sink)(Out::PauseMessages),
                 Effect::StopPlayback => (self.sink)(Out::StopPlayback),
-                Effect::Load { token, key } => {
+                Effect::Load {
+                    token,
+                    key,
+                    legacy,
+                    session,
+                } => {
+                    if !legacy.is_empty() {
+                        self.drafts.adopt(&legacy, &key, &session, |_| {});
+                    }
                     let feed = self.feed.clone();
                     self.drafts.load(&key, move |loaded| {
                         let _ = feed.send(Message::Loaded(token, loaded.draft));
@@ -484,7 +493,17 @@ impl Loop {
                 }
                 Effect::RememberProfile(profile) => (self.sink)(Out::RememberProfile { profile }),
                 Effect::Message { key, message } => (self.sink)(Out::Message { key, message }),
-                Effect::Insert { token, text, id } => (self.sink)(Out::Insert { token, text, id }),
+                Effect::Insert {
+                    token,
+                    text,
+                    id,
+                    revision,
+                } => (self.sink)(Out::Insert {
+                    token,
+                    text,
+                    id,
+                    revision,
+                }),
                 Effect::PollLater { token } => self
                     .timers
                     .push((Instant::now() + Duration::from_secs(1), token)),

@@ -80,3 +80,42 @@ class TaskHistory(Fixture):
         cached = self.hgs(*args)["task"]
         self.assertEqual(cached["target"]["session"], "codex/renamed")
         self.assertEqual(cached["target"]["session_id"], task["target"]["session_id"])
+
+    def test_metadata_pages_name_files_and_task_attachment_returns_them(self):
+        import base64
+        spec = dict(name="spec.txt", mime="text/plain", reference="[File #1]",
+                    data_base64=base64.b64encode(b"the spec").decode())
+        task = self.add(json.dumps(dict(text="Read [File #1]", attachments=[spec])), "--content-json")
+        log = dict(name="log.txt", mime="text/plain", reference="[File #1]",
+                   data_base64=base64.b64encode(b"a log").decode())
+        self.hgs("comment", task["uuid"], "--project", "orchard", "--content-json",
+                 text=json.dumps(dict(text="See [File #1]", attachments=[log])))
+        args = ("get", task["uuid"], "--project", "orchard", "--history-limit", "80")
+        full = self.hgs(*args)["task"]
+        page = self.hgs(*args, "--attachments", "metadata")["task"]
+        self.assertNotIn("data_base64", json.dumps(page))
+        self.assertEqual(page["attachments"], [dict(name="spec.txt", mime="text/plain", reference="[File #1]",
+                                                    size=8, sha256=hashlib.sha256(b"the spec").hexdigest())])
+        self.assertEqual(full["attachments"][0]["data_base64"], spec["data_base64"])
+        self.assertEqual([e["kind"] for e in page["log"]], [e["kind"] for e in full["log"]])
+        noted = next(e for e in page["log"] if e.get("text") == "See [File #1]")
+        self.assertEqual(noted["attachments"][0]["sha256"], hashlib.sha256(b"a log").hexdigest())
+        self.assertTrue(all("id" in e for e in page["log"]))
+        self.assertTrue(all("id" not in e for e in full["log"]))
+        # One file at a time, from the task or one of its entries.
+        own = self.hgs("attachment", task["uuid"], "--project", "orchard", "--file", "1")
+        self.assertEqual((own["name"], own["data_base64"], own["size"], own["entry"]),
+                         ("spec.txt", spec["data_base64"], 8, None))
+        self.assertEqual(own["sha256"], page["attachments"][0]["sha256"])
+        entry = self.hgs("attachment", task["uuid"], "--project", "orchard", "--file", "1", "--entry", noted["id"])
+        self.assertEqual((entry["name"], base64.b64decode(entry["data_base64"])), ("log.txt", b"a log"))
+        for refused, message in [
+            (("--file", "2"), "there is no file 2"),
+            (("--file", "0"), "--file is a number from 1"),
+            (("--file", "1", "--entry", "elsewhere:1@1"), "cursor does not match this task"),
+        ]:
+            self.assertIn(message, self.hgs("attachment", task["uuid"], "--project", "orchard", *refused, ok=False))
+        self.assertIn("--attachments requires --history-limit",
+                      self.hgs("get", task["uuid"], "--project", "orchard", "--attachments", "metadata", ok=False))
+        self.assertIn("--attachments takes metadata", self.hgs(*args, "--attachments", "files", ok=False))
+

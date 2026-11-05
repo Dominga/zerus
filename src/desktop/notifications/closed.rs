@@ -1,15 +1,14 @@
-//! Linux closed-instance selection and original launch custody, off the actor.
-//! No status/caption/PATH inference can manufacture the native ownership grant.
-use super::{
-    activation,
-    frontend::{linux::OwnedFrontend, SelectedFrontend},
-    preparation::Owner,
-    Outbox,
-};
+//! Linux and Windows closed-instance selection and original launch custody,
+//! off the actor. No status/caption/PATH inference can manufacture the native
+//! ownership grant.
+#[cfg(target_os = "linux")]
+use super::frontend::linux::OwnedFrontend;
+#[cfg(windows)]
+use super::frontend::OwnedFrontend;
+use super::{activation, frontend::SelectedFrontend, preparation::Owner, Outbox};
 use crate::{
     config::Config,
     desktop::{
-        owner,
         ownership::Grant,
         store::{Location, Store},
         ui_authority::Scope,
@@ -93,8 +92,7 @@ impl Runtime {
                         thread::Builder::new()
                             .name("notification-frontend".into())
                             .spawn(move || {
-                                observe(OwnedFrontend::launch(selected.image, launch)?, observing);
-                                Ok(())
+                                observe(OwnedFrontend::launch(selected.image, launch)?, observing)
                             })?,
                     );
                     Ok(())
@@ -141,11 +139,7 @@ impl Runtime {
                 );
                 grant.revalidate_image()?;
                 let image = scope.select_frontend(grant.image())?;
-                let observation = desktop::probe_at(
-                    &owner::instance_path(),
-                    &uuid::Uuid::new_v4().to_string(),
-                    &scope.configuration,
-                );
+                let observation = probe(&scope.configuration, &image)?;
                 image.revalidate()?;
                 grant.revalidate_image()?;
                 ensure!(
@@ -172,7 +166,15 @@ impl Runtime {
             let _ = self.selecting.take().unwrap().join();
         }
         if self.launching.as_ref().is_some_and(|w| w.is_finished()) {
-            let _ = self.launching.take().unwrap().join();
+            if let Err(error) = self
+                .launching
+                .take()
+                .unwrap()
+                .join()
+                .unwrap_or_else(|_| Err(anyhow::anyhow!("frontend launcher panicked")))
+            {
+                self.error = Some(bounded(error));
+            }
             self.observing.store(false, Ordering::Release);
         }
         if self.stop.load(Ordering::Acquire) && self.observing.load(Ordering::Acquire) {
@@ -186,17 +188,20 @@ impl Runtime {
         self.stop.load(Ordering::Acquire) && self.selecting.is_none() && self.launching.is_none()
     }
     pub fn status(&self) -> Value {
+        #[cfg(windows)]
+        let cleanup_unknown = super::frontend::cleanup_unknown();
+        #[cfg(not(windows))]
+        let cleanup_unknown: Option<String> = None;
+        let gui_exit_is_not_required = cleanup_unknown.is_none();
         json!({"selecting":self.selecting.is_some(),"original_worker":self.launching.is_some(),
             "stopping":self.stop.load(Ordering::Acquire),"offered":self.offered,"error":self.error,
-            "observing_gui":self.observing.load(Ordering::Acquire),"gui_observer_retained":self.observer_detached,"gui_exit_is_not_required":true})
+            "observing_gui":self.observing.load(Ordering::Acquire),"gui_observer_retained":self.observer_detached,"gui_exit_is_not_required":gui_exit_is_not_required,
+            "cleanup_unknown":cleanup_unknown})
     }
     #[cfg(test)]
     pub(in crate::desktop) fn observe_for_test(&mut self, frontend: OwnedFrontend) {
         let observing = self.observing.clone();
-        self.launching = Some(thread::spawn(move || {
-            observe(frontend, observing);
-            Ok(())
-        }));
+        self.launching = Some(thread::spawn(move || observe(frontend, observing)));
     }
 }
 impl Drop for Runtime {
@@ -204,16 +209,47 @@ impl Drop for Runtime {
         self.stop();
     }
 }
+/// Read-only absence evidence from the frontend's own activation endpoint.
+#[cfg(target_os = "linux")]
+fn probe(configuration: &str, _: &SelectedFrontend) -> Result<desktop::Observation> {
+    Ok(desktop::probe_at(
+        &crate::desktop::owner::instance_path(),
+        &uuid::Uuid::new_v4().to_string(),
+        configuration,
+    ))
+}
+/// The profile pipe that the Windows GUI listens on with its hello reply. Its
+/// server must be the selected, pinned image (desktop::windows::verify_server).
+#[cfg(windows)]
+fn probe(configuration: &str, image: &SelectedFrontend) -> Result<desktop::Observation> {
+    let home =
+        std::env::home_dir().ok_or_else(|| anyhow::anyhow!("profile directory unavailable"))?;
+    Ok(desktop::windows::probe_at(
+        &desktop::windows::activation_name("hgs-tray", &home),
+        &uuid::Uuid::new_v4().to_string(),
+        configuration,
+        Instant::now() + desktop::PROBE_WAIT,
+        image.pinned_image(),
+    ))
+}
 fn bounded(error: anyhow::Error) -> String {
     format!("{error:#}").chars().take(256).collect()
 }
-fn observe(mut frontend: OwnedFrontend, observing: Arc<AtomicBool>) {
-    // No real Root owner is retained after spawn, also checked by its Arc count.
-    observing.store(true, Ordering::Release);
-    // Pure observation outlives a backend revoke: never kill the GUI, lose its
-    // original Child, or keep its static admission forever after eventual exit.
+fn observe(mut frontend: OwnedFrontend, observing: Arc<AtomicBool>) -> Result<()> {
+    // Only an admitted, resumed GUI releases the Root preparation owner.
+    // A rejected Windows start keeps it until original-child exit is proven.
+    #[cfg(windows)]
+    let detachable = frontend.detachable();
+    #[cfg(not(windows))]
+    let detachable = true;
+    observing.store(detachable, Ordering::Release);
+    // Successful GUI observation may outlive a backend revoke. Rejected-start
+    // cleanup stays charged to the original worker through physical exit.
     while !frontend.exited() {
         frontend.poll();
         thread::sleep(Duration::from_millis(250));
     }
+    #[cfg(windows)]
+    frontend.result()?;
+    Ok(())
 }

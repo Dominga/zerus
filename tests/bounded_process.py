@@ -14,14 +14,22 @@ import time
 
 
 def children(pid):
+    """The children /proc lists for the threads of `pid`.
+
+    A process or thread can exit between being listed and being read:
+    ENOENT, or ESRCH from an exiting task. That process is gone. What its
+    other threads listed still stands, and the scan goes on. An unreadable
+    one (EACCES or EPERM) lists nothing here, but is never taken as gone:
+    custody follows only its retained pidfd. Any other error still fails.
+    """
     result = set()
     try:
         for thread in (Path('/proc') / str(pid) / 'task').iterdir():
             try:
                 result.update(map(int, (thread / 'children').read_text().split()))
-            except (FileNotFoundError, PermissionError):
+            except (FileNotFoundError, ProcessLookupError, PermissionError):
                 pass
-    except (FileNotFoundError, PermissionError):
+    except (FileNotFoundError, ProcessLookupError, PermissionError):
         pass
     return result
 

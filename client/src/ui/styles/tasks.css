@@ -146,6 +146,9 @@
   .tk-noproject { margin: auto 0; border: 0; }
   .tk-older { align-self: flex-start; margin-top: 6px; padding: 4px 2px; color: var(--z-color-accent); font-size: var(--fs-xs); }
   .tk-older:hover { text-decoration: underline; }
+  /* Show more of a windowed stage: quiet, like Activity's earlier-activity reader. */
+  .tk-more { align-self: center; margin-top: 6px; }
+  .tk-more-reading { align-self: center; margin-top: 6px; }
   .tk-skel { display: flex; gap: 10px; align-items: center; padding: 10px; border-radius: var(--z-radius-dialog); border: 1px solid var(--z-color-card-border); }
   .tk-skel-glyph { width: 22px; height: 22px; border-radius: 50%; flex: none; }
 

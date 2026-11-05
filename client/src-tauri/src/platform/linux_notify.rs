@@ -112,41 +112,6 @@ fn load(path: &Path, qt: QtSeed) -> Result<Saved, String> {
     }
     Ok(saved)
 }
-pub fn qt_values(
-) -> Result<Option<BTreeMap<String, zerus_client_core::settings::qt::QtValue>>, String> {
-    zerus_client_core::settings::QtStore::here()
-        .map(|store| store.read().map(|read| read.map(|(values, _)| values)))
-        .unwrap_or(Ok(None))
-}
-fn qt_seed() -> Result<Option<Saved>, String> {
-    let Some(values) = qt_values()? else {
-        return Ok(None);
-    };
-    let owner = values
-        .get("attention/linuxOwner")
-        .map(|v| v.to_text())
-        .unwrap_or_default();
-    if owner.is_empty() {
-        return Ok(None);
-    }
-    let tokens = values
-        .get("attention/linuxTokens")
-        .map(|v| v.to_text())
-        .unwrap_or_default();
-    let tokens = if tokens.is_empty() {
-        BTreeMap::new()
-    } else {
-        serde_json::from_str(&tokens)
-            .map_err(|e| format!("Could not read Qt notification identities: {e}"))?
-    };
-    Ok(Some(Saved {
-        version: 1,
-        bus_id: String::new(),
-        owner,
-        tokens,
-        uncertain: BTreeSet::new(),
-    }))
-}
 
 pub struct Poster {
     shared: Arc<Shared>,
@@ -643,7 +608,7 @@ fn signal(shared: &Shared, connection: &Connection, message: &zbus::Message) {
     }
 }
 
-pub fn install(app: &AppHandle, dir: PathBuf, switch: bool, desk: crate::desk::InputSender) {
+pub fn install(app: &AppHandle, dir: PathBuf, _switch: bool, desk: crate::desk::InputSender) {
     let target = app.clone();
     let sink = Arc::new(move |event| match event {
         Event::Activated { token, activation } => {
@@ -668,7 +633,7 @@ pub fn install(app: &AppHandle, dir: PathBuf, switch: bool, desk: crate::desk::I
     });
     app.manage(Poster::spawn(
         dir.join(FILE),
-        Box::new(move || if switch { qt_seed() } else { Ok(None) }),
+        Box::new(|| Ok(None)),
         None,
         sink,
     ));

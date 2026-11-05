@@ -2,6 +2,7 @@ import { nativeRoute } from "./native-entry";
 import { tr } from "../../i18n";
 import { createActivityScroll } from "./activity-scroll";
 import { activityReadingRows, createActivityAnchor } from "./activity-anchor";
+import { ActivityHeights, activityMeasureWindow, activityOverscan, createActivityResize, syncActivityHeights } from "./activity-heights";
 import { searchPreview, clearSearchPreview } from "../../store/searchSelection";
 import { SearchHighlight } from "./SearchHighlight";
 import { For, Show, batch, createContext, createEffect, createMemo, createSignal, on, onCleanup, onMount, untrack, useContext, type JSX } from "solid-js";
@@ -16,7 +17,7 @@ import { previews } from "../../store/attachments";
 import { mediaPlayback, retainedMediaId, setRetainedMediaId } from "../../store/mediaPlayback";
 import { pageHidden } from "../../store/visibility";
 import { recordingBlob } from "./voice-playback";
-import { cardTarget, createOpen, readCards } from "./attachment-card";
+import { cardTarget, createOpen, readCards, rowScope } from "./attachment-card";
 import { createStore, reconcile } from "solid-js/store";
 import { Icon } from "../lib/icons";
 import { selected, toast, contentScale, subagentOpen, setSubagentOpen, setMenu, setDetailTab, type MenuEntry } from "../../store/ui";
@@ -380,7 +381,7 @@ function MediaCard(props: { item: MediaMessage; scope?: AttachmentScope; sourceI
     else void play(next);
   };
   return (
-    <article class="act-msg k-user media" id={`item-${it.id}`}>
+    <article class="act-msg k-user media" id={`item-${it.id}`} classList={{ inherited: !!it.inherited }}>
       <header>
         <b>{video ? tr("You (video)") : tr("You (voice)")}</b>
         <span class="grow" />
@@ -481,7 +482,9 @@ function AttachmentCard(props: { file: ItemAttachment; scope?: AttachmentScope }
     </Show>
     <span class="att-caption">{props.file.caption}</span>
     <span class="dim">{props.file.meta}</span>
-    <span class="att-open" style={{ visibility: target() ? "visible" : "hidden" }}>{tr("Open →")}</span>
+    {/* "inherit", never "visible": a row inside the column that is still
+        hidden while it is placed must stay hidden (zerus-ig5q). */}
+    <span class="att-open" style={{ visibility: target() ? "inherit" : "hidden" }}>{tr("Open →")}</span>
   </button>;
 }
 
@@ -627,12 +630,12 @@ function EchoBody(props: { item: ActivityItem; scope?: AttachmentScope }) {
 function Item(props: { item: TranscriptItem; scope?: AttachmentScope; sourceId?: string; postersEnabled?: boolean; expanded?: boolean; onExpanded?: (open: boolean) => void }) {
   const [open, toggleOpen] = layoutDisclosure(() => props.expanded, props.onExpanded);
   const it = props.item;
-  if (it.kind === "media") return <MediaCard item={it} scope={props.scope} sourceId={props.sourceId} postersEnabled={props.postersEnabled} expanded={props.expanded} onExpanded={props.onExpanded} />;
+  if (it.kind === "media") return <MediaCard item={it} scope={rowScope(it, props.scope)} sourceId={props.sourceId} postersEnabled={props.postersEnabled} expanded={props.expanded} onExpanded={props.onExpanded} />;
   if (it.kind === "context") return <div class="act-label eyebrow" id={`item-${it.id}`}>{it.body}</div>;
-  if (it.kind === "thinking") return <div class="act-thinking" id={`item-${it.id}`}><span class="eyebrow">{tr("Thinking")}</span><p>{it.body}</p></div>;
+  if (it.kind === "thinking") return <div class="act-thinking" id={`item-${it.id}`} classList={{ inherited: !!it.inherited }}><span class="eyebrow">{tr("Thinking")}</span><p>{it.body}</p></div>;
   if (it.kind === "report")
     return (
-      <div class="act-notice" id={`item-${it.id}`} classList={{ open: open() }}>
+      <div class="act-notice" id={`item-${it.id}`} classList={{ open: open(), inherited: !!it.inherited }}>
         <div class="row"><Icon name="bot" size={13} /><b>{it.title}</b><Show when={it.sender}><span class="muted">{tr("from %1", it.sender!)}</span></Show><span class="grow" /><span class="act-time">{it.at}</span></div>
         <button class="link" onClick={toggleOpen}>{open() ? tr("▾ Hide report") : tr("▸ Show report")}</button>
         <Show when={open()}><p class="act-notice-body">{it.body}</p></Show>
@@ -640,7 +643,7 @@ function Item(props: { item: TranscriptItem; scope?: AttachmentScope; sourceId?:
     );
   return (
     <Show when={it.kind !== "tools" && it.kind !== "tool"} fallback={
-      <div class="act-tools" id={`item-${it.id}`} classList={{ open: open(), warn: !!it.warn }}>
+      <div class="act-tools" id={`item-${it.id}`} classList={{ open: open(), warn: !!it.warn, inherited: !!it.inherited }}>
         <button class="act-tools-head" onClick={toggleOpen} aria-expanded={open()}>
           <Icon name="chevron-right" size={12} class="chev" />
           <b>{it.title}</b>
@@ -653,7 +656,7 @@ function Item(props: { item: TranscriptItem; scope?: AttachmentScope; sourceId?:
         </Show>
       </div>
     }>
-      <article class={`act-msg k-${it.kind}`} id={`item-${it.id}`}>
+      <article class={`act-msg k-${it.kind}`} id={`item-${it.id}`} classList={{ inherited: !!it.inherited }}>
         <header>
           <b>{it.label ?? (it.kind === "user" ? tr("You") : it.kind === "agent" ? tr("Agent") : it.sender ?? "Zerus")}</b>
           {/* A local row's stamp stands in for the time and the receipt (ActivityView.cpp:1053-1055). */}
@@ -664,7 +667,8 @@ function Item(props: { item: TranscriptItem; scope?: AttachmentScope; sourceId?:
           <span class="grow" />
           <Show when={it.kind === "agent"}><button class="icon-btn small act-copy" title={tr("Copy as Markdown")} onClick={() => copyText(it.body ?? "", tr("The reply is on the clipboard"))}><Icon name="copy" size={12} /></button></Show>
         </header>
-        <EchoBody item={it} scope={props.scope} />
+        {/* A fork's inherited row belongs to its source: never this session's attachments. */}
+        <EchoBody item={it} scope={rowScope(it, props.scope)} />
       </article>
     </Show>
   );
@@ -723,12 +727,13 @@ export function localRows(source: ActivitySource, s: Session | undefined): reado
   const v = composer.view(), child = subagentOpen();
   if (!v || !s) return [];
   if (child) {
-    const key = draftKey({ computer: s.computer, key: s.catalogKey, name: s.name, archive_id: null,
+    const key = draftKey({ computer: s.computer, key: s.catalogKey, name: s.name, archive_id: null, session_id: s.sessionId ?? null,
       subagent: { agent_id: child, parent_conversation_id: s.conversationId ?? "" } });
     return v.subagent?.agent_id === child && v.key === key ? v.local : [];
   }
   if (source.readOnly) return [];
-  const key = draftKey({ computer: s.computer, key: s.catalogKey, name: s.name, archive_id: s.state === "archived" ? s.archiveId ?? null : null });
+  const key = draftKey({ computer: s.computer, key: s.catalogKey, name: s.name, archive_id: s.state === "archived" ? s.archiveId ?? null : null,
+    session_id: s.sessionId ?? null });
   return v.key === key ? v.local : [];
 }
 
@@ -773,6 +778,10 @@ export function ActivityView(props: { source?: ActivitySource }) {
   const [measuring, setMeasuring] = createSignal<number[]>([]);
   const [selectionIndexes, setSelectionIndexes] = createSignal<number[]>([]);
   let measuredContent = new Map<string, string>();
+  const heights = new ActivityHeights();
+  let measurementWidth = 0;
+  const [resizing, setResizing] = createSignal(false);
+  const overscan = () => activityOverscan(resizing());
   // Items keep their identity while events append, including across the virtual window.
   const [view, setView] = createStore<{ items: TranscriptItem[]; expired: boolean; loaded: boolean; pane: ReturnType<typeof paneStates>; tool: string }>({ items: [], expired: false, loaded: false, pane: paneStates(source(), s()), tool: "" });
   const local = createMemo(() => localRows(source(), s()), undefined, { equals: (a, b) => a === b || (a.length === 0 && b.length === 0) });
@@ -794,6 +803,7 @@ export function ActivityView(props: { source?: ActivitySource }) {
     motion.update(() => untrack(() => {
       settleReading(true);
       const content = new Map(items.map((item) => [item.id, JSON.stringify(item)]));
+      syncActivityHeights(heights, measuredContent, content);
       const pending = new Set(measuring().map((index) => view.items[index]?.id));
       setMeasuring(items.flatMap((item, index) => pending.has(item.id) || content.get(item.id) !== measuredContent.get(item.id) ? [index] : []));
       measuredContent = content;
@@ -838,11 +848,15 @@ export function ActivityView(props: { source?: ActivitySource }) {
       queueMicrotask(() => { if (target === source().target()?.id) write(); });
     },
     getScrollElement: () => (scroller?.isConnected ? scroller : null),
-    estimateSize: () => 96,
-    measureElement: (element) => element.getBoundingClientRect().height,
+    estimateSize: (index) => heights.get(view.items[index]?.id, measurementWidth) ?? 96,
+    measureElement: (element) => {
+      const rect = element.getBoundingClientRect(), item = view.items[Number(element.getAttribute("data-index"))];
+      if (item) heights.set(item.id, rect.width, rect.height);
+      return rect.height;
+    },
     get getItemKey() { return itemKey(); },
     get rangeExtractor() { return rangeExtractor(); },
-    overscan: 8,
+    get overscan() { return overscan(); },
     gap: 10,
   });
   virtualizer.shouldAdjustScrollPositionOnItemSizeChange = (item, _delta, instance) => {
@@ -890,7 +904,12 @@ export function ActivityView(props: { source?: ActivitySource }) {
       // considers the initial end-placement scroll active. Finish this explicit
       // premeasure before dropping retained rows; otherwise its RO never sees
       // offscreen nodes and estimates change the range on a later gesture.
-      measureActivityRows(scroller.querySelectorAll<HTMLElement>(".act-virtual-row"), virtualizer.resizeItem);
+      const indexes = new Set(pending);
+      measureActivityRows([...scroller.querySelectorAll<HTMLElement>(".act-virtual-row")].filter(row => indexes.has(Number(row.dataset.index))), (index, height, width) => {
+        const item = view.items[index];
+        if (item) heights.set(item.id, width, height);
+        virtualizer.resizeItem(index, height);
+      });
       setMeasuring([]);
       end.settle(); reading.changed();
     });
@@ -916,7 +935,14 @@ export function ActivityView(props: { source?: ActivitySource }) {
   const reading = createActivityAnchor({
     visible: () => activityReadingRows(scroller).visible(),
     offset: measuredOffset,
-    adjust: (delta) => activityReadingRows(scroller).adjust(delta),
+    adjust: (delta) => {
+      activityReadingRows(scroller).adjust(delta);
+      // The virtualizer learns the position only from the next scroll event,
+      // one frame later. A window recomputed before then (premeasured rows
+      // dropping after an older page lands) used the anchor's previous,
+      // estimated write and painted one blank frame (zerus-oavj).
+      virtualizer.scrollOffset = scroller.scrollTop;
+    },
     scrollTop: () => scroller.scrollTop,
   }, () => !end.active() && !preview(), animationFrames, () => !motion.active() && !selectionInside());
   const holdSelection = () => {
@@ -966,16 +992,38 @@ export function ActivityView(props: { source?: ActivitySource }) {
     const changed = () => { end.changed(); settleReading(); };
     // Resizes settle before the frame paints, so opening a session never shows
     // its content shifted by a late card, image or Markdown height for a frame.
-    let measuredWidth = scroller.clientWidth;
-    const resize = new ResizeObserver(() => {
-      if (scroller.clientWidth !== measuredWidth) {
-        measuredWidth = scroller.clientWidth;
-        setMeasuring(view.items.map((_, index) => index));
+    const column = scroller.querySelector<HTMLElement>(".act-col");
+    measurementWidth = column?.getBoundingClientRect().width ?? scroller.clientWidth;
+    const measureWindow = () => {
+      // Off-screen rows keep their last height as an estimate until mounted.
+      // Restoring a width must not clear the entire virtual layout or mount it.
+      const pending = activityMeasureWindow(virtualizer.range, view.items.length, overscan());
+      batch(() => {
+        for (const index of pending) {
+          const size = heights.get(view.items[index].id, measurementWidth);
+          if (size !== undefined) virtualizer.resizeItem(index, size);
+        }
+        setMeasuring(pending);
+      });
+    };
+    let viewportWidth = scroller.clientWidth;
+    // A capped column can stay fixed while the surrounding viewport resizes.
+    const widths = createActivityResize(setResizing, () => { end.settle(); settleReading(); });
+    const resize = new ResizeObserver((entries) => {
+      const viewport = entries.find(entry => entry.target === scroller)?.contentRect;
+      const viewportChanged = viewport && Math.abs(viewport.width - viewportWidth) > .5;
+      if (viewport) viewportWidth = viewport.width;
+      // These borderless boxes already have current geometry. A synchronous
+      // DOM read can flush another whole-page layout after virtual row writes.
+      const width = entries.find(entry => entry.target === (column ?? scroller))?.contentRect.width ?? measurementWidth;
+      if (viewportChanged && placed()) widths.resized();
+      if (Math.abs(width - measurementWidth) > .5) {
+        measurementWidth = width;
+        if (placed()) { widths.resized(); measureWindow(); }
       }
       end.settle(); settleReading();
     });
     resize.observe(scroller);
-    const column = scroller.querySelector(".act-col");
     const mutations = new MutationObserver(changed);
     if (column) {
       resize.observe(column);
@@ -984,11 +1032,12 @@ export function ActivityView(props: { source?: ActivitySource }) {
     scroller.addEventListener("load", changed, true);
     scroller.addEventListener("contentvisibilityautostatechange", changed, true);
     const fontChanged = () => {
-      setMeasuring(view.items.map((_, index) => index));
+      heights.clear();
+      if (placed()) measureWindow();
       changed();
     };
     document.fonts?.addEventListener("loadingdone", fontChanged);
-    onCleanup(() => { document.removeEventListener("selectionchange", selectionChanged); resize.disconnect(); mutations.disconnect(); scroller.removeEventListener("load", changed, true); scroller.removeEventListener("contentvisibilityautostatechange", changed, true); document.fonts?.removeEventListener("loadingdone", fontChanged); });
+    onCleanup(() => { widths.dispose(); document.removeEventListener("selectionchange", selectionChanged); resize.disconnect(); mutations.disconnect(); scroller.removeEventListener("load", changed, true); scroller.removeEventListener("contentvisibilityautostatechange", changed, true); document.fonts?.removeEventListener("loadingdone", fontChanged); });
   });
   onCleanup(() => {
     end.dispose(); reading.dispose(); motion.dispose();
@@ -1028,6 +1077,7 @@ export function ActivityView(props: { source?: ActivitySource }) {
     activityAll.delete(scroller);
     setExpanded(reconcile({}));
     measuredContent.clear(); setMeasuring([]); setSelectionIndexes([]);
+    heights.clear();
     virtualizer.measure();
     setFollowing(true); setUnseen(0); reading.reset(); newest = undefined;
     // Selection changes must place even when the next page has the same row count.
@@ -1115,9 +1165,12 @@ export function ActivityView(props: { source?: ActivitySource }) {
           </section>}</Show>
           <Show when={!preview()}>
           <div class="act-history-header">
+          {/* The two labels swap with "inherit", never "visible": a child set
+              visible shows through the column that stays hidden until it is
+              placed, so the loading heading was drawn twice (zerus-ig5q). */}
           <div class="act-label eyebrow" style={{ position: "relative", flex: "1", "min-width": "0" }}>
-            <span style={{ visibility: source().loadingOlder() ? "hidden" : "visible" }}>{tr("Recorded activity — messages and tool excerpts")}</span>
-            <span class="act-older hint" style={{ position: "absolute", inset: "0", padding: "0", display: "flex", "align-items": "center", "justify-content": "center", "text-transform": "none", "letter-spacing": "normal", "font-weight": "normal", visibility: source().loadingOlder() ? "visible" : "hidden" }} aria-hidden={!source().loadingOlder()}>{tr("Reading earlier activity…")}</span>
+            <span style={{ visibility: source().loadingOlder() ? "hidden" : "inherit" }}>{tr("Recorded activity — messages and tool excerpts")}</span>
+            <span class="act-older hint" style={{ position: "absolute", inset: "0", padding: "0", display: "flex", "align-items": "center", "justify-content": "center", "text-transform": "none", "letter-spacing": "normal", "font-weight": "normal", visibility: source().loadingOlder() ? "inherit" : "hidden" }} aria-hidden={!source().loadingOlder()}>{tr("Reading earlier activity…")}</span>
           </div>
           <Show when={!source().olderDone() && source().events().length > 0}>
             <button type="button" class="btn small ghost act-read-older" disabled={source().loadingOlder()} onClick={() => source().loadOlder()}>{tr("Read earlier activity")}</button>
@@ -1141,9 +1194,15 @@ export function ActivityView(props: { source?: ActivitySource }) {
                     // Solid writes data-index after this ref, so supply it before measuring.
                     return (
                       <div class="act-virtual-row" data-index={indexOf().get(id) ?? 0} data-start={flow().starts.get(id) ?? 0}
-                        ref={(node) => { node.dataset.index = String(indexOf().get(id) ?? 0); virtualizer.measureElement(node); }}
+                        ref={(node) => {
+                          const index = indexOf().get(id) ?? 0;
+                          node.dataset.index = String(index);
+                          const size = heights.get(id, measurementWidth);
+                          if (size !== undefined) virtualizer.resizeItem(index, size);
+                          virtualizer.measureElement(node);
+                        }}
                         style={{ "margin-top": `${flow().margins.get(id) ?? 0}px` }}>
-                        <Show when={item()}>{(it) => <Item item={it()} scope={scope()} sourceId={source().target()?.id} postersEnabled={placed() && !pageHidden()} expanded={!!expanded[id]} onExpanded={(open) => setExpanded(id, open)} />}</Show>
+                        <Show when={item()}>{(it) => <Item item={it()} scope={scope()} sourceId={source().target()?.id} postersEnabled={placed() && !pageHidden()} expanded={!!expanded[id]} onExpanded={(open) => { heights.invalidate(id); setExpanded(id, open); }} />}</Show>
                       </div>
                     );
                   }}</For>

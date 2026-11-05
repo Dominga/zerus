@@ -190,6 +190,7 @@ fn confirm(id: &str, mut event: Value, bytes: &[u8]) -> anyhow::Result<()> {
 /// every delivery guard and exact exit status. Only metadata capture is bounded;
 /// stdout is streamed byte-for-byte, and errors retain the normal stderr route.
 pub(crate) fn forward_send(route: &str, args: &[String], origin: Value) -> crate::cli::Result<i32> {
+    let executable = crate::self_exec::current()?;
     let mut input = Vec::new();
     std::io::stdin()
         .take(MAX_INPUT + 1)
@@ -219,7 +220,7 @@ pub(crate) fn forward_send(route: &str, args: &[String], origin: Value) -> crate
     let mut file = tempfile::tempfile()?;
     file.write_all(&input)?;
     file.rewind()?;
-    let mut command = Command::new(std::env::current_exe()?);
+    let mut command = Command::new(executable);
     if !route.is_empty() {
         command.arg(format!("@{route}"));
     }
@@ -227,6 +228,7 @@ pub(crate) fn forward_send(route: &str, args: &[String], origin: Value) -> crate
         .arg("send")
         .args(args)
         .env_remove("HGS_SESSION")
+        .env_remove("HGS_SESSION_ID")
         .env_remove("HGS_RUN_ID")
         .stdin(file)
         .stdout(Stdio::piped())

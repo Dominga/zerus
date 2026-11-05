@@ -53,10 +53,7 @@ fn publish(shared: &Shared) {
         .lock()
         .unwrap_or_else(PoisonError::into_inner)
         .status();
-    let mut snapshot = shared
-        .snapshot
-        .lock()
-        .unwrap_or_else(PoisonError::into_inner);
+    let mut snapshot = shared.snapshot.lock();
     snapshot.pending_read_import = Some(status);
     shared.pump.service(snapshot.clone());
 }
@@ -95,6 +92,21 @@ pub(super) fn retry(shared: Arc<Shared>) {
         // The charge remains inside every original checkpoint/native worker,
         // even if its receiver times out or the UI requests shutdown.
         let hold: Arc<dyn Send + Sync> = Arc::new(charge);
+        // Bootstrap installs this producer before preflight. Wait for its
+        // native mode classification BEFORE freezing/capturing any old source.
+        // An observation-restored host cannot schedule an import from a wake.
+        let ready_until = Instant::now() + Duration::from_secs(30);
+        while !shared.snapshot.copy().connected {
+            if shared.stopped.load(Ordering::Acquire) || Instant::now() >= ready_until {
+                finish(&shared, "pending_read_import_waiting_for_service");
+                return;
+            }
+            tokio::time::sleep(Duration::from_millis(25)).await;
+        }
+        if !shared.business_scheduling_permitted() {
+            finish(&shared, "pending_read_import_waiting_for_action");
+            return;
+        }
         let captured = match captured {
             Some(captured) => captured,
             None => {
@@ -150,11 +162,7 @@ pub(super) fn retry(shared: Arc<Shared>) {
                 finish(&shared, "pending_read_import_stopped");
                 return;
             }
-            let connected = shared
-                .snapshot
-                .lock()
-                .unwrap_or_else(PoisonError::into_inner)
-                .connected;
+            let connected = shared.snapshot.lock().connected;
             let configuration = shared
                 .responder
                 .as_ref()
@@ -191,6 +199,10 @@ pub(super) fn retry(shared: Arc<Shared>) {
         loop {
             if shared.stopped.load(Ordering::Acquire) {
                 finish(&shared, "pending_read_import_stopped");
+                return;
+            }
+            if !shared.business_scheduling_permitted() {
+                finish(&shared, "pending_read_import_waiting_for_action");
                 return;
             }
             if shared

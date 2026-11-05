@@ -15,6 +15,8 @@ use std::{
 };
 
 mod shim;
+#[cfg(any(target_os = "linux", target_os = "macos"))]
+mod worktree_membership;
 #[cfg(unix)]
 mod unix;
 #[cfg(unix)]
@@ -24,13 +26,39 @@ mod windows;
 #[cfg(windows)]
 pub use windows::*;
 
-/// A completed process roster may still contain protected Linux processes whose
+/// Start a child of the desktop service (a remote watch, a probe, maintenance).
+/// The service has no console on Windows, so its children start without a
+/// console window there; on Unix they take their turn as other children do.
+pub fn spawn_service_child(command: &mut Command) -> io::Result<Child> {
+    #[cfg(unix)]
+    {
+        spawn_in_turn(command)
+    }
+    #[cfg(windows)]
+    {
+        spawn_windowless(command)
+    }
+}
+
+/// Whether a console belongs to this process alone: it has a window and no other
+/// process, such as the user's shell, is attached. Windows creates one for a
+/// console program whose starter gave it none (a logon task, COM activation).
+#[cfg(any(windows, test))]
+pub fn private_console(window: bool, attached: u32) -> bool {
+    window && attached == 1
+}
+
+/// A completed process roster may still contain protected processes whose
 /// paths the OS refuses to disclose. Keep these separate from readable paths:
-/// they require personal confirmation, never automatic cleanup authority.
+/// background cleanup keeps them; only the confirmed Terminate/Remove policy
+/// may ignore actual permission denials. This data is never signal authority.
 #[derive(Default)]
 pub struct WorktreeProcesses {
     pub paths: Vec<(u32, PathBuf, String)>,
     pub unreadable: Vec<UnreadableWorktreeProcess>,
+    /// Complete bounded native cwd/image/FD inspection, with only actual
+    /// permission denials represented in `unreadable`. Never inferred from Err.
+    pub membership_complete: bool,
 }
 
 #[derive(serde::Serialize)]
@@ -40,6 +68,7 @@ pub struct UnreadableWorktreeProcess {
     pub command: String,
     pub cwd: bool,
     pub executable: bool,
+    pub files: bool,
     /// Kernel-verified invocation ancestor, retained as diagnostic metadata.
     pub invocation_ancestor: bool,
 }
@@ -50,6 +79,7 @@ impl From<Vec<(u32, PathBuf, String)>> for WorktreeProcesses {
         Self {
             paths,
             unreadable: Vec::new(),
+            membership_complete: false,
         }
     }
 }
@@ -175,6 +205,12 @@ impl FileLock {
     /// Takes ownership of a file whose lock this process has just acquired.
     pub fn held(file: File) -> Self {
         Self(file)
+    }
+
+    /// The identity of the exact file object this lock is held on.
+    #[cfg_attr(not(any(windows, test)), allow(dead_code))]
+    pub fn identity(&self) -> io::Result<FileIdentity> {
+        FileIdentity::of(&self.0)
     }
 }
 
@@ -654,5 +690,67 @@ mod tests {
         drop(FileLock::exclusive(owner).unwrap());
         contender.try_lock_exclusive().unwrap();
         drop(still_open);
+    }
+}
+
+#[cfg(test)]
+mod console_allocation_tests {
+    #[test]
+    fn only_a_console_no_other_process_uses_is_released() {
+        // A logon task or COM start: Windows made a console for this process alone.
+        assert!(super::private_console(true, 1));
+        // Started from a terminal: the user's shell shares it, so it stays.
+        assert!(!super::private_console(true, 2));
+        // No console window, or no attached process count: nothing to release.
+        assert!(!super::private_console(false, 1));
+        assert!(!super::private_console(true, 0));
+    }
+
+    #[test]
+    fn desktop_service_children_start_without_console_windows() {
+        // A plain spawn from the console-less service would give every remote
+        // watch, probe or maintenance child (and its ssh.exe) a window.
+        for (name, source) in [
+            ("fleet", include_str!("../desktop/fleet.rs")),
+            ("maintenance", include_str!("../desktop/maintenance.rs")),
+        ] {
+            let body = source
+                .split("\nfn spawn(command: &mut ")
+                .nth(1)
+                .and_then(|rest| rest.split("\n}\n").next())
+                .expect(name);
+            assert!(
+                body.contains("platform::spawn_service_child(command)"),
+                "{name}"
+            );
+            assert!(!body.contains(".spawn()"), "{name} spawns directly");
+        }
+        let shared = include_str!("mod.rs")
+            .split("pub fn spawn_service_child(")
+            .nth(1)
+            .and_then(|rest| rest.split("\n}\n").next())
+            .expect("spawn_service_child");
+        assert!(shared.contains("#[cfg(windows)]") && shared.contains("spawn_windowless(command)"));
+        assert!(
+            include_str!("windows.rs").contains("command.creation_flags(CREATE_NO_WINDOW).spawn()")
+        );
+    }
+
+    #[test]
+    fn the_manifest_gives_hgs_no_console_when_its_starter_has_none() {
+        let manifest = include_str!("../hgs.manifest");
+        let settings = manifest
+            .split("<windowsSettings>")
+            .nth(1)
+            .and_then(|rest| rest.split("</windowsSettings>").next())
+            .expect("windowsSettings");
+        assert!(settings.contains(
+            r#"<consoleAllocationPolicy xmlns="http://schemas.microsoft.com/SMI/2024/WindowsSettings">detached</consoleAllocationPolicy>"#
+        ));
+        // The settings it already had stay.
+        assert!(
+            settings.contains(">UTF-8</activeCodePage>")
+                && settings.contains(">true</longPathAware>")
+        );
     }
 }

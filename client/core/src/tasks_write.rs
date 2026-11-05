@@ -168,6 +168,27 @@ impl TaskCall {
         TaskCall::new(with_project(words(&["get", task]), project), "")
     }
 
+    /// One file of a task, or of one of its history entries:
+    /// `task attachment TASK --file N [--entry ID]`.
+    pub fn attachment(project: &str, task: &str, file: usize, entry: Option<&str>) -> TaskCall {
+        let mut args = words(&["attachment", task, "--file"]);
+        args.push(file.to_string());
+        if let Some(entry) = entry {
+            args.extend(["--entry".to_owned(), entry.to_owned()]);
+        }
+        TaskCall::new(with_project(args, project), "")
+    }
+
+    /// One page of a stage: `task list --stage S --limit N [--after CURSOR]`.
+    pub fn list_page(project: &str, stage: &str, limit: usize, after: Option<&str>) -> TaskCall {
+        let mut args = words(&["list", "--stage", stage, "--limit"]);
+        args.push(limit.to_string());
+        if let Some(after) = after {
+            args.extend(["--after".to_owned(), after.to_owned()]);
+        }
+        TaskCall::new(with_project(args, project), "")
+    }
+
     /// To the top of its list.
     pub fn move_top(project: &str, task: &str) -> TaskCall {
         TaskCall::new(with_project(words(&["move", task, "--top"]), project), "")
@@ -393,9 +414,32 @@ pub fn message_intent(text: &str, files: &[Attachment], mode: &str, dispatch: &s
     json!({"content": content, "mode": mode, "dispatch": dispatch})
 }
 
+/// The canonical `hgs task message` stdin for a message intent: its
+/// content's serialization.
+pub fn message_input(intent: &Value) -> String {
+    intent["content"].to_string()
+}
+
+/// The digest that freezes a canonical task message stdin in its record.
+pub fn input_digest(input: &str) -> String {
+    use sha2::{Digest, Sha256};
+    format!("{:x}", Sha256::digest(input.as_bytes()))
+}
+
 /// `hgs task message` for a reserved record; a recovery only checks whether
-/// the original was delivered (`--recover-only`) and sends nothing new.
-pub fn message_call(project: &str, task: &str, record: &Value, recovery: bool) -> TaskCall {
+/// the original was delivered (`--recover-only`) and sends nothing new. Its
+/// stdin is the record's frozen input (see [`outbox::reserve_message`]): its
+/// exact `input` bytes, or the canonical serialization its `input_sha256`
+/// names. Only an absent field is legacy: a present but invalid or
+/// mismatched one is refused before any call, never serialized again. Only a
+/// legacy record serializes its content; it never qualifies for an admitted
+/// actor.
+pub fn message_call(
+    project: &str,
+    task: &str,
+    record: &Value,
+    recovery: bool,
+) -> Result<TaskCall, String> {
     let intent = &record["intent"];
     let mut args = words(&[
         "message",
@@ -413,7 +457,20 @@ pub fn message_call(project: &str, task: &str, record: &Value, recovery: bool) -
     if recovery {
         args.push("--recover-only".into());
     }
-    TaskCall::new(args, intent["content"].to_string())
+    let canonical = message_input(intent);
+    let input = match (record.get("input"), record.get("input_sha256")) {
+        (None, None) => canonical,
+        (Some(Value::String(frozen)), None)
+            if serde_json::from_str::<Value>(frozen).ok().as_ref() == Some(&intent["content"]) =>
+        {
+            frozen.clone()
+        }
+        (None, Some(Value::String(digest))) if *digest == input_digest(&canonical) => canonical,
+        _ => {
+            return Err("The original message has an invalid saved input. Recovery data was kept and nothing was submitted.".into())
+        }
+    };
+    Ok(TaskCall::new(args, input))
 }
 
 /// Whether a message reply names the same task and request.
@@ -467,13 +524,77 @@ pub mod outbox {
         file.with_extension("marker")
     }
 
+    /// Evidence that the record was handed to the desktop service, never
+    /// permission: written and synced before the admission request.
+    fn handoff(file: &Path) -> PathBuf {
+        file.with_extension("service")
+    }
+
+    /// The handoff marker's exact content: the record's ID and snapshot.
+    fn handoff_bytes(record: &Value) -> Vec<u8> {
+        json!({"id": record["id"], "snapshot": snapshot(record)})
+            .to_string()
+            .into_bytes()
+    }
+
+    /// Removes a file that may already be gone.
+    fn remove(path: &Path) -> std::io::Result<()> {
+        match fs::remove_file(path) {
+            Err(error) if error.kind() != std::io::ErrorKind::NotFound => Err(error),
+            _ => Ok(()),
+        }
+    }
+
+    /// Durably marks the exact pending `record` as handed to the desktop
+    /// service, before its admission request is written. The marker is
+    /// evidence only: a marked record recovers only through the service's
+    /// read-only lookup, never through the direct `--recover-only` check.
+    pub fn hand_off(root: &Path, project: &str, task: &str, record: &Value) -> Result<(), String> {
+        let file = path(root, project, task);
+        let Some(_turn) = Turn::take(&file) else {
+            return Err("The message recovery record is busy.".into());
+        };
+        if pending(root, project, task)?.as_ref() != Some(record) {
+            return Err("The pending message changed; refresh this task.".into());
+        }
+        write(&handoff(&file), &handoff_bytes(record))
+            .map_err(|_| "Could not record the message handoff. Nothing was submitted.".to_owned())
+    }
+
+    /// Whether the exact `record` was handed to the desktop service. A marker
+    /// that is unreadable or names another record is never taken as absent.
+    pub fn handed_off(
+        root: &Path,
+        project: &str,
+        task: &str,
+        record: &Value,
+    ) -> Result<bool, String> {
+        let unavailable = || {
+            "The message handoff record could not be verified. Nothing was submitted.".to_owned()
+        };
+        let marker = handoff(&path(root, project, task));
+        match fs::symlink_metadata(&marker) {
+            Err(e) if e.kind() == std::io::ErrorKind::NotFound => return Ok(false),
+            Ok(meta) if meta.is_file() => {}
+            _ => return Err(unavailable()),
+        }
+        let mut bytes = Vec::new();
+        fs::File::open(&marker)
+            .and_then(|f| f.take(257).read_to_end(&mut bytes))
+            .map_err(|_| unavailable())?;
+        if bytes != handoff_bytes(record) {
+            return Err(unavailable());
+        }
+        Ok(true)
+    }
+
     /// One message operation per task at a time, within this client.
     static BUSY: Mutex<Option<HashSet<PathBuf>>> = Mutex::new(None);
 
-    struct Turn(PathBuf);
+    pub(crate) struct Turn(PathBuf);
 
     impl Turn {
-        fn take(file: &Path) -> Option<Turn> {
+        pub(crate) fn take(file: &Path) -> Option<Turn> {
             let until = Instant::now() + Duration::from_secs(1);
             loop {
                 {
@@ -538,8 +659,23 @@ pub mod outbox {
             return Err("The original message recovery snapshot exceeds its byte limit. Nothing was submitted.".into());
         }
         let record: Value = serde_json::from_slice(bytes).unwrap_or(Value::Null);
+        // A frozen message input, when present, is exactly one valid form:
+        // never a fallback to the legacy serialization.
+        let content = &record["intent"]["content"];
+        let frozen = match (record.get("input"), record.get("input_sha256")) {
+            (None, None) => true,
+            (Some(input), None) => input
+                .as_str()
+                .and_then(|input| serde_json::from_str::<Value>(input).ok())
+                .is_some_and(|parsed| parsed == *content),
+            (None, Some(digest)) => {
+                digest.as_str() == Some(super::input_digest(&content.to_string()).as_str())
+            }
+            (Some(_), Some(_)) => false,
+        };
         if !record["id"].as_str().is_some_and(uuid)
             || !record["intent"].is_object()
+            || !frozen
             || ["version", "schema"]
                 .iter()
                 .any(|key| record.get(key).is_some_and(|version| version != 1))
@@ -606,6 +742,10 @@ pub mod outbox {
         if pending(root, project, task)?.as_ref() != Some(expected) {
             return Ok(false);
         }
+        // A record handed to the desktop service is evidence for its review.
+        if fs::symlink_metadata(handoff(&file)).is_ok() {
+            return Err("The task recovery record is under review.".into());
+        }
         let bytes = next.to_string();
         decode(bytes.as_bytes())?;
         write(&file, bytes.as_bytes())
@@ -626,6 +766,36 @@ pub mod outbox {
         project: &str,
         task: &str,
         intent: &Value,
+        new_id: &str,
+    ) -> Result<Reserved, String> {
+        reserve_record(root, project, task, intent, None, new_id)
+    }
+
+    /// Reserves a task message with the one actual `hgs task message` stdin,
+    /// frozen before this checkpoint in the same record write: a canonical
+    /// stdin as its digest `input_sha256` (one copy of the content), any other
+    /// as its exact `input` bytes. The complete record must stay readable, or
+    /// nothing is written or sent. An earlier attempt is reused as [`reserve`]
+    /// does, with whatever it retained: a legacy record has neither. A
+    /// reservation is durable data about the original, not consent to
+    /// execute it.
+    pub fn reserve_message(
+        root: &Path,
+        project: &str,
+        task: &str,
+        intent: &Value,
+        input: &str,
+        new_id: &str,
+    ) -> Result<Reserved, String> {
+        reserve_record(root, project, task, intent, Some(input), new_id)
+    }
+
+    fn reserve_record(
+        root: &Path,
+        project: &str,
+        task: &str,
+        intent: &Value,
+        input: Option<&str>,
         new_id: &str,
     ) -> Result<Reserved, String> {
         let file = path(root, project, task);
@@ -653,6 +823,13 @@ pub mod outbox {
         let Some(_turn) = Turn::take(&file) else {
             return Err("This task already has a message operation in progress.".into());
         };
+        if let Some(input) = input {
+            if serde_json::from_str::<Value>(input).ok().as_ref() != Some(&intent["content"]) {
+                return Err(
+                    "The message input does not match its content. Nothing was submitted.".into(),
+                );
+            }
+        }
         let reserved = if file.exists() || marker(&file).exists() {
             let record = read(&file)?;
             let different_intent = record["intent"] != *intent;
@@ -662,8 +839,28 @@ pub mod outbox {
                 different_intent,
             }
         } else {
-            let record = json!({"id": new_id, "intent": intent});
-            write(&file, record.to_string().as_bytes()).map_err(|_| {
+            // Without a record or reservation marker, a handoff marker is
+            // what a completed release left: its record is already gone.
+            remove(&handoff(&file)).map_err(|_| {
+                "Could not update message recovery state. Nothing was submitted.".to_owned()
+            })?;
+            let mut record = json!({"id": new_id, "intent": intent});
+            if let Some(input) = input {
+                if input == super::message_input(intent) {
+                    record["input_sha256"] = Value::from(super::input_digest(input));
+                } else {
+                    record["input"] = Value::from(input);
+                }
+            }
+            // The complete persisted record must stay readable for recovery:
+            // refuse before anything is written or sent.
+            let bytes = record.to_string();
+            if bytes.len() as u64 > MAX_RECORD {
+                return Err(
+                    "This message is too large to keep for recovery. Nothing was submitted.".into(),
+                );
+            }
+            write(&file, bytes.as_bytes()).map_err(|_| {
                 "Could not save the original message. Nothing was submitted.".to_owned()
             })?;
             Reserved {
@@ -701,15 +898,13 @@ pub mod outbox {
         }
         fs::remove_file(&file)
             .map_err(|_| "Could not release the local message recovery record.".to_owned())?;
-        match fs::remove_file(marker(&file)) {
-            Ok(()) => {}
-            Err(error) if error.kind() == std::io::ErrorKind::NotFound => {}
-            Err(_) => return Err("Could not update message recovery state.".into()),
-        }
-        #[cfg(unix)]
-        fs::File::open(file.parent().expect("outbox parent"))
-            .and_then(|f| f.sync_all())
+        // The record's removal is durable before its markers go: a record
+        // never outlives its handoff marker.
+        sync_parent(&file)?;
+        remove(&marker(&file))
+            .and_then(|()| remove(&handoff(&file)))
             .map_err(|_| "Could not update message recovery state.".to_owned())?;
+        sync_parent(&file)?;
         Ok(true)
     }
 
@@ -726,12 +921,198 @@ pub mod outbox {
             }
             fs::remove_file(&file)
                 .map_err(|_| "Could not release the local message recovery record.".to_owned())?;
+            // The record's removal is durable before its markers go.
+            sync_parent(&file)?;
         }
-        match fs::remove_file(marker(&file)) {
-            Ok(()) => Ok(()),
-            Err(error) if error.kind() == std::io::ErrorKind::NotFound => Ok(()),
-            Err(_) => Err("Could not update message recovery state.".into()),
+        remove(&marker(&file))
+            .and_then(|()| remove(&handoff(&file)))
+            .map_err(|_| "Could not update message recovery state.".to_owned())?;
+        sync_parent(&file)
+    }
+
+    /// Makes the outbox folder's entries durable: an ordering barrier.
+    fn sync_parent(file: &Path) -> Result<(), String> {
+        #[cfg(unix)]
+        fs::File::open(file.parent().expect("outbox parent"))
+            .and_then(|f| f.sync_all())
+            .map_err(|_| "Could not update message recovery state.".to_owned())?;
+        #[cfg(not(unix))]
+        let _ = file;
+        Ok(())
+    }
+}
+
+/// The reference form (`reference-v1`) of a canonical task message record:
+/// the record with each attachment's `data_base64` replaced by a `data_ref`
+/// naming the raw bytes' SHA-256 and size. Every other field, the attachment
+/// order and metadata included, stays exact. Only a record whose stdin was
+/// frozen in its canonical form (`input_sha256`) has one. Rebuilding uses the
+/// same canonical serializer as [`content`] and [`message_input`], and the
+/// rebuilt stdin must hash to the frozen digest.
+pub mod references {
+    use super::{
+        input_digest, message_input, MAX_ATTACHMENTS, MAX_ATTACHMENT_BYTES, MAX_TOTAL_BYTES,
+    };
+    use base64::Engine;
+    use serde_json::{json, Value};
+    use sha2::{Digest, Sha256};
+
+    /// The form name an intent states for a reference projection.
+    pub const FORM: &str = "reference-v1";
+    const INVALID: &str = "invalid_task_message_reference";
+    /// A raw attachment whose size or digest is not its reference's.
+    pub const MISMATCH: &str = "task_message_reference_mismatch";
+    /// A rebuilt stdin whose digest is not the frozen one.
+    pub const INPUT_CHANGED: &str = "task_message_input_changed";
+
+    /// One attachment's raw bytes, by digest and size.
+    #[derive(Clone, Debug, PartialEq, Eq)]
+    pub struct Reference {
+        pub sha256: String,
+        pub size: u64,
+    }
+
+    fn digest(bytes: &[u8]) -> String {
+        format!("{:x}", Sha256::digest(bytes))
+    }
+    fn hex(value: &str) -> bool {
+        value.len() == 64
+            && value
+                .bytes()
+                .all(|b| b.is_ascii_digit() || (b'a'..=b'f').contains(&b))
+    }
+    fn attachments(record: &Value) -> Option<&Vec<Value>> {
+        record["intent"]["content"]["attachments"].as_array()
+    }
+
+    /// The ordered references of a projection, with its shape and the
+    /// attachment limits checked. It reads no file and builds no input.
+    pub fn of(projection: &Value) -> Result<Vec<Reference>, &'static str> {
+        let frozen = projection["input_sha256"].as_str().is_some_and(hex);
+        if !projection.is_object()
+            || projection.get("input").is_some()
+            || !frozen
+            || !projection["intent"]["content"].is_object()
+        {
+            return Err(INVALID);
         }
+        let items = attachments(projection).ok_or(INVALID)?;
+        if items.is_empty() || items.len() > MAX_ATTACHMENTS {
+            return Err(INVALID);
+        }
+        let mut total = 0u64;
+        let mut references = Vec::with_capacity(items.len());
+        for item in items {
+            let reference = &item["data_ref"];
+            let fields = reference.as_object().map_or(0, |o| o.len());
+            let sha256 = reference["sha256"].as_str().filter(|v| hex(v));
+            let size = reference["size"].as_u64();
+            let (Some(sha256), Some(size)) = (sha256, size) else {
+                return Err(INVALID);
+            };
+            total = total.saturating_add(size);
+            if item.get("data_base64").is_some()
+                || fields != 2
+                || size == 0
+                || size > MAX_ATTACHMENT_BYTES as u64
+                || total > MAX_TOTAL_BYTES as u64
+            {
+                return Err(INVALID);
+            }
+            references.push(Reference {
+                sha256: sha256.into(),
+                size,
+            });
+        }
+        Ok(references)
+    }
+
+    /// The projection of a canonical record and its ordered raw attachments.
+    /// A record without attachments, with a non-canonical or legacy input or
+    /// with an attachment that is not canonical base64 has none.
+    pub fn project(record: &Value) -> Result<(Value, Vec<Vec<u8>>), &'static str> {
+        let canonical = record.get("input").is_none()
+            && record["input_sha256"].as_str()
+                == Some(input_digest(&message_input(&record["intent"])).as_str());
+        if !canonical {
+            return Err(INVALID);
+        }
+        let items = attachments(record).ok_or(INVALID)?;
+        let mut projection = record.clone();
+        let mut blobs = Vec::with_capacity(items.len());
+        for (index, item) in items.iter().enumerate() {
+            // A field already named `data_ref`, even null, would be replaced:
+            // that record has no projection that keeps every other field.
+            if item.get("data_ref").is_some() {
+                return Err(INVALID);
+            }
+            let encoded = item["data_base64"].as_str().ok_or(INVALID)?;
+            if encoded.len() > MAX_ATTACHMENT_BYTES.div_ceil(3) * 4 {
+                return Err(INVALID);
+            }
+            // The standard engine decodes only the one canonical encoding
+            // (canonical padding, no trailing bits or whitespace), the one
+            // that rebuilds the same stdin.
+            let bytes = base64::engine::general_purpose::STANDARD
+                .decode(encoded)
+                .map_err(|_| INVALID)?;
+            let slot = &mut projection["intent"]["content"]["attachments"][index];
+            let object = slot.as_object_mut().ok_or(INVALID)?;
+            object.remove("data_base64");
+            object.insert(
+                "data_ref".into(),
+                json!({"sha256": digest(&bytes), "size": bytes.len()}),
+            );
+            blobs.push(bytes);
+        }
+        of(&projection)?;
+        Ok((projection, blobs))
+    }
+
+    /// The exact record a projection stands for, from its ordered raw
+    /// attachments. Each must have its reference's size and digest, and the
+    /// rebuilt canonical stdin must hash to the frozen `input_sha256`.
+    pub fn rebuild(projection: &Value, blobs: &[&[u8]]) -> Result<Value, &'static str> {
+        let references = of(projection)?;
+        if blobs.len() != references.len() {
+            return Err(MISMATCH);
+        }
+        let mut record = projection.clone();
+        for (index, (reference, bytes)) in references.iter().zip(blobs).enumerate() {
+            if bytes.len() as u64 != reference.size || digest(bytes) != reference.sha256 {
+                return Err(MISMATCH);
+            }
+            let slot = &mut record["intent"]["content"]["attachments"][index];
+            let object = slot.as_object_mut().ok_or(INVALID)?;
+            object.remove("data_ref");
+            object.insert(
+                "data_base64".into(),
+                base64::engine::general_purpose::STANDARD
+                    .encode(bytes)
+                    .into(),
+            );
+        }
+        let input = message_input(&record["intent"]);
+        if record["input_sha256"].as_str() != Some(input_digest(&input).as_str()) {
+            return Err(INPUT_CHANGED);
+        }
+        Ok(record)
+    }
+
+    /// The exact byte length of the stdin a projection rebuilds, without its
+    /// attachments: base64 needs no JSON escaping, so each one adds exactly
+    /// its encoded length to the content with empty data.
+    pub fn input_len(projection: &Value) -> Result<u64, &'static str> {
+        let references = of(projection)?;
+        let mut content = projection["intent"]["content"].clone();
+        let items = content["attachments"].as_array_mut().ok_or(INVALID)?;
+        for item in items.iter_mut() {
+            let object = item.as_object_mut().ok_or(INVALID)?;
+            object.remove("data_ref");
+            object.insert("data_base64".into(), "".into());
+        }
+        let encoded: u64 = references.iter().map(|r| r.size.div_ceil(3) * 4).sum();
+        Ok(content.to_string().len() as u64 + encoded)
     }
 }
 
@@ -994,6 +1375,178 @@ mod tests {
 }
 
 #[cfg(test)]
+mod references_tests {
+    use super::references::{self, Reference};
+    use super::*;
+    use sha2::Digest;
+
+    const ID: &str = "11111111-1111-4111-8111-111111111111";
+
+    fn file(name: &str, bytes: Vec<u8>) -> Attachment {
+        Attachment {
+            name: name.into(),
+            mime: "image/png".into(),
+            bytes: bytes.into(),
+            reference: format!("[{name}]"),
+        }
+    }
+    /// A canonical record as the editor reserves it, with an opaque field.
+    fn record(files: &[Attachment]) -> Value {
+        let intent = message_intent("see these", files, "queue", "");
+        json!({"id": ID, "intent": intent, "input_sha256": input_digest(&message_input(&intent)),
+            "opaque_future": {"kept": true}})
+    }
+    fn pair() -> Vec<Attachment> {
+        let shot: Vec<u8> = (0..3000u32).map(|n| (n % 251) as u8).collect();
+        // The same bytes twice: each attachment keeps its own reference.
+        vec![
+            file("a.png", shot.clone()),
+            file("b.png", shot),
+            file("c.txt", b"note".to_vec()),
+        ]
+    }
+
+    #[test]
+    fn a_projection_keeps_every_other_field_and_rebuilds_the_exact_record() {
+        let files = pair();
+        let record = record(&files);
+        let (projection, blobs) = references::project(&record).unwrap();
+        let items = projection["intent"]["content"]["attachments"]
+            .as_array()
+            .unwrap();
+        assert_eq!(items.len(), 3);
+        for (item, file) in items.iter().zip(&files) {
+            assert!(item.get("data_base64").is_none());
+            assert_eq!(item["name"], file.name.as_str(), "order and metadata kept");
+            assert_eq!(item["reference"], file.reference.as_str());
+        }
+        assert_eq!(projection["opaque_future"], record["opaque_future"]);
+        assert_eq!(projection["input_sha256"], record["input_sha256"]);
+        assert_eq!(
+            references::of(&projection).unwrap()[0],
+            Reference {
+                sha256: format!("{:x}", sha2::Sha256::digest(&files[0].bytes)),
+                size: 3000
+            }
+        );
+        let views: Vec<&[u8]> = blobs.iter().map(Vec::as_slice).collect();
+        assert_eq!(references::rebuild(&projection, &views).unwrap(), record);
+        assert_eq!(
+            references::input_len(&projection).unwrap(),
+            message_input(&record["intent"]).len() as u64
+        );
+    }
+
+    #[test]
+    fn only_a_canonical_record_with_canonical_attachments_has_a_projection() {
+        let record = record(&pair());
+        // A non-canonical frozen input, a legacy record or no attachments.
+        let mut exact = record.clone();
+        exact.as_object_mut().unwrap().remove("input_sha256");
+        exact["input"] = json!(message_input(&record["intent"]));
+        let mut legacy = record.clone();
+        legacy.as_object_mut().unwrap().remove("input_sha256");
+        let plain = {
+            let intent = message_intent("text only", &[], "queue", "");
+            json!({"id": ID, "intent": intent, "input_sha256": input_digest(&message_input(&intent))})
+        };
+        // Encodings of the same bytes other than the one canonical encoding:
+        // trailing bits, missing padding, whitespace.
+        let loose = ["bm90ZR==", "bm90ZQ", "bm90ZQ==\n", "bm90 ZQ=="].map(|encoded| {
+            let mut loose = record.clone();
+            loose["intent"]["content"]["attachments"][2]["data_base64"] = json!(encoded);
+            loose["input_sha256"] = json!(input_digest(&message_input(&loose["intent"])));
+            loose
+        });
+        let mut changed = record.clone();
+        changed["input_sha256"] = json!("0".repeat(64));
+        // An attachment that already has a `data_ref` field, null or not:
+        // projecting it would overwrite that field (review-n on #1324).
+        let named = [json!(null), json!({"sha256": "0".repeat(64), "size": 4})].map(|value| {
+            let mut named = record.clone();
+            named["intent"]["content"]["attachments"][2]["data_ref"] = value;
+            named["input_sha256"] = json!(input_digest(&message_input(&named["intent"])));
+            assert!(
+                outbox::decode(named.to_string().as_bytes()).is_ok(),
+                "a valid record"
+            );
+            named
+        });
+        for refused in [exact, legacy, plain, changed]
+            .into_iter()
+            .chain(loose)
+            .chain(named)
+        {
+            assert!(references::project(&refused).is_err(), "{refused}");
+        }
+    }
+
+    #[test]
+    fn a_rebuild_refuses_any_other_bytes_and_any_other_shape() {
+        let record = record(&pair());
+        let (projection, blobs) = references::project(&record).unwrap();
+        let views: Vec<&[u8]> = blobs.iter().map(Vec::as_slice).collect();
+        let wrong = b"note!".to_vec();
+        // The same size, other bytes.
+        let mut flipped = blobs[0].clone();
+        flipped[0] ^= 1;
+        assert_eq!(
+            references::rebuild(&projection, &[flipped.as_slice(), views[1], views[2]]),
+            Err(references::MISMATCH)
+        );
+        for bad in [
+            vec![views[0], views[1]],
+            vec![views[0], views[1], views[2], views[2]],
+            vec![views[0], views[1], wrong.as_slice()],
+            vec![views[2], views[1], views[0]],
+        ] {
+            assert!(references::rebuild(&projection, &bad).is_err());
+        }
+        // Metadata changed after the input was frozen no longer rebuilds it.
+        let mut renamed = projection.clone();
+        renamed["intent"]["content"]["attachments"][0]["name"] = json!("other.png");
+        assert_eq!(
+            references::rebuild(&renamed, &views),
+            Err(references::INPUT_CHANGED)
+        );
+        let shape = |edit: &dyn Fn(&mut Value)| {
+            let mut changed = projection.clone();
+            edit(&mut changed);
+            references::of(&changed).is_err()
+        };
+        fn first(v: &mut Value) -> &mut Value {
+            &mut v["intent"]["content"]["attachments"][0]
+        }
+        assert!(shape(&|v| first(v)["data_base64"] = json!("")));
+        assert!(shape(&|v| first(v)["data_ref"]["extra"] = json!(1)));
+        assert!(shape(&|v| first(v)["data_ref"]["size"] = json!(0)));
+        assert!(shape(
+            &|v| first(v)["data_ref"]["size"] = json!(MAX_ATTACHMENT_BYTES + 1)
+        ));
+        assert!(shape(
+            &|v| first(v)["data_ref"]["sha256"] = json!("A".repeat(64))
+        ));
+        assert!(shape(&|v| v["input"] = json!("{}")));
+        assert!(shape(&|v| v["input_sha256"] = json!("not a digest")));
+        assert!(shape(&|v| v["intent"]["content"]["attachments"] = json!([])));
+        // The attachment count and total size limits hold for references too.
+        let many = |count: usize, size: usize| {
+            let mut changed = projection.clone();
+            let item = projection["intent"]["content"]["attachments"][0].clone();
+            let mut items = vec![item; count];
+            for item in &mut items {
+                item["data_ref"]["size"] = json!(size);
+            }
+            changed["intent"]["content"]["attachments"] = json!(items);
+            references::of(&changed).is_err()
+        };
+        assert!(!many(MAX_ATTACHMENTS, 1));
+        assert!(many(MAX_ATTACHMENTS + 1, 1));
+        assert!(many(3, MAX_ATTACHMENT_BYTES), "over the total");
+    }
+}
+
+#[cfg(test)]
 mod outbox_tests {
     use super::*;
     use std::path::PathBuf;
@@ -1047,13 +1600,309 @@ mod outbox_tests {
     }
 
     #[test]
+    fn a_reserved_message_sends_its_frozen_stdin_byte_for_byte() {
+        let root = scratch("frozen");
+        let intent = message_intent("hello", &[], "comment", "none");
+        // Bytes that serializing the content again would not reproduce.
+        let frozen = "{\n  \"text\": \"hello\",\n  \"attachments\": []\n}";
+        let reserved =
+            outbox::reserve_message(&root.0, "alpha", "t-1", &intent, frozen, ID).unwrap();
+        assert!(!reserved.recovering);
+        let saved = outbox::read(&outbox::path(&root.0, "alpha", "t-1")).unwrap();
+        assert_eq!(saved["input"], frozen, "saved with the checkpoint");
+        assert_eq!(
+            message_call("alpha", "t-1", &saved, false).unwrap().input,
+            frozen
+        );
+        assert_eq!(
+            message_call("alpha", "t-1", &saved, true).unwrap().input,
+            frozen
+        );
+        // Reopening keeps the original's frozen input, never this caller's.
+        let again = outbox::reserve_message(
+            &root.0,
+            "alpha",
+            "t-1",
+            &intent,
+            &message_input(&intent),
+            OTHER,
+        )
+        .unwrap();
+        assert!(again.recovering);
+        assert_eq!(again.record["id"], ID);
+        assert_eq!(again.record["input"], frozen);
+        // A legacy record has none: only the direct path serializes it.
+        let legacy = json!({"id": ID, "intent": intent});
+        assert_eq!(
+            message_call("alpha", "t-1", &legacy, false).unwrap().input,
+            intent["content"].to_string()
+        );
+    }
+
+    #[test]
+    fn a_canonical_frozen_stdin_keeps_one_copy_and_stays_readable() {
+        // Two allowed 7 MiB attachments: one copy of the content fits the
+        // record limit, a second would not.
+        let root = scratch("frozen-large");
+        let files: Vec<Attachment> = (0..2)
+            .map(|n| Attachment {
+                name: format!("file-{n}.bin"),
+                mime: "application/octet-stream".into(),
+                bytes: std::sync::Arc::from(vec![42; 7 * 1024 * 1024]),
+                reference: String::new(),
+            })
+            .collect();
+        let intent = message_intent("Allowed attachments", &files, "note", "");
+        let input = message_input(&intent);
+        let reserved =
+            outbox::reserve_message(&root.0, "alpha", "t-1", &intent, &input, ID).unwrap();
+        assert!(reserved.record.get("input").is_none(), "one copy");
+        assert_eq!(reserved.record["input_sha256"], input_digest(&input));
+        let pending = outbox::pending(&root.0, "alpha", "t-1").unwrap().unwrap();
+        assert_eq!(
+            message_call("alpha", "t-1", &pending, true).unwrap().input,
+            input
+        );
+        // Frozen bytes that would make the record unreadable are refused
+        // before anything is written.
+        let root = scratch("frozen-oversize");
+        let pretty = serde_json::to_string_pretty(&intent["content"]).unwrap();
+        assert!(outbox::reserve_message(&root.0, "alpha", "t-1", &intent, &pretty, ID).is_err());
+        assert!(!outbox::path(&root.0, "alpha", "t-1").exists());
+    }
+
+    #[test]
+    fn a_present_but_invalid_frozen_input_is_never_legacy() {
+        let intent = message_intent("original", &[], "note", "");
+        let canonical = message_input(&intent);
+        for (frozen, field) in [
+            ("{ \"text\":\"original\", \"attachments\":[] }", "input"),
+            (canonical.as_str(), "input_sha256"),
+        ] {
+            let root = scratch(&format!("frozen-malformed-{field}"));
+            let file = outbox::path(&root.0, "alpha", "t-1");
+            outbox::reserve_message(&root.0, "alpha", "t-1", &intent, frozen, ID).unwrap();
+            let original = outbox::read(&file).unwrap();
+            assert!(original.get(field).is_some());
+            let mut both = original.clone();
+            both["input"] = json!(frozen);
+            both["input_sha256"] = json!(input_digest(frozen));
+            let damaged = [
+                json!(null),
+                json!(42),
+                json!([]),
+                json!({"invalid": true}),
+                json!("{\"text\":\"changed\",\"attachments\":[]}"),
+            ]
+            .into_iter()
+            .map(|value| {
+                let mut damaged = original.clone();
+                damaged[field] = value;
+                damaged
+            })
+            .chain([both]);
+            for damaged in damaged {
+                std::fs::write(&file, damaged.to_string()).unwrap();
+                assert!(
+                    outbox::pending(&root.0, "alpha", "t-1").is_err(),
+                    "{field}: {damaged}"
+                );
+            }
+        }
+        // The call itself refuses them too, on any record it is given.
+        let base = json!({"id": ID, "intent": intent});
+        for (field, value) in [
+            ("input", json!(null)),
+            ("input", json!(42)),
+            ("input", json!([])),
+            ("input", json!({"invalid": true})),
+            ("input", json!("{\"text\":\"changed\",\"attachments\":[]}")),
+            ("input_sha256", json!(null)),
+            ("input_sha256", json!("b".repeat(64))),
+        ] {
+            let mut bad = base.clone();
+            bad[field] = value.clone();
+            assert!(
+                message_call("alpha", "t-1", &bad, true).is_err(),
+                "{field}: {value}"
+            );
+        }
+        let mut both = base.clone();
+        both["input"] = json!(canonical);
+        both["input_sha256"] = json!(input_digest(&canonical));
+        assert!(message_call("alpha", "t-1", &both, true).is_err());
+        // A frozen input must be this intent's content.
+        assert!(outbox::reserve_message(
+            &scratch("frozen-mismatch").0,
+            "alpha",
+            "t-1",
+            &intent,
+            "{\"text\":\"other\",\"attachments\":[]}",
+            ID
+        )
+        .is_err());
+    }
+
+    #[test]
+    fn a_generic_reopen_keeps_frozen_bytes_and_legacy_stays_legacy() {
+        let root = scratch("frozen-reopen");
+        let intent = message_intent("hello", &[], "note", "");
+        let frozen = "{ \"attachments\":[], \"text\":\"hello\" }\n";
+        let saved = outbox::reserve_message(&root.0, "alpha", "t-1", &intent, frozen, ID).unwrap();
+        let file = outbox::path(&root.0, "alpha", "t-1");
+        let bytes = std::fs::read(&file).unwrap();
+        let again = outbox::reserve(
+            &root.0,
+            "alpha",
+            "t-1",
+            &message_intent("different", &[], "queue", ""),
+            OTHER,
+        )
+        .unwrap();
+        assert!(again.recovering && again.different_intent);
+        assert_eq!(again.record, saved.record);
+        assert_eq!(std::fs::read(&file).unwrap(), bytes);
+        for recover in [false, true] {
+            assert_eq!(
+                message_call("alpha", "t-1", &again.record, recover)
+                    .unwrap()
+                    .input,
+                frozen
+            );
+        }
+        let legacy = scratch("frozen-legacy");
+        outbox::reserve(&legacy.0, "alpha", "t-1", &intent, ID).unwrap();
+        let old =
+            outbox::reserve_message(&legacy.0, "alpha", "t-1", &intent, frozen, OTHER).unwrap();
+        assert!(old.recovering);
+        assert!(old.record.get("input").is_none() && old.record.get("input_sha256").is_none());
+        assert_eq!(
+            message_call("alpha", "t-1", &old.record, true)
+                .unwrap()
+                .input,
+            message_input(&intent)
+        );
+    }
+
+    #[test]
+    fn a_handoff_marks_only_the_exact_pending_record_and_fails_closed() {
+        let root = scratch("handoff");
+        let intent = message_intent("hello", &[], "queue", "");
+        let frozen = message_input(&intent);
+        let record = outbox::reserve_message(&root.0, "alpha", "t-1", &intent, &frozen, ID)
+            .unwrap()
+            .record;
+        assert_eq!(
+            outbox::handed_off(&root.0, "alpha", "t-1", &record),
+            Ok(false)
+        );
+        // Only the exact pending record can be marked.
+        let mut other = record.clone();
+        other["opaque"] = json!(1);
+        assert!(outbox::hand_off(&root.0, "alpha", "t-1", &other).is_err());
+        assert_eq!(
+            outbox::handed_off(&root.0, "alpha", "t-1", &record),
+            Ok(false)
+        );
+        outbox::hand_off(&root.0, "alpha", "t-1", &record).unwrap();
+        assert_eq!(
+            outbox::handed_off(&root.0, "alpha", "t-1", &record),
+            Ok(true)
+        );
+        // Evidence about another record, or unreadable evidence, is never
+        // taken as an unmarked record.
+        assert!(outbox::handed_off(&root.0, "alpha", "t-1", &other).is_err());
+        let marker = outbox::path(&root.0, "alpha", "t-1").with_extension("service");
+        std::fs::write(&marker, b"{}").unwrap();
+        assert!(outbox::handed_off(&root.0, "alpha", "t-1", &record).is_err());
+        std::fs::remove_file(&marker).unwrap();
+        std::fs::create_dir(&marker).unwrap();
+        assert!(outbox::handed_off(&root.0, "alpha", "t-1", &record).is_err());
+        std::fs::remove_dir(&marker).unwrap();
+        // The marker is evidence for review, never something TaskStart may
+        // rewrite underneath.
+        outbox::hand_off(&root.0, "alpha", "t-1", &record).unwrap();
+        assert!(outbox::replace_if_unchanged(&root.0, "alpha", "t-1", &record, &other).is_err());
+        assert_eq!(
+            outbox::pending(&root.0, "alpha", "t-1").unwrap().as_ref(),
+            Some(&record)
+        );
+    }
+
+    #[test]
+    fn a_crash_between_the_marker_and_the_request_stays_in_review_until_released() {
+        let root = scratch("handoff-crash");
+        let intent = message_intent("hello", &[], "queue", "");
+        let frozen = message_input(&intent);
+        let record = outbox::reserve_message(&root.0, "alpha", "t-1", &intent, &frozen, ID)
+            .unwrap()
+            .record;
+        // The marker is durable before the request; the client then stopped.
+        outbox::hand_off(&root.0, "alpha", "t-1", &record).unwrap();
+        // A new Submit reopens the same original, still marked: review only.
+        let again =
+            outbox::reserve_message(&root.0, "alpha", "t-1", &intent, &frozen, OTHER).unwrap();
+        assert!(again.recovering);
+        assert_eq!(again.record, record);
+        assert_eq!(
+            outbox::handed_off(&root.0, "alpha", "t-1", &record),
+            Ok(true)
+        );
+        // An explicit discard releases the record and its marker together.
+        assert_eq!(
+            outbox::release_if_unchanged(&root.0, "alpha", "t-1", &record),
+            Ok(true)
+        );
+        let file = outbox::path(&root.0, "alpha", "t-1");
+        for evidence in ["json", "marker", "service"] {
+            assert!(!file.with_extension(evidence).exists(), "{evidence}");
+        }
+        // Sending again is a NEW record, unmarked.
+        let fresh =
+            outbox::reserve_message(&root.0, "alpha", "t-1", &intent, &frozen, OTHER).unwrap();
+        assert!(!fresh.recovering);
+        assert_eq!(fresh.record["id"], OTHER);
+        assert_eq!(
+            outbox::handed_off(&root.0, "alpha", "t-1", &fresh.record),
+            Ok(false)
+        );
+    }
+
+    #[test]
+    fn a_settled_release_removes_the_marker_last_and_a_leftover_never_marks_a_new_record() {
+        let root = scratch("handoff-release");
+        let intent = message_intent("hello", &[], "queue", "");
+        let frozen = message_input(&intent);
+        let record = outbox::reserve_message(&root.0, "alpha", "t-1", &intent, &frozen, ID)
+            .unwrap()
+            .record;
+        outbox::hand_off(&root.0, "alpha", "t-1", &record).unwrap();
+        outbox::release(&root.0, "alpha", "t-1", ID).unwrap();
+        let file = outbox::path(&root.0, "alpha", "t-1");
+        assert!(!file.with_extension("service").exists());
+        assert_eq!(outbox::pending(&root.0, "alpha", "t-1").unwrap(), None);
+        // A release interrupted after the record went leaves only the marker.
+        // The record is gone, so the next reservation clears that leftover.
+        let marker = file.with_extension("service");
+        std::fs::write(&marker, b"left by an interrupted release").unwrap();
+        assert_eq!(outbox::pending(&root.0, "alpha", "t-1").unwrap(), None);
+        let fresh =
+            outbox::reserve_message(&root.0, "alpha", "t-1", &intent, &frozen, OTHER).unwrap();
+        assert!(!fresh.recovering && !marker.exists());
+        assert_eq!(
+            outbox::handed_off(&root.0, "alpha", "t-1", &fresh.record),
+            Ok(false)
+        );
+    }
+
+    #[test]
     fn a_message_is_reserved_recovered_and_released() {
         let root = scratch("cycle");
         let intent = message_intent("hello", &[], "comment", "none");
         let first = outbox::reserve(&root.0, "alpha", "t-1", &intent, ID).unwrap();
         assert!(!first.recovering && !first.different_intent);
         assert_eq!(first.record["id"], ID);
-        let call = message_call("alpha", "t-1", &first.record, false);
+        let call = message_call("alpha", "t-1", &first.record, false).unwrap();
         assert_eq!(
             call.args,
             [
@@ -1080,6 +1929,7 @@ mod outbox_tests {
         assert!(again.recovering && !again.different_intent);
         assert_eq!(again.record["id"], ID);
         assert!(message_call("alpha", "t-1", &again.record, true)
+            .unwrap()
             .args
             .ends_with(&["--recover-only".to_owned()]));
         let changed = message_intent("hello!", &[], "comment", "none");

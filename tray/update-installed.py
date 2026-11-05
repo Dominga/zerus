@@ -18,9 +18,9 @@ tray/install.sh runs this whenever its build differs from the installed GUI.
    (~/.local/share/hgs/desktop-previous) does not change, until the new GUI
    was verified: running, or, when no GUI was running and none is started,
    by its signature and its own --build-info. Then the replaced GUI becomes
-   the rollback copy, or, once the Tauri client replaced the Qt GUI, goes
-   while a verified complete Qt stays that copy. When Qt's rollback copy
-   cannot be verified as complete, the replaced client is kept too. A replaced
+   the usable rollback copy. Each Qt image displaced from the slot gets a unique entry in
+   desktop-qt-legacy for manual recovery, never deletion or offered rollback.
+   An unclassified old slot is retained conservatively too. A replaced
    bundle without its identity, executable or valid signature never becomes
    the rollback copy, and a Zerus process started meanwhile stops the change;
    both keep the replaced GUI. A
@@ -59,6 +59,7 @@ HGS_TRAY_QUIT_TIMEOUT and HGS_TRAY_START_TIMEOUT (seconds, default 35) bound the
 waits for the old GUI to quit and the new one to start.
 """
 import argparse
+from contextlib import contextmanager
 import datetime
 import errno
 import hashlib
@@ -70,10 +71,12 @@ import re
 import shutil
 import signal
 import socket
+import stat
 import subprocess
 import sys
 import tempfile
 import time
+from typing import NamedTuple
 import uuid
 
 MAC = sys.platform == 'darwin'
@@ -86,6 +89,7 @@ SNAPSHOTS = ((Path(INSTALL_PREFIX) / 'state/hgs/desktop-update') if INSTALL_PREF
              else (HOME / '.local/state/hgs/desktop-update'))
 CLI = (Path(INSTALL_PREFIX) / 'bin/hgs') if INSTALL_PREFIX else (HOME / '.local/bin/hgs')
 HELPER = (Path(INSTALL_PREFIX) / 'bin/hgs_state.py') if INSTALL_PREFIX else (HOME / '.local/bin/hgs_state.py')
+REFRESH_MAC_DESKTOP = None
 LABEL = 'com.hgdev.hgs-tray'
 PLIST = HOME / f'Library/LaunchAgents/{LABEL}.plist'
 UNIT = 'hgs-tray.service'
@@ -109,7 +113,7 @@ DEFAULTS = 'defaults'
 # Qt's QSettings domain, which is also the NSUserDefaults domain of any bundle
 # with this identifier (the Tauri switch bundle included).
 PREFERENCES = 'com.hgdev.hgs-tray'
-# Kept beside the Qt rollback copy at the switch (docs/macos-distribution.md).
+# Kept at this compatible path even after the Qt image leaves for manual recovery.
 SETTINGS_SNAPSHOT = ROLLBACK / f'{PREFERENCES}.plist'
 # Keys AppKit and WebKit write into a bundle's defaults domain; every other key is Qt's.
 COCOA_PREFIXES = ('NS', 'Apple', 'Web', 'com.apple.', '_')
@@ -331,8 +335,29 @@ def quit_gui(pid, installed):
         raise UpdateError('Zerus started again during the update; nothing was replaced')
 
 
+def refresh_mac_desktop(installed):
+    """Refresh the owned backend from the just-verified installed bundle.
+
+    The source installer opts in. No caller-supplied script, mode, request ID,
+    or manager verb enters this hook; the maintained helper preserves selection.
+    Every updater recovery start runs this before starting its restored GUI too.
+    """
+    backend = installed / 'Contents/MacOS/hgs'
+    paired = backend.exists()
+    if not paired and (installed / 'Contents/Resources/zerus-local-pair.json').exists():
+        raise UpdateError('the installed paired desktop helper is missing; GUI kept stopped')
+    helper = Path(__file__).resolve().parent.parent / 'scripts/install-macos-desktop-service.py'
+    runner = REFRESH_MAC_DESKTOP
+    args = [sys.executable, helper, backend if paired else runner, '--restart']
+    if paired:
+        args += ['--runner-hgs', runner]
+    run(args)
+
+
 def start(installed):
     if MAC:
+        if REFRESH_MAC_DESKTOP:
+            refresh_mac_desktop(installed)
         domain = f'gui/{os.getuid()}'
         subprocess.run(['launchctl', 'bootout', f'{domain}/{LABEL}'], capture_output=True)
         deadline = time.monotonic() + 10
@@ -410,14 +435,6 @@ def bundle_kind(bundle):
     return kind if kind == 'qt' or info.get('CFBundleIdentifier') else None
 
 
-def keeps_slot(installed_kind, slot_kind, new_kind):
-    """Whether the one rollback copy stays. Once it holds Qt, it stays the
-    switch's rollback target while the client replaces anything but Qt
-    itself: a client, an incomplete bundle or nothing. The replaced client
-    waits only for this update's own restore."""
-    return slot_kind == 'qt' and new_kind == 'tauri' and installed_kind != 'qt'
-
-
 def client_drafts_root(identifier):
     """The Tauri client's drafts root, `<app data>/drafts`: Tauri's
     app_data_dir formula with the running bundle's identifier."""
@@ -472,31 +489,57 @@ def snapshot(destination, roots):
     return count
 
 
+class KeptDrafts(NamedTuple):
+    """What the drafts saved when the old GUI quit held, once verified.
+
+    `total` counts every verified draft. Each counts once as `unsent` (text
+    or files) or `forms` (saved form state only, such as an answered or
+    submitted question form), and `held` counts the drafts holding a delivery
+    identity (`deferred_input`, zerus-5wmh.66.4.4), with or without content.
+    """
+    total: int = 0
+    unsent: int = 0
+    forms: int = 0
+    held: int = 0
+
+
 def changed_drafts(saved, roots):
-    """Nonempty drafts saved when the old GUI quit that are missing or different now."""
-    problems, preserved = [], 0
+    """Drafts saved when the old GUI quit that are missing or different now.
+
+    Every draft holding unsent input, saved form state or a held delivery
+    identity is compared, and the counts tell those apart (zerus-8iwj).
+    """
+    problems, total, unsent, forms, held = [], 0, 0, 0, 0
     for label, current in roots:
         prefix = '' if label == 'qt' else f'{label} '
         kept = saved / label
         for before in sorted(kept.rglob('draft.json')):
             relative = before.relative_to(kept).parent
             original = json.loads(before.read_text())
-            if not (original.get('text') or original.get('attachments') or original.get('form_state')):
+            content = bool(original.get('text') or original.get('attachments'))
+            form = bool(original.get('form_state'))
+            identity = 'deferred_input' in original
+            if not (content or form or identity):
                 continue
             after = current / relative / 'draft.json'
             if not after.exists():
                 problems.append(f'{prefix}{relative}: missing')
                 continue
             restored = json.loads(after.read_text())
-            if any(original.get(key) != restored.get(key) for key in ('key', 'text', 'attachments', 'form_state')):
+            keys = ('key', 'text', 'attachments', 'form_state', 'deferred_input')
+            if any(original.get(key) != restored.get(key) for key in keys):
                 problems.append(f'{prefix}{relative}: changed')
                 continue
             for attachment in original.get('attachments') or []:
                 blob = after.parent / (attachment['sha256'] + '.bin')
                 if not blob.exists() or digest(blob) != attachment['sha256']:
                     problems.append(f'{prefix}{relative}: attachment changed')
-            preserved += 1
-    return preserved, problems
+            total += 1
+            unsent += content
+            forms += form and not content
+            # A present but null field is compared, never counted as held.
+            held += original.get('deferred_input') is not None
+    return KeptDrafts(total, unsent, forms, held), problems
 
 
 def running_image_matches(pid, installed):
@@ -528,11 +571,13 @@ def build_info(path):
     return info
 
 
-def provenance(installed, info, installed_at, preserved, retained):
+def provenance(installed, info, installed_at, kept, retained):
     record = {'schema': 1, 'sourceCommit': info.get('sourceCommit') or None, 'sourceDirty': info.get('sourceDirty'),
               'guiVersion': info.get('version'), 'guiVersionName': info.get('versionName'),
               'guiSha256': digest(executable(installed)), 'installedAt': installed_at, 'verifiedAt': now(),
-              'preservedDrafts': preserved, 'nativeRetained': retained}
+              'preservedDrafts': kept.total,
+              'keptDrafts': {'unsentInput': kept.unsent, 'formState': kept.forms, 'heldIdentities': kept.held},
+              'nativeRetained': retained}
     if CLI.exists():
         record['cliSha256'] = digest(CLI)
         try:
@@ -687,6 +732,7 @@ def take_slot(previous, progress):
                 shutil.copy2(previous, incoming)
         if slot.exists():
             replaced = Path(tempfile.mkdtemp(prefix='.replaced-', dir=ROLLBACK)) / slot.name
+            say(f'the prior rollback copy stays in {slot} or {replaced} until replacement settles')
             os.rename(slot, replaced)
         os.rename(incoming, slot)
     except BaseException:
@@ -713,7 +759,41 @@ def take_slot(previous, progress):
         progress['removing'] = True
         remove(previous)
     if replaced is not None:
-        shutil.rmtree(replaced.parent)
+        if bundle_kind(replaced) != 'tauri':
+            retain_legacy_image(replaced)
+        else:
+            shutil.rmtree(replaced.parent)
+
+
+def retain_legacy_image(previous):
+    """Best-effort manual retention after the usable Next slot is committed.
+    Each old Qt/unknown image gets its own entry; failure never undoes a verified
+    update or skips draft/provenance checks, and never deletes either copy."""
+    legacy = ROLLBACK.parent / 'desktop-qt-legacy'
+    entry = target = None
+    try:
+        if legacy.is_symlink() or (legacy.exists() and not legacy.is_dir()):
+            raise UpdateError(f'{legacy} is not a private retained directory')
+        legacy.mkdir(mode=0o700, exist_ok=True)
+        if legacy.stat().st_uid != os.getuid() or legacy.stat().st_mode & 0o077:
+            raise UpdateError(f'{legacy} is not private')
+        entry = Path(tempfile.mkdtemp(prefix='qt-', dir=legacy))
+        target = entry / previous.name
+        say(f'preserving retired Qt for manual recovery: {previous} -> {target}')
+        os.rename(previous, target)
+        previous.parent.rmdir()
+        say(f'the retired Qt image is kept for manual recovery in {target}')
+    except (OSError, UpdateError) as error:
+        # A rename may be uncertain. Name both locations and keep every image;
+        # no retry/copy/delete is inferred from a failed move or cleanup.
+        where = f'{previous} or {target}' if target is not None else str(previous)
+        say(f'legacy archive did not settle ({error}); the image is retained in {where}; '
+            'the verified Next update continues')
+        if entry is not None:
+            try:
+                entry.rmdir()  # Only an empty directory made by this invocation.
+            except OSError:
+                pass
 
 
 def verify_signature(path):
@@ -751,27 +831,14 @@ def complete_gui(gui):
     return True
 
 
-def settle(previous, keep, progress):
-    """Only after the new GUI was verified: the GUI it replaced becomes the
-    rollback copy, or goes when the slot keeps a complete Qt (a superseded
-    client). An incomplete bundle never takes the slot and stays where the
-    update keeps it, as does a client the slot's incomplete Qt cannot
-    replace. Says which; `progress` notes a removal under way, which an
-    interrupt leaves partial."""
+def settle(previous, progress):
+    """A verified replaced GUI becomes the usable rollback copy. A retired Qt
+    image leaves that slot for a separately retained manual-recovery copy."""
     if previous is None:
         return 'nothing was installed before'
     if not complete_gui(previous):
-        # Never removed: a check that failed for another reason must not cost a GUI.
         return ('the replaced bundle could not be verified as complete (identity, executable or signature check), '
                 'so it did not become the rollback copy')
-    if keep:
-        if not complete_gui(ROLLBACK / previous.name):
-            # take_slot would set the slot's copy aside for good: keep both.
-            return (f'the rollback copy in {ROLLBACK} could not be verified as complete, so the replaced GUI was kept '
-                    'rather than removed')
-        progress['removing'] = True
-        remove(previous)
-        return f'the Qt GUI stays the rollback copy in {ROLLBACK}'
     take_slot(previous, progress)
     return f'the replaced GUI is the rollback copy in {ROLLBACK}'
 
@@ -973,7 +1040,7 @@ def legacy_desktop_state_absent():
                       'cannot check desktop revocation; keep Qt stopped and upgrade or repair hgs')
 
 
-def revoke_configuration():
+def revoke_configuration(with_status=False):
     """The selected CLI's supported, read-only configuration, never an approximation."""
     try:
         help_result = subprocess.run([CLI, '--help'], capture_output=True, text=True, timeout=10)
@@ -997,7 +1064,124 @@ def revoke_configuration():
         raise UpdateError(f'cannot read the desktop configuration; keep Qt stopped: {error}')
     if status.returncode != 0 or not isinstance(result, dict) or not result.get('configuration'):
         raise UpdateError('the selected hgs did not report a canonical desktop configuration; keep Qt stopped')
-    return result['configuration']
+    return (result['configuration'], result) if with_status else result['configuration']
+
+
+def passive_before_qt(installed, configuration, status):
+    """Use the maintained helper, never raw manager verbs, to retain passive.
+
+    Legacy CLI/no-service paths keep their existing revoke-only behavior.
+    A current service must select passive before a future update can restart
+    it. The helper owns the SAME rollback UUID/hold through physical readiness.
+    """
+    lifecycle = status.get('lifecycle')
+    if not isinstance(lifecycle, dict) or lifecycle.get('abi') != 'desktop-lifecycle-v1':
+        return
+    helper = Path(__file__).resolve().parent.parent / 'scripts' / (
+        'install-macos-desktop-service.py' if MAC else 'install-linux-desktop-service.py')
+    backend = installed / 'Contents/MacOS/hgs' if MAC and (installed / 'Contents/MacOS/hgs').exists() else CLI
+    query = ([sys.executable, str(helper), str(backend), '--status', '--json'] if MAC else
+             [sys.executable, str(helper), 'status', '--hgs', str(CLI), '--json'])
+    record = (HOME / 'Library/LaunchAgents/.com.hgdev.hgs-desktop.zerus-registration.json' if MAC else
+              Path(os.environ.get('XDG_CONFIG_HOME') or HOME / '.config')
+              / 'systemd/user/.hgs-desktop.zerus-registration.json')
+    refusal = f'desktop registration is unconfirmed; keep Qt stopped and inspect {record} with the maintained helper'
+    try:
+        result = subprocess.run(query, capture_output=True, text=True, timeout=REVOKE_SECONDS)
+        registration = json.loads(result.stdout)
+    except (OSError, ValueError, subprocess.TimeoutExpired) as error:
+        raise UpdateError(f'{refusal}: {error}') from None
+    if (result.returncode != 0 or not isinstance(registration, dict)
+            or registration.get('schema') != 1 or registration.get('operation') != 'status'
+            or registration.get('configuration') != configuration
+            or type(registration.get('registered')) is not bool):
+        raise UpdateError(refusal)
+    # The CLI's lifecycle ABI also describes an unavailable service. Only the
+    # helper can establish an existing owned registration; Qt never creates one.
+    if registration['registered'] is False:
+        return
+    if registration.get('selected_mode') not in ('passive', 'background'):
+        raise UpdateError(f'desktop registration mode is unavailable; keep Qt stopped and inspect {record}')
+    args = ([sys.executable, str(helper), str(backend), '--mode', 'passive', '--json'] if MAC else
+            [sys.executable, str(helper), 'install', '--hgs', str(CLI), '--mode', 'passive', '--json'])
+    try:
+        result = subprocess.run(args, capture_output=True, text=True, timeout=REVOKE_SECONDS)
+        receipt = json.loads(result.stdout)
+    except (OSError, ValueError, subprocess.TimeoutExpired) as error:
+        raise UpdateError(f'passive rollback is unconfirmed; keep Qt stopped and inspect the maintained helper: {error}') from None
+    if (result.returncode != 0 or not isinstance(receipt, dict) or receipt.get('configuration') != configuration
+            or receipt.get('ok') is not True or receipt.get('selected_mode') != 'passive'
+            or receipt.get('running_mode') != 'passive' or receipt.get('ipc_ready') is not True
+            or receipt.get('pending_restart') is not False or receipt.get('transition') is not None):
+        raise UpdateError('passive rollback is not settled; keep Qt stopped and inspect the SAME helper transition; do not Rearm')
+
+
+@contextmanager
+def qt_revoke_journal(configuration, before_offer):
+    """Private metadata and exclusion, never a native execution permission."""
+    directory = SNAPSHOTS.with_name('desktop-qt-revoke')
+    # Keep draft snapshots separate. If an earlier updater left an original in
+    # its old location, keep that exact journal rather than offering a new UUID.
+    legacy = SNAPSHOTS / '.qt-revoke'
+    if os.path.lexists(legacy):
+        if os.path.lexists(directory):
+            raise UpdateError('two Qt revoke journals require review; keep Qt stopped without another offer')
+        directory = legacy
+    directory.mkdir(mode=0o700, parents=True, exist_ok=True)
+    meta = directory.lstat()
+    if not stat.S_ISDIR(meta.st_mode) or meta.st_uid != os.getuid() or stat.S_IMODE(meta.st_mode) != 0o700:
+        raise UpdateError('the Qt revoke journal is not a private owned directory; keep Qt stopped')
+    flags = os.O_NOFOLLOW | os.O_NONBLOCK | os.O_CLOEXEC
+    import fcntl
+    fd = os.open(directory / 'original.lock', os.O_CREAT | os.O_RDWR | flags, 0o600)
+    try:
+        meta = os.fstat(fd)
+        if not stat.S_ISREG(meta.st_mode) or meta.st_uid != os.getuid() or meta.st_nlink != 1 or stat.S_IMODE(meta.st_mode) != 0o600:
+            raise UpdateError('the Qt revoke journal lock is not private; keep Qt stopped')
+        fcntl.flock(fd, fcntl.LOCK_EX | fcntl.LOCK_NB)
+        path = directory / 'original.json'
+        previous = None
+        try:
+            source = os.open(path, os.O_RDONLY | flags)
+        except FileNotFoundError:
+            pass
+        else:
+            with os.fdopen(source, 'rb') as original:
+                meta = os.fstat(original.fileno())
+                if not stat.S_ISREG(meta.st_mode) or meta.st_uid != os.getuid() or meta.st_nlink != 1 or stat.S_IMODE(meta.st_mode) != 0o600 or meta.st_size > 8192:
+                    raise UpdateError('the original Qt revoke record is unavailable; keep Qt stopped')
+                previous = json.loads(original.read(8193))
+            if (not isinstance(previous, dict) or set(previous) != {'schema', 'configuration', 'request_id', 'phase'}
+                    or previous.get('schema') != 1 or previous.get('configuration') != configuration
+                    or previous.get('phase') not in ('unknown', 'settled')
+                    or not isinstance(previous.get('request_id'), str)
+                    or str(uuid.UUID(previous['request_id'])) != previous['request_id']):
+                raise UpdateError('the original Qt revoke scope changed; keep Qt stopped and inspect that original')
+        def save(value):
+            out, temporary = tempfile.mkstemp(prefix='.original-', dir=directory)
+            try:
+                with os.fdopen(out, 'w') as target:
+                    json.dump(value, target); target.write('\n'); target.flush(); os.fsync(target.fileno())
+                os.replace(temporary, path)
+                parent = os.open(directory, os.O_RDONLY | os.O_DIRECTORY | os.O_CLOEXEC)
+                try:
+                    os.fsync(parent)
+                finally:
+                    os.close(parent)
+            finally:
+                Path(temporary).unlink(missing_ok=True)
+        fresh = previous is None or previous['phase'] == 'settled'
+        if fresh:
+            # An uncertain original bypasses even this maintained helper:
+            # only lookup runs after an updater restart.
+            before_offer()
+        record = ({'schema': 1, 'configuration': configuration, 'request_id': str(uuid.uuid4()), 'phase': 'unknown'}
+                  if fresh else previous)
+        if fresh:
+            save(record)  # Before offering the original command, including lost replies/crashes.
+        yield record, fresh, save
+    finally:
+        os.close(fd)
 
 
 def revocation_refusal(request_id, receipt=None):
@@ -1020,15 +1204,24 @@ def revocation_refusal(request_id, receipt=None):
             'Reboot only as a last resort.')
 
 
-def revoke_before_qt():
+def revoke_before_qt(installed):
     """Revoke migrated writers before any Qt start, with one retained request ID."""
-    configuration = revoke_configuration()
-    if configuration is None:
+    scope = revoke_configuration(with_status=True)
+    if scope is None:
         return
-    request_id = str(uuid.uuid4())
+    configuration, status = scope
+    try:
+        with qt_revoke_journal(configuration, lambda: passive_before_qt(installed, configuration, status)) as (record, fresh, save):
+            _revoke_before_qt(configuration, record['request_id'], fresh)
+            save(dict(record, phase='settled'))
+    except (OSError, ValueError, TypeError) as error:
+        raise UpdateError(f'cannot retain or read the original Qt rollback; keep Qt stopped: {error}') from None
+
+
+def _revoke_before_qt(configuration, request_id, fresh):
     args = [CLI, 'desktop', 'revoke', '--json', '--request-id', request_id, '--reason', 'rollback']
     try:
-        result = subprocess.run(args, capture_output=True, text=True, timeout=REVOKE_SECONDS)
+        result = subprocess.run(args, capture_output=True, text=True, timeout=REVOKE_SECONDS) if fresh else None
     except (OSError, subprocess.TimeoutExpired):
         result = None
     if result is not None and result.returncode == 0:
@@ -1058,7 +1251,6 @@ def update(built, installed, rollback=False):
     built, installed = built.resolve(), installed.absolute()
     refuse_links(installed)
     info = build_info(built)
-    slot = ROLLBACK / installed.name
     new_info = bundle_info(built) if MAC else info
     old_info = (bundle_info(installed) if MAC else installed_build_info(installed) or {}) if installed.exists() else {}
     old_kind = bundle_kind(installed)
@@ -1068,7 +1260,7 @@ def update(built, installed, rollback=False):
         if refusal:
             raise UpdateError(refusal + ' Nothing was replaced.')
     if new_kind == 'qt':
-        revoke_before_qt()
+        revoke_before_qt(installed)
     switching = MAC and old_kind == 'qt' and new_kind == 'tauri'
     # Qt's settings follow the direction of the change: leaving the client for
     # Qt checks them before Qt runs again and writes its own (and can still
@@ -1076,7 +1268,6 @@ def update(built, installed, rollback=False):
     to_qt = MAC and old_kind == 'tauri' and new_kind == 'qt'
     to_client = MAC and new_kind == 'tauri'
     # A rollback installs from the slot, whose copy stays until the new GUI runs.
-    keep = not rollback and keeps_slot(old_kind, bundle_kind(slot), new_kind)
     roots = draft_roots(old_info, new_info)
     name = info.get('versionName', info['version'])
     report_kept(installed)
@@ -1124,7 +1315,11 @@ def update(built, installed, rollback=False):
                 done = True
                 raise UpdateError('the new GUI is installed, but Zerus started during the update; '
                                   'the replaced GUI was kept')
-            settled = settle(aside if aside.exists() else None, keep, progress)
+            if MAC and REFRESH_MAC_DESKTOP:
+                # The installer skips its second refresh after this successful
+                # opt-in update, even when no GUI needed restarting here.
+                refresh_mac_desktop(installed)
+            settled = settle(aside if aside.exists() else None, progress)
             done = True
             say(f'installed {name} without starting it; {settled}')
             sweep(installed.parent, folder)
@@ -1183,9 +1378,9 @@ def update(built, installed, rollback=False):
         if problems[len(early):]:
             done = True
             raise UpdateError('the new GUI runs, but ' + '; '.join(problems) + '; the replaced GUI was kept')
-        settled = settle(aside if aside.exists() else None, keep, progress)
+        settled = settle(aside if aside.exists() else None, progress)
         done = True
-        preserved, draft_problems = changed_drafts(saved, roots)
+        kept, draft_problems = changed_drafts(saved, roots)
         problems += draft_problems
         if to_client:
             late, notes = settings_report()
@@ -1199,11 +1394,12 @@ def update(built, installed, rollback=False):
         if problems:
             raise UpdateError('the new GUI runs, but ' + '; '.join(problems))
         retained = sum(after.get(p) == value for p, value in before.items())
-        provenance(installed, info, installed_at, preserved, retained)
+        provenance(installed, info, installed_at, kept, retained)
         shutil.rmtree(saved)
         saved = None
         sweep(installed.parent, folder)
-        say(f'Zerus {name} runs as pid {new}; {preserved} nonempty drafts kept, '
+        say(f'Zerus {name} runs as pid {new}; drafts kept: {kept.unsent} with unsent input, '
+            f'{kept.forms} with saved form state only, {kept.held} with a held delivery identity; '
             f'{retained} native processes untouched; {settled}')
         return 0
     except UpdateError:
@@ -1223,8 +1419,8 @@ def update(built, installed, rollback=False):
 
 
 def roll_back_installed(installed):
-    """Reinstall the one rollback copy (after the switch: the last Qt GUI)
-    through the same quit, snapshot, start and verification as an update."""
+    """Reinstall the verified previous Next copy through the same checks.
+    The command entrypoint refuses a retired Qt rollback image."""
     installed = installed.absolute()
     refuse_links(installed)
     previous = ROLLBACK / installed.name
@@ -1235,26 +1431,39 @@ def roll_back_installed(installed):
 
 
 def main():
+    global REFRESH_MAC_DESKTOP
     usage = __doc__.split('\n\n')[1]
     parser = argparse.ArgumentParser(usage=usage, add_help=False)
     parser.add_argument('--rollback', metavar='INSTALLED', type=Path)
     parser.add_argument('--installed-gui', metavar='INSTALLED', type=Path)
     parser.add_argument('--check', nargs=2, metavar=('BUILT', 'INSTALLED'), type=Path)
     parser.add_argument('--live', action='store_true')
+    parser.add_argument('--refresh-macos-desktop', metavar='RUNNER_HGS', type=Path)
     parser.add_argument('paths', nargs='*', type=Path)
     args = parser.parse_args()
     chosen = [option for option in (args.rollback, args.installed_gui, args.check) if option]
     try:
+        if args.refresh_macos_desktop:
+            if not MAC or args.check or args.installed_gui or not args.refresh_macos_desktop.is_absolute():
+                raise UpdateError('paired desktop refresh is only available for a macOS update or rollback')
+            REFRESH_MAC_DESKTOP = args.refresh_macos_desktop
         if args.live and not args.check:
             chosen = []
         elif args.installed_gui and len(chosen) == 1 and not args.paths:
             print(bundle_kind(args.installed_gui) or 'none')
             return 0
         elif args.rollback and len(chosen) == 1 and not args.paths:
+            previous = ROLLBACK / args.rollback.name
+            if bundle_kind(previous) == 'qt':
+                raise UpdateError('Qt rollback is retired after platform acceptance; the saved copy and user data were kept.')
             return roll_back_installed(args.rollback)
         elif args.check and len(chosen) == 1 and not args.paths:
+            if bundle_kind(args.check[0]) == 'qt':
+                raise UpdateError('Qt installation is retired; build Zerus Next. Nothing was replaced.')
             return check_replace(*args.check, live=args.live)
         elif len(args.paths) == 2 and not chosen:
+            if bundle_kind(args.paths[0]) == 'qt':
+                raise UpdateError('Qt installation is retired; build Zerus Next. Nothing was replaced.')
             return update(*args.paths)
     except (UpdateError, subprocess.SubprocessError) as error:
         print(f'hgs-tray update failed: {error}', file=sys.stderr)

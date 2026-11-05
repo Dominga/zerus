@@ -1,5 +1,6 @@
+import { showQtUpgradeNotice } from "./store/qtUpgrade";
 import { DesktopServiceStatus } from "./ui/components/DesktopServiceStatus";
-import { desktopService } from "./store/desktopService";
+import { desktopService, serviceStatus, servicePaused, firstChoicePending } from "./store/desktopService";
 import { CleanupChip } from "./ui/screens/CleanupChip";
 import { worktreeReviewDialog } from "./store/worktreeCleanup";
 import { cleanupDialog } from "./store/terminationCleanup";
@@ -82,18 +83,19 @@ function StatusBar(props: { mode: () => BridgeMode | "starting" }) {
   const summary = createMemo(() => tr("%1 of %2 machines connected", live(), computers().length) + (problems().length ? tr(", %1 offline", problems().map((c) => label(c.id)).join(", ")) : ""));
   return (
     <footer class="statusbar">
-      <Show when={computers().length} fallback={<span>{props.mode() === "starting" ? tr("Starting…") : tr("Connecting…")}</span>}>
+      <Show when={computers().length} fallback={<Show when={!servicePaused(desktopService.state()) && !firstChoicePending(desktopService.state())}><span>{props.mode() === "starting" ? tr("Starting…") : tr("Connecting…")}</span></Show>}>
         {connectionError() ? (
           <>
             <span class="danger">
               <For each={problems()}>{(c, i) => <>{i() ? "; " : ""}{label(c.id)}: {tr(STATE_TEXT[c.status] ?? c.status)}{c.status === "reconnecting" && c.attempt ? ` (attempt ${c.attempt})` : ""}</>}</For>
             </span>
-            <button type="button" class="btn small ghost" onClick={() => { void fleetRefresh().catch((error) => toast("Connection", String(error), "error", true)); }}>{tr("Retry now")}</button>
+            <Show when={!serviceStatus(desktopService.state())?.retry}><button type="button" class="btn small ghost" onClick={() => { void fleetRefresh().catch((error) => toast("Connection", String(error), "error", true)); }}>{tr("Retry now")}</button></Show>
           </>
         ) : (
           <span class="conn-ok"><span class="state-dot ready" hidden={problems().length > 0} />{summary()}</span>
         )}
       </Show>
+      <DesktopServiceStatus />
       <Show when={props.mode() === "replay"}>
         <span class="chip-accent" title={tr("Synthetic data from the replay fixture; no hgs is running")}>{tr("Replay")}</span>
       </Show>
@@ -121,6 +123,7 @@ function zoom(scale: number) {
 }
 
 export function App(props: { mode: () => BridgeMode | "starting" }) {
+  createEffect(() => { if (props.mode() === "tauri") void showQtUpgradeNotice(); });
   installUiLanguage();
   createEffect(() => { document.documentElement.lang = uiLanguage(); });
   createEffect(() => applySkin(skin()));
@@ -154,8 +157,7 @@ export function App(props: { mode: () => BridgeMode | "starting" }) {
   return (
     <div class="app" classList={{ "rail-labeled": skin().layout.rail === "labeled" }}>
       <Rail />
-      <main class="page" classList={{ "with-service-status": desktopService.enabled() }}>
-        <DesktopServiceStatus />
+      <main class="page">
         <Switch>
           <Match when={page() === "sessions"}>
             <div class="sessions-page" classList={{ "layout-right": skin().layout["sessions-pane"] === "right" }}>

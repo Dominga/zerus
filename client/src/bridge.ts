@@ -1,7 +1,7 @@
 import { desktopService } from "./store/desktopService";
 import { Channel, invoke } from "@tauri-apps/api/core";
 import { listen } from "@tauri-apps/api/event";
-import { emptyAccounts, emptyBatch, emptyMachines, emptyProjects, isEmptyBatch, type AccountsView, type MachinesView, type ProjectsView, type Screen, type Action, type ActivityEvent, type Batch, type ComputerId, type Details, type EditOutcome, type Outcome, type ReadMark, type Target, type TerminalConnected, type TerminalFacts, type TerminalEvent, type TerminalStatus, type TerminalTarget, type ArchivePage, type ArchivedActivity, type ProcessTarget, type Answer, type ComposerTab, type ComposerView, type Inspect, type SendReply, type SessionRef, type AttachmentRef, type Fetched, type ConflictsPage, type DraftSource, type SavedDraftDetail, type SavedDraftsPage, type QuestionEdit, type QuestionReply, type ClearControl, emptyUsage, type TerminalFinished, type SessionUsageRef, type Usage } from "./types";
+import { emptyAccounts, emptyBatch, emptyMachines, emptyProjects, isEmptyBatch, type AccountsView, type MachinesView, type ProjectsView, type Screen, type Action, type ActivityEvent, type Batch, type ComputerId, type Details, type EditOutcome, type Outcome, type ReadMark, type Target, type TerminalConnected, type TerminalFacts, type TerminalEvent, type TerminalStatus, type TerminalTarget, type ArchivePage, type ArchivedActivity, type ProcessTarget, type Answer, type ComposerTab, type ComposerView, type Inspect, type SendReply, type SessionRef, type AttachmentRef, type Fetched, type TaskFileSource, type ConflictsPage, type DraftSource, type SavedDraftDetail, type SavedDraftsPage, type QuestionEdit, type QuestionReply, type ClearControl, emptyUsage, type TerminalFinished, type SessionUsageRef, type Usage } from "./types";
 import type { CreatedWorktree, CreationAction, CreationAdmission, CreationCard, CreationEvent, FolderOut, LaunchAccounts, LaunchChoices, LaunchPlan, LaunchStart, MachineMeta, NewSessionContext, NewSessionFormInput, NewSessionFormView, PathStyle, RepositoryFields } from "./types";
 import type { ActivityPort, FollowRequest } from "./store/activity";
 import { documentVisibility, type PageVisibility } from "./store/visibility";
@@ -13,6 +13,10 @@ import { emptyUpdatesView, type UpdateChannel, type UpdatesView } from "./types"
 // poll. A batch is applied in the frame after it arrives, at most one per
 // frame. Outside Tauri (`npm run dev` in a browser) a built-in replay of the
 // synthetic fixture stands in, so the UI works without the app.
+
+/** A local explanation only, with no runtime, import or permission action. */
+export const qtUpgradeNotice = () => desktop<boolean>("qt_upgrade_notice", {});
+export const acknowledgeQtUpgradeNotice = () => desktop<void>("qt_upgrade_notice_ack", {});
 
 export type BridgeMode = "tauri" | "replay";
 
@@ -51,6 +55,8 @@ export const readTaskSettings = (project: string) => desktop<import("./store/tas
 export const saveTaskSettings = (project: string, changes: Partial<import("./store/taskSettings").TaskSettings>) => desktop<import("./store/taskSettings").TaskSettings>("task_settings", { project, changes });
 export const taskStart = (input: import("./store/taskStart").StartInput) => desktop<import("./store/taskStart").StartView>("task_start", { input });
 export const taskStartRelease = (view: import("./store/taskStart").StartView) => desktop<import("./store/taskStart").StartView>("task_start_release", { project: view.project, task: view.task, id: view.id, snapshot: view.snapshot });
+export const taskStartCheck = (view: import("./store/taskStart").StartView) => desktop<import("./store/taskStart").StartView>("task_start_check", { project: view.project, task: view.task, id: view.id, snapshot: view.snapshot });
+export const taskStartDiscardCheck = (view: import("./store/taskStart").StartView) => desktop<import("./store/taskStart").StartView>("task_start_discard_check", { project: view.project, task: view.task, id: view.id, snapshot: view.snapshot, checkId: view.unsent_check_id });
 export const cancelTaskExecution = (project: string, task: string, execution: import("./store/taskCancel").Execution, reason: string) => desktop<string | null>("task_cancel_execution", { project, task, execution, reason });
 export const taskBoardAction = (project: string, task: string, expectedStage: string, action: import("./store/taskBoard").BoardAction) => desktop<void>("task_board_action", { project, task, expectedStage, action });
 export const taskFormOpen = (target: import("./store/taskEditor").TaskEditorTarget<import("./store/taskForms").FormKind>) => desktop<import("./store/taskEditor").TaskEditorView<import("./store/taskForms").FormKind>>("task_form_open", { project: target.project, task: target.task, kind: target.mode });
@@ -59,7 +65,14 @@ export const taskFormSubmit = (input: import("./store/taskForms").FormSubmit) =>
 export const taskFormCancel = (kind: import("./store/taskForms").FormKind, handle: number, rev: number) => desktop<import("./store/taskEditor").TaskEditorView<import("./store/taskForms").FormKind>>("task_form_cancel", { kind, handle, rev });
 export const assignTask = (project: string, task: string, target: { computer: string; name: string; run_id: string; conversation_id: string } | null, catalogKey: string | null, sessionId: string | null, mode?: "session" | "subagent" | "new_session") => desktop<void>("task_assign", { input: { project, task, target, catalog_key: catalogKey, session_id: sessionId, mode: mode ?? null } });
 export const readTaskDetails = (project: string, task: string, before: string | null) => desktop<unknown>("task_details", { project, task, before });
+/** The UUID of the task a deep link's short reference names, after one bounded read that checks it. */
+export const resolveTaskReference = (project: string, reference: string) => desktop<string>("task_reference", { project, reference });
+/** One further page of a board stage after a cursor (`task list --stage --limit --after`). */
+export const readTaskPage = (project: string, stage: string, limit: number, after: string | null) => desktop<unknown>("task_page", { project, stage, limit, after });
 export const openTaskAttachment = (path: string) => desktop<string | null>("task_attachment_open", { path });
+/** One file of a task, read when its card needs it, checked against its page and kept in the private cache. */
+export const readTaskAttachment = (project: string, task: string, source: TaskFileSource) =>
+  desktop<Fetched>("task_attachment_read", { project, task, entry: source.entry, file: source.file, meta: source.meta });
 
 /** `next_batch` answers with raw JSON bytes (`ipc::Response`), so large batches skip script evaluation. */
 function decodeBatch(reply: unknown): Batch {
@@ -842,6 +855,9 @@ const desktop = <T>(command: string, args: Record<string, unknown>): Promise<T> 
 /** Opens the selected session's composer (undefined: none is open); null outside the app. */
 export const composerOpen = (session: SessionRef | undefined) =>
   inTauri() ? invoke<ComposerView | null>("composer_open", { session: session ?? null }) : Promise.resolve(null);
+/** Whether the window is hidden: a hidden window checks no handed-over send. */
+export const composerVisibility = (hidden: boolean) =>
+  inTauri() ? invoke<void>("composer_visibility", { hidden }) : Promise.resolve();
 export const composerEdit = (handle: number, rev: number, epoch: number, text: string, position: number, anchor: number) =>
   desktop<void>("composer_edit", { handle, rev, epoch, text, position, anchor });
 /** The native file picker, then the reads; resolves once they ended. */
@@ -956,6 +972,12 @@ export const savedDraft = (source: DraftSource, key: string) => desktop<SavedDra
 export const draftRecover = (key: string) => desktop<void>("draft_recover", { key });
 /** Replaces the open composer's draft with the selected one; rejects with why not. */
 export const draftRestore = (handle: number, source: DraftSource, key: string) => desktop<void>("draft_restore", { handle, source, key });
+/** This run's drafts capture status, `null` when the run never captures. */
+export const draftCaptureStatus = () => desktop<import("./types").DraftCaptureStatus | null>("draft_capture_status", {});
+/** Queues the draft store's Retry; a recorded outcome never changes. */
+export const draftCaptureRetry = () => desktop<void>("draft_capture_retry", {});
+/** `draft-capture-changed`: the capture's status changed; resolves with the stop once listening. */
+export const onDraftCaptureChanged = (listener: () => void) => onEvent<null>("draft-capture-changed", listener);
 
 /** Availability is a local folder stat; opening does a fresh identity/directory check. */
 export const sessionFolderStatus = (computer: string, directory: string) => desktop<import("./store/sessionFolders").FolderStatus>("session_folder_status", { computer, directory });

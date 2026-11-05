@@ -137,6 +137,7 @@ const SESSION_CONTEXT: &[&str] = &[
     "HGS_HOST_SESSION",
     "HGS_HOST_PANE",
     "HGS_SESSION",
+    "HGS_SESSION_ID",
     "HGS_AGENT",
     "HGS_RUN_ID",
     "HGS_EXPECTED_ID",
@@ -965,6 +966,16 @@ impl<C: Connector> TerminalBackend for HostBackend<C> {
         .ok()
         .and_then(|value| value.value)
         .unwrap_or_default()
+    }
+    fn session_variable(&self, name: &str, key: &str) -> Result<Option<String>> {
+        Ok(self
+            .call::<EnvValue>(Op::ShowEnvironment {
+                target: protocol::Target::Name(name.into()),
+                name: key.into(),
+            })
+            .map_err(Failure::message)?
+            .value
+            .filter(|value| !value.is_empty()))
     }
     fn notify(&self, client: &str, text: &str) {
         let _ = self.act(Op::Notify {

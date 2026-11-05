@@ -65,7 +65,7 @@ pub(super) fn dispatch(args: &[String]) -> Result<i32> {
     input::checked_terminal(&record, true)?;
     let path = absolute_root()?.join("compact_receipts").join(format!("{uuid}.json"));
     if path.exists() { return Err("This compact was already attempted. Check Terminal before trying again".into()); }
-    recovery::cancel_for_input(name)?;
+    recovery::cancel_for_input(&record)?;
     let mut receipt = json!({"request_id":request.request_id,"name":name,"run_id":request.expected_run_id,
         "conversation_id":request.expected_conversation_id,"status":"submitted","at":now()});
     record["compact_context_request"] = receipt.clone();
@@ -88,14 +88,21 @@ pub(super) fn dispatch(args: &[String]) -> Result<i32> {
         backend::current().send(string(&current,"pane"), &[backend::Key::Named("Enter")])?;
         Ok(())
     })();
+    // From the typed command on, every error may follow input (zerus-1wchz).
+    let uncertain = |error: String| {
+        format!("Compact delivery uncertain: {error}. Check Terminal before retrying")
+    };
     if let Err(error) = result {
         receipt["status"] = json!("uncertain");
-        record["compact_context_request"] = receipt.clone(); write(&mut record)?;
-        atomic(&path, &receipt.to_string())?;
-        return Err(format!("Compact delivery uncertain: {error}. Check Terminal before retrying"));
+        record["compact_context_request"] = receipt.clone();
+        let recorded = write(&mut record).and_then(|()| atomic(&path, &receipt.to_string()));
+        return Err(uncertain(match recorded {
+            Ok(()) => error,
+            Err(failed) => format!("{error}; {failed}"),
+        }));
     }
     drop(guard); // Native hooks must be free to report start/completion.
-    atomic(&path, &receipt.to_string())?;
+    atomic(&path, &receipt.to_string()).map_err(uncertain)?;
     println!("{receipt}"); Ok(0)
 }
 

@@ -14,11 +14,12 @@ thread_local! {
 // A denial-only reentrancy marker inherited by Git and its descendants. It is
 // never evidence of permission or a substitute for the original image proof.
 pub(super) const CONTEXT: &str = "HGS_REPOSITORY_GIT_WORKER";
+/// Descriptor numbers the worker binds as Git's `GIT_DIR` and
+/// `GIT_COMMON_DIR`; the parent keeps both descriptors open across exec.
+pub(super) const BIND_GIT_DIR: &str = "HGS_REPOSITORY_GIT_DIR_FD";
+pub(super) const BIND_COMMON_DIR: &str = "HGS_REPOSITORY_GIT_COMMON_DIR_FD";
 
-fn wrapper_context(test_image: bool, nested: bool) -> Result<()> {
-    if test_image {
-        return Err("A unit-test image cannot launch a repository Git worker".into());
-    }
+fn wrapper_context(nested: bool) -> Result<()> {
     if nested {
         return Err("Nested repository Git workers are refused".into());
     }
@@ -59,16 +60,16 @@ fn verify_image(expected: &str, actual: Option<crate::platform::FileIdentity>) -
 
 pub(super) fn run(
     directory: &directory::Directory,
+    share: &[&directory::Directory],
+    bind: super::Bind,
     args: &[&str],
     seconds: u64,
     control: Option<&Control<'_>>,
 ) -> Result<Vec<u8>> {
     #[cfg(test)]
     STARTS.with(|count| count.set(count.get() + 1));
-    // libtest replaces main: re-executing a unit-test image with worker argv
-    // would interpret "clone" as a test filter and run those tests recursively.
+    crate::self_exec::ensure().map_err(|e| e.to_string())?;
     wrapper_context(
-        cfg!(test),
         std::env::var_os(CONTEXT).is_some() || worker_arguments(std::env::args_os().skip(1)),
     )?;
     #[cfg(target_os = "linux")]
@@ -89,6 +90,8 @@ pub(super) fn run(
         ])
         .args(args)
         .process_group(0)
+        .env_remove(BIND_GIT_DIR)
+        .env_remove(BIND_COMMON_DIR)
         .stdin(Stdio::piped())
         .stdout(Stdio::piped())
         .stderr(Stdio::null());
@@ -102,6 +105,16 @@ pub(super) fn run(
                 .custody
                 .inherit(&mut command)
                 .map_err(|e| e.to_string())?;
+        }
+        // After the whitelist: the worker keeps these pinned descriptors for
+        // Git, which inherits them at the same numbers.
+        for held in share {
+            held.share(&mut command);
+        }
+        for (key, fd) in [(BIND_GIT_DIR, bind.git_dir), (BIND_COMMON_DIR, bind.common_dir)] {
+            if let Some(fd) = fd {
+                command.env(key, fd.to_string());
+            }
         }
         command
             .spawn()
@@ -207,7 +220,23 @@ pub(super) fn dispatch(args: &[String]) -> Result<i32> {
         }
     };
     let refs: Vec<&str> = args[2..].iter().map(String::as_str).collect();
-    let result = run_git(None, &refs, seconds, &cancelled);
+    let fd = |key: &str| -> Result<Option<i32>> {
+        std::env::var_os(key)
+            .map(|value| {
+                value
+                    .to_str()
+                    .filter(|text| !text.is_empty() && text.bytes().all(|b| b.is_ascii_digit()))
+                    .and_then(|text| text.parse::<i32>().ok())
+                    .filter(|fd| *fd > 2)
+                    .ok_or_else(|| "Invalid Git descriptor binding".to_string())
+            })
+            .transpose()
+    };
+    let bind = super::Bind {
+        git_dir: fd(BIND_GIT_DIR)?,
+        common_dir: fd(BIND_COMMON_DIR)?,
+    };
+    let result = run_git(None, &[], bind, &refs, seconds, &cancelled);
     // All Git work is finished before writing. A dead reader cannot leave an
     // operation running while this worker blocks or exits on a broken pipe.
     let encoded = serde_json::to_vec(&result).map_err(|e| e.to_string())?;
@@ -223,10 +252,8 @@ mod tests {
 
     #[test]
     fn unit_images_and_nested_contexts_refuse_before_any_self_exec() {
-        assert!(wrapper_context(true, false).is_err());
-        assert!(wrapper_context(true, true).is_err());
-        assert!(wrapper_context(false, true).is_err());
-        assert!(wrapper_context(false, false).is_ok());
+        assert!(wrapper_context(true).is_err());
+        assert!(wrapper_context(false).is_ok());
         let args = ["__state", "repository-git-worker", "600", "proof", "clone"];
         assert!(worker_arguments(args.into_iter().map(Into::into)));
         assert!(!worker_arguments(
@@ -238,11 +265,8 @@ mod tests {
     fn clone_worker_entry_in_a_unit_image_is_always_refused() {
         let root = tempfile::tempdir().unwrap();
         let directory = directory::Directory::open(&root.path().canonicalize().unwrap()).unwrap();
-        let error = run(&directory, &["clone"], 600, None).unwrap_err();
-        assert_eq!(
-            error,
-            "A unit-test image cannot launch a repository Git worker"
-        );
+        let error = run(&directory, &[], super::super::Bind::default(), &["clone"], 600, None).unwrap_err();
+        assert_eq!(error, crate::self_exec::TEST_IMAGE);
     }
 
     #[test]

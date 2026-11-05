@@ -44,6 +44,11 @@ const LISTING_GAP: Duration = Duration::from_millis(500);
 /// background work, a session that has not reported a hook event yet
 /// (startup choosers) and DeepSeek and OpenCode hosts.
 const PROBE: Duration = Duration::from_secs(5);
+/// How often the stream looks for a replaced executable; a replacement must
+/// read the same twice in a row, so the stream ends 5 to 10 s after it.
+const REPLACEMENT_CHECK: Duration = PROBE;
+/// How long an ending stream waits for its last frames to be written.
+const END_DRAIN: Duration = Duration::from_secs(2);
 /// The whole listing runs at least this often, for what neither a file nor
 /// the probe shows: terminal choosers and status lines of sessions that have
 /// reported hooks, and native transcripts between hook events. 15 s would
@@ -119,7 +124,10 @@ pub(crate) fn run(config: &Config, args: &[String], dry: bool) -> Result<i32> {
     let mut next_pulse = Instant::now() + PULSE;
     loop {
         let now = Instant::now();
-        let deadline = [watch.listing_due, watch.refresh_due].into_iter().flatten().fold(next_pulse, Instant::min);
+        let deadline = [watch.listing_due, watch.refresh_due, Some(watch.replacement_due)]
+            .into_iter()
+            .flatten()
+            .fold(next_pulse, Instant::min);
         let input = received.recv_timeout(deadline.saturating_duration_since(now));
         if matches!(input, Ok(Input::Line(_) | Input::TooLong)) {
             pending.fetch_sub(1, Ordering::SeqCst);
@@ -161,6 +169,10 @@ pub(crate) fn run(config: &Config, args: &[String], dry: bool) -> Result<i32> {
         }
         if watch.refresh_due.is_some_and(|due| now >= due) {
             watch.refresh_rows(now);
+        }
+        if now >= watch.replacement_due && watch.replaced(now) {
+            watch.end_replaced();
+            return Ok(0);
         }
         watch.emit_catalog();
         watch.resync_activity();
@@ -275,6 +287,17 @@ impl Out {
         }
     }
 
+    /// Writes the stream's last frame within `limit`, or halts the stream.
+    fn finish(&self, body: &Body, limit: Duration) -> bool {
+        match Self::encode(body) {
+            Some(body) => self.writer.finish(Item { coalesce: None, body }, limit),
+            None => {
+                self.writer.halt();
+                false
+            }
+        }
+    }
+
     fn error(&mut self, code: &str, message: &str, topic: Option<&str>, key: Option<&str>) {
         let body = Body::Error(protocol::ErrorFrame {
             code: code.into(),
@@ -347,6 +370,11 @@ struct Watch<'a> {
     organization: organization::Organization,
     organization_pool: Option<organization::Pool>,
     writers: Writers,
+    /// The file this stream started from (zerus-5wmh.66.2.46), the last
+    /// replacement seen at its path, and when to look again.
+    executable: Option<crate::swarm::Executable>,
+    replacement: Option<crate::swarm::Replacement>,
+    replacement_due: Instant,
 }
 
 impl<'a> Watch<'a> {
@@ -395,7 +423,39 @@ impl<'a> Watch<'a> {
             organization: organization::Organization::new(),
             organization_pool: None,
             writers: Writers::None,
+            executable: crate::swarm::Executable::current(),
+            replacement: None,
+            replacement_due: Instant::now() + REPLACEMENT_CHECK,
         }
+    }
+
+    /// An update put another ready executable at this stream's path, and
+    /// the next look found the same file: a file still being written, a
+    /// missing path or one not yet executable never ends the stream.
+    fn replaced(&mut self, now: Instant) -> bool {
+        self.replacement_due = now + REPLACEMENT_CHECK;
+        let seen = self.executable.as_ref().and_then(crate::swarm::Executable::replacement);
+        let settled = seen.is_some() && seen == self.replacement;
+        self.replacement = seen;
+        settled
+    }
+
+    /// Ends the stream so that its client starts the new executable: a
+    /// stream left running would keep the old code's summaries beside the
+    /// new CLI's commands. Clients keep their rows across the restart.
+    /// One deadline covers the frame's room in the queue and its write; past
+    /// it the stream halts and the process ends, closing stdout (EOF).
+    fn end_replaced(&mut self) {
+        self.out.finish(
+            &Body::Error(protocol::ErrorFrame {
+                code: protocol::code::HGS_REPLACED.into(),
+                message: "the hgs executable was replaced; start the stream again to run the new version".into(),
+                topic: None,
+                key: None,
+                fatal: true,
+            }),
+            END_DRAIN,
+        );
     }
 
     fn hello(&mut self) {
@@ -858,6 +918,12 @@ impl<'a> Watch<'a> {
         if let Some(db) = &self.journal {
             self.data_version = source::data_version(db).ok();
             self.journal_max = source::bounds(db).map_or(0, |(_, max)| max);
+            // A newly available or reopened journal may already contain a
+            // file-changing call missed while it was unavailable. Recheck
+            // only the existing Git subscriptions, without replaying history.
+            if !self.git.is_empty() {
+                self.writers = Writers::All;
+            }
             // Rows written before this connection opened: read after each cursor.
             for sub in self.subs.iter_mut().filter(|sub| !sub.native) {
                 sub.more = true;
@@ -879,8 +945,9 @@ impl<'a> Watch<'a> {
         if Some(version) == self.data_version {
             return Journal::Unchanged;
         }
-        self.data_version = Some(version);
         let Ok((_, max)) = source::bounds(db) else { return Journal::Unknown };
+        // A busy bounds read must retry this version on the next pulse.
+        self.data_version = Some(version);
         if max < self.journal_max {
             // A replaced journal: every cursor is meaningless now.
             for sub in self.subs.iter_mut().filter(|sub| !sub.native) {
@@ -1258,13 +1325,22 @@ impl<'a> Watch<'a> {
 
     // ---- Tasks -------------------------------------------------------------
 
-    fn subscribe_tasks(&mut self, project: Option<&str>) {
+    fn subscribe_tasks(&mut self, project: Option<&str>, window: Option<u32>) {
         let Some(project) = project.filter(|project| {
             !project.is_empty() && project.len() <= tasks::PROJECT_BYTES && !project.chars().any(char::is_control)
         }) else {
             self.out.error("bad_request", "a tasks subscription names its project ID", Some(topic::TASKS), None);
             return;
         };
+        if window.is_some_and(|rows| rows == 0 || rows as usize > protocol::TASKS_WINDOW) {
+            self.out.error(
+                "bad_request",
+                &format!("a tasks window is between 1 and {} rows of each stage", protocol::TASKS_WINDOW),
+                Some(topic::TASKS),
+                Some(project),
+            );
+            return;
+        }
         if !self.tasks.contains(project) && self.tasks.len() >= protocol::TASKS_SUBSCRIPTIONS {
             self.out.error(
                 "too_many_subscriptions",
@@ -1274,7 +1350,7 @@ impl<'a> Watch<'a> {
             );
             return;
         }
-        let job = self.tasks.subscribe(project, Instant::now());
+        let job = self.tasks.subscribe(project, window, Instant::now());
         self.run_tasks([job]);
     }
 
@@ -1291,7 +1367,8 @@ impl<'a> Watch<'a> {
                 Ok(()) => {}
                 Err(mpsc::TrySendError::Full(job)) => self.tasks.defer(job, Instant::now()),
                 Err(mpsc::TrySendError::Disconnected(job)) => {
-                    self.tasks_done(tasks::Done { token: job.token, key: job.key, value: Some(Err("Task list worker is unavailable".into())) });
+                    let tasks::Job { token, key, .. } = job;
+                    self.tasks_done(tasks::Done { token, key, value: Some(Err("Task list worker is unavailable".into())) });
                 }
             }
         }
@@ -1456,7 +1533,7 @@ impl<'a> Watch<'a> {
             topic::CATALOG | topic::CATALOG_META => return,
             topic::GIT => return self.subscribe_git(request.path.as_deref()),
             topic::PROCESSES => return self.subscribe_processes(request.session, request.interval_ms, request.refresh == Some(true)),
-            topic::TASKS => return self.subscribe_tasks(request.project.as_deref()),
+            topic::TASKS => return self.subscribe_tasks(request.project.as_deref(), request.window),
             topic::ORGANIZATION => return self.subscribe_organization(),
             topic::ACTIVITY => {}
             other => {

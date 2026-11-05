@@ -1,11 +1,10 @@
 use super::*;
 use crate::desktop_service::tests::{eventually, Fixture};
 
+mod helper_image;
+
 fn replace_helper(fixture: &Fixture) {
-    let path = fixture.0.join("hgs");
-    let replacement = fixture.0.join("hgs-new");
-    std::fs::copy(&path, &replacement).unwrap();
-    std::fs::rename(replacement, path).unwrap();
+    helper_image::replace(fixture);
 }
 fn help_calls(fixture: &Fixture) -> usize {
     fixture
@@ -28,7 +27,6 @@ fn audit_calls(fixture: &Fixture) -> usize {
 
 #[test]
 fn abi_probe_reuses_only_the_original_connection_and_helper_image() {
-    use std::io::Write;
     let _process = crate::PROCESS_TREE.read().unwrap();
     let fixture = Fixture::new(json!({"audit_first_watch_hold":true}));
     replace_helper(&fixture); // Never modify the shared source fixture's symlink target.
@@ -102,12 +100,7 @@ fn abi_probe_reuses_only_the_original_connection_and_helper_image() {
         let scope = first(service.clone()).await.unwrap().scope;
         detail(Some(service.clone()), 53, scope).await.unwrap();
         assert_eq!(help_calls(&fixture), 5, "same pathname, new file identity");
-        std::fs::OpenOptions::new()
-            .append(true)
-            .open(fixture.0.join("hgs"))
-            .unwrap()
-            .write_all(b"\n# changed helper image\n")
-            .unwrap();
+        helper_image::append(&fixture);
         let scope = first(service.clone()).await.unwrap().scope;
         detail(Some(service.clone()), 53, scope).await.unwrap();
         assert_eq!(help_calls(&fixture), 6, "in-place version change");
@@ -117,9 +110,32 @@ fn abi_probe_reuses_only_the_original_connection_and_helper_image() {
             json!({"audit_abi":false}).to_string(),
         )
         .unwrap();
-        replace_helper(&fixture);
-        assert!(first(service.clone()).await.is_err());
-        assert!(first(service.clone()).await.is_err());
+        let mut inherited = Some(helper_image::replace_during_parent_fork(&fixture));
+        for expected in [7, 8] {
+            // ABI support is tested after the original request resources settle;
+            // an admission refusal is not evidence of an unsupported helper.
+            eventually("original audit request resources settled", || {
+                service
+                    .shared
+                    .rpc
+                    .snapshot()
+                    .is_ok_and(|rpc| rpc.admitted == 0)
+            })
+            .await;
+            assert_eq!(
+                first(service.clone()).await.err().as_deref(),
+                Some(UNAVAILABLE)
+            );
+            assert_eq!(
+                help_calls(&fixture),
+                expected,
+                "each unsupported result ran its own probe"
+            );
+            assert!(service.shared.audit_help.is_empty());
+            if let Some(original) = inherited.take() {
+                original.finish();
+            }
+        }
         assert_eq!(
             help_calls(&fixture),
             8,

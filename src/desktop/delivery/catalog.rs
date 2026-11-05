@@ -27,6 +27,26 @@ pub(super) struct Candidate {
     pub key: String,
 }
 
+/// One row of an indexed pass and, when the policy accepts it, its candidate.
+/// The pass moves past it only once [`Sources::handled`] says so.
+pub(super) struct Indexed {
+    computer: String,
+    generation: i64,
+    id: i64,
+    /// The last row of its source's pass.
+    last: bool,
+    pub candidate: Option<Candidate>,
+}
+
+/// One source's pass over its flagged rows: the generation it walks, the last
+/// row it handled and the end it captured when it started.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+struct Pass {
+    generation: i64,
+    after: i64,
+    end: Option<i64>,
+}
+
 fn bounded_row(row: &rusqlite::Row<'_>) -> rusqlite::Result<String> {
     let value = row.get_ref(0)?;
     let text = value.as_str().map_err(|_| rusqlite::Error::InvalidQuery)?;
@@ -43,6 +63,10 @@ pub(super) struct Sources {
     computer: usize,
     read_after: i64,
     read_through: i64,
+    /// Per native source: its pass over the approval-phase index. At most
+    /// one entry per native source.
+    approval_after: BTreeMap<String, Pass>,
+    approval_next: usize,
 }
 impl Sources {
     pub fn new(epoch: &str) -> Self {
@@ -53,6 +77,8 @@ impl Sources {
             computer: 0,
             read_after: 0,
             read_through: 0,
+            approval_after: BTreeMap::new(),
+            approval_next: 0,
         }
     }
 
@@ -195,6 +221,126 @@ impl Sources {
         Ok(())
     }
 
+    /// The approval-phase index (zerus-5wmh.66.3.33): at most `limit` flagged
+    /// rows per scan over the current native sources. A scan whose index goes
+    /// before the catalog walk (`leads`) starts with the next source, so each
+    /// source leads in turn, whatever the number of sources or the walk's own
+    /// rotation (which a per-scan rotation would fall in step with, leaving one
+    /// source's index always behind its walk). Each source walks a pass in id order, from
+    /// the last row it handled to the highest flagged id when the pass began
+    /// (ids only grow and an update keeps its id, so arrivals neither shift
+    /// nor extend a pass; they and rows that entered the phase behind it come
+    /// in the next one). Reading moves nothing: a pass moves past a row only
+    /// once [`Self::handled`] says the scan decided it. Candidates go through
+    /// the same policy, `same()`, native inspection and durable reservation
+    /// as the catalog walk's.
+    pub fn approvals(&mut self, store: &Store, limit: usize, leads: bool) -> Result<Vec<Indexed>> {
+        self.approval_after
+            .retain(|computer, _| self.native.contains_key(computer));
+        let sources: Vec<Stamp> = self
+            .native
+            .values()
+            .map(|(stamp, _)| stamp.clone())
+            .collect();
+        if sources.is_empty() {
+            return Ok(Vec::new());
+        }
+        let first = self.approval_next % sources.len();
+        if leads {
+            self.approval_next = first + 1;
+        }
+        let mut indexed = Vec::new();
+        let mut budget = limit;
+        for offset in 0..sources.len() {
+            if budget == 0 {
+                break;
+            }
+            let stamp = &sources[(first + offset) % sources.len()];
+            let Some(visible) = stamp.visible else {
+                continue;
+            };
+            if !self.current(&store.db, stamp)? {
+                continue;
+            }
+            let pass = self
+                .approval_after
+                .entry(stamp.computer.clone())
+                .or_insert(Pass {
+                    generation: visible,
+                    after: 0,
+                    end: None,
+                });
+            if pass.generation != visible {
+                *pass = Pass {
+                    generation: visible,
+                    after: 0,
+                    end: None,
+                };
+            }
+            let end = match pass.end {
+                Some(end) => end,
+                None => match catalog::approvals::pass_end(&store.db, visible)? {
+                    Some(end) => *pass.end.insert(end),
+                    // Nothing flagged: the next scan looks again.
+                    None => continue,
+                },
+            };
+            let rows = catalog::approvals::page(&store.db, visible, pass.after, end, budget)?;
+            // A short page holds the rest of the pass.
+            let short = rows.len() < budget;
+            if rows.is_empty() {
+                *pass = Pass {
+                    generation: visible,
+                    after: 0,
+                    end: None,
+                };
+                continue;
+            }
+            budget -= rows.len();
+            let count = rows.len();
+            for (index, row) in rows.into_iter().enumerate() {
+                let view = view::row(&serde_json::from_str(&row.json)?);
+                let candidate = policy::candidate(&stamp.computer, &view).map(|target| Candidate {
+                    target,
+                    source: stamp.clone(),
+                    key: row.key,
+                });
+                indexed.push(Indexed {
+                    computer: stamp.computer.clone(),
+                    generation: visible,
+                    last: row.id >= end || (short && index + 1 == count),
+                    id: row.id,
+                    candidate,
+                });
+            }
+        }
+        Ok(indexed)
+    }
+
+    /// The scan decided `row` (inspected it, or found nothing to inspect):
+    /// its pass moves past it, and starts again after its last row. A pass
+    /// of another generation, or one already past the row, is left alone.
+    pub fn handled(&mut self, row: &Indexed) {
+        let Some(pass) = self.approval_after.get_mut(&row.computer) else {
+            return;
+        };
+        if pass.generation != row.generation || pass.after >= row.id {
+            return;
+        }
+        *pass = if row.last {
+            Pass {
+                generation: row.generation,
+                after: 0,
+                end: None,
+            }
+        } else {
+            Pass {
+                after: row.id,
+                ..*pass
+            }
+        };
+    }
+
     /// One bounded discovery page, never an all-session map. Every candidate
     /// still needs a fresh native question inspection and durable reservation.
     pub fn page(&mut self, store: &mut Store) -> Result<Vec<Candidate>> {
@@ -258,5 +404,21 @@ impl Sources {
     pub(super) fn native_fixture(&mut self, store: &Store, computer: &str) {
         let stamp = self.stamp(&store.db, computer).unwrap().unwrap();
         self.native.insert(computer.into(), (stamp, Instant::now()));
+    }
+    /// A live stream's heartbeat (`HEARTBEAT_MS`, within `FRESH`): every
+    /// registered source is observed again at its current stamp.
+    pub(super) fn heartbeat_fixture(&mut self, store: &Store) {
+        let computers: Vec<String> = self.native.keys().cloned().collect();
+        for computer in computers {
+            if let Some(stamp) = self.stamp(&store.db, &computer).unwrap() {
+                self.native.insert(computer, (stamp, Instant::now()));
+            }
+        }
+    }
+    /// A slow runner: every registered source was last observed `by` ago.
+    pub(super) fn age_fixture(&mut self, by: Duration) {
+        for (_, at) in self.native.values_mut() {
+            *at = at.checked_sub(by).unwrap_or(*at);
+        }
     }
 }

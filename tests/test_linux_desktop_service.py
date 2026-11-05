@@ -13,6 +13,7 @@ import unittest
 import uuid
 import sys
 from unittest.mock import patch
+from desktop_activation_review import ReviewControls
 
 ROOT = Path(__file__).resolve().parents[1]
 installer = None
@@ -32,7 +33,7 @@ class Manager:
         self.state_override = None
         self.lifecycle = {"abi": installer.ABI, "configuration": "a" * 64, "ipc_ready": True,
                           "mode": "passive",
-                          "phase": "serving", "pid": 4321, "epoch": "original-epoch", "generation": 1,
+                          "phase": "serving", "pid": 4321, "epoch": "33333333-3333-4333-8333-333333333333", "generation": 1,
                           "background": {"attention": {"ready": False, "code": "not_started"}}}
         self.grant = {"abi": "desktop-ownership-v1", "configuration": "a" * 64, "state": "service",
                       "identity_current": True, "rearm_required": False, "revision": 1,
@@ -46,6 +47,8 @@ class Manager:
         self.after_revoke_check = None
         self.holds = []
         self.after_action = None
+        self.consumer = {"machine": str(uuid.uuid4()), "boot": str(uuid.uuid4()),
+                         "pid": os.getpid(), "birth": "fixture-native-birth"}
         self.release_failure = False
         self.during_probe = None
 
@@ -103,7 +106,7 @@ class Manager:
                 if self.caller_refused:
                     raise installer.Refusal("agent-descended frontend request refused")
                 return json.dumps({"schema": 1, "configuration": "a" * 64, "admitted": True,
-                                   "source": "interactive_terminal"})
+                                   "source": "interactive_terminal", "consumer": self.consumer})
             if args[1:] == ["desktop", "ownership-status", "--json"]:
                 return json.dumps(self.grant)
             if args[1:4] == ["desktop", "revoke", "--json"]:
@@ -152,7 +155,7 @@ class Manager:
 
 
 @unittest.skipUnless(sys.platform.startswith("linux"), "Linux service registration")
-class LinuxDesktopService(unittest.TestCase):
+class LinuxDesktopService(ReviewControls, unittest.TestCase):
     def setUp(self):
         self.temporary = tempfile.TemporaryDirectory(prefix="zerus-desktop-install-")
         self.addCleanup(self.temporary.cleanup)
@@ -189,6 +192,102 @@ class LinuxDesktopService(unittest.TestCase):
     def instance(self, mode=None):
         return installer.Installer(str(self.hgs), self.env, self.manager.run, mode=mode,
                                    hold_factory=self.manager.hold)
+
+    def test_default_activation_rechecks_explicit_passive_under_the_registration_lock(self):
+        self.instance().install()
+        original_status = self.instance().status()
+        self.assertEqual(original_status["mode_selection"], "default")
+        # Owner selection wins after the GUI read but before activation.
+        self.instance("passive").install()
+        self.manager.calls.clear()
+        with self.assertRaisesRegex(installer.Refusal, "Resume"):
+            self.instance("background").install(activation_id=str(uuid.uuid4()), default_only=True)
+        self.assertFalse(set(self.manager.actions()) - {"show"})
+        self.assertEqual(self.instance().status()["selected_mode"], "passive")
+        self.assertIsNone(self.instance().status()["activation_pending"])
+
+    def test_activation_settles_only_its_original_and_lookup_never_restarts(self):
+        self.instance().install()
+        request = str(uuid.uuid4())
+        result = self.instance("background").install(activation_id=request)
+        self.assertEqual((result["abi"], result["request_id"], result["phase"]),
+                         (installer._activation.ABI, request, "settled"))
+        self.assertEqual(result["result"], {"ok": True, "code": "ready"})
+        self.manager.calls.clear()
+        self.assertEqual(self.instance("background").install(activation_id=request), result)
+        self.assertFalse(set(self.manager.actions()) - {"show"})
+        self.instance().install(refresh=True)
+        self.assertEqual(self.instance().activation_result(request), result)
+
+    def test_real_helper_cutover_keeps_process_only_unit_and_exact_manager_scope(self):
+        # Drive the production Installer through both mode transitions. Only
+        # native caller/Grant/hold and manager replies are private fixtures;
+        # the helper writes the actual unit path and selects its manager argv.
+        self.instance().install()
+        self.manager.calls.clear()
+        result = self.instance("background").install(activation_id=str(uuid.uuid4()))
+        self.assertEqual(result["phase"], "settled")
+        for mode in ("background", "passive"):
+            if mode == "passive":
+                self.instance(mode).install()
+            self.assertEqual(self.instance().status()["selected_mode"], mode)
+            definition = self.destination.read_text()
+            self.assertIn("\nKillMode=process\n", definition)
+            self.assertNotIn("KillMode=control-group", definition)
+        manager = [args for args, _ in self.manager.calls if args[0] == "systemctl"]
+        self.assertEqual(sum(args[2] == "restart" for args in manager), 2)
+        for args in manager:
+            self.assertEqual(args[:2], ["systemctl", "--user"])
+            if args[2] == "show":
+                self.assertEqual(args[3:], [installer.UNIT,
+                    "--property=LoadState,ActiveState,MainPID,FragmentPath,DropInPaths", "--no-pager"])
+            elif args[2] in ("enable", "start", "restart"):
+                self.assertEqual(args[3:], [installer.UNIT])
+            elif args[2] == "daemon-reload":
+                self.assertEqual(len(args), 3)
+            elif args[2] == "import-environment":
+                self.assertEqual(args[3:], sorted(installer.graphics(self.env)))
+            else:
+                self.fail(f"cutover used an unexpected manager operation: {args}")
+        self.assertFalse(any(Path(args[0]).name in ("kill", "pkill", "killall", "tmux", "dsh")
+                             for args, _ in self.manager.calls))
+
+    def test_activation_lost_manager_reply_is_unknown_and_never_reoffered(self):
+        self.instance().install()
+        request = str(uuid.uuid4())
+        def lose_reply():
+            raise installer.Refusal("original manager reply lost")
+        self.manager.after_action = ("restart", lose_reply)
+        with self.assertRaisesRegex(installer.Refusal, "reply lost"):
+            self.instance("background").install(activation_id=request)
+        self.manager.calls.clear()
+        result = self.instance("background").install(activation_id=request)
+        self.assertEqual((result["phase"], result["result"]), ("unknown", None))
+        self.assertFalse(set(self.manager.actions()) - {"show"})
+        with self.assertRaisesRegex(installer._activation.Refusal, "original_pending"):
+            self.instance("background").install(activation_id=str(uuid.uuid4()))
+        self.assertFalse(set(self.manager.actions()) - {"show"})
+
+    def test_activation_original_grant_and_cli_stay_pinned_across_manager_effects(self):
+        for replacement in ("grant", "cli"):
+            with self.subTest(replacement=replacement):
+                # Restore a private passive installation for each independent attempt.
+                if self.destination.exists():
+                    self.destination.unlink()
+                    self.instance().record_path.unlink()
+                self.manager.active = False
+                self.manager.lifecycle["mode"] = "passive"
+                self.instance().install()
+                request = str(uuid.uuid4())
+                def change():
+                    if replacement == "grant":
+                        self.manager.rearm()
+                    else:
+                        self.hgs.write_bytes(b"changed original CLI")
+                self.manager.after_action = ("restart", change)
+                with self.assertRaises((installer.Refusal, installer._activation.Refusal)):
+                    self.instance("background").install(activation_id=request)
+                self.assertEqual(self.instance().activation_result(request)["phase"], "unknown")
 
     def test_rearm_after_receipt_cannot_win_during_the_held_manager_transition(self):
         self.instance().install()
@@ -509,6 +608,34 @@ class LinuxDesktopService(unittest.TestCase):
         self.assertEqual(instance.status()["selected_mode"], "passive")
         self.assertEqual(instance.record_path.read_bytes(), original)
         self.assertEqual(self.manager.actions(), ["show"])
+
+    def test_default_and_explicit_selection_provenance_survives_updates(self):
+        self.instance().install()
+        self.assertEqual(self.instance().status()["mode_selection"], "default")
+        self.instance().install(refresh=True)
+        self.assertEqual(self.instance().status()["mode_selection"], "default")
+        self.instance("passive").install()
+        self.assertEqual(self.instance().status()["mode_selection"], "explicit")
+        self.instance().install(refresh=True)
+        self.assertEqual(self.instance().status()["mode_selection"], "explicit")
+
+    def test_missing_or_unknown_provenance_never_becomes_a_default_selection(self):
+        self.instance().install()
+        instance = self.instance()
+        record = instance.ownership()
+        record.pop("mode_selection")
+        instance.save(record)
+        original = instance.record_path.read_bytes()
+        self.assertEqual(instance.status()["mode_selection"], "retained")
+        self.assertEqual(instance.record_path.read_bytes(), original)
+        instance.install(refresh=True)
+        self.assertEqual(instance.status()["mode_selection"], "retained")
+        record["mode_selection"] = "automatic"
+        instance.save(record)
+        original = instance.record_path.read_bytes()
+        with self.assertRaisesRegex(installer.Refusal, "provenance"):
+            instance.status()
+        self.assertEqual(instance.record_path.read_bytes(), original)
 
     def test_a_waiting_upgrade_cannot_flip_a_newly_selected_background_mode(self):
         self.instance().install()

@@ -29,7 +29,7 @@ function facts(): ViewedFacts {
     inspected: s ? followedFor(s.key).value : undefined,
     // Qt's m_inspectError: the follow failed, or the open composer's last read did.
     inspectError: !!s && ((activity.target()?.id === s.key && !!activity.error())
-      || (!!v?.inspect_error && v.key === draftKey({ computer: s.computer, key: s.catalogKey, name: s.name, archive_id: null }))),
+      || (!!v?.inspect_error && v.key === draftKey({ computer: s.computer, key: s.catalogKey, name: s.name, archive_id: null, session_id: s.sessionId ?? null }))),
     tab: detailTab(),
     active: () => page() === "sessions" && !pageHidden() && !windowVisibility.hidden() && documentFocused() && !popupOpen(),
     activityShows: (reply) => !!s && activityShowsReply(s.key, reply),

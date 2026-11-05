@@ -7,6 +7,11 @@
   /* zerus-5wmh.83: live appends must be visible when the end pin follows them.
      A tall new row starting at opacity zero blanks the whole transcript. */
   .act-col [id^="item-"] { animation: none; }
+  /* zerus-agv9: an opened task's result, document and journal are read in
+     place, without an entrance. On the arch WebKit the end of an opacity
+     entrance presents one frame near its start opacity, so the text blinked
+     once it had appeared (scripts/task-view-flicker-smoke.html). */
+  .tv-content .act-msg, .tv-content .tv-doc, .tv-content .tv-event { animation: none; }
   .act-older { padding: 4px 2px; text-align: center; }
   /* Groups that hold an approval or a failure read in the warning colour, as in Qt. */
   .act-tools.warn .act-tools-head b { color: var(--z-color-warn); }

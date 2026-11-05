@@ -22,15 +22,44 @@ pub(super) fn created(common: &Path, path: &Path, branch: &str, head: &str) -> R
         Instant::now() + Duration::from_secs(3),
     )
     .map_err(|e| e.detail)?;
-    let metadata = crate::platform::canonical(String::from_utf8_lossy(&metadata).trim())
+    created_at(common, path, branch, head, &metadata).map(drop)
+}
+
+/// `metadata` is the checkout's `rev-parse --absolute-git-dir` output. The
+/// owned effect writes through its pinned entry instead.
+fn created_at(
+    common: &Path,
+    path: &Path,
+    branch: &str,
+    head: &str,
+    metadata: &[u8],
+) -> Result<Value> {
+    let metadata = crate::platform::canonical(String::from_utf8_lossy(metadata).trim())
         .map_err(|e| e.to_string())?;
     if !metadata.starts_with(common.join("worktrees")) {
         return Err("Cannot verify linked worktree metadata".into());
     }
-    let value = json!({"version":1,"id":uuid::Uuid::new_v4().to_string(),"common_dir":common,"path":path,"branch":branch,"head":head,"metadata":metadata,"created_at":now()});
+    let value = owner_value(common, path, branch, head, &metadata);
     atomic(&metadata.join("zerus-owner.json"), &format!("{value}\n"))?;
+    record_owner(common, path, value)
+}
+
+/// A new checkout's ownership record, for its metadata entry `metadata`.
+pub(super) fn owner_value(
+    common: &Path,
+    path: &Path,
+    branch: &str,
+    head: &str,
+    metadata: &Path,
+) -> Value {
+    json!({"version":1,"id":uuid::Uuid::new_v4().to_string(),"common_dir":common,"path":path,"branch":branch,"head":head,"metadata":metadata,"created_at":now()})
+}
+
+/// After the entry's owner file: the private receipt and maintenance record.
+pub(super) fn record_owner(common: &Path, path: &Path, value: Value) -> Result<Value> {
     atomic(&receipt_path(common, path), &format!("{value}\n"))?;
-    super::worktree_maintenance::register(&value)
+    super::worktree_maintenance::register(&value)?;
+    Ok(value)
 }
 
 pub(super) fn owned(common: &Path, path: &Path) -> Option<Value> {
@@ -111,9 +140,9 @@ pub(super) fn prepare_removal(common: &Path, row: &Value) -> Result<()> {
             return Ok(());
         }
         record["worktree_cleanup"] = json!({"owner":ownership,"head":row["head"],"branch":row["branch"],"status":"removal_pending"});
-        atomic(
+        atomic_record(
             &archive::path(string(&record, "archive_id"))?,
-            &format!("{record}\n"),
+            &mut record,
         )?;
         Ok(())
     })

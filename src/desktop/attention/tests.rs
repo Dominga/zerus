@@ -11,6 +11,7 @@ use zerus_client_core::{
 };
 use zerus_desktop_ledger as ledger;
 use zerus_watch_protocol::{Body, CatalogItem, Delta, Frame, Hello, Snapshot};
+mod retention_tests;
 fn id() -> String {
     uuid::Uuid::new_v4().to_string()
 }
@@ -886,7 +887,10 @@ fn disabled_history_is_baselined_when_policy_enables_before_host_arrives() {
     f.runtime.set_policy(enabled());
     f.delta(row());
     f.ticks(4);
-    assert_eq!(f.intents(), 1);
+    assert_eq!(f.intents(), 0, "the attempt-less baseline is compacted");
+    assert!(
+        super::retention::suppressed(&f.store.db, &project(&row()).candidates[0].logical).unwrap()
+    );
     assert!(f.host.try_next().is_err());
     let mut next = row();
     next["reply_id"] = json!("new-reply");

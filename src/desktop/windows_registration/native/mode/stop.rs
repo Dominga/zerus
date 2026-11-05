@@ -1,5 +1,8 @@
 //! Original-stop ordering and the existing atomic metadata write. Non-Windows
 //! tests compile this SAME code as a model; they construct no native authority.
+//! Windows file publication runs in the admitted dedicated helper, whose entry
+//! selects its exact-user creation owner. Models must not change the shared
+//! Windows unit process token; the hosted task fixture exercises that helper.
 use crate::{
     desktop::windows_registration_policy::mode::{Phase, Record},
     platform,
@@ -7,7 +10,7 @@ use crate::{
 use anyhow::{ensure, Result};
 use std::{io::Write, path::Path};
 
-#[cfg(test)]
+#[cfg(all(test, not(windows)))]
 std::thread_local! { static FAIL_DIRECTORY_SYNC: std::cell::Cell<bool> = const { std::cell::Cell::new(false) }; }
 
 pub(in crate::desktop) const RECORD: &str = "windows-registration-mode.json";
@@ -60,7 +63,7 @@ pub(in crate::desktop) fn publish(
     file.as_file().sync_all()?;
     fence()?;
     platform::persist(file, root.join(RECORD)).map_err(|error| error.error)?;
-    #[cfg(test)]
+    #[cfg(all(test, not(windows)))]
     ensure!(
         !FAIL_DIRECTORY_SYNC.get(),
         "injected directory sync uncertainty"
@@ -69,6 +72,6 @@ pub(in crate::desktop) fn publish(
     fence()
 }
 
-#[cfg(test)]
+#[cfg(all(test, not(windows)))]
 #[path = "stop/tests.rs"]
 mod tests;

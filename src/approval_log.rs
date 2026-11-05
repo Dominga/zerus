@@ -54,6 +54,9 @@ fn answers(question: &Value) -> Option<Value> {
         // U19: the owner (or a member's lead) confirms subagents; an
         // automatic approval never does.
         || question["subagent_confirmation"] == true
+        // A known panel read from the screen without a native request has no
+        // exact request identity; only the owner answers it.
+        || question["screen_only_request"] == true
         || matches!(question["questions"][0]["header"].as_str(), Some("Agent" | "Task" | "Subagents"))
     {
         return None;
@@ -497,6 +500,36 @@ mod tests {
         always.as_object_mut().unwrap().remove("subagent_confirmation");
         always["questions"][0]["header"] = json!("Bash");
         assert_eq!(answers(&always).unwrap()[0]["selected_option_ids"], json!(["1"]), "only ever the one-time Yes");
+    }
+
+    /// A known panel read from the screen without a native request has no exact
+    /// identity; automatic approval never takes it, though the owner still can.
+    #[test]
+    fn a_screen_only_read_outside_approval_is_never_approved_automatically() {
+        let card = |screen_only: bool| {
+            let mut card = json!({"approval":true,"can_answer":true,"source":"claude_tool_approval",
+                "answer_transport":"claude_tui","approval_choices":true,"question_id":"claude-approval:x",
+                "question_hash":"a".repeat(64),"run_id":"run","conversation_id":"conversation","tool_call_id":"",
+                "questions":[{"id":"approval","header":"Read","question":"Allow this read outside the working directories?",
+                    "allow_other":false,"options":[
+                        {"id":"1","label":"Yes, and keep allowing any reads outside the working directories","scope":"broader"},
+                        {"id":"2","label":"No, and block reads outside the working directories from now on","scope":"broader"},
+                        {"id":"3","label":"No, and ask again next time","scope":"once"},
+                        {"id":"4","label":"Yes, but ask again next time","scope":"once"}]}]});
+            if screen_only {
+                card["screen_only_request"] = json!(true);
+            }
+            card
+        };
+        // Its one-time "Yes, but ask again next time" would otherwise be a grant.
+        assert_eq!(answers(&card(false)).unwrap()[0]["selected_option_ids"], json!(["4"]));
+        assert!(answers(&card(true)).is_none());
+        // The owner still answers the same card by hand.
+        let owner = card(true);
+        assert_eq!(
+            (owner["can_answer"].clone(), owner["questions"][0]["options"][3]["label"].clone()),
+            (json!(true), json!("Yes, but ask again next time"))
+        );
     }
 
     #[test]

@@ -302,7 +302,11 @@ fn build(record:&Value,screen:Option<&str>)->Option<(Value,Option<Panel>)> {
     if record.get("pending_approval").is_some() {return None;}
     let request=native_read_request(screen)?;
     let at=record["attention_started"].as_f64().map_or(record["last_event_at"].clone(),|at|json!(at));
-    build_request_seen(record,Some(screen),&request,&at,"",false)
+    let (mut card,panel)=build_request_seen(record,Some(screen),&request,&at,"",false)?;
+    // No native request identity exists, so automatic approvals must never
+    // take this card; only the owner may answer the verified panel.
+    card["screen_only_request"]=json!(true);
+    Some((card,panel))
 }
 
 /// The exact shell command of a Bash or PowerShell request, for a team's safe
@@ -1683,11 +1687,13 @@ pub(super) fn reconcile(record:Value)->Value {
             ("No, and ask again next time","once"),("Yes, but ask again next time","once")].map(|(l,s)|(l.to_owned(),s.to_owned())));
         assert!(string(&q["questions"][0],"body").contains("01-Screenshot_2.png"));
         assert!(string(&q["questions"][0],"body").contains("Read outside the working directories"));
+        assert_eq!(q["screen_only_request"],true);
         assert!(snapshot(&r,screen).is_some());
         // The same panel with the waiting hook keeps the existing answerable card.
         let hooked=record("Read",json!({"file_path":r"C:\Users\whitl\.local\state\hgs\sessions\attachments\message-40hhyN\01-Screenshot_2.png"}));
         let hooked=card(&hooked,screen);
         assert_eq!((hooked["source"].clone(),hooked["can_answer"].clone()),(json!("claude_tool_approval"),json!(true)));
+        assert!(hooked.get("screen_only_request").is_none());
         // A different question is not this known panel.
         assert!(native_read_request(&screen.replace("Allow this read outside the working directories?","Do you want to proceed?")).is_none());
     }

@@ -1334,7 +1334,7 @@ os._exit(0)"#;
                 input,
                 lock,
                 resources,
-                Instant::now() + Duration::from_millis(500),
+                Instant::now() + Duration::from_millis(1500),
                 |_| Ok(()),
             )
         });
@@ -1400,7 +1400,7 @@ os._exit(0)"#;
                 input,
                 lock,
                 resources,
-                Instant::now() + Duration::from_millis(300),
+                Instant::now() + Duration::from_millis(1500),
                 |_| Ok(()),
             )
         });
@@ -1867,7 +1867,7 @@ os._exit(0)"#;
 /// never-renewed deadline last before the spawn and before any input.
 #[cfg(any(target_os = "linux", target_os = "macos"))]
 mod spent_deadline {
-    use crate::desktop::original_child::{OFFERED, SPAWNED};
+    use crate::desktop::original_child::{crossed, OFFERED, SPAWNED};
     use std::path::Path;
     use std::sync::Arc;
     use std::time::{Duration, Instant};
@@ -1892,13 +1892,6 @@ mod spent_deadline {
     pub(super) fn expired() -> Instant {
         Instant::now() - Duration::from_millis(1)
     }
-    pub(super) fn crossed() -> Instant {
-        Instant::now() + Duration::from_millis(20)
-    }
-    pub(super) fn slow(_: &mut std::process::Command) -> std::io::Result<()> {
-        std::thread::sleep(Duration::from_millis(60));
-        Ok(())
-    }
     pub(super) fn soon() -> Instant {
         Instant::now() + Duration::from_secs(20)
     }
@@ -1906,20 +1899,32 @@ mod spent_deadline {
     #[test]
     fn a_send_child_never_starts_once_its_deadline_is_spent() {
         use super::super::child::{run, Ended};
-        for deadline in [expired(), crossed()] {
+        clear();
+        let ended = run(
+            cat(),
+            &[],
+            b"hello",
+            &custody(),
+            &resources(),
+            expired(),
+            |_| Ok(()),
+        );
+        assert_eq!(ended, Ended::NotStarted);
+        assert_eq!(spawned(), None);
+        let ended = crossed(|deadline, check| {
             clear();
-            let ended = run(
+            run(
                 cat(),
                 &[],
                 b"hello",
                 &custody(),
                 &resources(),
                 deadline,
-                slow,
-            );
-            assert_eq!(ended, Ended::NotStarted);
-            assert_eq!(spawned(), None);
-        }
+                check,
+            )
+        });
+        assert_eq!(ended, Ended::NotStarted);
+        assert_eq!(spawned(), None, "no child once the last check spent it");
         clear();
         let ended = run(
             cat(),

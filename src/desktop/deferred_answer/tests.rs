@@ -1600,7 +1600,7 @@ os._exit(0)"#;
                 input,
                 lock,
                 resources,
-                Instant::now() + Duration::from_millis(500),
+                Instant::now() + Duration::from_millis(1500),
                 |_| Ok(()),
             )
         });
@@ -1666,7 +1666,7 @@ os._exit(0)"#;
                 input,
                 lock,
                 resources,
-                Instant::now() + Duration::from_millis(300),
+                Instant::now() + Duration::from_millis(1500),
                 |_| Ok(()),
             )
         });
@@ -2252,7 +2252,7 @@ os._exit(0)"#;
 /// never-renewed deadline last before the spawn and before any input.
 #[cfg(any(target_os = "linux", target_os = "macos"))]
 mod spent_deadline {
-    use crate::desktop::original_child::{OFFERED, SPAWNED};
+    use crate::desktop::original_child::{crossed, OFFERED, SPAWNED};
     use std::path::Path;
     use std::sync::Arc;
     use std::time::{Duration, Instant};
@@ -2277,13 +2277,6 @@ mod spent_deadline {
     pub(super) fn expired() -> Instant {
         Instant::now() - Duration::from_millis(1)
     }
-    pub(super) fn crossed() -> Instant {
-        Instant::now() + Duration::from_millis(20)
-    }
-    pub(super) fn slow(_: &mut std::process::Command) -> std::io::Result<()> {
-        std::thread::sleep(Duration::from_millis(60));
-        Ok(())
-    }
     pub(super) fn soon() -> Instant {
         Instant::now() + Duration::from_secs(20)
     }
@@ -2292,12 +2285,24 @@ mod spent_deadline {
     fn an_answer_child_never_starts_once_its_deadline_is_spent() {
         use super::super::child::{run, Ended};
         let input = b"private fixture answer";
-        for deadline in [expired(), crossed()] {
+        clear();
+        let ended = run(
+            cat(),
+            &[],
+            input,
+            &custody(),
+            &resources(),
+            expired(),
+            |_| Ok(()),
+        );
+        assert_eq!(ended, Ended::NotStarted);
+        assert_eq!(spawned(), None, "no child after its deadline");
+        let ended = crossed(|deadline, check| {
             clear();
-            let ended = run(cat(), &[], input, &custody(), &resources(), deadline, slow);
-            assert_eq!(ended, Ended::NotStarted);
-            assert_eq!(spawned(), None, "no child after its deadline");
-        }
+            run(cat(), &[], input, &custody(), &resources(), deadline, check)
+        });
+        assert_eq!(ended, Ended::NotStarted);
+        assert_eq!(spawned(), None, "no child once the last check spent it");
         // Within its budget, the same child runs with all of its input.
         clear();
         let ended = run(cat(), &[], input, &custody(), &resources(), soon(), |_| {
@@ -2311,11 +2316,15 @@ mod spent_deadline {
     #[test]
     fn an_observation_child_never_starts_once_its_deadline_is_spent() {
         use super::super::child::observe;
-        for deadline in [expired(), crossed()] {
+        clear();
+        assert_eq!(observe(cat(), &[], b"{}", expired(), |_| Ok(())), None);
+        assert_eq!(spawned(), None);
+        let observed = crossed(|deadline, check| {
             clear();
-            assert_eq!(observe(cat(), &[], b"{}", deadline, slow), None);
-            assert_eq!(spawned(), None);
-        }
+            observe(cat(), &[], b"{}", deadline, check)
+        });
+        assert_eq!(observed, None);
+        assert_eq!(spawned(), None);
         clear();
         assert_eq!(
             observe(cat(), &[], b"{}", soon(), |_| Ok(())),

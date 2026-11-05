@@ -145,7 +145,7 @@ class WatchStream(unittest.TestCase):
         self.assertEqual((hello['v'], hello['t'], hello['seq']), (1, 'hello', 1))
         self.assertEqual(hello['host'], 'test')
         self.assertEqual((hello['heartbeat_ms'], hello['max_frame_bytes']), (10000, 1048576))
-        self.assertEqual(hello['topics'], ['catalog', 'catalog.meta', 'activity', 'git', 'processes', 'tasks', 'organization'])
+        self.assertEqual(hello['topics'], ['catalog', 'catalog.meta', 'activity', 'git', 'processes', 'tasks', 'organization', 'team'])
         self.assertEqual(hello['limits']['activity_subscriptions'], 16)
         self.assertEqual(hello['limits']['git_subscriptions'], 64)
         self.assertEqual(hello['limits']['processes_subscriptions'], 16)
@@ -394,6 +394,51 @@ class WatchStream(unittest.TestCase):
         stream.next(lambda f: f['t'] == 'pong' and f['id'] == 'unsubscribed')
         self.task('add', '--project', 'orchard', text='Unwatched task')
         stream.quiet(lambda f: f['t'] == 'snapshot' and f['topic'] == 'tasks', 3)
+        self.assertEqual(stream.close(), 0)
+
+    def team_store(self, *rows):
+        """A team store with these heads, written as hgs writes it (rollback journal)."""
+        path = self.state / 'teams' / 'teams.sqlite3'
+        path.parent.mkdir(exist_ok=True)
+        with sqlite3.connect(path) as db:
+            db.execute('PRAGMA journal_mode=DELETE')
+            db.execute('CREATE TABLE IF NOT EXISTS teams(id TEXT PRIMARY KEY,revision INTEGER NOT NULL,status TEXT NOT NULL,'
+                       'updated REAL NOT NULL,payload TEXT NOT NULL)')
+            db.execute('DELETE FROM teams')
+            for team_id, revision, status in rows:
+                payload = json.dumps(dict(id=team_id, name='Team ' + team_id, lead='lead'))
+                db.execute('INSERT INTO teams VALUES(?,?,?,?,?)', (team_id, revision, status, time.time(), payload))
+        return path
+
+    def test_team_heads_stream_as_rows_and_a_raised_revision_is_a_delta(self):
+        # Task 8: the client reads a team again only when its revision moved.
+        self.team_store(('t-one', 3, 'running'), ('t-two', 1, 'planning'))
+        stream, hello, *_ = self.start()
+        self.assertIn('team', hello['topics'])
+        stream.send(op='subscribe', topic='team')
+        snapshot = stream.next(lambda f: f['t'] == 'snapshot' and f['topic'] == 'team')
+        self.assertTrue(snapshot['last'])
+        rows = {item['key']: item['row'] for item in snapshot['items']}
+        self.assertEqual(set(rows), {'team:t-one', 'team:t-two', 'teams'})
+        self.assertEqual((rows['team:t-one']['revision'], rows['team:t-one']['status'], rows['team:t-one']['name']), (3, 'running', 'Team t-one'))
+        self.assertEqual(rows['teams'], dict(count=2, truncated=False))
+        # A change raises a revision; the other team stays out of the delta.
+        self.team_store(('t-one', 4, 'paused'), ('t-two', 1, 'planning'))
+        delta = stream.next(lambda f: f['t'] == 'delta' and f['topic'] == 'team', timeout=10)
+        changed = {item['key']: item['row'] for item in delta['upsert']}
+        self.assertEqual((changed['team:t-one']['revision'], changed['team:t-one']['status']), (4, 'paused'))
+        self.assertNotIn('team:t-two', changed)
+        self.assertGreater(delta['cursor'], snapshot['cursor'])
+        # A team that left is a removed key.
+        self.team_store(('t-one', 4, 'paused'))
+        delta = stream.next(lambda f: f['t'] == 'delta' and f['topic'] == 'team' and f['remove'], timeout=10)
+        self.assertEqual([removal['key'] for removal in delta['remove']], ['team:t-two'])
+        # Unsubscribed: no more team frames.
+        stream.send(op='unsubscribe', topic='team')
+        stream.send(op='ping', id='unsubscribed')
+        stream.next(lambda f: f['t'] == 'pong' and f['id'] == 'unsubscribed')
+        self.team_store(('t-one', 5, 'running'))
+        stream.quiet(lambda f: f.get('topic') == 'team', 3)
         self.assertEqual(stream.close(), 0)
 
     @staticmethod

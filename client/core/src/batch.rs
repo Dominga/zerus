@@ -332,6 +332,8 @@ impl Coalescer {
                     self.tasks.insert(id, update);
                 }
             }
+            // Task 8: the stream's team heads go to the Teams pollers, never the webview.
+            Change::TeamHeads { .. } => {}
             Change::Teams {
                 computer,
                 key,

@@ -589,8 +589,13 @@ stops an idle session host without disabling anything.
   and stays unavailable. It never switches image, reinstalls or retries an
   effect. `notification-registration install` refuses an existing registration
   for another image (`foreign_or_incomplete_notification_registration_kept`).
-  Replacing it takes the explicit removal below, run with the same CLI and
-  profile that wrote it, then an install from the CLI the background task runs.
+  Replacing it takes the explicit removal below, then an install from the CLI
+  the background task runs. After a reinstall to another path, the removal also
+  takes the registration of the earlier CLI image when it is exactly what this
+  build writes for that image with the same configuration and state folders;
+  the reply then reports `previous_image: true`. Another configuration or state,
+  an older registration format, extra or missing values or keys never qualify.
+  The earlier image is only compared, never started or read.
   The three current-user keys are `HKCU\Software\Classes\AppUserModelId\com.hgdev.hgs-tray`,
   `HKCU\Software\Classes\CLSID\{0F0F70A2-1D40-47D8-AC5E-D6A9B789605F}`,
   and `HKCU\Software\Classes\CLSID\{0F0F70A2-1D40-47D8-AC5E-D6A9B789605F}\LocalServer32`.
@@ -605,11 +610,11 @@ stops an idle session host without disabling anything.
   UUID retained for the whole operation:
   1. `hgs.exe desktop revoke --json --request-id UUID --reason rollback`, until it
      reports accepted, durable, revoked and checkpointed.
-  2. `hgs.exe desktop registration remove --json`, so the task no longer starts at
-     sign-in. It does not stop a running service.
-  3. Stop the running service through its owner: sign out of Windows and back in,
-     or end only the running `hgs-desktop` task in Task Scheduler. Never end other
-     processes.
+  2. Stop the running service through its owner: end only the running
+     `hgs-desktop` task in Task Scheduler. Never end other processes.
+  3. `hgs.exe desktop registration remove --json`, so the task no longer starts at
+     sign-in. It does not stop a running service: when step 2 is not possible,
+     run this step first, then sign out of Windows and back in.
   4. `hgs.exe desktop notification-registration remove --json --request-id UUID`
      with that **same** UUID.
 

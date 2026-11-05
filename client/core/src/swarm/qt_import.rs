@@ -6,6 +6,7 @@ use crate::settings::{OrganizationImport, QtSnapshot, QtStore, Settings};
 use crate::{run_limited, Exit, Invocation};
 use serde_json::{json, Value};
 use std::collections::BTreeSet;
+use std::io::Read;
 use std::path::Path;
 use std::time::Duration;
 
@@ -157,6 +158,34 @@ pub fn shared(snapshot: Option<&QtSnapshot>, node: &str) -> Result<Value, &'stat
     Ok(shared)
 }
 
+/// Qt saves its organization only once it first changes, so a store read
+/// without one never had an organization: the same first use as an absent
+/// store. A Qt backup of an organization is not that evidence. Plist sources
+/// map every entry; the INI reader is QSettings-permissive, where a damaged
+/// earlier value can swallow a later `organization=` line, so the exact bytes
+/// read (the same hash) must not mention it at all. Anything else stays for
+/// review.
+fn never_saved(source: &QtStore, snapshot: &QtSnapshot) -> bool {
+    if snapshot.values.keys().any(|key| key.starts_with(KEY)) {
+        return false;
+    }
+    match source {
+        QtStore::Plist { .. } => matches!(snapshot.source, "qt-plist" | "qt-defaults"),
+        QtStore::Ini(path) => {
+            let mut bytes = Vec::new();
+            snapshot.source == "qt-ini"
+                && std::fs::File::open(path)
+                    .and_then(|file| file.take(MAX_INPUT as u64 + 1).read_to_end(&mut bytes))
+                    .is_ok()
+                && bytes.len() <= MAX_INPUT
+                && zerus_desktop_migration::sha256(&bytes) == snapshot.sha256
+                && !bytes
+                    .windows(b"organization".len())
+                    .any(|word| word.eq_ignore_ascii_case(b"organization"))
+        }
+    }
+}
+
 fn call(
     hgs: &Path,
     environment: &[(&str, &str)],
@@ -236,15 +265,57 @@ pub fn recover(
         if identity["schema"] != 1 {
             return Err(NEEDS_HGS.into());
         }
-        return recover_with(source, settings, actual, |status, request| {
-            call(hgs, environment, status, request)
-        });
+        return recover_read(
+            source,
+            settings,
+            actual,
+            || source.snapshot().map_err(|_| SOURCE_FAILED.into()),
+            |status, request| call(hgs, environment, status, request),
+            || bootstrap(hgs, environment, actual),
+        );
     }
-    recover_with(source, settings, node, |status, request| {
-        call(hgs, environment, status, request)
-    })
+    recover_read(
+        source,
+        settings,
+        node,
+        || source.snapshot().map_err(|_| SOURCE_FAILED.into()),
+        |status, request| call(hgs, environment, status, request),
+        || bootstrap(hgs, environment, node),
+    )
 }
 
+/// The CLI's own first-use bootstrap, bound to `node`, for a catalog whose Qt
+/// organization cannot be read: projects become usable at once, and its pending
+/// GUI import lets a later readable organization fill only missing fields.
+fn bootstrap(hgs: &Path, environment: &[(&str, &str)], node: &str) -> Result<(), String> {
+    let invocation = Invocation {
+        args: vec![
+            "swarm".into(),
+            "initialize".into(),
+            "--g3-bootstrap".into(),
+            "--json".into(),
+        ],
+        stdin: Some(serde_json::to_vec(&json!({"version":1,"expected_node_id":node})).unwrap()),
+        timeout: Duration::from_secs(10),
+        request_id: None,
+    };
+    let reply = execute(
+        hgs,
+        environment,
+        &invocation,
+        crate::reads::Read::Swarm.limit(),
+    )?;
+    if reply["schema"] != 1
+        || reply["node_id"].as_str() != Some(node)
+        || reply["initialized"] != true
+        || reply["g3_bootstrap"] != json!({"version":1})
+    {
+        return Err(NEEDS_HGS.into());
+    }
+    Ok(())
+}
+
+#[cfg(test)]
 fn recover_with(
     source: &QtStore,
     settings: &Settings,
@@ -257,6 +328,7 @@ fn recover_with(
         node,
         || source.snapshot().map_err(|_| SOURCE_FAILED.into()),
         invoke,
+        || Ok(()),
     )
 }
 
@@ -266,6 +338,7 @@ fn recover_read(
     node: &str,
     mut read: impl FnMut() -> Result<Option<QtSnapshot>, String>,
     mut invoke: impl FnMut(bool, Value) -> Result<Value, String>,
+    mut bootstrap: impl FnMut() -> Result<(), String>,
 ) -> Result<(), String> {
     if !crate::creation::canonical_uuid(node) {
         return Err(IMPORT_FAILED.into());
@@ -291,9 +364,24 @@ fn recover_read(
         }
         return Ok(());
     }
-    let path = zerus_desktop_migration::canonical(source.path()).map_err(|_| SOURCE_FAILED)?;
-    let snapshot = read()?;
-    let organization = shared(snapshot.as_ref(), node)?;
+    let attempt = (|| {
+        let path = zerus_desktop_migration::canonical(source.path()).map_err(|_| SOURCE_FAILED)?;
+        let snapshot = read()?;
+        let first_use = snapshot.as_ref().is_some_and(|s| never_saved(source, s));
+        let organization = shared(if first_use { None } else { snapshot.as_ref() }, node)?;
+        Ok::<_, String>((path, snapshot, organization))
+    })();
+    let (path, snapshot, organization) = match attempt {
+        Ok(read) => read,
+        // An unreadable or malformed organization must not keep Projects from
+        // being set up: bootstrap the uninitialized catalog with its pending GUI
+        // import, and keep the refusal visible. Nothing else is retried here.
+        Err(error) if error == SOURCE_FAILED && status["initialized"] == false => {
+            bootstrap()?;
+            return Err(error);
+        }
+        Err(error) => return Err(error),
+    };
     if !settings.prepare_organization_import(node, source, snapshot.as_ref())? {
         return Ok(());
     }

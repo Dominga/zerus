@@ -572,6 +572,15 @@ pub(super) fn terminal_card(record:&Value,cards:&[Value])->Option<Value> {
         .or_else(||if cards.is_empty() {terminal_choice(record,screen.as_deref()?)} else {None})
 }
 
+/// The hint under Claude's unnumbered choosers: "Enter to confirm · Esc to
+/// <what Esc does>", such as "cancel", or "keep browser tools off" under
+/// "Claude in Chrome extension detected" (task 2). Any other footer, or one
+/// with more keys, is not this chooser.
+pub(super) fn confirm_hint(row:&str)->bool {
+    row.trim().strip_prefix("Enter to confirm · Esc to ")
+        .is_some_and(|what|!what.trim().is_empty()&&!what.contains('·'))
+}
+
 /// A chooser whose options are not numbered and that Claude closes with Enter
 /// or Esc, such as "Review proposed auto-mode setup" (owner, 2026-10-28). The
 /// options are the rows right above the hint, exactly one marked `❯`; a bar
@@ -579,7 +588,7 @@ pub(super) fn terminal_card(record:&Value,cards:&[Value])->Option<Value> {
 fn hinted_choice(screen:&str)->Option<Chooser> {
     let rows:Vec<String>=screen.lines().map(|r|r.trim().trim_start_matches(['│','▌','▎','▍','┃']).trim().to_owned()).collect();
     let last=rows.iter().rposition(|r|!r.is_empty())?;
-    if rows[last]!="Enter to confirm · Esc to cancel" {return None;}
+    if !confirm_hint(&rows[last]) {return None;}
     let end=rows[..last].iter().rposition(|r|!r.is_empty())?;
     let start=rows[..=end].iter().rposition(|r|r.is_empty())?+1;
     let options=&rows[start..=end];
@@ -1900,5 +1909,34 @@ mod hinted_choice_tests {
         assert!(hinted_choice(&SETUP.replace("Enter to confirm · Esc to cancel", "Esc to cancel")).is_none());
         assert!(hinted_choice(&SETUP.replace("   Discard and exit", " ❯ Discard and exit")).is_none());
         assert!(hinted_choice(&SETUP.replace("   Discard and exit\n", "")).is_none());
+    }
+    // Task 2: Claude Code 2.1.318's "Claude in Chrome extension detected"
+    // panel, whose Esc keeps browser tools off.
+    const CHROME: &str = include_str!("../../tests/fixtures/claude-chrome-detected.txt");
+    #[test]
+    fn a_chooser_whose_esc_does_something_else_has_its_options() {
+        let (title, body, options) = hinted_choice(CHROME).unwrap();
+        assert_eq!(title, "Claude in Chrome extension detected");
+        assert!(body.starts_with("Claude will use your Chrome browser by default") && body.ends_with("with /chrome"), "{body}");
+        assert!(!body.contains("use my browser"), "{body}");
+        assert_eq!(options.iter().map(|(label, _)| label.as_str()).collect::<Vec<_>>(), ["Yes, use my browser", "No, keep browser tools off"]);
+        // After the first turn it is a read-only Terminal card with both options.
+        let record = json!({"agent":"claude","run_id":"run","conversation_id":"conversation","last_event_at":20,"phase":"idle"});
+        let card = choice_card(&record, CHROME, hinted_choice(CHROME).unwrap()).unwrap();
+        assert_eq!((card["source"].clone(), card["can_answer"].clone()), (json!("claude_terminal_choice"), json!(false)));
+        let labels: Vec<_> = card["questions"][0]["options"].as_array().unwrap().iter().map(|option| option["label"].clone()).collect();
+        assert_eq!(labels, [json!("Yes, use my browser"), json!("No, keep browser tools off")]);
+        assert_eq!(card["questions"][0]["question"], "Claude in Chrome extension detected");
+    }
+    #[test]
+    fn only_the_enter_to_confirm_esc_to_hint_marks_this_chooser() {
+        assert!(confirm_hint("Enter to confirm · Esc to cancel") && confirm_hint(" Enter to confirm · Esc to keep browser tools off "));
+        for footer in ["Esc to keep browser tools off", "Enter to confirm · Esc to", "Enter to confirm · Esc to  ",
+            "Enter to select · Esc to cancel", "Enter to confirm · Esc to cancel · Tab to amend",
+            "Enter to select · ↑/↓ to navigate · Esc to cancel", "Press Enter to confirm · Esc to cancel", "Ordinary output"] {
+            assert!(!confirm_hint(footer), "{footer}");
+            let screen = CHROME.replace("Enter to confirm · Esc to keep browser tools off", footer);
+            assert!(hinted_choice(&screen).is_none(), "{footer}");
+        }
     }
 }

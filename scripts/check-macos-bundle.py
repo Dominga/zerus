@@ -16,6 +16,7 @@ import sys
 import tempfile
 
 from macos_stapler import run_stapler
+import macos_service_payload
 
 BUNDLE_ID = "com.hgdev.hgs-tray"
 MINIMUM_SYSTEM = "14.0"
@@ -111,7 +112,9 @@ def bundle_findings(bundle, version, release=None, gui="tauri"):
     required = TAURI_RELEASE_REQUIRED
     for name in ("rust", "client-rust", "frontend"):
         findings += inventory_findings(bundle / "Contents/Resources/licenses" / name)
-    findings += [f"missing {name}" for name in required if not (bundle / name).is_file()]
+    findings += [f"missing {name}" for name in required
+                 if name not in macos_service_payload.SERVICE_RESOURCES and not (bundle / name).is_file()]
+    findings += macos_service_payload.findings(bundle)
     findings += [f"not executable: {name}" for name in EXECUTABLES
                  if (bundle / name).is_file() and not os.access(bundle / name, os.X_OK)]
     # The connector's black-box test seams exist only with the test-hooks feature.
@@ -163,9 +166,9 @@ TAURI_RELEASE_REQUIRED = list(dict.fromkeys([
     *EXECUTABLES,
     "Contents/Resources/setup/hgs_state.py",
     *[f"Contents/Resources/setup/{name}" for name in
-      ("install-macos-session-service.py", "install-macos-desktop-service.py", "desktop-revoke-hold.py",
-       "desktop-service-activation.py", "install-recovery-service.py", "install-swarm-service.py", "launchd_agent.py",
-       "install-mobile-connector-service.py")],
+      ("install-macos-session-service.py", "install-recovery-service.py", "install-swarm-service.py",
+       "launchd_agent.py", "install-mobile-connector-service.py")],
+    *macos_service_payload.SERVICE_RESOURCES,
     "Contents/Resources/doc/README.md", "Contents/Resources/doc/tmux.conf",
     "Contents/Resources/licenses/LICENSE", "Contents/Resources/licenses/THIRD_PARTY_NOTICES.md",
     "Contents/Resources/licenses/codex-LICENSE.txt", "Contents/Resources/licenses/rust/inventory.json",

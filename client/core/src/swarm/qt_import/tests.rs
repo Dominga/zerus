@@ -662,8 +662,10 @@ fn damaged_or_ambiguous_qt_stores_are_never_taken_for_a_first_use() {
     for text in [
         "[workspace]\nother=\"unterminated\norganization={}\n",
         "[workspace]\nother=continued\\\norganization={}\n",
-        // Conservatively, any mention of the key in the exact bytes read.
+        // Conservatively, any mention of the key in the exact bytes read, in
+        // any ASCII case.
         "[General]\nnote=organization planning\n",
+        "[General]\nnote=Organization\n",
         // A Qt backup of an organization without the organization itself.
         "[workspace]\norganizationBeforeProjects={}\n",
     ] {
@@ -810,4 +812,26 @@ fn a_later_readable_organization_fills_a_bootstrapped_catalog_once() {
         settings.organization_import(),
         Ok(OrganizationImport::Handled)
     );
+}
+
+#[test]
+fn a_mac_plist_file_fallback_is_never_taken_for_a_first_use() {
+    // zerus-oagwo: with a defaults domain the file can lag an organization Qt
+    // has just saved, so only the current export can prove a first use.
+    let empty = |source| QtSnapshot {
+        values: Default::default(),
+        source,
+        sha256: "a".repeat(64),
+        modified_at: None,
+    };
+    let path = PathBuf::from("/nonexistent/synthetic-qt.plist");
+    let domain = QtStore::Plist {
+        domain: Some("com.example.synthetic".into()),
+        path: path.clone(),
+    };
+    assert!(never_saved(&domain, &empty("qt-defaults")));
+    assert!(!never_saved(&domain, &empty("qt-plist")));
+    let file = QtStore::Plist { domain: None, path };
+    assert!(never_saved(&file, &empty("qt-plist")));
+    assert!(!never_saved(&file, &empty("qt-ini")));
 }

@@ -13,7 +13,9 @@ pub(crate) const BASE_TASK_SCHEMA: i64 = 2;
 /// Schema three adds immutable comment media. Older readers stay read-only.
 pub(crate) const DISCUSSION_TASK_SCHEMA: i64 = 3;
 /// Schema four adds independent task titles and title-only cards.
-pub const TASK_SCHEMA: i64 = 5;
+pub const TASK_SCHEMA: i64 = crate::execution::EXECUTION_TASK_SCHEMA;
+/// Discussion messages; they never raise a task to the execution schema.
+pub(crate) const MESSAGE_TASK_SCHEMA: i64 = 5;
 pub(crate) const NAMED_TASK_SCHEMA: i64 = 4;
 
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]

@@ -18,13 +18,22 @@ export function sameForkSource(a: ActionRow, b: ActionRow): boolean {
 }
 
 export function forkName(row: ActionRow, tag: string): string { return renameParts(row.name).prefix + tag; }
-export function forkProblem(row: ActionRow, tag: string, rows: readonly ActionRow[]): string | undefined {
-  return tagProblem(tag) ?? (rows.some((r) => r.computer === row.computer && r.name === forkName(row, tag)) ? tr("This session name is already in use.") : undefined);
+/** Names a fork cannot take on this computer: live and saved sessions. An
+ * archived session's name is free, as `hgs fork` treats it (names are labels). */
+/** Names live and saved sessions on the row's computer use; archives hold none. */
+export function occupied(row: ActionRow, rows: readonly ActionRow[]): Set<string> {
+  return new Set(rows.filter((r) => r.computer === row.computer && r.state !== "archived").map((r) => r.name));
 }
-export function forkTag(row: ActionRow, rows: readonly ActionRow[]): string {
-  const tag = renameParts(row.name).tag, base = tag ? `${tag}-fork` : "fork";
-  const names = new Set(rows.filter((r) => r.computer === row.computer).map((r) => r.name));
-  let value = base;
-  for (let number = 2; names.has(forkName(row, value)); number++) value = `${base}-${number}`;
+/** The tag the fork gets: `tag`, or `tag-2`, `tag-3`… while a session uses it, as `hgs fork` chooses. */
+export function freeForkTag(row: ActionRow, tag: string, rows: readonly ActionRow[]): string {
+  const names = occupied(row, rows);
+  let value = tag;
+  for (let number = 2; names.has(forkName(row, value)); number++) value = `${tag}-${number}`;
   return value;
+}
+/** Only an invalid tag stops the fork; a name in use gets a free suffix instead. */
+export function forkProblem(_row: ActionRow, tag: string): string | undefined { return tagProblem(tag); }
+export function forkTag(row: ActionRow, rows: readonly ActionRow[]): string {
+  const tag = renameParts(row.name).tag;
+  return freeForkTag(row, tag ? `${tag}-fork` : "fork", rows);
 }

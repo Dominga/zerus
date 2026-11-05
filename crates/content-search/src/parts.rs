@@ -1,6 +1,8 @@
 //! Bounded physical parts of one original public message. Publication belongs
 //! to the complete original, not to an individual part or input slice.
 use super::*;
+mod query;
+pub(super) use query::Position;
 
 const ABANDONED: i64 = 2;
 

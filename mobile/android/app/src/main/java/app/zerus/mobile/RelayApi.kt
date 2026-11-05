@@ -231,11 +231,14 @@ object NativeParser {
         val occurrences = mutableMapOf<String, Int>()
         fun parse(value: JSONObject, streamArgument: String): Event? {
             val stream = value.string("history_stream").takeIf { it in listOf("journal", "provider", "attachment", "voice") } ?: streamArgument
-            val type = value.string("type")
+            // A fork's inherited row carries its original type; older apps drop the unknown type.
+            val inheritedFrom = if (value.string("type") == "Inherited") value.string("inherited_from") else ""
+            if (value.string("type") == "Inherited" && inheritedFrom.isBlank()) return null
+            val type = if (inheritedFrom.isNotEmpty()) value.string("inherited_type") else value.string("type")
             if (type !in listOf("UserPromptSubmit", "UserPromptQueued", "UserMessage", "TurnStarted", "QuestionAnswered", "AgentMessage", "Stop") ||
                 !inScope(value)) return null
             // A native prompt the person did not write is a notice, as on desktop.
-            val origin = value.string("origin").takeIf { it in ActivityNotices.origins && type in
+            val origin = value.string("origin").takeIf { inheritedFrom.isEmpty() && it in ActivityNotices.origins && type in
                 listOf("UserPromptSubmit", "UserPromptQueued", "UserMessage", "TurnStarted") }.orEmpty()
             val role = when (type) {
                 "QuestionAnswered" -> "You (answer)"
@@ -245,7 +248,9 @@ object NativeParser {
             // Identities keep the native role, so cached rows stay the same rows.
             val shown = if (origin.isNotEmpty()) ActivityNotices.ROLE else role
             val source = value.string("source").ifBlank { stream }
-            val voice = if (source == "hgs_voice") value.optJSONObject("voice")?.let {
+            // An inherited voice belongs to the source session: its text stays, but
+            // no voice card, playback or status acts on it through this fork.
+            val voice = if (source == "hgs_voice" && inheritedFrom.isEmpty()) value.optJSONObject("voice")?.let {
                 runCatching { VoiceProtocol.message(it) }.getOrNull()
             } else null
             val files = value.optJSONArray("attachments")?.objects().orEmpty().map {
@@ -274,7 +279,7 @@ object NativeParser {
             val originalId = value.string("original_id").ifBlank { "$stream:$source:$role:$fallback" }
             val historyId = value.string("history_id")
             val requestId = when {
-                shown != "You" -> ""
+                shown != "You" || inheritedFrom.isNotEmpty() -> ""
                 source in setOf("hgs_delivery", "hgs_voice") -> value.string("message_id")
                 // OpenCode dates a queued prompt by its delivery; hgs names the Zerus send
                 // that admitted it, so the phone can match its own message exactly.
@@ -284,13 +289,13 @@ object NativeParser {
             }
             return Event(if (historyId.isBlank()) originalId else "history:$historyId", shown,
                 text, value.string("at", "timestamp"), at, requestId, files, source,
-                delivery = if (shown == "You") MessageDeliveryPresentation.inboxState(value) else "",
+                delivery = if (shown == "You" && inheritedFrom.isEmpty()) MessageDeliveryPresentation.inboxState(value) else "",
                 nativeType = type, submittedText = if (source == "hgs_delivery") value.string("submitted_text") else "",
                 originalId = originalId, historyId = historyId, historyCursor = value.string("history_cursor"),
                 historyEpoch = raw.string("history_epoch"), incomingSeq = (value.opt("incoming_seq") as? Number)?.toLong()?.takeIf { it >= 0 },
                 originalIds = value.optJSONArray("original_ids")?.let { ids -> (0 until minOf(ids.length(),8)).mapNotNull { ids.opt(it) as? String } }.orEmpty(), detailTruncated = value.optBoolean("detail_truncated"), voice = voice,
                 origin = origin, sender = if (origin == "peer_message") value.string("sender") else "",
-                report = ActivityNotices.report(origin, value.string("report")))
+                report = ActivityNotices.report(origin, value.string("report")), inheritedFrom = inheritedFrom)
         }
         val rows = (journal.mapNotNull { item ->
             fun replaces(provider: JSONObject, hook: JSONObject) = provider.string("type") == "AgentMessage" && inScope(provider) && inScope(hook) &&

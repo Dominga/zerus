@@ -58,6 +58,11 @@ const NAME_LENGTH: usize = 16;
 /// How long an install waits for another one to finish.
 const LOCK_WAIT: Duration = Duration::from_secs(30);
 
+/// The host images folder below `home`, where `Layout` keeps them.
+pub fn images_below(home: &str) -> PathBuf {
+    PathBuf::from(platform::below(home, ".local/share/hgs/host"))
+}
+
 /// Where enablement keeps its files.
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct Layout {
@@ -73,7 +78,7 @@ impl Layout {
     pub fn new(home: &str, config_dir: &Path) -> Self {
         Self {
             cli: PathBuf::from(platform::below(home, ".local/bin")).join(EXECUTABLE),
-            images: PathBuf::from(platform::below(home, ".local/share/hgs/host")),
+            images: images_below(home),
             marker: config_dir.join(MARKER),
         }
     }
@@ -177,7 +182,7 @@ fn aside_name() -> String {
 }
 
 /// Whether `name` is one `aside_name` gave; nothing else is ever deleted.
-fn is_aside(name: &str) -> bool {
+pub(crate) fn is_aside(name: &str) -> bool {
     name.strip_prefix(ASIDE_PREFIX)
         .and_then(|rest| rest.split_once('-'))
         .is_some_and(|(seconds, random)| {
@@ -682,6 +687,8 @@ pub struct InstallReport {
     pub image: ImageReport,
     /// Whether the marker was created now (it may have existed).
     pub enabled: bool,
+    /// The app bound to the staged CLI, when the source folder holds one.
+    pub frontend: Option<FrontendBinding>,
 }
 
 /// Install just the maintained CLI for another hgs service. Use the same lock
@@ -695,18 +702,264 @@ pub fn install_cli(layout: &Layout, source: &Path) -> Result<CliReport, StageErr
 
 /// Enable local sessions (D2): stage `source`, the running hgs of version
 /// `version`, as the stable CLI and as a host image, then write the marker.
-/// Idempotent; installs of one user run one at a time.
+/// Idempotent; installs of one user run one at a time. Removes any app
+/// binding: only the app's own install (`install_bound`) records one.
 pub fn install(layout: &Layout, source: &Path, version: &str) -> Result<InstallReport, StageError> {
-    fs::create_dir_all(&layout.images).map_err(at(&layout.images))?;
+    install_bound(layout, source, version, |_, _| Ok(None))
+}
+
+/// Create `path` and its missing parents; on Unix owner-only, like the other
+/// private records. Existing folders are never changed.
+fn create_private_dirs(path: &Path) -> io::Result<()> {
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::DirBuilderExt;
+        fs::DirBuilder::new()
+            .recursive(true)
+            .mode(0o700)
+            .create(path)
+    }
+    #[cfg(not(unix))]
+    fs::create_dir_all(path)
+}
+
+/// One folder of the binding's chain, opened without following a link or
+/// junction, verified private to this user (owner and access) and held: on
+/// Windows without delete sharing, so it cannot be renamed while held.
+fn private_directory(path: &Path) -> io::Result<fs::File> {
+    let mut options = fs::OpenOptions::new();
+    options.read(true);
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::OpenOptionsExt;
+        options.custom_flags(
+            libc::O_DIRECTORY | libc::O_NOFOLLOW | libc::O_NONBLOCK | libc::O_CLOEXEC,
+        );
+    }
+    #[cfg(windows)]
+    {
+        use std::os::windows::fs::OpenOptionsExt;
+        use windows_sys::Win32::Storage::FileSystem::{
+            FILE_FLAG_BACKUP_SEMANTICS, FILE_FLAG_OPEN_REPARSE_POINT, FILE_SHARE_READ,
+            FILE_SHARE_WRITE,
+        };
+        options
+            .custom_flags(FILE_FLAG_BACKUP_SEMANTICS | FILE_FLAG_OPEN_REPARSE_POINT)
+            .share_mode(FILE_SHARE_READ | FILE_SHARE_WRITE);
+    }
+    let file = options.open(path)?;
+    if !platform::verify_private_directory(&file)? {
+        return Err(io::Error::new(
+            io::ErrorKind::PermissionDenied,
+            "the binding's folder is not private to this user",
+        ));
+    }
+    Ok(file)
+}
+
+/// The images folder and the three folders above it that hgs keeps below the
+/// home folder (`.local`, `share`, `hgs`, `host`), outermost first, all private
+/// and held while a binding is published or read. Unsafe folders are refused,
+/// never repaired.
+fn private_chain(images: &Path) -> io::Result<Vec<fs::File>> {
+    let mut chain: Vec<&Path> = images.ancestors().take(4).collect();
+    chain.reverse();
+    chain.into_iter().map(private_directory).collect()
+}
+
+/// The binding file itself, opened without following a link and verified
+/// private: this user's, owner-only access, a single link, not a reparse
+/// point. On Windows nobody can write or delete it while it is held.
+fn private_record(path: &Path) -> io::Result<fs::File> {
+    let mut options = fs::OpenOptions::new();
+    options.read(true);
+    platform::no_follow(&mut options);
+    #[cfg(windows)]
+    {
+        use std::os::windows::fs::OpenOptionsExt;
+        options.share_mode(windows_sys::Win32::Storage::FileSystem::FILE_SHARE_READ);
+    }
+    let file = options.open(path)?;
+    if !platform::verify_private_file(&file)? {
+        return Err(io::Error::new(
+            io::ErrorKind::PermissionDenied,
+            "the binding is not a private file of this user",
+        ));
+    }
+    Ok(file)
+}
+
+/// Publishes a binding: the candidate is prepared and verified first, then
+/// `commit`, the creator's own last check of the evidence it still holds, runs
+/// immediately before the namespace commit. `Ok(false)`: nothing was published.
+pub type Publish<'a> =
+    dyn FnMut(&FrontendBinding, &dyn Fn() -> bool) -> Result<bool, StageError> + 'a;
+
+/// `install`, then `bind` may record the app staged with this CLI. The old
+/// binding goes first, so a failure anywhere leaves none. `bind` runs only
+/// after the CLI, the image and the marker are complete, and publishes through
+/// the callback it is given, immediately after its last check of the evidence
+/// it still holds.
+pub fn install_bound(
+    layout: &Layout,
+    source: &Path,
+    version: &str,
+    bind: impl FnOnce(&Layout, &mut Publish<'_>) -> Result<Option<FrontendBinding>, StageError>,
+) -> Result<InstallReport, StageError> {
+    create_private_dirs(&layout.images).map_err(at(&layout.images))?;
     let _lock = lock(&layout.images)?;
+    unbind_frontend(layout)?;
     let cli = stage_cli(source, &layout.cli)?;
     let image = stage_image(source, &layout.images, version)?;
     let enabled = enable(&layout.marker).map_err(at(&layout.marker))?;
+    let frontend = bind(layout, &mut |binding, commit| {
+        publish_frontend(layout, binding, commit)
+    })?;
     Ok(InstallReport {
         cli,
         image,
         enabled,
+        frontend,
     })
+}
+
+/// Below the images folder: which app was staged together with the stable CLI
+/// (docs/desktop-windows-mode.md). Only an install by that app writes it.
+pub const FRONTEND_BINDING: &str = "frontend.json";
+/// The app a portable zip keeps beside its `hgs.exe`.
+pub const FRONTEND_IMAGE: &str = "hgs-tray.exe";
+/// The largest binding read; a recorded one is well under a kilobyte.
+const FRONTEND_BYTES: u64 = 4096;
+pub const FRONTEND_SCHEMA: u32 = 1;
+
+/// One pinned object of a binding: its final path, the volume serial and file
+/// ID of the exact object (FileIdInfo, the ID as 32 hex digits) and its length.
+#[derive(Clone, Debug, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct BoundObject {
+    pub path: PathBuf,
+    pub volume: u64,
+    pub file_id: String,
+    pub length: u64,
+}
+
+/// The maintained binding of a portable zip's app to the stable CLI staged
+/// from the same folder: both objects as the app's own staging pinned them,
+/// and the app's digest read through that pin. A copied CLI never creates one,
+/// and neither identity nor this digest alone admits anything: each admitting
+/// process pins the pair again and checks the digest once.
+#[derive(Clone, Debug, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct FrontendBinding {
+    pub schema: u32,
+    pub frontend: BoundObject,
+    pub frontend_sha256: String,
+    pub cli: BoundObject,
+}
+
+impl FrontendBinding {
+    pub fn valid(&self) -> bool {
+        let hex = |value: &str, digits: usize| {
+            value.len() == digits
+                && value
+                    .bytes()
+                    .all(|b| matches!(b, b'0'..=b'9' | b'a'..=b'f'))
+        };
+        let object = |object: &BoundObject| object.path.is_absolute() && hex(&object.file_id, 32);
+        self.schema == FRONTEND_SCHEMA
+            && object(&self.frontend)
+            && object(&self.cli)
+            && hex(&self.frontend_sha256, 64)
+            && self
+                .frontend
+                .path
+                .file_name()
+                .and_then(|name| name.to_str())
+                .is_some_and(|name| name.eq_ignore_ascii_case(FRONTEND_IMAGE))
+    }
+}
+
+fn unbind_frontend(layout: &Layout) -> Result<(), StageError> {
+    let path = layout.images.join(FRONTEND_BINDING);
+    match fs::remove_file(&path) {
+        Ok(()) => platform::sync_dir(&layout.images).map_err(at(&layout.images)),
+        Err(error) if error.kind() == io::ErrorKind::NotFound => Ok(()),
+        Err(error) => Err(StageError::Io(path, error)),
+    }
+}
+
+/// Publish `binding` as a private record. The candidate is written, synced and
+/// verified private (owner, access, single link, no reparse point) through its
+/// own handle, with the folder chain held private, before anything is visible
+/// at the record's name. `commit` runs last, immediately before the rename;
+/// afterwards the published name must be that same private object.
+fn publish_frontend(
+    layout: &Layout,
+    binding: &FrontendBinding,
+    commit: &dyn Fn() -> bool,
+) -> Result<bool, StageError> {
+    let path = layout.images.join(FRONTEND_BINDING);
+    let invalid = |path: &Path| StageError::Io(path.to_owned(), io::ErrorKind::InvalidData.into());
+    let bytes = serde_json::to_vec(binding)
+        .map_err(|error| StageError::Io(path.clone(), io::Error::other(error)))?;
+    if !binding.valid() || bytes.len() as u64 > FRONTEND_BYTES {
+        return Err(invalid(&path));
+    }
+    let _chain = private_chain(&layout.images).map_err(at(&layout.images))?;
+    let mut candidate = tempfile::Builder::new()
+        .prefix(&format!("{STAGING_PREFIX}frontend-"))
+        .tempfile_in(&layout.images)
+        .map_err(at(&layout.images))?;
+    let staged = candidate.path().to_owned();
+    candidate.write_all(&bytes).map_err(at(&staged))?;
+    candidate.as_file().sync_all().map_err(at(&staged))?;
+    // Refused, never repaired: an inherited ACE the folder check cannot see
+    // shows here, before the record's name exists.
+    if !platform::verify_private_file(candidate.as_file()).map_err(at(&staged))? {
+        return Err(StageError::Io(
+            staged,
+            io::Error::new(
+                io::ErrorKind::PermissionDenied,
+                "the binding candidate is not a private file of this user",
+            ),
+        ));
+    }
+    let object = platform::FileIdentity::of(candidate.as_file()).map_err(at(&staged))?;
+    if !commit() {
+        return Ok(false);
+    }
+    platform::persist(candidate, &path)
+        .map_err(|error| StageError::Io(path.clone(), error.error))?;
+    platform::sync_dir(&layout.images).map_err(at(&layout.images))?;
+    // The published name is the verified candidate, still private.
+    let same = private_record(&path)
+        .and_then(|file| platform::FileIdentity::of(&file))
+        .is_ok_and(|published| published == object);
+    if !same {
+        let _ = fs::remove_file(&path);
+        return Err(invalid(&path));
+    }
+    Ok(true)
+}
+
+/// The binding below `images`, read like the other private records: every
+/// folder of its chain and the file itself private to this user and held, no
+/// link or reparse point, a single link, at most `FRONTEND_BYTES`, the exact
+/// schema with absolute paths. Anything else is no binding.
+pub fn read_frontend(images: &Path) -> Option<FrontendBinding> {
+    let _chain = private_chain(images).ok()?;
+    let file = private_record(&images.join(FRONTEND_BINDING)).ok()?;
+    let metadata = file.metadata().ok()?;
+    if !metadata.is_file() || metadata.len() > FRONTEND_BYTES {
+        return None;
+    }
+    let mut bytes = Vec::new();
+    file.take(FRONTEND_BYTES + 1).read_to_end(&mut bytes).ok()?;
+    if bytes.len() as u64 > FRONTEND_BYTES {
+        return None;
+    }
+    let binding: FrontendBinding = serde_json::from_slice(&bytes).ok()?;
+    binding.valid().then_some(binding)
 }
 
 #[cfg(test)]
@@ -989,6 +1242,269 @@ mod tests {
         assert!(install_cli(&layout, &two).unwrap().changed);
         assert_eq!(fs::read(&layout.marker).unwrap(), marker);
         assert!(layout.enabled());
+    }
+
+    fn sample_binding(root: &Path) -> FrontendBinding {
+        FrontendBinding {
+            schema: FRONTEND_SCHEMA,
+            frontend: BoundObject {
+                path: root.join("zip").join(FRONTEND_IMAGE),
+                volume: 7,
+                file_id: "0123456789abcdef0123456789abcdef".into(),
+                length: 42,
+            },
+            frontend_sha256: ABC.into(),
+            cli: BoundObject {
+                path: root.join("home/.local/bin").join(EXECUTABLE),
+                volume: 7,
+                file_id: "fedcba9876543210fedcba9876543210".into(),
+                length: 43,
+            },
+        }
+    }
+
+    /// A private images folder below a home in `root`, as an install creates it.
+    fn private_images(root: &Path) -> PathBuf {
+        let images = images_below(&root.join("home").to_string_lossy());
+        create_private_dirs(&images).unwrap();
+        images
+    }
+
+    /// A new owner-only file, as the publication creates it.
+    fn write_private(path: &Path, bytes: &[u8]) {
+        let mut options = fs::OpenOptions::new();
+        options.write(true).create_new(true);
+        platform::private_open(&mut options);
+        options.open(path).unwrap().write_all(bytes).unwrap();
+    }
+
+    #[test]
+    fn a_frontend_binding_is_read_only_in_its_exact_bounded_form() {
+        let dir = tempfile::tempdir().unwrap();
+        let images = private_images(dir.path());
+        let path = images.join(FRONTEND_BINDING);
+        assert_eq!(read_frontend(&images), None);
+        let binding = sample_binding(dir.path());
+        let good = serde_json::to_value(&binding).unwrap();
+        write_private(&path, &serde_json::to_vec(&good).unwrap());
+        assert_eq!(read_frontend(&images), Some(binding.clone()));
+
+        let refused = |bytes: Vec<u8>, why: &str| {
+            fs::write(&path, bytes).unwrap();
+            assert_eq!(read_frontend(&images), None, "{why}");
+        };
+        refused(b"{\"schema\":1".to_vec(), "corrupt");
+        refused(vec![b' '; FRONTEND_BYTES as usize + 1], "oversize");
+        let mut padded = serde_json::to_vec(&good).unwrap();
+        padded.resize(FRONTEND_BYTES as usize + 1, b' ');
+        refused(padded, "a valid record padded past the cap");
+        let mutate = |change: &dyn Fn(&mut serde_json::Value)| {
+            let mut value = good.clone();
+            change(&mut value);
+            serde_json::to_vec(&value).unwrap()
+        };
+        refused(mutate(&|v| v["extra"] = true.into()), "unknown field");
+        refused(
+            mutate(&|v| v["frontend"]["extra"] = 1.into()),
+            "unknown object field",
+        );
+        refused(mutate(&|v| v["schema"] = 2.into()), "another schema");
+        refused(
+            mutate(&|v| v["frontend"]["path"] = "zip/hgs-tray.exe".into()),
+            "relative app",
+        );
+        refused(
+            mutate(&|v| v["cli"]["path"] = "hgs.exe".into()),
+            "relative CLI",
+        );
+        let other = dir.path().join("zip/other.exe");
+        refused(
+            mutate(&|v| v["frontend"]["path"] = other.to_string_lossy().into()),
+            "another app name",
+        );
+        refused(
+            mutate(&|v| v["frontend"]["file_id"] = "0123".into()),
+            "short file ID",
+        );
+        refused(
+            mutate(&|v| v["cli"]["file_id"] = "0123456789ABCDEF0123456789ABCDEF".into()),
+            "upper-case ID",
+        );
+        refused(
+            mutate(&|v| v["frontend_sha256"] = "zz".into()),
+            "bad digest",
+        );
+        refused(
+            mutate(&|v| {
+                v.as_object_mut().unwrap().remove("cli");
+            }),
+            "missing CLI",
+        );
+
+        // Never through a link.
+        #[cfg(unix)]
+        {
+            let real = dir.path().join("elsewhere.json");
+            write_private(&real, &serde_json::to_vec(&good).unwrap());
+            fs::remove_file(&path).unwrap();
+            std::os::unix::fs::symlink(&real, &path).unwrap();
+            assert_eq!(read_frontend(&images), None, "link");
+        }
+    }
+
+    /// Unix half of the private-record controls; Windows owner, ACL, hard-link
+    /// and junction controls are in desktop::portable_frontend::tests.
+    #[cfg(unix)]
+    #[test]
+    fn a_binding_that_is_not_a_private_record_of_this_user_is_refused() {
+        use std::os::unix::fs::PermissionsExt;
+        let dir = tempfile::tempdir().unwrap();
+        let images = private_images(dir.path());
+        let path = images.join(FRONTEND_BINDING);
+        let bytes = serde_json::to_vec(&sample_binding(dir.path())).unwrap();
+        write_private(&path, &bytes);
+        assert!(read_frontend(&images).is_some());
+        let mode = |path: &Path, mode: u32| {
+            fs::set_permissions(path, fs::Permissions::from_mode(mode)).unwrap()
+        };
+        // A record others may read or write.
+        for permissive in [0o640, 0o604, 0o620] {
+            mode(&path, permissive);
+            assert!(read_frontend(&images).is_none(), "{permissive:o}");
+        }
+        mode(&path, 0o600);
+        // A record with a second link.
+        let other = dir.path().join("second-link.json");
+        fs::hard_link(&path, &other).unwrap();
+        assert!(read_frontend(&images).is_none(), "hard link");
+        fs::remove_file(&other).unwrap();
+        assert!(read_frontend(&images).is_some());
+        // Any folder of the chain that others may use.
+        for folder in images.ancestors().take(4) {
+            mode(folder, 0o750);
+            assert!(read_frontend(&images).is_none(), "{}", folder.display());
+            mode(folder, 0o700);
+        }
+        assert!(read_frontend(&images).is_some());
+        // A link in place of a folder of the chain.
+        let hgs = images.parent().unwrap();
+        let moved = dir.path().join("real-hgs");
+        fs::rename(hgs, &moved).unwrap();
+        std::os::unix::fs::symlink(&moved, hgs).unwrap();
+        assert!(read_frontend(&images).is_none(), "linked ancestor");
+        fs::remove_file(hgs).unwrap();
+        fs::rename(&moved, hgs).unwrap();
+        assert!(read_frontend(&images).is_some());
+        // Publication refuses a folder that is not private, and leaves nothing.
+        fs::remove_file(&path).unwrap();
+        let layout = Layout::new(
+            &dir.path().join("home").to_string_lossy(),
+            &dir.path().join("config"),
+        );
+        mode(&images, 0o755);
+        assert!(publish_frontend(&layout, &sample_binding(dir.path()), &|| true).is_err());
+        assert!(!path.exists());
+        mode(&images, 0o700);
+        assert!(publish_frontend(&layout, &sample_binding(dir.path()), &|| true).unwrap());
+        assert!(read_frontend(&images).is_some());
+    }
+
+    #[test]
+    fn only_a_binder_records_the_app_after_staging_and_any_install_unbinds_first() {
+        let dir = tempfile::tempdir().unwrap();
+        let layout = Layout::new(
+            &dir.path().join("home").to_string_lossy(),
+            &dir.path().join("config"),
+        );
+        let one = source(dir.path(), "one", b"build one", &PAIR);
+        let binding = sample_binding(dir.path());
+        // The binder runs after the CLI, the image and the marker are complete.
+        let report = install_bound(&layout, &one, "1.0.0", |layout, publish| {
+            assert_eq!(fs::read(&layout.cli).unwrap(), b"build one");
+            assert!(current_image_in(&layout.images).is_some());
+            assert!(layout.enabled());
+            publish(&binding, &|| true)?;
+            Ok(Some(binding.clone()))
+        })
+        .unwrap();
+        assert_eq!(report.frontend, Some(binding.clone()));
+        assert_eq!(read_frontend(&layout.images), Some(binding.clone()));
+
+        // A plain install, which no app started, removes it.
+        let report = install(&layout, &one, "1.0.0").unwrap();
+        assert_eq!(report.frontend, None);
+        assert_eq!(read_frontend(&layout.images), None);
+        assert!(!layout.images.join(FRONTEND_BINDING).exists());
+
+        // The old binding goes before staging: a failing install leaves none.
+        install_bound(&layout, &one, "1.0.0", |_, publish| {
+            publish(&binding, &|| true)?;
+            Ok(Some(binding.clone()))
+        })
+        .unwrap();
+        assert!(install_bound(
+            &layout,
+            &dir.path().join("gone.exe"),
+            "1.1.0",
+            |_, publish| {
+                publish(&sample_binding(dir.path()), &|| true)?;
+                Ok(None)
+            }
+        )
+        .is_err());
+        assert_eq!(read_frontend(&layout.images), None);
+
+        // An invalid binding is never published.
+        let mut invalid = binding.clone();
+        invalid.frontend.file_id = "short".into();
+        assert!(install_bound(&layout, &one, "1.0.0", |_, publish| {
+            publish(&invalid, &|| true)?;
+            Ok(Some(invalid.clone()))
+        })
+        .is_err());
+        assert_eq!(read_frontend(&layout.images), None);
+
+        // A binder that declines records nothing.
+        install_bound(&layout, &one, "1.0.0", |_, publish| {
+            publish(&binding, &|| true)?;
+            Ok(Some(binding.clone()))
+        })
+        .unwrap();
+        let report = install_bound(&layout, &one, "1.0.0", |_, _| Ok(None)).unwrap();
+        assert_eq!(report.frontend, None);
+        assert_eq!(read_frontend(&layout.images), None);
+        // A stray temporary binding from an interrupted publish is not a binding.
+        assert!(names(&layout.images)
+            .iter()
+            .all(|name| name != FRONTEND_BINDING));
+    }
+
+    #[test]
+    fn a_refused_commit_publishes_nothing_and_leaves_no_candidate() {
+        let dir = tempfile::tempdir().unwrap();
+        let images = private_images(dir.path());
+        let layout = Layout::new(
+            &dir.path().join("home").to_string_lossy(),
+            &dir.path().join("config"),
+        );
+        let checked = std::cell::Cell::new(false);
+        let published = publish_frontend(&layout, &sample_binding(dir.path()), &|| {
+            // The candidate is complete and verified when the guard runs.
+            let candidate = names(&images)
+                .into_iter()
+                .find(|name| name.starts_with(&format!("{STAGING_PREFIX}frontend-")))
+                .expect("a prepared candidate");
+            assert!(
+                platform::verify_private(&images.join(candidate), platform::Private::File).unwrap()
+            );
+            assert!(!images.join(FRONTEND_BINDING).exists());
+            checked.set(true);
+            false
+        })
+        .unwrap();
+        assert!(checked.get() && !published);
+        assert_eq!(names(&images), Vec::<String>::new());
+        assert_eq!(read_frontend(&images), None);
     }
 
     #[test]

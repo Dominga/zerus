@@ -200,9 +200,21 @@ pub(crate) fn machine(config: &crate::config::Config) -> Result<String> {
     crate::swarm::existing_node_id(&bytes).map_err(|_| INVALID.into())
 }
 
+/// Observe the exact original request through the existing receipt owner.
+/// Input and output are DATA, never consent, a retry, current ownership or
+/// drain proof. A service caller must supply its native selected state root
+/// and run this potentially blocking read off its actor/control thread.
+pub(crate) fn observe_original(root: &Path, name: &str, original: &[u8]) -> Result<Value> {
+    let request = decode_request(original, name)?;
+    observe(root, &request, name)
+}
+
 pub(in crate::state) fn dispatch(args: &[String]) -> Result<i32> {
-    let request = request_input(args, "session-action-status")?;
-    println!("{}", observe(&root(), &request, &args[0])?);
+    let bytes = input_bytes(args, "session-action-status")?;
+    println!(
+        "{}",
+        crate::state::observe_lifecycle_receipt(&root(), &args[0], &bytes)?
+    );
     Ok(0)
 }
 

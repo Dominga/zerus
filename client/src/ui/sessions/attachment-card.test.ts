@@ -1,6 +1,6 @@
 import { describe, expect, it } from "vitest";
 import { attachments } from "./transcript";
-import { cardTarget, createOpen, OPENING } from "./attachment-card";
+import { cardTarget, createOpen, OPENING, rowScope } from "./attachment-card";
 import type { AttachmentScope } from "../../store/activitySource";
 import type { ActivityEvent } from "../../types";
 
@@ -86,5 +86,14 @@ describe("Task 9's texts are Qt's", () => {
     expect(read("client/src/ui/sessions/transcript.ts")).toContain("`${Math.max(1, Math.ceil(bytes / 1024))} KiB` : \"File\"");
     expect(read("tray/src/MessageComposer.cpp")).toContain('tr("Open %1")');
     expect(read("client/src/ui/sessions/Attachments.tsx")).toContain('title={tr("Open %1", a().name)}');
+  });
+});
+
+// zerus-b4qk: a fork's inherited row never opens files through the fork.
+describe("inherited rows", () => {
+  it("read no file in this session", () => {
+    const file = { request_id: "parent-request", index: 0 };
+    expect(cardTarget(file, rowScope({ inherited: true }, scope))).toBeUndefined();
+    expect(cardTarget(file, rowScope({}, scope))).toMatchObject({ computer: "studio", ref: { request_id: "parent-request", conversation_id: "conv-1" } });
   });
 });

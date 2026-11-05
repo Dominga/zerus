@@ -28,8 +28,29 @@ pub enum Request {
     CreationWorktree {
         intent: Box<super::creation_worktree::Intent>,
     },
+    CreationLaunch {
+        intent: Box<super::creation_launch::Intent>,
+    },
+    TaskMessage {
+        intent: Box<super::task_message::Intent>,
+    },
+    TaskMessageInputRelease {
+        release: Box<super::task_message::review::Release>,
+    },
+    DeferredSend {
+        intent: Box<super::deferred_send::Intent>,
+    },
+    DeferredAnswer {
+        intent: Box<super::deferred_answer::Intent>,
+    },
+    CompactToSend {
+        intent: Box<super::compact_to_send::Intent>,
+    },
     TaskStartReconcile {
         intent: Box<super::task_start_reconcile::Intent>,
+    },
+    TerminationOutcome {
+        intent: Box<super::termination_outcome::Intent>,
     },
     NotificationControl {
         scope: super::notification_control::Scope,
@@ -40,6 +61,9 @@ pub enum Request {
         action: super::ownership::Action,
         journal: Option<String>,
         revision: u64,
+    },
+    DesktopOwnershipObserve {
+        query: Box<super::ownership::observation::Query>,
     },
     ImportPendingReads {
         request_id: String,
@@ -84,8 +108,16 @@ impl Request {
         match self {
             Self::CreationClone { intent } => &intent.clone_request_id,
             Self::CreationWorktree { intent } => &intent.worktree_request_id,
+            Self::CreationLaunch { intent } => &intent.launch_id,
+            Self::TaskMessage { intent } => &intent.request_id,
+            Self::TaskMessageInputRelease { release } => &release.release_id,
+            Self::DeferredSend { intent } => &intent.request_id,
+            Self::DeferredAnswer { intent } => &intent.request_id,
+            Self::CompactToSend { intent } => &intent.request_id,
             Self::TaskStartReconcile { intent } => &intent.reconcile_id,
+            Self::TerminationOutcome { intent } => &intent.request_id,
             Self::NotificationControl { control, .. } => control.request_id(),
+            Self::DesktopOwnershipObserve { query } => &query.request_id,
             Self::ActivationWait { request_id }
             | Self::DesktopOwnership { request_id, .. }
             | Self::ImportPendingReads { request_id, .. }
@@ -98,9 +130,17 @@ impl Request {
         match self {
             Self::CreationClone { .. } => "creation_clone",
             Self::CreationWorktree { .. } => "creation_worktree",
+            Self::CreationLaunch { .. } => "creation_launch",
+            Self::TaskMessage { .. } => "task_message",
+            Self::TaskMessageInputRelease { .. } => "task_message_input_release",
+            Self::DeferredSend { .. } => "deferred_send",
+            Self::DeferredAnswer { .. } => "deferred_answer",
+            Self::CompactToSend { .. } => "compact_to_send",
             Self::TaskStartReconcile { .. } => "task_start_reconcile",
+            Self::TerminationOutcome { .. } => "termination_outcome",
             Self::NotificationControl { control, .. } => control.operation(),
             Self::DesktopOwnership { .. } => "desktop_ownership",
+            Self::DesktopOwnershipObserve { .. } => "desktop_ownership_observe",
             Self::ImportPendingReads { .. } => "import_pending_reads",
             Self::ActivationWait { .. } => "activation_wait",
             Self::AutomaticApprovals { .. } => "automatic_approvals",
@@ -112,7 +152,14 @@ impl Request {
         match self {
             Self::CreationClone { intent } => intent.as_ref().clone().verify().is_ok(),
             Self::CreationWorktree { intent } => intent.as_ref().clone().verify().is_ok(),
+            Self::CreationLaunch { intent } => intent.as_ref().clone().verify().is_ok(),
+            Self::TaskMessage { intent } => intent.as_ref().clone().verify().is_ok(),
+            Self::TaskMessageInputRelease { release } => release.valid(),
+            Self::DeferredSend { intent } => intent.as_ref().clone().verify().is_ok(),
+            Self::DeferredAnswer { intent } => intent.as_ref().clone().verify().is_ok(),
+            Self::CompactToSend { intent } => intent.as_ref().clone().verify().is_ok(),
             Self::TaskStartReconcile { intent } => intent.as_ref().clone().verify().is_ok(),
+            Self::TerminationOutcome { intent } => intent.valid(),
             Self::NotificationControl { scope, control } => scope.valid() && control.valid(),
             Self::DesktopOwnership {
                 journal, revision, ..
@@ -121,6 +168,7 @@ impl Request {
                     && *revision <= super::ownership::MAX_REVISION
                     && (journal.is_some() || *revision == 0)
             }
+            Self::DesktopOwnershipObserve { query } => query.valid(),
             Self::ImportPendingReads { page, .. } => page.valid(),
             Self::ActivationWait { .. } | Self::AutomaticApprovals { .. } => true,
             Self::CacheMaintenance {
@@ -142,6 +190,35 @@ impl Request {
             Sha256::digest(serde_json::to_vec(self).expect("fixed request fields"))
         )
     }
+}
+
+/// The complete line the `frontend-request` child sends the service for one
+/// envelope: the `desktop-v1` hello around it and its newline. The service
+/// reads at most [`zerus_watch_protocol::CONTROL_LINE_BYTES`] of it.
+pub fn frontend_line(configuration: &str, envelope: &serde_json::Value) -> Vec<u8> {
+    let mut bytes = serde_json::to_vec(&serde_json::json!({
+        "abi": super::service::ABI,
+        "configuration": configuration,
+        "op": "frontend_request",
+        "request": envelope,
+    }))
+    .expect("a JSON line");
+    bytes.push(b'\n');
+    bytes
+}
+
+/// Whether `request` fits that complete line for any attempt and
+/// configuration: both have a fixed length, so the size is exact. A request
+/// that does not fit must never be sent.
+pub fn fits_frontend_line(request: &Request) -> bool {
+    let envelope = Envelope {
+        abi: ABI.into(),
+        attempt: "00000000-0000-4000-8000-000000000000".into(),
+        request: request.clone(),
+    };
+    serde_json::to_value(&envelope).is_ok_and(|envelope| {
+        frontend_line(&"0".repeat(64), &envelope).len() <= zerus_watch_protocol::CONTROL_LINE_BYTES
+    })
 }
 
 #[derive(Clone, Debug, Deserialize, Serialize)]
@@ -240,9 +317,17 @@ impl Cache {
         } else if matches!(
             envelope.request,
             Request::CacheMaintenance { .. }
+                | Request::DesktopOwnershipObserve { .. }
                 | Request::CreationClone { .. }
                 | Request::CreationWorktree { .. }
+                | Request::CreationLaunch { .. }
+                | Request::TaskMessage { .. }
+                | Request::TaskMessageInputRelease { .. }
+                | Request::DeferredSend { .. }
+                | Request::DeferredAnswer { .. }
+                | Request::CompactToSend { .. }
                 | Request::TaskStartReconcile { .. }
+                | Request::TerminationOutcome { .. }
         ) {
             if ownership_mode != Some(super::ownership::Mode::Service) {
                 return Err(io::ErrorKind::PermissionDenied.into());
@@ -350,7 +435,7 @@ impl Responder {
         attempt: String,
         request: Request,
     ) -> io::Result<Registration> {
-        let agent = ["HGS_SESSION", "HGS_RUN_ID"]
+        let agent = ["HGS_SESSION", "HGS_SESSION_ID", "HGS_RUN_ID"]
             .iter()
             .any(|key| std::env::var_os(key).is_some_and(|v| !v.is_empty()));
         if agent
@@ -385,7 +470,63 @@ impl Responder {
                 }
                 Some(super::ownership::Mode::Service)
             }
+            Request::CreationLaunch { intent } => {
+                if self.ownership_mode.get() != Some(&super::ownership::Mode::Service)
+                    || self.configuration.get() != Some(&intent.scope.configuration)
+                {
+                    return Err(io::ErrorKind::PermissionDenied.into());
+                }
+                Some(super::ownership::Mode::Service)
+            }
             Request::TaskStartReconcile { intent } => {
+                if self.ownership_mode.get() != Some(&super::ownership::Mode::Service)
+                    || self.configuration.get() != Some(&intent.scope.configuration)
+                {
+                    return Err(io::ErrorKind::PermissionDenied.into());
+                }
+                Some(super::ownership::Mode::Service)
+            }
+            Request::TerminationOutcome { intent } => {
+                if self.ownership_mode.get() != Some(&super::ownership::Mode::Service)
+                    || self.configuration.get() != Some(&intent.scope.configuration)
+                {
+                    return Err(io::ErrorKind::PermissionDenied.into());
+                }
+                Some(super::ownership::Mode::Service)
+            }
+            Request::TaskMessage { intent } => {
+                if self.ownership_mode.get() != Some(&super::ownership::Mode::Service)
+                    || self.configuration.get() != Some(&intent.scope.configuration)
+                {
+                    return Err(io::ErrorKind::PermissionDenied.into());
+                }
+                Some(super::ownership::Mode::Service)
+            }
+            Request::TaskMessageInputRelease { release } => {
+                if self.ownership_mode.get() != Some(&super::ownership::Mode::Service)
+                    || self.configuration.get() != Some(&release.scope.configuration)
+                {
+                    return Err(io::ErrorKind::PermissionDenied.into());
+                }
+                Some(super::ownership::Mode::Service)
+            }
+            Request::DeferredSend { intent } => {
+                if self.ownership_mode.get() != Some(&super::ownership::Mode::Service)
+                    || self.configuration.get() != Some(&intent.scope.configuration)
+                {
+                    return Err(io::ErrorKind::PermissionDenied.into());
+                }
+                Some(super::ownership::Mode::Service)
+            }
+            Request::DeferredAnswer { intent } => {
+                if self.ownership_mode.get() != Some(&super::ownership::Mode::Service)
+                    || self.configuration.get() != Some(&intent.scope.configuration)
+                {
+                    return Err(io::ErrorKind::PermissionDenied.into());
+                }
+                Some(super::ownership::Mode::Service)
+            }
+            Request::CompactToSend { intent } => {
                 if self.ownership_mode.get() != Some(&super::ownership::Mode::Service)
                     || self.configuration.get() != Some(&intent.scope.configuration)
                 {
@@ -399,6 +540,14 @@ impl Responder {
                     return Err(io::ErrorKind::PermissionDenied.into());
                 }
                 mode
+            }
+            Request::DesktopOwnershipObserve { query } => {
+                if self.ownership_mode.get() != Some(&super::ownership::Mode::Service)
+                    || self.configuration.get() != Some(&query.configuration)
+                {
+                    return Err(io::ErrorKind::PermissionDenied.into());
+                }
+                Some(super::ownership::Mode::Service)
             }
             _ => None,
         };
@@ -629,6 +778,75 @@ mod tests {
     }
 
     #[test]
+    fn termination_retention_requires_cached_service_mode_and_exact_configuration() {
+        use crate::desktop::{
+            ownership::Mode,
+            termination_outcome::{Choice, Intent, Scope},
+        };
+        let capture = crate::termination_cleanup::Capture {
+            target: crate::Target {
+                computer: String::new(),
+                name: "codex/example/source".into(),
+                run_id: "run".into(),
+                conversation_id: "conversation".into(),
+            },
+            machine: id(7),
+            root: "/srv/example/work".into(),
+            common_dir: "/srv/example/main/.git".into(),
+            owner_id: "original-owner".into(),
+        };
+        let original =
+            String::from_utf8(capture.invocation(&id(101)).unwrap().stdin.unwrap()).unwrap();
+        let intent = Intent {
+            scope: Scope {
+                configuration: "a".repeat(64),
+                service_epoch: id(4),
+            },
+            confirmation_id: id(102),
+            choice: Choice::RemoveAfterTerminate,
+            request_id: id(101),
+            capture,
+            original,
+        };
+        let mut envelope = envelope(1);
+        envelope.request = Request::TerminationOutcome {
+            intent: Box::new(intent),
+        };
+        let cache = Cache::default();
+        assert!(cache.prepare(envelope.clone()).is_err());
+        assert!(cache
+            .prepare_with_mode(envelope.clone(), Some(Mode::Native))
+            .is_err());
+        let slot = cache
+            .prepare_with_mode(envelope.clone(), Some(Mode::Service))
+            .unwrap();
+        *slot.0.child.lock().unwrap() = Some((24, "synthetic-birth".into()));
+        assert_eq!(
+            cache.evidence(&id(1)).unwrap().ownership_mode,
+            Some(Mode::Service)
+        );
+        let responder = Responder::new(
+            "com.hgdev.hgs-tray".into(),
+            super::super::Build {
+                version: "1.0.0".into(),
+                source_commit: "a".repeat(40),
+                source_dirty: Some(false),
+            },
+            id(8),
+            true,
+            false,
+        );
+        assert!(responder.configure_ownership_mode_once(Mode::Service));
+        assert!(responder.configure_once("b".repeat(64)));
+        assert!(responder
+            .prepare_ui_request(envelope.attempt.clone(), envelope.request.clone())
+            .is_err());
+        let decoded: Result<Envelope, _> =
+            serde_json::from_value(serde_json::to_value(&envelope).unwrap());
+        assert!(decoded.unwrap().valid());
+    }
+
+    #[test]
     fn cache_requires_the_original_native_service_mode() {
         use crate::desktop::{
             cache_maintenance::{Command, Timing},
@@ -746,6 +964,40 @@ mod tests {
     }
 
     #[test]
+    fn launch_evidence_requires_cached_service_mode_and_the_same_configuration() {
+        use crate::desktop::ownership::Mode;
+        let intent = crate::desktop::creation_launch::test_intent();
+        let cache = Cache::default();
+        let mut value = envelope(1);
+        value.request = Request::CreationLaunch {
+            intent: Box::new(intent.clone()),
+        };
+        assert_eq!(value.request.operation(), "creation_launch");
+        assert_eq!(value.request.id(), intent.launch_id);
+        assert!(cache.prepare(value.clone()).is_err());
+        assert!(cache
+            .prepare_with_mode(value.clone(), Some(Mode::Native))
+            .is_err());
+        let slot = cache
+            .prepare_with_mode(value.clone(), Some(Mode::Service))
+            .unwrap();
+        *slot.0.child.lock().unwrap() = Some((25, "synthetic-birth".into()));
+        let evidence = cache.evidence(&id(1)).unwrap();
+        assert_eq!(evidence.ownership_mode, Some(Mode::Service));
+        assert_eq!(evidence.request_id, intent.launch_id);
+        // A clone-shaped body never deserializes as this kind, and no
+        // authority claim can ride along.
+        let mut request = serde_json::to_value(&value.request).unwrap();
+        request["op"] = "creation_worktree".into();
+        assert!(serde_json::from_value::<Request>(request).is_err());
+        for field in ["mode", "confirmed", "role", "execution_consent"] {
+            let mut request = serde_json::to_value(&value.request).unwrap();
+            request[field] = true.into();
+            assert!(serde_json::from_value::<Request>(request).is_err());
+        }
+    }
+
+    #[test]
     fn task_start_reconcile_keeps_its_original_body_and_cached_service_mode() {
         use crate::desktop::ownership::Mode;
         let intent = crate::desktop::task_start_reconcile::test_intent();
@@ -784,12 +1036,432 @@ mod tests {
     }
 
     #[test]
+    fn task_message_responder_requires_cached_service_mode_and_the_same_configuration() {
+        const CASE: &str = "desktop::ui_requests::tests::task_message_responder_requires_cached_service_mode_and_the_same_configuration";
+        if std::env::var_os("ZERUS_TASK_MESSAGE_RESPONDER_TEST_CHILD").is_none() {
+            let output = std::process::Command::new(std::env::current_exe().unwrap())
+                .args(["--exact", CASE, "--test-threads=1", "--nocapture"])
+                .env_remove("HGS_SESSION")
+                .env_remove("HGS_SESSION_ID")
+                .env_remove("HGS_RUN_ID")
+                .env("ZERUS_TASK_MESSAGE_RESPONDER_TEST_CHILD", "1")
+                .output()
+                .unwrap();
+            assert!(
+                output.status.success(),
+                "{}",
+                String::from_utf8_lossy(&output.stderr)
+            );
+            assert!(String::from_utf8_lossy(&output.stdout).contains("1 passed; 0 failed"));
+            return;
+        }
+        use crate::desktop::{ownership::Mode, Build};
+        let intent = crate::desktop::task_message::test_intent();
+        let request = Request::TaskMessage {
+            intent: Box::new(intent.clone()),
+        };
+        assert_eq!(request.operation(), "task_message");
+        assert_eq!(request.id(), intent.request_id);
+        // The slot itself binds only the Service mode.
+        let cache = Cache::default();
+        let value = Envelope {
+            abi: ABI.into(),
+            attempt: id(1),
+            request: request.clone(),
+        };
+        assert!(cache.prepare(value.clone()).is_err());
+        assert!(cache
+            .prepare_with_mode(value.clone(), Some(Mode::Native))
+            .is_err());
+        // The responder admits only its own cached Service mode and exactly
+        // the configuration the original was scoped to.
+        for (configuration, mode, accepted) in [
+            (intent.scope.configuration.clone(), None, false),
+            (
+                intent.scope.configuration.clone(),
+                Some(Mode::Native),
+                false,
+            ),
+            ("f".repeat(64), Some(Mode::Service), false),
+            (
+                intent.scope.configuration.clone(),
+                Some(Mode::Service),
+                true,
+            ),
+        ] {
+            let responder = Responder::new(
+                "com.hgdev.hgs-tray".into(),
+                Build {
+                    version: "1.2.3".into(),
+                    source_commit: "a".repeat(40),
+                    source_dirty: Some(false),
+                },
+                id(80),
+                true,
+                false,
+            );
+            assert!(responder.configure_once(configuration));
+            if let Some(mode) = mode {
+                assert!(responder.configure_ownership_mode_once(mode));
+            }
+            let prepared = responder.prepare_ui_request(id(1), request.clone());
+            assert_eq!(prepared.is_ok(), accepted);
+            if let Ok(slot) = prepared {
+                *slot.0.child.lock().unwrap() = Some((27, "synthetic-birth".into()));
+                let evidence = responder.ui_requests.evidence(&id(1)).unwrap();
+                assert_eq!(evidence.ownership_mode, Some(Mode::Service));
+                assert_eq!(evidence.request_id, intent.request_id);
+                assert_eq!(evidence.fingerprint, request.fingerprint());
+            }
+        }
+    }
+
+    #[test]
+    fn task_message_input_release_responder_requires_cached_service_mode_and_the_same_configuration(
+    ) {
+        const CASE: &str = "desktop::ui_requests::tests::task_message_input_release_responder_requires_cached_service_mode_and_the_same_configuration";
+        if std::env::var_os("ZERUS_TASK_MESSAGE_INPUT_RELEASE_RESPONDER_TEST_CHILD").is_none() {
+            let output = std::process::Command::new(std::env::current_exe().unwrap())
+                .args(["--exact", CASE, "--test-threads=1", "--nocapture"])
+                .env_remove("HGS_SESSION")
+                .env_remove("HGS_SESSION_ID")
+                .env_remove("HGS_RUN_ID")
+                .env("ZERUS_TASK_MESSAGE_INPUT_RELEASE_RESPONDER_TEST_CHILD", "1")
+                .output()
+                .unwrap();
+            assert!(
+                output.status.success(),
+                "{}",
+                String::from_utf8_lossy(&output.stderr)
+            );
+            assert!(String::from_utf8_lossy(&output.stdout).contains("1 passed; 0 failed"));
+            return;
+        }
+        use crate::desktop::{ownership::Mode, Build};
+        let release = crate::desktop::task_message::review::tests::release();
+        let request = Request::TaskMessageInputRelease {
+            release: Box::new(release.clone()),
+        };
+        assert_eq!(request.operation(), "task_message_input_release");
+        assert_eq!(request.id(), release.release_id);
+        // An invalid release never prepares.
+        let invalid = Request::TaskMessageInputRelease {
+            release: Box::new(crate::desktop::task_message::review::Release {
+                bytes: 0,
+                ..release.clone()
+            }),
+        };
+        // The responder admits only its own cached Service mode and exactly
+        // the configuration the release was scoped to.
+        for (configuration, mode, request, accepted) in [
+            (release.scope.configuration.clone(), None, &request, false),
+            (
+                release.scope.configuration.clone(),
+                Some(Mode::Native),
+                &request,
+                false,
+            ),
+            ("f".repeat(64), Some(Mode::Service), &request, false),
+            (
+                release.scope.configuration.clone(),
+                Some(Mode::Service),
+                &invalid,
+                false,
+            ),
+            (
+                release.scope.configuration.clone(),
+                Some(Mode::Service),
+                &request,
+                true,
+            ),
+        ] {
+            let responder = Responder::new(
+                "com.hgdev.hgs-tray".into(),
+                Build {
+                    version: "1.2.3".into(),
+                    source_commit: "a".repeat(40),
+                    source_dirty: Some(false),
+                },
+                id(80),
+                true,
+                false,
+            );
+            assert!(responder.configure_once(configuration));
+            if let Some(mode) = mode {
+                assert!(responder.configure_ownership_mode_once(mode));
+            }
+            let prepared = responder.prepare_ui_request(id(1), request.clone());
+            assert_eq!(prepared.is_ok(), accepted);
+            if let Ok(slot) = prepared {
+                *slot.0.child.lock().unwrap() = Some((27, "synthetic-birth".into()));
+                let evidence = responder.ui_requests.evidence(&id(1)).unwrap();
+                assert_eq!(evidence.ownership_mode, Some(Mode::Service));
+                assert_eq!(evidence.request_id, release.release_id);
+                assert_eq!(evidence.fingerprint, request.fingerprint());
+            }
+        }
+    }
+
+    #[test]
+    fn deferred_send_responder_requires_cached_service_mode_and_the_same_configuration() {
+        const CASE: &str = "desktop::ui_requests::tests::deferred_send_responder_requires_cached_service_mode_and_the_same_configuration";
+        if std::env::var_os("ZERUS_DEFERRED_SEND_RESPONDER_TEST_CHILD").is_none() {
+            let output = std::process::Command::new(std::env::current_exe().unwrap())
+                .args(["--exact", CASE, "--test-threads=1", "--nocapture"])
+                .env_remove("HGS_SESSION")
+                .env_remove("HGS_RUN_ID")
+                .env("ZERUS_DEFERRED_SEND_RESPONDER_TEST_CHILD", "1")
+                .output()
+                .unwrap();
+            assert!(
+                output.status.success(),
+                "{}",
+                String::from_utf8_lossy(&output.stderr)
+            );
+            assert!(String::from_utf8_lossy(&output.stdout).contains("1 passed; 0 failed"));
+            return;
+        }
+        use crate::desktop::{ownership::Mode, Build};
+        let intent = crate::desktop::deferred_send::tests::intent();
+        let request = Request::DeferredSend {
+            intent: Box::new(intent.clone()),
+        };
+        assert_eq!(request.operation(), "deferred_send");
+        assert_eq!(request.id(), intent.request_id);
+        // An intent that does not verify never prepares.
+        let invalid = Request::DeferredSend {
+            intent: Box::new(crate::desktop::deferred_send::Intent {
+                original: "{}".into(),
+                ..intent.clone()
+            }),
+        };
+        // The responder admits only its own cached Service mode and exactly
+        // the configuration the intent was scoped to.
+        for (configuration, mode, request, accepted) in [
+            (intent.scope.configuration.clone(), None, &request, false),
+            (
+                intent.scope.configuration.clone(),
+                Some(Mode::Native),
+                &request,
+                false,
+            ),
+            ("f".repeat(64), Some(Mode::Service), &request, false),
+            (
+                intent.scope.configuration.clone(),
+                Some(Mode::Service),
+                &invalid,
+                false,
+            ),
+            (
+                intent.scope.configuration.clone(),
+                Some(Mode::Service),
+                &request,
+                true,
+            ),
+        ] {
+            let responder = Responder::new(
+                "com.hgdev.hgs-tray".into(),
+                Build {
+                    version: "1.2.3".into(),
+                    source_commit: "a".repeat(40),
+                    source_dirty: Some(false),
+                },
+                id(80),
+                true,
+                false,
+            );
+            assert!(responder.configure_once(configuration));
+            if let Some(mode) = mode {
+                assert!(responder.configure_ownership_mode_once(mode));
+            }
+            let prepared = responder.prepare_ui_request(id(1), request.clone());
+            assert_eq!(prepared.is_ok(), accepted);
+            if let Ok(slot) = prepared {
+                *slot.0.child.lock().unwrap() = Some((27, "synthetic-birth".into()));
+                let evidence = responder.ui_requests.evidence(&id(1)).unwrap();
+                assert_eq!(evidence.ownership_mode, Some(Mode::Service));
+                assert_eq!(evidence.request_id, intent.request_id);
+                assert_eq!(evidence.fingerprint, request.fingerprint());
+            }
+        }
+    }
+
+    #[test]
+    fn deferred_answer_responder_requires_cached_service_mode_and_the_same_configuration() {
+        const CASE: &str = "desktop::ui_requests::tests::deferred_answer_responder_requires_cached_service_mode_and_the_same_configuration";
+        if std::env::var_os("ZERUS_DEFERRED_ANSWER_RESPONDER_TEST_CHILD").is_none() {
+            let output = std::process::Command::new(std::env::current_exe().unwrap())
+                .args(["--exact", CASE, "--test-threads=1", "--nocapture"])
+                .env_remove("HGS_SESSION")
+                .env_remove("HGS_RUN_ID")
+                .env("ZERUS_DEFERRED_ANSWER_RESPONDER_TEST_CHILD", "1")
+                .output()
+                .unwrap();
+            assert!(
+                output.status.success(),
+                "{}",
+                String::from_utf8_lossy(&output.stderr)
+            );
+            assert!(String::from_utf8_lossy(&output.stdout).contains("1 passed; 0 failed"));
+            return;
+        }
+        use crate::desktop::{ownership::Mode, Build};
+        let intent = crate::desktop::deferred_answer::tests::intent();
+        let request = Request::DeferredAnswer {
+            intent: Box::new(intent.clone()),
+        };
+        assert_eq!(request.operation(), "deferred_answer");
+        assert_eq!(request.id(), intent.request_id);
+        // An intent that does not verify never prepares.
+        let invalid = Request::DeferredAnswer {
+            intent: Box::new(crate::desktop::deferred_answer::Intent {
+                original: "{}".into(),
+                ..intent.clone()
+            }),
+        };
+        // The responder admits only its own cached Service mode and exactly
+        // the configuration the intent was scoped to.
+        for (configuration, mode, request, accepted) in [
+            (intent.scope.configuration.clone(), None, &request, false),
+            (
+                intent.scope.configuration.clone(),
+                Some(Mode::Native),
+                &request,
+                false,
+            ),
+            ("f".repeat(64), Some(Mode::Service), &request, false),
+            (
+                intent.scope.configuration.clone(),
+                Some(Mode::Service),
+                &invalid,
+                false,
+            ),
+            (
+                intent.scope.configuration.clone(),
+                Some(Mode::Service),
+                &request,
+                true,
+            ),
+        ] {
+            let responder = Responder::new(
+                "com.hgdev.hgs-tray".into(),
+                Build {
+                    version: "1.2.3".into(),
+                    source_commit: "a".repeat(40),
+                    source_dirty: Some(false),
+                },
+                id(80),
+                true,
+                false,
+            );
+            assert!(responder.configure_once(configuration));
+            if let Some(mode) = mode {
+                assert!(responder.configure_ownership_mode_once(mode));
+            }
+            let prepared = responder.prepare_ui_request(id(1), request.clone());
+            assert_eq!(prepared.is_ok(), accepted);
+            if let Ok(slot) = prepared {
+                *slot.0.child.lock().unwrap() = Some((27, "synthetic-birth".into()));
+                let evidence = responder.ui_requests.evidence(&id(1)).unwrap();
+                assert_eq!(evidence.ownership_mode, Some(Mode::Service));
+                assert_eq!(evidence.request_id, intent.request_id);
+                assert_eq!(evidence.fingerprint, request.fingerprint());
+            }
+        }
+    }
+
+    #[test]
+    fn compact_to_send_responder_requires_cached_service_mode_and_the_same_configuration() {
+        const CASE: &str = "desktop::ui_requests::tests::compact_to_send_responder_requires_cached_service_mode_and_the_same_configuration";
+        if std::env::var_os("ZERUS_COMPACT_TO_SEND_RESPONDER_TEST_CHILD").is_none() {
+            let output = std::process::Command::new(std::env::current_exe().unwrap())
+                .args(["--exact", CASE, "--test-threads=1", "--nocapture"])
+                .env_remove("HGS_SESSION")
+                .env_remove("HGS_RUN_ID")
+                .env("ZERUS_COMPACT_TO_SEND_RESPONDER_TEST_CHILD", "1")
+                .output()
+                .unwrap();
+            assert!(
+                output.status.success(),
+                "{}",
+                String::from_utf8_lossy(&output.stderr)
+            );
+            assert!(String::from_utf8_lossy(&output.stdout).contains("1 passed; 0 failed"));
+            return;
+        }
+        use crate::desktop::{ownership::Mode, Build};
+        let intent = crate::desktop::compact_to_send::tests::intent();
+        let request = Request::CompactToSend {
+            intent: Box::new(intent.clone()),
+        };
+        assert_eq!(request.operation(), "compact_to_send");
+        assert_eq!(request.id(), intent.request_id);
+        // An intent that does not verify never prepares.
+        let invalid = Request::CompactToSend {
+            intent: Box::new(crate::desktop::compact_to_send::Intent {
+                original: "{}".into(),
+                ..intent.clone()
+            }),
+        };
+        // The responder admits only its own cached Service mode and exactly
+        // the configuration the intent was scoped to.
+        for (configuration, mode, request, accepted) in [
+            (intent.scope.configuration.clone(), None, &request, false),
+            (
+                intent.scope.configuration.clone(),
+                Some(Mode::Native),
+                &request,
+                false,
+            ),
+            ("f".repeat(64), Some(Mode::Service), &request, false),
+            (
+                intent.scope.configuration.clone(),
+                Some(Mode::Service),
+                &invalid,
+                false,
+            ),
+            (
+                intent.scope.configuration.clone(),
+                Some(Mode::Service),
+                &request,
+                true,
+            ),
+        ] {
+            let responder = Responder::new(
+                "com.hgdev.hgs-tray".into(),
+                Build {
+                    version: "1.2.3".into(),
+                    source_commit: "a".repeat(40),
+                    source_dirty: Some(false),
+                },
+                id(80),
+                true,
+                false,
+            );
+            assert!(responder.configure_once(configuration));
+            if let Some(mode) = mode {
+                assert!(responder.configure_ownership_mode_once(mode));
+            }
+            let prepared = responder.prepare_ui_request(id(1), request.clone());
+            assert_eq!(prepared.is_ok(), accepted);
+            if let Ok(slot) = prepared {
+                *slot.0.child.lock().unwrap() = Some((27, "synthetic-birth".into()));
+                let evidence = responder.ui_requests.evidence(&id(1)).unwrap();
+                assert_eq!(evidence.ownership_mode, Some(Mode::Service));
+                assert_eq!(evidence.request_id, intent.request_id);
+                assert_eq!(evidence.fingerprint, request.fingerprint());
+            }
+        }
+    }
+
+    #[test]
     fn task_start_native_responder_uses_its_cached_configuration_and_mode() {
         const CASE: &str = "desktop::ui_requests::tests::task_start_native_responder_uses_its_cached_configuration_and_mode";
         if std::env::var_os("ZERUS_TASK_START_RESPONDER_TEST_CHILD").is_none() {
             let output = std::process::Command::new(std::env::current_exe().unwrap())
                 .args(["--exact", CASE, "--test-threads=1", "--nocapture"])
                 .env_remove("HGS_SESSION")
+                .env_remove("HGS_SESSION_ID")
                 .env_remove("HGS_RUN_ID")
                 .env("ZERUS_TASK_START_RESPONDER_TEST_CHILD", "1")
                 .output()

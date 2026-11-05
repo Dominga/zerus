@@ -51,6 +51,34 @@ Windows PC execution waits for its separate acceptance. Neither this scheduling
 nor the exception permits clearing state, creating a replacement account or
 restarting agents, tmux or a live DeepSeek host.
 
+### Retained legacy images after #1217
+
+This guidance applies after [#1217](https://github.com/ufna/zerus/pull/1217)
+lands; its source approval is not an installed acceptance result. Each displaced
+Qt or unclassified rollback image can add a separate `qt-*` entry under
+`~/.local/share/hgs/desktop-qt-legacy/`. On Linux, an updater staging prefix
+uses `<HGS_INSTALL_PREFIX>/share/hgs/desktop-qt-legacy/`; the macOS updater ignores
+that prefix and uses the normal root above. These entries are manual recovery
+copies, never candidates offered by `--rollback`. Retained images have no
+automatic expiry or size quota. On Linux, a replaced Next image whose
+`--build-info` fails is conservatively retained too: the folder name does not
+establish that its contents are Qt.
+
+Review one entry at a time using the updater's printed path and the file
+manager's size/properties view; inspect saved metadata without launching the
+retained GUI. Keep recovery copies while their upgrade/import acceptance or any
+uncertain update remains unresolved. A failed archive move can leave an image in
+its named `desktop-previous/.replaced-*` location or the named archive entry;
+inspect both before treating either as disposable.
+
+Once an entry is verified as an obsolete recovery copy that no running GUI or
+process uses, it may be removed manually. Keep it if ownership, image identity
+or recovery needs remain uncertain. There is no bulk or age-based cleanup: an
+unclassified image needs individual review. Preserve the installed image and the
+usable `desktop-previous` rollback, Qt settings exports, original migration snapshots,
+drafts and journals. Removing an image is not permission to clear owner state,
+reseed an import or start a legacy GUI alongside service-owned background duties.
+
 ## Linux — arch
 
 **GUI/installed acceptance is deferred until the owner reschedules it**, even
@@ -308,6 +336,109 @@ keep the shared report admission charged until actual completion. Publication
 runs off the UI/legacy worker and never gates Grant, watch/catalog or Resume.
 Capture/report success alone does not complete G3 or installed acceptance.
 
+The service-mode, non-replay native local-mark writer also preserves the exact
+`attention-marks.json` bytes before its first load/normalization in a separate
+`local-read-preload-v1` slot. This historical boundary is specific to local
+presentation marks, not the shared host-read queue or `attention-observed.json`.
+The original pair order, duplicates and unknown fields remain in the private
+snapshot. The existing decoder still refuses more than 20,000 entries in either
+map; a larger captured original is retained, never exported after capping it.
+Capture failure pauses local-mark mutations and all file writes, including
+flush/drop and thread-spawn fallback, while presentation reads still answer.
+Review shows `local_read_capture` independently; Retry wakes the same writer.
+A loaded model retains editable unsaved changes after a failed file write;
+Retry checks the same live file object before saving them.
+Later writes check the canonical managed directory and the same live leaf
+identity/hash; a changed leaf is never adopted. Every current file is classified
+without normalization before a restarted model is installed, even when an older
+historical receipt exists.
+
+The separate `local_reads_report` publishes that original snapshot and its
+historical provenance through the existing Staged publisher after paired
+canonical configuration is known. Its fixed scope and private journal are
+separate from the Qt/Settings and creations reports. Review keeps capture and
+publication reasons separate. Later local writes do not change the original;
+publication rechecks the retained snapshot's private identity and raw hash.
+A lost or uncertain result only looks up the original import UUID. Explicit
+Retry can repeat only a verified not-committed attempt or a durably proven
+failure before the final record, with the same snapshot/configuration/receipt
+and a compare-and-swap fence against a late original callback. All groups share
+the existing single report admission and original helper/pipe resource charges;
+report failure never gates Grant, watch/catalog or Resume.
+
+These are source/component controls. A Staged receipt is historical evidence,
+not shared-read delivery or acknowledgement, notification suppression,
+current-source completeness, ownership or permission to act. Installed import
+and upgrade acceptance remain pending.
+
+The native NewSession owner also preserves `worktree-snapshots.json` in a fixed
+`worktree-cache-preload-v1` slot before its first service-mode load or file write.
+The exact historical original and capture ID remain unchanged after later cache
+writes. Both the original and today's restarted file pass the existing strict
+64-record/8 MiB cache decoder before the pruning model runs (raw reads stay
+bounded to 16 MiB). Opaque cache hashes never prove current checkout ownership.
+Only this legacy cache's read accepts an owned, single-link 0644 Unix source;
+group/other writes, links and changed canonical identities refuse capture.
+The source is never chmodded. Archive/metadata and replacement cache files stay
+private (0600); Windows native ACL/reparse checks are unchanged. The existing
+local-disk and ancestor-list requirements still apply; a redirected UNC source
+remains unavailable.
+
+A failure pauses only cache file persistence. Fresh folder queries and separately
+authorized session creation remain available; dirty in-memory cache data stays
+bounded and unsaved until an explicit same-owner Retry passes its original
+source checks. Quit refuses late model installation and new cache writes.
+Review shows `worktree_cache_capture` separately from drafts, local read marks
+and published reports. The separate `worktree_cache_report` publishes only the
+committed archive plus its pre-first-load provenance under the closed
+`next-worktree-cache-preload-v1` scope and `worktree-cache-retained-import-v1.json`
+journal. It binds once to the actual paired canonical configuration, original
+capture/import ID and expected record. Later live writes or a paused cache
+writer do not replace that historical source. Every publication reopens and
+rechecks the private original; it never reads today's mutable cache as evidence.
+
+The existing one-slot report executor and original helper/pipe resources remain
+in use. An unknown publication is lookup-only under the original ID. An exact
+negative or a fenced definitely-unsent preparation can be retried only explicitly
+with that same source/configuration/payload. Missing is not applicable;
+unsupported, over-cap, changed or unreadable retained data stays incomplete and
+reviewable. Grant/watch/catalog/Resume stay independent. This is component/source
+coverage, not current checkout identity, creation/cleanup consent, drain or
+installed acceptance; no acceptance row is promoted.
+
+The native draft-store capture from [#1230](https://github.com/ufna/zerus/pull/1230)
+also has a separate Staged publisher in
+[#1279](https://github.com/ufna/zerus/pull/1279). It reads only the committed
+`drafts-preload-v1` receipt, index and original container; it never captures or
+substitutes today's drafts. The schema-1 families distinguish their boundaries:
+
+- `next-drafts-preload`: Next's own store, `next-drafts-before-first-job-v1`.
+- `next-dev-drafts-preload`: the dev stores, `next-dev-drafts-observed-v1`.
+- `qt-drafts-preload`: the Qt store, `qt-drafts-observed-v1`.
+- `next-drafts-preload-provenance`: the receipt and each root's boundary,
+  presence, entry count and completeness, with `historical: true`,
+  `drained: false` and `current_source_complete: false`.
+
+Store families use `draft-preload-entries-v1`; provenance uses
+`draft-preload-provenance-v1`. A store family's SHA binds its ordered index
+entries, capture ID, container SHA and boundary; individual raw-manifest and
+container hashes stay separate. Supported entries carry the unchanged
+`sources::draft_checkpoint` body. Other classes retain classification/hash
+metadata, with their original bytes kept in the private capture. Attachment
+references are stat-only; blob contents are not included. Pages retain the
+existing 64-entry/1 MiB bounds; an oversized entry is refused, never truncated.
+
+A missing receipt, a recorded capture failure or an unverifiable capture
+publishes nothing and remains required/incomplete; publication Retry does not
+replace it with live drafts. An earlier uncaptured Next run omits the Next
+family. Its Qt/dev originals or provenance alone may be saved, but the durable
+binding keeps `partial: true, complete: false` across Retry and restart.
+The fixed `next-drafts-preload-v1` scope and `drafts-retained-import-v1.json`
+journal use the same single report admission and original-result lookup rules.
+Review keeps `drafts_capture` and `drafts_report` separate. This is source
+coverage only: no draft send, blob copy, import, deletion, current completeness,
+drain or installed acceptance is established by the report.
+
 ## macOS
 
 For a coordinator-approved private click fixture, opt in to actual GUI selection
@@ -376,6 +507,36 @@ identify the checked summary bytes, not public SDK metadata or owner content:
 | `summary.json` | 833 | `d5f29374b8de0a3a894150ba3fabc7366f0839264dec8f08b9508a1c40d2ffed` |
 | `selected-receipts.json` | 664 | `95ad49391c527b69082ffea7f7f51868e4acdde8b77a87612f53985a9e97f3ca` |
 | `selected-cleanup-status.json` | 406 | `73bcf6e34d938b088268497978f57855e3150d8198502e1edce53aa88581d308` |
+
+### Recorded Mac installed caller trial — 2026-11-05
+
+Macbundle-u reported **BLOCKED** for the coordinator-admitted installed
+candidate `69ef4c5fbf9e4d57dde75a017d685f94b49abd8a`. The dedicated
+Accessibility runner's consumer-tree inspection reached its bound. Correcting
+that ad-hoc runner changed its code identity and invalidated the human grant;
+its self-probe returned `trusted=0`. UI actions stopped and no regrant arrived.
+The genuine Terminate-with-Remove caller was never exercised.
+
+| Subcheck | Result | Scoped evidence |
+|---|---|---|
+| Installed-pair Terminate/Remove | BLOCKED, no attempt | Resume, synthetic target/session/worktree, retention, actual Terminate and removal counts were all zero. No capture, confirmation or Terminate UUID was created. No unknown operation was replayed and no folder was manually deleted. This supplies no actual caller positive for `.66.3.40.4` or #1340. |
+| Required Native restoration and drafts | PASS, producer-reported restoration scope | The consumer normally quit after a stable held-zero barrier. One clean same-source GUI returned through ordinary no-environment LaunchServices, with the consumer flag absent. A fresh Native takeover showed revision 28 and current identity; the original service stayed passive/serving at the same epoch. All 538 draft records were preserved (22 unsent, 319 form-only, held zero). Normal `--sessions` forwarding succeeded. The local catalog was empty before and after; visual and remote-list usability remain unqualified with AX untrusted. |
+| Runtime and retained test artifacts | Settled runtime; artifact cleanup pending | The runner exited and was retired to PID zero, leaving GUI effects unavailable. No synthetic process, worktree or private-service residue remained, and native agents, tmux, DeepSeek and other sessions were untouched. The test app and private evidence remain for the owner to remove the sole TCC entry and for subsequent bounded residue verification. |
+
+The restore proof SHA-256 is
+`7424ee05a4502d89b0b14d9b9ca0525d03d8cbc313e0099e7e692f43ee5b6321`;
+the draft manifest SHA-256 is
+`abe727fb0b175ce5e51dbddc4bb5be0103a6861abfc994090e28256cf74c4f72`.
+Macbundle-u retains the bounded source/status/signature artifacts privately.
+These hashes record the scoped restoration evidence; no SDK metadata, private
+stdin or session body is published here.
+
+The result dependency completed with BLOCKED, not an acceptance PASS.
+`.66.3.40.4` stays in progress, its trial child `.66.3.40.4.1` stays blocked,
+and #1340 still needs the installed-pair positive. Reviewed source and hosted
+native controls from [#1363](https://github.com/ufna/zerus/pull/1363) remain
+separate evidence. A future trial requires its own coordinator-designated
+candidate/window and result correlation. Platform checkboxes remain unchanged.
 
 ## Installed client cutover on Linux and macOS
 
@@ -798,6 +959,212 @@ Record the accepted conservative first-baseline omission window from
 [#914](https://github.com/ufna/zerus/pull/914); native presentation and click results
 still need their own platform checks above.
 
+### Recorded Windows installer acceptance — 2026-11-04
+
+win-accept-cl ran the #906b installer acceptance on va-kids for integrate head
+`0fca73f54579db2882657d56ca9e08ca399792c8`, CI run
+[41783655673](https://github.com/ufna/zerus/actions/runs/41783655673), attempt 1.
+Every job of that run passed, including Quick checks and the CI gate. Admission
+used the Windows package job `126420804566` and the native job `126420804715`.
+Artifact `13301922603` (`windows-x86_64-<source>`, SHA256
+`c995126af2874080e3ff7fbb76531573caab491bd8fe6c16b496b5e1f8ef6790`) contains:
+
+- the portable ZIP, 36,155,383 bytes, SHA256
+  `6296e44790cddaef14146c4a9cc8fa2d2c1316e981894e288b4024f3180da1ff`;
+- the per-user installer, 24,515,324 bytes, SHA256
+  `d5107b4d8e4c7177df46ff795e60305996baab8032d5a29420fdc8fddd99de36`;
+- `hgs.exe`, 36,961,792 bytes, SHA256
+  `04ddfbaa02d7090164842ba3251626cd3d64117b3bd3cd830372b1de97f2e53a`.
+
+The installer payload has 1,106 files, `desktop: tauri` and version 0.47.0, with
+no Qt DLLs or plugins.
+
+Both cases used the owner's standard console account in session 1 with an
+unelevated token. The console was unlocked; this was checked before each case.
+Kaspersky stayed active and unchanged: it logged no events and its quarantine did
+not change. A one-shot SYSTEM task started each case through `WTSQueryUserToken`.
+Each case used a fresh private stage and fixture profile, its own `HOME`, config
+and state, and the real per-user registration namespace, which each case first
+verified absent. Every product call was waited until it physically exited, with
+its output fully captured.
+
+**Setup case — PASS, 16/16.** A clean per-user `setup.exe` install wrote the
+exact payload and `installation.json`. It registered the passive task in READY
+state and the Toast AUMID/COM keys without starting the service or creating
+durable service state. The staged stable CLI matched the CI `hgs.exe` bytes. The
+Start Menu entry targeted the installed UI, and login stayed opt-in. A
+same-source upgrade with the explicit login choice added only the UI
+`--background` Run value and kept the backend registration. UI-only uninstall
+kept the task, stable CLI and Toast identity. The maintained removals then left
+the task and every Toast key absent. Seeded config, drafts and session files
+survived every step.
+
+**Legacy case — PASS, 22/22.** A clean portable ZIP extraction kept the winget
+layout (`hgs-tray.exe`, `hgs.exe`, connector, ConPTY). Its GUI loader reported
+the exact source, and its maintained commands registered only passive backend
+metadata.
+
+The Qt starting point was a CI-built Qt portable ZIP of
+`c7189d936e1743ed5109a59b5351aaa4eed5391e` (Qt 6.10.3, 615 files, SHA256
+`af133299dff0b39a94db0b985a0c13285736eca9815ed513085793e75960f442`), extracted
+into its own folder. Released Windows builds were only ever portable ZIPs, so the
+upgrade followed the documented route: the Next installer went into its own
+folder. That left the Qt folder byte-identical (615/615) and installed no Qt
+files; seeded config, drafts and session files survived.
+
+The installed Tauri loader reported the exact source. The first start opened its
+own visible WebView2 window; the retained screenshot shows the Sessions screen
+and one connected machine. The native tray menu (Open Zerus, No remote machines,
+Open in, Quit) quit the app within the bound. UI-only uninstall and the
+maintained removals then left the namespace absent.
+
+An earlier attempt installed `setup.exe` over the extracted Qt ZIP folder
+instead. The installer correctly does not sweep a folder it does not own, so
+the Qt files stayed mixed with the Next payload. The owner decided that the
+installer must refuse such a folder (`zerus-5wmh.66.8.1.11`).
+The installed `uninstall\payload.txt` has CR CR LF line endings when CI packages
+it on Windows. The same ordered path list matched; the installer reader is
+unaffected (`zerus-5wmh.66.8.1.10`).
+
+Cleanup after each case removed its temporary task, stage and fixture profile.
+It also removed the Explorer tray-icon record that the test GUI left under the
+owner's `NotifyIconSettings`. A final read-only check found no Zerus task, stage,
+registration, shortcut, notification setting or process. A cold standard-user
+status preflight of `1ba301c5` (CI 41675738074) the same morning also passed:
+`--version`, `desktop registration status` and `desktop notification-registration
+status` returned structured results in 33, 112 and 38 ms. That closed the
+CLI-only hang scope of `.66.3.27.3.2`.
+
+**Owner-account row.** The step-0 inventory found no Zerus or Qt installation and
+no agent CLI on the owner's account. The owner-account upgrade is therefore
+recorded under the 2026-11-03 clean-install exception; it was not exercised on
+the main account.
+
+**Not covered by this record:** upgrade with agents running, notifications and
+clicks, terminal, voice/video, UI/durable parity and Qt rollback. Those rows stay
+unchecked, and this record ticks no broader checkbox.
+
+### Earlier va-kids row evidence (owner decision 4)
+
+These rows ran on va-kids on 2026-11-04, in private fixture profiles, before the
+owner accepted private-profile evidence (owner decision 4). They are recorded
+here as earlier evidence under that decision. They tick no checkbox; the same
+rows are rerun on the latest integrate artifact in the approved order: voice,
+terminal, upgrade, readiness, tray and lifecycle, Qt rollback, UI parity.
+
+Each row used CI artifacts of its exact source and a fresh private stage and
+fixture profile. It ran in the owner's console session 1, started by a one-shot
+SYSTEM task, and ended with teardown, cleanup and a residue check.
+
+- **Upgrade with live agents: PASS.**
+  - Row `up-4` at `0fca73f5` (CI run 41783655673, artifact 13301922603): 23/23.
+  - Row `p14-up-1` at `73a9f785` (CI run 41831170444, artifact 13325617629): 25/25.
+  - The starting point was the CI Qt portable ZIP and its stable CLI, with a
+    live fixture agent session that answered.
+  - Starting the Next GUI restaged the exact Next CLI. The same session, run and
+    conversation survived, and no host, ConPTY or agent process restarted.
+  - The upgraded CLI delivered to the same conversation, which answered. The
+    Next GUI showed the turns from before and after the upgrade in one session.
+  - A round trip followed. The Qt-era install restaged its own CLI, read the
+    state Next had written and delivered to the same conversation. Starting
+    Next again restaged the exact Next CLI, with the same session and no
+    process restarts.
+  - No desktop service owned the fixture, so no revoke or drain took part.
+- **Terminal: partial.** Row `terminal-9` at `0fca73f5`.
+  - The attach client ran with an exact non-ASCII session name and path.
+  - Paste through the console reached the live session.
+  - The session stayed live after its own Windows Terminal window closed, and
+    reattach showed the same pane with the pasted text.
+  - Not covered: resize, PowerShell compared with Windows Terminal, and exact
+    selection through UI Automation.
+- **Voice and video: PASS for the documented refusal.** Row `voice-5` at
+  `0fca73f5`: local Windows voice refuses visibly.
+- **UI walk: partial.** Row `walk-1` at `0fca73f5`: every rail screen rendered,
+  and the fixture session showed its reply. The full inventory walk and a
+  durable frontend request round trip were not covered.
+- **Service readiness: FAILED then.** Rows `readiness-1` to `readiness-7` at
+  `0fca73f5`.
+  - The task-started service was IPC-ready with the UI closed, and it admitted
+    the service-mode GUI with current ownership.
+  - No maintained route then selected background mode.
+  - Settings > About now offers the first background choice (`zerus-yfbd.1`,
+    [#1398](https://github.com/ufna/zerus/pull/1398) and
+    [#1399](https://github.com/ufna/zerus/pull/1399)). Its qualification on
+    integrate `347c8f1c` (firstchoice 35/35, attention ready through the real
+    Task Scheduler path) is recorded in `zerus-yfbd.1` and `zerus-emphh`. The
+    readiness rerun goes through that choice.
+
+### va-kids rows on the latest integrate artifacts (owner decision 4)
+
+These rows reran in the approved order on 2026-11-05, in private fixture
+profiles, under the same rules as above. Each row had its own fresh stage,
+teardown, cleanup and residue check. A guard removed the test AUMID's
+notification-settings key only when a stage had created it, and changed no other
+app's settings. Rows A–C used integrate `faa4d324` (CI run 41944519612,
+artifact 13380445725). Rows D–H used integrate `58cce17f` with #1441 (CI run
+41951499758, artifact 13382023595).
+
+- **A, voice and video: PASS for the documented refusal** (2/2). Local Windows
+  voice refuses visibly.
+- **B, terminal: PASS** (9/9).
+  - A Windows Terminal attach ran with a non-ASCII name and path. Paste reached
+    the live session.
+  - Resizing the Windows Terminal window resized the attached pane (120x30 to
+    128x33).
+  - The app selected exactly this session through UI Automation.
+  - The session stayed live after its terminal client exited, and reattach
+    showed the same pane.
+- **C, upgrade with live agents: PASS** (25/25). This is the Qt ZIP to Next
+  upgrade and round trip described above, on `faa4d324`.
+- **D, service registration and readiness: PASS** (12/12).
+  - The registered task runs as the interactive user with the least privilege,
+    never LocalSystem.
+  - Settings > About > "Use background mode…" settled background mode.
+  - With the UI closed, background mode was IPC-ready with writers enabled, and
+    fleet, presence, reads and attention were ready.
+  - The named-pipe server is the engine of the registered task's only instance,
+    in session 1, as this user. The live fixture session is listed with no GUI.
+- **E, tray and lifecycle: PASS** (12/12).
+  - Close to the notification area works. A second start shows the first
+    instance. Quit from the app's own tray menu works.
+  - Login start uses the documented `--install-login-item` and
+    `--remove-login-item` route; Windows has no Settings toggle for it.
+  - Draft-safe exit: an unsent draft typed through UI Automation was on disk
+    after Quit and was restored exactly on the next start.
+  - A background start shows no window but owns its tray icon.
+- **F, Qt rollback: rollback PASS; the return is BLOCKED without a restart.**
+  - After background mode, `desktop revoke --reason rollback` settled for the
+    exact request and configuration, and writers went off. The CI Qt ZIP
+    restaged the Qt-era CLI, which reached the same session, run and
+    conversation and got an answer. The draft stayed on disk.
+  - Returning while the revoked service still ran from the renamed-aside Next
+    image left the person with no sessions in either GUI mode
+    (`zerus-5wmh.66.3.40.3.4`, blocked by `.66.3.40.3.3`).
+  - After a fixture-only simulated sign-out/in (stopping only that task
+    instance, then one Run), the full return passed 32/32. The service was
+    passive with `explicit_handoff_required`, the default GUI was admitted,
+    the draft and the Qt-era turn were back, and writers stayed off.
+- **G, UI/durable parity: PASS** (20/20).
+  - The UI Automation walk matched the CLI's catalog, session and versions.
+  - One composer Send through the ready service reached the same conversation
+    and was answered. The route was direct, because Windows does not advertise
+    the Linux-only deferred send ABI.
+  - Automatic approvals stayed off. With the UI closed, the service alone
+    stayed ready.
+  - Findings: `zerus-5wmh.92` (session rows have no accessible name, on Windows
+    and Linux), `zerus-5wmh.66.3.31.14` and `zerus-5wmh.66.3.31.15`.
+- **H, notifications:**
+  - **H1, mandatory question: BLOCKED.** The service cannot notify a question
+    that precedes the first conversation (`zerus-5wmh.66.3.30.14`).
+  - **H2, unread reply: Delivered PROVEN; banner BLOCKED, cause undetermined.**
+    The journal and our AUMID's History show exactly one post. Do not disturb
+    was off, the foreground was not full-screen and the per-app setting was
+    Enabled, yet UI Automation saw no banner surface.
+  - **H3, cold GUI click: deferred** to an owner-present console run.
+  - **H4, withdrawal: PASS.** After `hgs read` on the exact reply, the service
+    removed its own History entry within about 1.2 s and retired the mapping.
+    Nothing opened or launched afterwards.
+
 ## Deletion PR merge gate
 
 The coordinator records per-platform acceptance and any exceptions against the
@@ -835,3 +1202,91 @@ CLI/connector/ConPTY and immutable published assets unchanged. Keep legacy updat
 feed fields and sealed-candidate retry templates while old clients require them.
 Remove each part only at its gate above; the coordinator owns merge and rollout. This document authorizes no install,
 service cutover, credential operation or deletion of user data.
+
+## Deletion gate matrix — 2026-11-04
+
+Owner: win-accept-cl, for the coordinator (`zerus-5wmh.66.8.1`). This matrix maps
+every applicable gate row to arch, Mac and va-kids at integrate `7d2b9b93`. It
+promotes no checkbox; a cell is complete only with a full per-platform record.
+
+Each cell has three parts:
+
+- **Have** is the evidence recorded so far, including today's runs: the Windows
+  installer cases on `0fca73f5` (setup 16/16, legacy 22/22, #1339); desktop-u's
+  Arch window on `0fca73f5` (`zerus-5wmh.66.8.3`); and macbundle-u's Mac window
+  on `b72dea32` (`zerus-5wmh.66.3.30.2.4`).
+- **Auto** is a route that needs only existing access, with no new grant, install,
+  security or settings change.
+- **Owner** marks what needs the owner's presence or a new grant. Those items are
+  batched into the owner questions below.
+
+Shared routes the cells refer to:
+
+- **Qt round trip (arch, Mac).** First check read-only that `desktop-previous`
+  is the verified complete Qt copy that `tray/update-installed.py` keeps after
+  the Next switch.
+  - Settle the desktop revoke, then run `update-installed.py --rollback` to start Qt.
+  - Check the exact agents, drafts and settings under Qt.
+  - Return through the maintained Next install.
+  - Record a native process-birth census, one open terminal session and one
+    unsent draft before and after.
+
+  One round trip gives the Qt rollback row, a recorded Qt→Next upgrade with live
+  agents, the no-second-import check and the owner-account half of the
+  clean-install exception. It interrupts the owner's GUI for minutes, so the
+  coordinator schedules it.
+- **Synthetic session.** A disposable target that the coordinator or the test
+  creates, as in the Arch and Mac windows today; never the owner's agents. On
+  va-kids it is a fixture agent in a private profile, because the owner's
+  Windows account has no agents.
+- **Windows UI driving.** A temporary SYSTEM task starts a helper in console
+  session 1 with the user's token. That helper uses UI Automation and SendInput at
+  the same integrity level, including on Toast buttons, with no new grant.
+- **Arch input.** The session user already has an ACL on `/dev/uinput`, so raw
+  uinput pointer events (no package install) and `spectacle -b` screenshots can
+  click a banner or menu in a scheduled display window. Injecting input into the
+  live Plasma session is listed as owner question 3. XTEST into XWayland stays
+  forbidden; a private Xvfb with XTEST remains available for fixture walks.
+- **Arch audio.** `espeak-ng` already exists and can speak into a temporary
+  PipeWire virtual source (`pw-cli`/`pw-loopback`), removed afterwards. Choose
+  that source explicitly in Zerus. `pw-record` on the sink monitor proves that
+  non-silent playback reached the output.
+
+| Gate row | arch | Mac | va-kids |
+|---|---|---|---|
+| Clean install / package (exception) | **Have:** source-install identity and no Qt/KF6/WebEngine in the dependency closure (11-02, `a1023d4`); today's `0fca73f5` source install has clean source identity. Neither is a package transaction or a clean-account install. **Auto:** the exact candidate's CI Arch package job, plus the Qt round trip for the owner-account upgrade half. **Owner:** none. | **Have:** clean frozen `b72dea32` pair/seal verified today. **Auto:** the exact candidate's CI signed/notarized bundle check, plus the Qt round trip. **Owner:** none. | **Have:** PASS. CI install/package checks plus setup 16/16 and legacy 22/22 on `0fca73f5`. The owner-account half is recorded under the exception: no Qt install exists. **Owner:** none. |
+| Upgrade with live agents | **Have:** today all 63 original native PID/births survived GUI Quit/restart; rollouts keep 63–64 agents. Both are Next→Next only. **Auto:** the Qt round trip. **Owner:** none. | **Have:** rollouts keep agents (Next→Next). **Auto:** the Qt round trip (macbundle-u; normal app Quit is authorized). **Owner:** none. | **Have:** legacy case, Qt ZIP→Next installer in its own folder, with seeded config, drafts and session files preserved; no agents. **Auto:** a private profile running a fixture-agent session and ConPTY job through the Qt ZIP's `hgs.exe`, upgraded to Next; verify the same session, run, conversation, job and draft. **Owner:** question 5. |
+| One-time import | **Have:** 9 handled preference families unchanged (11-02); retained-source warning `.66.5.11`. **Blocked:** G3 source work `.66.5.2.1/.66.5.2/.66.5.4` (migrate-u). **Auto after G3:** during the Qt round trip, check the handled families and source hashes, and that there is no reseed or second import. | **Blocked:** G3 as on arch. **Auto after G3:** during the Qt round trip, with the exported defaults snapshot. **Owner:** none. | **Have:** none. The owner account has no Qt registry or INI state (inventory 06:10Z). **Auto:** none on the main account; seeding a legacy source there would manufacture state. **Owner:** question 5. |
+| Service registration / readiness | **Have:** readiness PASS (`5c110055`); today a background no-op, with presence, reads and delivery continuing while the GUI was absent. Custom-unit refusal still PENDING. **Auto:** custom-unit refusal against a private unit directory; one exact-target delivered read with the UI closed, on a synthetic session. **Owner:** none. | **Have:** today the service and host were ready, drain and revoke settled, and wrapper `.4.11` failed closed (macbundle-u fix). **Auto:** inspect the `zerus-setup` LaunchAgent; foreign-definition refusal against a private directory; UI-closed duties on a synthetic session. **Owner:** none. | **Have:** passive registration [x] (11-02); today install/status/remove, cold activation refusal and no service start. **Auto:** start the registered task in session 1; check the pipe identity and readiness with the UI closed; remove it afterwards. **Owner:** the real logon trigger needs a sign-out/sign-in (question 6). |
+| Notifications / clicks | **Have:** today one Post Delivered, with its native ID in the history. The click FAILED to reopen the GUI (`.66.3.42`); banner appearance was not observed. **Auto after the `.42` fix:** one synthetic Post, then a uinput click on the banner (question 3), plus stale and withdrawn refusal. **Owner:** the click if question 3 is declined; lock/idle (question 6). | **Have:** a Post plus an owner click into the project (`f1833dec`; selection unqualified; drain FAILED). Today a Post was Delivered and drain settled; Withdraw is Unknown; no click. **Auto:** Post, drain and withdraw rerun after `.4.11`; selection readback (#1210). **Owner:** the click and selection (question 1); lock/idle (question 6). | **Have:** none. The GUI routes #1170/#1174/#1175 are merged. **Auto:** a service-owned Toast from a synthetic session, clicked through UI Automation, with stale and withdrawn refusal and a cold-GUI launch (win-notify-cl plan `.66.3.30.8`). **Owner:** lock/idle (question 6). |
+| Tray / menu bar / lifecycle | **Have:** today the panel tooltip, menu and primary reopen; normal Quit and maintained unit start; drafts byte-identical. **Auto:** second-instance routing, background start, Quit with a pending draft. **Owner:** none. | **Have:** none. **Auto:** reopen and second instance through `open`; maintained Quit. **Owner:** menu-bar clicks, Services, Hide and Show All (question 1). | **Have:** legacy case first-start window, own tray menu (Open Zerus / No remote machines / Open in / Quit) and native Quit (fixture). **Auto:** on the main install, second instance, background start, draft-safe exit, and setting/removing the login opt-in, all through UI Automation. **Owner:** the real login start (question 6). |
+| Terminal | **Have:** none. **Auto:** a synthetic session and a folder terminal on fixture paths with spaces and non-ASCII; exact argv from `/proc`; resize, paste and reattach after client exit. **Owner:** none. | **Have:** none. **Auto:** none; driving Terminal.app needs AX. **Owner:** the expected Apple Events consent and GUI driving (questions 1 and 2). | **Have:** none. **Auto:** a fixture session through Windows Terminal, PowerShell and ConPTY on paths with spaces and non-ASCII; exact selection through UI Automation; paste and resize through SendInput; continuity after GUI exit. **Owner:** none. |
+| Voice / video | **Have:** today microphone record, Escape to preview, playback state and discard PASS. Camera FAILED (`.66.3.41`; fix #1338 merged, awaiting rollout). Audible playback and transcription unqualified. **Auto:** real-camera preview and cancel after the rollout; espeak-ng speech into a virtual source, then transcription with the existing speech profile; playback proven by sink-monitor capture. **Owner:** question 4. A new speech-provider credential, if no profile exists. | **Have:** none. **Auto:** none; consent state is unknown, and synthetic input needs a virtual audio driver. **Owner:** question 2. | **Have:** none. Voice for local Windows sessions is unsupported by design (installation docs). **Auto:** check through UI Automation that the refusal is visible. **Owner:** none. |
+| UI / durable parity | **Have:** approvals OFF and generic-agent refusal (11-02); today 128 draft records byte-identical. **Auto:** a fixture walk of the installed build in a private Xvfb; on the owner account, read-only service queries plus a uinput-driven walk (question 3); one authenticated frontend request round trip. **Owner:** none if question 3 is approved. | **Have:** none. **Auto:** read-only service and catalog queries. **Owner:** the GUI walk (question 1). | **Have:** first-start window only. **Auto:** a UI Automation walk against a fixture profile with a synthetic session; one frontend request through a ready service to its durable result. **Owner:** none. |
+| Qt rollback / reimport | **Have:** none. **Auto:** the Qt round trip. **Owner:** none. | **Have:** none. **Auto:** the Qt round trip with the retained settings snapshot. **Owner:** none. | **Have:** none; the main account has no Qt. **Auto:** in a fixture, settle the revoke, start the Qt ZIP and return. **Owner:** question 5. |
+| Open failures | `.66.3.41`: rerun the real camera after the rollout (desktop-u). `.66.3.42`: rerun after macbundle-u's fix, with the click as above. | `.66.3.30.2.4`: click and navigation owner-pending (AX untrusted, loginwindow frontmost); wrapper `.4.11`. | `.66.8.1.11` (P2, installer refuses a non-owned folder), `.66.8.1.10` (CR CR LF), both win-accept-cl; `.66.8.1.12` (P4 log line). |
+
+### Batched owner questions
+
+1. **Mac clicks.** Either one window in which the owner unlocks the Mac and
+   performs the listed clicks (one banner, menu-bar items, a short UI walk), or
+   Accessibility for one dedicated, revocable test runner, so macbundle-u can
+   drive them.
+2. **Mac media and terminal consent.** Microphone, camera and Apple Events
+   consent for `com.hgdev.hgs-tray`, if not already granted. Then either one
+   spoken phrase with the owner confirming playback, or permission to install a
+   virtual audio driver for synthetic speech.
+3. **Arch input injection.** May tests inject uinput pointer events into the live
+   Plasma session during coordinator-scheduled display windows? This uses the
+   existing ACL; no new grant. If not, the owner performs one physical click per
+   window.
+4. **Audible playback.** Does a PipeWire (or WASAPI loopback) monitor capture of
+   non-silent output count as playback evidence, or must the owner listen once?
+5. **Windows main account.** It has no Qt install, Qt settings or agents. Accept
+   private-profile evidence (Qt ZIP plus a fixture-agent session) for the upgrade,
+   import and Qt rollback rows. Or authorize installing Qt 0.47.0 plus an agent
+   on that account; that needs the owner's agent login.
+6. **Logon and lock.** On all three machines, the lock/idle notification subcases
+   need a lock and an owner unlock. The va-kids logon-trigger rows need one
+   sign-out/sign-in. Either the owner does these once per machine, or they stay
+   recorded as owner-pending.

@@ -81,6 +81,14 @@ fn try_bindings_at(path: &Path, wait: Duration) -> Option<Bindings> {
 pub(crate) fn exists(name: &str) -> bool {
     binding_path(name).is_file()
 }
+/// Valid OpenCode bindings, read without contacting a service.
+pub(super) fn binding_records() -> Vec<Value> {
+    let Ok(files) = fs::read_dir(bindings()) else { return Vec::new(); };
+    files.flatten().take(5000).filter_map(|file| {
+        let record: Value = serde_json::from_slice(&fs::read(file.path()).ok()?).ok()?;
+        (record["backend"] == "opencode" && binding_path(string(&record, "name")) == file.path()).then_some(record)
+    }).collect()
+}
 pub(super) fn binding(name: &str) -> Result<Value> {
     let bytes = fs::read(binding_path(name)).map_err(|e| e.to_string())?;
     if bytes.len() > 1_048_576 {
@@ -93,6 +101,7 @@ pub(super) fn binding(name: &str) -> Result<Value> {
     {
         return Err("Invalid OpenCode binding".into());
     }
+    session_id::verify(&record)?;
     Ok(record)
 }
 pub(super) fn native_id(id: &str, prefix: &str) -> bool {
@@ -102,8 +111,12 @@ pub(super) fn native_id(id: &str, prefix: &str) -> bool {
             .bytes()
             .all(|c| c.is_ascii_alphanumeric() || c == b'_' || c == b'-')
 }
-fn save(record: &Value) -> Result<()> {
-    atomic(&binding_path(string(record, "name")), &record.to_string())
+/// Saves the binding, keeping its durable session ID on the caller's record.
+pub(super) fn save(record: &mut Value) -> Result<()> {
+    ensure_session_id(record);
+    atomic(&binding_path(string(record, "name")), &record.to_string())?;
+    session_index::note(record, session_index::Kind::OpenCode);
+    Ok(())
 }
 pub(crate) fn config_home() -> PathBuf {
     nonempty_env("OPENCODE_CONFIG_DIR")
@@ -331,7 +344,7 @@ fn adopt_binding(name: &str, conversation_id: &str) {
     if let Ok(mut record) = binding(name) {
         if record["conversation_id"] == conversation_id {
             modernize(&mut record);
-            let _ = save(&record);
+            let _ = save(&mut record);
         }
     }
 }
@@ -405,7 +418,7 @@ pub(crate) fn launch(
     }
     let _writer = lock(None)?;
     let _guard = lock_bindings()?;
-    if record_path(name).exists() || live()?.contains_key(name) {
+    if storage::label_taken(name) || live()?.contains_key(name) {
         return Err(
             "This name belongs to an existing terminal session; it was left untouched".into(),
         );
@@ -452,7 +465,7 @@ pub(crate) fn launch(
         verify_session(&service, &record)?;
         if adopted {
             modernize(&mut record);
-            save(&record)?;
+            save(&mut record)?;
         }
         return Ok(());
     }
@@ -468,7 +481,7 @@ pub(crate) fn launch(
     // Persist the chosen native ID and exact body before the first creation
     // attempt so one launch never has two identities.
     record["creation_body"] = body;
-    save(&record)?;
+    save(&mut record)?;
     finish_creation(&service, record, true)?;
     if let Ok(config) = crate::config::Config::load() {
         crate::swarm::infer_new_session(&config, name, &cwd);
@@ -513,7 +526,7 @@ fn finish_creation(service: &service::Service, mut record: Value, first: bool) -
             let map = record.as_object_mut().unwrap();
             map.remove("creation_pending");
             map.remove("creation_body");
-            save(&record)
+            save(&mut record)
         }
         Err(Refusal::Definite(reason)) => {
             let _ = fs::remove_file(binding_path(string(&record, "name")));
@@ -640,6 +653,9 @@ fn normalize(record: &Value, observed: Option<&Observed>) -> Value {
         "activity_detail":reply.map(|r|r["detail"].clone()),"prompt":prompt.map(|r|r["detail"].clone()),"reply_id":reply.map(|r|r["reply_id"].clone()),"reply_at":reply.map(|r|r["at"].clone()),
         "last_event_at":session["time"]["updated"].as_f64().unwrap_or(0.0)/1000.0,"turn_started":turn_started,"account_id":"native-opencode","account_home":record["agent_home"],
         "model":model["id"],"model_provider":model["providerID"],"settings_model":settings_model,"effort":effort});
+    if !string(record, "session_id").is_empty() {
+        value["session_id"] = record["session_id"].clone();
+    }
     let controls = json!({"send_available":idle,"send_supported":idle,"settings_change_supported":idle && !active,"interrupt_supported":available && active,
         "terminal_supported":false,"terminal_reason":backend::OPENCODE_TERMINAL_REASON.text(),
         "terminal_attach_supported":cfg!(unix) && available && record["service"] == "opencode2",
@@ -1674,23 +1690,31 @@ pub(crate) fn interrupt(record: &Value) -> Result<()> {
     interrupt_with(&running_service()?, &original)
 }
 /// Core of `interrupt`: success when OpenCode says it interrupted the turn or
-/// the session is no longer running.
+/// the session is no longer running. From the POST on, OpenCode may have
+/// stopped the turn, so every error says so (zerus-1wchz).
 fn interrupt_with(native: &dyn Native, record: &Value) -> Result<()> {
-    let reply = native.raw("POST", &session_path(record, "/interrupt"), Some(&json!({})))?;
-    let said = reply.body["interrupted"] == true || reply.body["data"]["interrupted"] == true;
-    if successful(&reply) && said {
-        return Ok(());
-    }
-    // A failed lookup never counts as "not running".
-    if let Ok(active) = active_sessions(native) {
-        if active.get(string(record, "conversation_id")).is_none() {
+    (|| {
+        let reply = native.raw(
+            "POST",
+            &session_path(record, "/interrupt"),
+            Some(&json!({})),
+        )?;
+        let said = reply.body["interrupted"] == true || reply.body["data"]["interrupted"] == true;
+        if successful(&reply) && said {
             return Ok(());
         }
-    }
-    Err(format!(
-        "OpenCode did not confirm the interruption ({})",
-        refusal_reason(&reply)
-    ))
+        // A failed lookup never counts as "not running".
+        if let Ok(active) = active_sessions(native) {
+            if active.get(string(record, "conversation_id")).is_none() {
+                return Ok(());
+            }
+        }
+        Err(format!(
+            "OpenCode did not confirm the interruption ({})",
+            refusal_reason(&reply)
+        ))
+    })()
+    .map_err(|error: String| format!("Interrupt delivery uncertain: {error}"))
 }
 const NOT_QUEUED: &str = "This message is no longer queued";
 /// The message a `remove_queued` request may name: `msg_` and 1-124 ASCII
@@ -1898,7 +1922,7 @@ fn rename_with<N: Native>(
     new: &str,
     scope: Option<&session_action::Scope>,
     connect: impl FnOnce() -> Result<N>,
-    save: impl FnOnce(&Value) -> Result<()>,
+    save: impl FnOnce(&mut Value) -> Result<()>,
     marks: impl FnOnce(&str, &str) -> Result<()>,
     retire: impl FnOnce(&str) -> Result<()>,
 ) -> Result<()> {
@@ -4141,12 +4165,32 @@ mod tests {
             ("POST /api/session/ses_A/interrupt", 200, json!({"interrupted": false})),
             ("GET /api/session/active", 200, json!({"data": {"ses_A": {}}})),
         ]);
-        assert!(interrupt_with(&running, &bound()).is_err());
+        // Every end after the POST may have stopped the turn (zerus-1wchz).
+        let error = interrupt_with(&running, &bound()).unwrap_err();
+        assert!(
+            error.starts_with("Interrupt delivery uncertain: OpenCode did not confirm"),
+            "{error}"
+        );
         let unknown = seen(vec![
             ("POST /api/session/ses_A/interrupt", 500, json!({"message": "down"})),
             ("GET /api/session/active", 500, json!({"message": "down"})),
         ]);
-        assert!(interrupt_with(&unknown, &bound()).is_err());
+        let error = interrupt_with(&unknown, &bound()).unwrap_err();
+        assert!(
+            error.starts_with("Interrupt delivery uncertain: "),
+            "{error}"
+        );
+        // A reply lost after the POST went out.
+        struct Lost;
+        impl Native for Lost {
+            fn raw(&self, _: &str, _: &str, _: Option<&Value>) -> Result<Response> {
+                Err("connection reset by peer".into())
+            }
+        }
+        assert_eq!(
+            interrupt_with(&Lost, &bound()).unwrap_err(),
+            "Interrupt delivery uncertain: connection reset by peer"
+        );
     }
     #[test]
     fn a_queued_message_is_removed_only_while_stopped_and_still_queued() {

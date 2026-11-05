@@ -7,6 +7,8 @@ use std::{
 };
 use zerus_desktop_ledger::operations::cache as cache_ledger;
 
+mod observation;
+
 #[cfg(any(target_os = "linux", target_os = "macos", windows))]
 #[test]
 fn held_original_rollback_excludes_a_real_rearm_and_refuses_when_rearm_already_won() {
@@ -921,4 +923,153 @@ fn unknown_absence_and_a_live_owner_cannot_supply_an_absent_takeover_receipt() {
     }
     std::fs::remove_file(location.root.join("notification-host.lock")).unwrap();
     assert!(absent_takeover(&location, &old_scope, &f.origin).is_err());
+}
+
+#[test]
+fn registration_refresh_keeps_the_same_grant_but_refuses_revoke_and_rearm() {
+    let mut f = Fixture::new();
+    assert!(RegistrationGrant::capture(&f.location).unwrap().is_none());
+    let request = f.request(Action::Grant);
+    f.apply(request);
+    let original = RegistrationGrant::capture(&f.location).unwrap().unwrap();
+    let binding = original.refresh_binding(&f.location).unwrap();
+    let before = f.current();
+    let requests = f.count();
+    for _ in 0..3 {
+        original.check(&f.location).unwrap();
+    }
+    assert_eq!(f.current(), before, "read-only checks changed ownership");
+    assert_eq!(f.count(), requests);
+    // A harmless same-Origin reconnect advances the revision, not incarnation.
+    let request = f.request(Action::Grant);
+    f.apply(request);
+    original.check(&f.location).unwrap();
+    assert_eq!(original.refresh_binding(&f.location).unwrap(), binding);
+    invalidate(&f.store.db).unwrap();
+    assert!(original.check(&f.location).is_err());
+    assert!(original.refresh_binding(&f.location).is_err());
+    assert!(RegistrationGrant::capture(&f.location).unwrap().is_none());
+    let request = f.request(Action::Rearm);
+    f.apply(request);
+    assert!(
+        registration_row(&f.location)
+            .unwrap()
+            .0
+            .status
+            .identity_current
+    );
+    assert!(
+        original.check(&f.location).is_err(),
+        "new Rearm replaced the original Grant"
+    );
+    let replacement = RegistrationGrant::capture(&f.location).unwrap().unwrap();
+    replacement.check(&f.location).unwrap();
+    assert_ne!(replacement.refresh_binding(&f.location).unwrap(), binding);
+}
+
+#[test]
+fn registration_refresh_refuses_changed_configuration_and_actual_origin() {
+    let mut f = Fixture::new();
+    let request = f.request(Action::Grant);
+    f.apply(request);
+    let original = RegistrationGrant::capture(&f.location).unwrap().unwrap();
+    let other = Location {
+        root: f.location.root.clone(),
+        configuration: "b".repeat(64),
+    };
+    assert!(original.check(&other).is_err());
+    std::fs::write(
+        &f.origin.image,
+        b"replacement frontend image with a different length",
+    )
+    .unwrap();
+    assert!(original.check(&f.location).is_err());
+    assert!(RegistrationGrant::capture(&f.location).unwrap().is_none());
+    f.origin = Origin::capture(&f.origin.image, f.origin.build.clone()).unwrap();
+    let request = f.request(Action::Grant);
+    f.apply(request);
+    assert!(
+        original.check(&f.location).is_err(),
+        "new frontend Grant replaced the original"
+    );
+}
+
+#[cfg(unix)]
+#[test]
+fn registration_refresh_retains_the_database_object_instead_of_adopting_its_replacement() {
+    let mut f = Fixture::new();
+    let request = f.request(Action::Grant);
+    f.apply(request);
+    let original = RegistrationGrant::capture(&f.location).unwrap().unwrap();
+    f.store
+        .db
+        .execute_batch("PRAGMA wal_checkpoint(TRUNCATE);")
+        .unwrap();
+    let path = f.location.root.join("state.sqlite3");
+    let replacement = f.location.root.join("replacement.sqlite3");
+    std::fs::copy(&path, &replacement).unwrap();
+    // Identical rows are insufficient when the actual checked file changed.
+    std::fs::rename(replacement, path).unwrap();
+    assert!(original.check(&f.location).is_err());
+}
+
+#[test]
+fn registration_refresh_rejects_each_changed_grant_incarnation_component() {
+    for component in ["journal", "owner_epoch", "origin"] {
+        let mut f = Fixture::new();
+        let request = f.request(Action::Grant);
+        f.apply(request);
+        let original = RegistrationGrant::capture(&f.location).unwrap().unwrap();
+        // Model a changed row component independently so another fence cannot
+        // conceal a missing same-incarnation comparison.
+        let (sql, replacement) = match component {
+            "journal" => (
+                "UPDATE desktop_ownership SET journal=?1 WHERE id=1",
+                uuid::Uuid::new_v4().to_string(),
+            ),
+            "owner_epoch" => (
+                "UPDATE desktop_ownership SET owner_epoch=?1 WHERE id=1",
+                uuid::Uuid::new_v4().to_string(),
+            ),
+            "origin" => {
+                let mut origin = f.origin.clone();
+                origin.build.source_commit = "b".repeat(40);
+                (
+                    "UPDATE desktop_ownership SET origin=?1 WHERE id=1",
+                    serde_json::to_string(&origin).unwrap(),
+                )
+            }
+            _ => unreachable!(),
+        };
+        f.store.db.execute(sql, [replacement]).unwrap();
+        assert!(
+            original.check(&f.location).is_err(),
+            "adopted changed {component}"
+        );
+    }
+}
+
+#[cfg(windows)]
+#[test]
+fn registration_refresh_pins_its_checked_database_without_delete_sharing() {
+    let mut f = Fixture::new();
+    let request = f.request(Action::Grant);
+    f.apply(request);
+    let original = RegistrationGrant::capture(&f.location).unwrap().unwrap();
+    drop(f.store); // The retained registration guard is now the sole database pin.
+    let path = f.location.root.join("state.sqlite3");
+    let before = original.database.identity().unwrap();
+    let error = std::fs::rename(&path, f.location.root.join("moved.sqlite3")).unwrap_err();
+    assert_eq!(
+        error.raw_os_error(),
+        Some(32),
+        "database pin did not refuse replacement: {error}"
+    );
+    original.check(&f.location).unwrap();
+    let actual = platform::file_identity(&path).unwrap();
+    assert_eq!(before, (actual.device, actual.inode));
+    drop(original);
+    let moved = f.location.root.join("moved.sqlite3");
+    std::fs::rename(&path, &moved).unwrap();
+    std::fs::rename(&moved, &path).unwrap();
 }

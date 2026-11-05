@@ -368,6 +368,9 @@ pub(super) fn dispatch(args: &[String]) -> Result<i32> {
             return Ok(0);
         }
         let _guard = if native { lock(Some(&root().join("dsh/bindings.lock")))? } else { lock(None)? };
+        // zerus-ucck P3c: the request's identities select among sessions
+        // that share the label.
+        expect(name, string(&request, "expected_run_id"), string(&request, "expected_conversation_id"))?;
         let record = if native { dsh::binding(name)? } else { read(name)? };
         if string(&request,"expected_run_id").is_empty() || request["expected_run_id"] != record["run_id"]
             || request["expected_conversation_id"] != record["conversation_id"] {
@@ -393,6 +396,8 @@ pub(super) fn dispatch(args: &[String]) -> Result<i32> {
     if index >= 8 {
         return Err("Invalid attachment index".into());
     }
+    // zerus-ucck P3c: the conversation it names selects among sessions that
+    // share the label (resolved at dispatch from `--conversation`).
     let record = if !flag("--archive").is_empty() {
         archive::read_archive(name, flag("--archive"))?
     } else if opencode::exists(name) { opencode::binding(name)?

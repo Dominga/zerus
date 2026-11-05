@@ -39,6 +39,7 @@ struct Session {
     work: Mutex<Work>,
     view: Mutex<View>,
     active: AtomicBool,
+    reattached: AtomicBool,
 }
 #[derive(Clone, Default)]
 pub struct Clones(Arc<Mutex<VecDeque<Arc<Session>>>>);
@@ -97,6 +98,16 @@ impl Clones {
             .cloned()
             .ok_or_else(|| "This clone dialog expired. Open it again.".into())
     }
+    fn close(&self, id: &str) -> Result<(), String> {
+        let session = self.find(id)?;
+        let mut current = lock(&session.view)?;
+        if current.cloning && session.active.load(Ordering::Acquire) {
+            return Err("Cloning repository…".into());
+        }
+        current.cancelled = true;
+        session.reattached.store(false, Ordering::Release);
+        Ok(())
+    }
     fn open(&self, org: &Organization, settings: &Settings, place: Place) -> Result<View, String> {
         proof(org, &place)?;
         let mut hash = Sha256::new();
@@ -115,6 +126,10 @@ impl Clones {
             let mut current = lock(&session.view)?;
             if !session.active.load(Ordering::Acquire) {
                 current.cancelled = false;
+            } else if current.cancelled {
+                // Keep cancellation effective for the old transition. Only
+                // its completion may make this reattached dialog usable.
+                session.reattached.store(true, Ordering::Release);
             }
             return Ok(current.clone());
         }
@@ -138,6 +153,7 @@ impl Clones {
             work: Mutex::new(Work { model, checkpoint }),
             view: Mutex::new(v.clone()),
             active: AtomicBool::new(false),
+            reattached: AtomicBool::new(false),
         }));
         Ok(v)
     }
@@ -153,6 +169,13 @@ fn publish(session: &Session, model: &repo::Clone) -> Result<bool, String> {
 struct Active<'a>(&'a Session);
 impl Drop for Active<'_> {
     fn drop(&mut self) {
+        // Serialize completion with open/close: a racing reattach must either
+        // mark this release or observe an already inactive step.
+        let mut current = lock(&self.0.view);
+        let reattached = self.0.reattached.swap(false, Ordering::AcqRel);
+        if let Ok(current) = &mut current {
+            current.cancelled &= !reattached;
+        }
         self.0.active.store(false, Ordering::Release);
     }
 }
@@ -308,13 +331,7 @@ pub fn project_clone_status(clones: State<'_, Clones>, id: String) -> Result<Vie
 }
 #[tauri::command]
 pub fn project_clone_close(clones: State<'_, Clones>, id: String) -> Result<(), String> {
-    let session = clones.find(&id)?;
-    let mut v = lock(&session.view)?;
-    if v.cloning && session.active.load(Ordering::Acquire) {
-        return Err("Cloning repository…".into());
-    }
-    v.cancelled = true;
-    Ok(())
+    clones.close(&id)
 }
 #[tauri::command]
 pub async fn project_clone_step(
@@ -553,6 +570,81 @@ mod tests {
         assert!(!f.dir.join("settings.json").exists());
         assert!(!lock(&session.work).unwrap().model.busy());
     }
+    fn reattach_while_checking(close_again: bool) {
+        let f = Fixture::new(true);
+        let clones = Clones::default();
+        let opened = clones.open(&f.org, &f.settings, place()).unwrap();
+        let session = clones.find(&opened.id).unwrap();
+        std::thread::scope(|scope| {
+            let worker =
+                scope.spawn(|| execute(&session, &f.org, &f.settings, Step::Begin, source()));
+            let limit = Instant::now() + Duration::from_secs(5);
+            while !f.dir.join("checking").exists() && Instant::now() < limit {
+                std::thread::sleep(Duration::from_millis(10));
+            }
+            assert!(f.dir.join("checking").exists());
+            clones.close(&opened.id).unwrap();
+            let reattached = clones.open(&f.org, &f.settings, place()).unwrap();
+            assert_eq!(reattached.id, opened.id);
+            assert!(reattached.busy);
+            assert!(
+                lock(&session.view).unwrap().cancelled,
+                "reopening must not revive the cancelled transition"
+            );
+            let busy = execute(&session, &f.org, &f.settings, Step::Begin, source())
+                .err()
+                .unwrap();
+            assert!(busy.contains("already busy"));
+            if close_again {
+                clones.close(&opened.id).unwrap();
+            }
+            assert_eq!(f.calls().len(), 2);
+            assert!(!f.dir.join("settings.json").exists());
+            std::fs::write(f.dir.join("release"), b"").unwrap();
+            worker.join().unwrap().unwrap();
+        });
+        assert_eq!(
+            f.calls().len(),
+            2,
+            "the cancelled check must never reserve or clone"
+        );
+        assert!(!f.dir.join("settings.json").exists());
+        assert!(!session.active.load(Ordering::Acquire));
+        assert!(!lock(&session.work).unwrap().model.busy());
+        assert_eq!(lock(&session.view).unwrap().cancelled, close_again);
+        if close_again {
+            assert!(
+                execute(&session, &f.org, &f.settings, Step::Begin, source())
+                    .err()
+                    .unwrap()
+                    .contains("closed")
+            );
+            assert_eq!(f.calls().len(), 2);
+            clones.open(&f.org, &f.settings, place()).unwrap();
+        }
+        let retry = execute(&session, &f.org, &f.settings, Step::Begin, source()).unwrap();
+        assert!(retry.uncertain);
+        assert_eq!(
+            f.calls()
+                .iter()
+                .filter(|args| args
+                    .windows(2)
+                    .any(|words| words == ["repository", "clone"]))
+                .count(),
+            1
+        );
+    }
+
+    #[test]
+    fn reopening_during_a_cancelled_check_recovers_only_after_that_check_ends() {
+        reattach_while_checking(false);
+    }
+
+    #[test]
+    fn closing_the_reattached_dialog_again_preserves_cancellation() {
+        reattach_while_checking(true);
+    }
+
     #[test]
     fn closing_before_worker_admission_is_sticky() {
         let f = Fixture::new(false);

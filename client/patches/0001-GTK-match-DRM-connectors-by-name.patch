@@ -1,0 +1,82 @@
+--- a/Source/WebKit/UIProcess/glib/DisplayVBlankMonitorDRM.cpp
++++ b/Source/WebKit/UIProcess/glib/DisplayVBlankMonitorDRM.cpp
+@@ -43,11 +43,47 @@
+ #if PLATFORM(GTK)
+ #include "ScreenManager.h"
+ #include <gtk/gtk.h>
++#include <wtf/glib/GUniquePtr.h>
++#include <wtf/text/StringCommon.h>
++#include <wtf/text/StringToIntegerConversion.h>
+ #endif
+ 
+ namespace WebKit {
+ 
+ #if PLATFORM(GTK)
++static std::span<const char8_t> utf8Span(const char* string)
++{
++    if (!string)
++        return { };
++    return unsafeMakeSpan(byteCast<char8_t>(string), std::char_traits<char>::length(string));
++}
++
++#if USE(GTK4)
++static std::span<const char8_t> monitorConnectorName(GdkMonitor* monitor)
++{
++    return utf8Span(gdk_monitor_get_connector(monitor));
++}
++#else
++static GUniquePtr<char> monitorConnectorName(GdkMonitor* monitor)
++{
++    auto* display = gdk_monitor_get_display(monitor);
++    auto* screen = gdk_display_get_default_screen(display);
++    if (!screen)
++        return { };
++
++    const int monitorCount = gdk_display_get_n_monitors(display);
++    for (int i = 0; i < monitorCount; ++i) {
++        if (gdk_display_get_monitor(display, i) != monitor)
++            continue;
++        ALLOW_DEPRECATED_DECLARATIONS_BEGIN
++        GUniquePtr<char> name(gdk_screen_get_monitor_plug_name(screen, i));
++        ALLOW_DEPRECATED_DECLARATIONS_END
++        return WTF::move(name);
++    }
++    return { };
++}
++#endif
++
+ static std::optional<std::pair<uint32_t, uint32_t>> findCrtc(int fd, GdkMonitor* monitor)
+ {
+     drmModeRes* resources = drmModeGetResources(fd);
+@@ -56,8 +92,15 @@
+ 
+     uint32_t widthMM = gdk_monitor_get_width_mm(monitor);
+     uint32_t heightMM = gdk_monitor_get_height_mm(monitor);
++#if USE(GTK4)
++    auto connectorNameSpan = monitorConnectorName(monitor);
++#else
++    auto name = monitorConnectorName(monitor);
++    auto connectorNameSpan = utf8Span(name.get());
++#endif
++    const auto dash = reverseFind(connectorNameSpan, u8'-');
++    const auto connectorTypeID = dash != notFound ? parseInteger<uint32_t>(connectorNameSpan.subspan(dash + 1)) : std::nullopt;
+ 
+-    // First find connectors matching the size.
+     Vector<drmModeConnector*, 1> connectors;
+     for (uint32_t connectorId : unsafeMakeSpan(resources->connectors, resources->count_connectors)) {
+         auto* connector = drmModeGetConnector(fd, connectorId);
+@@ -69,7 +112,13 @@
+             continue;
+         }
+ 
+-        if (widthMM != connector->mmWidth || heightMM != connector->mmHeight) {
++        if (!connectorNameSpan.empty()) {
++            const auto connectorTypeName = utf8Span(drmModeGetConnectorTypeName(connector->connector_type));
++            if (!connectorTypeID || *connectorTypeID != connector->connector_type_id || !equalSpans(connectorNameSpan.first(dash), connectorTypeName)) {
++                drmModeFreeConnector(connector);
++                continue;
++            }
++        } else if (widthMM != connector->mmWidth || heightMM != connector->mmHeight) {
+             drmModeFreeConnector(connector);
+             continue;
+         }

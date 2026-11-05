@@ -11,6 +11,8 @@ mod capture;
 pub mod geometry;
 pub use capture::{CapturedQt, CapturedSettings};
 mod imports;
+mod legacy_projects;
+pub use legacy_projects::Record as LegacyProjectImport;
 pub mod qt;
 mod qt_layout;
 pub mod repository;
@@ -1010,6 +1012,57 @@ impl Settings {
     /// The seed record (`source`, `path`, `at`, `keys`), once seeded.
     pub fn seed_record(&self) -> Option<Value> {
         self.loaded().contents.seed.clone()
+    }
+
+    /// The Qt preference import by key name only (no values): handled
+    /// families, families waiting to retry, and Qt keys with no Next use.
+    pub fn preference_report(&self) -> Value {
+        imports::report(&self.loaded().contents)
+    }
+
+    /// A distinct one-time family, never part of Qt organization recovery.
+    /// Pending records are observation-only even after a process restart.
+    pub fn legacy_project_import(
+        &self,
+        machine: &str,
+    ) -> Result<Option<LegacyProjectImport>, String> {
+        let state = self.loaded();
+        if state.unreadable.is_some() {
+            return Err(crate::swarm::legacy_projects::Code::Invalid.as_str().into());
+        }
+        legacy_projects::read(&state.contents.extra, machine).map_err(|e| e.as_str().into())
+    }
+
+    /// True only for the first durable reservation. A repeat never admits an
+    /// apply, whether the previous attempt is pending, incomplete or complete.
+    pub fn prepare_legacy_project_import(
+        &self,
+        plan: &crate::swarm::legacy_projects::Plan,
+    ) -> Result<bool, String> {
+        self.update_organization_record(|contents| {
+            legacy_projects::prepare(&mut contents.extra, plan).map_err(|e| e.as_str())
+        })
+    }
+
+    /// Finish only from newly verified original-scope observation. This
+    /// records evidence and never recreates or returns an apply request.
+    pub fn observe_legacy_project_import(
+        &self,
+        binding: &crate::swarm::legacy_projects::Binding,
+        snapshot: &Value,
+    ) -> Result<bool, String> {
+        self.update_organization_record(|contents| {
+            legacy_projects::observe(&mut contents.extra, binding, snapshot).map_err(|e| e.as_str())
+        })
+    }
+
+    /// Fixed codes and key names only; no machine, project or folder values.
+    pub fn legacy_project_report(&self) -> Value {
+        let state = self.loaded();
+        if state.unreadable.is_some() {
+            return legacy_projects::unavailable(crate::swarm::legacy_projects::Code::Invalid);
+        }
+        legacy_projects::report(&state.contents.extra)
     }
 
     /// Background organization recovery shares this writer and its existing

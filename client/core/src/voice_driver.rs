@@ -446,7 +446,15 @@ impl Loop {
                 Effect::CancelRecorder => self.capture.cancel(),
                 Effect::PauseMessages => (self.sink)(Out::PauseMessages),
                 Effect::StopPlayback => (self.sink)(Out::StopPlayback),
-                Effect::Load { token, key } => {
+                Effect::Load {
+                    token,
+                    key,
+                    legacy,
+                    session,
+                } => {
+                    if !legacy.is_empty() {
+                        self.drafts.adopt(&legacy, &key, &session, |_| {});
+                    }
                     let feed = self.feed.clone();
                     self.drafts.load(&key, move |loaded| {
                         let _ = feed.send(Message::Loaded(token, loaded.draft));

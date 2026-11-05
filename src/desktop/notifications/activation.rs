@@ -1,7 +1,7 @@
 //! Ephemeral, service-owned click delivery. Only an original authenticated
 //! frontend child can wait here; generic requests and display watches cannot.
 #![allow(dead_code)] // Callback/launcher attachment follows the platform lifecycle.
-use super::{Activation, Identity, Outbox, Target};
+use super::{AdmittedClick, Identity, Outbox, Target};
 use crate::desktop::{fanout::Queue, ownership, store::Store, ui_authority};
 use anyhow::{ensure, Context, Result};
 use rusqlite::OptionalExtension;
@@ -14,7 +14,7 @@ use zerus_client_core::desktop::{
 
 struct Pending {
     id: String,
-    value: Activation,
+    click: AdmittedClick,
     until: Instant,
 }
 struct Wait {
@@ -94,7 +94,7 @@ impl Router {
             foreground: (0, 0),
         }
     }
-    pub fn offer(&mut self, store: &Store, outbox: &Outbox, value: Activation) -> Result<bool> {
+    pub fn offer(&mut self, store: &Store, outbox: &Outbox, click: AdmittedClick) -> Result<bool> {
         ensure!(!self.stopping, "activation transport stopped");
         self.expire();
         ensure!(
@@ -102,7 +102,7 @@ impl Router {
                 && outbox.session.service_epoch == self.epoch,
             "activation source changed"
         );
-        if outbox.current_activation(store, &value)?.is_none() {
+        if outbox.admitted_activation(store, &click)?.is_none() {
             return Ok(false);
         }
         if self.pending.len() == wire::QUEUE {
@@ -111,7 +111,7 @@ impl Router {
         }
         self.pending.push_back(Pending {
             id: uuid::Uuid::new_v4().to_string(),
-            value,
+            click,
             until: Instant::now() + wire::MAX_AGE,
         });
         Ok(true)
@@ -234,7 +234,7 @@ impl Router {
         );
         // The whole queue is capped at 32; no journal or session scan.
         while let Some(pending) = self.pending.pop_front() {
-            let Some(binding) = outbox.current_activation(store, &pending.value)? else {
+            let Some(binding) = outbox.admitted_activation(store, &pending.click)? else {
                 continue;
             };
             let raw:Option<String>=store.db.query_row("SELECT CASE WHEN length(CAST(identity AS BLOB))<=4096 THEN identity END FROM desktop_intents WHERE id=?1",[&binding.intent_id],|r|r.get(0)).optional()?.flatten();
@@ -262,14 +262,14 @@ impl Router {
             }
             let open = Open {
                 activation_id: pending.id,
-                post_request_id: pending.value.request_id,
+                post_request_id: pending.click.value.request_id,
                 target: wire::Target {
                     computer,
                     run,
                     conversation,
                 },
-                token: pending.value.token,
-                platform_context: pending.value.platform_context,
+                token: pending.click.value.token,
+                platform_context: pending.click.value.platform_context,
             };
             ensure!(open.valid(), "activation target invalid");
             return Ok(Some((open, pending.until)));

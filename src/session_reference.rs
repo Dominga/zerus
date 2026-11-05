@@ -16,6 +16,10 @@ pub(crate) struct Reference {
     pub run: String,
     pub archive: String,
     pub agent: String,
+    /// The durable session ID (zerus-ucck P1c). Parsed and verified when a
+    /// reference carries it; references do not emit it yet, because older
+    /// parsers refuse an unknown field (rollout gated as P3).
+    pub session: String,
 }
 fn encode(value: &str) -> String {
     value
@@ -68,6 +72,7 @@ impl Reference {
                 "run",
                 "archive",
                 "agent",
+                "session",
             ]
             .contains(&key.as_str())
                 || fields.insert(key, decode(value)?).is_some()
@@ -87,6 +92,7 @@ impl Reference {
             run: take("run"),
             archive: take("archive"),
             agent: take("agent"),
+            session: take("session"),
         };
         if !uuid::Uuid::parse_str(&reference.machine)
             .is_ok_and(|id| !id.is_nil() && id.to_string() == reference.machine)
@@ -101,6 +107,7 @@ impl Reference {
             || reference.name.len() > 512
             || !reference.name.contains('/')
             || (reference.conversation.is_empty() && reference.run.is_empty())
+            || (!reference.session.is_empty() && !state::session_id::canonical(&reference.session))
             || [
                 &reference.name,
                 &reference.conversation,
@@ -124,6 +131,7 @@ impl Reference {
             ("run", &self.run),
             ("archive", &self.archive),
             ("agent", &self.agent),
+            ("session", &self.session),
         ];
         format!(
             "zerus://session?{}",
@@ -197,6 +205,7 @@ pub(crate) fn create(config: &Config, args: &[String]) -> cli::Result<i32> {
         run: text("run_id"),
         archive,
         agent,
+        session: String::new(),
     };
     print(&reference, as_json, json!({}))
 }
@@ -245,6 +254,7 @@ fn caller(config: &Config) -> cli::Result<Option<(Reference, String)>> {
         run: text("run_id"),
         archive: String::new(),
         agent: String::new(),
+        session: String::new(),
     };
     Ok(Some((reference, text("agent"))))
 }
@@ -357,6 +367,7 @@ mod tests {
             run: "run".into(),
             archive: String::new(),
             agent: String::new(),
+            session: String::new(),
         };
         let uri = reference.uri();
         assert_eq!(Reference::parse(&uri).unwrap().name, reference.name);
@@ -374,6 +385,41 @@ mod tests {
         }
     }
 
+    /// zerus-ucck P1c: references do not emit `session` until every reader
+    /// parses it. One built as `hgs reference` and `hgs self` build it uses
+    /// only the fields the strict parser of older hgs accepts, and still parses.
+    #[test]
+    fn an_emitted_reference_keeps_the_strict_shape_older_parsers_accept() {
+        const OLDER: [&str; 7] = ["machine", "host", "name", "conversation", "run", "archive", "agent"];
+        let reference = Reference {
+            machine: "11111111-1111-4111-8111-111111111111".into(),
+            host: "fixture".into(),
+            name: "claude/project/a".into(),
+            conversation: "conversation".into(),
+            run: "run".into(),
+            archive: "22222222-2222-4222-8222-222222222222".into(),
+            agent: "agent".into(),
+            session: String::new(),
+        };
+        let uri = reference.uri();
+        let query = uri.strip_prefix("zerus://session?").unwrap();
+        for pair in query.split('&') {
+            let key = pair.split_once('=').unwrap().0;
+            assert!(OLDER.contains(&key), "{key} in {uri}");
+        }
+        assert_eq!(Reference::parse(&uri).unwrap().session, "");
+        // The current parser accepts a session ID, exactly once and canonical.
+        let session = "3f2a9c1d-0b4e-4d6a-9c1d-2e3f4a5b6c7d";
+        assert_eq!(Reference::parse(&format!("{uri}&session={session}")).unwrap().session, session);
+        for tail in [
+            "&session=NOT-A-UUID".to_owned(),
+            format!("&session={}", session.to_uppercase()),
+            format!("&session={session}&session={session}"),
+        ] {
+            assert!(Reference::parse(&format!("{uri}{tail}")).is_err(), "{tail}");
+        }
+    }
+
     #[test]
     fn the_sender_envelope_names_an_exact_copyable_reference() {
         let reference = Reference {
@@ -384,6 +430,7 @@ mod tests {
             run: "run".into(),
             archive: String::new(),
             agent: String::new(),
+            session: String::new(),
         };
         let uri = reference.uri();
         let text = envelope(&reference.name, &reference.host, &uri, "Line one.\n\nLine two.");

@@ -149,7 +149,59 @@ mod native {
     }
 
     #[test]
+    fn a_keep_epoch_refresh_requires_a_fresh_read_of_our_own_native_receipt() {
+        #[cfg(unix)]
+        if crate::test_context::non_agent() {
+            return;
+        }
+        let _process = crate::PROCESS_TREE.read().unwrap();
+        tauri::async_runtime::block_on(async {
+            let f = Fixture::new(Mode::Service, json!({"state":"service"}));
+            let config = "a".repeat(64);
+            let stop = Arc::new(AtomicBool::new(false));
+            assert!(
+                f.owner
+                    .current_grant(config.clone(), stop.clone())
+                    .await
+                    .is_none(),
+                "a display status alone cannot construct the token"
+            );
+            f.run(Some(Action::Grant));
+            let token = f
+                .owner
+                .current_grant(config.clone(), stop.clone())
+                .await
+                .unwrap();
+            let original = token.status().clone();
+            let path = f.root.join("current.json");
+            let mut changed = original.clone();
+            changed.owner_epoch = Some(uuid::Uuid::new_v4().to_string());
+            fs::write(&path, serde_json::to_vec(&changed).unwrap()).unwrap();
+            let calls = f.calls("frontend-request").len();
+            f.owner.keep_epoch_refresh(token, stop.clone()).await;
+            assert_eq!(
+                f.calls("frontend-request").len(),
+                calls,
+                "changed epoch is never repaired"
+            );
+            fs::write(&path, serde_json::to_vec(&original).unwrap()).unwrap();
+            let token = f.owner.current_grant(config, stop.clone()).await.unwrap();
+            f.owner.keep_epoch_refresh(token, stop).await;
+            assert_eq!(f.calls("frontend-request").len(), calls + 1);
+            assert!(f.owner.granted());
+            assert_eq!(
+                f.owner.view().status.unwrap().owner_epoch,
+                original.owner_epoch
+            );
+        });
+    }
+
+    #[test]
     fn startup_grant_uses_original_mode_and_only_revocation_requires_explicit_rearm() {
+        #[cfg(unix)]
+        if crate::test_context::non_agent() {
+            return;
+        }
         let _process = crate::PROCESS_TREE.read().unwrap();
         let f = Fixture::new(Mode::Service, json!({"state":"identity_changed"}));
         let view = f.run(Some(Action::Grant));
@@ -181,6 +233,10 @@ mod native {
 
     #[test]
     fn lost_original_is_only_queried_and_missing_requires_a_fresh_definitive_negative() {
+        #[cfg(unix)]
+        if crate::test_context::non_agent() {
+            return;
+        }
         let _process = crate::PROCESS_TREE.read().unwrap();
         let f = Fixture::new(Mode::Service, json!({"lost":true,"missing":true}));
         let original = f.run(Some(Action::Grant));
@@ -213,6 +269,10 @@ mod native {
 
     #[test]
     fn pending_drain_and_historical_receipts_never_release_native_posting() {
+        #[cfg(unix)]
+        if crate::test_context::non_agent() {
+            return;
+        }
         let _process = crate::PROCESS_TREE.read().unwrap();
         let f = Fixture::new(Mode::Native, json!({"pending":true}));
         let original = f.run(Some(Action::NativeTakeover));
@@ -282,6 +342,10 @@ mod native {
 
     #[test]
     fn startup_retries_only_a_definitive_image_drain_refusal_with_new_bounded_intents() {
+        #[cfg(unix)]
+        if crate::test_context::non_agent() {
+            return;
+        }
         let _process = crate::PROCESS_TREE.read().unwrap();
         tauri::async_runtime::block_on(async {
             for (config, count, granted) in [
@@ -329,6 +393,10 @@ mod native {
 
     #[test]
     fn local_transport_capacity_recovers_without_an_original_to_replay() {
+        #[cfg(unix)]
+        if crate::test_context::non_agent() {
+            return;
+        }
         let _process = crate::PROCESS_TREE.read().unwrap();
         let f = Fixture::new(Mode::Service, json!({}));
         let held = [
@@ -359,6 +427,10 @@ mod native {
 
     #[test]
     fn a_fresh_revoked_scope_or_read_failure_cannot_reuse_an_old_transient_refusal() {
+        #[cfg(unix)]
+        if crate::test_context::non_agent() {
+            return;
+        }
         let _process = crate::PROCESS_TREE.read().unwrap();
         for changed in [
             json!({"state":"revoked","rearm_required":true}),
@@ -376,6 +448,10 @@ mod native {
 
     #[test]
     fn the_actual_service_connection_retries_slow_drain_and_preserves_explicit_rearm() {
+        #[cfg(unix)]
+        if crate::test_context::non_agent() {
+            return;
+        }
         let _process = crate::PROCESS_TREE.read().unwrap();
         tauri::async_runtime::block_on(async {
             for (revoked, slow) in [(false, false), (true, false), (false, true)] {
@@ -437,6 +513,10 @@ mod native {
 
     #[test]
     fn long_grant_recovery_keeps_watch_and_catalog_live_until_a_later_fresh_grant() {
+        #[cfg(unix)]
+        if crate::test_context::non_agent() {
+            return;
+        }
         let _process = crate::PROCESS_TREE.read().unwrap();
         tauri::async_runtime::block_on(async {
             let f = Fixture::new(
@@ -485,6 +565,10 @@ mod native {
 
     #[test]
     fn long_grant_recovery_stops_when_a_new_original_becomes_unknown() {
+        #[cfg(unix)]
+        if crate::test_context::non_agent() {
+            return;
+        }
         let _process = crate::PROCESS_TREE.read().unwrap();
         tauri::async_runtime::block_on(async {
             let f = Fixture::new(
@@ -519,6 +603,10 @@ mod native {
 
     #[test]
     fn a_lost_grant_reply_is_looked_up_once_and_only_definitive_not_applied_admits_a_fresh_grant() {
+        #[cfg(unix)]
+        if crate::test_context::non_agent() {
+            return;
+        }
         let _process = crate::PROCESS_TREE.read().unwrap();
         tauri::async_runtime::block_on(async {
             for definitive in [true, false] {
@@ -573,6 +661,10 @@ mod native {
 
     #[test]
     fn an_authority_change_after_a_definitive_negative_fences_the_recovery_grant() {
+        #[cfg(unix)]
+        if crate::test_context::non_agent() {
+            return;
+        }
         let _process = crate::PROCESS_TREE.read().unwrap();
         tauri::async_runtime::block_on(async {
             for (journal, revision) in [
@@ -627,6 +719,10 @@ mod native {
 
     #[test]
     fn a_check_between_recovery_eligibility_and_admission_never_admits_an_unbound_grant() {
+        #[cfg(unix)]
+        if crate::test_context::non_agent() {
+            return;
+        }
         let _process = crate::PROCESS_TREE.read().unwrap();
         tauri::async_runtime::block_on(async {
             let f = Fixture::new(
@@ -690,6 +786,10 @@ mod native {
 
     #[test]
     fn the_retry_decision_table_never_downgrades_a_basis_or_admits_an_unverified_grant() {
+        #[cfg(unix)]
+        if crate::test_context::non_agent() {
+            return;
+        }
         let _process = crate::PROCESS_TREE.read().unwrap();
         // A retained basis: the real lost original plus its definitive lookup.
         let f = Fixture::new(
@@ -794,6 +894,10 @@ mod native {
 
     #[test]
     fn a_transient_refusal_retry_is_fenced_when_the_authority_scope_moves() {
+        #[cfg(unix)]
+        if crate::test_context::non_agent() {
+            return;
+        }
         let _process = crate::PROCESS_TREE.read().unwrap();
         tauri::async_runtime::block_on(async {
             for (journal, revision) in [
@@ -848,6 +952,10 @@ mod native {
 
     #[test]
     fn a_busy_check_never_turns_a_retained_basis_into_an_unbound_grant() {
+        #[cfg(unix)]
+        if crate::test_context::non_agent() {
+            return;
+        }
         let _process = crate::PROCESS_TREE.read().unwrap();
         tauri::async_runtime::block_on(async {
             let f = Fixture::new(
@@ -890,6 +998,10 @@ mod native {
 
     #[test]
     fn only_a_verified_exit_and_unchanged_scope_let_not_applied_admit_a_grant() {
+        #[cfg(unix)]
+        if crate::test_context::non_agent() {
+            return;
+        }
         let _process = crate::PROCESS_TREE.read().unwrap();
         let f = Fixture::new(Mode::Service, json!({"lost":true,"missing":true}));
         assert!(f.run(Some(Action::Grant)).pending);
@@ -914,6 +1026,10 @@ mod native {
 
     #[test]
     fn connection_close_joins_a_long_grant_backoff_without_another_attempt() {
+        #[cfg(unix)]
+        if crate::test_context::non_agent() {
+            return;
+        }
         let _process = crate::PROCESS_TREE.read().unwrap();
         tauri::async_runtime::block_on(async {
             let f = Fixture::new(
@@ -1043,6 +1159,10 @@ mod native {
 
     #[test]
     fn closed_root_refusal_explains_failure_without_settling_or_replaying_original() {
+        #[cfg(unix)]
+        if crate::test_context::non_agent() {
+            return;
+        }
         let _process = crate::PROCESS_TREE.read().unwrap();
         let f = Fixture::new(
             Mode::Native,
@@ -1067,6 +1187,10 @@ mod native {
 
     #[test]
     fn native_recovery_retains_the_original_controller_and_actual_last_pipe_charge() {
+        #[cfg(unix)]
+        if crate::test_context::non_agent() {
+            return;
+        }
         let _process = crate::PROCESS_TREE.read().unwrap();
         let f = Fixture::new(Mode::Native, json!({"held_pipe":true}));
         struct Release(PathBuf);
@@ -1111,6 +1235,10 @@ mod native {
 
     #[test]
     fn native_bootstrap_requires_exact_settlement_and_all_original_resources() {
+        #[cfg(unix)]
+        if crate::test_context::non_agent() {
+            return;
+        }
         let _process = crate::PROCESS_TREE.read().unwrap();
         let f = Fixture::new(Mode::Native, json!({}));
         let proof =
@@ -1131,6 +1259,10 @@ mod native {
 
     #[test]
     fn never_service_native_start_consumes_only_its_original_authenticated_noop_reply() {
+        #[cfg(unix)]
+        if crate::test_context::non_agent() {
+            return;
+        }
         let _process = crate::PROCESS_TREE.read().unwrap();
         let f = Fixture::new(Mode::Native, json!({"never_service":true}));
         let proof =
@@ -1168,6 +1300,10 @@ mod native {
 
     #[test]
     fn two_lost_noop_intents_exit_fenced_within_the_original_budget() {
+        #[cfg(unix)]
+        if crate::test_context::non_agent() {
+            return;
+        }
         let _process = crate::PROCESS_TREE.read().unwrap();
         let f = Fixture::new(
             Mode::Native,
@@ -1200,6 +1336,10 @@ mod native {
 
     #[test]
     fn lost_initial_noop_admits_only_one_fresh_authenticated_takeover_and_uses_its_result() {
+        #[cfg(unix)]
+        if crate::test_context::non_agent() {
+            return;
+        }
         let _process = crate::PROCESS_TREE.read().unwrap();
         let f = Fixture::new(
             Mode::Native,
@@ -1225,6 +1365,10 @@ mod native {
 
     #[test]
     fn an_unverified_exit_or_existing_journal_never_gets_the_absent_native_exception() {
+        #[cfg(unix)]
+        if crate::test_context::non_agent() {
+            return;
+        }
         let _process = crate::PROCESS_TREE.read().unwrap();
         for (never_service, confirmed) in [(true, false), (false, true)] {
             let f = Fixture::new(
@@ -1261,6 +1405,10 @@ mod native {
 
     #[test]
     fn an_original_reply_with_a_different_scope_or_fingerprint_remains_unconfirmed() {
+        #[cfg(unix)]
+        if crate::test_context::non_agent() {
+            return;
+        }
         let _process = crate::PROCESS_TREE.read().unwrap();
         for field in ["request_id", "configuration", "fingerprint"] {
             let f = Fixture::new(Mode::Native, json!({"bad_receipt":field}));
@@ -1274,6 +1422,10 @@ mod native {
 
     #[test]
     fn an_original_descendants_pipe_delays_native_ready_without_replaying_takeover() {
+        #[cfg(unix)]
+        if crate::test_context::non_agent() {
+            return;
+        }
         let _process = crate::PROCESS_TREE.read().unwrap();
         let f = Fixture::new(Mode::Native, json!({"held_pipe":true}));
         let helper = f.root.join("hgs");

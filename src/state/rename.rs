@@ -83,7 +83,7 @@ pub(super) fn dispatch_scoped(args: &[String], dry: bool, scope: Option<&session
     let snapshot = live()?;
     if archive_id.is_none()
         && old != new
-        && (snapshot.contains_key(new) || record_path(new).exists())
+        && (snapshot.contains_key(new) || storage::label_taken(new))
     {
         return Err(format!(
             "{new}: a live or saved session already uses this name"
@@ -110,7 +110,9 @@ pub(super) fn dispatch_scoped(args: &[String], dry: bool, scope: Option<&session
             None
         };
         if let Some(scope)=scope {scope.check(record.as_ref().ok_or("Scoped rename requires a tracked binding")?)?;}
-        let live_panes = snapshot.get(old);
+        // The session's own terminal (P3b); an untracked one by its name.
+        let terminal = record.as_ref().map_or(old.as_str(), terminal_name).to_owned();
+        let live_panes = snapshot.get(&terminal);
         if record.is_none() && live_panes.is_none() {
             return Err(format!("{old}: session not found"));
         }
@@ -126,11 +128,14 @@ pub(super) fn dispatch_scoped(args: &[String], dry: bool, scope: Option<&session
         }
         if old != new && !dry {
             let id = if live_panes.is_some() {
-                Some(session_id(old)?)
+                Some(session_id(&terminal)?)
             } else {
                 None
             };
-            let legacy = record.as_ref().is_some_and(|record| {
+            // A session in the ID layout is renamed in place (P3a): no route
+            // and no shadow at a label's path.
+            let in_place = record.as_ref().is_some_and(storage::in_id_layout);
+            let legacy = !in_place && record.as_ref().is_some_and(|record| {
                 record["run_identity_version"] != 1
                     && record["legacy_shadow"].is_null()
                     && record["supervisor"].is_object()
@@ -138,9 +143,14 @@ pub(super) fn dispatch_scoped(args: &[String], dry: bool, scope: Option<&session
             });
             let mut record = record;
             if let Some(record) = &mut record { processes::compact(record); }
-            let transaction = json!({"version":1,"old":old,"new":new,"record":record,
-                "session_id":id,"legacy":legacy,
-                "source_routed":route_path(old).exists()});
+            // The terminal moves to the new label by its `$N`, under the
+            // writer lock (P3b); recovery compares its name with `terminal`.
+            let mut transaction = json!({"version":1,"old":old,"new":new,"record":record,
+                "session_id":id,"terminal":terminal,"legacy":legacy,
+                "source_routed":!in_place && route_path(old).exists()});
+            if in_place {
+                transaction["layout"] = json!("id");
+            }
             let path = root()
                 .join("renames")
                 .join(format!("{}.json", uuid::Uuid::new_v4()));
@@ -157,7 +167,7 @@ pub(super) fn dispatch_scoped(args: &[String], dry: bool, scope: Option<&session
         }
     }
     if let Some(scope)=scope {
-        if archive_id.is_none() {scope.result_record(&read(new)?);}
+        if archive_id.is_none() {scope.result_record(&renamed(new)?);}
     } else {println!(
         "hgs: {}renamed {old} to {new}",
         if dry { "would have " } else { "" }
@@ -165,9 +175,26 @@ pub(super) fn dispatch_scoped(args: &[String], dry: bool, scope: Option<&session
     Ok(0)
 }
 
+/// A rename that moved the session's terminal gives the record its new
+/// terminal name (P3b). One that moved none, of a stopped or paused session,
+/// clears it, so the session's terminal is its new label until a launch names
+/// one: an old name another session may later take never stays (#1445
+/// review).
+fn moved_terminal(transaction: &Value, record: &mut Value) {
+    if transaction["session_id"].is_string() {
+        record["terminal_name"] = transaction["new"].clone();
+    } else if let Some(fields) = record.as_object_mut() {
+        fields.remove("terminal_name");
+    }
+}
+
 fn anchor(record: &mut Value) {
     if string(record, "journal_name").is_empty() {
         record["journal_name"] = record["name"].clone();
+    }
+    // A record an older hgs rebuilt without it keeps the label it leaves.
+    if string(record, "launch_label").is_empty() {
+        record["launch_label"] = record["name"].clone();
     }
 }
 
@@ -180,10 +207,60 @@ fn source_path(transaction: &Value) -> PathBuf {
     }
 }
 
+/// The record a rename just gave `new`: the selected session's, when the
+/// command selected one in the ID layout, else the label's.
+fn renamed(new: &str) -> Result<Value> {
+    match session_id::selected().and_then(|selection| storage::id_record_path(&selection.session_id)) {
+        Some(path) if path.is_file() => storage::read_id(&session_id::selected().unwrap().session_id),
+        _ => read(new),
+    }
+}
+
+/// A rename of a session in the ID layout (P3a): its record stays in
+/// `sessions/<id>.json`, and only that record and the label index change. The
+/// new label's entry is durable before the record takes it, and the old
+/// label's entry goes only after the record left it. Nothing is written at a
+/// label's path, so the first holder of either label is never touched.
+fn commit_in_place(transaction: &Value, old: &str, new: &str) -> Result<()> {
+    let record = &transaction["record"];
+    let id = string(record, "session_id").to_owned();
+    let path = storage::id_record_path(&id).ok_or("rename record has no session ID")?;
+    let mut current = storage::read_id(&id).or_else(|_| {
+        // Recovery after the record already took the new label.
+        load(&path)
+    })?;
+    if current["run_id"] != record["run_id"] || !storage::in_id_layout(&current) {
+        return Err("rename source run changed; refusing to replace its binding".into());
+    }
+    if string(&current, "name") != new {
+        labels::add(new, &id)?;
+        // Its recovery job keeps its key, the session ID, and takes the label.
+        recovery::rename_job_in_place(&current, new)?;
+        anchor(&mut current);
+        current["name"] = json!(new);
+        current["renamed_at"] = json!(now());
+        moved_terminal(transaction, &mut current);
+        write(&mut current)?;
+    }
+    labels::remove(old, &id)?;
+    for path in json_files(&root().join("archives"))? {
+        let mut archived = load(&path)?;
+        if archived["run_id"] == current["run_id"] && string(&archived, "name") == old {
+            anchor(&mut archived);
+            archived["name"] = json!(new);
+            atomic_record(&path, &mut archived)?;
+        }
+    }
+    Ok(())
+}
+
 fn commit(transaction: &Value) -> Result<()> {
     let old = string(transaction, "old");
     let new = string(transaction, "new");
     validate(old, new)?;
+    if transaction["layout"] == "id" && transaction["record"].is_object() {
+        return commit_in_place(transaction, old, new);
+    }
     let Some(mut record) = transaction["record"]
         .as_object()
         .map(|_| transaction["record"].clone())
@@ -209,6 +286,7 @@ fn commit(transaction: &Value) -> Result<()> {
     anchor(&mut record);
     record["name"] = json!(new);
     record["renamed_at"] = json!(now());
+    moved_terminal(transaction, &mut record);
     if transaction["legacy"] == true {
         record["legacy_shadow"] = json!({"name":old,"run_id":record["run_id"]});
     }
@@ -258,8 +336,14 @@ pub(super) fn recover_locked() -> Result<()> {
         let new = string(&transaction, "new");
         validate(old, new)?;
         if let Some(id) = transaction["session_id"].as_str() {
+            // The terminal's name before the move: its own (P3b), or for a
+            // transaction an older hgs wrote, the old label.
+            let from = match string(&transaction, "terminal") {
+                "" => old,
+                terminal => terminal,
+            };
             if let Some(current) = current_session_name(id)? {
-                if current == old {
+                if current == from {
                     // tmux rename never happened. All durable bindings still
                     // use the old name, so aborting is lossless.
                     remove(&path)?;
@@ -384,6 +468,26 @@ pub(super) fn remove_legacy(record: &Value) -> Result<()> {
 
 #[cfg(test)]
 mod tests {
+    /// A rename pins the history it leaves: the label as the journal of a
+    /// record that had none, and the label it leaves as `launch_label` when an
+    /// older hgs rebuilt the record without one. Existing values are kept.
+    #[test]
+    fn a_rename_anchors_the_journal_and_the_launch_label_once() {
+        const JOURNAL: &str = "session:3f2a9c1d-0b4e-4d6a-9c1d-2e3f4a5b6c7d";
+        let mut old_style = json!({"name":"codex/p/one"});
+        super::anchor(&mut old_style);
+        assert_eq!(old_style["journal_name"], "codex/p/one");
+        assert_eq!(old_style["launch_label"], "codex/p/one");
+        let mut new_style =
+            json!({"name":"codex/p/renamed","journal_name":JOURNAL,"launch_label":"codex/p/one"});
+        super::anchor(&mut new_style);
+        assert_eq!(new_style["journal_name"], JOURNAL);
+        assert_eq!(new_style["launch_label"], "codex/p/one");
+        let mut rebuilt = json!({"name":"codex/p/renamed","journal_name":JOURNAL});
+        super::anchor(&mut rebuilt);
+        assert_eq!(rebuilt["launch_label"], "codex/p/renamed");
+    }
+
     use super::*;
 
     #[test]

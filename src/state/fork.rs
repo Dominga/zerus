@@ -101,6 +101,7 @@ fn kimi_fork(record: &Value) -> Result<String> {
     }
     for key in [
         "HGS_SESSION",
+        "HGS_SESSION_ID",
         "HGS_RUN_ID",
         "HGS_AGENT",
         "HGS_REQUESTED_ID",
@@ -144,21 +145,24 @@ pub(super) fn choose_name(
         {
             return Err("fork name must be a nonempty tag without '/', ':', '.', control characters or surrounding whitespace".into());
         }
-        let name = format!("{prefix}{tag}");
-        if occupied.contains(&name) {
-            return Err(format!("{name}: a session already uses this name"));
-        }
-        return Ok(name);
+        // A name is a label: one a live or saved session uses gets the first
+        // free `-2`, `-3`… instead of failing the fork.
+        return free(&format!("{prefix}{tag}"), occupied);
     }
     let base = format!("{}-fork", parts.get(2).copied().unwrap_or("session"));
+    free(&format!("{prefix}{base}"), occupied)
+}
+
+/// `name`, or `name-2`, `name-3`… while a live or saved session uses it.
+fn free(name: &str, occupied: &std::collections::BTreeSet<String>) -> Result<String> {
     for suffix in 1..10000 {
-        let name = if suffix == 1 {
-            format!("{prefix}{base}")
+        let candidate = if suffix == 1 {
+            name.to_owned()
         } else {
-            format!("{prefix}{base}-{suffix}")
+            format!("{name}-{suffix}")
         };
-        if !occupied.contains(&name) {
-            return Ok(name);
+        if !occupied.contains(&candidate) {
+            return Ok(candidate);
         }
     }
     Err("could not find an unused fork name".into())
@@ -200,8 +204,8 @@ pub(super) fn start_scoped(
         return Err("source session changed; refresh before forking".into());
     }
     let snapshot = live()?;
-    let live_pane = archive_id.is_none() && snapshot.contains_key(name);
-    if live_pane && (!matches(&record, snapshot.get(name)) || !process_alive(&record)) {
+    let live_pane = archive_id.is_none() && terminal_live(&snapshot, &record)?;
+    if live_pane && (!matches(&record, panes_of(&snapshot, &record)) || !process_alive(&record)) {
         return Err("source process no longer matches its tracked session".into());
     }
     if let Some(reason) = unavailable(&record, live_pane) {
@@ -218,8 +222,10 @@ pub(super) fn start_scoped(
     if !Path::new(string(&record, "launch_dir")).is_dir() {
         return Err("the source working directory is missing".into());
     }
+    // Live and saved sessions keep unique names; an archived session's name
+    // is free for a new one (names are labels, archives are found by ID).
     let mut occupied: std::collections::BTreeSet<String> = snapshot.keys().cloned().collect();
-    for record in records()?.into_iter().chain(archive::records()?) {
+    for record in records()? {
         occupied.insert(string(&record, "name").into());
     }
     let target = choose_name(name, tag, &occupied)?;
@@ -241,8 +247,11 @@ pub(super) fn start_scoped(
     let hint_environment = crate::config::agent_hint_environment(agent);
     let launch = supervisor_command(&record, &executable, argv, &hint_environment);
     let new_run=uuid::Uuid::new_v4().to_string();
+    let lineage = journal::fork_lineage(&record);
     let mut environment = BTreeMap::from([
         ("HGS_SESSION", target.clone()),
+        // A fork's terminal is its own new label (zerus-ucck P3b).
+        ("HGS_TERMINAL_NAME", target.clone()),
         ("HGS_AGENT", agent.into()),
         (
             "HGS_STATE_DIR",
@@ -260,6 +269,15 @@ pub(super) fn start_scoped(
             string(&record, "conversation_id").into(),
         ),
         ("HGS_FORK_SOURCE_NAME", name.into()),
+        // The archived source's own identity, so the fork can inherit its project.
+        ("HGS_FORK_SOURCE_ARCHIVE", archive_id.unwrap_or_default().into()),
+        // The source history the fork's Activity shows (zerus-b4qk).
+        ("HGS_FORK_LINEAGE", lineage.clone()),
+        // The labels its sources had, where a journal is not one (P2b).
+        (
+            "HGS_FORK_LINEAGE_LABELS",
+            journal::fork_lineage_labels(&record, &lineage),
+        ),
         (agent_hint::FORK_REVISION_ENV, agent_hint::fork_revision(&record)),
         ("HGS_TRACKING", "1".into()),
         (
@@ -405,7 +423,14 @@ mod tests {
             choose_name("codex/project/work", None, &used).unwrap(),
             "codex/project/work-fork-3"
         );
-        assert!(choose_name("codex/project/work", Some("work-fork"), &used).is_err());
+        assert_eq!(
+            choose_name("codex/project/work", Some("work-fork"), &used).unwrap(),
+            "codex/project/work-fork-3"
+        );
+        assert_eq!(
+            choose_name("codex/project/work", Some("other"), &used).unwrap(),
+            "codex/project/other"
+        );
         assert!(choose_name("codex/project/work", Some("../bad"), &used).is_err());
         assert_eq!(
             parse_kimi_id(

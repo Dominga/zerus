@@ -15,8 +15,7 @@ impl Directory {
     }
     fn helper(&self, body: &str) -> PathBuf {
         let path = self.0.join("fake-wl-copy");
-        std::fs::write(&path, format!("#!/usr/bin/python3\n{body}\n")).unwrap();
-        std::fs::set_permissions(&path, std::fs::Permissions::from_mode(0o700)).unwrap();
+        crate::write_executable(&path, format!("#!/usr/bin/python3\n{body}\n"));
         path
     }
 }

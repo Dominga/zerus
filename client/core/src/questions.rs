@@ -10,6 +10,7 @@
 
 use crate::cache;
 use crate::drafts::{Loaded, StoredDraft};
+use crate::operation_recovery::deferred_input::Checkpoint;
 use crate::text::{Arg, Text};
 use serde::{Deserialize, Serialize};
 use serde_json::{json, Map, Value};
@@ -20,10 +21,31 @@ use std::collections::{BTreeMap, BTreeSet};
 pub const REVIEW_MS: u64 = 3000;
 /// The draft store's prefix of an answer draft's key.
 pub const STORE_PREFIX: &str = "question\n";
-pub const CHANGED: &str = "This question changed. Refresh before answering.";
-pub const CHANGED_KEPT: &str = "The question changed. Your answers were kept without submitting.";
-pub const CONSENT_CHANGED: &str =
-    "The question or your answers changed. Your draft was kept; review it before submitting again.";
+pub const CHANGED: &str = crate::source!("This question changed. Refresh before answering.");
+pub const CHANGED_KEPT: &str =
+    crate::source!("The question changed. Your answers were kept without submitting.");
+pub const CONSENT_CHANGED: &str = crate::source!(
+    "The question or your answers changed. Your draft was kept; review it before submitting again."
+);
+/// The deferred answer's notices (zerus-5wmh.66.4.7): the desktop service
+/// still sends the answer, it never reached the service, the service could
+/// not start it, the CLI refused it before any delivery, or the service could
+/// not confirm it.
+pub const ANSWER_STILL_SENDING: &str = crate::source!(
+    "The desktop service is still sending this answer. Its result appears here when it finishes."
+);
+pub const ANSWER_NOT_SENT: &str = crate::source!(
+    "The answer was not sent: it did not reach the desktop service. Your answer was kept, so you can submit it again."
+);
+pub const ANSWER_NOT_STARTED: &str = crate::source!(
+    "The answer was not sent: the desktop service could not start it. The question may have changed. Your answer was kept, so you can submit it again."
+);
+pub const ANSWER_REFUSED: &str = crate::source!(
+    "The answer was not sent: it was refused before anything reached the agent. Your answer was kept, so you can submit it again."
+);
+pub const UNCONFIRMED_BY_SERVICE: &str = crate::source!(
+    "Delivery is not confirmed by the desktop service. Check Terminal before retrying."
+);
 /// The pending count's tooltip.
 pub const PENDING_TIP: &str =
     crate::source!("Questions waiting for an answer, including the questions shown in this card.");
@@ -33,13 +55,56 @@ pub const SKIP_TIP: &str = crate::source!(
 pub const RETRY_TIP: &str =
     crate::source!("Check the agent in Terminal before retrying to avoid submitting twice.");
 
-const SAVING: &str = "Saving before submitting\u{2026}";
-const RECORDED: &str = "Response recorded.";
-const SENT_WAITING: &str = "Answer sent. Waiting for the agent\u{2026}";
-const SUBMITTED_CODEX: &str =
-    "Answer submitted. Waiting for Codex to record it. You can check the queue above or open Terminal.";
-const SUBMITTED_RESTORED: &str =
-    "Answer submitted. Waiting for the agent to record it. Check Activity or Terminal.";
+const SAVING: &str = crate::source!("Saving before submitting…");
+const RECORDED: &str = crate::source!("Response recorded.");
+const SENT_WAITING: &str = crate::source!("Answer sent. Waiting for the agent…");
+const SUBMITTED_CODEX: &str = crate::source!(
+    "Answer submitted. Waiting for Codex to record it. You can check the queue above or open Terminal."
+);
+const SUBMITTED_RESTORED: &str = crate::source!(
+    "Answer submitted. Waiting for the agent to record it. Check Activity or Terminal."
+);
+/// An uncertain answer's notice, its detail last.
+const UNCERTAIN: &str =
+    crate::source!("Delivery is not confirmed. Check Terminal before retrying. %1");
+/// Every notice the card or the app sets on an answer draft: catalog
+/// sources, which the card shows translated. Any other notice (a CLI's or
+/// the system's message) is shown as written.
+const NOTICES: [&str; 17] = [
+    SAVING,
+    RECORDED,
+    SENT_WAITING,
+    SUBMITTED_CODEX,
+    SUBMITTED_RESTORED,
+    CHANGED,
+    CHANGED_KEPT,
+    CONSENT_CHANGED,
+    ANSWER_STILL_SENDING,
+    ANSWER_NOT_SENT,
+    ANSWER_NOT_STARTED,
+    ANSWER_REFUSED,
+    UNCONFIRMED_BY_SERVICE,
+    crate::actions::ALREADY_ANSWERING,
+    crate::drafts::INTERRUPTED,
+    crate::drafts::UNCONFIRMED,
+    crate::drafts::NOT_RESTORED,
+];
+
+/// How the card shows a draft's notice: its own or the app's prose as the
+/// catalog source, translated where it is shown (the uncertain one with its
+/// detail inside); anything else as written, within 600 units.
+fn notice_text(value: &str) -> Text {
+    if let Some(known) = NOTICES.iter().find(|known| **known == value) {
+        return Text::new(known);
+    }
+    if let Some(detail) = UNCERTAIN
+        .strip_suffix("%1")
+        .and_then(|prefix| value.strip_prefix(prefix))
+    {
+        return Text::with(UNCERTAIN, vec![Arg::Text(notice_text(detail))]);
+    }
+    Text::verbatim(left_units(value, 600))
+}
 const BROADER_NOTE: &str = crate::source!("Applies beyond this request. Asks for confirmation.");
 const COLD_TEXT: &str = "Submitting this answer may resume the agent with the entire conversation, increasing token usage, cost or subscription usage. Compaction or clearing can invalidate the pending question. Cancel keeps your answers.";
 
@@ -72,7 +137,7 @@ const REFRESHED: [&str; 3] = [
     "claude_terminal_choice",
 ];
 /// The fields consent was given for (`consentIdentity`).
-const CONSENT_FIELDS: [&str; 16] = [
+pub const CONSENT_FIELDS: [&str; 16] = [
     "question_id",
     "question_hash",
     "run_id",
@@ -520,12 +585,18 @@ pub struct AnswerDraft {
     pub confirm: String,
     pub storage_error: String,
     pub label: String,
+    /// [`StoredDraft::session_label`] of an answer keyed by session ID.
+    pub session_label: String,
     pub page: usize,
     pub sending: bool,
     pub submitted: bool,
     pub answered: bool,
     pub error: bool,
     pub uncertain: bool,
+    /// The answer's reserved request identity and consent checkpoint,
+    /// saved with the draft before `hgs answer` (zerus-5wmh.66.4.4). Kept
+    /// while the outcome is uncertain; data only, never a permission.
+    pub checkpoint: Option<Checkpoint>,
 }
 
 /// What a submission's consent is compared with, the notice aside
@@ -556,7 +627,9 @@ impl AnswerDraft {
             notice: loaded.notice.clone().unwrap_or_default(),
             uncertain: loaded.draft.uncertain,
             error: loaded.draft.uncertain,
+            checkpoint: loaded.draft.checkpoint.as_deref().cloned(),
             label: label.to_owned(),
+            session_label: loaded.draft.session_label.clone(),
             page: state.get("page").and_then(Value::as_u64).unwrap_or(0) as usize,
             answered: state
                 .get("answered")
@@ -620,8 +693,10 @@ impl AnswerDraft {
         }
         let mut stored = StoredDraft {
             label: self.label.clone(),
+            session_label: self.session_label.clone(),
             sending: self.sending,
             uncertain: self.uncertain,
+            checkpoint: self.checkpoint.clone().map(Box::new),
             ..StoredDraft::default()
         };
         if !self.answered && !self.submitted {
@@ -827,11 +902,12 @@ impl AnswerDraft {
         self.notice = SAVING.to_owned();
     }
 
-    /// That save failed: nothing was sent.
+    /// That save failed: nothing was sent, and its reserved identity goes.
     pub fn sending_failed(&mut self) {
         if !self.submitted && !self.answered {
             self.sending = false;
             self.notice.clear();
+            self.checkpoint = None;
         }
     }
 
@@ -844,16 +920,49 @@ impl AnswerDraft {
         }
         self.error = true;
         self.uncertain = uncertain;
+        // A definite failure sent nothing; an uncertain one keeps the
+        // original identity for its receipt.
+        if !uncertain {
+            self.checkpoint = None;
+        }
         self.notice = if uncertain {
-            format!("Delivery is not confirmed. Check Terminal before retrying. {detail}")
+            UNCERTAIN.replace("%1", detail)
         } else {
             detail.to_owned()
         };
     }
 
+    /// The desktop service still sends this answer: it stays uncertain and
+    /// keeps its identity, but its status is `notice`, not an error, and the
+    /// card holds it locked without Allow retry while the service is asked
+    /// again (zerus-5wmh.66.4.7).
+    pub fn set_pending(&mut self, notice: &str) {
+        self.sending = false;
+        if self.submitted || self.answered {
+            return;
+        }
+        self.error = false;
+        self.uncertain = true;
+        self.notice = notice.to_owned();
+    }
+
+    /// The desktop service could not confirm this answer: uncertain, its
+    /// identity kept for Allow retry, and the service's whole `line` shown as
+    /// is (zerus-5wmh.66.4.7).
+    pub fn set_unconfirmed(&mut self, line: &str) {
+        self.sending = false;
+        if self.submitted || self.answered {
+            return;
+        }
+        self.error = true;
+        self.uncertain = true;
+        self.notice = line.to_owned();
+    }
+
     /// The host recorded the answer.
     pub fn set_answered(&mut self, optional: bool) {
         self.sending = false;
+        self.checkpoint = None;
         self.answered = true;
         self.error = false;
         self.uncertain = false;
@@ -863,17 +972,22 @@ impl AnswerDraft {
     /// Codex took the answer and will record it.
     pub fn set_submitted(&mut self) {
         self.sending = false;
+        self.checkpoint = None;
         self.submitted = true;
         self.error = false;
         self.uncertain = false;
         self.notice = SUBMITTED_CODEX.to_owned();
     }
 
-    /// Allow retry, after the user checked the agent.
+    /// Allow retry, after the user checked the agent: the explicit
+    /// resolution of an uncertain answer. It also ends the held identity,
+    /// and the next answer reserves its own before its call
+    /// (zerus-5wmh.66.4.4). Nothing reaches it automatically.
     pub fn allow_retry(&mut self) {
         self.uncertain = false;
         self.error = false;
         self.notice.clear();
+        self.checkpoint = None;
     }
 
     pub fn snapshot(&self) -> Snapshot {
@@ -1362,12 +1476,14 @@ pub fn card(question: &Question, draft: &AnswerDraft, ctx: &CardContext) -> Card
     };
     let pending = ctx.pending.max(question.items.len());
 
-    // Stored notices and remote reasons stay as written; the rest is the card's own prose.
+    // The draft's notices are the card's or the app's prose, translated
+    // where shown; remote reasons stay as written.
     let stored = |value: &str| (!value.is_empty()).then(|| Text::verbatim(left_units(value, 600)));
+    let noticed = |value: &str| (!value.is_empty()).then(|| notice_text(value));
     let mut notice = if draft.storage_error.is_empty() {
-        stored(&draft.notice)
+        noticed(&draft.notice)
     } else {
-        stored(&draft.storage_error)
+        noticed(&draft.storage_error)
     };
     if notice.is_none() && !ctx.available {
         notice = stored(&ctx.unavailable_reason);

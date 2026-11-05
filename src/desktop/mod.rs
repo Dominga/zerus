@@ -9,6 +9,8 @@ mod catalog_read;
 mod catalog_relay;
 mod counts;
 mod creation_clone;
+mod creation_worktree;
+pub(crate) mod creation_launch;
 #[cfg(any(target_os = "linux", target_os = "macos"))]
 mod custody;
 mod delivery;
@@ -25,9 +27,16 @@ mod notification_controls;
 mod notifications;
 #[allow(dead_code)]
 mod operations;
+// One bounded original-child runner for the launch and task message leaves.
+#[cfg(any(target_os = "linux", target_os = "macos"))]
+mod original_child;
+// The CLI state store one deferred original holds and reads.
+#[cfg(any(target_os = "linux", target_os = "macos"))]
+mod original_store;
 mod owner;
 mod ownership;
 mod pending_reads;
+pub(crate) mod portable_frontend;
 mod presence_admission;
 mod presence_worker;
 #[allow(dead_code)]
@@ -47,12 +56,26 @@ pub(crate) mod startup_diagnostic;
 mod startup_exclusion;
 mod startup_stdio;
 mod store;
+#[cfg(windows)]
+mod swarm_windows;
+/// The deferred send leaf (zerus-5wmh.66.4.4, slice 3).
+pub(crate) mod compact_to_send;
+pub(crate) mod deferred_answer;
+pub(crate) mod deferred_send;
+pub(crate) mod task_message;
+#[cfg(any(target_os = "linux", target_os = "macos"))]
+mod task_start_reconcile;
+mod termination_outcome;
 mod transport;
 mod ui_authority;
+mod upgrade;
 #[cfg(windows)]
 mod windows_registration;
 #[cfg(any(windows, test))]
 mod windows_registration_policy;
+#[cfg(all(test, not(windows)))]
+#[path = "windows_registration/native/mode/stop.rs"]
+mod windows_mode_stop;
 
 use crate::{cli, config::Config, platform};
 use anyhow::{ensure, Context, Result};
@@ -82,7 +105,7 @@ pub(crate) mod creation_test {
     }
 }
 
-const USAGE: &str = "usage: hgs desktop serve [--config-dir DIR --state-dir DIR] [--background] | status [--json] | startup --json | owner-status --json | ownership-status --json | ownership-result --json | watch --json | feed --json | request --json | catalog-relay --json | registration --json [--background] | registration install|remove|status --json (Windows) | registration install --mode background|passive --json (Windows) | registration cancel-rollback --json --request-id UUID (Windows) | notification-registration install|status --json | notification-registration remove --json --request-id UUID (Windows) | revoke --json [--request-id UUID] [--reason rollback] | import-evidence --json | import-status --json --import-id UUID";
+const USAGE: &str = "usage: hgs desktop serve [--config-dir DIR --state-dir DIR] [--background] | status [--json] | startup --json | owner-status --json | ownership-status --json | ownership-result --json | swarm-restart --json (Windows) | watch --json | feed --json | request --json | catalog-relay --json | registration --json [--background] | registration install|remove|status --json (Windows) | registration install --mode background|passive --json [--after-review UUID --request-id NEW_UUID] (Windows) | registration install --mode background --json --request-id NEW_UUID (Windows first choice) | registration cancel-rollback --json --request-id UUID (Windows) | registration review-mode --json --request-id UUID (Windows) | registration mode-result --json --request-id UUID (Windows) | notification-registration install|status --json | notification-registration remove --json --request-id UUID (Windows) | revoke --json [--request-id UUID] [--reason rollback] | import-evidence --json | import-status --json --import-id UUID";
 const HEARTBEAT: Duration = Duration::from_secs(10);
 pub const STARTUP_REFUSED: i32 = 78;
 
@@ -156,11 +179,18 @@ pub fn launch_configuration(args: &[String]) -> cli::Result<()> {
 }
 
 pub fn dispatch(config: &Config, target: &str, args: &[String], dry: bool) -> cli::Result<i32> {
+    #[cfg(test)]
+    use swarm_cli_test::Location;
     let run = || -> Result<()> {
         ensure!(
             !dry && (target.is_empty() || config.is_self(target)),
             "desktop manages only this computer; remote desktop IPC is refused"
         );
+        #[cfg(any(windows, test))]
+        if args == ["swarm-restart", "--json"] {
+            println!("{}", restart_swarm(config)?);
+            return Ok(());
+        }
         let location = Location::new(config).map_err(|error| {
             if args.first().is_some_and(|arg| arg == "serve") {
                 error.context(StartupRefused)
@@ -218,11 +248,18 @@ pub fn dispatch(config: &Config, target: &str, args: &[String], dry: bool) -> cl
                 #[cfg(any(target_os = "linux", target_os = "macos", windows))]
                 {
                     let scope = ui_authority::Scope::new(config, &location);
-                    let source = ui_authority::registration::caller(&scope)?;
-                    println!(
-                        "{}",
+                    #[cfg(not(windows))]
+                    let reply = {
+                        let (source, consumer) = ui_authority::registration::observation(&scope)?;
+                        json!({"schema":1,"configuration":location.configuration,"admitted":true,
+                            "source":source,"consumer":consumer})
+                    };
+                    #[cfg(windows)]
+                    let reply = {
+                        let source = ui_authority::registration::caller(&scope)?;
                         json!({"schema":1,"configuration":location.configuration,"admitted":true,"source":source})
-                    );
+                    };
+                    println!("{reply}");
                     Ok(())
                 }
                 #[cfg(not(any(target_os = "linux", target_os = "macos", windows)))]
@@ -246,6 +283,25 @@ pub fn dispatch(config: &Config, target: &str, args: &[String], dry: bool) -> cl
                         "desktop registration install/remove/status is available only on Windows; use the maintained platform installer"
                     )
                 }
+            }
+            ["registration", "refresh-info", "--json"] => {
+                #[cfg(windows)]
+                { println!("{}", windows_registration::refresh_info(config,&location)?); Ok(()) }
+                #[cfg(not(windows))]
+                { anyhow::bail!("Original-instance refresh is available only on Windows.") }
+            }
+            ["registration", "refresh", "--json", "--request-id", id, "--scope", target] => {
+                #[cfg(windows)]
+                { println!("{}", windows_registration::refresh_command(config,&location,id,target)?); Ok(()) }
+                #[cfg(not(windows))]
+                { let _=(id,target); anyhow::bail!("Original-instance refresh is available only on Windows.") }
+            }
+            ["registration", op @ ("refresh-result" | "cancel-refresh"), "--json", "--request-id", id] => {
+                #[cfg(windows)]
+                { println!("{}", if *op == "refresh-result" { windows_registration::refresh_result(config,&location,id)? }
+                    else { windows_registration::cancel_refresh(config,&location,id)? }); Ok(()) }
+                #[cfg(not(windows))]
+                { let _=(op,id); anyhow::bail!("Original-instance refresh is available only on Windows.") }
             }
             ["registration", "install", "--mode", mode, "--json"] => {
                 #[cfg(windows)]
@@ -278,6 +334,30 @@ pub fn dispatch(config: &Config, target: &str, args: &[String], dry: bool) -> cl
                         "Use the maintained platform installer to cancel rollback metadata."
                     )
                 }
+            }
+            ["registration", "review-mode", "--json", "--request-id", id] => {
+                #[cfg(windows)]
+                { println!("{}", windows_registration::review_mode(config, &location, id)?); Ok(()) }
+                #[cfg(not(windows))]
+                { let _ = id; anyhow::bail!("Use the maintained Unix helper to review its original activation.") }
+            }
+            ["registration", "mode-result", "--json", "--request-id", id] => {
+                #[cfg(windows)]
+                { println!("{}", windows_registration::mode_result(config, &location, id)?); Ok(()) }
+                #[cfg(not(windows))]
+                { let _ = id; anyhow::bail!("Use the maintained Unix helper to read its original activation.") }
+            }
+            ["registration", "install", "--mode", "background", "--json", "--request-id", request] => {
+                #[cfg(windows)]
+                { println!("{}", windows_registration::first_choice(config, &location, request)?); Ok(()) }
+                #[cfg(not(windows))]
+                { let _ = request; anyhow::bail!("Use the maintained platform installer to select desktop mode.") }
+            }
+            ["registration", "install", "--mode", mode, "--json", "--after-review", reviewed, "--request-id", request] => {
+                #[cfg(windows)]
+                { println!("{}", windows_registration::mode_after_review(config, &location, mode, reviewed, request)?); Ok(()) }
+                #[cfg(not(windows))]
+                { let _ = (mode, reviewed, request); anyhow::bail!("Use the maintained Unix helper for an explicit mode choice.") }
             }
             ["notification-registration", rest @ ..] => {
                 let (operation, request_id) = match rest {
@@ -509,6 +589,8 @@ enum Event {
     ApprovalAudit(Hello, mpsc::SyncSender<approval_audit::worker::Reply>),
     ImportOwner(String, mpsc::SyncSender<import_evidence::held::Loan>),
     Command(Hello, Arc<Queue>, Option<Box<ui_authority::Authorized>>),
+    #[cfg(windows)]
+    SwarmRestart(Arc<Queue>, zerus_client_core::desktop::windows::Peer),
     FeedOpen(Hello, mpsc::SyncSender<feed::Opened>),
     FeedData(feed::Data),
     ListenerFailed,
@@ -521,7 +603,16 @@ impl Drop for Permit {
 }
 
 fn serve(config: &Config, location: Location, background_mode: bool) -> Result<()> {
-    let (_signals, owner, listener, epoch, mut store) = (|| -> Result<_> {
+    // A logon-task start on Windows before 24H2 gets a console window of its own.
+    #[cfg(windows)]
+    lifecycle::CONSOLE_RELEASED.store(
+        platform::release_private_console(),
+        std::sync::atomic::Ordering::Relaxed,
+    );
+    let mut upgrade = upgrade::Upgrade::new();
+    #[cfg(all(test, target_os = "linux"))]
+    upgrade::actor_tests::configure(&mut upgrade);
+    let (_signals, owner, listener, epoch, mut store, ui_scope) = (|| -> Result<_> {
         #[cfg(windows)]
         crate::host::token::private_creation::prepare()
             .context("select exact-user desktop creation owner")?;
@@ -541,8 +632,12 @@ fn serve(config: &Config, location: Location, background_mode: bool) -> Result<(
         let store = Store::open(&location, &epoch).context("open desktop store")?;
         // A status deadline must not start while startup still owns the actor
         // for migrations/recovery. Publish only once that work has completed.
+        #[allow(unused_mut)]
+        let mut ui_scope = ui_authority::Scope::new(config, &location);
+        #[cfg(target_os = "linux")]
+        ui_scope.initialize_reference(&lock);
         let listener = Arc::new(Listener::bind(&location).context("bind desktop listener")?);
-        Ok((signals, lock, listener, epoch, store))
+        Ok((signals, lock, listener, epoch, store, Arc::new(ui_scope)))
     })()
     .context(StartupRefused)?;
     let stopped = Arc::new(AtomicBool::new(false));
@@ -560,10 +655,11 @@ fn serve(config: &Config, location: Location, background_mode: bool) -> Result<(
     let mut frontend = frontend::Cache::default();
     let mut background: Option<background::Runtime> = None;
     let mut frontend_order = ui_authority::Order::default();
-    let ui_scope = Arc::new(ui_authority::Scope::new(config, &location));
     // At most16 queued controls/data, thirteen bounded parsers and one passive
     // producer. Background mode owns the only internal source producer.
     let (send, receive) = mpsc::sync_channel(protocol::PENDING);
+    #[cfg(all(test, target_os = "linux"))]
+    let fault_send = upgrade::actor_tests::fault_sender(&send);
     let acceptor = {
         let ui_scope = ui_scope.clone();
         let (listener, stopped, active, ingress) = (
@@ -610,6 +706,8 @@ fn serve(config: &Config, location: Location, background_mode: bool) -> Result<(
                 }
             })?
     };
+    #[cfg(all(test, target_os = "linux"))]
+    upgrade::actor_tests::started(&location, &owner);
     let mut fanout = Fanout::default();
     let mut migration = handoff::inspect(&location);
     let mut seq = 0;
@@ -617,6 +715,8 @@ fn serve(config: &Config, location: Location, background_mode: bool) -> Result<(
     let mut collect_at = Instant::now();
     let mut failed = false;
     let mut background_blocked = false;
+    #[cfg(any(windows, all(test, target_os = "linux")))]
+    let mut retirement_drained = false;
     let run_result = (|| -> Result<()> {
         if background_mode {
             background_blocked = !revoke::background_permitted(&location, &store)?;
@@ -635,49 +735,82 @@ fn serve(config: &Config, location: Location, background_mode: bool) -> Result<(
                 .context(StartupRefused)?;
         }
         while platform::shutdown_signal() == 0 {
-            // Prepared takeover reconciliation only reduces authority. Keep the
-            // same runtime until its actual drain succeeds; no replacement yet.
-            let handoff = background.as_ref().and_then(background::Runtime::handoff);
-            ownership::settle(&location, &mut store, handoff.as_deref(), |store| {
-                background.as_mut().map_or(Ok(()), |runtime| {
-                    runtime.drain(store, Duration::from_millis(10))
-                })
-            })?;
-            drop(handoff);
-            if background::replacement_permitted(
-                background_mode,
-                background
-                    .as_ref()
-                    .is_some_and(background::Runtime::drained),
-                &location,
-                &store,
-            )? {
-                feed.stop(&mut store)?;
-                background = None;
-            }
-            let ownership_status = ownership::status(&store, &location.configuration)?;
-            if ownership_status.state == zerus_client_core::desktop::ownership::State::Native {
-                if background.is_some() {
-                    // NativeReady was written only after this original drain.
+            let was_replacing = upgrade.requested();
+            if upgrade.poll(Instant::now()) {
+                if !was_replacing {
+                    seq += 1;
+                    fanout.publish(
+                        protocol::encode(&frame(
+                            &epoch,
+                            seq,
+                            "error",
+                            json!({"code":"hgs_replaced","fatal":true}),
+                        ))?
+                        .into(),
+                    );
+                }
+                // Only stop admission here. Original jobs/SDK callbacks keep
+                // their actual owners until the existing drain really finishes.
+                let drained = background.as_mut().map_or(Ok(()), |runtime| {
+                    runtime.drain(&mut store, Duration::from_millis(10))
+                });
+                if drained.is_ok() && feed.stop(&mut store).is_ok() {
+                    #[cfg(any(windows, all(test, target_os = "linux")))]
+                    {
+                        retirement_drained = true;
+                    }
+                    background = None;
+                    // Audit/finalizer I/O can retain the original serve owner
+                    // outside the background runtime. Never abandon those loans.
+                    if upgrade.restart_ready(&owner) {
+                        break;
+                    }
+                }
+            } else {
+                // Prepared takeover reconciliation only reduces authority. Keep the
+                // same runtime until its actual drain succeeds; no replacement yet.
+                let handoff = background.as_ref().and_then(background::Runtime::handoff);
+                ownership::settle(&location, &mut store, handoff.as_deref(), |store| {
+                    background.as_mut().map_or(Ok(()), |runtime| {
+                        runtime.drain(store, Duration::from_millis(10))
+                    })
+                })?;
+                drop(handoff);
+                if background::replacement_permitted(
+                    background_mode,
+                    background
+                        .as_ref()
+                        .is_some_and(background::Runtime::drained),
+                    &location,
+                    &store,
+                )? {
                     feed.stop(&mut store)?;
                     background = None;
                 }
-                background_blocked = true;
-            } else if background_mode
-                && background.is_none()
-                && revoke::background_permitted(&location, &store)?
-            {
-                background = Some(background::Runtime::start(
-                    config,
-                    &epoch,
-                    &mut feed,
-                    owner.clone(),
-                )?);
-                background.as_mut().unwrap().start_presence(&location)?;
-                background_blocked = false;
+                let ownership_status = ownership::status(&store, &location.configuration)?;
+                if ownership_status.state == zerus_client_core::desktop::ownership::State::Native {
+                    if background.is_some() {
+                        // NativeReady was written only after this original drain.
+                        feed.stop(&mut store)?;
+                        background = None;
+                    }
+                    background_blocked = true;
+                } else if background_mode
+                    && background.is_none()
+                    && revoke::background_permitted(&location, &store)?
+                {
+                    background = Some(background::Runtime::start(
+                        config,
+                        &epoch,
+                        &mut feed,
+                        owner.clone(),
+                    )?);
+                    background.as_mut().unwrap().start_presence(&location)?;
+                    background_blocked = false;
+                }
             }
             let mut full_batch = false;
-            if let Some(runtime) = &mut background {
+            if let Some(runtime) = background.as_mut().filter(|_| !upgrade.requested()) {
                 let previous = seq;
                 runtime.notification_controls(
                     notification_controls.preferences(),
@@ -695,6 +828,8 @@ fn serve(config: &Config, location: Location, background_mode: bool) -> Result<(
             }
             frontend.tick(&location);
             store.recover_operation_custody(&location);
+            #[cfg(all(test, target_os = "linux"))]
+            upgrade::actor_tests::replacement_error(&upgrade, &fault_send, &active);
             match receive.recv_timeout(if full_batch {
                 Duration::ZERO
             } else {
@@ -702,7 +837,7 @@ fn serve(config: &Config, location: Location, background_mode: bool) -> Result<(
             }) {
                 Ok(Event::ImportOwner(configuration, reply)) => {
                     seq += 1;
-                    let owner = if configuration == location.configuration {
+                    let owner = if !upgrade.requested() && configuration == location.configuration {
                         background
                             .as_ref()
                             .map(|runtime| runtime.publication_owner(&store))
@@ -724,7 +859,21 @@ fn serve(config: &Config, location: Location, background_mode: bool) -> Result<(
                 Ok(Event::ApprovalAudit(hello, reply)) => {
                     // Only bounded validation/admission occurs here. The same
                     // original client worker owns query I/O and transport cleanup.
-                    let _ = reply.try_send(audit.admit(hello, owner.clone(), seq));
+                    if !upgrade.requested() {
+                        let _ = reply.try_send(audit.admit(hello, owner.clone(), seq));
+                    } // Dropping the one-shot refuses new audit admission.
+                }
+                #[cfg(windows)]
+                Ok(Event::SwarmRestart(queue, peer)) => {
+                    let result = if peer.current() {
+                        background.as_ref().map(|runtime| runtime.restart_swarm())
+                            .unwrap_or_else(|| json!({"schema":1,"accepted":false,"code":"background_service_required"}))
+                    } else {
+                        json!({"schema":1,"accepted":false,"code":"swarm_requester_exited"})
+                    };
+                    let _ = queue
+                        .offer(protocol::encode(&frame(&epoch, seq, "response", result))?.into());
+                    queue.close();
                 }
                 Ok(Event::Command(hello, queue, authority)) => {
                     let mut value = projection(
@@ -750,6 +899,17 @@ fn serve(config: &Config, location: Location, background_mode: bool) -> Result<(
                     } else if background_blocked {
                         value["background_start"] = json!({"admitted":false,"code":"explicit_handoff_required","durably_blocked":true});
                     }
+                    upgrade.decorate(&mut value);
+                    #[cfg(any(windows, all(test, target_os = "linux")))]
+                    if hello.op == "status" && hello.request.is_none() {
+                        upgrade.decorate_refresh(
+                            &mut value,
+                            &owner,
+                            retirement_drained,
+                            active.load(Ordering::SeqCst),
+                            store.operation_undrained()?,
+                        );
+                    }
                     let mut streaming = false;
                     let mut activation_waiting = false;
                     let reply = if hello.abi != ABI || hello.configuration != location.configuration
@@ -759,6 +919,15 @@ fn serve(config: &Config, location: Location, background_mode: bool) -> Result<(
                             seq,
                             "error",
                             json!({"code":"incompatible_configuration"}),
+                        )
+                    } else if upgrade.requested()
+                        && !upgrade::allowed_during_retirement(&hello.op, hello.request.as_ref())
+                    {
+                        frame(
+                            &epoch,
+                            seq,
+                            "error",
+                            json!({"code":"hgs_replaced","fatal":true}),
                         )
                     } else if hello.op == "watch" && hello.request.is_none() {
                         if fanout.subscribe(queue.clone()) {
@@ -786,6 +955,26 @@ fn serve(config: &Config, location: Location, background_mode: bool) -> Result<(
                         frame(&epoch, seq, "status", value)
                     } else if hello.op == "frontend_request" {
                         let result = match (authority, &mut background) {
+                            (Some(authority), _) if authority.operation() == "desktop_ownership_observe" => {
+                                match authority.into_request(&mut frontend_order).and_then(|permit|
+                                    ownership::observation::frontend(&location, &store, &epoch, permit)) {
+                                    Ok(observation) => serde_json::to_value(observation)?,
+                                    Err(_) => frontend_refused(hello.request.as_ref(), "ownership_observation_unavailable"),
+                                }
+                            }
+                            (Some(authority), _)
+                                if authority.operation() == "termination_outcome" =>
+                            {
+                                match authority.into_request(&mut frontend_order) {
+                                    Ok(request) => {
+                                        termination_outcome::frontend(&mut store, request)
+                                    }
+                                    Err(_) => frontend_refused(
+                                        hello.request.as_ref(),
+                                        "frontend_identity_expired",
+                                    ),
+                                }
+                            }
                             (Some(authority), _)
                                 if authority.operation() == "desktop_ownership" =>
                             {
@@ -863,6 +1052,62 @@ fn serve(config: &Config, location: Location, background_mode: bool) -> Result<(
                                             ),
                                         }
                                     }
+                                    // The reference form prepares off the actor and
+                                    // answers later on this same connection.
+                                    #[cfg(any(target_os = "linux", target_os = "macos"))]
+                                    Ok(request)
+                                        if request.operation() == "task_message"
+                                            && request
+                                                .task_message_preview()
+                                                .is_ok_and(|intent| !intent.form.is_inline()) =>
+                                    {
+                                        runtime.task_message_request(
+                                            &mut store,
+                                            request,
+                                            queue.clone(),
+                                            seq,
+                                        );
+                                        streaming = true;
+                                        activation_waiting = true;
+                                        Value::Null
+                                    }
+                                    // A reviewed input release answers once its
+                                    // worker joined, on this same connection.
+                                    #[cfg(any(target_os = "linux", target_os = "macos"))]
+                                    Ok(request)
+                                        if request.operation() == "task_message_input_release" =>
+                                    {
+                                        runtime.task_message_input_release(
+                                            &mut store,
+                                            request,
+                                            queue.clone(),
+                                            seq,
+                                        );
+                                        streaming = true;
+                                        activation_waiting = true;
+                                        Value::Null
+                                    }
+                                    #[cfg(any(target_os = "linux", target_os = "macos"))]
+                                    Ok(request)
+                                        if request.operation() == "task_start_reconcile" =>
+                                    {
+                                        let request_id = request.id().to_owned();
+                                        match runtime.task_start_request(
+                                            &mut store,
+                                            request,
+                                            queue.clone(),
+                                            seq,
+                                        ) {
+                                            Ok(()) => {
+                                                streaming = true;
+                                                activation_waiting = true;
+                                                Value::Null
+                                            }
+                                            Err(_) => {
+                                                json!({"request_id":request_id,"accepted":false,"durable":false,"code":"task_start_reconcile_unavailable"})
+                                            }
+                                        }
+                                    }
                                     Ok(request) => runtime.frontend_request(&mut store, request),
                                     Err(_) => frontend_refused(
                                         hello.request.as_ref(),
@@ -888,7 +1133,26 @@ fn serve(config: &Config, location: Location, background_mode: bool) -> Result<(
                         };
                         frame(&epoch, seq, "response", result)
                     } else if hello.op == "request" {
-                        let result = if hello.request.as_ref().is_some_and(|v| {
+                        let result = if hello
+                            .request
+                            .as_ref()
+                            .is_some_and(|v| v["op"] == "termination_outcome_status")
+                        {
+                            termination_outcome::query(
+                                &store,
+                                &location.configuration,
+                                hello.request.as_ref().unwrap(),
+                            )
+                        } else if hello
+                            .request
+                            .as_ref()
+                            .is_some_and(|v| v["op"] == "termination_outcome")
+                        {
+                            frontend_refused(
+                                hello.request.as_ref(),
+                                "frontend_authentication_required",
+                            )
+                        } else if hello.request.as_ref().is_some_and(|v| {
                             matches!(
                                 v["op"].as_str(),
                                 Some("cache_maintenance_result" | "cache_maintenance_policy")
@@ -930,11 +1194,106 @@ fn serve(config: &Config, location: Location, background_mode: bool) -> Result<(
                             .is_some_and(|v| v["op"] == "creation_clone_result")
                         {
                             creation_clone::query(&store, hello.request.as_ref().unwrap())
+                        } else if hello
+                            .request
+                            .as_ref()
+                            .is_some_and(|v| v["op"] == "creation_worktree_result")
+                        {
+                            creation_worktree::query(&store, hello.request.as_ref().unwrap())
+                        } else if hello
+                            .request
+                            .as_ref()
+                            .is_some_and(|v| v["op"] == "creation_launch_result")
+                        {
+                            creation_launch::query(&store, hello.request.as_ref().unwrap())
+                        } else if hello
+                            .request
+                            .as_ref()
+                            .is_some_and(|v| v["op"] == "task_message_result")
+                        {
+                            task_message::query(&store, hello.request.as_ref().unwrap())
+                        } else if hello
+                            .request
+                            .as_ref()
+                            .is_some_and(|v| v["op"] == "deferred_send_result")
+                        {
+                            deferred_send::query(&store, hello.request.as_ref().unwrap())
+                        } else if hello
+                            .request
+                            .as_ref()
+                            .is_some_and(|v| v["op"] == "deferred_answer_result")
+                        {
+                            deferred_answer::query(&store, hello.request.as_ref().unwrap())
+                        } else if hello
+                            .request
+                            .as_ref()
+                            .is_some_and(|v| v["op"] == "compact_to_send_result")
+                        {
+                            compact_to_send::query(&store, hello.request.as_ref().unwrap())
+                        } else if hello
+                            .request
+                            .as_ref()
+                            .is_some_and(|v| v["op"] == "task_message_staging")
+                        {
+                            task_message::staging_route(
+                                &store,
+                                &location,
+                                hello.request.as_ref().unwrap(),
+                            )
+                        } else if hello
+                            .request
+                            .as_ref()
+                            .is_some_and(|v| v["op"] == "task_message_inputs")
+                        {
+                            // Read-only: one bounded page, observed off the
+                            // actor, answered on this same connection.
+                            #[cfg(any(target_os = "linux", target_os = "macos"))]
+                            match &mut background {
+                                Some(runtime) => {
+                                    runtime.task_message_inputs(
+                                        &store,
+                                        hello.request.as_ref().unwrap(),
+                                        queue.clone(),
+                                        seq,
+                                    );
+                                    streaming = true;
+                                    activation_waiting = true;
+                                    Value::Null
+                                }
+                                None => {
+                                    json!({"read_only":true,"code":"task_message_inputs_unavailable"})
+                                }
+                            }
+                            #[cfg(not(any(target_os = "linux", target_os = "macos")))]
+                            {
+                                json!({"read_only":true,"code":"task_message_inputs_unavailable"})
+                            }
+                        } else if hello
+                            .request
+                            .as_ref()
+                            .is_some_and(|v| v["op"] == "task_start_reconcile_result")
+                        {
+                            #[cfg(any(target_os = "linux", target_os = "macos"))]
+                            {
+                                task_start_reconcile::query(&store, hello.request.as_ref().unwrap())
+                            }
+                            #[cfg(not(any(target_os = "linux", target_os = "macos")))]
+                            {
+                                json!({"read_only":true,"code":"task_start_result_unavailable"})
+                            }
                         } else if hello.request.as_ref().is_some_and(|v| {
                             matches!(
                                 v["op"].as_str(),
                                 Some(
-                                    "creation_clone" | "creation_worktree" | "task_start_reconcile"
+                                    "creation_clone"
+                                        | "creation_worktree"
+                                        | "creation_launch"
+                                        | "task_message"
+                                        | "task_message_input_release"
+                                        | "deferred_send"
+                                        | "deferred_answer"
+                                        | "compact_to_send"
+                                        | "task_start_reconcile"
                                 )
                             )
                         }) {
@@ -1083,6 +1442,7 @@ fn serve(config: &Config, location: Location, background_mode: bool) -> Result<(
                     let producer = if hello.abi == ABI
                         && hello.configuration == location.configuration
                         && hello.op == "feed"
+                        && !upgrade.requested()
                         && background.is_none()
                     {
                         feed.open(hello.request.as_ref()).ok()
@@ -1171,6 +1531,7 @@ fn serve(config: &Config, location: Location, background_mode: bool) -> Result<(
                 } else if background_blocked {
                     value["background_start"] = json!({"admitted":false,"code":"explicit_handoff_required","durably_blocked":true});
                 }
+                upgrade.decorate(&mut value);
                 fanout.publish(protocol::encode(&frame(&epoch, seq, "heartbeat", value))?.into());
                 heartbeat = Instant::now() + HEARTBEAT;
             }
@@ -1178,23 +1539,60 @@ fn serve(config: &Config, location: Location, background_mode: bool) -> Result<(
         ensure!(!failed, "desktop listener failed");
         Ok(())
     })();
+    let replaced = upgrade.requested() && platform::shutdown_signal() == 0;
     stopped.store(true, Ordering::SeqCst);
     listener.close();
     let _ = acceptor.join();
     drop(fanout);
     for event in receive.try_iter() {
-        if let Event::Command(_, queue, _) = event {
-            queue.close();
+        match event {
+            Event::Command(_, queue, _) => queue.close(),
+            #[cfg(windows)]
+            Event::SwarmRestart(queue, _) => queue.close(),
+            _ => {}
         }
     }
     let deadline = Instant::now() + TIMEOUT + Duration::from_secs(1);
-    while active.load(Ordering::SeqCst) != 0 && Instant::now() < deadline {
+    while upgrade::connections_pending(
+        active.load(Ordering::SeqCst),
+        replaced,
+        Instant::now() < deadline,
+        platform::shutdown_signal() != 0,
+    ) {
+        #[cfg(all(test, target_os = "linux"))]
+        upgrade::actor_tests::connection_wait(replaced, &active);
         thread::sleep(Duration::from_millis(10));
     }
-    let drained = background.as_mut().map_or(Ok(()), |runtime| {
-        runtime.drain(&mut store, Duration::from_secs(4))
-    });
+    let drained = if replaced {
+        // Even an unrelated listener/store error during replacement must not
+        // turn the normal four-second shutdown wait into abandonment. An
+        // explicit shutdown signal retains the existing termination behavior.
+        loop {
+            let result = background.as_mut().map_or(Ok(()), |runtime| {
+                runtime.drain(&mut store, Duration::from_millis(100))
+            });
+            if result.is_ok() || platform::shutdown_signal() != 0 {
+                break result;
+            }
+            thread::sleep(Duration::from_millis(10));
+        }
+    } else {
+        background.as_mut().map_or(Ok(()), |runtime| {
+            runtime.drain(&mut store, Duration::from_secs(4))
+        })
+    };
     let feed_stopped = feed.stop(&mut store);
+    if replaced && drained.is_ok() {
+        // A drained runtime can now drop its own serve-owner copies. Retain
+        // the original kernel owner through any independent finalizer/audit
+        // loan even if the actor ended on an unrelated listener/store error.
+        drop(background.take());
+        #[cfg(all(test, target_os = "linux"))]
+        upgrade::actor_tests::owner_wait(&owner);
+        while !upgrade::owner_loans_released(&owner) && platform::shutdown_signal() == 0 {
+            thread::sleep(Duration::from_millis(10));
+        }
+    }
     let checkpointed = store.checkpoint();
     if let Err(error) = run_result {
         if drained.is_err() {
@@ -1214,6 +1612,10 @@ fn serve(config: &Config, location: Location, background_mode: bool) -> Result<(
     ensure!(
         active.load(Ordering::SeqCst) == 0,
         "desktop connections did not drain"
+    );
+    ensure!(
+        !replaced,
+        "hgs_replaced: original desktop resources drained; supervisor restart required"
     );
     Ok(())
 }
@@ -1268,12 +1670,28 @@ fn client(
         None
     };
     let queue = Arc::new(Queue::default());
-    send.try_send(Event::Command(
-        hello,
-        queue.clone(),
-        authority.map(Box::new),
-    ))
-    .map_err(|_| anyhow::anyhow!("desktop admission is full"))?;
+    let event = Event::Command(hello, queue.clone(), authority.map(Box::new));
+    #[cfg(windows)]
+    let event = match event {
+        Event::Command(hello, _, _) if hello.op == swarm_windows::OP => {
+            use zerus_client_core::desktop::windows::{verify_own_client_until, Server};
+            ensure!(
+                hello.abi == ABI
+                    && hello.configuration == location.configuration
+                    && hello.request.is_none(),
+                "invalid swarm restart scope"
+            );
+            let pipe = stream.verification_handle()?;
+            let peer = match verify_own_client_until(&pipe, Instant::now() + TIMEOUT) {
+                Server::Verified(peer) => peer,
+                _ => anyhow::bail!("swarm requester could not be verified"),
+            };
+            Event::SwarmRestart(queue.clone(), peer)
+        }
+        event => event,
+    };
+    send.try_send(event)
+        .map_err(|_| anyhow::anyhow!("desktop admission is full"))?;
     // Close even if a timeout change or thread creation fails after admission.
     struct CloseQueue(Arc<Queue>);
     impl Drop for CloseQueue {
@@ -1382,14 +1800,117 @@ fn exchange(location: &Location, op: &str, request: Option<Value>) -> Result<Opt
     );
     Ok(Some(response["value"].clone()))
 }
+/// Restart only the worker retained by an already-running background service.
+/// Offline/passive/revoked owners are refused; this never starts a service or GUI.
+#[cfg(windows)]
+pub(crate) fn restart_swarm(config: &Config) -> Result<Value> {
+    let budget = TIMEOUT;
+    #[cfg(test)]
+    let budget = swarm_cli_test::budget(config).unwrap_or(budget);
+    bounded_swarm_restart(config, Instant::now() + budget, restart_swarm_until)
+}
+#[cfg(all(test, not(windows)))]
+fn restart_swarm(config: &Config) -> Result<Value> {
+    let budget = swarm_cli_test::budget(config).context("no CLI lookup fixture selected")?;
+    bounded_swarm_restart(config, Instant::now() + budget, |config, _| {
+        let _ = swarm_cli_test::Location::new(config)?;
+        anyhow::bail!("CLI lookup fixture finished")
+    })
+}
+#[cfg(any(windows, test))]
+pub(crate) static SWARM_RESTART_ACQUIRING: AtomicBool = AtomicBool::new(false);
+#[cfg(any(windows, test))]
+fn bounded_swarm_restart(
+    config: &Config,
+    until: Instant,
+    request: impl FnOnce(&Config, Instant) -> Result<Value> + Send + 'static,
+) -> Result<Value> {
+    // Path/state discovery can involve filesystem I/O. Only one
+    // acquisition/request worker may outlive this caller's total deadline.
+    ensure!(
+        SWARM_RESTART_ACQUIRING
+            .compare_exchange(false, true, Ordering::AcqRel, Ordering::Acquire)
+            .is_ok(),
+        "desktop swarm restart acquisition is still owned"
+    );
+    let config = config.clone();
+    let (send, receive) = mpsc::sync_channel(1);
+    let spawned = thread::Builder::new()
+        .name("swarm-restart-request".into())
+        .spawn(move || {
+            struct Admission;
+            impl Drop for Admission {
+                fn drop(&mut self) {
+                    SWARM_RESTART_ACQUIRING.store(false, Ordering::Release);
+                }
+            }
+            let _admission = Admission;
+            let result = request(&config, until);
+            drop(config);
+            let _ = send.try_send(result);
+        });
+    if let Err(error) = spawned {
+        SWARM_RESTART_ACQUIRING.store(false, Ordering::Release);
+        return Err(error.into());
+    }
+    receive
+        .recv_timeout(until.saturating_duration_since(Instant::now()))
+        .context("desktop swarm restart outcome is unconfirmed; do not repeat this attempt")?
+}
+#[cfg(windows)]
+pub(crate) fn restart_swarm_until(config: &Config, until: Instant) -> Result<Value> {
+    #[cfg(test)]
+    use swarm_cli_test::Location;
+    use zerus_client_core::desktop::windows::{verify_own_server_until, Server};
+    let location = Location::new(config)?;
+    location.check_existing()?;
+    let mut stream = transport::connect(&location)?
+        .context("the Windows desktop background service is not running")?;
+    let pipe = stream.verification_handle()?;
+    let peer = match verify_own_server_until(&pipe, until) {
+        Server::Verified(peer) => peer,
+        _ => anyhow::bail!("the desktop swarm owner could not be verified"),
+    };
+    ensure!(peer.current(), "desktop swarm owner exited");
+    let remaining = || {
+        until
+            .checked_duration_since(Instant::now())
+            .filter(|duration| !duration.is_zero())
+            .context("desktop swarm restart deadline expired")
+    };
+    stream.set_write_timeout(Some(remaining()?))?;
+    stream.write_all(&protocol::encode(&json!({"abi":ABI,"configuration":location.configuration,"op":swarm_windows::OP,"request":null}))?)?;
+    stream.set_read_timeout(Some(remaining()?))?;
+    let bytes = protocol::line(&mut BufReader::new(stream), protocol::FRAME_BYTES)?
+        .context("desktop swarm owner disconnected")?;
+    ensure!(
+        peer.current() && Instant::now() < until,
+        "desktop swarm restart outcome is unconfirmed"
+    );
+    let response: Value = serde_json::from_slice(&bytes)?;
+    ensure!(
+        response["abi"] == ABI && response["t"] == "response",
+        "invalid desktop swarm restart response"
+    );
+    let value = response["value"].clone();
+    ensure!(
+        value["accepted"] == true,
+        "desktop swarm restart refused: {}",
+        value["code"]
+    );
+    Ok(value)
+}
+#[cfg(test)]
+mod swarm_cli_test;
 fn status(location: &Location) -> Result<Value> {
     Ok(exchange(location, "status", None)?.unwrap_or_else(|| json!({"abi":ABI,"running":false,"ownership":"unavailable","configuration":location.configuration,"writers_enabled":false,
         "lifecycle":lifecycle::unavailable(&location.configuration),
         "frontend_read_delivery":frontend::inspect(&location.configuration)})))
 }
 fn watch(location: &Location) -> Result<()> {
+    let mut upgrade = upgrade::Upgrade::new();
     let stream = connection(location, "watch", None)?.context("desktop service is not running")?;
-    stream.set_read_timeout(None)?;
+    stream.set_read_timeout(Some(Duration::from_millis(200)))?;
     let detached = stream.try_clone()?;
     thread::Builder::new()
         .name("desktop-stdin".into())
@@ -1399,9 +1920,58 @@ fn watch(location: &Location) -> Result<()> {
         })?;
     let mut reader = BufReader::new(stream);
     let mut output = std::io::stdout().lock();
-    while let Some(bytes) = protocol::line(&mut reader, protocol::FRAME_BYTES)? {
+    let mut line = protocol::WatchLine::default();
+    let mut last: Option<(String, u64)> = None;
+    loop {
+        if upgrade.poll(Instant::now()) {
+            if let Some((epoch, seq)) = &last {
+                output.write_all(&protocol::encode(&frame(
+                    epoch,
+                    *seq,
+                    "error",
+                    json!({"code":"hgs_replaced","fatal":true}),
+                ))?)?;
+                output.flush()?;
+            }
+            break;
+        }
+        let bytes = match line.read(&mut reader)? {
+            protocol::ReadTurn::Pending => continue,
+            protocol::ReadTurn::End => break,
+            protocol::ReadTurn::Frame(bytes) => bytes,
+        };
+        // Retain only the original stream identity for a local transport error.
+        // It cannot construct a writer receipt or a service incarnation.
+        #[derive(serde::Deserialize)]
+        struct ErrorCode {
+            code: Option<String>,
+        }
+        #[derive(serde::Deserialize)]
+        struct Header {
+            abi: String,
+            epoch: String,
+            seq: u64,
+            t: String,
+            value: ErrorCode,
+        }
+        let header = serde_json::from_slice::<Header>(&bytes).ok();
+        if let Some(header) = &header {
+            if header.abi == ABI
+                && uuid::Uuid::parse_str(&header.epoch)
+                    .is_ok_and(|id| !id.is_nil() && id.to_string() == header.epoch)
+            {
+                last = Some((header.epoch.clone(), header.seq));
+            }
+        }
         output.write_all(&bytes)?;
         output.flush()?;
+        if header.is_some_and(|header| {
+            header.abi == ABI
+                && header.t == "error"
+                && header.value.code.as_deref() == Some("hgs_replaced")
+        }) {
+            break;
+        }
     }
     Ok(())
 }

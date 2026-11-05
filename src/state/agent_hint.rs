@@ -112,13 +112,34 @@ fn decide(record: &mut Value, event: &Value, enabled: bool) -> Option<&'static s
     Some(HINT)
 }
 
-pub(super) fn output(writer: &mut impl Write, hint: &str) -> Result<()> {
-    let output =
-        json!({"hookSpecificOutput":{"hookEventName":"SessionStart","additionalContext":hint}});
+/// One stable UTF-8 JSON document, serialized before the first stdout write.
+/// Field order is explicit and does not depend on serde_json map features.
+pub(super) fn output(writer: &mut impl Write, context: &str) -> Result<()> {
+    #[derive(serde::Serialize)]
+    struct Fields<'a> {
+        #[serde(rename = "additionalContext")]
+        context: &'a str,
+        #[serde(rename = "hookEventName")]
+        event: &'static str,
+    }
+    #[derive(serde::Serialize)]
+    struct Output<'a> {
+        #[serde(rename = "hookSpecificOutput")]
+        fields: Fields<'a>,
+    }
+    let output = Output {
+        fields: Fields {
+            context,
+            event: "SessionStart",
+        },
+    };
+    let mut bytes =
+        serde_json::to_vec(&output).map_err(|_| "Could not encode SessionStart context")?;
+    bytes.push(b'\n');
     writer
-        .write_all(format!("{output}\n").as_bytes())
+        .write_all(&bytes)
         .and_then(|()| writer.flush())
-        .map_err(|_| "Could not write the optional agent hint output; delivery is unknown".into())
+        .map_err(|_| "Could not write SessionStart context; delivery is unknown".into())
 }
 
 #[cfg(test)]
@@ -314,6 +335,30 @@ mod tests {
         );
         assert!(HINT.is_ascii() && HINT.len() <= 220 && !HINT.contains('\n'));
         assert_eq!(HINT, "This agent runs in a Zerus session: the hgs CLI reads, messages, launches and stops other agent sessions on this and other computers. Run hgs guide before using it.");
+    }
+
+    #[test]
+    fn session_start_combines_hint_and_tasks_in_one_stable_document() {
+        let tasks = crate::tasks::session_context("claude").unwrap();
+        let text = format!(
+            "{HINT}\n\n{}",
+            tasks["hookSpecificOutput"]["additionalContext"]
+                .as_str()
+                .unwrap()
+        );
+        let mut bytes = Vec::new();
+        output(&mut bytes, &text).unwrap();
+        assert_eq!(
+            bytes,
+            include_bytes!("../../tests/fixtures/session-start-context.json")
+        );
+        assert_eq!(
+            serde_json::from_slice::<Value>(&bytes).unwrap()["hookSpecificOutput"]["additionalContext"],
+            text
+        );
+        assert_eq!(bytes.last(), Some(&b'\n'));
+        assert_eq!(bytes.iter().filter(|&&b| b == b'\n').count(), 1);
+        assert!(!bytes.starts_with(&[0xef, 0xbb, 0xbf]));
     }
 
     #[test]

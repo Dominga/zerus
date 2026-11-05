@@ -17,18 +17,34 @@ const MAINTENANCE_UNAVAILABLE: &str =
 #[derive(Clone, Copy, Debug, Deserialize, PartialEq, Eq, PartialOrd, Ord)]
 #[serde(rename_all = "snake_case")]
 pub enum Operation {
+    #[serde(skip)] // Original native Terminate capture only, never renderer JSON.
+    TerminationOutcome,
     #[serde(skip)] // Native Files controller only, never caller-chosen paths.
     CacheMaintenance,
     #[serde(skip)] // Native creation owner only; never generic policy dispatch or receipts.
     CreationClone,
     #[serde(skip)] // Native creation owner only; never generic policy dispatch or receipts.
     CreationWorktree,
+    #[serde(skip)] // Native creation owner only; never generic policy dispatch or receipts.
+    CreationLaunch,
+    #[serde(skip)] // Native task message owner only; never generic policy dispatch or receipts.
+    TaskMessage,
+    #[serde(skip)] // Native input review only; never generic policy dispatch or receipts.
+    TaskMessageInputRelease,
+    #[serde(skip)] // Native deferred send owner only; never generic policy dispatch or receipts.
+    DeferredSend,
+    #[serde(skip)] // Native deferred answer owner only; never generic policy dispatch or receipts.
+    DeferredAnswer,
+    #[serde(skip)] // Native compact-to-send owner only; never generic policy dispatch or receipts.
+    CompactToSend,
     #[serde(skip)] // Native TaskStart boundary only, never generic renderer JSON.
     TaskStartReconcile,
     #[serde(skip)] // Separate native notification controller, never generic policy JSON.
     NotificationControl,
     #[serde(skip)] // Separate native ownership controller, never a generic policy request.
     DesktopOwnership,
+    #[serde(skip)] // Closed native observation, never a policy operation or Grant receipt.
+    DesktopOwnershipObserve,
     #[serde(skip)] // Fixed native startup producer only, never JS row/path input.
     ImportPendingReads,
     #[serde(skip)] // The ephemeral consumer is separate from durable policy requests.
@@ -40,11 +56,19 @@ impl Operation {
     fn of(request: &Request) -> Self {
         match request {
             Request::CacheMaintenance { .. } => Self::CacheMaintenance,
+            Request::TerminationOutcome { .. } => Self::TerminationOutcome,
             Request::CreationClone { .. } => Self::CreationClone,
             Request::CreationWorktree { .. } => Self::CreationWorktree,
+            Request::CreationLaunch { .. } => Self::CreationLaunch,
+            Request::TaskMessage { .. } => Self::TaskMessage,
+            Request::TaskMessageInputRelease { .. } => Self::TaskMessageInputRelease,
+            Request::DeferredSend { .. } => Self::DeferredSend,
+            Request::DeferredAnswer { .. } => Self::DeferredAnswer,
+            Request::CompactToSend { .. } => Self::CompactToSend,
             Request::TaskStartReconcile { .. } => Self::TaskStartReconcile,
             Request::NotificationControl { .. } => Self::NotificationControl,
             Request::DesktopOwnership { .. } => Self::DesktopOwnership,
+            Request::DesktopOwnershipObserve { .. } => Self::DesktopOwnershipObserve,
             Request::ImportPendingReads { .. } => Self::ImportPendingReads,
             Request::ActivationWait { .. } => Self::ActivationWait,
             Request::AutomaticApprovals { .. } => Self::AutomaticApprovals,
@@ -54,11 +78,19 @@ impl Operation {
     fn name(self) -> &'static str {
         match self {
             Self::CacheMaintenance => "cache_maintenance",
+            Self::TerminationOutcome => "termination_outcome",
             Self::CreationClone => "creation_clone",
             Self::CreationWorktree => "creation_worktree",
+            Self::CreationLaunch => "creation_launch",
+            Self::TaskMessage => "task_message",
+            Self::TaskMessageInputRelease => "task_message_input_release",
+            Self::DeferredSend => "deferred_send",
+            Self::DeferredAnswer => "deferred_answer",
+            Self::CompactToSend => "compact_to_send",
             Self::TaskStartReconcile => "task_start_reconcile",
             Self::NotificationControl => "notification_controls",
             Self::DesktopOwnership => "desktop_ownership",
+            Self::DesktopOwnershipObserve => "desktop_ownership_observe",
             Self::ImportPendingReads => "import_pending_reads",
             Self::ActivationWait => "activation_wait",
             Self::AutomaticApprovals => "automatic_approvals",
@@ -101,6 +133,9 @@ enum Receipt {
 }
 impl Frontend {
     fn begin(&self, operation: Operation, requested: Option<Request>) -> Begin {
+        if let Some(request @ Request::DesktopOwnershipObserve { .. }) = &requested {
+            return Begin::Immediate(refused(request, "native_observation_required"));
+        }
         let mut state = self.state.lock().unwrap_or_else(PoisonError::into_inner);
         if let Some(old) = state.operations.get_mut(&operation) {
             if let Some(request) = &requested {
@@ -553,9 +588,17 @@ fn submission_ready(snapshot: &Snapshot, request: &Request) -> bool {
     if matches!(
         request,
         Request::NotificationControl { .. }
+            | Request::DesktopOwnershipObserve { .. }
             | Request::CreationClone { .. }
             | Request::CreationWorktree { .. }
+            | Request::CreationLaunch { .. }
+            | Request::TaskMessage { .. }
+            | Request::TaskMessageInputRelease { .. }
+            | Request::DeferredSend { .. }
+            | Request::DeferredAnswer { .. }
+            | Request::CompactToSend { .. }
             | Request::TaskStartReconcile { .. }
+            | Request::TerminationOutcome { .. }
     ) {
         return false;
     }
@@ -702,7 +745,14 @@ fn lookup(
         Request::NotificationControl { .. }
             | Request::CreationClone { .. }
             | Request::CreationWorktree { .. }
+            | Request::CreationLaunch { .. }
+            | Request::TaskMessage { .. }
+            | Request::TaskMessageInputRelease { .. }
+            | Request::DeferredSend { .. }
+            | Request::DeferredAnswer { .. }
+            | Request::CompactToSend { .. }
             | Request::TaskStartReconcile { .. }
+            | Request::TerminationOutcome { .. }
     ) {
         return Err("frontend_receipt_unconfirmed");
     }
@@ -738,7 +788,14 @@ fn lookup_receipt(request: &Request, id: &str, value: Value) -> Result<Receipt, 
         Request::NotificationControl { .. }
             | Request::CreationClone { .. }
             | Request::CreationWorktree { .. }
+            | Request::CreationLaunch { .. }
+            | Request::TaskMessage { .. }
+            | Request::TaskMessageInputRelease { .. }
+            | Request::DeferredSend { .. }
+            | Request::DeferredAnswer { .. }
+            | Request::CompactToSend { .. }
             | Request::TaskStartReconcile { .. }
+            | Request::TerminationOutcome { .. }
     ) {
         return Err("frontend_receipt_unconfirmed");
     }
@@ -798,7 +855,14 @@ fn checked(request: &Request, mut value: Value, lookup: bool) -> Option<(Value, 
             | Request::NotificationControl { .. }
             | Request::CreationClone { .. }
             | Request::CreationWorktree { .. }
+            | Request::CreationLaunch { .. }
+            | Request::TaskMessage { .. }
+            | Request::TaskMessageInputRelease { .. }
+            | Request::DeferredSend { .. }
+            | Request::DeferredAnswer { .. }
+            | Request::CompactToSend { .. }
             | Request::TaskStartReconcile { .. }
+            | Request::TerminationOutcome { .. }
     ) {
         // Their separate consumers validate different receipts and completion rules.
         return None;
@@ -855,12 +919,20 @@ fn checked(request: &Request, mut value: Value, lookup: bool) -> Option<(Value, 
             true
         }
         Request::DesktopOwnership { .. }
+        | Request::DesktopOwnershipObserve { .. }
         | Request::ActivationWait { .. }
         | Request::CacheMaintenance { .. }
         | Request::NotificationControl { .. }
         | Request::CreationClone { .. }
         | Request::CreationWorktree { .. }
-        | Request::TaskStartReconcile { .. } => return None,
+        | Request::CreationLaunch { .. }
+        | Request::TaskMessage { .. }
+        | Request::TaskMessageInputRelease { .. }
+        | Request::DeferredSend { .. }
+        | Request::DeferredAnswer { .. }
+        | Request::CompactToSend { .. }
+        | Request::TaskStartReconcile { .. }
+        | Request::TerminationOutcome { .. } => return None,
         Request::AutomaticApprovals { enabled, .. } => {
             if value["op"] != "automatic_approvals" || value["enabled"] != *enabled {
                 return None;

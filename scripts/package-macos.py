@@ -20,7 +20,7 @@ MINIMUM_SYSTEM = "14.0"
 # Installers zerus-setup runs from Contents/Resources/setup, with the local modules they import.
 SETUP_SCRIPTS = ("install-macos-session-service.py", "install-recovery-service.py",
                  "install-swarm-service.py", "launchd_agent.py", "install-mobile-connector-service.py",
-                 "install-macos-desktop-service.py", "desktop-revoke-hold.py")
+                 "install-macos-desktop-service.py", "desktop-revoke-hold.py", "desktop-service-activation.py")
 
 
 def run(*command):

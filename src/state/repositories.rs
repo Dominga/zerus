@@ -45,6 +45,77 @@ pub(crate) struct Control<'a> {
     #[cfg(unix)]
     pub custody: &'a std::sync::Arc<zerus_client_core::run::custody::InheritedLock>,
 }
+#[cfg(test)]
+thread_local! {
+    /// Owned-effect tests run the same anchored Git argv directly: a unit
+    /// image cannot self-exec the worker. Production always uses the worker.
+    pub(in crate::state) static OWNED_GIT_DIRECT: std::cell::Cell<bool> =
+        const { std::cell::Cell::new(false) };
+}
+/// Test-only: `run` with this thread's owned Git commands run directly, for
+/// actor tests of the real owned executor inside a private probe.
+#[cfg(all(test, target_os = "linux"))]
+pub(crate) fn with_direct_owned_git<T>(run: impl FnOnce() -> T) -> T {
+    OWNED_GIT_DIRECT.with(|direct| direct.set(true));
+    let result = run();
+    OWNED_GIT_DIRECT.with(|direct| direct.set(false));
+    result
+}
+/// Git's own `GIT_DIR` and `GIT_COMMON_DIR` for one owned command, as
+/// descriptors its process holds (`/proc/self/fd/N`), never as pathnames.
+#[derive(Clone, Copy, Default)]
+pub(in crate::state) struct Bind {
+    pub git_dir: Option<i32>,
+    pub common_dir: Option<i32>,
+}
+/// One Git command for another admitted creation effect: anchored in a pinned
+/// directory, run by the deadline-owning worker and held by that effect's
+/// original close-only custody and cancellation. Each `share` stays open, at
+/// its own descriptor number, in Git's process, so an argument or `bind` may
+/// name it as `/proc/self/fd/N`.
+#[cfg(unix)]
+pub(in crate::state) fn owned_git(
+    directory: &directory::Directory,
+    share: &[&directory::Directory],
+    bind: Bind,
+    args: &[&str],
+    seconds: u64,
+    cancelled: &std::sync::atomic::AtomicBool,
+    custody: &std::sync::Arc<zerus_client_core::run::custody::InheritedLock>,
+) -> Result<Vec<u8>> {
+    #[cfg(test)]
+    if OWNED_GIT_DIRECT.with(std::cell::Cell::get) {
+        directory.verify()?;
+        let result = run_git(Some(directory), share, bind, args, seconds, &|| {
+            cancelled.load(std::sync::atomic::Ordering::Acquire)
+        });
+        directory.verify()?;
+        return result;
+    }
+    let control = Control {
+        before: &|_| Ok(()),
+        cancelled,
+        custody,
+    };
+    directory.verify()?;
+    let result = worker::run(directory, share, bind, args, seconds, Some(&control));
+    directory.verify()?;
+    result
+}
+/// Test-only: the anchored Git argv without identity checks, to prove that
+/// Git's own writes follow the pinned directory object.
+#[cfg(all(test, target_os = "linux"))]
+pub(in crate::state) fn owned_git_unverified_for_test(
+    directory: &directory::Directory,
+    share: &[&directory::Directory],
+    bind: Bind,
+    args: &[&str],
+    cancelled: &std::sync::atomic::AtomicBool,
+) -> Result<Vec<u8>> {
+    run_git(Some(directory), share, bind, args, 30, &|| {
+        cancelled.load(std::sync::atomic::Ordering::Acquire)
+    })
+}
 fn before(control: Option<&Control<'_>>, step: Step) -> Result<()> {
     if let Some(control) = control {
         (control.before)(step)?;
@@ -178,11 +249,11 @@ fn git(
 ) -> Result<Vec<u8>> {
     directory.verify()?;
     #[cfg(unix)]
-    let result = worker::run(directory, args, seconds, control);
+    let result = worker::run(directory, &[], Bind::default(), args, seconds, control);
     #[cfg(windows)]
     let result = {
         let _ = control; // The first admitted service clone leaf is POSIX-only.
-        run_git(Some(directory), args, seconds, &|| false)
+        run_git(Some(directory), &[], Bind::default(), args, seconds, &|| false)
     };
     directory.verify()?;
     result
@@ -190,6 +261,8 @@ fn git(
 
 fn run_git(
     directory: Option<&directory::Directory>,
+    share: &[&directory::Directory],
+    bind: Bind,
     args: &[&str],
     seconds: u64,
     cancelled: &dyn Fn() -> bool,
@@ -214,6 +287,14 @@ fn run_git(
     if let Some(directory) = directory {
         directory.anchor(&mut cmd)?;
     }
+    #[cfg(unix)]
+    for held in share {
+        held.share(&mut cmd);
+    }
+    #[cfg(windows)]
+    if !share.is_empty() || bind.git_dir.is_some() || bind.common_dir.is_some() {
+        return Err("creation_worktree_unsupported".into());
+    }
     cmd.args(["--no-pager", "-c", "core.fsmonitor=false"])
         .args(args)
         .env("LC_ALL", "C");
@@ -227,6 +308,16 @@ fn run_git(
         "GIT_CONFIG_COUNT",
     ] {
         cmd.env_remove(key);
+    }
+    #[cfg(unix)]
+    {
+        cmd.env_remove(worker::BIND_GIT_DIR)
+            .env_remove(worker::BIND_COMMON_DIR);
+        for (key, fd) in [("GIT_DIR", bind.git_dir), ("GIT_COMMON_DIR", bind.common_dir)] {
+            if let Some(fd) = fd {
+                cmd.env(key, format!("/proc/self/fd/{fd}"));
+            }
+        }
     }
     crate::platform::git_noninteractive(&mut cmd);
     let (status, out, err) = crate::platform::run_bounded(

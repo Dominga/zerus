@@ -65,6 +65,10 @@ pub struct SavedDraftItem {
     /// key names the machine instead (`ComposerDraftOwner`).
     pub computer: String,
     pub session: String,
+    /// The durable session ID of a draft keyed by it (zerus-ucck P2c-2),
+    /// empty for a key that names its session: the listed row with this ID
+    /// owns the draft, whatever its label is now.
+    pub session_id: String,
     /// The row's accessible text: the owner's parts joined by " / ".
     pub title: String,
     /// What the row shows as its title (Qt's `SessionRoles::Title`).
@@ -134,7 +138,15 @@ pub fn cursor_of(token: &str) -> Option<Cursor> {
 
 /// One Saved drafts row (`showSavedDrafts`, 1257-1300).
 pub(crate) fn item(key: String, summary: &Summary, source: DraftSource) -> SavedDraftItem {
-    let owner = drafts::owner(&key);
+    let mut owner = drafts::owner(&key);
+    // A draft keyed by session ID shows its session's label at the save.
+    if !owner.session_id.is_empty() {
+        owner.session = if summary.session_label.is_empty() {
+            format!("session {}", &owner.session_id[..8])
+        } else {
+            summary.session_label.clone()
+        };
+    }
     let machine = if owner.machine.is_empty() {
         THIS_COMPUTER.to_owned()
     } else {
@@ -211,6 +223,7 @@ pub(crate) fn item(key: String, summary: &Summary, source: DraftSource) -> Saved
         kind: owner.kind,
         computer: owner.machine.clone(),
         session: owner.session.clone(),
+        session_id: owner.session_id.clone(),
         title: title.join(" / "),
         caption,
         machine,
@@ -380,6 +393,7 @@ impl Composers {
             preview: String::new(),
             modified: 0.0,
             attachments: 0,
+            session_label: String::new(),
         };
         ConflictsPage {
             items: conflicts
@@ -517,10 +531,12 @@ impl Composers {
             hub.stored_keys.push_front(key.to_owned());
             hub.stored_keys.truncate(DRAFT_KEYS);
         }
+        // A composer holding an unresolved delivery has a draft of its own.
         let empty = |c: &&mut Composer| {
             c.loaded
                 && !c.busy()
                 && c.storage_error.is_none()
+                && c.checkpoint.is_none()
                 && c.draft.text.is_empty()
                 && c.draft.attachments.is_empty()
         };
@@ -589,9 +605,13 @@ impl Composers {
         composer.anchor = stored.anchor;
         composer.label.clear();
         composer.form_state = Map::new();
-        composer.uncertain = uncertain;
-        composer.error = error;
-        composer.notice = notice;
+        // The draft's unresolved delivery stays held, with its doubt, until
+        // the user allows a retry (zerus-5wmh.66.4.4).
+        if composer.checkpoint.is_none() {
+            composer.uncertain = uncertain;
+            composer.error = error;
+            composer.notice = notice;
+        }
         composer.removed = None;
         composer.text_epoch += 1;
         composer.attachments_changed();
@@ -599,6 +619,31 @@ impl Composers {
         drop(hub);
         self.changed();
         Ok(())
+    }
+}
+
+/// This run's G3 drafts capture (zerus-5wmh.66.5.2.1.2.1): its status and
+/// Retry in Saved drafts, in service mode or not. `None` for an identity or a
+/// replay that never captures.
+pub struct DraftCapture(
+    pub Option<std::sync::Arc<zerus_client_core::migration::draft_preload::Capture>>,
+);
+
+/// The capture's status, `None` when this run has no capture.
+#[tauri::command]
+pub fn draft_capture_status(
+    state: State<'_, DraftCapture>,
+) -> Option<zerus_client_core::migration::draft_preload::Status> {
+    state.0.as_ref().map(|capture| capture.status())
+}
+
+/// Queues the draft store's Retry job: a run whose capture lineage was not
+/// durable captures again; otherwise the waiting one-time import runs. A
+/// recorded outcome never changes.
+#[tauri::command]
+pub fn draft_capture_retry(state: State<'_, DraftCapture>) {
+    if let Some(capture) = &state.0 {
+        capture.request_retry();
     }
 }
 
@@ -876,6 +921,68 @@ mod tests {
         );
     }
 
+    /// review-n's #1316 R2 probe (zerus-5wmh.66.4.4).
+    #[test]
+    fn a_recovery_callback_never_installs_over_a_held_memory_identity() {
+        let root = dir("probe-r2-recovered-memory");
+        let store = Arc::new(DraftStore::open(root.join("drafts")));
+        let (c, _) = crate::composer::tests::hub_on(&store);
+        c.open(Some(session()));
+        until(&c, |v| v.loaded);
+        let held = crate::composer::tests::held_checkpoint();
+        {
+            let mut hub = c.lock();
+            let composer = hub.composers.get_mut(KEY).unwrap();
+            composer.checkpoint = Some(held.clone());
+            composer.uncertain = true;
+        }
+        let mut copy = Loaded::default();
+        copy.draft.draft.text = "recovered elsewhere".into();
+        // Model the writer result after an identity appeared in memory during recovery.
+        c.recovered(KEY, copy);
+        let hub = c.lock();
+        let composer = &hub.composers[KEY];
+        assert_eq!(composer.checkpoint.as_ref(), Some(&held));
+        assert!(
+            composer.draft.text.is_empty() && composer.uncertain,
+            "the callback must not install or normalize a held draft"
+        );
+    }
+
+    #[test]
+    fn a_restore_keeps_the_open_draft_s_unresolved_identity() {
+        let root = dir("restore-held");
+        let other = "\nclaude/sample-project/other";
+        let store_root = write_store(root.join("drafts"), vec![(other, text("a clean draft"))]);
+        let store = Arc::new(DraftStore::open(store_root.clone()));
+        let (c, _) = crate::composer::tests::hub_on(&store);
+        c.open(Some(session()));
+        let view = until(&c, |v| v.loaded);
+        c.edit(view.handle, 1, view.text_epoch, "current".into(), 0, 0);
+        let held = crate::composer::tests::held_checkpoint();
+        {
+            let mut hub = c.lock();
+            let composer = hub.composers.get_mut(KEY).unwrap();
+            composer.uncertain = true;
+            composer.error = true;
+            composer.checkpoint = Some(held.clone());
+        }
+        assert_eq!(c.restore(view.handle, DraftSource::Client, other), Ok(()));
+        let restored = c.current().unwrap();
+        assert_eq!(restored.text, "a clean draft");
+        assert!(
+            restored.uncertain && !restored.can_send,
+            "its unresolved delivery stays held until Allow retry"
+        );
+        assert_eq!(c.lock().composers[KEY].checkpoint.as_ref(), Some(&held));
+        c.flush();
+        store.flush();
+        assert_eq!(
+            read_draft(&store_root, KEY).draft.checkpoint.as_deref(),
+            Some(&held)
+        );
+    }
+
     #[test]
     fn restore_replaces_the_open_draft_and_keeps_its_doubt() {
         let root = dir("restore");
@@ -1073,6 +1180,58 @@ mod tests {
         );
     }
 
+    /// zerus-ucck P2c-2: a draft keyed by session ID is titled by the label
+    /// its session had at the save, and names that ID for the owner row.
+    #[test]
+    fn a_draft_keyed_by_session_id_shows_its_session_label() {
+        let id = "3f2a9c1d-6b7e-4c2a-9d1f-0a1b2c3d4e5f";
+        let summary = |session_label: &str| Summary {
+            label: String::new(),
+            preview: "hi".into(),
+            modified: 1.0,
+            attachments: 0,
+            session_label: session_label.into(),
+        };
+        let labelled = item(
+            format!("studio\nid:{id}"),
+            &summary("claude/sample-project/review"),
+            DraftSource::Client,
+        );
+        assert_eq!(
+            (
+                labelled.session.as_str(),
+                labelled.session_id.as_str(),
+                labelled.caption.as_str()
+            ),
+            ("claude/sample-project/review", id, "review")
+        );
+        assert_eq!(labelled.title, "claude/sample-project/review / studio");
+        let child = item(
+            format!("studio\nid:{id}\nconv-1\nagent-2"),
+            &summary("claude/p/a"),
+            DraftSource::Client,
+        );
+        assert_eq!(
+            (child.kind, child.session.as_str()),
+            (OwnerKind::Subagent, "claude/p/a")
+        );
+        let unlabelled = item(
+            format!("studio\nid:{id}"),
+            &summary(""),
+            DraftSource::Client,
+        );
+        assert_eq!(unlabelled.session, "session 3f2a9c1d");
+        let named = item(
+            "studio\nclaude/p/a".into(),
+            &summary("ignored"),
+            DraftSource::Client,
+        );
+        assert_eq!(
+            (named.session.as_str(), named.session_id.as_str()),
+            ("claude/p/a", "")
+        );
+    }
+
     #[test]
     fn items_follow_qts_titles() {
         let summary = |preview: &str, attachments: usize| Summary {
@@ -1080,6 +1239,7 @@ mod tests {
             preview: preview.into(),
             modified: 1.0,
             attachments,
+            session_label: String::new(),
         };
         let subagent = item(
             "workstation\nclaude/p/a\nconv-1\nagent-2".into(),

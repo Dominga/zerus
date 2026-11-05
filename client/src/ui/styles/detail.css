@@ -8,6 +8,7 @@
   .drop-overlay span { color: light-dark(#167357, #8bdfc0); font-size: 16px; padding: 24px; text-align: center; }
   .detail-empty { margin: auto; text-align: center; color: var(--z-color-muted); }
   .detail-empty h2 { font-size: 21px; font-weight: 600; color: var(--z-color-text-2); margin-bottom: 8px; }
+  .detail-empty .btn.primary { margin-top: 16px; }
 
   .detail-head { padding: 8px 12px 4px; display: flex; flex-direction: column; gap: 4px; }
   .dh-row1 { display: flex; align-items: center; gap: 4px; min-width: 0; }
@@ -83,6 +84,8 @@
   .act-msg { border-radius: var(--z-radius-lg); padding: 9px 14px 11px; background: var(--z-color-tile); border-left: 3px solid var(--z-color-border); animation: rise var(--z-motion-slow) var(--ease) both; }
   .act-msg.k-user { background: var(--z-color-bubble); border-left-color: var(--z-color-accent-muted); white-space: pre-wrap; }
   .act-msg.k-agent { border-left-color: var(--z-color-accent); }
+  /* A fork's history from the session it began from: read-only, muted. */
+  .act-msg.inherited, .act-tools.inherited, .act-thinking.inherited, .act-notice.inherited { opacity: .72; }
   .act-msg.k-receipt { background: transparent; border-left-color: var(--z-color-violet); padding: 6px 12px; font-size: var(--fs-sm); color: var(--z-color-text-3); }
   .act-msg header { display: flex; align-items: center; gap: 8px; margin-bottom: 4px; font-size: var(--fs-sm); }
   .act-msg header b { color: var(--z-color-accent); }
@@ -465,6 +468,9 @@
     border: 1px solid var(--z-color-divider); border-radius: var(--z-radius-md); background: var(--z-color-code-bg); font-size: calc(var(--fs-base) * .9); }
   .draft-message { font-size: var(--fs-xs); color: var(--z-color-text-2); }
   .draft-message.error { color: var(--z-color-danger); }
+  .draft-capture-notice { display: flex; align-items: center; gap: 8px; }
+  .draft-capture-text { flex: 1; min-width: 0; }
+  .draft-capture-text p { margin: 0; }
   .confirm-body { font-size: var(--fs-sm); line-height: 1.5; margin-bottom: 12px; color: var(--z-color-text-2); }
   .confirm-body p { line-height: 1.5; }
 

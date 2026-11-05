@@ -23,6 +23,30 @@ const PROCESS_CONSENT_SECONDS: u64 = 300;
 const LEFTOVER_ROWS: usize = 32;
 const LEFTOVER_BYTES: usize = 1024 * 1024;
 
+const MACOS_LEFTOVER_REASON: &str = "Deleting leftover files is disabled on macOS until AppleDouble cleanup can be guarded. Open this folder in Finder to review and clean it up manually, or keep the folder.";
+
+fn macos_leftover_deletion_blocked() -> bool {
+    #[cfg(test)]
+    if FORCE_MACOS_LEFTOVER_GUARD.with(std::cell::Cell::get) {
+        return true;
+    }
+    cfg!(target_os = "macos")
+}
+
+fn leftover_deletion_guard() -> std::io::Result<()> {
+    if macos_leftover_deletion_blocked() {
+        return Err(std::io::Error::new(
+            std::io::ErrorKind::Unsupported,
+            MACOS_LEFTOVER_REASON,
+        ));
+    }
+    Ok(())
+}
+
+#[cfg(test)]
+thread_local! {
+    static FORCE_MACOS_LEFTOVER_GUARD: std::cell::Cell<bool> = const { std::cell::Cell::new(false) };
+}
 fn admit_leftover(used: &mut usize, row: &Value) -> bool {
     let size = serde_json::to_vec(row).map_or(usize::MAX, |bytes| bytes.len());
     match used.checked_add(size).filter(|n| *n <= LEFTOVER_BYTES) {
@@ -57,9 +81,11 @@ fn valid_process_consent(proof: &str, row: &Value, common: &Path, at: u64) -> bo
 }
 
 /// Folders a Zerus session record refers to.
-struct Reference {
-    name: String,
-    folders: Vec<PathBuf>,
+pub(super) struct Reference {
+    pub(super) name: String,
+    pub(super) folders: Vec<PathBuf>,
+    /// The ID of the checkout ownership recorded at the session's launch.
+    pub(super) owner: String,
 }
 
 struct Context {
@@ -127,15 +153,16 @@ fn reference(record: &Value) -> Reference {
     Reference {
         name: string(record, "name").to_owned(),
         folders,
+        owner: string(&record["worktree_owner"], "id").to_owned(),
     }
 }
 
-fn bindings() -> Result<Vec<Reference>> {
+pub(super) fn bindings() -> Result<Vec<Reference>> {
     // Ordinary catalog reads tolerate broken records. Deletion cannot interpret
     // a skipped or unreadable record as proof that no session uses the folder.
     let mut result = Vec::new();
     let mut count = 0;
-    for directory in ["", "bindings", "dsh/bindings", "opencode/bindings"] {
+    for directory in storage::BINDING_DIRS {
         let folder = root().join(directory);
         let files = match fs::read_dir(&folder) {
             Ok(files) => files,
@@ -152,9 +179,7 @@ fn bindings() -> Result<Vec<Reference>> {
                 .file_stem()
                 .and_then(|s| s.to_str())
                 .unwrap_or_default();
-            if !(directory.contains('/')
-                || stem.len() == 64 && stem.bytes().all(|b| b.is_ascii_hexdigit()))
-            {
+            if !storage::binding_stem(directory, stem) {
                 continue;
             }
             count += 1;
@@ -169,8 +194,12 @@ fn bindings() -> Result<Vec<Reference>> {
             if string(&value, "name").is_empty() {
                 return Err("Invalid saved session identity".into());
             }
+            // A session in the ID layout is its own record: its label's path
+            // may hold another session (P3a), whose folders are not its own.
             let value = if directory.contains('/') {
                 value
+            } else if directory == "sessions" {
+                storage::read_id(stem)?
             } else {
                 read(string(&value, "name"))?
             };
@@ -273,6 +302,23 @@ fn status(tree: &Path, deadline: Instant) -> std::result::Result<Status, GitErro
     Ok(result)
 }
 
+#[cfg(test)]
+thread_local! {
+    static AFTER_LEFTOVER_SCAN: std::cell::RefCell<Option<Box<dyn FnOnce()>>> =
+        const { std::cell::RefCell::new(None) };
+    static MEASURED_PATHS: std::cell::RefCell<Option<BTreeMap<PathBuf, usize>>> =
+        const { std::cell::RefCell::new(None) };
+}
+
+#[cfg(test)]
+fn trace_measured(path: &Path) {
+    MEASURED_PATHS.with(|paths| {
+        if let Some(paths) = paths.borrow_mut().as_mut() {
+            *paths.entry(path.to_path_buf()).or_default() += 1;
+        }
+    });
+}
+
 /// Apparent size of an ignored entry, without following symlinks.
 fn measure(path: &Path, entries: &mut usize, deadline: Instant) -> (u64, bool, String) {
     let mut total = 0;
@@ -285,6 +331,8 @@ fn measure(path: &Path, entries: &mut usize, deadline: Instant) -> (u64, bool, S
             complete = false;
             break;
         }
+        #[cfg(test)]
+        trace_measured(&path);
         let Ok(metadata) = fs::symlink_metadata(&path) else {
             complete = false;
             continue;
@@ -958,11 +1006,22 @@ fn assess(tree: &Value, trees: &[Value], context: &Context, total: Instant) -> V
         "status":status.entries,"nested":row["nested"],"sessions":row["sessions"],
         "ignored":row["ignored_fingerprint"],"discard":row["discard_fingerprint"]})));
     // A complete roster with only stable access-denied paths permits a narrow
-    // manual exception. All other blockers (including any readable use) win.
+    // manual exception. All other blockers (including any readable use) win,
+    // except changes the person may also discard: then removal needs both
+    // explicit consents (zerus-k2ga).
+    let discard_offered = row["discard_fingerprint"].as_str().is_some_and(|s| !s.is_empty());
+    let codes: Vec<&str> = reasons.iter().map(|r| string(r, "code")).collect();
+    let changed = codes.iter().any(|code| matches!(*code, "changes" | "untracked"));
     if context.processes.as_ref().is_ok_and(|p| !p.unreadable.is_empty())
-        && reasons.len() == 1 && reasons[0]["code"] == "processes_unavailable"
+        && codes.contains(&"processes_unavailable")
+        && codes.iter().all(|code| *code == "processes_unavailable"
+            || (discard_offered && matches!(*code, "changes" | "untracked")))
     {
         row["process_fingerprint"] = json!(process_consent(&row, &context.common, now() as u64));
+        if changed {
+            // Older clients read `discardable` alone, so it stays false here.
+            row["discardable_with_process_consent"] = json!(true);
+        }
     }
     finish(row, reasons, notes)
 }
@@ -1036,9 +1095,10 @@ fn leftovers(
             continue;
         }
         let registered = trees.iter().any(|tree| tree["path"] == json!(path));
-        let present = !matches!(fs::symlink_metadata(&path),
-            Err(e) if e.kind() == std::io::ErrorKind::NotFound);
-        if !present && !registered {
+        // A missing folder resolves only when it is gone for good; on an
+        // unmounted or unidentifiable volume it stays as an uncertain row.
+        let folder = record.volumes.as_ref().map(|v| v.folder.as_str());
+        if !registered && super::worktree_maintenance::vanished(&record.path, folder) {
             super::worktree_maintenance::forget_removal(&record.path)?;
             continue;
         }
@@ -1084,6 +1144,9 @@ fn leftover(
 ) -> Value {
     let path = PathBuf::from(&record.path);
     let mut reasons = Vec::new();
+    if macos_leftover_deletion_blocked() {
+        reasons.push(reason("macos_appledouble_safety", MACOS_LEFTOVER_REASON));
+    }
     let mut notes = vec![reason(
         "partially_removed",
         "Git no longer tracks this folder, but files remain. Review them; the removal is never retried.",
@@ -1114,11 +1177,25 @@ fn leftover(
             "The worktree list was incomplete; Git may still track this folder.",
         ));
     }
+    // An incomplete inventory is unknown use, never an empty set of sessions.
+    // Keep the same completeness gate as ordinary worktree assessment.
+    if !context.bindings_complete {
+        reasons.push(reason(
+            "sessions_unavailable",
+            "Saved sessions could not be checked. Review again before removal.",
+        ));
+    }
     occupants(&path, context, &mut row, &mut reasons);
-    let mut entries = 0;
-    let (bytes, complete, manifest) =
-        measure(&path, &mut entries, step(total, WALK_TIME.as_secs()));
-    row["size"] = json!(bytes);
+    let scan = scan_leftover(&path, step(total, WALK_TIME.as_secs()));
+    #[cfg(test)]
+    AFTER_LEFTOVER_SCAN.with(|hook| {
+        if let Some(hook) = hook.borrow_mut().take() {
+            hook()
+        }
+    });
+    let complete = scan.complete;
+    let manifest = scan.manifest;
+    row["size"] = json!(scan.bytes);
     row["size_complete"] = json!(complete);
     if !complete {
         reasons.push(reason(
@@ -1126,17 +1203,10 @@ fn leftover(
             "The remaining files could not be fully listed. Review again later.",
         ));
     }
-    let (scanned, blockers) = scan_leftover(&path, step(total, WALK_TIME.as_secs()));
-    if !scanned && complete {
-        reasons.push(reason(
-            "status_unavailable",
-            "The remaining folders could not be fully checked. Review again later.",
-        ));
-    }
-    reasons.extend(blockers);
-    // The reviewed root itself: deletion opens it without following links and
-    // must find this exact directory (device, inode and mount) again.
-    row["root_identity"] = root_identity(&path).map_or(Value::Null, |id| id.json());
+    reasons.extend(scan.blockers);
+    // Keep the identity captured before the walk; a later replacement must
+    // not acquire the old manifest or confirmation.
+    row["root_identity"] = scan.root.as_ref().map_or(Value::Null, RootIdentity::json);
     // Hidden processes elsewhere come and go; like worktree removal, their
     // count is not part of what the owner confirms.
     let stable: Vec<_> = reasons
@@ -1163,21 +1233,45 @@ fn leftover(
     row
 }
 
-/// What would stop a guarded deletion of a leftover: nested repositories,
-/// special files, folders on another filesystem or owned by another user.
-/// Bounded and never follows links; `false` means the scan was incomplete.
-#[cfg(unix)]
-fn scan_leftover(root: &Path, deadline: Instant) -> (bool, Vec<Value>) {
+/// One bounded view of the remaining files and everything that blocks
+/// deletion. A skipped or unreadable subtree always leaves size incomplete.
+struct LeftoverScan {
+    bytes: u64,
+    complete: bool,
+    manifest: String,
+    blockers: Vec<Value>,
+    root: Option<RootIdentity>,
+    #[cfg(all(test, unix))]
+    queued: usize,
+}
+
+fn scan_leftover(root: &Path, deadline: Instant) -> LeftoverScan {
+    scan_leftover_limit(root, deadline, WALK_ENTRIES)
+}
+
+fn scan_leftover_limit(root: &Path, deadline: Instant, limit: usize) -> LeftoverScan {
+    #[cfg(unix)]
     use std::os::unix::fs::MetadataExt;
+    #[cfg(unix)]
     let uid = unsafe { libc::geteuid() };
-    let top = match fs::symlink_metadata(root) {
-        Ok(top) => top,
-        Err(_) => return (false, Vec::new()),
+    let mut scan = LeftoverScan {
+        bytes: 0,
+        complete: true,
+        manifest: String::new(),
+        blockers: Vec::new(),
+        root: None,
+        #[cfg(all(test, unix))]
+        queued: 0,
     };
-    if !top.is_dir() {
-        let blocker = reason("not_a_folder", "The leftover is not a plain folder.");
-        return (true, vec![blocker]);
-    }
+    #[cfg(not(unix))]
+    scan.blockers.push(reason(
+        "unsupported_platform",
+        "Deleting leftover files is currently available on Linux only. Keep the folder or delete it manually.",
+    ));
+    let mut manifest = BTreeMap::new();
+    let mut pending = vec![root.to_path_buf()];
+    let (mut visited, mut queued) = (0, 1);
+    #[cfg(unix)]
     let unidentified = |path: &Path| {
         reason(
             "mount_unavailable",
@@ -1187,109 +1281,181 @@ fn scan_leftover(root: &Path, deadline: Instant) -> (bool, Vec<Value>) {
             ),
         )
     };
-    let Ok(scope) = root_identity(root) else {
-        return (true, vec![unidentified(root)]);
-    };
-    let mut blockers = Vec::new();
-    match root.parent().map(root_identity) {
-        Some(Ok(parent)) if parent.dev == scope.dev && parent.mount == scope.mount => {}
-        Some(Ok(_)) => {
-            blockers.push(reason(
-                "mount_point",
-                "The leftover folder is a mount point. Unmount it first.",
-            ));
-            return (true, blockers);
-        }
-        _ => return (true, vec![unidentified(root)]),
-    }
-    let mut pending = vec![root.to_path_buf()];
-    let mut count = 0;
-    let mut complete = true;
     while let Some(path) = pending.pop() {
-        count += 1;
-        if count > WALK_ENTRIES || Instant::now() >= deadline {
-            complete = false;
+        if visited >= limit || Instant::now() >= deadline || scan.blockers.len() >= MAX_SAMPLES {
+            scan.complete = false;
             break;
         }
-        let Ok(metadata) = fs::symlink_metadata(&path) else {
-            complete = false;
-            continue;
+        visited += 1;
+        #[cfg(test)]
+        trace_measured(&path);
+        let metadata = match fs::symlink_metadata(&path) {
+            Ok(metadata) => metadata,
+            Err(_) => {
+                scan.complete = false;
+                continue;
+            }
         };
+        let modified = metadata
+            .modified()
+            .ok()
+            .and_then(|t| t.duration_since(UNIX_EPOCH).ok());
+        manifest.insert(
+            path.to_string_lossy().into_owned(),
+            json!({
+                "size":metadata.len(), "modified":modified.map(|t| t.as_nanos().to_string()),
+                "directory":metadata.is_dir(), "link":fs::read_link(&path).ok()
+            }),
+        );
+        if path == root && !metadata.is_dir() {
+            scan.blockers.push(reason(
+                "not_a_folder",
+                "The leftover is not a plain folder.",
+            ));
+        }
         let git = path
             .file_name()
             .and_then(|name| name.to_str())
             .is_some_and(|name| name.eq_ignore_ascii_case(".git"));
-        // The leftover's own stale `.git` pointer file is expected.
         if git && (path.parent() != Some(root) || metadata.is_dir()) {
-            blockers.push(reason(
+            scan.blockers.push(reason(
                 "nested_repository",
                 format!(
                     "Contains a Git repository: {}. Move it out first.",
                     path.display()
                 ),
             ));
+            scan.complete = false;
             continue;
         }
         if metadata.is_dir() {
-            // Device and mount: a same-device bind mount has the same st_dev.
-            match root_identity(&path) {
-                Ok(id) if id.dev == scope.dev && id.mount == scope.mount => {}
-                Ok(_) => {
-                    blockers.push(reason(
+            #[cfg(unix)]
+            {
+                let id = match root_identity(&path) {
+                    Ok(id) if id.dev == metadata.dev() && id.ino == metadata.ino() => id,
+                    Ok(_) => {
+                        scan.blockers.push(reason(
+                            "folder_changed",
+                            "The remaining folder changed while it was being listed. Review again.",
+                        ));
+                        scan.complete = false;
+                        continue;
+                    }
+                    Err(_) => {
+                        scan.blockers.push(unidentified(&path));
+                        scan.complete = false;
+                        continue;
+                    }
+                };
+                if path == root {
+                    scan.root = Some(id.clone());
+                    match root.parent().map(root_identity) {
+                        Some(Ok(parent)) if parent.dev == id.dev && parent.mount == id.mount => (),
+                        Some(Ok(_)) => {
+                            scan.blockers.push(reason(
+                                "mount_point",
+                                "The leftover folder is a mount point. Unmount it first.",
+                            ));
+                            scan.complete = false;
+                            continue;
+                        }
+                        _ => {
+                            scan.blockers.push(unidentified(root));
+                            scan.complete = false;
+                            continue;
+                        }
+                    }
+                }
+                let Some(scope) = &scan.root else {
+                    scan.complete = false;
+                    continue;
+                };
+                if id.dev != scope.dev || id.mount != scope.mount {
+                    scan.blockers.push(reason(
                         "other_filesystem",
                         format!(
                             "{} is on another filesystem or mount. Move it out first.",
                             path.display()
                         ),
                     ));
+                    scan.complete = false;
                     continue;
                 }
-                Err(_) => {
-                    blockers.push(unidentified(&path));
+                if metadata.uid() != uid {
+                    scan.blockers.push(reason(
+                        "foreign_owner",
+                        format!("{} belongs to another user.", path.display()),
+                    ));
+                    scan.complete = false;
                     continue;
                 }
-            }
-            if metadata.uid() != uid {
-                blockers.push(reason(
-                    "foreign_owner",
-                    format!("{} belongs to another user.", path.display()),
-                ));
-                continue;
             }
             match fs::read_dir(&path) {
                 Ok(children) => {
                     for child in children {
+                        // Bound enumeration as well as visited nodes: a very wide
+                        // folder cannot fill an unbounded pending queue first.
+                        if queued >= limit || Instant::now() >= deadline {
+                            scan.complete = false;
+                            break;
+                        }
                         match child {
-                            Ok(child) => pending.push(child.path()),
-                            Err(_) => complete = false,
+                            Ok(child) => {
+                                queued += 1;
+                                pending.push(child.path());
+                            }
+                            Err(_) => {
+                                queued += 1;
+                                scan.complete = false;
+                            }
                         }
                     }
                 }
-                Err(_) => complete = false,
+                Err(_) => scan.complete = false,
             }
-        } else if !metadata.is_file() && !metadata.file_type().is_symlink() {
-            blockers.push(reason(
-                "special_files",
-                format!(
-                    "Contains a special file: {}. Remove or move it explicitly first.",
-                    path.display()
-                ),
-            ));
+        } else {
+            match scan.bytes.checked_add(metadata.len()) {
+                Some(bytes) => scan.bytes = bytes,
+                None => {
+                    scan.complete = false;
+                    break;
+                }
+            }
+            if !metadata.is_file() && !metadata.file_type().is_symlink() {
+                scan.blockers.push(reason(
+                    "special_files",
+                    format!(
+                        "Contains a special file: {}. Remove or move it explicitly first.",
+                        path.display()
+                    ),
+                ));
+            }
         }
-        if blockers.len() >= MAX_SAMPLES {
+        if scan.blockers.len() >= MAX_SAMPLES {
+            scan.complete = false;
             break;
         }
     }
-    (complete, blockers)
-}
-
-#[cfg(not(unix))]
-fn scan_leftover(_root: &Path, _deadline: Instant) -> (bool, Vec<Value>) {
-    let blocker = reason(
-        "unsupported_platform",
-        "Deleting leftover files is available on Linux and macOS. Keep the folder or delete it manually.",
-    );
-    (true, vec![blocker])
+    #[cfg(unix)]
+    if scan
+        .root
+        .as_ref()
+        .is_some_and(|expected| root_identity(root).as_ref().ok() != Some(expected))
+    {
+        scan.complete = false;
+        if scan.blockers.len() < MAX_SAMPLES {
+            scan.blockers.push(reason(
+                "folder_changed",
+                "The remaining folder changed while it was being listed. Review again.",
+            ));
+        }
+    }
+    #[cfg(all(test, unix))]
+    {
+        scan.queued = queued;
+    }
+    scan.manifest = fingerprint(json!(manifest));
+    scan
 }
 
 pub(super) fn review(path: &Path, only: Option<&Path>, total: Instant) -> Value {
@@ -1451,7 +1617,11 @@ pub(super) fn leftovers_command(args: &[String]) -> Result<Value> {
 /// and is never retried.
 pub(super) fn delete_leftover_command(args: &[String]) -> (Result<Value>, bool) {
     let mut attempted = false;
-    let result = delete_leftover(args, &mut attempted);
+    // Refuse before even reserving an attempt: a known platform refusal is
+    // the existing kept/v1 outcome, with no partial filesystem effect.
+    let result = leftover_deletion_guard()
+        .map_err(|error| error.to_string())
+        .and_then(|()| delete_leftover(args, &mut attempted));
     (result, attempted)
 }
 
@@ -1560,6 +1730,15 @@ fn delete_leftover(args: &[String], attempted: &mut bool) -> Result<Value> {
     }
     let expected = RootIdentity::from_json(&row["root_identity"])
         .ok_or("The leftover folder cannot be identified. Review it again.")?;
+    // The confirmation is single-use even if deletion changes no files and
+    // recording its stopped outcome fails. Keep this in the existing record
+    // so older readers also see a changed fingerprint. Failure to reserve it
+    // refuses before any filesystem change.
+    let attempt = uuid::Uuid::new_v4();
+    let pending = format!(
+        "Deleting remaining files started: attempt {attempt}. Review the folder again if the outcome is unknown."
+    );
+    super::worktree_maintenance::settle_removal(&record, Some(&pending))?;
     *attempted = true;
     // Completion is confirmed through the parent's descriptor, never by path.
     match delete_tree(&path, &expected, Instant::now() + Duration::from_secs(300)) {
@@ -1571,7 +1750,10 @@ fn delete_leftover(args: &[String], attempted: &mut bool) -> Result<Value> {
         }
         Err(e) => {
             let detail = format!("Deleting the leftover stopped: {e}");
-            let _ = super::worktree_maintenance::settle_removal(&record, Some(&detail));
+            // Keep the unique reference before any possibly long error text:
+            // the bounded detail must never restore a previous confirmation.
+            let stored = format!("Deleting the leftover stopped: attempt {attempt}; {e}");
+            let _ = super::worktree_maintenance::settle_removal(&record, Some(&stored));
             Err(format!(
                 "{detail}\nSome files may remain; review the folder again. The deletion is never retried."
             ))
@@ -1609,11 +1791,6 @@ fn root_identity(path: &Path) -> std::io::Result<RootIdentity> {
     deletion::identify(&deletion::open(libc::AT_FDCWD, &name)?)
 }
 
-#[cfg(not(unix))]
-fn root_identity(_path: &Path) -> std::io::Result<RootIdentity> {
-    Err(std::io::Error::other("unsupported"))
-}
-
 /// Deletes the reviewed tree without following links or leaving its mount.
 /// The parent is opened component by component without following links, and
 /// the root must be the exact reviewed directory (device, inode, mount). Every
@@ -1624,6 +1801,7 @@ fn root_identity(_path: &Path) -> std::io::Result<RootIdentity> {
 /// descriptor.
 #[cfg(unix)]
 fn delete_tree(root: &Path, expected: &RootIdentity, deadline: Instant) -> std::io::Result<()> {
+    leftover_deletion_guard()?;
     use std::ffi::CString;
     use std::io::Error;
     use std::os::fd::AsRawFd;
@@ -1652,6 +1830,7 @@ fn delete_tree(root: &Path, expected: &RootIdentity, deadline: Instant) -> std::
         ));
     }
     deletion::checked(&fd, uid, expected)?;
+    let pinned_root = fd.try_clone()?;
     let names = deletion::entries(&fd)?;
     let mut stack = vec![Frame {
         fd,
@@ -1699,6 +1878,22 @@ fn delete_tree(root: &Path, expected: &RootIdentity, deadline: Instant) -> std::
             deletion::unlink(frame.fd.as_raw_fd(), &entry, 0)?;
         }
     }
+    #[cfg(test)]
+    BEFORE_ROOT_UNLINK.with(|hook| {
+        if let Some(hook) = hook.borrow_mut().take() {
+            hook()
+        }
+    });
+    // unlinkat is by name, so reject an observable replacement immediately
+    // before it. Keep the reviewed inode open to prevent inode-number reuse.
+    // This cannot make the check and unlink atomic; see the documented limit.
+    if deletion::identify(&deletion::open(parent.as_raw_fd(), &name)?)?
+        != deletion::identify(&pinned_root)?
+    {
+        return Err(Error::other(
+            "the leftover folder changed before its final removal",
+        ));
+    }
     deletion::unlink(parent.as_raw_fd(), &name, libc::AT_REMOVEDIR)?;
     #[cfg(test)]
     AFTER_ROOT_UNLINK.with(|hook| {
@@ -1717,6 +1912,8 @@ fn delete_tree(root: &Path, expected: &RootIdentity, deadline: Instant) -> std::
 
 #[cfg(all(test, unix))]
 thread_local! {
+    static BEFORE_ROOT_UNLINK: std::cell::RefCell<Option<Box<dyn FnOnce()>>> =
+        const { std::cell::RefCell::new(None) };
     /// Runs right after the reviewed root is unlinked, before its absence is
     /// confirmed through the parent.
     static AFTER_ROOT_UNLINK: std::cell::RefCell<Option<Box<dyn FnOnce()>>> =
@@ -1864,6 +2061,11 @@ mod deletion {
     }
 
     pub(super) fn unlink(at: RawFd, name: &CStr, flags: libc::c_int) -> Result<()> {
+        // XNU may remove ordinary ._* files while retrying a directory
+        // removal. Both nested and root callers must fail before that syscall.
+        if flags & libc::AT_REMOVEDIR != 0 {
+            super::leftover_deletion_guard()?;
+        }
         if unsafe { libc::unlinkat(at, name.as_ptr(), flags) } != 0 {
             return Err(Error::last_os_error());
         }
@@ -2164,9 +2366,8 @@ fn remove(args: &[String], attempted: &mut bool, observed: &mut Option<Value>) -
         return Err("Only linked worktrees can be removed; the main checkout stays.".into());
     }
     let discard = options.get("--discard-fingerprint").copied();
-    if discard.is_some()
-        && (row["discardable"] != true || discard != row["discard_fingerprint"].as_str())
-    {
+    let discardable = row["discardable"] == true || row["discardable_with_process_consent"] == true;
+    if discard.is_some() && (!discardable || discard != row["discard_fingerprint"].as_str()) {
         return Err(
             "Discard confirmation is stale or this worktree is still protected. Review it again."
                 .into(),
@@ -2178,18 +2379,27 @@ fn remove(args: &[String], attempted: &mut bool, observed: &mut Option<Value>) -
     {
         return Err("Process confirmation is stale or this worktree is still protected. Review it again.".into());
     }
-    if row["verdict"] == "blocked" && discard.is_none() && process_consent.is_none() {
+    // Every blocking reason needs its own explicit consent: a discard for
+    // changes, the bounded acceptance for unreadable processes (zerus-k2ga).
+    if row["verdict"] == "blocked" {
         let reasons: Vec<_> = row["reasons"]
             .as_array()
             .into_iter()
             .flatten()
+            .filter(|r| match string(r, "code") {
+                "changes" | "untracked" => discard.is_none(),
+                "processes_unavailable" => process_consent.is_none(),
+                _ => true,
+            })
             .map(|r| string(r, "message").to_owned())
             .collect();
-        return Err(format!(
-            "Cannot remove {}: {}",
-            path.display(),
-            reasons.join(" ")
-        ));
+        if !reasons.is_empty() {
+            return Err(format!(
+                "Cannot remove {}: {}",
+                path.display(),
+                reasons.join(" ")
+            ));
+        }
     }
     if automatic {
         let policy = super::worktree_maintenance::policy()?;
@@ -2260,6 +2470,7 @@ fn remove(args: &[String], attempted: &mut bool, observed: &mut Option<Value>) -
         reserved_at: now(),
         status: "pending".into(),
         detail: String::new(),
+        volumes: None,
     };
     super::worktree_maintenance::reserve_removal(&removal)?;
     if automatic || preserve_restore {
@@ -2385,13 +2596,286 @@ mod tests {
         let mut row = json!({"fingerprint":"checkout", "process_fingerprint":"available", "verdict":"blocked"});
         let proof = process_consent(&row, common, 1000);
         row.as_object_mut().unwrap().remove("process_fingerprint");
-        for code in ["processes", "sessions", "processes_unavailable", "status_unavailable", "locked"] {
+        for code in ["processes", "sessions", "sessions_unavailable", "processes_unavailable", "status_unavailable", "locked"] {
             row["reasons"] = json!([{"code":code}]);
             assert!(!valid_process_consent(&proof, &row, common, 1000));
         }
         row["verdict"] = json!("ready");row["reasons"] = json!([]);
         assert!(valid_process_consent(&proof, &row, common, 1000), "Complete readable coverage also satisfies the accepted risk");
     }
+    #[cfg(unix)]
+    #[test]
+    fn leftover_review_measures_each_entry_once_and_keeps_its_navigation() {
+        use std::os::unix::fs::symlink;
+        let base = tempfile::tempdir().unwrap();
+        let common = base.path().join("repository.git");
+        let initialized = std::process::Command::new("git")
+            .args(["init", "--bare", "--quiet"])
+            .arg(&common)
+            .env("GIT_CONFIG_NOSYSTEM", "1")
+            .env("GIT_CONFIG_GLOBAL", "/dev/null")
+            .env_remove("GIT_DIR")
+            .env_remove("GIT_COMMON_DIR")
+            .env_remove("GIT_WORK_TREE")
+            .output()
+            .unwrap();
+        assert!(initialized.status.success());
+        let root = base.path().join("leftover");
+        fs::create_dir_all(root.join("cache")).unwrap();
+        fs::write(root.join("cache/bytes"), "fixture data").unwrap();
+        let outside = base.path().join("outside-ignored");
+        fs::write(&outside, "keep this data").unwrap();
+        symlink(&outside, root.join("link")).unwrap();
+        let record = super::super::worktree_maintenance::Removal {
+            path: root.to_string_lossy().into_owned(),
+            common_dir: common.to_string_lossy().into_owned(),
+            branch: String::new(),
+            head: String::new(),
+            fingerprint: "original".into(),
+            request_id: "fixture".into(),
+            reserved_at: 1.0,
+            status: "partial".into(),
+            detail: String::new(),
+            volumes: None,
+        };
+        let context = Context {
+            common: common.clone(),
+            bases: Vec::new(),
+            processes: Ok(Default::default()),
+            bindings: Vec::new(),
+            bindings_complete: true,
+            archives: Vec::new(),
+            archives_complete: true,
+        };
+        MEASURED_PATHS.with(|paths| *paths.borrow_mut() = Some(BTreeMap::new()));
+        let row = leftover(
+            &record,
+            &common,
+            false,
+            &context,
+            Instant::now() + Duration::from_secs(10),
+        );
+        let visits = MEASURED_PATHS.with(|paths| paths.borrow_mut().take().unwrap());
+        assert_eq!(visits.len(), 4);
+        assert!(
+            visits.values().all(|count| *count == 1),
+            "a leftover gets one metadata walk: {visits:?}"
+        );
+        assert!(!visits.contains_key(&outside));
+        assert_eq!(row["path"], json!(root));
+        assert_eq!(row["removal"]["fingerprint"], "original");
+        assert_eq!(row["size_complete"], true);
+        assert_eq!(
+            row["size"],
+            json!(
+                "fixture data".len() as u64
+                    + fs::symlink_metadata(root.join("link")).unwrap().len()
+            )
+        );
+        assert_eq!(row["deletable"], !cfg!(target_os = "macos"));
+        assert_eq!(fs::read_to_string(outside).unwrap(), "keep this data");
+        assert_eq!(
+            leftover(
+                &record,
+                &common,
+                false,
+                &context,
+                Instant::now() + Duration::from_secs(10)
+            )["fingerprint"],
+            row["fingerprint"]
+        );
+        {
+            struct Restore(bool);
+            impl Drop for Restore {
+                fn drop(&mut self) {
+                    FORCE_MACOS_LEFTOVER_GUARD.with(|guard| guard.set(self.0));
+                }
+            }
+            let _restore = Restore(FORCE_MACOS_LEFTOVER_GUARD.with(|guard| guard.replace(true)));
+            use std::os::unix::fs::PermissionsExt;
+            let original_mode = fs::metadata(&root).unwrap().permissions();
+            fs::set_permissions(&root, fs::Permissions::from_mode(0o500)).unwrap();
+            let blocked = leftover(
+                &record,
+                &common,
+                false,
+                &context,
+                Instant::now() + Duration::from_secs(10),
+            );
+            assert_eq!(blocked["reasons"][0]["code"], "macos_appledouble_safety");
+            assert_eq!(blocked["deletable"], false);
+            assert!(blocked["process_fingerprint"].is_null());
+            let mode = fs::metadata(&root).unwrap().permissions();
+            let (refused, attempted) = delete_leftover_command(&[
+                "--path".into(),
+                root.to_string_lossy().into_owned(),
+                "--common-dir".into(),
+                common.join("never-opened").to_string_lossy().into_owned(),
+                "--fingerprint".into(),
+                string(&blocked, "fingerprint").into(),
+                "--confirm-delete".into(),
+            ]);
+            assert!(
+                !attempted,
+                "a platform refusal cannot consume a confirmation"
+            );
+            assert_eq!(refused.unwrap_err(), MACOS_LEFTOVER_REASON);
+            assert_eq!(
+                delete_tree(
+                    &root,
+                    &RootIdentity::from_json(&row["root_identity"]).unwrap(),
+                    Instant::now() + Duration::from_secs(10)
+                )
+                .unwrap_err()
+                .kind(),
+                std::io::ErrorKind::Unsupported
+            );
+            assert_eq!(fs::metadata(&root).unwrap().permissions(), mode);
+            assert_eq!(
+                fs::read_to_string(root.join("cache/bytes")).unwrap(),
+                "fixture data"
+            );
+            use std::os::fd::AsRawFd;
+            let parent = deletion::open_path(&fs::canonicalize(base.path()).unwrap()).unwrap();
+            for name in [c"empty-root", c"empty-nested"] {
+                fs::create_dir(base.path().join(name.to_str().unwrap())).unwrap();
+                assert_eq!(
+                    deletion::unlink(parent.as_raw_fd(), name, libc::AT_REMOVEDIR)
+                        .unwrap_err()
+                        .kind(),
+                    std::io::ErrorKind::Unsupported
+                );
+                assert!(base.path().join(name.to_str().unwrap()).is_dir());
+            }
+            fs::set_permissions(&root, original_mode).unwrap();
+        }
+        // A replacement after the walk cannot inherit its manifest. Keep
+        // the old root identity in the row so the effect refuses it.
+        let original = row["root_identity"].clone();
+        let moved = base.path().join("reviewed-leftover");
+        let (swap_root, swap_moved) = (root.clone(), moved.clone());
+        AFTER_LEFTOVER_SCAN.with(|hook| {
+            *hook.borrow_mut() = Some(Box::new(move || {
+                fs::rename(&swap_root, &swap_moved).unwrap();
+                fs::create_dir(&swap_root).unwrap();
+            }))
+        });
+        let replaced = leftover(
+            &record,
+            &common,
+            false,
+            &context,
+            Instant::now() + Duration::from_secs(10),
+        );
+        assert_eq!(
+            replaced["root_identity"], original,
+            "a new root cannot acquire an old scan"
+        );
+        assert!(delete_tree(
+            &root,
+            &RootIdentity::from_json(&replaced["root_identity"]).unwrap(),
+            Instant::now() + Duration::from_secs(10)
+        )
+        .is_err());
+        assert!(root.is_dir());
+        assert_eq!(
+            fs::read_to_string(moved.join("cache/bytes")).unwrap(),
+            "fixture data"
+        );
+    }
+    #[cfg(unix)]
+    #[test]
+    fn a_wide_leftover_bounds_enumeration_and_reports_incomplete_size() {
+        let base = tempfile::tempdir().unwrap();
+        let root = base.path().join("wide");
+        fs::create_dir(&root).unwrap();
+        for number in 0..64 {
+            fs::write(root.join(number.to_string()), "x").unwrap();
+        }
+        MEASURED_PATHS.with(|paths| *paths.borrow_mut() = Some(BTreeMap::new()));
+        let scan = scan_leftover_limit(&root, Instant::now() + Duration::from_secs(10), 4);
+        let visits = MEASURED_PATHS.with(|paths| paths.borrow_mut().take().unwrap());
+        assert!(!scan.complete);
+        assert!(scan.blockers.is_empty());
+        assert_eq!(
+            scan.queued, 4,
+            "bound queued entries before filling the pending walk"
+        );
+        assert_eq!(visits.len(), 4);
+        assert_eq!(scan.bytes, 3);
+        assert!(visits.values().all(|count| *count == 1));
+        MEASURED_PATHS.with(|paths| *paths.borrow_mut() = Some(BTreeMap::new()));
+        let expired = scan_leftover_limit(&root, Instant::now(), 4);
+        let visits = MEASURED_PATHS.with(|paths| paths.borrow_mut().take().unwrap());
+        assert!(visits.is_empty());
+        assert!(!expired.complete && expired.root.is_none());
+        assert_eq!(fs::read_dir(root).unwrap().count(), 64);
+    }
+
+    #[cfg(target_os = "macos")]
+    #[test]
+    #[ignore = "requires an explicitly authorized native macOS filesystem window"]
+    fn macos_late_swap_preserves_appledouble_payload_at_root_and_nested_names() {
+        use std::os::fd::AsRawFd;
+        for nested in [false, true] {
+            let base = tempfile::tempdir().unwrap();
+            let parent = if nested {
+                base.path().join("parent")
+            } else {
+                base.path().to_path_buf()
+            };
+            fs::create_dir_all(&parent).unwrap();
+            let root = parent.join("reviewed");
+            fs::create_dir(&root).unwrap();
+            let parent_fd = deletion::open_path(&fs::canonicalize(&parent).unwrap()).unwrap();
+            let pinned = deletion::open(parent_fd.as_raw_fd(), c"reviewed").unwrap();
+            let expected = deletion::identify(&pinned).unwrap();
+            assert_eq!(
+                deletion::identify(&deletion::open(parent_fd.as_raw_fd(), c"reviewed").unwrap())
+                    .unwrap(),
+                expected
+            );
+            // The swap is AFTER the final identity check, not before it.
+            let moved = parent.join("original");
+            fs::rename(&root, &moved).unwrap();
+            fs::create_dir(&root).unwrap();
+            fs::write(root.join("._payload"), b"unreviewed user bytes").unwrap();
+            assert!(
+                deletion::unlink(parent_fd.as_raw_fd(), c"reviewed", libc::AT_REMOVEDIR).is_err()
+            );
+            assert_eq!(
+                fs::read(root.join("._payload")).unwrap(),
+                b"unreviewed user bytes"
+            );
+            assert_eq!(deletion::identify(&pinned).unwrap(), expected);
+            assert!(moved.is_dir());
+        }
+    }
+    #[cfg(target_os = "linux")]
+    #[test]
+    fn an_empty_replacement_before_the_final_unlink_is_refused() {
+        let base = tempfile::tempdir().unwrap();
+        let root = base.path().join("leftover");
+        fs::create_dir_all(root.join("cache")).unwrap();
+        fs::write(root.join("cache/file"), "reviewed").unwrap();
+        let identity = root_identity(&root).unwrap();
+        let moved = base.path().join("reviewed-root");
+        let (swap_root, swap_moved) = (root.clone(), moved.clone());
+        BEFORE_ROOT_UNLINK.with(|hook| {
+            *hook.borrow_mut() = Some(Box::new(move || {
+                fs::rename(&swap_root, &swap_moved).unwrap();
+                fs::create_dir(&swap_root).unwrap();
+            }))
+        });
+        let result = delete_tree(&root, &identity, Instant::now() + Duration::from_secs(10));
+        assert!(
+            result.is_err(),
+            "an unreviewed empty replacement must survive"
+        );
+        assert!(root.is_dir() && moved.is_dir());
+        assert!(fs::read_dir(root).unwrap().next().is_none());
+    }
+
     /// A filesystem or same-device bind mount inside a leftover after its
     /// review: the scan reports it and the deletion stops before changing it.
     /// Runs the probe in a private user and mount namespace when available.
@@ -2467,7 +2951,7 @@ mod tests {
         fs::set_permissions(&mounted, fs::Permissions::from_mode(0o500)).unwrap();
         let identity = root_identity(&root).unwrap();
         assert!(scan_leftover(&root, deadline())
-            .1
+            .blockers
             .iter()
             .any(|r| r["code"] == "other_filesystem"));
         let error = delete_tree(&root, &identity, deadline()).unwrap_err();
@@ -2492,7 +2976,7 @@ mod tests {
             "the bind mount shares the device"
         );
         assert!(scan_leftover(&tree, deadline())
-            .1
+            .blockers
             .iter()
             .any(|r| r["code"] == "other_filesystem"));
         let error = delete_tree(&tree, &identity, deadline()).unwrap_err();
@@ -2508,7 +2992,7 @@ mod tests {
         fs::write(top.join("keep"), "mounted root").unwrap();
         let identity = root_identity(&top).unwrap();
         assert!(scan_leftover(&top, deadline())
-            .1
+            .blockers
             .iter()
             .any(|r| r["code"] == "mount_point"));
         let error = delete_tree(&top, &identity, deadline()).unwrap_err();
@@ -2522,7 +3006,7 @@ mod tests {
 
     /// The reviewed root is bound by device and inode. Swapping its parent for
     /// a link, or renaming another folder into place, stops the deletion.
-    #[cfg(unix)]
+    #[cfg(target_os = "linux")]
     #[test]
     fn a_swapped_leftover_root_is_refused_and_the_decoy_survives() {
         let base = tempfile::tempdir().unwrap();
@@ -2566,7 +3050,7 @@ mod tests {
     /// zerus-ty94 #4: an ancestor the owner may only search (execute without
     /// read) does not stop the deletion, and a link in the ancestor chain is
     /// still never followed.
-    #[cfg(any(target_os = "linux", target_os = "macos"))]
+    #[cfg(target_os = "linux")]
     #[test]
     fn a_search_only_ancestor_does_not_stop_the_deletion() {
         use std::os::unix::fs::PermissionsExt;
@@ -2592,7 +3076,7 @@ mod tests {
 
     /// Mutation R5: the deletion is confirmed only when the name is absent
     /// through the parent, never because the unlink returned.
-    #[cfg(unix)]
+    #[cfg(target_os = "linux")]
     #[test]
     fn a_name_that_reappears_after_the_root_is_unlinked_is_not_confirmed() {
         let base = tempfile::tempdir().unwrap();

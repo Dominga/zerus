@@ -164,7 +164,7 @@ TAURI_RELEASE_REQUIRED = list(dict.fromkeys([
     "Contents/Resources/setup/hgs_state.py",
     *[f"Contents/Resources/setup/{name}" for name in
       ("install-macos-session-service.py", "install-macos-desktop-service.py", "desktop-revoke-hold.py",
-       "install-recovery-service.py", "install-swarm-service.py", "launchd_agent.py",
+       "desktop-service-activation.py", "install-recovery-service.py", "install-swarm-service.py", "launchd_agent.py",
        "install-mobile-connector-service.py")],
     "Contents/Resources/doc/README.md", "Contents/Resources/doc/tmux.conf",
     "Contents/Resources/licenses/LICENSE", "Contents/Resources/licenses/THIRD_PARTY_NOTICES.md",

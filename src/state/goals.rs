@@ -48,7 +48,9 @@ pub(super) fn summary(record: &Value) -> Value {
         return json!({"goal":null,"goal_source":"unsupported"});
     }
     let conversation = string(record, "conversation_id");
-    if uuid::Uuid::parse_str(conversation).is_err() {
+    // Codex keeps the old native ID until its first post-clear SessionStart.
+    // A confirmed clear ends that goal's scope even if its old DB row changes.
+    if clear_context::awaiting_start(record) || uuid::Uuid::parse_str(conversation).is_err() {
         return json!({"goal":null,"goal_source":"unavailable"});
     }
     let native_home = if string(record, "agent_home").is_empty() {
@@ -399,6 +401,51 @@ mod tests {
         assert_eq!(
             summary(&json!({"agent":"other"}))["goal_source"],
             "unsupported"
+        );
+    }
+
+    #[test]
+    fn a_clear_hides_the_old_native_goal_until_the_real_successor_starts() {
+        let root = tempfile::tempdir().unwrap();
+        let path = root.path().join("goals_1.sqlite");
+        let old = "12345678-1234-1234-1234-123456789abc";
+        let next = "12345678-1234-1234-1234-123456789def";
+        let db = Connection::open(&path).unwrap();
+        db.execute_batch("CREATE TABLE thread_goals(thread_id TEXT PRIMARY KEY, goal_id TEXT, objective TEXT, status TEXT, token_budget INTEGER, tokens_used INTEGER, time_used_seconds INTEGER, created_at_ms INTEGER, updated_at_ms INTEGER);").unwrap();
+        db.execute("INSERT INTO thread_goals VALUES (?1,'old-goal','Cleared objective','complete',NULL,1,1,1000,2000)",[old]).unwrap();
+        db.execute("INSERT INTO thread_goals VALUES (?1,'new-goal','Successor objective','active',NULL,1,1,1000,2000)",[next]).unwrap();
+        let mut record = json!({"agent":"codex","agent_home":root.path(),"run_id":"original-run",
+                "conversation_id":old,"activity":"idle","phase":"idle"});
+        assert_eq!(summary(&record)["goal"]["status"], "complete");
+        record["session_clear"] = json!({"at":3.0,"run_id":"original-run","conversation_id":old,
+                "source":"native_terminal","awaiting_session_start":true});
+        for ended in [false, true] {
+            record["conversation_state"] = json!(if ended { "ended" } else { "active" });
+            assert!(
+                summary(&record)["goal"].is_null(),
+                "cleared goal was re-observed"
+            );
+            // A native update of the OLD thread after Clear cannot revive it.
+            db.execute(
+                "UPDATE thread_goals SET status='active',updated_at_ms=4000 WHERE thread_id=?1",
+                [old],
+            )
+            .unwrap();
+            assert!(summary(&record)["goal"].is_null());
+        }
+        clear_context::observe_start(&mut record, &json!({"source":"clear","session_id":next}));
+        record["conversation_id"] = json!(next);
+        assert_eq!(summary(&record)["goal"]["id"], "new-goal");
+        let old_status: String = db
+            .query_row(
+                "SELECT status FROM thread_goals WHERE thread_id=?1",
+                [old],
+                |row| row.get(0),
+            )
+            .unwrap();
+        assert_eq!(
+            old_status, "active",
+            "observing a clear never changes native goals"
         );
     }
 

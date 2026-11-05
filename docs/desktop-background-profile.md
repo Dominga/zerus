@@ -1,5 +1,13 @@
 # Canonical background profile definition
 
+**Status: PARKED, 2026-11-04.** Only the dormant producer preparation binds this
+definition. No producer/controller caller is planned since the owner direction
+of 2026-11-01 recorded in `zerus-5wmh.66.3.23` (`hgs desktop` owns background
+duties and Zerus Next is UI only; no universal-old-binary proof gate); the live
+background runtime is selected through the service's ownership and registration
+mode instead. The definition and its pinned bytes stay unchanged for a
+reactivation, which reopens `zerus-5wmh.66.3.23.18.2`.
+
 `client/core::desktop::profile::BACKGROUND_V1` is shared definition data for
 the approved `g1-background-v1` profile. It has no producer/controller caller,
 transport frame, CLI/status change, marker, store or migration. A matching

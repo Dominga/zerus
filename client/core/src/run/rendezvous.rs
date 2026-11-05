@@ -107,18 +107,11 @@ mod tests {
     use std::{
         fs::File,
         io::{Read, Write},
-        os::fd::{FromRawFd, OwnedFd},
     };
-    fn pipe() -> (File, File) {
-        let mut fds = [0; 2];
-        // SAFETY: exact two-descriptor output; each result is owned once.
-        assert_eq!(unsafe { libc::pipe(fds.as_mut_ptr()) }, 0);
-        unsafe {
-            (
-                File::from(OwnedFd::from_raw_fd(fds[0])),
-                File::from(OwnedFd::from_raw_fd(fds[1])),
-            )
-        }
+    fn pipe() -> (std::io::PipeReader, std::io::PipeWriter) {
+        // Standard-library pipes are close-on-exec. Parallel core fixtures must
+        // not inherit a writer and delay this test's actual EOF indefinitely.
+        std::io::pipe().unwrap()
     }
     #[test]
     fn release_preserves_the_exact_original_input_and_identity() {
@@ -142,7 +135,12 @@ mod tests {
     }
     #[test]
     fn eof_wrong_prefix_timeout_and_nonpipe_refuse() {
-        for bytes in [b"".as_slice(), &RELEASE[..3], b"untrusted-prefix"] {
+        for bytes in [
+            b"".as_slice(),
+            &RELEASE[..3],
+            b"untrusted-prefix",
+            b"XGS-ORIGINAL-CHILD-V1\n", // Exact length; comparison must refuse.
+        ] {
             let (input, mut output) = pipe();
             output.write_all(bytes).unwrap();
             drop(output);

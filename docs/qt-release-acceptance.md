@@ -182,34 +182,44 @@ subchecks, not the clean-install exception's exact-candidate CI/package proof.
 | Background readiness | Same backend PID/birth; lifecycle `serving`, background mode and actual attention host ready, delivery writer ready; automatic approvals remain OFF. No mode switch, Grant/Rearm or service restart was performed. Closed-GUI read delivery and host ACK still need their actual observations. |
 | Custom registration refusal | Maintained helper `--check` against one private custom unit refuses before any `systemctl` execution. Both that unit and the real owner unit remain byte-identical. This is a private refusal subcheck, not an installed custom-unit mutation. |
 | Display admission | A passive Wayland input observer and one retained display flock admitted bounded screenshot inspection. AT-SPI's advertised socket refused connection; no accessibility action occurred. Input resumed before a later Settings admission, so it refused before issuing a click. A subsequent admitted maintained navigation selected the exact live linux-shell-u target in the same original GUI; a separately admitted single click focused its verified empty composer. Draft/Terminal preparation, interactive parity and lifecycle cases remain pending. |
-| Upgrade preparation | A private bounded manifest retains original native PID/births and draft hashes. The next coordinator-announced maintained rollout, after #1467 and #1470, is the live-agent upgrade row. The coordinator waits for a fresh **manifests ready** receipt before updating; this preparation is not upgrade survival evidence. |
+| Upgrade preparation | A private bounded manifest retains original native PID/births and draft hashes. The coordinator moved the next maintained rollout (after #1467 and #1470) into the first Arch owner-session segment because the owner is actively using Arch. Idle-window attempts for draft/Terminal preparation stopped, and the original observer joined. No draft text was typed and no **manifests ready** receipt was sent. Fresh manifests are taken in that explicit session; this preparation is not upgrade survival evidence. |
 | Qt artifact | The retained previous GUI reports clean Qt source `3a28fb2219fa0c4e7a367933d35b4c1882f607d6`, Dev 1595. Build-info inspection opened no Qt window; rollback/drain/return remain owner-only and unqualified. |
 
 Private evidence is indexed by the Arch 0.48 acceptance task. Public records
 omit account/message content and use the exact source plus selected-field
 observations. None of these subchecks checks a complete platform row.
 
-### Arch owner session — 20–30 minute step list
+### Arch owner session — at most 35 minutes
 
-Prepare first: announce and pin the installed candidate; finish the unattended
-rows and capture fresh private session/run/conversation, native process births,
-jobs/terminal and an unsent draft. Keep the complete verified Qt rollback copy
-and maintained return-to-Next route. Settle prior unknown transitions, confirm
+Prepare first: build and stage the coordinator-selected candidate through the
+maintained route, without updating yet. Finish nondisplay checks and retain the
+complete verified Qt rollback copy and maintained return-to-Next route. Take the
+fresh live manifests in segment 1, rather than waiting for an unattended idle
+window. Settle prior unknown transitions, confirm
 initial mode/Grant and dangerous opt-ins, and have desktop-u and its exact idle
 synthetic target ready. Devices and the existing speech provider must be
 available; no privacy or notification preference is silently changed.
 
-1. **Notification / Open session (6–8 minutes; explicit handoff to desktop-u).**
+1. **Upgrade with agents running (5–7 minutes).** In this explicit owner-present
+   window, the owner keeps hands off for about 1–2 minutes while linux-shell-u
+   holds the display flock, types its synthetic **unsent** draft and verifies
+   the Terminal. Those expected test inputs need no idle60 admission. Capture
+   the exact live session/run/conversation, jobs, process births and draft, then
+   send **manifests ready**. The coordinator performs the maintained rollout and
+   announces its exact SHA. Verify the same native agent/jobs/terminal and unsent
+   draft survived without a restart before continuing. Do not begin the rollout
+   from a preliminary manifest or an unconfirmed preparation.
+2. **Notification / Open session (6–8 minutes; explicit handoff to desktop-u).**
    Desktop-u rechecks source, GUI/backend and target, holds the display flock,
    normally Quits the GUI and makes one fresh scoped Post. The owner physically
    clicks **Open session once**. Desktop-u records the native notification and
    callback identity, one relaunch and exact target selection, then restores
    that same installed GUI. A failed/unknown attempt is recorded without retry.
-2. **Microphone/camera (6–8 minutes).** The owner answers the actual consent
+3. **Microphone/camera (6–8 minutes).** The owner answers the actual consent
    prompts and records a short synthetic phrase/clip. Check preview, Escape/
    cancel, transcription and draft retention, with the owner confirming sound
    and image quality. Do not send an uncertain recording again.
-3. **Qt rollback and return (8–12 minutes).** Use the maintained service-aware
+4. **Qt rollback and return (8–10 minutes).** Use the maintained service-aware
    rollback from the authenticated Settings route or a foreground terminal outside
    Zerus, only after the original revoke and actual drain settle. Verify the
    original agents/jobs, draft and settings under Qt, then return through the
@@ -217,9 +227,11 @@ available; no privacy or notification preference is silently changed.
    missing return authority stops the round trip; no marker/store deletion or
    native-agent restart substitutes for it.
 
-Record exact sources and evidence for each completed row. A blocked prerequisite
-is reported before the owner session; the time estimate assumes all preparation
-is complete.
+Target 25–33 minutes, with a hard planning cap of 35 minutes. The candidate is
+built before the session; no compilation time is hidden in that estimate. Record
+exact sources and evidence for each completed row. A blocked or unknown result
+stops its dependent segment rather than triggering a replay or extending the
+session. Keep the acceptance PR draft until session results are recorded.
 
 ### Recorded Arch passive cutover subchecks — 2026-11-02
 

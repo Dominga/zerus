@@ -957,6 +957,46 @@ export interface TeamTaskView {
   attempt_state: string; decided_by: string; pinned: boolean; output: string[]; waits: string;
   /** Task 11: the newest attempt's id, and whether its member got no report in. */
   attempt_id?: string; no_report?: boolean;
+  /** Task 41: the task's pipeline and its latest stage runs, bounded. */
+  pipeline?: TeamTaskPipeline | null;
+}
+
+export interface TeamTaskStage {
+  kind: string; state: string; attempt: number; member: string;
+}
+
+export interface TeamTaskPipeline {
+  name: string; round: number; stages: TeamTaskStage[];
+}
+
+export interface TeamProfileLoss {
+  kind: string; task: number; seconds: number; tokens: number | null;
+}
+
+export interface TeamProfileRole {
+  key: string; kind: string; accepted: number; attempts: number; returned: number;
+  tokens_per_accepted: number | null;
+}
+
+export interface TeamProfileView {
+  team: string; elapsed_s: number | null; worked_s: number | null; tasks: number; accepted: number;
+  tokens: number | null; tokens_partial: boolean;
+  losses: TeamProfileLoss[]; roles: TeamProfileRole[];
+}
+
+export interface TeamTestPending {
+  id: string; suite: string; asked_by: string; state: string; task: number; forced: boolean;
+  started: number; seconds: number; reason: string;
+}
+
+export interface TeamTestRun {
+  id: string; suite: string; status: string; asked_by: string; task: number; at: number;
+  duration_ms: number; recorded_ms: number; runner: string; excerpt: string;
+  flags: string[]; reused_from: string; due: boolean; over_budget: boolean;
+}
+
+export interface TeamTestsView {
+  team: string; queue: TeamTestPending[]; runs: TeamTestRun[]; next: number | null;
 }
 
 export interface TeamPhaseView {

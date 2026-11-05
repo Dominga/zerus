@@ -290,6 +290,26 @@ pub struct TaskView {
     pub output: Vec<String>,
     /// What the task waits for, as hgs words it (`waits.unblock`).
     pub waits: String,
+    /// Task 41: the pipeline and its stage runs, bounded; None for a task
+    /// without a pipeline run.
+    pub pipeline: Option<TaskPipelineView>,
+}
+
+/// One stage a task's pipeline ran (or waits to run): its kind, state,
+/// attempt and member; `stages.rs` names the kind.
+#[derive(Clone, Debug, Default, PartialEq, Serialize)]
+pub struct TaskStageView {
+    pub kind: String,
+    pub state: String,
+    pub attempt: u64,
+    pub member: String,
+}
+
+#[derive(Clone, Debug, Default, PartialEq, Serialize)]
+pub struct TaskPipelineView {
+    pub name: String,
+    pub round: u64,
+    pub stages: Vec<TaskStageView>,
 }
 
 /// One phase of the plan (`phase_summary`).
@@ -506,6 +526,24 @@ fn task(value: &Value) -> TaskView {
             .get("waits")
             .map(|waits| text(waits, "unblock", LINE_CHARS))
             .unwrap_or_default(),
+        pipeline: value
+            .get("pipeline_run")
+            .filter(|run| run.is_object())
+            .map(|run| TaskPipelineView {
+                name: name(run, "name"),
+                round: run.get("round").and_then(Value::as_u64).unwrap_or(0),
+                stages: array(run, "runs")
+                    .iter()
+                    .rev()
+                    .take(16)
+                    .map(|stage| TaskStageView {
+                        kind: name(stage, "kind"),
+                        state: name(stage, "state"),
+                        attempt: stage.get("attempt").and_then(Value::as_u64).unwrap_or(0),
+                        member: name(stage, "member"),
+                    })
+                    .collect(),
+            }),
     }
 }
 
@@ -960,21 +998,185 @@ pub fn spans(team: &str, value: &Value) -> SpansView {
     }
 }
 
-/// `team profile`, kept as hgs gives it (a bounded summary: losses, roles,
-/// models and one page of tasks).
+/// One loss the profile names (a rework, a wait for a member, the lead or a
+/// dependency); `tokens` is null when hgs has no count, never zero.
+#[derive(Clone, Debug, Default, PartialEq, Serialize)]
+pub struct ProfileLossView {
+    pub kind: String,
+    pub task: u64,
+    pub seconds: f64,
+    pub tokens: Option<u64>,
+}
+
+#[derive(Clone, Debug, Default, PartialEq, Serialize)]
+pub struct ProfileRoleView {
+    pub key: String,
+    pub kind: String,
+    pub accepted: u64,
+    pub attempts: u64,
+    pub returned: u64,
+    pub tokens_per_accepted: Option<u64>,
+}
+
+/// `team profile`, projected: the summary, the top time losses and the roles
+/// and models. Unknown token counts stay null.
 #[derive(Clone, Debug, Default, PartialEq, Serialize)]
 pub struct ProfileView {
     pub team: String,
-    pub profile: Value,
+    pub elapsed_s: Option<u64>,
+    pub worked_s: Option<u64>,
+    pub tasks: u64,
+    pub accepted: u64,
+    pub tokens: Option<u64>,
+    pub tokens_partial: bool,
+    pub losses: Vec<ProfileLossView>,
+    pub roles: Vec<ProfileRoleView>,
 }
 
 pub fn profile(team: &str, value: &Value) -> ProfileView {
+    let summary = value.get("summary").unwrap_or(&Value::Null);
+    let tokens = summary.get("tokens").unwrap_or(&Value::Null);
+    let total = tokens.get("total").and_then(Value::as_u64);
+    let roles = [
+        ("role", array(value, "roles")),
+        ("model", array(value, "models")),
+    ]
+    .into_iter()
+    .flat_map(|(kind, rows)| {
+        rows.iter().take(PROPOSALS_KEPT).map(move |row| {
+            let role = name(row, "role");
+            let model = name(row, "model");
+            ProfileRoleView {
+                key: if !role.is_empty() { role } else if !model.is_empty() { model } else { name(row, "key") },
+                kind: kind.to_owned(),
+                accepted: row.get("accepted").and_then(Value::as_u64).unwrap_or(0),
+                attempts: row.get("attempts").and_then(Value::as_u64).unwrap_or(0),
+                returned: row.get("returned").and_then(Value::as_u64).unwrap_or(0),
+                tokens_per_accepted: row.get("tokens_per_accepted").and_then(Value::as_u64),
+            }
+        })
+    })
+    .collect();
     ProfileView {
         team: team.to_owned(),
-        profile: value.clone(),
+        elapsed_s: summary
+            .get("totals")
+            .and_then(|totals| totals.get("elapsed_s"))
+            .and_then(Value::as_u64),
+        worked_s: summary
+            .get("totals")
+            .and_then(|totals| totals.get("worked_s"))
+            .and_then(Value::as_u64),
+        tasks: summary.get("tasks").and_then(Value::as_u64).unwrap_or(0),
+        accepted: summary.get("accepted").and_then(Value::as_u64).unwrap_or(0),
+        tokens: total,
+        tokens_partial: tokens
+            .get("partial")
+            .and_then(Value::as_bool)
+            .unwrap_or(false),
+        losses: array(
+            value
+                .get("losses")
+                .and_then(|losses| losses.get("by_time"))
+                .unwrap_or(&Value::Null),
+            "items",
+        )
+        .iter()
+        .take(ITEMS_KEPT)
+        .map(|loss| ProfileLossView {
+            kind: name(loss, "kind"),
+            task: loss.get("task").and_then(Value::as_u64).unwrap_or(0),
+            seconds: number(loss, "s"),
+            tokens: loss.get("tokens").and_then(Value::as_u64),
+        })
+        .collect(),
+        roles,
     }
 }
 
+/// One test request still in the queue.
+#[derive(Clone, Debug, Default, PartialEq, Serialize)]
+pub struct TestPendingView {
+    pub id: String,
+    pub suite: String,
+    pub asked_by: String,
+    pub state: String,
+    pub task: u64,
+    pub forced: bool,
+    pub started: f64,
+    pub seconds: f64,
+    pub reason: String,
+}
+
+/// One recorded test run.
+#[derive(Clone, Debug, Default, PartialEq, Serialize)]
+pub struct TestRunView {
+    pub id: String,
+    pub suite: String,
+    pub status: String,
+    pub asked_by: String,
+    pub task: u64,
+    pub at: f64,
+    pub duration_ms: u64,
+    pub recorded_ms: u64,
+    pub runner: String,
+    pub excerpt: String,
+    pub flags: Vec<String>,
+    pub reused_from: String,
+    pub due: bool,
+    pub over_budget: bool,
+}
+
+/// `team test` for the Tests mode: the queue and one page of results.
+#[derive(Clone, Debug, Default, PartialEq, Serialize)]
+pub struct TestsView {
+    pub team: String,
+    pub queue: Vec<TestPendingView>,
+    pub runs: Vec<TestRunView>,
+    pub next: Option<f64>,
+}
+
+pub fn tests(team: &str, queue: &Value, results: &Value) -> TestsView {
+    TestsView {
+        team: team.to_owned(),
+        queue: array(queue, "items")
+            .iter()
+            .take(ITEMS_KEPT)
+            .map(|item| TestPendingView {
+                id: name(item, "id"),
+                suite: name(item, "suite"),
+                asked_by: name(item, "asked_by"),
+                state: name(item, "state"),
+                task: item.get("task").and_then(Value::as_u64).unwrap_or(0),
+                forced: flag(item, "forced"),
+                started: number(item, "started"),
+                seconds: number(item, "seconds"),
+                reason: text(item, "reason", LINE_CHARS),
+            })
+            .collect(),
+        runs: array(results, "items")
+            .iter()
+            .take(ITEMS_KEPT)
+            .map(|run| TestRunView {
+                id: name(run, "id"),
+                suite: name(run, "suite"),
+                status: name(run, "status"),
+                asked_by: name(run, "asked_by"),
+                task: run.get("task").and_then(Value::as_u64).unwrap_or(0),
+                at: number(run, "at"),
+                duration_ms: run.get("duration_ms").and_then(Value::as_u64).unwrap_or(0),
+                recorded_ms: run.get("recorded_ms").and_then(Value::as_u64).unwrap_or(0),
+                runner: name(run, "runner"),
+                excerpt: text(run, "excerpt", TEXT_CHARS),
+                flags: lines(run, "flags", NAME_CHARS),
+                reused_from: name(run, "reused_from"),
+                due: flag(run, "due"),
+                over_budget: flag(run, "over_budget"),
+            })
+            .collect(),
+        next: results.get("next_cursor").and_then(Value::as_f64),
+    }
+}
 /// One catalog role as the editor lists it.
 #[derive(Clone, Debug, Default, PartialEq, Serialize)]
 pub struct CatalogRoleView {

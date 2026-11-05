@@ -372,7 +372,19 @@ fn inbox_waiting_spans_and_profile_project_their_replies() {
         (27, None, false)
     );
     let profile = view::profile(TEAM, &fixture("profile"));
-    assert!(profile.profile["losses"].is_object() && profile.profile["summary"].is_object());
+    assert_eq!((profile.tasks, profile.accepted), (27, 8));
+    assert!(!profile.losses.is_empty() && !profile.roles.is_empty());
+}
+
+#[test]
+fn a_test_page_is_projected_with_its_queue_and_next_cursor() {
+    let queue = json!({"items":[{"id":"q1","suite":"test_a","state":"running","task":2,"forced":true}]});
+    let results = json!({"items":[{"id":"r1","suite":"test_a","status":"passed","task":2,"duration_ms":45000,"recorded_ms":40000,"flags":["retried"]}],"next_cursor":9.5});
+    let view = view::tests(TEAM, &queue, &results);
+    assert_eq!(view.team, TEAM);
+    assert_eq!((view.queue[0].suite.as_str(), view.queue[0].state.as_str()), ("test_a", "running"));
+    assert_eq!((view.runs[0].status.as_str(), view.runs[0].duration_ms), ("passed", 45000));
+    assert_eq!(view.next, Some(9.5));
 }
 
 fn follow_team() -> TeamsFollow {
@@ -410,6 +422,7 @@ fn replies(read: &TeamRead) -> Value {
         TeamRead::Spans { .. } => fixture("spans"),
         TeamRead::Profile { .. } => fixture("profile"),
         TeamRead::Catalog => fixture("catalog"),
+        TeamRead::TestQueue { .. } | TeamRead::TestResults { .. } => json!({"items":[]}),
     }
 }
 

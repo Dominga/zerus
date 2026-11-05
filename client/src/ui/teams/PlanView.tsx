@@ -1,8 +1,11 @@
-import { For, Show, createMemo, createSignal, type JSX } from "solid-js";
+import { For, Show, createEffect, createMemo, createSignal, type JSX } from "solid-js";
 import { createVirtualizer } from "@tanstack/solid-virtual";
 import { Icon } from "../lib/icons";
 import { tr } from "../../i18n";
 import type { PlanGraph, TeamView } from "./types";
+import type { TeamProfileView, TeamTestsView } from "../../types";
+import { BoardView, LayersView, PlanModeBar, ProfilePanel, TestsPanel, stageLabel } from "./plan-panels";
+import { stageChips, heatShare, type PlanMode } from "./planModes";
 import {
   CARD_H,
   ROW_H,
@@ -29,6 +32,11 @@ export interface PlanViewProps {
   onOpenTask?: (id: number) => void;
   onApprovePhase?: (n: number) => void;
   onDiscardPhase?: (n: number) => void;
+  profile?: TeamProfileView | null;
+  tests?: TeamTestsView | null;
+  /** The Tests mode asks for its page when opened; the host reads it through
+   * the core and passes it back. */
+  onLoadTests?: (before: number | null) => void;
   class?: string;
 }
 
@@ -74,6 +82,11 @@ function statusLabel(kind: string): string {
 }
 
 export function PlanView(props: PlanViewProps): JSX.Element {
+  const [mode, setMode] = createSignal<PlanMode>("graph");
+  const [includeCancelled, setIncludeCancelled] = createSignal(false);
+  createEffect(() => {
+    if (mode() === "tests") props.onLoadTests?.(null);
+  });
   const [collapsed, setCollapsed] = createSignal<Set<number>>(
     new Set(props.team.phases.filter((phase) => phase.status === "done").map((phase) => phase.n)),
   );
@@ -198,6 +211,8 @@ export function PlanView(props: PlanViewProps): JSX.Element {
     const attempt = task?.attempts ? tr("Attempt %1", task.attempts) : "";
     const stateText = task?.attempt_state?.trim() || "";
     const classes = ["pt-card", `pt-card-${state}`];
+    const stages = stageChips(task?.pipeline?.stages);
+    const heat = heatShare(props.profile, placed.node.id);
     const litNow = lit();
     if (litNow) classes.push(litNow.has(placed.node.id) ? (hover() === placed.node.id ? "pt-card-on" : "pt-card-lit") : "pt-card-dim");
     if (task?.pinned) classes.push("pt-card-pinned");
@@ -205,7 +220,7 @@ export function PlanView(props: PlanViewProps): JSX.Element {
       <button
         type="button"
         class={classes.join(" ")}
-        style={{ left: `${placed.x}px`, top: "0px" }}
+        style={{ left: `${placed.x}px`, top: "0px", "--heat": String(heat ?? 0) }}
         data-task={placed.node.id}
         data-lit={litNow ? (litNow.has(placed.node.id) ? "lit" : "dim") : "none"}
         aria-label={tr("Task %1: %2", placed.node.id, placed.node.title || task?.title || "")}
@@ -238,8 +253,12 @@ export function PlanView(props: PlanViewProps): JSX.Element {
           </Show>
         </span>
         <span class="pt-card-l3">
-          <Show when={waits} fallback={<span class="pt-muted">{placed.node.ready ? tr("ready") : short(placed.node.status, 24)}</span>}>
-            <span class="pt-waits">{short(waits!, 76)}</span>
+          <Show when={stages.length > 0} fallback={<Show when={waits} fallback={<span class="pt-muted">{placed.node.ready ? tr("ready") : short(placed.node.status, 24)}</span>}><span class="pt-waits">{short(waits!, 76)}</span></Show>}>
+            <span class="pt-stages">
+              <For each={stages}>
+                {(stage) => <span class={`pt-stage pt-stage-${stage.state}`}>{stageLabel(stage.kind)}{stage.attempt > 1 ? ` ${stage.attempt}` : ""}</span>}
+              </For>
+            </span>
           </Show>
         </span>
       </button>
@@ -264,7 +283,7 @@ export function PlanView(props: PlanViewProps): JSX.Element {
             )}
           </For>
         </svg>
-        <For each={row.nodes}>{(placed) => card(placed, phase)}</For>
+        <For each={row.nodes.filter((placed) => includeCancelled() || placed.node.status !== "cancelled")}>{(placed) => card(placed, phase)}</For>
       </div>
     );
   };
@@ -345,37 +364,58 @@ export function PlanView(props: PlanViewProps): JSX.Element {
   return (
     <section class={`pt-plan${props.class ? ` ${props.class}` : ""}`} aria-label={tr("Plan")}>
       <header class="pt-plan-bar">
-        <span class="pt-plan-mode">{tr("Graph")}</span>
+        <PlanModeBar
+          mode={mode()}
+          includeCancelled={includeCancelled()}
+          onMode={setMode}
+          onCancelled={setIncludeCancelled}
+        />
         <span class="pt-grow" />
         <span class="pt-plan-summary">
           <span>{tr("Phases: %1", phases().length)}</span>
           <span>{tr("Tasks: %1", props.team.tasks.length)}</span>
         </span>
-        <button type="button" class="btn ghost small" onClick={collapseAll}>{tr("Collapse all")}</button>
-        <button type="button" class="btn ghost small" onClick={expandAll}>{tr("Expand all")}</button>
+        <Show when={mode() === "graph"}>
+          <button type="button" class="btn ghost small" onClick={collapseAll}>{tr("Collapse all")}</button>
+          <button type="button" class="btn ghost small" onClick={expandAll}>{tr("Expand all")}</button>
+        </Show>
       </header>
-      <div class="pt-plan-body">
-        <div class="pt-plan-scroll" ref={scroller} onPointerLeave={() => setHover(null)}>
-          <div class="pt-plan-canvas" style={{ height: `${virtualizer.getTotalSize()}px` }}>
-            <For each={virtualRows()}>
-              {(item) => {
-                const row = rows()[item.index];
-                if (!row) return null;
-                return (
-                  <div
-                    class={`pt-row pt-row-${row.kind}`}
-                    style={{ top: `${item.start}px`, height: `${item.size}px` }}
-                    data-phase={row.phase.phase.n}
-                  >
-                    {row.kind === "header" ? header(row.phase, row) : layer(row.phase, row)}
-                  </div>
-                );
-              }}
-            </For>
+      <Show when={mode() === "graph"}>
+        <div class="pt-plan-body">
+          <div class="pt-plan-scroll" ref={scroller} onPointerLeave={() => setHover(null)}>
+            <div class="pt-plan-canvas" style={{ height: `${virtualizer.getTotalSize()}px` }}>
+              <For each={virtualRows()}>
+                {(item) => {
+                  const row = rows()[item.index];
+                  if (!row) return null;
+                  return (
+                    <div
+                      class={`pt-row pt-row-${row.kind}`}
+                      style={{ top: `${item.start}px`, height: `${item.size}px` }}
+                      data-phase={row.phase.phase.n}
+                    >
+                      {row.kind === "header" ? header(row.phase, row) : layer(row.phase, row)}
+                    </div>
+                  );
+                }}
+              </For>
+            </div>
           </div>
+          {detail()}
         </div>
-        {detail()}
-      </div>
+      </Show>
+      <Show when={mode() === "board"}>
+        <BoardView phases={phases()} includeCancelled={includeCancelled()} profile={props.profile} onOpen={open} />
+      </Show>
+      <Show when={mode() === "layers"}>
+        <LayersView phases={phases()} includeCancelled={includeCancelled()} profile={props.profile} onOpen={open} />
+      </Show>
+      <Show when={mode() === "profile"}>
+        <ProfilePanel profile={props.profile} />
+      </Show>
+      <Show when={mode() === "tests"}>
+        <TestsPanel tests={props.tests} onMore={() => props.onLoadTests?.(props.tests?.next ?? null)} />
+      </Show>
     </section>
   );
 }

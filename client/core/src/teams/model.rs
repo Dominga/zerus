@@ -398,6 +398,8 @@ impl TeamsModel {
             TeamRead::Spans { team, .. } => team_key("spans", team),
             TeamRead::Profile { team } => team_key("profile", team),
             TeamRead::Catalog => "catalog".into(),
+            TeamRead::TestQueue { team } => team_key("tests-queue", team),
+            TeamRead::TestResults { team, .. } => team_key("tests", team),
         }
     }
 
@@ -513,6 +515,9 @@ impl TeamsModel {
                 TeamsUpdate::Catalog(Arc::new(view::catalog(&value))),
                 &mut out,
             ),
+            // Test pages are read on request by the Tests mode, not polled by
+            // this model; no TeamsUpdate is kept for them.
+            TeamRead::TestQueue { .. } | TeamRead::TestResults { .. } => {}
         }
         out
     }

@@ -9,7 +9,8 @@ use std::sync::{Arc, Mutex, MutexGuard, PoisonError};
 
 use tauri::State;
 use zerus_client_core::fleet::valid_alias;
-use zerus_client_core::teams::read::valid_team;
+use zerus_client_core::teams::read::{read, valid_team, TeamRead};
+use zerus_client_core::teams::view::{tests as tests_view, TestsView};
 use zerus_client_core::teams::Heads;
 use zerus_client_core::{default_hgs, ComputerId, TeamCall, TeamOutcome, TeamsFollow, TeamsPoller};
 
@@ -170,6 +171,36 @@ pub fn teams_spans(teams: State<'_, Teams>, computer: String, after: u64) -> Res
 pub fn teams_profile(teams: State<'_, Teams>, computer: String) -> Result<bool, String> {
     let target = self::computer(&computer)?;
     Ok(teams.with(&target, TeamsPoller::profile))
+}
+
+/// Task 41: the Tests mode's queue and one page of results, read together off
+/// the UI thread. The mode calls this only while it is open.
+#[tauri::command]
+pub async fn team_tests(computer: String, team: String, before: Option<f64>) -> Result<TestsView, String> {
+    if !valid_team(&team) {
+        return Err("Not a team id.".into());
+    }
+    let target = self::computer(&computer)?;
+    tauri::async_runtime::spawn_blocking(move || {
+        let queue = read(
+            &default_hgs(),
+            &target,
+            &TeamRead::TestQueue { team: team.clone() },
+        )
+        .map_err(|error| error.to_string())?;
+        let results = read(
+            &default_hgs(),
+            &target,
+            &TeamRead::TestResults {
+                team: team.clone(),
+                before,
+            },
+        )
+        .map_err(|error| error.to_string())?;
+        Ok(tests_view(&team, &queue, &results))
+    })
+    .await
+    .map_err(|error| error.to_string())?
 }
 
 /// Runs one team action (task #7) as a guarded `hgs team` call with a

@@ -71,6 +71,9 @@ export const teamsFollow = (computer: ComputerId, follow: import("./store/teamsV
 /** One guarded owner action on a team (core action.rs); the outcome says whether it was applied, refused, unknown or must be confirmed first. The core runs `hgs team`, the webview never does. */
 export const teamAction = (call: import("./types").TeamCall) =>
   inTauri() ? invoke<import("./types").TeamOutcome>("team_action", { call }) : Promise.reject(new Error("Teams need the desktop app."));
+/** Task 41: the Tests mode's queue and one bounded result page through the core. */
+export const teamTests = (computer: ComputerId, team: string, before: number | null) =>
+  inTauri() ? invoke<import("./types").TeamTestsView>("team_tests", { computer, team, before }) : Promise.reject(new Error("Teams need the desktop app."));
 /** Task 11: reads one team once, as an answer in Waiting for you does before it sends. */
 export const teamRead = (computer: ComputerId, team: string) =>
   inTauri() ? invoke<import("./types").TeamView>("team_read", { computer, team }) : Promise.reject(new Error("Teams need the desktop app."));

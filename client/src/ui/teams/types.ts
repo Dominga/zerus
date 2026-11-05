@@ -7,6 +7,19 @@ export interface DepView {
   hard: boolean;
 }
 
+export interface TeamTaskStage {
+  kind: string;
+  state: string;
+  attempt: number;
+  member: string;
+}
+
+export interface TaskPipelineView {
+  name: string;
+  round: number;
+  stages: TeamTaskStage[];
+}
+
 export interface TaskView {
   id: number;
   title: string;
@@ -21,6 +34,7 @@ export interface TaskView {
   pinned: boolean;
   output: string[];
   waits: string;
+  pipeline?: TaskPipelineView | null;
 }
 
 export interface PhaseView {

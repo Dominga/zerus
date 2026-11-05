@@ -3143,14 +3143,19 @@ as a send an older build recorded concurrently, is listed in `unexplained`, sets
 No start, child or result is invented. A resume settles only the pauses it observed, so a
 pause that no resume observed keeps the attempt paused. A session's
 Stop, idle time, pause or elapsed time is never an attempt event and never
-moves a task. Attempts are kept beside the history under task schema 6, which a
-reader that does not know them shows read-only. The stored schema is one merged
+moves a task. Attempts are kept beside the history under task schema 7, which a
+reader that does not know them shows read-only: that includes the builds that
+already read schema 6 but know no floor. The stored schema is one merged
 value, so an older replica's concurrent upgrade can leave a lower one; this
 version raises it again for a task with attempts in every write and every live
 import, and before a task is read for an inventory, so the raised value is what
 other replicas receive. That repair is a new change, not proof that an older
-replica did nothing before it. This version reads attempts and guards reports
-against the current execution; recording attempts comes later.
+replica did nothing before it. A task can also take a floor before its first
+attempt: a cutover record that keeps schema 7 the same way, so a reader that
+does not know attempts or the floor refuses to write it, while every path that would start
+it without an attempt refuses it as cutting over. A floor this version cannot
+read still counts. This version reads attempts and guards reports against the
+current execution; recording attempts and floors comes later.
 
 Plain `task list` still returns every task for existing clients. With `--stage`
 and `--limit` (1–200) it returns one page of that stage in the same order and
@@ -3366,7 +3371,54 @@ bindings yet, so there `--host` is refused and other computers read null.
 Tasks are Loro documents below `HGS_STATE_DIR/replica`, one directory per
 project; a task file that fails to load is listed under `damaged` and left in
 place until another computer of the swarm sends its copy, which replaces it;
-the damaged file stays beside it as `<file>.damaged-<time>`. The swarm worker
+a copy of the damaged file stays beside it as `<file>.damaged-<time>`. A task
+this computer saved with attempts or a floor gets a mark, `<uuid>.managed`,
+naming the version this computer last saved and the exact first block of
+the updates file after the snapshot, sealed by a digest of its whole content
+so that a mark changed in any way cannot be read. The mark is rewritten before every save
+of such a task makes it durable (one small extra write per save), and every
+fold opens a new updates file with the operations at the document's
+frontiers, which every copy already holds, so it adds no change and differs
+from fold to fold. A copy whose files hold less than its mark records (they
+were cut short, a save did not finish, or an older Zerus wrote them so), or
+whose mark cannot be read, is damaged, not read without those changes:
+nothing sends, writes or folds it, not even a copy read before, until a person
+reviews it or a copy that covers the mark arrives. Files that hold more than the mark records (an older
+Zerus folded or appended) raise the mark to what they hold when the task is
+read, before anything lists, inventories or sends it. A task with only its
+mark left is still listed under `damaged`. Saves of a task go through one
+store in turn: a copy read before a later save of the same task is merged
+into what is saved, never written over it, and the mark never moves back. Its damaged copy is replaced only when the mark is readable and
+still describes the files (an older Zerus that folded or rewrote them, or a
+mark restored from before a later fold, leaves it stale), every
+update saved here applies, and the other copy merged with them holds that
+version, so no attempt fact is lost. A copy without a mark is replaced only
+when every update saved here applies and the result shows no attempts or
+floor. Otherwise the copy is kept: it stays under `damaged`, nothing is sent
+for it, and each copy another computer or a phone sends is refused and named
+in that exchange's refusals, not kept for later. A person reviews it: moving
+both damaged files (`<uuid>.loro` and `<uuid>.updates`) away keeps it refused
+while the mark remains, and removing the mark as well accepts the next copy
+sent, which may lack attempts. Any
+entry at the mark's path counts as a mark, even one that cannot be read.
+
+What this recovery supports, alone or combined: running an older Zerus
+after a rollback (its importer may fold, append or rewrite the task files as
+it always did), a crash at any point, damaged or truncated files, and an
+unreadable or dangling mark; in each it stays correct or keeps the copy. It
+also supports restoring or copying the whole replica root as one consistent
+older state, an ordinary rollback of local data: other computers supply the
+newer changes again. It does not support replacing, restoring or copying
+individual files under the replica root (a task's snapshot, updates or mark)
+from a backup or another computer while the rest stays newer, by any means,
+including file-level backup and sync tools: such a partial restore can put
+back an older pair of files that agree with each other, which nothing here
+can tell from a genuine one, and recovery may then accept another copy and
+lose what was written after that backup. Restore the replica root only as a
+whole, never copy task files back one by one, and keep file-level sync tools
+away from it.
+
+The swarm worker
 replicates them with the catalog: after each catalog
 sync it compares every project's digest with the member's and exchanges only
 the changes each side lacks, in pages of at most 1 MiB, and a task changed

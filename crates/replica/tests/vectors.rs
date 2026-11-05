@@ -284,7 +284,7 @@ fn task_schema6_attempts_loro_1_16() {
         let current = view.execution.unwrap().current.unwrap();
         assert_eq!(
             (view.schema, view.writable, view.stage),
-            (6, true, Stage::Active)
+            (zerus_replica::TASK_SCHEMA, true, Stage::Active)
         );
         assert_eq!(
             serde_json::to_value(current.phase).unwrap(),

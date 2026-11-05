@@ -386,16 +386,18 @@ fn optional(parent: &File, leaf: &str, directory: bool) -> Result<Option<File>> 
 
 /// At most [`RECORD_BYTES`] of `file`, or an error.
 fn bounded(file: &mut File) -> Result<Vec<u8>> {
-    ensure!(
-        file.metadata()?.len() <= RECORD_BYTES,
-        "executor record too large"
-    );
+    bounded_to(file, RECORD_BYTES)
+}
+
+/// The label-index manifest's bound, as the CLI bounds it.
+const MANIFEST_BYTES: u64 = 16 << 20;
+
+/// At most `limit` bytes of `file`, or an error.
+fn bounded_to(file: &mut File, limit: u64) -> Result<Vec<u8>> {
+    ensure!(file.metadata()?.len() <= limit, "executor record too large");
     let mut bytes = Vec::new();
-    file.take(RECORD_BYTES + 1).read_to_end(&mut bytes)?;
-    ensure!(
-        bytes.len() as u64 <= RECORD_BYTES,
-        "executor record too large"
-    );
+    file.take(limit + 1).read_to_end(&mut bytes)?;
+    ensure!(bytes.len() as u64 <= limit, "executor record too large");
     Ok(bytes)
 }
 
@@ -409,14 +411,37 @@ fn read_in_id_layout(
     name: &str,
     executor: &Executor,
 ) -> Result<Option<(Value, String)>> {
-    let Some(labels) = optional(directory, "labels", true)? else {
+    // The label index names candidates only while its manifest proves them
+    // (#1437 review). With no `sessions/` there is no ID layout at all.
+    let manifest = match optional(directory, "labels", true)? {
+        Some(labels) => optional(&labels, ".complete", false)?
+            .map(|mut file| bounded_to(&mut file, MANIFEST_BYTES))
+            .transpose()?
+            .map(|bytes| (labels, bytes)),
+        None => None,
+    };
+    let Some((labels, manifest)) = manifest else {
+        ensure!(
+            optional(directory, "sessions", true)?.is_none(),
+            "executor label index cannot be proven"
+        );
         return Ok(None);
     };
-    let entry = format!("{:x}.json", Sha256::digest(name.as_bytes()));
-    let Some(mut index) = optional(&labels, &entry, false)? else {
+    let manifest: Value = serde_json::from_slice(&manifest)?;
+    ensure!(manifest["version"] == 1 && manifest["labels"].is_object(), "executor label index cannot be proven");
+    let key = format!("{:x}", Sha256::digest(name.as_bytes()));
+    let Some(expected) = manifest["labels"].get(&key) else {
+        // The manifest proves this label has no session in the ID layout.
         return Ok(None);
     };
-    let index: Value = serde_json::from_slice(&bounded(&mut index)?)?;
+    let mut index = optional(&labels, &format!("{key}.json"), false)?
+        .context("executor label index cannot be proven")?;
+    let index = bounded(&mut index)?;
+    ensure!(
+        expected.as_str() == Some(format!("{:x}", Sha256::digest(&index)).as_str()),
+        "executor label index cannot be proven"
+    );
+    let index: Value = serde_json::from_slice(&index)?;
     ensure!(
         index["version"] == 1 && index["label"] == name,
         "executor label index does not match"
@@ -834,7 +859,16 @@ mod tests {
         f.record["session_id"] = json!(id);
         private(&own, &serde_json::to_vec(&f.record).unwrap());
         assert!(f.capture().is_err(), "the label's holder binds another run");
-        private(&index, json!({"version":1,"label":"private-task-executor","ids":[id]}).to_string().as_bytes());
+        let text = json!({"version":1,"label":"private-task-executor","ids":[id]}).to_string();
+        private(&index, text.as_bytes());
+        assert!(f.capture().is_err(), "an index no manifest proves is refused");
+        // The manifest lists the label with its file's digest (#1437 review).
+        let key = index.file_stem().unwrap().to_str().unwrap().to_owned();
+        let manifest = f.root.path().join("labels").join(".complete");
+        private(&manifest, json!({"version":1,"labels":{}}).to_string().as_bytes());
+        assert!(f.capture().is_err(), "a label the manifest omits is read at its own path");
+        let digest = format!("{:x}", Sha256::digest(text.as_bytes()));
+        private(&manifest, json!({"version":1,"labels":{&key: digest}}).to_string().as_bytes());
         assert!(f.capture().is_err(), "a file there without the layout is refused");
         f.record["layout"] = json!("id");
         private(&own, &serde_json::to_vec(&f.record).unwrap());
@@ -842,7 +876,32 @@ mod tests {
         f.record["activity"] = json!("working");
         private(&own, &serde_json::to_vec(&f.record).unwrap());
         original.current(until()).unwrap();
+        // A changed index no longer matches its manifest entry, even when it
+        // still lists the executor.
+        let stale = uuid::Uuid::new_v4().to_string();
+        private(&index, json!({"version":1,"label":"private-task-executor","ids":[id, stale]}).to_string().as_bytes());
+        assert!(f.capture().is_err(), "an index its manifest no longer proves");
+        private(&index, text.as_bytes());
         fs::remove_file(&own).unwrap();
         assert!(original.current(until()).is_err(), "never the label's first holder");
+    }
+    /// #1437 review: while `sessions/` exists, the executor proof needs the
+    /// manifest's word that its label has no session in the ID layout.
+    #[test]
+    fn an_executor_is_refused_while_no_manifest_proves_its_label() {
+        let f = Fixture::new();
+        f.capture().unwrap();
+        let sessions = f.root.path().join("sessions");
+        fs::create_dir(&sessions).unwrap();
+        fs::set_permissions(&sessions, fs::Permissions::from_mode(0o700)).unwrap();
+        assert!(f.capture().is_err());
+        let labels = f.root.path().join("labels");
+        fs::create_dir(&labels).unwrap();
+        fs::set_permissions(&labels, fs::Permissions::from_mode(0o700)).unwrap();
+        assert!(f.capture().is_err());
+        let manifest = labels.join(".complete");
+        fs::write(&manifest, json!({"version":1,"labels":{}}).to_string()).unwrap();
+        fs::set_permissions(&manifest, fs::Permissions::from_mode(0o600)).unwrap();
+        f.capture().unwrap();
     }
 }

@@ -24,8 +24,46 @@ pub(super) fn absolute_root() -> Result<PathBuf> {
     crate::platform::canonical(root()).map_err(|e| e.to_string())
 }
 
+/// Crash cuts for tests (#1437 review): a budget of durable writes, after
+/// which every further write refuses before it starts, as if the writer had
+/// crashed there. Off unless a test arms it.
+#[cfg(test)]
+pub(super) mod cut {
+    use std::sync::atomic::{AtomicUsize, Ordering};
+    /// The writes allowed, plus one; 0 is off.
+    static BUDGET: AtomicUsize = AtomicUsize::new(0);
+    static DONE: AtomicUsize = AtomicUsize::new(0);
+    /// Allows exactly `writes` more durable writes.
+    #[cfg(unix)]
+    pub(crate) fn arm(writes: usize) {
+        DONE.store(0, Ordering::SeqCst);
+        BUDGET.store(writes + 1, Ordering::SeqCst);
+    }
+    #[cfg(unix)]
+    pub(crate) fn disarm() {
+        BUDGET.store(0, Ordering::SeqCst);
+    }
+    /// Refuses a write once the budget is spent; else counts it.
+    pub(crate) fn write() -> Result<(), String> {
+        let budget = BUDGET.load(Ordering::SeqCst);
+        if budget != 0 && DONE.load(Ordering::SeqCst) + 1 >= budget {
+            return Err("crash cut".into());
+        }
+        DONE.fetch_add(1, Ordering::SeqCst);
+        Ok(())
+    }
+}
+
+/// Counts a durable write for the crash cuts; nothing outside tests.
+pub(super) fn cut_write() -> Result<()> {
+    #[cfg(test)]
+    cut::write()?;
+    Ok(())
+}
+
 pub(super) fn atomic(path: &Path, contents: &str) -> Result<()> {
     let parent = path.parent().ok_or("cannot write file without parent")?;
+    cut_write()?;
     private_dir(parent)?;
     let mut temp = tempfile::Builder::new()
         .prefix(".hgs-")
@@ -145,17 +183,22 @@ fn sole_id_holder(name: &str) -> Option<PathBuf> {
     }
 }
 
-/// The key of the files a session owns by name, such as its recovery job and
-/// its native-input lock: its label's SHA-256, or for a session in the ID
-/// layout its session ID (P3a), so two sessions that share a label never share
-/// one. The ID never changes, so a rename in place moves none of them.
-pub(super) fn owner_key(name: &str) -> String {
-    let path = record_path(name);
-    if path.parent().is_some_and(|parent| parent == root().join("sessions")) {
-        if let Some(id) = path.file_stem().and_then(|stem| stem.to_str()) {
-            return id.to_owned();
-        }
+/// The key of the files a session owns, such as its recovery job and its
+/// native-input lock, taken from its verified record (#1437 review): its
+/// session ID in the ID layout (P3a), so two sessions that share a label never
+/// share one and a rename in place moves none of them; else its label's
+/// SHA-256, as before. Never from a label alone or the command's selection, so
+/// a watch, a worker or a hook that holds a record keeps that session's files.
+pub(super) fn owner_key(record: &Value) -> String {
+    let id = string(record, "session_id");
+    if in_id_layout(record) && session_id::canonical(id) {
+        return id.to_owned();
     }
+    label_key(string(record, "name"))
+}
+
+/// The SHA-256 of `name`, the key of a legacy session's files.
+pub(super) fn label_key(name: &str) -> String {
     format!("{:x}", Sha256::digest(name.as_bytes()))
 }
 
@@ -168,9 +211,13 @@ pub(super) fn label_taken(name: &str) -> bool {
     })
 }
 
+/// The fixed path of the session the command selected in the ID layout under
+/// `name`. It stays the route when that file vanishes or is replaced: the read
+/// then refuses, and never falls back to the label's holder (#1437 review).
 fn selected_id_path(name: &str) -> Option<PathBuf> {
-    let selection = session_id::selected().filter(|selection| selection.name == name)?;
-    id_record_path(&selection.session_id).filter(|path| path.is_file())
+    let selection = session_id::selected()
+        .filter(|selection| selection.name == name && selection.id_layout)?;
+    id_record_path(&selection.session_id)
 }
 
 pub(super) fn read(name: &str) -> Result<Value> {
@@ -183,15 +230,54 @@ pub(super) fn read_bounded(name: &str, bytes: u64) -> Result<Value> {
 /// `sessions/<id>.json` must carry that ID and say it is in the ID layout.
 pub(super) fn read_id(id: &str) -> Result<Value> {
     let path = id_record_path(id).ok_or("invalid session ID")?;
-    let name = read_name(&path)?;
-    read_at(&path, &name, None)
+    let bytes = record_bytes(&path, None).map_err(|e| not_found(id, e))?;
+    let name = serde_json::from_slice::<Value>(&bytes)
+        .map(|value| string(&value, "name").to_owned())
+        .map_err(|e| format!("{id}: invalid saved binding: {e}"))?;
+    verify_at(&path, &name, &bytes)
 }
 
-/// The label a record file names, before the full verified read.
-fn read_name(path: &Path) -> Result<String> {
-    let value: Value = serde_json::from_str(&fs::read_to_string(path).map_err(|e| e.to_string())?)
-        .map_err(|e| e.to_string())?;
-    Ok(string(&value, "name").to_owned())
+/// The largest record read from the ID layout (#1437 review). Real records
+/// stay well under a megabyte; a larger file is not one of ours.
+pub(super) const ID_RECORD_BYTES: u64 = 16 << 20;
+
+/// Whether `path` is in the ID layout's own folder.
+fn in_sessions(path: &Path) -> bool {
+    path.parent().is_some_and(|parent| parent == root().join("sessions"))
+}
+
+/// A record file's bytes. In the ID layout, and whenever a caller bounds it,
+/// the read never follows a final link, never blocks on a FIFO, takes only a
+/// regular file and stops at its bound (#1437 review): a lock-free scan must
+/// not hang on what it finds there.
+fn record_bytes(path: &Path, limit: Option<u64>) -> io::Result<Vec<u8>> {
+    let retiring = limit.is_some();
+    let Some(limit) = limit.or(in_sessions(path).then_some(ID_RECORD_BYTES)) else {
+        return fs::read(path);
+    };
+    use std::io::Read;
+    let file = crate::platform::no_follow(OpenOptions::new().read(true)).open(path)?;
+    if !file.metadata()?.is_file() {
+        return Err(io::Error::other("Selected session is not a regular record"));
+    }
+    let mut bytes = Vec::new();
+    file.take(limit + 1).read_to_end(&mut bytes)?;
+    if bytes.len() as u64 > limit {
+        return Err(io::Error::other(if retiring {
+            "Selected session record exceeds retirement bound"
+        } else {
+            "Session record exceeds its bound"
+        }));
+    }
+    Ok(bytes)
+}
+
+fn not_found(name: &str, error: io::Error) -> String {
+    if error.kind() == io::ErrorKind::NotFound {
+        format!("{name}: no saved binding; restart through hgs to enable tracking")
+    } else {
+        error.to_string()
+    }
 }
 
 /// The record at the label's own path, never steered by a selection.
@@ -204,24 +290,13 @@ fn read_limit(name: &str, limit: Option<u64>) -> Result<Value> {
 }
 
 fn read_at(path: &Path, name: &str, limit: Option<u64>) -> Result<Value> {
-    let contents = (|| -> io::Result<String> {
-        if let Some(limit) = limit {
-            use std::io::Read;
-            let mut bytes=Vec::new();
-            let file=crate::platform::never_block(OpenOptions::new().read(true)).open(path)?;
-            if !file.metadata()?.is_file() {return Err(io::Error::other("Selected session is not a regular record"));}
-            file.take(limit+1).read_to_end(&mut bytes)?;
-            if bytes.len() as u64 > limit { return Err(io::Error::other("Selected session record exceeds retirement bound")); }
-            String::from_utf8(bytes).map_err(|e|io::Error::new(io::ErrorKind::InvalidData,e))
-        } else {fs::read_to_string(path)}
-    })().map_err(|e| {
-        if e.kind() == io::ErrorKind::NotFound {
-            format!("{name}: no saved binding; restart through hgs to enable tracking")
-        } else {
-            e.to_string()
-        }
-    })?;
-    let mut record: Value = serde_json::from_str(&contents)
+    let bytes = record_bytes(path, limit).map_err(|e| not_found(name, e))?;
+    verify_at(path, name, &bytes)
+}
+
+/// The record in `bytes`, read from `path` as `name`, verified.
+fn verify_at(path: &Path, name: &str, bytes: &[u8]) -> Result<Value> {
+    let mut record: Value = serde_json::from_slice(bytes)
         .map_err(|e| format!("{name}: invalid saved binding: {e}"))?;
     if !record.is_object()
         || record["version"] != 1
@@ -232,7 +307,7 @@ fn read_at(path: &Path, name: &str, limit: Option<u64>) -> Result<Value> {
     }
     // A record in the ID layout is verified against its own path: the same
     // session ID, and the layout it claims. Neither alone is authority.
-    let by_id = path.parent().is_some_and(|parent| parent == root().join("sessions"));
+    let by_id = in_sessions(path);
     if by_id != in_id_layout(&record)
         || (by_id && id_record_path(string(&record, "session_id")).as_deref() != Some(path))
     {
@@ -459,7 +534,8 @@ pub(super) fn records() -> Result<Vec<Value>> {
         }
     }
     for path in by_id {
-        match read_name(&path).and_then(|name| read_at(&path, &name, None)) {
+        let id = path.file_stem().and_then(|stem| stem.to_str()).unwrap_or_default();
+        match read_id(id) {
             Ok(record) => result.push(record),
             Err(error) => eprintln!("hgs: cannot read {}: {error}", path.display()),
         }

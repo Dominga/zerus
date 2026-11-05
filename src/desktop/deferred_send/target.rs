@@ -16,6 +16,8 @@ use zerus_client_core::desktop::{creation_launch::AGENTS, deferred_send::Plan};
 
 /// The largest session record read.
 const RECORD_BYTES: u64 = 1 << 20;
+/// The largest label-index manifest read, as the CLI bounds it.
+const MANIFEST_BYTES: u64 = 16 << 20;
 
 fn string<'a>(value: &'a serde_json::Value, key: &str) -> &'a str {
     value
@@ -60,31 +62,74 @@ pub(super) fn current(roots: &Roots, plan: &Plan) -> bool {
         return true;
     }
     // A session in the ID layout (zerus-ucck P3a), whose label's own record
-    // is another session's or none: the label index names its candidates, and
-    // each is opened at its fixed `sessions/<id>.json`, never a path from
-    // elsewhere. Exactly one may carry the plan's run and conversation; an
-    // absent or unreadable index refuses, as an unreadable record does.
-    let Some(index) = json_at(roots, &["labels", &file]) else {
+    // is another session's or none. The label index names its candidates only
+    // while its manifest proves them (#1437 review): the manifest must list
+    // the label, and the label's file must hash to that entry. Each candidate
+    // is opened at its fixed `sessions/<id>.json`, never a path from
+    // elsewhere; one that is there but cannot be read refuses, and exactly one
+    // may carry the plan's run and conversation.
+    let key = format!("{:x}", Sha256::digest(plan.session.as_bytes()));
+    let Ok(Some(manifest)) = bytes_at(roots, &["labels", ".complete"], MANIFEST_BYTES) else {
+        return false;
+    };
+    let Ok(manifest) = serde_json::from_slice::<serde_json::Value>(&manifest) else {
+        return false;
+    };
+    let Some(expected) = manifest["labels"][&key].as_str().filter(|_| manifest["version"] == 1) else {
+        return false;
+    };
+    let Ok(Some(index)) = bytes_at(roots, &["labels", &file], RECORD_BYTES) else {
+        return false;
+    };
+    if format!("{:x}", Sha256::digest(&index)) != expected {
+        return false;
+    }
+    let Ok(index) = serde_json::from_slice::<serde_json::Value>(&index) else {
         return false;
     };
     if index["version"] != 1 || string(&index, "label") != plan.session {
         return false;
     }
-    let ids = index["ids"].as_array().into_iter().flatten();
-    let found = ids
-        .filter_map(|id| id.as_str())
-        .filter(|id| {
-            uuid::Uuid::parse_str(id).is_ok_and(|uuid| uuid.hyphenated().to_string() == *id)
-        })
-        .filter(|id| {
-            json_at(roots, &["sessions", &format!("{id}.json")]).is_some_and(|record| {
-                record["layout"] == "id"
-                    && string(&record, "session_id") == *id
+    let canonical = |id: &str| uuid::Uuid::parse_str(id).is_ok_and(|uuid| uuid.hyphenated().to_string() == id);
+    let mut found = 0;
+    for id in index["ids"].as_array().into_iter().flatten() {
+        let Some(id) = id.as_str().filter(|id| canonical(id)) else {
+            return false;
+        };
+        match bytes_at(roots, &["sessions", &format!("{id}.json")], RECORD_BYTES) {
+            // A stale entry: the session left the label.
+            Ok(None) => {}
+            Ok(Some(bytes)) => {
+                let Ok(record) = serde_json::from_slice::<serde_json::Value>(&bytes) else {
+                    return false;
+                };
+                if record["layout"] == "id"
+                    && string(&record, "session_id") == id
                     && names_plan(&record)
-            })
-        })
-        .count();
+                {
+                    found += 1;
+                }
+            }
+            Err(_) => return false,
+        }
+    }
     found == 1
+}
+
+/// The bytes at `path` under the held root, bounded: `Ok(None)` only when it
+/// verifiably does not exist; anything there that cannot be read is an error.
+fn bytes_at(roots: &Roots, path: &[&str], limit: u64) -> io::Result<Option<Vec<u8>>> {
+    let file = match roots.open_file(path) {
+        Ok(file) => file,
+        Err(error) if error.kind() == io::ErrorKind::NotFound => return Ok(None),
+        Err(error) => return Err(error),
+    };
+    let mut bytes = Vec::new();
+    (&file).take(limit + 1).read_to_end(&mut bytes)?;
+    if bytes.len() as u64 > limit {
+        return Err(io::ErrorKind::InvalidData.into());
+    }
+    Ok(Some(bytes))
 }
 
 /// The JSON object at `path` under the held root, bounded; None when it is

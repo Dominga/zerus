@@ -192,6 +192,7 @@ fn write_entry(id: &str, name: &str, kind: Kind) -> Result<()> {
 fn remove_entry(id: &str) -> Result<()> {
     #[cfg(test)]
     CHANGES.fetch_add(1, Ordering::SeqCst);
+    storage::cut_write()?;
     match fs::remove_file(path(id)) {
         Err(error) if error.kind() != io::ErrorKind::NotFound => Err(error.to_string()),
         _ => Ok(()),

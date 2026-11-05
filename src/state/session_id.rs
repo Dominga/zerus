@@ -22,6 +22,11 @@ pub(crate) struct Selection {
     pub session_id: String,
     pub conversation: String,
     pub run: String,
+    /// Whether the selection was verified, when made, as the session in the
+    /// ID layout under `name` (#1437 review). Its fixed `sessions/<id>.json`
+    /// then stays the command's route for that name, even if the file
+    /// vanishes: a read then refuses instead of reaching the label's holder.
+    pub id_layout: bool,
     /// How a refusal names the selector.
     label: String,
 }
@@ -49,8 +54,14 @@ pub(crate) fn select(name: &str, id: &str) {
         session_id: id.into(),
         conversation: String::new(),
         run: String::new(),
+        id_layout: in_id_layout_under(name, id),
         label: format!("Session ID {id}"),
     });
+}
+
+/// Whether `id` is, right now, the session in the ID layout under `name`.
+fn in_id_layout_under(name: &str, id: &str) -> bool {
+    canonical(id) && storage::read_id(id).is_ok_and(|record| string(&record, "name") == name)
 }
 
 /// Records a session reference's selection for the rest of this command: its
@@ -62,6 +73,7 @@ pub(crate) fn select_reference(name: &str, session_id: &str, conversation: &str,
         session_id: session_id.into(),
         conversation: conversation.into(),
         run: if conversation.is_empty() { run.into() } else { String::new() },
+        id_layout: in_id_layout_under(name, session_id),
         label: "The session reference".into(),
     });
 }

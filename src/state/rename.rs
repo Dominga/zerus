@@ -217,6 +217,8 @@ fn commit_in_place(transaction: &Value, old: &str, new: &str) -> Result<()> {
     }
     if string(&current, "name") != new {
         labels::add(new, &id)?;
+        // Its recovery job keeps its key, the session ID, and takes the label.
+        recovery::rename_job_in_place(&current, new)?;
         anchor(&mut current);
         current["name"] = json!(new);
         current["renamed_at"] = json!(now());

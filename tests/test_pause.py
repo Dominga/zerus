@@ -1008,8 +1008,14 @@ class Harness(unittest.TestCase):
         session = record["session_id"]
         for folder in ("labels", "sessions", "ids"):
             (state / folder).mkdir(exist_ok=True)
-        (state / "labels" / f"{digest}.json").write_text(
-            json.dumps(dict(version=1, label=name, ids=[session])) + "\n")
+        index = (json.dumps(dict(version=1, label=name, ids=[session])) + "\n").encode()
+        (state / "labels" / f"{digest}.json").write_bytes(index)
+        # Then its manifest entry, when there is a manifest (#1437 review).
+        manifest = state / "labels" / ".complete"
+        if manifest.exists():
+            proof = json.loads(manifest.read_text())
+            proof["labels"][digest] = hashlib.sha256(index).hexdigest()
+            manifest.write_text(json.dumps(proof) + "\n")
         moved = state / "sessions" / f"{session}.json"
         moved.write_text(json.dumps(dict(record, layout="id")) + "\n")
         (state / "ids" / f"{session}.json").write_text(json.dumps(dict(version=1, name=name, kind="id")) + "\n")
@@ -1217,6 +1223,20 @@ class SessionIdentity(Harness):
         # The label two sessions share names neither; its ID names the twin.
         self.hgs("inspect", name, rc=5)
         self.assertEqual(json.loads(self.hgs("inspect", "--session-id", session))["session_id"], session)
+        # #1437 review: commands that find their own session (hooks) are not
+        # resolved, an option's value is never a label, and an archive ID
+        # already selects exactly.
+        def call(*args):
+            return subprocess.run([str(HGS), *args], env=self.env, capture_output=True, text=True, timeout=20)
+        for args in (["hooks", "--account", name, "--json"], ["hooks", name, "--json"]):
+            self.assertNotEqual(call(*args).returncode, 5, args)
+        archive_id = str(uuid.uuid4())
+        archived = dict(first, session_id=str(uuid.uuid4()), run_id=str(uuid.uuid4()), archive_id=archive_id,
+                        archived_at=time.time(), state="archived")
+        (state / "archives").mkdir(exist_ok=True)
+        (state / "archives" / f"{archive_id}.json").write_text(json.dumps(archived) + "\n")
+        self.assertEqual(json.loads(self.hgs("inspect", name, "--archive", archive_id))["run_id"], archived["run_id"])
+        (state / "archives" / f"{archive_id}.json").unlink()
         # Resume by ID: the supervisor selects the twin, never the first holder.
         previous = held()["run_id"]
         self.hgs("resume", "--session-id", session, "-d")

@@ -732,9 +732,14 @@ fn dispatch_normal(mut args: Vec<String>) -> Result<i32> {
     };
     // zerus-ucck P3a: a label named without a selection is resolved among
     // its candidates here, on the computer that holds the sessions.
+    // Commands exempt from local sessions (hooks, session-action-status)
+    // find their own session through `ids/`, and an archive ID already
+    // selects exactly (#1437 review).
     if SESSION_COMMANDS.contains(&command.as_str())
+        && needs_local_sessions(command)
         && (target.is_empty() || config.is_self(&target))
         && state::session_id::selected().is_none()
+        && !has(args, "--archive")
     {
         resolve_label(args)?;
     }
@@ -1320,7 +1325,9 @@ fn session_id_flag(command: &str, args: &[String]) -> Result<Option<(usize, Stri
 /// the ambiguity report goes to standard output under `--json`, and its text is
 /// the error, with exit status 5.
 fn resolve_label(args: &[String]) -> Result<()> {
-    let Some(name) = args.iter().find(|arg| !arg.starts_with('-')) else {
+    // Only the first argument names the session: a later word may be an
+    // option's value, never a label.
+    let Some(name) = args.first().filter(|arg| !arg.starts_with('-')) else {
         return Ok(());
     };
     local_sessions()?;

@@ -772,6 +772,7 @@ pub(crate) fn task_bindings() -> Result<Vec<Value>> {
 /// `--json` value, with exit status 5. A candidate set that cannot be proven
 /// complete is refused the same way, never settled on the label's first holder.
 pub(crate) fn resolve_label(name: &str) -> std::result::Result<(), (String, Option<Value>)> {
+    labels::repair();
     let candidates = labels::candidates(name).map_err(|error| (error, None))?;
     match (candidates.first, candidates.by_id.as_slice()) {
         (_, []) => Ok(()),

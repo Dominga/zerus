@@ -1047,27 +1047,41 @@ fn record_target(record: &Value) -> Target {
 /// The record of an ID-layout session (zerus-ucck P3a) whose label has no
 /// first holder: the file in `sessions/` with this identity's label and run.
 /// The scan reads at most 2,000 files.
-pub(super) fn id_layout_path(state: &Path, identity: &Identity) -> Option<PathBuf> {
-    std::fs::read_dir(state.join("sessions"))
-        .ok()?
-        .take(2_000)
-        .flatten()
-        .map(|entry| entry.path())
-        .filter(|path| {
-            path.file_stem()
-                .and_then(|stem| stem.to_str())
-                .is_some_and(super::session_id::canonical)
-        })
-        .find(|path| {
-            std::fs::read(path)
+pub(super) fn id_layout_path(state: &Path, identity: &Identity, label: &Path) -> Option<PathBuf> {
+    // The label index names the candidates when its manifest proves it; a
+    // label it proves has no session in the ID layout is never scanned, and
+    // only a label path with no record falls back to a bounded scan.
+    let sessions = state.join("sessions");
+    let candidates: Vec<PathBuf> = match super::labels::listed_in(state, &identity.name) {
+        Some(ids) => ids.iter().map(|id| sessions.join(format!("{id}.json"))).collect(),
+        None if !label.exists() => std::fs::read_dir(&sessions)
+            .ok()?
+            .take(2_000)
+            .flatten()
+            .map(|entry| entry.path())
+            .filter(|path| {
+                path.file_stem()
+                    .and_then(|stem| stem.to_str())
+                    .is_some_and(super::session_id::canonical)
+            })
+            .collect(),
+        None => Vec::new(),
+    };
+    // Each read is bounded, never follows a final link and never blocks on a
+    // FIFO (#1437 review); the whole search stops at its deadline.
+    let deadline = std::time::Instant::now() + std::time::Duration::from_secs(2);
+    candidates.into_iter().find(|path| {
+        std::time::Instant::now() < deadline
+            && super::labels::read_file(path, super::storage::ID_RECORD_BYTES)
                 .ok()
+                .flatten()
                 .and_then(|bytes| serde_json::from_slice::<Value>(&bytes).ok())
                 .is_some_and(|record| {
                     string(&record, "name") == identity.name
                         && string(&record, "run_id") == identity.run_id
                         && record["layout"] == "id"
                 })
-        })
+    })
 }
 
 fn binding(
@@ -1085,8 +1099,9 @@ fn binding(
         } else {
             state.join(basename)
         };
-        // A session in the ID layout (zerus-ucck P3a): found by its run.
-        if label.exists() { label } else { id_layout_path(state, identity).unwrap_or(label) }
+        // A session in the ID layout (zerus-ucck P3a): found by its run, also
+        // when the label's own path holds its first holder.
+        id_layout_path(state, identity, &label).unwrap_or(label)
     } else {
         uuid::Uuid::parse_str(&identity.archive_id).map_err(|_| "Invalid archive identity")?;
         state

@@ -95,6 +95,7 @@ pub(super) fn visit_bounded(deadline: std::time::Instant, mut visit: impl FnMut(
 }
 
 pub(super) fn remove_synced(path: &Path) -> Result<()> {
+    storage::cut_write()?;
     match fs::remove_file(path) {
         Ok(()) => crate::platform::sync_dir(path.parent().ok_or("invalid record path")?)
             .map_err(|error| error.to_string()),

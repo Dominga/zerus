@@ -17,83 +17,161 @@ use super::*;
 use sha2::{Digest, Sha256};
 use std::time::{Duration, Instant};
 
-/// The scan that stands in for an unreadable index reads at most this many
-/// records, within [`SCAN_TIME`].
+/// The scan that stands in for an index that cannot be proven reads at most
+/// this many records, within [`SCAN_TIME`], checked before every read and when
+/// the scan settles.
 const SCAN_RECORDS: usize = 2_000;
 const SCAN_TIME: Duration = Duration::from_secs(2);
 /// Index files are small; anything larger is not one of ours.
 const INDEX_BYTES: u64 = 1024 * 1024;
-/// The completeness marker, inside `labels/` so a hand deletion of the index
-/// removes it too (#1430 review). While it is there, a label without an index
-/// file has no session in the ID layout; without it, that file is incomplete.
-const MARKER: &str = ".complete";
+/// The manifest, inside `labels/` so a hand deletion of the index removes it
+/// too: `{"version":1,"labels":{<sha256(label)>:<sha256 of that label's
+/// file>}}`, one entry for every label that has a session in the ID layout
+/// (#1437 review). It proves, for one label at a time, that the label has no
+/// such session (no entry) or exactly the sessions its file lists (the file
+/// hashes to its entry).
+const MANIFEST: &str = ".complete";
+/// The manifest's bound: about 120 bytes a label.
+const MANIFEST_BYTES: u64 = 16 << 20;
 
-fn marker() -> PathBuf {
-    root().join("labels").join(MARKER)
+type Manifest = BTreeMap<String, String>;
+
+fn manifest_path() -> PathBuf {
+    manifest_in(&root())
+}
+
+fn manifest_in(state: &Path) -> PathBuf {
+    state.join("labels").join(MANIFEST)
+}
+
+fn key(label: &str) -> String {
+    format!("{:x}", Sha256::digest(label.as_bytes()))
 }
 
 fn path(label: &str) -> PathBuf {
-    root()
-        .join("labels")
-        .join(format!("{:x}.json", Sha256::digest(label.as_bytes())))
+    path_in(&root(), label)
 }
 
-/// The IDs listed under `label`; None when that cannot be proven. A missing
-/// file is empty only while the completeness marker is there; otherwise it
-/// may have been deleted by hand, and the caller scans instead.
-fn listed(label: &str) -> Option<Vec<String>> {
-    let path = path(label);
-    let file =
-        match crate::platform::never_block(std::fs::OpenOptions::new().read(true)).open(&path) {
-            Ok(file) => file,
-            Err(error) if error.kind() == io::ErrorKind::NotFound => {
-                return marker().is_file().then(Vec::new);
-            }
-            Err(_) => return None,
-        };
-    if !file.metadata().ok()?.is_file() {
-        return None;
+fn path_in(state: &Path, label: &str) -> PathBuf {
+    state.join("labels").join(format!("{}.json", key(label)))
+}
+
+fn digest(bytes: &[u8]) -> String {
+    format!("{:x}", Sha256::digest(bytes))
+}
+
+/// A small private file's bytes: never through a final link, never blocking
+/// on a FIFO, only a regular file, at most `limit` bytes. `Ok(None)` only when
+/// it verifiably does not exist; anything else there that cannot be read is
+/// an error, never absence.
+pub(super) fn read_file(path: &Path, limit: u64) -> io::Result<Option<Vec<u8>>> {
+    use std::io::Read;
+    let file = match crate::platform::no_follow(std::fs::OpenOptions::new().read(true)).open(path) {
+        Ok(file) => file,
+        Err(error) if error.kind() == io::ErrorKind::NotFound => return Ok(None),
+        Err(error) => return Err(error),
+    };
+    if !file.metadata()?.is_file() {
+        return Err(io::Error::other("not a regular file"));
     }
     let mut bytes = Vec::new();
-    use std::io::Read;
-    file.take(INDEX_BYTES + 1).read_to_end(&mut bytes).ok()?;
-    if bytes.len() as u64 > INDEX_BYTES {
-        return None;
+    file.take(limit + 1).read_to_end(&mut bytes)?;
+    if bytes.len() as u64 > limit {
+        return Err(io::Error::other("too large"));
     }
+    Ok(Some(bytes))
+}
+
+/// The manifest; None when it is absent, unreadable or not well formed.
+fn manifest() -> Option<Manifest> {
+    read_manifest(&root())
+}
+
+fn read_manifest(state: &Path) -> Option<Manifest> {
+    let bytes = read_file(&manifest_in(state), MANIFEST_BYTES).ok()??;
     let value: Value = serde_json::from_slice(&bytes).ok()?;
-    if value["version"] != 1 || string(&value, "label") != label {
+    if value["version"] != 1 {
         return None;
     }
-    value["ids"]
-        .as_array()?
+    value["labels"]
+        .as_object()?
         .iter()
-        .map(|id| {
-            id.as_str()
-                .filter(|id| session_id::canonical(id))
-                .map(str::to_owned)
-        })
+        .map(|(key, digest)| digest.as_str().map(|digest| (key.clone(), digest.to_owned())))
         .collect()
 }
 
+fn write_manifest(manifest: &Manifest) -> Result<()> {
+    atomic(
+        &manifest_path(),
+        &format!("{}\n", json!({"version": 1, "labels": manifest})),
+    )
+}
+
+/// The IDs a label file lists: its own label, one or more canonical IDs.
+fn parse_index(label: &str, bytes: &[u8]) -> Option<Vec<String>> {
+    let value: Value = serde_json::from_slice(bytes).ok()?;
+    if value["version"] != 1 || string(&value, "label") != label {
+        return None;
+    }
+    let ids = value["ids"]
+        .as_array()?
+        .iter()
+        .map(|id| id.as_str().filter(|id| session_id::canonical(id)).map(str::to_owned))
+        .collect::<Option<Vec<String>>>()?;
+    (!ids.is_empty()).then_some(ids)
+}
+
+/// The IDs under `label`, when the manifest proves them: none when it lists
+/// no entry for the label, else exactly what the label's file lists, which
+/// must be there, readable, well formed and hash to the manifest's entry.
+/// None when anything is missing, changed or unreadable: the caller then scans
+/// or refuses, and never settles for the label's first holder or for a subset.
+fn listed(label: &str) -> Option<Vec<String>> {
+    listed_in(&root(), label)
+}
+
+/// [`listed`], under the state root `state`.
+pub(super) fn listed_in(state: &Path, label: &str) -> Option<Vec<String>> {
+    let manifest = read_manifest(state)?;
+    let Some(expected) = manifest.get(&key(label)) else {
+        return Some(Vec::new());
+    };
+    let bytes = read_file(&path_in(state, label), INDEX_BYTES).ok()??;
+    if digest(&bytes) != *expected {
+        return None;
+    }
+    parse_index(label, &bytes)
+}
+
+/// Writes `label`'s file and then its manifest entry; the last session's
+/// removal takes the entry out first, then the file (#1437 review). Under the
+/// state writer lock, with a valid manifest ([`ensure_manifest`]). A reader
+/// between the two steps sees a file that does not match its entry and scans.
 fn save(label: &str, ids: &[String]) -> Result<()> {
+    let mut manifest = manifest().ok_or("the label index has no valid manifest")?;
     let path = path(label);
     if ids.is_empty() {
+        if manifest.remove(&key(label)).is_some() {
+            write_manifest(&manifest)?;
+        }
+        storage::cut_write()?;
         return match std::fs::remove_file(&path) {
             Err(error) if error.kind() != io::ErrorKind::NotFound => Err(error.to_string()),
             _ => Ok(()),
         };
     }
-    atomic(
-        &path,
-        &format!("{}\n", json!({"version": 1, "label": label, "ids": ids})),
-    )
+    let text = format!("{}\n", json!({"version": 1, "label": label, "ids": ids}));
+    atomic(&path, &text)?;
+    manifest.insert(key(label), digest(text.as_bytes()));
+    write_manifest(&manifest)
 }
 
 /// Lists `id` under `label`, durably, before its record takes the label.
-/// Under the state writer lock. An index that cannot be read is rebuilt from
-/// a scan first; one that still cannot be is an error, so the record write
-/// that depends on it refuses.
+/// Under the state writer lock. An index that cannot be proven is rebuilt
+/// from a scan first; one that still cannot be is an error, so the record
+/// write that depends on it refuses.
 pub(super) fn add(label: &str, id: &str) -> Result<()> {
+    ensure_manifest()?;
     let mut ids = match listed(label) {
         Some(ids) => ids,
         None => scan(label)?,
@@ -102,78 +180,126 @@ pub(super) fn add(label: &str, id: &str) -> Result<()> {
         ids.push(id.to_owned());
         ids.sort();
     }
-    save(label, &ids)?;
-    mark_complete();
-    Ok(())
-}
-
-/// Writes the completeness marker once the index is known complete: every
-/// session in `sessions/` is listed under its label, an unlisted one being
-/// added first. Under the state writer lock. A scan beyond its bounds, or any
-/// record that cannot be read, leaves the marker out, so readers keep
-/// scanning or refusing. Best effort: the index stays correct without it.
-pub(super) fn mark_complete() {
-    if marker().is_file() {
-        return;
-    }
-    let complete = (|| -> Result<bool> {
-        let dir = root().join("sessions");
-        let entries = match std::fs::read_dir(&dir) {
-            Ok(entries) => entries,
-            Err(error) if error.kind() == io::ErrorKind::NotFound => return Ok(true),
-            Err(error) => return Err(error.to_string()),
-        };
-        let deadline = Instant::now() + SCAN_TIME;
-        for (count, entry) in entries.enumerate() {
-            if count >= SCAN_RECORDS || Instant::now() >= deadline {
-                return Ok(false);
-            }
-            let entry = entry.map_err(|error| error.to_string())?;
-            let Some(id) = entry
-                .path()
-                .file_stem()
-                .and_then(|stem| stem.to_str())
-                .filter(|id| session_id::canonical(id))
-                .map(str::to_owned)
-            else {
-                continue;
-            };
-            let record = storage::read_id(&id)?;
-            let label = string(&record, "name").to_owned();
-            if !holds(&record, &id, &label) {
-                continue;
-            }
-            match std::fs::read(path(&label)) {
-                Ok(_) => match listed(&label) {
-                    Some(ids) if ids.contains(&id) => {}
-                    Some(mut ids) => {
-                        ids.push(id);
-                        ids.sort();
-                        save(&label, &ids)?;
-                    }
-                    None => return Ok(false),
-                },
-                Err(error) if error.kind() == io::ErrorKind::NotFound => save(&label, &[id])?,
-                Err(error) => return Err(error.to_string()),
-            }
-        }
-        Ok(true)
-    })();
-    if matches!(complete, Ok(true)) {
-        let _ = atomic(&marker(), "{\"version\":1}\n");
-    }
+    save(label, &ids)
 }
 
 /// Removes `id` from `label`'s entry once its record has left the label.
 /// Under the state writer lock. A failure only leaves an extra entry.
 pub(super) fn remove(label: &str, id: &str) -> Result<()> {
-    let Some(mut ids) = listed(label) else {
-        return save(label, &scan(label)?);
+    ensure_manifest()?;
+    let mut ids = match listed(label) {
+        Some(ids) => ids,
+        None => scan(label)?,
     };
     ids.retain(|known| known != id);
-    save(label, &ids)?;
-    mark_complete();
-    Ok(())
+    save(label, &ids)
+}
+
+/// Makes the manifest valid, under the state writer lock: a valid one is
+/// kept; otherwise it is rebuilt from a bounded enumeration of `sessions/`,
+/// every session listed under its label, together with every IDs a label
+/// file already lists (so an entry written ahead of its record is kept). A
+/// record that cannot be read, or an enumeration beyond its bounds, is an
+/// error and writes no manifest: readers keep scanning or refusing.
+pub(super) fn ensure_manifest() -> Result<()> {
+    if manifest().is_some() {
+        return Ok(());
+    }
+    let deadline = Instant::now() + SCAN_TIME;
+    let mut found: BTreeMap<String, (String, Vec<String>)> = BTreeMap::new();
+    for (id, record) in enumerate(deadline)? {
+        let label = string(&record, "name").to_owned();
+        found.entry(key(&label)).or_insert_with(|| (label, Vec::new())).1.push(id);
+    }
+    let folder = root().join("labels");
+    if let Ok(entries) = std::fs::read_dir(&folder) {
+        for (count, entry) in entries.enumerate() {
+            if count >= SCAN_RECORDS || Instant::now() >= deadline {
+                return Err("the label index is too large to rebuild here".into());
+            }
+            let path = entry.map_err(|error| error.to_string())?.path();
+            let Some(stem) = path.file_stem().and_then(|stem| stem.to_str()) else {
+                continue;
+            };
+            if path.extension().is_none_or(|extension| extension != "json") || stem.len() != 64 {
+                continue;
+            }
+            let Some(bytes) = read_file(&path, INDEX_BYTES).map_err(|error| error.to_string())? else {
+                continue;
+            };
+            let Some(label) = serde_json::from_slice::<Value>(&bytes)
+                .ok()
+                .map(|value| string(&value, "label").to_owned())
+                .filter(|label| key(label) == stem)
+            else {
+                continue;
+            };
+            if let Some(ids) = parse_index(&label, &bytes) {
+                found.entry(stem.to_owned()).or_insert_with(|| (label, Vec::new())).1.extend(ids);
+            }
+        }
+    }
+    let mut manifest = Manifest::new();
+    for (key, (label, mut ids)) in found {
+        ids.sort();
+        ids.dedup();
+        let text = format!("{}\n", json!({"version": 1, "label": label, "ids": ids}));
+        atomic(&path(&label), &text)?;
+        manifest.insert(key, digest(text.as_bytes()));
+    }
+    write_manifest(&manifest)
+}
+
+/// Rebuilds a manifest that cannot be read, from label resolution only (a
+/// command, never a hook), when the writer lock is free at once, as `ids/`
+/// is repaired (P2a). Until then every reader scans or refuses.
+pub(super) fn repair() {
+    // Without `sessions/` nothing is in the ID layout: nothing to prove, and
+    // resolution then writes nothing.
+    if root().join("sessions").is_dir() && manifest().is_none() {
+        if let Ok(Some(_guard)) = storage::writer_until(Instant::now()) {
+            let _ = ensure_manifest();
+        }
+    }
+}
+
+/// Every live or saved session in `sessions/`, read within the bounds and
+/// `deadline`; an error when they cannot cover it, or when a record there
+/// cannot be read.
+fn enumerate(deadline: Instant) -> Result<Vec<(String, Value)>> {
+    let dir = root().join("sessions");
+    let entries = match std::fs::read_dir(&dir) {
+        Ok(entries) => entries,
+        Err(error) if error.kind() == io::ErrorKind::NotFound => return Ok(Vec::new()),
+        Err(error) => return Err(error.to_string()),
+    };
+    let late = || "the sessions in the ID layout could not all be read in time; choose one with --session-id".to_owned();
+    let mut found = Vec::new();
+    for (count, entry) in entries.enumerate() {
+        if count >= SCAN_RECORDS || Instant::now() >= deadline {
+            return Err(late());
+        }
+        let entry = entry.map_err(|error| error.to_string())?;
+        let Some(id) = entry
+            .path()
+            .file_stem()
+            .and_then(|stem| stem.to_str())
+            .filter(|id| session_id::canonical(id))
+            .map(str::to_owned)
+        else {
+            continue;
+        };
+        let record = storage::read_id(&id).map_err(|error| {
+            format!("a session in the ID layout could not be read ({error}); choose one with --session-id")
+        })?;
+        if string(&record, "archive_id").is_empty() && record["rename_shadow"] != true {
+            found.push((id, record));
+        }
+    }
+    if Instant::now() >= deadline {
+        return Err(late());
+    }
+    Ok(found)
 }
 
 /// Whether `record`, read from the ID layout, is the live or saved session
@@ -186,51 +312,34 @@ fn holds(record: &Value, id: &str, label: &str) -> bool {
         && record["rename_shadow"] != true
 }
 
-/// The sessions in the ID layout under `label`, read from `sessions/` within
-/// the scan's bounds. An error when the bounds cannot cover it.
+/// The sessions in the ID layout under `label`, by a bounded scan of
+/// `sessions/`. An error when the bounds cannot cover it, or when a record
+/// there cannot be read: it may be this label's.
 fn scan(label: &str) -> Result<Vec<String>> {
-    let dir = root().join("sessions");
-    let entries = match std::fs::read_dir(&dir) {
-        Ok(entries) => entries,
-        Err(error) if error.kind() == io::ErrorKind::NotFound => return Ok(Vec::new()),
-        Err(error) => return Err(error.to_string()),
-    };
     let deadline = Instant::now() + SCAN_TIME;
-    let mut ids = Vec::new();
-    for (count, entry) in entries.enumerate() {
-        if count >= SCAN_RECORDS || Instant::now() >= deadline {
-            return Err(format!(
-                "{label}: the sessions that share this label could not all be read; choose one with --session-id"
-            ));
-        }
-        let entry = entry.map_err(|error| error.to_string())?;
-        let Some(id) = entry
-            .path()
-            .file_stem()
-            .and_then(|stem| stem.to_str())
-            .filter(|id| session_id::canonical(id))
-            .map(str::to_owned)
-        else {
-            continue;
-        };
-        if verified(&id, label)?.is_some() {
-            ids.push(id);
-        }
-    }
+    let mut ids: Vec<String> = enumerate(deadline)
+        .map_err(|error| format!("{label}: {error}"))?
+        .into_iter()
+        .filter(|(id, record)| holds(record, id, label))
+        .map(|(id, _)| id)
+        .collect();
     ids.sort();
     Ok(ids)
 }
 
 /// The record of `id` when it is a live or saved session under `label`; None
-/// when it is gone or left the label (a stale entry). A record that is there
-/// but cannot be read, or that another session's file replaced, is never
-/// taken as absent: the set cannot be proven complete, so it is an error.
+/// only when its file verifiably does not exist, or its record left the label
+/// (a stale entry). Anything present there that cannot be read, a link or a
+/// FIFO included, is never taken as absent: the set cannot be proven
+/// complete, so it is an error (#1437 review).
 fn verified(id: &str, label: &str) -> Result<Option<Value>> {
     let Some(path) = storage::id_record_path(id) else {
         return Ok(None);
     };
-    if !path.exists() {
-        return Ok(None);
+    match std::fs::symlink_metadata(&path) {
+        Err(error) if error.kind() == io::ErrorKind::NotFound => return Ok(None),
+        Err(error) => return Err(format!("{label}: {error}")),
+        Ok(_) => {}
     }
     let record = storage::read_id(id).map_err(|error| {
         format!("{label}: a session that may share this label could not be read ({error}); choose one with --session-id")
@@ -245,9 +354,9 @@ pub(super) struct Candidates {
     pub by_id: Vec<Value>,
 }
 
-/// The verified candidates of `label`, read without the lock. An unreadable
-/// index falls back to the bounded scan; when that cannot prove the set
-/// complete it is an error, never the first holder alone.
+/// The verified candidates of `label`, read without the lock. An index that
+/// the manifest cannot prove falls back to the bounded scan; when the scan
+/// cannot prove the set complete it is an error, never the first holder alone.
 pub(super) fn candidates(label: &str) -> Result<Candidates> {
     let ids = match listed(label) {
         Some(ids) => ids,
@@ -529,11 +638,12 @@ mod tests {
             twin_id.as_str()
         );
 
-        // Files owned by name are keyed by the session ID in the ID layout.
-        assert_eq!(storage::owner_key(alone), alone_id);
+        // A session's files are keyed by its verified record: the session ID
+        // in the ID layout, the label's hash for the first holder.
+        assert_eq!(storage::owner_key(&storage::read_id(&alone_id).unwrap()), alone_id);
         assert_eq!(
-            storage::owner_key(shared).len(),
-            64,
+            storage::owner_key(&read(shared).unwrap()),
+            storage::label_key(shared),
             "the first holder keeps its label's hash"
         );
 
@@ -561,7 +671,7 @@ mod tests {
         )
         .unwrap();
         assert_eq!(
-            search_index::id_layout_path(&root(), &identity),
+            search_index::id_layout_path(&root(), &identity, &storage::label_record_path(alone)),
             storage::id_record_path(&alone_id)
         );
 
@@ -626,10 +736,10 @@ mod tests {
         assert!(session_index::find(&twin_id).is_none());
         assert_eq!(std::fs::read(&first_path).unwrap(), first_bytes);
 
-        // The completeness marker: a missing index file is empty only while it
-        // is there; deleting labels/ by hand removes it, and readers scan.
-        mark_complete();
-        assert!(marker().is_file());
+        // The manifest: a label it does not list has no session in the ID
+        // layout. Deleting labels/ by hand removes it; readers then scan, and
+        // label resolution rebuilds it when the writer lock is free.
+        assert!(manifest().is_some());
         assert_eq!(listed("claude/example/free"), Some(Vec::new()));
         std::fs::remove_dir_all(root().join("labels")).unwrap();
         assert_eq!(listed(alone), None);
@@ -638,10 +748,263 @@ mod tests {
             1,
             "the scan finds it"
         );
+        repair();
+        assert_eq!(listed(alone), Some(vec![alone_id.clone()]));
         // Forget in place, too.
         let current = storage::read_id(&alone_id).unwrap();
         storage::remove_record(&current).unwrap();
         assert!(!storage::id_record_path(&alone_id).unwrap().exists());
         assert_eq!(std::fs::read(&first_path).unwrap(), first_bytes);
+    }
+
+    /// #1437 review (desktop-u G1): each control runs in its own child with a
+    /// private state root, and a child that outlives the scan's promised
+    /// bound by far fails instead of hanging the suite.
+    fn control(case: &str) {
+        let state = tempfile::tempdir().unwrap();
+        let mut child = std::process::Command::new(std::env::current_exe().unwrap())
+            .args(["--exact", "state::labels::tests::control_fixture", "--ignored", "--test-threads=1"])
+            .env("HGS_STATE_DIR", state.path().join("sessions-root"))
+            .env("TMUX_TMPDIR", state.path().join("tmux"))
+            .env("ZERUS_ID_LAYOUT_CONTROL", case)
+            .env_remove("TMUX")
+            .env_remove("HGS_SESSION")
+            .env_remove("HGS_SESSION_ID")
+            .env_remove("HGS_RUN_ID")
+            .stdout(std::process::Stdio::piped())
+            .stderr(std::process::Stdio::piped())
+            .spawn()
+            .unwrap();
+        let until = Instant::now() + Duration::from_millis(3_500);
+        while child.try_wait().unwrap().is_none() {
+            if Instant::now() >= until {
+                child.kill().unwrap();
+                let _ = child.wait();
+                panic!("{case}: the bounded scan did not return within 3.5 s");
+            }
+            std::thread::sleep(Duration::from_millis(10));
+        }
+        let output = child.wait_with_output().unwrap();
+        let stdout = String::from_utf8_lossy(&output.stdout);
+        assert!(
+            output.status.success() && stdout.contains("test result: ok. 1 passed"),
+            "{case}: {stdout}{}",
+            String::from_utf8_lossy(&output.stderr)
+        );
+    }
+
+    #[test]
+    fn a_deleted_label_file_never_selects_the_first_holder() {
+        control("deleted");
+    }
+    #[test]
+    fn a_well_formed_but_incomplete_label_file_never_selects_the_first_holder() {
+        control("partial");
+    }
+    #[test]
+    fn a_dangling_candidate_is_not_proven_absent() {
+        control("dangling");
+    }
+    #[test]
+    fn a_twin_keeps_its_own_recovery_job_and_native_input_lock() {
+        control("owned");
+    }
+    #[test]
+    fn a_selected_record_that_vanishes_never_changes_its_route() {
+        control("selected");
+    }
+    #[test]
+    fn a_scan_never_blocks_on_a_candidate_fifo() {
+        control("fifo");
+    }
+    /// #1437 review (review-q2): the index stays a superset at every crash
+    /// cut of a rename in place, an archive and a forget.
+    #[test]
+    fn the_label_index_stays_a_superset_at_every_crash_cut() {
+        control("cuts");
+    }
+
+    /// Every session in the ID layout is a candidate of its label, or that
+    /// label's resolution refuses: never its first holder alone.
+    fn superset_holds(context: &str) {
+        let Ok(entries) = std::fs::read_dir(root().join("sessions")) else {
+            return;
+        };
+        for entry in entries.flatten() {
+            let Some(id) = entry
+                .path()
+                .file_stem()
+                .and_then(|stem| stem.to_str())
+                .filter(|id| session_id::canonical(id))
+                .map(str::to_owned)
+            else {
+                continue;
+            };
+            let Ok(record) = storage::read_id(&id) else {
+                continue;
+            };
+            let label = string(&record, "name");
+            if let Ok(found) = candidates(label) {
+                assert!(
+                    found.by_id.iter().any(|candidate| string(candidate, "session_id") == id),
+                    "{context}: {id} is not a candidate of {label}"
+                );
+            }
+        }
+    }
+
+    #[test]
+    #[ignore = "run by the bounded controls above"]
+    fn control_fixture() {
+        let Ok(case) = std::env::var("ZERUS_ID_LAYOUT_CONTROL") else {
+            return;
+        };
+        std::fs::create_dir_all(root()).unwrap();
+        let label = "claude/example/control";
+        let mut first = record(label, "run-first");
+        storage::write(&mut first).unwrap();
+        let (twin, id) = by_id(label, "run-twin");
+        assert!(manifest().is_some_and(|manifest| manifest.contains_key(&key(label))));
+        let ambiguous = || {
+            let (text, _) = resolve_label(label).unwrap_err();
+            assert!(text.starts_with("2 sessions on this computer are named"), "{text}");
+        };
+        match case.as_str() {
+            // Only the label's file goes; the manifest still lists the label,
+            // so the reader scans and finds the twin.
+            "deleted" => {
+                std::fs::remove_file(path(label)).unwrap();
+                assert!(manifest().is_some());
+                assert_eq!(listed(label), None);
+                ambiguous();
+            }
+            // A well-formed file that no longer matches its manifest entry.
+            "partial" => {
+                atomic(&path(label), &json!({"version":1,"label":label,"ids":[]}).to_string()).unwrap();
+                assert_eq!(listed(label), None);
+                ambiguous();
+                let other = uuid::Uuid::new_v4().to_string();
+                atomic(&path(label), &json!({"version":1,"label":label,"ids":[other]}).to_string()).unwrap();
+                assert_eq!(listed(label), None);
+                ambiguous();
+                // A listed label whose file lists no session is inconsistent,
+                // even with a matching entry: no writer makes one.
+                let empty = json!({"version":1,"label":label,"ids":[]}).to_string();
+                atomic(&path(label), &empty).unwrap();
+                let mut proof = manifest().unwrap();
+                proof.insert(key(label), digest(empty.as_bytes()));
+                write_manifest(&proof).unwrap();
+                assert_eq!(listed(label), None);
+                ambiguous();
+            }
+            // A link there, even a dangling one, is present and unreadable.
+            "dangling" => {
+                let own = storage::id_record_path(&id).unwrap();
+                std::fs::remove_file(&own).unwrap();
+                std::os::unix::fs::symlink(root().join("missing-target"), &own).unwrap();
+                assert!(resolve_label(label).is_err());
+                assert!(candidates(label).is_err());
+                assert!(storage::label_taken(label));
+            }
+            // With no selection, a watch or worker that holds the twin's record
+            // reaches its ID-keyed job and its own native-input lock.
+            "owned" => {
+                let job = json!({"id":"twin-job","state":"waiting","name":label,
+                    "identity":[twin["run_id"], twin["conversation_id"]]});
+                atomic(&root().join("recovery/jobs").join(format!("{id}.json")), &job.to_string()).unwrap();
+                let legacy = json!({"id":"first-job","state":"waiting","name":label,
+                    "identity":[first["run_id"], first["conversation_id"]]});
+                atomic(
+                    &root().join("recovery/jobs").join(format!("{}.json", storage::label_key(label))),
+                    &legacy.to_string(),
+                )
+                .unwrap();
+                let mut output = json!({"run_id":twin["run_id"],"conversation_id":twin["conversation_id"]});
+                recovery::enrich(&twin, &mut output);
+                assert_eq!(output["recovery"]["id"], "twin-job");
+                let mut output = json!({"run_id":first["run_id"],"conversation_id":first["conversation_id"]});
+                recovery::enrich(&read(label).unwrap(), &mut output);
+                assert_eq!(output["recovery"]["id"], "first-job");
+                let held = startup_choice::driving(&twin).unwrap();
+                let own = root().join("native-input").join(format!("{id}.lock"));
+                assert!(matches!(lock_until(&own, Instant::now()), Ok(None)), "the twin's lock is held");
+                let other = root().join("native-input").join(format!("{}.lock", storage::label_key(label)));
+                assert!(matches!(lock_until(&other, Instant::now()), Ok(Some(_))), "never the first holder's");
+                drop(held);
+                // The scheduler's observation carries the twin's own key.
+                let observed = recovery::observe().unwrap();
+                let seen = observed.iter().find(|s| s["run_id"] == "run-twin").unwrap();
+                assert_eq!(storage::owner_key(seen), id);
+                // A rename in place keeps the job's key and gives it the label.
+                session_id::select(label, &id);
+                rename::dispatch(&[label.to_owned(), "claude/example/renamed".to_owned()], false).unwrap();
+                session_id::clear();
+                let moved: Value = serde_json::from_slice(
+                    &std::fs::read(root().join("recovery/jobs").join(format!("{id}.json"))).unwrap(),
+                )
+                .unwrap();
+                assert_eq!((moved["id"].as_str(), moved["name"].as_str()), (Some("twin-job"), Some("claude/example/renamed")));
+            }
+            // A selection verified in the ID layout keeps its fixed route when
+            // the file vanishes: the read refuses, never the first holder.
+            "selected" => {
+                session_id::select(label, &id);
+                let own = storage::id_record_path(&id).unwrap();
+                std::fs::remove_file(&own).unwrap();
+                assert_eq!(storage::record_path(label), own);
+                assert!(read(label).is_err());
+                session_id::clear();
+                assert_eq!(read(label).unwrap()["run_id"], "run-first");
+            }
+            // A FIFO where a record should be: the scan refuses at once.
+            "fifo" => {
+                std::fs::remove_file(path(label)).unwrap();
+                std::fs::remove_file(manifest_path()).unwrap();
+                let own = storage::id_record_path(&id).unwrap();
+                std::fs::remove_file(&own).unwrap();
+                use std::os::unix::ffi::OsStrExt;
+                let c = std::ffi::CString::new(own.as_os_str().as_bytes()).unwrap();
+                assert_eq!(unsafe { libc::mkfifo(c.as_ptr(), 0o600) }, 0);
+                let started = Instant::now();
+                assert!(candidates(label).is_err(), "an unsafe candidate closes the scan");
+                assert!(storage::label_taken(label));
+                assert!(started.elapsed() < SCAN_TIME);
+            }
+            // Stop after each write of the operation, as if it crashed there.
+            "cuts" => {
+                let base = root();
+                for op in ["rename", "archive", "forget"] {
+                    let mut writes = 0;
+                    loop {
+                        std::env::set_var("HGS_STATE_DIR", base.join(format!("{op}-{writes}")));
+                        std::fs::create_dir_all(root()).unwrap();
+                        let mut first = record(label, "run-first");
+                        storage::write(&mut first).unwrap();
+                        let (_, id) = by_id(label, "run-twin");
+                        session_id::select(label, &id);
+                        storage::cut::arm(writes);
+                        let result = match op {
+                            "rename" => rename::dispatch(
+                                &[label.to_owned(), "claude/example/moved".to_owned()],
+                                false,
+                            )
+                            .map(drop),
+                            "archive" => archive::save(&storage::read_id(&id).unwrap()).map(drop),
+                            _ => storage::remove_record(&storage::read_id(&id).unwrap()),
+                        };
+                        storage::cut::disarm();
+                        session_id::clear();
+                        superset_holds(&format!("{op} cut after {writes} writes"));
+                        if result.is_ok() {
+                            break;
+                        }
+                        writes += 1;
+                        assert!(writes < 64, "{op} never completed");
+                    }
+                    assert!(writes >= 2, "{op} completed after only {writes} writes");
+                }
+            }
+            other => panic!("unknown control {other}"),
+        }
     }
 }

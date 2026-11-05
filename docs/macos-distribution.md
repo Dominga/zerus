@@ -228,46 +228,15 @@ identifier and team satisfy. This was rehearsed on 2026-10-17 with a signed main
 build under a fixture label, on a Mac where Zerus already had that consent, and
 no prompt appeared (`zerus-nbzl.23`).
 
-## Legacy Qt bundles
+## Retired Qt builds
 
-The release, Nightly and Dev bundle jobs build Zerus Next without Qt. The
-pinned Qt tooling below remains for legacy builds and their regression checks.
-
-`packaging/macos/qt.json` pins official Qt **6.11.2** (`qtbase`, `qtsvg`,
-`qtmultimedia`, `qttools`, `qtdeclarative`) by archive size and SHA-256. `qttools`
-supplies the build-time `lrelease` compiler for the optional interface catalog;
-it does not change the English default. `lrelease` loads QtQml, so the build
-prefix also needs `qtdeclarative`; the GUI links neither module. Qt WebEngine and
-the other modules only it needs (`qtwebchannel`, `qtpositioning`) are not pinned:
-the embedded DeepSeek Native UI is an optional Linux plugin, so on macOS
-Native UI opens in the browser. `check-macos-bundle.py` rejects any Qt WebEngine
-file. `scripts/install-qt-macos.py` downloads the archives from
-`download.qt.io` (mirrors may serve them), verifies every archive before any
-extraction and extracts them with the system `bsdtar`, through
-`scripts/qt_archives.py`, which the [Windows build](ci-and-aur.md#windows-client-desktop-and-portable-zip)
-shares. Framework links must stay inside the prefix. Before any Qt tool runs,
-the installer reads the Mach-O load commands of `qmake`, `lrelease`,
-`macdeployqt`, `moc` and `rcc` and stops when one of them, or a framework it
-loads, needs a Qt framework the prefix lacks. The official Qt is relocatable
-and needs no path patching.
-
-Qt 6.11.2 is the version macOS CI tests through Homebrew, supports macOS 14 and
-has public sources (`qt-everywhere-src-6.11.2`, `v6.11.2` tags) for the LGPL
-source pointer. On 2026-10-10 the Qt 6.11.3 binaries were available without
-published sources, so they cannot be shipped. Its relevant QtNetwork and
-QXmlStreamReader security fixes are already in the v6.11.2 sources. Qt 6.12.0 also
-passed all Qt suites but requires macOS 14.4.
-
-To move to another Qt version, change the version and package names in
-`qt.json`, confirm that its exact sources are published, then refresh the pins:
-
-```sh
-python3 scripts/install-qt-macos.py --lock
-python3 scripts/install-qt-macos.py --output /tmp/zerus-qt
-```
-
-Build and test the tray against that prefix (`ZERUS_QT_PREFIX=/tmp/zerus-qt bash
-scripts/ci/macos-bundle.sh`) and review the module SBOMs before committing.
+New release, Nightly, Dev and maintained source bundles build Zerus Next without
+Qt. The Mac Qt pin/installer and Qt deployment/notices assembly are retired.
+Historical signed Qt artifacts remain immutable. The public feed's `qt_version`
+and previously sealed cask/candidate validation remain compatible with older
+clients; those fields do not select a new Qt build. Original Qt settings/drafts
+stay read-only migration sources. The Windows Qt source tools remain separate
+until Windows PC acceptance.
 
 ## Candidates
 
@@ -526,8 +495,8 @@ unsigned build artifact's SHA-256 and the signed CLI's SHA-256. Both signatures
 must be genuine Apple application signatures from the same team, with stable
 designated requirements; both retain mutual continuity with an existing pair.
 Unexpected nested Mach-O files, links and special files refuse preparation.
-The signer's default single-executable mode remains available for the explicit
-`HGS_MAC_GUI=qt` fallback.
+The signer's single-executable mode remains a standalone utility; the maintained
+Next installer uses the paired mode. Qt installer selections are retired.
 
 The independent `~/.local/bin/hgs` remains the ordinary CLI for agents, hooks and
 session recipes. Before building or replacing the GUI, the installer requires
@@ -675,8 +644,8 @@ export ZERUS_DEV_BUILD_NUMBER=NUMBER_FROM_THIS_MAIN_PUSH
 bash tray/install.sh
 ```
 
-- **Choosing the GUI.** Fresh installs and upgrades use Zerus Next, including when Qt is installed. `HGS_MAC_GUI=client` selects it explicitly; `HGS_MAC_GUI=qt` selects the temporary Qt fallback until Mac acceptance. A later install without that override selects Next again. `mac-install.sh` ships the client sources and forwards the same choice, but its tarball has no Git metadata and cannot make a numbered build. The maintained updater keeps Qt as the rollback copy after the switch.
-- **The build.** It needs npm and Rust 1.99.1 on the Mac. With the `media` feature present, the build enables it. It always builds into `client/src-tauri/target`, whatever `CARGO_TARGET_DIR` says, since the installer takes the bundle from there, and the installer's job count bounds Cargo as it bounds the Qt build (`CARGO_BUILD_JOBS` overrides it).
+- **The installer.** Fresh installs and upgrades build Next, including upgrades from Qt. `HGS_MAC_GUI=client` is the only GUI selection; Qt builds are retired. `mac-install.sh` forwards the same choice and source set. A numbered Dev build needs its clean Git checkout.
+- **The build.** It needs npm and Rust 1.99.1 on the Mac. With the `media` feature present, the build enables it. It always builds into `client/src-tauri/target`, whatever `CARGO_TARGET_DIR` says, since the installer takes the bundle from there, and the installer's job count bounds Cargo for the native Next build (`CARGO_BUILD_JOBS` overrides it).
 - **The updater at the switch.** `tray/update-installed.py`:
   1. quits Qt as its Quit action does, so Qt saves its drafts: SIGTERM, which current builds handle, or the quit Apple Event for an older one;
   2. snapshots Qt's drafts and the client's drafts root;
@@ -687,7 +656,7 @@ bash tray/install.sh
   7. verifies the drafts, the native processes and Qt's settings keys.
 
   A failure or interrupt before step 6 puts Qt back, or keeps it in `~/Applications/.hgs-tray-kept-*/previous/hgs-tray.app` and prints where. Later updates list such folders and never remove them.
-- **Later client updates.** Qt stays the rollback copy until the owner retires Qt; there is no second slot. The replaced client is kept while that update runs, so a new client that does not start is replaced by it automatically. After a successful update, the replaced client is removed only if Qt's rollback copy can be verified as complete. If that check fails or times out, both copies stay: the client in a `.hgs-tray-kept-*` folder beside the installed bundle, Qt in the rollback folder. The updater prints the kept client's path; later updates list it and never remove it.
+- **Later client updates.** Each displaced Qt rollback image gets a unique `~/.local/share/hgs/desktop-qt-legacy/qt-*/hgs-tray.app` entry for manual recovery. Older versions may coexist and are never deleted or offered as rollback. A failed archive move keeps its image named and retained while the verified Next update completes its remaining checks. Each verified replaced Next build then takes `desktop-previous`. Qt settings remain at their compatible export path. Failed-upgrade restoration and draft/native-process checks remain unchanged.
 - **Dev numbers.** The updater refuses to replace a numbered Dev install with a build that has neither a Dev number nor a local preview label, also for `HGS_TRAY_RESTART=0` (`docs/reference.md`). `HGS_TRAY_RESTART=0` never switches between Qt and the client.
 
 ### Rollback
@@ -696,7 +665,7 @@ bash tray/install.sh
 python3 tray/update-installed.py --rollback ~/Applications/hgs-tray.app
 ```
 
-The rollback reinstalls exactly the rollback copy through the same quit, snapshot, start and verification steps. After the switch, that copy is the last Qt bundle. It compares Qt's settings with the copy taken at the switch before Qt starts. If they differ, quit Zerus, run `defaults import com.hgdev.hgs-tray ~/.local/share/hgs/desktop-previous/com.hgdev.hgs-tray.plist`, then `launchctl kickstart gui/$(id -u)/com.hgdev.hgs-tray`, since KeepAlive Crashed does not restart a clean quit. The client then becomes the rollback copy. Drafts typed in the client after the switch stay in `~/Library/Application Support/com.hgdev.hgs-tray/drafts/`, where Qt does not see them. Use `HGS_MAC_GUI=qt` on later installs to stay on Qt.
+The rollback reinstalls a verified previous Next build through the same quit, snapshot, start and verification steps. It refuses a Qt image. Displaced Qt images are retained in distinct `desktop-qt-legacy/qt-*` entries for manual recovery only; it is never offered as a rollback. The existing Qt settings export and both draft stores remain preserved. A retained image does not authorize starting Qt alongside service-owned background duties.
 
 ### Privacy identity
 
@@ -833,12 +802,12 @@ The coordinator runs this on the owner's Mac after Tasks 1 to 9 are merged to ma
    - the owner's sessions, and the drafts in Qt's store, are where they were; Qt drafts and the dev app's drafts appear in the client (the import of step 7);
    - the settings seed: a key from step 7's list shows Qt's value in Settings (for example the theme in Settings > Appearance), automatic approvals are off, and Voice input asks for the microphone again;
    - after the Mac's next sleep and wake, `launchctl print gui/$(id -u)/com.hgdev.hgs-tray | grep 'pid ='` shows the same pid as before, and `~/Library/Logs/hgs-tray.log` has no `main thread unresponsive` line.
-9. **Later Dev rollouts.** Run the same `bash tray/install.sh` with the new `N` and without `HGS_MAC_GUI`. The installed client is kept, and Qt stays the rollback copy: there is no second slot. A new client that does not start is replaced by the client it replaced, automatically. The numbered Dev guard refuses a run without `ZERUS_DEV_BUILD_NUMBER` or a local preview label.
+9. **Later Dev rollouts.** Run the same maintained Next installer with the exact new Dev number. The replaced verified Next becomes the usable rollback; each displaced Qt image gets a unique `desktop-qt-legacy/qt-*` manual-recovery entry. Failed-upgrade restoration and the numbered Dev guard remain unchanged.
 10. **Rollback.** From the clean checkout, in Terminal:
     ```sh
     cd "${CLONE:?}" && python3 tray/update-installed.py --rollback ~/Applications/hgs-tray.app
     ```
-    Qt comes back with its drafts, and the client moves into the rollback folder, so a second `--rollback` returns to the client. If the updater reports changed Qt settings, quit Zerus, run `defaults import com.hgdev.hgs-tray ~/.local/share/hgs/desktop-previous/com.hgdev.hgs-tray.plist`, then `launchctl kickstart gui/$(id -u)/com.hgdev.hgs-tray` (KeepAlive Crashed does not restart a clean quit). Drafts typed in the client after the switch stay in `~/Library/Application Support/com.hgdev.hgs-tray/drafts/`, where Qt does not see them. Use `HGS_MAC_GUI=qt` on later installs to stay on Qt, and file a bead for the cause.
+    A verified previous Next build comes back with its drafts/process checks. Qt rollback and Qt installer selections are refused. The retained Qt image and settings export remain manual-recovery material; do not run its background duties alongside the service.
 
 ## Mac App Store
 

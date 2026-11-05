@@ -17,7 +17,14 @@ spec = importlib.util.spec_from_file_location("check_macos_bundle", ROOT / "scri
 check = importlib.util.module_from_spec(spec)
 spec.loader.exec_module(check)
 
-QT_INFO = plistlib.loads((ROOT / "tray/packaging/Info.plist").read_bytes())
+# Historical Qt privacy strings remain compatibility fixtures after its build
+# sources are removed; they are not read from a new Qt bundle template.
+QT_INFO = {
+    "NSMicrophoneUsageDescription": "Zerus records your voice when you start dictation and sends it to your selected speech computer for recognition.",
+    "NSCameraUsageDescription": "Zerus records video messages when you hold the video recording button.",
+    "CFBundleIconName": "hgs-zerus-swarm",
+    "CFBundleDevelopmentRegion": "en",
+}
 SWITCH_INFO = plistlib.loads((ROOT / "client/src-tauri/Info.switch.plist").read_bytes())
 VERSION = (ROOT / "VERSION").read_text().strip()
 OTOOL = """hgs-tray:

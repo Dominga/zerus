@@ -821,6 +821,45 @@ class NativeHarness(unittest.TestCase):
         self.assertEqual(self.cli('inspect', a)['model'], 'test-b')
         self.assertEqual(self.cli('inspect', b)['model'], 'test-a')
         self.assertEqual(self.rpc('catalog')['default'], before)
+        # The native selection is durable on this session, not just a live
+        # option override; a new Agent resumes it without changing the default.
+        self.cli('pause', a)
+        self.cli('resume', a)
+        resumed = self.cli('inspect', a)
+        self.assertEqual((resumed['model'], resumed['effort']), ('test-b', 'off'))
+        self.assertEqual(self.cli('inspect', b)['model'], 'test-a')
+        self.assertEqual(self.rpc('catalog')['default'], before)
+
+    def test_settings_and_image_admission_use_the_same_native_queue(self):
+        b = self.create()
+        gate = self.root / 'holds' / 'MODEL_ADMISSION_HOLD'
+        encoded = 'iVBORw0KGgoAAAANSUhEUgAAAAIAAAACCAIAAAD91JpzAAAADklEQVR4nGP4DwYMEAoAU7oL9ZisIGcAAAAASUVORK5CYII='
+        request = self.payload(b, text='Image admission must see the selected text-only model',
+                               attachments=[dict(name='pixel.png', mime='image/png', data_base64=encoded)])
+        before = self.rpc('catalog')['default']
+        gate.touch()
+        try:
+            with concurrent.futures.ThreadPoolExecutor(2) as pool:
+                # Two CLI writers also share bindings.lock. Use the original
+                # bridge RPC for settings to test the HOST's admission queue.
+                settings = pool.submit(self.rpc, 'settings', dict(sessionId=b['conversation_id'],
+                                       provider='hgs-test', model='test-b', reasoningEffort='off'))
+                try:
+                    self.wait(lambda: gate.with_suffix('.resolving').exists())
+                    image = pool.submit(self.hgs, 'send', b['name'], request=request)
+                    self.wait(lambda: gate.with_suffix('.queued').exists())
+                finally:
+                    gate.unlink(missing_ok=True)
+                self.assertEqual(settings.result(timeout=30)['scope'], 'session')
+                refused = image.result(timeout=30)
+        finally:
+            gate.unlink(missing_ok=True)
+        self.assertNotEqual(refused.returncode, 0)
+        self.assertIn('does not support image input', refused.stderr)
+        data = self.cli('inspect', b)
+        self.assertEqual(data['model'], 'test-b')
+        self.assertFalse(any(e['type'] == 'UserPromptSubmit' for e in data['events']))
+        self.assertEqual(self.rpc('catalog')['default'], before)
 
     def test_pause_resume_preserves_identity_and_other_agent(self):
         a, b = self.create(), self.create()
@@ -909,7 +948,10 @@ class NativeHarness(unittest.TestCase):
         self.assertEqual(self.project_of(fork, node), 'work')
         self.assertFalse(list((self.state / 'dsh/forks').glob('*.json')))
         row = next(r for r in self.rpc('list')['items'] if r['sessionId'] == fork['conversation_id'])
-        self.assertEqual(row['parentSessionId'], source['conversation_id'])
+        # 0.2.2 omits ordinary fork parent metadata; the bridge instead pins
+        # and verifies the exact inherited source prefix before accepting it.
+        self.assertIn(row.get('parentSessionId'), (None, source['conversation_id']))
+        self.assertNotEqual(row.get('origin'), 'subagent')
         self.assertEqual(row['projections']['values']['title'], tag)
         # The fork starts from the source's history and then diverges.
         data = self.cli('inspect', fork)
@@ -1009,7 +1051,8 @@ class NativeSchedules(unittest.TestCase):
         listed = self.wait(lambda: d if (d := json.loads(self.hgs('schedules', b['name']).stdout))['items'] else None)
         self.assertEqual((listed['name'], listed['run_id'], listed['conversation_id']), (b['name'], b['run_id'], b['conversation_id']))
         [item] = listed['items']
-        self.assertEqual((item['title'], item['kind'], item['status'], item['recurring']), ('Fixture check', 'every', 'active', True))
+        self.assertEqual((item['title'], item['status'], item['recurring']), ('Fixture check', 'active', True))
+        self.assertIn(item['kind'], ('every', 'rrule'))
         self.assertGreater(item['scheduled_at'], time.time())
         self.assertEqual(json.loads(self.hgs('schedules', other['name']).stdout)['items'], [])
         row = self.wait(lambda: next((r for r in json.loads(self.hgs('ls', '--local', '--json').stdout)['sessions']

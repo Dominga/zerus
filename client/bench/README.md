@@ -1,3 +1,7 @@
+> Qt baseline commands and paths below are historical measurements. The Qt
+> harness has been removed at retirement; retain the recorded JSON for comparison,
+> and use the maintained Tauri harness for new runs. Do not rebuild an old Qt GUI.
+
 # Client measurement and the Qt comparison
 
 Tooling for Beads `zerus-5wmh.4`: frame pacing, input-to-frame latency, session

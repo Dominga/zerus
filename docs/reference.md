@@ -4033,11 +4033,11 @@ SSH launches; an `opencode` found earlier on PATH keeps precedence.
 ## Official DeepSeek Harness
 
 The native adapter accepts exactly the reviewed `@deepseek-ai/dsh` releases
-`0.2.1-rc.2` and `0.2.1-rc.5`. Install a reviewed release on the agent host,
+`0.2.1-rc.2`, `0.2.1-rc.5` and `0.2.2-rc.1`. Install a reviewed release on the agent host,
 sign in and choose **DeepSeek Harness** in New session:
 
 ```sh
-npm install -g @deepseek-ai/dsh@0.2.1-rc.5
+npm install -g @deepseek-ai/dsh@0.2.2-rc.1
 hgs account login native-dsh
 hgs dsh /path/to/project --new -n work
 ```
@@ -4059,6 +4059,26 @@ The adapter's private socket, protocol 1, per-host random generation and native
 methods are unchanged. Its ping version remains `0.2.1-rc.2`: that identifies
 the resident adapter, independently of the installed harness. Existing rc.2
 hosts remain accepted without a restart or extension reload.
+
+Reviewed adoption of `0.2.2-rc.1` (2026-11-05, `zerus-o8ftr`): model selection
+moved from the controller's selection map into each native Agent's model object.
+The adapter uses its pure `current()` read and session-local durable `select()`
+write. It still serializes settings through the same native image-admission
+chain; it never calls the public model command that also saves a profile default.
+The new model interface is checked before the native Agent setup is published,
+and a partial or missing interface refuses. The rc.2/rc.5 selection path, resident
+adapter identity and existing-host reuse remain unchanged. An owning host is
+never hot-reloaded to adopt a new bridge. CI continues to resolve and verify one
+official latest release, with no historical fallback.
+
+Ordinary forks in `0.2.2-rc.1` no longer name their parent in the native header. Zerus
+pins a completed source event boundary before forking and verifies the exact
+inherited prefix and native seed marker before accepting the new identity.
+The original parent-header check remains for rc.2/rc.5. Schedule tasks are now
+Host-wide: Zerus still lists and edits only a task whose explicit destination is
+the selected session, checks the original record and uses the native queued
+`expectedUpdatedAt` comparison. Creator/editor membership does not grant access
+through another session. Delivery-history pages omit other destinations.
 
 rc.5 adds a UI entry-customization plugin and changes conversation, settings,
 analytics and model-list UI. It shares model-listing/cache code between account
@@ -4142,7 +4162,7 @@ older adapter or a host that does not answer within 7 seconds reports that
 history as unavailable.
 
 The official Schedule plugin (**Automation tasks** in Native UI Plugins) is
-listed and managed per exact session. Both reviewed web bundles include it,
+listed and managed per exact session. The reviewed web bundles include it,
 and the profile Zerus creates layers that bundle, so it is on unless the
 profile's own patch disables it:
 
@@ -4524,12 +4544,13 @@ for a GUI that is not running, by its signature and its own `--build-info`) and
 only then becomes the one rollback copy in `~/.local/share/hgs/desktop-previous`;
 a new GUI that does not start is replaced by it again. A replaced bundle without
 its identity, executable or valid signature never becomes the rollback copy, and
-a Zerus process started during the update stops the change. After the Mac switch,
-Qt stays the rollback copy; if it cannot be verified as complete, including when
-its signature check times out, the replaced client is kept too. Those cases and an
-interrupted update keep the replaced GUI in a `.hgs-tray-kept-*` folder beside
-the installed one and print where; later updates list such folders and never
-remove them. Links at the
+a Zerus process started during the update stops the change. Each displaced Qt/unclassified rollback image gets a unique entry under
+`~/.local/share/hgs/desktop-qt-legacy/qt-*/` for manual recovery; the replaced
+Next takes `desktop-previous`. Older retained images are never overwritten,
+deleted or offered by `--rollback`. The settings export stays at its compatible
+path. An archive-move failure keeps the image named and retained while the
+verified Next update continues its draft/process/provenance checks. Interrupted
+or unverifiable replacements remain in a named kept folder. Links at the
 installed path or in the rollback folder are refused. The update confirms the
 running image, unchanged nonempty drafts and native agent and tmux processes. It records the
 installed builds in `~/.local/share/hgs/build-provenance.json`, then removes hidden
@@ -4562,7 +4583,7 @@ Linux installs the binary under `~/.local/bin`, a systemd user service under
 `~/.config/systemd/user` and a launcher under `~/.local/share/applications`.
 The launcher is not a second autostart entry. Fresh installs and upgrades default
 to Zerus Next; `HGS_LINUX_GUI=client` selects it explicitly.
-`HGS_LINUX_GUI=qt` keeps the Qt source-build fallback until Linux acceptance. `HGS_INSTALL_PREFIX` redirects the binary, launch files and
+Qt source builds and the Qt installer selection are retired. `HGS_INSTALL_PREFIX` redirects the binary, launch files and
 updater state into a scratch prefix and performs no service-manager action; see
 [Linux packages and source installation](linux-distribution.md).
 The service belongs to `graphical-session.target`, restarts after crashes and

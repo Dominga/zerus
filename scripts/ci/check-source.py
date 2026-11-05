@@ -16,10 +16,8 @@ ROOT = Path(__file__).resolve().parents[2]
 # its QProcess parameter there, in the function that creates it (for a member,
 # a constructor of its class) and before it starts. Only these files may start
 # children otherwise:
-CHILD_PROCESS_EXEMPT = {
-    "tray/src/ChildProcess.h": "implements inheritStdioOnly() and startDetached()",
-    "tray/src/WindowsTerminalBackend.cpp": "the app links it only on Windows, where inheritStdioOnly() does nothing",
-}
+CHILD_PROCESS_EXEMPT = {}
+
 CHILD_PROCESS_SOURCES = re.compile(r"tray/src/.+\.(?:cpp|h|mm)")
 # The desktop parses JSON only through tray/src/JsonParse.h, which reports a
 # parse on the GUI thread. There is no GUI-thread exception: owner decision,
@@ -288,9 +286,6 @@ def main():
     version = (ROOT / "VERSION").read_text().strip()
     if not re.fullmatch(r"\d+\.\d+\.\d+", version):
         raise SystemExit("VERSION must contain one stable semantic version.")
-    cmake = (ROOT / "tray/CMakeLists.txt").read_text()
-    if f"project(hgs-tray VERSION {version} " not in cmake:
-        raise SystemExit("VERSION and the desktop version must match before release.")
     android = (ROOT / "mobile/android/app/build.gradle.kts").read_text()
     mobile_version = re.search(r'val stableVersionName = "([0-9]+\.[0-9]+\.[0-9]+)"', android)
     if not mobile_version:

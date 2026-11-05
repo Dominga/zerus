@@ -307,8 +307,8 @@ class PublicationTests(unittest.TestCase):
         # Portable Windows apps announce every stable release after this one as a
         # Windows update, so publication never lets one through without the zip.
         self.assertEqual(common.LAST_STABLE_WITHOUT_WINDOWS, "0.42.2")
-        self.assertIn(f'lastStableWithoutWindows="{common.LAST_STABLE_WITHOUT_WINDOWS}"',
-                      (ROOT / "tray/src/UpdateController.cpp").read_text())
+        self.assertIn(f'plain_stable_is_newer("{common.LAST_STABLE_WITHOUT_WINDOWS}", version)',
+                      (ROOT / "client/core/src/updates.rs").read_text())
         without = self.candidate()
         with_zip = self.candidate(windows=True, name="with-zip")
         with patch.object(common, "LAST_STABLE_WITHOUT_WINDOWS", "0.36.9"):

@@ -352,6 +352,12 @@ impl Admitted<'_> {
     pub fn save(&mut self, task: &mut TaskDoc) -> Result<()> {
         self.store.save_locked(task)
     }
+
+    /// The project's directory, for a record kept beside its tasks under
+    /// this admission and the project lock.
+    pub fn dir(&self) -> &Path {
+        self.store.dir()
+    }
 }
 
 pub struct ProjectStore {

@@ -3682,6 +3682,32 @@ Only then would a reservation run; the check runs none. Closed reasons add:
 `deadline`. It proves the schema barrier only: not exclusive delivery, not
 consent.
 
+A proof that passed its final admission can be kept as the task's
+certificate (C3e): `<project store>/fence/<task>.json`, inside the replica
+root, so a replaced root loses it. The record holds:
+- the proven version;
+- this computer's membership view (peers, catalog machines, membership
+  generation), store and root;
+- every node with the store it answered from.
+
+A later operation reuses it with no network, in the same final admission
+(the catalog lock, the project lock, the store's admission). That admission
+reads everything the record binds again:
+- the record itself, for this task, project and swarm;
+- the view, so any enrolment, disconnection or new catalog machine refuses;
+- the store and the root;
+- every certified member's last observed store, from the swarm's member
+  records, used only to refuse;
+- the hold, for a first attempt;
+- the task: holding the certified version, with its floor and raw stored
+  schema.
+
+Anything changed refuses it with its reason, and the caller proves the
+fence afresh. Only the attempt writer writes a certificate. `--check` reports
+`certificate` (`valid`, or the first `reason`) and never writes one. A
+certificate is a schema-barrier record only: never consent and never send
+authority.
+
 Cutover boundary (owner decision, 2026-11-05): once a project's tasks cut
 over, the rollback floor for every computer in that swarm is the first
 floor-aware build. That is the minimum managed-store, writer and importer

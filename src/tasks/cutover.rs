@@ -186,6 +186,14 @@ fn fence_check(config: &Config, id: &str, name: &str, task: &str, deadline: std:
 /// replica data and repairs like a sync; it creates no floor and no attempt,
 /// and grants no send authority.
 fn check(config: &Config, id: &str, name: &str, uuid: &str, deadline: std::time::Instant) -> Result<Value> {
+    // The task's certificate, read only: whether it would be reused now
+    // (C3e). The check never writes one.
+    let certificate = match swarm::fence::admit_certified(config, id, uuid, deadline, |_, _| Ok(()))
+        .map_err(fail)?
+    {
+        Ok(()) => json!({"valid": true}),
+        Err(closed) => json!({"valid": false, "reason": closed.reason}),
+    };
     let (universe, proved) =
         swarm::fence::prove(config, &swarm::fence::Ssh(config), id, uuid, deadline).map_err(fail)?;
     let (closed, proof) = match proved {
@@ -210,6 +218,7 @@ fn check(config: &Config, id: &str, name: &str, uuid: &str, deadline: std::time:
         "universe_closed": universe.closed().map(|(node, reason)| json!({"node": node, "reason": reason})),
         "closed": closed.map(|c| json!({"node": c.node, "reason": c.reason})),
         "proof": proof,
+        "certificate": certificate,
     }))
 }
 

@@ -702,8 +702,11 @@ class Swarm(unittest.TestCase):
         relayed = self.call('b', 'replica-relay', data=relay)
         self.assertEqual((relayed['to'], relayed['reply']['store'], relayed['reply']['loads']),
                          (hello['c']['node_id'], hello['c']['replica']['store'], True))
-        # The check closes before any exchange for a task that never cut over.
-        self.assertEqual(self.fence_check('a', task['id'])['closed'], {'node': None, 'reason': 'no_floor'})
+        # The check closes before any exchange for a task that never cut over,
+        # and reads, never writes, the task's certificate (C3e).
+        check = self.fence_check('a', task['id'])
+        self.assertEqual(check['closed'], {'node': None, 'reason': 'no_floor'})
+        self.assertEqual(check['certificate'], {'valid': False, 'reason': 'no_certificate'})
 
     def test_a_relay_never_answers_after_its_budget(self):
         # review-n on #1452: an answer whose pipe a descendant keeps open past

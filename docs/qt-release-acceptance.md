@@ -1250,11 +1250,14 @@ integrate `68b2c426` (CI run 41977902432, artifact 13394048639) and integrate
       attempts. Its counters include withdrawals, and the click's selection
       marks the reply read, which withdraws the toast. That is the likely
       second attempt, but this row kept no database copy to prove it.
-  - The cold-started GUI ran with the user's real environment, because Windows
-    COM activation does not pass the fixture's profile redirection. It wrote
-    Zerus app data into the console user's real profile. Those three folders
-    were removed after checking that every item was created during the stage,
-    and the residue check was then clean.
+  - **One cold start wrote to the owner's real profile, and it was removed.**
+    The H3 click launched the GUI through Windows COM activation with the
+    console user's real environment, because activation does not pass the
+    fixture's profile redirection. It wrote Zerus app data into the real
+    `AppData\Roaming\com.hgdev.hgs-tray`, `AppData\Local\com.hgdev.hgs-tray`
+    and `AppData\Local\hgdev`. Those three folders were removed after checking
+    that every item was created during the stage, and the residue check was
+    then clean. Every later cold-start row runs the same guarded cleanup.
 - **One-time import, G3 scope: PASS** (16/16, twice on `af07efb6`). Before Next
   first started, the fixture held Qt sources: a Qt INI and a Qt main draft in
   the redirected `APPDATA`, and a legacy per-computer project alias.

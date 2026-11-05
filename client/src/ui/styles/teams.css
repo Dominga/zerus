@@ -97,4 +97,51 @@
 
   /* The Team tab's "?N" in the tab row: what waits for your answer. */
   .tabs .tab-count { margin-left: 6px; padding: 0 5px; border-radius: 7px; font-size: 10.5px; font-weight: 600; color: var(--z-color-warn); background: var(--z-color-warn-bg); }
+
+  /* Task 11: the lead's proposal cards, the reports the owner decides and
+     Waiting for you (page, rows, banner). Parts sit apart through layout. */
+  .team-proposals { display: flex; flex-direction: column; gap: 6px; padding: 6px 10px; max-height: 50%; overflow-y: auto; flex: none; }
+  .team-proposal { display: flex; flex-direction: column; gap: 3px; padding: 6px 8px; border-radius: 7px;
+    background: color-mix(in srgb, var(--z-color-warn) 10%, transparent); border: 1px solid color-mix(in srgb, var(--z-color-warn) 40%, transparent); }
+  .team-proposal.stale { opacity: .8; }
+  .team-proposal-head { display: flex; align-items: baseline; gap: 6px; min-width: 0; }
+  .team-pill { flex: none; padding: 0 6px; border-radius: 8px; font-size: 10.5px; font-weight: 600; color: var(--z-color-warn); border: 1px solid var(--z-color-warn); }
+  .team-proposal-what { min-width: 0; overflow-wrap: anywhere; }
+  .team-proposal-by { font-size: 10.5px; }
+  .team-proposal-change { padding-left: 6px; color: var(--z-color-muted); overflow-wrap: anywhere; user-select: text; }
+  .team-proposal-reason { color: var(--z-color-muted); overflow-wrap: anywhere; }
+  .team-proposal-notice, .team-waiting-notice { color: var(--z-color-warn); overflow-wrap: anywhere; }
+  .team-waiting-notice.inline { font-size: 11px; max-width: 40ch; }
+  .team-proposal-answers { display: flex; align-items: center; gap: 6px; }
+  .team-proposal-answers .field { flex: 1; min-width: 0; }
+  .team-proposal-question { display: flex; flex-direction: column; gap: 2px; }
+  .team-proposal-option { display: flex; align-items: center; gap: 6px; cursor: pointer; }
+
+  .team-reports { display: flex; flex-direction: column; gap: 4px; padding: 6px 14px; border-bottom: 1px solid var(--z-color-divider); }
+  .team-report { display: flex; flex-direction: column; gap: 4px; }
+  .team-report-line { display: flex; align-items: center; gap: 8px; min-width: 0; }
+
+  .team-waiting-page { flex: 1; min-height: 0; display: flex; flex-direction: column; font-size: var(--fs-sm); }
+  .team-waiting-header { display: flex; align-items: center; gap: 10px; padding: 14px 20px; border-bottom: 1px solid var(--z-color-divider); }
+  .team-waiting-header h1 { font-size: var(--fs-lg); font-weight: 600; }
+  .team-waiting-tile { display: grid; place-items: center; width: 28px; height: 28px; border-radius: 7px; background: var(--z-color-warn-bg); color: var(--z-color-warn); }
+  .team-waiting-error { margin: 10px 20px 0; color: var(--z-color-danger); }
+  .team-waiting-list { flex: 1; min-height: 0; overflow-y: auto; display: flex; flex-direction: column; gap: 8px; padding: 14px 20px 20px; }
+  .team-waiting-row { display: flex; flex-direction: column; gap: 6px; padding: 8px 10px; border-radius: 8px; background: var(--z-color-card); border: 1px solid var(--z-color-card-border); cursor: pointer; }
+  .team-waiting-row.open { cursor: default; }
+  .team-waiting-row.compact { padding: 4px 8px; background: transparent; border: 0; border-radius: 0; }
+  .team-waiting-head { display: flex; align-items: center; gap: 8px; min-width: 0; }
+  .team-waiting-icon { display: grid; place-items: center; color: var(--z-color-warn); flex: none; }
+  .team-waiting-kind { font-weight: 600; flex: none; }
+  .team-waiting-title { min-width: 0; }
+  .team-waiting-team { max-width: 18ch; color: var(--z-color-muted); }
+  .team-waiting-age { flex: none; }
+  .team-waiting-answer { display: flex; flex-direction: column; gap: 6px; cursor: default; }
+  .team-waiting-card { display: flex; flex-direction: column; gap: 4px; }
+  .team-waiting-question { display: flex; flex-direction: column; gap: 2px; }
+  .team-waiting-command { display: block; padding: 4px 6px; border-radius: 5px; background: var(--z-color-field); overflow-wrap: anywhere; user-select: text; }
+  .team-waiting-output { margin: 0; max-height: 8em; overflow: auto; padding: 4px 6px; border-radius: 5px; background: var(--z-color-field); white-space: pre-wrap; }
+  .team-waiting-banner { display: flex; flex-direction: column; gap: 2px; padding: 4px 14px; border-bottom: 1px solid var(--z-color-divider); background: var(--z-color-warn-bg); }
+  .team-waiting-banner-head { display: flex; align-items: center; gap: 8px; min-width: 0; color: var(--z-color-warn); }
+  .team-confirm-text { white-space: pre-line; }
 }

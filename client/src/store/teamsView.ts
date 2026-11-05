@@ -1,6 +1,6 @@
 import { batch } from "solid-js";
 import { createStore } from "solid-js/store";
-import type { ComputerId, TeamList, TeamSessionView, TeamSummary, TeamView, TeamsOut } from "../types";
+import type { ComputerId, TeamList, TeamSessionView, TeamSummary, TeamView, TeamWaitingView, TeamsOut } from "../types";
 import type { Session } from "../ui/sessions/types";
 
 // The Teams views the core reads and projects (client/core/src/teams), as the
@@ -88,6 +88,8 @@ export function createTeams(port: TeamsPort) {
     list,
     teamOf,
     team: (computer: ComputerId, id: string) => view<TeamView>(computer, `team:${id}`, "team"),
+    /** Task 11: what waits for the owner across the computer's teams (`waiting`). */
+    waiting: (computer: ComputerId) => view<TeamWaitingView>(computer, "waiting", "waiting"),
     /** Why the last read of a view failed, while it still shows what it had. */
     failure: (computer: ComputerId, key: string) => views[entryId(computer, key)]?.failed,
     /** Why the last follow of a computer was refused. */

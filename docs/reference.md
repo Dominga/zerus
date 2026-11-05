@@ -3591,7 +3591,9 @@ floor-aware build. That is the minimum managed-store, writer and importer
 implementation, on every import route, including a phone's answering hgs.
 Running an older CLI or desktop there is unsupported: an older build's
 damaged-task recovery, or a truncated update tail, can bring back a pre-floor
-copy that it would then write.
+copy that it would then write. On an activated swarm that floor is the first
+release with the membership incarnation of C3c1 R3 (in practice 0.48.0);
+unreleased intermediate builds are unsupported too.
 
 Phones reach a project's tasks through the mobile relay and the Rust mobile
 connector, which uses two commands of its own. `hgs task digests --json` prints

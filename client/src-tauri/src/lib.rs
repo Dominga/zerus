@@ -1156,7 +1156,7 @@ fn launch(context: tauri::Context<tauri::Wry>, startup: Startup) {
                             Box::new(move || desk::Attention::load(path, || None)) as desk::LoadAttention
                         });
                     let notifies = attention.is_some();
-                    desk::start(app.handle(), &pump, dir.clone(), attention);
+                    desk::start(app.handle(), &pump, attention);
                     if desktop_service::mode() {
                         if let Some(sender) = desk::sender(app.handle()) {
                             app.state::<commands::AppState>().register_service_activation(std::sync::Arc::new(move |delivery| {
@@ -1181,7 +1181,7 @@ fn launch(context: tauri::Context<tauri::Wry>, startup: Startup) {
                         let path = dir.join(desk::ATTENTION_FILE);
                         Box::new(move || desk::Attention::load(path, || None)) as desk::LoadAttention
                     });
-                    desk::start(app.handle(), &pump, dir.clone(), attention);
+                    desk::start(app.handle(), &pump, attention);
                     if let Some(target) = navigation {
                         if let Some(sender) = desk::sender(app.handle()) {
                             let _ = sender.send(desk::DeskInput::Navigate { target, activation: activation_token });
@@ -1209,7 +1209,7 @@ fn launch(context: tauri::Context<tauri::Wry>, startup: Startup) {
                         let path = dir.join(desk::ATTENTION_FILE);
                         Box::new(move || desk::Attention::load(path, || None)) as desk::LoadAttention
                     });
-                    desk::start(app.handle(), &pump, dir.clone(), attention);
+                    desk::start(app.handle(), &pump, attention);
                     // The service posts the toast and grants foreground; this GUI only routes the click.
                     if desktop_service::mode() {
                         if let Some(sender) = desk::sender(app.handle()) {

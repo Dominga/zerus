@@ -192,11 +192,11 @@ describe("perform", () => {
       const a = setup();
       mocked.runAction.mockResolvedValue(done({ status: "kept", path: "/home/example/wt", common_dir: "/home/example/.git", reason: "uncommitted changes" }));
       await a.perform(session(), { kind: "archive" });
-      expect(a.notices().find((n) => n.sticky)).toMatchObject({ tone: "warn", text: "Working folder kept for review." });
+      expect(a.notices().find((n) => n.title === "Session archived")).toMatchObject({ tone: "warn", text: "Working folder kept for review.", sticky: false });
       for (const n of a.notices()) a.dismiss(n.id);
       mocked.runAction.mockResolvedValue(done({ status: "unconfirmed", path: "/home/example/wt", common_dir: "/home/example/.git", reason: null }));
       await a.perform(session(), { kind: "terminate" });
-      expect(a.notices().find((n) => n.sticky)?.text).toBe("Working folder kept for review.");
+      expect(a.notices().find((n) => n.title === "Session archived")?.text).toBe("Working folder kept for review.");
       for (const n of a.notices()) a.dismiss(n.id);
       mocked.runAction.mockResolvedValue(done({ status: "removed", path: "/home/example/wt", common_dir: "/home/example/.git", reason: null }));
       await a.perform(session(), { kind: "archive" });
@@ -278,7 +278,7 @@ describe("perform", () => {
       expect(a.notices()).toEqual([]);
       mocked.runAction.mockResolvedValueOnce(done({ status: "kept", path: "/home/example/wt", common_dir: "/home/example/.git", reason: "uncommitted changes" }));
       await a.perform(session(), { kind: "terminate" }, { quiet: true });
-      expect(a.notices()).toEqual([expect.objectContaining({ tone: "warn", text: "Working folder kept for review.", sticky: true })]);
+      expect(a.notices()).toEqual([expect.objectContaining({ tone: "warn", text: "Working folder kept for review.", sticky: false })]);
       mocked.runAction.mockResolvedValueOnce(done({ status: "removed", path: "/home/example/wt", common_dir: "/home/example/.git", reason: null }));
       await a.perform(session(), { kind: "archive" }, { quiet: true });
       expect(a.notices().map((n) => n.text)).toEqual(["Working folder kept for review.", "Worktree removed automatically. The branch and archived conversation are kept."]);

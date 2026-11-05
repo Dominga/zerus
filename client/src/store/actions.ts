@@ -103,7 +103,7 @@ export function createActions(
     if (cleanup.status === "removed") notify("info", tr("Worktree removed automatically. The branch and archived conversation are kept."));
     else if (cleanup.status === "kept" || cleanup.status === "unconfirmed") {
       if (cleanupReport) cleanupReport(out, row);
-      else notify("warn", tr("Working folder kept for review."), true, sessionNoticeKey(row.computer, row.name), tr("Session archived"));
+      else notify("warn", tr("Working folder kept for review."), false, sessionNoticeKey(row.computer, row.name), tr("Session archived"));
     }
   }
 
@@ -452,7 +452,7 @@ export function bindArchivedRows(lookup: (key: string) => Session | undefined) {
 
 const app = createActions(withArchived(appCatalog, (key) => archivedRow(key) ?? searchRow(key)), (computer) => !computerOffline(computer), () => selection(), appMarks, appBus,
   (out, row) => { void import("./cleanupNotices").then((m) => m.reportCleanup(out, row)).catch(() => {
-    appBus.notify("warn", tr("Working folder kept for review."), true, sessionNoticeKey(row.computer, row.name), tr("Session archived"));
+    appBus.notify("warn", tr("Working folder kept for review."), false, sessionNoticeKey(row.computer, row.name), tr("Session archived"));
   }); }, async (row, action, execute, current, remove) => {
     const { endActions } = await import("./endActions");
     return endActions.schedule([captureEnd(row, action)], ([ref], key) => execute(ref, key), { current, remove });

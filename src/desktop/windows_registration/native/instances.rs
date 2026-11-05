@@ -471,11 +471,13 @@ pub(super) fn stopped(
     original.exited(native, &task(&native.folder, plan, wanted)?, until)
 }
 
-pub(super) fn stop_original(
+/// Read the SAME retained original under the caller's registration lock.
+/// Refusal is not absence and never acquires a later instance or Stop ability.
+pub(super) fn check_original_selection(
     native: &Native,
     plan: &Plan,
     wanted: &Shape,
-    original: &mut Running,
+    original: &Running,
     until: Instant,
     fence: &mut impl FnMut() -> Result<()>,
 ) -> Result<()> {
@@ -486,7 +488,24 @@ pub(super) fn stop_original(
         values.len() == 1 && guid(&values[0])? == original.guid,
         "Original task selection changed before stop."
     );
-    original.stop(fence)
+    original.check()?;
+    fence()
+}
+
+pub(super) fn stop_original(
+    native: &Native,
+    plan: &Plan,
+    wanted: &Shape,
+    original: &mut Running,
+    until: Instant,
+    fence: &mut impl FnMut() -> Result<()>,
+) -> Result<()> {
+    super::mode::stop::checked(
+        original,
+        fence,
+        |original, fence| check_original_selection(native, plan, wanted, original, until, fence),
+        |original, fence| original.stop(fence),
+    )
 }
 
 pub(super) fn replace(

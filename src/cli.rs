@@ -596,6 +596,10 @@ pub fn dispatch(mut args: Vec<String>) -> Result<i32> {
     if args.first().is_some_and(|a| a == "__peer") {
         return crate::peer_channel::command(&config, &args[1..]);
     }
+    // Task #28 (2): a sandboxed member's host reads go to its team worker.
+    if let Some(answer) = state::sandbox_read(&args) {
+        return answer.map_err(|error| Error::new(1, error));
+    }
     // An encrypted gateway binds every local native call to the physical
     // machine it advertised. This check also works on Windows, without a
     // shell, stdin rewriting or a second native process.

@@ -3,7 +3,7 @@
 //! take and an example, instead of the field being dropped in silence. The
 //! accepted fields are read from the serde definition itself, so the list
 //! cannot drift from the model.
-use anyhow::{bail, Context};
+use anyhow::bail;
 use serde::de::{self, DeserializeOwned, Visitor};
 use serde_json::Value;
 
@@ -81,12 +81,53 @@ pub(crate) fn check_keys(value: &Value, allowed: &[&str], what: &str, example: &
 }
 
 /// Parses `value` as `T`, refusing unknown fields (with `extra` keys allowed
-/// besides `T`'s own) and naming serde's own reason with an example.
+/// besides `T`'s own). Task #26: a value serde refuses names its field and
+/// serde's reason in the message itself: team 33fbafeb's lead saw only "A
+/// member is invalid" and an example for a member whose `folder` was the
+/// catalog's `read_only`.
 pub(crate) fn parse<T: DeserializeOwned>(value: &Value, extra: &[&str], what: &str, example: &str) -> anyhow::Result<T> {
     let mut allowed: Vec<&str> = fields::<T>().to_vec();
     allowed.extend_from_slice(extra);
     check_keys(value, &allowed, what, example)?;
-    serde_json::from_value(value.clone()).map_err(|error| anyhow::anyhow!("{error}")).with_context(|| format!("{what} is invalid; example: {example}"))
+    let error = match serde_json::from_value::<T>(value.clone()) {
+        Ok(parsed) => return Ok(parsed),
+        Err(error) => error.to_string(),
+    };
+    let who = match value["id"].as_str().map(str::to_owned).or_else(|| value["id"].as_u64().map(|id| id.to_string())) {
+        Some(id) if !id.is_empty() => format!("{what} \"{id}\""),
+        _ => what.to_owned(),
+    };
+    match failing_field::<T>(value, &error) {
+        Some(field) => bail!("{who} is invalid: field \"{field}\": {error}; example: {example}"),
+        None => bail!("{who} is invalid: {error}; example: {example}"),
+    }
+}
+
+/// The field whose value serde refused: the one whose removal makes the rest
+/// parse, else the one whose removal changes the refusal into another one
+/// (two bad fields), else a required field serde then misses. None when no
+/// single field explains it.
+fn failing_field<T: DeserializeOwned>(value: &Value, error: &str) -> Option<String> {
+    let object = value.as_object()?;
+    let without = |key: &str| {
+        let mut rest = object.clone();
+        rest.remove(key);
+        serde_json::from_value::<T>(Value::Object(rest)).map(drop).map_err(|error| error.to_string())
+    };
+    let missing = |key: &str, other: &str| other.starts_with(&format!("missing field `{key}`"));
+    let mut required = None;
+    for key in object.keys() {
+        match without(key) {
+            Ok(()) => return Some(key.clone()),
+            Err(other) if missing(key, &other) => {
+                required.get_or_insert_with(|| key.clone());
+            }
+            Err(other) if other != error => return Some(key.clone()),
+            Err(_) => {}
+        }
+    }
+    // A required field's own value: the only one whose removal is missed.
+    required.filter(|_| !error.starts_with("missing field"))
 }
 
 pub(crate) const MEMBER_EXAMPLE: &str =
@@ -131,7 +172,26 @@ mod tests {
             "{:#}",
             parse::<super::super::model::Member>(&json!({"id":"d","agent":"claude","models":"opus"}), &[], "A member", MEMBER_EXAMPLE).unwrap_err()
         );
-        assert!(error.contains("A member is invalid; example:"), "{error}");
-        assert!(error.contains("invalid type"), "{error}");
+        assert!(error.contains("A member \"d\" is invalid: field \"models\""), "{error}");
+        assert!(error.contains("invalid type") && error.contains("example:"), "{error}");
+    }
+
+    /// Task #26: every refused field is named in the message itself, not
+    /// only in a cause a caller may not print.
+    #[test]
+    fn a_refused_value_names_its_field() {
+        use super::super::model::{Member, Task};
+        let member = |value: Value| parse::<Member>(&value, &[], "A member", MEMBER_EXAMPLE).unwrap_err().to_string();
+        let error = member(json!({"id":"qa","agent":"claude","folder":"elsewhere"}));
+        assert!(error.contains("A member \"qa\" is invalid: field \"folder\": unknown variant `elsewhere`"), "{error}");
+        let error = member(json!({"id":"qa","agent":"claude","folder":"nowhere","models":"opus"}));
+        assert!(error.contains("field \"folder\"") || error.contains("field \"models\""), "{error}");
+        let error = member(json!({"id":7,"agent":"claude"}));
+        assert!(error.contains("field \"id\""), "{error}");
+        let task = |value: Value| parse::<Task>(&value, &[], "A task", TASK_EXAMPLE).unwrap_err().to_string();
+        let error = task(json!({"id":2,"title":"Follow-up","assignee":"dev","deps":[1]}));
+        assert!(error.contains("A task \"2\" is invalid: field \"deps\""), "{error}");
+        let error = task(json!({"id":2,"title":["no"]}));
+        assert!(error.contains("field \"title\""), "{error}");
     }
 }

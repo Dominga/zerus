@@ -1,4 +1,5 @@
 import type { Text } from "./text";
+import type { DraftMember } from "./ui/teams/types";
 // The batch the Rust side returns from `next_batch` (zerus-client-core
 // `Batch`, snake_case JSON). Rows arrive as compact view rows projected in
 // Rust; the webview never sees raw watch frames.
@@ -998,7 +999,11 @@ export interface TeamWaitingView { items: TeamWaitingItem[]; total: number; more
 /** The owner's confirmation of a team action, worded by the core. */
 export interface TeamConfirmation { name: string; title: string; text: string; action: string }
 
-/** A team action (client/core/src/teams/action.rs `TeamAction`), by its kind. */
+/**
+ * A team action (client/core/src/teams/action.rs `TeamAction`), by its kind:
+ * the one definition for the Team tab, Waiting for you, New team, settings and
+ * the catalog (task 47).
+ */
 export type TeamAction =
   | { kind: "approve"; phase?: number | null; plan_mode?: string | null; confirm_widening?: boolean; alongside?: boolean }
   | { kind: "accept"; task: number; reason?: string; manual?: boolean }
@@ -1012,12 +1017,28 @@ export type TeamAction =
   | { kind: "decide_tool"; offer: string; allow: boolean; reason?: string }
   | { kind: "release"; task: number }
   | { kind: "retry"; task: number }
-  | { kind: "finish" };
+  | { kind: "finish" }
+  | { kind: "draft_start"; folder: string; name?: string; lead: DraftMember; project?: string; project_id?: string; template?: string }
+  | { kind: "draft_update"; revision: number; set: Record<string, unknown> }
+  | { kind: "draft_seen"; fields: string[] }
+  | { kind: "draft_create"; approve?: boolean; confirm_widening?: boolean }
+  | { kind: "draft_discard"; stop_lead?: boolean; reason?: string }
+  | { kind: "settings"; settings: Record<string, unknown> }
+  | { kind: "catalog_propose"; change: Record<string, unknown> }
+  | { kind: "catalog_decide"; proposal: string; decision: "keep" | "reject" | "undo" }
+  | { kind: "catalog_apply" }
+  | { kind: "catalog_discard" };
 
-export interface TeamCall { computer: ComputerId; team: string; team_name: string; action: TeamAction; confirmed: boolean; request_id?: string | null }
+/**
+ * One call (core `TeamCall`): the computer ("" is this one), the team (empty
+ * for a draft start, a tool offer or the catalog), its name for the
+ * confirmation, whether the owner confirmed it, and the request id of an
+ * earlier attempt sent again.
+ */
+export interface TeamCall { computer?: ComputerId; team?: string; team_name?: string; action: TeamAction; confirmed?: boolean; request_id?: string | null }
 
 export type TeamOutcome =
-  | { outcome: "done"; receipt: unknown; request_id: string }
+  | { outcome: "done"; receipt: Record<string, unknown>; request_id: string }
   | { outcome: "failed"; detail: string; request_id: string }
   | { outcome: "uncertain"; detail: string; request_id: string }
   | { outcome: "confirm"; confirmation: TeamConfirmation };

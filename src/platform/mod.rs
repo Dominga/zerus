@@ -24,6 +24,50 @@ mod windows;
 #[cfg(windows)]
 pub use windows::*;
 
+/// Task #28: whether this process runs in a sandbox below Medium integrity
+/// (a DeepSeek member's confined shell on Windows). It reads Zerus state, but
+/// writes and the session host stay closed to it, so its `hgs run` and its
+/// host reads go through the member's folder to the team worker instead.
+/// Never on Unix, where agent sandboxes have no integrity levels.
+pub fn sandboxed() -> bool {
+    #[cfg(test)]
+    if let Some(forced) = SANDBOXED.with(std::cell::Cell::get) {
+        return forced;
+    }
+    #[cfg(windows)]
+    {
+        crate::host::token::below_medium()
+    }
+    #[cfg(not(windows))]
+    {
+        false
+    }
+}
+
+#[cfg(test)]
+thread_local! {
+    static SANDBOXED: std::cell::Cell<Option<bool>> = const { std::cell::Cell::new(None) };
+}
+
+/// A test's stand-in for this process's sandbox, on this thread.
+#[cfg(test)]
+pub(crate) fn set_test_sandboxed(sandboxed: Option<bool>) {
+    SANDBOXED.with(|value| value.set(sandboxed));
+}
+
+/// Task #28: lowers this process to Low integrity before it starts a
+/// sandboxed member's run, so the run keeps the member's sandbox level.
+pub fn lower_to_low_integrity() -> io::Result<()> {
+    #[cfg(windows)]
+    {
+        crate::host::token::lower_current_to_low()
+    }
+    #[cfg(not(windows))]
+    {
+        Err(io::Error::other("integrity levels exist only on Windows"))
+    }
+}
+
 /// A completed process roster may still contain protected Linux processes whose
 /// paths the OS refuses to disclose. Keep these separate from readable paths:
 /// they require personal confirmation, never automatic cleanup authority.

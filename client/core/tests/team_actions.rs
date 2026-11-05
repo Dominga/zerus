@@ -17,10 +17,16 @@ fn fake(test: &str) -> FakeHgs {
 }
 
 fn reply(fake: &FakeHgs, op: &str, host: &str, answer: Value) {
-    let name = format!(
-        "team-{op}-{}.json",
-        if host.is_empty() { "local" } else { host }
-    );
+    let name = match op.strip_prefix("catalog ") {
+        Some(sub) => format!(
+            "team-catalog-{sub}-{}.json",
+            if host.is_empty() { "local" } else { host }
+        ),
+        None => format!(
+            "team-{op}-{}.json",
+            if host.is_empty() { "local" } else { host }
+        ),
+    };
     std::fs::write(fake.dir.join(name), answer.to_string()).unwrap();
 }
 
@@ -35,6 +41,14 @@ fn requests(fake: &FakeHgs) -> Vec<(String, Value)> {
                 entry["request"].clone(),
             )
         })
+        .collect()
+}
+
+/// The catalog requests the fake received, in order.
+fn catalog_requests(fake: &FakeHgs) -> Vec<(String, Value)> {
+    requests(fake)
+        .into_iter()
+        .filter(|(op, _)| op.starts_with("catalog "))
         .collect()
 }
 
@@ -236,6 +250,13 @@ fn actions() -> Vec<(TeamAction, &'static str, Value)> {
             "draft",
             json!({"action": "discard", "stop_lead": true}),
         ),
+        (
+            TeamAction::Settings {
+                settings: json!({"branch_per_task": true, "land": false}),
+            },
+            "settings",
+            json!({"settings": {"branch_per_task": true, "land": false}}),
+        ),
     ]
 }
 
@@ -362,6 +383,117 @@ fn every_action_sends_its_request_once_and_gives_the_receipt() {
         assert!(matches!(outcome, TeamOutcome::Failed { .. }), "{outcome:?}");
     }
     assert_eq!(requests(&fake).len(), before);
+}
+
+#[test]
+fn catalog_actions_send_their_requests_and_apply_and_discard_ask_first() {
+    let fake = fake("team_actions_catalog");
+    let cases = [
+        (
+            TeamAction::CatalogPropose {
+                change: json!({"kind": "role", "target": "tester", "action": "update"}),
+            },
+            "propose",
+            json!({"change": {"kind": "role", "target": "tester", "action": "update"}}),
+        ),
+        (
+            TeamAction::CatalogDecide {
+                proposal: "p1".into(),
+                decision: "keep".into(),
+            },
+            "decide",
+            json!({"proposal": "p1", "decision": "keep"}),
+        ),
+        (TeamAction::CatalogApply, "apply", json!({})),
+        (TeamAction::CatalogDiscard, "discard", json!({})),
+    ];
+    let mut sent = 0;
+    for (action, sub, fields) in cases {
+        reply(
+            &fake,
+            &format!("catalog {sub}"),
+            "",
+            json!({"stdout": {"status": "ok"}, "echo": true}),
+        );
+        let outcome = run(
+            &fake.path(),
+            &TeamCall {
+                team: String::new(),
+                ..call(action)
+            },
+        );
+        let TeamOutcome::Done {
+            receipt,
+            request_id,
+        } = &outcome
+        else {
+            panic!("{sub}: {outcome:?}")
+        };
+        assert_eq!(receipt["request_id"], json!(request_id), "{sub}");
+        sent += 1;
+        let log = catalog_requests(&fake);
+        assert_eq!(log.len(), sent, "{sub} ran once");
+        let (logged_op, request) = log.last().unwrap();
+        assert_eq!(logged_op, &format!("catalog {sub}"));
+        let mut expected = fields.as_object().unwrap().clone();
+        expected.insert("by".into(), json!("human"));
+        expected.insert("request_id".into(), json!(request_id));
+        assert_eq!(request, &Value::Object(expected), "{sub}");
+        assert!(request.get("team").is_none(), "a catalog call names no team");
+    }
+    // Apply and discard end the draft, so both ask the owner first.
+    for (action, dialog) in [
+        (TeamAction::CatalogApply, "teamCatalogApplyConfirm"),
+        (TeamAction::CatalogDiscard, "teamCatalogDiscardConfirm"),
+    ] {
+        let outcome = run(
+            &fake.path(),
+            &TeamCall {
+                team: String::new(),
+                confirmed: false,
+                ..call(action)
+            },
+        );
+        let TeamOutcome::Confirm { confirmation } = &outcome else {
+            panic!("{outcome:?}")
+        };
+        assert_eq!(confirmation.name, dialog);
+    }
+    assert_eq!(catalog_requests(&fake).len(), sent, "nothing ran before confirmation");
+    // The exact command is `hgs team catalog decide --json`.
+    let (invocation, _) = prepare(&TeamCall {
+        team: String::new(),
+        ..call(TeamAction::CatalogDecide {
+            proposal: "p1".into(),
+            decision: "keep".into(),
+        })
+    })
+    .unwrap();
+    assert_eq!(
+        invocation.args,
+        ["team", "catalog", "decide", "--json"]
+    );
+    // hgs's own refusal is failed, never uncertain or resent.
+    reply(
+        &fake,
+        "catalog decide",
+        "",
+        json!({"exit": 1, "stderr": "hgs: only the owner decides catalog proposals\n"}),
+    );
+    let outcome = run(
+        &fake.path(),
+        &TeamCall {
+            team: String::new(),
+            ..call(TeamAction::CatalogDecide {
+                proposal: "p1".into(),
+                decision: "keep".into(),
+            })
+        },
+    );
+    assert!(
+        matches!(&outcome, TeamOutcome::Failed { detail, .. } if detail == "hgs: only the owner decides catalog proposals"),
+        "{outcome:?}"
+    );
 }
 
 #[test]
@@ -549,6 +681,24 @@ fn a_refusal_fails_and_an_unknown_outcome_is_uncertain_and_never_sent_again() {
         ),
         TeamOutcome::Uncertain { .. }
     ));
+    // An owner-only settings change refused by hgs is failed, with hgs's
+    // own words, and is never resent.
+    reply(
+        &fake,
+        "settings",
+        "",
+        json!({"exit": 1, "stderr": "hgs: only the owner can change team settings\n"}),
+    );
+    let settings = TeamAction::Settings {
+        settings: json!({"land": true}),
+    };
+    let before = requests(&fake).len();
+    let outcome = run(&fake.path(), &call(settings.clone()));
+    assert!(
+        matches!(&outcome, TeamOutcome::Failed { detail, .. } if detail == "hgs: only the owner can change team settings"),
+        "{outcome:?}"
+    );
+    assert_eq!(requests(&fake).len(), before + 1, "a refusal is not resent");
 }
 
 #[test]
@@ -624,6 +774,9 @@ fn requests_that_cannot_be_made_never_run_and_a_peer_gets_its_alias() {
         revision: 1,
         set: json!({})
     })));
+    assert!(refused(call(TeamAction::Settings {
+        settings: json!({})
+    })));
     assert!(requests(&fake).is_empty(), "no refused request ran");
     // A peer: `hgs @studio team ...`, Qt's 45 s.
     let (invocation, _) = prepare(&TeamCall {
@@ -686,4 +839,9 @@ fn the_webview_names_an_action_by_its_kind() {
     )
     .unwrap();
     assert_eq!(decide.op(), "decide-proposal");
+    let settings: TeamAction = serde_json::from_value(
+        json!({"kind": "settings", "settings": {"land": true}}),
+    )
+    .unwrap();
+    assert_eq!(settings.op(), "settings");
 }

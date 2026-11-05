@@ -332,14 +332,14 @@ fn a_check_task_needs_a_command_and_kind() {
     )
     .unwrap_err()
     .to_string();
-    assert_eq!(empty, "Task #1 is a check: its command is empty");
+    assert_eq!(empty, "Task #1: field \"check.command\" is empty");
     let timeout = plan_with(
         &mut team,
         json!({"id":1,"title":"Build","assignee":"dev","kind":"check","check":{"command":"cargo test","timeout_minutes":0}}),
     )
     .unwrap_err()
     .to_string();
-    assert_eq!(timeout, "Task #1: a check waits 1 to 1440 minutes");
+    assert_eq!(timeout, "Task #1: field \"check.timeout_minutes\": a check waits 1 to 1440 minutes");
     let no_kind = plan_with(
         &mut team,
         json!({"id":1,"title":"Build","assignee":"dev","check":{"command":"cargo test"}}),
@@ -498,6 +498,22 @@ fn a_member_asks_about_its_open_attempt() {
     assert_eq!(error, "You have 2 open pieces of work: #1, #2; name one with \"task\"");
     let asked = apply(&mut team, "ask", &json!({"task":2,"text":"Which tests?"}), &Actor::Member("dev".into()), &none, &mut events).unwrap();
     assert_eq!((asked["question"].as_str(), asked["task"].as_u64()), (Some("q2"), Some(2)));
+    // Task #29: a named attempt is the work the question goes to, and an
+    // attempt that is not the member's open one is refused (team 33fbafeb's
+    // audit filed a probe with a made-up attempt as a real question, q24).
+    // hand_out numbers attempts per task; real ids are unique per hand-out.
+    let second = "00000000-0000-4000-8000-0000000000b2".to_owned();
+    team.task_mut(2).unwrap().attempts.last_mut().unwrap().id = second.clone();
+    let asked = apply(&mut team, "ask", &json!({"attempt":second,"text":"And the fixtures?"}), &Actor::Member("dev".into()), &none, &mut events).unwrap();
+    assert_eq!((asked["question"].as_str(), asked["task"].as_u64()), (Some("q3"), Some(2)));
+    let questions = |team: &Team| team.tasks.iter().flat_map(|task| &task.attempts).map(|attempt| attempt.questions.len()).sum::<usize>();
+    let before = questions(&team);
+    for input in [json!({"attempt":"00000000-0000-4000-8000-00000000abcd","text":"audit probe"}),
+        json!({"task":1,"attempt":second,"text":"Wrong pair"})] {
+        let error = apply(&mut team, "ask", &input, &Actor::Member("dev".into()), &none, &mut events).unwrap_err().to_string();
+        assert!(error.contains("is not your open attempt or stage"), "{error}");
+    }
+    assert_eq!(questions(&team), before, "nothing was asked");
     // Only a running or paused team takes questions.
     team.status = TeamStatus::Done;
     let error = apply(&mut team, "ask", &json!({"text":"Which?"}), &Actor::Member("dev".into()), &none, &mut events)

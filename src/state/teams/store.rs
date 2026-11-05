@@ -185,6 +185,11 @@ impl Store {
         // Task 25: a write waits for the lock (it used to give up after 2 s);
         // a read waits less.
         db.busy_timeout(if write { BUSY_WAIT } else { Duration::from_secs(10) })?;
+        // Task #28: a sorted read (`team list`, `team current`) spilled to a
+        // temporary file in %TEMP%, which a sandboxed member at Low integrity
+        // may not create: "unable to open database file". Sorts stay in
+        // memory; every such read is bounded by its LIMIT.
+        db.pragma_update(None, "temp_store", "MEMORY")?;
         if write {
             db.execute_batch(
                 "PRAGMA journal_mode=DELETE; PRAGMA max_page_count=262144;
@@ -540,6 +545,36 @@ fn record(transaction: &rusqlite::Transaction, id: &str, input: &Value, receipt:
 mod tests {
     use super::super::model::{TeamStatus};
     use super::*;
+
+    /// Task #28: `hgs team current` and `hgs team list` from a sandboxed
+    /// DeepSeek member failed with "unable to open database file": the sorted
+    /// read of the active teams spilled to a temporary file, and Low integrity
+    /// may not create one in %TEMP%. Here the temporary folder is gone before
+    /// the read, and the sort is larger than the cache.
+    #[test]
+    fn a_sorted_read_needs_no_temporary_file() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("teams.sqlite3");
+        let store = Store::open_at(&path, true).unwrap();
+        for index in 0..40 {
+            let team = Team { id: format!("t{index}"), name: format!("t{index}"), goal: "g".repeat(200_000),
+                status: TeamStatus::Running, ..Default::default() };
+            store.db.execute("INSERT INTO teams(id,revision,status,updated,payload) VALUES(?1,1,'running',?2,?3)",
+                params![team.id, index as f64, serde_json::to_string(&team).unwrap()]).unwrap();
+        }
+        drop(store);
+        let store = Store::open_at(&path, false).unwrap();
+        store.db.pragma_update(None, "cache_size", -1).unwrap();
+        let gone = dir.path().join("gone");
+        std::fs::create_dir(&gone).unwrap();
+        store.db.execute_batch(&format!("PRAGMA temp_store_directory='{}'", gone.display())).unwrap();
+        std::fs::remove_dir(&gone).unwrap();
+        let teams = store.active_teams(1000);
+        store.db.execute_batch("PRAGMA temp_store_directory=''").unwrap();
+        let teams = teams.unwrap();
+        assert_eq!(teams.len(), 40);
+        assert_eq!(teams[0].id, "t39");
+    }
 
     #[test]
     fn a_sandbox_blocked_write_says_what_to_do() {

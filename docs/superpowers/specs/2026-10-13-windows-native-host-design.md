@@ -669,6 +669,14 @@ the first one and stops it when it exits. A host that does not know the request
 (an older one) is treated like no host; the next request reaches its successor.
 The M3 variable `HGS_HOST_RECOVERY_WORKER` is gone.
 
+WhiteWh fork, task #33: protocol 1's `caller_session` names the session whose
+root process or job holds the connection's own client (the PID from
+`GetNamedPipeClientProcessId` at authentication, never one a request names), with
+its pane and run marker; `not_found` outside every session, `unsupported` on an
+older host. The CLI asks it only when its ancestry walk to the session's owner
+breaks (a Git Bash wrapper's exec), and accepts it only for the exact session,
+pane and run its environment names.
+
 ### D15. Paths and files
 
 - `platform::canonical` returns canonical paths without the `\\?\` prefix; every

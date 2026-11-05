@@ -2497,9 +2497,9 @@ mod process {
     /// `prepare_environment`'s job allows that (spec D4); an enclosing job that
     /// forbids breakaway makes it fail.
     pub fn spawn_detached(command: &mut Command) -> io::Result<Child> {
-        command
-            .creation_flags(CREATE_BREAKAWAY_FROM_JOB | CREATE_NEW_PROCESS_GROUP | CREATE_NO_WINDOW)
-            .spawn()
+        spawn_unshared(
+            command.creation_flags(CREATE_BREAKAWAY_FROM_JOB | CREATE_NEW_PROCESS_GROUP | CREATE_NO_WINDOW),
+        )
             .map_err(|error| {
                 // WhiteWh fork: name the cause instead of a bare "access denied".
                 let program = Path::new(command.get_program());
@@ -2514,6 +2514,30 @@ mod process {
                     error
                 }
             })
+    }
+
+    /// Task #28 (4): a process meant to outlive this one starts without this
+    /// process's standard handles. Windows hands a child every inheritable
+    /// handle, not only the ones its STARTUPINFO names, and std starts children
+    /// with inheritance on: a detached `hgs run` runner kept the write end of
+    /// the caller's output pipe, so `hgs run --json` printed its answer but the
+    /// caller (PowerShell, Node) read no end of output until the build ended,
+    /// minutes later. This process's own standard handles stop being
+    /// inheritable before the spawn; a later child that inherits one gets a
+    /// duplicate std makes for it, so nothing else changes.
+    pub(crate) fn spawn_unshared(command: &mut Command) -> io::Result<Child> {
+        use windows_sys::Win32::Foundation::{SetHandleInformation, HANDLE_FLAG_INHERIT};
+        use windows_sys::Win32::System::Console::{GetStdHandle, STD_ERROR_HANDLE, STD_INPUT_HANDLE, STD_OUTPUT_HANDLE};
+        for id in [STD_INPUT_HANDLE, STD_OUTPUT_HANDLE, STD_ERROR_HANDLE] {
+            // SAFETY: GetStdHandle takes a constant and returns a handle this
+            // process owns, null or INVALID_HANDLE_VALUE; only its flag changes.
+            let handle = unsafe { GetStdHandle(id) };
+            if !handle.is_null() && handle != INVALID_HANDLE_VALUE {
+                // Best effort: a console pseudo-handle refuses, and has nothing to leak.
+                unsafe { SetHandleInformation(handle, HANDLE_FLAG_INHERIT, 0) };
+            }
+        }
+        command.spawn()
     }
 
     type Reader = thread::JoinHandle<io::Result<Vec<u8>>>;
@@ -3792,4 +3816,59 @@ mod tests {
         assert!(select_powershell(None, &[], |_| unreachable!()).is_err());
     }
 
+}
+
+/// Task #28 (4): `hgs run --json` printed its answer at once, yet the caller
+/// (PowerShell in a DeepSeek member, the lead's Node shell) waited minutes for
+/// the end of the output: the detached runner held the caller's pipe.
+#[cfg(test)]
+mod detach_tests {
+    use std::io::Read;
+    use std::process::{Command, Stdio};
+    use std::time::{Duration, Instant};
+
+    const HELPER: &str = "platform::windows::detach_tests::detached_child_helper";
+
+    /// The helper side: it starts a ~30 s child the way `spawn_detached`
+    /// does (without the breakaway a test job may forbid) and exits at once.
+    #[test]
+    fn detached_child_helper() {
+        if std::env::var_os("HGS_TEST_DETACH_HELPER").is_none() {
+            return;
+        }
+        let mut sleeper = Command::new("ping");
+        sleeper.args(["-n", "30", "127.0.0.1"]).stdin(Stdio::null()).stdout(Stdio::null()).stderr(Stdio::null());
+        let child = super::process::spawn_unshared(&mut sleeper).unwrap();
+        println!("sleeper {}", child.id());
+    }
+
+    #[test]
+    fn a_detached_child_leaves_the_callers_output_pipe() {
+        let started = Instant::now();
+        let mut helper = Command::new(std::env::current_exe().unwrap());
+        helper
+            .args([HELPER, "--exact", "--nocapture", "--test-threads=1"])
+            .env("HGS_TEST_DETACH_HELPER", "1")
+            .stdin(Stdio::null())
+            .stdout(Stdio::piped())
+            .stderr(Stdio::null());
+        let mut child = helper.spawn().unwrap();
+        let mut output = child.stdout.take().unwrap();
+        let (sender, receiver) = std::sync::mpsc::channel();
+        std::thread::spawn(move || {
+            let mut text = String::new();
+            let _ = output.read_to_string(&mut text);
+            let _ = sender.send(text);
+        });
+        // The helper exits within seconds; its output must end with it, not
+        // when the 30 s child it left behind ends.
+        let text = receiver.recv_timeout(Duration::from_secs(20));
+        let _ = child.wait();
+        if let Some(pid) = text.as_deref().ok().and_then(|text| text.split("sleeper ").nth(1)).and_then(|rest| rest.split_whitespace().next()) {
+            let _ = Command::new("taskkill").args(["/PID", pid, "/F"]).stdout(Stdio::null()).stderr(Stdio::null()).status();
+        }
+        let text = text.expect("the caller's output stayed open while the detached child ran");
+        assert!(text.contains("sleeper "), "{text}");
+        assert!(started.elapsed() < Duration::from_secs(20), "{:?}", started.elapsed());
+    }
 }

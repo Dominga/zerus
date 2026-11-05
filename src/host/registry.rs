@@ -31,7 +31,7 @@ use super::{
     link::Link,
     log,
     protocol::{
-        Attach, Attached, Captured, ClientEntry, ClientList, ConsoleEvidence, CreateSession,
+        Attach, Attached, CallerSession, Captured, ClientEntry, ClientList, ConsoleEvidence, CreateSession,
         Created, Done, EnvValue, ErrorBody, ErrorCode, Grown, HostStatus, InputClaim, InputReady,
         LaunchState, Listed, Op, PaneDetails, PaneEntry, Resolved, SessionEntry, Signal,
         SupervisorOp, SupervisorRegistration, Target, RUN_MARKER,
@@ -514,6 +514,11 @@ impl<L: Launcher> Host<L> {
                 ErrorCode::Invalid,
                 "this request changes the connection and needs one of its own",
             )),
+            // Task #33: only the connection knows its client's process.
+            Op::CallerSession => Err(error(
+                ErrorCode::Invalid,
+                "caller_session is answered for a connection's own client",
+            )),
             Op::Unsupported => Err(error(
                 ErrorCode::Unsupported,
                 "this session host does not know the request",
@@ -954,6 +959,22 @@ impl<L: Launcher> Host<L> {
     pub(crate) fn detached(&self, session: &Session, client: &Attachment) {
         session.detach(client.id);
         self.changed();
+    }
+
+    /// Task #33: the session whose root process or job holds `client_pid`,
+    /// the connection's own kernel-verified client. Session jobs never share a
+    /// process and forbid breakaway, so at most one session holds it.
+    pub(crate) fn caller_session(&self, client_pid: u32) -> Result<Value, ErrorBody> {
+        let sessions: Vec<Arc<Session>> = self.registry().sessions.values().cloned().collect();
+        let found = sessions.iter().find(|session| session.holds(client_pid)).ok_or_else(|| {
+            error(ErrorCode::NotFound, "this process runs in no session of this host")
+        })?;
+        payload(&CallerSession {
+            session: found.session_id(),
+            name: found.name(),
+            pane: found.pane_id(),
+            run_marker: found.variable(RUN_MARKER).unwrap_or_default(),
+        })
     }
 
     /// Accept `link` as the supervisor channel of a session (D10), from a

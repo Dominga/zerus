@@ -277,6 +277,41 @@ fn prune_rejected(folder: &Path, age: impl Fn(SystemTime) -> Duration) {
     prune(&mut files, age);
 }
 
+/// Task #28 (2): the host reads a sandboxed member may ask the worker for.
+/// Its shell cannot reach the session host (Low integrity, and DeepSeek's
+/// confined token opens no named pipe), so these few reads run for it outside
+/// the sandbox: `hgs ls` and `hgs inspect <session>`, with options that only
+/// shape the answer. Nothing here writes, sends, starts or attaches; the
+/// sandbox already reads every file these reads read, so they disclose
+/// nothing new. `--read-observation`, which records a read, is not one.
+pub(crate) fn sandbox_read_allowed(argv: &[String]) -> bool {
+    let words: Vec<&str> = argv.iter().map(String::as_str).collect();
+    match words.as_slice() {
+        ["ls", options @ ..] => options.iter().all(|option| matches!(*option, "--json" | "--local" | "--no-archives")),
+        ["inspect", name, options @ ..] => {
+            let name_ok = !name.is_empty()
+                && name.chars().count() <= 300
+                && !name.starts_with('-')
+                && !name.starts_with('@')
+                && !name.chars().any(char::is_control);
+            let mut rest = options.iter();
+            let mut options_ok = true;
+            while let Some(option) = rest.next() {
+                options_ok &= match *option {
+                    "--skip-processes" => true,
+                    "--after" => rest.next().is_some_and(|value| !value.is_empty() && value.len() <= 18 && value.bytes().all(|b| b.is_ascii_digit())),
+                    _ => false,
+                };
+            }
+            name_ok && options_ok
+        }
+        _ => false,
+    }
+}
+
+/// The most a brokered read answers with; a larger listing is cut and says so.
+pub(crate) const READ_STDOUT: usize = 8 * 1024 * 1024;
+
 /// The outcome the worker wrote, when it has.
 pub(crate) fn result(folder: &Path, request_id: &str) -> Option<Value> {
     fs::read(result_path(folder, request_id)).ok().and_then(|bytes| serde_json::from_slice(&bytes).ok())
@@ -313,6 +348,21 @@ mod tests {
 
     fn request(id: &str, op: &str) -> Value {
         json!({"op":op,"request_id":id,"team":"t","member":"dev","attempt":"A1","input":{"text":"Done"}})
+    }
+
+    /// Task #28 (2): only reads, and only with options that shape them.
+    #[test]
+    fn a_sandbox_asks_only_for_host_reads() {
+        let argv = |words: &[&str]| words.iter().map(|word| (*word).to_owned()).collect::<Vec<_>>();
+        for allowed in [&["ls"][..], &["ls", "--json"], &["ls", "--json", "--local", "--no-archives"],
+            &["inspect", "dsh/Zerus/zerus-next-for-the-fork-qa"], &["inspect", "claude/p/t", "--skip-processes", "--after", "42"]] {
+            assert!(sandbox_read_allowed(&argv(allowed)), "{allowed:?}");
+        }
+        for refused in [&[][..], &["send", "claude/p/t"], &["ls", "--json", "--prune"], &["inspect"], &["inspect", "--after"],
+            &["inspect", "claude/p/t", "--read-observation"], &["inspect", "claude/p/t", "--after", "-1"],
+            &["inspect", "@peer"], &["launch", "claude"], &["run", "--json"], &["team", "report", "--json"]] {
+            assert!(!sandbox_read_allowed(&argv(refused)), "{refused:?}");
+        }
     }
 
     #[test]

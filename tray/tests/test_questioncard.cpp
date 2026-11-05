@@ -761,6 +761,8 @@ void TestQuestionCard::terminalOnlyChoicesDoNotPretendToAcceptAnswers()
     setQuestionReady(card, "session", question);
     QVERIFY(option(card, "opt_0_0")->isVisible()); QVERIFY(option(card, "opt_0_0")->isEnabled());
     QVERIFY(!option(card, "opt_0_0")->parentWidget()->property("readOnly").toBool());
+    auto *tabs = card.findChild<QTabBar *>("questionTabs");
+    QVERIFY(tabs); tabs->setCurrentIndex(tabs->count() - 1);
     QVERIFY(!terminal->property("prominent").toBool()); QVERIFY(submit(card)->isVisible());
 }
 

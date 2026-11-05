@@ -11,8 +11,8 @@
 //! `feed:`, `inbox:`, `spans:`, `profile:` followed by the team id.
 use super::read::{TeamRead, FEED_PAGE};
 use super::view::{
-    self, FeedEvent, FeedView, InboxView, NewTeamView, PlanGraph, ProfileView, SpansView, TeamList,
-    TeamView, WaitingView,
+    self, CatalogView, FeedEvent, FeedView, InboxView, NewTeamView, PlanGraph, ProfileView,
+    SpansView, TeamList, TeamView, WaitingView,
 };
 use crate::reads::ReadError;
 use serde::Serialize;
@@ -45,6 +45,8 @@ pub struct TeamsFollow {
     pub waiting: bool,
     /// The team whose tab, plan or New team form is open.
     pub team: Option<String>,
+    /// The team catalog and the designer's draft.
+    pub catalog: bool,
 }
 
 /// One change of a Teams view, keyed as the module says.
@@ -59,6 +61,7 @@ pub enum TeamsUpdate {
     Waiting(Arc<WaitingView>),
     Spans(Arc<SpansView>),
     Profile(Arc<ProfileView>),
+    Catalog(Arc<CatalogView>),
     /// The read failed; the view keeps what it showed.
     Failed {
         code: String,
@@ -81,6 +84,7 @@ impl TeamsUpdate {
             Self::Waiting(_) => "waiting",
             Self::Spans(_) => "spans",
             Self::Profile(_) => "profile",
+            Self::Catalog(_) => "catalog",
             Self::Failed { .. } => "failed",
             Self::Ended => "ended",
         }
@@ -101,6 +105,7 @@ impl TeamsUpdate {
             Self::Waiting(view) => value(&**view),
             Self::Spans(view) => value(&**view),
             Self::Profile(view) => value(&**view),
+            Self::Catalog(view) => value(&**view),
             Self::Failed { code, message } => serde_json::json!({"code": code, "message": message}),
             Self::Ended => Value::Null,
         }
@@ -127,6 +132,7 @@ enum Slot {
     Status,
     Inbox,
     Feed,
+    Catalog,
 }
 
 #[derive(Debug, Default)]
@@ -197,6 +203,7 @@ impl TeamsModel {
             (Slot::Status, self.follow.team.is_some()),
             (Slot::Inbox, self.follow.team.is_some()),
             (Slot::Feed, self.follow.team.is_some()),
+            (Slot::Catalog, self.follow.catalog),
         ];
         for (slot, on) in wanted {
             if on {
@@ -210,6 +217,9 @@ impl TeamsModel {
         }
         if !self.follow.waiting {
             self.end("waiting", &mut out);
+        }
+        if !self.follow.catalog {
+            self.end("catalog", &mut out);
         }
         out
     }
@@ -295,6 +305,7 @@ impl TeamsModel {
             (Slot::Status, Some(team)) => TeamRead::Status { team },
             (Slot::Inbox, Some(team)) => TeamRead::Inbox { team },
             (Slot::Feed, Some(team)) => TeamRead::Events { team, before: None },
+            (Slot::Catalog, _) => TeamRead::Catalog,
             // A team slot without a watched team: it cannot be due again.
             _ => {
                 self.due.remove(&slot);
@@ -372,6 +383,7 @@ impl TeamsModel {
             TeamRead::Status { .. } => Some(Slot::Status),
             TeamRead::Inbox { .. } => Some(Slot::Inbox),
             TeamRead::Events { before: None, .. } => Some(Slot::Feed),
+            TeamRead::Catalog => Some(Slot::Catalog),
             _ => None,
         }
     }
@@ -385,6 +397,7 @@ impl TeamsModel {
             TeamRead::Events { team, .. } => team_key("feed", team),
             TeamRead::Spans { team, .. } => team_key("spans", team),
             TeamRead::Profile { team } => team_key("profile", team),
+            TeamRead::Catalog => "catalog".into(),
         }
     }
 
@@ -493,6 +506,11 @@ impl TeamsModel {
             TeamRead::Profile { team } => self.send(
                 team_key("profile", team),
                 TeamsUpdate::Profile(Arc::new(view::profile(team, &value))),
+                &mut out,
+            ),
+            TeamRead::Catalog => self.send(
+                "catalog".into(),
+                TeamsUpdate::Catalog(Arc::new(view::catalog(&value))),
                 &mut out,
             ),
         }

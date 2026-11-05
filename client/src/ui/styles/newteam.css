@@ -1,0 +1,51 @@
+/* New team and Team settings: the compact form the Team tab opens. */
+.nt {
+  display: flex;
+  flex-direction: column;
+  min-width: 0;
+  min-height: 0;
+  height: 100%;
+  background: var(--z-color-page);
+  color: var(--z-color-text);
+}
+.nt-head { display: flex; align-items: center; gap: 8px; padding: 10px 14px; border-bottom: 1px solid var(--z-color-divider); }
+.nt-head h2 { margin: 0; font-size: var(--fs-lg); font-weight: 600; }
+.nt-body { flex: 1; min-height: 0; overflow: auto; display: flex; flex-direction: column; gap: 10px; padding: 12px 14px; }
+.nt-field { display: flex; flex-direction: column; gap: 4px; font-size: var(--fs-sm); color: var(--z-color-text-2); }
+.nt-field input, .nt-field textarea, .nt-row input, .nt-row select {
+  box-sizing: border-box;
+  min-width: 0;
+  padding: 6px 8px;
+  border: 1px solid var(--z-color-card-border);
+  border-radius: var(--z-radius-md);
+  background: var(--z-color-field);
+  color: var(--z-color-text);
+  font: inherit;
+}
+.nt-field textarea { resize: vertical; }
+.nt-goal { flex: none; }
+.nt-note { margin: 0; color: var(--z-color-warn); font-size: var(--fs-xs); line-height: 1.4; }
+.nt-members { display: flex; flex-direction: column; gap: 6px; padding-top: 4px; }
+.nt-members-head { display: flex; align-items: center; gap: 8px; font-size: var(--fs-sm); }
+.nt-hint { color: var(--z-color-muted); font-size: var(--fs-xs); }
+.nt-row { display: grid; grid-template-columns: minmax(120px, 1.4fr) 130px 180px; gap: 6px; align-items: center; }
+.nt-row .nt-error { grid-column: 1 / -1; }
+.nt-error { color: var(--z-color-danger); font-size: var(--fs-xs); }
+.nt-block-error { margin: 0; }
+.nt-created { margin: 0; color: var(--z-color-status-ready); font-size: var(--fs-sm); }
+.nt-foot { flex: none; display: flex; align-items: center; gap: 8px; padding: 10px 14px; border-top: 1px solid var(--z-color-divider); }
+.nt-check { display: flex; align-items: center; gap: 8px; font-size: var(--fs-sm); color: var(--z-color-text-2); }
+.nt-check input { flex: none; }
+.nt-settings {
+  position: absolute; right: 16px; top: 16px; bottom: 16px; width: 380px;
+  display: flex; flex-direction: column;
+  border: 1px solid var(--z-color-card-border); border-radius: 11px;
+  background: var(--z-color-raised);
+  box-shadow: var(--z-shadow, 0 8px 24px rgba(0, 0, 0, .25));
+  z-index: 4;
+}
+.nt-settings .nt-body { gap: 12px; }
+@media (max-width: 700px) {
+  .nt-row { grid-template-columns: 1fr; }
+  .nt-settings { left: 12px; right: 12px; width: auto; }
+}

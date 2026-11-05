@@ -2,7 +2,7 @@ import { createEffect, createMemo, createRoot, createSignal } from "solid-js";
 import { teamsFollow } from "../bridge";
 import { catalog } from "./catalog";
 import { page, selected } from "./ui";
-import { NOTHING, createTeams, sessionIs, type TeamsFollow } from "./teamsView";
+import { NOTHING, createTeams, mergeFollows, sessionIs, type TeamsNeed } from "./teamsView";
 import type { ComputerId, TeamMemberView, TeamWaitingItem, TeamWaitingView } from "../types";
 import type { Session } from "../ui/sessions/types";
 
@@ -30,14 +30,25 @@ export function memberRow(teamComputer: ComputerId, member: Pick<TeamMemberView,
   return undefined;
 }
 
-/** Task 11: how many views show Waiting for you (the page, the Team tab's banner); while any does, this computer's list is read. */
-const [waitingShown, setWaitingShown] = createSignal(0);
-/** Shows Waiting for you; the returned function hides it again. */
-export function showWaiting(): () => void {
-  setWaitingShown((n) => n + 1);
+/**
+ * Task 47: the one owner of what the Teams views read. Each open view says
+ * what it needs (Waiting for you, a team opened by New team or the Plan view,
+ * the catalog page) and takes it back when it closes; the selected session's
+ * team list and team are needed while the Sessions page shows it. The needs
+ * are merged into one follow per computer (`mergeFollows`).
+ */
+const [shownNeeds, setShownNeeds] = createSignal<readonly TeamsNeed[]>([]);
+function show(need: TeamsNeed): () => void {
+  setShownNeeds((needs) => [...needs, need]);
   let shown = true;
-  return () => { if (shown) { shown = false; setWaitingShown((n) => n - 1); } };
+  return () => { if (shown) { shown = false; setShownNeeds((needs) => needs.filter((found) => found !== need)); } };
 }
+/** Shows Waiting for you (this computer's list); the returned function hides it again. */
+export const showWaiting = (): (() => void) => show({ computer: "", waiting: true });
+/** Shows a computer's catalog page; the returned function hides it again. */
+export const showCatalog = (computer: ComputerId = ""): (() => void) => show({ computer, catalog: true });
+/** Shows one team outside the selected session (New team, the Plan view); the returned function hides it again. */
+export const showTeam = (computer: ComputerId, team: string): (() => void) => show({ computer, team });
 
 /** Task 11: items answered here leave at once, before the next read drops them. */
 const [answeredIds, setAnsweredIds] = createSignal<ReadonlySet<string>>(new Set());
@@ -62,16 +73,16 @@ createRoot(() => createEffect(() => {
 }));
 
 // The Sessions page reads the selected session's computer: its team list, and
-// the team the session belongs to. Another page, or no selection, reads nothing.
-// Waiting for you, while shown, reads this computer's list as well.
+// the team the session belongs to. Another page, or no selection, reads nothing
+// of it. The views shown elsewhere add their needs; every computer gets one
+// follow with all of them.
 createRoot(() => {
   let current = new Set<ComputerId>();
   createEffect(() => {
     const row = page() === "sessions" ? selected() : undefined;
     const computer = row && row.state !== "archived" ? row.computer : undefined;
-    const wanted = new Map<ComputerId, TeamsFollow>();
-    if (computer !== undefined) wanted.set(computer, { list: true, waiting: false, team: selectedTeam()?.id ?? null });
-    if (waitingShown() > 0) wanted.set("", { ...(wanted.get("") ?? NOTHING), waiting: true });
+    const needs: TeamsNeed[] = computer !== undefined ? [{ computer, list: true, team: selectedTeam()?.id ?? null }] : [];
+    const wanted = mergeFollows([...needs, ...shownNeeds()]);
     for (const gone of current) if (!wanted.has(gone)) teams.follow(gone, NOTHING);
     for (const [id, follow] of wanted) teams.follow(id, follow);
     current = new Set(wanted.keys());

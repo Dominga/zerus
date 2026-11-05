@@ -1151,12 +1151,24 @@ Start builds and long tests through Zerus so they show as work:
 `hgs team run` for a team member's templates (`hgs guide team-run`), and
 `hgs run --json [--wait]` with `{request_id, label, command, cwd?,
 timeout_minutes?}` for any session (`hgs guide run`). `hgs run` names the
-calling session by its process ancestry, runs the command in `sh -c` (`cmd /C`
-on Windows) in a detached runner with its whole process tree stopped after the
+calling session by its process ancestry, or a DeepSeek session by the
+conversation its harness exports as `DSH_SESSION_ID`, runs the command in
+`sh -c` (`cmd /C` on Windows) in a detached runner with its whole process tree stopped after the
 timeout (30 minutes by default, at most 240), keeps the last 4000 characters of
 output and records the run under the session; the same `request_id` never runs
 twice, and asking again reads its state. `hgs run --list --json` lists the
 session's newest runs.
+
+On Windows a Git Bash wrapper (`bash -c`, `env`, `nohup`, `timeout`, `xargs`,
+`sh -c`, `npx -c`) ends a Windows process between the session and hgs, so the
+process ancestry stops at a process that no longer exists. hgs then asks the
+session host which session's job holds it (`caller_session`): the host answers
+for the connection's own client, by the process ID the kernel gives it, and
+the session, pane and run marker must be exactly those of the record that
+`HGS_SESSION` and `HGS_RUN_ID` name. A leaked or stale session environment
+therefore never names the caller, and a process outside every session is still
+refused. A host from before this question answers `unsupported`, and the caller
+stays unproven as before.
 
 A job the session started otherwise makes it wait only while it waits for it. A
 long-lived process it does not wait for, such as a dev server, a watcher or a
@@ -5402,6 +5414,37 @@ finished but the branch was not made, the clone is kept: starting the member
 again finishes it (fetching the base when it moved on), provided the folder is a
 clone of this repository with no changes and without that branch. Any other
 folder there is refused, never changed.
+
+**DeepSeek members in their sandbox.** On Windows a DeepSeek member's shell runs
+in DeepSeek's sandbox at Low integrity. It reads Zerus state but may not write
+it, and the session host keeps it out (a sandboxed caller hears
+`this process runs in a sandbox below the session host's integrity level`).
+Such a member still does its work through its own folder, where its sandbox
+writes, and the team worker applies what it leaves there on its next tick
+(about three seconds):
+
+- `hgs team report`, `ask`, `commit` and `hgs team run` wait there as before.
+- `hgs run` waits there too. The worker records the run as the member
+  session's work, so the session is Building, and starts it at Low integrity
+  with its temporary files in `<folder>/.zerus-team/tmp`: a member's run never
+  runs above its sandbox. `--wait` and `--list` read the run's record as for
+  any session.
+- `hgs ls` and `hgs inspect <session>` (with `--skip-processes` or
+  `--after N`) are answered by the worker, which runs the read outside the
+  sandbox and leaves the output in the folder. These reads write, send, start
+  and attach nothing, and the sandbox already reads every file they read.
+  Every other command, such as `send`, `launch` or `attach`, stays closed to a
+  sandbox.
+
+This needs a running team: a sandboxed DeepSeek session outside a team is told
+so. The worker runs a member's `hgs run` at Low integrity but outside
+DeepSeek's own confinement, so the run, like any Low process, may use the
+network and named pipes of Low processes.
+
+A DeepSeek member's own folder is a clone: a worktree's git metadata lives in
+the main checkout's `.git`, which its sandbox may not write. A worktree asked
+for it (by a role, a template, the New team form or the worktree policy, which
+a clone also meets) becomes a clone; an adopted session keeps its folder.
 
 **DeepSeek session-log upload.** Zerus starts and resumes DeepSeek sessions with
 the official session-log upload off, unless the owner turns the block off in

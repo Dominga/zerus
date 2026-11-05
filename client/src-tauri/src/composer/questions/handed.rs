@@ -101,7 +101,7 @@ fn recorded(
     Outcome::Done {
         receipt: serde_json::json!({"request_id": outcome.request_id, "status": outcome.status,
             "question_hash": a.question.hash, "run_id": a.question.run_id,
-            "open_terminal": outcome.open_terminal}),
+            "open_terminal": outcome.open_terminal, "codex_update": outcome.codex_update}),
         cleanup: None,
     }
 }
@@ -124,13 +124,9 @@ impl Composers {
     /// reload.
     pub(super) fn offer_answer(&self, a: &Answering) -> Option<AnswerResult> {
         let route = self.answer_route()?;
-        // v1: a main session on this computer. Codex's update stays direct
-        // until the wire carries its phase (zerus-5wmh.66.4.7.2).
-        if !a.session.computer.is_empty()
-            || a.session.subagent.is_some()
-            || a.skipping
-            || a.question.source == "codex_update"
-        {
+        // v1: a main session on this computer. Codex's update goes only to
+        // a service that carries its phase (`deferred_answer::call`).
+        if !a.session.computer.is_empty() || a.session.subagent.is_some() || a.skipping {
             return None;
         }
         let checkpoint = self
@@ -256,9 +252,6 @@ impl Composers {
             rules::decision(&question, false),
         ];
         hub.answers.probed.insert(card.clone());
-        if question.source == "codex_update" {
-            return None;
-        }
         let answers = candidates.into_iter().flatten().find(|answers| {
             serde_json::to_string(answers)
                 .is_ok_and(|json| message_sha256(&json, []) == checkpoint.message_sha256)
@@ -338,7 +331,9 @@ impl Composers {
         // The held entry goes with the ending itself, under its lock.
         drop(hub);
         match ending {
-            Some(outcome) => self.answer_finished(a, outcome),
+            // A check observes; it is never the click that asked for
+            // Terminal.
+            Some(outcome) => self.answer_observed(a, outcome),
             None => self.answer_unconfirmed(a, UNCONFIRMED),
         }
     }

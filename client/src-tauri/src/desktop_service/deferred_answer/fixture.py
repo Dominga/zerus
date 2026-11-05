@@ -11,6 +11,8 @@ if sys.argv[1:] == ['--help']:
     c = json.loads((Path(__file__).parent / 'fixture.json').read_text())
     if not c.get('answer_no_abi'):
         print('Desktop deferred answer ABI: desktop-deferred-answer-v1', flush=True)
+    if c.get('answer_update_phase'):
+        print('Desktop deferred answer update phase: desktop-deferred-answer-update-phase-v1', flush=True)
 elif sys.argv[1:3] in [['desktop', 'frontend-request'], ['desktop', 'request']]:
     import io
     import json

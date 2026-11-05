@@ -27,6 +27,11 @@ pub use super::creation_clone::Scope;
 
 pub const ABI: &str = "desktop-deferred-answer-v1";
 pub const HELP_MARKER: &str = "Desktop deferred answer ABI: desktop-deferred-answer-v1";
+/// The service also carries Codex's update phase in a Recorded outcome
+/// (zerus-5wmh.66.4.7.2). Without this line a `codex_update` answer stays on
+/// the direct path, decided before any offer; the ABI is unchanged.
+pub const UPDATE_PHASE_MARKER: &str =
+    "Desktop deferred answer update phase: desktop-deferred-answer-update-phase-v1";
 pub const PROFILE: &str = "deferred-answer-v1";
 pub const REPLY_BYTES: usize = 24 << 10;
 /// The receipt statuses that record the answer: the provider acknowledged it
@@ -50,6 +55,12 @@ pub const RECEIPT_IN_PROGRESS: &str = "deferred_answer_in_progress";
 pub const RECEIPT_MISMATCH: &str = "deferred_answer_receipt_mismatch";
 /// The CLI receipt is oversized or not a readable receipt.
 pub const RECEIPT_INVALID: &str = "deferred_answer_receipt_invalid";
+/// The CLI receipt's Codex update phase is malformed, or present where this
+/// original cannot have one, or missing where it must be.
+pub const RECEIPT_PHASE: &str = "deferred_answer_receipt_phase";
+/// The question ID prefix of Codex's update question, the only question
+/// whose recorded answer carries an update phase.
+const UPDATE_QUESTION: &str = "codex-update:";
 /// The session is not a terminal agent's: an OpenCode or DeepSeek session's
 /// `hgs answer` goes to its own native backend. Direct, before any offer.
 pub const AGENT_REFUSED: &str = "deferred_answer_agent_refused";
@@ -411,6 +422,11 @@ impl Intent {
         if !SOURCES.contains(&text(&pinned, "source")) {
             return Err(SOURCE_REFUSED);
         }
+        // Codex's update question, and only it, has its ID prefix: the plan's
+        // question ID alone then says whether an update phase may follow.
+        if (text(&pinned, "source") == "codex_update") != question.id.starts_with(UPDATE_QUESTION) {
+            return Err("deferred_answer_consent_changed");
+        }
         let request: Request =
             serde_json::from_str(&self.original).map_err(|_| "invalid_deferred_answer_original")?;
         if request.request_id != self.request_id
@@ -544,9 +560,21 @@ impl Phase {
     }
 }
 
+/// What Codex's Update now did, as the CLI's own receipt of that answer
+/// observed it: a closed two-value set. Absence is the only "none".
+/// `installing` is that receipt's observation, never later progress, and
+/// `exited` is not proof that the update succeeded.
+#[derive(Clone, Copy, Debug, Deserialize, Serialize, PartialEq, Eq)]
+#[serde(rename_all = "snake_case")]
+pub enum UpdatePhase {
+    Installing,
+    Exited,
+}
+
 /// The closed outcome a matching recorded CLI receipt proves: its request
-/// ID, status, stdin digest and whether the answer continues in Terminal (an
-/// offer for an explicit Open Terminal action, never opened on its own).
+/// ID, status, stdin digest, whether the answer continues in Terminal (an
+/// offer for an explicit Open Terminal action, never opened on its own) and,
+/// for Codex's Update now only, the receipt's update phase.
 #[derive(Clone, Debug, Deserialize, Serialize, PartialEq, Eq)]
 #[serde(deny_unknown_fields)]
 pub struct Outcome {
@@ -554,6 +582,22 @@ pub struct Outcome {
     pub status: String,
     pub input_sha256: String,
     pub open_terminal: bool,
+    /// Present exactly when [`Outcome::paired`] says so; an explicit null
+    /// never decodes.
+    #[serde(
+        default,
+        skip_serializing_if = "Option::is_none",
+        deserialize_with = "present_phase"
+    )]
+    pub codex_update: Option<UpdatePhase>,
+}
+/// A phase key that is present must hold one of the two values.
+fn present_phase<'de, D: serde::Deserializer<'de>>(d: D) -> Result<Option<UpdatePhase>, D::Error> {
+    UpdatePhase::deserialize(d).map(Some)
+}
+/// Any value of a present key, kept raw so that null and other shapes refuse.
+fn present_value<'de, D: serde::Deserializer<'de>>(d: D) -> Result<Option<Value>, D::Error> {
+    Value::deserialize(d).map(Some)
 }
 /// The fields of the CLI's `question_receipts/<request_id>.json` record this
 /// rule reads; others are kept by the CLI and ignored here. A duplicate of
@@ -570,6 +614,8 @@ struct CliReceipt {
     status: String,
     #[serde(default)]
     open_terminal: bool,
+    #[serde(default, deserialize_with = "present_value")]
+    codex_update: Option<Value>,
 }
 /// What the CLI's own receipt of this original says.
 #[derive(Clone, Debug, PartialEq, Eq)]
@@ -586,6 +632,16 @@ impl Outcome {
         self.request_id == plan.request_id
             && (self.status == ANSWERED || self.status == SUBMITTED)
             && self.input_sha256 == plan.input_sha256
+            && self.paired(&plan.question_id)
+    }
+    /// The strict pairing: a phase is present if and only if this is Codex's
+    /// update question, answered, and continuing in Terminal (Update now).
+    /// Its two Skip choices carry neither.
+    pub fn paired(&self, question_id: &str) -> bool {
+        let update_now = question_id.starts_with(UPDATE_QUESTION)
+            && self.status == ANSWERED
+            && self.open_terminal;
+        self.codex_update.is_some() == update_now
     }
     /// The one rule for this original's CLI receipt. It proves this original
     /// only when its session (`name`), run, conversation, question, question
@@ -609,13 +665,32 @@ impl Outcome {
         if !exact {
             return Read::Unknown(RECEIPT_MISMATCH);
         }
+        // Only a recorded answer may carry a phase, and only one of the two
+        // values: null, "none", other cases or types never pass.
+        let codex_update = match receipt.codex_update {
+            None => None,
+            Some(value) => match serde_json::from_value::<UpdatePhase>(value) {
+                Ok(phase) if receipt.status == ANSWERED || receipt.status == SUBMITTED => {
+                    Some(phase)
+                }
+                _ => return Read::Unknown(RECEIPT_PHASE),
+            },
+        };
         match receipt.status.as_str() {
-            ANSWERED | SUBMITTED => Read::Recorded(Self {
-                request_id: receipt.request_id,
-                status: receipt.status,
-                input_sha256: receipt.digest,
-                open_terminal: receipt.open_terminal,
-            }),
+            ANSWERED | SUBMITTED => {
+                let outcome = Self {
+                    request_id: receipt.request_id,
+                    status: receipt.status,
+                    input_sha256: receipt.digest,
+                    open_terminal: receipt.open_terminal,
+                    codex_update,
+                };
+                if outcome.paired(&plan.question_id) {
+                    Read::Recorded(outcome)
+                } else {
+                    Read::Unknown(RECEIPT_PHASE)
+                }
+            }
             "rejected" => Read::Rejected,
             "in_progress" => Read::Unknown(RECEIPT_IN_PROGRESS),
             _ => Read::Unknown(RECEIPT_MISMATCH),
@@ -657,7 +732,13 @@ impl Receipt {
                 .all(|b| b.is_ascii_lowercase() || b.is_ascii_digit() || b == b'_')
             && (!self.drained || self.phase.terminal())
             && match self.phase {
-                Phase::Recorded => self.drained && self.outcome.is_some(),
+                Phase::Recorded => {
+                    self.drained
+                        && self
+                            .outcome
+                            .as_ref()
+                            .is_some_and(|outcome| outcome.paired(&self.binding.question_id))
+                }
                 // Only the closed no-spawn boundary and the CLI's exact
                 // durable refusal fail.
                 Phase::Failed => {

@@ -103,6 +103,7 @@ fn receipt(verified: &wire::Verified, phase: wire::Phase, drained: bool, code: &
             status: wire::ANSWERED.into(),
             input_sha256: verified.plan.input_sha256.clone(),
             open_terminal: true,
+            codex_update: None,
         }),
     })
 }
@@ -330,6 +331,88 @@ fn a_check_without_the_kind_knows_nothing_and_each_call_uses_its_lane() {
         assert_eq!(lane("deferred_answer"), ["frontend-request"]);
         let lookups = lane("deferred_answer_result");
         assert!(!lookups.is_empty() && lookups.iter().all(|a| a == "request"));
+        service.join().await.unwrap();
+    });
+}
+
+/// zerus-5wmh.66.4.7.2: Codex's update answer goes to the service only when
+/// it carries the update phase, decided before any request; there it comes
+/// back with its exact phase, from the admission and from a later check.
+#[test]
+fn a_codex_update_answer_needs_the_phase_line_and_comes_back_with_its_phase() {
+    if !private_case("desktop_service::deferred_answer::fixture_tests::a_codex_update_answer_needs_the_phase_line_and_comes_back_with_its_phase") {
+        return;
+    }
+    tauri::async_runtime::block_on(async {
+        // The base kind without the phase line: direct, nothing requested;
+        // another source still goes to the service.
+        let f = fixture(json!({}));
+        let (service, _cache) = connected(&f).await;
+        assert_eq!(
+            offer(
+                service.clone(),
+                SESSION,
+                original("codex_update", "update_now")
+            )
+            .await,
+            AnswerResult::Direct
+        );
+        assert_eq!(count(&f.0, "deferred_answer"), 0);
+        assert_ne!(
+            offer(
+                service.clone(),
+                SESSION,
+                original("claude_folder_trust", "yes")
+            )
+            .await,
+            AnswerResult::Direct
+        );
+        assert_eq!(count(&f.0, "deferred_answer"), 1);
+        service.join().await.unwrap();
+        // With the line: offered, and the phase returns exactly.
+        let f = fixture(json!({"answer_update_phase": true}));
+        let (service, _cache) = connected(&f).await;
+        for phase in [wire::UpdatePhase::Installing, wire::UpdatePhase::Exited] {
+            let update = original("codex_update", "update_now");
+            let v = verified(&service, &update).await;
+            let outcome = wire::Outcome {
+                request_id: v.plan.request_id.clone(),
+                status: wire::ANSWERED.into(),
+                input_sha256: v.plan.input_sha256.clone(),
+                open_terminal: true,
+                codex_update: Some(phase),
+            };
+            let recorded = json!(wire::Receipt {
+                binding: v.binding.clone(),
+                admission_epoch: v.intent.scope.service_epoch.clone(),
+                revision: 3,
+                phase: wire::Phase::Recorded,
+                drained: true,
+                code: String::new(),
+                outcome: Some(outcome.clone()),
+            });
+            let admission = json!({"abi": wire::ABI, "request_id": v.plan.request_id,
+                "scope": v.intent.scope, "accepted": true, "durable": true, "code": "",
+                "receipt": recorded});
+            answers(&f.0, Some(admission), std::slice::from_ref(&recorded));
+            assert_eq!(
+                offer(service.clone(), SESSION, update).await,
+                AnswerResult::Recorded(outcome.clone())
+            );
+            assert_eq!(
+                checked(&service, &v.plan).await,
+                Checked::Settled(AnswerResult::Recorded(outcome))
+            );
+        }
+        // A recorded Update now without its phase never settles.
+        let update = original("codex_update", "update_now");
+        let v = verified(&service, &update).await;
+        let mut bare = receipt(&v, wire::Phase::Recorded, true, "");
+        assert!(serde_json::from_value::<wire::Receipt>(bare.clone())
+            .is_ok_and(|receipt| !receipt.valid()));
+        bare["outcome"]["open_terminal"] = json!(true);
+        answers(&f.0, None, &[bare]);
+        assert_eq!(checked(&service, &v.plan).await, Checked::Unavailable);
         service.join().await.unwrap();
     });
 }

@@ -384,6 +384,8 @@ finally:
         if sys.platform.startswith('linux'):
             self.assertIn('Desktop deferred answer ABI: desktop-deferred-answer-v1',
                           [line.strip() for line in help_text.splitlines()])
+            self.assertIn('Desktop deferred answer update phase: desktop-deferred-answer-update-phase-v1',
+                          [line.strip() for line in help_text.splitlines()])
         else:
             self.assertNotIn('desktop-deferred-answer', help_text)
 

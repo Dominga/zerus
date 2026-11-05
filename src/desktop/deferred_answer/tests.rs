@@ -31,7 +31,22 @@ fn pinned() -> Value {
 /// A saved answer checkpoint with its pinned consent and the exact stdin
 /// the client builds for it.
 fn original(configuration: &str, epoch: &str) -> Verified {
-    let answers = json!([{"question_id": "q-1", "selected_option_ids": ["yes"], "text": ""}]);
+    original_of(&question(), "yes", configuration, epoch)
+}
+/// Codex's update question, as `hgs inspect` shows it.
+fn update_question() -> Value {
+    let mut asked = question();
+    asked["question_id"] = json!(format!("codex-update:{HASH}"));
+    asked["source"] = json!("codex_update");
+    asked["answer_transport"] = json!("codex_tui");
+    asked
+}
+/// A saved answer of `option` to `asked`, with its pinned consent and the
+/// exact stdin the client builds for it.
+fn original_of(asked: &Value, option: &str, configuration: &str, epoch: &str) -> Verified {
+    let id = asked["question_id"].as_str().unwrap();
+    let pinned = || zerus_client_core::questions::consent_identity(asked);
+    let answers = json!([{"question_id": id, "selected_option_ids": [option], "text": ""}]);
     let checkpoint = Checkpoint::reserve(checkpoint::Intent {
         kind: checkpoint::Kind::Answer,
         draft_revision: 3,
@@ -42,14 +57,14 @@ fn original(configuration: &str, epoch: &str) -> Verified {
         run_id: RUN.into(),
         conversation_id: CONVERSATION.into(),
         question: Some(checkpoint::Question {
-            id: "q-1".into(),
+            id: id.into(),
             identity_sha256: checkpoint::identity_sha256(&pinned()),
         }),
         start: None,
         retry_of: None,
         consent: false,
     });
-    let stdin = json!({"request_id": checkpoint.request_id, "question_id": "q-1",
+    let stdin = json!({"request_id": checkpoint.request_id, "question_id": id,
         "expected_question_hash": HASH, "expected_run_id": RUN,
         "expected_conversation_id": CONVERSATION, "answers": answers});
     Intent {
@@ -530,6 +545,128 @@ fn only_the_released_custody_settles_an_answer_and_only_its_exact_cli_record_dec
                 .receipt,
             settled
         );
+        assert_eq!(ledger::undrained(&store.db).unwrap(), 0);
+    }
+}
+
+/// zerus-5wmh.66.4.7.2: Codex's update phase is copied only from the CLI's
+/// exact receipt of Update now, kept through the drained settlement and the
+/// ledger; a malformed or missing one stays Unknown, never a refusal, and
+/// the original is never offered again.
+#[test]
+fn a_codex_update_phase_survives_settlement_and_a_malformed_one_stays_unknown() {
+    use wire::UpdatePhase;
+    /// The option, the receipt's phase value and Terminal flag, then the
+    /// settled phase, its code and the outcome's phase.
+    type Case = (
+        &'static str,
+        Option<Value>,
+        bool,
+        Phase,
+        &'static str,
+        Option<UpdatePhase>,
+    );
+    let cases: Vec<Case> = vec![
+        (
+            "update_now",
+            Some(json!("installing")),
+            true,
+            Phase::Recorded,
+            "",
+            Some(UpdatePhase::Installing),
+        ),
+        (
+            "update_now",
+            Some(json!("exited")),
+            true,
+            Phase::Recorded,
+            "",
+            Some(UpdatePhase::Exited),
+        ),
+        ("not_now", None, false, Phase::Recorded, "", None),
+        ("skip_version", None, false, Phase::Recorded, "", None),
+        (
+            "update_now",
+            Some(json!("none")),
+            true,
+            Phase::Unknown,
+            wire::RECEIPT_PHASE,
+            None,
+        ),
+        (
+            "update_now",
+            Some(Value::Null),
+            true,
+            Phase::Unknown,
+            wire::RECEIPT_PHASE,
+            None,
+        ),
+        (
+            "update_now",
+            None,
+            true,
+            Phase::Unknown,
+            wire::RECEIPT_PHASE,
+            None,
+        ),
+        (
+            "update_now",
+            Some(json!("installing")),
+            false,
+            Phase::Unknown,
+            wire::RECEIPT_PHASE,
+            None,
+        ),
+    ];
+    for (index, (option, value, terminal, phase, code, expected)) in cases.into_iter().enumerate() {
+        let (_temp, location, mut store, epoch) = fixture();
+        let verified = original_of(&update_question(), option, &location.configuration, &epoch);
+        let (record, held) = running(&mut store, &location, &verified, &epoch);
+        let row = ledger::pending(&store.db).unwrap().unwrap();
+        let tx = store
+            .db
+            .transaction_with_behavior(TransactionBehavior::Immediate)
+            .unwrap();
+        ledger::ended(&tx, &row, ledger::AWAITING_DRAIN).unwrap();
+        tx.commit().unwrap();
+        drop(held);
+        let mut cli = cli_record(&verified.plan, wire::ANSWERED);
+        cli["open_terminal"] = json!(terminal);
+        if let Some(value) = value {
+            cli["codex_update"] = value;
+        }
+        let read = wire::Outcome::read(&verified.plan, cli.to_string().as_bytes());
+        let row = ledger::pending(&store.db).unwrap().unwrap();
+        let observation = released(&location, &record);
+        let tx = store
+            .db
+            .transaction_with_behavior(TransactionBehavior::Immediate)
+            .unwrap();
+        let settled = ledger::drained(tx, row, observation, &read, Default::default()).unwrap();
+        assert_eq!(
+            (settled.phase, settled.code.as_str()),
+            (phase, code),
+            "{index}"
+        );
+        assert!(settled.drained && settled.valid(), "{index}");
+        // The stored row is the settled one, with the same phase.
+        let stored = ledger::load(&store.db, &verified.plan.request_id)
+            .unwrap()
+            .unwrap()
+            .receipt;
+        assert_eq!(stored, settled, "{index}");
+        if phase == Phase::Recorded {
+            let outcome = stored.outcome.clone().unwrap();
+            assert_eq!(outcome.codex_update, expected, "{index}");
+            assert_eq!(outcome.open_terminal, terminal, "{index}");
+            assert_eq!(stored.result(&verified.plan), Some(Ok(outcome)), "{index}");
+        } else {
+            // Unknown for good: never settled, never a refusal before
+            // delivery, so nothing may answer it again.
+            assert!(stored.outcome.is_none(), "{index}");
+            assert_eq!(stored.result(&verified.plan), None, "{index}");
+            assert!(!stored.not_delivered(&verified.plan), "{index}");
+        }
         assert_eq!(ledger::undrained(&store.db).unwrap(), 0);
     }
 }

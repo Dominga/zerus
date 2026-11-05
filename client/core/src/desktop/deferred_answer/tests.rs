@@ -21,6 +21,23 @@ fn question(source: &str) -> Value {
             "options": [{"id": "yes", "label": "Yes"}, {"id": "no", "label": "No"}]}],
         "can_answer": true, "status": "pending"})
 }
+/// A native question of `source` with the ID its source gives it: Codex's
+/// update question, and only it, is `codex-update:<hash>`.
+fn sourced(source: &str) -> Value {
+    let mut asked = question(source);
+    if source == "codex_update" {
+        asked["question_id"] = json!(format!("codex-update:{HASH}"));
+    }
+    asked
+}
+/// A choice of `option` for `asked`'s own question.
+fn choice_of(asked: &Value, option: &str) -> Vec<AnswerItem> {
+    vec![AnswerItem::Choice {
+        question_id: asked["question_id"].as_str().unwrap().into(),
+        selected_option_ids: vec![option.into()],
+        text: String::new(),
+    }]
+}
 fn choice(option: &str) -> Vec<AnswerItem> {
     vec![AnswerItem::Choice {
         question_id: "q-1".into(),
@@ -345,13 +362,13 @@ fn only_an_answer_matching_its_checkpoint_and_pinned_consent_verifies() {
     // A Skip, alone or beside a choice: the CLI skips only an optional Codex
     // asynchronous question, which v1 never takes, and refuses any other
     // before its receipt.
-    let skip = AnswerItem::Skip {
-        question_id: "q-1".into(),
-        skip: true,
-    };
     for source in SOURCES {
-        let mut optional = question(source);
+        let mut optional = sourced(source);
         optional["optional"] = json!(true);
+        let skip = AnswerItem::Skip {
+            question_id: optional["question_id"].as_str().unwrap().into(),
+            skip: true,
+        };
         assert_eq!(
             intent_of(&optional, std::slice::from_ref(&skip))
                 .verify()
@@ -416,7 +433,7 @@ fn only_the_v1_allowlisted_sources_are_offered() {
     // Allowed: every source whose `rejected` receipt proves no delivery.
     for source in SOURCES {
         assert!(
-            intent_of(&question(source), &choice("yes"))
+            intent_of(&sourced(source), &choice_of(&sourced(source), "yes"))
                 .verify()
                 .is_ok(),
             "{source}"
@@ -456,7 +473,12 @@ fn an_empty_conversation_verifies_only_for_the_clis_startup_questions() {
         (format!("claude-tool:{HASH}"), false),
         (format!("x-claude-trust:{HASH}"), false),
     ] {
-        let mut asked = question("claude_folder_trust");
+        // Codex's update question is the codex_update source's own.
+        let mut asked = question(if id.starts_with("codex-update:") {
+            "codex_update"
+        } else {
+            "claude_folder_trust"
+        });
         asked["question_id"] = json!(id);
         asked["conversation_id"] = json!("");
         let answers = vec![AnswerItem::Choice {
@@ -607,6 +629,7 @@ fn only_a_drained_recorded_receipt_or_a_proven_non_delivery_settles() {
         status: ANSWERED.into(),
         input_sha256: plan.input_sha256.clone(),
         open_terminal: false,
+        codex_update: None,
     };
     let recorded = receipt(&verified, Phase::Recorded, true, "", Some(answered.clone()));
     assert!(recorded.valid() && recorded.matches(&intent));
@@ -967,4 +990,227 @@ fn the_native_request_names_its_reserved_identity() {
     };
     assert_eq!(request.operation(), "deferred_answer");
     assert_eq!(request.id(), intent.request_id);
+}
+
+/// Codex's update question as `hgs inspect` shows it, answered with `option`.
+fn update_intent(option: &str) -> Intent {
+    let asked = sourced("codex_update");
+    intent_of(&asked, &choice_of(&asked, option))
+}
+
+/// zerus-5wmh.66.4.7.2: the source and the question ID agree, so the plan's
+/// question ID alone says whether an update phase may follow.
+#[test]
+fn codex_updates_source_and_question_id_go_together() {
+    assert!(update_intent("update_now").verify().is_ok());
+    let mut renamed = question("codex_update");
+    renamed["question_id"] = json!("q-1");
+    assert_eq!(
+        intent_of(&renamed, &choice("yes")).verify().err(),
+        Some("deferred_answer_consent_changed")
+    );
+    let mut borrowed = question("claude_folder_trust");
+    borrowed["question_id"] = json!(format!("codex-update:{HASH}"));
+    assert_eq!(
+        intent_of(&borrowed, &choice_of(&borrowed, "yes"))
+            .verify()
+            .err(),
+        Some("deferred_answer_consent_changed")
+    );
+}
+
+/// The raw CLI receipt: a phase is read only for Update now (answered, in
+/// Terminal) of Codex's update question, and only as one of two values.
+#[test]
+fn only_update_now_records_a_phase_and_only_one_of_two_values() {
+    let verified = update_intent("update_now").verify().unwrap();
+    let plan = &verified.plan;
+    let read = |value: &Value| Outcome::read(plan, value.to_string().as_bytes());
+    let update_now = |phase: Value| {
+        let mut receipt = cli_receipt(plan, ANSWERED);
+        receipt["open_terminal"] = json!(true);
+        receipt["codex_update"] = phase;
+        receipt
+    };
+    for (raw, phase) in [
+        ("installing", UpdatePhase::Installing),
+        ("exited", UpdatePhase::Exited),
+    ] {
+        match read(&update_now(json!(raw))) {
+            Read::Recorded(outcome) => {
+                assert_eq!(outcome.codex_update, Some(phase));
+                assert!(outcome.open_terminal && outcome.matches(plan));
+            }
+            other => panic!("{raw}: {other:?}"),
+        }
+    }
+    // Absence is the only "none"; every other value or shape refuses.
+    for malformed in [
+        Value::Null,
+        json!("none"),
+        json!("Installing"),
+        json!("EXITED"),
+        json!(""),
+        json!("installed"),
+        json!(true),
+        json!(1),
+        json!(["installing"]),
+        json!({"phase": "installing"}),
+    ] {
+        assert_eq!(
+            read(&update_now(malformed.clone())),
+            Read::Unknown(RECEIPT_PHASE),
+            "{malformed}"
+        );
+    }
+    let mut missing = update_now(Value::Null);
+    missing.as_object_mut().unwrap().remove("codex_update");
+    assert_eq!(read(&missing), Read::Unknown(RECEIPT_PHASE), "missing");
+    let duplicate = update_now(json!("installing")).to_string().replacen(
+        '{',
+        "{\"codex_update\":\"exited\",",
+        1,
+    );
+    assert_eq!(
+        Outcome::read(plan, duplicate.as_bytes()),
+        Read::Unknown(RECEIPT_INVALID)
+    );
+    // Never on another status: a rejected answer with a phase is not the
+    // CLI's refusal before delivery.
+    for status in [SUBMITTED, "rejected", "in_progress"] {
+        let mut other = update_now(json!("installing"));
+        other["status"] = json!(status);
+        assert_eq!(read(&other), Read::Unknown(RECEIPT_PHASE), "{status}");
+    }
+    let mut stays = update_now(json!("installing"));
+    stays["open_terminal"] = json!(false);
+    assert_eq!(read(&stays), Read::Unknown(RECEIPT_PHASE));
+    // Both Skip choices: answered, no Terminal, no phase.
+    for skip in ["not_now", "skip_version"] {
+        let verified = update_intent(skip).verify().unwrap();
+        let plan = &verified.plan;
+        match Outcome::read(plan, cli_receipt(plan, ANSWERED).to_string().as_bytes()) {
+            Read::Recorded(outcome) => {
+                assert_eq!(outcome.codex_update, None);
+                assert!(!outcome.open_terminal && outcome.matches(plan));
+            }
+            other => panic!("{skip}: {other:?}"),
+        }
+        // An explicit null is no absence, even where no phase belongs.
+        let mut null = cli_receipt(plan, ANSWERED);
+        null["codex_update"] = Value::Null;
+        assert_eq!(
+            Outcome::read(plan, null.to_string().as_bytes()),
+            Read::Unknown(RECEIPT_PHASE),
+            "{skip}"
+        );
+    }
+    // Another question never carries one, even in Terminal.
+    let ordinary = intent().verify().unwrap();
+    let mut hooks = cli_receipt(&ordinary.plan, ANSWERED);
+    hooks["open_terminal"] = json!(true);
+    assert!(matches!(
+        Outcome::read(&ordinary.plan, hooks.to_string().as_bytes()),
+        Read::Recorded(Outcome {
+            codex_update: None,
+            open_terminal: true,
+            ..
+        })
+    ));
+    hooks["codex_update"] = json!("installing");
+    assert_eq!(
+        Outcome::read(&ordinary.plan, hooks.to_string().as_bytes()),
+        Read::Unknown(RECEIPT_PHASE)
+    );
+}
+
+/// The same pairing holds for a serialized outcome, receipt and lookup, not
+/// only the raw read; both values survive a round trip; an old row without
+/// the key still parses.
+#[test]
+fn a_serialized_outcome_receipt_and_lookup_keep_the_pairing() {
+    let verified = update_intent("update_now").verify().unwrap();
+    let plan = &verified.plan;
+    let outcome = |status: &str, open_terminal: bool, phase: Option<UpdatePhase>| Outcome {
+        request_id: plan.request_id.clone(),
+        status: status.into(),
+        input_sha256: plan.input_sha256.clone(),
+        open_terminal,
+        codex_update: phase,
+    };
+    let query = Query::for_plan(scope(), plan).unwrap();
+    let lookup = |receipt: Receipt| Lookup {
+        abi: ABI.into(),
+        request_id: plan.request_id.clone(),
+        scope: scope(),
+        read_only: true,
+        found: true,
+        receipt: Some(receipt),
+    };
+    for phase in [UpdatePhase::Installing, UpdatePhase::Exited] {
+        let good = receipt(
+            &verified,
+            Phase::Recorded,
+            true,
+            "",
+            Some(outcome(ANSWERED, true, Some(phase))),
+        );
+        assert!(good.valid());
+        assert_eq!(
+            good.result(plan),
+            Some(Ok(outcome(ANSWERED, true, Some(phase))))
+        );
+        assert!(lookup(good.clone()).matches(&query));
+        let text = serde_json::to_string(&good).unwrap();
+        assert!(text.contains(&format!(
+            "\"codex_update\":{}",
+            serde_json::to_string(&phase).unwrap()
+        )));
+        assert!(serde_json::from_str::<Receipt>(&text).unwrap() == good);
+    }
+    for (name, bad) in [
+        ("missing", outcome(ANSWERED, true, None)),
+        (
+            "submitted",
+            outcome(SUBMITTED, true, Some(UpdatePhase::Installing)),
+        ),
+        (
+            "no terminal",
+            outcome(ANSWERED, false, Some(UpdatePhase::Exited)),
+        ),
+    ] {
+        assert!(!bad.matches(plan), "{name}");
+        let row = receipt(&verified, Phase::Recorded, true, "", Some(bad));
+        assert!(!row.valid(), "{name}");
+        assert_eq!(row.result(plan), None, "{name}");
+        assert!(!lookup(row).matches(&query), "{name}");
+    }
+    // An ordinary question's outcome never carries one.
+    let ordinary = intent().verify().unwrap();
+    let mut stray = Outcome {
+        request_id: ordinary.plan.request_id.clone(),
+        status: ANSWERED.into(),
+        input_sha256: ordinary.plan.input_sha256.clone(),
+        open_terminal: true,
+        codex_update: Some(UpdatePhase::Installing),
+    };
+    assert!(!stray.matches(&ordinary.plan));
+    assert!(!receipt(&ordinary, Phase::Recorded, true, "", Some(stray.clone())).valid());
+    stray.codex_update = None;
+    assert!(stray.matches(&ordinary.plan));
+    // Decoding: an old row without the key is None; null, "none" and an
+    // unknown value never decode.
+    let mut json = serde_json::to_value(&stray).unwrap();
+    assert!(json.get("codex_update").is_none());
+    assert_eq!(
+        serde_json::from_value::<Outcome>(json.clone()).unwrap(),
+        stray
+    );
+    for value in [Value::Null, json!("none"), json!("Installing"), json!(true)] {
+        json["codex_update"] = value.clone();
+        assert!(
+            serde_json::from_value::<Outcome>(json.clone()).is_err(),
+            "{value}"
+        );
+    }
 }

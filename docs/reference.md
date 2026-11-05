@@ -5293,14 +5293,30 @@ folders, not its `HOME`; another registered image is reported as
 `notification_registration_other_image` and changes nothing.
 
 Explicit removal uses `notification-registration remove --json --request-id UUID`
-only after the original selected service's settled manual revoke with that same
-UUID. The authenticated current-service reply must match configuration and
-original runtime epoch and have accepted/durable/revoked/checkpointed all true.
-Lost replies authorize read-only `revoke_status`, never a new revoke UUID.
-Unknown or retained offline state stays for inspection. UI-only uninstall keeps
-the service task, staged CLI and Toast identity; its separate UI login entry is
-removed normally. Active removal currently remains unavailable until root Windows Runtime drain
-attachment is integrated; metadata removal does not claim native history deletion.
+after a settled `desktop revoke --json --request-id UUID --reason rollback` with
+that same UUID, the task's `registration remove`, and a stop of the running
+service through its owner (sign-out, or ending only that task). Removal is
+offline only. It holds the actual `owner.lock` and then the handoff lock through
+the exact registry change; a missing endpoint, stopped task or PID is never the
+exclusion. Without desktop state nothing more is needed. A sidecar or marker
+without its database refuses. Existing state, also from a passive-only history,
+needs the CURRENT proof of the shared read-only rollback check in one checked
+transaction:
+- the UUID is the newest command, settled with its exact receipt;
+- ownership is revoked and rearm-required with no request or owner epoch;
+- the writer is revoked under that rollback's writer;
+- any marker is Revoked for the same writer;
+- operations are drained.
+
+A later grant, rearm, handoff or revoke supersedes the proof, and removal never
+submits or reconciles a revoke. The checked database is retained, and the proof
+is checked again right before the registry effect. The read-only lookup may
+leave SQLite's reader sidecars (an empty `-wal` and the `-shm` index) next to a
+cleanly stopped database; the database itself is not modified. UI-only
+uninstall keeps the service task, staged CLI and Toast identity; its separate UI
+login entry is removed normally. While the service runs, removal remains
+unavailable until root Windows Runtime drain attachment is integrated. Metadata
+removal does not claim native history deletion.
 
 The proposed service names are `hgs-desktop.service` (systemd user),
 `com.hgdev.hgs-desktop` (LaunchAgent), and `hgs-desktop` (per-user Windows logon

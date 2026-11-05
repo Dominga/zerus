@@ -36,6 +36,19 @@ export async function followTasks(project: string | null): Promise<void> {
   await invoke("tasks_follow", { project });
 }
 
+/** Follows one computer's team list, Waiting list, team and catalog. The
+ * catalog is read only while its page is open. */
+export async function followTeams(computer: string, team: string | null, catalog = false): Promise<void> {
+  if (!inTauri()) return;
+  await invoke("teams_follow", { computer, list: false, waiting: false, team, catalog });
+}
+
+/** One guarded `hgs team` action; the core runs it, the webview never does. */
+export const teamAction = (call: import("./ui/teams/types").TeamCall) =>
+  inTauri()
+    ? invoke<import("./ui/teams/types").TeamOutcome>("team_action", { call })
+    : Promise.reject(new Error("Teams need hgs."));
+
 export const taskEditorOpen = (target: import("./store/taskEditor").TaskEditorTarget) => desktop<import("./store/taskEditor").TaskEditorView>("task_editor_open", { ...target });
 export const taskEditorEdit = (input: Pick<import("./store/taskEditor").TaskEditorView, "handle" | "rev" | "text" | "position" | "anchor">) => desktop<import("./store/taskEditor").TaskEditorView>("task_editor_edit", { input });
 export const taskEditorPick = (handle: number, start: number, end: number) => desktop<import("./store/taskEditor").TaskEditorView>("task_editor_pick", { handle, start, end });

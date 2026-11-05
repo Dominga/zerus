@@ -131,6 +131,7 @@ pub fn teams_follow(
     list: bool,
     waiting: bool,
     team: Option<String>,
+    catalog: bool,
 ) -> Result<(), String> {
     let team = team.filter(|team| !team.is_empty());
     if team.as_deref().is_some_and(|team| !valid_team(team)) {
@@ -144,6 +145,7 @@ pub fn teams_follow(
             list,
             waiting,
             team,
+            catalog,
         },
     )
 }

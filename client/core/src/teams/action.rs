@@ -148,6 +148,17 @@ pub enum TeamAction {
         #[serde(default)]
         reason: String,
     },
+    /// The owner's settings patch, merged by `hgs team settings`: only the
+    /// fields that differ from the team's current settings.
+    Settings { settings: Value },
+    /// The designer's change, left for the owner to keep or reject.
+    CatalogPropose { change: Value },
+    /// The owner's decision on one catalog proposal: keep, reject or undo.
+    CatalogDecide { proposal: String, decision: String },
+    /// Writes the kept proposals as the next catalog version.
+    CatalogApply,
+    /// Ends the catalog draft, undecided changes included.
+    CatalogDiscard,
 }
 
 /// What the owner is asked before a destructive action or an approval.
@@ -275,12 +286,35 @@ impl TeamAction {
             | Self::DraftSeen { .. }
             | Self::DraftCreate { .. }
             | Self::DraftDiscard { .. } => "draft",
+            Self::Settings { .. } => "settings",
+            Self::CatalogPropose { .. }
+            | Self::CatalogDecide { .. }
+            | Self::CatalogApply
+            | Self::CatalogDiscard => "catalog",
+        }
+    }
+
+    /// The `hgs team catalog <sub>` word of a catalog action.
+    pub fn catalog_op(&self) -> Option<&'static str> {
+        match self {
+            Self::CatalogPropose { .. } => Some("propose"),
+            Self::CatalogDecide { .. } => Some("decide"),
+            Self::CatalogApply => Some("apply"),
+            Self::CatalogDiscard => Some("discard"),
+            _ => None,
         }
     }
 
     /// Whether the call names an existing team (all but a draft start).
     pub fn names_team(&self) -> bool {
-        !matches!(self, Self::DraftStart { .. })
+        !matches!(
+            self,
+            Self::DraftStart { .. }
+                | Self::CatalogPropose { .. }
+                | Self::CatalogDecide { .. }
+                | Self::CatalogApply
+                | Self::CatalogDiscard
+        )
     }
 
     /// Checks what the action sends before anything runs.
@@ -379,6 +413,29 @@ impl TeamAction {
             }
             Self::DraftCreate { .. } => Ok(()),
             Self::DraftDiscard { reason, .. } => plain(reason, "A reason", 2000),
+            Self::Settings { settings } => {
+                if !settings.as_object().is_some_and(|fields| !fields.is_empty()) {
+                    return Err("A settings change names the fields it sets.".into());
+                }
+                Ok(())
+            }
+            Self::CatalogPropose { change } => {
+                if !change.as_object().is_some_and(|fields| !fields.is_empty()) {
+                    return Err("A catalog proposal names its change.".into());
+                }
+                Ok(())
+            }
+            Self::CatalogDecide {
+                proposal,
+                decision,
+            } => {
+                word(proposal, "proposal id")?;
+                if !matches!(decision.as_str(), "keep" | "reject" | "undo") {
+                    return Err("A catalog decision is keep, reject or undo.".into());
+                }
+                Ok(())
+            }
+            Self::CatalogApply | Self::CatalogDiscard => Ok(()),
         }
     }
 
@@ -536,6 +593,20 @@ impl TeamAction {
                     put("reason", json!(reason));
                 }
             }
+            Self::Settings { settings } => {
+                put("settings", settings.clone());
+            }
+            Self::CatalogPropose { change } => {
+                put("change", change.clone());
+            }
+            Self::CatalogDecide {
+                proposal,
+                decision,
+            } => {
+                put("proposal", json!(proposal));
+                put("decision", json!(decision));
+            }
+            Self::CatalogApply | Self::CatalogDiscard => {}
         }
         input
     }
@@ -612,6 +683,20 @@ impl TeamAction {
                     "Approve and run",
                 )
             }),
+            Self::CatalogApply => Some(ask(
+                "teamCatalogApplyConfirm",
+                "Apply the catalog draft?",
+                "Write the kept changes as the next catalog version? Undecided changes are dropped with the draft."
+                    .to_owned(),
+                "Apply",
+            )),
+            Self::CatalogDiscard => Some(ask(
+                "teamCatalogDiscardConfirm",
+                "Discard draft",
+                "Drop every proposal in the designer's draft? The catalog stays as it is."
+                    .to_owned(),
+                "Discard draft",
+            )),
             _ => None,
         }
     }
@@ -666,11 +751,20 @@ pub fn prepare(call: &TeamCall) -> Result<(Invocation, String), TeamOutcome> {
         .then(|| format!("@{}", call.computer))
         .into_iter()
         .collect();
-    args.extend([
-        "team".to_owned(),
-        call.action.op().to_owned(),
-        "--json".to_owned(),
-    ]);
+    if let Some(sub) = call.action.catalog_op() {
+        args.extend([
+            "team".to_owned(),
+            "catalog".to_owned(),
+            sub.to_owned(),
+            "--json".to_owned(),
+        ]);
+    } else {
+        args.extend([
+            "team".to_owned(),
+            call.action.op().to_owned(),
+            "--json".to_owned(),
+        ]);
+    }
     let invocation = Invocation {
         args,
         stdin: Some(Value::Object(input).to_string().into_bytes()),

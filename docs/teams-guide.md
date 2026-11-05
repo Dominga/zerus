@@ -31,6 +31,12 @@ This guide is the English original. It describes teams as they are today. A
 | **Shared folder** | A project too large to copy (a game with big assets), or a non-Git folder. | Members edit the same folder. Builds should use the **build broker**. |
 | **Auto** | You want the lead to decide per member. | The lead chooses a worktree or the shared folder for each member. |
 
+A member's own folder is `worktree`, `clone` or `shared`. The catalog's
+read-only roles (Architect, Reviewer, Security, Researcher) name `read_only`:
+the shared folder without a checkout of their own, accepted in a plan and a
+draft as well. A member or task the plan refuses names the field, for example
+`A member "merger" is invalid: field "folder": unknown variant ...`.
+
 With **Branch per task** on, each task gets its own branch (for example
 `task/{id}`) from the base branch, and a returned task keeps its branch.
 

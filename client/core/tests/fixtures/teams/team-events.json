@@ -1,0 +1,560 @@
+{
+ "items": [
+  {
+   "at": 1793895184.8869388,
+   "detail": {
+    "attempt": 1,
+    "member": "QA tester (Windows, DeepSeek)",
+    "task": 5
+   },
+   "kind": "started",
+   "seq": 13367
+  },
+  {
+   "at": 1793895138.5188131,
+   "detail": {
+    "attempt": 1,
+    "task": 5
+   },
+   "kind": "delivered",
+   "seq": 13366
+  },
+  {
+   "at": 1793895138.4510114,
+   "detail": {
+    "attempt": 1,
+    "by": "Lead",
+    "task": 5,
+    "to": "QA tester (Windows, DeepSeek)"
+   },
+   "kind": "handed_out",
+   "seq": 13365
+  },
+  {
+   "at": 1793895138.4087374,
+   "detail": {
+    "attempt": 1,
+    "member": "Frontend (DeepSeek)",
+    "task": 1
+   },
+   "kind": "started",
+   "seq": 13364
+  },
+  {
+   "at": 1793895128.340288,
+   "detail": {
+    "attempt": 1,
+    "task": 1
+   },
+   "kind": "delivered",
+   "seq": 13363
+  },
+  {
+   "at": 1793895128.1187837,
+   "detail": {
+    "attempt": 1,
+    "by": "Lead",
+    "task": 1,
+    "to": "Frontend (DeepSeek)"
+   },
+   "kind": "handed_out",
+   "seq": 13362
+  },
+  {
+   "at": 1793895117.1573324,
+   "detail": {
+    "attempt": 1,
+    "member": "Tauri core (Rust)",
+    "task": 6
+   },
+   "kind": "started",
+   "seq": 13361
+  },
+  {
+   "at": 1793895117.1464264,
+   "detail": {
+    "member": "QA tester (Windows, DeepSeek)",
+    "session": "dsh/Zerus/zerus-next-for-the-fork-qa"
+   },
+   "kind": "member_started",
+   "seq": 13360
+  },
+  {
+   "at": 1793895105.739969,
+   "detail": {
+    "attempt": 1,
+    "task": 6
+   },
+   "kind": "delivered",
+   "seq": 13359
+  },
+  {
+   "at": 1793895105.368742,
+   "detail": {
+    "attempt": 1,
+    "by": "Lead",
+    "task": 6,
+    "to": "Tauri core (Rust)"
+   },
+   "kind": "handed_out",
+   "seq": 13358
+  },
+  {
+   "at": 1793895098.9781067,
+   "detail": {
+    "attempt": 2,
+    "by": "Lead",
+    "manual": false,
+    "reason": "Synthetic reason text.",
+    "task": 4,
+    "title": "Tauri client dev build runs on this Windows computer beside the Qt GUI"
+   },
+   "kind": "accepted",
+   "seq": 13357
+  },
+  {
+   "at": 1793895098.8105118,
+   "detail": {
+    "attempt": 1,
+    "by": "Lead",
+    "manual": false,
+    "reason": "Synthetic reason text.",
+    "task": 25,
+    "title": "Team commands retry a busy team database instead of failing with 'database is locked'"
+   },
+   "kind": "accepted",
+   "seq": 13356
+  },
+  {
+   "at": 1793895087.5197847,
+   "detail": {
+    "hash": "2b6ebd67366ada737302d22e69433b62ff90eac074b3bdb59bae47381c18cb0b",
+    "id": "p4",
+    "kind": "add-to-phase"
+   },
+   "kind": "proposed",
+   "seq": 13355
+  },
+  {
+   "at": 1793895084.7238264,
+   "detail": {
+    "items": 2
+   },
+   "kind": "inbox_told",
+   "seq": 13354
+  },
+  {
+   "at": 1793895084.3843915,
+   "detail": {
+    "attempt": 2,
+    "by": "Frontend (DeepSeek)",
+    "human": false,
+    "task": 4,
+    "title": "Tauri client dev build runs on this Windows computer beside the Qt GUI",
+    "to": "Lead"
+   },
+   "kind": "reported",
+   "seq": 13353
+  },
+  {
+   "at": 1793895026.4642432,
+   "detail": {
+    "attempt": 1,
+    "by": "Frontend (SolidJS)",
+    "human": false,
+    "task": 25,
+    "title": "Team commands retry a busy team database instead of failing with 'database is locked'",
+    "to": "Lead"
+   },
+   "kind": "reported",
+   "seq": 13352
+  },
+  {
+   "at": 1793894939.268369,
+   "detail": {
+    "attempt": 1,
+    "exit": 101,
+    "member": "Frontend (SolidJS)",
+    "task": 25,
+    "template": "cargo-test",
+    "timed_out": false
+   },
+   "kind": "ran",
+   "seq": 13351
+  },
+  {
+   "at": 1793894923.9922664,
+   "detail": {
+    "by": "You",
+    "member": "hgs"
+   },
+   "kind": "relaunch",
+   "seq": 13350
+  },
+  {
+   "at": 1793894912.6710525,
+   "detail": {
+    "attempt": 2,
+    "exit": 0,
+    "member": "Frontend (DeepSeek)",
+    "task": 4,
+    "template": "git-commit",
+    "timed_out": false
+   },
+   "kind": "ran",
+   "seq": 13349
+  },
+  {
+   "at": 1793894912.6636443,
+   "detail": {
+    "attempt": 2,
+    "files": 2,
+    "member": "Frontend (DeepSeek)",
+    "sha": "1228a2a59bde86154db8a1c3798ff74fdb3f07b4",
+    "task": 4
+   },
+   "kind": "committed",
+   "seq": 13348
+  },
+  {
+   "at": 1793894877.6502483,
+   "detail": {
+    "attempt": 1,
+    "exit": 0,
+    "member": "Frontend (SolidJS)",
+    "task": 25,
+    "template": "cargo-test",
+    "timed_out": false
+   },
+   "kind": "ran",
+   "seq": 13347
+  },
+  {
+   "at": 1793894809.2793603,
+   "detail": {
+    "attempt": 1,
+    "by": "Lead",
+    "manual": false,
+    "reason": "Synthetic reason text.",
+    "task": 21,
+    "title": "URGENT: every owner's-word gate becomes a confirmation dialog (Allow/Reject), never a typed sentence"
+   },
+   "kind": "accepted",
+   "seq": 13346
+  },
+  {
+   "at": 1793894797.1267724,
+   "detail": {
+    "items": 1
+   },
+   "kind": "inbox_told",
+   "seq": 13345
+  },
+  {
+   "at": 1793894763.6616411,
+   "detail": {
+    "attempt": 1,
+    "by": "Tauri core (Rust)",
+    "human": false,
+    "task": 21,
+    "title": "URGENT: every owner's-word gate becomes a confirmation dialog (Allow/Reject), never a typed sentence",
+    "to": "Lead"
+   },
+   "kind": "reported",
+   "seq": 13344
+  },
+  {
+   "at": 1793894687.2583897,
+   "detail": {
+    "attempt": 1,
+    "exit": 0,
+    "member": "Tauri core (Rust)",
+    "task": 21,
+    "template": "git-commit",
+    "timed_out": false
+   },
+   "kind": "ran",
+   "seq": 13343
+  },
+  {
+   "at": 1793894687.251971,
+   "detail": {
+    "attempt": 1,
+    "files": 17,
+    "member": "Tauri core (Rust)",
+    "sha": "ea8274a68e96da4aac328476f2f76788ff530203",
+    "task": 21
+   },
+   "kind": "committed",
+   "seq": 13342
+  },
+  {
+   "at": 1793894675.0363898,
+   "detail": {
+    "items": 1
+   },
+   "kind": "inbox_told",
+   "seq": 13341
+  },
+  {
+   "at": 1793894641.5793786,
+   "detail": {
+    "attempt": 1,
+    "exit": 0,
+    "member": "Tauri core (Rust)",
+    "task": 21,
+    "template": "cargo-test",
+    "timed_out": false
+   },
+   "kind": "ran",
+   "seq": 13340
+  },
+  {
+   "at": 1793894565.574856,
+   "detail": {
+    "attempt": 1,
+    "member": "Frontend (SolidJS)",
+    "task": 25
+   },
+   "kind": "started",
+   "seq": 13339
+  },
+  {
+   "at": 1793894552.4038954,
+   "detail": {
+    "attempt": 1,
+    "by": "Lead",
+    "manual": false,
+    "reason": "Synthetic reason text.",
+    "task": 24,
+    "title": "A reassigned task stops in the old member's session"
+   },
+   "kind": "accepted",
+   "seq": 13338
+  },
+  {
+   "at": 1793894538.2074695,
+   "detail": {
+    "attempt": 1,
+    "task": 25
+   },
+   "kind": "delivered",
+   "seq": 13337
+  },
+  {
+   "at": 1793894537.6582272,
+   "detail": {
+    "attempt": 1,
+    "by": "Lead",
+    "task": 25,
+    "to": "Frontend (SolidJS)"
+   },
+   "kind": "handed_out",
+   "seq": 13336
+  },
+  {
+   "at": 1793894537.6350124,
+   "detail": {
+    "items": 1
+   },
+   "kind": "inbox_told",
+   "seq": 13335
+  },
+  {
+   "at": 1793894489.892139,
+   "detail": {
+    "attempt": 1,
+    "by": "Frontend (SolidJS)",
+    "human": false,
+    "task": 24,
+    "title": "A reassigned task stops in the old member's session",
+    "to": "Lead"
+   },
+   "kind": "reported",
+   "seq": 13334
+  },
+  {
+   "at": 1793894386.1695516,
+   "detail": {
+    "attempt": 1,
+    "exit": 0,
+    "member": "Frontend (SolidJS)",
+    "task": 24,
+    "template": "git-commit",
+    "timed_out": false
+   },
+   "kind": "ran",
+   "seq": 13333
+  },
+  {
+   "at": 1793894386.1631453,
+   "detail": {
+    "attempt": 1,
+    "files": 6,
+    "member": "Frontend (SolidJS)",
+    "sha": "6adfc6996f1e4abc1d31a2d1cfbe9a4c9720270c",
+    "task": 24
+   },
+   "kind": "committed",
+   "seq": 13332
+  },
+  {
+   "at": 1793894369.5961628,
+   "detail": {
+    "attempt": 1,
+    "exit": 101,
+    "member": "Frontend (SolidJS)",
+    "task": 24,
+    "template": "cargo-test",
+    "timed_out": false
+   },
+   "kind": "ran",
+   "seq": 13331
+  },
+  {
+   "at": 1793894328.8913393,
+   "detail": {
+    "attempt": 1,
+    "exit": 101,
+    "member": "Tauri core (Rust)",
+    "task": 21,
+    "template": "cargo-test",
+    "timed_out": false
+   },
+   "kind": "ran",
+   "seq": 13330
+  },
+  {
+   "at": 1793894287.7148046,
+   "detail": {
+    "attempt": 2,
+    "by": "Lead",
+    "question": "q9",
+    "task": 4
+   },
+   "kind": "question_answered",
+   "seq": 13329
+  },
+  {
+   "at": 1793894254.0828056,
+   "detail": {
+    "attempt": 1,
+    "exit": 0,
+    "member": "Frontend (SolidJS)",
+    "task": 24,
+    "template": "cargo-test",
+    "timed_out": false
+   },
+   "kind": "ran",
+   "seq": 13328
+  },
+  {
+   "at": 1793894235.4518816,
+   "detail": {
+    "attempt": 1,
+    "exit": 0,
+    "member": "Frontend (SolidJS)",
+    "task": 24,
+    "template": "cargo-test",
+    "timed_out": false
+   },
+   "kind": "ran",
+   "seq": 13327
+  },
+  {
+   "at": 1793894179.1703207,
+   "detail": {
+    "items": 1
+   },
+   "kind": "inbox_told",
+   "seq": 13326
+  },
+  {
+   "at": 1793894178.5707495,
+   "detail": {
+    "attempt": 2,
+    "by": "Frontend (DeepSeek)",
+    "question": "q9",
+    "task": 4
+   },
+   "kind": "question_asked",
+   "seq": 13325
+  },
+  {
+   "at": 1793894084.460933,
+   "detail": {
+    "attempt": 2,
+    "by": "Lead",
+    "question": "q8",
+    "task": 4
+   },
+   "kind": "question_answered",
+   "seq": 13324
+  },
+  {
+   "at": 1793894070.8191683,
+   "detail": {
+    "attempt": 1,
+    "exit": 101,
+    "member": "Tauri core (Rust)",
+    "task": 21,
+    "template": "cargo-test",
+    "timed_out": false
+   },
+   "kind": "ran",
+   "seq": 13323
+  },
+  {
+   "at": 1793893928.4466536,
+   "detail": {
+    "items": 1
+   },
+   "kind": "inbox_told",
+   "seq": 13322
+  },
+  {
+   "at": 1793893928.0499084,
+   "detail": {
+    "attempt": 2,
+    "by": "Frontend (DeepSeek)",
+    "question": "q8",
+    "task": 4
+   },
+   "kind": "question_asked",
+   "seq": 13321
+  },
+  {
+   "at": 1793893878.8755846,
+   "detail": {
+    "attempt": 1,
+    "exit": 101,
+    "member": "Frontend (SolidJS)",
+    "task": 24,
+    "template": "cargo-test",
+    "timed_out": false
+   },
+   "kind": "ran",
+   "seq": 13320
+  },
+  {
+   "at": 1793893790.750674,
+   "detail": {
+    "attempt": 2,
+    "by": "Lead",
+    "question": "q7",
+    "task": 4
+   },
+   "kind": "question_answered",
+   "seq": 13319
+  },
+  {
+   "at": 1793893754.606663,
+   "detail": {
+    "items": 1
+   },
+   "kind": "inbox_told",
+   "seq": 13318
+  }
+ ],
+ "next_cursor": 13318
+}

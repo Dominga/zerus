@@ -1,0 +1,72 @@
+{
+ "items": [
+  {
+   "action": "decide_proposal",
+   "id": "33fbafeb-8291-4eda-a00c-6e1448ec6f20/owner_word_asked/proposal-p4",
+   "kind": "owner_word_asked",
+   "proposal": "p4",
+   "since": 1793895087.5196455,
+   "team": "33fbafeb-8291-4eda-a00c-6e1448ec6f20",
+   "team_name": "Zerus Next for the fork",
+   "title": "Synthetic text of 166 characters."
+  },
+  {
+   "action": "resume_lead",
+   "id": "0392bb12-48b4-4528-8278-e7ecd0a2c284/lead_stopped/Lead",
+   "kind": "lead_stopped",
+   "member": "Lead",
+   "member_id": "lead",
+   "since": 1793806090.4604256,
+   "team": "0392bb12-48b4-4528-8278-e7ecd0a2c284",
+   "team_name": "DCB PBR export",
+   "title": "The lead's session stopped: nobody reads reports or hands out tasks. Resume claude/DCB/work-0cca7c77"
+  },
+  {
+   "action": "resume_lead",
+   "id": "1e7e15b0-24e1-4932-b122-6266e61ab0f7/lead_stopped/Lead",
+   "kind": "lead_stopped",
+   "member": "Lead",
+   "member_id": "lead",
+   "since": 1793806090.356358,
+   "team": "1e7e15b0-24e1-4932-b122-6266e61ab0f7",
+   "team_name": "DCB presentation",
+   "title": "The lead's session stopped: nobody reads reports or hands out tasks. Resume claude/DCB/work-672da05f"
+  },
+  {
+   "action": "decide_tool",
+   "command": "Synthetic command text.",
+   "id": "tools/58e71b49a929",
+   "kind": "tool_missing",
+   "offer": "58e71b49a929",
+   "output": "",
+   "project": "d:/tools/zerus",
+   "saves": "tests the map misses, found here instead of in the CI",
+   "since": 1793400139.5728042,
+   "state": "offered",
+   "team": "",
+   "team_name": "Zerus",
+   "title": "Zerus needs OpenCppCoverage: measuring Qt test binaries against the test map on Windows",
+   "tool": "OpenCppCoverage",
+   "why": "measuring Qt test binaries against the test map on Windows"
+  },
+  {
+   "action": "decide_tool",
+   "command": "cargo install cargo-llvm-cov --locked",
+   "id": "tools/32adcf74f0b0",
+   "kind": "tool_missing",
+   "offer": "32adcf74f0b0",
+   "output": "",
+   "project": "d:/tools/zerus",
+   "saves": "tests the map misses, found here instead of in the CI",
+   "since": 1793400139.5726826,
+   "state": "offered",
+   "team": "",
+   "team_name": "Zerus",
+   "title": "Zerus needs cargo-llvm-cov: measuring Rust modules against the test map (hgs test coverage)",
+   "tool": "cargo-llvm-cov",
+   "why": "measuring Rust modules against the test map (hgs test coverage)"
+  }
+ ],
+ "next": null,
+ "total": 5
+}

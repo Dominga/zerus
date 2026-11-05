@@ -110,7 +110,23 @@ TeamNewTab::TeamNewTab(TeamController *teams, HgsClient *client, const QList<Com
 
     // Accounts per computer, for the account combos and the signed-in check.
     if (m_client) {
-        connect(m_client, &HgsClient::accountsReady, this, [this](quint64, const QString &host, const QJsonObject &result) {
+        connect(m_client, &HgsClient::accountsReady, this, [this](quint64 request, const QString &host, const QJsonObject &result) {
+            // Task #19: a model catalog this form asked for.
+            if (m_modelRequests.contains(request)) {
+                const QString key = m_modelRequests.take(request);
+                m_modelPending.remove(key);
+                QList<ModelChoice> choices;
+                for (const auto &value : result.value("models").toArray()) {
+                    const auto model = value.toObject();
+                    const QString id = model.value("id").toString();
+                    if (!id.isEmpty() && choices.size() < 256) choices.append({id, model.value("label").toString()});
+                }
+                m_models.insert(key, choices);
+                renderMembers();
+                return;
+            }
+            // Another reply on the shared client (a catalog read elsewhere) is no account list.
+            if (!result.contains(QLatin1String("profiles"))) return;
             QList<Account> list;
             for (const auto &value : result.value("profiles").toArray()) {
                 const auto p = value.toObject();
@@ -126,6 +142,13 @@ TeamNewTab::TeamNewTab(TeamController *teams, HgsClient *client, const QList<Com
                     m_leadAccount->addItem(a.label.isEmpty() ? a.id : a.label + (a.signedIn ? QString() : tr(" (signed out)")), a.id);
                 m_leadAccount->setCurrentIndex(qMax(0, m_leadAccount->findData(keep)));
             }
+            renderMembers();
+        });
+        connect(m_client, &HgsClient::accountsFailed, this, [this](quint64 request, const QString &, const QString &) {
+            if (!m_modelRequests.contains(request)) return;
+            const QString key = m_modelRequests.take(request);
+            m_modelPending.remove(key);
+            m_models.insert(key, {});   // the known models stay offered
             renderMembers();
         });
         m_client->requestAccounts({});
@@ -602,6 +625,22 @@ QStringList TeamNewTab::rowErrors(const Member &m) const
     return errors;
 }
 
+QString TeamNewTab::modelKey(const QString &agent, const QString &host, const QString &account)
+{
+    const QString a = agent.isEmpty() ? QStringLiteral("claude") : agent;
+    return host + QLatin1Char('\n') + (account.isEmpty() ? QStringLiteral("native-") + a : account);
+}
+
+void TeamNewTab::requestModels(const QString &agent, const QString &host, const QString &account)
+{
+    // The agents whose accounts `account model-settings` reads.
+    if (!m_client || !(agent == "claude" || agent == "codex" || agent == "kimi" || agent == "dsh")) return;
+    const QString key = modelKey(agent, host, account);
+    if (m_models.contains(key) || m_modelPending.contains(key)) return;
+    m_modelPending.insert(key);
+    m_modelRequests.insert(m_client->requestAccounts(host, {QStringLiteral("model-settings"), key.section(QLatin1Char('\n'), 1), QStringLiteral("--json")}), key);
+}
+
 void TeamNewTab::renderMembers()
 {
     if (!m_membersLayout) return;
@@ -643,7 +682,21 @@ void TeamNewTab::renderMembers()
         w.agent = combo("teamNewAgent");
         for (const auto &a : agents) w.agent->addItem(workspaceIcon(a, c.fg), agentNames.value(a), a);
         w.agent->setCurrentIndex(qMax(0, w.agent->findData(m.agent)));
-        w.model = combo("teamNewModel"); w.model->setEditable(true); w.model->setCurrentText(m.model); w.model->lineEdit()->setPlaceholderText(tr("default"));
+        w.model = combo("teamNewModel"); w.model->setEditable(true); w.model->lineEdit()->setPlaceholderText(tr("default"));
+        // Task #19: the account's catalog, DeepSeek's too; until it is read,
+        // the agent's known models. The model stays as chosen or typed.
+        requestModels(m.agent, m.computer, m.account);
+        if (const auto choices = m_models.value(modelKey(m.agent, m.computer, m.account)); choices.isEmpty()) {
+            for (const auto &id : Teams::knownModels(m.agent)) w.model->addItem(id, id);
+        } else {
+            for (const auto &choice : choices) {
+                if (w.model->findData(choice.id) >= 0) continue;
+                w.model->addItem(choice.id, choice.id);
+                if (!choice.label.isEmpty() && choice.label != choice.id) w.model->setItemData(w.model->count() - 1, choice.label, Qt::ToolTipRole);
+            }
+        }
+        w.model->setCurrentIndex(w.model->findText(m.model));
+        if (w.model->currentIndex() < 0) w.model->setEditText(m.model);
         w.effort = combo("teamNewEffort"); w.effort->addItem(QStringLiteral("—"), QString());
         for (const auto *e : {"low", "medium", "high", "xhigh"}) w.effort->addItem(QString::fromLatin1(e), QString::fromLatin1(e));
         w.effort->setCurrentIndex(qMax(0, w.effort->findData(m.effort)));

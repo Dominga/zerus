@@ -166,6 +166,53 @@ impl Token {
     }
 }
 
+/// Task #28: whether this process runs below Medium integrity, as a
+/// sandboxed agent's shell does (DeepSeek's confined pwsh runs at Low). Such a
+/// process reads Zerus state but may not write it, and the session host keeps
+/// it out; an unreadable token counts as not sandboxed, so nothing changes.
+pub fn below_medium() -> bool {
+    Token::current().and_then(|token| token.integrity()).is_ok_and(|level| level.rid < Integrity::MEDIUM)
+}
+
+/// Task #28: lowers this process's own primary token to Low integrity, the
+/// level a sandboxed member's shell runs at; what it starts afterwards
+/// inherits it. Windows lets a process lower its own level, never raise it.
+pub fn lower_current_to_low() -> io::Result<()> {
+    use windows_sys::Win32::Security::{
+        Authorization::ConvertStringSidToSidW, SetTokenInformation, SID_AND_ATTRIBUTES,
+        TOKEN_ADJUST_DEFAULT,
+    };
+    let mut token = std::ptr::null_mut();
+    // SAFETY: the current-process pseudo handle; `token` receives a new handle.
+    if unsafe { OpenProcessToken(GetCurrentProcess(), TOKEN_ADJUST_DEFAULT | TOKEN_QUERY, &mut token) } == 0 {
+        return Err(io::Error::last_os_error());
+    }
+    // SAFETY: OpenProcessToken returned a handle that nothing else owns.
+    let token = unsafe { OwnedHandle::from_raw_handle(token) };
+    let low: Vec<u16> = "S-1-16-4096\0".encode_utf16().collect();
+    let mut sid: PSID = std::ptr::null_mut();
+    // SAFETY: `low` is NUL-terminated; `sid` receives a LocalAlloc'd SID.
+    if unsafe { ConvertStringSidToSidW(low.as_ptr(), &mut sid) } == 0 {
+        return Err(io::Error::last_os_error());
+    }
+    // SE_GROUP_INTEGRITY
+    let label = TOKEN_MANDATORY_LABEL { Label: SID_AND_ATTRIBUTES { Sid: sid, Attributes: 0x20 } };
+    // SAFETY: `sid` is the valid SID converted above.
+    let size = std::mem::size_of::<TOKEN_MANDATORY_LABEL>() as u32 + unsafe { GetLengthSid(sid) };
+    // SAFETY: `label` and the SID it points to outlive the call; the token has
+    // TOKEN_ADJUST_DEFAULT.
+    let done = unsafe {
+        SetTokenInformation(token.as_raw_handle() as HANDLE, TokenIntegrityLevel, (&label as *const TOKEN_MANDATORY_LABEL).cast(), size)
+    };
+    let error = io::Error::last_os_error();
+    // SAFETY: ConvertStringSidToSidW allocated `sid` with LocalAlloc.
+    unsafe { LocalFree(sid.cast()) };
+    if done == 0 {
+        return Err(error);
+    }
+    Ok(())
+}
+
 /// A token's user and integrity level: what the host compares clients against.
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct Identity {

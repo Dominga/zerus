@@ -922,6 +922,12 @@ pub(crate) fn task_bindings_in(root: &Path) -> Result<Vec<Value>> {
 }
 
 /// Compatibility entry point used by `hgs __state` and the legacy hook shim.
+/// Task #28 (2): a sandboxed member's `hgs ls` or `hgs inspect`, answered by
+/// its team worker; None for every other command and process.
+pub(crate) fn sandbox_read(args: &[String]) -> Option<Result<i32>> {
+    builds::sandbox_read(args)
+}
+
 pub fn dispatch(args: &[String]) -> Result<i32> {
     if args.first().map(String::as_str)==Some("rules") { return iron_rules::dispatch(&args[1..]); }
     // Receipt observation needs neither a native host nor a state writer.

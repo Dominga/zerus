@@ -8,7 +8,7 @@
 //! deadlock (the OpenSSH relays met the same; see `overlapped_pipe` in
 //! `platform::windows`).
 use super::endpoint::pipe_sddl;
-use super::protocol::{ErrorBody, ErrorCode, Integrity, ELEVATED_HOST};
+use super::protocol::{ErrorBody, ErrorCode, Integrity, ELEVATED_HOST, SANDBOXED_CLIENT};
 use super::token::{Identity, Token};
 use std::{
     fmt,
@@ -531,7 +531,12 @@ pub fn connect(name: &str, deadline: Instant) -> Result<PipeStream, ConnectError
             ERROR_FILE_NOT_FOUND => return Err(ConnectError::NoHost),
             // The label of an elevated host keeps lower-integrity clients out
             // before the host sees them; another user could not know the name.
-            ERROR_ACCESS_DENIED => return Err(ConnectError::Refused(ELEVATED_HOST.into())),
+            // Task #28: a sandboxed caller is below a Medium host, not facing an
+            // elevated one.
+            ERROR_ACCESS_DENIED => {
+                let reason = if super::token::below_medium() { SANDBOXED_CLIENT } else { ELEVATED_HOST };
+                return Err(ConnectError::Refused(reason.into()));
+            }
             ERROR_PIPE_BUSY => {
                 let left = deadline.saturating_duration_since(Instant::now());
                 if left.is_zero() {

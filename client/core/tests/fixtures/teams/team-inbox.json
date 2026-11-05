@@ -1,0 +1,41 @@
+{
+ "items": [
+  {
+   "age": "29898253 min",
+   "command": "{\"kind\":\"switch-setting\",\"reason\":\"merger (Reviewer & Merger), qa (QA tester (Windows, DeepSeek)) share C:\\work\\example\",\"request_id\":\"UUID\",\"setting\":\"build_broker\",\"team\":\"33fbafeb-8291-4eda-a00c-6e1448ec6f20\",\"value\":true} | hgs team propose --json",
+   "detail": "Synthetic text of 568 characters.",
+   "kind": "build_broker",
+   "member": "merger (Reviewer & Merger), qa (QA tester (Windows, DeepSeek))",
+   "since": 0.0,
+   "summary": "Synthetic summary text.",
+   "task": null
+  },
+  {
+   "age": "65 min",
+   "command": "Synthetic command text.",
+   "kind": "proposal_decided",
+   "member": "owner",
+   "since": 1793891317.5730429,
+   "summary": "Synthetic summary text.",
+   "task": null
+  },
+  {
+   "age": "62 min",
+   "command": "Synthetic command text.",
+   "kind": "proposal_decided",
+   "member": "owner",
+   "since": 1793891493.778844,
+   "summary": "Synthetic summary text.",
+   "task": null
+  },
+  {
+   "age": "57 min",
+   "command": "Synthetic command text.",
+   "kind": "proposal_decided",
+   "member": "owner",
+   "since": 1793891758.4734688,
+   "summary": "Synthetic summary text.",
+   "task": null
+  }
+ ]
+}

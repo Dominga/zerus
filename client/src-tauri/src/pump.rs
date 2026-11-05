@@ -881,7 +881,8 @@ impl Mirror {
             Change::Organization { .. }
             | Change::Activity { .. }
             | Change::Processes { .. }
-            | Change::Tasks { .. } => {}
+            | Change::Tasks { .. }
+            | Change::Teams { .. } => {}
         }
     }
 

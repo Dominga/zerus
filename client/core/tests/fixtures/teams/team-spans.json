@@ -1,0 +1,1394 @@
+{
+ "events": {
+  "read": 4,
+  "truncated": false
+ },
+ "next_cursor": null,
+ "tasks": [
+  {
+   "estimate_minutes": 180.0,
+   "estimate_source": "lead",
+   "estimate_spent_minutes": 1.0,
+   "estimate_text": "180 min",
+   "overlay": [],
+   "spans": [
+    {
+     "from": 1793890977.660748,
+     "kind": "member",
+     "s": 4150,
+     "to": 1793895128.1167362
+    },
+    {
+     "attempt": 1,
+     "from": 1793895128.1167362,
+     "kind": "delivery",
+     "member": "ui2",
+     "s": 0,
+     "to": 1793895128.3402867
+    },
+    {
+     "attempt": 1,
+     "from": 1793895128.3402867,
+     "kind": "start_delay",
+     "member": "ui2",
+     "s": 10,
+     "to": 1793895138.408736
+    },
+    {
+     "attempt": 1,
+     "from": 1793895138.408736,
+     "kind": "work",
+     "member": "ui2",
+     "s": 50,
+     "to": null
+    }
+   ],
+   "status": "in_progress",
+   "task": 1,
+   "totals": {
+    "delivery": 0,
+    "member": 4150,
+    "start_delay": 10,
+    "work": 50
+   }
+  },
+  {
+   "estimate_minutes": 120.0,
+   "estimate_source": "lead",
+   "estimate_text": "120 min",
+   "overlay": [],
+   "spans": [
+    {
+     "from": 1793890977.660748,
+     "kind": "member",
+     "s": 4211,
+     "to": null
+    }
+   ],
+   "status": "pending",
+   "task": 2,
+   "totals": {
+    "member": 4211
+   }
+  },
+  {
+   "estimate_minutes": 90.0,
+   "estimate_source": "lead",
+   "estimate_text": "90 min",
+   "overlay": [
+    {
+     "attempt": 1,
+     "exit": 0,
+     "from": 1793891389.0744994,
+     "kind": "build",
+     "member": "ui1",
+     "s": 126,
+     "template": "cargo-test",
+     "to": 1793891514.9104993
+    },
+    {
+     "attempt": 1,
+     "exit": 0,
+     "from": 1793891538.0136218,
+     "kind": "build",
+     "member": "ui1",
+     "s": 2,
+     "template": "cargo-test",
+     "to": 1793891540.1986217
+    },
+    {
+     "attempt": 1,
+     "exit": 0,
+     "from": 1793891577.322047,
+     "kind": "build",
+     "member": "ui1",
+     "s": 0,
+     "template": "git-commit",
+     "to": 1793891577.322047
+    }
+   ],
+   "spans": [
+    {
+     "from": 1793890977.660748,
+     "kind": "member",
+     "s": 36,
+     "to": 1793891013.510472
+    },
+    {
+     "attempt": 1,
+     "from": 1793891013.510472,
+     "kind": "delivery",
+     "member": "ui1",
+     "s": 0,
+     "to": 1793891013.8830118
+    },
+    {
+     "attempt": 1,
+     "from": 1793891013.8830118,
+     "kind": "start_delay",
+     "member": "ui1",
+     "s": 5,
+     "to": 1793891018.4709299
+    },
+    {
+     "attempt": 1,
+     "from": 1793891018.4709299,
+     "kind": "work",
+     "member": "ui1",
+     "s": 635,
+     "to": 1793891653.251821
+    },
+    {
+     "attempt": 1,
+     "from": 1793891653.251821,
+     "kind": "lead",
+     "member": "ui1",
+     "s": 21,
+     "to": 1793891674.2423055
+    }
+   ],
+   "status": "accepted",
+   "task": 3,
+   "totals": {
+    "delivery": 0,
+    "lead": 21,
+    "member": 36,
+    "start_delay": 5,
+    "work": 635
+   }
+  },
+  {
+   "estimate_minutes": 150.0,
+   "estimate_source": "lead",
+   "estimate_text": "150 min",
+   "overlay": [
+    {
+     "attempt": 2,
+     "exit": 0,
+     "from": 1793894912.6710472,
+     "kind": "build",
+     "member": "ui2",
+     "s": 0,
+     "template": "git-commit",
+     "to": 1793894912.6710472
+    }
+   ],
+   "spans": [
+    {
+     "from": 1793890977.660748,
+     "kind": "member",
+     "s": 36,
+     "to": 1793891013.1693487
+    },
+    {
+     "attempt": 1,
+     "from": 1793891013.1693487,
+     "kind": "delivery",
+     "member": "core",
+     "s": 0,
+     "to": 1793891013.4902997
+    },
+    {
+     "attempt": 1,
+     "from": 1793891013.4902997,
+     "kind": "start_delay",
+     "member": "core",
+     "s": 5,
+     "to": 1793891018.4791448
+    },
+    {
+     "attempt": 1,
+     "from": 1793891018.4791448,
+     "kind": "work",
+     "member": "core",
+     "s": 519,
+     "to": 1793891537.967026
+    },
+    {
+     "attempt": 2,
+     "from": 1793891537.967026,
+     "kind": "delivery",
+     "member": "ui2",
+     "s": 0,
+     "to": 1793891538.4030533
+    },
+    {
+     "attempt": 2,
+     "from": 1793891538.4030533,
+     "kind": "start_delay",
+     "member": "ui2",
+     "s": 14,
+     "to": 1793891551.9654
+    },
+    {
+     "attempt": 2,
+     "from": 1793891551.9654,
+     "kind": "work",
+     "member": "ui2",
+     "s": 562,
+     "to": 1793892113.4704916
+    },
+    {
+     "attempt": 2,
+     "by": "lead",
+     "decision": "allow",
+     "from": 1793892113.4704916,
+     "kind": "permission",
+     "member": "ui2",
+     "s": 18,
+     "to": 1793892131.6393971
+    },
+    {
+     "attempt": 2,
+     "from": 1793892131.6393971,
+     "kind": "work",
+     "member": "ui2",
+     "s": 60,
+     "to": 1793892191.9234872
+    },
+    {
+     "attempt": 2,
+     "by": "lead",
+     "decision": "deny",
+     "from": 1793892191.9234872,
+     "kind": "permission",
+     "member": "ui2",
+     "s": 80,
+     "to": 1793892271.97562
+    },
+    {
+     "attempt": 2,
+     "from": 1793892271.97562,
+     "kind": "work",
+     "member": "ui2",
+     "s": 52,
+     "to": 1793892323.840202
+    },
+    {
+     "attempt": 2,
+     "by": "Lead",
+     "from": 1793892323.840202,
+     "kind": "question",
+     "member": "ui2",
+     "question": "q2",
+     "s": 64,
+     "to": 1793892388.1008093
+    },
+    {
+     "attempt": 2,
+     "from": 1793892388.1008093,
+     "kind": "work",
+     "member": "ui2",
+     "s": 37,
+     "to": 1793892425.4332738
+    },
+    {
+     "attempt": 2,
+     "by": "Lead",
+     "from": 1793892425.4332738,
+     "kind": "question",
+     "member": "ui2",
+     "question": "q3",
+     "s": 53,
+     "to": 1793892478.6723113
+    },
+    {
+     "attempt": 2,
+     "by": "Lead",
+     "from": 1793892478.6723113,
+     "kind": "question",
+     "member": "ui2",
+     "question": "q4",
+     "s": 43,
+     "to": 1793892522.1503608
+    },
+    {
+     "attempt": 2,
+     "from": 1793892522.1503608,
+     "kind": "work",
+     "member": "ui2",
+     "s": 472,
+     "to": 1793892994.051766
+    },
+    {
+     "attempt": 2,
+     "by": "Lead",
+     "from": 1793892994.051766,
+     "kind": "question",
+     "member": "ui2",
+     "question": "q5",
+     "s": 155,
+     "to": 1793893149.4796848
+    },
+    {
+     "attempt": 2,
+     "from": 1793893149.4796848,
+     "kind": "work",
+     "member": "ui2",
+     "s": 262,
+     "to": 1793893411.6222918
+    },
+    {
+     "attempt": 2,
+     "by": "Lead",
+     "from": 1793893411.6222918,
+     "kind": "question",
+     "member": "ui2",
+     "question": "q6",
+     "s": 241,
+     "to": 1793893652.4758782
+    },
+    {
+     "attempt": 2,
+     "from": 1793893652.4758782,
+     "kind": "work",
+     "member": "ui2",
+     "s": 102,
+     "to": 1793893754.1659594
+    },
+    {
+     "attempt": 2,
+     "by": "Lead",
+     "from": 1793893754.1659594,
+     "kind": "question",
+     "member": "ui2",
+     "question": "q7",
+     "s": 37,
+     "to": 1793893790.7505202
+    },
+    {
+     "attempt": 2,
+     "from": 1793893790.7505202,
+     "kind": "work",
+     "member": "ui2",
+     "s": 137,
+     "to": 1793893928.0499024
+    },
+    {
+     "attempt": 2,
+     "by": "Lead",
+     "from": 1793893928.0499024,
+     "kind": "question",
+     "member": "ui2",
+     "question": "q8",
+     "s": 156,
+     "to": 1793894084.4607701
+    },
+    {
+     "attempt": 2,
+     "from": 1793894084.4607701,
+     "kind": "work",
+     "member": "ui2",
+     "s": 94,
+     "to": 1793894178.5707402
+    },
+    {
+     "attempt": 2,
+     "by": "Lead",
+     "from": 1793894178.5707402,
+     "kind": "question",
+     "member": "ui2",
+     "question": "q9",
+     "s": 109,
+     "to": 1793894287.7145414
+    },
+    {
+     "attempt": 2,
+     "from": 1793894287.7145414,
+     "kind": "work",
+     "member": "ui2",
+     "s": 797,
+     "to": 1793895084.3843563
+    },
+    {
+     "attempt": 2,
+     "from": 1793895084.3843563,
+     "kind": "lead",
+     "member": "ui2",
+     "s": 15,
+     "to": 1793895098.9779727
+    }
+   ],
+   "status": "accepted",
+   "task": 4,
+   "totals": {
+    "delivery": 1,
+    "lead": 15,
+    "member": 36,
+    "permission": 98,
+    "question": 859,
+    "start_delay": 19,
+    "work": 3094
+   }
+  },
+  {
+   "estimate_minutes": 90.0,
+   "estimate_source": "lead",
+   "estimate_spent_minutes": 1.0,
+   "estimate_text": "90 min",
+   "overlay": [],
+   "spans": [
+    {
+     "from": 1793890977.660748,
+     "kind": "deps",
+     "s": 4121,
+     "to": 1793895098.9779727
+    },
+    {
+     "from": 1793895098.9779727,
+     "kind": "member",
+     "s": 39,
+     "to": 1793895138.4481387
+    },
+    {
+     "attempt": 1,
+     "from": 1793895138.4481387,
+     "kind": "delivery",
+     "member": "qa",
+     "s": 0,
+     "to": 1793895138.5188115
+    },
+    {
+     "attempt": 1,
+     "from": 1793895138.5188115,
+     "kind": "start_delay",
+     "member": "qa",
+     "s": 46,
+     "to": 1793895184.8869376
+    },
+    {
+     "attempt": 1,
+     "from": 1793895184.8869376,
+     "kind": "work",
+     "member": "qa",
+     "s": 4,
+     "to": null
+    }
+   ],
+   "status": "in_progress",
+   "task": 5,
+   "totals": {
+    "delivery": 0,
+    "deps": 4121,
+    "member": 39,
+    "start_delay": 46,
+    "work": 4
+   }
+  },
+  {
+   "estimate_minutes": 360.0,
+   "estimate_source": "lead",
+   "estimate_spent_minutes": 1.0,
+   "estimate_text": "360 min",
+   "overlay": [],
+   "spans": [
+    {
+     "from": 1793890977.660748,
+     "kind": "deps",
+     "s": 4121,
+     "to": 1793895098.9779727
+    },
+    {
+     "from": 1793895098.9779727,
+     "kind": "member",
+     "s": 6,
+     "to": 1793895105.366503
+    },
+    {
+     "attempt": 1,
+     "from": 1793895105.366503,
+     "kind": "delivery",
+     "member": "core",
+     "s": 0,
+     "to": 1793895105.7399676
+    },
+    {
+     "attempt": 1,
+     "from": 1793895105.7399676,
+     "kind": "start_delay",
+     "member": "core",
+     "s": 11,
+     "to": 1793895117.1573308
+    },
+    {
+     "attempt": 1,
+     "from": 1793895117.1573308,
+     "kind": "work",
+     "member": "core",
+     "s": 72,
+     "to": null
+    }
+   ],
+   "status": "in_progress",
+   "task": 6,
+   "totals": {
+    "delivery": 0,
+    "deps": 4121,
+    "member": 6,
+    "start_delay": 11,
+    "work": 72
+   }
+  },
+  {
+   "estimate_minutes": 300.0,
+   "estimate_source": "lead",
+   "estimate_text": "300 min",
+   "overlay": [],
+   "spans": [
+    {
+     "from": 1793890977.660748,
+     "kind": "deps",
+     "s": 4211,
+     "to": null
+    }
+   ],
+   "status": "pending",
+   "task": 7,
+   "totals": {
+    "deps": 4211
+   }
+  },
+  {
+   "estimate_minutes": 240.0,
+   "estimate_source": "lead",
+   "estimate_text": "240 min",
+   "overlay": [],
+   "spans": [
+    {
+     "from": 1793890977.660748,
+     "kind": "deps",
+     "s": 4211,
+     "to": null
+    }
+   ],
+   "status": "pending",
+   "task": 8,
+   "totals": {
+    "deps": 4211
+   }
+  },
+  {
+   "estimate_minutes": 420.0,
+   "estimate_source": "lead",
+   "estimate_text": "420 min",
+   "overlay": [],
+   "spans": [
+    {
+     "from": 1793890977.660748,
+     "kind": "deps",
+     "s": 4211,
+     "to": null
+    }
+   ],
+   "status": "pending",
+   "task": 9,
+   "totals": {
+    "deps": 4211
+   }
+  },
+  {
+   "estimate_minutes": 420.0,
+   "estimate_source": "lead",
+   "estimate_text": "420 min",
+   "overlay": [],
+   "spans": [
+    {
+     "from": 1793890977.660748,
+     "kind": "deps",
+     "s": 4211,
+     "to": null
+    }
+   ],
+   "status": "pending",
+   "task": 10,
+   "totals": {
+    "deps": 4211
+   }
+  },
+  {
+   "estimate_minutes": 360.0,
+   "estimate_source": "lead",
+   "estimate_text": "360 min",
+   "overlay": [],
+   "spans": [
+    {
+     "from": 1793890977.660748,
+     "kind": "deps",
+     "s": 4211,
+     "to": null
+    }
+   ],
+   "status": "pending",
+   "task": 11,
+   "totals": {
+    "deps": 4211
+   }
+  },
+  {
+   "estimate_minutes": 360.0,
+   "estimate_source": "lead",
+   "estimate_text": "360 min",
+   "overlay": [],
+   "spans": [
+    {
+     "from": 1793890977.660748,
+     "kind": "deps",
+     "s": 4211,
+     "to": null
+    }
+   ],
+   "status": "pending",
+   "task": 12,
+   "totals": {
+    "deps": 4211
+   }
+  },
+  {
+   "estimate_minutes": 300.0,
+   "estimate_source": "lead",
+   "estimate_text": "300 min",
+   "overlay": [],
+   "spans": [
+    {
+     "from": 1793890977.660748,
+     "kind": "deps",
+     "s": 4211,
+     "to": null
+    }
+   ],
+   "status": "pending",
+   "task": 13,
+   "totals": {
+    "deps": 4211
+   }
+  },
+  {
+   "estimate_minutes": 180.0,
+   "estimate_source": "lead",
+   "estimate_text": "180 min",
+   "overlay": [],
+   "spans": [
+    {
+     "from": 1793890977.660748,
+     "kind": "deps",
+     "s": 4211,
+     "to": null
+    }
+   ],
+   "status": "pending",
+   "task": 14,
+   "totals": {
+    "deps": 4211
+   }
+  },
+  {
+   "estimate_minutes": 60.0,
+   "estimate_source": "lead",
+   "estimate_text": "60 min",
+   "overlay": [],
+   "spans": [
+    {
+     "from": 1793890977.660748,
+     "kind": "deps",
+     "s": 4211,
+     "to": null
+    }
+   ],
+   "status": "pending",
+   "task": 15,
+   "totals": {
+    "deps": 4211
+   }
+  },
+  {
+   "estimate_minutes": 90.0,
+   "estimate_source": "lead",
+   "estimate_text": "90 min",
+   "overlay": [],
+   "spans": [
+    {
+     "from": 1793890977.660748,
+     "kind": "deps",
+     "s": 4211,
+     "to": null
+    }
+   ],
+   "status": "pending",
+   "task": 16,
+   "totals": {
+    "deps": 4211
+   }
+  },
+  {
+   "estimate_minutes": 120.0,
+   "estimate_source": "lead",
+   "estimate_text": "120 min",
+   "overlay": [],
+   "spans": [
+    {
+     "from": 1793890977.660748,
+     "kind": "deps",
+     "s": 4211,
+     "to": null
+    }
+   ],
+   "status": "pending",
+   "task": 17,
+   "totals": {
+    "deps": 4211
+   }
+  },
+  {
+   "estimate_minutes": 180.0,
+   "estimate_source": "lead",
+   "estimate_text": "180 min",
+   "overlay": [
+    {
+     "attempt": 1,
+     "exit": 0,
+     "from": 1793892478.7130194,
+     "kind": "build",
+     "member": "core",
+     "s": 361,
+     "template": "cargo-test",
+     "to": 1793892839.9820194
+    },
+    {
+     "attempt": 1,
+     "exit": 1,
+     "from": 1793892849.9658775,
+     "kind": "build",
+     "member": "core",
+     "s": 2,
+     "template": "qt-configure",
+     "to": 1793892852.2788775
+    },
+    {
+     "attempt": 1,
+     "exit": 0,
+     "from": 1793892890.4649515,
+     "kind": "build",
+     "member": "core",
+     "s": 0,
+     "template": "git-commit",
+     "to": 1793892890.4649515
+    }
+   ],
+   "spans": [
+    {
+     "from": 1793890977.660748,
+     "kind": "member",
+     "s": 441,
+     "to": 1793891418.420977
+    },
+    {
+     "attempt": 1,
+     "from": 1793891418.420977,
+     "kind": "delivery",
+     "member": "core",
+     "s": 0,
+     "to": 1793891418.792688
+    },
+    {
+     "attempt": 1,
+     "from": 1793891418.792688,
+     "kind": "start_delay",
+     "member": "core",
+     "s": 5,
+     "to": 1793891423.792969
+    },
+    {
+     "attempt": 1,
+     "from": 1793891423.792969,
+     "kind": "work",
+     "member": "core",
+     "s": 369,
+     "to": 1793891792.7433515
+    },
+    {
+     "attempt": 1,
+     "by": "Lead",
+     "from": 1793891792.7433515,
+     "kind": "question",
+     "member": "core",
+     "question": "q1",
+     "s": 167,
+     "to": 1793891959.3654225
+    },
+    {
+     "attempt": 1,
+     "from": 1793891959.3654225,
+     "kind": "work",
+     "member": "core",
+     "s": 1000,
+     "to": 1793892959.4960768
+    },
+    {
+     "attempt": 1,
+     "from": 1793892959.4960768,
+     "kind": "lead",
+     "member": "core",
+     "s": 24,
+     "to": 1793892983.2372947
+    }
+   ],
+   "status": "accepted",
+   "task": 18,
+   "totals": {
+    "delivery": 0,
+    "lead": 24,
+    "member": 441,
+    "question": 167,
+    "start_delay": 5,
+    "work": 1369
+   }
+  },
+  {
+   "estimate_minutes": 150.0,
+   "estimate_source": "lead",
+   "estimate_text": "150 min",
+   "overlay": [],
+   "spans": [
+    {
+     "from": 1793890977.660748,
+     "kind": "member",
+     "s": 4211,
+     "to": null
+    }
+   ],
+   "status": "pending",
+   "task": 19,
+   "totals": {
+    "member": 4211
+   }
+  },
+  {
+   "estimate_minutes": 150.0,
+   "estimate_source": "lead",
+   "estimate_text": "150 min",
+   "overlay": [
+    {
+     "attempt": 1,
+     "exit": 0,
+     "from": 1793892068.7096155,
+     "kind": "build",
+     "member": "ui1",
+     "s": 367,
+     "template": "cargo-test",
+     "to": 1793892435.7866154
+    },
+    {
+     "attempt": 1,
+     "exit": 0,
+     "from": 1793892478.7038765,
+     "kind": "build",
+     "member": "ui1",
+     "s": 181,
+     "template": "cargo-build",
+     "to": 1793892659.5998764
+    },
+    {
+     "attempt": 1,
+     "exit": 0,
+     "from": 1793892678.7811797,
+     "kind": "build",
+     "member": "ui1",
+     "s": 0,
+     "template": "git-commit",
+     "to": 1793892678.7811797
+    }
+   ],
+   "spans": [
+    {
+     "from": 1793890977.660748,
+     "kind": "member",
+     "s": 704,
+     "to": 1793891681.6617215
+    },
+    {
+     "attempt": 1,
+     "from": 1793891681.6617215,
+     "kind": "delivery",
+     "member": "ui1",
+     "s": 0,
+     "to": 1793891682.0873094
+    },
+    {
+     "attempt": 1,
+     "from": 1793891682.0873094,
+     "kind": "start_delay",
+     "member": "ui1",
+     "s": 12,
+     "to": 1793891693.852713
+    },
+    {
+     "attempt": 1,
+     "from": 1793891693.852713,
+     "kind": "work",
+     "member": "ui1",
+     "s": 1067,
+     "to": 1793892761.2710218
+    },
+    {
+     "attempt": 1,
+     "from": 1793892761.2710218,
+     "kind": "lead",
+     "member": "ui1",
+     "s": 29,
+     "to": 1793892790.677909
+    }
+   ],
+   "status": "accepted",
+   "task": 20,
+   "totals": {
+    "delivery": 0,
+    "lead": 29,
+    "member": 704,
+    "start_delay": 12,
+    "work": 1067
+   }
+  },
+  {
+   "estimate_minutes": 480.0,
+   "estimate_source": "lead",
+   "estimate_text": "480 min",
+   "overlay": [
+    {
+     "attempt": 1,
+     "exit": 0,
+     "from": 1793893616.92881,
+     "kind": "build",
+     "member": "core",
+     "s": 127,
+     "template": "cargo-build",
+     "to": 1793893743.5968099
+    },
+    {
+     "attempt": 1,
+     "exit": 101,
+     "from": 1793893896.6991568,
+     "kind": "build",
+     "member": "core",
+     "s": 174,
+     "template": "cargo-test",
+     "to": 1793894070.8191566
+    },
+    {
+     "attempt": 1,
+     "exit": 101,
+     "from": 1793894204.7293308,
+     "kind": "build",
+     "member": "core",
+     "s": 124,
+     "template": "cargo-test",
+     "to": 1793894328.8913307
+    },
+    {
+     "attempt": 1,
+     "exit": 0,
+     "from": 1793894398.0743623,
+     "kind": "build",
+     "member": "core",
+     "s": 244,
+     "template": "cargo-test",
+     "to": 1793894641.5793624
+    },
+    {
+     "attempt": 1,
+     "exit": 0,
+     "from": 1793894687.2583835,
+     "kind": "build",
+     "member": "core",
+     "s": 0,
+     "template": "git-commit",
+     "to": 1793894687.2583835
+    }
+   ],
+   "spans": [
+    {
+     "from": 1793890977.660748,
+     "kind": "member",
+     "s": 2016,
+     "to": 1793892994.1153371
+    },
+    {
+     "attempt": 1,
+     "from": 1793892994.1153371,
+     "kind": "delivery",
+     "member": "core",
+     "s": 0,
+     "to": 1793892994.4904995
+    },
+    {
+     "attempt": 1,
+     "from": 1793892994.4904995,
+     "kind": "start_delay",
+     "member": "core",
+     "s": 11,
+     "to": 1793893005.538318
+    },
+    {
+     "attempt": 1,
+     "from": 1793893005.538318,
+     "kind": "work",
+     "member": "core",
+     "s": 1758,
+     "to": 1793894763.6614647
+    },
+    {
+     "attempt": 1,
+     "from": 1793894763.6614647,
+     "kind": "lead",
+     "member": "core",
+     "s": 46,
+     "to": 1793894809.2787943
+    }
+   ],
+   "status": "accepted",
+   "task": 21,
+   "totals": {
+    "delivery": 0,
+    "lead": 46,
+    "member": 2016,
+    "start_delay": 11,
+    "work": 1758
+   }
+  },
+  {
+   "estimate_minutes": 150.0,
+   "estimate_source": "lead",
+   "estimate_text": "150 min",
+   "overlay": [
+    {
+     "attempt": 1,
+     "exit": 0,
+     "from": 1793893139.7988563,
+     "kind": "build",
+     "member": "ui1",
+     "s": 209,
+     "template": "cargo-test",
+     "to": 1793893349.2018564
+    },
+    {
+     "attempt": 1,
+     "exit": 0,
+     "from": 1793893358.3819675,
+     "kind": "build",
+     "member": "ui1",
+     "s": 1,
+     "template": "cargo-test",
+     "to": 1793893359.3589675
+    },
+    {
+     "attempt": 1,
+     "exit": 101,
+     "from": 1793893370.234806,
+     "kind": "build",
+     "member": "ui1",
+     "s": 46,
+     "template": "cargo-test",
+     "to": 1793893416.648806
+    },
+    {
+     "attempt": 1,
+     "exit": 0,
+     "from": 1793893433.939425,
+     "kind": "build",
+     "member": "ui1",
+     "s": 0,
+     "template": "git-commit",
+     "to": 1793893433.939425
+    }
+   ],
+   "spans": [
+    {
+     "from": 1793890977.660748,
+     "kind": "member",
+     "s": 1812,
+     "to": 1793892789.6463048
+    },
+    {
+     "attempt": 1,
+     "from": 1793892789.6463048,
+     "kind": "delivery",
+     "member": "ui1",
+     "s": 0,
+     "to": 1793892790.1319797
+    },
+    {
+     "attempt": 1,
+     "from": 1793892790.1319797,
+     "kind": "start_delay",
+     "member": "ui1",
+     "s": 13,
+     "to": 1793892803.3559265
+    },
+    {
+     "attempt": 1,
+     "from": 1793892803.3559265,
+     "kind": "work",
+     "member": "ui1",
+     "s": 706,
+     "to": 1793893509.015446
+    },
+    {
+     "attempt": 1,
+     "from": 1793893509.015446,
+     "kind": "lead",
+     "member": "ui1",
+     "s": 56,
+     "to": 1793893564.9199202
+    }
+   ],
+   "status": "accepted",
+   "task": 22,
+   "totals": {
+    "delivery": 0,
+    "lead": 56,
+    "member": 1812,
+    "start_delay": 13,
+    "work": 706
+   }
+  },
+  {
+   "estimate_minutes": 120.0,
+   "estimate_source": "lead",
+   "estimate_text": "120 min",
+   "overlay": [],
+   "spans": [
+    {
+     "from": 1793890977.660748,
+     "kind": "member",
+     "s": 4211,
+     "to": null
+    }
+   ],
+   "status": "pending",
+   "task": 23,
+   "totals": {
+    "member": 4211
+   }
+  },
+  {
+   "estimate_minutes": 150.0,
+   "estimate_source": "lead",
+   "estimate_text": "150 min",
+   "overlay": [
+    {
+     "attempt": 1,
+     "exit": 101,
+     "from": 1793893831.519574,
+     "kind": "build",
+     "member": "ui1",
+     "s": 47,
+     "template": "cargo-test",
+     "to": 1793893878.8755739
+    },
+    {
+     "attempt": 1,
+     "exit": 0,
+     "from": 1793893986.5468655,
+     "kind": "build",
+     "member": "ui1",
+     "s": 249,
+     "template": "cargo-test",
+     "to": 1793894235.4518654
+    },
+    {
+     "attempt": 1,
+     "exit": 0,
+     "from": 1793894252.500792,
+     "kind": "build",
+     "member": "ui1",
+     "s": 2,
+     "template": "cargo-test",
+     "to": 1793894254.082792
+    },
+    {
+     "attempt": 1,
+     "exit": 101,
+     "from": 1793894274.9561539,
+     "kind": "build",
+     "member": "ui1",
+     "s": 95,
+     "template": "cargo-test",
+     "to": 1793894369.596154
+    },
+    {
+     "attempt": 1,
+     "exit": 0,
+     "from": 1793894386.1695466,
+     "kind": "build",
+     "member": "ui1",
+     "s": 0,
+     "template": "git-commit",
+     "to": 1793894386.1695466
+    }
+   ],
+   "spans": [
+    {
+     "from": 1793890977.660748,
+     "kind": "member",
+     "s": 2562,
+     "to": 1793893539.590377
+    },
+    {
+     "attempt": 1,
+     "from": 1793893539.590377,
+     "kind": "delivery",
+     "member": "ui1",
+     "s": 0,
+     "to": 1793893540.0704286
+    },
+    {
+     "attempt": 1,
+     "from": 1793893540.0704286,
+     "kind": "start_delay",
+     "member": "ui1",
+     "s": 10,
+     "to": 1793893549.6882172
+    },
+    {
+     "attempt": 1,
+     "from": 1793893549.6882172,
+     "kind": "work",
+     "member": "ui1",
+     "s": 940,
+     "to": 1793894489.8918862
+    },
+    {
+     "attempt": 1,
+     "from": 1793894489.8918862,
+     "kind": "lead",
+     "member": "ui1",
+     "s": 63,
+     "to": 1793894552.403712
+    }
+   ],
+   "status": "accepted",
+   "task": 24,
+   "totals": {
+    "delivery": 0,
+    "lead": 63,
+    "member": 2562,
+    "start_delay": 10,
+    "work": 940
+   }
+  },
+  {
+   "estimate_minutes": 90.0,
+   "estimate_source": "lead",
+   "estimate_text": "90 min",
+   "overlay": [
+    {
+     "attempt": 1,
+     "exit": 0,
+     "from": 1793894718.0412378,
+     "kind": "build",
+     "member": "ui1",
+     "s": 160,
+     "template": "cargo-test",
+     "to": 1793894877.6502378
+    },
+    {
+     "attempt": 1,
+     "exit": 101,
+     "from": 1793894890.9013634,
+     "kind": "build",
+     "member": "ui1",
+     "s": 48,
+     "template": "cargo-test",
+     "to": 1793894939.2683635
+    }
+   ],
+   "spans": [
+    {
+     "from": 1793890977.660748,
+     "kind": "member",
+     "s": 3560,
+     "to": 1793894537.654793
+    },
+    {
+     "attempt": 1,
+     "from": 1793894537.654793,
+     "kind": "delivery",
+     "member": "ui1",
+     "s": 1,
+     "to": 1793894538.2074664
+    },
+    {
+     "attempt": 1,
+     "from": 1793894538.2074664,
+     "kind": "start_delay",
+     "member": "ui1",
+     "s": 27,
+     "to": 1793894565.574854
+    },
+    {
+     "attempt": 1,
+     "from": 1793894565.574854,
+     "kind": "work",
+     "member": "ui1",
+     "s": 461,
+     "to": 1793895026.4640212
+    },
+    {
+     "attempt": 1,
+     "from": 1793895026.4640212,
+     "kind": "lead",
+     "member": "ui1",
+     "s": 72,
+     "to": 1793895098.8103733
+    }
+   ],
+   "status": "accepted",
+   "task": 25,
+   "totals": {
+    "delivery": 1,
+    "lead": 72,
+    "member": 3560,
+    "start_delay": 27,
+    "work": 461
+   }
+  },
+  {
+   "estimate_minutes": 90.0,
+   "estimate_source": "lead",
+   "estimate_text": "90 min",
+   "overlay": [],
+   "spans": [
+    {
+     "from": 1793890977.660748,
+     "kind": "member",
+     "s": 4211,
+     "to": null
+    }
+   ],
+   "status": "pending",
+   "task": 26,
+   "totals": {
+    "member": 4211
+   }
+  },
+  {
+   "estimate_minutes": 180.0,
+   "estimate_source": "lead",
+   "estimate_text": "180 min",
+   "overlay": [],
+   "spans": [
+    {
+     "from": 1793890977.660748,
+     "kind": "deps",
+     "s": 4211,
+     "to": null
+    }
+   ],
+   "status": "pending",
+   "task": 27,
+   "totals": {
+    "deps": 4211
+   }
+  }
+ ],
+ "team": "33fbafeb-8291-4eda-a00c-6e1448ec6f20"
+}

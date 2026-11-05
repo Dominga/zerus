@@ -1,0 +1,58 @@
+{
+  "analytics": {
+    "providers": [
+      "codex",
+      "claude",
+      "kimi",
+      "dsh",
+      "opencode",
+      "other"
+    ],
+    "agentCounters": [
+      "turn_started",
+      "turn_completed",
+      "turn_interrupted",
+      "work_ms",
+      "approval_wait_ms",
+      "input_wait_ms",
+      "approval_requested",
+      "approval_resolved",
+      "input_requested",
+      "input_resolved",
+      "delivery_submitted",
+      "delivery_failed",
+      "delivery_uncertain",
+      "recovery_attempt",
+      "recovery_succeeded",
+      "recovery_exhausted",
+      "failure_authentication",
+      "failure_rate_limit",
+      "failure_quota",
+      "failure_policy",
+      "failure_network",
+      "failure_service",
+      "failure_unknown",
+      "input_tokens",
+      "output_tokens",
+      "cache_tokens",
+      "reasoning_tokens"
+    ],
+    "speechCounters": [
+      "submitted",
+      "completed",
+      "failed",
+      "cancelled",
+      "uncertain",
+      "audio_ms",
+      "queue_ms",
+      "processing_ms"
+    ]
+  },
+  "approvalTranslationKeys": {
+    "APPROVALS_TITLE": "Enable automatic approvals?",
+    "APPROVALS_CONFIRM": "Enable automatic approvals",
+    "APPROVALS_BODY": "Agents on this computer and connected machines will be allowed to run tools without your review, including commands that delete files or consume paid usage. Resuming after an expired cache may process the full conversation again. Zerus will grant one-time permissions and record each attempt in this computer's private journal. Enable this dangerous mode?",
+    "APPROVALS_WARNING": "Allows agents to run commands and change files without waiting for you, including destructive actions and paid usage. Resuming after an expired cache may process the full conversation again. Applies to all reachable sessions while this Zerus is running, including with its window hidden. Ordinary questions, folder trust and permanent permission changes still need you.",
+    "APPROVALS_HINT": "Off by default and separate from automatic recovery. Supports verified one-time Claude, OpenCode and DeepSeek tool permissions. A journal entry must be saved first. Unconfirmed delivery is never retried automatically. Turning this off stops new approvals; requests already sent may still finish."
+  }
+}

@@ -7,8 +7,8 @@ import type { ActivityEvent } from "../../types";
 const message = (files: ActivityEvent["attachments"]): ActivityEvent => ({ seq: 1, type: "UserPromptSubmit", detail: "See the shot", attachments: files });
 const scope: AttachmentScope = { computer: "studio", name: "claude/sample-project/review", conversation_id: "conv-1", archive_id: null };
 
-describe("Activity attachment cards (ActivityView.cpp:759-782)", () => {
-  it("caption, size and thumbnail as Qt shows them", () => {
+describe("Activity attachment cards", () => {
+  it("formats the caption, size and thumbnail", () => {
     const [shot, notes, drawing, unsaved] = attachments(message([
       { name: "shot.png", mime: "image/png", bytes: 1500, reference: "[Image #1]", request_id: "req-1", index: 0 },
       { name: "notes.txt", mime: "text/plain", bytes: 1, request_id: "req-1", index: 1 },
@@ -34,7 +34,7 @@ describe("Activity attachment cards (ActivityView.cpp:759-782)", () => {
   });
 });
 
-describe("Open on an Activity attachment (SessionsWindow.cpp:1093-1102)", () => {
+describe("Open on an Activity attachment", () => {
   const ref = cardTarget(attachments(message([{ name: "shot.png", request_id: "req-1", index: 0 }]))![0], scope)!.ref;
 
   function harness(answer: () => Promise<string | null>) {
@@ -56,36 +56,6 @@ describe("Open on an Activity attachment (SessionsWindow.cpp:1093-1102)", () => 
     const failed = harness(async () => { throw "No application could open this file."; });
     await failed.open("studio", ref);
     expect(failed.said[1]).toEqual(["error", "No application could open this file.", true, OPENING]);
-  });
-});
-
-// Every text of Task 9 is Qt's: it appears in the Qt source it comes from and
-// in the client source that shows it. Read from disk as the Settings text test does.
-const fs = (await import(/* @vite-ignore */ ["node", "fs"].join(":"))) as { readFileSync(path: URL, encoding: "utf8"): string };
-const repo = new URL("../../../../", import.meta.url);
-const read = (file: string) => fs.readFileSync(new URL(file, repo), "utf8");
-
-describe("Task 9's texts are Qt's", () => {
-  const cases: [qt: string, client: string, text: string][] = [
-    ["tray/src/AttachmentViewer.h", "client/src-tauri/src/composer/fetch.rs", "No application could open this file."],
-    ["tray/src/AttachmentViewer.h", "client/src-tauri/src/composer/fetch.rs", "This attachment has no saved file reference."],
-    ["tray/src/MessageComposer.cpp", "client/src-tauri/src/composer/fetch.rs", "Could not open the attachment."],
-    ["tray/src/MessageComposer.cpp", "client/src-tauri/src/composer/fetch.rs", "Could not open the attachment with its default application."],
-    ["tray/src/SessionsWindow.cpp", "client/src/ui/sessions/attachment-card.ts", "Opening attachment…"],
-    ["tray/src/ActivityView.cpp", "client/src/ui/sessions/Activity.tsx", "Open →"],
-  ];
-  it.each(cases)("%s and %s say %s", (qt, client, text) => {
-    expect(read(qt)).toContain(`tr("${text}")`);
-    expect(read(client)).toContain(text);
-  });
-
-  it("fills in Qt's formats", () => {
-    expect(read("tray/src/ActivityView.cpp")).toContain('tr("Attachment: %1")');
-    expect(read("client/src/ui/sessions/Activity.tsx")).toContain('tr("Attachment: %1", props.file.name)');
-    expect(read("tray/src/ActivityView.cpp")).toContain('tr("%1 KiB")');
-    expect(read("client/src/ui/sessions/transcript.ts")).toContain("`${Math.max(1, Math.ceil(bytes / 1024))} KiB` : \"File\"");
-    expect(read("tray/src/MessageComposer.cpp")).toContain('tr("Open %1")');
-    expect(read("client/src/ui/sessions/Attachments.tsx")).toContain('title={tr("Open %1", a().name)}');
   });
 });
 

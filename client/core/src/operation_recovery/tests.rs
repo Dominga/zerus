@@ -191,7 +191,8 @@ fn original_task_scopes_and_delivery_ids_do_not_use_current_ui_choices() {
         start("review"),
     ]);
     let page = f.page().unwrap();
-    assert_eq!(page.operations.len(), 3);
+    assert_eq!(page.operations.len(), 2);
+    assert_eq!(page.unsupported_pages, vec![0]);
     for op in page.operations {
         assert_eq!(op.id, REQUEST);
         assert_eq!(op.requests["delivery"], REQUEST);
@@ -427,7 +428,7 @@ fn byte_budget_limits_reads_and_preserves_stable_order_without_retaining_bodies(
     }
     let bytes = serde_json::to_vec(&json!({"schema":1,"operations":operations})).unwrap();
     let mut f = Fixture::new(vec![
-        sources::creations(sources::Origin::Qt, &bytes).unwrap()
+        sources::creations(sources::Origin::Next, &bytes).unwrap()
     ]);
     let projection = f.projection();
     let first = projection
@@ -586,4 +587,20 @@ fn recognized_names_with_future_schema_or_format_stay_unsupported() {
         assert_eq!(f.page().unwrap().unsupported_pages, vec![0]);
         assert_eq!(f.memory.body_reads, 0);
     }
+}
+
+#[test]
+fn qt_creation_and_message_reports_are_ignored_without_reading_or_reoffering_them() {
+    let bytes =
+        serde_json::to_vec(&json!({"schema":1,"operations":{OP:operation(OP,"unknown")}})).unwrap();
+    let mut f = Fixture::new(vec![
+        sources::creations(sources::Origin::Qt, &bytes).unwrap(),
+        message(sources::Origin::Qt),
+    ]);
+    let original = f.memory.snapshots.clone();
+    let page = f.page().unwrap();
+    assert!(page.operations.is_empty());
+    assert_eq!(f.memory.body_reads, 0);
+    assert_eq!(page.unsupported_pages.len(), f.record.pages.len());
+    assert_eq!(f.memory.snapshots, original);
 }

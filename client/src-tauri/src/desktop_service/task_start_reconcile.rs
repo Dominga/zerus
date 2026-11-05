@@ -11,7 +11,7 @@ use zerus_client_core::{
     task_start::{
         self,
         capture::{
-            journal::{self, Journal, Phase, PublicationStatus, Saved, Settlement},
+            journal::{self, CheckId, Journal, Phase, PublicationStatus, Saved, Settlement},
             Captured,
         },
     },
@@ -309,11 +309,17 @@ pub(crate) fn check(
     if !offered {
         let source = Captured::read(store, project, task, id, snapshot, read.scope.clone())
             .map_err(|_| UNAVAILABLE)?;
+        let proposal = match loaded.as_ref() {
+            Some(saved) if saved.phase() == Phase::CancelledBeforeOffer || new_original => {
+                saved.next_check_id().map_err(journal_problem)?
+            }
+            _ => CheckId::fresh(),
+        };
         let reconcile = loaded
             .as_ref()
             .filter(|s| s.phase() == Phase::Prepared && s.original_id() == id)
             .map(|s| s.reconcile_id().to_owned())
-            .unwrap_or_else(|| uuid::Uuid::new_v4().to_string());
+            .unwrap_or_else(|| proposal.as_str().to_owned());
         let intent = source.intent(&reconcile).map_err(|_| UNAVAILABLE)?;
         let registration = read.prepare(intent.clone())?;
         // Defence in depth: today's bounded original cannot fill this envelope
@@ -328,10 +334,10 @@ pub(crate) fn check(
         }
         let journal = match loaded {
             Some(saved) if saved.phase() == Phase::CancelledBeforeOffer => {
-                Journal::prepare_after_discard(source, &reconcile, saved.reconcile_id())
+                Journal::prepare_after_discard(source, &proposal, saved.reconcile_id())
             }
-            Some(saved) if new_original => saved.prepare_new_original(source, &reconcile),
-            _ => Journal::prepare(source, &reconcile),
+            Some(saved) if new_original => saved.prepare_new_original(source, &proposal),
+            _ => Journal::prepare(source, &proposal),
         }
         .map_err(journal_problem)?;
         let journal = Arc::new(Mutex::new(journal));

@@ -33,6 +33,7 @@
 
 pub mod clones;
 pub mod folders;
+mod legacy_projects;
 pub mod overview;
 pub mod swarm_dialog;
 
@@ -139,6 +140,10 @@ struct Hub {
     recovery_due: Option<String>,
     presentation_due: bool,
     catalog: Option<swarm_dialog::Context>,
+    legacy: Option<legacy_projects::Context>,
+    legacy_report: Option<legacy_projects::Report>,
+    legacy_epochs: HashMap<String, u64>,
+    legacy_read_blocked: bool,
     source_generation: u64,
     /// Only an adopted current source observation can qualify local metadata.
     /// Kept out of Controller: it is never shared state or apply input.
@@ -535,6 +540,7 @@ impl Organization {
 
     /// This computer's organization changes, from the drain thread.
     pub fn observe(&self, change: &Change) {
+        self.legacy_observe(change);
         // This callback precedes Pump::push. Drop the proof before a new hello
         // or a disconnect can leave the previous card cached in the pump.
         let identity_changed = match change {
@@ -652,6 +658,11 @@ impl Organization {
     fn view(&self, hub: &Hub) -> SyncView {
         let mut view = hub.sync.view();
         view.notice = hub.notice.clone();
+        if hub.legacy_read_blocked {
+            view.reason = Some(legacy_projects::READ_BLOCKED.into());
+            view.status = legacy_projects::READ_BLOCKED.into();
+            view.status_error = true;
+        }
         view.layout_save_paused = !self.0.layout_writable;
         if !self.0.allowed {
             view.ready = false;
@@ -1050,6 +1061,9 @@ impl Organization {
         if self.catalog_pass() {
             return;
         }
+        if self.legacy_projects_pass() {
+            return;
+        }
         if let Err(detail) = self.recover_windows_folders() {
             let mut hub = self.lock();
             hub.notice = Some(detail);
@@ -1119,6 +1133,13 @@ impl Organization {
         let wait = hub
             .sync
             .next_due()
+            .into_iter()
+            .chain(
+                hub.legacy
+                    .as_ref()
+                    .and_then(legacy_projects::Context::next_due),
+            )
+            .min()
             .map_or(IDLE_MS, |at| at.saturating_sub(now))
             .clamp(1, IDLE_MS);
         drop(
@@ -1766,6 +1787,7 @@ pub fn set_project_collapsed(state: State<'_, Organization>, project: String, co
 
 #[cfg(all(test, unix))]
 mod tests {
+    mod legacy_projects;
     mod swarm_conflicts;
     mod swarm_dialog_cases;
     mod windows_folders;

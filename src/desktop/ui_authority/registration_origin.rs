@@ -65,8 +65,23 @@ mod tests {
     use super::*;
     #[test]
     fn native_identity_is_stable_and_never_uses_dates() {
-        assert_eq!(native().unwrap(), native().unwrap());
         assert!(canonical("").is_err());
         assert!(canonical("00000000-0000-0000-0000-000000000000").is_err());
+        let first = native();
+        // Minimal Linux package containers need not have a machine-id (or a
+        // boot-id mount). Missing native evidence must stay unavailable, rather
+        // than inventing an identity or making this host-dependent test panic.
+        #[cfg(target_os = "linux")]
+        if ["/etc/machine-id", "/proc/sys/kernel/random/boot_id"]
+            .iter()
+            .any(|path| {
+                std::fs::metadata(path)
+                    .is_err_and(|error| error.kind() == std::io::ErrorKind::NotFound)
+            })
+        {
+            assert!(first.is_err(), "missing native identity must fail closed");
+            return;
+        }
+        assert_eq!(first.unwrap(), native().unwrap());
     }
 }

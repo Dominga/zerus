@@ -983,3 +983,25 @@ fn report_slot_wakes_only_after_the_last_original_resource_and_never_after_stop(
         }
     });
 }
+
+#[test]
+fn projects_only_upgrade_keeps_next_source_guards_but_never_offers_a_runtime_report() {
+    let fixture = Fixture::new("ok");
+    let inputs = Inputs::native(
+        crate::identity::SWITCH_ID,
+        false,
+        fixture.root.clone(),
+        fixture.report.inputs.settings.clone(),
+        Arc::new(|| PathBuf::from("/unused")),
+    )
+    .unwrap();
+    let creations = inputs.creations.clone();
+    let local_reads = inputs.local_reads.clone();
+    let copy = inputs.clone();
+    assert!(copy.for_runtime_report().is_none());
+    assert!(Arc::ptr_eq(&creations, &inputs.creations));
+    assert!(Arc::ptr_eq(&local_reads, &inputs.local_reads));
+    assert!(creations.prepare().is_ok());
+    assert!(local_reads.prepare().is_ok());
+    assert!(!fixture.root.join("qt-retained-import-v1.json").exists());
+}

@@ -818,7 +818,8 @@ fn launch(context: tauri::Context<tauri::Wry>, startup: Startup) {
                     &app.state::<identity::Identity>().bundle_id, replay,
                 );
                 organization.seed_runs(qt_source.clone());
-                organization.recover_qt(qt_source,app.state::<settings::Store>().0.clone());
+                organization.recover_qt(qt_source.clone(),app.state::<settings::Store>().0.clone());
+                organization.import_legacy_projects(qt_source,app.state::<settings::Store>().0.clone());
                 // Before any start of the source (the menu bar's below, or the webview's).
                 app.state::<commands::AppState>().set_organization(organization.clone());
                 let screens = screens::Screens::tauri(app.handle().clone(), pump.clone());
@@ -877,9 +878,8 @@ fn launch(context: tauri::Context<tauri::Wry>, startup: Startup) {
                     }));
                 }
                 app.manage(composer::saved::DraftCapture(capture.clone()));
-                // The switch build takes Qt's and the dev app's drafts once,
-                // right after the capture (zerus-5wmh.13.1); the dev identity
-                // and a replay never import.
+                // Keep Next's existing interim draft import and writer fence.
+                // The core startup importer excludes Qt under the 0.48 policy.
                 if seeds_qt {
                     zerus_client_core::drafts::import_at_start(&drafts);
                 }
@@ -898,12 +898,9 @@ fn launch(context: tauri::Context<tauri::Wry>, startup: Startup) {
                     })
                     .flatten()
                     .map(|now| (now, std::time::Instant::now()));
-                // Saved drafts reads Qt's store and the dev app's, never
-                // writing to them; a replay lists neither.
-                let qt_drafts = composer::qt_store(
-                    drafts.root(),
-                    (!replay).then(zerus_client_core::drafts::qt_root).flatten(),
-                );
+                // Qt drafts are not imported or offered for recovery. The
+                // existing Next dev stores are separate interim client data.
+                let qt_drafts = None;
                 let dev_drafts = if replay {
                     Vec::new()
                 } else {
@@ -1148,15 +1145,7 @@ fn launch(context: tauri::Context<tauri::Wry>, startup: Startup) {
                     let attention = identity::notifier_runs(posts, bundled)
                         .then(|| {
                             let path = dir.join(desk::ATTENTION_FILE);
-                            // Qt's edges seed the switch bundle's first start
-                            // (Decision 11): its `attention/observed`, which the
-                            // defaults domain keeps as `attention.observed`.
-                            let switch = identity.is_switch();
-                            Box::new(move || {
-                                desk::Attention::load(path, || {
-                                    switch.then(|| platform::macos::qt_default_data("attention.observed")).flatten()
-                                })
-                            }) as desk::LoadAttention
+                            Box::new(move || desk::Attention::load(path, || None)) as desk::LoadAttention
                         });
                     let notifies = attention.is_some();
                     desk::start(app.handle(), &pump, dir.clone(), desk::load_mode(&dir, conf.as_deref()), attention);
@@ -1182,10 +1171,7 @@ fn launch(context: tauri::Context<tauri::Wry>, startup: Startup) {
                     let switch = identity.is_switch();
                     let attention = posts.then(|| {
                         let path = dir.join(desk::ATTENTION_FILE);
-                        Box::new(move || desk::Attention::load(path, || {
-                            switch.then(|| platform::linux_notify::qt_values().ok().flatten()
-                                .and_then(|values| values.get("attention/observed").map(|v| v.to_text().into_bytes()))).flatten()
-                        })) as desk::LoadAttention
+                        Box::new(move || desk::Attention::load(path, || None)) as desk::LoadAttention
                     });
                     desk::start(app.handle(), &pump, dir.clone(), desk::load_linux_mode(&dir, conf.as_deref()), attention);
                     if let Some(target) = navigation {
@@ -1213,11 +1199,7 @@ fn launch(context: tauri::Context<tauri::Wry>, startup: Startup) {
                     let switch = identity.is_switch();
                     let attention = posts.then(|| {
                         let path = dir.join(desk::ATTENTION_FILE);
-                        Box::new(move || desk::Attention::load(path, || {
-                            if !switch { return None; }
-                            zerus_client_core::settings::QtStore::here().and_then(|store| store.snapshot().ok().flatten())
-                                .and_then(|snapshot| snapshot.values.get("attention/observed").map(|v| v.to_text().into_bytes()))
-                        })) as desk::LoadAttention
+                        Box::new(move || desk::Attention::load(path, || None)) as desk::LoadAttention
                     });
                     desk::start(app.handle(), &pump, dir.clone(), desk::load_windows_mode(&dir, conf.as_deref()), attention);
                     // The service posts the toast and grants foreground; this GUI only routes the click.
@@ -1611,7 +1593,10 @@ fn handler() -> impl Fn(tauri::ipc::Invoke) -> bool + Send + Sync + 'static {
         settings::skins::user_skin_import,
         settings::skins::user_skins_open,
         settings::settings_get,
+        settings::qt_upgrade_notice,
+        settings::qt_upgrade_notice_ack,
         settings::settings_qt_preferences,
+        settings::settings_legacy_projects,
         settings::settings_set,
         desk::desk_take_pending,
         window_layer::window_layer_state,

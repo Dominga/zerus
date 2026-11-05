@@ -23,6 +23,7 @@ import {
   type PlanPhase,
   type PlanRow,
 } from "./plan";
+import { stageName } from "./actions";
 import "../styles/plan.css";
 
 export interface PlanViewProps {
@@ -39,6 +40,8 @@ export interface PlanViewProps {
   onLoadTests?: (before: number | null) => void;
   /** The Profile mode asks for the team's profile when opened. */
   onLoadProfile?: () => void;
+  /** Task 40: the task card's actions (ui/teams/TeamActions.tsx TaskActions), drawn under the task's detail. */
+  taskActions?: (id: number) => JSX.Element;
   class?: string;
 }
 
@@ -214,7 +217,7 @@ export function PlanView(props: PlanViewProps): JSX.Element {
     const attempt = task?.attempts ? tr("Attempt %1", task.attempts) : "";
     const stateText = task?.attempt_state?.trim() || "";
     const classes = ["pt-card", `pt-card-${state}`];
-    const stages = stageChips(task?.pipeline?.stages);
+    const stages = stageChips(task?.pipeline_run);
     const heat = heatShare(props.profile, placed.node.id);
     const litNow = lit();
     if (litNow) classes.push(litNow.has(placed.node.id) ? (hover() === placed.node.id ? "pt-card-on" : "pt-card-lit") : "pt-card-dim");
@@ -238,6 +241,15 @@ export function PlanView(props: PlanViewProps): JSX.Element {
           <span class="pt-title">{placed.node.title || task?.title || tr("Task %1", placed.node.id)}</span>
           <Show when={task?.pinned}>
             <span class="pt-badge">{tr("Pinned")}</span>
+          </Show>
+          <Show when={task?.held}>
+            <span class="pt-badge">{tr("Held")}</span>
+          </Show>
+          <Show when={task?.pipeline_run?.open}>{(open) => (
+            <span class="pt-badge" data-stage={open().kind} title={tr("Pipeline stage")}>{stageName(open().kind)}</span>
+          )}</Show>
+          <Show when={!task?.pipeline_run && task?.pipeline && task.pipeline !== "none"}>
+            <span class="pt-badge" title={tr("Pipeline")}>{task!.pipeline}</span>
           </Show>
         </span>
         <span class="pt-card-l2">
@@ -360,6 +372,7 @@ export function PlanView(props: PlanViewProps): JSX.Element {
         <Show when={task.decided_by}>
           <p class="pt-detail-note">{tr("Decided by %1", task.decided_by)}</p>
         </Show>
+        <Show when={props.taskActions}>{(actions) => actions()(task.id)}</Show>
       </aside>
     );
   };

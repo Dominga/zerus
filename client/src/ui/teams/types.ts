@@ -3,7 +3,7 @@
 // module aliases them and adds the plan graph and New team's draft shapes.
 import type { TeamMemberView, TeamPhaseView, TeamTaskView } from "../../types";
 
-export type { TeamTaskStage, TeamTaskPipeline as TaskPipelineView, TeamView } from "../../types";
+export type { TeamPipelineRun, TeamView } from "../../types";
 export type TaskView = TeamTaskView;
 export type PhaseView = TeamPhaseView;
 export type MemberView = TeamMemberView;

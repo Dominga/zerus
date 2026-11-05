@@ -1,4 +1,4 @@
-import type { TeamProfileView, TeamTaskStage, TeamTestsView } from "../../types";
+import type { TeamPipelineRun, TeamProfileView, TeamTestsView } from "../../types";
 import type { PlacedNode } from "./plan";
 
 /** The plan's five modes, as Qt's TeamWorkspace toolbar names them. */
@@ -55,18 +55,20 @@ export function stageName(kind: string): string {
 }
 
 /** The newest run of each stage kind, in pipeline order. */
-export function stageChips(stages: TeamTaskStage[] | undefined): { kind: string; state: string; attempt: number }[] {
-  if (!stages) return [];
+export function stageChips(run: TeamPipelineRun | null | undefined): { kind: string; state: string; attempt: number }[] {
+  if (!run) return [];
   const seen = new Set<string>();
-  return stages
-    .slice()
-    .reverse()
-    .filter((stage) => {
-      if (seen.has(stage.kind)) return false;
-      seen.add(stage.kind);
+  return run.stages
+    .filter((kind) => {
+      if (seen.has(kind)) return false;
+      seen.add(kind);
       return true;
     })
-    .map((stage) => ({ kind: stage.kind, state: stage.state, attempt: stage.attempt }));
+    .map((kind) => ({
+      kind,
+      state: run.open?.kind === kind ? run.open.state : "",
+      attempt: 0,
+    }));
 }
 
 /** A task's share of the profile's largest recorded loss, 0..1; null when

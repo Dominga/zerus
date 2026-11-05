@@ -14,7 +14,7 @@ return-to-draft re-approves. pause-phase {phase, reason}; unpause yours by a
 card. Owner-acceptance holds later phases until accept-phase (a card); extend
 reworks a sent-back phase.
 
-Pipelines: "pipeline":"code" (review/test), "docs"/"check"/"none", default role/template.
+Pipelines: "code" (review/test), "docs"/"check"/"none"; default role/template.
 Pass/return; decide at round 3; skip-stage/send-back override.
 
 {"team":"ID","phase":N} | hgs team profile --json: top three losses, roles[],
@@ -22,8 +22,8 @@ tokens per accepted task; unknown, never zero.
 
 hgs guide team-tests.
 
-Reject reworks on the same member; "fresh":true tries a free peer of its role.
-Rework reserves its member; unavailable: wait for reassign.
+Reject reworks on its member (reserved; unavailable: reassign); "fresh":true
+tries a free peer of its role.
 
 Auto drafts (U61): with Auto-accept, a phase stays a draft you edit until first hand-out.
 If members are idle and tasks independent:
@@ -41,6 +41,8 @@ Members:
 - Budgets: hgs team expect {"label":"x","minutes":15}; red says once.
 - Never install a tool; propose it on the question card.
 - Shared folder: hgs guide team-broker.
+- Codex on Windows: read-only .git, so it commits via git-commit; no Store
+  pwsh, so powershell.exe (team-run).
 - Permissions: allow what the task needs; outside or destructive: ask the owner.
-- Cancel empty tasks first; all decided: extend/team finish; owner stop is final.
+- Cancel empty tasks first; all decided: extend/finish; owner stop is final.
 Sub-teams: hgs guide team-tree.

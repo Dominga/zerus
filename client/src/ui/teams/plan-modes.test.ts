@@ -80,15 +80,18 @@ describe("layers mode", () => {
 });
 
 describe("stages and heat", () => {
-  it("keeps the newest run of each stage kind", () => {
-    const stages = [
-      { kind: "review", state: "passed", attempt: 1, member: "rev" },
-      { kind: "test", state: "waiting", attempt: 1, member: "qa" },
-      { kind: "review", state: "returned", attempt: 2, member: "rev" },
-    ];
-    expect(stageChips(stages)).toEqual([
-      { kind: "review", state: "returned", attempt: 2 },
-      { kind: "test", state: "waiting", attempt: 1 },
+  it("keeps the pipeline's stages and its open stage's state", () => {
+    const run = {
+      name: "Standard",
+      accept: "lead",
+      round: 1,
+      max_rounds: 3,
+      stages: ["review", "test"],
+      open: { stage: 1, kind: "review", member: "rev", state: "returned" },
+    };
+    expect(stageChips(run)).toEqual([
+      { kind: "review", state: "returned", attempt: 0 },
+      { kind: "test", state: "", attempt: 0 },
     ]);
   });
 

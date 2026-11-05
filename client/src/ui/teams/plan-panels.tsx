@@ -125,9 +125,9 @@ function Card(props: { placed: PlacedNode; heat?: number | null; loss?: string; 
         <Show when={task().assignee}><span>{task().assignee}</span></Show>
         <Show when={props.loss}><span class="pm-loss">{props.loss}</span></Show>
       </span>
-      <Show when={stageChips(props.placed.task?.pipeline?.stages).length > 0}>
+      <Show when={stageChips(props.placed.task?.pipeline_run).length > 0}>
         <span class="pm-stages">
-          <For each={stageChips(props.placed.task?.pipeline?.stages)}>
+          <For each={stageChips(props.placed.task?.pipeline_run)}>
             {(stage) => (
               <span class={`pm-stage pm-stage-${stage.state || "waiting"}`} title={stageLabel(stage.kind)}>
                 {stageLabel(stage.kind)}

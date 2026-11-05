@@ -3,7 +3,7 @@
 //! parses an `hgs` reply. Texts and lists are bounded; a view that left
 //! something out says so (`truncated`).
 use serde::Serialize;
-use serde_json::{Map, Value};
+use serde_json::{json, Map, Value};
 
 /// The longest name, title or short field kept.
 pub const NAME_CHARS: usize = 200;
@@ -292,26 +292,61 @@ pub struct TaskView {
     pub output: Vec<String>,
     /// What the task waits for, as hgs words it (`waits.unblock`).
     pub waits: String,
-    /// Task 41: the pipeline and its stage runs, bounded; None for a task
-    /// without a pipeline run.
-    pub pipeline: Option<TaskPipelineView>,
+    /// Task 40: the owner holds it (`held`).
+    pub held: bool,
+    /// Task 40: the pipeline chosen in the plan, and its run (stages and the
+    /// open stage) when one started.
+    pub pipeline: String,
+    pub pipeline_run: Option<PipelineRunView>,
+    /// Task 40: the task delegates to a sub-team (`subteam`).
+    pub subteam: bool,
 }
 
-/// One stage a task's pipeline ran (or waits to run): its kind, state,
-/// attempt and member; `stages.rs` names the kind.
+/// Task 40: a task's pipeline run (`pipeline_run`): its stage kinds in order,
+/// how it is accepted, and the stage that is open now, if any.
 #[derive(Clone, Debug, Default, PartialEq, Serialize)]
-pub struct TaskStageView {
-    pub kind: String,
-    pub state: String,
-    pub attempt: u64,
-    pub member: String,
-}
-
-#[derive(Clone, Debug, Default, PartialEq, Serialize)]
-pub struct TaskPipelineView {
+pub struct PipelineRunView {
     pub name: String,
+    pub accept: String,
     pub round: u64,
-    pub stages: Vec<TaskStageView>,
+    pub max_rounds: u64,
+    pub stages: Vec<String>,
+    /// The open run's stage index, kind and member (None: no stage runs).
+    pub open: Option<StageRunView>,
+}
+
+#[derive(Clone, Debug, Default, PartialEq, Serialize)]
+pub struct StageRunView {
+    pub stage: u64,
+    pub kind: String,
+    pub member: String,
+    pub state: String,
+}
+
+fn pipeline_run(value: &Value) -> Option<PipelineRunView> {
+    let run = value.get("pipeline_run").filter(|run| run.is_object())?;
+    let last = array(run, "runs").last();
+    // A run is open while its state is one hgs keeps open (Qt StageRun::open).
+    let open = last
+        .filter(|last| matches!(last["state"].as_str(), Some("waiting" | "delivered")))
+        .map(|last| StageRunView {
+            stage: count(last, "stage"),
+            kind: name(last, "kind"),
+            member: name(last, "member"),
+            state: name(last, "state"),
+        });
+    Some(PipelineRunView {
+        name: name(run, "name"),
+        accept: name(run, "accept"),
+        round: count(run, "round"),
+        max_rounds: count(run, "max_rounds"),
+        stages: array(run, "stages")
+            .iter()
+            .take(ITEMS_KEPT)
+            .map(|stage| name(stage, "kind"))
+            .collect(),
+        open,
+    })
 }
 
 /// One phase of the plan (`phase_summary`).
@@ -433,6 +468,12 @@ pub struct TeamView {
     /// Task 11: additions to a running phase that wait for the owner's
     /// confirmation (`pending_additions`, each bounded): id, phase, tasks.
     pub additions: Vec<Value>,
+    /// Task 40: the plan's permission widenings ({member, role, from, to}),
+    /// which Approve & Run confirms separately (Qt Team::widenings).
+    pub widenings: Vec<Value>,
+    /// Task 40: the team's direct sub-teams ({team, name, status}), for the
+    /// tree confirmations of Pause and Stop.
+    pub children: Vec<Value>,
     pub validation: Validation,
     pub health: HealthView,
     pub ready: Vec<u64>,
@@ -529,24 +570,10 @@ fn task(value: &Value) -> TaskView {
             .get("waits")
             .map(|waits| text(waits, "unblock", LINE_CHARS))
             .unwrap_or_default(),
-        pipeline: value
-            .get("pipeline_run")
-            .filter(|run| run.is_object())
-            .map(|run| TaskPipelineView {
-                name: name(run, "name"),
-                round: run.get("round").and_then(Value::as_u64).unwrap_or(0),
-                stages: array(run, "runs")
-                    .iter()
-                    .rev()
-                    .take(16)
-                    .map(|stage| TaskStageView {
-                        kind: name(stage, "kind"),
-                        state: name(stage, "state"),
-                        attempt: stage.get("attempt").and_then(Value::as_u64).unwrap_or(0),
-                        member: name(stage, "member"),
-                    })
-                    .collect(),
-            }),
+        held: flag(value, "held"),
+        pipeline: name(value, "pipeline"),
+        pipeline_run: pipeline_run(value),
+        subteam: value.get("subteam").is_some_and(Value::is_object),
     }
 }
 
@@ -587,6 +614,39 @@ fn proposal(value: &Value) -> ProposalView {
         goal: text(value, "goal", TEXT_CHARS),
         mode: name(value, "mode"),
     }
+}
+
+/// Task 40: the plan's permission widenings, as Qt reads them: each member's
+/// `profile_widening`, then the team's own (an object or a list).
+fn widenings(value: &Value) -> Vec<Value> {
+    let one = |widening: &Value, member: &str, role: &str| {
+        let from = name(widening, "from");
+        let to = name(widening, "to");
+        (!from.is_empty() || !to.is_empty()).then(|| {
+            let named = name(widening, "member");
+            json!({"member": if named.is_empty() { member.to_owned() } else { named },
+                "role": if role.is_empty() { name(widening, "role") } else { role.to_owned() }, "from": from, "to": to})
+        })
+    };
+    let mut out: Vec<Value> = array(value, "members")
+        .iter()
+        .filter_map(|member| {
+            one(
+                &member["profile_widening"],
+                &name(member, "id"),
+                &name(member, "role"),
+            )
+        })
+        .collect();
+    match value.get("profile_widening") {
+        Some(Value::Array(list)) => {
+            out.extend(list.iter().filter_map(|widening| one(widening, "", "")))
+        }
+        Some(widening) if widening.is_object() => out.extend(one(widening, "", "")),
+        _ => {}
+    }
+    out.truncate(ITEMS_KEPT);
+    out
 }
 
 /// Projects `team status` for the Team tab.
@@ -644,6 +704,12 @@ pub fn team(value: &Value) -> TeamView {
             .iter()
             .take(ITEMS_KEPT)
             .map(|item| bounded(Some(item)))
+            .collect(),
+        widenings: widenings(value),
+        children: array(value, "children")
+            .iter()
+            .take(ITEMS_KEPT)
+            .map(|child| json!({"team": name(child, "team"), "name": name(child, "name"), "status": name(child, "status")}))
             .collect(),
         validation: Validation {
             errors: findings(validation, "errors"),
@@ -1188,6 +1254,13 @@ pub struct CatalogRoleView {
     pub agent: String,
     pub model: String,
     pub prompt: String,
+    /// Task 42: what New team copies into a member of this role.
+    pub effort: String,
+    pub account: String,
+    pub permissions: String,
+    pub computer: String,
+    /// `worktree`, `shared` or `read_only`: the role's folder.
+    pub folder: String,
 }
 
 #[derive(Clone, Debug, Default, PartialEq, Serialize)]
@@ -1207,6 +1280,20 @@ pub struct CatalogTemplateView {
     pub max_members: u64,
     pub pipeline: String,
     pub roster: Vec<CatalogSeatView>,
+    /// Task 42: the approval of later phases and the lead protocol New team
+    /// takes from the template.
+    pub phase_approval: String,
+    pub lead_protocol: String,
+    /// Task 42: the template's tasks (Use template tasks): title, the role
+    /// that does it and the indexes of the tasks it waits for.
+    pub tasks: Vec<CatalogTaskView>,
+}
+
+#[derive(Clone, Debug, Default, PartialEq, Serialize)]
+pub struct CatalogTaskView {
+    pub title: String,
+    pub role: String,
+    pub deps: Vec<u64>,
 }
 
 #[derive(Clone, Debug, Default, PartialEq, Serialize)]
@@ -1271,7 +1358,10 @@ pub fn catalog(value: &Value) -> CatalogView {
     let draft = value.get("draft").unwrap_or(&Value::Null);
     CatalogView {
         version: catalog.get("version").and_then(Value::as_u64).unwrap_or(0),
-        builtin: value.get("builtin").and_then(Value::as_bool).unwrap_or(false),
+        builtin: value
+            .get("builtin")
+            .and_then(Value::as_bool)
+            .unwrap_or(false),
         roles: array(catalog, "roles")
             .iter()
             .take(PROPOSALS_KEPT)
@@ -1281,6 +1371,11 @@ pub fn catalog(value: &Value) -> CatalogView {
                 agent: name(role, "agent"),
                 model: name(role, "model"),
                 prompt: text(role, "prompt", TEXT_CHARS),
+                effort: name(role, "effort"),
+                account: name(role, "account"),
+                permissions: name(role, "permissions"),
+                computer: name(role, "computer"),
+                folder: name(role, "folder"),
             })
             .collect(),
         templates: array(catalog, "templates")
@@ -1297,13 +1392,30 @@ pub fn catalog(value: &Value) -> CatalogView {
                     .and_then(Value::as_u64)
                     .unwrap_or(6),
                 pipeline: name(template, "pipeline"),
+                phase_approval: name(template, "phase_approval"),
+                lead_protocol: text(template, "lead_protocol", TEXT_CHARS),
+                tasks: array(template, "tasks")
+                    .iter()
+                    .take(TASKS_KEPT)
+                    .map(|task| CatalogTaskView {
+                        title: text(task, "title", LINE_CHARS),
+                        role: name(task, "role"),
+                        deps: array(task, "deps")
+                            .iter()
+                            .filter_map(Value::as_u64)
+                            .collect(),
+                    })
+                    .collect(),
                 roster: array(template, "roster")
                     .iter()
                     .take(MEMBERS_KEPT)
                     .map(|seat| CatalogSeatView {
                         role: name(seat, "role"),
                         count: seat.get("count").and_then(Value::as_u64).unwrap_or(1),
-                        optional: seat.get("optional").and_then(Value::as_bool).unwrap_or(false),
+                        optional: seat
+                            .get("optional")
+                            .and_then(Value::as_bool)
+                            .unwrap_or(false),
                     })
                     .collect(),
             })
@@ -1333,10 +1445,17 @@ pub fn catalog(value: &Value) -> CatalogView {
                         kind: name(stage, "kind"),
                         role: name(stage, "role"),
                         member: name(stage, "member"),
-                        command: text(stage.get("command").unwrap_or(&Value::Null), "command", TEXT_CHARS),
+                        command: text(
+                            stage.get("command").unwrap_or(&Value::Null),
+                            "command",
+                            TEXT_CHARS,
+                        ),
                     })
                     .collect(),
-                max_rounds: pipeline.get("max_rounds").and_then(Value::as_u64).unwrap_or(0),
+                max_rounds: pipeline
+                    .get("max_rounds")
+                    .and_then(Value::as_u64)
+                    .unwrap_or(0),
                 folder: name(pipeline, "folder"),
                 accept: name(pipeline, "accept"),
             })

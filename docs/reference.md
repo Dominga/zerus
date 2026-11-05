@@ -1147,6 +1147,15 @@ each other's entries); `qt-build` sets the launcher first in a build folder
 configured without it. A tool not found on `PATH` (or in cargo's bin folder)
 is named at the start of the run's output and the run builds without it.
 
+A build or test template (`cargo-build`, `cargo-test`, `cargo-clippy`,
+`qt-configure`, `qt-build`, `qt-test`) that fails with MSVC's C1083 "Cannot open
+compiler generated file ... Permission denied" or D8050 "failed to get command
+line into debug records" runs once more. These are the failures real-time
+scanning (Microsoft Defender) gives a compiler in a folder it scans. The run's
+output names the folder and asks for its build outputs (`.ci-build`, `target`)
+to be excluded from scanning. No other failure is retried, and a commit or
+merge never is.
+
 Start builds and long tests through Zerus so they show as work:
 `hgs team run` for a team member's templates (`hgs guide team-run`), and
 `hgs run --json [--wait]` with `{request_id, label, command, cwd?,

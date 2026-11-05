@@ -1416,6 +1416,16 @@ pub(crate) struct Attempt {
     /// The member's turn ended long enough ago without a report.
     #[serde(default)]
     pub no_report: bool,
+    /// Task 36 (audit P8): the Zerus build the member's session was seen
+    /// Building on for this attempt (a claimed `hgs team run`, or `hgs run`):
+    /// its request id, or "build" when the listing names none. While it is
+    /// set and the build has settled, the finished turn is not captured: the
+    /// member is woken once to read the result and go on.
+    #[serde(default, skip_serializing_if = "String::is_empty")]
+    pub awaited_run: String,
+    /// What that build runs, for the wake message.
+    #[serde(default, skip_serializing_if = "String::is_empty")]
+    pub awaited_label: String,
     /// The newest session event the dispatcher read for this attempt when the
     /// listing's `last_event_at` did not advance (a DeepSeek session's native
     /// tool events, #628). It keeps the silent check from reading the session

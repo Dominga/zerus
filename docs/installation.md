@@ -40,7 +40,7 @@ cd zerus
 On macOS, install the dependencies first:
 
 ```sh
-brew install rust python tmux cmake qt qtmultimedia
+brew install rust python tmux node pkg-config gstreamer gst-plugins-base
 ```
 
 The macOS source installer also needs a valid application-signing certificate
@@ -58,8 +58,8 @@ Compatible certificate signatures keep the privacy identity across local
 rebuilds. The installer verifies both designated requirements before replacing
 an existing certificate-signed app and stops if they are incompatible. It never
 falls back to ad hoc signing. Moving from an older ad hoc installation can require
-fresh consent once; no permissions are reset automatically. Source builds link
-Homebrew Qt and are signed locally without the hardened runtime or notarization;
+fresh consent once; no permissions are reset automatically. Source builds use
+Tauri and WebKit and are signed locally without notarization;
 use the published app for distribution. See [macOS signing](macos-distribution.md#local-source-builds).
 
 On Arch Linux, install the Next build and runtime dependencies before a source

@@ -2146,3 +2146,55 @@ mod spent_deadline {
         assert_eq!(ended, Ended::Exited { code: 0 });
     }
 }
+
+/// #1437 review (desktop-u, R4): a listed candidate that is there must
+/// establish its own identity, the ID layout and the ID its fixed path names,
+/// before it counts at all; one that cannot refuses, never leaving the label's
+/// matching record to decide alone.
+#[test]
+fn the_target_check_refuses_a_listed_candidate_without_its_identity() {
+    use sha2::Digest;
+    let temp = tempfile::tempdir().unwrap();
+    let state = state_root(temp.path());
+    let verified = original(&"a".repeat(64), &uuid::Uuid::new_v4().to_string());
+    let plan = &verified.plan;
+    session_record(&state, SESSION, "claude", RUN, CONVERSATION);
+    let current = || target::current(&super::receipt::Roots::open(&state, super::receipt::FOLDER).unwrap(), plan);
+    let private = |path: &Path, bytes: &[u8]| {
+        std::fs::create_dir_all(path.parent().unwrap()).unwrap();
+        mode(path.parent().unwrap(), 0o700);
+        std::fs::write(path, bytes).unwrap();
+        mode(path, 0o600);
+    };
+    let id = uuid::Uuid::new_v4().to_string();
+    let key = format!("{:x}", sha2::Sha256::digest(SESSION.as_bytes()));
+    let index = json!({"version": 1, "label": SESSION, "ids": [id]}).to_string();
+    private(&state.join("labels").join(format!("{key}.json")), index.as_bytes());
+    let digest = format!("{:x}", sha2::Sha256::digest(index.as_bytes()));
+    private(&state.join("labels").join(".complete"), json!({"version": 1, "labels": {&key: digest}}).to_string().as_bytes());
+    let twin = state.join("sessions").join(format!("{id}.json"));
+    let other = json!({"name": SESSION, "agent": "claude", "run_id": "run-other",
+        "conversation_id": CONVERSATION, "session_id": id, "layout": "id"});
+    private(&twin, other.to_string().as_bytes());
+    assert!(current(), "a valid twin on another run is a non-match");
+    for record in [
+        Value::Null,
+        json!({}),
+        json!({"name": SESSION, "agent": "claude", "run_id": "run-other", "session_id": id, "layout": "legacy"}),
+        json!({"name": SESSION, "agent": "claude", "run_id": "run-other", "session_id": uuid::Uuid::new_v4().to_string(), "layout": "id"}),
+    ] {
+        private(&twin, record.to_string().as_bytes());
+        assert!(!current(), "a listed candidate {record}");
+    }
+    // review-q2: while the label's record matches, a twin that cannot even be
+    // opened, a link or a file that is not private, refuses too.
+    std::fs::remove_file(&twin).unwrap();
+    std::os::unix::fs::symlink(state.join("missing"), &twin).unwrap();
+    assert!(!current(), "a listed twin that is a link");
+    std::fs::remove_file(&twin).unwrap();
+    private(&twin, other.to_string().as_bytes());
+    mode(&twin, 0o644);
+    assert!(!current(), "a listed twin that is not private");
+    mode(&twin, 0o600);
+    assert!(current());
+}

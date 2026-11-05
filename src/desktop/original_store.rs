@@ -397,10 +397,13 @@ pub(in crate::desktop) fn session_current(
                 let Ok(record) = serde_json::from_slice::<serde_json::Value>(&bytes) else {
                     return false;
                 };
-                if record["layout"] == "id"
-                    && string(&record, "session_id") == id
-                    && names_plan(&record)
-                {
+                // A listed candidate that is there must establish its own
+                // identity, as every reader of the ID layout requires; one
+                // that cannot refuses, never leaving the rest to decide.
+                if !crate::state::is_id_layout_record(&record, &id) {
+                    return false;
+                }
+                if names_plan(&record) {
                     found += 1;
                 }
             }

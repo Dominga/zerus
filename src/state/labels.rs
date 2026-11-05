@@ -469,6 +469,10 @@ mod tests {
                     continue;
                 }
                 assert!(production.contains("prove_label_index("), "{relative} reads the label index without the shared proof");
+                assert!(
+                    production.contains("is_id_layout_record("),
+                    "{relative} reads candidates without the shared identity check"
+                );
                 assert!(!production.contains("\"ids\""), "{relative} parses an index file's IDs itself");
                 found.push(relative);
             }

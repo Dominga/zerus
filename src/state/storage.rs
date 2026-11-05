@@ -157,6 +157,14 @@ pub(super) fn in_id_layout(record: &Value) -> bool {
     record["layout"] == "id"
 }
 
+/// Whether `record`, read from `sessions/<id>.json`, is that session's own
+/// record: it says it lives in the ID layout and carries that canonical ID.
+/// Every reader of the ID layout, native ones included, checks this first;
+/// a present file that fails it refuses (#1437 review).
+pub(crate) fn is_id_layout_record(record: &Value, id: &str) -> bool {
+    session_id::canonical(id) && in_id_layout(record) && string(record, "session_id") == id
+}
+
 /// The path this command reads `name` from (P3a):
 /// - the selected session's own record, when the command selected under
 ///   `name` a session in the ID layout. The read then verifies every selected
@@ -308,9 +316,8 @@ fn verify_at(path: &Path, name: &str, bytes: &[u8]) -> Result<Value> {
     // A record in the ID layout is verified against its own path: the same
     // session ID, and the layout it claims. Neither alone is authority.
     let by_id = in_sessions(path);
-    if by_id != in_id_layout(&record)
-        || (by_id && id_record_path(string(&record, "session_id")).as_deref() != Some(path))
-    {
+    let stem = path.file_stem().and_then(|stem| stem.to_str()).unwrap_or_default();
+    if (by_id && !is_id_layout_record(&record, stem)) || (!by_id && in_id_layout(&record)) {
         return Err(format!("{name}: the saved binding's layout and location disagree"));
     }
     session_id::verify(&record)?;

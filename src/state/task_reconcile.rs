@@ -504,7 +504,7 @@ fn read_by_id(directory: &File, id: &str) -> Result<Option<Value>> {
     let _: RecordFields = serde_json::from_slice(&bytes)?;
     let record: Value = serde_json::from_slice(&bytes)?;
     ensure!(
-        record["layout"] == "id" && record["session_id"] == id,
+        crate::state::is_id_layout_record(&record, id),
         "executor record does not match its ID"
     );
     Ok(Some(record))

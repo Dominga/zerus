@@ -56,6 +56,9 @@ mod labels;
 /// the native readers that need it outside this module run on Unix.
 #[cfg(unix)]
 pub(crate) use labels::prove as prove_label_index;
+/// How every reader of the ID layout checks a record's own identity.
+#[cfg(unix)]
+pub(crate) use storage::is_id_layout_record;
 mod provider_messages;
 mod processes;
 mod prompt_suggestion;

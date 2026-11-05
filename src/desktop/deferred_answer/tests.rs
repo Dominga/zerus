@@ -2422,6 +2422,40 @@ mod id_layout_target {
     }
 
     #[test]
+    fn a_listed_candidate_without_its_identity_refuses() {
+        let temp = tempfile::tempdir().unwrap();
+        let state = state_root(temp.path());
+        let verified = original(&"a".repeat(64), &uuid::Uuid::new_v4().to_string());
+        let plan = &verified.plan;
+        session_record(&state, SESSION, "claude", RUN, CONVERSATION);
+        let id = uuid::Uuid::new_v4().to_string();
+        twin(&state, &id, "run-other");
+        prove(&state, &json!({"version": 1, "label": SESSION, "ids": [id]}));
+        assert!(current(&state, plan), "a valid twin on another run is a non-match");
+        let path = state.join("sessions").join(format!("{id}.json"));
+        for record in [
+            Value::Null,
+            json!({}),
+            json!({"name": SESSION, "agent": "claude", "run_id": "run-other", "session_id": id, "layout": "legacy"}),
+            json!({"name": SESSION, "agent": "claude", "run_id": "run-other", "session_id": uuid::Uuid::new_v4().to_string(), "layout": "id"}),
+        ] {
+            private(&path, record.to_string().as_bytes());
+            assert!(!current(&state, plan), "a listed candidate {record}");
+        }
+        // review-q2: while the label's record matches, a twin that cannot even
+        // be opened, a link or a file that is not private, refuses too.
+        std::fs::remove_file(&path).unwrap();
+        std::os::unix::fs::symlink(state.join("missing"), &path).unwrap();
+        assert!(!current(&state, plan), "a listed twin that is a link");
+        std::fs::remove_file(&path).unwrap();
+        twin(&state, &id, "run-other");
+        mode(&path, 0o644);
+        assert!(!current(&state, plan), "a listed twin that is not private");
+        mode(&path, 0o600);
+        assert!(current(&state, plan));
+    }
+
+    #[test]
     fn every_malformed_listed_index_refuses() {
         let temp = tempfile::tempdir().unwrap();
         let state = state_root(temp.path());

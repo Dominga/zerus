@@ -283,6 +283,25 @@ pub fn dispatch(config: &Config, target: &str, args: &[String], dry: bool) -> cl
                     )
                 }
             }
+            ["registration", "refresh-info", "--json"] => {
+                #[cfg(windows)]
+                { println!("{}", windows_registration::refresh_info(config,&location)?); Ok(()) }
+                #[cfg(not(windows))]
+                { anyhow::bail!("Original-instance refresh is available only on Windows.") }
+            }
+            ["registration", "refresh", "--json", "--request-id", id, "--scope", target] => {
+                #[cfg(windows)]
+                { println!("{}", windows_registration::refresh_command(config,&location,id,target)?); Ok(()) }
+                #[cfg(not(windows))]
+                { let _=(id,target); anyhow::bail!("Original-instance refresh is available only on Windows.") }
+            }
+            ["registration", op @ ("refresh-result" | "cancel-refresh"), "--json", "--request-id", id] => {
+                #[cfg(windows)]
+                { println!("{}", if *op == "refresh-result" { windows_registration::refresh_result(config,&location,id)? }
+                    else { windows_registration::cancel_refresh(config,&location,id)? }); Ok(()) }
+                #[cfg(not(windows))]
+                { let _=(op,id); anyhow::bail!("Original-instance refresh is available only on Windows.") }
+            }
             ["registration", "install", "--mode", mode, "--json"] => {
                 #[cfg(windows)]
                 {

@@ -4,7 +4,7 @@ No WebView or native agent is started. WindowsFrontend uses a private passive
 foreground service. WindowsTaskMode additionally exercises its own disposable
 hosted-runner logon task and private service configuration.
 """
-from contextlib import closing
+from contextlib import closing, contextmanager
 import json
 import os
 from pathlib import Path
@@ -17,6 +17,7 @@ import uuid
 import base64
 import tempfile
 import time
+import threading
 import test_desktop as kernel
 
 
@@ -1534,6 +1535,266 @@ $later=@{guid=$guid;pid=$q.Id;birth=$q.StartTime.ToFileTimeUtc()};
         self.assertFalse(metadata.get('exited', True), metadata)
         self.assertEqual(Path(metadata['image']).resolve(strict=True), self.cli_image)
         return dict(guid=guid, pid=instances[0]['engine_pid'], birth=metadata['birth'])
+
+    @contextmanager
+    def partial_original_pipe(self, original, configuration):
+        """One retained partial client of the exact old service. It is a real
+        parser/connection loan, never a manager or operation capability."""
+        import ctypes as c
+        from ctypes import wintypes as w
+        dll = c.WinDLL('kernel32', use_last_error=True)
+        dll.CreateFileW.argtypes = (w.LPCWSTR, w.DWORD, w.DWORD, c.c_void_p, w.DWORD, w.DWORD, w.HANDLE)
+        dll.CreateFileW.restype = w.HANDLE
+        dll.WaitNamedPipeW.argtypes = (w.LPCWSTR, w.DWORD)
+        dll.GetNamedPipeServerProcessId.argtypes = (w.HANDLE, c.POINTER(w.DWORD))
+        dll.WriteFile.argtypes = (w.HANDLE, c.c_void_p, w.DWORD, c.POINTER(w.DWORD), c.c_void_p)
+        dll.CloseHandle.argtypes = (w.HANDLE,)
+        name = r'\\.\pipe\hgs-desktop-' + self.sid + '-' + configuration
+        self.assertTrue(dll.WaitNamedPipeW(name, 5000), c.get_last_error())
+        handle = dll.CreateFileW(name, 0xc0000000, 0, None, 3, 0x00110000, None)
+        self.assertNotEqual(handle, c.c_void_p(-1).value, c.get_last_error())
+        stopping = threading.Event()
+        errors = []
+        def write():
+            byte = c.create_string_buffer(b' ')
+            while not stopping.is_set():
+                count = w.DWORD()
+                if not dll.WriteFile(handle, byte, 1, c.byref(count), None) or count.value != 1:
+                    errors.append(c.get_last_error())
+                    return
+                stopping.wait(0.1)
+        worker = None
+        try:
+            pid = w.DWORD()
+            self.assertTrue(dll.GetNamedPipeServerProcessId(handle, c.byref(pid)), c.get_last_error())
+            self.assertEqual(pid.value, original['pid'])
+            worker = threading.Thread(target=write)
+            worker.start()
+            yield
+            self.assertEqual(errors, [], 'original partial connection disappeared before its release')
+        finally:
+            stopping.set()
+            if worker is not None:
+                worker.join(timeout=5)
+                self.assertFalse(worker.is_alive(), 'original partial writer cleanup unknown; original handle retained')
+            dll.CloseHandle(handle)
+
+    def refresh_call(self, case, request=None, target=None):
+        control = dict(case=case)
+        if request is not None:
+            control['request_id'] = request
+        if target is not None:
+            control['target'] = target
+        result = self.frontend_call(control, 'MODE_CALLER_RESULT ')
+        self.assertEqual(result['code'], 0, result)
+        return json.loads(result['stdout'])
+
+    def refresh_info_drained(self):
+        # Observe the required EOF/Permit settlement, including prior status
+        # observers; a helper exit alone does not synchronize the remote actor.
+        deadline = time.monotonic() + 10
+        while True:
+            info = self.refresh_call('mode_refresh_info')
+            self.assertTrue(info['ok'], info)
+            if info['drained']:
+                return info
+            self.assertLess(time.monotonic(), deadline, info)
+            time.sleep(0.05)
+
+    def refresh_started_at_held(self, request, target):
+        self.control.write_text(json.dumps(dict(case='mode_refresh', request_id=request, target=target,
+                                                cli=str(self.cli_image))), encoding='utf-8')
+        return subprocess.Popen([str(self.frontend), '--exact',
+                                 'instance::tests::evidence::native_frontend_request_fixture', '--nocapture'],
+                                env=dict(self.env, HGS_FRONTEND_TEST_CONTROL=str(self.control),
+                                         HGS_TEST_MODE_HELD_PAUSE=request),
+                                stdout=subprocess.PIPE, stderr=subprocess.PIPE, text=True,
+                                creationflags=subprocess.CREATE_NO_WINDOW)
+
+    def replace_private_cli_and_wait_for_retirement(self, suffix):
+        # Installer-equivalent replacement of ONLY this private stable CLI.
+        # Same bytes, different object; no process/image adoption by pathname.
+        replacement = self.cli_image.with_name('next-private-cli.exe')
+        shutil.copy2(self.cli_image, replacement)
+        aside = self.cli_image.with_name('hgs.exe.old-1760371200-' + suffix)
+        self.cli_image.rename(aside)
+        replacement.rename(self.cli_image)
+        deadline = time.monotonic() + 30
+        while True:
+            status = self.cli('desktop', 'status', '--json')
+            if status.get('executable_upgrade', {}).get('state') == 'manual_refresh_required':
+                return
+            self.assertLess(time.monotonic(), deadline, status)
+            time.sleep(0.1)
+
+    def test_original_instance_refresh_keeps_its_grant_mode_and_original_ids(self):
+        """Actual private hosted task/caller/loaded image. Held helper death
+        is before every manager call, not abrupt in-flight manager cleanup
+        qualification. Installed Settings and owner-PC checks remain separate."""
+        initial = self.cli('desktop', 'registration', 'status', '--json')
+        self.assertFalse(initial['registered'], 'Requires an unused disposable runner')
+        self.task = initial['task_name']
+        self.sid = self.task.removeprefix('hgs-desktop-')
+        clean = False
+        try:
+            installed = self.cli('desktop', 'registration', 'install', '--json')
+            self.installed = True
+            self.cli_image = Path(installed['cli']['path']).resolve(strict=True)
+            shutil.copy2(self.frontend_source, self.frontend)
+            passive = self.mode('passive')
+            self.assertTrue(passive['ok'], passive)
+            self.latest = passive['instance']
+            self.grant()
+            granted = self.cli('desktop', 'ownership-status', '--json')
+            original = dict(self.latest)
+            self.pin_original(original)
+            before = self.observe()['instances']
+            self.replace_private_cli_and_wait_for_retirement('01234567')
+            info = self.refresh_info_drained()
+            target = info['target']
+            self.assertEqual(target['original'], original)
+            self.assertEqual(target['mode'], 'passive')
+            self.assertTrue(info['drained'], info)
+            self.assertNotEqual(target['original_image'], target['replacement_image'])
+            path = self.state / 'desktop' / 'windows-registration-mode.json'
+            stable = path.read_bytes()
+            # Same configuration with a changed confirmed selection must fail
+            # before reserving an intent, and without any native effect.
+            wrong = dict(target, selection='0' * 64)
+            refused = self.refresh_call('mode_refresh', str(uuid.uuid4()), wrong)
+            self.assertFalse(refused['ok'], refused)
+            self.assertIn('target changed', refused['error'])
+            self.assertEqual(path.read_bytes(), stable)
+            self.assertEqual(self.observe()['instances'], before)
+            self.assertEqual(self.cli('desktop', 'ownership-status', '--json'), granted)
+            # A live original partial pipe blocks the real controller before
+            # Held/Stop. Closing it is the actual EOF, not an invented drain.
+            with self.partial_original_pipe(original, target['configuration']):
+                blocked_info = self.refresh_call('mode_refresh_info')
+                self.assertFalse(blocked_info['drained'], blocked_info)
+                blocked_id = str(uuid.uuid4())
+                blocked = self.refresh_call('mode_refresh', blocked_id, blocked_info['target'])
+                self.assertFalse(blocked['ok'], blocked)
+                record = json.loads(path.read_bytes())
+                self.assertEqual((record['pending']['request_id'], record['pending']['phase']),
+                                 (blocked_id, 'prepared'), blocked)
+                self.assertEqual(self.observe()['instances'], before)
+                self.assertEqual(self.cli('desktop', 'ownership-status', '--json'), granted)
+            cancelled = self.refresh_call('mode_refresh_cancel', blocked_id)
+            self.assertEqual(cancelled['receipt']['phase'], 'refused', cancelled)
+            target = self.refresh_info_drained()['target']
+            request = str(uuid.uuid4())
+            child = self.refresh_started_at_held(request, target)
+            helper = self.held_helper(request, child)
+            record = json.loads(path.read_bytes())
+            self.assertEqual((record['pending']['request_id'], record['pending']['phase']), (request, 'held'))
+            self.assertEqual(record['pending']['refresh']['kind'], 'original_instance_refresh')
+            self.kill_held_helper(helper)
+            lost = self.first_call_finished(child)
+            self.assertNotEqual(lost['code'], 0, lost)
+            helper['marker'].unlink()
+            pending = path.read_bytes()
+            outcome = self.cli('desktop', 'registration', 'refresh-result', '--json', '--request-id', request)
+            self.assertEqual((outcome['outcome'], outcome['receipt']['phase']), ('unknown', 'unknown'))
+            duplicate = self.refresh_call('mode_refresh', request, target)
+            self.assertEqual(duplicate['outcome'], 'unknown', duplicate)
+            self.assertFalse(duplicate['manager_changed'], duplicate)
+            self.assertFalse(self.mode('background')['ok'])
+            self.assertEqual(path.read_bytes(), pending)
+            self.assertEqual(self.observe()['instances'], before)
+            self.assertEqual(self.cli('desktop', 'ownership-status', '--json'), granted)
+            cancelled = self.refresh_call('mode_refresh_cancel', request)
+            self.assertEqual(cancelled['receipt']['phase'], 'refused', cancelled)
+            self.assertFalse(cancelled['manager_changed'])
+            target = self.refresh_info_drained()['target']
+            new_request = str(uuid.uuid4())
+            refreshed = self.refresh_call('mode_refresh', new_request, target)
+            self.assertTrue(refreshed['ok'], refreshed)
+            receipt = refreshed['receipt']
+            self.assertEqual((receipt['request'], receipt['phase']), (new_request, 'settled'))
+            self.assertEqual(receipt['scope']['mode'], 'passive')
+            self.assertEqual(receipt['original'], original)
+            self.assertEqual((receipt['scope']['journal'], receipt['scope']['owner_epoch']),
+                             (granted['journal'], granted['owner_epoch']))
+            current = receipt['ready']['instance']
+            self.latest = current
+            self.assertNotEqual(current['guid'], original['guid'])
+            self.assertNotEqual((current['pid'], current['birth']), (original['pid'], original['birth']))
+            self.assertNotEqual(current['epoch'], original['epoch'])
+            observed = self.observe()['instances']
+            self.assertEqual([item['guid'] for item in observed], [current['guid']], observed)
+            current_grant = self.cli('desktop', 'ownership-status', '--json')
+            self.assertEqual((current_grant['state'], current_grant['journal'], current_grant['owner_epoch'],
+                              current_grant['identity_current'], current_grant['rearm_required']),
+                             ('service', granted['journal'], granted['owner_epoch'], True, False))
+            lifecycle = self.cli('desktop', 'status', '--json')['lifecycle']
+            self.assertEqual((lifecycle['epoch'], lifecycle['generation'], lifecycle['mode']),
+                             (current['epoch'], receipt['ready']['generation'], 'passive'))
+            settled = path.read_bytes()
+            # Every call has a fresh native helper; loss of the original reply
+            # and helper restart can only read this SAME request/receipt.
+            duplicate = self.refresh_call('mode_refresh', new_request, target)
+            self.assertEqual(duplicate['receipt'], receipt)
+            self.assertFalse(duplicate['manager_changed'])
+            self.assertEqual(path.read_bytes(), settled)
+            self.assertEqual(self.observe()['instances'], observed)
+            # Separately choose background with the EXISTING maintained mode
+            # route, then exercise same-background refresh. The refresh itself
+            # must preserve this mode history and the original Grant incarnation.
+            background = self.mode('background')
+            self.assertTrue(background['ok'], background)
+            self.latest = background['instance']
+            self.pin_original(self.latest)
+            background_original = dict(self.latest)
+            mode_record = json.loads(path.read_bytes())
+            self.replace_private_cli_and_wait_for_retirement('89abcdef')
+            target = self.refresh_info_drained()['target']
+            self.assertEqual((target['mode'], target['original']), ('background', background_original))
+            refreshed = self.refresh_call('mode_refresh', str(uuid.uuid4()), target)
+            self.assertTrue(refreshed['ok'], refreshed)
+            receipt = refreshed['receipt']
+            self.assertEqual((receipt['phase'], receipt['scope']['mode'], receipt['original']),
+                             ('settled', 'background', background_original))
+            self.assertEqual((receipt['scope']['journal'], receipt['scope']['owner_epoch']),
+                             (granted['journal'], granted['owner_epoch']))
+            current = receipt['ready']['instance']
+            self.latest = current
+            self.assertNotEqual(current['guid'], background_original['guid'])
+            self.assertNotEqual((current['pid'], current['birth']),
+                                (background_original['pid'], background_original['birth']))
+            saved = json.loads(path.read_bytes())
+            for key in ('completed', 'cancelled', 'choices', 'first_choices', 'reviewed'):
+                self.assertEqual(saved.get(key), mode_record.get(key), key)
+            lifecycle = self.cli('desktop', 'status', '--json')['lifecycle']
+            self.assertEqual((lifecycle['epoch'], lifecycle['generation'], lifecycle['mode']),
+                             (current['epoch'], receipt['ready']['generation'], 'background'))
+            settled = path.read_bytes()
+            observed = self.observe()['instances']
+            # Revoked/blocked refresh is explicitly unsupported in this source
+            # slice. It never Rearms or toggles the registration to recover it.
+            revoked = self.cli('desktop', 'revoke', '--json', '--request-id', str(uuid.uuid4()), '--reason', 'manual')
+            self.assertTrue(revoked['revoked'], revoked)
+            blocked = self.refresh_call('mode_refresh_info')
+            self.assertFalse(blocked['ok'], blocked)
+            self.assertIn('current Service Grant', blocked['error'])
+            self.assertEqual(path.read_bytes(), settled)
+            self.assertEqual(self.observe()['instances'], observed)
+            self.stop_exact_passive(current)
+            self.assertFalse(self.cli('desktop', 'status', '--json')['running'])
+            self.assertFalse(self.cli('desktop', 'registration', 'remove', '--json')['registered'])
+            self.installed = False
+            self.close_originals()
+            clean = True
+        finally:
+            if clean:
+                shutil.rmtree(self.root)
+            else:
+                print('REFRESH_PRIVATE_ROOT_RETAINED ' + str(self.root), file=sys.stderr)
+                if self.installed:
+                    try:
+                        print('REFRESH_TASK_OBSERVATION ' + json.dumps(self.observe()), file=sys.stderr)
+                    except Exception as error:
+                        print('REFRESH_OBSERVATION_UNAVAILABLE ' + type(error).__name__, file=sys.stderr)
 
     def test_first_choice_instance_drift_refuses_at_held_and_cancels_without_stop(self):
         """The same timely Held arrangement now refuses before StopOffered.

@@ -4,7 +4,7 @@ use super::*;
 use crate::desktop::{protocol, store::Location, transport};
 use std::{
     fs::File,
-    io::{BufReader, Write},
+    io::{BufReader, Read, Write},
     path::Path,
     sync::Arc,
     time::Duration,
@@ -196,6 +196,9 @@ impl Service {
         Ok(Some(value))
     }
     fn exchange(&self, location: &Location, plan: &Plan, until: Instant) -> Result<()> {
+        self.status(location, plan, until).map(|_| ())
+    }
+    fn status(&self, location: &Location, plan: &Plan, until: Instant) -> Result<Value> {
         self.check()?;
         let mut stream =
             transport::connect(location)?.context("Original desktop pipe disconnected.")?;
@@ -209,8 +212,13 @@ impl Service {
         stream.set_read_timeout(Some(remaining.min(crate::desktop::TIMEOUT)))?;
         stream.set_write_timeout(Some(remaining.min(crate::desktop::TIMEOUT)))?;
         stream.write_all(&protocol::encode(&json!({"abi":crate::desktop::ABI,"configuration":location.configuration,"op":"status"}))?)?;
-        let bytes = protocol::line(&mut BufReader::new(stream), protocol::FRAME_BYTES)?
+        let mut reader = BufReader::new(stream);
+        let bytes = protocol::line(&mut reader, protocol::FRAME_BYTES)?
             .context("Original desktop pipe ended before its reply.")?;
+        let remaining = until.checked_duration_since(Instant::now())
+            .context("Original status EOF deadline expired.")?;
+        reader.get_ref().set_read_timeout(Some(remaining.min(crate::desktop::TIMEOUT)))?;
+        ensure!(reader.read(&mut [0])? == 0, "Original status pipe has extra output; drain unconfirmed.");
         let reply: Value = serde_json::from_slice(&bytes)?;
         let life = &reply["value"]["lifecycle"];
         let mode = if plan.argv.last().is_some_and(|v| v == "--background") {
@@ -219,7 +227,7 @@ impl Service {
             "passive"
         };
         ensure!(
-            reply["abi"] == crate::desktop::ABI
+            reply["abi"] == crate::desktop::ABI && reply["t"] == "status"
                 && life["configuration"] == location.configuration
                 && life["epoch"] == self.epoch
                 && life["generation"].as_u64() == Some(self.generation)
@@ -229,7 +237,9 @@ impl Service {
                 && life["abi"] == "desktop-lifecycle-v1",
             "Original desktop pipe reply changed."
         );
-        self.check()
+        self.check()?;
+        ensure!(Instant::now() < until, "Original status deadline expired.");
+        Ok(reply["value"].clone())
     }
     fn check(&self) -> Result<()> {
         ensure!(self.process.current(), "Original desktop process changed.");
@@ -250,6 +260,23 @@ pub(super) struct Running {
     stopped: bool,
 }
 impl Running {
+    /// Read-only observations of these retained pins; no process is reopened.
+    pub(super) fn refresh_images(&self) -> Result<(String, String)> {
+        self.check()?;
+        let (old, new) = self.service.image.ids();
+        let encode = |(volume, file): zerus_client_core::desktop::windows::image::FileId|
+            format!("{volume:016x}{file:032x}");
+        Ok((encode(old), encode(new)))
+    }
+    pub(super) fn image_files_current(&self) -> Result<()> {
+        self.service.image.check_files()
+    }
+    pub(super) fn retirement_drained(&self, location: &Location, plan: &Plan, until: Instant) -> Result<bool> {
+        self.check()?;
+        let value = self.service.status(location, plan, until)?;
+        self.check()?;
+        policy::mode::refresh::drained(&value)
+    }
     pub(super) fn scope(&self) -> (String, u64) {
         (self.service.epoch.clone(), self.service.generation)
     }
@@ -448,6 +475,14 @@ pub(super) fn original(
             Ok(None)
         }
     }
+}
+
+/// Definition-only read; it obtains no later task instance/process capability.
+pub(super) fn definition_current(native: &Native, plan: &Plan, wanted: &Shape, until: Instant) -> Result<()> {
+    ensure!(Instant::now() < until, "Owned definition deadline expired.");
+    task(&native.folder, plan, wanted)?;
+    ensure!(Instant::now() < until, "Owned definition deadline expired.");
+    Ok(())
 }
 
 pub(super) fn stopped(

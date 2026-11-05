@@ -1974,6 +1974,8 @@ os._exit(0)"#;
         let original = f.original();
         assert!(f.admit(&original).accepted);
         f.runtime = runtime::Runtime::new(&f.config, &f.epoch, f.owner.clone()).unwrap();
+        // A new runtime fences macOS again; the fixture's runs without it.
+        f.runtime.fixture_mac_fence(false);
         f.runtime.fixture_executor(
             MACHINE,
             Arc::new(|_, _, _, _, _| panic!("restart must not execute")),

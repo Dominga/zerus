@@ -2415,6 +2415,15 @@ missing-field import. An already imported catalog without a matching marker
 keeps the existing initialize no-op. The catalog and peer wire formats are
 unchanged; older hgs versions can read the catalog but do not perform the pending
 GUI import. Qt's settings store is never changed by the bootstrap or import.
+A desktop whose saved Qt organization cannot be read, while Qt's store is
+present, runs the same bootstrap through `hgs swarm initialize --g3-bootstrap
+--json` with stdin `{"version":1,"expected_node_id":NODE}`. It refuses another
+node and a foreign or unreadable marker, leaves an initialized catalog as it is,
+and reports `g3_bootstrap` in the returned snapshot. Projects are then usable,
+the desktop keeps showing the refusal, and a later readable organization still
+fills only missing fields. A Qt store read completely without a saved
+organization is a first use instead: the desktop imports the default project
+through `--g3`, as for an absent store.
 An unreadable, malformed or unsupported pending marker prevents bootstrap but
 does not fail get or the initial organization read: they return the existing
 uninitialized state and leave the marker untouched. A stderr note is emitted

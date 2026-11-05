@@ -456,6 +456,7 @@ fn a_changed_source_or_mismatched_receipt_leaves_the_family_pending() {
             assert!(read_only, "changed source must never reach initialize");
             Ok(status(false, false))
         },
+        || panic!("a changed source is retried, never bootstrapped"),
     );
     assert_eq!(result.unwrap_err(), CHANGED);
     assert!(matches!(
@@ -691,5 +692,122 @@ fn damaged_or_ambiguous_qt_stores_are_never_taken_for_a_first_use() {
     assert_eq!(
         first_use(&scratch.source(), &scratch.settings()),
         Err(SOURCE_FAILED.into())
+    );
+}
+
+/// Recovery with the given catalog status: the result, how many imports and
+/// how many CLI first-use bootstraps it made.
+fn recover_counting(
+    source: &QtStore,
+    settings: &Settings,
+    initialized: bool,
+    pending: bool,
+    bootstrapped: Result<(), String>,
+) -> (Result<(), String>, usize, usize) {
+    let (mut imports, mut bootstraps) = (0, 0);
+    let result = recover_read(
+        source,
+        settings,
+        NODE,
+        || source.snapshot().map_err(|_| SOURCE_FAILED.into()),
+        |read_only, request| {
+            if read_only {
+                Ok(status(initialized, pending))
+            } else {
+                imports += 1;
+                Ok(receipt(&request))
+            }
+        },
+        || {
+            bootstraps += 1;
+            bootstrapped.clone()
+        },
+    );
+    (result, imports, bootstraps)
+}
+
+#[test]
+fn an_unreadable_qt_organization_still_sets_up_projects_and_stays_visible() {
+    // P1 (b): an unreadable or malformed Qt organization left the catalog
+    // uninitialized for good. The CLI first-use bootstrap sets it up and keeps
+    // the pending GUI import; the refusal stays visible for review.
+    let damaged = |scratch: &Scratch| {
+        ini(
+            scratch,
+            "[workspace]\nother=\"unterminated\norganization={}\n",
+        )
+    };
+    let malformed = |scratch: &Scratch| {
+        scratch.write(&json!({"version":99}));
+        scratch.source()
+    };
+    // A directory where the store should be: present, but its read fails.
+    let unreadable = |scratch: &Scratch| {
+        let store = scratch.0.join("hgs-tray.conf");
+        fs::create_dir(&store).unwrap();
+        QtStore::Ini(store)
+    };
+    for (name, make) in [
+        ("damaged INI", &damaged as &dyn Fn(&Scratch) -> QtStore),
+        ("malformed organization", &malformed),
+        ("unreadable store", &unreadable),
+    ] {
+        let scratch = Scratch::new();
+        let source = make(&scratch);
+        let settings = scratch.settings();
+        assert_eq!(
+            recover_counting(&source, &settings, false, false, Ok(())),
+            (Err(SOURCE_FAILED.into()), 0, 1),
+            "{name}"
+        );
+        assert_eq!(
+            settings.organization_import(),
+            Ok(OrganizationImport::Unhandled),
+            "{name}"
+        );
+        // Once bootstrapped (initialized with its pending GUI import), the next
+        // start reads Qt again and never bootstraps twice.
+        assert_eq!(
+            recover_counting(&source, &settings, true, true, Ok(())),
+            (Err(SOURCE_FAILED.into()), 0, 0),
+            "{name}"
+        );
+    }
+    // A failed bootstrap reports its own reason instead.
+    let scratch = Scratch::new();
+    let source = malformed(&scratch);
+    assert_eq!(
+        recover_counting(
+            &source,
+            &scratch.settings(),
+            false,
+            false,
+            Err(NEEDS_HGS.into())
+        ),
+        (Err(NEEDS_HGS.into()), 0, 1)
+    );
+    // A first use imports its default and never bootstraps.
+    let scratch = Scratch::new();
+    qt_profile_without_organization(&scratch);
+    assert_eq!(
+        recover_counting(&scratch.source(), &scratch.settings(), false, false, Ok(())),
+        (Ok(()), 1, 0)
+    );
+}
+
+#[test]
+fn a_later_readable_organization_fills_a_bootstrapped_catalog_once() {
+    // After the bootstrap the CLI reports initialized with its pending GUI
+    // import; a now readable organization is imported through the same G3 call.
+    let scratch = Scratch::new();
+    scratch.write(&organization());
+    let settings = scratch.settings();
+    assert_eq!(
+        recover_counting(&scratch.source(), &settings, true, true, Ok(())),
+        (Ok(()), 1, 0)
+    );
+    assert_eq!(
+        settings.organization_import(),
+        Ok(OrganizationImport::Handled)
     );
 }

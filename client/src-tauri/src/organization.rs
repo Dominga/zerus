@@ -2133,6 +2133,77 @@ mod tests {
     }
 
     #[test]
+    fn an_unreadable_qt_organization_still_sets_up_projects() {
+        // P1 (b): a malformed saved organization kept the catalog uninitialized
+        // for good. The CLI first-use bootstrap sets it up once, the refusal
+        // stays visible, and Projects can add projects.
+        let fake = Fake::landing();
+        let node = "11111111-1111-4111-8111-111111111111";
+        let qt = fake.dir.join("synthetic-qt.conf");
+        let ini = "[workspace]\norganization=\"{\\\"version\\\":99}\"\n";
+        std::fs::write(&qt, ini).unwrap();
+        std::fs::write(fake.dir.join("config.json"),json!({"g3-status":[
+                {"stdout":{"version":1,"node_id":node,"initialized":false,"gui_import_pending":false}},
+                {"stdout":{"version":1,"node_id":node,"initialized":true,"gui_import_pending":true}}],
+            "g3-bootstrap":[{"stdout":{"schema":1,"node_id":node,"initialized":true,"g3_bootstrap":{"version":1}}}]}).to_string()).unwrap();
+        let settings =
+            zerus_client_core::settings::Settings::open(fake.dir.join("settings.json"), None);
+        let organization = fake.organization(&Pump::default(), true);
+        organization.recover_qt(
+            Some(zerus_client_core::settings::QtStore::Ini(qt.clone())),
+            settings.clone(),
+        );
+        let mut observed = full("d1");
+        observed["node_id"] = json!(node);
+        observed["initialized"] = json!(false);
+        organization.set_source(snapshot_of(&observed));
+        organization.observe(&state_of(&observed));
+        wait_until("the first-use bootstrap", || {
+            std::fs::read_to_string(fake.dir.join("log.ndjson"))
+                .is_ok_and(|log| log.contains("--g3-bootstrap"))
+        });
+        let refused = swarm::sync::unavailable(swarm::qt_import::SOURCE_FAILED);
+        wait_until("the visible refusal", || {
+            organization.lock().sync.view().status == refused
+        });
+        // The CLI publishes the bootstrapped catalog. Its next recovery pass
+        // reads Qt again and refuses visibly, while project edits stay ready.
+        observed["initialized"] = json!(true);
+        organization.set_source(snapshot_of(&observed));
+        organization.observe(&state_of(&observed));
+        wait_until("the second recovery pass", || {
+            std::fs::read_to_string(fake.dir.join("log.ndjson"))
+                .is_ok_and(|log| log.matches("--g3-status").count() == 2)
+        });
+        wait_until("ready projects with the visible refusal", || {
+            let hub = organization.lock();
+            hub.sync.ready() && hub.sync.view().status == refused
+        });
+        organization.flush();
+        let log = std::fs::read_to_string(fake.dir.join("log.ndjson")).unwrap();
+        let bootstraps: Vec<_> = log
+            .lines()
+            .filter(|line| line.contains("--g3-bootstrap"))
+            .collect();
+        assert_eq!(bootstraps.len(), 1);
+        assert_eq!(
+            input(bootstraps[0]),
+            json!({"version":1,"expected_node_id":node})
+        );
+        assert_eq!(
+            log.lines().filter(|line| line.contains("\"--g3\"")).count(),
+            0
+        );
+        assert_eq!(
+            settings.organization_import().unwrap(),
+            zerus_client_core::settings::OrganizationImport::Unhandled
+        );
+        assert_eq!(std::fs::read_to_string(qt).unwrap(), ini);
+        drop(settings);
+        fake.finish(organization);
+    }
+
+    #[test]
     fn qt_recovery_uses_the_existing_worker_without_holding_ui_or_checkpoint_locks() {
         let fake = Fake::landing();
         let node = "11111111-1111-4111-8111-111111111111";

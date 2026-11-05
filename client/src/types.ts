@@ -756,7 +756,9 @@ export interface FormView { id: string; tab: Text; prompt: string; body: string;
   mode: Text; mode_visible: boolean; options: OptionView[]; other: OptionView | null; text: TextView | null }
 export interface QueueNav { previous: boolean; next: boolean; previous_tip: Text; next_tip: Text }
 export interface CardView { heading: Text; progress: Text | null; pending: Text | null; pending_tip: Text; nav: QueueNav | null; tabs_visible: boolean;
-  page: number; forms: FormView[]; status: Text; status_error: boolean; available: boolean; locked: boolean; review: boolean; created_at: number;
+  page: number; forms: FormView[]; status: Text; status_error: boolean; available: boolean; locked: boolean;
+  /** Only Terminal can answer it: the options are a plain list and Open Terminal is the primary action. */
+  read_only: boolean; review: boolean; created_at: number;
   submit: ButtonView; approve: ButtonView; deny: ButtonView; skip: ButtonView; previous: ButtonView; next: ButtonView; retry: boolean; skip_tip: Text; retry_tip: Text }
 /**
  * `revision` grows when the card is built again (a new card, a changed form,

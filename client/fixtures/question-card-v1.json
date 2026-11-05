@@ -148,6 +148,7 @@
     "status_error": false,
     "available": true,
     "locked": false,
+    "read_only": false,
     "review": false,
     "created_at": 1.0,
     "submit": {
@@ -363,6 +364,7 @@
     "status_error": false,
     "available": true,
     "locked": false,
+    "read_only": false,
     "review": false,
     "created_at": 1.0,
     "submit": {
@@ -639,6 +641,7 @@
     "status_error": false,
     "available": true,
     "locked": false,
+    "read_only": false,
     "review": false,
     "created_at": 1.0,
     "submit": {
@@ -848,6 +851,7 @@
     "status_error": false,
     "available": true,
     "locked": true,
+    "read_only": false,
     "review": false,
     "created_at": 1.0,
     "submit": {
@@ -1011,6 +1015,7 @@
     "status_error": false,
     "available": true,
     "locked": false,
+    "read_only": false,
     "review": true,
     "created_at": 0.0,
     "submit": {
@@ -1180,6 +1185,7 @@
     "status_error": false,
     "available": false,
     "locked": false,
+    "read_only": false,
     "review": true,
     "created_at": 0.0,
     "submit": {
@@ -1644,6 +1650,7 @@
     "status_error": false,
     "available": true,
     "locked": false,
+    "read_only": false,
     "review": false,
     "created_at": 0.0,
     "submit": {

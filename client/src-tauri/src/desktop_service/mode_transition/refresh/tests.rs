@@ -304,7 +304,17 @@ fn actual_service_refresh_keeps_immutable_manual_binding_and_all_positive_paths_
             .shared
             .mode_transition
             .fixture_windows(Some(fake.cli.clone()));
-        let offer = service.refresh_status().await.unwrap().offer.unwrap();
+        // The service's own classification observes through the same
+        // one-admission controller; while it holds that admission a refresh
+        // offers nothing yet (zerus-ohna7).
+        let until = std::time::Instant::now() + Duration::from_secs(10);
+        let offer = loop {
+            if let Some(offer) = service.refresh_status().await.unwrap().offer {
+                break offer;
+            }
+            assert!(std::time::Instant::now() < until, "no refresh offer");
+            tokio::time::sleep(Duration::from_millis(20)).await;
+        };
         let fence = service.refresh_fence(&offer).unwrap();
         let prepared = service
             .shared

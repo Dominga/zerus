@@ -742,11 +742,13 @@ fn dispatch_normal(mut args: Vec<String>) -> Result<i32> {
     // Commands exempt from local sessions (hooks, session-action-status)
     // find their own session through `ids/`, and an archive ID already
     // selects exactly (#1437 review).
-    if SESSION_COMMANDS.contains(&command.as_str())
-        && needs_local_sessions(command)
-        && (target.is_empty() || config.is_self(&target))
-        && state::session_id::selected().is_none()
-        && !has(args, "--archive")
+    if state::session_id::selected().is_none()
+        && resolves_label_first(
+            command,
+            args,
+            target.is_empty() || config.is_self(&target),
+            platform::local_sessions(),
+        )
     {
         resolve_label(args)?;
     }
@@ -1326,6 +1328,26 @@ fn session_id_flag(command: &str, args: &[String]) -> Result<Option<(usize, Stri
         return Err(Error::new(2, "--session-id needs a session ID (a lowercase UUID from hgs ls --json)"));
     }
     Ok(Some((at, id.to_owned())))
+}
+
+/// Whether dispatch resolves the label a session command names before the
+/// command runs (zerus-ucck P3a). Only on the computer that holds the
+/// sessions, with its local sessions enabled, and only for a plain label:
+/// never a reference (`zerus://`), which routes or resolves itself, nor a
+/// command that finds its own session or names an archive. Otherwise the
+/// command's own refusal or routing answers first, as before label
+/// resolution existed: a Windows computer without local sessions still
+/// refuses the native DeepSeek UI and routes a peer's reference
+/// (zerus-t2hd0).
+fn resolves_label_first(command: &str, args: &[String], here: bool, local: bool) -> bool {
+    SESSION_COMMANDS.contains(&command)
+        && needs_local_sessions(command)
+        && here
+        && local
+        && !has(args, "--archive")
+        && args
+            .first()
+            .is_some_and(|first| !first.starts_with('-') && !first.starts_with("zerus://"))
 }
 
 /// The label a session command names first, resolved (`state::resolve_label`):
@@ -2887,6 +2909,34 @@ fn launch(
 
 #[cfg(test)]
 mod tests {
+    /// zerus-t2hd0: with local sessions off, as on a Windows computer without
+    /// its session host, dispatch never resolves a label first, so each
+    /// command answers for itself: `native-ui dsh/p` and `a dsh/p` with the
+    /// native DeepSeek UI's refusal, `inspect` of a peer's reference by
+    /// routing to it, and the other session commands with their own
+    /// local-sessions refusal. A reference is never resolved as a label.
+    #[test]
+    fn label_resolution_never_answers_before_a_commands_own_refusal_or_routing() {
+        let args = |list: &[&str]| list.iter().map(|arg| arg.to_string()).collect::<Vec<_>>();
+        let uri = "zerus://session?machine=11111111-2222-4333-8444-555555555555&host=peer&name=claude%2Fp&conversation=c1";
+        for (command, rest) in [
+            ("native-ui", args(&["dsh/p"])),
+            ("a", args(&["dsh/p"])),
+            ("inspect", args(&[uri])),
+            ("inspect", args(&["claude/p"])),
+            ("send", args(&["claude/p", "--json"])),
+        ] {
+            assert!(!super::resolves_label_first(command, &rest, true, false), "{command} {rest:?}");
+        }
+        // With local sessions on, a plain label resolves; a reference never.
+        assert!(super::resolves_label_first("native-ui", &args(&["dsh/p"]), true, true));
+        assert!(super::resolves_label_first("inspect", &args(&["claude/p"]), true, true));
+        assert!(!super::resolves_label_first("inspect", &args(&[uri]), true, true));
+        assert!(!super::resolves_label_first("inspect", &args(&[uri, "--local"]), true, true));
+        // Another computer resolves its own labels.
+        assert!(!super::resolves_label_first("inspect", &args(&["claude/p"]), false, true));
+    }
+
     use super::*;
 
     /// #1355 review: every command whose usage takes a session first accepts

@@ -1324,12 +1324,14 @@ pub fn import_sources(own: &Path, qt: Option<PathBuf>, dev: Vec<PathBuf>) -> Vec
     .collect()
 }
 
-/// Queues the one-time import of Qt's and the dev app's drafts as the job
+/// Queues the one-time import of the Next dev app's drafts as the job
 /// the store runs next. Call it right after the store opens, before anything
 /// reads it: loads and pages run on the same writer after it, so every read
 /// sees the imported drafts. The report goes to the marker and a log line.
 pub fn import_at_start(store: &DraftStore) {
-    let sources = import_sources(store.root(), qt_root(), dev_roots());
+    // Qt drafts are deliberately excluded by the 0.48.0 upgrade policy.
+    // Next's own interim stores remain eligible; neither source is removed.
+    let sources = import_sources(store.root(), None, dev_roots());
     store.import(sources, |_| {});
 }
 

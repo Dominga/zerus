@@ -1,5 +1,31 @@
 # Desktop import evidence and writer handoff
 
+## Release 0.48.0 scope (owner, 2026-11-05)
+
+The release imports Qt projects/organization and uses shared `hgs` accounts;
+already delivered preference imports remain. Other Qt state is configure again:
+drafts, unsent organization edits, pending operations, task-message/task-Start
+outboxes and markers, unknown deliveries, attention/notification history and
+identities, repository clone settings and caches. Qt files/blobs stay untouched
+for manual recovery. Their operations are neither executed, replayed nor
+re-offered as Next recovery choices, including from older private reports.
+
+Production runtime-report execution is disabled. Existing Next preload guards
+remain with their original writers; no new source family is added. The adapters, immutable
+records and transport contracts below remain historical/component documentation,
+not promises of full-family migration. Next's own interim stores, original IDs,
+recovery-only rules and service-handoff markers remain active; an unreadable or
+incomplete reservation pair refuses a fresh attempt. Next dev drafts remain
+eligible from their separate roots; Qt draft import and Saved drafts recovery
+are disabled. Previously imported Next copies are not purged.
+
+One GUI explanation per production profile lists the omissions. **Got it** saves
+only Next notice metadata; failed persistence keeps the notice available. It
+changes no pending record, permission, consent or retry. The
+[G3 release scope](qt-release-acceptance.md#g3-scope-for-0480--owner-decision-2026-11-05)
+replaces the former complete-source-family requirement. Platform and native
+caller qualifications remain separate.
+
 G1 (`hgs desktop`) and G3 (read-only migration) agreed this v1 contract on
 2026-10-30. The shared Rust crate is `crates/desktop-migration`, package
 `zerus-desktop-migration`. It contains structural types and pure validation,

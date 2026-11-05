@@ -368,6 +368,14 @@ Give `hgs` the post-exit lifecycle for creation/jobs and uncertain-result reconc
 
 ### G3: One-time read-only Qt and interim-store migration
 
+**Superseded release scope, owner 2026-11-05:** for 0.48.0, import Qt
+projects/organization and use shared `hgs` accounts only; already delivered
+preferences remain. Everything else from Qt is configure again. Keep source
+files/blobs untouched, ignore Qt operations and notification identities, and
+preserve Next's own interim pending-operation guards. The full-family inventory
+below is historical/component coverage, not remaining release work. See the
+[current G3 scope](../../qt-release-acceptance.md#g3-scope-for-0480--owner-decision-2026-11-05).
+
 **Proposed owners:** `codex/zerus-work-431af08b/core` with `codex/zerus-work-6768c5c5/a2hub`.
 
 **Extend** the merged importers; do not create a second migration stack:

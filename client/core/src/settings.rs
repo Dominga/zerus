@@ -9,6 +9,7 @@
 
 mod capture;
 pub mod geometry;
+mod upgrade;
 pub use capture::{CapturedQt, CapturedSettings};
 mod imports;
 mod legacy_projects;

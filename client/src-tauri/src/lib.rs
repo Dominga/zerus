@@ -1195,6 +1195,7 @@ fn launch(context: tauri::Context<tauri::Wry>, startup: Startup) {
                     platform::windows::tray::install(app.handle(), conf.as_deref())?;
                     let identity = app.state::<identity::Identity>().inner().clone();
                     let posts = !desktop_service::mode() && (!identity.is_switch() || app.try_state::<desktop_ownership::NativeReady>().is_some()) && identity.notifications(identity::flag("ZERUS_CLIENT_NOTIFICATIONS"), replay);
+                    let switch = identity.is_switch();
                     let attention = posts.then(|| {
                         let path = dir.join(desk::ATTENTION_FILE);
                         Box::new(move || desk::Attention::load(path, || None)) as desk::LoadAttention

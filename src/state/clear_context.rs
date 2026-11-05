@@ -1024,12 +1024,14 @@ pub(super) fn dispatch(args: &[String]) -> Result<i32> {
     #[test] fn reset_panel_accepts_only_the_fixed_native_usage_notices() {
         let warning="⚠ Heads up, you have less than 10% of your weekly limit left. Run /status for a breakdown.";
         let footer="⚠ weekly limit: 10% left · resets at 11:22 PM on 7 Nov · /status";
-        let screen=format!(">_ OpenAI Codex (v0.166.0)\n/fixture\npermissions: default\n\n{warning}\n\n{footer}\n\n› Ask Codex to do anything\n\nGPT-6.1-Sol default · /fixture\n? for shortcuts");
-        assert!(codex_reset_panel(&screen,"/fixture"));
+        // An absolute folder on each platform: `/fixture` has no drive on Windows.
+        let cwd=if cfg!(windows) {r"C:\fixture"} else {"/fixture"};
+        let screen=format!(">_ OpenAI Codex (v0.166.0)\n{cwd}\npermissions: default\n\n{warning}\n\n{footer}\n\n› Ask Codex to do anything\n\nGPT-6.1-Sol default · {cwd}\n? for shortcuts");
+        assert!(codex_reset_panel(&screen,cwd));
         for changed in [screen.replace(warning,"⚠ An unknown warning"),screen.replace("10% left","101% left"),
             screen.replace("11:22 PM","13:22 PM"),screen.replace("Run /status for a breakdown.","Approve this command."),
             screen.replace("› Ask Codex to do anything","› my draft"),format!("Previous conversation\n{screen}")] {
-            assert!(!codex_reset_panel(&changed,"/fixture"),"{changed}");
+            assert!(!codex_reset_panel(&changed,cwd),"{changed}");
         }
     }
     #[test] fn fresh_starts_continue_the_activity_timeline_like_a_clear() {

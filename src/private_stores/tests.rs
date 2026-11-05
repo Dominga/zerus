@@ -189,3 +189,12 @@ fn the_journal_keeps_the_newest_lines_within_its_bounds() {
         assert!(platform::verify_private(&root.join(JOURNAL), Private::File).unwrap());
     });
 }
+
+#[test]
+fn a_canonical_windows_path_is_compared_without_its_verbatim_prefix() {
+    // The desktop presence fence opens `\\?\C:\...`; the roots are plain.
+    assert_eq!(plain(Path::new(r"\\?\C:\Users\a\.local\state\hgs\x.lock")).as_ref(),
+        Path::new(r"C:\Users\a\.local\state\hgs\x.lock"));
+    assert_eq!(plain(Path::new(r"\\?\UNC\server\share\x")).as_ref(), Path::new(r"\\?\UNC\server\share\x"));
+    assert_eq!(plain(Path::new("/home/a/x")).as_ref(), Path::new("/home/a/x"));
+}

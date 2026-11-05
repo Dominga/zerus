@@ -1,84 +1,62 @@
 Zerus @VERSION@ for Windows x86_64 (portable)
-hgs @CLI_VERSION@, Qt @QT_VERSION@, source commit @SOURCE_COMMIT@
-
-This folder is a portable Zerus control console. hgs-tray.exe manages agent
-sessions on remote Linux and macOS machines through the Windows OpenSSH client.
-It can also run agents on this computer once you enable local sessions: choose
-Enable local sessions for this computer in Machines, or run
-hgs.exe session-host install. This stages the hgs CLI in
-%USERPROFILE%\.local\bin and a session host in
-%USERPROFILE%\.local\share\hgs\host; hgs.exe session-host uninstall disables
-local sessions again. Claude Code, Codex and Kimi Code then run here once
-installed; DeepSeek and OpenCode do not. Install agent... in Accounts installs
-Codex with npm (Node.js required) and Claude Code and Kimi Code with their
-vendors' PowerShell installers.
-
-Mobile connection in Settings configures this PC's bundled Rust outbound
-connector. Supply the computer credential issued by your relay, save, and
-choose Start connector. Refresh Phones to pair a phone by QR code. No Linux
-or macOS gateway is needed. Start it again after each Windows login; closing
-Zerus leaves the connector and native sessions running. Stop connector drains
-its current request and preserves native agents and durable request receipts.
-This first Windows gateway controls existing local Codex, Claude and Kimi
-sessions. Mobile session creation, folder/worktree/Git/file operations, peer
-routing, voice/speech, DeepSeek and OpenCode are unavailable.
-Documentation: https://github.com/ufna/zerus/blob/main/docs/installation.md#windows
+hgs @CLI_VERSION@, Tauri desktop, source commit @SOURCE_COMMIT@
 
 Requirements
 - Windows 10 version 1903 or later, or Windows 11, on x86_64.
-- The OpenSSH client (ssh.exe), included with current Windows versions.
-- Key-based SSH access to each remote machine, with hgs installed there in
-  ~/.local/bin/hgs. Host aliases from %USERPROFILE%\.ssh\config work as usual.
+- Microsoft Edge WebView2 Evergreen Runtime. Windows 11 normally includes it;
+  on machines without it, install the Evergreen Runtime from Microsoft's page:
+  https://developer.microsoft.com/microsoft-edge/webview2/#download-section
+  Microsoft Edge itself is not a substitute. The runtime is shared with other
+  applications and Zerus never removes it on uninstall.
+- The Windows OpenSSH client (ssh.exe) for remote computers, with key-based
+  SSH access and hgs installed there. Existing SSH aliases keep working.
 
 Use
-- Extract the whole folder and run hgs-tray.exe. Keep the files together:
-  hgs-tray.exe uses the hgs.exe next to it.
-- hgs-tray.exe opens the Zerus window. Closing it keeps Zerus running in the
-  notification area, where Windows 11 first hides a new icon behind the ^
-  arrow; run hgs-tray.exe again to bring the window back. To start Zerus at
-  sign-in, put a shortcut to hgs-tray.exe in the Startup folder
-  (shell:startup) and add a space and --background at the end of its Target
-  field: Zerus then starts in the notification area without its window.
-- To use the CLI in a terminal, run hgs.exe from this folder or add the folder
-  to PATH. In PowerShell, a program in the current folder needs the .\ prefix
-  and a machine argument needs quotes:
-    .\hgs.exe '@myserver' ls
-  With the folder on PATH, PowerShell takes hgs.exe '@myserver' ls, and
-  cmd.exe takes hgs.exe @myserver ls without quotes. In Git Bash, set
+- Extract the whole folder and run hgs-tray.exe. This is the Tauri Zerus Next
+  desktop; it ships no Qt runtime. Keep the files together: the desktop uses
+  the adjacent hgs.exe and zerus-mobile-connector.exe.
+- Closing the window keeps Zerus in the notification area. Run hgs-tray.exe
+  again to bring it back. For portable login start, put a shortcut in
+  shell:startup with --background appended to its Target. The per-user
+  installer also offers an optional Start at login choice, off by default.
+- The CLI works from a terminal as .\hgs.exe '@myserver' ls in PowerShell.
+  With this folder on PATH, use hgs.exe '@myserver' ls. In Git Bash set
   MSYS_NO_PATHCONV=1 before passing remote paths such as /workspace/project.
-- Configuration lives in %USERPROFILE%\.config\hgs (under HOME instead when
-  that variable is set), as on Linux and macOS. HGS_CONFIG_DIR and
-  HGS_STATE_DIR move only the CLI's configuration and state; hgs-tray.exe
-  always reads tray.conf from .config\hgs under HOME, or else under the
-  account's profile folder.
+- Configuration remains in %USERPROFILE%\.config\hgs (HOME when set).
+  HGS_CONFIG_DIR and HGS_STATE_DIR keep their existing meanings. tray.conf
+  is read from .config\hgs under HOME or the account's profile folder.
+- Local sessions remain opt-in: use Machines or hgs.exe session-host install.
+  The staged CLI and host images live outside this app folder, so replacing
+  or uninstalling this folder does not remove native agents or their sessions.
+- Desktop service setup remains separate from optional GUI login start.
+  hgs.exe desktop registration --json previews the maintained logon definition
+  and readiness contract. The installer has a marked hook for the Windows G1
+  setup/removal command; it creates no ad-hoc scheduled task while that command
+  is pending.
+- The bundled Rust outbound connector keeps its existing configuration and
+  durable request receipts. Closing Zerus does not stop native sessions.
 
-There is no installer and no automatic update. Newer builds come with the
-stable and nightly releases at https://github.com/ufna/zerus/releases, and
-Settings > Updates reports them. To update, quit hgs-tray from its tray menu, then replace
-this folder with a newer one. The executables are not code-signed, so
-Windows SmartScreen may ask for confirmation on the first start. Compare the
-zip with SHA256SUMS of its GitHub release, for example:
+Updates
+The portable zip is distributed at https://github.com/ufna/zerus/releases.
+The per-user installer is currently built and tested in CI; publishing that
+installer is a separate release task. The installer preserves configuration,
+state, drafts and staged native hosts, and removes obsolete app files only
+inside its verified owned installation folder. For a portable update, quit
+hgs-tray from its tray menu before replacing the app folder. Keep your data.
+Compare the zip with the release's SHA256SUMS, for example:
   Get-FileHash zerus-<version>-windows-x86_64.zip -Algorithm SHA256
+Unsigned builds can trigger Windows SmartScreen on first start.
+Documentation: https://github.com/ufna/zerus/blob/main/docs/installation.md#windows
 
 Licenses
-Zerus is licensed under the MIT license in LICENSE; THIRD_PARTY_NOTICES.md
-describes the components it uses. The folder also contains:
-- Qt @QT_VERSION@ libraries and plugins, used under the GNU LGPL version 3
-  (licenses\qt). They are separate DLLs that can be replaced with compatible
-  builds. Their exact source code is available from
-    https://download.qt.io/archive/qt/@QT_SERIES@/@QT_VERSION@/single/qt-everywhere-src-@QT_VERSION@.tar.xz
-  and as Git tags v@QT_VERSION@ in the Qt Project repositories at
-  https://code.qt.io.
-- SPDX documents supplied with Qt (licenses\qt\sbom) that name the license
-  and copyright of each Qt module and of the third-party code inside it.
-  licenses\qt holds the text of every standard license and exception they
-  name. This software is based in part on the work of the Independent JPEG
-  Group and of the FreeType Team (https://freetype.org).
-- The Microsoft Visual C++ runtime DLLs, redistributed with the application.
-- Microsoft's ConPTY, conpty.dll and OpenConsole.exe from the NuGet package
-  Microsoft.Windows.Console.ConPTY @CONPTY_VERSION@, under the MIT license
-  (licenses\conpty-LICENSE.txt), with the notices of the third-party code
-  that OpenConsole.exe contains (licenses\conpty-NOTICE.md). hgs.exe hosts
-  consoles with them once local sessions are enabled.
-- License texts of the Rust crates in hgs.exe (licenses\rust) and of libvterm,
-  md4c and the QR Code generator, which hgs-tray.exe contains (licenses).
+Zerus is MIT-licensed (LICENSE). THIRD_PARTY_NOTICES.md describes project
+components. This distribution includes:
+- Microsoft Visual C++ app-local runtime DLLs.
+- Microsoft.Windows.Console.ConPTY @CONPTY_VERSION@, under the MIT license
+  (licenses\conpty-LICENSE.txt), with OpenConsole's third-party notices
+  (licenses\conpty-NOTICE.md). hgs.exe stages the pinned pair for local hosts.
+- Rust dependency notices for hgs and the connector (licenses\rust), and the
+  Tauri desktop's selected Rust dependencies (licenses\rust\desktop).
+- Locked frontend runtime dependency notices, including Vite's emitted preload
+  helper (licenses\frontend).
+WebView2 Evergreen is installed separately under Microsoft's terms.

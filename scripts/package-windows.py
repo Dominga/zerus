@@ -1,11 +1,8 @@
 #!/usr/bin/env python3
-"""Bundle the tested hgs.exe and hgs-tray.exe into the Windows portable zip.
+"""Bundle tested hgs, the Tauri desktop and connector into the Windows zip.
 
-windeployqt adds the Qt runtime, vswhere locates the app-local MSVC runtime,
-the pinned ConPTY pair (conpty.dll and OpenConsole.exe, scripts/conpty_pair.py)
-goes next to hgs.exe, and the notices that make the bundle redistributable are
-copied next to them. Nothing is compiled here: the executables are the exact
-files the Windows CI job has just tested.
+The app-local MSVC runtime and pinned ConPTY pair accompany the unchanged
+binaries. WebView2 uses the installed Evergreen runtime; Qt is never deployed.
 """
 import argparse
 import datetime
@@ -23,21 +20,10 @@ import zipfile
 
 import conpty_pair
 from release_common import require
-from windows_portable import TOP, inspect, missing_license_texts
+from windows_portable import TOP, inspect
 
 ROOT = Path(__file__).resolve().parents[1]
 CRT_REQUIRED = ("vcruntime140.dll", "vcruntime140_1.dll", "msvcp140.dll")
-
-
-def qt_version(qt_root):
-    """The exact Qt release, read from its CMake package version file."""
-    for name in ("Qt6CoreConfigVersionImpl.cmake", "Qt6CoreConfigVersion.cmake"):
-        path = qt_root / "lib" / "cmake" / "Qt6Core" / name
-        if path.is_file():
-            match = re.search(r'set\(PACKAGE_VERSION "(\d+\.\d+\.\d+)"\)', path.read_text(encoding="utf-8"))
-            if match:
-                return match[1]
-    raise SystemExit(f"Cannot determine the Qt version under {qt_root}.")
 
 
 def visual_studio():
@@ -113,25 +99,20 @@ def main():
     # WhiteWh fork: a relay for this computer alone (docs/fork-updates.md).
     parser.add_argument("--mobile-relay", type=Path, help="tested zerus-relay.exe")
     parser.add_argument("--output", type=Path, required=True, help="zip to write")
-    parser.add_argument("--qt-root", type=Path, default=os.environ.get("QT_ROOT_DIR"),
-                        help="Qt installation, e.g. .../6.10.3/msvc2022_64 [default: $QT_ROOT_DIR]")
-    parser.add_argument("--windeployqt", type=Path, help="[default: <qt-root>/bin/windeployqt.exe]")
     parser.add_argument("--crt-dir", type=Path, help="Microsoft.VC14*.CRT folder [default: found with vswhere]")
     parser.add_argument("--rust-licenses", type=Path,
                         help="notices from scripts/collect-licenses.py [default: collected for this host target]")
+    parser.add_argument("--frontend-licenses", type=Path, help="collected production frontend notices")
     parser.add_argument("--conpty", type=Path,
                         help="folder with the pinned conpty.dll and OpenConsole.exe from scripts/fetch-conpty.py "
                              "[default: fetched from nuget.org]")
     args = parser.parse_args()
-    require(args.qt_root is not None and args.qt_root.is_dir(), "Pass --qt-root or set QT_ROOT_DIR.")
     require(args.output.suffix == ".zip", "The output must be a .zip file.")
-    qt_root = args.qt_root.resolve()
-    windeployqt = args.windeployqt or qt_root / "bin" / "windeployqt.exe"
     crt = args.crt_dir or crt_directory(visual_studio())
     version = (ROOT / "VERSION").read_text(encoding="utf-8").strip()
     cli_version = tomllib.loads((ROOT / "Cargo.toml").read_text(encoding="utf-8"))["package"]["version"]
     manifest = {"product": "Zerus", "version": version, "cli_version": cli_version, "platform": "Windows",
-                "architecture": "x86_64", "qt_version": qt_version(qt_root), "native_agents_bundled": False, "mobile_connector_bundled": True,
+                "architecture": "x86_64", "desktop": "tauri", "webview2_runtime": "evergreen", "native_agents_bundled": False, "mobile_connector_bundled": True,
                 "source_commit": source_commit()}
     output = args.output.resolve()
     output.parent.mkdir(parents=True, exist_ok=True)
@@ -150,27 +131,6 @@ def main():
         copy(args.connector, stage / "zerus-mobile-connector.exe")
         if args.mobile_relay:
             copy(args.mobile_relay, stage / "zerus-relay.exe")
-        # Qt libraries, plugins and translations. The SVG image and icon plugins
-        # are loaded at run time only, so windeployqt cannot infer them from
-        # imports. QML debugging and TUIO touch plugins are not used; the NMEA
-        # position plugin needs Qt Serial Port, which is not shipped. The compiler
-        # runtime is copied as DLLs below instead of windeployqt's vc_redist
-        # installer. The Mesa software OpenGL fallback, which the bundled notices
-        # do not cover, is left out.
-        # Microsoft's Direct3D shader compilers stay out as well: Windows 10 1903
-        # and later include D3DCompiler_47.dll, and the notices do not cover the
-        # Windows SDK's DXC (dxcompiler.dll, dxil.dll) either.
-        subprocess.run([str(windeployqt), "--release", "--no-compiler-runtime", "--no-opengl-sw",
-                        "--no-system-d3d-compiler", "--no-system-dxc-compiler",
-                        "--include-plugins", "qsvg,qsvgicon", "--skip-plugin-types", "qmltooling,generic",
-                        "--exclude-plugins", "qtposition_nmea", str(stage / "hgs-tray.exe")], check=True)
-        # windeployqt also copies the ICU that Qt6Core imports from PATH: the build
-        # machine's System32 copy, which is a forwarder to icu.dll on current
-        # Windows. Qt6Core uses the system ICU instead; never redistribute it.
-        for path in sorted(stage.glob("*.dll")):
-            if path.name.lower().startswith("icu"):
-                print(f"Leaving out {path.name}, a Windows system library.")
-                path.unlink()
         for dll in sorted(crt.glob("*.dll")):
             copy(dll, stage / dll.name)
         missing = [name for name in CRT_REQUIRED if not (stage / name).is_file()]
@@ -180,9 +140,6 @@ def main():
         for name in ("LICENSE", "THIRD_PARTY_NOTICES.md"):
             copy(ROOT / name, stage / name)
         licenses = stage / "licenses"
-        copy(ROOT / "tray/vendor/libvterm/LICENSE", licenses / "libvterm-LICENSE")
-        copy(ROOT / "tray/vendor/md4c/LICENSE.md", licenses / "md4c-LICENSE")
-        copy(ROOT / "tray/vendor/qrcodegen/LICENSE", licenses / "qrcodegen-LICENSE")
         copy(ROOT / "docs/licenses/codex-LICENSE.txt", licenses / "codex-LICENSE.txt")
         copy(ROOT / "docs/licenses/conpty-LICENSE.txt", licenses / "conpty-LICENSE.txt")
         copy(ROOT / "docs/licenses/conpty-NOTICE.md", licenses / "conpty-NOTICE.md")
@@ -195,25 +152,20 @@ def main():
                             "--manifest-path", str(ROOT / "Cargo.toml"),
                             "--manifest-path", str(ROOT / "services/mobile/connector/Cargo.toml"), *relay],
                            cwd=ROOT, check=True)
-        for text in sorted((ROOT / "packaging/windows/licenses").glob("*.txt")):
-            copy(text, licenses / "qt" / text.name)
-        # Qt ships SPDX documents per module. Source SBOMs are not needed.
-        sboms = sorted(path for path in (qt_root / "sbom").glob("*.spdx") if not path.name.endswith(".source.spdx"))
-        names = {path.name for path in sboms}
-        require(f"qtbase-{manifest['qt_version']}.spdx" in names and
-                f"qtmultimedia-{manifest['qt_version']}.spdx" in names,
-                "The Qt installation lacks its SBOM notices; review Qt licensing before distribution.")
-        for sbom in sboms:
-            copy(sbom, licenses / "qt" / "sbom" / sbom.name)
-        # The documents name licenses by identifier; each needs its text here.
-        texts = {path.stem for path in (licenses / "qt").glob("*.txt")}
-        missing = missing_license_texts({sbom.name: sbom.read_text(encoding="utf-8") for sbom in sboms}, texts)
-        require(not missing, "Qt SPDX documents name licenses without a text in packaging/windows/licenses: "
-                + ", ".join(missing))
+            subprocess.run([sys.executable, str(ROOT / "scripts/collect-licenses.py"), str(licenses / "rust/desktop"),
+                            "--manifest-path", str(ROOT / "client/src-tauri/Cargo.toml"),
+                            "--manifest-features", f"{ROOT / 'client/src-tauri/Cargo.toml'}=video"],
+                           cwd=ROOT, check=True)
+        require((licenses / "rust/desktop/inventory.json").is_file(), "Collect Tauri dependency license texts first.")
+        if args.frontend_licenses:
+            require((args.frontend_licenses / "inventory.json").is_file(), "Collect frontend dependency license texts first.")
+            shutil.copytree(args.frontend_licenses, licenses / "frontend")
+        else:
+            subprocess.run([sys.executable, str(ROOT / "client/scripts/collect-notices.py"),
+                            str(licenses / "frontend")], cwd=ROOT, check=True)
         readme = (ROOT / "packaging/windows/README.txt").read_text(encoding="utf-8")
-        for key in ("version", "cli_version", "qt_version", "source_commit"):
+        for key in ("version", "cli_version", "source_commit"):
             readme = readme.replace(f"@{key.upper()}@", manifest[key])
-        readme = readme.replace("@QT_SERIES@", ".".join(manifest["qt_version"].split(".")[:2]))
         readme = readme.replace("@CONPTY_VERSION@", conpty_pair.PIN["version"])
         require(not re.search(r"@[A-Z_]+@", readme), "Unreplaced placeholder in the Windows README.")
         # Notepad and other Windows tools expect CRLF in a plain-text README.
@@ -230,7 +182,7 @@ def main():
             raise
     os.replace(partial, output)
     print(f"Wrote {output} ({output.stat().st_size} bytes) for Zerus {version}, hgs {cli_version}, "
-          f"Qt {manifest['qt_version']}, commit {manifest['source_commit']}.")
+          f"Tauri/WebView2 Evergreen, commit {manifest['source_commit']}.")
 
 
 if __name__ == "__main__":

@@ -33,9 +33,13 @@ pub(super) fn fence(location: &Location) -> Result<Guard> {
     platform::no_follow(&mut options);
     #[cfg(windows)]
     platform::refuse_link(&mut options);
-    let file = options.open(state.join("desktop-presence.lock"))?;
+    let path = state.join("desktop-presence.lock");
+    let file = options.open(&path)?;
+    // WhiteWh fork (#569): a lock only too open (inherited Windows ACLs) is
+    // made private again, as every other private store; one that stays
+    // refused is reported with its fix.
     ensure!(
-        platform::verify_private_file(&file)?,
+        crate::private_stores::ensure_file(&path, &file)?,
         "unsafe presence fence"
     );
     fs2::FileExt::try_lock_exclusive(&file).context("presence writer is busy")?;

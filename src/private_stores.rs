@@ -93,8 +93,20 @@ fn state_root() -> PathBuf {
     crate::state::watch_source::state_root()
 }
 
+/// `\\?\C:\...` (a canonical Windows path) as `C:\...`, so a canonical store
+/// path is compared with the plain roots; UNC and other forms are unchanged.
+fn plain(path: &Path) -> std::borrow::Cow<'_, Path> {
+    let text = path.to_string_lossy();
+    match text.strip_prefix(r"\\?\") {
+        Some(rest) if rest.as_bytes().get(1) == Some(&b':') => std::borrow::Cow::Owned(std::path::PathBuf::from(rest)),
+        _ => std::borrow::Cow::Borrowed(path),
+    }
+}
+
 /// Repairs only inside Zerus's state and configuration folders.
 fn within_roots(path: &Path) -> bool {
+    let path = plain(path);
+    let path = path.as_ref();
     let mut roots = vec![state_root()];
     if let Some(home) = platform::home() {
         roots.push(crate::config::config_dir(&home));

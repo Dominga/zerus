@@ -370,10 +370,47 @@ its own terminal, with its pane and run, or while a launch of its own label
 holds that terminal; a tmux session another launch started under its terminal
 name never makes it live and never hides it from `hgs ls`. When hgs cannot
 read a terminal's environment to tell whose launch it is, it refuses and
-starts nothing. A new launch, fork, rename or restore still refuses a
-label that any tmux session holds. A build older than this one finds no pane
-for a session whose terminal is named otherwise, shows it as not live and
-drops `terminal_name` when it rewrites the record.
+starts nothing. A new launch, fork, rename or restore still refuses a label
+that any tmux session holds. A build older than this one finds no pane for a
+session whose terminal is named otherwise, shows it as not live and drops
+`terminal_name` when it rewrites the record.
+
+When several sessions share a label (zerus-ucck P3c), a command picks one by
+the identities it carries. These come from its command line
+(`--expected-run-id`, `--run`, `--run-id`, `--expected-conversation-id`,
+`--conversation`) or from its JSON request (`expected_run_id` and
+`expected_conversation_id`; `run_id` and `conversation_id` for `hgs read` and
+`hgs notifications`).
+- Exactly one session carrying them is the one, and every later read in that
+  command still checks both identities against it.
+- None carrying them is refused as a changed session (exit status 1). The
+  command then reads none of the sessions under that label.
+- With several, or with no identities at all, the command exits with status 5
+  and lists the candidates (as JSON under `--json`). This holds for `inspect`,
+  `pause`, `rename`, `archive`, `kill` and others that take no identities.
+- `--session-id` and references always select exactly.
+- `pause --all` and `resume --all` refuse a label that several sessions share;
+  act on each with `--session-id`.
+
+When a session leaves, hgs releases its own Git worktree lock. A session
+leaves by an archive, by `terminate` with or without `--forget`, or by
+forgetting its archive. Its own lock is one whose reason is exactly
+`zerus:<session ID>`, on the checkout Zerus created for that session.
+- hgs never touches a person's own lock, another session's, or any lock on a
+  folder Zerus did not create.
+- The lock stays in three cases:
+  - another live or saved session uses the checkout;
+  - the checkout's Zerus ownership cannot be verified;
+  - the sessions that might use it cannot all be read.
+
+  hgs then says on standard error why it kept the lock, and the archive
+  stands.
+- The release never forces Git. It sets the lock aside and checks its text,
+  and removes it only when the text is exactly that session's. Anything else
+  is put back, never over a lock that appeared meanwhile. A lock left aside by
+  a crash is put back by the next hgs command.
+
+Nothing in this version creates such a lock.
 
 The desktop client adds `--session-id` only to explicit actions: send, send
 now, answer, queued-message removal, clear and compact, interrupt, model

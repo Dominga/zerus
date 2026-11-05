@@ -1146,6 +1146,7 @@
   "Go to… (type > for commands)": "Перейти… (введите > для команд)",
   "Goal": "Цель",
   "Goal blocked": "Цель заблокирована",
+  "Goal budget limit reached": "Достигнут лимит бюджета цели",
   "Goal complete": "Цель достигнута",
   "Goal data is unavailable for this conversation or agent version.": "Данные о целях недоступны для этого разговора или версии агента.",
   "Goal paused": "Цель приостановлена",

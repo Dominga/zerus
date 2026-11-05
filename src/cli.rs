@@ -75,6 +75,7 @@ pub(crate) const USAGE: &str = r#"usage: hgs [@host] <cmd> [project] [-c [ID]] [
        Desktop deferred send ABI: desktop-deferred-send-v1
        Desktop deferred answer ABI: desktop-deferred-answer-v1
        Desktop deferred answer update phase: desktop-deferred-answer-update-phase-v1
+       Desktop deferred compact to send ABI: desktop-deferred-compact-to-send-v1
        Desktop task start reconcile ABI: desktop-task-start-reconcile-v1
        Desktop pending read import ABI: desktop-pending-reads-v1
        Desktop activation ABI: desktop-activation-v1
@@ -453,6 +454,7 @@ fn unix_only_usage(line: &str) -> bool {
         zerus_client_core::desktop::deferred_send::HELP_MARKER,
         zerus_client_core::desktop::deferred_answer::HELP_MARKER,
         zerus_client_core::desktop::deferred_answer::UPDATE_PHASE_MARKER,
+        zerus_client_core::desktop::compact_to_send::HELP_MARKER,
         zerus_client_core::desktop::task_start_reconcile::HELP_MARKER,
     ]
     .contains(&line.trim())
@@ -500,6 +502,7 @@ fn advertised(usage: Cow<'static, str>, linux: bool) -> Cow<'static, str> {
         zerus_client_core::desktop::deferred_send::HELP_MARKER,
         zerus_client_core::desktop::deferred_answer::HELP_MARKER,
         zerus_client_core::desktop::deferred_answer::UPDATE_PHASE_MARKER,
+        zerus_client_core::desktop::compact_to_send::HELP_MARKER,
     ];
     usage
         .lines()
@@ -535,7 +538,20 @@ pub(crate) fn dispatch_at(args: Vec<String>, entered: Instant) -> Result<i32> {
     }
     #[cfg(not(any(windows, test)))]
     let _ = entered;
-    dispatch_normal(args)
+    let json = args.iter().any(|arg| arg == "--json");
+    let result = dispatch_normal(args);
+    // A read that refused because several sessions share the label it named,
+    // with nothing in the request selecting one (zerus-ucck P3c), exits 5 with
+    // the ambiguity report, as resolution does.
+    match (result, state::session_id::refused()) {
+        (Err(_), Some((text, value))) => {
+            if json {
+                println!("{value}");
+            }
+            Err(Error::new(state::session_id::AMBIGUOUS, text))
+        }
+        (result, _) => result,
+    }
 }
 
 fn dispatch_normal(mut args: Vec<String>) -> Result<i32> {
@@ -751,7 +767,7 @@ fn dispatch_normal(mut args: Vec<String>) -> Result<i32> {
             platform::local_sessions(),
         )
     {
-        resolve_label(args)?;
+        resolve_label(command, args)?;
     }
     match command.as_str() {
         "--expect-machine" => {
@@ -1351,21 +1367,62 @@ fn resolves_label_first(command: &str, args: &[String], here: bool, local: bool)
             .is_some_and(|first| !first.starts_with('-') && !first.starts_with("zerus://"))
 }
 
+/// zerus-ucck P3c: how each session command carries the identities it
+/// expects, which select among the sessions that share the label it names.
+/// Its guard arrives with its request on standard input, and its own check
+/// selects (`state::expect`); until then every read of the label refuses.
+const REQUEST_GUARDED: &[&str] = &[
+    "send", "send-now", "history", "history-projection", "terminal", "session-action",
+    "compact-context", "clear-context", "interrupt", "attachment", "file-read", "answer", "read",
+    "notifications", "effort", "settings", "schedules", "voice",
+];
+/// Its guard is on its command line (`--expected-run-id`, `--run`, `--run-id`,
+/// `--expected-conversation-id`, `--conversation`).
+#[cfg_attr(not(test), allow(dead_code))]
+const FLAG_GUARDED: &[&str] = &["fork", "terminate", "resume", "processes", "reference", "a"];
+/// It carries none: a label several sessions share is refused (exit 5).
+#[cfg_attr(not(test), allow(dead_code))]
+const UNGUARDED: &[&str] = &["inspect", "kill", "rename", "archive", "pause", "native-ui", "__dsh-ui-url"];
+/// It finds its own session and is not resolved here: `hooks` through `ids/`
+/// and its request's identities, `session-action-status` through its receipts.
+#[cfg_attr(not(test), allow(dead_code))]
+const SELF_RESOLVED: &[&str] = &["hooks", "session-action-status"];
+
+/// The guard of `command` invoked with `args`: identities on its command line
+/// select now; a command whose request carries them waits for it.
+fn label_guard(command: &str, args: &[String]) -> state::LabelGuard {
+    let value = |flags: &[&str]| {
+        args.windows(2)
+            .find(|pair| flags.contains(&pair[0].as_str()))
+            .map(|pair| pair[1].clone())
+            .unwrap_or_default()
+    };
+    let run = value(&["--expected-run-id", "--run", "--run-id"]);
+    let conversation = value(&["--expected-conversation-id", "--conversation"]);
+    if !run.is_empty() || !conversation.is_empty() {
+        state::LabelGuard::Given { run, conversation }
+    } else if REQUEST_GUARDED.contains(&command) {
+        state::LabelGuard::Request
+    } else {
+        state::LabelGuard::None
+    }
+}
+
 /// The label a session command names first, resolved (`state::resolve_label`):
 /// the ambiguity report goes to standard output under `--json`, and its text is
 /// the error, with exit status 5.
-fn resolve_label(args: &[String]) -> Result<()> {
+fn resolve_label(command: &str, args: &[String]) -> Result<()> {
     // Only the first argument names the session: a later word may be an
     // option's value, never a label.
     let Some(name) = args.first().filter(|arg| !arg.starts_with('-')) else {
         return Ok(());
     };
     local_sessions()?;
-    state::resolve_label(name).map_err(|(text, value)| {
-        if let Some(value) = value.filter(|_| args.iter().any(|arg| arg == "--json")) {
+    state::resolve_label(name, label_guard(command, args)).map_err(|refusal| {
+        if let Some(value) = refusal.value.filter(|_| args.iter().any(|arg| arg == "--json")) {
             println!("{value}");
         }
-        Error::new(state::session_id::AMBIGUOUS, text)
+        Error::new(refusal.code, refusal.text)
     })
 }
 
@@ -2956,6 +3013,47 @@ mod tests {
         assert!(!super::resolves_label_first("inspect", &args(&["claude/p"]), false, true));
     }
 
+    /// zerus-ucck P3c: every session command declares how it carries the
+    /// identities that select among sessions sharing a label, exactly once;
+    /// a new one fails here until it is classified.
+    #[test]
+    fn every_session_command_declares_its_guard() {
+        for command in super::SESSION_COMMANDS {
+            let lists = [super::REQUEST_GUARDED, super::FLAG_GUARDED, super::UNGUARDED, super::SELF_RESOLVED];
+            let count = lists.iter().filter(|list| list.contains(command)).count();
+            assert_eq!(count, 1, "{command} is classified {count} times");
+        }
+        for list in [super::REQUEST_GUARDED, super::FLAG_GUARDED, super::UNGUARDED, super::SELF_RESOLVED] {
+            for command in list {
+                assert!(super::SESSION_COMMANDS.contains(command), "{command} is not a session command");
+            }
+        }
+    }
+
+    /// zerus-ucck P3c: only a command classified as carrying its identities in
+    /// its request defers a shared label; any other, a new unclassified reader
+    /// included, refuses it at dispatch unless its command line carries them.
+    #[test]
+    fn an_unclassified_reader_refuses_a_shared_label() {
+        use crate::state::LabelGuard;
+        let args = |list: &[&str]| list.iter().map(|arg| arg.to_string()).collect::<Vec<_>>();
+        assert!(matches!(super::label_guard("new-reader", &args(&["claude/p"])), LabelGuard::None));
+        assert!(matches!(
+            super::label_guard("new-reader", &args(&["claude/p", "--json"])),
+            LabelGuard::None
+        ));
+        for command in super::REQUEST_GUARDED {
+            assert!(matches!(super::label_guard(command, &args(&["claude/p"])), LabelGuard::Request), "{command}");
+        }
+        for command in super::FLAG_GUARDED.iter().chain(super::UNGUARDED).chain(super::SELF_RESOLVED) {
+            assert!(matches!(super::label_guard(command, &args(&["claude/p"])), LabelGuard::None), "{command}");
+        }
+        assert!(matches!(
+            super::label_guard("terminate", &args(&["claude/p", "--expected-run-id", "run-twin"])),
+            LabelGuard::Given { ref run, ref conversation } if run == "run-twin" && conversation.is_empty()
+        ));
+    }
+
     use super::*;
 
     /// #1355 review: every command whose usage takes a session first accepts
@@ -3247,6 +3345,8 @@ mod tests {
         assert!(USAGE.lines().any(|line| line.trim() == answer_marker));
         let phase_marker = zerus_client_core::desktop::deferred_answer::UPDATE_PHASE_MARKER;
         assert!(USAGE.lines().any(|line| line.trim() == phase_marker));
+        let compact_marker = zerus_client_core::desktop::compact_to_send::HELP_MARKER;
+        assert!(USAGE.lines().any(|line| line.trim() == compact_marker));
         // Windows has no `hgs paste`, `hgs clip` or `hgs notify`, no Ctrl+V
         // that pulls a peer's image, and no POSIX creation-clone executor.
         // Its dry runs print the host's requests; every other line stays as is.
@@ -3259,6 +3359,7 @@ mod tests {
         assert!(!neutral.lines().any(|line| line.trim() == send_marker));
         assert!(!neutral.lines().any(|line| line.trim() == answer_marker));
         assert!(!neutral.lines().any(|line| line.trim() == phase_marker));
+        assert!(!neutral.lines().any(|line| line.trim() == compact_marker));
         assert_eq!(
             neutral,
             USAGE
@@ -3311,6 +3412,10 @@ mod tests {
                     ""
                 )
                 .replace(
+                    "       Desktop deferred compact to send ABI: desktop-deferred-compact-to-send-v1\n",
+                    ""
+                )
+                .replace(
                     "       Desktop task start reconcile ABI: desktop-task-start-reconcile-v1\n",
                     ""
                 )
@@ -3334,6 +3439,7 @@ mod tests {
         let send = zerus_client_core::desktop::deferred_send::HELP_MARKER;
         let answer = zerus_client_core::desktop::deferred_answer::HELP_MARKER;
         let phase = zerus_client_core::desktop::deferred_answer::UPDATE_PHASE_MARKER;
+        let compact = zerus_client_core::desktop::compact_to_send::HELP_MARKER;
         let clone = zerus_client_core::desktop::creation_clone::HELP_MARKER;
         assert_eq!(advertised(usage_text(true), true), USAGE);
         let mac = advertised(usage_text(true), false);
@@ -3344,6 +3450,7 @@ mod tests {
         assert!(!mac.lines().any(|line| line.trim() == send));
         assert!(!mac.lines().any(|line| line.trim() == answer));
         assert!(!mac.lines().any(|line| line.trim() == phase));
+        assert!(!mac.lines().any(|line| line.trim() == compact));
         assert!(mac.lines().any(|line| line.trim() == clone), "clone stays POSIX");
         assert_eq!(
             mac,
@@ -3376,8 +3483,14 @@ mod tests {
                     "       Desktop deferred answer update phase: desktop-deferred-answer-update-phase-v1\n",
                     ""
                 )
+                .replace(
+                    "       Desktop deferred compact to send ABI: desktop-deferred-compact-to-send-v1\n",
+                    ""
+                )
         );
-        for marker in [marker, message, references, review, send, answer, phase] {
+        for marker in [
+            marker, message, references, review, send, answer, phase, compact,
+        ] {
             assert_eq!(
                 help_text().lines().any(|line| line.trim() == marker),
                 cfg!(target_os = "linux")

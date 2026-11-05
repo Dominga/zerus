@@ -681,13 +681,13 @@ mod tests {
         session_id::select(shared, &twin_id);
         assert_eq!(read(shared).unwrap()["run_id"], "run-twin");
         session_id::clear();
-        let (text, value) = resolve_label(shared).unwrap_err();
+        let Unresolved { text, value, .. } = resolve_label(shared, LabelGuard::None).unwrap_err();
         assert!(
             text.starts_with("2 sessions on this computer are named claude/example/shared"),
             "{text}"
         );
         assert_eq!(value.unwrap()["total"], 2);
-        resolve_label(alone).unwrap();
+        resolve_label(alone, LabelGuard::None).unwrap();
         assert_eq!(session_id::selected().unwrap().session_id, alone_id);
         session_id::clear();
 
@@ -718,16 +718,20 @@ mod tests {
             "the first holder keeps its label's hash"
         );
 
-        // Every binding scanner sees the ID layout.
-        let folders: Vec<String> = worktree_cleanup::bindings()
-            .unwrap()
-            .into_iter()
-            .map(|r| r.name)
+        // Every binding scanner sees the ID layout, each session with its
+        // own folders: never the first holder's twice.
+        let references = worktree_cleanup::bindings().unwrap();
+        let folders: Vec<&std::path::Path> = references
+            .iter()
+            .filter(|r| r.name == shared)
+            .flat_map(|r| r.folders.iter().map(|folder| folder.as_path()))
             .collect();
-        assert!(
-            folders.iter().filter(|name| *name == shared).count() == 2,
-            "{folders:?}"
-        );
+        for run in ["run-first", "run-twin"] {
+            assert!(
+                folders.iter().any(|folder| folder.ends_with(run)),
+                "{run}: {folders:?}"
+            );
+        }
         let routed = task_bindings_in(&root()).unwrap();
         assert_eq!(routed.iter().filter(|row| row["name"] == alone).count(), 1);
         let (sources, _) = session_graph::inventory(&root()).unwrap();
@@ -895,6 +899,26 @@ mod tests {
         control("cuts");
     }
 
+    /// zerus-ucck P3c: while the ambiguity of a label is deferred to the
+    /// command's guard, every reader of the label refuses, one written later
+    /// included, with the ambiguity report; the guard selects its session.
+    #[test]
+    fn an_unmatched_guard_never_reopens_the_first_holder() {
+        control("unmatched-guard");
+    }
+    #[test]
+    fn a_selection_keeps_the_expected_run() {
+        control("guard-run-continuity");
+    }
+    #[test]
+    fn a_selection_keeps_the_expected_conversation() {
+        control("guard-conversation-continuity");
+    }
+    #[test]
+    fn a_deferred_ambiguity_refuses_every_reader_until_the_guard_selects() {
+        control("deferred");
+    }
+
     /// #1445 review (desktop-u): the terminal route of a label keeps the
     /// command's selection. A selected record that vanishes, or a dangling
     /// link where a record should be, refuses; only a name with no record
@@ -954,7 +978,7 @@ mod tests {
         let (twin, id) = by_id(label, "run-twin");
         assert!(manifest().is_some_and(|manifest| manifest.contains_key(&key(label))));
         let ambiguous = || {
-            let (text, _) = resolve_label(label).unwrap_err();
+            let text = resolve_label(label, LabelGuard::None).unwrap_err().text;
             assert!(text.starts_with("2 sessions on this computer are named"), "{text}");
         };
         match case.as_str() {
@@ -990,7 +1014,7 @@ mod tests {
                 let own = storage::id_record_path(&id).unwrap();
                 std::fs::remove_file(&own).unwrap();
                 std::os::unix::fs::symlink(root().join("missing-target"), &own).unwrap();
-                assert!(resolve_label(label).is_err());
+                assert!(resolve_label(label, LabelGuard::None).is_err());
                 assert!(candidates(label).is_err());
                 assert!(storage::label_taken(label));
             }
@@ -1161,6 +1185,95 @@ mod tests {
                 let legacy = storage::label_record_path("claude/example/linked");
                 std::os::unix::fs::symlink(root().join("missing"), &legacy).unwrap();
                 assert!(terminal_of("claude/example/linked").is_err(), "a dangling link at a label's path");
+            }
+            // desktop-u's #1454 reproducers, kept as controls.
+            "unmatched-guard" => {
+                resolve_label(label, LabelGuard::Request).unwrap();
+                let attempted = expect(label, "a-run-that-no-candidate-holds", "");
+                assert!(attempted.is_err() && read(label).is_err(), "an unmatched guard reopened the first holder");
+            }
+            "guard-run-continuity" | "guard-conversation-continuity" => {
+                // At dispatch from the command line and from the request alike,
+                // the selection keeps both identities given with it.
+                for request in [true, false] {
+                    let own = storage::id_record_path(&id).unwrap();
+                    let kept = std::fs::read(&own).unwrap();
+                    if request {
+                        resolve_label(label, LabelGuard::Request).unwrap();
+                        expect(label, "run-twin", "conversation-run-twin").unwrap();
+                    } else {
+                        let guard =
+                            LabelGuard::Given { run: "run-twin".into(), conversation: "conversation-run-twin".into() };
+                        resolve_label(label, guard).unwrap();
+                    }
+                    assert_eq!(read(label).unwrap()["session_id"], id.as_str());
+                    let mut changed: Value = serde_json::from_slice(&kept).unwrap();
+                    if case == "guard-run-continuity" {
+                        changed["run_id"] = json!("changed-run");
+                    } else {
+                        changed["conversation_id"] = json!("changed-conversation");
+                    }
+                    atomic(&own, &changed.to_string()).unwrap();
+                    assert!(
+                        read(label).is_err(),
+                        "{case} ({request}): the selection kept the ID but dropped an identity"
+                    );
+                    atomic(&own, std::str::from_utf8(&kept).unwrap()).unwrap();
+                    session_id::clear();
+                }
+            }
+            "deferred" => {
+                resolve_label(label, LabelGuard::Request).unwrap();
+                // Every reader: the label's path, the twin's own path, records.
+                assert!(read(label).unwrap_err().starts_with("2 sessions on this computer are named"));
+                assert!(storage::read_label(label).is_err());
+                assert!(storage::read_id(&id).is_err());
+                assert!(storage::records().unwrap().iter().all(|record| record["name"] != label));
+                assert!(session_id::refused().is_some());
+                // The guard selects exactly the session that carries it.
+                expect(label, "run-twin", "").unwrap();
+                assert_eq!(read(label).unwrap()["session_id"], id.as_str());
+                session_id::clear();
+                // No identity at all, or one several carry, refuses.
+                resolve_label(label, LabelGuard::Request).unwrap();
+                assert!(expect(label, "", "").is_err());
+                // One that none carries selects no session and reopens none:
+                // the stale refusal at the guard and at every reader, and no
+                // other candidate's route (#1454 review).
+                session_id::clear();
+                resolve_label(label, LabelGuard::Request).unwrap();
+                let stale = expect(label, "run-nobody", "").unwrap_err();
+                assert!(stale.contains("refresh and retry"), "{stale}");
+                assert!(read(label).unwrap_err().contains("refresh and retry"));
+                assert!(storage::read_label(label).is_err());
+                assert!(storage::read_id(&id).is_err());
+                assert!(storage::records().unwrap().iter().all(|record| record["name"] != label));
+                session_id::clear();
+                // The same at dispatch, from the command line: the stale
+                // refusal, exit status 1, never a resolution.
+                let refusal = resolve_label(label, LabelGuard::Given { run: "run-nobody".into(), conversation: String::new() })
+                    .unwrap_err();
+                assert_eq!((refusal.code, refusal.value.is_none()), (1, true), "{}", refusal.text);
+                assert!(read(label).is_err());
+                session_id::clear();
+                // And for hooks and scoped recovery, which select by their
+                // request: stale, never an ambiguity report.
+                let refused = session_id::refused();
+                let stale = select_by(label, "run-nobody", "").unwrap_err();
+                assert!(stale.contains("refresh and retry"), "{stale}");
+                assert_eq!(session_id::refused().map(|report| report.0), refused.map(|report| report.0));
+                assert!(read(label).is_err());
+                session_id::clear();
+                assert!(resolve_label(label, LabelGuard::Given { run: "run-first".into(), conversation: String::new() }).is_ok());
+                assert_eq!(read(label).unwrap()["run_id"], "run-first");
+                session_id::clear();
+                assert!(resolve_label(label, LabelGuard::None).is_err());
+                // An empty guard never selects, not even when only one of the
+                // sessions is left by the time it is read.
+                resolve_label(label, LabelGuard::Request).unwrap();
+                let own = storage::id_record_path(&id).unwrap();
+                std::fs::remove_file(&own).unwrap();
+                assert!(expect(label, "", "").is_err());
             }
             other => panic!("unknown control {other}"),
         }

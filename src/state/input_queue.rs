@@ -131,6 +131,7 @@ pub(super) fn dispatch(args: &[String]) -> Result<i32> {
     if bytes.len()>8192 {return Err("queue request is too large".into());}
     let request:Request=serde_json::from_slice(&bytes).map_err(|e|e.to_string())?;
     let uuid=uuid::Uuid::parse_str(&request.request_id).map_err(|_|"request_id must be a UUID")?;
+    expect(&args[0], &request.expected_run_id, &request.expected_conversation_id)?;
     let _guard=lock(None)?;
     let record=read(&args[0])?;
     if record["run_id"]!=request.expected_run_id || record["conversation_id"]!=request.expected_conversation_id || !eligible(&record) {

@@ -489,6 +489,9 @@ pub(super) fn dispatch(args: &[String]) -> Result<i32> {
         return Err("notification request exceeds limits".into());
     }
     let request = parse(&bytes)?;
+    // zerus-ucck P3c: the request's run and conversation select among
+    // sessions that share the label.
+    expect(name, &request.run_id, &request.conversation_id)?;
     let _preference_guard = lock(Some(&root().join("notifications.lock")))?;
     // Same lock files as their writers, without the default lock's rename
     // recovery. An interrupted rename is refused, never completed here.

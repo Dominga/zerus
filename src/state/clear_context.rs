@@ -624,6 +624,9 @@ pub(super) fn dispatch(args: &[String]) -> Result<i32> {
     let name=&args[0];
     if opencode::exists(name) {return Err("OpenCode context reset is not supported by this adapter".into());}
     if dsh::exists(name) {return Err("This DeepSeek harness does not expose a native context reset. Use its native UI.".into());}
+    // zerus-ucck P3c: the request's identities select among sessions that
+    // share the label, before the first read.
+    expect(name, &request.expected_run_id, &request.expected_conversation_id)?;
     let mut guard=Some(lock(None)?);
     let current=read(name)?;
     // A resume before its deferred SessionStart is verified as for its first message.

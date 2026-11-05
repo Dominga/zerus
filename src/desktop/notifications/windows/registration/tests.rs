@@ -333,3 +333,208 @@ fn only_exact_arguments_under_another_quoted_image_name_another_image() {
         assert!(!names_other_image(&registered, &expected, image), "{case}");
     }
 }
+
+/// zerus-5wmh.66.3.30.8.5.1: only an exact earlier image of THIS configuration
+/// and state is a previous image; the parse is a byte-for-byte round trip.
+#[test]
+fn only_an_exact_round_trip_for_the_current_folders_is_a_previous_image() {
+    let image = r"C:\Users\Example\.local\bin\hgs.exe";
+    let (config, state) = (r"C:\Users\Тима Example\.config\hgs", r"C:\s");
+    let earlier = r"C:\Old copy\hgs.exe";
+    let registered = expected_command(earlier, config, state).unwrap();
+    assert_eq!(
+        previous_image(&registered, image, config, state).as_deref(),
+        Some(earlier)
+    );
+    let current = expected_command(image, config, state).unwrap();
+    for (case, command) in [
+        ("the same image", current.clone()),
+        (
+            "other config",
+            expected_command(earlier, r"C:\d", state).unwrap(),
+        ),
+        (
+            "other state",
+            expected_command(earlier, config, r"C:\t").unwrap(),
+        ),
+        ("extra argument", format!("{registered} --extra")),
+        ("trailing space", format!("{registered} ")),
+        ("unquoted image", registered.replacen('"', "", 2)),
+        ("empty image", registered.replacen(earlier, "", 1)),
+        (
+            "relative image",
+            registered.replacen(earlier, r"Old copy\hgs.exe", 1),
+        ),
+        (
+            "control character",
+            registered.replacen(earlier, "C:\\Old\tcopy\\hgs.exe", 1),
+        ),
+        ("nothing", String::new()),
+    ] {
+        assert!(
+            previous_image(&command, image, config, state).is_none(),
+            "{case}"
+        );
+    }
+}
+
+fn earlier_plan() -> Plan {
+    Plan::new(&"a".repeat(64),"S-1-5-21-1000",r#""C:\Old copy\hgs.exe" --desktop-notification-activation --config-dir C:\Example\config --state-dir C:\Example\state"#).unwrap()
+}
+
+#[test]
+fn an_exact_previous_image_registration_is_selected_and_removed_before_a_new_install() {
+    let (current, earlier) = (plan(), earlier_plan());
+    let mut r = Fake::default();
+    earlier.apply(&mut r, "install").unwrap();
+    assert_eq!(
+        current.inspect(&mut r),
+        Err("foreign_or_incomplete_notification_registration_kept")
+    );
+    let effects = r.effects;
+    let previous = current
+        .previous(
+            &mut r,
+            r"C:\Example\hgs.exe",
+            r"C:\Example\config",
+            r"C:\Example\state",
+        )
+        .unwrap()
+        .expect("the exact earlier registration");
+    assert_eq!(r.effects, effects, "selection is read-only");
+    assert_eq!(previous.keys, earlier.keys);
+    assert_eq!(
+        previous.apply(&mut r, "remove").unwrap(),
+        Reply {
+            registered: false,
+            changed: true
+        }
+    );
+    assert!(r.keys.is_empty());
+    assert!(current.apply(&mut r, "install").unwrap().registered);
+}
+
+#[test]
+fn a_foreign_partial_older_or_other_configuration_registration_is_no_previous_image() {
+    let (current, earlier) = (plan(), earlier_plan());
+    let mut full = Fake::default();
+    earlier.apply(&mut full, "install").unwrap();
+    let class = &earlier.keys[0].0;
+    let server = &earlier.keys[1].0;
+    let application = &earlier.keys[2].0;
+    let edits: Vec<(&str, Box<dyn Fn(&mut Fake)>)> = vec![
+        (
+            "other configuration hash",
+            Box::new(|r: &mut Fake| {
+                for path in [class, application] {
+                    r.keys
+                        .get_mut(path)
+                        .unwrap()
+                        .values
+                        .insert(CONFIGURATION_VALUE.into(), "b".repeat(64));
+                }
+            }),
+        ),
+        (
+            "older ABI marker",
+            Box::new(|r: &mut Fake| {
+                r.keys
+                    .get_mut(class)
+                    .unwrap()
+                    .values
+                    .insert(ABI_VALUE.into(), "desktop-notification-v0".into());
+            }),
+        ),
+        (
+            "foreign activator",
+            Box::new(|r: &mut Fake| {
+                r.keys.get_mut(application).unwrap().values.insert(
+                    "CustomActivator".into(),
+                    "{00000000-0000-0000-0000-000000000000}".into(),
+                );
+            }),
+        ),
+        (
+            "foreign display name",
+            Box::new(|r: &mut Fake| {
+                r.keys
+                    .get_mut(application)
+                    .unwrap()
+                    .values
+                    .insert("DisplayName".into(), "Other".into());
+            }),
+        ),
+        (
+            "extra value",
+            Box::new(|r: &mut Fake| {
+                r.keys
+                    .get_mut(server)
+                    .unwrap()
+                    .values
+                    .insert("Other".into(), "kept".into());
+            }),
+        ),
+        (
+            "extra key",
+            Box::new(|r: &mut Fake| {
+                r.keys
+                    .get_mut(class)
+                    .unwrap()
+                    .children
+                    .insert("Other".into());
+            }),
+        ),
+        (
+            "partial set",
+            Box::new(|r: &mut Fake| {
+                r.keys.remove(application);
+            }),
+        ),
+        (
+            "other state folder in the command",
+            Box::new(|r: &mut Fake| {
+                r.keys.get_mut(server).unwrap().values.insert(
+                    String::new(),
+                    expected_command(
+                        r"C:\Old copy\hgs.exe",
+                        r"C:\Example\config",
+                        r"C:\Other\state",
+                    )
+                    .unwrap(),
+                );
+            }),
+        ),
+    ];
+    for (case, edit) in edits {
+        let mut r = Fake {
+            keys: full.keys.clone(),
+            ..Default::default()
+        };
+        edit(&mut r);
+        let before = r.keys.clone();
+        assert_eq!(
+            current
+                .previous(
+                    &mut r,
+                    r"C:\Example\hgs.exe",
+                    r"C:\Example\config",
+                    r"C:\Example\state"
+                )
+                .unwrap()
+                .map(|p| p.keys),
+            None,
+            "{case}"
+        );
+        assert_eq!((r.effects, &r.keys), (0, &before), "{case}");
+    }
+    // Nothing registered: nothing to select.
+    assert!(current
+        .previous(
+            &mut Fake::default(),
+            r"C:\Example\hgs.exe",
+            r"C:\Example\config",
+            r"C:\Example\state"
+        )
+        .unwrap()
+        .is_none());
+}

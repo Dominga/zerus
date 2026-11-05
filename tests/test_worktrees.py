@@ -337,6 +337,25 @@ class Cleanup(Repository,unittest.TestCase):
         row=self.row(archived,data);self.assertEqual(row['verdict'],'review');self.assertEqual(codes(row['notes']),['archived_sessions']);self.assertEqual(row['archived_sessions'],1)
         row=self.row(lost,data);self.assertEqual(codes(row['reasons']),['detached_unreachable'])
         row=self.row(kept,data);self.assertEqual(row['verdict'],'ready',row);self.assertTrue(row['detached'])
+    @unittest.skipUnless(sys.platform in ('linux', 'darwin'), 'Native open-file membership')
+    def test_an_open_file_blocks_removal_even_when_the_program_works_elsewhere(self):
+        tree=self.linked('held file');self.age(tree)
+        child=subprocess.Popen([sys.executable,'-I','-c',
+            'import sys,time; held=open(sys.argv[1],"rb"); print("ready",flush=True); time.sleep(90)',
+            str(tree/'.gitignore')],cwd=self.root,stdout=subprocess.PIPE,text=True)
+        self.addCleanup(child.stdout.close);self.addCleanup(child.wait)
+        self.addCleanup(lambda: child.poll() is None and child.kill())
+        self.assertEqual(child.stdout.readline().strip(),'ready')
+        row=self.row(tree)
+        self.assertIn('processes',codes(row['reasons']),row)
+        self.assertIn(child.pid,[p['pid'] for p in row['processes']])
+        self.assertNotIn('process_fingerprint',row)
+        self.assertTrue(row['process_coverage']['complete'])
+        self.assertTrue(row['process_coverage']['open_files_checked'])
+        refused=self.remove(tree,row['fingerprint'])
+        self.assertNotEqual(refused.returncode,0)
+        self.assertTrue(tree.exists());self.assertIsNone(child.poll())
+
     def test_review_reports_ignored_data_and_missing_checkouts(self):
         built=self.linked('built');(built/'target').mkdir();(built/'target'/'big.bin').write_bytes(b'x'*1000);(built/'target'/'small').write_bytes(b'y'*24)
         gone=self.linked('gone');shutil.rmtree(gone);self.age(built)

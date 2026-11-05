@@ -2859,6 +2859,18 @@ the folder, changed files or ownership, and all other protections. An incomplete
 inventory remains blocked. Automatic cleanup never uses this exception. Process
 names, PIDs and access details remain available under **Details**.
 
+The original native **Terminate** with **Remove working folder** also ignores
+actual permission-denied cwd or open-file reads after that exact termination
+succeeds, for its verified generated checkout and unchanged launch ownership.
+Those unreadable programs are neither listed nor signalled by that cleanup.
+Linux and macOS inspect open files as well as current folders; a readable path
+inside the checkout still keeps it, even if another read on the same process is
+denied. The owning CLI repeats the complete bounded classification before
+removal. Other errors, incomplete coverage, changed identities or ownership,
+known use, sessions and file protections still refuse removal. Generic background
+maintenance remains conservative; retained results never reconstruct this
+original confirmation or retry an unknown removal.
+
 A checkout with uncommitted or untracked files can also have such access
 denials. Its review then offers both consents (`discardable_with_process_consent`
 beside the discard and process fingerprints, while `discardable` stays false for

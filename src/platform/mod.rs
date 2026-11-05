@@ -15,6 +15,8 @@ use std::{
 };
 
 mod shim;
+#[cfg(any(target_os = "linux", target_os = "macos"))]
+mod worktree_membership;
 #[cfg(unix)]
 mod unix;
 #[cfg(unix)]
@@ -46,13 +48,17 @@ pub fn private_console(window: bool, attached: u32) -> bool {
     window && attached == 1
 }
 
-/// A completed process roster may still contain protected Linux processes whose
+/// A completed process roster may still contain protected processes whose
 /// paths the OS refuses to disclose. Keep these separate from readable paths:
-/// they require personal confirmation, never automatic cleanup authority.
+/// background cleanup keeps them; only the confirmed Terminate/Remove policy
+/// may ignore actual permission denials. This data is never signal authority.
 #[derive(Default)]
 pub struct WorktreeProcesses {
     pub paths: Vec<(u32, PathBuf, String)>,
     pub unreadable: Vec<UnreadableWorktreeProcess>,
+    /// Complete bounded native cwd/image/FD inspection, with only actual
+    /// permission denials represented in `unreadable`. Never inferred from Err.
+    pub membership_complete: bool,
 }
 
 #[derive(serde::Serialize)]
@@ -62,6 +68,7 @@ pub struct UnreadableWorktreeProcess {
     pub command: String,
     pub cwd: bool,
     pub executable: bool,
+    pub files: bool,
     /// Kernel-verified invocation ancestor, retained as diagnostic metadata.
     pub invocation_ancestor: bool,
 }
@@ -72,6 +79,7 @@ impl From<Vec<(u32, PathBuf, String)>> for WorktreeProcesses {
         Self {
             paths,
             unreadable: Vec::new(),
+            membership_complete: false,
         }
     }
 }

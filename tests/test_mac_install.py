@@ -1,4 +1,5 @@
 """Installer configuration checks with fake transports and an isolated home."""
+import importlib.util
 import json
 import os
 import shlex
@@ -11,6 +12,11 @@ import tomllib
 import unittest
 
 REPO = Path(__file__).resolve().parents[1]
+# The helpers a Mac app's Service payload carries, from their one list.
+_payload = importlib.util.spec_from_file_location('macos_service_payload', REPO / 'scripts/macos_service_payload.py')
+SERVICE_SCRIPTS = importlib.util.module_from_spec(_payload)
+_payload.loader.exec_module(SERVICE_SCRIPTS)
+SERVICE_SCRIPTS = SERVICE_SCRIPTS.SERVICE_SCRIPTS
 
 
 def desktop_preflight_fixture(root, tools):
@@ -276,9 +282,13 @@ class TrayInstallGui(unittest.TestCase):
         self.temp = tempfile.TemporaryDirectory(prefix='zerus-tray-gui-test-')
         self.addCleanup(self.temp.cleanup)
         self.root = Path(self.temp.name)
+        # prepare-local-macos.py loads the Service payload module, which
+        # stages the helpers it names from scripts/ (zerus-04xyx).
+        payload = ('scripts/macos_service_payload.py',
+                   *(f'scripts/{name}' for name in SERVICE_SCRIPTS))
         for name in ('tray/install.sh', 'tray/update-installed.py', 'tray/prepare-local-macos.py', 'tray/sign-local-macos.py', 'client/scripts/switch-config.py',
                      'client/src-tauri/tauri.switch.conf.json', 'client/src-tauri/Info.switch.plist',
-                     'VERSION', 'DEV_VERSION'):
+                     'VERSION', 'DEV_VERSION', *payload):
             (self.root / name).parent.mkdir(parents=True, exist_ok=True)
             (self.root / name).write_bytes((REPO / name).read_bytes())
         tools = self.root / 'bin'

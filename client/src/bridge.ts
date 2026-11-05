@@ -14,6 +14,10 @@ import { emptyUpdatesView, type UpdateChannel, type UpdatesView } from "./types"
 // frame. Outside Tauri (`npm run dev` in a browser) a built-in replay of the
 // synthetic fixture stands in, so the UI works without the app.
 
+/** A local explanation only, with no runtime, import or permission action. */
+export const qtUpgradeNotice = () => desktop<boolean>("qt_upgrade_notice", {});
+export const acknowledgeQtUpgradeNotice = () => desktop<void>("qt_upgrade_notice_ack", {});
+
 export type BridgeMode = "tauri" | "replay";
 
 export interface Source extends ActivityPort {

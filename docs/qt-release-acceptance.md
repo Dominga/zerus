@@ -1,5 +1,37 @@
 # Zerus Next release acceptance and Qt removal
 
+## G3 scope for 0.48.0 — owner decision 2026-11-05
+
+Qt migration is limited to **projects/organization and accounts**. The existing
+one-time preference import is already delivered and stays in place; accounts
+already live in the shared `hgs` configuration. Everything else from Qt is
+**configure again**: drafts, unsent organization edits, attention/notification
+history and identities, pending creations/launches, task-message/task-Start
+recovery, unknown deliveries, repository clone settings and caches. Original
+Qt files and attachments stay untouched for manual recovery. Qt operations
+are not imported, executed, replayed or offered as Next recovery choices.
+Previously imported Next copies are not cleared.
+
+This supersedes the earlier full-family G3 source-work requirements and import
+row descriptions below; dated run records remain historical evidence. No new
+capture families are required. One plain GUI explanation is kept until **Got
+it** is saved in Next's local settings, then does not appear on later starts.
+A save failure keeps it available. Replays and dev profiles do not acknowledge
+the production profile's notice.
+
+Next's **own** interim stores are not Qt migration. Drafts, creation/clone
+checkpoints, read queues, task-message outboxes, task-Start records and original
+service-handoff markers keep their existing roots and guards. Unresolved Starts
+stay review-only; reserved messages keep their original IDs/recovery-only path.
+Missing/mismatched pairs refuse a fresh attempt. Notice acknowledgment changes
+no pending marker and grants no effect or retry permission.
+
+For G3 upgrade acceptance, verify projects/accounts and existing Next choices,
+untouched Qt sources, no Qt draft recovery or old-operation/notification replay,
+Next pending markers across restart and the once-only notice. Native caller,
+platform and deletion gates remain independent; no platform box is checked.
+
+
 Owner: `zerus-5wmh.66.8.1` (G6). Basis: the
 [retirement inventory](superpowers/specs/2026-10-29-qt-retirement-inventory.md),
 especially its responsibility tables, migration contract and G1–G7 gates.
@@ -90,7 +122,7 @@ file checks only, not installed acceptance. Do not install a test binary by hand
 |---|---|---|
 | EXCEPTION — owner accepted 2026-11-03 | Combine the exact candidate's CI install/package checks (including Qt/KF6/WebEngine absence and GUI/CLI identity) with the maintained upgrade on the owner's main account. Link both results; do not clear state or claim an empty-account install. | G5 `.66.7.1`, [#867](https://github.com/ufna/zerus/pull/867); linux-shell-u |
 | [ ] Upgrade with agents running | From the last Qt release, keep a known terminal/native session and an unsent draft open; record exact session/run/conversation identities. Upgrade through the maintained installer/updater, reopen that same session and verify identity, jobs, terminal and draft survived without a restart. | [#886](https://github.com/ufna/zerus/pull/886), G2 `.66.4`, G6 `.66.8` |
-| [ ] One-time import | Compare selected Qt settings, collapsed rows, folder split, cleanup choices, window geometry, drafts and read marks. Change a Next preference, restart twice and roll back/forward: no reseed, source writes or replay. Malformed/partial families remain recoverable. | G3 `.66.5.2.1`, `.66.5.3`, [#870](https://github.com/ufna/zerus/pull/870) |
+| [ ] One-time import | Apply the 2026-11-05 G3 scope above: projects/accounts, existing Next values, untouched Qt sources, ignored Qt runtime state, retained Next pending markers and the once-only upgrade notice. Restart twice: no reseed or replay. | G3 `.66.5.2.1`, `.66.5.3`, [#870](https://github.com/ufna/zerus/pull/870) |
 | [ ] Service registration/readiness | Inspect the generated user unit and `hgs desktop status --json`: one owned service, independent background readiness, graphical-session environment imported. Close Next; catalog/details, presence and durable read delivery continue. Custom units refuse overwrite. | `.66.3.27`, [#886](https://github.com/ufna/zerus/pull/886), [#898](https://github.com/ufna/zerus/pull/898), `.66.3.31` |
 | [ ] Notifications/clicks | With Next closed, produce one scoped attention event; get one Freedesktop alert and badge, click into the exact run, then test stale/withdrawn click refusal and Wayland activation. Lock/idle does not invent activity. | `.66.3.30.1/.3/.4`, [#940](https://github.com/ufna/zerus/pull/940) in-process service Linux adapter, [#907](https://github.com/ufna/zerus/pull/907) ledger, [#914](https://github.com/ufna/zerus/pull/914) discovery; [#894](https://github.com/ufna/zerus/pull/894) is extraction only; linux-shell-u/desktop-u |
 | [ ] Tray/lifecycle | Check panel icon, primary click, menu, background start and second-instance routing; closing windows keeps service duties, Quit flushes drafts and does not stop agents. | G4 `.66.6`, `.66.3.31` |
@@ -465,7 +497,7 @@ existing privacy identity, signature, installed path and one verified rollback c
 |---|---|---|
 | EXCEPTION — owner accepted 2026-11-03 | Combine the exact candidate's CI install/package checks (bundle/CLI identity, signature/notary and no Qt frameworks/plugins) with the maintained owner-account upgrade. Cask installation must not quit apps or start services. Link both results; do not clear state or claim an empty-account install. | G5 `.66.7.2`, [#871](https://github.com/ufna/zerus/pull/871); macbundle-u |
 | [ ] Upgrade with agents running | Upgrade last Qt via the maintained updater; verify exact running session/run/conversation, terminal/jobs and flushed drafts survive. Keep `com.hgdev.hgs-tray` and `~/Applications/hgs-tray.app`; no native-agent/tmux restart. | `.12.6`, [#871](https://github.com/ufna/zerus/pull/871), `tray/update-installed.py` |
-| [ ] One-time import | Check exported Qt defaults, layout/window bounds, drafts and read/attention marks; Next values win. Restart and rollback/forward without reseeding handled families; preserve original plist/export/store bytes. | G3 `.66.5.2.1`, `.66.5.3`, [#870](https://github.com/ufna/zerus/pull/870) |
+| [ ] One-time import | Apply the 2026-11-05 G3 scope above. Projects/accounts and existing Next values remain; original plist/store/draft files stay untouched. Verify ignored Qt operations, retained Next pending markers and notice acknowledgment across restarts. | G3 `.66.5.2.1`, `.66.5.3`, [#870](https://github.com/ufna/zerus/pull/870) |
 | [ ] Service registration/readiness | Through explicit `zerus-setup`, inspect the Aqua `com.hgdev.hgs-desktop` LaunchAgent and actual `desktop status`; close Next and verify background duties continue. Foreign/custom definitions are refused. | `.66.3.27.2`, [#882](https://github.com/ufna/zerus/pull/882); macbundle-u/desktop-u |
 | [ ] Notifications/clicks | With Next closed, post one service-owned alert through the signed host; check badge, exact-session click, stale click refusal and lock/idle behavior. Existing notification permission remains attached to the public app identity. | `.66.3.30.2/.3/.4`, [#913](https://github.com/ufna/zerus/pull/913) signed host, [#907](https://github.com/ufna/zerus/pull/907) ledger, [#914](https://github.com/ufna/zerus/pull/914) discovery; [#891](https://github.com/ufna/zerus/pull/891) is extraction only |
 | [ ] Menu bar/lifecycle | Check icon/menu, reopen, Dock/menu-bar policy, second instance, Services/Hide/Show All and draft-safe Quit; agents and service remain independent. | G4 `.66.6`, `.66.3.31`, inventory native shell/menu rows |
@@ -880,7 +912,7 @@ Do not touch unrelated desktop/apps/settings.
 |---|---|---|
 | EXCEPTION — owner accepted 2026-11-03 | Combine CI portable-ZIP/per-user-installer install/package checks with the owner-account upgrade. Verify `zerus-windows-x86_64/hgs-tray.exe`, adjacent `hgs.exe`, connector/ConPTY, WebView2 readiness and no Qt DLLs/plugins. Native Windows PC acceptance remains deferred. | G5 `.66.7.3/.4`, [#875](https://github.com/ufna/zerus/pull/875); fleet-c |
 | [ ] Upgrade with agents running | Upgrade the last Qt install in its owned folder; verify exact native session/run/conversation and ConPTY jobs, saved drafts and accounts survive. Stale Qt payload cleanup must stay inside that installer-owned folder. | `.66.7.3`, `.66.6.15`; fleet-c/fixes-u |
-| [ ] One-time import | Check actual legacy registry/INI preferences, folder mapping, geometry, drafts and attention seed. Restart and rollback/forward: no source writes, reimport or automatic policy inheritance. | G3 `.66.5.2.1`, `.66.5.3/.10`, [#870](https://github.com/ufna/zerus/pull/870) |
+| [ ] One-time import | Apply the 2026-11-05 G3 scope above: project/folder mapping and shared accounts, untouched INI/registry/draft sources, ignored Qt runtime state, retained Next pending markers and a once-only notice. No replay or inherited approval consent. | G3 `.66.5.2.1`, `.66.5.3/.10`, [#870](https://github.com/ufna/zerus/pull/870) |
 | [ ] Service registration/readiness | Check opt-in registration in the interactive user session, never LocalSystem/Session 0; verify named-pipe identity and independent background readiness with UI closed. Remove temporary logon entries. | `.66.3.27.3`, `.66.3.31`, [#912](https://github.com/ufna/zerus/pull/912); fixes-u/desktop-u |
 | [x] Standard-user passive registration | Install, status, idempotent reinstall and removal passed on an existing non-administrator console token; see the evidence below. Actual login triggering and service readiness remain in the preceding unchecked row. | `.66.8.1`, [#912](https://github.com/ufna/zerus/pull/912) review follow-up; fixes-u |
 | [x] Windows frontend native authentication subchecks | Native process/ancestry and request-evidence checks, six canonical-pipe cases and a separate departed-launcher GUI ancestry probe passed; see the scoped evidence below. This does not check off a durable policy change or whole UI parity. | `.66.3.37`, [#931](https://github.com/ufna/zerus/pull/931), [#955](https://github.com/ufna/zerus/pull/955); fleet-c |

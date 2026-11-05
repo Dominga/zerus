@@ -193,6 +193,11 @@ pub(crate) struct Settings {
     /// U56: the lead may interrupt or relaunch a stuck member; the owner sets it.
     #[serde(default, skip_serializing_if = "std::ops::Not::not")]
     pub lead_restarts_stuck: bool,
+    /// Task 24: a member still working on an attempt that a reassign, a
+    /// take-over or a cancel revoked has its turn interrupted once, before its
+    /// stop notice; off by default, only the owner sets it.
+    #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+    pub interrupt_revoked: bool,
     /// U63 (owner, 2026-10-31): the lead removes its own phase pause by
     /// itself; off by default, when it needs the owner's word.
     #[serde(default, skip_serializing_if = "std::ops::Not::not")]
@@ -315,6 +320,7 @@ impl Default for Settings {
             restart_crashed: true,
             stuck_minutes: 0,
             lead_restarts_stuck: false,
+            interrupt_revoked: false,
             lead_removes_own_pause: false,
             phase_acceptance: PhaseAcceptance::Lead,
             build_broker: false,
@@ -2241,7 +2247,9 @@ pub(crate) struct Team {
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub pending_additions: Vec<PendingAddition>,
     /// #511 N3: members to tell that their worked-ahead attempt was revoked
-    /// with its phase, newest last, at most 20.
+    /// with its phase, newest last, at most 20. Task 24: also a member whose
+    /// attempt in progress was revoked by a reassign, a take-over or a cancel
+    /// (phase 0).
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub stops: Vec<StopNotice>,
     /// U51: the owner's intake keys; the key itself is never stored, only its
@@ -2277,6 +2285,13 @@ pub(crate) struct StopNotice {
     /// Refused sends so far; after ten it is left unconfirmed for the lead.
     #[serde(default, skip_serializing_if = "is_zero_u32")]
     pub refused: u32,
+    /// Task 24: the owner's interrupt_revoked held when the attempt was
+    /// revoked: a busy session is interrupted once before the notice.
+    #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+    pub interrupt: bool,
+    /// Task 24: that interrupt was asked for; it is never repeated.
+    #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+    pub interrupted: bool,
 }
 
 impl Team {

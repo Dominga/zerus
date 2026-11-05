@@ -1884,6 +1884,18 @@ reassignment clears the rework reservation and its wait age. Returning an
 unstarted phase to a draft also clears rework reservations. Member-wait inbox
 items exclude held rework and members available to take it.
 
+A reassign, a take-over or a cancel of a task whose attempt its member is still
+working on (sent or delivered, not reported) tells that member at once: one
+`[Zerus team · from: Zerus · task: #N · stop]` message names the task and why it
+left, asks it to stop the builds, tests and commands it started for it, not to
+report it and to commit nothing more for it (`stop_told`). It is sent as soon as the
+session runs, also while it is busy: an agent that reads messages mid-turn stops
+at once, others when the turn ends, and the member's next task then goes out
+without a message from the lead. With the owner's team setting
+`interrupt_revoked` (off by default; the lead cannot change it) a busy turn is
+interrupted once before the message (`revoked_interrupted`). A reported
+attempt, or a reassign to the same member, sends nothing.
+
 Tasks may declare `"output":["src/api.rs","src/protocol/"]`: repository-relative
 files or directories, with a directory covering all paths beneath it. Plan,
 extend, add-to-phase and edit-draft `tasks_update` normalize separators, remove

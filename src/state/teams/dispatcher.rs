@@ -398,6 +398,9 @@ pub(crate) enum Step {
     /// #511 N3: tell a member its worked-ahead attempt was revoked with its
     /// phase, so it stops.
     TellStop { stop: String },
+    /// Task 24: interrupts a member's busy turn once before its stop notice
+    /// (the owner's interrupt_revoked).
+    InterruptStop { stop: String },
 }
 
 /// U18: the lead's turn has ended and it can take a message, also while its own
@@ -1089,10 +1092,17 @@ pub(crate) fn steps_with(team: &Team, seen: &[Seen], now: f64, listed: Option<&B
     }
     // #511 N3: a member whose worked-ahead attempt was revoked hears it once,
     // as soon as its session runs; the message waits behind its turn.
+    // Task 24: so does a member whose attempt in progress was reassigned,
+    // taken over or cancelled; with the owner's interrupt_revoked its busy turn
+    // is interrupted once first, so it stops at once and takes its next task.
     for stop in team.stops.iter().filter(|stop| stop.notice == Notice::Pending) {
-        if team.member(&stop.member).and_then(|member| session_of(member, seen)).is_some_and(|found| found.live) {
-            steps.push(Step::TellStop { stop: stop.id.clone() });
+        let Some(found) = team.member(&stop.member).and_then(|member| session_of(member, seen)).filter(|found| found.live) else {
+            continue;
+        };
+        if stop.interrupt && !stop.interrupted && !found.free {
+            steps.push(Step::InterruptStop { stop: stop.id.clone() });
         }
+        steps.push(Step::TellStop { stop: stop.id.clone() });
     }
     // U47/U48: a started stage command ends while the team is paused too; a
     // new one starts only while it runs.
@@ -3910,6 +3920,17 @@ fn task_waits(team: &mut Team, task_id: u32, member_id: &str, step: &PrepareStep
 /// #511 N3: the message that tells a member to stop a worked-ahead attempt
 /// Zerus revoked with its phase.
 pub(crate) fn stop_text(team: &Team, stop: &StopNotice) -> String {
+    // Task 24: an attempt in progress that a reassign, a take-over or a
+    // cancel revoked (no phase).
+    if stop.phase == 0 {
+        return format!(
+            "[Zerus team \u{b7} from: Zerus \u{b7} task: #{} \u{b7} stop]\n\
+             Stop working on task #{} {}: {}, so Zerus revoked your attempt {}. \
+             Stop the builds, tests and commands you started for it, do not report it and commit nothing more for it. \
+             Your next task comes in its own message (team {}).",
+            stop.task, stop.task, stop.title, stop.reason, stop.attempt, team.name
+        );
+    }
     format!(
         "[Zerus team \u{b7} from: Zerus \u{b7} task: #{} \u{b7} stop]\n\
          Stop working on task #{} {}: {}, so Zerus revoked your attempt {} that worked ahead of it. \
@@ -3946,6 +3967,34 @@ fn tell_stop(store: &mut Store, team: &Team, id: &str) -> anyhow::Result<()> {
                 events.push(Event::new("stop_unconfirmed", json!({"task":stop.task,"member":role,"attempt":stop.attempt,"error":error})));
             }
         }
+        Ok(())
+    })
+}
+
+/// Task 24: interrupts the busy turn of a member whose attempt was revoked,
+/// once (the owner's interrupt_revoked); the stop notice follows. A failed
+/// interrupt is recorded and not repeated: the notice still reaches the member.
+fn interrupt_stop(store: &mut Store, team: &Team, id: &str) -> anyhow::Result<()> {
+    let Some(stop) = team.stops.iter().find(|stop| stop.id == id && stop.notice == Notice::Pending && stop.interrupt && !stop.interrupted).cloned() else {
+        return Ok(());
+    };
+    let Some(session) = team.member(&stop.member).and_then(|member| member.session.clone()) else { return Ok(()) };
+    let input = json!({"run_id":session.run_id,"conversation_id":session.conversation_id});
+    let outcome = hgs(&session.host, &["interrupt", &session.name, "--json"], Some(&input), Duration::from_secs(60));
+    let error = match &outcome {
+        Ok(output) if output.status.success() => String::new(),
+        Ok(output) => String::from_utf8_lossy(&output.stderr).trim().to_owned(),
+        Err(error) => error.to_string(),
+    };
+    change(store, &team.id, |team, events| {
+        let role = team.role_of(&stop.member);
+        if let Some(found) = team.stops.iter_mut().find(|found| found.id == stop.id) {
+            found.interrupted = true;
+        }
+        events.push(Event::new(
+            "revoked_interrupted",
+            json!({"task":stop.task,"member":role,"attempt":stop.attempt,"ok":error.is_empty(),"error":error}),
+        ));
         Ok(())
     })
 }
@@ -6615,6 +6664,7 @@ fn run_step(store: &mut Store, team: &Team, step: &Step, host: &str) -> anyhow::
         Step::StageStalled { task, run, reason } => stall_stage_command(store, team, *task, run, reason),
         Step::StageSilent { task, run } => stage_silent_command(store, team, *task, run),
         Step::TellStop { stop } => tell_stop(store, team, stop),
+        Step::InterruptStop { stop } => interrupt_stop(store, team, stop),
         Step::Rebalanced { tasks } => tell_lead_rebalanced(store, team, tasks),
         Step::TurnEnded { task, at, reply } => change(store, &team.id, |team, _| {
             if let Some(attempt) = team.task_mut(*task).and_then(|t| t.attempts.last_mut()) {

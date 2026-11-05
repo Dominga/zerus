@@ -25,7 +25,11 @@ export interface PointerDrag {
 }
 
 /** The part of a pointer or key event a drag reads. */
-interface PointerLike { clientX: number; clientY: number; pointerId: number; button?: number; isPrimary?: boolean; preventDefault(): void }
+interface PointerLike { clientX: number; clientY: number; pointerId: number; button?: number; buttons?: number; isPrimary?: boolean; target?: unknown; preventDefault(): void }
+/** What can hold a pointer while it drags (an Element). */
+type Capturing = { setPointerCapture(id: number): void; releasePointerCapture(id: number): void };
+const capturing = (target: unknown): Capturing | undefined =>
+  typeof (target as Capturing | undefined)?.setPointerCapture === "function" ? target as Capturing : undefined;
 /** The window, or a test double of it. */
 export type DragHost = Pick<Window, "addEventListener" | "removeEventListener" | "requestAnimationFrame" | "cancelAnimationFrame" | "setTimeout">;
 const listen = (f: (event: never) => void) => f as unknown as EventListener;
@@ -38,7 +42,9 @@ export function pointerDrag(down: PointerLike, drag: PointerDrag, host: DragHost
   if ((down.button ?? 0) !== 0 || down.isPrimary === false) return;
   const x0 = down.clientX, y0 = down.clientY;
   let x = x0, y = y0, started = false, frame = 0;
+  const holder = capturing(down.target);
   const finish = () => {
+    if (started) try { holder?.releasePointerCapture(down.pointerId); } catch { /* Already released. */ }
     host.removeEventListener("pointermove", handlers.move, true);
     host.removeEventListener("pointerup", handlers.up, true);
     host.removeEventListener("pointercancel", handlers.cancel, true);
@@ -62,11 +68,15 @@ export function pointerDrag(down: PointerLike, drag: PointerDrag, host: DragHost
   };
   const move = (e: PointerLike) => {
     if (e.pointerId !== down.pointerId) return;
+    // No button is pressed any more: the release was lost (outside the window).
+    if (e.buttons === 0) { cancel(); return; }
     x = e.clientX; y = e.clientY;
     if (!started) {
       if (Math.hypot(x - x0, y - y0) < THRESHOLD) return;
       if (!drag.start()) { finish(); return; }
       started = true;
+      // The pressed element keeps the pointer, even over another window's edge.
+      try { holder?.setPointerCapture(down.pointerId); } catch { /* A pointer the page no longer has. */ }
     }
     e.preventDefault();
     drag.move(x, y);

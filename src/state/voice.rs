@@ -517,6 +517,9 @@ fn record(name: &str) -> Result<Value> {
     }
 }
 fn checked(name: &str, request: &Value) -> Result<Value> {
+    // zerus-ucck P3c: the request's identities select among sessions that
+    // share the label.
+    expect(name, string(request, "expected_run_id"), string(request, "expected_conversation_id"))?;
     let value = record(name)?;
     if value["run_id"] != request["expected_run_id"]
         || value["conversation_id"] != request["expected_conversation_id"]

@@ -241,6 +241,9 @@ pub(super) fn session_report(name: &str, input: &Value) -> Result<Value> {
     let id = request_id(input)?;
     bounded(input, "expected_run_id", 128, false)?;
     bounded(input, "expected_conversation_id", 256, false)?;
+    // zerus-ucck P3c: not resolved at dispatch; the request's identities
+    // select among sessions that share the label.
+    select_by(name, string(input, "expected_run_id"), string(input, "expected_conversation_id"))?;
     // Read a single immutable-target record; never use inspection/reconciliation
     // helpers that can contact a provider or scan native history.
     let path = if opencode::exists(name) {

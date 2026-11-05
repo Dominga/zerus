@@ -24,6 +24,7 @@ pub(super) fn dispatch(args: &[String]) -> Result<i32> {
     let uuid=uuid::Uuid::parse_str(&request.request_id).map_err(|_|"Invalid request identity")?;
     let uncertain =
         |e: String| format!("Interrupt delivery uncertain: {e}. Check Terminal before retrying");
+    expect(&args[0], &request.expected_run_id, &request.expected_conversation_id)?;
     let guard=lock(None)?;
     let name=&args[0];let open_native=opencode::exists(name);let native=dsh::exists(name) || open_native;
     let record=if open_native {opencode::own_state(name)?} else if native {dsh::inspect(name,None)?} else {read(name)?};

@@ -3,9 +3,16 @@ import { tr } from "../../i18n";
 import { AgentGlyph, Icon } from "../lib/icons";
 import { agentKind, computerOffline } from "../../store/catalog";
 import { coordinatorActivity, activity } from "../../store/session";
-import { memberRow, teams } from "../../store/teams";
+import { memberRow, showCatalog, showTeam, teams } from "../../store/teams";
 import { SHARE, SIDE, dragShare, dragSide, teamLayout, type TeamLayout } from "../../store/teamLayout";
 import { selected, setDetailTab, setSelectedKey } from "../../store/ui";
+import { teamTests, teamsProfile } from "../../bridge";
+import { PlanView } from "./PlanView";
+import { TeamCatalog } from "./TeamCatalog";
+import { TeamSettingsDialog } from "./TeamSettingsDialog";
+import { catalogPort } from "../../store/teamsCatalog";
+import { parseCatalog } from "./catalog";
+import type { TeamTestsView } from "../../types";
 import { ActivityView } from "../sessions/Activity";
 import { Composer } from "../sessions/Composer";
 import { QuestionCard } from "../sessions/QuestionCard";
@@ -54,10 +61,41 @@ function TeamWorkspace(props: { computer: ComputerId; team: TeamView; failure?: 
   const statuses = createMemo(() => new Map(props.team.members.map((member) => [member.id, memberStatus(props.team, member, live(member))])));
   const problems = createMemo(() => shownMembers(props.team).filter((member) => statuses().get(member.id)?.problem));
   const problemTasks = createMemo(() => new Set(problems().map((member) => statuses().get(member.id)!.task).filter((task) => task > 0)));
+  const [settingsOpen, setSettingsOpen] = createSignal(false);
+  const [catalogOpen, setCatalogOpen] = createSignal(false);
+  const [tests, setTests] = createSignal<TeamTestsView | null>(null);
+  const graph = () => teams.graph(props.computer, props.team.id);
+  const profile = () => teams.profile(props.computer, props.team.id);
+  const catalog = () => {
+    const view = teams.catalog(props.computer);
+    return view ? parseCatalog(view) : null;
+  };
   let body!: HTMLDivElement;
+  createEffect(() => {
+    const hide = showTeam(props.computer, props.team.id);
+    onCleanup(hide);
+  });
+  createEffect(() => {
+    if (!catalogOpen()) return;
+    const hide = showCatalog(props.computer);
+    onCleanup(hide);
+  });
+  const loadTests = async (before: number | null) => {
+    try {
+      setTests(await teamTests(props.computer, props.team.id, before));
+    } catch {
+      // The panel keeps what it showed; the follow error strip names reads.
+    }
+  };
   return (
     <>
-      <TeamBar team={props.team} state={state()} problemTasks={problemTasks()} />
+      <TeamBar
+        team={props.team}
+        state={state()}
+        problemTasks={problemTasks()}
+        onSettings={() => setSettingsOpen(true)}
+        onCatalog={() => setCatalogOpen(true)}
+      />
       <WaitingBanner />
       <TeamReports computer={props.computer} team={props.team} />
       <Show when={props.failure}><div class="team-strip danger" role="status"><Icon name="circle-alert" size={14} /><span class="ell">{props.failure}</span></div></Show>
@@ -76,7 +114,20 @@ function TeamWorkspace(props: { computer: ComputerId; team: TeamView; failure?: 
         </div>
       </Show>
       <div class="team-body" ref={body}>
-        <div class="team-canvas"><TeamPhases team={props.team} /></div>
+        <div class="team-canvas">
+          <Show when={graph()} fallback={<TeamPhases team={props.team} />}>
+            {(shown) => (
+              <PlanView
+                team={props.team}
+                graph={shown()}
+                profile={profile()}
+                tests={tests()}
+                onLoadProfile={() => { void teamsProfile(props.computer); }}
+                onLoadTests={loadTests}
+              />
+            )}
+          </Show>
+        </div>
         <Divider orientation="vertical" label={tr("Side column width")} layout={teamLayout}
           value={teamLayout.sideWidth()} min={SIDE.min} max={SIDE.max}
           onDrag={(start, from, to) => teamLayout.previewSide(dragSide(start, from.x, to.x, body.clientWidth))}
@@ -86,11 +137,23 @@ function TeamWorkspace(props: { computer: ComputerId; team: TeamView; failure?: 
           <SideColumn computer={props.computer} team={props.team} statuses={statuses()} />
         </aside>
       </div>
+      <Show when={settingsOpen()}>
+        <TeamSettingsDialog team={props.team} onClose={() => setSettingsOpen(false)} />
+      </Show>
+      <Show when={catalogOpen() && catalog()}>
+        <TeamCatalog catalog={catalog()!} port={catalogPort} onClose={() => setCatalogOpen(false)} />
+      </Show>
     </>
   );
 }
 
-function TeamBar(props: { team: TeamView; state: string; problemTasks: ReadonlySet<number> }) {
+function TeamBar(props: {
+  team: TeamView;
+  state: string;
+  problemTasks: ReadonlySet<number>;
+  onSettings: () => void;
+  onCatalog: () => void;
+}) {
   const counts = createMemo(() => progress(props.team, props.problemTasks));
   const [now, setNow] = createSignal(Date.now() / 1000);
   const clock = setInterval(() => setNow(Date.now() / 1000), 60_000);
@@ -109,6 +172,8 @@ function TeamBar(props: { team: TeamView; state: string; problemTasks: ReadonlyS
         <i class="seg problem" style={{ width: share(counts().problems) }} />
       </div>
       <span class="mono team-count">{counts().accepted}/{counts().total}</span>
+      <button type="button" class="btn ghost small" onClick={props.onSettings}>{tr("Team settings")}</button>
+      <button type="button" class="btn ghost small" onClick={props.onCatalog}>{tr("Catalog")}</button>
       <Show when={props.team.created > 0}><span class="dim team-age" title={tr("Since the team was created")}>{duration(now() - props.team.created)}</span></Show>
       <span class="grow" />
       <Show when={props.state === "planning"}><span class="team-note">{tr("The plan waits for your approval")}</span></Show>

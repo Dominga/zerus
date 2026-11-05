@@ -1,98 +1,13 @@
-// The Teams plan view's inputs: the compact view models the core projects
-// (client/core/src/teams/view.rs) and the plan graph. The webview parses no
-// `hgs team` reply; these are already bounded and sanitized.
+// The Teams plan view's inputs. The team, member, task and phase shapes have
+// ONE definition in client/src/types.ts, the core's compact view models; this
+// module aliases them and adds the plan graph and New team's draft shapes.
+import type { TeamMemberView, TeamPhaseView, TeamTaskView } from "../../types";
 
-export interface DepView {
-  task: number;
-  hard: boolean;
-}
-
-export interface TeamTaskStage {
-  kind: string;
-  state: string;
-  attempt: number;
-  member: string;
-}
-
-export interface TaskPipelineView {
-  name: string;
-  round: number;
-  stages: TeamTaskStage[];
-}
-
-export interface TaskView {
-  id: number;
-  title: string;
-  status: string;
-  assignee: string;
-  phase: number;
-  deps: DepView[];
-  estimate_minutes: number;
-  attempts: number;
-  attempt_state: string;
-  decided_by: string;
-  pinned: boolean;
-  output: string[];
-  waits: string;
-  pipeline?: TaskPipelineView | null;
-}
-
-export interface PhaseView {
-  n: number;
-  title: string;
-  state: string;
-  status: string;
-  done: number;
-  total: number;
-  barrier: boolean;
-  auto: boolean;
-  acceptance: string;
-  paused: boolean;
-  health: string;
-}
-
-export interface MemberView {
-  id: string;
-  role: string;
-  agent: string;
-  model: string;
-  effort: string;
-  account: string;
-  computer: string;
-  folder: string;
-  state: string;
-  activity: string;
-  phase: string;
-  error: string;
-  lead: boolean;
-  queue: number[];
-  live: boolean | null;
-  stuck: boolean;
-  question: boolean;
-  host_shared: boolean;
-  minutes_without_progress: number;
-}
-
-export interface TeamView {
-  id: string;
-  name: string;
-  status: string;
-  project: string;
-  folder: string;
-  goal: string;
-  plan_mode: string;
-  lead: string;
-  revision: number;
-  created: number;
-  updated: number;
-  waiting_for_lead: boolean;
-  members: MemberView[];
-  tasks: TaskView[];
-  phases: PhaseView[];
-  ready: number[];
-  cycle: number[];
-  truncated: boolean;
-}
+export type { TeamTaskStage, TeamTaskPipeline as TaskPipelineView, TeamView } from "../../types";
+export type TaskView = TeamTaskView;
+export type PhaseView = TeamPhaseView;
+export type MemberView = TeamMemberView;
+export type DepView = TeamTaskView["deps"][number];
 
 export interface GraphNode {
   id: number;
@@ -179,4 +94,3 @@ export type TeamSettings = Record<string, unknown>;
 // Task 47: the team action, call and outcome have one definition, in
 // client/src/types.ts, for the one core enum.
 export type { TeamAction, TeamCall, TeamConfirmation, TeamOutcome } from "../../types";
-

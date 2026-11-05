@@ -52,3 +52,8 @@
 .nt-confirm { margin: 8px 14px; padding: 10px 12px; border: 1px solid var(--z-color-warn); border-radius: var(--z-radius-md); background: var(--z-color-warn-bg); }
 .nt-confirm p { margin: 0 0 8px; font-size: var(--fs-sm); }
 .nt-confirm-actions { display: flex; gap: 6px; justify-content: flex-end; }
+.newteam-page, .catalog-page { height: 100%; overflow: auto; padding: 18px 22px; }
+.nt-page-head { display: flex; align-items: center; gap: 10px; margin-bottom: 14px; }
+.nt-page-head h1 { margin: 0; font-size: var(--fs-lg); }
+.set-actions { display: flex; gap: 8px; flex-wrap: wrap; margin-top: 10px; }
+.set-note { color: var(--z-color-muted); font-size: var(--fs-sm); max-width: 620px; }

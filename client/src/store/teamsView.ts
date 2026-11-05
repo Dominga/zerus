@@ -113,6 +113,12 @@ export function createTeams(port: TeamsPort) {
     list,
     teamOf,
     team: (computer: ComputerId, id: string) => view<TeamView>(computer, `team:${id}`, "team"),
+    /** The dependency graph of the same team (`graph:${id}`). */
+    graph: (computer: ComputerId, id: string) => view<import("../ui/teams/types").PlanGraph>(computer, `graph:${id}`, "graph"),
+    /** The team's profile, read on request (`profile:${id}`). */
+    profile: (computer: ComputerId, id: string) => view<import("../types").TeamProfileView>(computer, `profile:${id}`, "profile"),
+    /** A draft the New team page follows while it is open (`new:${id}`). */
+    newTeam: (computer: ComputerId, id: string) => view<import("../ui/teams/types").NewTeamView>(computer, `new:${id}`, "new"),
     /** The team catalog and the designer's draft, as the core projects it (`catalog`); parsed by ui/teams/catalog.ts. */
     catalog: (computer: ComputerId) => view<Record<string, unknown>>(computer, "catalog", "catalog"),
     /** Task 11: what waits for the owner across the computer's teams (`waiting`). */

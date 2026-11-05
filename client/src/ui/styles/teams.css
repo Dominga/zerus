@@ -145,3 +145,5 @@
   .team-waiting-banner-head { display: flex; align-items: center; gap: 8px; min-width: 0; color: var(--z-color-warn); }
   .team-confirm-text { white-space: pre-line; }
 }
+  .team-tab { position: relative; }
+  .team-tab .nt-settings, .team-tab .cat-editor { position: absolute; z-index: 3; }

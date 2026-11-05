@@ -11,7 +11,7 @@ export interface NewTeamProps {
   computers: ComputerChoice[];
   git: boolean;
   lead: DraftMember;
-  onOpenSettings: () => void;
+  onOpenSettings?: () => void;
   onCreated?: (team: string) => void;
 }
 
@@ -47,9 +47,11 @@ export function NewTeam(props: NewTeamProps): JSX.Element {
         <h2>{tr("New team")}</h2>
         <span class="grow" />
         <Show when={draft()}>
-          <button type="button" class="btn ghost small" onClick={props.onOpenSettings}>
-            {tr("Team settings")}
-          </button>
+          <Show when={props.onOpenSettings}>
+            <button type="button" class="btn ghost small" onClick={() => props.onOpenSettings?.()}>
+              {tr("Team settings")}
+            </button>
+          </Show>
         </Show>
         <button type="button" class="icon-btn small" aria-label={tr("Close")} onClick={props.store.close}>
           <Icon name="x" size={14} />

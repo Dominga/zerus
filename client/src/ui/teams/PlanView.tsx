@@ -37,6 +37,8 @@ export interface PlanViewProps {
   /** The Tests mode asks for its page when opened; the host reads it through
    * the core and passes it back. */
   onLoadTests?: (before: number | null) => void;
+  /** The Profile mode asks for the team's profile when opened. */
+  onLoadProfile?: () => void;
   class?: string;
 }
 
@@ -86,6 +88,7 @@ export function PlanView(props: PlanViewProps): JSX.Element {
   const [includeCancelled, setIncludeCancelled] = createSignal(false);
   createEffect(() => {
     if (mode() === "tests") props.onLoadTests?.(null);
+    if (mode() === "profile") props.onLoadProfile?.();
   });
   const [collapsed, setCollapsed] = createSignal<Set<number>>(
     new Set(props.team.phases.filter((phase) => phase.status === "done").map((phase) => phase.n)),

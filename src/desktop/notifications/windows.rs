@@ -16,6 +16,7 @@ mod callbacks;
 mod native;
 pub(in crate::desktop) mod registration;
 pub(in crate::desktop) mod runtime;
+mod setting;
 
 /// Fixed cold activation is deliberately passive; the root lifecycle parser
 /// owns routing here and cannot promote it to a service-owner launch.
@@ -34,6 +35,12 @@ const ID_UNITS: usize = 16;
 const CLICK_COALESCE: Duration = Duration::from_secs(5);
 
 trait Native {
+    /// Only an original admitted post reaches this phase. Identity-less Win32
+    /// may need one suppressed, expiring bootstrap before its Setting getter
+    /// works. It is not the requested notification and carries no user data.
+    fn ensure_post_ready(&mut self, _cancelled: &dyn Fn() -> bool) -> Result<(), Refusal> {
+        Ok(())
+    }
     /// No posting/withdrawal effect is allowed during preparation. Registration
     /// and interactive-session checks remain native reads, not JSON authority.
     fn prepare(&mut self, command: &Command, native_id: &NativeId) -> Result<(), Refusal>;
@@ -248,6 +255,11 @@ impl Mappings {
                 (native_id.clone(), Some(original.request_id.clone()))
             }
         };
+        if matches!(command.action, Action::Post { .. }) {
+            if let Err(code) = native.ensure_post_ready(&|| cancelled().is_some()) {
+                return refuse(code);
+            }
+        }
         if let Err(code) = native.prepare(command, &native_id) {
             return refuse(code);
         }

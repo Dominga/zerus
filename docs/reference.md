@@ -5463,6 +5463,19 @@ guard and removed through the same guarded exact removal; the reply adds
 `previous_image: true`. Install and status never take it, and nothing falls back
 after an effect.
 
+Before an admitted Windows notification post, a successful `Setting` getter
+must report Enabled. A real disabled setting refuses as `permission_denied`;
+a getter failure refuses as `getter_failed`. Only `ERROR_NOT_FOUND`
+(`0x80070490`) permits one identity-less initialization attempt per service
+process: a suppressed toast with no session content, a 15-second expiry,
+group `hgs-bootstrap` and a fresh 16-character tag. The worker immediately
+removes that exact tag/group for this AUMID and rechecks `Setting`; only Enabled
+allows the original user notification. Failure, cancellation and worker restart
+never reset the attempt. Status and withdrawal do not initialize an identity,
+and initialization never repairs registry/COM registration or changes consent.
+This follows the upstream [identity-less notifier initialization](https://github.com/CommunityToolkit/WindowsCommunityToolkit/blob/c8f76d072df53d3622fb5440d63afb06cb9e7a10/Microsoft.Toolkit.Uwp.Notifications/Toasts/Compat/ToastNotificationManagerCompat.cs)
+used before its [Setting getter](https://github.com/CommunityToolkit/WindowsCommunityToolkit/blob/c8f76d072df53d3622fb5440d63afb06cb9e7a10/Microsoft.Toolkit.Uwp.Notifications/Toasts/Compat/ToastNotifierCompat.cs).
+
 Explicit removal uses `notification-registration remove --json --request-id UUID`
 after a settled `desktop revoke --json --request-id UUID --reason rollback` with
 that same UUID, a stop of the running service through its owner (ending only

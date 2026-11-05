@@ -175,6 +175,7 @@ pub enum Refusal {
     Unsupported,
     Capacity,
     PermissionDenied,
+    GetterFailed,
 }
 #[derive(Clone, Copy, Debug, Deserialize, Serialize, PartialEq, Eq)]
 #[serde(rename_all = "snake_case")]
@@ -191,7 +192,9 @@ pub enum Outcome {
     Delivered {
         native_id: NativeId,
     },
-    /// Only a known refusal BEFORE the native posting/withdrawal API.
+    /// A known refusal before the REQUESTED posting/withdrawal API. Windows
+    /// may have initialized its identity with one suppressed, expiring toast
+    /// under that original admission; it never carries user/session content.
     Refused {
         code: Refusal,
     },

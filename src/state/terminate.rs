@@ -117,8 +117,12 @@ pub(super) fn dispatch_scoped(args: &[String], dry: bool, scope: Option<&session
             }
             if let Some(scope)=scope {scope.changing();}
             archive::remove_synced(&archive::path(string(&archived,"archive_id"))?)?;
-            if let Some(record)=current {
-                storage::remove_record(&record)?;
+            if let Some(record)=&current {
+                storage::remove_record(record)?;
+            }
+            worktree_lock::left(&archived);
+            if let Some(record)=current.filter(|record| record["session_id"]!=archived["session_id"]) {
+                worktree_lock::left(&record);
             }
         } else {
             drop(_guard);
@@ -142,6 +146,7 @@ pub(super) fn dispatch_scoped(args: &[String], dry: bool, scope: Option<&session
     if let Some(scope)=scope {scope.changing();}
     if forget {
         storage::remove_record(&record)?;
+        worktree_lock::left(&record);
         return Ok(0);
     }
     record["completion_source"] = json!("manual_terminate");

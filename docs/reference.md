@@ -392,6 +392,26 @@ the identities it carries. These come from its command line
 - `pause --all` and `resume --all` refuse a label that several sessions share;
   act on each with `--session-id`.
 
+When a session leaves, hgs releases its own Git worktree lock. A session
+leaves by an archive, by `terminate` with or without `--forget`, or by
+forgetting its archive. Its own lock is one whose reason is exactly
+`zerus:<session ID>`, on the checkout Zerus created for that session.
+- hgs never touches a person's own lock, another session's, or any lock on a
+  folder Zerus did not create.
+- The lock stays in three cases:
+  - another live or saved session uses the checkout;
+  - the checkout's Zerus ownership cannot be verified;
+  - the sessions that might use it cannot all be read.
+
+  hgs then says on standard error why it kept the lock, and the archive
+  stands.
+- The release never forces Git. It sets the lock aside and checks its text,
+  and removes it only when the text is exactly that session's. Anything else
+  is put back, never over a lock that appeared meanwhile. A lock left aside by
+  a crash is put back by the next hgs command.
+
+Nothing in this version creates such a lock.
+
 The desktop client adds `--session-id` only to explicit actions: send, send
 now, answer, queued-message removal, clear and compact, interrupt, model
 settings, pause, resume, start fresh, rename, fork, archive, terminate, kill

@@ -138,6 +138,9 @@ pub(super) fn save(record: &Value) -> Result<String> {
             storage::remove_record(&current)?;
         }
     }
+    // Its own Git worktree lock goes with it, or stays and is reported; the
+    // archive stands either way (P3c).
+    worktree_lock::left(record);
     Ok(id)
 }
 
@@ -330,7 +333,10 @@ pub(super) fn forget_scoped(name: &str, id: &str, dry: bool, scope: Option<&sess
         return Ok(());
     }
     if let Some(scope)=scope {scope.changing();}
-    remove_synced(&path(id)?)
+    remove_synced(&path(id)?)?;
+    // A lock its archive kept, once nothing else uses the checkout (P3c).
+    worktree_lock::left(&record);
+    Ok(())
 }
 
 /// The immutable source of a still-pending restore, before its binding changes.

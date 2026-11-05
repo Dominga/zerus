@@ -718,16 +718,20 @@ mod tests {
             "the first holder keeps its label's hash"
         );
 
-        // Every binding scanner sees the ID layout.
-        let folders: Vec<String> = worktree_cleanup::bindings()
-            .unwrap()
-            .into_iter()
-            .map(|r| r.name)
+        // Every binding scanner sees the ID layout, each session with its
+        // own folders: never the first holder's twice.
+        let references = worktree_cleanup::bindings().unwrap();
+        let folders: Vec<&std::path::Path> = references
+            .iter()
+            .filter(|r| r.name == shared)
+            .flat_map(|r| r.folders.iter().map(|folder| folder.as_path()))
             .collect();
-        assert!(
-            folders.iter().filter(|name| *name == shared).count() == 2,
-            "{folders:?}"
-        );
+        for run in ["run-first", "run-twin"] {
+            assert!(
+                folders.iter().any(|folder| folder.ends_with(run)),
+                "{run}: {folders:?}"
+            );
+        }
         let routed = task_bindings_in(&root()).unwrap();
         assert_eq!(routed.iter().filter(|row| row["name"] == alone).count(), 1);
         let (sources, _) = session_graph::inventory(&root()).unwrap();

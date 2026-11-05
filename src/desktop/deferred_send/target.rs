@@ -45,6 +45,51 @@ pub(super) fn current(roots: &Roots, plan: &Plan) -> bool {
     } else {
         &[&file]
     };
+    let names_plan = |record: &serde_json::Value| {
+        string(record, "name") == plan.session
+            && AGENTS.contains(&string(record, "agent"))
+            && plan
+                .session
+                .split('/')
+                .next()
+                .is_some_and(|agent| agent == string(record, "agent"))
+            && string(record, "run_id") == plan.run_id
+            && string(record, "conversation_id") == plan.conversation_id
+    };
+    if json_at(roots, path).is_some_and(|record| names_plan(&record)) {
+        return true;
+    }
+    // A session in the ID layout (zerus-ucck P3a), whose label's own record
+    // is another session's or none: the label index names its candidates, and
+    // each is opened at its fixed `sessions/<id>.json`, never a path from
+    // elsewhere. Exactly one may carry the plan's run and conversation; an
+    // absent or unreadable index refuses, as an unreadable record does.
+    let Some(index) = json_at(roots, &["labels", &file]) else {
+        return false;
+    };
+    if index["version"] != 1 || string(&index, "label") != plan.session {
+        return false;
+    }
+    let ids = index["ids"].as_array().into_iter().flatten();
+    let found = ids
+        .filter_map(|id| id.as_str())
+        .filter(|id| {
+            uuid::Uuid::parse_str(id).is_ok_and(|uuid| uuid.hyphenated().to_string() == *id)
+        })
+        .filter(|id| {
+            json_at(roots, &["sessions", &format!("{id}.json")]).is_some_and(|record| {
+                record["layout"] == "id"
+                    && string(&record, "session_id") == *id
+                    && names_plan(&record)
+            })
+        })
+        .count();
+    found == 1
+}
+
+/// The JSON object at `path` under the held root, bounded; None when it is
+/// absent or cannot be read.
+fn json_at(roots: &Roots, path: &[&str]) -> Option<serde_json::Value> {
     let record = (|| -> io::Result<serde_json::Value> {
         let file = roots.open_file(path)?;
         let mut bytes = Vec::new();
@@ -54,16 +99,5 @@ pub(super) fn current(roots: &Roots, plan: &Plan) -> bool {
         }
         serde_json::from_slice(&bytes).map_err(io::Error::other)
     })();
-    let Ok(record) = record else {
-        return false;
-    };
-    string(&record, "name") == plan.session
-        && AGENTS.contains(&string(&record, "agent"))
-        && plan
-            .session
-            .split('/')
-            .next()
-            .is_some_and(|agent| agent == string(&record, "agent"))
-        && string(&record, "run_id") == plan.run_id
-        && string(&record, "conversation_id") == plan.conversation_id
+    record.ok()
 }

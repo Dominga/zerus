@@ -139,6 +139,8 @@ pub(super) fn run(args: &[String]) -> Result<i32> {
     }
     let archive_id = nonempty_env("HGS_ARCHIVE_ID");
     std::env::remove_var("HGS_ARCHIVE_ID");
+    let resume_session_id = nonempty_env("HGS_RESUME_SESSION_ID").filter(|id| session_id::canonical(id));
+    std::env::remove_var("HGS_RESUME_SESSION_ID");
     let fork_hint_revision = nonempty_env(agent_hint::FORK_REVISION_ENV);
     std::env::remove_var(agent_hint::FORK_REVISION_ENV);
     let _signals = crate::platform::ShutdownGuard::install().map_err(|e| e.to_string())?;
@@ -164,6 +166,12 @@ pub(super) fn run(args: &[String]) -> Result<i32> {
         }
         if name != actual_name {
             name = actual_name;
+        }
+        // The session in the ID layout this run resumes is selected under its
+        // terminal's name, so every read of that name reaches its own record
+        // and verifies its ID (P3a).
+        if let Some(id) = resume_session_id.as_deref() {
+            session_id::select(&name, id);
         }
         let mut replaced = None;
         if expected.is_none() && record_path(&name).exists() {
@@ -273,6 +281,7 @@ pub(super) fn run(args: &[String]) -> Result<i32> {
                 "cleared_conversations",
                 "session_id",
                 "launch_label",
+                "layout",
             ] {
                 if let Some(value) = previous.get(key) {
                     record[key] = value.clone();
@@ -303,6 +312,18 @@ pub(super) fn run(args: &[String]) -> Result<i32> {
             record["worktree_owner"]=owner;
         }
         write(&mut record)?;
+        // A launch that replaces a session in the ID layout without keeping
+        // its ID (a retry, or a new session over a stopped one) is written at
+        // the label's path. The replaced record goes once the new one is
+        // durable, so it never stays behind as a twin; a failure leaves both,
+        // never neither (P3a). A fresh start keeps the ID and stays in place.
+        if let Some(previous) = replaced.as_ref().filter(|previous| {
+            storage::in_id_layout(previous) && previous["session_id"] != record["session_id"]
+        }) {
+            if let Err(error) = storage::remove_record(previous) {
+                eprintln!("hgs: {name}: the replaced session stays in the ID layout: {error}");
+            }
+        }
         // Keep this exact newly-created binding pinned during optional initial
         // placement. A removal/replacement must not inherit the old folder's
         // inference. The swarm lock is nonblocking and Git shares one 3s cap.
@@ -362,7 +383,7 @@ pub(super) fn run(args: &[String]) -> Result<i32> {
         let confirmed = {
             let _guard = lock(None)?;
             let current =
-                read_run(&name, &token)?.ok_or("session changed while launching agent")?;
+                read_own_run(&name, &token)?.ok_or("session changed while launching agent")?;
             !string(&current, "conversation_id").is_empty() || current.get("pausing").is_some()
         };
         let fallback = nonempty_env("HGS_FALLBACK_SECS")
@@ -382,7 +403,7 @@ pub(super) fn run(args: &[String]) -> Result<i32> {
         {
             let _guard = lock(None)?;
             let mut current =
-                read_run(&name, &token)?.ok_or("session changed while launching agent")?;
+                read_own_run(&name, &token)?.ok_or("session changed while launching agent")?;
             current["pid"] = json!(std::process::id());
             current["process_start"] = json!(process_start(std::process::id()));
             current["activity"] = json!("unknown");
@@ -668,6 +689,12 @@ fn session_spec(
         ),
         ("HGS_RUN_ID", run_id.into()),
         ("HGS_ARCHIVE_ID", archive_id.unwrap_or("").into()),
+        // A session in the ID layout names itself to its supervisor, which
+        // otherwise reads its label's path (zerus-ucck P3a).
+        (
+            "HGS_RESUME_SESSION_ID",
+            if storage::in_id_layout(record) { string(record, "session_id") } else { "" }.to_owned(),
+        ),
         ("HGS_REQUESTED_ID", "".into()),
         ("HGS_FRESH", if replaces.is_some() { "1" } else { "0" }.into()),
         ("HGS_FRESH_REPLACES", replaces.unwrap_or("").into()),
@@ -732,19 +759,24 @@ fn journal_identity(record: &mut Value, name: &str, retried: Option<&Value>) {
 }
 
 fn resume_archive(name: &str, id: &str, dry: bool, scope: Option<&session_action::Scope>) -> Result<i32> {
-    let archived = archive::read_archive(name, id)?;
+    // A restore never creates the ID layout in P3a: it is written at its
+    // label's path and needs a free label, whatever its archive says.
+    let mut archived = archive::read_archive(name, id)?;
+    if let Some(fields) = archived.as_object_mut() {
+        fields.remove("layout");
+    }
     refuse_unsettled_clear(&archived)?;
     recipes::verify_history(&archived, true)?;
     if let Some(scope)=scope {scope.check(&archived)?;}
     {
         let _guard = lock(None)?;
-        if live()?.contains_key(name) || record_path(name).exists() { return Err(format!("{name}: a live or saved session already uses this name; finish or archive it before restoring")); }
+        if live()?.contains_key(name) || storage::label_taken(name) { return Err(format!("{name}: a live or saved session already uses this name; finish or archive it before restoring")); }
     }
     if !dry { super::worktree_lifecycle::restore(&archived)?; }
     let run_id = uuid::Uuid::new_v4().to_string();
     let spec = resume_spec(&archived, &run_id, Some(id))?;
     let _guard = lock(None)?;
-    if live()?.contains_key(name) || record_path(name).exists() {
+    if live()?.contains_key(name) || storage::label_taken(name) {
         return Err(format!("{name}: a live or saved session already uses this name; finish or archive it before restoring"));
     }
     let current_archive = archive::read_archive(name, id)?;

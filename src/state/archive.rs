@@ -120,17 +120,19 @@ pub(super) fn save(record: &Value) -> Result<String> {
         archived["archived_at"] = json!(now());
         archived["state"] = json!("archived");
         archived.as_object_mut().unwrap().remove("pausing");
+        // An archive holds no label and lives in no layout: a restore writes
+        // wherever its label then allows (P3a: the label's own path).
+        archived.as_object_mut().unwrap().remove("layout");
         atomic_record(&path(&id)?, &mut archived)?;
         id
     };
-    if record_path(string(record, "name")).exists() {
-        let current = read(string(record, "name"))?;
+    // The archived session's own record goes, never its label's holder: a
+    // session in the ID layout removes `sessions/<id>.json` (P3a).
+    if let Some(current) = storage::current_of(record)? {
         if current["run_id"] == record["run_id"]
             && current["conversation_id"] == record["conversation_id"]
         {
-            remove_synced(&record_path(string(record, "name")))?;
-            rename::remove_legacy(&current)?;
-            session_index::retire(&current);
+            storage::remove_record(&current)?;
         }
     }
     Ok(id)
@@ -431,7 +433,7 @@ pub(super) fn failed_restore(record: &mut Value) -> Result<bool> {
         string(record, "error")
     });
     atomic_record(&path(id)?, &mut archived)?;
-    remove_synced(&record_path(string(record, "name")))?;
+    remove_synced(&storage::own_path(record)?)?;
     Ok(true)
 }
 

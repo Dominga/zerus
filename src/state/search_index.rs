@@ -1044,6 +1044,32 @@ fn record_target(record: &Value) -> Target {
             .unwrap_or(0.0),
     }
 }
+/// The record of an ID-layout session (zerus-ucck P3a) whose label has no
+/// first holder: the file in `sessions/` with this identity's label and run.
+/// The scan reads at most 2,000 files.
+pub(super) fn id_layout_path(state: &Path, identity: &Identity) -> Option<PathBuf> {
+    std::fs::read_dir(state.join("sessions"))
+        .ok()?
+        .take(2_000)
+        .flatten()
+        .map(|entry| entry.path())
+        .filter(|path| {
+            path.file_stem()
+                .and_then(|stem| stem.to_str())
+                .is_some_and(super::session_id::canonical)
+        })
+        .find(|path| {
+            std::fs::read(path)
+                .ok()
+                .and_then(|bytes| serde_json::from_slice::<Value>(&bytes).ok())
+                .is_some_and(|record| {
+                    string(&record, "name") == identity.name
+                        && string(&record, "run_id") == identity.run_id
+                        && record["layout"] == "id"
+                })
+        })
+}
+
 fn binding(
     state: &Path,
     identity: &Identity,
@@ -1054,11 +1080,13 @@ fn binding(
 ) -> Result<metadata::Record> {
     let path = if identity.archive_id.is_empty() {
         let basename = format!("{:x}.json", Sha256::digest(identity.name.as_bytes()));
-        if state.join("name_routes").join(&basename).exists() {
+        let label = if state.join("name_routes").join(&basename).exists() {
             state.join("bindings").join(basename)
         } else {
             state.join(basename)
-        }
+        };
+        // A session in the ID layout (zerus-ucck P3a): found by its run.
+        if label.exists() { label } else { id_layout_path(state, identity).unwrap_or(label) }
     } else {
         uuid::Uuid::parse_str(&identity.archive_id).map_err(|_| "Invalid archive identity")?;
         state

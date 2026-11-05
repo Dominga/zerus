@@ -97,7 +97,9 @@ pub(super) fn route_path(name: &str) -> PathBuf {
         .join(legacy_record_path(name).file_name().unwrap())
 }
 
-pub(super) fn record_path(name: &str) -> PathBuf {
+/// The label's own path: `sha256(label).json`, or `bindings/` through
+/// `name_routes`. Only the label's first holder lives there.
+pub(super) fn label_record_path(name: &str) -> PathBuf {
     let legacy = legacy_record_path(name);
     if route_path(name).exists() {
         root().join("bindings").join(legacy.file_name().unwrap())
@@ -106,23 +108,112 @@ pub(super) fn record_path(name: &str) -> PathBuf {
     }
 }
 
+/// Where a session that reuses a label lives for life (zerus-ucck P3, the ID
+/// layout). Only a canonical session ID names such a path.
+pub(super) fn id_record_path(id: &str) -> Option<PathBuf> {
+    session_id::canonical(id).then(|| root().join("sessions").join(format!("{id}.json")))
+}
+
+/// Whether `record` says it lives in the ID layout.
+pub(super) fn in_id_layout(record: &Value) -> bool {
+    record["layout"] == "id"
+}
+
+/// The path this command reads `name` from (P3a):
+/// - the selected session's own record, when the command selected under
+///   `name` a session in the ID layout. The read then verifies every selected
+///   identity, so a selection never falls back to the label's holder;
+/// - else the label's path, when its first holder is there;
+/// - else the label's only session in the ID layout, so name-based readers
+///   reach a session whose label has no first holder.
+pub(super) fn record_path(name: &str) -> PathBuf {
+    if let Some(path) = selected_id_path(name) {
+        return path;
+    }
+    let label = label_record_path(name);
+    if label.exists() {
+        return label;
+    }
+    sole_id_holder(name).unwrap_or(label)
+}
+
+fn sole_id_holder(name: &str) -> Option<PathBuf> {
+    let candidates = labels::candidates(name).ok()?;
+    match (candidates.first, candidates.by_id.as_slice()) {
+        (false, [only]) => id_record_path(string(only, "session_id")),
+        _ => None,
+    }
+}
+
+/// The key of the files a session owns by name, such as its recovery job and
+/// its native-input lock: its label's SHA-256, or for a session in the ID
+/// layout its session ID (P3a), so two sessions that share a label never share
+/// one. The ID never changes, so a rename in place moves none of them.
+pub(super) fn owner_key(name: &str) -> String {
+    let path = record_path(name);
+    if path.parent().is_some_and(|parent| parent == root().join("sessions")) {
+        if let Some(id) = path.file_stem().and_then(|stem| stem.to_str()) {
+            return id.to_owned();
+        }
+    }
+    format!("{:x}", Sha256::digest(name.as_bytes()))
+}
+
+/// Whether a live or saved session holds `name`, at its label's path or in
+/// the ID layout. A candidate set that cannot be proven complete counts as
+/// taken, so a uniqueness check fails closed and never makes a second holder.
+pub(super) fn label_taken(name: &str) -> bool {
+    labels::candidates(name).map_or(true, |candidates| {
+        candidates.first || !candidates.by_id.is_empty()
+    })
+}
+
+fn selected_id_path(name: &str) -> Option<PathBuf> {
+    let selection = session_id::selected().filter(|selection| selection.name == name)?;
+    id_record_path(&selection.session_id).filter(|path| path.is_file())
+}
+
 pub(super) fn read(name: &str) -> Result<Value> {
     read_limit(name,None)
 }
 pub(super) fn read_bounded(name: &str, bytes: u64) -> Result<Value> {
     read_limit(name,Some(bytes))
 }
+/// The session in the ID layout with this ID, verified: the record in
+/// `sessions/<id>.json` must carry that ID and say it is in the ID layout.
+pub(super) fn read_id(id: &str) -> Result<Value> {
+    let path = id_record_path(id).ok_or("invalid session ID")?;
+    let name = read_name(&path)?;
+    read_at(&path, &name, None)
+}
+
+/// The label a record file names, before the full verified read.
+fn read_name(path: &Path) -> Result<String> {
+    let value: Value = serde_json::from_str(&fs::read_to_string(path).map_err(|e| e.to_string())?)
+        .map_err(|e| e.to_string())?;
+    Ok(string(&value, "name").to_owned())
+}
+
+/// The record at the label's own path, never steered by a selection.
+pub(super) fn read_label(name: &str) -> Result<Value> {
+    read_at(&label_record_path(name), name, None)
+}
+
 fn read_limit(name: &str, limit: Option<u64>) -> Result<Value> {
+    read_at(&record_path(name), name, limit)
+}
+
+fn read_at(path: &Path, name: &str, limit: Option<u64>) -> Result<Value> {
     let contents = (|| -> io::Result<String> {
         if let Some(limit) = limit {
             use std::io::Read;
             let mut bytes=Vec::new();
-            let file=crate::platform::never_block(OpenOptions::new().read(true)).open(record_path(name))?;
+            let file=crate::platform::never_block(OpenOptions::new().read(true)).open(path)?;
             if !file.metadata()?.is_file() {return Err(io::Error::other("Selected session is not a regular record"));}
             file.take(limit+1).read_to_end(&mut bytes)?;
             if bytes.len() as u64 > limit { return Err(io::Error::other("Selected session record exceeds retirement bound")); }
             String::from_utf8(bytes).map_err(|e|io::Error::new(io::ErrorKind::InvalidData,e))
-        } else {fs::read_to_string(record_path(name))}
+        } else {fs::read_to_string(path)}
     })().map_err(|e| {
         if e.kind() == io::ErrorKind::NotFound {
             format!("{name}: no saved binding; restart through hgs to enable tracking")
@@ -138,6 +229,14 @@ fn read_limit(name: &str, limit: Option<u64>) -> Result<Value> {
         || !AGENTS.contains(&string(&record, "agent"))
     {
         return Err(format!("{name}: invalid saved binding"));
+    }
+    // A record in the ID layout is verified against its own path: the same
+    // session ID, and the layout it claims. Neither alone is authority.
+    let by_id = path.parent().is_some_and(|parent| parent == root().join("sessions"));
+    if by_id != in_id_layout(&record)
+        || (by_id && id_record_path(string(&record, "session_id")).as_deref() != Some(path))
+    {
+        return Err(format!("{name}: the saved binding's layout and location disagree"));
     }
     session_id::verify(&record)?;
     journal::repair_kimi_main(&mut record);
@@ -160,9 +259,76 @@ pub(super) fn ensure_session_id(record: &mut Value) {
     }
 }
 
+/// Where `record` is written: back to its own `sessions/<id>.json` when it is
+/// in the ID layout, else the label's path. A record keeps the ID layout only
+/// when it says so and that file exists; when the two disagree the write is
+/// refused, never guessed (P3a).
+fn write_path(record: &Value) -> Result<(PathBuf, bool)> {
+    let name = string(record, "name");
+    let at_id = id_record_path(string(record, "session_id")).filter(|path| path.is_file());
+    match (in_id_layout(record), at_id) {
+        (true, Some(path)) => Ok((path, true)),
+        (false, None) => Ok((label_record_path(name), false)),
+        _ => Err(format!("{name}: the session's layout and its record disagree; refusing to write")),
+    }
+}
+
+/// The current record of the session `record` names, read from where it
+/// lives: its own `sessions/<id>.json` in the ID layout, else its label's path.
+/// None when that file is gone.
+pub(super) fn current_of(record: &Value) -> Result<Option<Value>> {
+    if in_id_layout(record) {
+        let id = string(record, "session_id");
+        return match id_record_path(id) {
+            Some(path) if path.exists() => read_id(id).map(Some),
+            _ => Ok(None),
+        };
+    }
+    let name = string(record, "name");
+    if label_record_path(name).exists() {
+        read_label(name).map(Some)
+    } else {
+        Ok(None)
+    }
+}
+
+/// Removes the live or saved session `record` from where it lives, and then
+/// everything that names it: the legacy rename shadow for a record at its
+/// label's path, the ID index entry, and, for the ID layout, its label-index
+/// entry, which goes only after the record (the index stays a superset).
+pub(super) fn remove_record(record: &Value) -> Result<()> {
+    let path = own_path(record)?;
+    if in_id_layout(record) {
+        if path.exists() {
+            archive::remove_synced(&path)?;
+        }
+        session_index::retire(record);
+        return labels::remove(string(record, "name"), string(record, "session_id"));
+    }
+    rename::remove_legacy(record)?;
+    if path.exists() {
+        archive::remove_synced(&path)?;
+    }
+    session_index::retire(record);
+    Ok(())
+}
+
+/// The file `record` lives in: its own `sessions/<id>.json` in the ID layout,
+/// else its label's path. Deletions use this, never the label alone, so a
+/// session in the ID layout never removes its label's first holder.
+pub(super) fn own_path(record: &Value) -> Result<PathBuf> {
+    write_path(record).map(|(path, _)| path)
+}
+
 pub(super) fn write(record: &mut Value) -> Result<()> {
     record["updated"] = json!(now());
-    atomic_record(&record_path(string(record, "name")), record)?;
+    let (path, by_id) = write_path(record)?;
+    atomic_record(&path, record)?;
+    if by_id {
+        // A session in the ID layout never writes at a label's path.
+        session_index::note(record, session_index::Kind::IdRecord);
+        return Ok(());
+    }
     session_index::note(record, session_index::Kind::Record);
     rename::mirror_legacy(record)
 }
@@ -191,7 +357,7 @@ pub(super) fn read_own_run(name: &str, run_id: &str) -> Result<Option<Value>> {
     // session carries now, so a rename since launch costs no scan.
     if let (Some(id), false) = (session.as_deref(), run_id.is_empty()) {
         if let Some(found) = session_index::find(id) {
-            if found.kind == session_index::Kind::Record
+            if matches!(found.kind, session_index::Kind::Record | session_index::Kind::IdRecord)
                 && string(&found.record, "run_id") == run_id
             {
                 return Ok(Some(found.record));
@@ -263,6 +429,18 @@ pub(super) fn records() -> Result<Vec<Value>> {
         );
     }
     paths.sort();
+    // Sessions in the ID layout (P3a), read from their own path.
+    let sessions = root().join("sessions");
+    let mut by_id: Vec<PathBuf> = if sessions.is_dir() {
+        fs::read_dir(&sessions)
+            .map_err(|e| e.to_string())?
+            .filter_map(|entry| entry.ok().map(|entry| entry.path()))
+            .filter(|path| is_id_record_path(path))
+            .collect()
+    } else {
+        Vec::new()
+    };
+    by_id.sort();
     let mut result = Vec::new();
     for path in paths {
         let loaded = (|| {
@@ -272,7 +450,7 @@ pub(super) fn records() -> Result<Vec<Value>> {
             if value["rename_shadow"] == true {
                 return Ok(None);
             }
-            read(string(&value, "name")).map(Some)
+            read_at(&label_record_path(string(&value, "name")), string(&value, "name"), None).map(Some)
         })();
         match loaded {
             Ok(Some(record)) => result.push(record),
@@ -280,7 +458,47 @@ pub(super) fn records() -> Result<Vec<Value>> {
             Err(error) => eprintln!("hgs: cannot read {}: {error}", path.display()),
         }
     }
+    for path in by_id {
+        match read_name(&path).and_then(|name| read_at(&path, &name, None)) {
+            Ok(record) => result.push(record),
+            Err(error) => eprintln!("hgs: cannot read {}: {error}", path.display()),
+        }
+    }
     Ok(result)
+}
+
+/// Every directory that holds live or saved session bindings: the label
+/// paths, the provider bindings and, since P3a, the ID layout. A scanner of
+/// bindings reads all of them; `binding_dirs_cover_the_id_layout` checks the
+/// source for one that does not.
+pub(crate) const BINDING_DIRS: [&str; 7] = [
+    "",
+    "bindings",
+    "dsh/bindings",
+    "opencode/bindings",
+    "sessions",
+    "dsh/sessions",
+    "opencode/sessions",
+];
+
+/// Whether a file named `stem` in the binding directory `directory` can be a
+/// binding: a label's SHA-256 at the root and in `bindings/`, a canonical
+/// session ID in the ID layout, and any name in a provider's bindings.
+pub(crate) fn binding_stem(directory: &str, stem: &str) -> bool {
+    match directory {
+        "" | "bindings" => stem.len() == 64 && stem.bytes().all(|b| b.is_ascii_hexdigit()),
+        "sessions" | "dsh/sessions" | "opencode/sessions" => session_id::canonical(stem),
+        _ => true,
+    }
+}
+
+/// A file in `sessions/` named by a canonical session ID.
+fn is_id_record_path(path: &Path) -> bool {
+    path.extension().and_then(|extension| extension.to_str()) == Some("json")
+        && path
+            .file_stem()
+            .and_then(|stem| stem.to_str())
+            .is_some_and(session_id::canonical)
 }
 
 pub(super) type Pane = (String, String, String);

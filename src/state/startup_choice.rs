@@ -143,7 +143,7 @@ fn codex_sandbox(choice: &Choice) -> bool {
 }
 
 fn native_input(name: &str) -> PathBuf {
-    root().join("native-input").join(format!("{:x}.lock", Sha256::digest(name.as_bytes())))
+    root().join("native-input").join(format!("{}.lock", storage::owner_key(name)))
 }
 
 /// Held while Zerus itself drives a native picker in this session, such as the

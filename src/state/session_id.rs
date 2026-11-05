@@ -66,6 +66,12 @@ pub(crate) fn select_reference(name: &str, session_id: &str, conversation: &str,
     });
 }
 
+/// Forgets the selection (tests only: a command never drops its own).
+#[cfg(all(test, unix))]
+pub(crate) fn clear() {
+    *SELECTED.lock().unwrap_or_else(std::sync::PoisonError::into_inner) = None;
+}
+
 /// The command's selection, when it was given one.
 pub(crate) fn selected() -> Option<Selection> {
     SELECTED.lock().unwrap_or_else(std::sync::PoisonError::into_inner).clone()
@@ -125,7 +131,10 @@ pub(crate) fn names_of(id: &str) -> Result<Vec<String>> {
     use session_index::Kind;
     let found: Vec<(String, Kind)> = records()?
         .into_iter()
-        .map(|record| (record, Kind::Record))
+        .map(|record| {
+            let kind = if storage::in_id_layout(&record) { Kind::IdRecord } else { Kind::Record };
+            (record, kind)
+        })
         .chain(
             dsh::binding_records()
                 .into_iter()
@@ -151,9 +160,9 @@ pub(crate) fn names_of(id: &str) -> Result<Vec<String>> {
 /// The report for a name several sessions share: the text lines and the
 /// `--json` value. Candidates carry `session_id`, `run_id`,
 /// `conversation_id`, `state` (live or saved), `cwd`, `created` and an
-/// optional `reference`, never transcript content. P2's label index calls it
-/// when a name matches more than one session; until P3 names stay unique.
-#[cfg_attr(not(test), allow(dead_code))]
+/// optional `reference`, never transcript content. Label resolution
+/// (`resolve_label`, zerus-ucck P3a) reports it when a label matches more than
+/// one live or saved session; until P3e no writer makes that happen.
 pub(crate) fn ambiguity(name: &str, mut candidates: Vec<Value>) -> (String, Value) {
     let total = candidates.len();
     candidates.sort_by(|a, b| {

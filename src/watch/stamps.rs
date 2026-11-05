@@ -24,7 +24,19 @@ const ROOT_FILES: [&str; 2] = ["read-marks.json", "notifications.json"];
 /// The folder that holds routed bindings next to the root's own.
 const BINDINGS: &str = "bindings";
 /// Folders whose every entry counts.
-const FOLDERS: [&str; 6] = [BINDINGS, "name_routes", "renames", "launches", "dsh/bindings", "opencode/bindings"];
+const FOLDERS: [&str; 10] = [
+    BINDINGS,
+    "name_routes",
+    "renames",
+    "launches",
+    "dsh/bindings",
+    "opencode/bindings",
+    // The ID layout and its label index (zerus-ucck P3a).
+    "sessions",
+    "dsh/sessions",
+    "opencode/sessions",
+    "labels",
+];
 /// Single files and folders whose own stamp counts. Archive files are added or
 /// removed, which changes the folder.
 const PATHS: [&str; 4] = ["coordination/waits.sqlite3", "coordination/waits.sqlite3-wal", "coordination/waits.sqlite3-journal", "archives"];
@@ -136,6 +148,22 @@ pub(super) fn scan(root: &Path) -> Scan {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// zerus-ucck P3a: a session in the ID layout, and the label index, are
+    /// inputs of `hgs watch` too.
+    #[test]
+    fn the_id_layout_changes_the_stamp() {
+        let dir = tempfile::tempdir().unwrap();
+        let root = dir.path();
+        fs::create_dir_all(root.join("sessions")).unwrap();
+        fs::create_dir_all(root.join("labels")).unwrap();
+        let before = scan(root);
+        fs::write(root.join("sessions/3f2a9c1d-6b7e-4c2a-9d1f-0a1b2c3d4e5f.json"), "{}").unwrap();
+        let session = scan(root);
+        assert_ne!(session, before);
+        fs::write(root.join(format!("labels/{}.json", "b".repeat(64))), "{}").unwrap();
+        assert_ne!(scan(root), session);
+    }
 
     #[test]
     fn bindings_and_inputs_change_the_stamp_and_temporary_files_do_not() {

@@ -127,7 +127,7 @@ fn next_delay(delays: &[Value], attempt: usize) -> Option<f64> {
 fn job_path(name: &str) -> PathBuf {
     root()
         .join("recovery/jobs")
-        .join(legacy_record_path(name).file_name().unwrap())
+        .join(format!("{}.json", storage::owner_key(name)))
 }
 fn load_job(name: &str) -> Value {
     read_json(&job_path(name)).unwrap_or(Value::Null)

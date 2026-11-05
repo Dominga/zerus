@@ -1856,3 +1856,45 @@ os._exit(0)"#;
         assert_eq!(f.row(&original).receipt.phase, Phase::Recorded);
     }
 }
+
+/// zerus-ucck P3a: a session in the ID layout, whose label's own record is
+/// another session's, is found through the label index at its fixed
+/// `sessions/<id>.json`. Without the index the check refuses, as with any
+/// unreadable record; a record without the layout, or two matches, refuse too.
+#[test]
+fn the_target_check_finds_a_session_in_the_id_layout() {
+    use sha2::Digest;
+    let temp = tempfile::tempdir().unwrap();
+    let state = state_root(temp.path());
+    let verified = original(&"a".repeat(64), &uuid::Uuid::new_v4().to_string());
+    let plan = &verified.plan;
+    session_record(&state, SESSION, "claude", "run-other", "conversation-other");
+    let current = || target::current(&super::receipt::Roots::open(&state).unwrap(), plan);
+    assert!(!current(), "the label's holder runs another run");
+    let private = |path: &Path, body: &Value| {
+        std::fs::create_dir_all(path.parent().unwrap()).unwrap();
+        mode(path.parent().unwrap(), 0o700);
+        std::fs::write(path, body.to_string()).unwrap();
+        mode(path, 0o600);
+    };
+    let ids = ["3f2a9c1d-6b7e-4c2a-9d1f-0a1b2c3d4e5f", "7be01d44-6b7e-4c2a-9d1f-0a1b2c3d4e5f"];
+    let session = |id: &str, layout: bool| {
+        let mut record = json!({"name": SESSION, "agent": "claude", "run_id": RUN,
+            "conversation_id": CONVERSATION, "session_id": id});
+        if layout {
+            record["layout"] = json!("id");
+        }
+        private(&state.join("sessions").join(format!("{id}.json")), &record);
+    };
+    session(ids[0], true);
+    assert!(!current(), "no label index: refused");
+    let index = state.join("labels").join(format!("{:x}.json", sha2::Sha256::digest(SESSION.as_bytes())));
+    private(&index, &json!({"version": 1, "label": SESSION, "ids": [ids[0]]}));
+    assert!(current());
+    session(ids[0], false);
+    assert!(!current(), "a record without the ID layout");
+    session(ids[0], true);
+    session(ids[1], true);
+    private(&index, &json!({"version": 1, "label": SESSION, "ids": ids}));
+    assert!(!current(), "two sessions carry the plan's run: never one of them");
+}

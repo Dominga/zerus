@@ -79,8 +79,10 @@ pub(super) fn carry_fresh_start(previous: &Value, record: &mut Value) {
     if !earlier.is_empty() { record["cleared_conversations"] = json!(earlier); }
     if let Some(anchor) = previous.get("journal_name") { record["journal_name"] = anchor.clone(); }
     if let Some(label) = previous.get("launch_label") { record["launch_label"] = label.clone(); }
-    // A clear starts another conversation of the same session.
+    // A clear starts another conversation of the same session, written where
+    // that session lives: a session in the ID layout stays there (P3a).
     if let Some(id) = previous.get("session_id") { record["session_id"] = id.clone(); }
+    if let Some(layout) = previous.get("layout") { record["layout"] = layout.clone(); }
 }
 
 // Earlier conversations of this session's Activity, oldest first. Only

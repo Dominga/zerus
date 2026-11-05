@@ -939,7 +939,9 @@ class Harness(unittest.TestCase):
         state = self.root / "state"
         # Reused pre-upgrade names can have a canonical binding in bindings/;
         # the old physical slot is reserved for the running legacy supervisor.
-        for p in [*state.glob("*.json"), *(state / "bindings").glob("*.json")]:
+        # A session in the ID layout lives in sessions/<id>.json (P3a).
+        for p in [*state.glob("*.json"), *(state / "bindings").glob("*.json"),
+                  *(state / "sessions").glob("*.json")]:
             r = json.loads(p.read_text())
             if r.get("name") == name and not r.get("rename_shadow"):
                 return r
@@ -993,6 +995,26 @@ class Harness(unittest.TestCase):
                    [str(HGS), "__state", "hook"])
         return subprocess.run(command, env=env,
                               input=json.dumps(event), text=True, capture_output=True, check=True)
+
+    def move_to_id_layout(self, name):
+        """Moves the saved session `name` into the ID layout by hand, as a later
+        build will for a label in use (zerus-ucck P3): its label-index entry
+        first, then sessions/<id>.json and its ids/ entry, and the label's path
+        last. Returns its session ID and a reader of its new file."""
+        state = self.root / "state"
+        digest = hashlib.sha256(name.encode()).hexdigest()
+        label = state / f"{digest}.json"
+        record = json.loads(label.read_text())
+        session = record["session_id"]
+        for folder in ("labels", "sessions", "ids"):
+            (state / folder).mkdir(exist_ok=True)
+        (state / "labels" / f"{digest}.json").write_text(
+            json.dumps(dict(version=1, label=name, ids=[session])) + "\n")
+        moved = state / "sessions" / f"{session}.json"
+        moved.write_text(json.dumps(dict(record, layout="id")) + "\n")
+        (state / "ids" / f"{session}.json").write_text(json.dumps(dict(version=1, name=name, kind="id")) + "\n")
+        label.unlink()
+        return session, lambda: json.loads(moved.read_text())
 
     def saved_v1(self, agent="claude", base=None, tag="legacy"):
         """A pre-migration record, independent of the current writer's schema."""
@@ -1167,6 +1189,93 @@ class SessionIdentity(Harness):
         self.hgs("pause", legacy["name"])
         self.resume(legacy["name"])
         self.assertEqual(self.binding(legacy["name"])["session_id"], gained)
+
+    # zerus-ucck P3a: a session a later build moved into the ID layout, beside
+    # the label's first holder at its own path, is resumed, renamed and started
+    # fresh in place. Its supervisor and its agent's hooks write
+    # sessions/<id>.json, and the first holder stays byte-identical. An
+    # archive drops the layout; a restore needs a free label and is written
+    # at its path, as today.
+    def test_a_session_in_the_id_layout_stays_in_place(self):
+        name = self.start(tag="by-id")
+        self.send_event(name, "Stop", last_assistant_message="done")
+        self.hgs("pause", name)
+        session, held = self.move_to_id_layout(name)
+        state = self.root / "state"
+        label = lambda who: state / (hashlib.sha256(who.encode()).hexdigest() + ".json")
+        index = lambda who: state / "labels" / (hashlib.sha256(who.encode()).hexdigest() + ".json")
+        moved = state / "sessions" / f"{session}.json"
+        first = dict(held(), session_id=str(uuid.uuid4()), run_id=str(uuid.uuid4()),
+                     conversation_id=str(uuid.uuid4()))
+        first.pop("layout")
+        label(name).write_text(json.dumps(first) + "\n")
+        first_bytes = label(name).read_bytes()
+        def in_place(who):
+            record = held()
+            self.assertEqual((record["name"], record["session_id"], record["layout"]), (who, session, "id"))
+            self.assertEqual(json.loads(index(who).read_text())["ids"], [session])
+        # The label two sessions share names neither; its ID names the twin.
+        self.hgs("inspect", name, rc=5)
+        self.assertEqual(json.loads(self.hgs("inspect", "--session-id", session))["session_id"], session)
+        # Resume by ID: the supervisor selects the twin, never the first holder.
+        previous = held()["run_id"]
+        self.hgs("resume", "--session-id", session, "-d")
+        self.wait(lambda: held()["run_id"] != previous and held().get("activity") == "idle"
+                  and not held().get("expected_id"))
+        in_place(name)
+        self.assertEqual(label(name).read_bytes(), first_bytes)
+        launched = json.loads((self.root / "argv.jsonl").read_text().splitlines()[-1])
+        self.assertEqual(launched["hgs_session_id"], session)
+        record = held()
+        def hook(prompt, who):
+            event = dict(session_id=record["conversation_id"], hook_event_name="UserPromptSubmit", prompt=prompt)
+            self.hook(event, dict(self.env, HGS_SESSION=who, HGS_RUN_ID=record["run_id"], HGS_SESSION_ID=session))
+        prompts = lambda: [e["detail"] for e in json.loads(self.hgs("inspect", "--session-id", session))["events"]
+                           if e["type"] == "UserPromptSubmit"]
+        hook("by its ID", name)
+        self.assertEqual(prompts(), ["by its ID"])
+        # Rename, live and by ID: the run keeps its record, and a hook still
+        # naming the shared label reaches it through ids/.
+        renamed = "claude/p/by-id-renamed"
+        self.hgs("rename", "--session-id", session, renamed)
+        in_place(renamed)
+        self.assertFalse(label(renamed).exists(), "nothing at the new label's path")
+        self.assertFalse(index(name).exists())
+        self.assertEqual(held()["run_id"], record["run_id"])
+        hook("after the rename", name)
+        self.assertEqual(prompts(), ["by its ID", "after the rename"])
+        self.assertEqual(label(name).read_bytes(), first_bytes)
+        # Start fresh keeps the session, and so its place.
+        self.send_event(renamed, "Stop", last_assistant_message="done")
+        self.hgs("pause", renamed)
+        conversation, run = held()["conversation_id"], held()["run_id"]
+        self.hgs("resume", renamed, "--fresh", "--expected-run-id", run, "-d")
+        self.wait(lambda: held().get("conversation_id") not in (None, conversation))
+        in_place(renamed)
+        self.assertFalse(label(renamed).exists())
+        # Archive: the session's record and both index entries go.
+        self.wait(lambda: held().get("activity") == "idle")
+        self.send_event(renamed, "Stop", last_assistant_message="done")
+        self.hgs("pause", renamed)
+        self.hgs("archive", renamed)
+        self.assertFalse(moved.exists())
+        self.assertFalse(index(renamed).exists())
+        self.assertFalse((state / "ids" / f"{session}.json").exists())
+        self.assertFalse(label(renamed).exists())
+        archived = next(json.loads(p.read_text()) for p in (state / "archives").glob("*.json")
+                        if json.loads(p.read_text())["session_id"] == session)
+        self.assertNotIn("layout", archived)
+        # Restore: at the free label's own path, with the same ID, even from
+        # an archive that still says it was in the ID layout.
+        kept = state / "archives" / f"{archived['archive_id']}.json"
+        kept.write_text(json.dumps(dict(archived, layout="id")) + "\n")
+        self.hgs("resume", renamed, "--archive", archived["archive_id"], "-d")
+        self.wait(lambda: self.binding(renamed).get("activity") == "idle")
+        restored = json.loads(label(renamed).read_text())
+        self.assertEqual(restored["session_id"], session)
+        self.assertNotIn("layout", restored)
+        self.assertFalse(moved.exists())
+        self.assertEqual(label(name).read_bytes(), first_bytes)
 
 
     # zerus-ucck P1b: --session-id selects the session a command names first,
@@ -3143,6 +3252,29 @@ os.execvp("codex", ["codex", *sys.argv[1:]])
         self.assertNotEqual(retried["session_id"], failed["session_id"])
         self.assertEqual((retried["journal_name"], retried["launch_label"]),
                          (failed["journal_name"], failed["launch_label"]))
+
+    # zerus-ucck P3a: a retry over an unconfirmed attempt that a later build
+    # left in the ID layout gets its own ID at the label's path; the attempt
+    # is preserved as before, and its record goes with its index entries, so
+    # no stale twin stays.
+    def test_a_retry_replaces_an_attempt_in_the_id_layout(self):
+        self.gate.write_text("7")
+        name = self.launch()
+        failed = self.wait_failed(name)
+        session, _ = self.move_to_id_layout(name)
+        state = self.root / "state"
+        digest = hashlib.sha256(name.encode()).hexdigest()
+        self.gate.unlink()
+        self.assertEqual(self.launch(), name)
+        self.wait(lambda: self.binding(name).get("conversation_id"))
+        retried = json.loads((state / f"{digest}.json").read_text())
+        self.assertNotEqual(retried["session_id"], session)
+        self.assertNotIn("layout", retried)
+        self.assertEqual(retried["journal_name"], failed["journal_name"])
+        self.assertFalse((state / "sessions" / f"{session}.json").exists())
+        self.assertFalse((state / "labels" / f"{digest}.json").exists())
+        self.assertFalse((state / "ids" / f"{session}.json").exists())
+        self.assertEqual([record["run_id"] for record in self.attempts()], [failed["run_id"]])
 
     def test_a_retry_of_a_requested_id_continues_its_journal(self):
         requested = str(uuid.uuid4())

@@ -730,6 +730,14 @@ fn dispatch_normal(mut args: Vec<String>) -> Result<i32> {
     } else {
         args
     };
+    // zerus-ucck P3a: a label named without a selection is resolved among
+    // its candidates here, on the computer that holds the sessions.
+    if SESSION_COMMANDS.contains(&command.as_str())
+        && (target.is_empty() || config.is_self(&target))
+        && state::session_id::selected().is_none()
+    {
+        resolve_label(args)?;
+    }
     match command.as_str() {
         "--expect-machine" => {
             if dry { return Err(Error::new(2,"Guarded calls do not support --dry-run")); }
@@ -1306,6 +1314,22 @@ fn session_id_flag(command: &str, args: &[String]) -> Result<Option<(usize, Stri
         return Err(Error::new(2, "--session-id needs a session ID (a lowercase UUID from hgs ls --json)"));
     }
     Ok(Some((at, id.to_owned())))
+}
+
+/// The label a session command names first, resolved (`state::resolve_label`):
+/// the ambiguity report goes to standard output under `--json`, and its text is
+/// the error, with exit status 5.
+fn resolve_label(args: &[String]) -> Result<()> {
+    let Some(name) = args.iter().find(|arg| !arg.starts_with('-')) else {
+        return Ok(());
+    };
+    local_sessions()?;
+    state::resolve_label(name).map_err(|(text, value)| {
+        if let Some(value) = value.filter(|_| args.iter().any(|arg| arg == "--json")) {
+            println!("{value}");
+        }
+        Error::new(state::session_id::AMBIGUOUS, text)
+    })
 }
 
 /// The arguments with `--session-id ID` replaced by the selected session's

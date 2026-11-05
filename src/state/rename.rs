@@ -83,7 +83,7 @@ pub(super) fn dispatch_scoped(args: &[String], dry: bool, scope: Option<&session
     let snapshot = live()?;
     if archive_id.is_none()
         && old != new
-        && (snapshot.contains_key(new) || record_path(new).exists())
+        && (snapshot.contains_key(new) || storage::label_taken(new))
     {
         return Err(format!(
             "{new}: a live or saved session already uses this name"
@@ -130,7 +130,10 @@ pub(super) fn dispatch_scoped(args: &[String], dry: bool, scope: Option<&session
             } else {
                 None
             };
-            let legacy = record.as_ref().is_some_and(|record| {
+            // A session in the ID layout is renamed in place (P3a): no route
+            // and no shadow at a label's path.
+            let in_place = record.as_ref().is_some_and(storage::in_id_layout);
+            let legacy = !in_place && record.as_ref().is_some_and(|record| {
                 record["run_identity_version"] != 1
                     && record["legacy_shadow"].is_null()
                     && record["supervisor"].is_object()
@@ -138,9 +141,12 @@ pub(super) fn dispatch_scoped(args: &[String], dry: bool, scope: Option<&session
             });
             let mut record = record;
             if let Some(record) = &mut record { processes::compact(record); }
-            let transaction = json!({"version":1,"old":old,"new":new,"record":record,
+            let mut transaction = json!({"version":1,"old":old,"new":new,"record":record,
                 "session_id":id,"legacy":legacy,
-                "source_routed":route_path(old).exists()});
+                "source_routed":!in_place && route_path(old).exists()});
+            if in_place {
+                transaction["layout"] = json!("id");
+            }
             let path = root()
                 .join("renames")
                 .join(format!("{}.json", uuid::Uuid::new_v4()));
@@ -157,7 +163,7 @@ pub(super) fn dispatch_scoped(args: &[String], dry: bool, scope: Option<&session
         }
     }
     if let Some(scope)=scope {
-        if archive_id.is_none() {scope.result_record(&read(new)?);}
+        if archive_id.is_none() {scope.result_record(&renamed(new)?);}
     } else {println!(
         "hgs: {}renamed {old} to {new}",
         if dry { "would have " } else { "" }
@@ -184,10 +190,57 @@ fn source_path(transaction: &Value) -> PathBuf {
     }
 }
 
+/// The record a rename just gave `new`: the selected session's, when the
+/// command selected one in the ID layout, else the label's.
+fn renamed(new: &str) -> Result<Value> {
+    match session_id::selected().and_then(|selection| storage::id_record_path(&selection.session_id)) {
+        Some(path) if path.is_file() => storage::read_id(&session_id::selected().unwrap().session_id),
+        _ => read(new),
+    }
+}
+
+/// A rename of a session in the ID layout (P3a): its record stays in
+/// `sessions/<id>.json`, and only that record and the label index change. The
+/// new label's entry is durable before the record takes it, and the old
+/// label's entry goes only after the record left it. Nothing is written at a
+/// label's path, so the first holder of either label is never touched.
+fn commit_in_place(transaction: &Value, old: &str, new: &str) -> Result<()> {
+    let record = &transaction["record"];
+    let id = string(record, "session_id").to_owned();
+    let path = storage::id_record_path(&id).ok_or("rename record has no session ID")?;
+    let mut current = storage::read_id(&id).or_else(|_| {
+        // Recovery after the record already took the new label.
+        load(&path)
+    })?;
+    if current["run_id"] != record["run_id"] || !storage::in_id_layout(&current) {
+        return Err("rename source run changed; refusing to replace its binding".into());
+    }
+    if string(&current, "name") != new {
+        labels::add(new, &id)?;
+        anchor(&mut current);
+        current["name"] = json!(new);
+        current["renamed_at"] = json!(now());
+        write(&mut current)?;
+    }
+    labels::remove(old, &id)?;
+    for path in json_files(&root().join("archives"))? {
+        let mut archived = load(&path)?;
+        if archived["run_id"] == current["run_id"] && string(&archived, "name") == old {
+            anchor(&mut archived);
+            archived["name"] = json!(new);
+            atomic_record(&path, &mut archived)?;
+        }
+    }
+    Ok(())
+}
+
 fn commit(transaction: &Value) -> Result<()> {
     let old = string(transaction, "old");
     let new = string(transaction, "new");
     validate(old, new)?;
+    if transaction["layout"] == "id" && transaction["record"].is_object() {
+        return commit_in_place(transaction, old, new);
+    }
     let Some(mut record) = transaction["record"]
         .as_object()
         .map(|_| transaction["record"].clone())

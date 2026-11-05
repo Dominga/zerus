@@ -212,6 +212,9 @@ pub(crate) struct Original {
     directory: File,
     filename: String,
     routed: bool,
+    /// The session ID the record was read by, for an executor in the ID
+    /// layout; it is read the same way on every later check.
+    by_id: Option<String>,
     binding: Binding,
     process: Process,
     supervisor: Process,
@@ -247,7 +250,14 @@ impl Original {
             "executor root unavailable"
         );
         let filename = format!("{:x}.json", Sha256::digest(name.as_bytes()));
-        let (record, routed) = read(&directory, &filename)?;
+        // An executor in the ID layout (zerus-ucck P3a) is read by its ID.
+        let (record, routed, by_id) = match read_in_id_layout(&directory, name, executor)? {
+            Some((record, id)) => (record, false, Some(id)),
+            None => {
+                let (record, routed) = read(&directory, &filename)?;
+                (record, routed, None)
+            }
+        };
         let binding = binding(&record)?;
         ensure!(
             binding.name == name
@@ -269,6 +279,7 @@ impl Original {
             directory,
             filename,
             routed,
+            by_id,
             binding,
             process,
             supervisor,
@@ -287,7 +298,7 @@ impl Original {
                 && now.ino() == original.ino(),
             "executor root replaced"
         );
-        let (record, routed) = read(&self.directory, &self.filename)?;
+        let (record, routed) = reread(&self.directory, &self.filename, self.by_id.as_deref())?;
         ensure!(
             routed == self.routed && binding(&record)? == self.binding,
             "executor binding changed"
@@ -356,20 +367,115 @@ fn environment(pid: u32) -> Result<Vec<u8>> {
     }
     Ok(rest.to_vec())
 }
-fn read(directory: &File, filename: &str) -> Result<(Value, bool)> {
-    fn optional(parent: &File, leaf: &str, directory: bool) -> Result<Option<File>> {
-        match open(parent, leaf, directory) {
-            Ok(file) => Ok(Some(file)),
-            Err(error)
-                if error
-                    .downcast_ref::<std::io::Error>()
-                    .is_some_and(|e| e.kind() == std::io::ErrorKind::NotFound) =>
-            {
-                Ok(None)
-            }
-            Err(error) => Err(error),
+/// An optional fixed entry under `parent`: None only when it is verifiably
+/// absent. Permission, links and every other error stay errors, so they can
+/// never select a different saved binding.
+fn optional(parent: &File, leaf: &str, directory: bool) -> Result<Option<File>> {
+    match open(parent, leaf, directory) {
+        Ok(file) => Ok(Some(file)),
+        Err(error)
+            if error
+                .downcast_ref::<std::io::Error>()
+                .is_some_and(|e| e.kind() == std::io::ErrorKind::NotFound) =>
+        {
+            Ok(None)
+        }
+        Err(error) => Err(error),
+    }
+}
+
+/// At most [`RECORD_BYTES`] of `file`, or an error.
+fn bounded(file: &mut File) -> Result<Vec<u8>> {
+    ensure!(
+        file.metadata()?.len() <= RECORD_BYTES,
+        "executor record too large"
+    );
+    let mut bytes = Vec::new();
+    file.take(RECORD_BYTES + 1).read_to_end(&mut bytes)?;
+    ensure!(
+        bytes.len() as u64 <= RECORD_BYTES,
+        "executor record too large"
+    );
+    Ok(bytes)
+}
+
+/// The executor's record in the ID layout (zerus-ucck P3a), found through
+/// its label's index entry `labels/<sha256(label)>.json`: the one listed
+/// session whose `sessions/<id>.json` binds this executor's run, conversation
+/// and session. None when the label has no entry or no listed session binds
+/// it, so the label's own path is read instead; two that bind it are an error.
+fn read_in_id_layout(
+    directory: &File,
+    name: &str,
+    executor: &Executor,
+) -> Result<Option<(Value, String)>> {
+    let Some(labels) = optional(directory, "labels", true)? else {
+        return Ok(None);
+    };
+    let entry = format!("{:x}.json", Sha256::digest(name.as_bytes()));
+    let Some(mut index) = optional(&labels, &entry, false)? else {
+        return Ok(None);
+    };
+    let index: Value = serde_json::from_slice(&bounded(&mut index)?)?;
+    ensure!(
+        index["version"] == 1 && index["label"] == name,
+        "executor label index does not match"
+    );
+    let mut found = None;
+    for id in index["ids"].as_array().into_iter().flatten() {
+        let Some(id) = id.as_str() else { continue };
+        let Some(record) = read_by_id(directory, id)? else {
+            continue;
+        };
+        let binds = binding(&record).is_ok_and(|binding| {
+            binding.name == name
+                && binding.run == executor.run_id
+                && binding.conversation == executor.conversation_id
+                && binding.session == executor.session_id
+        });
+        if binds {
+            ensure!(found.is_none(), "executor binds more than one session");
+            found = Some((record, id.to_owned()));
         }
     }
+    Ok(found)
+}
+
+/// The record at `sessions/<id>.json`, when there is one: it must say it is
+/// in the ID layout and carry that exact ID. None when it is absent.
+fn read_by_id(directory: &File, id: &str) -> Result<Option<Value>> {
+    if !crate::state::session_id::canonical(id) {
+        return Ok(None);
+    }
+    let Some(sessions) = optional(directory, "sessions", true)? else {
+        return Ok(None);
+    };
+    let Some(mut file) = optional(&sessions, &format!("{id}.json"), false)? else {
+        return Ok(None);
+    };
+    let bytes = bounded(&mut file)?;
+    let _: RecordFields = serde_json::from_slice(&bytes)?;
+    let record: Value = serde_json::from_slice(&bytes)?;
+    ensure!(
+        record["layout"] == "id" && record["session_id"] == id,
+        "executor record does not match its ID"
+    );
+    Ok(Some(record))
+}
+
+/// The executor's record, read where it was first found: by its session ID
+/// in the ID layout, where it must still be, or else at its label's path.
+fn reread(directory: &File, filename: &str, by_id: Option<&str>) -> Result<(Value, bool)> {
+    match by_id {
+        Some(id) => Ok((
+            read_by_id(directory, id)?.context("executor record left the ID layout")?,
+            false,
+        )),
+        None => read(directory, filename),
+    }
+}
+
+fn read(directory: &File, filename: &str) -> Result<(Value, bool)> {
     // Only verified absence selects the legacy namespace. Permission, links
     // and all other errors cannot silently select a different saved binding.
     let routed = optional(directory, "name_routes", true)?
@@ -382,16 +488,7 @@ fn read(directory: &File, filename: &str) -> Result<(Value, bool)> {
         None
     };
     let mut file = open(folder.as_ref().unwrap_or(directory), filename, false)?;
-    ensure!(
-        file.metadata()?.len() <= RECORD_BYTES,
-        "executor record too large"
-    );
-    let mut bytes = Vec::new();
-    (&mut file).take(RECORD_BYTES + 1).read_to_end(&mut bytes)?;
-    ensure!(
-        bytes.len() as u64 <= RECORD_BYTES,
-        "executor record too large"
-    );
+    let bytes = bounded(&mut file)?;
     let _: RecordFields = serde_json::from_slice(&bytes)?;
     Ok((serde_json::from_slice(&bytes)?, routed))
 }
@@ -712,5 +809,40 @@ mod tests {
             fs::write(f.path(), format!("{{\"{key}\":{value},{}", &bytes[1..])).unwrap();
             assert!(f.capture().is_err(), "{key}");
         }
+    }
+    /// zerus-ucck P3a: an executor in the ID layout is found through its
+    /// label's index entry and read by its session ID on every later check.
+    /// The label's first holder, at the label's own path, never stands in.
+    #[test]
+    fn an_executor_in_the_id_layout_is_read_by_its_id_throughout() {
+        let mut f = Fixture::new();
+        let mut first = f.record.clone();
+        first["session_id"] = json!(uuid::Uuid::new_v4().to_string());
+        first["run_id"] = json!(uuid::Uuid::new_v4().to_string());
+        fs::write(f.path(), serde_json::to_vec(&first).unwrap()).unwrap();
+        let private = |path: &Path, bytes: &[u8]| {
+            fs::write(path, bytes).unwrap();
+            fs::set_permissions(path, fs::Permissions::from_mode(0o600)).unwrap();
+        };
+        for folder in ["sessions", "labels"] {
+            fs::create_dir(f.root.path().join(folder)).unwrap();
+            fs::set_permissions(f.root.path().join(folder), fs::Permissions::from_mode(0o700)).unwrap();
+        }
+        let id = uuid::Uuid::new_v4().to_string();
+        let own = f.root.path().join("sessions").join(format!("{id}.json"));
+        let index = f.root.path().join("labels").join(f.path().file_name().unwrap());
+        f.record["session_id"] = json!(id);
+        private(&own, &serde_json::to_vec(&f.record).unwrap());
+        assert!(f.capture().is_err(), "the label's holder binds another run");
+        private(&index, json!({"version":1,"label":"private-task-executor","ids":[id]}).to_string().as_bytes());
+        assert!(f.capture().is_err(), "a file there without the layout is refused");
+        f.record["layout"] = json!("id");
+        private(&own, &serde_json::to_vec(&f.record).unwrap());
+        let original = f.capture().unwrap();
+        f.record["activity"] = json!("working");
+        private(&own, &serde_json::to_vec(&f.record).unwrap());
+        original.current(until()).unwrap();
+        fs::remove_file(&own).unwrap();
+        assert!(original.current(until()).is_err(), "never the label's first holder");
     }
 }

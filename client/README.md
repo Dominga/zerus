@@ -1150,6 +1150,23 @@ created or discarded ends its `new:` key. Memory is bounded: one view per key,
 feed over), and caps on teams, members, tasks, proposals and items. A replay
 runs no `hgs`, so `teams_follow` refuses there.
 
+Team actions (`team_action({call})`, `core/src/teams/action.rs`) are the calls
+the Qt Teams UI makes: approve (plan or phase), accept, reject with a comment,
+reply, reassign, take over, cancel, pause, resume, stop, archive,
+decide-proposal, use-last-reply and draft start/update/seen/create/discard.
+`call` is `{computer, team, team_name, action: {kind, ...}, confirmed,
+request_id}`; each call sends `"by": "human"` and a request id (new unless the
+owner sends an earlier one again). The answer's `outcome`:
+
+| Outcome | Meaning |
+| --- | --- |
+| `done` | hgs applied it; `receipt` is its answer |
+| `failed` | nothing was applied: hgs refused it (`detail` is its text) or the request could not be made |
+| `uncertain` | it may have been applied (a timeout, an abnormal end, no valid receipt). It is never sent again by itself; the views are read again, and only the owner may send it again with its `request_id`, which the store answers with the stored receipt |
+| `confirm` | not sent: stop, archive, cancel, take over, discard a draft and approvals need `confirmed`; `confirmation` has Qt's title, text and button |
+
+After `done` or `uncertain` the computer's followed views are read at once.
+
 ## Composer and Send
 
 The composer keeps the text protocol in Rust and the webview in sync: edits

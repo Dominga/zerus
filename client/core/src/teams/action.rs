@@ -1,0 +1,760 @@
+//! The team actions the Qt Teams UI offers, as guarded `hgs [@host] team <op>
+//! --json` calls (task #7).
+//!
+//! Every call carries a request identity (`request_id`, a canonical UUID) and
+//! `"by": "human"`, as Qt's `TeamController::act` sends them. The team store
+//! keeps the receipt of each request id, so a call sent again with the same id
+//! answers its stored receipt instead of applying the change twice.
+//!
+//! [`classify`] turns the call's exit into a [`TeamOutcome`]:
+//!
+//! - `done`: hgs took the change and gave a receipt;
+//! - `failed`: hgs refused it, or never ran; nothing was applied, and a new
+//!   attempt may get a new request id;
+//! - `uncertain`: the call timed out, ended abnormally or gave no valid
+//!   receipt, so the change may have been applied. It is never sent again by
+//!   itself: the view reads the team first, and only the owner may send it
+//!   again, with the same request id ([`TeamCall::request_id`]), which the
+//!   store answers with its receipt if it had applied it;
+//! - `confirm`: a destructive action (stop, archive, cancel, take over,
+//!   discard a draft) or an approval was asked for without `confirmed`;
+//!   nothing ran, and the confirmation names what the owner is asked.
+use crate::actions::{Exit, Invocation};
+use crate::fleet::valid_alias;
+use serde::{Deserialize, Serialize};
+use serde_json::{json, Map, Value};
+use std::path::Path;
+use std::time::Duration;
+
+/// The longest reason, comment or reply text an action sends.
+pub const TEXT_CHARS: usize = 20_000;
+/// The longest stderr a failure keeps.
+const DETAIL_CHARS: usize = 2000;
+
+/// One team action, as the webview asks for it (`{"kind": "...", ...}`).
+#[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
+#[serde(tag = "kind", rename_all = "snake_case")]
+pub enum TeamAction {
+    /// `approve` (the plan; `plan_mode` and `confirm_widening` as Qt's
+    /// approval adds them) or, with `phase`, `approve-phase` (`alongside`: hand
+    /// its tasks out while an earlier phase runs).
+    Approve {
+        #[serde(default)]
+        phase: Option<u64>,
+        #[serde(default)]
+        plan_mode: Option<String>,
+        #[serde(default)]
+        confirm_widening: bool,
+        #[serde(default)]
+        alongside: bool,
+    },
+    /// Accepts a task's report; `manual` marks it done without one.
+    Accept {
+        task: u64,
+        #[serde(default)]
+        reason: String,
+        #[serde(default)]
+        manual: bool,
+    },
+    /// Rejects a task's report with the comment the member gets; `hold` keeps
+    /// the task for a later release, `fresh` hands it to a free peer.
+    Reject {
+        task: u64,
+        reason: String,
+        #[serde(default)]
+        hold: bool,
+        #[serde(default)]
+        fresh: bool,
+    },
+    /// Answers a member's question to the lead (`hgs team reply`).
+    Reply {
+        question: String,
+        text: String,
+    },
+    /// Gives a task to another member.
+    Reassign {
+        task: u64,
+        member: String,
+        #[serde(default)]
+        subteam: Option<String>,
+    },
+    /// The owner does the task: its attempt is revoked.
+    TakeOver {
+        task: u64,
+    },
+    /// Cancels a task.
+    Cancel {
+        task: u64,
+        #[serde(default)]
+        subteam: Option<String>,
+    },
+    Pause,
+    Resume,
+    /// Cancels every open task and hands nothing out again.
+    Stop,
+    /// Hides a done or stopped team, keeping its history.
+    Archive,
+    /// Answers the lead's proposal card with its content hash; a question's
+    /// `answer` is an offered option or the owner's own words.
+    DecideProposal {
+        proposal: String,
+        accept: bool,
+        expected_hash: String,
+        #[serde(default)]
+        reason: String,
+        #[serde(default)]
+        answer: String,
+    },
+    /// Takes the member's last reply as the task's report.
+    UseLastReply {
+        task: u64,
+        #[serde(default)]
+        attempt: String,
+    },
+    /// Starts a draft team (no team id yet): its folder, name, lead and
+    /// template as New team's Start planning sends them.
+    DraftStart {
+        folder: String,
+        #[serde(default)]
+        name: String,
+        lead: Value,
+        #[serde(default)]
+        project: String,
+        #[serde(default)]
+        project_id: String,
+        #[serde(default)]
+        template: String,
+    },
+    /// The owner's edit of a draft against the revision it read.
+    DraftUpdate {
+        revision: u64,
+        set: Value,
+    },
+    /// Marks fields the lead changed as seen.
+    DraftSeen {
+        fields: Vec<String>,
+    },
+    /// Creates the team from the draft.
+    DraftCreate {
+        #[serde(default)]
+        approve: bool,
+        #[serde(default)]
+        confirm_widening: bool,
+    },
+    /// Discards the draft; `stop_lead` stops the lead's session too.
+    DraftDiscard {
+        #[serde(default)]
+        stop_lead: bool,
+        #[serde(default)]
+        reason: String,
+    },
+}
+
+/// What the owner is asked before a destructive action or an approval.
+#[derive(Clone, Debug, PartialEq, Serialize)]
+pub struct Confirmation {
+    /// Qt's dialog name, for parity checks.
+    pub name: String,
+    pub title: String,
+    pub text: String,
+    /// The confirming button's text.
+    pub action: String,
+}
+
+/// One call from the view: the computer ("" is this one), the team (empty
+/// only for a draft start), its name for the confirmation text, the action,
+/// whether the owner confirmed it, and the request id of an earlier attempt
+/// the owner sends again (None: a new request).
+#[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
+pub struct TeamCall {
+    #[serde(default)]
+    pub computer: String,
+    #[serde(default)]
+    pub team: String,
+    #[serde(default)]
+    pub team_name: String,
+    pub action: TeamAction,
+    #[serde(default)]
+    pub confirmed: bool,
+    #[serde(default)]
+    pub request_id: Option<String>,
+}
+
+/// How a call ended for the view.
+#[derive(Clone, Debug, PartialEq, Serialize)]
+#[serde(tag = "outcome", rename_all = "snake_case")]
+pub enum TeamOutcome {
+    /// hgs applied it; `receipt` is its answer.
+    Done { receipt: Value, request_id: String },
+    /// Nothing was applied: hgs refused it (its words) or the call never ran.
+    Failed { detail: String, request_id: String },
+    /// It may have been applied. Never sent again by itself: read the team,
+    /// then the owner may send it again with this `request_id`.
+    Uncertain { detail: String, request_id: String },
+    /// Not sent: the owner confirms first.
+    Confirm { confirmation: Confirmation },
+}
+
+impl TeamOutcome {
+    pub fn request_id(&self) -> Option<&str> {
+        match self {
+            Self::Done { request_id, .. }
+            | Self::Failed { request_id, .. }
+            | Self::Uncertain { request_id, .. } => Some(request_id),
+            Self::Confirm { .. } => None,
+        }
+    }
+}
+
+/// A canonical UUID as the team store requires a request id: 8-4-4-4-12
+/// lowercase hexadecimal digits.
+pub fn canonical_uuid(id: &str) -> bool {
+    id.len() == 36
+        && id.bytes().enumerate().all(|(index, byte)| match index {
+            8 | 13 | 18 | 23 => byte == b'-',
+            _ => byte.is_ascii_digit() || (b'a'..=b'f').contains(&byte),
+        })
+}
+
+/// A new request identity.
+pub fn new_request_id() -> String {
+    uuid::Uuid::new_v4().to_string()
+}
+
+fn plain(text: &str, what: &str, chars: usize) -> Result<(), String> {
+    if text.chars().count() > chars {
+        return Err(format!("{what} is too long."));
+    }
+    if text
+        .chars()
+        .any(|c| c.is_control() && c != '\n' && c != '\t')
+    {
+        return Err(format!("{what} contains control characters."));
+    }
+    Ok(())
+}
+
+fn word(text: &str, what: &str) -> Result<(), String> {
+    if text.is_empty()
+        || text.len() > 128
+        || text.starts_with('-')
+        || text.chars().any(|c| c.is_control() || c.is_whitespace())
+    {
+        return Err(format!("Not a {what}."));
+    }
+    Ok(())
+}
+
+fn task(task: u64) -> Result<(), String> {
+    if task == 0 || task > u64::from(u32::MAX) {
+        return Err("Not a task number.".into());
+    }
+    Ok(())
+}
+
+impl TeamAction {
+    /// The operation: `hgs team <op> --json`.
+    pub fn op(&self) -> &'static str {
+        match self {
+            Self::Approve { phase: None, .. } => "approve",
+            Self::Approve { phase: Some(_), .. } => "approve-phase",
+            Self::Accept { .. } => "accept",
+            Self::Reject { .. } => "reject",
+            Self::Reply { .. } => "reply",
+            Self::Reassign { .. } => "reassign",
+            Self::TakeOver { .. } => "take-over",
+            Self::Cancel { .. } => "cancel",
+            Self::Pause => "pause",
+            Self::Resume => "resume",
+            Self::Stop => "stop",
+            Self::Archive => "archive",
+            Self::DecideProposal { .. } => "decide-proposal",
+            Self::UseLastReply { .. } => "use-last-reply",
+            Self::DraftStart { .. }
+            | Self::DraftUpdate { .. }
+            | Self::DraftSeen { .. }
+            | Self::DraftCreate { .. }
+            | Self::DraftDiscard { .. } => "draft",
+        }
+    }
+
+    /// Whether the call names an existing team (all but a draft start).
+    pub fn names_team(&self) -> bool {
+        !matches!(self, Self::DraftStart { .. })
+    }
+
+    /// Checks what the action sends before anything runs.
+    pub fn check(&self) -> Result<(), String> {
+        match self {
+            Self::Approve {
+                phase, plan_mode, ..
+            } => {
+                if phase.is_some_and(|phase| phase == 0) {
+                    return Err("Not a phase number.".into());
+                }
+                if plan_mode
+                    .as_deref()
+                    .is_some_and(|mode| !matches!(mode, "standard" | "free"))
+                {
+                    return Err("A plan mode is standard or free.".into());
+                }
+                Ok(())
+            }
+            Self::Accept {
+                task: id, reason, ..
+            } => task(*id).and(plain(reason, "A reason", TEXT_CHARS)),
+            Self::Reject {
+                task: id, reason, ..
+            } => {
+                task(*id)?;
+                if reason.trim().is_empty() {
+                    return Err("A rejection needs a comment for the member.".into());
+                }
+                plain(reason, "A comment", TEXT_CHARS)
+            }
+            Self::Reply { question, text } => {
+                word(question, "question id")?;
+                if text.trim().is_empty() {
+                    return Err("Write the answer.".into());
+                }
+                plain(text, "An answer", TEXT_CHARS)
+            }
+            Self::Reassign {
+                task: id,
+                member,
+                subteam,
+            } => {
+                task(*id)?;
+                word(member, "member id")?;
+                subteam
+                    .as_deref()
+                    .map_or(Ok(()), |choice| word(choice, "sub-team choice"))
+            }
+            Self::TakeOver { task: id } | Self::UseLastReply { task: id, .. } => task(*id),
+            Self::Cancel { task: id, subteam } => {
+                task(*id)?;
+                subteam
+                    .as_deref()
+                    .map_or(Ok(()), |choice| word(choice, "sub-team choice"))
+            }
+            Self::Pause | Self::Resume | Self::Stop | Self::Archive => Ok(()),
+            Self::DecideProposal {
+                proposal,
+                expected_hash,
+                reason,
+                answer,
+                ..
+            } => {
+                word(proposal, "proposal id")?;
+                word(expected_hash, "proposal hash")?;
+                plain(reason, "A reason", 2000)?;
+                plain(answer, "An answer", 4000)
+            }
+            Self::DraftStart {
+                folder, name, lead, ..
+            } => {
+                if folder.trim().is_empty() {
+                    return Err("Choose the team's folder.".into());
+                }
+                plain(folder, "A folder", 4096)?;
+                plain(name, "A name", 80)?;
+                if !lead.is_object() {
+                    return Err("A draft names its lead.".into());
+                }
+                Ok(())
+            }
+            Self::DraftUpdate { set, .. } => {
+                if !set.as_object().is_some_and(|fields| !fields.is_empty()) {
+                    return Err("A draft update names the fields it sets.".into());
+                }
+                Ok(())
+            }
+            Self::DraftSeen { fields } => {
+                if fields.is_empty() || fields.len() > 32 {
+                    return Err("Name the fields seen.".into());
+                }
+                fields
+                    .iter()
+                    .try_for_each(|field| word(field, "draft field"))
+            }
+            Self::DraftCreate { .. } => Ok(()),
+            Self::DraftDiscard { reason, .. } => plain(reason, "A reason", 2000),
+        }
+    }
+
+    /// The request's own fields (without `team`, `by` and `request_id`).
+    pub fn input(&self) -> Map<String, Value> {
+        let mut input = Map::new();
+        let mut put = |key: &str, value: Value| {
+            input.insert(key.to_owned(), value);
+        };
+        match self {
+            Self::Approve {
+                phase,
+                plan_mode,
+                confirm_widening,
+                alongside,
+            } => {
+                match phase {
+                    Some(phase) => {
+                        put("phase", json!(phase));
+                        if *alongside {
+                            put("alongside", json!(true));
+                        }
+                    }
+                    None => {
+                        if let Some(mode) = plan_mode {
+                            put("plan_mode", json!(mode));
+                        }
+                    }
+                }
+                if *confirm_widening {
+                    put("confirm_widening", json!(true));
+                }
+            }
+            Self::Accept {
+                task,
+                reason,
+                manual,
+            } => {
+                put("task", json!(task));
+                if !reason.is_empty() {
+                    put("reason", json!(reason));
+                }
+                if *manual {
+                    put("manual", json!(true));
+                }
+            }
+            Self::Reject {
+                task,
+                reason,
+                hold,
+                fresh,
+            } => {
+                put("task", json!(task));
+                put("reason", json!(reason));
+                if *hold {
+                    put("hold", json!(true));
+                }
+                if *fresh {
+                    put("fresh", json!(true));
+                }
+            }
+            Self::Reply { question, text } => {
+                put("question", json!(question));
+                put("text", json!(text));
+            }
+            Self::Reassign {
+                task,
+                member,
+                subteam,
+            } => {
+                put("task", json!(task));
+                put("member", json!(member));
+                if let Some(choice) = subteam {
+                    put("subteam", json!(choice));
+                }
+            }
+            Self::TakeOver { task } => put("task", json!(task)),
+            Self::Cancel { task, subteam } => {
+                put("task", json!(task));
+                if let Some(choice) = subteam {
+                    put("subteam", json!(choice));
+                }
+            }
+            Self::Pause | Self::Resume | Self::Stop | Self::Archive => {}
+            Self::DecideProposal {
+                proposal,
+                accept,
+                expected_hash,
+                reason,
+                answer,
+            } => {
+                put("proposal", json!(proposal));
+                put("accept", json!(accept));
+                put("expected_hash", json!(expected_hash));
+                if !reason.is_empty() {
+                    put("reason", json!(reason));
+                }
+                if !answer.is_empty() {
+                    put("answer", json!(answer));
+                }
+            }
+            Self::UseLastReply { task, attempt } => {
+                put("task", json!(task));
+                if !attempt.is_empty() {
+                    put("attempt", json!(attempt));
+                }
+            }
+            Self::DraftStart {
+                folder,
+                name,
+                lead,
+                project,
+                project_id,
+                template,
+            } => {
+                put("action", json!("start"));
+                put("folder", json!(folder));
+                put("lead", lead.clone());
+                for (key, value) in [
+                    ("name", name),
+                    ("project", project),
+                    ("project_id", project_id),
+                    ("template", template),
+                ] {
+                    if !value.is_empty() {
+                        put(key, json!(value));
+                    }
+                }
+            }
+            Self::DraftUpdate { revision, set } => {
+                put("action", json!("update"));
+                put("revision", json!(revision));
+                put("set", set.clone());
+            }
+            Self::DraftSeen { fields } => {
+                put("action", json!("seen"));
+                put("fields", json!(fields));
+            }
+            Self::DraftCreate {
+                approve,
+                confirm_widening,
+            } => {
+                put("action", json!("create"));
+                if *approve {
+                    put("approve", json!(true));
+                }
+                if *confirm_widening {
+                    put("confirm_widening", json!(true));
+                }
+            }
+            Self::DraftDiscard { stop_lead, reason } => {
+                put("action", json!("discard"));
+                put("stop_lead", json!(stop_lead));
+                if !reason.is_empty() {
+                    put("reason", json!(reason));
+                }
+            }
+        }
+        input
+    }
+
+    /// What the owner confirms first, Qt's dialogs' words: destructive
+    /// actions and approvals. None: the action runs at once.
+    pub fn confirmation(&self, team_name: &str) -> Option<Confirmation> {
+        let name = if team_name.trim().is_empty() {
+            "this team"
+        } else {
+            team_name.trim()
+        };
+        let ask = |dialog: &str, title: &str, text: String, action: &str| Confirmation {
+            name: dialog.to_owned(),
+            title: title.to_owned(),
+            text,
+            action: action.to_owned(),
+        };
+        match self {
+            Self::Stop => Some(ask(
+                "teamStopConfirm",
+                "Stop team?",
+                format!(
+                    "Stop {name}? Every open task is cancelled and no task is handed out again. Member sessions keep running; their current turns finish."
+                ),
+                "Stop team",
+            )),
+            Self::Archive => Some(ask(
+                "teamArchiveConfirm",
+                "Archive team?",
+                format!("Archive {name}? Its history, tasks and reports stay; the team leaves the list of teams."),
+                "Archive",
+            )),
+            Self::Cancel { .. } => Some(ask(
+                "teamCancelTaskConfirm",
+                "Cancel task?",
+                "Cancel this task? Tasks that depend on it hard never become ready.".to_owned(),
+                "Cancel task",
+            )),
+            Self::TakeOver { .. } => Some(ask(
+                "teamTakeOverConfirm",
+                "Take over task?",
+                "You do this task yourself; its current attempt is revoked and no member gets it.".to_owned(),
+                "Take over",
+            )),
+            Self::DraftDiscard { stop_lead, .. } => Some(ask(
+                "teamDiscardDraftConfirm",
+                "Discard draft",
+                if *stop_lead {
+                    format!("Discard the draft \u{201c}{name}\u{201d}? Nothing of it is created, and the lead's session stops.")
+                } else {
+                    format!("Discard the draft \u{201c}{name}\u{201d}? Nothing of it is created.")
+                },
+                "Discard draft",
+            )),
+            Self::Approve { phase: Some(phase), .. } => Some(ask(
+                "teamApprovePhaseConfirm",
+                "Approve phase?",
+                format!("Hand phase {phase}'s tasks to the members?"),
+                "Approve phase",
+            )),
+            Self::Approve { phase: None, confirm_widening, .. } => Some(if *confirm_widening {
+                ask(
+                    "teamWideningConfirm",
+                    "Widen permissions?",
+                    format!("Approve the plan of {name}? It widens the permissions of its members beyond the template; approve it only if they need it."),
+                    "Confirm and approve",
+                )
+            } else {
+                ask(
+                    "teamApproveConfirm",
+                    "Approve plan and run?",
+                    format!("Approve the plan of {name} and run it? Ready tasks are handed out at once."),
+                    "Approve and run",
+                )
+            }),
+            _ => None,
+        }
+    }
+}
+
+fn outcome_failed(detail: impl Into<String>, request_id: &str) -> TeamOutcome {
+    TeamOutcome::Failed {
+        detail: detail.into(),
+        request_id: request_id.to_owned(),
+    }
+}
+
+fn outcome_uncertain(detail: impl Into<String>, request_id: &str) -> TeamOutcome {
+    TeamOutcome::Uncertain {
+        detail: detail.into(),
+        request_id: request_id.to_owned(),
+    }
+}
+
+/// The checked call: its command and its request id. A call that is not
+/// sent gives the outcome instead: `confirm` without the owner's
+/// confirmation, `failed` for a request that cannot be made.
+pub fn prepare(call: &TeamCall) -> Result<(Invocation, String), TeamOutcome> {
+    let request_id = match &call.request_id {
+        Some(id) => id.clone(),
+        None => new_request_id(),
+    };
+    if !canonical_uuid(&request_id) {
+        return Err(outcome_failed("Not a request id.", &request_id));
+    }
+    if !call.computer.is_empty() && !valid_alias(&call.computer) {
+        return Err(outcome_failed("Not a computer alias.", &request_id));
+    }
+    if call.action.names_team() && !super::read::valid_team(&call.team) {
+        return Err(outcome_failed("Not a team id.", &request_id));
+    }
+    if let Err(detail) = call.action.check() {
+        return Err(outcome_failed(detail, &request_id));
+    }
+    if !call.confirmed {
+        if let Some(confirmation) = call.action.confirmation(&call.team_name) {
+            return Err(TeamOutcome::Confirm { confirmation });
+        }
+    }
+    let mut input = call.action.input();
+    if call.action.names_team() {
+        input.insert("team".into(), json!(call.team));
+    }
+    input.insert("by".into(), json!("human"));
+    input.insert("request_id".into(), json!(request_id));
+    let mut args: Vec<String> = (!call.computer.is_empty())
+        .then(|| format!("@{}", call.computer))
+        .into_iter()
+        .collect();
+    args.extend([
+        "team".to_owned(),
+        call.action.op().to_owned(),
+        "--json".to_owned(),
+    ]);
+    let invocation = Invocation {
+        args,
+        stdin: Some(Value::Object(input).to_string().into_bytes()),
+        // Qt's requestTeam: 15 s here, 45 s on a peer.
+        timeout: Duration::from_secs(if call.computer.is_empty() { 15 } else { 45 }),
+        request_id: Some(request_id.clone()),
+    };
+    Ok((invocation, request_id))
+}
+
+fn stderr_text(stderr: &str) -> Option<String> {
+    let text: String = stderr.trim().chars().take(DETAIL_CHARS).collect();
+    (!text.is_empty()).then_some(text)
+}
+
+const READ_FIRST: &str = "Read the team before sending it again.";
+
+/// The outcome of a call's exit. Only a refusal (an exit code) or a call that
+/// never started is `failed`; everything that may have reached the store
+/// without a valid receipt is `uncertain`.
+pub fn classify(action: &TeamAction, request_id: &str, exit: Exit) -> TeamOutcome {
+    match exit {
+        Exit::StartFailed(error) => {
+            outcome_failed(format!("hgs did not start: {error}"), request_id)
+        }
+        Exit::TimedOut => outcome_uncertain(
+            format!("hgs did not answer in time; the change may have been made. {READ_FIRST}"),
+            request_id,
+        ),
+        Exit::WriteFailed => outcome_uncertain(
+            format!(
+                "The request did not reach hgs whole; the change may have been made. {READ_FIRST}"
+            ),
+            request_id,
+        ),
+        Exit::Abnormal { stderr } => outcome_uncertain(
+            stderr_text(&stderr).map_or_else(
+                || format!("hgs ended abnormally. {READ_FIRST}"),
+                |text| format!("{text} {READ_FIRST}"),
+            ),
+            request_id,
+        ),
+        Exit::Code { code, stderr, .. } if code != 0 => outcome_failed(
+            stderr_text(&stderr).unwrap_or_else(|| format!("hgs exited with code {code}")),
+            request_id,
+        ),
+        Exit::Code { stdout, .. } => {
+            let receipt: Value = serde_json::from_slice(&stdout).unwrap_or(Value::Null);
+            if !receipt.is_object() {
+                return outcome_uncertain(format!("hgs gave no receipt. {READ_FIRST}"), request_id);
+            }
+            let matches = match action {
+                // The new draft's id is the receipt.
+                TeamAction::DraftStart { .. } => receipt["team"]
+                    .as_str()
+                    .is_some_and(|id| super::read::valid_team(id)),
+                // The receipt names the proposal it decided (or its earlier
+                // decision, on a replay).
+                TeamAction::DecideProposal { proposal, .. } => receipt
+                    .get("proposal")
+                    .is_none_or(|id| id.as_str() == Some(proposal.as_str())),
+                _ => true,
+            };
+            if matches {
+                TeamOutcome::Done {
+                    receipt,
+                    request_id: request_id.to_owned(),
+                }
+            } else {
+                outcome_uncertain(
+                    format!("hgs's receipt does not match the request. {READ_FIRST}"),
+                    request_id,
+                )
+            }
+        }
+    }
+}
+
+/// Runs one call through `hgs`: blocks for at most its timeout plus a few
+/// seconds; callers run it off the UI thread. Never sends it twice.
+pub fn run(hgs: &Path, call: &TeamCall) -> TeamOutcome {
+    let (invocation, request_id) = match prepare(call) {
+        Ok(prepared) => prepared,
+        Err(outcome) => return outcome,
+    };
+    classify(&call.action, &request_id, crate::run::run(hgs, &invocation))
+}

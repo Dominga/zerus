@@ -120,7 +120,7 @@ pub use state::{ActivityState, CatalogState};
 pub use stream::{StreamEvent, StreamHandle, Timing};
 pub use swarm::grouping::{GroupOut, GroupingOut, HeaderOut, SyncView};
 pub use tasks::{TasksState, TasksUpdate};
-pub use teams::{TeamsFollow, TeamsPoller, TeamsUpdate};
+pub use teams::{TeamAction, TeamCall, TeamOutcome, TeamsFollow, TeamsPoller, TeamsUpdate};
 pub use view::ViewRow;
 pub use zerus_watch_protocol::SessionRef;
 

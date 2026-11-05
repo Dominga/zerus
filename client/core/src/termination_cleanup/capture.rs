@@ -70,10 +70,11 @@ impl Capture {
         {
             return Err(STATE_CHANGED.into());
         }
+        // Live inspections expose runtime_state/agent, not catalog state/cmd.
         if !super::removal_offered(
-            text(value, "state") == "running",
+            text(value, "runtime_state") == "live",
             value["tracked"] == true,
-            text(value, "cmd"),
+            text(value, "agent"),
             false,
             value["git_worktree"] == true,
         ) {
@@ -177,7 +178,7 @@ mod tests {
         }
     }
     fn inspection() -> Value {
-        json!({"name":"codex/example/review","run_id":"run-1","conversation_id":"conversation-1","tracked":true,"state":"running","cmd":"codex","git_worktree":true,"git_root":"/srv/example/work-1","git_common_dir":"/srv/example/main/.git","worktree_owner_id":"launch-owner-1"})
+        json!({"name":"codex/example/review","run_id":"run-1","conversation_id":"conversation-1","tracked":true,"runtime_state":"live","agent":"codex","git_worktree":true,"git_root":"/srv/example/work-1","git_common_dir":"/srv/example/main/.git","worktree_owner_id":"launch-owner-1"})
     }
     fn capture() -> Capture {
         Capture::from_inspection(&target(), "example-peer", &inspection())
@@ -192,6 +193,105 @@ mod tests {
             code: 0,
             stdout: serde_json::to_vec(&value).unwrap(),
             stderr: String::new(),
+        }
+    }
+    // Recorded from the installed 7a60dcee helper's actual
+    // `inspect NAME --after 0 --skip-processes` reply for a no-credential
+    // synthetic Mac session. Paths, identities and times are redacted; the
+    // complete key set and value types are preserved (no row state/cmd).
+    fn recorded_inspection() -> Value {
+        serde_json::from_str(include_str!(
+            "../../tests/fixtures/termination-inspect-live.json"
+        ))
+        .unwrap()
+    }
+    fn recorded_target(value: &Value) -> Target {
+        Target {
+            computer: "example-peer".into(),
+            name: text(value, "name").into(),
+            run_id: text(value, "run_id").into(),
+            conversation_id: text(value, "conversation_id").into(),
+        }
+    }
+    #[test]
+    fn recorded_cli_inspection_offers_only_the_original_live_worktree() {
+        let value = recorded_inspection();
+        assert_eq!(value.as_object().unwrap().len(), 100);
+        assert!(value.get("state").is_none());
+        assert!(value.get("cmd").is_none());
+        let target = recorded_target(&value);
+        let capture = Capture::from_inspection(&target, "example-peer", &value)
+            .unwrap()
+            .expect("the real live inspection must offer Remove");
+        assert_eq!(capture.target, target);
+        assert_eq!(capture.root, "/srv/example/work-1");
+        assert_eq!(capture.common_dir, "/srv/example/main/.git");
+        assert_eq!(capture.owner_id, text(&value, "worktree_owner_id"));
+        assert!(capture.recheck(&value));
+    }
+    #[test]
+    fn recorded_cli_near_miss_cannot_borrow_a_running_catalog_row() {
+        let mut stopped = recorded_inspection();
+        let target = recorded_target(&stopped);
+        stopped["runtime_state"] = json!("stopped");
+        stopped["state"] = json!("running");
+        stopped["cmd"] = json!("codex");
+        assert!(Capture::from_inspection(&target, "example-peer", &stopped)
+            .unwrap()
+            .is_none());
+    }
+    #[test]
+    fn recorded_cli_missing_or_invalid_admission_fields_never_offer_remove() {
+        let original = recorded_inspection();
+        let target = recorded_target(&original);
+        for field in ["tracked", "runtime_state", "agent", "git_worktree"] {
+            for replacement in [None, Some(Value::Null), Some(json!([]))] {
+                let mut value = original.clone();
+                match replacement {
+                    Some(replacement) => value[field] = replacement,
+                    None => {
+                        value.as_object_mut().unwrap().remove(field);
+                    }
+                }
+                // A catalog-shaped decoy cannot fill an absent inspection field.
+                value["state"] = json!("running");
+                value["cmd"] = json!("codex");
+                assert!(
+                    Capture::from_inspection(&target, "example-peer", &value)
+                        .unwrap()
+                        .is_none(),
+                    "{field}"
+                );
+            }
+        }
+        for (field, replacement) in [
+            ("tracked", json!(false)),
+            ("tracked", json!("true")),
+            ("runtime_state", json!("stopped")),
+            ("runtime_state", json!("unknown")),
+            ("agent", json!("sh")),
+            ("agent", json!("opencode")),
+            ("git_worktree", json!(false)),
+            ("git_worktree", json!("true")),
+        ] {
+            let mut value = original.clone();
+            value[field] = replacement;
+            assert!(Capture::from_inspection(&target, "example-peer", &value)
+                .unwrap()
+                .is_none());
+        }
+        let capture = Capture::from_inspection(&target, "example-peer", &original)
+            .unwrap()
+            .unwrap();
+        for field in ["name", "run_id", "conversation_id", "worktree_owner_id"] {
+            let mut changed = original.clone();
+            changed[field] = json!("another");
+            assert!(!capture.recheck(&changed), "{field}");
+        }
+        for field in ["git_root", "git_common_dir"] {
+            let mut missing = original.clone();
+            missing.as_object_mut().unwrap().remove(field);
+            assert!(Capture::from_inspection(&target, "example-peer", &missing).is_err());
         }
     }
     #[test]
@@ -224,8 +324,8 @@ mod tests {
         assert!(legacy.entry(None).unwrap().expected_owner_id.is_empty());
         for (field, value) in [
             ("tracked", json!(false)),
-            ("state", json!("paused")),
-            ("cmd", json!("opencode")),
+            ("runtime_state", json!("stopped")),
+            ("agent", json!("opencode")),
             ("git_worktree", json!(false)),
         ] {
             let mut unsupported = inspection();

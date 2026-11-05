@@ -75,6 +75,9 @@ ready review PR, not permission to merge or deploy. **#906b remains draft until
 Windows PC (va-kids) acceptance** and then removes the retained `tray/` tree and
 Windows Qt pieces. Windows PC testing does not gate #906a. Use the existing
 candidate installation, never either deletion branch, for acceptance.
+**Owner decision (2026-11-05): Qt rollback is waived on every platform** ("откат
+на Qt не нужен совсем"). No Qt rollback or Qt round trip is prepared or run; the
+rows below that relied on the round trip were re-planned by the coordinator.
 
 For each platform, record the exact Next and last-Qt release/source, installed
 `--build-info`, package/artifact identity and installer route in the acceptance
@@ -164,7 +167,7 @@ acceptance. Do not install a test binary by hand.
 | [ ] Terminal | Open an existing session and a folder terminal with spaces/non-ASCII paths; check exact argv, resize, paste and reattach after client exit. Never create a worktree by opening a dialog. | inventory “Terminal and process lifetime”; G7 `.66.2`, native terminal contracts |
 | [ ] Voice/video | Explicitly choose microphone/camera; record, preview, cancel and transcribe a short synthetic message. Hide/Escape stops capture, private draft survives exit, and an uncertain delivery is not resent. | G2 `.66.4.5`, inventory “Voice, video and speech providers” |
 | [ ] UI/durable parity | Exercise each inventory responsibility with its target owner: bounded Activity/archive/search/tasks pages, organization writes, creation/recovery, read marks and manual questions. Use the [installed client cutover runbook](#installed-client-cutover-on-linux-and-macos) for service and intent cases. Approval opt-in starts off; generic/agent callers cannot enable it. | G1–G4/G7; [#884](https://github.com/ufna/zerus/pull/884), `.66.3.32`, `.66.3.35`, `.66.3.38` |
-| WAIVED — waived by owner 2026-11-05 | No Qt rollback or round trip is required; no further preparation or execution. | `.66.3.31`, `tray/update-installed.py`; desktop-u |
+| WAIVED — owner 2026-11-05 | Qt rollback is waived by owner 2026-11-05 ("откат на Qt не нужен совсем"): no Qt rollback or Qt round trip is prepared or run on any platform. | `.66.3.31`, `tray/update-installed.py`; desktop-u |
 
 Linux notification acceptance also requires the root service attachment
 (`.66.3.30.11.2`, desktop-u) and activation/click handoff to the service-mode UI
@@ -633,7 +636,7 @@ existing privacy identity, signature, installed path and one verified rollback c
 | [ ] Terminal | Open exact session/folder in the configured Terminal path, with quotes/spaces/non-ASCII; accept only the expected Apple Events consent. Check resize/paste and session survival after UI exit. | inventory Mac terminal rows; native terminal contracts |
 | [ ] Voice/video | Exercise real microphone/camera consent, short preview/transcription, cancel/hide and exit recovery. Check public privacy identity; never import an old device ID or replay uncertain delivery. | G2 `.66.4.5`, inventory media/privacy rows |
 | [ ] UI/durable parity | Apply the same complete inventory responsibility walk as Linux, including bounded details/tasks, archived reads, creation recovery and default-off approvals with authenticated frontend-only enablement. Use the [installed client cutover runbook](#installed-client-cutover-on-linux-and-macos). | G1–G4/G7, `.66.3.31/.32/.35/.38` |
-| WAIVED — waived by owner 2026-11-05 | No Qt rollback or round trip is required; no further preparation or execution. | `.66.3.31`, updater rollback and defaults-snapshot checks |
+| WAIVED — owner 2026-11-05 | Qt rollback is waived by owner 2026-11-05: no Qt rollback or Qt round trip is prepared or run on any platform. | `.66.3.31`, updater rollback and defaults-snapshot checks |
 
 ### Recorded Mac native-host subchecks — source `f1833dec`
 
@@ -880,8 +883,8 @@ the acceptance mode switch on the owner's behalf. Default install is passive;
 normal refreshes preserve selection. Mac uses its own maintained route below;
 Windows switching remains separate work. Linux results do not qualify them.
 
-For Linux passive rollback, use `install --mode passive --json` with the same
-selections **before** the GUI rollback. It durably retains one revoke UUID and
+For an admitted Linux passive restoration, use `install --mode passive --json`
+with the same selections. It durably retains one revoke UUID and
 requires the original checkpointed drain before changing/restarting only
 `hgs-desktop.service`. Record `last_revoke_request_id` on success. On uncertainty,
 `status.transition.request_id` is the original ID; inspect it and resume only
@@ -919,8 +922,9 @@ revoke, no Aqua or a custom plist refuses; do not repair it by changing files or
 starting another service. Only the owned desktop LaunchAgent reloads; neither
 GUI nor agents restart. Normal GUI installs and CLI-only refresh preserve mode.
 
-Before GUI rollback, use this helper with the same selections and `--mode
-passive --json`. It retains one original revoke UUID and requires its exact
+For an admitted Mac passive restoration, use this helper with the same
+selections and `--mode passive --json`. It retains one original revoke UUID and
+requires its exact
 checkpointed runtime/resource drain and the original native hold through
 bootout/rewrite/bootstrap and passive readiness. Require the matching release,
 actual child exit and both pipe EOFs before transition completion. Record
@@ -965,13 +969,32 @@ an unbounded full listing or the GUI's local overlay.
 | Authenticated enable and confirmation | Record the main account's actual policy; verify default OFF only if that default state is present, otherwise leave that subcase pending without resetting consent. Turn ON only through Settings' existing confirmation; cancel once, then explicitly confirm with no unrelated/private questions eligible. Use one harmless synthetic one-time question to verify the intended flow and its journal, then turn OFF. | Cancel changes nothing. Confirm yields the native authenticated commit for the original logical UUID; ENABLE needs actual runtime/current writer readiness. Generic/agent toggle requests remain refused and do not change policy. No JSON role/confirmed flag, helper wrapper or direct audit Begin/Finish is an alternative. Journal paging/detail stays on the same configuration/epoch/journal/high-water. End with a confirmed durable OFF. |
 | OFF while degraded | With confirmed ON and no pending intent, use the admitted owned service lifecycle to reach IPC-connected, stored `automatic_approvals:true`, approvals `ready:false` (for example its documented passive state after restart). Do not revoke/reset policy to manufacture the case. Click OFF. | OFF is available without another confirmation and commits through the authenticated writable route despite degraded/absent workers. ON remains disabled until ready and still requires confirmation. If that state cannot be reached through the admitted source route, leave this case blocked. |
 | Uncertain result, lookup, no replay | During a controlled owned-service transition on the main account, submit one Approvals or Updates/Recovery configuration change through its existing UI and retain its original ID. Once the actual UI reports unconfirmed, use **Check result** while transport is unavailable, then after the service returns; check twice. For maintenance, retain the full update-and-recovery configuration; do not submit a second subsystem change while it is pending. | Unavailable lookup stays pending; the logical ID and operation do not change, and no new frontend mutation is sent. A durable receipt settles the original result. Only a later exact negative lookup after confirmed original child exit can settle not-applied; unverified exit remains pending. A fresh opposite intent is allowed only after settlement. If the transition produces only a definitive result/refusal, record that outcome and leave the unknown case incomplete; do not invent an unknown, replay, fake native authority or alter SQL/helper identity to obtain one. |
-| Qt rollback and return | **waived by owner 2026-11-05**, every platform. | No acceptance rollback is prepared or run. |
+| Revoke, rollback and return to Next | Waived by owner 2026-11-05: no Qt rollback or return segment is prepared or run. | — |
 
-### Qt rollback acceptance — waived
+### Revoke and drain commands
 
-**waived by owner 2026-11-05**, every platform. No rollback, service-mode change
-or return-to-Next sequence is prepared or executed for acceptance. The retained
-copies and earlier run records stay in place.
+On Linux/macOS, use the appropriate maintained `--mode passive` command above
+and retain its original revoke ID. A read-only lookup uses that same original
+ID; it does not repeat revoke. Never create a second revoke while the helper
+has a pending original transition.
+Qt rollback is waived by owner 2026-11-05; no updater rollback command is run.
+The remaining commands apply only to an admitted service transition or cleanup.
+
+```bash
+# Only if the helper result was uncertain, read its original receipt:
+: "${REVOKE_ID:?original ID from the helper transition}"
+printf '{"op":"revoke_status","request_id":"%s"}\n' "$REVOKE_ID" |
+  env HGS_CONFIG_DIR="$CFG" HGS_STATE_DIR="$STATE" "$SERVICE_HGS" desktop request --json
+```
+
+Require matching request/configuration and `accepted`, `durable`, `revoked`,
+`checkpointed`. The explicit `applicable:false`, `handoff:none`, `revoked:true`,
+`nothing_written` no-op is a separate no-work case; it does not prove that an
+active runtime drained. Unknown stops the cleanup sequence. PID disappearance,
+a native Stop or `writers_enabled:false` alone is not original-resource drain.
+For the normal Next restore, preserve the draft-safe Quit checks and verify the
+installed candidate and actual fresh grant/rearm source. The Qt waiver does not
+turn an unsettled service cleanup into a successful drain.
 
 ### Record and restore the main account
 
@@ -1032,7 +1055,7 @@ Do not touch unrelated desktop/apps/settings.
 | [ ] Terminal | Check PowerShell/Windows Terminal/ConPTY paths with spaces/non-ASCII, exact session selection, resize/paste and live-session continuity. Exercise supported operations only; unsupported remote paths must refuse clearly. | `.52`, `.66.6.15`, Windows native contracts; fixes-u |
 | [ ] Voice/video | Verify actual supported capture/preview/transcription/cancel paths and privacy consent; unsupported paths refuse visibly. An unavailable release-required inventory capability blocks acceptance rather than counting as a skip. | G2 `.66.4.5`, inventory voice/media rows |
 | [ ] UI/durable parity | Run the complete inventory responsibility walk, especially tasks, folder mapping and bounded details. Verify an actual confirmed frontend request through a ready service to its durable result/query; approvals remain default-off and generic/agent toggles refuse. UI-only mode has no competing GUI Fleet. | G1–G4/G7, `.66.3.31/.32/.35/.37/.38` |
-| WAIVED — waived by owner 2026-11-05 | No Qt rollback or round trip is required; no further preparation or execution. | `.66.3.31`, `.66.7.3`; desktop-u/fleet-c |
+| WAIVED — owner 2026-11-05 | Qt rollback is waived by owner 2026-11-05: no Qt rollback or Qt round trip is prepared or run on any platform. | `.66.3.31`, `.66.7.3`; desktop-u/fleet-c |
 
 ### Recorded Windows registration subcheck — 2026-11-02
 
@@ -1194,8 +1217,8 @@ These rows ran on va-kids on 2026-11-04, in private fixture profiles, before the
 owner accepted private-profile evidence (owner decision 4). They are recorded
 here as earlier evidence under that decision. They tick no checkbox; the same
 rows are rerun on the latest integrate artifact in the approved order: voice,
-terminal, upgrade, readiness, tray and lifecycle, UI parity. Qt rollback is
-waived by owner 2026-11-05 and is not rerun.
+terminal, upgrade, readiness, tray and lifecycle, UI parity (Qt rollback is
+waived by owner 2026-11-05).
 
 Each row used CI artifacts of its exact source and a fresh private stage and
 fixture profile. It ran in the owner's console session 1, started by a one-shot
@@ -1311,6 +1334,99 @@ artifact 13380445725). Rows D–H used integrate `58cce17f` with #1441 (CI run
     removed its own History entry within about 1.2 s and retired the mapping.
     Nothing opened or launched afterwards.
 
+### va-kids rows for 0.48.0, continued — 2026-11-05
+
+The same rules apply: private fixture profiles, a fresh stage per row, and
+teardown, guard, cleanup and a residue check after each. The sources are
+integrate `68b2c426` (CI run 41977902432, artifact 13394048639) and integrate
+`af07efb6` (CI run 41989037251, artifact 13399282081).
+
+- **Toast registration removal after a rollback revoke: PASS** on `68b2c426`
+  (`zerus-5wmh.66.3.30.8.5`, #1453). The documented sequence has four steps: the
+  rollback revoke for R, ending only the running task instance, `registration
+  remove`, and `notification-registration remove` with the same R. It removed
+  the Toast keys with no manual removal and kept the desktop database's bytes
+  and mtime: 11/11 after a passive history, 15/15 twice in background mode.
+- **H2 and H3 with the owner present: not observable, because the service
+  refused both posts.** On `68b2c426`, the posts at 10:21 and 10:25 MSK were
+  refused before any banner, and the owner saw none. Unattended diagnosis on
+  `68b2c426` and `58cce17f`:
+  - `ToastNotifier.Setting` for `com.hgdev.hgs-tray` failed with HRESULT
+    `0x80070490` (element not found). The backend read it before any Show and
+    recorded `permission_denied`.
+  - The same `58cce17f` build had delivered at 03:58–04:11Z. The failure
+    persisted after the owner restarted va-kids, with a fresh per-user
+    notification service.
+  - An AUMID without a package identity must show one toast before `Setting`
+    works, so checking it first deadlocked. The fix is #1475
+    (`zerus-5wmh.66.3.30.8.7`, P1). Status hides the refusal code:
+    `zerus-5wmh.66.3.30.15`.
+  - On #1475's exact head `8cf223aa` (CI run 41996514139, artifact
+    13402753346) the unattended diagnosis passed 13/13. `Setting` read
+    `0x80070490` at the settled baseline and **Enabled** after the post. Exactly
+    one user post was Delivered, and its History entry was the only one; no
+    bootstrap scratch entry remained.
+  - The four-step Toast removal then passed 11/11. A fresh stage after it read
+    **Enabled** at the baseline and delivered one post (13/13), so the removal
+    did not make Windows forget the AUMID. What did so on va-kids that morning
+    remains unknown.
+  - **Owner-present H2/H3 on `8cf223aa`, 13:12–13:20 MSK.**
+    - H2: one History entry 1.5 s after the post. The owner saw the banner and
+      clicked it, the click reached the service, and the GUI selected exactly
+      the target session.
+    - H3: the GUI had been quit first. One delivery and one History entry
+      followed. The owner did not see the banner and clicked the entry in the
+      notification center (Win+N) instead. Exactly one GUI cold-started and
+      selected the same session.
+    - `Setting` read Enabled after each post. No bootstrap scratch entry
+      remained, and the owner saw no brand-only banner.
+    - The row's strict count failed for H2: the journal rose by two delivered
+      attempts. Its counters include withdrawals, and the click's selection
+      marks the reply read, which withdraws the toast. That is the likely
+      second attempt, but this row kept no database copy to prove it.
+  - **One cold start wrote to the owner's real profile, and it was removed.**
+    The H3 click launched the GUI through Windows COM activation with the
+    console user's real environment, because activation does not pass the
+    fixture's profile redirection. It wrote Zerus app data into the real
+    `AppData\Roaming\com.hgdev.hgs-tray`, `AppData\Local\com.hgdev.hgs-tray`
+    and `AppData\Local\hgdev`. Those three folders were removed after checking
+    that every item was created during the stage, and the residue check was
+    then clean. Every later cold-start row runs the same guarded cleanup.
+- **One-time import, G3 scope: PASS** (16/16, twice on `af07efb6`). Before Next
+  first started, the fixture held Qt sources: a Qt INI and a Qt main draft in
+  the redirected `APPDATA`, and a legacy per-computer project alias.
+  - The "Upgrading from Qt" notice showed once. **Got it** was saved, and the
+    next two starts showed no notice.
+  - The Qt INI and draft kept their bytes and times. The Qt draft was not
+    restored, and no Next draft carried it.
+  - The legacy project list and the shared account profiles were unchanged.
+  - Observed, not accepted: the legacy alias did not appear in Next's Projects.
+    Projects showed "Project sync unavailable: The saved Qt project
+    organization could not be read…" and "Project sync is not set up on this
+    computer yet…". The Migration report said no report was available. The
+    seeded INI held no real Qt organization, so the first message may come from
+    the seed. The owner wants projects to migrate; Windows support is being
+    sized.
+- **Service refresh after a CLI replacement: PASS** (20/20 on `af07efb6`,
+  `.66.3.40.3.3`, #1467), with a **model** of maintained staging. Staging
+  restages only changed bytes, so the row moved the running CLI to the exact
+  maintained aside name `hgs.exe.old-<seconds>-<8 hex>` and placed an identical
+  copy with a new file ID.
+  - The original service reported `manual_refresh_required`, drained.
+    Settings > About offered **Refresh background service…**, and its separate
+    native dialog was confirmed through its own button.
+  - The original exited, and one new service with a new epoch ran in
+    background mode. After close and reopen, ordinary startup authenticated
+    it: writers on, service ownership, no refresh group.
+  - Nothing was granted, rearmed, reinstalled or toggled.
+  - An earlier fixture with a non-maintained aside name was refused
+    (`refresh_scope_changed`), as the staging contract requires. The hidden
+    native reason is `zerus-5wmh.66.3.40.3.3.2`.
+- **F, Qt rollback: waived by the owner.** The F results above stay as history.
+  The Settings observation of the first `af07efb6` F run is withdrawn. It never
+  reached Settings > About, because the rail's Settings icon has no accessible
+  name, so its "no refresh offer" result proved nothing.
+
 ## Deletion PR merge gate
 
 The coordinator records per-platform acceptance and any exceptions against the
@@ -1358,9 +1474,12 @@ Each cell has three parts:
 
 Shared routes the cells refer to:
 
-- **Qt rollback / round trip (every platform): waived by owner 2026-11-05.**
-  No preparation or execution remains. Use the maintained owner-account upgrade
-  and the approved projects/accounts import checks for their independent rows.
+- **Qt round trip (arch, Mac): dropped.** The owner waived Qt rollback on every
+  platform on 2026-11-05, so no round trip is prepared or run. The coordinator
+  re-planned the rows that used it (2026-11-05):
+  - upgrade with live agents and the owner-account half of the clean-install
+    exception are covered by the maintained owner-account Next→Next upgrades;
+  - the one-time import runs as an unattended private-profile fixture.
 - **Synthetic session.** A disposable target that the coordinator or the test
   creates, as in the Arch and Mac windows today; never the owner's agents. On
   va-kids it is a fixture agent in a private profile, because the owner's
@@ -1380,16 +1499,16 @@ Shared routes the cells refer to:
 
 | Gate row | arch | Mac | va-kids |
 |---|---|---|---|
-| Clean install / package (exception) | **Have:** source-install identity and no Qt/KF6/WebEngine in the dependency closure (11-02, `a1023d4`); today's `0fca73f5` source install has clean source identity. Neither is a package transaction or a clean-account install. **Auto:** the exact candidate's CI Arch package job, plus the maintained owner-account upgrade. **Owner:** none. | **Have:** clean frozen `b72dea32` pair/seal verified today. **Auto:** the exact candidate's CI signed/notarized bundle check, plus the maintained owner-account upgrade. **Owner:** none. | **Have:** PASS. CI install/package checks plus setup 16/16 and legacy 22/22 on `0fca73f5`. The owner-account half is recorded under the exception: no Qt install exists. **Owner:** none. |
-| Upgrade with live agents | **Have:** today all 63 original native PID/births survived GUI Quit/restart; rollouts keep 63–64 agents. Both are Next→Next only. **Auto:** the coordinator-announced maintained upgrade; Qt rollback is waived. **Owner:** none. | **Have:** rollouts keep agents (Next→Next). **Auto:** the maintained upgrade (macbundle-u; normal app Quit is authorized); Qt rollback is waived. **Owner:** none. | **Have:** legacy case, Qt ZIP→Next installer in its own folder, with seeded config, drafts and session files preserved; no agents. **Auto:** a private profile running a fixture-agent session and ConPTY job through the Qt ZIP's `hgs.exe`, upgraded to Next; verify the same session, run, conversation, job and draft. **Owner:** question 5. |
-| One-time import | **Have:** 9 handled preference families unchanged (11-02); retained-source warning `.66.5.11`. **Blocked:** G3 source work `.66.5.2.1/.66.5.2/.66.5.4` (migrate-u). **Auto after G3:** check projects/accounts, retained source hashes and no reseed or second import under the 2026-11-05 G3 scope; do not start Qt. | **Blocked:** G3 as on arch. **Auto after G3:** the approved projects/accounts checks with the retained source/defaults snapshot; do not start Qt. **Owner:** none. | **Have:** none. The owner account has no Qt registry or INI state (inventory 06:10Z). **Auto:** none on the main account; seeding a legacy source there would manufacture state. **Owner:** question 5. |
+| Clean install / package (exception) | **Have:** source-install identity and no Qt/KF6/WebEngine in the dependency closure (11-02, `a1023d4`); today's `0fca73f5` source install has clean source identity. Neither is a package transaction or a clean-account install. **Auto:** the exact candidate's CI Arch package job. Owner-account upgrade half: covered by the maintained owner-account Next→Next upgrades in the next row (coordinator, 2026-11-05). **Owner:** none. | **Have:** clean frozen `b72dea32` pair/seal verified today. **Auto:** the exact candidate's CI signed/notarized bundle check. Owner-account upgrade half: covered by the maintained owner-account Next→Next upgrades in the next row (coordinator, 2026-11-05). **Owner:** none. | **Have:** PASS. CI install/package checks plus setup 16/16 and legacy 22/22 on `0fca73f5`. The owner-account half is recorded under the exception: no Qt install exists. **Owner:** none. |
+| Upgrade with live agents | **Have:** today all 63 original native PID/births survived GUI Quit/restart; rollouts keep 63–64 agents. Both are Next→Next only. **Covered (coordinator, 2026-11-05):** the maintained owner-account Next→Next upgrades with live agents. On arch, linux-shell-u's owner session moved `7a60dceeb` → `8e74aa884` with the same Codex/hgs/tmux/job/pane, exact draft bytes and 57 native processes untouched (#1472). On the Mac, the queue rollouts moved `7ae0c2bf6` → `7a60dceeb` → `0f6017973` with native processes untouched and drafts kept. Existing Qt users' Qt→Next path is covered by the CI install/package checks and the updater suites (`test_tray_update`, `test_macos_switch_updater`); an owner-account Qt→Next run is waived with the Qt rollback. **Owner:** none. | **Have:** rollouts keep agents (Next→Next). **Covered (coordinator, 2026-11-05):** the maintained owner-account Next→Next upgrades with live agents. On arch, linux-shell-u's owner session moved `7a60dceeb` → `8e74aa884` with the same Codex/hgs/tmux/job/pane, exact draft bytes and 57 native processes untouched (#1472). On the Mac, the queue rollouts moved `7ae0c2bf6` → `7a60dceeb` → `0f6017973` with native processes untouched and drafts kept. Existing Qt users' Qt→Next path is covered by the CI install/package checks and the updater suites (`test_tray_update`, `test_macos_switch_updater`); an owner-account Qt→Next run is waived with the Qt rollback. **Owner:** none. | **Have:** legacy case, Qt ZIP→Next installer in its own folder, with seeded config, drafts and session files preserved; no agents. **Auto:** a private profile running a fixture-agent session and ConPTY job through the Qt ZIP's `hgs.exe`, upgraded to Next; verify the same session, run, conversation, job and draft. **Owner:** question 5. |
+| One-time import | **Have:** 9 handled preference families unchanged (11-02); retained-source warning `.66.5.11`. **Blocked:** G3 source work `.66.5.2.1/.66.5.2/.66.5.4` (migrate-u). **Auto after G3:** an unattended PRIVATE-profile fixture, like va-kids importonce (coordinator, 2026-11-05). Seed Qt state: preferences, a Qt draft, a legacy per-computer project list and shared accounts. Start Next: the once-only notice, Got it, then two restarts with no notice, reseed or replay. Qt sources stay byte-identical; projects are imported, drafts are not; check the Migration report. linux-shell-u runs it after their owner segment. | **Blocked:** G3 as on arch. **Auto after G3:** the same fixture, run by macbundle-u after their owner segment. **Owner:** none. | **Have:** none. The owner account has no Qt registry or INI state (inventory 06:10Z). **Auto:** none on the main account; seeding a legacy source there would manufacture state. **Owner:** question 5. |
 | Service registration / readiness | **Have:** readiness PASS (`5c110055`); today a background no-op, with presence, reads and delivery continuing while the GUI was absent. Custom-unit refusal still PENDING. **Auto:** custom-unit refusal against a private unit directory; one exact-target delivered read with the UI closed, on a synthetic session. **Owner:** none. | **Have:** today the service and host were ready, drain and revoke settled, and wrapper `.4.11` failed closed (macbundle-u fix). **Auto:** inspect the `zerus-setup` LaunchAgent; foreign-definition refusal against a private directory; UI-closed duties on a synthetic session. **Owner:** none. | **Have:** passive registration [x] (11-02); today install/status/remove, cold activation refusal and no service start. **Auto:** start the registered task in session 1; check the pipe identity and readiness with the UI closed; remove it afterwards. **Owner:** the real logon trigger needs a sign-out/sign-in (question 6). |
 | Notifications / clicks | **Have:** today one Post Delivered, with its native ID in the history. The click FAILED to reopen the GUI (`.66.3.42`); banner appearance was not observed. **Auto after the `.42` fix:** one synthetic Post, then a uinput click on the banner (question 3), plus stale and withdrawn refusal. **Owner:** the click if question 3 is declined; lock/idle (question 6). | **Have:** a Post plus an owner click into the project (`f1833dec`; selection unqualified; drain FAILED). Today a Post was Delivered and drain settled; Withdraw is Unknown; no click. **Auto:** Post, drain and withdraw rerun after `.4.11`; selection readback (#1210). **Owner:** the click and selection (question 1); lock/idle (question 6). | **Have:** none. The GUI routes #1170/#1174/#1175 are merged. **Auto:** a service-owned Toast from a synthetic session, clicked through UI Automation, with stale and withdrawn refusal and a cold-GUI launch (win-notify-cl plan `.66.3.30.8`). **Owner:** lock/idle (question 6). |
 | Tray / menu bar / lifecycle | **Have:** today the panel tooltip, menu and primary reopen; normal Quit and maintained unit start; drafts byte-identical. **Auto:** second-instance routing, background start, Quit with a pending draft. **Owner:** none. | **Have:** none. **Auto:** reopen and second instance through `open`; maintained Quit. **Owner:** menu-bar clicks, Services, Hide and Show All (question 1). | **Have:** legacy case first-start window, own tray menu (Open Zerus / No remote machines / Open in / Quit) and native Quit (fixture). **Auto:** on the main install, second instance, background start, draft-safe exit, and setting/removing the login opt-in, all through UI Automation. **Owner:** the real login start (question 6). |
 | Terminal | **Have:** none. **Auto:** a synthetic session and a folder terminal on fixture paths with spaces and non-ASCII; exact argv from `/proc`; resize, paste and reattach after client exit. **Owner:** none. | **Have:** none. **Auto:** none; driving Terminal.app needs AX. **Owner:** the expected Apple Events consent and GUI driving (questions 1 and 2). | **Have:** none. **Auto:** a fixture session through Windows Terminal, PowerShell and ConPTY on paths with spaces and non-ASCII; exact selection through UI Automation; paste and resize through SendInput; continuity after GUI exit. **Owner:** none. |
 | Voice / video | **Have:** today microphone record, Escape to preview, playback state and discard PASS. Camera FAILED (`.66.3.41`; fix #1338 merged, awaiting rollout). Audible playback and transcription unqualified. **Auto:** real-camera preview and cancel after the rollout; espeak-ng speech into a virtual source, then transcription with the existing speech profile; playback proven by sink-monitor capture. **Owner:** question 4. A new speech-provider credential, if no profile exists. | **Have:** none. **Auto:** none; consent state is unknown, and synthetic input needs a virtual audio driver. **Owner:** question 2. | **Have:** none. Voice for local Windows sessions is unsupported by design (installation docs). **Auto:** check through UI Automation that the refusal is visible. **Owner:** none. |
 | UI / durable parity | **Have:** approvals OFF and generic-agent refusal (11-02); today 128 draft records byte-identical. **Auto:** a fixture walk of the installed build in a private Xvfb; on the owner account, read-only service queries plus a uinput-driven walk (question 3); one authenticated frontend request round trip. **Owner:** none if question 3 is approved. | **Have:** none. **Auto:** read-only service and catalog queries. **Owner:** the GUI walk (question 1). | **Have:** first-start window only. **Auto:** a UI Automation walk against a fixture profile with a synthetic session; one frontend request through a ready service to its durable result. **Owner:** none. |
-| Qt rollback / reimport | **WAIVED — waived by owner 2026-11-05.** No rollback preparation or execution. | **WAIVED — waived by owner 2026-11-05.** No rollback preparation or execution. | **WAIVED — waived by owner 2026-11-05.** No rollback preparation or execution. |
+| Qt rollback / reimport | Waived by owner 2026-11-05 on every platform; no Qt round trip. | Waived by owner 2026-11-05. | Waived by owner 2026-11-05; question 5 no longer covers Qt rollback. |
 | Open failures | `.66.3.41`: rerun the real camera after the rollout (desktop-u). `.66.3.42`: rerun after macbundle-u's fix, with the click as above. | `.66.3.30.2.4`: click and navigation owner-pending (AX untrusted, loginwindow frontmost); wrapper `.4.11`. | `.66.8.1.11` (P2, installer refuses a non-owned folder), `.66.8.1.10` (CR CR LF), both win-accept-cl; `.66.8.1.12` (P4 log line). |
 
 ### Batched owner questions
@@ -1408,9 +1527,10 @@ Shared routes the cells refer to:
    window.
 4. **Audible playback.** Does a PipeWire (or WASAPI loopback) monitor capture of
    non-silent output count as playback evidence, or must the owner listen once?
-5. **Windows main account.** Keep the approved private-profile evidence for the
-   applicable upgrade/import rows. Qt rollback is waived by owner 2026-11-05;
-   do not install Qt or prepare another rollback for acceptance.
+5. **Windows main account.** It has no Qt install, Qt settings or agents. Accept
+   private-profile evidence (Qt ZIP plus a fixture-agent session) for the upgrade
+   and import rows (Qt rollback is waived by owner 2026-11-05). Or authorize installing Qt 0.47.0 plus an agent
+   on that account; that needs the owner's agent login.
 6. **Logon and lock.** On all three machines, the lock/idle notification subcases
    need a lock and an owner unlock. The va-kids logon-trigger rows need one
    sign-out/sign-in. Either the owner does these once per machine, or they stay

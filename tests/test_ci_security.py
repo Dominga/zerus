@@ -679,6 +679,9 @@ class WorkflowSecurityTests(unittest.TestCase):
         self.assertIn('ZERUS_RELEASE_CHANNEL=dev', dev_package)
         self.assertIn('scripts/build-arch-package.sh --build-only', dev_package)
         self.assertNotIn('--build-only', job(checks, 'arch-package'))
+        # Its cold release build and full check() need headroom over a slow
+        # standard runner's 45 minutes (zerus-wnm5z).
+        self.assertEqual(field(job(checks, 'arch-package'), 'timeout-minutes'), '75')
 
     def test_relay_job_runs_every_mobile_service_module(self):
         relay = job((ROOT / ".github/workflows/checks.yml").read_text(), "relay")

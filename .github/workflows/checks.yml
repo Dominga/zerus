@@ -1316,7 +1316,9 @@ jobs:
     needs: source
     if: needs.source.outputs.run_arch == 'true'
     runs-on: ubuntu-24.04
-    timeout-minutes: 45
+    # The recipe's cold release build and full check() take about 30 minutes
+    # on a fast standard runner and over 45 on a slow one (zerus-wnm5z).
+    timeout-minutes: 75
     container:
       image: archlinux@sha256:996c3a1d6b0d87b01242f6fcd8cfa3ad3eece1a67ab5c8f108e20af1d7b97bdd
     env:

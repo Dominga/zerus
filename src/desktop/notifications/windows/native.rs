@@ -1,15 +1,15 @@
-//! Read-only installation preflight and original in-process WinRT objects.
+//! Native installation preflight and original in-process WinRT objects.
 //! Registration is an explicit installer operation; this worker never repairs it.
 use super::{
     activation,
     callbacks::{Candidate, Slot},
-    wire, Native,
+    setting, wire, Native,
 };
 use crate::{config::Config, desktop::store::Location, host, platform};
 use ::windows::{
-    core::{IInspectable, HSTRING},
+    core::{IInspectable, Interface, HSTRING},
     Data::Xml::Dom::XmlDocument,
-    Foundation::TypedEventHandler,
+    Foundation::{DateTime, IReference, PropertyValue, TypedEventHandler},
     Win32::System::WinRT::{RoInitialize, RoUninitialize, RO_INIT_MULTITHREADED},
     UI::Notifications::{
         NotificationSetting, ToastDismissalReason, ToastDismissedEventArgs, ToastFailedEventArgs,
@@ -232,6 +232,42 @@ fn toast(
     Ok(toast)
 }
 
+// A private identity-less initialization toast, never a user notification.
+// SuppressPopup prevents a banner, not an Action Center entry. Immediate exact
+// removal is the normal path; if removal fails, only the brand-only entry may
+// remain until its 15-second expiry. It has no launch argument or delegates:
+// empty activation is rejected by Slot, and the cold COM entry exits 78.
+const BOOTSTRAP_GROUP: &str = "hgs-bootstrap";
+const BOOTSTRAP_SECONDS: u128 = 15;
+fn bootstrap_toast(tag: &str) -> Result<ToastNotification, Refusal> {
+    let make = || -> ::windows::core::Result<ToastNotification> {
+        let xml = XmlDocument::new()?;
+        xml.LoadXml(&HSTRING::from("<toast><visual><binding template=\"ToastGeneric\"><text>Zerus</text></binding></visual></toast>"))?;
+        let toast = ToastNotification::CreateToastNotification(&xml)?;
+        toast.SetTag(&HSTRING::from(tag))?;
+        toast.SetGroup(&HSTRING::from(BOOTSTRAP_GROUP))?;
+        toast.SetSuppressPopup(true)?;
+        Ok(toast)
+    };
+    let toast = make().map_err(|_| Refusal::GetterFailed)?;
+    let since_unix = std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .map_err(|_| Refusal::GetterFailed)?;
+    let ticks = (since_unix.as_nanos() / 100)
+        .checked_add(116_444_736_000_000_000 + BOOTSTRAP_SECONDS * 10_000_000)
+        .and_then(|value| i64::try_from(value).ok())
+        .ok_or(Refusal::GetterFailed)?;
+    let boxed = PropertyValue::CreateDateTime(DateTime {
+        UniversalTime: ticks,
+    })
+    .and_then(|value| value.cast::<IReference<DateTime>>())
+    .map_err(|_| Refusal::GetterFailed)?;
+    toast
+        .SetExpirationTime(&boxed)
+        .map_err(|_| Refusal::GetterFailed)?;
+    Ok(toast)
+}
+
 struct Observed {
     toast: ToastNotification,
     activated: Option<i64>,
@@ -357,7 +393,53 @@ impl Backend {
         Ok(false)
     }
 }
+impl setting::Platform for Backend {
+    fn setting(&mut self) -> Result<bool, i32> {
+        self.notifier
+            .as_ref()
+            .ok_or(0x8000_4005_u32 as i32)?
+            .Setting()
+            .map(|value| value == NotificationSetting::Enabled)
+            .map_err(|error| error.code().0)
+    }
+    fn bootstrap(&mut self, cancelled: &dyn Fn() -> bool) -> Result<(), Refusal> {
+        let tag = format!("b{}", &uuid::Uuid::new_v4().simple().to_string()[..15]);
+        let toast = bootstrap_toast(&tag)?;
+        // Registration and the SAME original dispatch are rechecked after
+        // construction, immediately before the sole bootstrap Show.
+        if !self.apartment || !self.callbacks_current() {
+            return Err(Refusal::NotReady);
+        }
+        if cancelled() {
+            return Err(Refusal::Cancelled);
+        }
+        let shown = self
+            .notifier
+            .as_ref()
+            .ok_or(Refusal::NotReady)?
+            .Show(&toast);
+        // Attempt cleanup even when Show failed: never retry an uncertain Show.
+        let removed = ToastNotificationManager::History().and_then(|history| {
+            history.RemoveGroupedTagWithId(
+                &HSTRING::from(&tag),
+                &HSTRING::from(BOOTSTRAP_GROUP),
+                &HSTRING::from(wire::APPLICATION),
+            )
+        });
+        if shown.is_err() || removed.is_err() {
+            return Err(Refusal::GetterFailed);
+        }
+        Ok(())
+    }
+}
+
 impl Native for Backend {
+    fn ensure_post_ready(&mut self, cancelled: &dyn Fn() -> bool) -> Result<(), Refusal> {
+        if !self.apartment || !self.callbacks_current() || self.notifier.is_none() {
+            return Err(Refusal::NotReady);
+        }
+        setting::ensure_enabled(self, &setting::ATTEMPTED, cancelled)
+    }
     fn unavailable(&self) -> bool {
         self.unavailable
     }
@@ -386,11 +468,8 @@ impl Native for Backend {
             // permission was disabled after its original Show.
             return Ok(());
         };
-        let Some(notifier) = self.notifier.as_ref() else {
+        if self.notifier.is_none() {
             return Err(Refusal::NotReady);
-        };
-        if notifier.Setting().ok() != Some(NotificationSetting::Enabled) {
-            return Err(Refusal::PermissionDenied);
         }
         self.observed
             .retain(|_, value| !value.retired || !value.detach());

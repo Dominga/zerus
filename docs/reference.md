@@ -2415,6 +2415,15 @@ missing-field import. An already imported catalog without a matching marker
 keeps the existing initialize no-op. The catalog and peer wire formats are
 unchanged; older hgs versions can read the catalog but do not perform the pending
 GUI import. Qt's settings store is never changed by the bootstrap or import.
+A desktop whose saved Qt organization cannot be read, while Qt's store is
+present, runs the same bootstrap through `hgs swarm initialize --g3-bootstrap
+--json` with stdin `{"version":1,"expected_node_id":NODE}`. It refuses another
+node and a foreign or unreadable marker, leaves an initialized catalog as it is,
+and reports `g3_bootstrap` in the returned snapshot. Projects are then usable,
+the desktop keeps showing the refusal, and a later readable organization still
+fills only missing fields. A Qt store read completely without a saved
+organization is a first use instead: the desktop imports the default project
+through `--g3`, as for an absent store.
 An unreadable, malformed or unsupported pending marker prevents bootstrap but
 does not fail get or the initial organization read: they return the existing
 uninitialized state and leave the marker untouched. A stderr note is emitted
@@ -5462,6 +5471,24 @@ key). The selection is fixed under the registration lock before the offline
 guard and removed through the same guarded exact removal; the reply adds
 `previous_image: true`. Install and status never take it, and nothing falls back
 after an effect.
+
+Before an admitted Windows notification post, a successful `Setting` getter
+must report Enabled. A real disabled setting refuses as `permission_denied`;
+a getter failure refuses as `getter_failed`. Only `ERROR_NOT_FOUND`
+(`0x80070490`) permits one identity-less initialization attempt per service
+process: a suppressed toast with no session content, a 15-second expiry,
+group `hgs-bootstrap` and a fresh 16-character tag. The worker immediately
+removes that exact tag/group for this AUMID and rechecks `Setting`; only Enabled
+allows the original user notification. Failure, cancellation and worker restart
+never reset the attempt. Status and withdrawal do not initialize an identity,
+and initialization never repairs registry/COM registration or changes consent.
+SuppressPopup prevents a popup banner, not an Action Center entry. Immediate
+exact removal is the normal path. Only if that removal fails may the brand-only
+scratch entry remain until its 15-second expiry. It carries no launch argument
+or delegates: empty activation arguments are rejected, and the cold COM entry
+exits 78 without opening a session or GUI.
+This follows the upstream [identity-less notifier initialization](https://github.com/CommunityToolkit/WindowsCommunityToolkit/blob/c8f76d072df53d3622fb5440d63afb06cb9e7a10/Microsoft.Toolkit.Uwp.Notifications/Toasts/Compat/ToastNotificationManagerCompat.cs)
+used before its [Setting getter](https://github.com/CommunityToolkit/WindowsCommunityToolkit/blob/c8f76d072df53d3622fb5440d63afb06cb9e7a10/Microsoft.Toolkit.Uwp.Notifications/Toasts/Compat/ToastNotifierCompat.cs).
 
 Explicit removal uses `notification-registration remove --json --request-id UUID`
 after a settled `desktop revoke --json --request-id UUID --reason rollback` with

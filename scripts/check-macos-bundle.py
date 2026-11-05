@@ -18,6 +18,7 @@ import tempfile
 
 from macos_stapler import run_stapler
 from macos_notices import QT_NOTICES, notice_findings, ffmpeg_findings, ffmpeg_provenance
+import macos_service_payload
 
 BUNDLE_ID = "com.hgdev.hgs-tray"
 MINIMUM_SYSTEM = "14.0"
@@ -32,9 +33,7 @@ REQUIRED_FILES = [
     "Contents/Info.plist", *EXECUTABLES,
     "Contents/Resources/setup/hgs_state.py",
     "Contents/Resources/setup/install-macos-session-service.py",
-    "Contents/Resources/setup/install-macos-desktop-service.py",
-    "Contents/Resources/setup/desktop-revoke-hold.py",
-    "Contents/Resources/setup/desktop-service-activation.py",
+    *macos_service_payload.SERVICE_RESOURCES,
     "Contents/Resources/setup/install-recovery-service.py",
     "Contents/Resources/setup/install-swarm-service.py",
     "Contents/Resources/setup/launchd_agent.py",
@@ -162,7 +161,9 @@ def bundle_findings(bundle, version, release=None, gui="qt"):
         manifest = bundle / "Contents/Resources/licenses/qt/FFMPEG-SOURCE.json"
         if manifest.is_file() and json.loads(manifest.read_text()) != provenance:
             findings.append("FFMPEG-SOURCE.json differs from the reviewed source/configuration tuple")
-    findings += [f"missing {name}" for name in required if not (bundle / name).is_file()]
+    findings += [f"missing {name}" for name in required
+                 if name not in macos_service_payload.SERVICE_RESOURCES and not (bundle / name).is_file()]
+    findings += macos_service_payload.findings(bundle)
     findings += [f"not executable: {name}" for name in EXECUTABLES
                  if (bundle / name).is_file() and not os.access(bundle / name, os.X_OK)]
     # The connector's black-box test seams exist only with the test-hooks feature.

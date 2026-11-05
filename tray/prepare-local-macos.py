@@ -15,6 +15,10 @@ import subprocess
 spec = importlib.util.spec_from_file_location("local_sign", Path(__file__).with_name("sign-local-macos.py"))
 signer = importlib.util.module_from_spec(spec)
 spec.loader.exec_module(signer)
+spec = importlib.util.spec_from_file_location("macos_service_payload",
+    Path(__file__).resolve().parents[1] / "scripts/macos_service_payload.py")
+service_payload = importlib.util.module_from_spec(spec)
+spec.loader.exec_module(service_payload)
 
 
 def overlaps(a, b):
@@ -77,7 +81,10 @@ def prepare(app, hgs, output, installed, requested="", runner=None):
         shutil.copytree(app, output, symlinks=True, dirs_exist_ok=True)
         output.chmod(0o700)
         shutil.copy2(hgs, output / "Contents/MacOS/hgs", follow_symlinks=False)
+        service_payload.stage(Path(__file__).resolve().parents[1], output)
+        service_payload.require_payload(output)
         record = signer.sign(output, installed, requested, paired=True)
+        service_payload.require_payload(output)
         if runner is not None:
             check_cli(hgs, runner)
             if signer.sha256(hgs) != record["build_sha256"]:

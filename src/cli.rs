@@ -532,6 +532,11 @@ pub fn dispatch(args: Vec<String>) -> Result<i32> {
 }
 
 pub(crate) fn dispatch_at(args: Vec<String>, entered: Instant) -> Result<i32> {
+    // Keep an original helper alive until its parent has observed live code.
+    // Only a bounded pipe prefix is consumed; ordinary dispatch/auth is intact.
+    #[cfg(unix)]
+    let args = zerus_client_core::run::rendezvous::dispatch_args(args)
+        .map_err(|_| Error::new(2, "original helper rendezvous refused"))?;
     #[cfg(any(windows, test))]
     if let Some(request) = swarm_restart::select(&args) {
         return swarm_restart::dispatch(request, entered);

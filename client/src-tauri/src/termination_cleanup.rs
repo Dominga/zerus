@@ -393,7 +393,8 @@ impl Model {
                 } else {
                     entry.host.as_str()
                 };
-                let details=format!("Folder: {path}\nComputer: {}\n{}\n{}\nAfter removal: conversations and branches remain. Restoring an archived session may require recreating its working folder.", computer,reason,review::decision(&entry.row).join("\n"));
+                let presentation = job.cleanup.presentation_row(entry);
+                let details=format!("Folder: {path}\nComputer: {}\n{}\n{}\nAfter removal: conversations and branches remain. Restoring an archived session may require recreating its working folder.", computer,reason,review::decision(&presentation).join("\n"));
                 rows.push(Row {
                     id: job.id.clone(),
                     label: leaf(path),
@@ -427,7 +428,7 @@ impl Model {
                             let fallback = json!({});
                             retained_notice(
                                 if entry.verified {
-                                    Some(&entry.row)
+                                    Some(&presentation)
                                 } else if entry.status == Some(Status::Unconfirmed) {
                                     Some(&fallback)
                                 } else {
@@ -793,7 +794,7 @@ pub async fn termination_cleanup_offer(
     let service = if crate::desktop_service::mode() {
         Some(
             app.desktop_service()
-                .ok_or(crate::desktop_service::termination_outcome::UNCONFIRMED)?,
+                .ok_or_else(crate::desktop_service::termination_outcome::missing_offer_service)?,
         )
     } else {
         None

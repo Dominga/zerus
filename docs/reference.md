@@ -2859,6 +2859,18 @@ the folder, changed files or ownership, and all other protections. An incomplete
 inventory remains blocked. Automatic cleanup never uses this exception. Process
 names, PIDs and access details remain available under **Details**.
 
+The original native **Terminate** with **Remove working folder** also ignores
+actual permission-denied cwd or open-file reads after that exact termination
+succeeds, for its verified generated checkout and unchanged launch ownership.
+Those unreadable programs are neither listed nor signalled by that cleanup.
+Linux and macOS inspect open files as well as current folders; a readable path
+inside the checkout still keeps it, even if another read on the same process is
+denied. The owning CLI repeats the complete bounded classification before
+removal. Other errors, incomplete coverage, changed identities or ownership,
+known use, sessions and file protections still refuse removal. Generic background
+maintenance remains conservative; retained results never reconstruct this
+original confirmation or retry an unknown removal.
+
 A checkout with uncommitted or untracked files can also have such access
 denials. Its review then offers both consents (`discardable_with_process_consent`
 beside the discard and process fingerprints, while `discardable` stays false for
@@ -3096,7 +3108,10 @@ an unknown result. **Check again**, **View files**, **Details** and **Keep** pro
 explicit next actions. Review opens only when requested and does not block the
 rest of Zerus. Pending work and retained results are bounded to 64 folders, and
 background batches run sequentially. Closing the review does not cancel an
-accepted removal.
+accepted removal. The notice remains visible through the confirmed action and
+the actual folder-checking/removal phases. Result notices use the normal notice
+timeout; dismissing one does not discard the retained result. The status bar's
+working-folder entry still opens its review.
 
 The original folder is checked on its owning computer. A verified Zerus-created,
 clean, integrated checkout can be removed with tool-declared generated caches

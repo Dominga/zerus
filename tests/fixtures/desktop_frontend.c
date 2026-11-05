@@ -108,10 +108,11 @@ static int sealed_image(const char *path, const char *mode) {
 int main(int argc, char **argv) {
     check(argc == 3 || argc == 4);
     int image = -1;
+    int rendezvous = argc == 4 && !strcmp(argv[3], "rendezvous");
 #ifdef __linux__
-    if (argc == 4) image = sealed_image(argv[2], argv[3]);
+    if (argc == 4 && !rendezvous) image = sealed_image(argv[2], argv[3]);
 #else
-    check(argc == 3);
+    check(argc == 3 || rendezvous);
 #endif
     signal(SIGPIPE, SIG_IGN); signal(SIGTERM, stop); signal(SIGALRM, stop); alarm(35);
     int listener = socket(AF_UNIX, SOCK_STREAM, 0); check(listener >= 0);
@@ -152,7 +153,10 @@ int main(int argc, char **argv) {
             snprintf(program, sizeof(program), "/proc/self/fd/%d", image);
             selected = program;
         }
-        execl(selected, argv[2], "desktop", "frontend-request", "--json", (char *)NULL);
+        if (rendezvous)
+            execl(selected, argv[2], "--desktop-helper-rendezvous-v1", "desktop", "frontend-request", "--json", (char *)NULL);
+        else
+            execl(selected, argv[2], "desktop", "frontend-request", "--json", (char *)NULL);
         _exit(127);
     }
     close(input[0]); close(output[1]);
@@ -166,6 +170,7 @@ int main(int argc, char **argv) {
     char identity[128]; birth(relay, identity, sizeof(identity));
     printf("{\"pid\":%d,\"birth\":\"%s\"}\n", relay, identity); fflush(stdout);
     char *envelope = line(), *reply = line(), *query = line();
+    if (rendezvous) write_all(input[1], "HGS-ORIGINAL-CHILD-V1\n", sizeof("HGS-ORIGINAL-CHILD-V1\n") - 1);
     write_all(input[1], envelope, strlen(envelope)); close(input[1]); free(envelope);
     size_t total = 0; int proofs = 0;
     for (;;) {

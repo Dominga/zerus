@@ -5,6 +5,58 @@ use std::path::{Path, PathBuf};
 #[cfg(any(test, target_os = "macos"))]
 const UNAVAILABLE: &str = "paired_desktop_cli_unavailable";
 
+/// Closed observations of the same original helper; none is permission or a
+/// reason to replay. No PID, code detail, path or native error text is exported.
+#[cfg(target_os = "macos")]
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum OriginalHelperFailure {
+    Unavailable,
+    ChildExited,
+    #[cfg(feature = "macos-native-peer")]
+    Native(crate::macos_notify::peer::installation::Refusal),
+}
+#[cfg(all(target_os = "macos", feature = "macos-native-peer"))]
+impl From<crate::macos_notify::peer::installation::Refusal> for OriginalHelperFailure {
+    fn from(error: crate::macos_notify::peer::installation::Refusal) -> Self {
+        match error {
+            crate::macos_notify::peer::installation::Refusal::ChildExited => Self::ChildExited,
+            error => Self::Native(error),
+        }
+    }
+}
+#[cfg(target_os = "macos")]
+impl OriginalHelperFailure {
+    /// Unit-only native refusals project to fixed text; no SDK message or
+    /// serialized identity crosses into caller error details.
+    pub fn code(self) -> &'static str {
+        match self {
+            Self::Unavailable => "original_child_unavailable",
+            Self::ChildExited => "original_child_exited",
+            #[cfg(feature = "macos-native-peer")]
+            Self::Native(error) => {
+                use crate::macos_notify::peer::{installation::Refusal as R, Refusal as P};
+                match error {
+                    R::UnsupportedLayout => "original_child_layout",
+                    R::Metadata => "original_child_metadata",
+                    R::Signature => "original_child_signature",
+                    R::SelfChanged => "original_child_self_changed",
+                    R::GenerationChanged => "original_child_generation_changed",
+                    R::Child => "original_child_identity",
+                    R::ChildExited => "original_child_exited",
+                    R::Peer(P::RequirementSize) => "original_child_requirement_size",
+                    R::Peer(P::RequirementNul) => "original_child_requirement_nul",
+                    R::Peer(P::RequirementInvalid) => "original_child_requirement_invalid",
+                    R::Peer(P::AuditUnavailable) => "original_child_audit_unavailable",
+                    R::Peer(P::AuditMalformed) => "original_child_audit_malformed",
+                    R::Peer(P::LiveCodeUnavailable) => "original_child_code_unavailable",
+                    R::Peer(P::LiveCodeRejected) => "original_child_code_rejected",
+                    R::Peer(P::PeerChanged) => "original_child_peer_changed",
+                }
+            }
+        }
+    }
+}
+
 /// Off the UI thread. A paired Mac app uses only its verified own bundled hgs;
 /// a broken purported pair stays unavailable, never falling through to PATH or
 /// an explicit ordinary-CLI override. Source/unpaired and other platforms retain
@@ -52,14 +104,29 @@ impl Connection {
         &self,
         child: &mut std::process::Child,
     ) -> Result<(), &'static str> {
+        self.observe_original_helper_diagnostic(child)
+            .map_err(|_| UNAVAILABLE)
+    }
+
+    /// The same check/close-on-refusal, with its closed failure category kept
+    /// for the original caller's diagnostic. Performs no extra observation.
+    #[cfg(target_os = "macos")]
+    pub fn observe_original_helper_diagnostic(
+        &self,
+        child: &mut std::process::Child,
+    ) -> Result<(), OriginalHelperFailure> {
         #[cfg(feature = "macos-native-peer")]
-        let result = self.native.as_ref().ok_or(UNAVAILABLE).and_then(|native| {
-            native
-                .observe_original_helper(child)
-                .map_err(|_| UNAVAILABLE)
-        });
+        let result = self
+            .native
+            .as_ref()
+            .ok_or(OriginalHelperFailure::Unavailable)
+            .and_then(|native| {
+                native
+                    .observe_original_helper(child)
+                    .map_err(OriginalHelperFailure::from)
+            });
         #[cfg(not(feature = "macos-native-peer"))]
-        let result = Err(UNAVAILABLE);
+        let result = Err(OriginalHelperFailure::Unavailable);
         if result.is_err() {
             drop(child.stdin.take());
         }

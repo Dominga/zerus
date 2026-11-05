@@ -21,7 +21,7 @@ export { cleanup, cleanupDialog };
 let noticeModule: Promise<typeof import("./cleanupNotices")> | undefined;
 export function applyCleanup(view: CleanupView) { if (view.revision >= cleanup().revision) {
   setCleanup(view);
-  if (noticeModule || view.rows.some((r) => r.notice)) void (noticeModule ??= import("./cleanupNotices")).then((m) => m.syncCleanupNotices());
+  if (noticeModule || view.rows.some((r) => r.notice || r.busy && r.source)) void (noticeModule ??= import("./cleanupNotices")).then((m) => m.syncCleanupNotices());
 } }
 let reading = false, again = false;
 export async function refreshCleanup() {

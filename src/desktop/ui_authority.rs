@@ -824,6 +824,22 @@ impl Authorized {
     }
 }
 
+// The synchronization prefix does not broaden the permitted relay command.
+// Mac alone uses it; duplicate/misplaced markers and extra arguments refuse.
+fn frontend_request_arguments(args: &[String], rendezvous: bool) -> bool {
+    #[cfg(unix)]
+    let args = if rendezvous
+        && args.first().is_some_and(|arg| arg == zerus_client_core::run::rendezvous::ARG)
+    {
+        &args[1..]
+    } else {
+        args
+    };
+    #[cfg(not(unix))]
+    let _ = rendezvous;
+    args == ["desktop", "frontend-request", "--json"]
+}
+
 pub(super) fn authenticate(location: &Scope, peer_pid: u32, value: &Value) -> Result<Authorized> {
     let envelope: Envelope =
         serde_json::from_value(value.clone()).context("invalid frontend envelope")?;
@@ -864,8 +880,9 @@ pub(super) fn authenticate(location: &Scope, peer_pid: u32, value: &Value) -> Re
     }
     let argv = caller.arguments()?;
     ensure!(
-        argv.get(1..)
-            .is_some_and(|a| a == ["desktop", "frontend-request", "--json"]),
+        argv.get(1..).is_some_and(|args| {
+            frontend_request_arguments(args, cfg!(target_os = "macos"))
+        }),
         "unexpected frontend relay"
     );
     let Canonical {
@@ -2432,6 +2449,28 @@ mod tests {
             "1.0.0-dev.18446744073709551616",
         ] {
             assert_eq!(dev_number(version), None, "{version}");
+        }
+    }
+
+    #[test]
+    #[cfg(unix)]
+    fn the_mac_transport_prefix_keeps_exact_frontend_request_arguments() {
+        let args = |words: &[&str]| words.iter().map(|word| (*word).into()).collect::<Vec<String>>();
+        let original = args(&["desktop", "frontend-request", "--json"]);
+        assert!(frontend_request_arguments(&original, false));
+        assert!(frontend_request_arguments(&original, true));
+        let mut gated = original.clone();
+        gated.insert(0, zerus_client_core::run::rendezvous::ARG.into());
+        assert!(frontend_request_arguments(&gated, true));
+        assert!(!frontend_request_arguments(&gated, false));
+        for words in [
+            vec!["--desktop-helper-rendezvous-v1", "desktop", "request", "--json"],
+            vec!["--desktop-helper-rendezvous-v1", "desktop", "frontend-request", "--json", "extra"],
+            vec!["--desktop-helper-rendezvous-v1", "--desktop-helper-rendezvous-v1", "desktop", "frontend-request", "--json"],
+            vec!["desktop", "--desktop-helper-rendezvous-v1", "frontend-request", "--json"],
+            vec!["--desktop-helper-rendezvous-v2", "desktop", "frontend-request", "--json"],
+        ] {
+            assert!(!frontend_request_arguments(&args(&words), true));
         }
     }
 

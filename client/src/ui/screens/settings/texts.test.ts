@@ -61,7 +61,7 @@ const KEYBOARD = [
   "Press the new shortcut for %1.", "Already used by %1. Reassign?",
 ];
 const ABOUT_FILLED: [string, string][] = [
-  ["Zerus %1", "`Zerus ${__APP_VERSION__}`"],
+  ["Zerus %1", "installedAppName(appBuildInfo())"],
   ["hgs CLI %1", "`hgs CLI ${version}`"],
 ];
 const ABOUT = ["About", "hgs CLI version unavailable", "hgs CLI: checking…", "Open Zerus repository on GitHub"];

@@ -482,7 +482,13 @@ unlocks credentials and never falls back to ad hoc signing. `mac-install.sh`
 uses the destination Mac's keychain and forwards the optional
 `HGS_MACOS_SIGN_IDENTITY` exact certificate name or SHA-1 selector.
 
-The paired copy contains exactly the app and `Contents/MacOS/hgs`. The signer
+The paired copy contains exactly two code executables: the app and `Contents/MacOS/hgs`.
+Before signing, both local preparation and public release assembly copy the
+Service-mode helpers `install-macos-desktop-service.py`, `desktop-revoke-hold.py`
+and `desktop-service-activation.py` into `Contents/Resources/setup`. Local
+preparation and the release bundle check refuse a missing or empty helper;
+the outer app signature seals these resources. The raw Tauri build is only an
+input to preparation and does not yet contain this Service payload. The signer
 signs the CLI first with identifier `hgs`, then seals it and
 `Contents/Resources/zerus-local-pair.json` into the app. The record contains the
 unsigned build artifact's SHA-256 and the signed CLI's SHA-256. Both signatures

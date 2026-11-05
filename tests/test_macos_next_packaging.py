@@ -88,6 +88,10 @@ class NextPackaging(unittest.TestCase):
                     shutil.copytree(args[1], args[2])
                 else:
                     self.assertEqual(args[0], "codesign")
+                    for name, relative in zip(package.macos_service_payload.SERVICE_SCRIPTS,
+                                              package.macos_service_payload.SERVICE_RESOURCES):
+                        self.assertEqual((Path(args[-1]) / relative).read_bytes(),
+                                         (ROOT / "scripts" / name).read_bytes())
             argv = ["package-macos.py", "--gui", "tauri", "--app", str(app), "--cli", str(cli),
                     "--connector", str(cli), "--licenses", str(root / "rust"),
                     "--client-licenses", str(root / "client-rust"), "--frontend-licenses", str(root / "frontend"),
@@ -125,6 +129,7 @@ class NextPackaging(unittest.TestCase):
         bundle = root / "Zerus.app"
         for name in check.TAURI_RELEASE_REQUIRED:
             path = bundle / name; path.parent.mkdir(parents=True, exist_ok=True); path.write_bytes(b"")
+        package.macos_service_payload.stage(ROOT, bundle)
         info = plistlib.loads((ROOT / "client/src-tauri/Info.switch.plist").read_bytes())
         info.update(CFBundleIdentifier="com.hgdev.hgs-tray", CFBundleExecutable="hgs-tray",
                     CFBundleDisplayName="Zerus", CFBundleVersion=VERSION,
@@ -135,6 +140,27 @@ class NextPackaging(unittest.TestCase):
         for name in ("rust", "client-rust", "frontend"):
             inventory(bundle / "Contents/Resources/licenses" / name)
         return bundle
+
+    def test_release_checks_refuse_each_missing_empty_or_linked_service_helper(self):
+        with tempfile.TemporaryDirectory() as temporary, mock.patch.object(
+                check.subprocess, "check_output", side_effect=lambda args, **kw: "arm64\n" if args[0] == "lipo" else OTOOL):
+            bundle = self.distribution(Path(temporary))
+            self.assertEqual(check.tauri_bundle_findings(bundle, VERSION, VERSION), [])
+            for relative in package.macos_service_payload.SERVICE_RESOURCES:
+                target = bundle / relative
+                original = target.read_bytes()
+                for kind in ("missing", "empty", "link"):
+                    with self.subTest(relative=relative, kind=kind):
+                        target.unlink()
+                        if kind == "empty":
+                            target.write_bytes(b"")
+                        elif kind == "link":
+                            target.symlink_to(ROOT / "scripts" / target.name)
+                        # Only Next bundles are packaged since the Qt retirement.
+                        findings = check.bundle_findings(bundle, VERSION, gui="tauri")
+                        self.assertTrue(any(relative in error for error in findings), findings)
+                        target.unlink(missing_ok=True)
+                        target.write_bytes(original)
 
     def test_public_tauri_profile_checks_cli_notices_identity_and_refuses_qt(self):
         with tempfile.TemporaryDirectory() as temporary, mock.patch.object(

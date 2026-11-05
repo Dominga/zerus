@@ -14,13 +14,14 @@ import re
 import shutil
 import subprocess
 
+import macos_service_payload
 
 ROOT = Path(__file__).resolve().parents[1]
 MINIMUM_SYSTEM = "14.0"
 # Installers zerus-setup runs from Contents/Resources/setup, with the local modules they import.
 SETUP_SCRIPTS = ("install-macos-session-service.py", "install-recovery-service.py",
                  "install-swarm-service.py", "launchd_agent.py", "install-mobile-connector-service.py",
-                 "install-macos-desktop-service.py", "desktop-revoke-hold.py", "desktop-service-activation.py")
+                 *macos_service_payload.SERVICE_SCRIPTS)
 
 
 def run(*command):
@@ -111,7 +112,9 @@ def main():
     resources = contents / "Resources"
     install(ROOT / "packaging/macos/zerus-setup", resources / "bin/zerus-setup", 0o755)
     for name in SETUP_SCRIPTS:
-        install(ROOT / "scripts" / name, resources / "setup" / name)
+        if name not in macos_service_payload.SERVICE_SCRIPTS:
+            install(ROOT / "scripts" / name, resources / "setup" / name)
+    macos_service_payload.stage(ROOT, staged)
     install(ROOT / "hgs_state.py", resources / "setup/hgs_state.py")
     install(ROOT / "tray/packaging/com.hgdev.hgs-tray.plist", resources / "setup/com.hgdev.hgs-tray.plist")
     install(ROOT / "README.md", resources / "doc/README.md")
@@ -127,6 +130,7 @@ def main():
     bundle = args.output / "Zerus.app"
     run("ditto", staged, bundle)
     shutil.rmtree(work)
+    macos_service_payload.require_payload(bundle)
     # Thinning invalidates signatures. An ad-hoc signature keeps the unsigned
     # candidate runnable for checks; release signing replaces it.
     run("codesign", "--force", "--deep", "--sign", "-", bundle)

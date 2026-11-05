@@ -57,6 +57,20 @@ export function taskDrop(e: DragEvent, project: string, row?: Session) {
   if (task) void assign(project, task, row);
 }
 
+/**
+ * A pointer drag's assignment target in the session list (lib/pointerDrag):
+ * the session or project header under `el`, when the dragged task may be
+ * assigned there, as taskDragOver allows an HTML5 drop.
+ */
+export function taskAssignmentAt(el: Element | null | undefined, project: string): { project: string; row?: Session } | undefined {
+  const key = el?.closest<HTMLElement>(".sp-scroll .vrow")?.dataset.key;
+  const drag = draggedTask(), task = drag && tasks.find(drag.uuid);
+  if (!key || !task || drag.project !== project || tasks.project() !== project) return;
+  if (key.startsWith("h:")) return key.slice(2) === project && canAssign(task, project) ? { project } : undefined;
+  const row = catalog.rows[key];
+  return row && groupOf(row.key) === project && canAssign(task, project, row) ? { project, row } : undefined;
+}
+
 export const [taskAssignmentPopover, setTaskAssignmentPopover] = createSignal<{ project: string; task: Task; origin: HTMLElement }>();
 export function openTaskAssignment(project: string, task: Task, origin: HTMLElement) {
   if (canAssign(task, project) && !writingTask()) setTaskAssignmentPopover({ project, task: { ...task, target: { ...task.target } }, origin });

@@ -62,6 +62,8 @@
   /* Drag to organise (SessionList.cpp): a 2 px accent line between rows, or a
      2 px frame (radius 5) around the project header a session moves into. */
   .drop-line, .drop-box { position: absolute; z-index: 5; top: 0; pointer-events: none; }
+  /* A pointer drag (lib/pointerDrag) selects no text and shows a moving cursor. */
+  body.pointer-dragging, body.pointer-dragging * { cursor: grabbing !important; user-select: none !important; -webkit-user-select: none !important; }
   .drop-line { height: 2px; border-radius: 1px; background: var(--z-color-accent); }
   .drop-box { left: 5px; right: 5px; border: 2px solid var(--z-color-accent); border-radius: 5px; }
   .rowhit.dragged .scard { opacity: .45; }

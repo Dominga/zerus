@@ -50,6 +50,7 @@ impl Target {
     }
 }
 
+pub(in crate::desktop) mod budget;
 pub(in crate::desktop) mod engine;
 pub(in crate::desktop) mod observation;
 

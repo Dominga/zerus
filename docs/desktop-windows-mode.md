@@ -214,6 +214,17 @@ these diagnostics are never admission or cleanup evidence. Exit polling
 validates the current owned definition once and uses that same checked task
 for GUID disappearance, under the original Stop deadline.
 
+Refresh allocates the ordinary two-second Stop allowance plus its unused
+two-second Update allowance to ONE four-second Stop deadline, captured once
+at Stop entry. It performs no Update or Rollback phase and cannot spend those
+allowances again. Preflight 2 + Hold 3 + Stop 4 + Start 2 + Readiness 8 + Release 2
+is 21 seconds, plus the existing three-second exchange/cleanup allowance, inside
+the unchanged 30-second original-helper/runner bound. A declared overall
+deadline begins at helper entry; every phase is clipped to it. Checks, debug
+pause, physical-exit/GUID polls and Stopped publication all spend the same Stop
+deadline. Expiry never renews it or authorizes another start. Ordinary mode,
+first-choice and post-review choice budgets are unchanged.
+
 This first controller supports a current, identity-current Service Grant only.
 Revoked, blocked, changed-origin and unsupported actors are explicitly refused;
 refresh cannot obtain a Grant through retirement. In particular, it does not

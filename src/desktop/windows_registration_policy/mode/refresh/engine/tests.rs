@@ -20,7 +20,10 @@ struct Model {
     started: String,
     next: ObservedInstance,
     phase: Budget,
-    until: Instant,
+    deadlines: budget::Deadlines,
+    base: Instant,
+    elapsed: Duration,
+    schedule: Option<Schedule>,
     reads: usize,
     stops: usize,
     starts: usize,
@@ -30,8 +33,17 @@ struct Model {
     fail_final_post_persist: bool,
     trace: Vec<String>,
 }
+#[derive(Clone, Copy, Default)]
+struct Schedule {
+    pause_ms: u64,
+    offer_ms: u64,
+    stop_ms: u64,
+    exit_polls: usize,
+    stopped_fence_ms: u64,
+}
 impl Model {
     fn new() -> Self {
+        let base = Instant::now();
         Self {
             root: tempfile::tempdir().unwrap(),
             plan: super::super::tests::plan(),
@@ -44,7 +56,10 @@ impl Model {
             started: super::super::tests::id(),
             next: super::super::tests::instance(24),
             phase: Budget::Preflight,
-            until: Instant::now() + Duration::from_secs(60),
+            deadlines: budget::Deadlines::new(base, base + Budget::exchange_timeout()).unwrap(),
+            base,
+            elapsed: Duration::ZERO,
+            schedule: None,
             reads: 0,
             stops: 0,
             starts: 0,
@@ -54,6 +69,9 @@ impl Model {
             fail_final_post_persist: false,
             trace: Vec::new(),
         }
+    }
+    fn now(&self) -> Instant {
+        self.base + self.elapsed
     }
     fn source(&self) -> bool {
         Arc::strong_count(&self.owner) == 1 && !self.pipe && !self.operations
@@ -68,21 +86,20 @@ impl Model {
 }
 impl Session for Model {
     type Started = String;
-    fn phase(&mut self, phase: Budget) {
+    fn phase(&mut self, phase: Budget) -> Result<()> {
+        let now = self.now();
+        self.deadlines.enter(phase, now)?;
         self.phase = phase;
-        self.until = phase.deadline(Instant::now());
         self.reads = 0;
         self.trace.push(format!("{phase:?}"));
+        Ok(())
     }
     fn check(&mut self) -> Result<()> {
-        ensure!(
-            Instant::now() < self.until,
-            "original modeled deadline expired"
-        );
+        self.deadlines.check(self.now())?;
         if self.reads >= 5 && !self.source() {
             anyhow::bail!("original modeled resource still held");
         }
-        if self.reads >= 5 && self.stops != 0 && !self.exited {
+        if self.schedule.is_none() && self.reads >= 5 && self.stops != 0 && !self.exited {
             anyhow::bail!("original modeled physical exit unconfirmed");
         }
         Ok(())
@@ -95,11 +112,19 @@ impl Session for Model {
                 .refreshes
                 .last()
                 .is_some_and(|r| r.phase == ChoicePhase::Settled);
+        let stopped_save = record
+            .pending
+            .as_ref()
+            .is_some_and(|p| p.phase == Phase::Stopped);
         let mut calls = 0;
         windows_mode_stop::publish(
             &root,
             &mut || {
                 calls += 1;
+                if stopped_save {
+                    self.elapsed +=
+                        Duration::from_millis(self.schedule.unwrap_or_default().stopped_fence_ms);
+                }
                 self.check()?;
                 ensure!(
                     !(final_save && self.fail_final_post_persist && calls == 3),
@@ -117,8 +142,11 @@ impl Session for Model {
         self.reads += 1;
         Ok(self.source())
     }
-    fn pause(&mut self, _request: &str) {}
+    fn pause(&mut self, _request: &str) {
+        self.elapsed += Duration::from_millis(self.schedule.unwrap_or_default().pause_ms);
+    }
     fn offer_stop(&mut self, record: &mut Record) -> Result<()> {
+        self.elapsed += Duration::from_millis(self.schedule.unwrap_or_default().offer_ms);
         let current = self.current;
         let root = self.root.path().to_owned();
         let plan = self.plan.clone();
@@ -137,11 +165,17 @@ impl Session for Model {
     fn stop(&mut self) -> Result<()> {
         self.check()?;
         self.stops += 1;
+        self.elapsed += Duration::from_millis(self.schedule.unwrap_or_default().stop_ms);
         ensure!(!self.fail_stop, "modeled original Stop reply lost");
-        Ok(())
+        self.check()
     }
     fn stopped(&mut self) -> Result<bool> {
         self.reads += 1;
+        if let Some(schedule) = self.schedule {
+            self.elapsed += Duration::from_millis(100);
+            self.exited = self.reads >= schedule.exit_polls;
+            self.check()?;
+        }
         Ok(self.exited)
     }
     fn start(&mut self) -> Result<Self::Started> {
@@ -225,7 +259,7 @@ fn selection_refusal_is_before_publication_and_deadline_expiry_never_restarts_th
     assert_eq!(model.durable().pending.unwrap().phase, Phase::Held);
     let mut model = Model::new();
     let (mut record, token) = reserved(&mut model);
-    model.until = Instant::now();
+    model.elapsed += Duration::from_secs(2);
     let error = run(&mut model, &mut record, token).unwrap_err();
     assert!(error.to_string().contains("deadline expired"), "{error:#}");
     assert_eq!((model.stops, model.starts, model.released), (0, 0, false));
@@ -354,4 +388,104 @@ fn a_final_post_persist_failure_reads_the_original_settled_result_never_a_refusa
         (1, 1, true),
         "observation re-executed an effect"
     );
+}
+
+#[test]
+fn the_same_stop_deadline_covers_pause_checks_exit_polls_and_stopped_publication() {
+    // Deterministic virtual elapsed time drives the SAME deadline policy and
+    // actual engine/file publisher. Process/COM costs remain modeled only.
+    let mut model = Model::new();
+    let (mut record, token) = reserved(&mut model);
+    model.schedule = Some(Schedule {
+        offer_ms: 800,
+        stop_ms: 70,
+        exit_polls: 12,
+        stopped_fence_ms: 100,
+        ..Default::default()
+    });
+    run(&mut model, &mut record, token).unwrap();
+    assert_eq!(model.elapsed, Duration::from_millis(2370));
+    assert_eq!((model.stops, model.starts, model.released), (1, 1, true));
+    assert_eq!(
+        model.trace,
+        ["Hold", "Stop", "Start", "Readiness", "Release"]
+    );
+    assert_eq!(model.durable().refreshes[0].phase, ChoicePhase::Settled);
+
+    for (schedule, phase, stops, exited) in [
+        (
+            Schedule {
+                pause_ms: 4000,
+                ..Default::default()
+            },
+            Phase::Held,
+            0,
+            true,
+        ),
+        (
+            Schedule {
+                offer_ms: 800,
+                stop_ms: 70,
+                exit_polls: 50,
+                ..Default::default()
+            },
+            Phase::StopOffered,
+            1,
+            false,
+        ),
+        (
+            Schedule {
+                offer_ms: 800,
+                stop_ms: 70,
+                exit_polls: 12,
+                stopped_fence_ms: 2000,
+                ..Default::default()
+            },
+            Phase::StopOffered,
+            1,
+            true,
+        ),
+        (
+            Schedule {
+                offer_ms: 800,
+                stop_ms: 70,
+                exit_polls: 12,
+                stopped_fence_ms: 700,
+                ..Default::default()
+            },
+            Phase::Stopped,
+            1,
+            true,
+        ),
+    ] {
+        let mut model = Model::new();
+        let (mut record, token) = reserved(&mut model);
+        let id = record.pending.as_ref().unwrap().request_id.clone();
+        model.schedule = Some(schedule);
+        let error = run(&mut model, &mut record, token).unwrap_err();
+        assert!(error.to_string().contains("deadline expired"), "{error:#}");
+        assert_eq!(
+            (model.stops, model.starts, model.released),
+            (stops, 0, false)
+        );
+        assert_eq!(model.exited, exited);
+        let mut durable = model.durable();
+        assert_eq!(durable.pending.as_ref().unwrap().phase, phase);
+        assert_eq!(durable.pending.as_ref().unwrap().request_id, id);
+        assert_eq!(durable.refreshes[0].phase, ChoicePhase::Unknown);
+        assert_eq!(
+            model.trace,
+            ["Hold", "Stop"],
+            "an expired phase was renewed"
+        );
+        assert!(durable.choice(None).is_err());
+        assert!(durable
+            .reserve_refresh(
+                &id,
+                super::super::tests::instance(23),
+                super::super::tests::scope(),
+                super::super::tests::consumer()
+            )
+            .is_err());
+    }
 }

@@ -32,6 +32,8 @@ pub mod saved;
 pub mod send;
 #[cfg(any(target_os = "linux", target_os = "macos"))]
 pub use handed::DeferredRoute;
+#[cfg(any(target_os = "linux", target_os = "macos"))]
+pub use questions::AnswerRoute;
 #[cfg(feature = "media")]
 mod voice;
 
@@ -656,6 +658,8 @@ pub(crate) struct Shared {
     opened: Condvar,
     /// The selected desktop service's deferred send route, if any.
     pub(crate) deferred: Mutex<Option<Arc<handed::DeferredRoute>>>,
+    /// Its deferred answer route, if any.
+    pub(crate) answer_route: Mutex<Option<Arc<questions::AnswerRoute>>>,
     /// The ticker sleeps (tests wait for it).
     #[cfg(test)]
     parked: std::sync::atomic::AtomicBool,
@@ -710,6 +714,7 @@ impl Composers {
             changes: AtomicU64::new(0),
             opened: Condvar::new(),
             deferred: Mutex::new(None),
+            answer_route: Mutex::new(None),
             #[cfg(test)]
             parked: Default::default(),
         }));

@@ -797,7 +797,8 @@ pub const MAX_MESSAGE_BYTES: usize = 64 * 1024;
 /// While a send to the same session and agent is in flight.
 pub const ALREADY_SENDING: &str = "A message to this session is already being sent.";
 /// The answer lane of a session is busy.
-pub const ALREADY_ANSWERING: &str = "An answer to this session is already being sent.";
+pub const ALREADY_ANSWERING: &str =
+    crate::source!("An answer to this session is already being sent.");
 /// The largest answer `hgs answer` takes on standard input, and the largest
 /// acknowledgement it reads back.
 const MAXIMUM_ANSWER_BYTES: usize = 64 * 1024;
@@ -1370,8 +1371,9 @@ fn uuid_shaped(id: &str) -> bool {
         })
 }
 
-/// `requestAnswerQuestion`'s refusals and standard input.
-fn answer_input(
+/// `requestAnswerQuestion`'s refusals and standard input: the exact stdin
+/// of the one `hgs answer` call, which a deferred answer offers as is.
+pub fn answer_input(
     name: &str,
     question: &Value,
     answers: &[questions::AnswerItem],

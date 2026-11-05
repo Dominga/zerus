@@ -33,6 +33,10 @@ use zerus_client_core::{Action, Outcome, Target};
 use super::send::{outcome_of, Context};
 use super::{ComposerEvent, Composers, Hub, SessionRef};
 
+mod handed;
+pub(crate) use handed::restart_answer_checks;
+pub use handed::AnswerRoute;
+
 /// At most this many answer drafts stay in memory; Qt keeps every one.
 const HELD: usize = 64;
 /// At most this many remembered choices among optional cards.
@@ -100,6 +104,11 @@ pub(crate) struct Answers {
     pub(crate) cold: Option<ColdAsk>,
     /// The answer under way per session key, by card (`m_answersInFlight`).
     pub(crate) in_flight: HashMap<String, String>,
+    /// The answers the desktop service still reported in progress, by card:
+    /// held without Allow retry and checked again (zerus-5wmh.66.4.7).
+    pub(crate) handed: HashMap<String, handed::HandedAnswer>,
+    /// The cards whose one lookup after a reload ran.
+    pub(crate) probed: HashSet<String>,
     next_token: u64,
     /// Runs once between `sync_moving`'s two lock sections (tests only).
     #[cfg(test)]
@@ -479,6 +488,7 @@ impl Composers {
                 || answers.loading.contains(&key)
                 || answers.failed.contains(&key)
                 || answers.unsaved.contains(&key)
+                || answers.handed.contains_key(&key)
                 || answers.drafts.get(&key).is_some_and(|d| d.sending);
             if keep {
                 i += 1;
@@ -489,6 +499,11 @@ impl Composers {
             answers.saves.remove(&key);
             answers.loads.remove(&key);
         }
+        // A reload's lookup needs its draft: a mark whose draft is gone can
+        // never ask again, so it goes too and the set stays bounded.
+        answers
+            .probed
+            .retain(|key| answers.drafts.contains_key(key));
     }
 
     /// Saves a card's draft (`saveDraft`, 709-739); `durable` for the save
@@ -607,7 +622,9 @@ impl Composers {
             available: reason.is_none(),
             unavailable_reason: reason.unwrap_or_default().to_owned(),
             loading: hub.answers.loading.contains(&key) || !hub.answers.drafts.contains_key(&key),
-            in_flight: hub.answers.in_flight.values().any(|card| *card == key),
+            // A handed answer is locked like one under way: no Allow retry.
+            in_flight: hub.answers.in_flight.values().any(|card| *card == key)
+                || hub.answers.handed.contains_key(&key),
             pending: selection.pending,
             queue_index: selection.index,
             queue_count: selection.optional.len(),
@@ -620,7 +637,12 @@ impl Composers {
             .map(|(_, texts)| texts.clone())
             .unwrap_or_default();
         let view = QuestionView {
-            answering: hub.answers.in_flight.contains_key(&ctx.key),
+            answering: hub.answers.in_flight.contains_key(&ctx.key)
+                || hub
+                    .answers
+                    .handed
+                    .values()
+                    .any(|handed| handed.answering.key == ctx.key),
             card: key,
             revision: hub.answers.revision,
             epoch: hub.answers.epoch,
@@ -702,8 +724,12 @@ impl Composers {
     /// Allow retry on the card (256-259), after the user checked Terminal.
     pub fn question_allow_retry(&self, card: &str) {
         let mut hub = self.lock();
-        // Qt's Allow retry acts on the shown card (`m_key`, 256-259).
-        if hub.closed || self.shown_question(&hub, card).is_none() {
+        // Qt's Allow retry acts on the shown card (`m_key`, 256-259). An
+        // answer the desktop service still sends has none.
+        if hub.closed
+            || self.shown_question(&hub, card).is_none()
+            || hub.answers.handed.contains_key(card)
+        {
             return;
         }
         let Some(draft) = hub.answers.drafts.get_mut(card) else {
@@ -1105,6 +1131,20 @@ impl Composers {
                 outcome_of(Ok(Err(crate::actions::BUSY.to_owned())), ALREADY_ANSWERING),
             );
         }
+        // The desktop service takes it when it can; once offered, nothing
+        // goes the direct way. An offer that panicked may have reached it.
+        match std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+            self.offer_answer(&answering)
+        })) {
+            Ok(Some(answer)) => return self.answer_offered(&answering, answer),
+            Ok(None) => {}
+            Err(_) => {
+                return self.answer_unconfirmed(
+                    &answering,
+                    crate::desktop_service::deferred_answer::UNCONFIRMED,
+                )
+            }
+        }
         let target = Target {
             computer: answering.session.computer.clone(),
             name: answering.session.name.clone(),
@@ -1125,11 +1165,28 @@ impl Composers {
     /// `finishQuestion` (5177-5186) and the receipt's follow-ups (1156-1186):
     /// the card says how it ended. Nothing is sent again by itself.
     fn answer_finished(&self, a: &Answering, outcome: Outcome) {
+        self.answer_ended(a, outcome, false);
+    }
+
+    /// An answer the desktop service could not confirm: uncertain, with the
+    /// service's whole `line` as is (zerus-5wmh.66.4.7).
+    fn answer_unconfirmed(&self, a: &Answering, line: &str) {
+        self.answer_ended(
+            a,
+            Outcome::Uncertain {
+                detail: line.to_owned(),
+            },
+            true,
+        );
+    }
+
+    fn answer_ended(&self, a: &Answering, outcome: Outcome, as_is: bool) {
         let mut hub = self.lock();
         // Only this answer's own entry: another card's of the session stays.
         if hub.answers.in_flight.get(&a.key) == Some(&a.card) {
             hub.answers.in_flight.remove(&a.key);
         }
+        hub.answers.handed.remove(&a.card);
         let open = hub.open_key.as_deref() == Some(a.key.as_str());
         let open_run = open
             .then(|| {
@@ -1159,6 +1216,7 @@ impl Composers {
                     ));
                 }
                 Outcome::Failed { detail } => draft.set_error(detail, false),
+                Outcome::Uncertain { detail } if as_is => draft.set_unconfirmed(detail),
                 Outcome::Uncertain { detail } => draft.set_error(detail, true),
             }
         }

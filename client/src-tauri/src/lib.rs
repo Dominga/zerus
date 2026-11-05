@@ -1018,6 +1018,27 @@ fn launch(context: tauri::Context<tauri::Wry>, startup: Startup) {
                             desktop_service::deferred_send::check(service, plan)
                         }),
                     });
+                    // Question answers the service takes (deferred_answer),
+                    // the same way; every other answer stays direct.
+                    let (answering, checking) = (app.handle().clone(), app.handle().clone());
+                    composers.set_answer_route(composer::AnswerRoute {
+                        send: std::sync::Arc::new(move |session, checkpoint, pinned, stdin| {
+                            let service =
+                                answering.state::<commands::AppState>().desktop_service();
+                            desktop_service::deferred_answer::call(
+                                service,
+                                session,
+                                checkpoint,
+                                pinned,
+                                stdin,
+                                &std::sync::atomic::AtomicBool::new(false),
+                            )
+                        }),
+                        check: std::sync::Arc::new(move |plan| {
+                            let service = checking.state::<commands::AppState>().desktop_service();
+                            desktop_service::deferred_answer::check(service, plan)
+                        }),
+                    });
                 }
                 // The composer's session part once a second (the cache chip)
                 // and the inspect fallback; it sleeps while no composer is open.

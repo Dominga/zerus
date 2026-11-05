@@ -27,8 +27,11 @@ const ENTRY_BYTES: u64 = 4096;
 /// Where a session's record lives.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub(super) enum Kind {
-    /// A session record (`storage::read`).
+    /// A session record at its label's path (`storage::read`).
     Record,
+    /// A session record in the ID layout, `sessions/<id>.json` (zerus-ucck
+    /// P3a, `storage::read_id`).
+    IdRecord,
     /// A DeepSeek binding (`dsh::binding`).
     DeepSeek,
     /// An OpenCode binding (`opencode::binding`).
@@ -39,6 +42,7 @@ impl Kind {
     fn as_str(self) -> &'static str {
         match self {
             Kind::Record => "record",
+            Kind::IdRecord => "id",
             Kind::DeepSeek => "dsh",
             Kind::OpenCode => "opencode",
         }
@@ -46,6 +50,7 @@ impl Kind {
     fn parse(text: &str) -> Option<Kind> {
         match text {
             "record" => Some(Kind::Record),
+            "id" => Some(Kind::IdRecord),
             "dsh" => Some(Kind::DeepSeek),
             "opencode" => Some(Kind::OpenCode),
             _ => None,
@@ -187,6 +192,7 @@ fn write_entry(id: &str, name: &str, kind: Kind) -> Result<()> {
 fn remove_entry(id: &str) -> Result<()> {
     #[cfg(test)]
     CHANGES.fetch_add(1, Ordering::SeqCst);
+    storage::cut_write()?;
     match fs::remove_file(path(id)) {
         Err(error) if error.kind() != io::ErrorKind::NotFound => Err(error.to_string()),
         _ => Ok(()),
@@ -218,7 +224,9 @@ pub(super) fn note(record: &Value, kind: Kind) {
 /// holds, so `ids/` does not keep an entry for every session ever made.
 pub(super) fn retire(record: &Value) {
     let (id, name) = (string(record, "session_id"), string(record, "name"));
-    if entry(id).is_some_and(|(noted, kind)| noted == name && kind == Kind::Record) && writable(id)
+    if entry(id).is_some_and(|(noted, kind)| {
+        noted == name && matches!(kind, Kind::Record | Kind::IdRecord)
+    }) && writable(id)
     {
         changed(remove_entry(id));
     }
@@ -238,10 +246,11 @@ fn carries(record: &Value, id: &str, name: &str) -> bool {
 pub(super) fn find(id: &str) -> Option<Found> {
     let (name, kind) = entry(id)?;
     let record = match kind {
-        Kind::Record => storage::record_path(&name)
+        Kind::Record => storage::label_record_path(&name)
             .exists()
-            .then(|| storage::read(&name).ok())
+            .then(|| storage::read_label(&name).ok())
             .flatten()?,
+        Kind::IdRecord => storage::read_id(id).ok()?,
         Kind::DeepSeek => dsh::binding(&name).ok()?,
         Kind::OpenCode => opencode::binding(&name).ok()?,
     };

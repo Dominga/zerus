@@ -820,7 +820,7 @@ fn current(job: &Value) -> Result<Value> {
     }
     let mut candidates = records()?.into_iter().filter(matches).collect::<Vec<_>>();
     // DSH bindings are separate; inspect only private bounded manifests.
-    for entry in ["dsh/bindings","opencode/bindings"].into_iter().flat_map(|directory| fs::read_dir(root().join(directory)))
+    for entry in ["dsh/bindings","opencode/bindings","dsh/sessions","opencode/sessions"].into_iter().flat_map(|directory| fs::read_dir(root().join(directory)))
         .flatten()
         .flatten()
         .take(10000)

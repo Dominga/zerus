@@ -24,6 +24,17 @@ if (root / ('offline-' + alias)).exists():
 env = dict(os.environ, HGS_CONFIG_DIR=str(root / alias), HGS_STATE_DIR=str(root / alias / 'state'))
 args = shlex.split(sys.argv[-1])[1:]
 with (root / 'calls').open('a') as file: file.write(alias + ' ' + ' '.join(args) + '\\n')
+if (root / ('spoil-' + alias)).exists() and args[1:2] == [json.loads((root / ('spoil-' + alias)).read_text())['command']]:
+    # A member whose replica answer loses one field, or carries it in another
+    # form: {command, field[, value]}.
+    spoil = json.loads((root / ('spoil-' + alias)).read_text())
+    result = subprocess.run([os.environ['SWARM_TEST_HGS'], *args], input=sys.stdin.read(), env=env, text=True, capture_output=True)
+    sys.stderr.write(result.stderr)
+    if result.returncode: sys.exit(result.returncode)
+    output = json.loads(result.stdout)
+    if 'value' in spoil: output[spoil['field']] = spoil['value']
+    else: output.pop(spoil['field'], None)
+    print(json.dumps(output)); sys.exit(0)
 if (root / ('noreplica-' + alias)).exists():
     # A member from before task replication: its hello has no replica field and
     # it knows no replica commands.
@@ -495,6 +506,144 @@ class Swarm(unittest.TestCase):
         # Equal digests: a sync exchanges no project.
         before = self.exchanges(); self.call('a', 'sync'); self.call('b', 'sync')
         self.assertEqual(self.exchanges(), before)
+
+    def test_the_cutover_status_names_each_member_s_replica(self):
+        # zerus-cg5h.4 S2b.2 C2: what each member's hello and last exchange
+        # said, information only.
+        self.join('a', 'b'); self.join('b', 'a'); self.join('c', 'b'); self.join('b', 'c')
+        self.converge()
+        task = self.task('a', 'add', '--project', 'a', text='Add rate limiting')['task']
+        self.converge()
+        hello = self.call('b', 'hello')['replica']
+        self.assertEqual(hello['task_schema'], 7)
+        self.assertRegex(hello['store'], r'^[0-9a-f-]{36}$')
+        self.assertEqual(self.call('b', 'hello')['replica']['store'], hello['store'])
+        status = self.task('b', 'cutover', '--project', 'a')
+        members = {m['alias']: m for m in status['members']}
+        self.assertEqual(set(members), {'a', 'c'})
+        for alias in 'ac':
+            self.assertEqual(members[alias]['task_schema'], 7, alias)
+            self.assertRegex(members[alias]['store'], r'^[0-9a-f-]{36}$')
+            self.assertEqual(members[alias]['inventory']['complete'], True, alias)
+        self.assertNotEqual(members['a']['store'], members['c']['store'])
+        self.assertEqual((status['phase'], status['closed']), ('not_cut_over', None))
+        # A cutover written here after the members' last exchange keeps it
+        # open until they exchange again.
+        tasks = next(p for p in (self.root / 'b/state/replica').iterdir() if p.is_dir()) / 'tasks'
+        (tasks / (task['uuid'] + '.managed')).write_text('{"saved":{}}')
+        status = self.task('b', 'cutover', '--project', 'a')
+        self.assertEqual(status['phase'], 'cutting_over')
+        self.assertEqual({k: status['closed'][k] for k in ('member', 'project', 'reason')},
+                         {'member': 'a', 'project': 'a', 'reason': 'inventory_before_cutover'})
+        self.assertIn("predates the latest cutover", status['closed_text'])
+        # A member whose Zerus does not replicate tasks receives none: not eligible.
+        (self.root / 'noreplica-c').touch()
+        self.assertTrue(self.call('b', 'sync')['c']['ok'])
+        self.assertEqual({m['alias'] for m in self.task('b', 'cutover', '--project', 'a')['members']}, {'a'})
+
+    def test_a_member_whose_hello_fails_has_no_complete_project(self):
+        # review-n on #1432: a failed hello records every project known here
+        # as unreachable for that member, never leaving an old completion.
+        self.join('a', 'b'); self.join('b', 'a')
+        for n in 'abab':
+            self.call(n, 'sync')
+        self.task('a', 'add', '--project', 'a', text='Offline outcome fixture')
+        for n in 'abab':
+            self.call(n, 'sync')
+        path = self.root / 'b/swarm/replica-members.json'
+        before = json.loads(path.read_text())['a']['projects']['a']
+        self.assertTrue(before['complete'])
+        (self.root / 'offline-a').touch()
+        self.assertFalse(self.call('b', 'sync')['a']['ok'])
+        after = json.loads(path.read_text())['a']['projects']['a']
+        self.assertEqual((after['complete'], after.get('reason')), (False, 'unreachable'))
+        (self.root / 'offline-a').unlink()
+        self.call('b', 'sync')
+        self.assertTrue(json.loads(path.read_text())['a']['projects']['a']['complete'])
+
+    def damage_between_inventory_and_exchange(self, owner):
+        """review-n on #1432 R2: a task of `owner` (b remote, a local) is
+        damaged after a healthy inventory and just before the exchange: the
+        exchange is not complete."""
+        self.join('a', 'b'); self.join('b', 'a')
+        for n in 'abab':
+            self.call(n, 'sync')
+        task = self.task(owner, 'add', '--project', 'a', text='Damage between inventory and exchange')
+        project = next(p for p in (self.root / owner / 'state/replica').iterdir()
+                       if p.is_dir() and (p / 'project-id').read_text().strip() == 'a')
+        target = project / 'tasks' / (task['task']['uuid'] + '.loro')
+        self.assertTrue(target.is_file())
+        flag = self.root / 'damage-before-exchange-b'
+        flag.write_text(str(target))
+        ssh = self.root / 'bin/ssh'
+        script = ssh.read_text()
+        needle = "if not (root / ('old-' + alias)).exists():"
+        hook = ("if args[1:2] == ['replica-exchange'] and (root / ('damage-before-exchange-' + alias)).exists():\n"
+                "    trigger = root / ('damage-before-exchange-' + alias)\n"
+                "    pathlib.Path(trigger.read_text()).write_bytes(b'damaged after a healthy inventory')\n"
+                "    trigger.unlink()\n")
+        self.assertIn(needle, script)
+        ssh.write_text(script.replace(needle, hook + needle, 1))
+        self.call('a', 'sync')
+        self.assertFalse(flag.exists(), 'the fixture did not reach the exchange')
+        record = json.loads((self.root / 'a/swarm/replica-members.json').read_text())['b']['projects']['a']
+        damaged = self.task(owner, 'list', '--project', 'a')['damaged']
+        self.assertEqual(len(damaged), 1)
+        self.assertFalse(record['complete'], record)
+        self.assertEqual(record.get('reason'), 'damaged_tasks', record)
+
+    def test_absent_or_unreadable_exchange_evidence_is_never_complete(self):
+        # review-n on #1432 R3: a replica answer that leaves out, or garbles,
+        # its refusals, import count, damaged count or pages records the
+        # project as malformed; the untouched answer is the control.
+        self.join('a', 'b'); self.join('b', 'a')
+        for n in 'abab':
+            self.call(n, 'sync')
+        spoils = [None,
+                  ('replica-exchange', 'refused'), ('replica-exchange', 'refused', None),
+                  ('replica-exchange', 'refused', {}), ('replica-exchange', 'refused', 'none'),
+                  ('replica-exchange', 'refused', [{'uuid': 1}]),
+                  ('replica-exchange', 'imported'), ('replica-exchange', 'imported', '1'),
+                  # zerus-tfqd6: more than the page carried, up to the largest
+                  # unsigned count, is unknown and never added up.
+                  ('replica-exchange', 'imported', 1), ('replica-exchange', 'imported', 2 ** 64 - 1),
+                  ('replica-exchange', 'refused', [{'uuid': str(uuid.UUID(int=1)), 'error': 'not sent'}]),
+                  ('replica-exchange', 'damaged'), ('replica-exchange', 'damaged', -1),
+                  ('replica-exchange', 'damaged', '0'), ('replica-exchange', 'more'),
+                  ('replica-exchange', 'more', 'false'), ('replica-exchange', 'updates', 'none'),
+                  ('replica-inventory', 'damaged'), ('replica-inventory', 'damaged', 0.5),
+                  ('replica-inventory', 'inventory', [])]
+        path = self.root / 'a/swarm/replica-members.json'
+        flag = self.root / 'spoil-b'
+        for n, spoil in enumerate(spoils):
+            with self.subTest(spoil=spoil):
+                # A task added there makes the digests differ, so the pages are exchanged.
+                self.task('b', 'add', '--project', 'a', text=f'Exchange evidence fixture {n}')
+                if spoil is None:
+                    flag.unlink(missing_ok=True)
+                else:
+                    flag.write_text(json.dumps(dict(zip(('command', 'field', 'value'), spoil))))
+                command = 'b swarm ' + ('replica-exchange' if spoil is None else spoil[0])
+                before = (self.root / 'calls').read_text().count(command)
+                self.call('a', 'sync')
+                self.assertGreater((self.root / 'calls').read_text().count(command), before,
+                                   'the sync never reached the answer')
+                record = json.loads(path.read_text())['b']['projects']['a']
+                if spoil is None:
+                    self.assertTrue(record['complete'], record)
+                else:
+                    self.assertFalse(record['complete'], record)
+                    self.assertEqual(record.get('reason'), 'malformed', record)
+        flag.unlink(missing_ok=True)
+        self.task('b', 'add', '--project', 'a', text='Exchange evidence fixture, healthy again')
+        self.call('a', 'sync')
+        self.assertTrue(json.loads(path.read_text())['b']['projects']['a']['complete'])
+
+    def test_a_task_damaged_there_after_its_inventory_is_not_complete(self):
+        self.damage_between_inventory_and_exchange('b')
+
+    def test_a_task_damaged_here_after_its_inventory_is_not_complete(self):
+        self.damage_between_inventory_and_exchange('a')
 
     def test_a_large_project_travels_in_pages(self):
         self.join('a', 'b'); self.join('b', 'a')

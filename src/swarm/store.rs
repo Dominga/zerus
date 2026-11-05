@@ -336,7 +336,9 @@ impl LockedStore {
             &mut self.session_ids,
             peers,
             &mut self.session_ids_original,
-        )
+        )?;
+        // A member's replica record goes with its membership, at this save.
+        super::replica_members::prune(&self.path.with_file_name(super::replica_members::FILE), peers)
     }
     /// Persist only the catalog and its session ID memberships. Scoped
     /// assignment must not prune peer metadata.

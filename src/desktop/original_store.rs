@@ -309,6 +309,8 @@ pub(in crate::desktop) fn read(
 
 /// The largest session record read.
 const RECORD_BYTES: u64 = 1 << 20;
+/// The largest label-index manifest read, as the CLI bounds it.
+const MANIFEST_BYTES: u64 = 16 << 20;
 
 fn string<'a>(value: &'a serde_json::Value, key: &str) -> &'a str {
     value
@@ -317,8 +319,10 @@ fn string<'a>(value: &'a serde_json::Value, key: &str) -> &'a str {
         .unwrap_or("")
 }
 
-/// Whether `session` is a terminal agent's, running `run` and
-/// `conversation`, with no native binding.
+/// Whether exactly one of `session`'s records is a terminal agent's, running
+/// `run` and `conversation`, with no native binding. Those records are the
+/// CLI's own record for the name and, where the ID layout exists (zerus-ucck
+/// P3a), every session the label index proves for it.
 pub(in crate::desktop) fn session_current(
     roots: &Roots,
     session: &str,
@@ -343,24 +347,84 @@ pub(in crate::desktop) fn session_current(
     } else {
         &[&file]
     };
-    let record = (|| -> io::Result<serde_json::Value> {
-        let file = roots.open_file(path)?;
-        let mut bytes = Vec::new();
-        (&file).take(RECORD_BYTES + 1).read_to_end(&mut bytes)?;
-        if bytes.len() as u64 > RECORD_BYTES {
-            return Err(io::ErrorKind::InvalidData.into());
-        }
-        serde_json::from_slice(&bytes).map_err(io::Error::other)
-    })();
-    let Ok(record) = record else {
+    let names_plan = |record: &serde_json::Value| {
+        string(record, "name") == session
+            && AGENTS.contains(&string(record, "agent"))
+            && session
+                .split('/')
+                .next()
+                .is_some_and(|agent| agent == string(record, "agent"))
+            && string(record, "run_id") == run
+            && string(record, "conversation_id") == conversation
+    };
+    // The label's own record, read whole: one that is there but cannot be
+    // read refuses, as an unreadable candidate does.
+    let legacy = match bytes_at(roots, path, RECORD_BYTES) {
+        Ok(None) => false,
+        Ok(Some(bytes)) => match serde_json::from_slice::<serde_json::Value>(&bytes) {
+            Ok(record) => names_plan(&record),
+            Err(_) => return false,
+        },
+        Err(_) => return false,
+    };
+    // With no `sessions/` there is no ID layout (zerus-ucck P3a): the label's
+    // own record decides, as before.
+    match roots.absent(&["sessions"]) {
+        Ok(true) => return legacy,
+        Ok(false) => {}
+        Err(_) => return false,
+    }
+    // Otherwise the label index must prove the label's sessions in the ID
+    // layout before any answer (#1437 review), through the CLI's own proof.
+    // Each candidate is opened at its fixed `sessions/<id>.json`, never a
+    // path from elsewhere; one that is there but cannot be read refuses. The
+    // label's own record and the candidates count together: exactly one may
+    // carry the run and conversation.
+    let Some(manifest) = bytes_at(roots, &["labels", ".complete"], MANIFEST_BYTES).ok().flatten() else {
         return false;
     };
-    string(&record, "name") == session
-        && AGENTS.contains(&string(&record, "agent"))
-        && session
-            .split('/')
-            .next()
-            .is_some_and(|agent| agent == string(&record, "agent"))
-        && string(&record, "run_id") == run
-        && string(&record, "conversation_id") == conversation
+    let Some(ids) = crate::state::prove_label_index(session, &manifest, || {
+        bytes_at(roots, &["labels", &file], RECORD_BYTES).ok().flatten()
+    }) else {
+        return false;
+    };
+    let mut found = usize::from(legacy);
+    for id in ids {
+        match bytes_at(roots, &["sessions", &format!("{id}.json")], RECORD_BYTES) {
+            // A stale entry: the session left the label.
+            Ok(None) => {}
+            Ok(Some(bytes)) => {
+                let Ok(record) = serde_json::from_slice::<serde_json::Value>(&bytes) else {
+                    return false;
+                };
+                // A listed candidate that is there must establish its own
+                // identity, as every reader of the ID layout requires; one
+                // that cannot refuses, never leaving the rest to decide.
+                if !crate::state::is_id_layout_record(&record, &id) {
+                    return false;
+                }
+                if names_plan(&record) {
+                    found += 1;
+                }
+            }
+            Err(_) => return false,
+        }
+    }
+    found == 1
+}
+
+/// The bytes at `path` under the held root, bounded: `Ok(None)` only when it
+/// verifiably does not exist; anything there that cannot be read is an error.
+fn bytes_at(roots: &Roots, path: &[&str], limit: u64) -> io::Result<Option<Vec<u8>>> {
+    let file = match roots.open_file(path) {
+        Ok(file) => file,
+        Err(error) if error.kind() == io::ErrorKind::NotFound => return Ok(None),
+        Err(error) => return Err(error),
+    };
+    let mut bytes = Vec::new();
+    (&file).take(limit + 1).read_to_end(&mut bytes)?;
+    if bytes.len() as u64 > limit {
+        return Err(io::ErrorKind::InvalidData.into());
+    }
+    Ok(Some(bytes))
 }

@@ -418,7 +418,7 @@ pub(crate) fn launch(
     }
     let _writer = lock(None)?;
     let _guard = lock_bindings()?;
-    if record_path(name).exists() || live()?.contains_key(name) {
+    if storage::label_taken(name) || live()?.contains_key(name) {
         return Err(
             "This name belongs to an existing terminal session; it was left untouched".into(),
         );

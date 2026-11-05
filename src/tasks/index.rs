@@ -179,6 +179,14 @@ pub(super) fn capped_error(error: &str) -> String {
     cut(error, ERROR_BYTES).to_owned()
 }
 
+/// A damaged task as a page names it: its error capped, and what is known
+/// here of its recovery (`kept` with `kept_reason`, or `recovery`).
+pub(super) fn damaged_row(damaged: &zerus_replica::Damaged) -> Value {
+    let mut row = serde_json::to_value(damaged).unwrap_or_else(|_| json!({"uuid": damaged.uuid}));
+    row["error"] = json!(capped_error(&damaged.error));
+    row
+}
+
 /// A row's prompt text capped for a page, marked when it was cut.
 pub(super) fn capped(mut row: Value) -> Value {
     if let Some(text) = row["text"].as_str() {
@@ -768,16 +776,18 @@ impl<'a> Index<'a> {
         Ok(counts)
     }
 
-    /// The first damaged tasks by UUID, and how many there are.
+    /// The first damaged tasks by UUID, and how many there are. What is known
+    /// of a shown one's recovery is read from its files now.
     pub(super) fn damaged(&self) -> Outcome<(Vec<Value>, usize)> {
         let mut query = self
             .db
             .prepare_cached("SELECT uuid, error FROM tasks WHERE error IS NOT NULL ORDER BY uuid LIMIT ?1")?;
         let shown = query
-            .query_map([DAMAGED_SHOWN as i64], |r| {
-                Ok(json!({"uuid": r.get::<_, String>(0)?, "error": r.get::<_, String>(1)?}))
-            })?
-            .collect::<rusqlite::Result<Vec<_>>>()?;
+            .query_map([DAMAGED_SHOWN as i64], |r| Ok((r.get::<_, String>(0)?, r.get::<_, String>(1)?)))?
+            .collect::<rusqlite::Result<Vec<_>>>()?
+            .into_iter()
+            .map(|(uuid, error)| damaged_row(&self.store.damaged(&uuid, error)))
+            .collect();
         let total: i64 = self
             .db
             .query_row("SELECT count(*) FROM tasks WHERE error IS NOT NULL", [], |r| r.get(0))?;

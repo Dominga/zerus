@@ -857,7 +857,7 @@ impl Runtime {
     }
 }
 /// The selected session's actual backend and run, from the held root.
-fn session_current(roots: &Roots, plan: &wire::Plan) -> bool {
+pub(super) fn session_current(roots: &Roots, plan: &wire::Plan) -> bool {
     crate::desktop::original_store::session_current(
         roots,
         &plan.session,

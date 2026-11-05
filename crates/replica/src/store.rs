@@ -17,7 +17,7 @@ use std::collections::{BTreeMap, BTreeSet};
 use std::fs::{self, File, OpenOptions};
 use std::io::{ErrorKind, Write};
 use std::path::{Path, PathBuf};
-use std::time::{Duration, Instant};
+use std::time::{Duration, Instant, SystemTime};
 
 /// A rank longer than this renumbers its stage (ranks stay valid up to 64).
 const RENUMBER_AT: usize = 32;
@@ -138,11 +138,71 @@ pub struct Changes {
     pub documents: Option<BTreeSet<String>>,
 }
 
-/// A task file that failed to load. It stays on disk and never blocks the others.
+/// A task file that failed to load, or a document an import refused. It
+/// stays on disk and never blocks the others.
+///
+/// For a copy here that does not load, `kept` says the copy is kept for a
+/// person's review whatever copy arrives, with `kept_reason` (`marked`, or
+/// `unreadable_local_data`); otherwise `recovery` is
+/// `depends_on_incoming_copy`: what happens is decided against each copy
+/// that arrives, never shown as safe here. A refusal carries the decision
+/// against that copy: `kept` with `marked`, `attempt_evidence`, `pending` or
+/// `unreadable_local_data`. Information only; it grants nothing.
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
 pub struct Damaged {
     pub uuid: String,
     pub error: String,
+    #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+    pub kept: bool,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub kept_reason: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub recovery: Option<String>,
+}
+
+/// Why a copy here that does not load is kept for a person's review.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum Keep {
+    /// This store cut it over, and nothing here proves another copy holds it.
+    Marked,
+    /// Its local data, merged with the incoming copy, shows attempts or a floor.
+    AttemptEvidence,
+    /// A local update block does not apply onto the incoming copy.
+    Pending,
+    /// Its local updates are torn or cannot be read.
+    UnreadableLocalData,
+}
+
+impl Keep {
+    pub fn as_str(self) -> &'static str {
+        match self {
+            Keep::Marked => "marked",
+            Keep::AttemptEvidence => "attempt_evidence",
+            Keep::Pending => "pending",
+            Keep::UnreadableLocalData => "unreadable_local_data",
+        }
+    }
+}
+
+/// What a listing says when recovery is decided against each incoming copy.
+pub const DEPENDS_ON_INCOMING_COPY: &str = "depends_on_incoming_copy";
+
+impl Damaged {
+    pub fn new(uuid: impl Into<String>, error: impl Into<String>) -> Self {
+        Self {
+            uuid: uuid.into(),
+            error: error.into(),
+            kept: false,
+            kept_reason: None,
+            recovery: None,
+        }
+    }
+
+    pub fn kept_for(mut self, reason: Keep) -> Self {
+        self.kept = true;
+        self.kept_reason = Some(reason.as_str().to_owned());
+        self
+    }
 }
 
 /// Where a task goes in the order of its stage.
@@ -355,6 +415,13 @@ enum Marked {
 
 #[cfg(test)]
 thread_local! {
+    /// Runs while a first store identity is being created, under its lock.
+    pub(crate) static STORE_ID_CREATING: std::cell::RefCell<Option<Box<dyn FnMut()>>> =
+        const { std::cell::RefCell::new(None) };
+}
+
+#[cfg(test)]
+thread_local! {
     /// Runs inside an observation, between its read and its stamps.
     pub(crate) static OBSERVING: std::cell::RefCell<Option<Box<dyn FnMut()>>> =
         const { std::cell::RefCell::new(None) };
@@ -385,6 +452,47 @@ pub(crate) fn blocks(bytes: &[u8]) -> (Vec<(&[u8], usize)>, bool) {
 }
 
 impl ProjectStore {
+    /// The random identity of the replica root below `root`, in `store-id`,
+    /// created on first use. A root restored from a backup or copied to
+    /// another computer has its `store-id` deleted, so a new one is created
+    /// and other computers see a changed store.
+    pub fn store_id(root: &Path) -> Result<String> {
+        private_dir(root)?;
+        let path = root.join("store-id");
+        let read = |path: &Path| -> Result<Option<String>> {
+            match fs::read_to_string(path) {
+                Ok(text) => Ok(Some(text.trim().to_owned()).filter(|id| ids::is_uuid(id))),
+                Err(error) if error.kind() == ErrorKind::NotFound => Ok(None),
+                Err(error) => Err(error.into()),
+            }
+        };
+        if let Some(id) = read(&path)? {
+            return Ok(id);
+        }
+        // Creating it, or replacing a malformed one, is one step across
+        // processes: under this lock the file is read again, and only then
+        // written whole (an atomic replace), so a creator never replaces
+        // another's identity and nothing reads a partial one.
+        let lock = private_options()
+            .create(true)
+            .truncate(false)
+            .write(true)
+            .open(root.join("store-id.lock"))?;
+        lock.lock_exclusive()?;
+        if let Some(id) = read(&path)? {
+            return Ok(id);
+        }
+        let id = ids::new_uuid();
+        #[cfg(test)]
+        STORE_ID_CREATING.with(|hook| {
+            if let Some(hook) = hook.borrow_mut().as_mut() {
+                hook();
+            }
+        });
+        write_atomic(&path, format!("{id}\n").as_bytes())?;
+        Ok(id)
+    }
+
     /// Opens the project's directory below `root` and waits for its lock.
     pub fn open(root: &Path, project: &str) -> Result<Self> {
         Ok(Self::opening(root, project, None)?.expect("open waits for the lock"))
@@ -617,6 +725,34 @@ impl ProjectStore {
         write_atomic(&self.managed_path(uuid), &mark.sealed()?)
     }
 
+    /// What is known here, read-only, of a copy that does not load: kept
+    /// for every incoming copy (it is marked, or its local updates are torn
+    /// or unreadable), or none when recovery is decided against each copy
+    /// that arrives. Recovery (`import_task`) keeps a copy in each case
+    /// this returns.
+    pub fn locally_kept(&self, uuid: &str) -> Option<Keep> {
+        if self.was_managed(uuid) {
+            return Some(Keep::Marked);
+        }
+        match fs::read(self.updates_path(uuid)) {
+            Ok(bytes) => (!blocks(&bytes).1).then_some(Keep::UnreadableLocalData),
+            Err(error) if error.kind() == ErrorKind::NotFound => None,
+            Err(_) => Some(Keep::UnreadableLocalData),
+        }
+    }
+
+    /// A copy here that does not load, as a listing names it.
+    pub fn damaged(&self, uuid: &str, error: impl Into<String>) -> Damaged {
+        let listed = Damaged::new(uuid, error);
+        match self.locally_kept(uuid) {
+            Some(reason) => listed.kept_for(reason),
+            None => Damaged {
+                recovery: Some(DEPENDS_ON_INCOMING_COPY.to_owned()),
+                ..listed
+            },
+        }
+    }
+
     /// The version this store last saved, as the mark records it, only while
     /// the updates file still opens with the exact block the mark names: no
     /// other writer folded or rewrote the files, and no later fold of this
@@ -625,6 +761,42 @@ impl ProjectStore {
         let mark = self.mark(uuid)?;
         let first = first_block(&self.updates_path(uuid)).ok()??;
         mark.opens_with(&first).then(|| mark.version()).flatten()
+    }
+
+    /// How many tasks this store cut over to the execution schema (each has
+    /// a mark), and when the latest of their saves wrote its mark. Names and
+    /// stamps only, no task is read, within `entries` directory entries and
+    /// `time`: none when either runs out first, never a partial count.
+    pub fn cut_over_within(
+        &self,
+        entries: usize,
+        time: Duration,
+    ) -> Result<Option<(usize, Option<SystemTime>)>> {
+        let started = Instant::now();
+        let mut count = 0;
+        let mut latest: Option<SystemTime> = None;
+        for (seen, entry) in fs::read_dir(self.dir.join("tasks"))?.enumerate() {
+            if seen >= entries || started.elapsed() > time {
+                return Ok(None);
+            }
+            let path = entry?.path();
+            let marked = path.extension().and_then(|e| e.to_str()) == Some("managed")
+                && path
+                    .file_stem()
+                    .and_then(|s| s.to_str())
+                    .is_some_and(ids::is_uuid);
+            if marked {
+                count += 1;
+                if let Ok(modified) = fs::symlink_metadata(&path).and_then(|m| m.modified()) {
+                    latest = Some(latest.map_or(modified, |l| l.max(modified)));
+                }
+            }
+        }
+        // The last read and stat count against the time too.
+        if started.elapsed() > time {
+            return Ok(None);
+        }
+        Ok(Some((count, latest)))
     }
 
     pub fn uuids(&self) -> Result<Vec<String>> {
@@ -887,10 +1059,7 @@ impl ProjectStore {
         for uuid in self.uuids()? {
             match self.load(&uuid) {
                 Ok(task) => tasks.push(task),
-                Err(error) => damaged.push(Damaged {
-                    uuid,
-                    error: error.to_string(),
-                }),
+                Err(error) => damaged.push(self.damaged(&uuid, error.to_string())),
             }
         }
         Ok((tasks, damaged))
@@ -1603,5 +1772,80 @@ mod tests {
             .changes_since(&start.generation, start.offset)
             .unwrap();
         assert_eq!(read.documents, Some(uuids));
+    }
+
+    /// review-n on #1432: two first hellos at once agree on one store
+    /// identity; a creator under the lock is never replaced by another, and
+    /// a malformed one is replaced once.
+    #[test]
+    fn concurrent_first_hellos_agree_on_one_store_identity() {
+        let dir = tempfile::tempdir().unwrap();
+        let root = dir.path().join("replica");
+        let (ready, waiting) = std::sync::mpsc::channel();
+        let (release, released) = std::sync::mpsc::channel::<()>();
+        let (one, two) = std::thread::scope(|scope| {
+            let root_one = root.clone();
+            let one = scope.spawn(move || {
+                STORE_ID_CREATING.with(|hook| {
+                    *hook.borrow_mut() = Some(Box::new(move || {
+                        ready.send(()).unwrap();
+                        released.recv().unwrap();
+                    }))
+                });
+                ProjectStore::store_id(&root_one).unwrap()
+            });
+            waiting.recv().unwrap();
+            // The first creator holds the lock: the second waits, then reads it.
+            let root_two = root.clone();
+            let two = scope.spawn(move || ProjectStore::store_id(&root_two).unwrap());
+            std::thread::sleep(Duration::from_millis(100));
+            let waited = !two.is_finished();
+            release.send(()).unwrap();
+            let ids = (one.join().unwrap(), two.join().unwrap());
+            assert!(waited, "the second creator did not wait");
+            ids
+        });
+        assert_eq!(one, two);
+        assert_eq!(ProjectStore::store_id(&root).unwrap(), one);
+        assert!(ids::is_uuid(&one));
+        // A malformed identity is replaced once, and then kept.
+        fs::write(root.join("store-id"), b"not an identity").unwrap();
+        let replaced = ProjectStore::store_id(&root).unwrap();
+        assert!(ids::is_uuid(&replaced) && replaced != one);
+        assert_eq!(ProjectStore::store_id(&root).unwrap(), replaced);
+    }
+
+    /// The cutover status counts marks within a strict budget, and past it
+    /// says nothing rather than a partial count.
+    #[test]
+    fn the_cut_over_count_stays_within_its_budget() {
+        let dir = tempfile::tempdir().unwrap();
+        let store = ProjectStore::open(dir.path(), "p").unwrap();
+        for n in 0..3 {
+            let mut task = TaskDoc::create(NewTask {
+                project: "p",
+                id: &format!("T-00000{n}"),
+                text: "Floored",
+                stage: Stage::Todo,
+                target: Target::Any,
+                author: Actor::Person,
+                rank: "V",
+                now: 1,
+            })
+            .unwrap();
+            assert!(task.floor().unwrap());
+            store.save(&mut task).unwrap();
+        }
+        let long = Duration::from_secs(60);
+        let (count, latest) = store.cut_over_within(1_000, long).unwrap().unwrap();
+        assert_eq!(count, 3);
+        assert!(latest.is_some());
+        assert_eq!(store.cut_over_within(2, long).unwrap(), None);
+        assert_eq!(store.cut_over_within(1_000, Duration::ZERO).unwrap(), None);
+        // An empty folder still answers within its time, or not at all.
+        let empty = tempfile::tempdir().unwrap();
+        let none = ProjectStore::open(empty.path(), "q").unwrap();
+        assert_eq!(none.cut_over_within(1_000, long).unwrap(), Some((0, None)));
+        assert_eq!(none.cut_over_within(1_000, Duration::ZERO).unwrap(), None);
     }
 }

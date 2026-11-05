@@ -51,6 +51,14 @@ mod service_worker;
 mod session_limits;
 pub(crate) mod session_id;
 mod session_index;
+mod labels;
+/// How every reader decides what the label index proves (zerus-ucck P3a);
+/// the native readers that need it outside this module run on Unix.
+#[cfg(unix)]
+pub(crate) use labels::prove as prove_label_index;
+/// How every reader of the ID layout checks a record's own identity.
+#[cfg(unix)]
+pub(crate) use storage::is_id_layout_record;
 mod provider_messages;
 mod processes;
 mod prompt_suggestion;
@@ -629,7 +637,7 @@ pub fn check_requested_session(name: &str, agent: &str, requested: &str) -> Resu
     local_sessions()?;
     let _guard = lock(None)?;
     let snapshot = live()?;
-    if !record_path(name).exists() {
+    if !storage::label_taken(name) {
         return if snapshot.contains_key(name) {
             Err(format!(
                 "{name}: live session is not tracked; choose another name"
@@ -764,6 +772,45 @@ pub(crate) fn task_bindings() -> Result<Vec<Value>> {
     task_bindings_in(&root())
 }
 
+/// zerus-ucck P3a: a label a command names without a selection, resolved
+/// among its candidates. A label whose only holder is in the ID layout selects
+/// that session, so every read of the label in this command reaches it. A
+/// label several sessions share is the ambiguity report: its text, and its
+/// `--json` value, with exit status 5. A candidate set that cannot be proven
+/// complete is refused the same way, never settled on the label's first holder.
+pub(crate) fn resolve_label(name: &str) -> std::result::Result<(), (String, Option<Value>)> {
+    labels::repair();
+    let candidates = labels::candidates(name).map_err(|error| (error, None))?;
+    match (candidates.first, candidates.by_id.as_slice()) {
+        (_, []) => Ok(()),
+        (false, [only]) => {
+            session_id::select(name, string(only, "session_id"));
+            Ok(())
+        }
+        _ => {
+            let snapshot = live().unwrap_or_default();
+            let state = |record: &Value| {
+                if matches(record, snapshot.get(string(record, "name"))) { "live" } else { "saved" }
+            };
+            let mut listed: Vec<Value> = Vec::new();
+            if candidates.first {
+                if let Ok(record) = storage::read_label(name) {
+                    listed.push(json!({"session_id":record["session_id"],"run_id":record["run_id"],
+                        "conversation_id":record["conversation_id"],"state":state(&record),
+                        "cwd":record["cwd"],"created":record["created"]}));
+                }
+            }
+            for record in &candidates.by_id {
+                listed.push(json!({"session_id":record["session_id"],"run_id":record["run_id"],
+                    "conversation_id":record["conversation_id"],"state":"saved",
+                    "cwd":record["cwd"],"created":record["created"]}));
+            }
+            let (text, value) = session_id::ambiguity(name, listed);
+            Err((text, Some(value)))
+        }
+    }
+}
+
 /// The durable session ID of this computer's live or saved session `name`,
 /// from its record or provider binding (zerus-ucck P2c); None for an archive,
 /// an ID-less record or no session.
@@ -822,7 +869,8 @@ pub(crate) fn task_bindings_in(root: &Path) -> Result<Vec<Value>> {
     let limit = session_graph::MAX_RECORD;
     let mut bytes = Vec::new();
     let mut rows = Vec::new();
-    for directory in [root.to_owned(), root.join("bindings"), root.join("dsh/bindings"), root.join("opencode/bindings")] {
+    for name in storage::BINDING_DIRS {
+        let directory = root.join(name);
         let entries = match fs::read_dir(directory) {
             Ok(entries) => entries,
             Err(error) if error.kind() == io::ErrorKind::NotFound => continue,
@@ -831,7 +879,9 @@ pub(crate) fn task_bindings_in(root: &Path) -> Result<Vec<Value>> {
         for entry in entries.flatten() {
             let path = entry.path();
             let stem = path.file_stem().and_then(|s| s.to_str()).unwrap_or("");
-            if path.extension().is_none_or(|s| s != "json") || stem.len() != 64 || !stem.bytes().all(|c| c.is_ascii_hexdigit()) { continue; }
+            let hashed = stem.len() == 64 && stem.bytes().all(|c| c.is_ascii_hexdigit());
+            let named = match name { "dsh/bindings" | "opencode/bindings" => hashed, _ => storage::binding_stem(name, stem) };
+            if path.extension().is_none_or(|s| s != "json") || !named { continue; }
             let row = (|| -> Result<Option<Value>> {
                 let file = match crate::platform::no_follow(fs::OpenOptions::new().read(true)).open(&path) {
                     Ok(file) => file,
@@ -1061,15 +1111,8 @@ pub fn dispatch(args: &[String]) -> Result<i32> {
             let _guard = lock(None)?;
             let forgotten = record_path(&args[0]).exists().then(|| read(&args[0])).transpose()?;
             if let Some(record) = &forgotten {
-                rename::remove_legacy(record)?;
-            }
-            match std::fs::remove_file(record_path(args.first().ok_or("missing session name")?)) {
-                Ok(()) => {}
-                Err(error) if error.kind() == io::ErrorKind::NotFound => {}
-                Err(error) => return Err(error.to_string()),
-            }
-            if let Some(record) = &forgotten {
-                session_index::retire(record);
+                // Its own record, never its label's holder (P3a).
+                storage::remove_record(record)?;
             }
         }
         _ => return Err(format!("unknown state operation: {command}")),

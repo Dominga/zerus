@@ -110,8 +110,7 @@ pub(super) fn dispatch_scoped(args: &[String], dry: bool, scope: Option<&session
             if let Some(scope)=scope {scope.changing();}
             archive::remove_synced(&archive::path(string(&archived,"archive_id"))?)?;
             if let Some(record)=current {
-                rename::remove_legacy(&record)?;
-                archive::remove_synced(&record_path(name))?;
+                storage::remove_record(&record)?;
             }
         } else {
             drop(_guard);
@@ -134,8 +133,7 @@ pub(super) fn dispatch_scoped(args: &[String], dry: bool, scope: Option<&session
     }
     if let Some(scope)=scope {scope.changing();}
     if forget {
-        rename::remove_legacy(&record)?;
-        archive::remove_synced(&record_path(name))?;
+        storage::remove_record(&record)?;
         return Ok(0);
     }
     record["completion_source"] = json!("manual_terminate");

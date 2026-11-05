@@ -545,6 +545,7 @@ impl Composers {
         self.retry_answer_saves();
         self.push_check();
         self.tick_handed(now);
+        self.tick_handed_answers(now);
     }
 
     /// Ticks once a second while a composer is open, until the app quits.

@@ -81,9 +81,9 @@ fn valid_process_consent(proof: &str, row: &Value, common: &Path, at: u64) -> bo
 }
 
 /// Folders a Zerus session record refers to.
-struct Reference {
-    name: String,
-    folders: Vec<PathBuf>,
+pub(super) struct Reference {
+    pub(super) name: String,
+    pub(super) folders: Vec<PathBuf>,
 }
 
 struct Context {
@@ -154,12 +154,12 @@ fn reference(record: &Value) -> Reference {
     }
 }
 
-fn bindings() -> Result<Vec<Reference>> {
+pub(super) fn bindings() -> Result<Vec<Reference>> {
     // Ordinary catalog reads tolerate broken records. Deletion cannot interpret
     // a skipped or unreadable record as proof that no session uses the folder.
     let mut result = Vec::new();
     let mut count = 0;
-    for directory in ["", "bindings", "dsh/bindings", "opencode/bindings"] {
+    for directory in storage::BINDING_DIRS {
         let folder = root().join(directory);
         let files = match fs::read_dir(&folder) {
             Ok(files) => files,
@@ -176,9 +176,7 @@ fn bindings() -> Result<Vec<Reference>> {
                 .file_stem()
                 .and_then(|s| s.to_str())
                 .unwrap_or_default();
-            if !(directory.contains('/')
-                || stem.len() == 64 && stem.bytes().all(|b| b.is_ascii_hexdigit()))
-            {
+            if !storage::binding_stem(directory, stem) {
                 continue;
             }
             count += 1;

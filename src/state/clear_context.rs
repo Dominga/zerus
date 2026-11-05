@@ -79,8 +79,10 @@ pub(super) fn carry_fresh_start(previous: &Value, record: &mut Value) {
     if !earlier.is_empty() { record["cleared_conversations"] = json!(earlier); }
     if let Some(anchor) = previous.get("journal_name") { record["journal_name"] = anchor.clone(); }
     if let Some(label) = previous.get("launch_label") { record["launch_label"] = label.clone(); }
-    // A clear starts another conversation of the same session.
+    // A clear starts another conversation of the same session, written where
+    // that session lives: a session in the ID layout stays there (P3a).
     if let Some(id) = previous.get("session_id") { record["session_id"] = id.clone(); }
+    if let Some(layout) = previous.get("layout") { record["layout"] = layout.clone(); }
 }
 
 // Earlier conversations of this session's Activity, oldest first. Only
@@ -644,7 +646,7 @@ pub(super) fn dispatch(args: &[String]) -> Result<i32> {
     if record["pending_settings"].is_object() {return Err("Wait for the pending model settings before clearing context".into());}
     let path=absolute_root()?.join("clear_receipts").join(format!("{uuid}.json"));
     if path.exists() {return Err("This clear was already attempted. Check Terminal before trying again".into());}
-    recovery::cancel_for_input(name)?;
+    recovery::cancel_for_input(&record)?;
     record["clear_context_request"]=json!({"request_id":request.request_id,"run_id":request.expected_run_id,
         "conversation_id":request.expected_conversation_id,"at":now()});
     if resuming && !string(&record,"restore_archive_id").is_empty() {

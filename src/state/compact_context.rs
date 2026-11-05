@@ -65,7 +65,7 @@ pub(super) fn dispatch(args: &[String]) -> Result<i32> {
     input::checked_terminal(&record, true)?;
     let path = absolute_root()?.join("compact_receipts").join(format!("{uuid}.json"));
     if path.exists() { return Err("This compact was already attempted. Check Terminal before trying again".into()); }
-    recovery::cancel_for_input(name)?;
+    recovery::cancel_for_input(&record)?;
     let mut receipt = json!({"request_id":request.request_id,"name":name,"run_id":request.expected_run_id,
         "conversation_id":request.expected_conversation_id,"status":"submitted","at":now()});
     record["compact_context_request"] = receipt.clone();

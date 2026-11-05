@@ -1968,7 +1968,10 @@ fn apply_settings(
     receipt_path: &Path,
     receipt: &mut Value,
 ) -> Result<Value> {
-    let _driving = startup_choice::driving(name)?;
+    // The lock is the session's own, keyed by its verified record (#1437
+    // review); the record and its terminal are checked once it is held.
+    let owner = input::checked_settings(name, &request.expected_run_id, &request.expected_conversation_id)?;
+    let _driving = startup_choice::driving(&owner)?;
     let mut record = checked(name, request, true)?;
     let current = settings(&record, true);
     receipt["status"] = json!("in_progress");

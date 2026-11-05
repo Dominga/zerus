@@ -4203,6 +4203,15 @@ to save a choice. Omit effort to inherit the selected model's provider default;
 pass `--model ''` to return to provider settings. Revisions prevent overwriting
 another account edit made while the dialog was open.
 
+A DeepSeek account's catalog comes from its running host. Without one, it is
+what the composed profile configures (`dsh --profile hgs --dump-config`, which
+starts no host): the `models` of the `llm-deepseek` entry, or else the installed
+transport's bundled models, each named as dsh names it (for example
+`deepseek-official/deepseek-flash`, DeepSeek-V4.1-Flash). The answer then
+carries `"source":"dsh-profile"`. New team's member rows offer these models, and
+a DeepSeek member's model is applied after its session starts, as
+`provider/model` or as a bare id (`deepseek-flash`) that one provider offers.
+
 Accounts collects provider profiles from connected machines. Verified provider
 account ID, or email with organization, groups the same account across hosts;
 matching display names alone do not. Providers, organizations and conflicting

@@ -13,16 +13,20 @@
 //! - [`TeamsPoller`] runs the model on one thread per computer and hands each
 //!   update to the client as a [`crate::Change::Teams`], which the per-frame
 //!   [`crate::batch::Coalescer`] folds to the latest view per key.
+//! - [`action`] runs the team actions the Qt UI offers as guarded calls with
+//!   request identities; an unknown outcome is surfaced, never sent again.
 //!
 //! Memory is bounded: one view per key (a handful of keys per computer), the
 //! feed's [`FEED_KEPT`] events, and the caps of [`view`] on members, tasks,
 //! proposals and items.
+pub mod action;
 pub mod heads;
 pub mod model;
 pub mod poller;
 pub mod read;
 pub mod view;
 
+pub use action::{TeamAction, TeamCall, TeamOutcome};
 pub use heads::{Heads, TeamHeads};
 pub use model::{TeamsFollow, TeamsModel, TeamsUpdate, FEED_KEPT, POLL, STREAM_POLL};
 pub use poller::TeamsPoller;

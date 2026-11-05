@@ -91,6 +91,12 @@ impl TeamsPoller {
         asked
     }
 
+    /// Reads every followed view again now (after an action).
+    pub fn refresh(&self) {
+        self.shared.lock().model.refresh(Instant::now());
+        self.shared.wake.notify_all();
+    }
+
     /// Loads the feed page before the oldest event held.
     pub fn older(&self) -> bool {
         self.ask(TeamsModel::request_older)

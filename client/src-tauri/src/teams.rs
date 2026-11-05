@@ -2,7 +2,8 @@
 //! window follows, feeding the pump. The Team tab, the plan graph, Waiting
 //! and New team get their projected views in the per-frame batches
 //! (`batch.teams`, keyed `list`, `waiting`, `team:<id>`, ...); the webview
-//! never runs or parses an `hgs team` read. A replay never runs `hgs`.
+//! never runs or parses an `hgs team` read. [`team_action`] runs the team
+//! actions (task #7). A replay never runs `hgs`.
 use std::collections::BTreeMap;
 use std::sync::{Arc, Mutex, MutexGuard, PoisonError};
 
@@ -10,7 +11,7 @@ use tauri::State;
 use zerus_client_core::fleet::valid_alias;
 use zerus_client_core::teams::read::valid_team;
 use zerus_client_core::teams::Heads;
-use zerus_client_core::{default_hgs, ComputerId, TeamsFollow, TeamsPoller};
+use zerus_client_core::{default_hgs, ComputerId, TeamCall, TeamOutcome, TeamsFollow, TeamsPoller};
 
 use crate::commands::AppState;
 
@@ -167,6 +168,34 @@ pub fn teams_spans(teams: State<'_, Teams>, computer: String, after: u64) -> Res
 pub fn teams_profile(teams: State<'_, Teams>, computer: String) -> Result<bool, String> {
     let target = self::computer(&computer)?;
     Ok(teams.with(&target, TeamsPoller::profile))
+}
+
+/// Runs one team action (task #7) as a guarded `hgs team` call with a
+/// request identity, off the main thread. A destructive action or an
+/// approval comes back as `confirm` until the call says `confirmed`; an
+/// `uncertain` outcome is never sent again by itself. After a `done` or
+/// `uncertain` outcome the computer's followed views are read again at once.
+#[tauri::command]
+pub async fn team_action(teams: State<'_, Teams>, call: TeamCall) -> Result<TeamOutcome, String> {
+    if teams.replay {
+        return Err("Teams need hgs; a replay has none.".into());
+    }
+    let target = self::computer(&call.computer)?;
+    let outcome = tauri::async_runtime::spawn_blocking(move || {
+        zerus_client_core::teams::action::run(&default_hgs(), &call)
+    })
+    .await
+    .map_err(|error| error.to_string())?;
+    if matches!(
+        outcome,
+        TeamOutcome::Done { .. } | TeamOutcome::Uncertain { .. }
+    ) {
+        teams.with(&target, |poller| {
+            poller.refresh();
+            true
+        });
+    }
+    Ok(outcome)
 }
 
 #[cfg(test)]

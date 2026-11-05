@@ -302,3 +302,45 @@ fn listed_sessions_are_free_when_live_idle_and_unblocked_even_in_the_background(
     assert_eq!((seen[0].reply_id.as_str(), seen[0].turn_started, seen[0].activity.as_str()), ("r9", Some(2.0), "idle"));
     assert!(!seen[2].live && !seen[2].background);
 }
+
+/// Task #19: a DeepSeek member's model reaches `hgs settings` after its
+/// session starts, as `provider/model` or as the bare id (`deepseek-flash`),
+/// which hgs resolves; a member without one sends no model.
+#[test]
+fn a_deepseek_members_model_is_applied_bare_or_qualified() {
+    for (model, sent) in [
+        ("deepseek-flash", Some("deepseek-flash")),
+        ("deepseek-official/deepseek-flash", Some("deepseek-official/deepseek-flash")),
+        ("", None),
+    ] {
+        let seen = std::rc::Rc::new(std::cell::RefCell::new(Vec::<(Vec<String>, Value)>::new()));
+        let record = seen.clone();
+        set_fake_hgs(Some(Box::new(move |_, args: &[&str], input: Option<&Value>| {
+            record.borrow_mut().push((args.iter().map(|arg| (*arg).to_owned()).collect(), input.cloned().unwrap_or(Value::Null)));
+            Ok(fake_output(0, r#"{"status":"applied"}"#, ""))
+        })));
+        let member = Member {
+            id: "dev".into(),
+            role: "Backend".into(),
+            agent: "dsh".into(),
+            model: model.into(),
+            effort: "high".into(),
+            session: Some(SessionRef {
+                name: "dsh/example/dev".into(),
+                run_id: "r1".into(),
+                conversation_id: "session-1".into(),
+                ..Default::default()
+            }),
+            ..Default::default()
+        };
+        assert!(member.needs_settings());
+        super::apply_settings(&member).unwrap();
+        set_fake_hgs(None);
+        let calls = seen.borrow();
+        assert_eq!(calls.len(), 1);
+        assert_eq!(calls[0].0, ["settings", "dsh/example/dev", "--json"]);
+        assert_eq!(calls[0].1["model"].as_str(), sent, "{model}");
+        assert_eq!(calls[0].1["effort"], "high");
+        assert_eq!(calls[0].1["expected_run_id"], "r1");
+    }
+}

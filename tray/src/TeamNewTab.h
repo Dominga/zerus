@@ -1,5 +1,6 @@
 #pragma once
 #include <QDateTime>
+#include <QHash>
 #include <QJsonObject>
 #include <QMap>
 #include <QPointer>
@@ -122,6 +123,15 @@ private:
     QList<Member> m_members;
     QList<Teams::Task> m_tasks;
     QMap<QString, QList<Account>> m_accounts;   // by computer alias
+    // Task #19: each account's model catalog (`account model-settings`), by
+    // computer and account ("native-<agent>" for the default account), as New
+    // team's dialog reads it: DeepSeek's from its host or its profile.
+    struct ModelChoice { QString id, label; };
+    QHash<QString, QList<ModelChoice>> m_models;
+    QSet<QString> m_modelPending;
+    QHash<quint64, QString> m_modelRequests;
+    static QString modelKey(const QString &agent, const QString &host, const QString &account);
+    void requestModels(const QString &agent, const QString &host, const QString &account);
     bool m_dark = true, m_wide = true, m_tableMembers = true;
     // The columns' minimum widths: side by side when both fit, tabs below.
     static constexpr int settingsMinimum = 600, leadMinimum = 400;

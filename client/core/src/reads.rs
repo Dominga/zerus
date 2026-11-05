@@ -441,7 +441,7 @@ fn seconds(value: f64) -> Value {
 }
 
 /// The failure of an exit that gave no reply, or its standard output.
-fn output(exit: Exit) -> Result<Vec<u8>, ReadError> {
+pub(crate) fn output(exit: Exit) -> Result<Vec<u8>, ReadError> {
     match exit {
         Exit::Code {
             code: 0, stdout, ..

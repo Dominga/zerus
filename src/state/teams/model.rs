@@ -2305,6 +2305,7 @@ impl Team {
 
     /// U32/N7: how many times that word has paid for a change so far (a stored
     /// word without the count paid once).
+    #[cfg(test)]
     pub(crate) fn owner_word_uses(&self, event: i64) -> usize {
         self.used_owner_words
             .iter()
@@ -2317,10 +2318,17 @@ impl Team {
     /// a count word ("add two backends") authorizes that many adds, every other
     /// word one change.
     pub(crate) fn owner_word_allowed_again(&self, event: i64, allowed: usize, change: &str) -> bool {
-        match self.owner_word_used(event) {
-            None => true,
-            Some(used) => used == change && self.owner_word_uses(event) < allowed.max(1),
+        let spent: Vec<&serde_json::Value> = self.used_owner_words.iter().filter(|used| used["event"].as_i64() == Some(event)).collect();
+        if spent.is_empty() {
+            return true;
         }
+        if let Some(same) = spent.iter().find(|used| used["change"].as_str() == Some(change)) {
+            return (same["uses"].as_u64().unwrap_or(1) as usize) < allowed.max(1);
+        }
+        // Task #21 (owner, 2026-11-05): "relaunch hgs, relaunch ui2" pays once
+        // for each member it names (the name check ran on the whole message);
+        // a word never pays for a change of another kind.
+        member_change(change) && spent.iter().all(|used| used["change"].as_str().is_some_and(member_change))
     }
 
     /// U58: one sentence naming a member and its tasks pays for both changes,
@@ -2335,7 +2343,13 @@ impl Team {
     }
 
     pub(crate) fn record_owner_word(&mut self, event: i64, change: &str) {
-        if let Some(used) = self.used_owner_words.iter_mut().find(|used| used["event"].as_i64() == Some(event)) {
+        // Task #21: a word that paid for several members keeps one record each.
+        let per_member = member_change(change);
+        if let Some(used) = self
+            .used_owner_words
+            .iter_mut()
+            .find(|used| used["event"].as_i64() == Some(event) && (!per_member || used["change"].as_str() == Some(change)))
+        {
             used["uses"] = serde_json::json!(used["uses"].as_u64().unwrap_or(1) + 1);
         } else {
             self.used_owner_words.push(serde_json::json!({"event":event,"change":change,"uses":1}));
@@ -2451,6 +2465,12 @@ impl Team {
 /// An estimate source of "none" is the default and is not stored.
 fn no_estimate_source(source: &str) -> bool {
     source.is_empty() || source == "none"
+}
+
+/// Task #21: a roster change about one named member ("relaunching hgs"); one
+/// owner message naming several members pays once for each of them.
+fn member_change(change: &str) -> bool {
+    ["relaunching ", "removing ", "draining "].iter().any(|prefix| change.strip_prefix(prefix).is_some_and(|rest| !rest.is_empty() && rest != "the members"))
 }
 
 #[cfg(test)]
@@ -2750,4 +2770,3 @@ mod tests {
         assert!(!attempt.questions[0].open());
     }
 }
-

@@ -113,6 +113,8 @@ mod task_start;
 #[cfg(feature = "live")]
 mod terminal;
 #[cfg(feature = "live")]
+mod teams;
+#[cfg(feature = "live")]
 mod termination_cleanup;
 #[cfg(feature = "live")]
 mod updates;
@@ -615,6 +617,8 @@ fn launch(context: tauri::Context<tauri::Wry>, startup: Startup) {
                     }
                 }
                 app.manage(speech_settings::SpeechPage::default());
+                // Task #6: the Teams views' reads; a replay runs no hgs.
+                app.manage(teams::Teams::new(replay));
                 app.manage(termination_cleanup::TerminationCleanup::default());
                 app.manage(worktree_cleanup::WorktreeCleanup::default());
                 app.manage(recovery::start(app.handle()));
@@ -1424,6 +1428,10 @@ fn handler() -> impl Fn(tauri::ipc::Invoke) -> bool + Send + Sync + 'static {
         session_folders::session_folder_open,
         actions::inspect_subagent_activity,
         commands::tasks_follow,
+        teams::teams_follow,
+        teams::teams_older,
+        teams::teams_spans,
+        teams::teams_profile,
         task_details::task_details,
         task_details::task_assign,
         task_details::task_board_action,

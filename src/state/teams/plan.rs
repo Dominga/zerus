@@ -958,9 +958,11 @@ pub(crate) fn validate(team: &Team, offline: &BTreeSet<String>) -> Validation {
             ),
         ));
     }
+    // Owner, 2026-11-05 (task #18): a limit the create refuses is an error of
+    // the preflight, never a warning beside "Preflight: ok".
     let count = team.capped_members();
     if count > team.settings.max_members {
-        found.warnings.push(finding(
+        found.errors.push(finding(
             "members",
             None,
             None,
@@ -1386,11 +1388,12 @@ mod tests {
         t.settings.max_members = 0;
         let found = validate(&t, &BTreeSet::from(["msi-old".to_owned()]));
         let kinds: Vec<&str> = found.errors.iter().map(|f| f.kind).collect();
-        assert_eq!(kinds, vec!["assignee", "dependency", "cycle"]);
+        // Task #18: over the member limit is an error, as the create refuses it.
+        assert_eq!(kinds, vec!["assignee", "dependency", "cycle", "members"]);
         assert_eq!(found.errors[2].tasks, vec![2, 3]);
         let warnings: Vec<&str> = found.warnings.iter().map(|f| f.kind).collect();
         // Feedback 13: members without an account are named too.
-        assert_eq!(warnings, vec!["offline", "account", "members"]);
+        assert_eq!(warnings, vec!["offline", "account"]);
         // Cancelled tasks need no assignee.
         t.tasks[0].status = Cancelled;
         assert!(validate(&t, &BTreeSet::new()).errors.iter().all(|f| f.task != Some(1)));

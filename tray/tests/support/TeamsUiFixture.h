@@ -903,6 +903,9 @@ elif a[:2]==['team','draft']:
  import os
  act=body.get('action')
  if act=='start':print(json.dumps({'team':'draft-1','revision':1}))
+ elif act in ('update','create') and os.path.exists(__file__+'.'+('draftrefuse' if act=='update' else 'createrefuse')):
+  # Task #18: `.draftrefuse` refuses every save, `.createrefuse` the create, with their text.
+  print(open(__file__+'.'+('draftrefuse' if act=='update' else 'createrefuse')).read(),file=sys.stderr);sys.exit(1)
  elif act=='update':
   rev=int(open(__file__+'.draftrev').read()) if os.path.exists(__file__+'.draftrev') else body.get('revision')
   if body.get('revision')!=rev:print('hgs: Draft revision is %d now; read it again'%rev,file=sys.stderr);sys.exit(1)
@@ -940,6 +943,8 @@ inline void TeamsUiFixture::setUp()
     m_modals = std::make_unique<TestWait::ModalGuard>();
     QFile::remove(script() + ".calls");
     QFile::remove(script() + ".draftrev");
+    QFile::remove(script() + ".draftrefuse");
+    QFile::remove(script() + ".createrefuse");
     QFile::remove(script() + ".statushold");
     for (const char *suffix : {".swaphold", ".swaprefuse", ".swapreceipt", ".accounts", ".models"}) QFile::remove(script() + QLatin1String(suffix));
     QFile::remove(script() + ".refuse");

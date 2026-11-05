@@ -7,7 +7,7 @@
 use crate::swarm::grouping::{GroupOut, GroupingOut};
 use crate::{
     ActivityUpdate, Change, ComputerId, ComputerStatus, MachineMeta, OrganizationUpdate,
-    ProcessesUpdate, TasksUpdate, ViewRow,
+    ProcessesUpdate, TasksUpdate, TeamsUpdate, ViewRow,
 };
 use serde::{Deserialize, Serialize};
 use serde_json::{json, Value};
@@ -97,6 +97,20 @@ pub struct OrganizationOut {
     pub payload: Value,
 }
 
+/// The latest change of one Teams view of a computer, keyed as
+/// [`crate::teams::model`] says (`list`, `waiting`, `team:<id>`, ...). `kind`
+/// and `payload`: the view's name and its view model, `failed` `{code,
+/// message}` (the view keeps what it showed) or `ended` null (no longer
+/// followed). The payload is the projected view: the webview parses no `hgs`
+/// reply.
+#[derive(Clone, Debug, Default, PartialEq, Serialize, Deserialize)]
+pub struct TeamsOut {
+    pub computer: ComputerId,
+    pub key: String,
+    pub kind: String,
+    pub payload: Value,
+}
+
 /// A computer's latest card data from its `catalog.meta`.
 #[derive(Clone, Debug, Default, PartialEq, Serialize, Deserialize)]
 pub struct MachineOut {
@@ -106,7 +120,7 @@ pub struct MachineOut {
 
 /// Everything that changed since the previous batch. The view applies, in
 /// order: `computers`, `machines`, `replaces`, `removes`, `upserts`,
-/// `activity`, `processes`, `tasks`, `organizations`, then `groups` and `grouping`. A `replaces`
+/// `activity`, `processes`, `tasks`, `organizations`, `teams`, then `groups` and `grouping`. A `replaces`
 /// entry keeps the groups of the keys it keeps: grouping does not resend
 /// unchanged rows after a Replace, so the view must not clear them. `machines` holds
 /// at most one entry per computer and none for a computer whose status became
@@ -129,6 +143,9 @@ pub struct Batch {
     pub tasks: Vec<TasksOut>,
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub organizations: Vec<OrganizationOut>,
+    /// The Teams views that changed, at most one entry per key.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub teams: Vec<TeamsOut>,
     /// Each row's project and rank in the Sessions list, for the rows whose
     /// grouping changed. The Coalescer leaves it empty; the Tauri pump fills
     /// it from `swarm::grouping` (zerus-5wmh.31).
@@ -153,6 +170,7 @@ impl Batch {
             && self.processes.is_empty()
             && self.tasks.is_empty()
             && self.organizations.is_empty()
+            && self.teams.is_empty()
             && self.groups.is_empty()
             && self.grouping.is_none()
             && self.desktop_service.is_none()
@@ -200,6 +218,7 @@ pub struct Coalescer {
     processes: BTreeMap<SessionKey, ProcessesUpdate>,
     tasks: BTreeMap<SessionKey, TasksUpdate>,
     organizations: BTreeMap<ComputerId, OrganizationUpdate>,
+    teams: BTreeMap<SessionKey, TeamsUpdate>,
 }
 
 impl Coalescer {
@@ -311,6 +330,20 @@ impl Coalescer {
                     && matches!(self.tasks.get(&id), Some(TasksUpdate::List { .. }));
                 if !keep {
                     self.tasks.insert(id, update);
+                }
+            }
+            Change::Teams {
+                computer,
+                key,
+                update,
+            } => {
+                // The latest view of a key wins; a failure never replaces a
+                // pending view.
+                let id = (computer, key);
+                let keep = matches!(update, TeamsUpdate::Failed { .. })
+                    && self.teams.get(&id).is_some_and(TeamsUpdate::is_view);
+                if !keep {
+                    self.teams.insert(id, update);
                 }
             }
         }
@@ -434,6 +467,14 @@ impl Coalescer {
                 payload,
             });
         }
+        for ((computer, key), update) in std::mem::take(&mut self.teams) {
+            batch.teams.push(TeamsOut {
+                computer,
+                key,
+                kind: update.kind().to_owned(),
+                payload: update.payload(),
+            });
+        }
         batch
     }
 
@@ -460,6 +501,7 @@ impl Coalescer {
             + self.processes.len()
             + self.tasks.len()
             + self.organizations.len()
+            + self.teams.len()
     }
 
     pub fn is_empty(&self) -> bool {
@@ -471,6 +513,7 @@ impl Coalescer {
             && self.processes.is_empty()
             && self.tasks.is_empty()
             && self.organizations.is_empty()
+            && self.teams.is_empty()
     }
 }
 

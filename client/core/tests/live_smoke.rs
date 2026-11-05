@@ -52,6 +52,7 @@ fn live_smoke() {
                 Change::Tasks { .. } => "tasks",
                 Change::Machine { .. } => "machine",
                 Change::Organization { .. } => "organization",
+                Change::Teams { .. } => "teams",
             };
             *kinds.entry(kind).or_default() += 1;
             coalescer.push(change);

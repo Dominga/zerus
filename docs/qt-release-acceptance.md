@@ -1823,12 +1823,22 @@ this split on **2026-11-03**:
   complete**, including the clean-install exception's CI/package and owner-upgrade
   evidence. Remove the `arch` and `mac-desktop` Qt jobs, their runner/sampler,
   Linux/macOS Qt build/start/rollback selections and macOS Qt assembly/install
-  inputs. This also retires the tests tracked by `.66.21` and `.66.24`.
+  inputs. Keep the shared sampler/shard helpers for the retained optional Windows
+  Qt source tests until #906b; the retired sampler CI regression is removed. This also retires the tests tracked by `.66.21` and `.66.24`.
 - **#906b (Windows/tree):** retain as a draft until **va-kids acceptance**. Remove
   the remaining `tray/` C++/CMake/tests, Windows Qt installer/pin/notices, shared
   Qt archive installer, comparison programs and obsolete documentation. Audit
   non-CI rollback/build dependencies before deleting the tree. Historical immutable
   Qt ZIP validation and old-client update compatibility remain supported.
+
+Coordinator rollback decision (2026-11-03), clarified in R3: a verified replaced
+Next becomes `desktop-previous`. Every displaced Qt/unclassified rollback image
+gets its own unique entry under `desktop-qt-legacy/qt-*/`; several older Qt
+versions may coexist. They are never deleted or offered as rollback. The settings
+export stays at its compatible path. If an archive move fails, the image remains
+in a named retained location (or both named locations if the move is uncertain),
+and the verified Next update still completes its draft/process/provenance checks.
+No archive error grants automatic deletion or a retry of an unknown effect.
 
 Windows PC testing is deferred and is not a merge gate for #906a. The ready state
 of #906a is not an acceptance result or a merge authorization. Each part must be rebased on the final installer/consumer/notification/packaging PRs and pass

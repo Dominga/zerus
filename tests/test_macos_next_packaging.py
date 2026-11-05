@@ -79,6 +79,8 @@ class NextPackaging(unittest.TestCase):
             cli = root / "hgs"; cli.write_bytes(MAGIC)
             for name in ("rust", "client-rust", "frontend"):
                 inventory(root / name)
+            input_files = {str(p.relative_to(app)): (p.read_bytes(), p.stat().st_mode)
+                           for p in app.rglob('*') if p.is_file()}
             commands = []
             def run(*args):
                 commands.append(args)
@@ -94,8 +96,7 @@ class NextPackaging(unittest.TestCase):
                     "--connector", str(cli), "--licenses", str(root / "rust"),
                     "--client-licenses", str(root / "client-rust"), "--frontend-licenses", str(root / "frontend"),
                     "--version", VERSION, "--release", DEV_BASE + "-dev.17", "--output", str(output)]
-            with mock.patch.object(sys, "argv", argv), mock.patch.object(package, "run", side_effect=run), \
-                    mock.patch.object(package, "ffmpeg_provenance", side_effect=AssertionError("Qt must not be used")):
+            with mock.patch.object(sys, "argv", argv), mock.patch.object(package, "run", side_effect=run):
                 package.main()
             bundle = output / "Zerus.app"
             final = plistlib.loads((bundle / "Contents/Info.plist").read_bytes())
@@ -109,6 +110,20 @@ class NextPackaging(unittest.TestCase):
             for name in ("rust", "client-rust", "frontend"):
                 self.assertTrue((bundle / "Contents/Resources/licenses" / name / "inventory.json").is_file())
             self.assertEqual(commands[-1][0], "codesign")
+            self.assertEqual({str(p.relative_to(app)): (p.read_bytes(), p.stat().st_mode)
+                              for p in app.rglob('*') if p.is_file()}, input_files)
+            for identifier in ("dev.zerus.next", "example.foreign"):
+                foreign = dict(info, CFBundleIdentifier=identifier)
+                info_path.write_bytes(plistlib.dumps(foreign))
+                foreign_output = root / identifier
+                foreign_argv = list(argv)
+                foreign_argv[-1] = str(foreign_output)
+                with mock.patch.object(sys, "argv", foreign_argv), \
+                        mock.patch.object(package, "run") as execute, self.assertRaises(SystemExit):
+                    package.main()
+                execute.assert_not_called()
+                self.assertFalse(foreign_output.exists())
+                self.assertEqual(info_path.read_bytes(), plistlib.dumps(foreign))
 
     def distribution(self, root):
         bundle = root / "Zerus.app"
@@ -141,9 +156,9 @@ class NextPackaging(unittest.TestCase):
                             target.write_bytes(b"")
                         elif kind == "link":
                             target.symlink_to(ROOT / "scripts" / target.name)
-                        for gui in ("qt", "tauri"):
-                            findings = check.bundle_findings(bundle, VERSION, gui=gui)
-                            self.assertTrue(any(relative in error for error in findings), findings)
+                        # Only Next bundles are packaged since the Qt retirement.
+                        findings = check.bundle_findings(bundle, VERSION, gui="tauri")
+                        self.assertTrue(any(relative in error for error in findings), findings)
                         target.unlink(missing_ok=True)
                         target.write_bytes(original)
 

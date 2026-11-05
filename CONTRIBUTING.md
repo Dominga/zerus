@@ -39,7 +39,6 @@ whose fixes were taken separately.
 python3 scripts/ci/check-source.py
 python3 -m unittest discover -s tests -p 'test_*publication.py'
 bash scripts/ci/cli.sh
-bash scripts/ci/gui.sh
 ```
 
 The CLI script clears inherited `HGS_*` session/account context, runs Rust unit
@@ -179,10 +178,10 @@ backend classes when a behaviour must hold for both.
 On Arch, `bash scripts/ci/arch.sh` also builds and validates the pacman package
 as an unprivileged user. It substitutes a local Git source only in its disposable
 build directory; it never installs the package or enables services.
-Hosted Dev CI runs shared Rust/protocol checks, Linux CLI, Arch desktop/package,
+Hosted Dev CI runs shared Rust/protocol checks, Linux CLI, Arch package,
 macOS and Android on main. PRs retain Windows/iOS for affected or unknown paths;
 Nightly and Stable require the full matrix. Manual runs default to all platforms,
-with independent macOS-desktop and iOS flags. Validate workflow
+with independent macOS and iOS flags. Validate workflow
 edits locally before pushing. Daily nightlies publish a verified binary to GitHub and
 AUR, and the Windows portable zip to GitHub, only after every check passes; stable
 releases, which carry the zip their own candidate run tested, remain manually published.
@@ -278,10 +277,10 @@ You need:
 - Rust for MSVC: stable, and 1.99.1 with clippy;
 - Python 3.9 or later for the Qt test fixtures and 3.11 or later for the
   packaging scripts;
-- Git for Windows with Git Bash, and 7-Zip;
-- Qt 6.10.3 `msvc2022_64` with Qt Multimedia (no Qt WebEngine: the embedded
+- Git for Windows with Git Bash, 7-Zip and Node.js 24/npm for the Next frontend;
+- Only for the optional legacy source checks: Qt 6.10.3 `msvc2022_64` with Qt Multimedia (no Qt WebEngine: the embedded
   DeepSeek Native UI is an optional Linux plugin).
-  CI installs the official archives pinned in `packaging/windows/qt.json`, each
+  The retained optional installer uses the official archives pinned in `packaging/windows/qt.json`, each
   verified before 7-Zip extracts it. The same works locally and makes
   `~/Qt/6.10.3/msvc2022_64` (`--seven-zip` names 7-Zip when `7z` is not on
   `PATH`):
@@ -311,8 +310,17 @@ HGS_TEST_CONPTY_DIR="$(cygpath -w "$PWD/target/conpty")" \
 HGS_TEST_BIN="$(cygpath -w "$PWD/target/release/hgs.exe")" \
 HGS_TEST_CONPTY_DIR="$(cygpath -w "$PWD/target/conpty")" \
   python -X utf8 scripts/ci/agent-compatibility.py </dev/null
-export QT_ROOT_DIR="$(cygpath -w ~/Qt/6.10.3/msvc2022_64)"
-bash scripts/ci/gui.sh </dev/null
+# Optional legacy Qt source checks, retained only until Windows PC acceptance.
+export QT_ROOT_DIR="$(cygpath -m ~/Qt/6.10.3/msvc2022_64)"
+export PATH="$(cygpath -u "$QT_ROOT_DIR")/bin:$PATH"
+python scripts/ci/msvc-env.py cmake -S tray -B .ci-build/qt-windows -G Ninja \
+    -DCMAKE_BUILD_TYPE=Release -DBUILD_TESTING=ON \
+    "-DZERUS_QT_RESULTS_DIR=$(cygpath -m "$PWD/artifacts/test-results/qt-functions")" \
+    -DCMAKE_C_COMPILER=cl -DCMAKE_CXX_COMPILER=cl "-DCMAKE_PREFIX_PATH=$QT_ROOT_DIR"
+python scripts/ci/msvc-env.py cmake --build .ci-build/qt-windows --parallel 2
+QT_QPA_PLATFORM=offscreen QT_FORCE_STDERR_LOGGING=1 QT_QUICK_BACKEND=software \
+    QTWEBENGINE_CHROMIUM_FLAGS=--disable-gpu \
+    python scripts/ci/msvc-env.py ctest --test-dir .ci-build/qt-windows --timeout 240 --output-on-failure
 cargo +1.99.1 test --locked --manifest-path services/mobile/connector/Cargo.toml --lib windows_management::tests
 cargo +1.99.1 test --locked --manifest-path services/mobile/connector/Cargo.toml --test windows_gateway
 cargo +1.99.1 build --release --locked --manifest-path services/mobile/connector/Cargo.toml
@@ -322,9 +330,15 @@ HGS_TEST_FAKE_AGENT="$(cygpath -w "$PWD/target/debug/examples/fake_agent.exe")" 
   python scripts/ci/outside-job.py --custody-only --timeout 900 \
     --log artifacts/test-results/windows-mobile-gateway.log -- \
     python -m unittest discover -s tests -p test_windows_mobile_gateway.py -v </dev/null
+export CARGO_TARGET_DIR="$PWD/target/windows-next"
+(cd client && npm ci --no-audit --no-fund && \
+    npm run tauri -- build --ci --no-bundle --config src-tauri/tauri.windows.conf.json --features video)
+python client/scripts/collect-notices.py artifacts/windows-frontend-licenses
+unset CARGO_TARGET_DIR
 python scripts/package-windows.py --cli target/release/hgs.exe \
     --connector services/mobile/connector/target/release/zerus-mobile-connector.exe \
-    --gui .ci-build/gui/hgs-tray.exe --conpty target/conpty \
+    --gui target/windows-next/release/hgs-tray.exe --conpty target/conpty \
+    --frontend-licenses artifacts/windows-frontend-licenses \
     --output artifacts/zerus-windows-x86_64.zip
 python scripts/check-windows-portable.py artifacts/zerus-windows-x86_64.zip --run --selftest
 ```
@@ -390,9 +404,9 @@ qualifications; they do not add Kimi to every main run.
 `packaging/windows/conpty.json` from nuget.org and writes only its checked
 `conpty.dll` and `OpenConsole.exe`; `package-windows.py` puts them next to
 `hgs.exe` and fetches them itself without `--conpty`. On Windows,
-`scripts/ci/gui.sh` re-enters itself in the Visual Studio x64 environment
-(`scripts/ci/msvc-env.py`), builds with Ninja and `cl` against `QT_ROOT_DIR` and runs
-every Qt suite offscreen. The Qt fixtures are Python scripts that a small native
+the optional legacy Qt recipe uses `scripts/ci/msvc-env.py` for the Visual Studio
+x64 environment, builds with Ninja and `cl` against `QT_ROOT_DIR` and runs the
+retained Qt suites offscreen. It is not the maintained Tauri package build. The Qt fixtures are Python scripts that a small native
 shim (`zerus-test-helper`) starts, because Windows cannot run scripts directly.
 Outside a console, the shim hands each call to a worker of the test program's pool
 (`tray/tests/support/fixture-worker.py`), which keeps one warm interpreter and ends

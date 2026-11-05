@@ -56,7 +56,7 @@ class Signing(unittest.TestCase):
         args=['sign-macos.py','--app',str(self.app),'--identity','-','--team-id','ABCDE12345',
               '--version',version,'--output',str(Path(self.temporary.name)/'signed')]
         for release in [version,version+'.r812.gabcdef0.n41',base+'-dev.685']:
-            self.write('Contents/Info.plist',plistlib.dumps({'CFBundleShortVersionString':version,'ZerusReleaseVersion':release}))
+            self.write('Contents/Info.plist',plistlib.dumps({'CFBundleShortVersionString':version,'ZerusReleaseVersion':release,'ZerusGUI':'tauri'}))
             with self.subTest(release=release),mock.patch.object(sys,'argv',args+['--release',release]), \
                     mock.patch.object(sign,'signing_order',return_value=[]),mock.patch.object(sign.subprocess,'run') as execute, \
                     contextlib.redirect_stdout(io.StringIO()):

@@ -122,7 +122,7 @@ class LocalSigning(unittest.TestCase):
                     with self.assertRaisesRegex(ValueError, "incompatible"):
                         sign.verify_continuity("new", "installed")
 
-    def test_installer_stops_before_replacement_when_signing_fails(self):
+    def test_installer_stops_before_replacement_when_paired_preparation_fails(self):
         with tempfile.TemporaryDirectory(prefix="zerus-install-sign-") as temporary:
             root = Path(temporary)
             tray, home, tools = root / "tray", root / "home", root / "bin"
@@ -131,30 +131,34 @@ class LocalSigning(unittest.TestCase):
             installed = home / "Applications/hgs-tray.app/Contents/MacOS/hgs-tray"
             installed.parent.mkdir(parents=True)
             installed.write_bytes(b"previous installed application")
-            raw = tray / "build/hgs-tray.app/Contents/Info.plist"
+            raw = root / "client/src-tauri/target/release/bundle/macos/Zerus.app/Contents/Info.plist"
             raw.parent.mkdir(parents=True)
             original = plistlib.dumps({"CFBundleIdentifier": sign.LOCAL_BUNDLE_ID})
             raw.write_bytes(original)
             stage_root = root / "temporary"
             stage_root.mkdir()
             shutil.copy2(ROOT / "tray/install.sh", tray / "install.sh")
+            client_scripts = root / "client/scripts"; client_scripts.mkdir(parents=True)
+            (client_scripts / "switch-config.py").write_text("# Private source-only config fixture\n")
             scripts = root / "scripts"; scripts.mkdir()
             (scripts / "install-macos-desktop-service.py").write_text(
                 "import sys\nassert sys.argv[2:] == ['--check-only']\n")
-            # Exercise the installer boundary: failed signing must precede even
+            # Exercise the installer boundary: failed paired preparation precedes even
             # replacing the application or writing a LaunchAgent, with either restart policy.
-            (tray / "sign-local-macos.py").write_text(
+            (tray / "prepare-local-macos.py").write_text(
                 "import pathlib, sys\n"
-                "assert pathlib.Path(sys.argv[1]).resolve() != pathlib.Path(__file__).parent / 'build/hgs-tray.app'\n"
+                "if '--check-cli' in sys.argv: raise SystemExit(0)\n"
+                "assert '--app' in sys.argv and '--runner-hgs' in sys.argv\n"
+                "assert pathlib.Path(sys.argv[sys.argv.index('--app')+1]).resolve() != pathlib.Path(__file__).parent / 'build/hgs-tray.app'\n"
                 "raise SystemExit(17)\n")
-            for name, body in {"uname": "echo Darwin", "brew": "echo /fixture/qt", "cmake": "exit 0", "hgs": "exit 0",
+            for name, body in {"uname": "echo Darwin", "npm": "exit 0", "hgs": "exit 0",
                                "ditto": 'cp -R "$1" "$2"',
                                "launchctl": "touch \"$HOME/launchctl-called\""}.items():
                 path = tools / name
                 path.write_text("#!/bin/sh\n" + body + "\n")
                 path.chmod(0o755)
             for restart in ("0", "1"):
-                env = dict(os.environ, HOME=str(home), HGS_MAC_GUI="qt", PATH=str(tools) + os.pathsep + os.environ["PATH"],
+                env = dict(os.environ, HOME=str(home), HGS_MAC_GUI="client", PATH=str(tools) + os.pathsep + os.environ["PATH"],
                            HGS_TRAY_RESTART=restart, TMPDIR=str(stage_root))
                 result = subprocess.run(["bash", str(tray / "install.sh")], env=env, capture_output=True, text=True, timeout=15)
                 self.assertEqual(result.returncode, 17, result.stderr)

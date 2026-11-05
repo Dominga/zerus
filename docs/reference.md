@@ -4509,12 +4509,13 @@ for a GUI that is not running, by its signature and its own `--build-info`) and
 only then becomes the one rollback copy in `~/.local/share/hgs/desktop-previous`;
 a new GUI that does not start is replaced by it again. A replaced bundle without
 its identity, executable or valid signature never becomes the rollback copy, and
-a Zerus process started during the update stops the change. After the Mac switch,
-Qt stays the rollback copy; if it cannot be verified as complete, including when
-its signature check times out, the replaced client is kept too. Those cases and an
-interrupted update keep the replaced GUI in a `.hgs-tray-kept-*` folder beside
-the installed one and print where; later updates list such folders and never
-remove them. Links at the
+a Zerus process started during the update stops the change. Each displaced Qt/unclassified rollback image gets a unique entry under
+`~/.local/share/hgs/desktop-qt-legacy/qt-*/` for manual recovery; the replaced
+Next takes `desktop-previous`. Older retained images are never overwritten,
+deleted or offered by `--rollback`. The settings export stays at its compatible
+path. An archive-move failure keeps the image named and retained while the
+verified Next update continues its draft/process/provenance checks. Interrupted
+or unverifiable replacements remain in a named kept folder. Links at the
 installed path or in the rollback folder are refused. The update confirms the
 running image, unchanged nonempty drafts and native agent and tmux processes. It records the
 installed builds in `~/.local/share/hgs/build-provenance.json`, then removes hidden
@@ -4547,7 +4548,7 @@ Linux installs the binary under `~/.local/bin`, a systemd user service under
 `~/.config/systemd/user` and a launcher under `~/.local/share/applications`.
 The launcher is not a second autostart entry. Fresh installs and upgrades default
 to Zerus Next; `HGS_LINUX_GUI=client` selects it explicitly.
-`HGS_LINUX_GUI=qt` keeps the Qt source-build fallback until Linux acceptance. `HGS_INSTALL_PREFIX` redirects the binary, launch files and
+Qt source builds and the Qt installer selection are retired. `HGS_INSTALL_PREFIX` redirects the binary, launch files and
 updater state into a scratch prefix and performs no service-manager action; see
 [Linux packages and source installation](linux-distribution.md).
 The service belongs to `graphical-session.target`, restarts after crashes and

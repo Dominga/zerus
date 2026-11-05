@@ -1,5 +1,6 @@
 """The macOS bundle keeps its hgs-tray path while system surfaces show Zerus."""
 import os
+import json
 from pathlib import Path
 import plistlib
 import re
@@ -8,6 +9,7 @@ import unittest
 
 ROOT = Path(__file__).resolve().parents[1]
 PACKAGING = ROOT / "tray/packaging"
+TAURI = ROOT / "client/src-tauri"
 NAME = "Zerus"
 
 
@@ -38,18 +40,17 @@ class MacosBundleName(unittest.TestCase):
         return info
 
     def test_sources_localize_the_compatible_bundle(self):
-        info = self.check_names(PACKAGING / "Info.plist", PACKAGING / "en.lproj/InfoPlist.strings")
+        info = self.check_names(TAURI / "Info.switch.plist", PACKAGING / "en.lproj/InfoPlist.strings")
+        config = json.loads((TAURI / "tauri.switch.conf.json").read_text())
         # The executable must not depend on the bundle folder name.
-        self.assertEqual(info["CFBundleExecutable"], "${MACOSX_BUNDLE_EXECUTABLE_NAME}")
-        self.assertEqual(info["CFBundleIdentifier"], "${MACOSX_BUNDLE_GUI_IDENTIFIER}")
-        self.assertEqual(info["LSMinimumSystemVersion"], "${CMAKE_OSX_DEPLOYMENT_TARGET}")
+        self.assertEqual(config["mainBinaryName"], "hgs-tray")
+        self.assertEqual(config["bundle"]["macOS"]["minimumSystemVersion"], "14.0")
         self.assertIn("voice", info["NSMicrophoneUsageDescription"])
 
     def test_raw_build_has_a_separate_privacy_identifier(self):
-        info = plistlib.loads((PACKAGING / "Info.plist").read_bytes())
-        self.assertEqual(info["CFBundleIdentifier"], "${MACOSX_BUNDLE_GUI_IDENTIFIER}")
-        cmake = (ROOT / "tray/CMakeLists.txt").read_text()
-        self.assertRegex(cmake, r'MACOSX_BUNDLE_GUI_IDENTIFIER\s+"com\.hgdev\.hgs-tray\.local"')
+        config = json.loads((TAURI / "tauri.switch.conf.json").read_text())
+        self.assertEqual(config["identifier"], "com.hgdev.hgs-tray.local")
+        self.assertEqual(json.loads((TAURI / "tauri.conf.json").read_text())["identifier"], "dev.zerus.next")
 
     @unittest.skipUnless(os.environ.get("ZERUS_MACOS_BUNDLE"), "needs a built macOS bundle")
     def test_built_bundle_carries_the_localized_name(self):
@@ -65,7 +66,7 @@ class MacosBundleName(unittest.TestCase):
         info = plistlib.loads((contents / "Info.plist").read_bytes())
         # Finder refuses an older system up front instead of a dyld failure at launch.
         self.assertEqual(info["LSMinimumSystemVersion"], minimum_macos(contents / "MacOS/hgs-tray"))
-        # Homebrew's Qt frameworks need macOS 14; a build directory may cache an older value.
+        # The shipped Next configuration requires macOS 14.
         self.assertGreaterEqual(tuple(map(int, info["LSMinimumSystemVersion"].split("."))), (14, 0))
 
 

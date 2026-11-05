@@ -469,3 +469,122 @@ fn a_recorded_outcome_carries_the_cards_hash_run_and_terminal_hand_off() {
         );
     }
 }
+
+/// review-3 (G): each in-progress check doubles the delay from 2 s, never
+/// past 30 s.
+#[test]
+fn held_answer_checks_back_off_from_two_to_thirty_seconds() {
+    let root = dir("answer-r3-backoff");
+    let (c, _fake) = send_hub_on(&drafts(&root));
+    let service = Arc::new(Service::default());
+    route(&c, &service);
+    reply(&service, |plan| {
+        AnswerResult::Pending(Box::new(plan.clone()))
+    });
+    opened_local(&c, asking(vec![wire_card("tool:t1")]));
+    let card = chosen(&c);
+    submit(&c, &card);
+    status_is(&c, STILL_ANSWERING);
+    let (answering, plan) = {
+        let hub = c.lock();
+        let handed = &hub.answers.handed[&card];
+        (handed.answering.clone(), handed.plan.clone())
+    };
+    let mut delays = Vec::new();
+    for _ in 0..6 {
+        c.answer_checked(&answering, &plan, Basis::Handed, Checked::InProgress);
+        delays.push(c.lock().answers.handed[&card].delay);
+    }
+    assert_eq!(delays, [4.0, 8.0, 16.0, 30.0, 30.0, 30.0]);
+}
+
+/// review-3 (P): a check that panics ends the hold in state 6 with Allow
+/// retry, never a locked card that lasts until the app restarts.
+#[test]
+fn a_held_answer_whose_check_panics_ends_with_allow_retry() {
+    let root = dir("answer-r3-check-panic");
+    let (c, fake) = send_hub_on(&drafts(&root));
+    c.set_answer_route(AnswerRoute {
+        send: Arc::new(|name, checkpoint, pinned, stdin| {
+            AnswerResult::Pending(Box::new(
+                deferred_answer::plan(name, checkpoint, pinned, stdin).unwrap(),
+            ))
+        }),
+        check: Arc::new(|_| panic!("a check that dies")),
+    });
+    opened_local(&c, asking(vec![wire_card("tool:t1")]));
+    let card = chosen(&c);
+    submit(&c, &card);
+    status_is(&c, STILL_ANSWERING);
+    ticks(&c, &fake, FIRST, || {
+        !c.lock().answers.handed.contains_key(&card)
+    });
+    let q = card_view(&c);
+    assert!(q.view.retry && q.view.status_error, "{q:?}");
+    assert_eq!(q.view.status.english(), UNCONFIRMED);
+    assert!(
+        held(&c, &card).is_some(),
+        "the identity stays for Allow retry"
+    );
+}
+
+/// review-3 (E): a reload whose lookup the service cannot answer changes
+/// nothing: the card stays exactly as it loaded.
+#[test]
+fn a_reload_the_service_cannot_answer_stays_as_loaded() {
+    let root = dir("answer-r3-reload-unknown");
+    let store = drafts(&root);
+    {
+        let (c, _) = send_hub_on(&store);
+        let service = Arc::new(Service::default());
+        route(&c, &service);
+        reply(&service, |plan| {
+            AnswerResult::Pending(Box::new(plan.clone()))
+        });
+        opened_local(&c, asking(vec![wire_card("tool:t1")]));
+        let card = chosen(&c);
+        submit(&c, &card);
+        status_is(&c, STILL_ANSWERING);
+        eventually(|| read_draft(&root.join("drafts"), &card).draft.uncertain);
+    }
+    store.flush();
+    let service = Arc::new(Service::default());
+    let (c, fake) = send_hub_on(&store);
+    route(&c, &service);
+    opened_local(&c, asking(vec![wire_card("tool:t1")]));
+    let loaded = card_view(&c);
+    lock(&service.checks).push_back(Checked::Unavailable);
+    ticks(&c, &fake, 0.0, || lock(&service.checked).len() == 1);
+    std::thread::sleep(Duration::from_millis(100));
+    let after = card_view(&c);
+    assert_eq!(
+        (
+            after.view.status.english(),
+            after.view.status_error,
+            after.view.retry
+        ),
+        (
+            loaded.view.status.english(),
+            loaded.view.status_error,
+            loaded.view.retry
+        ),
+        "unchanged"
+    );
+    assert!(!c.lock().answers.handed.contains_key(&loaded.card));
+}
+
+/// review-3 (non-blocking): a reload's lookup is asked once per loaded
+/// draft, and its mark goes with the draft, so the set stays as bounded as
+/// the drafts are.
+#[test]
+fn a_lookup_mark_goes_with_its_draft() {
+    let root = dir("answer-probed-bound");
+    let (c, _fake) = send_hub_on(&drafts(&root));
+    let mut hub = c.lock();
+    let kept = "kept".to_owned();
+    hub.answers.drafts.insert(kept.clone(), Default::default());
+    hub.answers.probed.insert(kept.clone());
+    hub.answers.probed.insert("gone".into());
+    Composers::trim_answers(&mut hub, &HashSet::new());
+    assert_eq!(hub.answers.probed, HashSet::from([kept]));
+}

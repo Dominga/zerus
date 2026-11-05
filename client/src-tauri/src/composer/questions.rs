@@ -499,6 +499,11 @@ impl Composers {
             answers.saves.remove(&key);
             answers.loads.remove(&key);
         }
+        // A reload's lookup needs its draft: a mark whose draft is gone can
+        // never ask again, so it goes too and the set stays bounded.
+        answers
+            .probed
+            .retain(|key| answers.drafts.contains_key(key));
     }
 
     /// Saves a card's draft (`saveDraft`, 709-739); `durable` for the save

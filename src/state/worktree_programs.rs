@@ -8,6 +8,14 @@ use zerus_client_core::{termination_cleanup::Capture, worktree_programs as wire}
 const INVALID: &str =
     "The working folder or its programs changed. Review the original session again.";
 
+#[cfg(target_os = "linux")]
+#[allow(dead_code)] // Private native caller wiring follows the custody controls.
+mod holding;
+// Original data reservations/results only. The live native permit and held
+// checkout source are separate; a journal row can never reconstruct them.
+#[allow(dead_code)]
+mod journal;
+
 fn original(capture: &Capture) -> Result<Value> {
     let record = read_bounded(&capture.target.name, 1 << 20)?;
     if record["name"] != capture.target.name
@@ -98,6 +106,10 @@ pub(super) fn discover(args: &[String]) -> Result<Value> {
 }
 
 fn discover_bytes(config: &crate::config::Config, bytes: &[u8]) -> Result<wire::Manifest> {
+    discover_held(config, bytes).map(|(manifest, _)| manifest)
+}
+
+fn discover_held(config: &crate::config::Config, bytes: &[u8]) -> Result<(wire::Manifest, Scope)> {
     let deadline = Instant::now() + Duration::from_secs(5);
     let wire::Discovery { capture } = wire::Discovery::decode(bytes)?;
     if super::session_action::status_machine(config)? != capture.machine {
@@ -147,7 +159,7 @@ fn discover_bytes(config: &crate::config::Config, bytes: &[u8]) -> Result<wire::
         return Err(INVALID.into());
     }
     scope.current(deadline).map_err(|e| e.to_string())?;
-    Ok(manifest)
+    Ok((manifest, scope))
 }
 
 #[cfg(test)]

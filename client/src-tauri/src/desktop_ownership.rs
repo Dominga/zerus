@@ -882,6 +882,61 @@ impl NativeReady {
     pub(crate) fn helper(&self) -> Result<&Path, &'static str> {
         self.helper.executable()
     }
+
+    /// Native-only source selection for explicit program cleanup. A successful
+    /// legacy path check is not the current native ownership origin required
+    /// by the new pipeline. This selection supplies no stop permission.
+    #[allow(dead_code)] // The new native pipeline consumes this opaque source.
+    pub(crate) fn program_source(&self) -> Result<NativeSource, &'static str> {
+        let original = self
+            ._receipt
+            .as_ref()
+            .filter(|receipt| receipt.native_ready())
+            .ok_or("worktree_programs_native_origin_unavailable")?;
+        if crate::desktop_service::mode() {
+            return Err("worktree_programs_native_origin_changed");
+        }
+        self.helper.executable()?;
+        let environment = zerus_client_core::run::FrozenEnvironment::capture()
+            .map_err(|_| "worktree_programs_native_environment_unavailable")?;
+        Ok(NativeSource {
+            helper: self.helper.clone(),
+            original: original.clone(),
+            environment,
+        })
+    }
+}
+
+/// Constructed only from the actual guarded Native startup/takeover result.
+/// Not serialized, not a cached mode flag and not a stop/Force permit.
+#[allow(dead_code)] // Consumed by the live program pipeline, never legacy dispatch.
+pub(crate) struct NativeSource {
+    helper: Arc<relay::Connection>,
+    original: Receipt,
+    environment: zerus_client_core::run::FrozenEnvironment,
+}
+#[allow(dead_code)]
+impl NativeSource {
+    pub(crate) fn route_current(&self) -> bool {
+        !crate::desktop_service::mode()
+            && self.original.native_ready()
+            && self.environment.current()
+            && self.helper.executable().is_ok()
+    }
+    pub(crate) fn configuration(&self) -> &str {
+        &self.original.configuration
+    }
+    pub(crate) fn connection(&self) -> Result<Arc<relay::Connection>, &'static str> {
+        self.route_current()
+            .then(|| self.helper.clone())
+            .ok_or("worktree_programs_native_origin_changed")
+    }
+    pub(crate) fn environment(&self) -> &zerus_client_core::run::FrozenEnvironment {
+        &self.environment
+    }
+    pub(crate) fn original_ownership(&self) -> &Receipt {
+        &self.original
+    }
 }
 /// Called after canonical claim, before Bootstrap or notifier construction.
 pub(crate) struct NativeRecovery {

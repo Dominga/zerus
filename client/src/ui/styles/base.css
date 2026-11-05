@@ -312,7 +312,7 @@
    border.) The rule names the scroll containers, so a popup restyles only them,
    not the whole document; popups.test.ts keeps both lists complete. */
 @layer variants {
-  :root[data-platform="linux"]:has(:is(.menu, .att-pop, .archive-pop, .acct-more, .ns-choice-list, .tk-tip, .goto-scrim, .cat-confirm, dialog.ns-model-pop[open], :popover-open))
+  :root[data-platform="linux"]:has(:is(.menu, .att-pop, .archive-pop, .acct-more, .ns-choice-list, .tk-tip, .goto-scrim, .cat-confirm, .nt-confirm, dialog.ns-model-pop[open], :popover-open))
     :is(.dlg-body, .set-scroll, .perf-host, .content-search-list, .act-scroll, .act-table-wrap, .act-code, .act-queue-text,
       .insp-scroll, .insp-tabs, .proc-list, .proc-output, .draft-list, .draft-preview, .qcard-scroll, .fb-list, .goto-list,
       .shortcut-help-list, .mach-page, .mach-log, .acct-scroll, .acct-main-scroll, .acct-more-list, .atm-list, .atm-results,
@@ -320,8 +320,10 @@
       .bc-details, .sp-scroll, .strip-scroll, .set-nav, .set-table-wrap, .voice-list, .an-detail, .an-json, .sw-clist,
       .sw-review, .tasks-list, .tasks-detail, .tk-scroll, .tv-scroll, .tk-assign-list, .wto-tree, .team-canvas, .team-members-list, .team-proposals, .team-waiting-list,
       .team-waiting-output, .cat-list, .cat-proposals, .nt-body, .pt-plan-scroll, .pt-detail,
+      .cat-form, .cat-routing, .cat-rules, .designer-draft, .newteam-page, .catalog-page,
+      .pm-board, .pm-column-body, .pm-layers, .pm-layer-body, .pm-profile, .pm-tests,
       .xterm-viewport):not(
-      :is(.menu, .att-pop, .archive-pop, .acct-more, .ns-choice-list, .tk-tip, .goto-scrim, .cat-confirm, dialog.ns-model-pop[open], :popover-open) *) {
+      :is(.menu, .att-pop, .archive-pop, .acct-more, .ns-choice-list, .tk-tip, .goto-scrim, .cat-confirm, .nt-confirm, dialog.ns-model-pop[open], :popover-open) *) {
     scrollbar-width: none;
   }
 }

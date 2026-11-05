@@ -451,6 +451,13 @@ describe("Settings texts", () => {
     // WhiteWh fork: Extensions (SettingsPage.h) is in the Qt desktop only.
     const fork = qtOrder.indexOf("Extensions");
     if (fork >= 0) qtOrder.splice(fork, 1);
+    // The fork appends Teams after the nav list (SessionsWindow.cpp:2235);
+    // Model servers follows but is not ported to the client yet.
+    const sessionsWindow = fs.readFileSync(new URL("tray/src/SessionsWindow.cpp", repo), "utf8");
+    const appended = [...sessionsWindow.matchAll(/addSection\(tr\("([^"]+)"\)/g)]
+      .map((match) => match[1])
+      .filter((label) => label !== "Model servers");
+    qtOrder.push(...appended);
     expect(labels).toEqual(qtOrder);
   });
 });

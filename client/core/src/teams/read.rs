@@ -44,6 +44,14 @@ pub enum TeamRead {
     Profile { team: String },
     /// `team catalog get` with `{}`: the catalog and the designer's draft.
     Catalog,
+    /// Task #44: `team catalog route` with `{goal}`: the template a goal would
+    /// use (the routing tab's Try it).
+    CatalogRoute { goal: String },
+    /// Task 41: `team test` with `{team, action:"queue"}`: the test queue.
+    TestQueue { team: String },
+    /// Task 41: `team test` with `{team, action:"results", limit, before?}`:
+    /// one page of test results, newest first.
+    TestResults { team: String, before: Option<f64> },
 }
 
 impl TeamRead {
@@ -57,7 +65,8 @@ impl TeamRead {
             Self::Waiting { .. } => "waiting",
             Self::Spans { .. } => "spans",
             Self::Profile { .. } => "profile",
-            Self::Catalog => "catalog",
+            Self::Catalog | Self::CatalogRoute { .. } => "catalog",
+            Self::TestQueue { .. } | Self::TestResults { .. } => "test",
         }
     }
 
@@ -69,7 +78,8 @@ impl TeamRead {
             | Self::Inbox { team }
             | Self::Spans { team, .. }
             | Self::Profile { team } => Some(team),
-            Self::List | Self::Waiting { .. } | Self::Catalog => None,
+            Self::TestQueue { team } | Self::TestResults { team, .. } => Some(team),
+            Self::List | Self::Waiting { .. } | Self::Catalog | Self::CatalogRoute { .. } => None,
         }
     }
 
@@ -98,6 +108,15 @@ impl TeamRead {
             }
             Self::Profile { team } => json!({"team": team}),
             Self::Catalog => json!({}),
+            Self::CatalogRoute { goal } => json!({"goal": goal}),
+            Self::TestQueue { team } => json!({"team": team, "action": "queue"}),
+            Self::TestResults { team, before } => {
+                let mut request = json!({"team": team, "action": "results", "limit": 20});
+                if let Some(before) = before {
+                    request["before"] = json!(before);
+                }
+                request
+            }
         }
     }
 
@@ -110,7 +129,8 @@ impl TeamRead {
             Self::Status { .. } => &[("id", false), ("members", true), ("tasks", true)],
             Self::Spans { .. } => &[("tasks", true)],
             Self::Profile { .. } => &[],
-            Self::Catalog => &[],
+            Self::Catalog | Self::CatalogRoute { .. } => &[],
+            Self::TestQueue { .. } | Self::TestResults { .. } => &[("items", true)],
         }
     }
 }
@@ -150,8 +170,17 @@ pub fn invocation(computer: &ComputerId, read: &TeamRead) -> Result<Invocation, 
         .map(|alias| format!("@{alias}"))
         .into_iter()
         .collect();
+    if let TeamRead::CatalogRoute { goal } = read {
+        if goal.chars().count() > 4000 || goal.chars().any(|ch| ch.is_control() && ch != '\n') {
+            return Err(bad("not a goal"));
+        }
+    }
     if matches!(read, &TeamRead::Catalog) {
         args.extend(["team".to_owned(), "catalog".to_owned(), "get".to_owned(), "--json".to_owned()]);
+    } else if matches!(read, &TeamRead::CatalogRoute { .. }) {
+        args.extend(["team".to_owned(), "catalog".to_owned(), "route".to_owned(), "--json".to_owned()]);
+    } else if matches!(read, &TeamRead::TestQueue { .. }) || matches!(read, &TeamRead::TestResults { .. }) {
+        args.extend(["team".to_owned(), "test".to_owned(), "--json".to_owned()]);
     } else {
         args.extend(["team".to_owned(), read.op().to_owned(), "--json".to_owned()]);
     }

@@ -2,6 +2,7 @@ import { createSignal, type JSX } from "solid-js";
 import { setPage } from "../../../store/ui";
 import { AppearanceSection } from "./Appearance";
 import { SessionsSection } from "./Sessions";
+import { TeamsSection } from "./TeamsSection";
 import { KeyboardSection } from "./Keyboard";
 import { VoiceSection, refreshVoice } from "./Voice";
 import { RecoverySection, refreshRecovery } from "./Recovery";
@@ -22,7 +23,7 @@ import { trNoop } from "../../../i18n";
 // here as ProcessesSection (./Processes.tsx).
 
 export type SectionId =
-  | "appearance" | "sessions" | "recovery" | "processes" | "updates" | "mobile" | "files"
+  | "appearance" | "sessions" | "teams" | "recovery" | "processes" | "updates" | "mobile" | "files"
   | "worktrees" | "approvals" | "voice" | "keyboard" | "analytics" | "about";
 
 export interface Section {
@@ -47,6 +48,9 @@ export const SECTIONS: readonly Section[] = [
   { id: "keyboard", label: "Keyboard", icon: "keyboard", component: KeyboardSection },
   { id: "analytics", label: trNoop("Private analytics"), icon: "gauge", component: AnalyticsSection },
   { id: "about", label: "About", icon: "info", component: AboutSection, refresh: refreshAbout },
+  // SessionsWindow.cpp:2235 appends the fork's Teams section after Settings'
+  // own nav; Model servers follows but is not ported to the client yet.
+  { id: "teams", label: "Teams", icon: "users", component: TeamsSection },
 ];
 
 /** The sections the client has so far, in Qt's order. */

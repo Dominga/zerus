@@ -218,7 +218,48 @@ fn actions() -> Vec<(TeamAction, &'static str, Value)> {
             json!({"task": 7}),
         ),
         (TeamAction::Retry { task: 7 }, "retry", json!({"task": 7})),
-        (TeamAction::Finish, "finish", json!({})),
+        (
+            TeamAction::Finish {
+                summary: " Shipped the API. ".into(),
+            },
+            "finish",
+            json!({"summary": "Shipped the API."}),
+        ),
+        // Task 40: the team bar's Discard plan and the task card's actions.
+        (TeamAction::Discard, "discard", json!({})),
+        (
+            TeamAction::Hold {
+                task: 6,
+                reason: "After the release".into(),
+            },
+            "hold",
+            json!({"task": 6, "reason": "After the release"}),
+        ),
+        (
+            TeamAction::SkipStage {
+                task: 6,
+                reason: "Reviewed by hand".into(),
+            },
+            "skip-stage",
+            json!({"task": 6, "reason": "Reviewed by hand"}),
+        ),
+        (
+            TeamAction::SendBack {
+                task: 6,
+                reason: "Paging is missing".into(),
+            },
+            "send-back",
+            json!({"task": 6, "reason": "Paging is missing"}),
+        ),
+        (
+            TeamAction::MoveTask {
+                task: 6,
+                phase: 2,
+                revision: Some(9),
+            },
+            "move-task",
+            json!({"task": 6, "phase": 2, "revision": 9}),
+        ),
         (
             TeamAction::DraftUpdate {
                 revision: 3,
@@ -253,9 +294,18 @@ fn actions() -> Vec<(TeamAction, &'static str, Value)> {
         (
             TeamAction::Settings {
                 settings: json!({"branch_per_task": true, "land": false}),
+                members_update: vec![],
             },
             "settings",
             json!({"settings": {"branch_per_task": true, "land": false}}),
+        ),
+        (
+            TeamAction::Settings {
+                settings: json!({"build_broker": true}),
+                members_update: vec![json!({"id": "dev", "iron_rules": ["Run the tests"]})],
+            },
+            "settings",
+            json!({"settings": {"build_broker": true}, "members_update": [{"id": "dev", "iron_rules": ["Run the tests"]}]}),
         ),
     ]
 }
@@ -439,7 +489,10 @@ fn catalog_actions_send_their_requests_and_apply_and_discard_ask_first() {
         expected.insert("by".into(), json!("human"));
         expected.insert("request_id".into(), json!(request_id));
         assert_eq!(request, &Value::Object(expected), "{sub}");
-        assert!(request.get("team").is_none(), "a catalog call names no team");
+        assert!(
+            request.get("team").is_none(),
+            "a catalog call names no team"
+        );
     }
     // Apply and discard end the draft, so both ask the owner first.
     for (action, dialog) in [
@@ -459,7 +512,11 @@ fn catalog_actions_send_their_requests_and_apply_and_discard_ask_first() {
         };
         assert_eq!(confirmation.name, dialog);
     }
-    assert_eq!(catalog_requests(&fake).len(), sent, "nothing ran before confirmation");
+    assert_eq!(
+        catalog_requests(&fake).len(),
+        sent,
+        "nothing ran before confirmation"
+    );
     // The exact command is `hgs team catalog decide --json`.
     let (invocation, _) = prepare(&TeamCall {
         team: String::new(),
@@ -469,10 +526,7 @@ fn catalog_actions_send_their_requests_and_apply_and_discard_ask_first() {
         })
     })
     .unwrap();
-    assert_eq!(
-        invocation.args,
-        ["team", "catalog", "decide", "--json"]
-    );
+    assert_eq!(invocation.args, ["team", "catalog", "decide", "--json"]);
     // hgs's own refusal is failed, never uncertain or resent.
     reply(
         &fake,
@@ -501,7 +555,10 @@ fn destructive_actions_and_approvals_ask_first_and_send_nothing() {
     let fake = fake("team_actions_confirm");
     for action in [
         TeamAction::Stop,
-        TeamAction::Finish,
+        TeamAction::Finish {
+            summary: "Done".into(),
+        },
+        TeamAction::Discard,
         TeamAction::Archive,
         TeamAction::Cancel {
             task: 6,
@@ -691,6 +748,7 @@ fn a_refusal_fails_and_an_unknown_outcome_is_uncertain_and_never_sent_again() {
     );
     let settings = TeamAction::Settings {
         settings: json!({"land": true}),
+        members_update: vec![],
     };
     let before = requests(&fake).len();
     let outcome = run(&fake.path(), &call(settings.clone()));
@@ -775,7 +833,8 @@ fn requests_that_cannot_be_made_never_run_and_a_peer_gets_its_alias() {
         set: json!({})
     })));
     assert!(refused(call(TeamAction::Settings {
-        settings: json!({})
+        settings: json!({}),
+        members_update: vec![],
     })));
     assert!(requests(&fake).is_empty(), "no refused request ran");
     // A peer: `hgs @studio team ...`, Qt's 45 s.
@@ -839,9 +898,72 @@ fn the_webview_names_an_action_by_its_kind() {
     )
     .unwrap();
     assert_eq!(decide.op(), "decide-proposal");
-    let settings: TeamAction = serde_json::from_value(
-        json!({"kind": "settings", "settings": {"land": true}}),
-    )
-    .unwrap();
+    let settings: TeamAction =
+        serde_json::from_value(json!({"kind": "settings", "settings": {"land": true}})).unwrap();
     assert_eq!(settings.op(), "settings");
+}
+
+/// Task #44: Qt's catalog editor in core. The owner edits a field, exports
+/// the working copy, imports it into another editor and saves: `hgs team
+/// catalog set` gets the catalog over the version it was read at, with
+/// `by: human`, once. The designer's start sends the project's folder, the
+/// first message as its goal and the chosen agent.
+#[test]
+fn catalog_set_import_export_and_designer_send_their_requests() {
+    use zerus_client_core::teams::catalog_edit::{CatalogEdit, CatalogEditor, Kind};
+    let fake = fake("team_actions_catalog_edit");
+    let get = json!({"builtin":false,"draft":{"base":4,"proposals":[]},"catalog":{"version":4,
+        "roles":[{"id":"backend","name":"Backend","agent":"codex","prompt":"Build it."}],
+        "templates":[{"id":"feature","name":"Feature","roster":[{"role":"backend","count":1}],"tasks":[]}],
+        "routing":[],"pipelines":[],"planning_rules":"(1) small phases"}});
+    let mut editor = CatalogEditor::default();
+    editor.load(&get).unwrap();
+    editor
+        .edit(&CatalogEdit::Set { kind: Kind::Role, id: "backend".into(), field: "about".into(), value: json!("The API") })
+        .unwrap();
+    // Export writes the working copy; Import reads it into another editor.
+    let file = editor.export_text();
+    let mut imported = CatalogEditor::default();
+    imported.load(&get).unwrap();
+    imported.import_text(&file).unwrap();
+    assert_eq!(imported.working()["roles"][0]["about"], "The API");
+    reply(&fake, "catalog set", "", json!({"stdout": {"status": "saved", "version": 5}, "echo": true}));
+    let outcome = run(&fake.path(), &TeamCall { team: String::new(), ..call(imported.save_action()) });
+    let TeamOutcome::Done { receipt, request_id } = &outcome else { panic!("{outcome:?}") };
+    assert_eq!(receipt["status"], "saved");
+    let log = catalog_requests(&fake);
+    assert_eq!(log.len(), 1, "saved once");
+    let (op, request) = &log[0];
+    assert_eq!(op, "catalog set");
+    assert_eq!(request["version"], 4, "over the version it was read at");
+    assert_eq!(request["catalog"]["roles"][0]["about"], "The API");
+    assert_eq!(request["catalog"]["planning_rules"], "(1) small phases");
+    assert_eq!((request["by"].as_str(), request["request_id"].as_str()), (Some("human"), Some(request_id.as_str())));
+    // A newer catalog refuses the save: nothing was written, and the
+    // refusal is the owner's to read.
+    reply(&fake, "catalog set", "", json!({"stderr": "hgs: The catalog changed (now v5); refresh and try again", "exit": 1}));
+    let refused = run(&fake.path(), &TeamCall { team: String::new(), ..call(imported.save_action()) });
+    let TeamOutcome::Failed { detail, .. } = &refused else { panic!("{refused:?}") };
+    assert!(detail.contains("catalog changed"), "{detail}");
+    // The designer's conversation starts for the selected project.
+    reply(&fake, "catalog designer", "", json!({"stdout": {"status": "started", "name": "claude/designer/team-designer"}, "echo": true}));
+    let designer = TeamAction::CatalogDesigner {
+        folder: "C:/work/orbit".into(),
+        goal: "A team for the payments service".into(),
+        agent: "claude".into(),
+        model: "opus".into(),
+        effort: String::new(),
+        project: "Orbit".into(),
+    };
+    let started = run(&fake.path(), &TeamCall { team: String::new(), ..call(designer) });
+    assert!(matches!(started, TeamOutcome::Done { .. }), "{started:?}");
+    let (op, request) = catalog_requests(&fake).last().unwrap().clone();
+    assert_eq!(op, "catalog designer");
+    assert_eq!(request["folder"], "C:/work/orbit");
+    assert_eq!(request["goal"], "A team for the payments service");
+    assert_eq!((request["agent"].as_str(), request["model"].as_str(), request["project"].as_str()), (Some("claude"), Some("opus"), Some("Orbit")));
+    assert!(request.get("effort").is_none(), "an empty choice is not sent");
+    // Without a folder nothing starts.
+    let none = TeamAction::CatalogDesigner { folder: String::new(), goal: "x".into(), agent: String::new(), model: String::new(), effort: String::new(), project: String::new() };
+    assert!(matches!(run(&fake.path(), &TeamCall { team: String::new(), ..call(none) }), TeamOutcome::Failed { .. }));
 }

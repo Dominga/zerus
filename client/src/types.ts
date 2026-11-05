@@ -938,6 +938,8 @@ export interface TeamMemberView {
   live: boolean | null; stuck: boolean; question: boolean;
   /** Its open task first, then the tasks returned to it. */
   queue: number[]; minutes_without_progress: number; host_shared: boolean;
+  /** The owner's mandatory additions to the member's rules. */
+  iron_rules?: string[];
   /** Task 11: the pending question or permission request as hgs sends it (`members[].question`), null without one. */
   permission?: TeamMemberQuestion | null;
 }
@@ -957,6 +959,44 @@ export interface TeamTaskView {
   attempt_state: string; decided_by: string; pinned: boolean; output: string[]; waits: string;
   /** Task 11: the newest attempt's id, and whether its member got no report in. */
   attempt_id?: string; no_report?: boolean;
+  /** Task 40: held by the owner, its pipeline and the run's stages and open stage, a sub-team. */
+  held?: boolean; pipeline?: string; pipeline_run?: TeamPipelineRun | null; subteam?: boolean;
+}
+
+/** A task's pipeline run (core PipelineRunView). */
+export interface TeamPipelineRun {
+  name: string; accept: string; round: number; max_rounds: number; stages: string[];
+  open: { stage: number; kind: string; member: string; state: string } | null;
+}
+
+export interface TeamProfileLoss {
+  kind: string; task: number; seconds: number; tokens: number | null;
+}
+
+export interface TeamProfileRole {
+  key: string; kind: string; accepted: number; attempts: number; returned: number;
+  tokens_per_accepted: number | null;
+}
+
+export interface TeamProfileView {
+  team: string; elapsed_s: number | null; worked_s: number | null; tasks: number; accepted: number;
+  tokens: number | null; tokens_partial: boolean;
+  losses: TeamProfileLoss[]; roles: TeamProfileRole[];
+}
+
+export interface TeamTestPending {
+  id: string; suite: string; asked_by: string; state: string; task: number; forced: boolean;
+  started: number; seconds: number; reason: string;
+}
+
+export interface TeamTestRun {
+  id: string; suite: string; status: string; asked_by: string; task: number; at: number;
+  duration_ms: number; recorded_ms: number; runner: string; excerpt: string;
+  flags: string[]; reused_from: string; due: boolean; over_budget: boolean;
+}
+
+export interface TeamTestsView {
+  team: string; queue: TeamTestPending[]; runs: TeamTestRun[]; next: number | null;
 }
 
 export interface TeamPhaseView {
@@ -974,6 +1014,9 @@ export interface TeamView {
   attention: unknown[];
   /** Task 11: additions to a running phase that wait for the owner (`pending_additions`). */
   additions?: TeamAddition[];
+  /** Task 40: permission widenings Approve & Run confirms, and the direct sub-teams. */
+  widenings?: { member?: string; role?: string; from?: string; to?: string }[];
+  children?: { team: string; name?: string; status?: string }[];
   validation: { errors: TeamFinding[]; warnings: TeamFinding[] };
   health: { critical_path: number; parallelism: number; warnings: string[] };
   ready: number[]; cycle: number[]; draft: { revision: number; unseen: string[]; owner_edited: string[] } | null; truncated: boolean;
@@ -1017,17 +1060,69 @@ export type TeamAction =
   | { kind: "decide_tool"; offer: string; allow: boolean; reason?: string }
   | { kind: "release"; task: number }
   | { kind: "retry"; task: number }
-  | { kind: "finish" }
+  | { kind: "finish"; summary: string }
+  | { kind: "reassign"; task: number; member: string; subteam?: string | null }
+  | { kind: "take_over"; task: number }
+  | { kind: "cancel"; task: number; subteam?: string | null }
+  | { kind: "pause" }
+  | { kind: "resume" }
+  | { kind: "stop" }
+  | { kind: "archive" }
+  | { kind: "discard" }
+  | { kind: "hold"; task: number; reason: string }
+  | { kind: "skip_stage"; task: number; reason: string }
+  | { kind: "send_back"; task: number; reason: string }
+  | { kind: "move_task"; task: number; phase: number; revision?: number | null }
   | { kind: "draft_start"; folder: string; name?: string; lead: DraftMember; project?: string; project_id?: string; template?: string }
   | { kind: "draft_update"; revision: number; set: Record<string, unknown> }
   | { kind: "draft_seen"; fields: string[] }
   | { kind: "draft_create"; approve?: boolean; confirm_widening?: boolean }
   | { kind: "draft_discard"; stop_lead?: boolean; reason?: string }
-  | { kind: "settings"; settings: Record<string, unknown> }
+  | { kind: "settings"; settings: Record<string, unknown>; members_update?: unknown[] }
   | { kind: "catalog_propose"; change: Record<string, unknown> }
   | { kind: "catalog_decide"; proposal: string; decision: "keep" | "reject" | "undo" }
   | { kind: "catalog_apply" }
-  | { kind: "catalog_discard" };
+  | { kind: "catalog_discard" }
+  | { kind: "catalog_set"; version: number; catalog: Record<string, unknown> }
+  | { kind: "catalog_designer"; folder: string; goal: string; agent?: string; model?: string; effort?: string; project?: string };
+
+/** Task #44: one kind of catalog item (core catalog_edit.rs `Kind`). */
+export type CatalogKind = "role" | "template" | "rule" | "pipeline";
+/** The catalog's list of each kind. */
+export type CatalogList = "roles" | "templates" | "routing" | "pipelines";
+/** One field Qt's catalog editor shows (core `FieldSpec`); the webview translates its label and hint. */
+export interface CatalogFieldSpec {
+  name: string;
+  label: string;
+  hint: string;
+  type: "text" | "multiline" | "number" | "bool" | "choice" | "words" | "list";
+  min?: number;
+  max?: number;
+  options?: [string, string][];
+  fields?: CatalogFieldSpec[];
+}
+export type CatalogSchema = Record<CatalogList, CatalogFieldSpec[]>;
+/** The working copy as the editors show it (core `CatalogEditorView`); core checks every edit. */
+export interface CatalogEditorView {
+  version: number;
+  builtin: boolean;
+  roles: Record<string, unknown>[];
+  templates: Record<string, unknown>[];
+  routing: Record<string, unknown>[];
+  pipelines: Record<string, unknown>[];
+  planning_rules: string;
+  unsaved: number;
+  edited: Partial<Record<CatalogList, string[]>>;
+}
+export type CatalogEdit =
+  | { op: "set"; kind: CatalogKind; id: string; field: string; value: unknown }
+  | { op: "add"; kind: CatalogKind }
+  | { op: "duplicate"; kind: CatalogKind; id: string }
+  | { op: "remove"; kind: CatalogKind; id: string }
+  | { op: "move"; kind: CatalogKind; id: string; by: number }
+  | { op: "planning_rules"; text: string };
+/** What deleting an item takes with it (core `RemoveImpact`). */
+export interface CatalogRemoveImpact { name: string; templates: string[]; pipelines: string[]; emptied: string[] }
 
 /**
  * One call (core `TeamCall`): the computer ("" is this one), the team (empty

@@ -71,11 +71,32 @@ export const teamsFollow = (computer: ComputerId, follow: import("./store/teamsV
 /** One guarded owner action on a team (core action.rs); the outcome says whether it was applied, refused, unknown or must be confirmed first. The core runs `hgs team`, the webview never does. */
 export const teamAction = (call: import("./types").TeamCall) =>
   inTauri() ? invoke<import("./types").TeamOutcome>("team_action", { call }) : Promise.reject(new Error("Teams need the desktop app."));
+/**
+ * Task #44: Qt's catalog editor. Core keeps the working copy and checks every
+ * edit against the schema; the webview never parses or builds a catalog.
+ */
+const teamsOnly = <T,>(command: string, args: Record<string, unknown>) =>
+  inTauri() ? invoke<T>(command, args) : Promise.reject(new Error("Teams need the desktop app."));
+export const catalogEditorSchema = () => teamsOnly<import("./types").CatalogSchema>("catalog_editor_schema", {});
+export const catalogEditorLoad = (computer: ComputerId) => teamsOnly<import("./types").CatalogEditorView>("catalog_editor_load", { computer });
+export const catalogEditorEdit = (computer: ComputerId, edit: import("./types").CatalogEdit) => teamsOnly<import("./types").CatalogEditorView>("catalog_editor_edit", { computer, edit });
+export const catalogEditorRevert = (computer: ComputerId) => teamsOnly<import("./types").CatalogEditorView>("catalog_editor_revert", { computer });
+export const catalogEditorSave = (computer: ComputerId, requestId: string | null) => teamsOnly<import("./types").TeamOutcome>("catalog_editor_save", { computer, requestId });
+export const catalogEditorResetRules = (computer: ComputerId, requestId: string | null) => teamsOnly<import("./types").TeamOutcome>("catalog_editor_reset_rules", { computer, requestId });
+export const catalogEditorImpact = (computer: ComputerId, kind: import("./types").CatalogKind, id: string) => teamsOnly<import("./types").CatalogRemoveImpact>("catalog_editor_impact", { computer, kind, id });
+export const catalogEditorExport = (computer: ComputerId) => teamsOnly<string | null>("catalog_editor_export", { computer });
+export const catalogEditorImport = (computer: ComputerId) => teamsOnly<import("./types").CatalogEditorView | null>("catalog_editor_import", { computer });
+export const catalogRoute = (computer: ComputerId, goal: string) => teamsOnly<Record<string, unknown>>("catalog_route", { computer, goal });
 /** Task 11: reads one team once, as an answer in Waiting for you does before it sends. */
 export const teamRead = (computer: ComputerId, team: string) =>
   inTauri() ? invoke<import("./types").TeamView>("team_read", { computer, team }) : Promise.reject(new Error("Teams need the desktop app."));
 /** Reads the watched team's feed page before the oldest event shown; false when there is none to read. */
 export const teamsOlder = (computer: ComputerId) => inTauri() ? invoke<boolean>("teams_older", { computer }) : Promise.resolve(false);
+/** Task 41/32: asks the core to read the watched team's profile. */
+export const teamsProfile = (computer: ComputerId) => inTauri() ? invoke<boolean>("teams_profile", { computer }) : Promise.resolve(false);
+/** Task 41: the Tests mode's queue and one bounded result page through the core. */
+export const teamTests = (computer: ComputerId, team: string, before: number | null) =>
+  inTauri() ? invoke<import("./types").TeamTestsView>("team_tests", { computer, team, before }) : Promise.reject(new Error("Teams need the desktop app."));
 export const openTaskAttachment = (path: string) => desktop<string | null>("task_attachment_open", { path });
 
 /** `next_batch` answers with raw JSON bytes (`ipc::Response`), so large batches skip script evaluation. */

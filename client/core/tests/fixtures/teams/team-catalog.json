@@ -4,10 +4,10 @@
     "version": 3,
     "roles": [
       {"id": "lead", "name": "Lead", "agent": "claude", "model": "claude-opus", "prompt": "You lead."},
-      {"id": "tester", "name": "Tester", "agent": "kimi", "model": "kimi-k2", "prompt": "Test it."}
+      {"id": "tester", "name": "Tester", "agent": "kimi", "model": "kimi-k2", "prompt": "Test it.", "effort": "high", "account": "work", "permissions": "auto", "computer": "studio", "folder": "read_only"}
     ],
     "templates": [
-      {"id": "feature", "name": "Feature delivery", "description": "Build it", "roster": [{"role": "tester", "count": 1}], "planning": "lead", "approval": "review", "max_members": 6, "pipeline": "code"}
+      {"id": "feature", "name": "Feature delivery", "description": "Build it", "roster": [{"role": "tester", "count": 1}], "planning": "lead", "approval": "review", "max_members": 6, "pipeline": "code", "phase_approval": "auto", "lead_protocol": "Split by layer.", "tasks": [{"title": "Tests", "role": "tester", "deps": []}, {"title": "Fix", "role": "lead", "deps": [0]}]}
     ],
     "routing": [{"id": "tests", "when": "tests", "use": "feature", "approval": "review"}],
     "planning_rules": "Plan first.",

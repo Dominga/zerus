@@ -372,7 +372,8 @@ fn inbox_waiting_spans_and_profile_project_their_replies() {
         (27, None, false)
     );
     let profile = view::profile(TEAM, &fixture("profile"));
-    assert!(profile.profile["losses"].is_object() && profile.profile["summary"].is_object());
+    assert_eq!((profile.tasks, profile.accepted), (27, 8));
+    assert!(!profile.losses.is_empty() && !profile.roles.is_empty());
 }
 
 fn follow_team() -> TeamsFollow {
@@ -410,6 +411,8 @@ fn replies(read: &TeamRead) -> Value {
         TeamRead::Spans { .. } => fixture("spans"),
         TeamRead::Profile { .. } => fixture("profile"),
         TeamRead::Catalog => fixture("catalog"),
+        TeamRead::CatalogRoute { .. } => serde_json::json!({"rule": null, "template": null}),
+        TeamRead::TestQueue { .. } | TeamRead::TestResults { .. } => json!({"items":[]}),
     }
 }
 

@@ -3,18 +3,26 @@ import { tr } from "../../i18n";
 import { AgentGlyph, Icon } from "../lib/icons";
 import { agentKind, computerOffline } from "../../store/catalog";
 import { coordinatorActivity, activity } from "../../store/session";
-import { memberRow, teams } from "../../store/teams";
+import { memberRow, showCatalog, showTeam, teams } from "../../store/teams";
 import { SHARE, SIDE, dragShare, dragSide, teamLayout, type TeamLayout } from "../../store/teamLayout";
 import { selected, setDetailTab, setSelectedKey } from "../../store/ui";
+import { teamTests, teamsProfile } from "../../bridge";
+import { PlanView } from "./PlanView";
+import { TeamCatalogEditor } from "./TeamCatalogEditor";
+import { TeamSettingsDialog } from "./TeamSettingsDialog";
+import type { TeamTestsView } from "../../types";
 import { ActivityView } from "../sessions/Activity";
 import { Composer } from "../sessions/Composer";
 import { QuestionCard } from "../sessions/QuestionCard";
 import { QueuePanel } from "../sessions/QueuePanel";
+import { sendBackMessage } from "./actions";
 import { duration, memberProgress, memberStatus, progress, shownMembers, stateLabel, stateTone, teamState, type MemberLive, type MemberStatus } from "./team-model";
 import { roleStyle } from "./roles";
 import { TeamProposals } from "./ProposalCards";
 import { TeamReports } from "./TeamReports";
 import { WaitingBanner } from "./Waiting";
+import { Blockers, TaskActions, TeamBarActions, TeamBarChips } from "./TeamActions";
+import { composer } from "../../store/composer";
 import type { ComputerId, TeamMemberView, TeamView } from "../../types";
 import type { Session } from "../sessions/types";
 
@@ -54,10 +62,34 @@ function TeamWorkspace(props: { computer: ComputerId; team: TeamView; failure?: 
   const statuses = createMemo(() => new Map(props.team.members.map((member) => [member.id, memberStatus(props.team, member, live(member))])));
   const problems = createMemo(() => shownMembers(props.team).filter((member) => statuses().get(member.id)?.problem));
   const problemTasks = createMemo(() => new Set(problems().map((member) => statuses().get(member.id)!.task).filter((task) => task > 0)));
+  const [settingsOpen, setSettingsOpen] = createSignal(false);
+  const [catalogOpen, setCatalogOpen] = createSignal(false);
+  const [tests, setTests] = createSignal<TeamTestsView | null>(null);
+  const graph = () => teams.graph(props.computer, props.team.id);
+  const profile = () => teams.profile(props.computer, props.team.id);
   let body!: HTMLDivElement;
+  createEffect(() => {
+    const hide = showTeam(props.computer, props.team.id);
+    onCleanup(hide);
+  });
+  createEffect(() => {
+    if (!catalogOpen()) return;
+    const hide = showCatalog(props.computer);
+    onCleanup(hide);
+  });
+  const loadTests = async (before: number | null) => {
+    try {
+      setTests(await teamTests(props.computer, props.team.id, before));
+    } catch {
+      // The panel keeps what it showed; the follow error strip names reads.
+    }
+  };
   return (
     <>
-      <TeamBar team={props.team} state={state()} problemTasks={problemTasks()} />
+      <TeamBar computer={props.computer} team={props.team} state={state()} problemTasks={problemTasks()}
+        onPhase={(phase) => body?.querySelector<HTMLElement>(`[data-phase="${phase}"]`)?.scrollIntoView({ block: "nearest" })}
+        onSettings={() => setSettingsOpen(true)}
+        onCatalog={() => setCatalogOpen(true)} />
       <WaitingBanner />
       <TeamReports computer={props.computer} team={props.team} />
       <Show when={props.failure}><div class="team-strip danger" role="status"><Icon name="circle-alert" size={14} /><span class="ell">{props.failure}</span></div></Show>
@@ -66,6 +98,7 @@ function TeamWorkspace(props: { computer: ComputerId; team: TeamView; failure?: 
           <Icon name="triangle-alert" size={14} />
           <b>{tr("Nothing can move without you")}</b>
           <For each={problems()}>{(member) => <span class="team-strip-item">{member.role}: {statuses().get(member.id)?.text}</span>}</For>
+          <Blockers team={props.team} />
         </div>
       </Show>
       <Show when={props.team.status === "planning" && props.team.validation.errors.length > 0}>
@@ -76,7 +109,24 @@ function TeamWorkspace(props: { computer: ComputerId; team: TeamView; failure?: 
         </div>
       </Show>
       <div class="team-body" ref={body}>
-        <div class="team-canvas"><TeamPhases team={props.team} /></div>
+        <div class="team-canvas">
+          <Show when={graph()} fallback={<TeamPhases team={props.team} />}>
+            {(shown) => (
+              <PlanView
+                team={props.team}
+                graph={shown()}
+                profile={profile()}
+                tests={tests()}
+                onLoadProfile={() => { void teamsProfile(props.computer); }}
+                onLoadTests={loadTests}
+                taskActions={(id) => {
+                  const task = props.team.tasks.find((candidate) => candidate.id === id);
+                  return task ? <TaskActions computer={props.computer} team={props.team} task={task} /> : <></>;
+                }}
+              />
+            )}
+          </Show>
+        </div>
         <Divider orientation="vertical" label={tr("Side column width")} layout={teamLayout}
           value={teamLayout.sideWidth()} min={SIDE.min} max={SIDE.max}
           onDrag={(start, from, to) => teamLayout.previewSide(dragSide(start, from.x, to.x, body.clientWidth))}
@@ -86,11 +136,53 @@ function TeamWorkspace(props: { computer: ComputerId; team: TeamView; failure?: 
           <SideColumn computer={props.computer} team={props.team} statuses={statuses()} />
         </aside>
       </div>
+      <Show when={settingsOpen()}>
+        <TeamSettingsDialog team={props.team} onClose={() => setSettingsOpen(false)} />
+      </Show>
+      <Show when={catalogOpen()}>
+        <TeamCatalogEditor onOpenDesigner={() => setCatalogOpen(false)} />
+      </Show>
     </>
   );
 }
 
-function TeamBar(props: { team: TeamView; state: string; problemTasks: ReadonlySet<number> }) {
+/**
+ * Task 40: Send back's message reaches the coordinator through its composer
+ * (the Tauri client sends a session message only from a composer): the
+ * coordinator becomes the selected session, keeps the Team tab, and the
+ * message waits in its composer for the owner's Send.
+ */
+function toCoordinator(computer: ComputerId, team: TeamView, text: string) {
+  const row = memberRow(computer, team.members.find((member) => member.lead));
+  if (!row) return;
+  if (selected()?.key !== row.key) { setSelectedKey(row.key); setDetailTab("team"); }
+  let tries = 0;
+  const put = () => {
+    const view = composer.view();
+    if (selected()?.key === row.key && view && !composer.locked()) {
+      // A draft already typed stays; the message follows it.
+      const draft = composer.text();
+      const next = draft.trim() ? `${draft}\n${text}` : text;
+      composer.input(next, next.length, next.length);
+      return;
+    }
+    if (++tries < 40) setTimeout(put, 50);
+  };
+  put();
+}
+
+function TeamBar(props: {
+  computer: ComputerId;
+  team: TeamView;
+  state: string;
+  problemTasks: ReadonlySet<number>;
+  onPhase: (phase: number) => void;
+  onSettings: () => void;
+  onCatalog: () => void;
+}) {
+  const [finishOpen, setFinishOpen] = createSignal(false);
+  // U59: the owner's planning mode for the approval (none: as the lead planned).
+  const [freeMode, setFreeMode] = createSignal(false);
   const counts = createMemo(() => progress(props.team, props.problemTasks));
   const [now, setNow] = createSignal(Date.now() / 1000);
   const clock = setInterval(() => setNow(Date.now() / 1000), 60_000);
@@ -109,10 +201,21 @@ function TeamBar(props: { team: TeamView; state: string; problemTasks: ReadonlyS
         <i class="seg problem" style={{ width: share(counts().problems) }} />
       </div>
       <span class="mono team-count">{counts().accepted}/{counts().total}</span>
+      <button type="button" class="btn ghost small" onClick={props.onSettings}>{tr("Team settings")}</button>
+      <button type="button" class="btn ghost small" onClick={props.onCatalog}>{tr("Catalog")}</button>
       <Show when={props.team.created > 0}><span class="dim team-age" title={tr("Since the team was created")}>{duration(now() - props.team.created)}</span></Show>
       <span class="grow" />
+      <TeamBarChips team={props.team} onPhase={props.onPhase} onFinish={() => setFinishOpen(true)} />
       <Show when={props.state === "planning"}><span class="team-note">{tr("The plan waits for your approval")}</span></Show>
       <Show when={props.state === "done"}><span class="team-note done"><Icon name="check" size={13} />{tr("All tasks are decided")}</span></Show>
+      <Show when={props.team.status === "planning"}>
+        <label class="team-proposal-option" title={tr("One open phase that takes tasks as they come until you close it")}>
+          <input type="checkbox" checked={freeMode()} onChange={(event) => setFreeMode(event.currentTarget.checked)} />{tr("Free planning")}
+        </label>
+      </Show>
+      <TeamBarActions computer={props.computer} team={props.team} planMode={freeMode() ? "free" : ""}
+        sendToCoordinator={(text) => toCoordinator(props.computer, props.team, sendBackMessage(text))}
+        finishOpen={finishOpen} setFinishOpen={setFinishOpen} />
     </header>
   );
 }
@@ -122,7 +225,7 @@ function TeamPhases(props: { team: TeamView }) {
   return (
     <div class="team-phases">
       <For each={props.team.phases} fallback={<p class="dim team-empty">{tr("No phases yet")}</p>}>{(phase) => (
-        <div class="team-phase" classList={{ draft: phase.state === "draft", running: phase.state === "running", done: phase.state === "done" }}>
+        <div class="team-phase" data-phase={phase.n} classList={{ draft: phase.state === "draft", running: phase.state === "running", done: phase.state === "done" }}>
           <span class="team-phase-n mono">{phase.n}</span>
           <b class="ell">{phase.title || tr("Phase %1", phase.n)}</b>
           <span class="grow" />

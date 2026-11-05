@@ -711,7 +711,8 @@ export class WaitingAnswer {
   /** A held task, a step Zerus could not take, a finished team. */
   release() { return this.send({ kind: "release", task: waitingFields(this.item).task }, false); }
   retry() { return this.send({ kind: "retry", task: waitingFields(this.item).task }, false); }
-  finishTeam() { return this.send({ kind: "finish" }, false); }
+  /** Finish needs the owner's summary for the lead (hgs requires one). */
+  finishTeam(summary: string) { return summary.trim() ? this.send({ kind: "finish", summary: summary.trim() }, false) : Promise.resolve(undefined); }
 
   /** A proposal answered in its row: once hgs took it, the row leaves. */
   async decide(allow: boolean) {

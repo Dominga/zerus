@@ -398,6 +398,9 @@ impl TeamsModel {
             TeamRead::Spans { team, .. } => team_key("spans", team),
             TeamRead::Profile { team } => team_key("profile", team),
             TeamRead::Catalog => "catalog".into(),
+            TeamRead::CatalogRoute { .. } => "route".into(),
+            TeamRead::TestQueue { team } => team_key("tests-queue", team),
+            TeamRead::TestResults { team, .. } => team_key("tests", team),
         }
     }
 
@@ -513,6 +516,10 @@ impl TeamsModel {
                 TeamsUpdate::Catalog(Arc::new(view::catalog(&value))),
                 &mut out,
             ),
+            // Asked once by the editor's Try it, never polled.
+            TeamRead::CatalogRoute { .. } => {}
+            // Test pages are read on request by the Tests mode, not polled.
+            TeamRead::TestQueue { .. } | TeamRead::TestResults { .. } => {}
         }
         out
     }

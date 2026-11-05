@@ -818,7 +818,8 @@ fn launch(context: tauri::Context<tauri::Wry>, startup: Startup) {
                     &app.state::<identity::Identity>().bundle_id, replay,
                 );
                 organization.seed_runs(qt_source.clone());
-                organization.recover_qt(qt_source,app.state::<settings::Store>().0.clone());
+                organization.recover_qt(qt_source.clone(),app.state::<settings::Store>().0.clone());
+                organization.import_legacy_projects(qt_source,app.state::<settings::Store>().0.clone());
                 // Before any start of the source (the menu bar's below, or the webview's).
                 app.state::<commands::AppState>().set_organization(organization.clone());
                 let screens = screens::Screens::tauri(app.handle().clone(), pump.clone());
@@ -1612,6 +1613,7 @@ fn handler() -> impl Fn(tauri::ipc::Invoke) -> bool + Send + Sync + 'static {
         settings::skins::user_skins_open,
         settings::settings_get,
         settings::settings_qt_preferences,
+        settings::settings_legacy_projects,
         settings::settings_set,
         desk::desk_take_pending,
         window_layer::window_layer_state,

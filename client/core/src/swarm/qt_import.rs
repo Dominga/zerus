@@ -161,7 +161,8 @@ pub fn shared(snapshot: Option<&QtSnapshot>, node: &str) -> Result<Value, &'stat
 /// Qt saves its organization only once it first changes, so a store read
 /// without one never had an organization: the same first use as an absent
 /// store. A Qt backup of an organization is not that evidence. Plist sources
-/// map every entry; the INI reader is QSettings-permissive, where a damaged
+/// map every entry, but a Mac domain counts only through its current export,
+/// never the file fallback; the INI reader is QSettings-permissive, where a damaged
 /// earlier value can swallow a later `organization=` line, so the exact bytes
 /// read (the same hash) must not mention it at all. Anything else stays for
 /// review.
@@ -170,7 +171,16 @@ fn never_saved(source: &QtStore, snapshot: &QtSnapshot) -> bool {
         return false;
     }
     match source {
-        QtStore::Plist { .. } => matches!(snapshot.source, "qt-plist" | "qt-defaults"),
+        // A Mac domain is current only through cfprefsd's export; its plist
+        // file can lag an organization Qt has just saved (zerus-oagwo).
+        QtStore::Plist { domain, .. } => {
+            snapshot.source
+                == if domain.is_some() {
+                    "qt-defaults"
+                } else {
+                    "qt-plist"
+                }
+        }
         QtStore::Ini(path) => {
             let mut bytes = Vec::new();
             snapshot.source == "qt-ini"

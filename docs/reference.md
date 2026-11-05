@@ -3451,7 +3451,11 @@ and how each project's last exchange with it ended in
 bound to that exact observation: a changed store, protocol or schema retires
 the completions recorded under the old one, an outcome that arrives for an
 observation that is no longer the member's is refused, and a member's record
-goes at the membership change itself. A project is `complete` only when both
+goes at the membership change itself. Every `replica-inventory` and
+`replica-exchange` reply names the store that answered, read as it answers: a
+reply from another store than the hello showed (its replica root was replaced
+since) ends that exchange as `changed_identity`, and one that names no store in
+a form this reads still exchanges documents but is `malformed`. A project is `complete` only when both
 sides' whole inventories were exchanged: every page, nothing refused, and no
 task damaged or left out on either side (equal digests of the readable tasks
 alone are an exchanged subset, not a complete project). Otherwise it names a

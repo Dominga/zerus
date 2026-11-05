@@ -35,6 +35,11 @@ if (root / ('spoil-' + alias)).exists() and args[1:2] == [json.loads((root / ('s
     if 'value' in spoil: output[spoil['field']] = spoil['value']
     else: output.pop(spoil['field'], None)
     print(json.dumps(output)); sys.exit(0)
+if (root / ('reset-store-' + alias)).exists() and args[1:2] == ['replica-inventory']:
+    # The member's replica root is replaced after its hello: the store
+    # identity it answers with is created again.
+    (root / ('reset-store-' + alias)).unlink()
+    (root / alias / 'state' / 'replica' / 'store-id').unlink()
 if (root / ('noreplica-' + alias)).exists():
     # A member from before task replication: its hello has no replica field and
     # it knows no replica commands.
@@ -612,6 +617,9 @@ class Swarm(unittest.TestCase):
                   ('replica-exchange', 'damaged', '0'), ('replica-exchange', 'more'),
                   ('replica-exchange', 'more', 'false'), ('replica-exchange', 'updates', 'none'),
                   ('replica-inventory', 'damaged'), ('replica-inventory', 'damaged', 0.5),
+                  # zerus-cg5h.4.5: a reply that names no store that answered.
+                  ('replica-exchange', 'store'), ('replica-exchange', 'store', 'not a store'),
+                  ('replica-inventory', 'store'), ('replica-inventory', 'store', None),
                   ('replica-inventory', 'inventory', [])]
         path = self.root / 'a/swarm/replica-members.json'
         flag = self.root / 'spoil-b'
@@ -638,6 +646,41 @@ class Swarm(unittest.TestCase):
         self.task('b', 'add', '--project', 'a', text='Exchange evidence fixture, healthy again')
         self.call('a', 'sync')
         self.assertTrue(json.loads(path.read_text())['b']['projects']['a']['complete'])
+
+    def test_a_store_replaced_after_its_hello_is_a_changed_identity(self):
+        # zerus-cg5h.4.5: each reply is bound to the store the hello showed.
+        # A replica root replaced between the hello and the exchange, or an
+        # exchange answered by another store, is never complete; the next
+        # hello observes the new store and completes again.
+        self.join('a', 'b'); self.join('b', 'a')
+        for n in 'abab':
+            self.call(n, 'sync')
+        path = self.root / 'a/swarm/replica-members.json'
+        store_id = self.root / 'b/state/replica/store-id'
+        before = store_id.read_text().strip()
+        self.task('b', 'add', '--project', 'a', text='Store binding fixture')
+        flag = self.root / 'reset-store-b'
+        flag.touch()
+        self.call('a', 'sync')
+        self.assertFalse(flag.exists(), 'the fixture did not reach the inventory')
+        self.assertNotEqual(store_id.read_text().strip(), before)
+        record = json.loads(path.read_text())['b']
+        self.assertEqual(record['store'], before, record)
+        self.assertFalse(record['projects']['a']['complete'], record)
+        self.assertEqual(record['projects']['a'].get('reason'), 'changed_identity', record)
+        self.call('a', 'sync')
+        record = json.loads(path.read_text())['b']
+        self.assertEqual(record['store'], store_id.read_text().strip())
+        self.assertTrue(record['projects']['a']['complete'], record)
+        # Another store answering the exchange alone does the same.
+        self.task('b', 'add', '--project', 'a', text='Store binding fixture, exchange')
+        spoil = self.root / 'spoil-b'
+        spoil.write_text(json.dumps({'command': 'replica-exchange', 'field': 'store',
+                                     'value': str(uuid.UUID(int=2))}))
+        self.call('a', 'sync')
+        spoil.unlink()
+        record = json.loads(path.read_text())['b']['projects']['a']
+        self.assertEqual((record['complete'], record.get('reason')), (False, 'changed_identity'), record)
 
     def test_a_task_damaged_there_after_its_inventory_is_not_complete(self):
         self.damage_between_inventory_and_exchange('b')

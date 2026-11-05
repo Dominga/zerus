@@ -172,7 +172,17 @@ pub fn inventory(config: &Config, request: Request) -> Result<Value> {
     let node = admit(config, &request)?;
     let store = ProjectStore::open(&root(config), &request.project)?;
     let (inventory, damaged) = store.inventory()?;
-    Ok(json!({"node_id": node, "inventory": inventory, "damaged": damaged.len()}))
+    Ok(json!({"node_id": node, "store": answering_store(config), "inventory": inventory,
+              "damaged": damaged.len()}))
+}
+
+/// This member's replica store as it answers, read at that moment: a root
+/// replaced since its hello answers with another one (zerus-cg5h.4.5). One
+/// that cannot be read is null and named in the log.
+fn answering_store(config: &Config) -> Option<String> {
+    ProjectStore::store_id(&root(config))
+        .map_err(|error| eprintln!("hgs swarm: the replica store has no identity: {error}"))
+        .ok()
 }
 
 /// `swarm replica-exchange`: imports the requester's updates and answers with
@@ -188,8 +198,9 @@ pub fn exchange(config: &Config, request: Request) -> Result<Value> {
     let (updates, more) = store.updates_for(&ours, &theirs, PAGE)?;
     // How many of its tasks do not load now, after this page: a task
     // damaged since the inventory the requester read is counted too.
-    Ok(json!({"node_id": node, "imported": imported.changed, "refused": imported.refused,
-              "updates": encode(updates), "more": more, "damaged": damaged.len()}))
+    Ok(json!({"node_id": node, "store": answering_store(config), "imported": imported.changed,
+              "refused": imported.refused, "updates": encode(updates), "more": more,
+              "damaged": damaged.len()}))
 }
 
 /// What a member's hello says it holds, or none when that is not in a form
@@ -217,6 +228,8 @@ fn theirs(remote: &Value) -> Option<Theirs> {
 struct Shown {
     refused: bool,
     refusals_unknown: bool,
+    /// A reply did not name, in a form this reads, the store that answered.
+    store_unknown: bool,
     damaged: bool,
     damage_unknown: bool,
 }
@@ -250,7 +263,7 @@ impl Shown {
     fn outcome(&self) -> Outcome {
         if self.refused {
             Err((Incomplete::RefusedDocuments, false))
-        } else if self.refusals_unknown {
+        } else if self.refusals_unknown || self.store_unknown {
             Err((Incomplete::Malformed, false))
         } else if self.damaged {
             Err((Incomplete::DamagedTasks, true))
@@ -264,7 +277,7 @@ impl Shown {
     /// A page that changed nothing on either side: something is refused, or
     /// unknown when the member did not say what it did with the page.
     fn stalled(&self) -> Outcome {
-        if self.refusals_unknown && !self.refused {
+        if (self.refusals_unknown || self.store_unknown) && !self.refused {
             Err((Incomplete::Malformed, false))
         } else {
             Err((Incomplete::RefusedDocuments, false))
@@ -338,7 +351,7 @@ pub fn sync_peer(config: &Config, alias: &str, identity: &Value) -> Result<()> {
                 // is complete only when both sides say no task of it is damaged.
                 Shown::agreeing(&local, t, project)
             } else {
-                match exchange_pages(config, alias, project, Some(PROJECT_WAIT)) {
+                match exchange_pages(config, alias, project, observed.store.as_deref(), Some(PROJECT_WAIT)) {
                     Ok(outcome) => outcome,
                     Err((reason, error)) => {
                         failed.get_or_insert(error);
@@ -410,7 +423,7 @@ pub fn replicate(config: &Config, alias: &str, project: &str) -> Result<()> {
         record(config, alias, &observed, &[(project.to_owned(), Shown::agreeing(&local, t, project))]);
         return Ok(());
     }
-    let (outcome, result) = match exchange_pages(config, alias, project, None) {
+    let (outcome, result) = match exchange_pages(config, alias, project, observed.store.as_deref(), None) {
         Ok(outcome) => (outcome, Ok(())),
         Err((reason, error)) => (Err((reason, false)), Err(error)),
     };
@@ -426,7 +439,7 @@ pub fn replicate(config: &Config, alias: &str, project: &str) -> Result<()> {
 /// page, waiting for the project here as long as another command holds it.
 /// No hello verified this member for it, so nothing is recorded.
 pub fn exchange_project(config: &Config, alias: &str, project: &str) -> Result<()> {
-    exchange_pages(config, alias, project, None)
+    exchange_pages(config, alias, project, None, None)
         .map(|_| ())
         .map_err(|(_, error)| error)
 }
@@ -445,12 +458,30 @@ fn exchange_pages(
     config: &Config,
     alias: &str,
     project: &str,
+    observed: Option<&str>,
     wait: Option<Duration>,
 ) -> std::result::Result<Outcome, Failed> {
     let root = root(config);
     let unreachable = |error: anyhow::Error| (Incomplete::Unreachable, error);
     let malformed = |error: anyhow::Error| (Incomplete::Malformed, error.context(format!("{alias} sent an invalid replica answer")));
     let changed_identity = || (Incomplete::ChangedIdentity, anyhow::anyhow!("the computer behind {alias} changed identity"));
+    // Each reply comes from the store the hello showed (`observed`); another
+    // one means its replica root was replaced since, and one not named in a
+    // form this reads leaves the outcome unknown (zerus-cg5h.4.5).
+    let answered = |reply: &Value, shown: &mut Shown| -> std::result::Result<(), Failed> {
+        let store = reply["store"].as_str().filter(|store| zerus_replica::ids::is_uuid(store));
+        match (store, observed) {
+            (Some(store), Some(observed)) if store == observed => Ok(()),
+            (Some(_), Some(_)) => Err((
+                Incomplete::ChangedIdentity,
+                anyhow::anyhow!("the replica store behind {alias} changed since its hello"),
+            )),
+            _ => {
+                shown.store_unknown = true;
+                Ok(())
+            }
+        }
+    };
     // None: held by another command longer than `wait`.
     let open = |root: &PathBuf| -> std::result::Result<Option<ProjectStore>, Failed> {
         match wait {
@@ -484,6 +515,7 @@ fn exchange_pages(
         if reply["node_id"] != node.as_str() {
             return Err(changed_identity());
         }
+        answered(&reply, &mut shown)?;
         let theirs: Inventory = serde_json::from_value(reply["inventory"].clone()).map_err(|e| malformed(e.into()))?;
         shown.damage(reply["damaged"].as_u64());
         // The project's lock is held only between network calls.
@@ -507,6 +539,7 @@ fn exchange_pages(
         if response["node_id"] != node.as_str() {
             return Err(changed_identity());
         }
+        answered(&response, &mut shown)?;
         let updates = decode(serde_json::from_value(response["updates"].clone()).map_err(|e| malformed(e.into()))?)
             .map_err(malformed)?;
         let Some(more_theirs) = response["more"].as_bool() else {

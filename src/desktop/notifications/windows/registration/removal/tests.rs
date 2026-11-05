@@ -342,10 +342,13 @@ fn an_unsafe_or_replaced_database_or_marker_refuses() {
     }
     #[cfg(windows)]
     {
-        assert!(std::fs::rename(&copy, &database).is_err());
+        assert!(std::fs::rename(&copy, &database).is_err(), "held: refused");
         offline.admit(&f.location, &request).unwrap();
-        std::fs::remove_file(&copy).unwrap();
+        drop(offline);
+        // The protection lasts exactly as long as the guard.
+        std::fs::rename(&copy, &database).unwrap();
     }
+    #[cfg(unix)]
     drop(offline);
     // A marker changed after the proof.
     let offline = Offline::acquire(&f.location, &request).unwrap();
@@ -421,6 +424,10 @@ fn replaced_exclusion(leaf: &str) {
         assert!(std::fs::remove_file(&path).is_err(), "{leaf} is pinned");
         offline.admit(&f.location, &request).unwrap();
         offline.confirm(&f.location).unwrap();
+        drop(offline);
+        // The pin lasts exactly as long as the guard.
+        std::fs::rename(&path, &kept).unwrap();
+        std::fs::rename(&kept, &path).unwrap();
     }
 }
 
@@ -461,6 +468,9 @@ fn a_missing_lock_or_replaced_location_never_keeps_the_offline_proof() {
         assert!(std::fs::rename(&f.location.root, &aside).is_err());
         offline.admit(&f.location, &request).unwrap();
         offline.confirm(&f.location).unwrap();
+        drop(offline);
+        std::fs::rename(&f.location.root, &aside).unwrap();
+        std::fs::rename(&aside, &f.location.root).unwrap();
     }
 }
 

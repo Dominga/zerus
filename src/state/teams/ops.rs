@@ -235,6 +235,7 @@ fn parse_member_as(value: &Value, what: &str, example: &str) -> anyhow::Result<M
     );
     member.launch_id.clear();
     member.error.clear();
+    member.host_waits = 0;
     member.inbox = Inbox::default();
     if !member.parent.is_empty() {
         member.parent = member_id(&member.parent)?;
@@ -3603,6 +3604,7 @@ fn swap_one(team: &mut Team, input: &Value, id: &str, keep_session: bool, actor:
         }
         member.launch_id.clear();
         member.error.clear();
+        member.host_waits = 0;
         member.seen = None;
         member.settings_applied = false;
         member.pending = None;
@@ -4373,6 +4375,7 @@ pub(crate) fn next_team(team: &Team, goal: &str, name: &str, live: &[super::disp
         // N8: none of the session-bound state of the old team follows.
         member.launch_id.clear();
         member.error.clear();
+        member.host_waits = 0;
         member.settings_applied = false;
         member.asked.clear();
         member.pending = None;
@@ -5350,12 +5353,14 @@ pub(crate) fn apply(team: &mut Team, op: &str, input: &Value, actor: &Actor, off
                 // and the owner has the same route.
                 member.restart_pending = true;
                 member.error.clear();
+                member.host_waits = 0;
                 member.launch_id.clear();
                 events.push(Event::new("member_restart_requested", json!({"by":by,"member":id})));
                 return Ok(json!({"status":"relaunching","member":id}));
             }
             ensure!(member.session.is_none() && !member.error.is_empty(), "This member's session did not fail to start");
             member.error.clear();
+            member.host_waits = 0;
             member.launch_id.clear();
             events.push(Event::new("relaunch", json!({"by":"You","member":id})));
             Ok(json!({"status":"relaunch","member":id}))

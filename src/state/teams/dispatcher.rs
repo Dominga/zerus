@@ -3351,6 +3351,18 @@ mod set_aside_tests {
     }
 }
 
+/// Task 22: how many times a member is started again by itself when its
+/// DeepSeek host was still starting. Each start waits for the host (dsh's own
+/// bound), so a host that never answers fails once after about four of them.
+pub(crate) const HOST_WAITS: u32 = 3;
+
+/// Task 22: the start failed only because the DeepSeek host it started (or
+/// another start of it) did not answer yet. The host keeps starting on its
+/// own, so the next start finds it up.
+pub(crate) fn host_still_starting(error: &str) -> bool {
+    error.contains("DeepSeek host is still starting")
+}
+
 fn launch(team: &Team, member: &Member) -> anyhow::Result<()> {
     super::super::iron_rules::for_team(team, member)?;
     let folder = member_folder(team, member)?;
@@ -6519,9 +6531,34 @@ fn run_step(store: &mut Store, team: &Team, step: &Step, host: &str) -> anyhow::
                 Err(error) => Err(error),
             };
             if let Err(error) = launched {
+                let error = error.to_string();
+                // Task 22: a host that is still starting is waited for: the
+                // member is started again on a later tick (a new launch id;
+                // nothing was saved for this one), with no error and no inbox
+                // item, until HOST_WAITS such starts have failed.
+                let waits = found.host_waits;
+                if host_still_starting(&error) && waits < HOST_WAITS {
+                    change(store, &team.id, |team, events| {
+                        let role = team.role_of(member);
+                        if let Some(record) = team.members.iter_mut().find(|m| m.id == *member && m.session.is_none()) {
+                            record.launch_id.clear();
+                            record.host_waits = waits + 1;
+                        }
+                        events.push(Event::new(
+                            "launch_waiting",
+                            json!({"member":role,"reason":error,"wait":waits + 1,"of":HOST_WAITS}),
+                        ));
+                        Ok(())
+                    })?;
+                    return Ok(());
+                }
+                let error = if host_still_starting(&error) {
+                    format!("{error} (started {} times while the DeepSeek host was starting; it did not answer)", waits + 1)
+                } else {
+                    error
+                };
                 // U54: a failed post-swap launch keeps `launch_after_swap`, so a
                 // relaunch starts it at once; the error names its fix.
-                let error = error.to_string();
                 let error = if swapped {
                     format!("{error}; fix the folder or the old session, then hgs team relaunch starts it at once")
                 } else {
@@ -6531,6 +6568,7 @@ fn run_step(store: &mut Store, team: &Team, step: &Step, host: &str) -> anyhow::
                     if let Some(found) = team.members.iter_mut().find(|m| m.id == *member && m.session.is_none()) {
                         found.error = error.clone();
                         found.launch_after_swap = swapped;
+                        found.host_waits = 0;
                     }
                     events.push(Event::new("launch_failed", json!({"member":team.role_of(member),"error":error})));
                     Ok(())
@@ -6539,6 +6577,7 @@ fn run_step(store: &mut Store, team: &Team, step: &Step, host: &str) -> anyhow::
                 change(store, &team.id, |team, _| {
                     if let Some(found) = team.members.iter_mut().find(|m| m.id == *member && m.session.is_none()) {
                         found.launch_after_swap = false;
+                        found.host_waits = 0;
                     }
                     Ok(())
                 })?;
@@ -7683,6 +7722,10 @@ mod dispatcher_stages;
 #[cfg(test)]
 #[path = "tests/dispatcher_restart.rs"]
 mod dispatcher_restart;
+
+#[cfg(test)]
+#[path = "tests/dispatcher_host_start.rs"]
+mod dispatcher_host_start;
 
 #[cfg(test)]
 #[path = "tests/dispatcher_delivery.rs"]

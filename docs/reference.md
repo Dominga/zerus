@@ -5324,6 +5324,17 @@ inbox — says `the DeepSeek sandbox needs full control of <folder>` with the
 one-line fix `icacls "<folder>" /grant *<SID>:(OI)(CI)F`. A member never repairs
 ACLs itself: it reports the exact error to the Lead.
 
+**DeepSeek members whose host is starting.** One DeepSeek host serves every
+DeepSeek session of a user on a computer. A start launches it when none runs
+and waits 35 s for it to answer; a later start that finds a host launched
+recently and still running waits for that one instead of launching a second.
+When a member's start fails only with `DeepSeek host is still starting`, the
+dispatcher starts the member again by itself (a `launch_waiting` event, no
+error, no inbox item), up to three times. If the host still does not answer,
+the member fails once with that reason and the number of starts, and the
+Lead's inbox shows it; any other start failure is reported at once. A relaunch
+starts the count again.
+
 **Members' clones.** A clone member's folder is made by `hgs worktrees create
 --clone`: a full `git clone --local --no-hardlinks` of the team's repository (no
 hard links, because the folder's ACL grant would reach the source's files), then

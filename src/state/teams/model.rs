@@ -446,6 +446,12 @@ pub(crate) struct Member {
     /// until you relaunch it.
     #[serde(default)]
     pub error: String,
+    /// Task 22: starts that failed only because the DeepSeek host was still
+    /// starting. The dispatcher starts the member again by itself, at most
+    /// `HOST_WAITS` times, before it records the error; a start or a
+    /// relaunch clears it.
+    #[serde(default, skip_serializing_if = "is_zero_u32")]
+    pub host_waits: u32,
     /// The role's instructions from the catalog, given with every task.
     #[serde(default)]
     pub prompt: String,

@@ -81,6 +81,7 @@ pub mod task_start;
 pub mod task_view;
 pub mod tasks;
 pub mod tasks_write;
+pub mod teams;
 pub mod terminal;
 pub mod terminal_launch;
 pub mod termination_cleanup;
@@ -119,6 +120,7 @@ pub use state::{ActivityState, CatalogState};
 pub use stream::{StreamEvent, StreamHandle, Timing};
 pub use swarm::grouping::{GroupOut, GroupingOut, HeaderOut, SyncView};
 pub use tasks::{TasksState, TasksUpdate};
+pub use teams::{TeamsFollow, TeamsPoller, TeamsUpdate};
 pub use view::ViewRow;
 pub use zerus_watch_protocol::SessionRef;
 
@@ -274,6 +276,12 @@ pub enum Change {
         computer: ComputerId,
         update: OrganizationUpdate,
     },
+    /// A Teams view of the computer, keyed as [`teams::model`] says; see [`teams`].
+    Teams {
+        computer: ComputerId,
+        key: String,
+        update: TeamsUpdate,
+    },
 }
 
 impl Change {
@@ -287,7 +295,8 @@ impl Change {
             | Self::Processes { computer, .. }
             | Self::Tasks { computer, .. }
             | Self::Machine { computer, .. }
-            | Self::Organization { computer, .. } => computer,
+            | Self::Organization { computer, .. }
+            | Self::Teams { computer, .. } => computer,
         }
     }
 }

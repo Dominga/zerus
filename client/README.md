@@ -1112,6 +1112,44 @@ process in a newer view. The stop queue is cancelled by a changed session,
 conversation or host generation. These paths follow `ProcessView.cpp` and the
 core's `process_view` rules.
 
+## Teams read model
+
+The Team tab, the plan graph, Waiting and New team read the team store as Qt's
+`TeamController` does: `hgs [@host] team list|status|events|inbox|waiting|spans|profile
+--json`, each with a JSON request on standard input, 15 s here and 45 s on a
+peer, within the reads' output limit (`core/src/teams`). The core projects each
+reply into a compact view model; the webview gets those views in the per-frame
+batch and parses no `hgs` reply.
+
+| Command | Effect |
+| --- | --- |
+| `teams_follow({computer, list, waiting, team})` | Follows a computer's team list, Waiting and at most one team (`computer` empty is this computer); all false with no team stops reading it |
+| `teams_older({computer})` | Loads the watched team's feed page before the oldest event shown |
+| `teams_spans({computer, after})` | Reads the watched team's task spans after task `after` |
+| `teams_profile({computer})` | Reads the watched team's profile |
+
+Followed reads run every 3 s on one thread per computer, one read at a time; a
+view is sent only when it changed. `batch.teams` holds at most one entry per
+key, `{computer, key, kind, payload}`:
+
+| Key | Kind | Payload |
+| --- | --- | --- |
+| `list` | `list` | `{teams: [{id, name, status, lead, members, counts...}], truncated}` |
+| `waiting` | `waiting` | `{items, total, more}`, the first 100 items |
+| `team:<id>` | `team` | members, tasks, phases, open proposals (with `hash` and hgs's `summary`), preflight, health, draft state |
+| `graph:<id>` | `graph` | `{nodes (with layer, role, ready), edges (from, to, hard), layers}` |
+| `new:<id>` | `new_team` | a draft's form: name, goal, addendum, settings, members with prompts, tasks, unseen and owner-edited fields, preflight |
+| `feed:<id>` | `feed` | `{events (newest first, at most 500), more, capped}` |
+| `inbox:<id>`, `spans:<id>`, `profile:<id>` | the same | the lead's inbox, one spans page, the profile |
+
+Any key may be `failed` with `{code, message}` (the view keeps what it showed;
+a failure never replaces a pending view) or `ended` (no longer followed; drop
+it). Following another team ends the previous team's keys; a draft that was
+created or discarded ends its `new:` key. Memory is bounded: one view per key,
+500 feed events (a full newest page that skips past the held events starts the
+feed over), and caps on teams, members, tasks, proposals and items. A replay
+runs no `hgs`, so `teams_follow` refuses there.
+
 ## Composer and Send
 
 The composer keeps the text protocol in Rust and the webview in sync: edits

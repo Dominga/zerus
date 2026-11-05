@@ -2,7 +2,6 @@ import { createSignal, type JSX } from "solid-js";
 import { setPage } from "../../../store/ui";
 import { AppearanceSection } from "./Appearance";
 import { SessionsSection } from "./Sessions";
-import { TeamsSection } from "./TeamsSection";
 import { KeyboardSection } from "./Keyboard";
 import { VoiceSection, refreshVoice } from "./Voice";
 import { RecoverySection, refreshRecovery } from "./Recovery";
@@ -23,7 +22,7 @@ import { trNoop } from "../../../i18n";
 // here as ProcessesSection (./Processes.tsx).
 
 export type SectionId =
-  | "appearance" | "sessions" | "teams" | "recovery" | "processes" | "updates" | "mobile" | "files"
+  | "appearance" | "sessions" | "recovery" | "processes" | "updates" | "mobile" | "files"
   | "worktrees" | "approvals" | "voice" | "keyboard" | "analytics" | "about";
 
 export interface Section {
@@ -37,7 +36,6 @@ export interface Section {
 export const SECTIONS: readonly Section[] = [
   { id: "appearance", label: "Appearance", icon: "palette", component: AppearanceSection },
   { id: "sessions", label: "Sessions", icon: "rows-3", component: SessionsSection },
-  { id: "teams", label: "Teams", icon: "users", component: TeamsSection },
   { id: "recovery", label: trNoop("Automatic recovery"), icon: "rotate-ccw", component: RecoverySection, refresh: refreshRecovery },
   { id: "processes", label: "Processes", icon: "activity", component: ProcessesSection },
   { id: "updates", label: "Updates", icon: "download", component: UpdatesSection, refresh: refreshUpdates },

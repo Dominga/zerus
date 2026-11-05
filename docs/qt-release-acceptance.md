@@ -886,6 +886,39 @@ native controls from [#1363](https://github.com/ufna/zerus/pull/1363) remain
 separate evidence. A future trial requires its own coordinator-designated
 candidate/window and result correlation. Platform checkboxes remain unchanged.
 
+### Recorded Mac paired caller and kept-folder trial — source `7ebe7307`
+
+On 2026-11-05, macbundle-u reported an owner-present trial of the maintained,
+genuine signed pair `7ebe7307603b6bdc6fe3f73059306e95028732e6`. The runtime
+observations and evidence hashes below are producer-attributed, not an independent
+rerun by migrate-u. **The genuine caller and original Terminate completed, but
+the full Terminate-and-Removed result remains BLOCKED.** No platform checkbox or
+Service-default gate is satisfied by this scoped result.
+
+| Subcheck | Result | Actual evidence and limit |
+|---|---|---|
+| Genuine installed caller | PASS, producer-reported scope | The Service consumer observed every original paired helper before stdin and bound the original frontend-request Child. Exactly one native-confirmed disposable target produced one immutable retained Intent, matched to its original configuration, service epoch, run, conversation, ownership nonce and capture. No path, SSH or proof fallback was used. |
+| Original Terminate and recovery identity | COMPLETED | Maintained same-original receipt lookup with expected-machine returned completed and the exact archive. Direct native absence checks confirmed the selected original agent and supervisor were gone. The branch, archive identity and restoration source were preserved. This is not an exported LaunchServices GUI/helper exit-code receipt. |
+| Folder cleanup | KEPT: 0 removed, 1 kept, 0 unknown | Native membership inspection of one protected process returned EPERM, despite a stable short/unique process identity. Full process information, cwd/root, FD listing and standard-FD vnode probes were unavailable. The folder remained Git-registered and untouched. The unreadable process was not proven to use the folder; the trial applied no manual acceptance or force and sent it no signal. This is a definite keep, not an uncertain deletion. |
+| Queues, ordinary restore and drafts | PASS, producer-reported scope | The reported operation/resource queues were idle. The consumer quit normally, and the same app returned through ordinary no-environment launch to current Native ownership revision 44, with the same original service and no headless host. All 341 meaningful drafts were unchanged. Queue-idle status is not a separate physical helper exit-code claim. |
+| Full caller/Removed qualification | BLOCKED | No folder was removed. `.66.3.40.4` stays in progress and `.66.3.40.4.1` remains blocked; #1340 still needs its actual installed-pair qualification. The completed caller/Terminate subchecks do not close that dependency. |
+
+The later owner permission-denial decision, mirrored by
+[#1499](https://github.com/ufna/zerus/pull/1499), applies only prospectively to
+explicit Remove through the reviewed source path and its existing protections.
+It does not upgrade or replay this historical KEPT outcome. Fixes-u owns that
+runtime/G1 slice; a future qualification uses a fresh original fixture after
+reviewed source and coordinator booking.
+
+Macbundle-u retains the bounded evidence privately. Its supplied SHA-256 values
+are recorded here for correlation only, without SDK metadata, session bodies,
+private input, configuration values or process identifiers:
+
+- Original termination evidence: `823659678d6e8fa8c2c18b3c6fd60183e33bbc1fff415785d61cad0cf5fa60e2`.
+- Kept-folder evidence: `86f80a1560936dcdb2faaa1b16009848115dddb2473216a39fa6ec86baad5df2`.
+- Native membership evidence: `4b79af5e4ad15f16dff5fe6902dab17ba215a8e935dc5770887a3f00528400a1`.
+- Ordinary restore evidence: `e3639400cf8f770684d353da88ded1c0a9e98e8fd5720800739483d2c2ddebae`.
+
 ## Installed client cutover on Linux and macOS
 
 **Historical preparation baseline:** the source limitations in this section

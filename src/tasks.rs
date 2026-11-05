@@ -135,7 +135,12 @@ fn flag(args: &[String], name: &str) -> bool {
 
 /// The project's catalog ID and current name, by ID or name.
 fn project(config: &Config, wanted: &str) -> Result<(String, String)> {
-    let projects = crate::swarm::projects(config).map_err(fail)?;
+    project_in(&crate::swarm::projects(config).map_err(fail)?, wanted)
+}
+
+/// The project `wanted` (an ID, or a name only one project has) names among
+/// `projects`.
+fn project_in(projects: &[(String, String)], wanted: &str) -> Result<(String, String)> {
     if let Some(found) = projects.iter().find(|(id, _)| id == wanted) {
         return Ok(found.clone());
     }

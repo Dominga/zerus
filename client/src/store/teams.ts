@@ -5,6 +5,7 @@ import { page, selected } from "./ui";
 import { NOTHING, createTeams, mergeFollows, sessionIs, type TeamsNeed } from "./teamsView";
 import type { ComputerId, TeamMemberView, TeamWaitingItem, TeamWaitingView } from "../types";
 import type { Session } from "../ui/sessions/types";
+import { waitingNotices } from "./waitingNotices";
 
 // The window's Teams views (store/teamsView.ts) and what it follows: the team
 // list of the selected session's computer, to find its team, and that team.
@@ -52,7 +53,10 @@ export const showTeam = (computer: ComputerId, team: string): (() => void) => sh
 
 /** Task 11: items answered here leave at once, before the next read drops them. */
 const [answeredIds, setAnsweredIds] = createSignal<ReadonlySet<string>>(new Set());
-export function answeredWaiting(item: Pick<TeamWaitingItem, "id">) { setAnsweredIds((ids) => new Set([...ids, item.id])); }
+export function answeredWaiting(item: Pick<TeamWaitingItem, "id">) {
+  waitingNotices().withdraw(item.id);
+  setAnsweredIds((ids) => new Set([...ids, item.id]));
+}
 
 /** What waits for the owner on this computer, without what was answered here. */
 export const waiting = createRoot(() => createMemo((): TeamWaitingView | undefined => {

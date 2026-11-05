@@ -13,6 +13,22 @@ required before its first production probe cannot depend on that helper. This
 proposal introduces no bootstrap exception. A descriptor, digest, input manifest,
 passive G1 observation or decoded child record cannot resolve the gap by itself.
 
+## Current implementation and remaining scope
+
+The in-tree `client/core/src/quit_origin.rs` now retains an opaque, lossless
+first-entry arguments/environment snapshot before the known loader writes in
+both maintained mains. Its retention bounds are 1024 environment entries, 256
+arguments, 1 MiB total and 64 KiB per value. It still returns refusal or native
+origin unavailable: it supplies no anchor constructor, file acquisition,
+configuration derivation, loaded-image proof or initial durable-Quit admission.
+The proposed acquisition limits below describe a future qualified boundary;
+they are not claims about that existing diagnostic snapshot's implementation.
+
+The sealed Linux helper and the paired Mac helper checks used by other native
+operations likewise do not authorize a first durable-Quit anchor probe. This
+proposal remains live for that separate initial-ordering gap. It changes no
+runtime behavior and does not enable the production I/O or fixture backend.
+
 ## Proposed native boundaries
 
 The future implementation would keep these private, separate types:

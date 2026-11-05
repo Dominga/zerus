@@ -117,3 +117,44 @@ fn the_message_digest_binds_text_and_every_attachment_in_order() {
         )
     );
 }
+
+/// zerus-5wmh.66.4.8: a version 2 compact-to-send reserves its send with its
+/// compaction; version 2 is exactly that, with a distinct canonical send ID.
+#[test]
+fn a_compact_to_send_reserves_its_send_with_its_compaction() {
+    for kind in [Kind::Send, Kind::Answer, Kind::ResumeToSend] {
+        assert!(Checkpoint::reserve_compact_to_send(intent(kind)).is_none());
+    }
+    let paired = Checkpoint::reserve_compact_to_send(intent(Kind::CompactToSend)).unwrap();
+    assert_eq!(paired.version, COMPACT_TO_SEND_VERSION);
+    assert_eq!(paired.receipts, "compact_receipts");
+    let send = paired.send_request_id.clone().unwrap();
+    assert!(canonical_uuid(&send) && send != paired.request_id);
+    assert!(paired.valid());
+    // Round trip; a version 1 record never carries the key.
+    let text = serde_json::to_string(&paired).unwrap();
+    assert_eq!(serde_json::from_str::<Checkpoint>(&text).unwrap(), paired);
+    let single = Checkpoint::reserve(intent(Kind::CompactToSend));
+    assert!(!serde_json::to_string(&single)
+        .unwrap()
+        .contains("send_request_id"));
+    // Every inconsistency is invalid.
+    let invalid = |change: &dyn Fn(&mut Checkpoint)| {
+        let mut copy = paired.clone();
+        change(&mut copy);
+        !copy.valid()
+    };
+    assert!(invalid(&|c| c.send_request_id = None));
+    assert!(invalid(&|c| c.send_request_id = Some(c.request_id.clone())));
+    assert!(invalid(&|c| c.send_request_id = Some("not-a-uuid".into())));
+    assert!(invalid(&|c| c.send_request_id = Some(send.to_uppercase())));
+    assert!(invalid(&|c| c.version = VERSION));
+    assert!(invalid(&|c| c.version = 3));
+    assert!(invalid(&|c| {
+        c.kind = Kind::Send;
+        c.receipts = Kind::Send.receipts().into();
+    }));
+    let mut single_with_send = single.clone();
+    single_with_send.send_request_id = Some(send);
+    assert!(!single_with_send.valid());
+}

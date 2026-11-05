@@ -345,6 +345,7 @@ impl Validated {
                     | Request::TaskMessageInputRelease { .. }
                     | Request::DeferredSend { .. }
                     | Request::DeferredAnswer { .. }
+                    | Request::CompactToSend { .. }
                     | Request::TaskStartReconcile { .. }
                     | Request::TerminationOutcome { .. }
             ),
@@ -1063,6 +1064,14 @@ fn validate(
             "deferred answer does not match the native service frontend"
         );
     }
+    if let Request::CompactToSend { intent } = &envelope.request {
+        ensure!(
+            reply.request.ownership_mode
+                == Some(zerus_client_core::desktop::ownership::Mode::Service)
+                && intent.scope.configuration == configuration,
+            "compact-to-send does not match the native service frontend"
+        );
+    }
     if let Request::TaskStartReconcile { intent } = &envelope.request {
         ensure!(
             reply.request.ownership_mode
@@ -1147,6 +1156,7 @@ enum OrderedOperation {
     TaskMessageInputRelease,
     DeferredSend,
     DeferredAnswer,
+    CompactToSend,
     TaskStartReconcile,
     ActivationWait,
     AutomaticApprovals,
@@ -1170,6 +1180,7 @@ impl From<&Request> for OrderedOperation {
             Request::TaskMessageInputRelease { .. } => Self::TaskMessageInputRelease,
             Request::DeferredSend { .. } => Self::DeferredSend,
             Request::DeferredAnswer { .. } => Self::DeferredAnswer,
+            Request::CompactToSend { .. } => Self::CompactToSend,
             Request::TaskStartReconcile { .. } => Self::TaskStartReconcile,
             Request::ActivationWait { .. } => Self::ActivationWait,
             Request::AutomaticApprovals { .. } => Self::AutomaticApprovals,
@@ -1885,6 +1896,85 @@ mod tests {
             .into_request()
             .is_err());
         if let Request::DeferredAnswer { intent } = &mut envelope.request {
+            intent.scope.configuration = "b".repeat(64);
+        }
+        reply.request.fingerprint = envelope.request.fingerprint();
+        assert!(validate(&envelope, &caller, &frontend, &reply, &"a".repeat(64)).is_err());
+    }
+
+    /// A valid compact-to-send, built as the client builds it.
+    fn compact_to_send_intent(
+        configuration: String,
+        epoch: String,
+    ) -> zerus_client_core::desktop::compact_to_send::Intent {
+        use zerus_client_core::{
+            desktop::compact_to_send::{Intent, Scope},
+            operation_recovery::deferred_input as checkpoint,
+        };
+        let reserved = checkpoint::Checkpoint::reserve_compact_to_send(checkpoint::Intent {
+            kind: checkpoint::Kind::CompactToSend,
+            draft_revision: 1,
+            message_sha256: checkpoint::message_sha256("after compaction", std::iter::empty()),
+            run_id: "run-1".into(),
+            conversation_id: "conversation-1".into(),
+            question: None,
+            start: None,
+            retry_of: None,
+            consent: true,
+        })
+        .unwrap();
+        let compaction = serde_json::json!({"request_id": reserved.request_id,
+            "expected_run_id": "run-1", "expected_conversation_id": "conversation-1"});
+        let original = serde_json::json!({"request_id": reserved.send_request_id,
+            "text": "after compaction", "attachments": [], "expected_run_id": "run-1",
+            "expected_conversation_id": "conversation-1", "expected_compaction_id": reserved.request_id});
+        Intent {
+            scope: Scope {
+                configuration,
+                service_epoch: epoch,
+            },
+            session: "claude/private-compact".into(),
+            request_id: reserved.request_id.clone(),
+            send_request_id: reserved.send_request_id.clone().unwrap(),
+            checkpoint: serde_json::to_string(&reserved).unwrap(),
+            compaction: compaction.to_string(),
+            original: original.to_string(),
+        }
+    }
+
+    #[test]
+    fn compact_to_send_has_its_own_lane_and_never_passes_the_generic_boundary() {
+        use zerus_client_core::desktop::ownership::Mode;
+        let (mut envelope, caller, frontend, mut reply) = fixture();
+        let intent = compact_to_send_intent("a".repeat(64), id(91));
+        envelope.request = Request::CompactToSend {
+            intent: Box::new(intent.clone()),
+        };
+        assert_eq!(
+            OrderedOperation::from(&envelope.request),
+            OrderedOperation::CompactToSend
+        );
+        for other in [
+            OrderedOperation::DeferredSend,
+            OrderedOperation::DeferredAnswer,
+            OrderedOperation::TaskMessage,
+            OrderedOperation::CreationLaunch,
+        ] {
+            assert_ne!(OrderedOperation::CompactToSend, other);
+        }
+        assert_eq!(envelope.request.id(), intent.request_id);
+        reply.request.request_id = intent.request_id.clone();
+        reply.request.fingerprint = envelope.request.fingerprint();
+        assert!(validate(&envelope, &caller, &frontend, &reply, &"a".repeat(64)).is_err());
+        reply.request.ownership_mode = Some(Mode::Native);
+        assert!(validate(&envelope, &caller, &frontend, &reply, &"a".repeat(64)).is_err());
+        reply.request.ownership_mode = Some(Mode::Service);
+        validate(&envelope, &caller, &frontend, &reply, &"a".repeat(64)).unwrap();
+        // Only a future typed actor accessor may consume it.
+        assert!(Validated::fixture(&serde_json::json!(envelope.request))
+            .into_request()
+            .is_err());
+        if let Request::CompactToSend { intent } = &mut envelope.request {
             intent.scope.configuration = "b".repeat(64);
         }
         reply.request.fingerprint = envelope.request.fingerprint();

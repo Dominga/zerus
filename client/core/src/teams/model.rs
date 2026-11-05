@@ -257,6 +257,16 @@ impl TeamsModel {
         self.queue(TeamRead::Profile { team })
     }
 
+    /// Reads every followed view again at once (after an action): each slot
+    /// not in flight is due now.
+    pub fn refresh(&mut self, now: Instant) {
+        for due in self.due.values_mut() {
+            if *due <= now + POLL {
+                *due = now;
+            }
+        }
+    }
+
     /// The next read to run now, if any: an asked-for read first, then the
     /// followed read due longest. Its slot waits until its reply is applied.
     pub fn next(&mut self, now: Instant) -> Option<TeamRead> {

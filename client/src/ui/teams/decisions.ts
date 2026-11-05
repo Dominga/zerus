@@ -1,5 +1,5 @@
 import { tr } from "../../i18n";
-import type { ComputerId, TeamAction, TeamCall, TeamConfirmation, TeamMemberQuestion, TeamMemberView, TeamOutcome, TeamProposalView, TeamView, TeamWaitingItem } from "../../types";
+import type { ComputerId, TeamAction, TeamCall, TeamChoice, TeamConfirmation, TeamMemberQuestion, TeamMemberView, TeamOutcome, TeamProposalView, TeamView, TeamWaitingItem } from "../../types";
 
 // The owner's decisions on a team (task 11), ported from Qt's
 // TeamProposalCard.cpp, TeamWaitingAnswer.cpp, TeamWaitingPage.cpp and
@@ -21,6 +21,8 @@ export interface DecisionPort {
   send(call: TeamCall): Promise<TeamOutcome>;
   /** Asks the owner; true only for the confirming button (Cancel is focused). */
   confirm(confirmation: TeamConfirmation): Promise<boolean>;
+  /** Task 52: asks the owner to choose one answer; undefined is Cancel (Cancel is focused). */
+  choose?(choice: TeamChoice): Promise<string | undefined>;
   /** Reads one team once (bridge.teamRead). */
   read(computer: ComputerId, team: string): Promise<TeamView>;
 }

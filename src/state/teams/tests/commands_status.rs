@@ -939,6 +939,10 @@ fn a_parent_task_shows_its_subteam_and_the_team_lists_its_children() {
     assert_eq!(view["children"], json!([{"team":"child","name":"Child","status":"running","done":1,"total":2}]));
     // The parent's plan health counts only its own tasks.
     assert_eq!(view["health"]["tasks"], 1);
+    // Task 52: the list names each team's parent task, so a client walks the
+    // tree from the list; a team with no parent says null.
+    assert_eq!(summary(&child, true)["parent"], json!({"team":parent.id,"task":1}));
+    assert_eq!(summary(&parent, true)["parent"], json!(null));
 }
 
 #[test]

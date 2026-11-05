@@ -3,7 +3,7 @@ import {
   ProposalCards, WaitingAnswer, WaitingNotices, acceptanceSummary, act, noticeToken, proposalCards, proposalKindLabel, toolOffer,
   waitingActionLabel, waitingAge, waitingCount, waitingKindLabel, approves, opensCard, type DecisionPort, type QuestionChoice,
 } from "./decisions";
-import { confirmButtons, createConfirmer } from "../../store/teamConfirm";
+import { choiceButtons, confirmButtons, createConfirmer } from "../../store/teamConfirm";
 import type { TeamCall, TeamConfirmation, TeamMemberView, TeamProposalView, TeamTaskView, TeamView, TeamWaitingItem } from "../../types";
 
 // Every owner decision path of Qt's tray/tests/test_teamsui_waiting.cpp, on
@@ -548,6 +548,30 @@ describe("confirmations", () => {
     const third = confirmer.ask(confirmation);
     confirmer.choose("confirm");
     expect(await third).toBe(true);
+  });
+
+  it("Task 52: a choice offers its answers with Cancel last and focused; Enter and Escape cancel", async () => {
+    const choice = { name: "teamSubteamChoice", title: "Cancel task #4?", text: "Stop it too?", choices: [{ id: "stop", text: "Stop sub-team", danger: true }, { id: "keep", text: "Keep it running" }] };
+    expect(choiceButtons(choice)).toEqual([
+      { id: "stop", text: "Stop sub-team", danger: true, initial: false },
+      { id: "keep", text: "Keep it running", danger: false, initial: false },
+      { id: "cancel", text: "Cancel", danger: false, initial: true },
+    ]);
+    const confirmer = createConfirmer();
+    const first = confirmer.askChoice(choice);
+    expect(confirmer.asking()!.confirmation.title).toBe("Cancel task #4?");
+    confirmer.key("Enter");
+    expect(await first).toBeUndefined();
+    const second = confirmer.askChoice(choice);
+    confirmer.key("Escape");
+    expect(await second).toBeUndefined();
+    const third = confirmer.askChoice(choice);
+    confirmer.choose("keep");
+    expect(await third).toBe("keep");
+    // An answer the question did not offer is Cancel.
+    const fourth = confirmer.askChoice(choice);
+    confirmer.choose("confirm");
+    expect(await fourth).toBeUndefined();
   });
 
   it("an unknown outcome keeps its request id; the next answer is the same request", async () => {

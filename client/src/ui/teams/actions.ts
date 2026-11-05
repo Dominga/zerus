@@ -1,6 +1,6 @@
 import { tr } from "../../i18n";
 import { act, hgsWords, type DecisionPort } from "./decisions";
-import type { ComputerId, TeamAction, TeamConfirmation, TeamOutcome, TeamSummary } from "../../types";
+import type { ComputerId, TeamAction, TeamChoice, TeamConfirmation, TeamOutcome, TeamSummary } from "../../types";
 
 // Task 40: the team bar's actions and the task card's actions, as Qt's
 // TeamWorkspace (headerActionsContent, the bar chips), TeamPanel (approvePlan,
@@ -21,7 +21,7 @@ export interface ActTeam {
 
 export interface ActTask {
   id: number; title: string; status: string; assignee: string; phase: number; deps: { task: number; hard: boolean }[];
-  attempts: number; held?: boolean; pipeline?: string; subteam?: boolean;
+  attempts: number; held?: boolean; pipeline?: string; subteam?: boolean; subteam_team?: string;
   /** What it waits for, as hgs words it. */
   waits?: string;
   pipeline_run?: { name: string; accept: string; stages: string[]; open: { stage: number; kind: string; member: string; state: string } | null } | null;
@@ -116,12 +116,49 @@ export function barActions(team: ActTeam, planMode: string): BarAction[] {
   return out;
 }
 
-/** G1: the sub-teams a tree action reaches and their member sessions (direct sub-teams, as the list shows them). */
-export function subtreeImpact(team: ActTeam, list: readonly Pick<TeamSummary, "id" | "members">[]): { teams: number; sessions: number } {
-  const children = team.children ?? [];
-  let sessions = 0;
-  for (const child of children) sessions += list.find((found) => found.id === child.team)?.members.filter((member) => member.session).length ?? 0;
-  return { teams: children.length, sessions };
+/**
+ * G1: the sub-teams a tree action reaches and their member sessions, the team
+ * itself not counted (Qt subtreeImpact). Task 52: the whole tree: a team's
+ * children come from its own record and from every listed team whose parent
+ * it is, level by level; each sub-team is counted once.
+ */
+export function subtreeImpact(team: ActTeam, list: readonly (Pick<TeamSummary, "id" | "members"> & { parent?: string })[]): { teams: number; sessions: number } {
+  const seen = new Set([team.id]);
+  let teams = 0, sessions = 0;
+  const walk = (id: string, children: readonly { team: string }[]) => {
+    const ids = [...children.map((child) => child.team), ...list.filter((found) => found.parent === id).map((found) => found.id)];
+    for (const child of ids) {
+      if (!child || seen.has(child)) continue;
+      seen.add(child);
+      teams += 1;
+      const found = list.find((candidate) => candidate.id === child);
+      if (!found) continue;
+      sessions += found.members.filter((member) => member.session).length;
+      walk(found.id, []);
+    }
+  };
+  walk(team.id, team.children ?? []);
+  return { teams, sessions };
+}
+
+/**
+ * G1: Cancel or Reassign of a task with a sub-team asks what happens to it
+ * (Qt subteamChoice): stop it too, or keep it running. Undefined: the task
+ * names no sub-team, so nothing is asked.
+ */
+export function subteamQuestion(task: ActTask, verb: string): TeamChoice | undefined {
+  if (!task.subteam || !task.subteam_team) return undefined;
+  return {
+    name: "teamSubteamChoice",
+    title: tr("%1 task #%2?", verb, task.id),
+    text: tr("Task #%1 has the sub-team %2. Stop that sub-team too, or keep it running?", task.id, task.subteam_team),
+    choices: [{ id: "stop", text: tr("Stop sub-team"), danger: true }, { id: "keep", text: tr("Keep it running") }],
+  };
+}
+
+/** Cancel's question, in the core's (and Qt's) words; asked here when a sub-team choice follows it. */
+export function cancelConfirmation(): TeamConfirmation {
+  return { name: "teamCancelTaskConfirm", title: tr("Cancel task?"), text: tr("Cancel this task? Tasks that depend on it hard never become ready."), action: tr("Cancel task") };
 }
 
 /** B5/N17/U59: Approve & Run's question (Qt planApproval), and what it sends. */
@@ -342,7 +379,7 @@ export class TeamActions {
   constructor(private port: DecisionPort, private where: () => { computer: ComputerId; team: ActTeam },
     private changed: () => void = () => {}) {}
 
-  private async run(key: string, action: TeamAction, ask?: TeamConfirmation): Promise<TeamOutcome | "cancelled" | undefined> {
+  private async run(key: string, action: TeamAction, ask?: TeamConfirmation, asked = false): Promise<TeamOutcome | "cancelled" | undefined> {
     if (this.busy) return undefined;
     if (ask && !await this.port.confirm(ask)) return "cancelled";
     const { computer, team } = this.where();
@@ -350,7 +387,7 @@ export class TeamActions {
     this.notice = "";
     this.changed();
     const call = { computer, team: team.id, team_name: team.name, action };
-    const outcome = ask ? await this.confirmed(call, this.uncertain.get(key)) : await act(this.port, call, this.uncertain.get(key));
+    const outcome = ask || asked ? await this.confirmed(call, this.uncertain.get(key)) : await act(this.port, call, this.uncertain.get(key));
     this.busy = false;
     if (outcome !== "cancelled") {
       if (outcome.outcome === "uncertain") { this.uncertain.set(key, outcome.request_id); this.notice = tr("It may have been sent: %1", hgsWords(outcome.detail)); }
@@ -393,9 +430,30 @@ export class TeamActions {
   // The task card.
   accept(task: ActTask) { return this.run(`accept:${task.id}`, { kind: "accept", task: task.id }); }
   release(task: ActTask) { return this.run(`release:${task.id}`, { kind: "release", task: task.id }); }
-  reassign(task: ActTask, member: string) { return this.run(`reassign:${task.id}`, { kind: "reassign", task: task.id, member }); }
+  /** Task 52: a delegated task asks what happens to its sub-team (Qt subteamChoice) and sends the answer. */
+  reassign(task: ActTask, member: string) {
+    if (!task.subteam) return this.run(`reassign:${task.id}`, { kind: "reassign", task: task.id, member });
+    return this.delegated(`reassign:${task.id}`, task, tr("Reassign"), (subteam) => ({ kind: "reassign", task: task.id, member, subteam }));
+  }
   takeOver(task: ActTask) { return this.run(`take-over:${task.id}`, { kind: "take_over", task: task.id }); }
-  cancel(task: ActTask) { return this.run(`cancel:${task.id}`, { kind: "cancel", task: task.id }); }
+  /** Task 52: Cancel asks first; a delegated task then asks about its sub-team, as Qt does. */
+  cancel(task: ActTask) {
+    if (!task.subteam) return this.run(`cancel:${task.id}`, { kind: "cancel", task: task.id });
+    return this.delegated(`cancel:${task.id}`, task, tr("Cancel"), (subteam) => ({ kind: "cancel", task: task.id, subteam }), cancelConfirmation());
+  }
+  /** A delegated task's action: its confirmation, then the sub-team choice ("keep" without a named sub-team, as Qt). */
+  private async delegated(key: string, task: ActTask, verb: string, action: (subteam: string) => TeamAction, ask?: TeamConfirmation) {
+    if (this.busy) return undefined;
+    if (ask && !await this.port.confirm(ask)) return "cancelled" as const;
+    const question = subteamQuestion(task, verb);
+    let choice: string | undefined = "keep";
+    if (question) {
+      if (!this.port.choose) { this.notice = tr("This window cannot ask about the sub-team; nothing was sent."); this.changed(); return "cancelled" as const; }
+      choice = await this.port.choose(question);
+    }
+    if (!choice) return "cancelled" as const;
+    return this.run(key, action(choice), undefined, true);
+  }
   retry(task: ActTask) { return this.run(`retry:${task.id}`, { kind: "retry", task: task.id }, retryConfirmation(task)); }
   move(task: ActTask, phase: number) { return this.run(`move:${task.id}`, { kind: "move_task", task: task.id, phase, revision: this.where().team.revision }); }
   /** An inline form: nothing is sent without a reason. */

@@ -3,7 +3,8 @@ import { Icon } from "../lib/icons";
 import { teamConfirm, type Asking } from "../../store/teamConfirm";
 
 // The owner's confirmation of a team action (store/teamConfirm.ts): the
-// action's own button and Cancel, Cancel focused; Escape and closing cancel.
+// action's own button (or a choice's answers) and Cancel, Cancel focused;
+// Escape and closing cancel.
 
 function Dialog(props: { asking: Asking }) {
   let dialog!: HTMLDialogElement;
@@ -13,7 +14,7 @@ function Dialog(props: { asking: Asking }) {
     queueMicrotask(() => dialog.querySelector<HTMLElement>("[data-initial]")?.focus());
   });
   onCleanup(() => { if (dialog.open) dialog.close(); if (origin?.isConnected) origin.focus(); });
-  const focused = () => (document.activeElement instanceof HTMLElement ? document.activeElement.dataset.choice : undefined) as "cancel" | "confirm" | undefined;
+  const focused = () => (document.activeElement instanceof HTMLElement ? document.activeElement.dataset.choice : undefined);
   return (
     <dialog ref={dialog} class="dlg team-confirm" data-name={props.asking.confirmation.name} aria-labelledby="team-confirm-title" aria-describedby="team-confirm-text"
       onCancel={(event) => { event.preventDefault(); teamConfirm.choose("cancel"); }}

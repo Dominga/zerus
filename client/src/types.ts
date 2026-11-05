@@ -924,6 +924,8 @@ export interface TeamSummary {
   id: string; name: string; status: string; project: string; folder: string; plan_mode: string; lead: string;
   members: TeamListedMember[]; tasks: number; accepted: number; submitted: number; in_review: number; in_test: number;
   attention: number; open_proposals: number; waiting_for_lead: boolean; pending_phase: number | null; updated: number; revision: number;
+  /** Task 52: the team whose task this sub-team came from ("" for none); the tree is walked by it. */
+  parent?: string;
 }
 
 export interface TeamList { teams: TeamSummary[]; truncated: boolean }
@@ -961,6 +963,8 @@ export interface TeamTaskView {
   attempt_id?: string; no_report?: boolean;
   /** Task 40: held by the owner, its pipeline and the run's stages and open stage, a sub-team. */
   held?: boolean; pipeline?: string; pipeline_run?: TeamPipelineRun | null; subteam?: boolean;
+  /** Task 52: the delegated sub-team's id, named by Cancel's and Reassign's question. */
+  subteam_team?: string;
 }
 
 /** A task's pipeline run (core PipelineRunView). */
@@ -1041,6 +1045,8 @@ export interface TeamWaitingView { items: TeamWaitingItem[]; total: number; more
 
 /** The owner's confirmation of a team action, worded by the core. */
 export interface TeamConfirmation { name: string; title: string; text: string; action: string }
+/** Task 52: a question with several answers (Qt's subteamChoice); Cancel is always added last and focused. */
+export interface TeamChoice { name: string; title: string; text: string; choices: { id: string; text: string; danger?: boolean }[] }
 
 /**
  * A team action (client/core/src/teams/action.rs `TeamAction`), by its kind:

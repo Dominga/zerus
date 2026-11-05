@@ -1156,6 +1156,13 @@ void TestTeamsUiMembers::hierarchyInTeamViewsAndMemberCards()
     child["members"] = childMembers;
     const auto parsedChild = Teams::parse(child);
     QCOMPARE(TeamUi::subtreeImpact(parsed, {parsed, parsedChild}), qMakePair(1, 3));
+    // Task 52: a listed team names only its parent; the walk reaches the
+    // grandchild through it, and the whole tree is counted.
+    auto grandchild = child;
+    grandchild["id"] = "grandchild-team";
+    grandchild["parent"] = QJsonObject{{"team", "child-team"}, {"task", 1}};
+    const auto parsedGrandchild = Teams::parse(grandchild);
+    QCOMPARE(TeamUi::subtreeImpact(parsed, {parsed, parsedChild, parsedGrandchild}), qMakePair(2, 6));
     QTimer::singleShot(50, [] {
         for (auto *widget : QApplication::topLevelWidgets())
             if (auto *box = qobject_cast<QMessageBox *>(widget))

@@ -1096,6 +1096,10 @@ fn summary(team: &Team, include_cancelled: bool) -> Value {
         // U57: the lead's open proposals (at most 50), so the lead's session
         // window shows their cards from the polled list.
         "proposals":open_proposals(team),
+        // Task 52: the parent task of a sub-team, so a client walks the whole
+        // team tree from the list (a tree action's impact); null for a team
+        // with no parent.
+        "parent":team.parent.as_ref().map(|parent| json!({"team":parent.team,"task":parent.task})),
     })
 }
 

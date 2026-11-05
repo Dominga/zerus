@@ -285,19 +285,71 @@ impl Drop for Turn<'_> {
 /// turn with every other load and save through the store, and nothing else
 /// comes between them. A shared-store caller takes it with
 /// `ProjectStore::admit_until`, so it never waits past its own deadline.
+///
+/// One call at a time: the guard is not `Sync`, and its load and save take
+/// it by `&mut`, so two loads or saves through one admission never run at
+/// once (review-n and desktop-u on #1446). While it is held, the store's
+/// own `load` and `save` wait for it; use the guard's.
+///
+/// ```no_run
+/// # fn check(store: &zerus_replica::ProjectStore, a: &mut zerus_replica::TaskDoc,
+/// #          b: &mut zerus_replica::TaskDoc) -> zerus_replica::Result<()> {
+/// let deadline = std::time::Instant::now() + std::time::Duration::from_secs(1);
+/// let mut admitted = store.admit_until(deadline).expect("the store is free");
+/// admitted.save(a)?;
+/// admitted.save(b)
+/// # }
+/// ```
+///
+/// It is never shared between threads:
+///
+/// ```compile_fail,E0277
+/// # fn check(store: &zerus_replica::ProjectStore) {
+/// fn shared<T: Sync>(_: &T) {}
+/// let admitted = store.admit_until(std::time::Instant::now()).unwrap();
+/// shared(&admitted);
+/// # }
+/// ```
+///
+/// nor used through a shared reference, even on one thread:
+///
+/// ```compile_fail,E0596
+/// # fn check(store: &zerus_replica::ProjectStore) {
+/// let admitted = store.admit_until(std::time::Instant::now()).unwrap();
+/// let grant = &admitted;
+/// let _ = grant.load("a");
+/// # }
+/// ```
+///
+/// so two threads never save through one admission (desktop-u's case;
+/// either rule alone refuses it):
+///
+/// ```compile_fail,E0277
+/// # fn check(store: &zerus_replica::ProjectStore, a: &mut zerus_replica::TaskDoc,
+/// #          b: &mut zerus_replica::TaskDoc) {
+/// let admitted = store.admit_until(std::time::Instant::now()).unwrap();
+/// let grant = &admitted;
+/// std::thread::scope(|scope| {
+///     scope.spawn(move || grant.load("a"));
+///     scope.spawn(move || grant.load("b"));
+/// });
+/// # }
+/// ```
 pub struct Admitted<'a> {
     store: &'a ProjectStore,
     _turn: Turn<'a>,
+    /// Not `Sync`: a shared `&Admitted` never reaches another thread.
+    _one_call: std::marker::PhantomData<std::cell::Cell<()>>,
 }
 
 impl Admitted<'_> {
     /// `ProjectStore::load`, inside this admission.
-    pub fn load(&self, uuid: &str) -> Result<TaskDoc> {
+    pub fn load(&mut self, uuid: &str) -> Result<TaskDoc> {
         self.store.load_admitted(uuid)
     }
 
     /// `ProjectStore::save`, inside this admission.
-    pub fn save(&self, task: &mut TaskDoc) -> Result<()> {
+    pub fn save(&mut self, task: &mut TaskDoc) -> Result<()> {
         self.store.save_locked(task)
     }
 }
@@ -917,6 +969,7 @@ impl ProjectStore {
         Some(Admitted {
             store: self,
             _turn: turn,
+            _one_call: std::marker::PhantomData,
         })
     }
 
@@ -1648,7 +1701,7 @@ mod tests {
         let (release, released) = channel::<()>();
         let (refusal, waited) = std::thread::scope(|scope| {
             let holder = scope.spawn(move || {
-                let admitted = store
+                let mut admitted = store
                     .admit_until(Instant::now() + Duration::from_secs(30))
                     .unwrap();
                 held.send(()).unwrap();
@@ -1692,7 +1745,7 @@ mod tests {
             vec!["by the holder".to_owned()]
         );
         // Free, it enters within its deadline, and its load and save are one turn.
-        let admitted = store
+        let mut admitted = store
             .admit_until(Instant::now() + Duration::from_secs(5))
             .unwrap();
         let mut task = admitted.load(uuid).unwrap();
@@ -1742,7 +1795,7 @@ mod tests {
             let waiting = scope.spawn(move || {
                 store
                     .admit_until(Instant::now() + Duration::from_secs(10))
-                    .map(|admitted| admitted.load(uuid).is_ok())
+                    .map(|mut admitted| admitted.load(uuid).is_ok())
             });
             std::thread::sleep(Duration::from_millis(50));
             // Released before anything is asserted, so a failure never
@@ -1774,6 +1827,55 @@ mod tests {
         let mut task = store.load(uuid).unwrap();
         task.comment("after the panic", &Actor::Person, 5).unwrap();
         store.save(&mut task).unwrap();
+    }
+
+    /// desktop-u on #1446: one admission holds several reads, a recheck and
+    /// more than one save of a cut-over task in turn, and every save lands.
+    #[test]
+    fn one_admission_reads_rechecks_and_saves_in_turn() {
+        let root = tempfile::tempdir().unwrap();
+        let store = ProjectStore::open(root.path(), "p1").unwrap();
+        let mut task = new_task(&store, "V");
+        assert!(task.floor().unwrap());
+        store.save(&mut task).unwrap();
+        let uuid = task.uuid().to_owned();
+        let mut admitted = store
+            .admit_until(Instant::now() + Duration::from_secs(5))
+            .unwrap();
+        let first = admitted.load(&uuid).unwrap();
+        let recheck = admitted.load(&uuid).unwrap();
+        assert!(first.floor_record().is_some());
+        assert_eq!(first.version(), recheck.version());
+        let mut a = TaskDoc::from_bytes(&first.snapshot().unwrap()).unwrap();
+        a.comment("first in the turn", &Actor::Person, 2).unwrap();
+        admitted.save(&mut a).unwrap();
+        // A copy forked before that save is refused, never written over it.
+        let mut stale = TaskDoc::from_bytes(&recheck.snapshot().unwrap()).unwrap();
+        stale
+            .comment("from a stale copy", &Actor::Person, 3)
+            .unwrap();
+        assert_eq!(
+            admitted.save(&mut stale).unwrap_err().kind(),
+            ErrorKind::Refused
+        );
+        // Read again inside the same turn, it saves.
+        let mut b = admitted.load(&uuid).unwrap();
+        b.comment("second in the turn", &Actor::Person, 4).unwrap();
+        admitted.save(&mut b).unwrap();
+        let after = admitted.load(&uuid).unwrap();
+        drop(admitted);
+        let expected = vec![
+            "first in the turn".to_owned(),
+            "second in the turn".to_owned(),
+        ];
+        assert_eq!(comments(&after), expected);
+        let reloaded = store.load(&uuid).unwrap();
+        assert_eq!(comments(&reloaded), expected);
+        assert!(reloaded.floor_record().is_some());
+        assert!(
+            store.managed_path(&uuid).exists(),
+            "the cut-over task keeps its mark"
+        );
     }
 
     #[test]

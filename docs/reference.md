@@ -3442,9 +3442,9 @@ A member whose Zerus does not share tasks keeps syncing the catalog and is
 named in the Swarm settings. A hello's replica part also carries
 `task_schema`, the highest task schema that Zerus writes (7, which reads the
 floor; absent in an older one), `store`, the random identity of its replica
-root (`replica/store-id`, created once under a lock), and for its projects
-how many tasks do not load (`damaged`) and which it left out this time
-(`omitted`, busy or unreadable). This computer keeps what each member's last
+root (`replica/store-id`, created once under a lock), and for each project
+it read how many tasks do not load (`damaged`, 0 included) and which it left
+out this time (`omitted`, busy or unreadable). This computer keeps what each member's last
 verified hello showed (its computer, replica protocol, task schema and store)
 and how each project's last exchange with it ended in
 `replica-members.json` beside the catalog, information only. Each record is
@@ -3458,9 +3458,13 @@ alone are an exchanged subset, not a complete project). Otherwise it names a
 reason: `unreachable` (also for every project known here when the member's
 hello fails), `busy` (also for every project known here when this computer's
 own pass cannot read its projects), `refused_documents`, `page_budget`, `changed_identity`,
-`damaged_tasks`, `omitted` or `malformed` (an answer this cannot read is never
-taken for an empty, complete one). Every project this computer stores or knows
-alive gets an outcome on each sync.
+`damaged_tasks`, `omitted` or `malformed`. Absence or unreadability is never
+evidence of success: a project map, damaged count, refusal list or import
+count that is missing or in a form this does not read is `malformed`, never
+taken for an empty one. An exchange reply whose pages do not read stops the
+exchange; a reply whose evidence does not read (a member before this one sends
+no damaged counts) still exchanges documents and stays `malformed`. Every
+project this computer stores or knows alive gets an outcome on each sync.
 
 `task cutover --project P` shows the project's cutover to execution attempts
 as this computer knows it, read only and bounded by its members: `phase`

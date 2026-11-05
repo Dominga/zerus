@@ -24,6 +24,17 @@ if (root / ('offline-' + alias)).exists():
 env = dict(os.environ, HGS_CONFIG_DIR=str(root / alias), HGS_STATE_DIR=str(root / alias / 'state'))
 args = shlex.split(sys.argv[-1])[1:]
 with (root / 'calls').open('a') as file: file.write(alias + ' ' + ' '.join(args) + '\\n')
+if (root / ('spoil-' + alias)).exists() and args[1:2] == [json.loads((root / ('spoil-' + alias)).read_text())['command']]:
+    # A member whose replica answer loses one field, or carries it in another
+    # form: {command, field[, value]}.
+    spoil = json.loads((root / ('spoil-' + alias)).read_text())
+    result = subprocess.run([os.environ['SWARM_TEST_HGS'], *args], input=sys.stdin.read(), env=env, text=True, capture_output=True)
+    sys.stderr.write(result.stderr)
+    if result.returncode: sys.exit(result.returncode)
+    output = json.loads(result.stdout)
+    if 'value' in spoil: output[spoil['field']] = spoil['value']
+    else: output.pop(spoil['field'], None)
+    print(json.dumps(output)); sys.exit(0)
 if (root / ('noreplica-' + alias)).exists():
     # A member from before task replication: its hello has no replica field and
     # it knows no replica commands.
@@ -580,6 +591,49 @@ class Swarm(unittest.TestCase):
         self.assertEqual(len(damaged), 1)
         self.assertFalse(record['complete'], record)
         self.assertEqual(record.get('reason'), 'damaged_tasks', record)
+
+    def test_absent_or_unreadable_exchange_evidence_is_never_complete(self):
+        # review-n on #1432 R3: a replica answer that leaves out, or garbles,
+        # its refusals, import count, damaged count or pages records the
+        # project as malformed; the untouched answer is the control.
+        self.join('a', 'b'); self.join('b', 'a')
+        for n in 'abab':
+            self.call(n, 'sync')
+        spoils = [None,
+                  ('replica-exchange', 'refused'), ('replica-exchange', 'refused', None),
+                  ('replica-exchange', 'refused', {}), ('replica-exchange', 'refused', 'none'),
+                  ('replica-exchange', 'refused', [{'uuid': 1}]),
+                  ('replica-exchange', 'imported'), ('replica-exchange', 'imported', '1'),
+                  ('replica-exchange', 'damaged'), ('replica-exchange', 'damaged', -1),
+                  ('replica-exchange', 'damaged', '0'), ('replica-exchange', 'more'),
+                  ('replica-exchange', 'more', 'false'), ('replica-exchange', 'updates', 'none'),
+                  ('replica-inventory', 'damaged'), ('replica-inventory', 'damaged', 0.5),
+                  ('replica-inventory', 'inventory', [])]
+        path = self.root / 'a/swarm/replica-members.json'
+        flag = self.root / 'spoil-b'
+        for n, spoil in enumerate(spoils):
+            with self.subTest(spoil=spoil):
+                # A task added there makes the digests differ, so the pages are exchanged.
+                self.task('b', 'add', '--project', 'a', text=f'Exchange evidence fixture {n}')
+                if spoil is None:
+                    flag.unlink(missing_ok=True)
+                else:
+                    flag.write_text(json.dumps(dict(zip(('command', 'field', 'value'), spoil))))
+                command = 'b swarm ' + ('replica-exchange' if spoil is None else spoil[0])
+                before = (self.root / 'calls').read_text().count(command)
+                self.call('a', 'sync')
+                self.assertGreater((self.root / 'calls').read_text().count(command), before,
+                                   'the sync never reached the answer')
+                record = json.loads(path.read_text())['b']['projects']['a']
+                if spoil is None:
+                    self.assertTrue(record['complete'], record)
+                else:
+                    self.assertFalse(record['complete'], record)
+                    self.assertEqual(record.get('reason'), 'malformed', record)
+        flag.unlink(missing_ok=True)
+        self.task('b', 'add', '--project', 'a', text='Exchange evidence fixture, healthy again')
+        self.call('a', 'sync')
+        self.assertTrue(json.loads(path.read_text())['b']['projects']['a']['complete'])
 
     def test_a_task_damaged_there_after_its_inventory_is_not_complete(self):
         self.damage_between_inventory_and_exchange('b')

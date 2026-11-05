@@ -13,7 +13,7 @@ use sha2::{Digest, Sha256};
 use std::collections::{BTreeMap, BTreeSet};
 use std::path::PathBuf;
 use std::time::Duration;
-use zerus_replica::{Document, Inventory, ProjectStore, Update, SCHEMA, TASK_SCHEMA};
+use zerus_replica::{Damaged, Document, Inventory, ProjectStore, Update, SCHEMA, TASK_SCHEMA};
 
 /// The replica exchange this hgs speaks; members with another one are skipped.
 pub const PROTOCOL: u64 = 1;
@@ -30,9 +30,10 @@ fn root(config: &Config) -> PathBuf {
 }
 
 /// What this computer holds of its stored projects: each readable one's
-/// inventory digest, how many of its tasks do not load, and the projects
-/// left out (busy or unreadable this time, named in the log). A project
-/// that cannot be read never stops the catalog or the others.
+/// inventory digest, how many of its tasks do not load (one count for every
+/// readable project, 0 included: a missing count is never taken for none),
+/// and the projects left out (busy or unreadable this time, named in the
+/// log). A project that cannot be read never stops the catalog or the others.
 #[derive(Default, Serialize)]
 struct Digests {
     projects: BTreeMap<String, String>,
@@ -48,9 +49,7 @@ fn digests(config: &Config) -> Result<Digests> {
             Ok(Some(store)) => match store.inventory() {
                 Ok((inventory, damaged)) => {
                     out.projects.insert(id.clone(), inventory.digest());
-                    if !damaged.is_empty() {
-                        out.damaged.insert(id, damaged.len());
-                    }
+                    out.damaged.insert(id, damaged.len());
                 }
                 Err(error) => {
                     eprintln!("hgs swarm: the tasks of {id:?} cannot be read: {error}");
@@ -83,7 +82,8 @@ fn known(config: &Config) -> BTreeSet<String> {
 /// The replica capability `hello` advertises: the protocol, the replica
 /// schema, the highest task schema this hgs writes, this computer's replica
 /// store, every stored project's digest, how many of its tasks do not load
-/// (`damaged`, by project) and the projects left out (`omitted`). A store
+/// (`damaged`, by project, for each digest) and the projects left out
+/// (`omitted`). A store
 /// identity that cannot be read is null and named in the log; it never
 /// hides the rest.
 pub fn hello(config: &Config) -> Result<Value> {
@@ -193,7 +193,8 @@ pub fn exchange(config: &Config, request: Request) -> Result<Value> {
 }
 
 /// What a member's hello says it holds, or none when that is not in a form
-/// this reads: such a map is never taken for an empty, complete one.
+/// this reads: such a map is never taken for an empty, complete one, and a
+/// project with no damaged count in it is never taken for a healthy one.
 struct Theirs {
     projects: BTreeMap<String, String>,
     damaged: BTreeMap<String, usize>,
@@ -206,6 +207,69 @@ fn theirs(remote: &Value) -> Option<Theirs> {
         damaged: serde_json::from_value(remote["damaged"].clone()).ok()?,
         omitted: serde_json::from_value(remote["omitted"].clone()).ok()?,
     })
+}
+
+/// What one project's exchange showed. It is complete only when every
+/// refusal list and damaged count, here and there, is known and empty; a
+/// missing or unreadable one is unknown (`malformed`), never none. A known
+/// problem is named first.
+#[derive(Default)]
+struct Shown {
+    refused: bool,
+    refusals_unknown: bool,
+    damaged: bool,
+    damage_unknown: bool,
+}
+
+impl Shown {
+    /// Whether a side refused documents of the page, when it said so.
+    fn refusals(&mut self, refused: Option<bool>) {
+        match refused {
+            Some(refused) => self.refused |= refused,
+            None => self.refusals_unknown = true,
+        }
+    }
+
+    /// How many tasks of the project do not load on a side, when it said so.
+    fn damage(&mut self, count: Option<u64>) {
+        match count {
+            Some(count) => self.damaged |= count > 0,
+            None => self.damage_unknown = true,
+        }
+    }
+
+    /// The equal-digest case: the readable documents agree on both sides,
+    /// so only the damaged counts of `project` decide.
+    fn agreeing(local: &Digests, theirs: &Theirs, project: &str) -> Outcome {
+        let mut shown = Shown::default();
+        shown.damage(local.damaged.get(project).map(|&count| count as u64));
+        shown.damage(theirs.damaged.get(project).map(|&count| count as u64));
+        shown.outcome()
+    }
+
+    fn outcome(&self) -> Outcome {
+        if self.refused {
+            Err((Incomplete::RefusedDocuments, false))
+        } else if self.refusals_unknown {
+            Err((Incomplete::Malformed, false))
+        } else if self.damaged {
+            Err((Incomplete::DamagedTasks, true))
+        } else if self.damage_unknown {
+            Err((Incomplete::Malformed, true))
+        } else {
+            Ok(())
+        }
+    }
+
+    /// A page that changed nothing on either side: something is refused, or
+    /// unknown when the member did not say what it did with the page.
+    fn stalled(&self) -> Outcome {
+        if self.refusals_unknown && !self.refused {
+            Err((Incomplete::Malformed, false))
+        } else {
+            Err((Incomplete::RefusedDocuments, false))
+        }
+    }
 }
 
 /// Exchanges every project whose digest differs with the member behind
@@ -271,9 +335,8 @@ pub fn sync_peer(config: &Config, alias: &str, identity: &Value) -> Result<()> {
                 Err((Incomplete::Omitted, false))
             } else if let Some(t) = theirs.as_ref().filter(|t| t.projects.get(project) == local.projects.get(project)) {
                 // Equal digests: the readable documents agree, and the project
-                // is complete only when no task of it is damaged on either side.
-                let damaged = local.damaged.contains_key(project) || t.damaged.contains_key(project);
-                if damaged { Err((Incomplete::DamagedTasks, true)) } else { Ok(()) }
+                // is complete only when both sides say no task of it is damaged.
+                Shown::agreeing(&local, t, project)
             } else {
                 match exchange_pages(config, alias, project, Some(PROJECT_WAIT)) {
                     Ok(outcome) => outcome,
@@ -340,12 +403,11 @@ pub fn replicate(config: &Config, alias: &str, project: &str) -> Result<()> {
     let (inventory, damaged) = ProjectStore::open(&root(config), project)?.inventory()?;
     let theirs = theirs(&identity["replica"]);
     if let Some(t) = theirs.as_ref().filter(|t| t.projects.get(project) == Some(&inventory.digest())) {
-        let outcome = if damaged.is_empty() && !t.damaged.contains_key(project) {
-            Ok(())
-        } else {
-            Err((Incomplete::DamagedTasks, true))
+        let local = Digests {
+            damaged: BTreeMap::from([(project.to_owned(), damaged.len())]),
+            ..Digests::default()
         };
-        record(config, alias, &observed, &[(project.to_owned(), outcome)]);
+        record(config, alias, &observed, &[(project.to_owned(), Shown::agreeing(&local, t, project))]);
         return Ok(());
     }
     let (outcome, result) = match exchange_pages(config, alias, project, None) {
@@ -373,7 +435,12 @@ type Failed = (Incomplete, anyhow::Error);
 
 /// The pages of one project's exchange: complete, or why not and whether
 /// the readable documents were exchanged; a failure says why too. Complete
-/// needs every page, nothing refused, and no damaged task on either side.
+/// needs every page, and every reply saying, in a form this reads, that
+/// nothing was refused and no task is damaged on either side. A reply whose
+/// pages (`inventory`, `updates`, `more`) do not read stops the exchange as
+/// `malformed`. Its evidence (`imported` with `refused`, and `damaged`, which
+/// members before C2 do not send) missing or unreadable keeps the documents
+/// moving and the outcome `malformed`.
 fn exchange_pages(
     config: &Config,
     alias: &str,
@@ -382,6 +449,7 @@ fn exchange_pages(
 ) -> std::result::Result<Outcome, Failed> {
     let root = root(config);
     let unreachable = |error: anyhow::Error| (Incomplete::Unreachable, error);
+    let malformed = |error: anyhow::Error| (Incomplete::Malformed, error.context(format!("{alias} sent an invalid replica answer")));
     let changed_identity = || (Incomplete::ChangedIdentity, anyhow::anyhow!("the computer behind {alias} changed identity"));
     // None: held by another command longer than `wait`.
     let open = |root: &PathBuf| -> std::result::Result<Option<ProjectStore>, Failed> {
@@ -404,10 +472,7 @@ fn exchange_pages(
             .ok_or_else(|| (Incomplete::ChangedIdentity, anyhow::anyhow!("{alias} is not a member of this swarm")))?;
         (peer.node.clone(), store.data.catalog.swarm_id.clone())
     };
-    let mut refused = false;
-    // Whether a task does not load on either side; none when the member
-    // did not say.
-    let mut damaged = Some(false);
+    let mut shown = Shown::default();
     for _ in 0..MAX_PAGES {
         let reply = transport::remote(
             config,
@@ -419,18 +484,15 @@ fn exchange_pages(
         if reply["node_id"] != node.as_str() {
             return Err(changed_identity());
         }
-        let theirs: Inventory = serde_json::from_value(reply["inventory"].clone()).map_err(|e| unreachable(e.into()))?;
-        damaged = match (damaged, reply["damaged"].as_u64()) {
-            (Some(known), Some(count)) => Some(known || count > 0),
-            _ => None,
-        };
+        let theirs: Inventory = serde_json::from_value(reply["inventory"].clone()).map_err(|e| malformed(e.into()))?;
+        shown.damage(reply["damaged"].as_u64());
         // The project's lock is held only between network calls.
         let (mine, page, more_mine) = {
             let Some(store) = open(&root)? else {
                 return busy();
             };
             let (mine, here) = store.inventory().map_err(|e| (Incomplete::Busy, e.into()))?;
-            damaged = damaged.map(|known| known || !here.is_empty());
+            shown.damage(Some(here.len() as u64));
             let (page, more) = store.updates_for(&mine, &theirs, PAGE).map_err(|e| (Incomplete::Busy, e.into()))?;
             (mine, page, more)
         };
@@ -444,18 +506,20 @@ fn exchange_pages(
         if response["node_id"] != node.as_str() {
             return Err(changed_identity());
         }
-        let updates = decode(serde_json::from_value(response["updates"].clone()).map_err(|e| unreachable(e.into()))?)
-            .map_err(unreachable)?;
-        if !response["more"].is_boolean() {
-            return Err(unreachable(anyhow::anyhow!("{alias} sent an invalid replica exchange")));
-        }
-        refused |= response["refused"].as_array().is_some_and(|r| !r.is_empty());
-        // The member's count after this page, not only before it.
-        damaged = match (damaged, response["damaged"].as_u64()) {
-            (Some(known), Some(count)) => Some(known || count > 0),
-            _ => None,
+        let updates = decode(serde_json::from_value(response["updates"].clone()).map_err(|e| malformed(e.into()))?)
+            .map_err(malformed)?;
+        let Some(more_theirs) = response["more"].as_bool() else {
+            return Err(malformed(anyhow::anyhow!("no page marker")));
         };
-        let mut changed = response["imported"].as_u64().unwrap_or(0) as usize;
+        // What the member did with this page: both its count and its list of
+        // refusals, each in a form this reads, or unknown.
+        let import = response["imported"]
+            .as_u64()
+            .zip(serde_json::from_value::<Vec<Damaged>>(response["refused"].clone()).ok());
+        shown.refusals(import.as_ref().map(|(_, refused)| !refused.is_empty()));
+        // The member's count after this page, not only before it.
+        shown.damage(response["damaged"].as_u64());
+        let mut changed = import.map_or(0, |(imported, _)| imported as usize);
         if !updates.is_empty() {
             let Some(store) = open(&root)? else {
                 return busy();
@@ -466,28 +530,21 @@ fn exchange_pages(
             for document in &imported.refused {
                 eprintln!("hgs swarm: {alias}: task {} of {project} was refused: {}", document.uuid, document.error);
             }
-            refused |= !imported.refused.is_empty();
+            shown.refusals(Some(!imported.refused.is_empty()));
         }
-        if !more_mine && response["more"] != true {
+        if !more_mine && !more_theirs {
             // And this computer's count once more, after its own import.
-            if let Some(known) = damaged {
-                let Some(store) = open(&root)? else {
-                    return busy();
-                };
-                let (_, here) = store.inventory().map_err(|e| (Incomplete::Busy, e.into()))?;
-                damaged = Some(known || !here.is_empty());
-            }
-            return Ok(match (refused, damaged) {
-                (true, _) => Err((Incomplete::RefusedDocuments, false)),
-                (false, None) => Err((Incomplete::Malformed, true)),
-                (false, Some(true)) => Err((Incomplete::DamagedTasks, true)),
-                (false, Some(false)) => Ok(()),
-            });
+            let Some(store) = open(&root)? else {
+                return busy();
+            };
+            let (_, here) = store.inventory().map_err(|e| (Incomplete::Busy, e.into()))?;
+            shown.damage(Some(here.len() as u64));
+            return Ok(shown.outcome());
         }
         // A page that changed nothing on either side would come again unchanged.
         if changed == 0 {
             eprintln!("hgs swarm: {alias}: the rest of the tasks of {project} were refused; the next sync tries again");
-            return Ok(Err((Incomplete::RefusedDocuments, false)));
+            return Ok(shown.stalled());
         }
     }
     eprintln!("hgs swarm: {alias}: the tasks of {project} did not finish in {MAX_PAGES} pages; the next sync continues");
@@ -550,9 +607,14 @@ mod tests {
         task.uuid().to_owned()
     }
 
+    /// A member's hello with no damaged task: a count of 0 for every project.
     fn hello(projects: Value) -> Value {
+        let damaged: BTreeMap<String, usize> = projects
+            .as_object()
+            .map(|projects| projects.keys().map(|p| (p.clone(), 0)).collect())
+            .unwrap_or_default();
         json!({"node_id": NODE, "replica": {"protocol": PROTOCOL, "task_schema": TASK_SCHEMA,
-            "store": STORE, "projects": projects, "damaged": {}, "omitted": []}})
+            "store": STORE, "projects": projects, "damaged": damaged, "omitted": []}})
     }
 
     fn outcome(config: &Config, project: &str) -> replica_members::Exchanged {
@@ -610,6 +672,57 @@ mod tests {
         assert_eq!(outcome(&config, "p").reason, Some(Incomplete::DamagedTasks));
     }
 
+    /// review-n on #1432 R3: a hello that holds the project but gives no
+    /// damaged count for it never makes it complete (a count in another
+    /// form makes the whole map unreadable, below). The explicit 0 is the
+    /// control.
+    #[test]
+    fn a_project_with_no_damaged_count_in_the_hello_is_not_complete() {
+        for damaged in [json!({}), json!({"q": 0}), json!({"p": 0})] {
+            let (_dir, config) = fixture();
+            add(&config, "p");
+            let digest = ProjectStore::open(&root(&config), "p").unwrap().inventory().unwrap().0.digest();
+            complete_before(&config, "p");
+            let mut remote = hello(json!({"p": digest}));
+            remote["replica"]["damaged"] = damaged.clone();
+            sync_peer(&config, "peer", &remote).unwrap();
+            let after = outcome(&config, "p");
+            if damaged == json!({"p": 0}) {
+                assert!(after.complete, "{after:?}");
+            } else {
+                assert!(!after.complete && after.exchanged, "{damaged}: {after:?}");
+                assert_eq!(after.reason, Some(Incomplete::Malformed), "{damaged}");
+            }
+        }
+        // The hello this computer sends gives every readable project its count.
+        let (_dir, config) = fixture();
+        add(&config, "p");
+        assert_eq!(super::hello(&config).unwrap()["damaged"], json!({"p": 0}));
+    }
+
+    /// The evidence of one exchange decides in order: a known refusal, then
+    /// unknown refusals, known damage, unknown damage; only all known and
+    /// none is complete.
+    #[test]
+    fn exchange_evidence_is_complete_only_when_known_and_none() {
+        let shown = |steps: &[(Option<bool>, Option<u64>)]| {
+            let mut shown = Shown::default();
+            for &(refused, damaged) in steps {
+                shown.refusals(refused);
+                shown.damage(damaged);
+            }
+            shown
+        };
+        assert_eq!(shown(&[(Some(false), Some(0))]).outcome(), Ok(()));
+        assert_eq!(shown(&[(Some(false), Some(0)), (None, Some(0))]).outcome(), Err((Incomplete::Malformed, false)));
+        assert_eq!(shown(&[(Some(false), None)]).outcome(), Err((Incomplete::Malformed, true)));
+        assert_eq!(shown(&[(Some(false), None), (Some(false), Some(2))]).outcome(), Err((Incomplete::DamagedTasks, true)));
+        assert_eq!(shown(&[(None, None), (Some(true), Some(0))]).outcome(), Err((Incomplete::RefusedDocuments, false)));
+        assert_eq!(shown(&[(Some(false), Some(0))]).stalled(), Err((Incomplete::RefusedDocuments, false)));
+        assert_eq!(shown(&[(None, Some(0))]).stalled(), Err((Incomplete::Malformed, false)));
+        assert_eq!(shown(&[(None, Some(0)), (Some(true), Some(0))]).stalled(), Err((Incomplete::RefusedDocuments, false)));
+    }
+
     /// desktop-u on #1432 R2: this computer's own digest pass failing (its
     /// replica root unreadable) records every project known here as
     /// incomplete, apart from a per-project busy and a failed hello.
@@ -646,6 +759,19 @@ mod tests {
             let after = outcome(&config, "p");
             assert!(!after.complete, "{projects}");
             assert_eq!(after.reason, Some(Incomplete::Malformed), "{projects}");
+        }
+        // Equal digests with a damaged map, or a count, in another form.
+        for damaged in [json!("none"), Value::Null, json!({"p": "0"}), json!({"p": -1}), json!({"p": 0.5})] {
+            let (_dir, config) = fixture();
+            add(&config, "p");
+            let digest = ProjectStore::open(&root(&config), "p").unwrap().inventory().unwrap().0.digest();
+            complete_before(&config, "p");
+            let mut remote = hello(json!({"p": digest}));
+            remote["replica"]["damaged"] = damaged.clone();
+            sync_peer(&config, "peer", &remote).unwrap();
+            let after = outcome(&config, "p");
+            assert!(!after.complete, "{damaged}");
+            assert_eq!(after.reason, Some(Incomplete::Malformed), "{damaged}");
         }
     }
 }

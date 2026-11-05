@@ -83,7 +83,8 @@ pub enum Incomplete {
     DamagedTasks,
     /// The member's digests left the project out (busy or unreadable there).
     Omitted,
-    /// The member's answer did not say what it holds in a form this reads.
+    /// The member's answer did not say, in a form this reads, what it holds,
+    /// refused or found damaged: absence is never taken for none.
     Malformed,
 }
 

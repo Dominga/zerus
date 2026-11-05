@@ -1612,6 +1612,108 @@ integrate `68b2c426` (CI run 41977902432, artifact 13394048639) and integrate
   reached Settings > About, because the rail's Settings icon has no accessible
   name, so its "no refresh offer" result proved nothing.
 
+### va-kids unattended rows on `861e0baf` — 2026-11-05
+
+win-accept-cl ran these rows between 14:53 and 15:14 MSK, in private fixture
+profiles. win-accept-cl2 reviewed the raw results and wrote this record. The
+source is integrate `861e0baff28d4f354eeaedcbcbc9387b27ecaaec`, CI run
+[42010395529](https://github.com/ufna/zerus/actions/runs/42010395529) attempt 2:
+package job `127208000281`, native job `127207945053` and artifact `13408459971`
+(portable 0.47.0, SHA256
+`b7819cdb35197793db36877e698d9718266c60f56d9e181f22c8602534cba3bb`). In attempt 1
+of the same source, the native job failed three `WindowsTaskMode` tests. Attempt 2
+passed with no source change, and the flake is `zerus-yuwgz`.
+
+Each row had its own fresh stage, followed by teardown, the notification-settings
+guard, cleanup, the guarded real-profile cleanup and a residue check. The
+real-profile cleanup found nothing to remove after any stage. The `importonce` and
+`importbad` rows ran in the same batch and are recorded in the shared import
+evidence above.
+
+No checkbox changes, because these are fixture-profile runs and not main-account
+acceptance. The coordinator accepted `861e0baf` for now on 2026-11-05. The five rows
+rerun once on the final release candidate (`zerus-5wmh.66.8.1.1.6`), with a smoke
+of the Windows pointer drag from #1488 and #1491, which this source does not
+contain.
+
+- **Service registration and readiness: PASS** (12/12, stage `d3588a16`).
+  - Settings > About > "Use background mode…" settled background mode. The
+    registered task runs as the interactive user with the least privilege, never
+    LocalSystem.
+  - With the UI closed, the service was IPC-ready with writers enabled, and fleet,
+    presence, reads and attention were ready.
+  - The named-pipe server is the engine of the registered task's instance, in
+    session 1, as this user. The live fixture session is listed with no GUI.
+  - Not covered: a real logon trigger. The row started the task itself, so that
+    stays with batched owner question 6.
+- **Tray and lifecycle: PASS** (12/12, stage `0f71abd0`).
+  - Closing the window keeps Zerus in the notification area. A second start exits
+    and shows the first instance. Quit from the app's own tray menu exits.
+  - The login opt-in registers only the UI background command, and the opt-out
+    removes it. A real login start was not exercised (question 6).
+  - An unsent draft was on disk after Quit and was restored in the same session
+    composer on the next start.
+  - A background start shows no window, owns its tray icon and quits from it.
+- **Terminal: PASS** (9/9, stage `92b1dc95`).
+  - A Windows Terminal attach ran PowerShell with the exact non-ASCII session name
+    and path. Paste reached the live session, and resizing the window resized the
+    attached pane (120x30 to 128x33).
+  - The session stayed live after its terminal client exited, and reattach showed
+    the same pane with the pasted text. The app selected exactly this session
+    through UI Automation.
+  - Not covered: a console outside Windows Terminal, and the refusal of
+    unsupported remote paths.
+- **UI/durable parity: PASS** (20/20, stage `ab5b0e72`).
+  - The UI Automation walk covered Projects, Machines, Accounts, Sessions and
+    About. About showed `Zerus 0.47.0 (861e0ba)` and `hgs CLI 1.56.0`. The Projects
+    match is the empty case: the CLI catalog has no entries and the UI lists only
+    the default General.
+  - One composer Send through the ready service reached the same conversation and
+    was answered, with the run and conversation unchanged. The route was direct,
+    because Windows does not advertise the deferred send. The sent turn appeared
+    from durable history, and the composer was empty afterwards.
+  - Automatic approvals stayed off. With the UI closed, the service alone stayed
+    ready.
+  - Not covered: the complete inventory walk, including tasks, folder mapping and
+    bounded details, and the refusal of the generic and agent approval toggles.
+  - Seen again: the UI showed the service as not ready on Projects and Machines
+    before settling (`zerus-5wmh.66.3.31.15`), and session rows have no accessible
+    name (`zerus-5wmh.92`).
+  - New: the rail shows `0.1 Dev` while About shows 0.47.0 (`zerus-y48q0`), and the
+    "Upgrading from Qt" notice appears in a fixture with no Qt data
+    (`zerus-eo2gd`).
+- **Upgrade with live agents: PASS on the second run, after a harness failure.**
+  - **First run: FAILED, stage `fbebc9ed`, 15:07 MSK.** Its six checks passed, then
+    the driver stopped with `Private archive destination already exists`. The cause
+    is harness ordering, confirmed in the driver: this batch ran the `setup` row
+    first, which had already expanded the Next ZIP into the folder where `upgrade`
+    expands it, and the driver refuses an existing destination. Earlier upgrade
+    stages ran without `setup`. The row stopped before it started the Next GUI, so
+    this run says nothing about the upgrade either way.
+  - **What that run left behind.** The fixture's stable CLI stayed Qt-era, so
+    teardown failed: that CLI has no `desktop registration status` command. Cleanup
+    then refused to remove the stage while the desktop service task existed. The
+    residue check listed the service task, the Toast keys, the stage, the fixture,
+    and the fixture's host, ConPTY and agent processes.
+  - **Recovery, same stage, 15:10 MSK.** A recovery-only row restaged the exact Next
+    CLI (2/2). Teardown then passed 4/4, cleanup removed the stage and fixture, and
+    the residue check was clean.
+  - **Second run: PASS (14/14), fresh stage `4b5525f3` without `setup`, 15:12 MSK.**
+    - The start was the CI Qt portable ZIP (`c7189d93`, 0.47.0, CLI 1.56.0) with a
+      live fixture session that answered.
+    - Starting the Next GUI restaged the stable CLI to the exact Next build. The
+      ZIP's own GUI was admitted with no native takeover refusal and bound itself
+      to the staged CLI.
+    - The same session, run and conversation survived. The host, ConPTY and agent
+      processes kept their PIDs and creation times.
+    - The upgraded CLI delivered to the same conversation and it answered. The GUI
+      showed the pre-upgrade and post-upgrade turns in the same session, then quit
+      from its tray menu.
+  - Not covered: the installer route, because this row uses the ZIP; a saved draft
+    or account surviving, because the row checks neither; and a real model, because
+    the agent is the pinned fixture agent. This row has 14 checks where the earlier
+    run had 25 because the Qt round trip is waived.
+
 ## Deletion PR merge gate
 
 The coordinator records per-platform acceptance and any exceptions against the

@@ -213,10 +213,11 @@ class TrayUpdate(unittest.TestCase):
         self.assertIn("'second'", previous.read_text())
         self.assertEqual([variant for variant, _ in self.running()], ['third'])
 
-    def test_unregistered_current_cli_qt_update_only_reads_the_registration(self):
-        # The current CLI reports the lifecycle ABI even when no service exists.
-        # Exercise the full updater with that shape and a helper that refuses
-        # any install, like an agent-descended caller. It must never get one.
+    def test_unregistered_current_cli_next_update_never_installs_a_service(self):
+        # Next GUI-only updates leave the backend registration untouched. A
+        # current CLI can advertise its lifecycle ABI even without a service.
+        # Any optional registration probe must stay read-only; a helper that
+        # refuses install must never receive a mutating verb.
         self.env['REVOCATION_LIFECYCLE'] = 'unavailable'
         source = self.root / 'updater-source'
         (source / 'tray').mkdir(parents=True)
@@ -227,7 +228,7 @@ class TrayUpdate(unittest.TestCase):
         self.script(helper, f'#!{sys.executable}\n'
                     'import json, os, pathlib, sys\n'
                     'root = pathlib.Path(os.environ["TRAY_FIXTURE"])\n'
-                    'with (root / "qt-helper.calls").open("a") as out:\n'
+                    'with (root / "desktop-helper.calls").open("a") as out:\n'
                     '    out.write(json.dumps(sys.argv[1:]) + "\\n")\n'
                     'if sys.argv[1] != "status":\n'
                     '    print("agent-descended frontend request refused", file=sys.stderr)\n'
@@ -236,14 +237,20 @@ class TrayUpdate(unittest.TestCase):
                     '"configuration":"fixture-configuration","registered":False,"selected_mode":"passive"}))\n')
         self.build('first', self.installed)
         built = self.build('second')
+        for image in (self.installed, built):
+            info = json.loads(subprocess.check_output([str(image), '--build-info'],
+                              env=self.env, text=True, timeout=5))
+            self.assertEqual(info.get('ZerusGUI'), 'tauri')
         result = subprocess.run([sys.executable, str(updater), str(built), str(self.installed)],
                                 env=self.env, capture_output=True, text=True, timeout=60)
         self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
         self.assertIn("'second'", self.installed.read_text())
-        calls = [json.loads(line) for line in (self.root / 'qt-helper.calls').read_text().splitlines()]
-        self.assertEqual(calls, [['status', '--hgs', str(self.home / '.local/bin/hgs'), '--json']])
+        call_log = self.root / 'desktop-helper.calls'
+        calls = [json.loads(line) for line in call_log.read_text().splitlines()] if call_log.exists() else []
+        status = ['status', '--hgs', str(self.home / '.local/bin/hgs'), '--json']
+        self.assertIn(calls, ([], [status]), 'an unregistered update permits only a read-only registration probe')
         manager = self.root / 'systemctl'
-        self.assertFalse(manager.exists(), "an unregistered Qt update must not invoke the service manager")
+        self.assertFalse(manager.exists(), "an unregistered Next update must not invoke the service manager")
         self.assertFalse((self.home / '.config/systemd/user/hgs-desktop.service').exists())
         self.assertFalse((self.home / '.config/systemd/user/.hgs-desktop.zerus-registration.json').exists())
 

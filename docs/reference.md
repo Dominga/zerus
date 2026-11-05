@@ -5183,6 +5183,22 @@ does not turn `/command` into an ordinary message.
 
 ### Desktop background service
 
+Zerus Next defaults to the Service consumer on Linux and macOS when
+`ZERUS_CLIENT_DESKTOP_SERVICE` is absent and the maintained helper's read-only
+status confirms an owned registration. Otherwise startup stays guarded Native;
+app/cask or AUR installation alone does not register a service. Run
+`zerus-setup --desktop-service` on Linux, or plain `zerus-setup` on macOS,
+first. Explicit `=1` selects Service on all supported
+desktop platforms; Windows keeps that opt-in until its PC acceptance. Explicit
+`=0` requests the guarded Native/rollback path, which still needs a verified
+takeover and drain. It never forces a writer or starts the Qt rollback directly.
+An already-background installation is unchanged. Explicit passive choices and
+retained revokes require **Resume background work**; automatic read-only reconnect
+never grants, rearms or changes mode. Automatic approvals stay off. See
+[consumer activation and failure actions](desktop-consumer-activation.md).
+The supported persistent desktop rollback is the maintained Qt updater route;
+`=0` and transient manager environment settings only affect new process startup.
+
 ```sh
 hgs desktop serve
 hgs desktop status --json

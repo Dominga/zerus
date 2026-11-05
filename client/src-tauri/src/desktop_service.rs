@@ -90,10 +90,39 @@ pub type Projection = Arc<dyn Fn(Option<&Value>) + Send + Sync>;
 // 0: configured startup; 1: consumer awaiting explicit recovery; 2: resumed consumer.
 static STARTUP_RECOVERY: std::sync::atomic::AtomicU8 = std::sync::atomic::AtomicU8::new(0);
 
+static MODE: OnceLock<bool> = OnceLock::new();
+
+/// Capture the source before the canonical responder exists. A missing or
+/// unconfirmed registration keeps the existing guarded Native startup.
+pub(crate) fn prepare_mode(eligible: bool) {
+    MODE.get_or_init(|| {
+        let value = std::env::var_os(service::MODE_ENV);
+        startup_mode(
+            value.as_deref(),
+            eligible,
+            &zerus_client_core::default_hgs(),
+        )
+    });
+}
+
+fn startup_mode(value: Option<&std::ffi::OsStr>, eligible: bool, hgs: &std::path::Path) -> bool {
+    let registered = value.is_none()
+        && eligible
+        && cfg!(any(target_os = "linux", target_os = "macos"))
+        && mode_transition::registered_for_default(hgs);
+    service::enabled(value.map(|value| value.to_str().unwrap_or("")), registered)
+}
+
 pub fn mode() -> bool {
-    static MODE: OnceLock<bool> = OnceLock::new();
     STARTUP_RECOVERY.load(Ordering::Acquire) != 0
-        || *MODE.get_or_init(|| service::enabled(std::env::var(service::MODE_ENV).ok().as_deref()))
+        || *MODE.get_or_init(|| {
+            let value = std::env::var_os(service::MODE_ENV);
+            // An invalid explicit value is distinct from the platform default.
+            service::enabled(
+                value.as_deref().map(|value| value.to_str().unwrap_or("")),
+                false,
+            )
+        })
 }
 
 /// Before any GUI producer exists, a failed native takeover can only move to

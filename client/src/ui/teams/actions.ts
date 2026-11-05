@@ -24,6 +24,8 @@ export interface ActTask {
   attempts: number; held?: boolean; pipeline?: string; subteam?: boolean; subteam_team?: string;
   /** What it waits for, as hgs words it. */
   waits?: string;
+  /** Task 55: the newest attempt's open questions to the lead. */
+  questions?: { id: string; text: string; at: number }[];
   pipeline_run?: { name: string; accept: string; stages: string[]; open: { stage: number; kind: string; member: string; state: string } | null } | null;
 }
 
@@ -355,6 +357,17 @@ export function formAction(task: ActTask, form: TaskForm, reason: string, return
   }
 }
 
+/**
+ * Task 55: why the owner may not answer a member's question (Qt
+ * teamAnswerClosed): a decided task's question is closed; "" when it may.
+ */
+export const questionClosed = (task: ActTask) =>
+  finished(task) ? tr("Task #%1 is decided, so this question is closed; nobody can answer it any more.", task.id) : "";
+
+/** The open questions the owner sees across a team (the side's list), newest attempt of each task. */
+export const openQuestions = (team: ActTeam) =>
+  team.tasks.flatMap((task) => (task.questions ?? []).map((question) => ({ task, question })));
+
 /** Retry asks first, naming the attempt it revokes (Qt teamRetryConfirm). */
 export function retryConfirmation(task: ActTask): TeamConfirmation | undefined {
   if (task.attempts === 0) return undefined;
@@ -455,6 +468,12 @@ export class TeamActions {
     return this.run(key, action(choice), undefined, true);
   }
   retry(task: ActTask) { return this.run(`retry:${task.id}`, { kind: "retry", task: task.id }, retryConfirmation(task)); }
+  /** Task 55: the owner's answer to a member's question (`hgs team reply`); nothing without text or for a closed question. */
+  reply(task: ActTask, question: string, text: string) {
+    const answer = text.trim();
+    if (!answer || questionClosed(task)) return Promise.resolve(undefined);
+    return this.run(`reply:${question}`, { kind: "reply", question, text: answer });
+  }
   move(task: ActTask, phase: number) { return this.run(`move:${task.id}`, { kind: "move_task", task: task.id, phase, revision: this.where().team.revision }); }
   /** An inline form: nothing is sent without a reason. */
   submit(task: ActTask, form: TaskForm, reason: string, returnLater = false) {

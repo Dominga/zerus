@@ -236,6 +236,25 @@ pub async fn team_action(teams: State<'_, Teams>, call: TeamCall) -> Result<Team
     Ok(outcome)
 }
 
+/// Task 50: the models a catalog role's account offers (its account, or the
+/// agent's native one), for the catalog editor's model and effort menus.
+#[tauri::command]
+pub async fn team_role_models(
+    teams: State<'_, Teams>,
+    computer: String,
+    agent: String,
+    account: String,
+) -> Result<Vec<zerus_client_core::teams::role_models::RoleModel>, String> {
+    if teams.replay {
+        return Err("Teams need hgs; a replay has none.".into());
+    }
+    tauri::async_runtime::spawn_blocking(move || {
+        zerus_client_core::teams::role_models::read(&default_hgs(), &computer, &agent, &account)
+    })
+    .await
+    .map_err(|error| error.to_string())?
+}
+
 /// Task 11: reads one team once, as a Waiting for you answer does before it
 /// sends (Qt's TeamWaitingAnswer::read): the projected `team status`.
 #[tauri::command]

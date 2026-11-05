@@ -21,7 +21,7 @@ import { roleStyle } from "./roles";
 import { TeamProposals } from "./ProposalCards";
 import { TeamReports } from "./TeamReports";
 import { WaitingBanner } from "./Waiting";
-import { Blockers, TaskActions, TeamBarActions, TeamBarChips } from "./TeamActions";
+import { Blockers, TaskActions, TeamBarActions, TeamBarChips, TeamQuestions } from "./TeamActions";
 import { composer } from "../../store/composer";
 import type { ComputerId, TeamMemberView, TeamView } from "../../types";
 import type { Session } from "../sessions/types";
@@ -243,6 +243,7 @@ function SideColumn(props: { computer: ComputerId; team: TeamView; statuses: Map
   let column!: HTMLDivElement;
   return (
     <div class="team-side-inner" ref={column}>
+      <TeamQuestions computer={props.computer} team={props.team} />
       <section class="team-members" style={{ height: `${teamLayout.membersShare()}%` }} aria-label={tr("Members")}>
         <div class="team-section-head"><b>{tr("Members")}</b><span class="dim mono">{members().length}</span></div>
         <div class="team-members-list">

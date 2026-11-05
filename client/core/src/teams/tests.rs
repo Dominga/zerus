@@ -384,6 +384,24 @@ fn task_52_the_list_names_each_teams_parent() {
 }
 
 #[test]
+fn task_55_a_task_carries_its_newest_attempts_open_questions() {
+    let status = json!({"id":"t1","name":"Checkout","status":"running","lead":"lead","members":[{"id":"lead"}],
+        "tasks":[{"id":15,"title":"Asks","status":"in_progress","assignee":"tester","attempts":[
+            {"n":1,"questions":[{"id":"q0","text":"Old","at":1}]},
+            {"n":2,"questions":[{"id":"q1","text":"Keep the old field?","at":1720,"answer":"","answered_at":null},
+                                {"id":"q2","text":"Answered","at":1730,"answer":"Yes","answered_at":1740}]}]}]});
+    let view = view::team(&status);
+    assert_eq!(
+        view.tasks[0].questions,
+        vec![view::QuestionView {
+            id: "q1".into(),
+            text: "Keep the old field?".into(),
+            at: 1720.0
+        }]
+    );
+}
+
+#[test]
 fn a_draft_projects_the_new_team_form() {
     let value = fixture("status-draft");
     let team = view::team(&value);

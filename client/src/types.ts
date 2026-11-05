@@ -965,6 +965,8 @@ export interface TeamTaskView {
   held?: boolean; pipeline?: string; pipeline_run?: TeamPipelineRun | null; subteam?: boolean;
   /** Task 52: the delegated sub-team's id, named by Cancel's and Reassign's question. */
   subteam_team?: string;
+  /** Task 55: the newest attempt's open questions to the lead; the owner answers them too. */
+  questions?: { id: string; text: string; at: number }[];
 }
 
 /** A task's pipeline run (core PipelineRunView). */
@@ -1067,6 +1069,7 @@ export type TeamAction =
   | { kind: "release"; task: number }
   | { kind: "retry"; task: number }
   | { kind: "finish"; summary: string }
+  | { kind: "reply"; question: string; text: string }
   | { kind: "reassign"; task: number; member: string; subteam?: string | null }
   | { kind: "take_over"; task: number }
   | { kind: "cancel"; task: number; subteam?: string | null }

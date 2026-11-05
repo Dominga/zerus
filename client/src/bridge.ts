@@ -87,6 +87,9 @@ export const catalogEditorImpact = (computer: ComputerId, kind: import("./types"
 export const catalogEditorExport = (computer: ComputerId) => teamsOnly<string | null>("catalog_editor_export", { computer });
 export const catalogEditorImport = (computer: ComputerId) => teamsOnly<import("./types").CatalogEditorView | null>("catalog_editor_import", { computer });
 export const catalogRoute = (computer: ComputerId, goal: string) => teamsOnly<Record<string, unknown>>("catalog_route", { computer, goal });
+/** Task 50: the models a catalog role's account offers (its account, or the agent's native one); empty outside the desktop app. */
+export const teamRoleModels = (computer: ComputerId, agent: string, account: string) =>
+  inTauri() ? invoke<{ id: string; label: string; effort_options: string[] }[]>("team_role_models", { computer, agent, account }) : Promise.resolve([]);
 /** Task 11: reads one team once, as an answer in Waiting for you does before it sends. */
 export const teamRead = (computer: ComputerId, team: string) =>
   inTauri() ? invoke<import("./types").TeamView>("team_read", { computer, team }) : Promise.reject(new Error("Teams need the desktop app."));

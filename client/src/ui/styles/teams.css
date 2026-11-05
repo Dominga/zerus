@@ -144,4 +144,12 @@
   .team-waiting-banner { display: flex; flex-direction: column; gap: 2px; padding: 4px 14px; border-bottom: 1px solid var(--z-color-divider); background: var(--z-color-warn-bg); }
   .team-waiting-banner-head { display: flex; align-items: center; gap: 8px; min-width: 0; color: var(--z-color-warn); }
   .team-confirm-text { white-space: pre-line; }
+
+  /* Task 55: members' questions the owner answers (task card and side). */
+  .team-questions { display: flex; flex-direction: column; gap: 6px; padding: 6px 10px; max-height: 40%; overflow-y: auto; flex: none; border-bottom: 1px solid var(--z-color-divider); }
+  .team-question-row { display: flex; flex-direction: column; gap: 2px; }
+  .team-question { display: flex; flex-direction: column; gap: 4px; padding: 6px 8px; border-radius: 7px; border: 1px solid color-mix(in srgb, var(--z-color-warn) 40%, transparent); }
+  .team-question-text { margin: 0; overflow-wrap: anywhere; }
+  .team-question-closed, .team-question-sent { margin: 0; }
+  .team-task-questions { display: flex; flex-direction: column; gap: 6px; }
 }

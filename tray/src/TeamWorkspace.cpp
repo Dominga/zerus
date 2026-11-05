@@ -203,6 +203,11 @@ TeamWorkspace::TeamWorkspace(TeamController *teams, TeamPanel *panel, QWidget *p
     m_drawer->hide();
     m_drawer->back = [this] { m_drawerTask = 0; m_drawer->hide(); };
     m_drawer->act = [this](const QString &operation, const QJsonObject &input) { m_panel->act(operation, input); };
+    // Task 55: the card shows a member question's answer outcome on itself.
+    m_drawer->actThen = [this](const QString &operation, const QJsonObject &input, const TeamTaskCard::Done &done) {
+        QJsonObject body = input; if (!body.contains("team")) body.insert("team", m_team);
+        m_panel->act(operation, body, done);
+    };
     m_drawer->openTask = [this](int task) { m_drawerTask = task; scheduleRender(); };
     m_drawer->openTeam = [this](const QString &team) { m_teams->watch(team); showTeam(team); };
     m_drawer->openSession = [this](const QString &host, const QString &session) { if (openSession) openSession(host, session); };
@@ -3487,7 +3492,7 @@ QWidget *TeamWorkspace::sideLists(const Team &team, const QString &status)
         for (const auto &task : team.tasks) for (const auto &asked : openQuestions(task)) {
             ++waiting;
             listRow(block->body(), team.roleOf(task.assignee), QStringLiteral("#%1 %2 — %3").arg(task.id).arg(task.title, asked.text), tr("Answer"),
-                    "teamWorkspaceAnswerQuestion", [this, id = task.id] { m_drawerTask = id; scheduleRender(); });
+                    "teamWorkspaceAnswerQuestion", [this, id = task.id] { m_drawerTask = id; m_drawer->requestAnswerFocus(); scheduleRender(); });
         }
         if (team.status != "planning") for (int phase : team.draftPhases()) {
             const auto *record = team.phase(phase);

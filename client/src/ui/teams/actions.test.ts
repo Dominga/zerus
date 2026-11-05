@@ -1,7 +1,7 @@
 import { describe, expect, it } from "vitest";
 import {
   TeamActions, allDecided, barActions, barChips, discardConfirmation, finishSummary, formAction, formText, moreItems, moveTargets,
-  pauseConfirmation, planApproval, retryConfirmation, sendBackMessage, stageName, stopConfirmation, subtreeImpact, taskButtons,
+  openQuestions, pauseConfirmation, planApproval, questionClosed, retryConfirmation, sendBackMessage, stageName, stopConfirmation, subtreeImpact, taskButtons,
   type ActTask, type ActTeam,
 } from "./actions";
 import type { DecisionPort } from "./decisions";
@@ -284,5 +284,37 @@ describe("task card", () => {
     expect(f.sent.map((call) => [call.action.kind, call.confirmed])).toEqual([["take_over", true], ["cancel", true], ["retry", true]]);
     // A task never tried retries without asking.
     expect(retryConfirmation(task({ id: 2 }))).toBeUndefined();
+  });
+});
+
+describe("member questions (task 55)", () => {
+  const asks = task({ id: 15, assignee: "qa", status: "in_progress", attempts: 1, questions: [{ id: "q1", text: "Keep the old field?", at: 1720 }] });
+
+  it("the owner answers a member's question once, as hgs team reply", async () => {
+    const f = fake();
+    const t = team({ tasks: [asks] });
+    expect(openQuestions(t).map((entry) => [entry.task.id, entry.question.id])).toEqual([[15, "q1"]]);
+    const actions = actionsOf(f, t);
+    expect(await actions.reply(asks, "q1", "   ")).toBeUndefined();
+    // Two clicks while the first is on its way: one reply.
+    const first = actions.reply(asks, "q1", " Yes, keep it. ");
+    const second = actions.reply(asks, "q1", "Yes, keep it.");
+    await Promise.all([first, second]);
+    expect(f.sent.map((call) => [call.team, call.action])).toEqual([["t1", { kind: "reply", question: "q1", text: "Yes, keep it." }]]);
+    expect(f.asked).toEqual([]);
+  });
+
+  it("a refusal says why; a decided task's question says it is closed and sends nothing", async () => {
+    const f = fake();
+    f.refuse = "hgs: Question q1 was already answered";
+    const actions = actionsOf(f, team({ tasks: [asks] }));
+    await actions.reply(asks, "q1", "Yes");
+    expect(actions.notice).toBe("Question q1 was already answered");
+    const decided = { ...asks, status: "cancelled" };
+    expect(questionClosed(decided)).toBe("Task #15 is decided, so this question is closed; nobody can answer it any more.");
+    expect(questionClosed(asks)).toBe("");
+    const before = f.sent.length;
+    expect(await actions.reply(decided, "q1", "Yes")).toBeUndefined();
+    expect(f.sent).toHaveLength(before);
   });
 });

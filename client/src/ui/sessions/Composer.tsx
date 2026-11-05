@@ -56,6 +56,7 @@ const COMPACT_WIDTH = 600;
 const USUAL_STOP = () => tr("Interrupt the current turn, like Escape in Terminal. The session stays open; queued messages follow the agent's native behavior.");
 const USUAL_CACHE_CLEAR = () => tr("Clear this agent’s conversation, like /clear in Terminal. Your unsent message stays here.");
 const CANCEL_SEND = () => tr("Cancel the pending send and unlock the message for editing. Compaction or startup continues; use Stop to interrupt the agent.");
+const CANCEL_LOCKED = () => tr("The desktop service is finishing this send; it can't be cancelled here.");
 const ATTACH = () => tr("Attach files, paste an image, or drop files onto this session");
 
 const toneClass = (tone: ChipTone) => (tone === "danger" ? "danger" : tone === "warning" ? "warn" : tone === "success" ? "ok" : "");
@@ -293,7 +294,7 @@ export function Composer() {
           </span>
         </Show>
         <Show when={!child() && v()?.cancel_send}>
-          <button type="button" class="tchip link" title={CANCEL_SEND()} onClick={() => { void composer.cancelSend(); editor.focus(); }}>{tr("Cancel send")}</button>
+          <button type="button" class="tchip link" disabled={v()?.cancel_locked} title={v()?.cancel_locked ? CANCEL_LOCKED() : CANCEL_SEND()} onClick={() => { void composer.cancelSend(); editor.focus(); }}>{tr("Cancel send")}</button>
         </Show>
         <ResizeHandle hidden={!input()} />
         <Show when={!input()}><span class="grow" /></Show>

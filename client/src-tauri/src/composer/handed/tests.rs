@@ -1,7 +1,7 @@
 //! The composer's Send handed to the desktop service, against a fake route:
 //! what each answer leaves in the draft, its row and Allow retry, and the
 //! read-only checks of a send the service still holds.
-use super::super::send::tests::{opened, ready, send_hub_on, sent, state};
+use super::super::send::tests::{eventually, opened, ready, send_hub_on, sent, state};
 use super::super::tests::{dir, drafts, session, until};
 use super::*;
 use crate::desktop_service::deferred_send::{NOT_SENT, NOT_STARTED, UNCONFIRMED};
@@ -9,6 +9,7 @@ use std::collections::VecDeque;
 use std::sync::atomic::{AtomicUsize, Ordering};
 use zerus_client_core::desktop::deferred_send::Outcome as Settled;
 use zerus_client_core::local_messages::Status;
+use zerus_client_core::Action;
 
 type Answer = Box<dyn Fn(&Plan) -> SendAnswer + Send + Sync>;
 /// What the fake route answers and what it saw.
@@ -458,4 +459,330 @@ fn a_panicking_check_ends_the_hold_with_allow_retry() {
     assert_eq!(view.status, UNCONFIRMED);
     assert!(held(&c).is_some(), "the identity stays for Allow retry");
     assert_eq!(offer.load(Ordering::SeqCst), 1, "never offered again");
+}
+
+type CompactReply = Box<dyn Fn(&CompactPlan) -> CompactAnswer + Send + Sync>;
+/// One offer the fake compact route saw: the session, the checkpoint and the
+/// stdin of each call.
+type CompactOffer = (String, Checkpoint, Vec<u8>, Vec<u8>);
+/// What the fake compact-to-send route answers and what it saw.
+#[derive(Default)]
+struct Compact {
+    answer: Mutex<Option<CompactReply>>,
+    /// Refuses the hand-over hook's offer, or answers before it.
+    early: Mutex<Option<CompactAnswer>>,
+    /// Holds the offer after its hand-over until released.
+    hold: Mutex<Option<std::sync::mpsc::Receiver<()>>>,
+    handed: AtomicUsize,
+    offered: Mutex<Vec<CompactOffer>>,
+    checks: Mutex<VecDeque<Checked>>,
+    checked: Mutex<Vec<CompactPlan>>,
+}
+fn compact_route(c: &Composers, service: &Arc<Compact>) {
+    let (offer, look) = (service.clone(), service.clone());
+    c.set_compact(CompactRoute {
+        offer: Arc::new(move |name, checkpoint, compaction, stdin, handing| {
+            lock(&offer.offered).push((
+                name.into(),
+                checkpoint.clone(),
+                compaction.to_vec(),
+                stdin.to_vec(),
+            ));
+            if let Some(early) = lock(&offer.early).take() {
+                return early;
+            }
+            let plan = compact_to_send::plan(name, checkpoint, compaction, stdin)
+                .expect("a valid original");
+            if !handing(&plan) {
+                return CompactAnswer::Settled(SendAnswer::Unsent(NOT_SENT.into()));
+            }
+            offer.handed.fetch_add(1, Ordering::SeqCst);
+            if let Some(hold) = lock(&offer.hold).take() {
+                let _ = hold.recv_timeout(Duration::from_secs(5));
+            }
+            (lock(&offer.answer).as_ref().expect("an answer"))(&plan)
+        }),
+        check: Arc::new(move |plan| {
+            lock(&look.checked).push(plan.clone());
+            lock(&look.checks)
+                .pop_front()
+                .unwrap_or(Checked::InProgress)
+        }),
+    });
+}
+fn compact_answer(
+    service: &Compact,
+    answer: impl Fn(&CompactPlan) -> CompactAnswer + Send + Sync + 'static,
+) {
+    *lock(&service.answer) = Some(Box::new(answer));
+}
+fn compact_recorded(plan: &CompactPlan) -> CompactAnswer {
+    CompactAnswer::Settled(SendAnswer::Recorded(Settled {
+        request_id: plan.send_request_id.clone(),
+        status: "submitted".into(),
+        input_sha256: plan.input_sha256.clone(),
+    }))
+}
+/// A ready session whose cache is cold: Send asks first.
+fn cold() -> Value {
+    let mut details = ready();
+    details["cache_hint"] = serde_json::json!({"status": "cold"});
+    details
+}
+/// This computer's own session on a cold cache.
+fn open_local_cold(c: &Composers) -> ComposerView {
+    c.open(Some(local()));
+    let mut batch = state(cold());
+    batch.activity[0].computer = zerus_client_core::ComputerId::from("");
+    c.observe(&batch);
+    until(c, |v| v.loaded && v.available)
+}
+/// "Compact and continue" on `view` with `text`.
+fn compact_and_continue(c: &Composers, view: &ComposerView, text: &str) {
+    let send::SendReply::Cold { token, .. } =
+        c.send_message(view.handle, 1, view.text_epoch, text.into(), 0, 0)
+    else {
+        panic!("no cold prompt")
+    };
+    c.answer(
+        token,
+        send::Answer::Cold {
+            action: zerus_client_core::cache::ColdAction::Compact,
+        },
+    );
+}
+fn direct_calls(fake: &send::tests::Fake) -> Vec<Action> {
+    lock(&fake.calls)
+        .iter()
+        .map(|(_, a, _)| a.clone())
+        .collect()
+}
+
+/// zerus-5wmh.66.4.8: the service takes the whole compact-to-send, from the
+/// version 2 checkpoint its waiting save holds, with the exact stdin of each
+/// direct call; nothing is compacted or sent directly, and a recorded send
+/// clears the draft and its identity.
+#[test]
+fn a_compact_and_continue_the_service_takes_is_offered_once_with_the_direct_stdins() {
+    let root = dir("handed-compact-recorded");
+    let (c, fake) = send_hub_on(&drafts(&root));
+    let service = Arc::new(Compact::default());
+    compact_route(&c, &service);
+    compact_answer(&service, compact_recorded);
+    let view = open_local_cold(&c);
+    compact_and_continue(&c, &view, "compact me");
+    let view = until(&c, |v| !v.sending && v.text.is_empty() && !v.cancel_send);
+    assert!(
+        direct_calls(&fake).is_empty(),
+        "never compacted or sent directly"
+    );
+    let offered = lock(&service.offered).clone();
+    assert_eq!(offered.len(), 1);
+    let (name, checkpoint, compaction, stdin) = &offered[0];
+    assert_eq!(name, &local().name);
+    assert_eq!(checkpoint.kind, Kind::CompactToSend);
+    assert_eq!(checkpoint.version, 2);
+    let send_id = checkpoint
+        .send_request_id
+        .clone()
+        .expect("its send reserved");
+    let target = zerus_client_core::Target {
+        computer: String::new(),
+        name: local().name,
+        run_id: "run-1".into(),
+        conversation_id: "conv-1".into(),
+    };
+    assert_eq!(
+        compaction,
+        &zerus_client_core::actions::invocation(
+            &target,
+            &Action::CompactContext,
+            &checkpoint.request_id
+        )
+        .unwrap()
+        .stdin
+        .unwrap()
+    );
+    assert_eq!(
+        stdin,
+        &zerus_client_core::actions::send_input(
+            &target,
+            "compact me",
+            &[],
+            None,
+            Some(&checkpoint.request_id),
+            &send_id
+        )
+        .unwrap()
+    );
+    // The row is the message's send.
+    assert_eq!(view.local.len(), 1);
+    assert_eq!(view.local[0].id, send_id);
+    assert_eq!(view.local[0].status, Status::Sent);
+    assert!(!view.uncertain && !view.delivery_pending && !view.cancel_locked);
+    assert!(held(&c).is_none(), "a definite end releases the identity");
+}
+
+/// Each settled ending keeps its meaning: one that never sent releases the
+/// identity and keeps the draft with the service's line; Unknown stays
+/// uncertain until Allow retry.
+#[test]
+fn a_handed_compact_and_continue_ends_as_its_send_ended() {
+    for (answer, uncertain, line) in [
+        (
+            SendAnswer::Unsent(compact_to_send::COMPACTION_INCOMPLETE.into()),
+            false,
+            compact_to_send::COMPACTION_INCOMPLETE,
+        ),
+        (
+            SendAnswer::Unsent(compact_to_send::COMPACTION_UNCONFIRMED.into()),
+            false,
+            compact_to_send::COMPACTION_UNCONFIRMED,
+        ),
+        (SendAnswer::Unsent(NOT_STARTED.into()), false, NOT_STARTED),
+        (
+            SendAnswer::Unconfirmed(UNCONFIRMED.into()),
+            true,
+            UNCONFIRMED,
+        ),
+    ] {
+        let root = dir("handed-compact-ends");
+        let (c, fake) = send_hub_on(&drafts(&root));
+        let service = Arc::new(Compact::default());
+        compact_route(&c, &service);
+        let settled = Mutex::new(Some(answer));
+        compact_answer(&service, move |_| {
+            CompactAnswer::Settled(lock(&settled).take().expect("answered once"))
+        });
+        let view = open_local_cold(&c);
+        compact_and_continue(&c, &view, "keep me");
+        let view = until(&c, |v| !v.sending && !v.cancel_send && v.status_error);
+        assert_eq!(view.text, "keep me", "{line}");
+        assert_eq!(view.uncertain, uncertain, "{line}");
+        assert_eq!(view.status, line);
+        assert_eq!(held(&c).is_some(), uncertain, "{line}: identity");
+        assert!(direct_calls(&fake).is_empty(), "{line}");
+        assert_eq!(view.local.len(), 1, "{line}");
+        assert_eq!(view.local[0].uncertain, uncertain, "{line}");
+    }
+}
+
+/// One the service does not take goes the unchanged direct way; one that
+/// never reached it ends with nothing run.
+#[test]
+fn a_compact_and_continue_the_service_does_not_take_compacts_directly() {
+    // Decided before any offer: compacted directly.
+    let root = dir("handed-compact-direct");
+    let (c, fake) = send_hub_on(&drafts(&root));
+    let service = Arc::new(Compact::default());
+    compact_route(&c, &service);
+    *lock(&service.early) = Some(CompactAnswer::Direct);
+    let view = open_local_cold(&c);
+    compact_and_continue(&c, &view, "direct");
+    eventually(|| direct_calls(&fake).contains(&Action::CompactContext));
+    assert_eq!(service.handed.load(Ordering::SeqCst), 0);
+    // Another computer's session is never offered.
+    let root = dir("handed-compact-peer");
+    let (c, fake) = send_hub_on(&drafts(&root));
+    let service = Arc::new(Compact::default());
+    compact_route(&c, &service);
+    let view = opened(&c, cold());
+    compact_and_continue(&c, &view, "peer");
+    eventually(|| direct_calls(&fake).contains(&Action::CompactContext));
+    assert!(lock(&service.offered).is_empty());
+    // Nothing reached the service: the draft stays, nothing ran.
+    let root = dir("handed-compact-unsent");
+    let (c, fake) = send_hub_on(&drafts(&root));
+    let service = Arc::new(Compact::default());
+    compact_route(&c, &service);
+    *lock(&service.early) = Some(CompactAnswer::Settled(SendAnswer::Unsent(NOT_SENT.into())));
+    let view = open_local_cold(&c);
+    compact_and_continue(&c, &view, "unsent");
+    let view = until(&c, |v| !v.cancel_send && v.status_error);
+    assert_eq!(view.status, NOT_SENT);
+    assert_eq!(view.text, "unsent");
+    assert!(!view.uncertain && held(&c).is_none() && view.local.is_empty());
+    assert!(direct_calls(&fake).is_empty());
+}
+
+/// design-tima: from the hand-over, the service's line shows at once and
+/// Cancel send stays shown but locked, through the read-only checks, until
+/// the result settles.
+#[test]
+fn a_handed_compact_and_continue_locks_cancel_send_and_is_checked_until_settled() {
+    let root = dir("handed-compact-pending");
+    let (c, fake) = send_hub_on(&drafts(&root));
+    let service = Arc::new(Compact::default());
+    compact_route(&c, &service);
+    let (release, hold) = std::sync::mpsc::channel();
+    *lock(&service.hold) = Some(hold);
+    compact_answer(&service, |plan| CompactAnswer::Pending(plan.clone()));
+    let view = open_local_cold(&c);
+    compact_and_continue(&c, &view, "slow");
+    // Handed, its own call still waiting for the result.
+    let view = until(&c, |v| v.cancel_locked);
+    assert!(view.cancel_send && view.sending && !view.status_error);
+    assert_eq!(view.status, STILL_SENDING);
+    assert_eq!(view.local[0].status, Status::Sending);
+    // A Cancel send sent anyway changes nothing.
+    c.cancel_send(view.handle);
+    assert!(c.current().unwrap().cancel_locked);
+    release.send(()).unwrap();
+    let view = until(&c, |v| v.delivery_pending);
+    assert!(view.cancel_send && view.cancel_locked && !view.status_error);
+    assert_eq!(view.status, STILL_SENDING);
+    // The checks go to the compact route by its exact plan.
+    lock(&service.checks).extend([
+        Checked::InProgress,
+        Checked::Settled(SendAnswer::Recorded(Settled {
+            request_id: String::new(),
+            status: "submitted".into(),
+            input_sha256: String::new(),
+        })),
+    ]);
+    let view = ticks(&c, &fake, LONGEST, |v| !v.delivery_pending);
+    assert!(view.text.is_empty() && !view.cancel_send && !view.cancel_locked);
+    assert!(!view.uncertain && held(&c).is_none());
+    assert_eq!(view.local[0].status, Status::Sent);
+    let checked = lock(&service.checked).clone();
+    assert!(checked.len() >= 2);
+    assert_eq!(
+        checked[0].compaction_request_id,
+        view_held_compaction(&service)
+    );
+    assert!(direct_calls(&fake).is_empty());
+}
+fn view_held_compaction(service: &Compact) -> String {
+    lock(&service.offered)[0].1.request_id.clone()
+}
+
+/// A reloaded draft that holds a compact-to-send's identity is only looked
+/// up through its route, never offered again.
+#[test]
+fn a_reloaded_compact_and_continue_is_only_looked_up() {
+    let root = dir("handed-compact-reload");
+    let store = drafts(&root);
+    let (c, _) = send_hub_on(&store);
+    let service = Arc::new(Compact::default());
+    compact_route(&c, &service);
+    compact_answer(&service, |plan| CompactAnswer::Pending(plan.clone()));
+    let view = open_local_cold(&c);
+    compact_and_continue(&c, &view, "across a restart");
+    until(&c, |v| v.delivery_pending);
+    let id = held(&c).unwrap().request_id;
+    c.flush();
+    store.flush();
+    drop(c);
+    let (again, fake) = send_hub_on(&store);
+    let looked = Arc::new(Compact::default());
+    compact_route(&again, &looked);
+    compact_answer(&looked, |_| panic!("a reload never offers"));
+    lock(&looked.checks).extend([Checked::InProgress]);
+    let view = open_local(&again);
+    assert!(view.uncertain && !view.delivery_pending, "loaded uncertain");
+    again.tick();
+    let view = ticks(&again, &fake, 0.0, |v| v.delivery_pending);
+    assert_eq!(view.status, STILL_SENDING);
+    assert_eq!(lock(&looked.checked)[0].compaction_request_id, id);
+    assert!(lock(&looked.offered).is_empty());
 }

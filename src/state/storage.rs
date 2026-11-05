@@ -609,6 +609,47 @@ pub(super) fn live_sessions() -> Result<(Snapshot, BTreeMap<String, String>)> {
     Ok((result, names))
 }
 
+/// The terminal session `record`'s agent runs in (zerus-ucck P3b): its
+/// `terminal_name`, or for a record an older build wrote, its label, which
+/// was then its terminal's name too. Every step from a record to its
+/// terminal goes through this, never through the label.
+pub(crate) fn terminal_name(record: &Value) -> &str {
+    match string(record, "terminal_name") {
+        "" => string(record, "name"),
+        terminal => terminal,
+    }
+}
+
+/// The live panes of `record`'s own terminal, matched or not.
+pub(super) fn panes_of<'a>(snapshot: &'a Snapshot, record: &Value) -> Option<&'a Vec<Pane>> {
+    snapshot.get(terminal_name(record))
+}
+
+/// Whether `record`'s own terminal holds this session (#1445 review): its
+/// pane and run match the record, or a launch of this same label (its
+/// `HGS_SESSION`) holds it, such as the session's own resume still starting.
+/// A terminal under that name that another session's launch started, or that
+/// hgs never started, never makes the session live. An environment that
+/// cannot be read is an error, never absence.
+pub(super) fn terminal_live(snapshot: &Snapshot, record: &Value) -> Result<bool> {
+    if matches(record, panes_of(snapshot, record)) {
+        return Ok(true);
+    }
+    launched_as(snapshot, terminal_name(record), string(record, "name"))
+}
+
+/// Whether the live terminal `terminal` was started by a launch of the label
+/// `label`; false when it is not live or another launch, or none, started it.
+pub(super) fn launched_as(snapshot: &Snapshot, terminal: &str, label: &str) -> Result<bool> {
+    if !snapshot.contains_key(terminal) {
+        return Ok(false);
+    }
+    let launched = backend::current().session_variable(terminal, "HGS_SESSION").map_err(|error| {
+        format!("{error}; it may be this session's own launch, so nothing was changed")
+    })?;
+    Ok(launched.as_deref() == Some(label))
+}
+
 pub(super) fn matches(record: &Value, panes: Option<&Vec<Pane>>) -> bool {
     panes
         .map(|panes| {

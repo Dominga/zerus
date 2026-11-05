@@ -1300,6 +1300,143 @@ class SessionIdentity(Harness):
         self.assertEqual(label(name).read_bytes(), first_bytes)
 
 
+    # zerus-ucck P3b: a terminal that hgs never started may hold a saved
+    # session's label. Resume then mints the session its own terminal name,
+    # label~<id8>, and every command acts on that terminal, never the other.
+    def test_a_resume_beside_an_untracked_terminal_takes_its_own_name(self):
+        name = self.start(tag="held")
+        session = self.binding(name)["session_id"]
+        self.send_event(name, "Stop", last_assistant_message="done")
+        self.hgs("pause", name)
+        own = f"{name}~{session[:8]}"
+        # A terminal some hgs launch started, such as this session's own
+        # resume still starting, keeps a resume away: never a second agent.
+        self.t("new-session", "-d", "-s", name, "-e", f"HGS_SESSION={name}", "sleep 600")
+        run = self.binding(name)["run_id"]
+        self.hgs("resume", name, "-d")
+        self.assertEqual(self.binding(name)["run_id"], run)
+        self.assertNotEqual(subprocess.run([str(self.bin / "tmux"), "has-session", "-t", "=" + own],
+                                           env=self.env, capture_output=True).returncode, 0)
+        self.t("kill-session", "-t", "=" + name)
+        self.t("new-session", "-d", "-s", name, "sleep 600")
+        self.resume(name)
+        record = self.binding(name)
+        self.assertEqual((record["session_id"], record["terminal_name"]), (session, own))
+        self.t("has-session", "-t", "=" + own)
+        self.t("has-session", "-t", "=" + name)
+        rows = json.loads(self.hgs("ls", "--local", "--json"))["sessions"]
+        mine = [row for row in rows if row.get("session_id") == session]
+        self.assertEqual(len(mine), 1, rows)
+        self.assertEqual((mine[0]["name"], mine[0]["tag"], mine[0]["run_id"]), (name, "held", record["run_id"]))
+        self.assertEqual(json.loads(self.hgs("inspect", name))["run_id"], record["run_id"])
+        self.assertIn("=" + own, self.hgs("kill", name, "--dry-run"))
+        # Pause stops the session's own terminal; the other one stays, and
+        # `--all` pauses sessions, not every terminal.
+        self.send_event(name, "Stop", last_assistant_message="done")
+        self.hgs("pause", "--all")
+        self.assertTrue(self.binding(name)["paused"])
+        self.t("has-session", "-t", "=" + name)
+        # A stale terminal name whose terminal is now another's: not live.
+        self.t("new-session", "-d", "-s", own, "sleep 600")
+        rows = json.loads(self.hgs("ls", "--local", "--json"))["sessions"]
+        self.assertFalse([row for row in rows if row.get("session_id") == session and row.get("run_id")
+                          and row.get("state") not in ("paused", "stopped")], rows)
+        # Both names taken: the whole session ID.
+        self.resume(name)
+        self.assertEqual(self.binding(name)["terminal_name"], f"{name}~{session}")
+        # Kill ends the session's own terminal only.
+        self.hgs("kill", name)
+        self.t("has-session", "-t", "=" + name)
+        self.t("has-session", "-t", "=" + own)
+        self.assertEqual(self.binding(name), {})
+
+
+    # #1445 review (review-q2): a terminal name whose pane and run are not the
+    # record's never makes a session live or hides it. A rename of a paused
+    # session clears its old terminal name; a stale one, as the first P3b
+    # head left it, held by another session's launch, changes nothing either.
+    def test_another_sessions_terminal_never_hides_a_renamed_session(self):
+        old = self.start(tag="old")
+        session = self.binding(old)["session_id"]
+        self.send_event(old, "Stop", last_assistant_message="done")
+        self.hgs("pause", old)
+        renamed = "claude/p/renamed"
+        self.hgs("rename", old, renamed)
+        self.assertNotIn("terminal_name", self.binding(renamed))
+        path = self.root / "state" / (hashlib.sha256(renamed.encode()).hexdigest() + ".json")
+        path.write_text(json.dumps(dict(json.loads(path.read_text()), terminal_name=old)) + "\n")
+        other = self.start(tag="old")
+        self.assertNotEqual(self.binding(other)["session_id"], session)
+        rows = json.loads(self.hgs("ls", "--local", "--json"))["sessions"]
+        mine = [row for row in rows if row.get("session_id") == session]
+        self.assertEqual([(row["name"], row.get("state")) for row in mine], [(renamed, "paused")], rows)
+        self.resume(renamed)
+        self.assertEqual(self.binding(renamed)["terminal_name"], renamed)
+        self.hgs("kill", renamed)
+        self.t("has-session", "-t", "=" + other)
+        self.assertTrue(self.binding(other)["conversation_id"])
+
+    # #1445 review: the session's own launch may start under any name a launch
+    # of it can mint, not only its recorded terminal name (here one a suffixed
+    # run left). A launch of its label holding any of them keeps a resume away.
+    def test_a_starting_launch_under_any_minted_name_keeps_resume_away(self):
+        name = self.start(tag="minted")
+        self.send_event(name, "Stop", last_assistant_message="done")
+        self.hgs("pause", name)
+        before = self.binding(name)
+        path = self.root / "state" / (hashlib.sha256(name.encode()).hexdigest() + ".json")
+        stale = f"{name}~{before['session_id'][:8]}"
+        path.write_text(json.dumps(dict(json.loads(path.read_text()), terminal_name=stale)) + "\n")
+        self.t("new-session", "-d", "-s", name, "-e", f"HGS_SESSION={name}", "sleep 600")
+        self.hgs("resume", name, "-d")
+        self.assertEqual(self.binding(name)["run_id"], before["run_id"])
+        for minted in (stale, f"{name}~{before['session_id']}"):
+            self.assertNotEqual(subprocess.run([str(self.bin / "tmux"), "has-session", "-t", "=" + minted],
+                                               env=self.env, capture_output=True).returncode, 0)
+
+    # #1445 review (desktop-u): a terminal environment that cannot be read is
+    # never proof that hgs did not start it. A resume beside a terminal some
+    # launch marked refuses when the environment read fails, at the first
+    # check or only at the final one under the lock, and starts nothing.
+    def test_an_unreadable_launch_environment_never_starts_a_second_resume(self):
+        name = self.start(tag="env-unavailable")
+        self.send_event(name, "Stop", last_assistant_message="done")
+        self.hgs("pause", name)
+        before = self.binding(name)
+        own = f"{name}~{before['session_id'][:8]}"
+        self.t("new-session", "-d", "-s", name, "-e", f"HGS_SESSION={name}", "sleep 600")
+        original = (self.bin / "tmux").read_text()
+        calls = self.root / "show-environment-calls"
+        # A marked launch read at the first check; then an unmarked terminal,
+        # read healthily at the first check and unreadable at the final one.
+        for healthy in (0, 1):
+            if healthy:
+                self.t("kill-session", "-t", "=" + name)
+                self.t("new-session", "-d", "-s", name, "sleep 600")
+            calls.write_text("")
+            (self.bin / "tmux").write_text(
+                "#!/bin/sh\n"
+                'if [ "$1" = show-environment ]; then\n'
+                f"  echo x >> {shlex.quote(str(calls))}\n"
+                f"  if [ \"$(wc -l < {shlex.quote(str(calls))})\" -gt {healthy} ]; then\n"
+                "    echo 'fixture environment unreadable' >&2\n    exit 63\n  fi\nfi\n"
+                + original.split("\n", 1)[1])
+            result = subprocess.run([str(HGS), "resume", name, "-d"], env=self.env,
+                                    capture_output=True, text=True, timeout=20, input="")
+            (self.bin / "tmux").write_text(original)
+            self.assertGreater(len(calls.read_text().splitlines()), healthy, "the read was reached")
+            self.assertNotEqual(result.returncode, 0, result.stdout + result.stderr)
+            self.assertIn("cannot be read", result.stderr)
+            self.assertNotEqual(subprocess.run([str(self.bin / "tmux"), "has-session", "-t", "=" + own],
+                                               env=self.env, capture_output=True).returncode, 0)
+            self.assertEqual(self.binding(name)["run_id"], before["run_id"])
+        # Readable again: the marked launch still keeps the resume away.
+        self.t("kill-session", "-t", "=" + name)
+        self.t("new-session", "-d", "-s", name, "-e", f"HGS_SESSION={name}", "sleep 600")
+        self.hgs("resume", name, "-d")
+        self.assertEqual(self.binding(name)["run_id"], before["run_id"])
+
+
     # zerus-ucck P1b: --session-id selects the session a command names first,
     # and a hook prefers the record that carries its HGS_SESSION_ID without
     # depending on it: an older hgs can change a session's ID once.

@@ -108,7 +108,7 @@ fn checked(name: &str, request: &Request) -> Result<Value> {
         || string(&record, "conversation_id") != request.expected_conversation_id
         || !string(&record, "archive_id").is_empty()
         || !process_alive(&record)
-        || !matches(&record, live()?.get(name))
+        || !matches(&record, panes_of(&live()?, &record))
     {
         return Err("Terminal no longer belongs to this exact live session".into());
     }
@@ -147,7 +147,7 @@ fn frame(record: &Value) -> Result<Value> {
         || fields[1] != pane
         || fields[9] != "0"
         || fields[10] != string(record, "run_id")
-        || fields[11] != string(record, "name")
+        || fields[11] != terminal_name(record)
         || !fields[0]
             .strip_prefix('$')
             .is_some_and(|id| !id.is_empty() && id.bytes().all(|c| c.is_ascii_digit()))

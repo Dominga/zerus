@@ -277,7 +277,7 @@ fn checked_input(
     {
         return Err("session identity changed; refresh before sending".into());
     }
-    if !matches(&record, live()?.get(name)) || !process_alive(&record) {
+    if !matches(&record, panes_of(&live()?, &record)) || !process_alive(&record) {
         return Err("the exact agent process is no longer running; resume it explicitly".into());
     }
     if claude_approval::current(&record).is_some() {
@@ -703,7 +703,8 @@ fn terminal_check(record: &Value, empty: bool, sending: bool) -> Result<()> {
     let terminal = backend::current();
     let claim = backend::InputClaim {
         pane,
-        name: string(record, "name"),
+        // The pane's session is the record's own terminal (P3b).
+        name: terminal_name(record),
         run_id: string(record, "run_id"),
         agent: string(record, "agent"),
         pid: record["pid"].as_u64(),
@@ -992,7 +993,7 @@ fn submit_with(name: &str, input: &[u8], recovery_id: Option<&str>, answer: bool
         if string(&record, "agent") == "codex" {
             settle_codex_paste(terminal, pane, &pasted);
         }
-        if !process_alive(&record) || !matches(&record, live()?.get(name)) {
+        if !process_alive(&record) || !matches(&record, panes_of(&live()?, &record)) {
             return Err("agent changed after paste".into());
         }
         checked_terminal(&record, false)?;

@@ -2113,7 +2113,7 @@ pub(super) fn dispatch_settings(args: &[String]) -> Result<i32> {
         return Err("pending settings target changed; refresh before applying".into());
     }
     let running = process_alive(&record);
-    if running && !matches(&record, live()?.get(name)) {
+    if running && !matches(&record, panes_of(&live()?, &record)) {
         return Err(
             "the tracked terminal identity changed; refresh before changing settings".into(),
         );

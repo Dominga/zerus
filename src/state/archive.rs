@@ -121,9 +121,11 @@ pub(super) fn save(record: &Value) -> Result<String> {
         archived["archived_at"] = json!(now());
         archived["state"] = json!("archived");
         archived.as_object_mut().unwrap().remove("pausing");
-        // An archive holds no label and lives in no layout: a restore writes
-        // wherever its label then allows (P3a: the label's own path).
+        // An archive holds no label, lives in no layout and has no terminal:
+        // a restore writes wherever its label then allows (P3a: the label's
+        // own path), and its launch names a terminal anew (P3b).
         archived.as_object_mut().unwrap().remove("layout");
+        archived.as_object_mut().unwrap().remove("terminal_name");
         atomic_record(&path(&id)?, &mut archived)?;
         id
     };
@@ -168,7 +170,8 @@ pub(super) fn contains_selected(record: &Value) -> Result<bool> {
 }
 
 fn reconcile_candidate(record: &Value, snapshot: &Snapshot) -> bool {
-    !snapshot.contains_key(string(record, "name"))
+    // An environment that cannot be read counts as live: never archived.
+    !terminal_live(snapshot, record).unwrap_or(true)
         && !process_alive(record)
         && record.get("pausing").is_none()
         && !record["paused"].as_bool().unwrap_or(false)
@@ -213,7 +216,7 @@ pub(super) fn reconcile_locked(snapshot: &Snapshot) -> Result<(Vec<Value>, Vec<V
     let bindings = super::storage::records()?;
     let mut saved = false;
     for record in &bindings {
-        if snapshot.contains_key(string(record, "name"))
+        if terminal_live(snapshot, record).unwrap_or(true)
             || process_alive(record)
             || record.get("pausing").is_some()
             || record["paused"].as_bool().unwrap_or(false)
@@ -255,10 +258,10 @@ pub(super) fn reconcile_active_locked(snapshot: &Snapshot) -> Result<Vec<Value>>
     let mut catalog=None;
     for record in bindings {
         // A live exact binding cannot be the crash-left copy of a completed run.
-        if matches(&record,snapshot.get(string(&record,"name"))) || process_alive(&record) { result.push(record);continue; }
+        if matches(&record,panes_of(snapshot, &record)) || process_alive(&record) { result.push(record);continue; }
         if catalog.is_none(){catalog=Some(archive_catalog::catalog()?);}
         if archive_catalog::contains(catalog.as_ref().unwrap(), &record)? { save(&record)?; continue; }
-        if snapshot.contains_key(string(&record, "name")) || process_alive(&record)
+        if terminal_live(snapshot, &record).unwrap_or(true) || process_alive(&record)
             || record.get("pausing").is_some() || record["paused"].as_bool().unwrap_or(false)
             || !string(&record, "expected_id").is_empty() {
             result.push(record); continue;
@@ -275,12 +278,13 @@ pub(super) fn manual(name: &str, dry: bool) -> Result<i32> { manual_scoped(name,
 
 pub(super) fn manual_scoped(name: &str, dry: bool, scope: Option<&session_action::Scope>) -> Result<i32> {
     let _guard = lock(None)?;
-    if live()?.contains_key(name) {
+    let mut record = read(name)?;
+    // The session's own terminal (P3b), not another under its label.
+    if terminal_live(&live()?, &record)? {
         return Err(format!(
             "{name}: only stopped or paused sessions can be archived"
         ));
     }
-    let mut record = read(name)?;
     if let Some(scope)=scope {scope.check(&record)?;}
     if process_alive(&record) {
         return Err(format!("{name}: tracked agent process is still running"));

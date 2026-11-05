@@ -651,6 +651,19 @@ impl TerminalBackend for Tmux {
         let line = environment.trim_end_matches('\n');
         line.strip_prefix("HGS_CLIENT=").unwrap_or(line).to_owned()
     }
+    fn session_variable(&self, name: &str, key: &str) -> Result<Option<String>> {
+        // The session's whole environment: a listing that succeeds and lacks
+        // the key proves it unset, which a failed lookup of the key alone
+        // could not tell from an unreadable terminal.
+        let listing = platform::capture("tmux", &["show-environment", "-t", &format!("={name}")])
+            .ok_or_else(|| format!("{name}: the terminal's environment cannot be read"))?;
+        let prefix = format!("{key}=");
+        Ok(listing
+            .lines()
+            .find_map(|line| line.strip_prefix(&prefix))
+            .filter(|value| !value.is_empty())
+            .map(str::to_owned))
+    }
     fn notify(&self, client: &str, text: &str) {
         platform::silent(
             "tmux",

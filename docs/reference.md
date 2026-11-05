@@ -350,6 +350,31 @@ longer found treats the session as changed and never retries the call: its next
 action uses the refreshed listing, with the name and its expected run and
 conversation identities when the row lists no ID.
 
+A session's terminal has its own name, kept in the record as `terminal_name`
+(zerus-ucck P3b). A launch gives the terminal the session's label when no
+terminal session has that name, so `tmux attach -t LABEL` reaches the session
+as before. A record an older hgs wrote has no `terminal_name`; its terminal is
+its label. A tmux session that hgs never started, such as one opened by hand,
+may already hold the label of a saved session. A resume or Start fresh then
+names the session's terminal `LABEL~<first 8 characters of its session ID>`,
+or `LABEL~<session ID>` when that is taken too, and refuses when both are.
+Earlier hgs skipped such a resume as already live. In that case `tmux attach -t
+LABEL` reaches the other tmux session, while `hgs LABEL`, `hgs a LABEL`, `hgs
+kill LABEL`, pause, terminate and every other command act on the session's
+own terminal, after checking its pane and run as before; none of them touches
+the other tmux session. `hgs ls` lists the session under its label. A rename
+moves a live session's terminal to the new name and records it; when the move
+fails, nothing changes. A rename of a stopped or paused session clears its
+terminal name, so its next launch names one anew. A session is live only in
+its own terminal, with its pane and run, or while a launch of its own label
+holds that terminal; a tmux session another launch started under its terminal
+name never makes it live and never hides it from `hgs ls`. When hgs cannot
+read a terminal's environment to tell whose launch it is, it refuses and
+starts nothing. A new launch, fork, rename or restore still refuses a
+label that any tmux session holds. A build older than this one finds no pane
+for a session whose terminal is named otherwise, shows it as not live and
+drops `terminal_name` when it rewrites the record.
+
 The desktop client adds `--session-id` only to explicit actions: send, send
 now, answer, queued-message removal, clear and compact, interrupt, model
 settings, pause, resume, start fresh, rename, fork, archive, terminate, kill

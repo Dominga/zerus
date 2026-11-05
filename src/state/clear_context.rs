@@ -576,7 +576,7 @@ fn checked_chooser(name: &str, request: &Request) -> Result<Value> {
     if string(&record,"run_id")!=request.expected_run_id || string(&record,"conversation_id")!=request.expected_conversation_id {
         return Err("session identity changed; refresh before clearing".into());
     }
-    if !matches(&record,live()?.get(name)) || !process_alive(&record) {
+    if !matches(&record,panes_of(&live()?,&record)) || !process_alive(&record) {
         return Err("the exact agent process is no longer running; resume it explicitly".into());
     }
     if !dismissable(&record,true) {return Err("Claude is no longer waiting in a chooser; refresh before clearing".into());}

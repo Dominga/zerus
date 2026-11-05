@@ -1418,8 +1418,9 @@ fn bound_terminal(session: &str) -> Result<Option<(String, String)>> {
         let message = state::session_id::selected().map(|selection| selection.changed());
         Error::new(1, message.unwrap_or_else(|| format!("{session} changed; refresh and retry")))
     };
+    let own = state::terminal_of(session).map_err(|e| Error::new(1, e))?;
     let info = terminal()
-        .probe(Target::Name(session), &[PaneField::SessionId, PaneField::RunMarker])
+        .probe(Target::Name(&own), &[PaneField::SessionId, PaneField::RunMarker])
         .ok_or_else(changed)?;
     let fields = info.fields();
     if fields.len() != 2
@@ -1800,7 +1801,10 @@ fn attach_command(config: &Config, args: &[String], client: &str, mut dry: bool)
     if dry {
         println!(
             "{}",
-            terminal().describe(&DryRun::AttachExisting { session, run_id })
+            terminal().describe(&DryRun::AttachExisting {
+                session: &state::terminal_of(session).map_err(|e| Error::new(1, e))?,
+                run_id,
+            })
         );
         return Ok(0);
     }
@@ -1816,9 +1820,11 @@ fn attach_command(config: &Config, args: &[String], client: &str, mut dry: bool)
     // Resolve exact name to an immutable tmux session ID before checking the run.
     // If it disappears later, attach fails instead of creating or selecting a new one.
     const ENDED: &str = "session is no longer running; resume it explicitly";
+    // The session's own terminal (P3b), never another under its label.
+    let own = state::terminal_of(session).map_err(|e| Error::new(1, e))?;
     let target = terminal()
         .probe(
-            Target::Name(session),
+            Target::Name(&own),
             &[PaneField::SessionId, PaneField::RunMarker],
         )
         .ok_or_else(|| Error::new(1, ENDED))?;
@@ -1844,13 +1850,19 @@ fn attach(config: &Config, session: &str, client: &str, dry: bool) -> Result<i32
     if dry {
         println!(
             "{}",
-            terminal().describe(&DryRun::Attach { session, client })
+            terminal().describe(&DryRun::Attach {
+                session: &state::terminal_of(session).map_err(|e| Error::new(1, e))?,
+                client,
+            })
         );
         return Ok(0);
     }
     nested_guard(false, None)?;
     terminal().attachable()?;
-    if !session_exists(session) && config.state.is_dir() {
+    // The session's own terminal (P3b); a resume may name a new one, so it
+    // is read again after it.
+    let own = |session: &str| state::terminal_of(session).map_err(|e| Error::new(1, e));
+    if !session_exists(&own(session)?) && config.state.is_dir() {
         env::set_var("HGS_CLIENT", client);
         let rc = state_command("resume", &[session.into()])?;
         if rc != 0 {
@@ -1859,7 +1871,7 @@ fn attach(config: &Config, session: &str, client: &str, dry: bool) -> Result<i32
     }
     match bound_terminal(session)? {
         Some((id, run)) => attach_target(config, session, client, Target::Session(&id), Some(&run)),
-        None => attach_target(config, session, client, Target::Name(session), None),
+        None => attach_target(config, session, client, Target::Name(&own(session)?), None),
     }
 }
 
@@ -1895,8 +1907,9 @@ fn attach_requested(
 ) -> Result<i32> {
     // Capture the tmux identity before rechecking the conversation. If the name
     // is reused afterwards, attach must fail instead of selecting its new owner.
+    let own = state::terminal_of(session).map_err(|e| Error::new(1, e))?;
     let target = terminal()
-        .probe(Target::Name(session), &[PaneField::SessionId])
+        .probe(Target::Name(&own), &[PaneField::SessionId])
         .filter(|info| {
             info.value().strip_prefix('$').is_some_and(|value| {
                 !value.is_empty() && value.chars().all(|ch| ch.is_ascii_digit())
@@ -1942,10 +1955,13 @@ fn kill(config: &Config, args: &[String], mut dry: bool) -> Result<i32> {
         return state_command("forget", &args);
     }
     if dry {
-        println!("{}", terminal().describe(&DryRun::Kill { session }));
+        let own = state::terminal_of(session).map_err(|e| Error::new(1, e))?;
+        println!("{}", terminal().describe(&DryRun::Kill { session: &own }));
         return Ok(0);
     }
-    if session_exists(session) {
+    // The session's own terminal (P3b), never another under its label.
+    let own = state::terminal_of(session).map_err(|e| Error::new(1, e))?;
+    if session_exists(&own) {
         let rc = match bound_terminal(session)? {
             Some((id, _)) => {
                 terminal()
@@ -1953,7 +1969,7 @@ fn kill(config: &Config, args: &[String], mut dry: bool) -> Result<i32> {
                     .map_err(|error| Error::new(1, error))?;
                 0
             }
-            None => terminal().kill(session)?,
+            None => terminal().kill(&own)?,
         };
         if rc != 0 {
             return Ok(rc);
@@ -2856,6 +2872,8 @@ fn launch(
     {
         spec.env.extend([
             format!("HGS_SESSION={session}"),
+            // A new session's terminal is its label (zerus-ucck P3b).
+            format!("HGS_TERMINAL_NAME={session}"),
             format!("HGS_AGENT={command_name}"),
             format!(
                 "HGS_ACCOUNT_ID={}",

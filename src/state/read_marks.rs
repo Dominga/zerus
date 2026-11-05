@@ -414,8 +414,8 @@ fn current(name: &str) -> Result<Option<Current>> {
         return Ok(None);
     }
     let snapshot = live()?;
-    let panes = snapshot.get(name);
-    // A name reused by another pane is not this session.
+    let panes = panes_of(&snapshot, &record);
+    // A terminal name reused by another pane is not this session.
     if panes.is_some() && !matches(&record, panes) {
         return Ok(None);
     }

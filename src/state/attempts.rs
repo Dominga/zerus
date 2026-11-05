@@ -106,7 +106,12 @@ pub(super) fn binding_exists(name: &str) -> Result<bool> {
     }
     // Reads do not retire the record. The launch runner repeats this decision
     // under the writer lock immediately before replacing it.
-    Ok(live()?.contains_key(name) || !retryable(&record, None))
+    // A new session's terminal is its label (P3b): the record's own terminal
+    // and the label's both count.
+    let snapshot = live()?;
+    Ok(terminal_live(&snapshot, &record).unwrap_or(true)
+        || snapshot.contains_key(name)
+        || !retryable(&record, None))
 }
 
 fn save(record: &Value) -> Result<()> {
@@ -125,6 +130,7 @@ fn save(record: &Value) -> Result<()> {
 /// pane but before changing its run marker or replacing the durable binding.
 pub(super) fn prepare_replacement(
     record: &Value,
+    terminal: &str,
     pane: &str,
     token: &str,
     fresh: bool,
@@ -132,7 +138,8 @@ pub(super) fn prepare_replacement(
 ) -> Result<()> {
     let name = string(record, "name");
     let snapshot = live()?;
-    let Some(panes) = snapshot.get(name) else {
+    // The launch's own terminal (P3b), whatever the replaced record's was.
+    let Some(panes) = snapshot.get(terminal) else {
         return Err(format!("{name}: launch pane disappeared"));
     };
     if panes.len() != 1
@@ -193,10 +200,13 @@ pub(super) fn agent_home_matches(record: &Value, agent: &str) -> Result<bool> {
 
 pub(super) fn startup_failure(name: &str) -> Result<Option<String>> {
     let _guard = lock(None)?;
-    if !record_path(name).exists() || live()?.contains_key(name) {
+    if !record_path(name).exists() {
         return Ok(None);
     }
     let record = read(name)?;
+    if terminal_live(&live()?, &record).unwrap_or(true) {
+        return Ok(None);
+    }
     if !unconfirmed(&record) || !identities_gone(&record) {
         return Ok(None);
     }

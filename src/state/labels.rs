@@ -895,6 +895,23 @@ mod tests {
         control("cuts");
     }
 
+    /// #1445 review (desktop-u): the terminal route of a label keeps the
+    /// command's selection. A selected record that vanishes, or a dangling
+    /// link where a record should be, refuses; only a name with no record
+    /// and no selection names a terminal itself.
+    #[test]
+    fn a_terminal_route_keeps_the_selection() {
+        control("terminal-route");
+    }
+
+    /// zerus-ucck P3b (D5): a rename moves the session's terminal by its `$N`
+    /// under the writer lock; when that move fails, nothing changes and the
+    /// record keeps its terminal name.
+    #[test]
+    fn a_failed_terminal_move_keeps_the_record_and_its_terminal() {
+        control("terminal-move");
+    }
+
     /// Every session in the ID layout is a candidate of its label, or that
     /// label's resolution refuses: never its first holder alone.
     fn superset_holds(context: &str) {
@@ -1074,6 +1091,76 @@ mod tests {
                     }
                     assert!(writes >= 2, "{op} completed after only {writes} writes");
                 }
+            }
+            "terminal-move" => {
+                struct Moves(bool);
+                impl backend::TerminalBackend for Moves {
+                    fn panes(&self) -> Result<Vec<backend::PaneRow>> {
+                        Ok(vec![backend::PaneRow {
+                            session: "claude/example/term~3f2a9c1d".into(),
+                            session_id: "$1".into(),
+                            pane: "%1".into(),
+                            dead: "0".into(),
+                            run_marker: "run-term".into(),
+                        }])
+                    }
+                    fn pane_info(&self, target: backend::Target, _: &[backend::PaneField]) -> Result<backend::PaneInfo> {
+                        assert!(matches!(target, backend::Target::Name("claude/example/term~3f2a9c1d")), "{target:?}");
+                        Ok(backend::PaneInfo::new("$1\n".into()))
+                    }
+                    fn rename(&self, id: &str, name: &str) -> Result<()> {
+                        assert_eq!((id, name), ("$1", "claude/example/moved"));
+                        if self.0 { Ok(()) } else { Err("the terminal refused the move".into()) }
+                    }
+                    fn session_name(&self, id: &str) -> Result<Option<String>> {
+                        assert_eq!(id, "$1");
+                        Ok(Some(if self.0 { "claude/example/moved" } else { "claude/example/term~3f2a9c1d" }.into()))
+                    }
+                }
+                let old = "claude/example/term";
+                let mut live = record(old, "run-term");
+                live["pane"] = json!("%1");
+                live["terminal_name"] = json!("claude/example/term~3f2a9c1d");
+                storage::write(&mut live).unwrap();
+                let before = std::fs::read(storage::label_record_path(old)).unwrap();
+                let args = [old.to_owned(), "claude/example/moved".to_owned()];
+                assert!(backend::with_fake(&Moves(false), || rename::dispatch(&args, false)).is_err());
+                assert_eq!(std::fs::read(storage::label_record_path(old)).unwrap(), before);
+                assert!(!storage::label_record_path("claude/example/moved").exists());
+                let pending = root().join("renames");
+                assert!(!pending.exists() || std::fs::read_dir(&pending).unwrap().next().is_none());
+                // A crash before the move: recovery finds the terminal under
+                // its own name from before (not the old label) and aborts.
+                let transaction = json!({"version":1,"old":old,"new":"claude/example/moved",
+                    "record":read(old).unwrap(),"session_id":"$1",
+                    "terminal":"claude/example/term~3f2a9c1d","legacy":false,"source_routed":false});
+                atomic(&pending.join("crashed.json"), &format!("{transaction}\n")).unwrap();
+                backend::with_fake(&Moves(false), rename::recover_locked).unwrap();
+                assert!(std::fs::read_dir(&pending).unwrap().next().is_none());
+                assert_eq!(std::fs::read(storage::label_record_path(old)).unwrap(), before);
+                backend::with_fake(&Moves(true), || rename::dispatch(&args, false)).unwrap();
+                let moved = read("claude/example/moved").unwrap();
+                assert_eq!(moved["terminal_name"], "claude/example/moved");
+            }
+            "terminal-route" => {
+                let mut twin_record = storage::read_id(&id).unwrap();
+                twin_record["terminal_name"] = json!(format!("{label}~{}", &id[..8]));
+                storage::write(&mut twin_record).unwrap();
+                session_id::select(label, &id);
+                assert_eq!(terminal_of(label).unwrap(), format!("{label}~{}", &id[..8]));
+                let own = storage::id_record_path(&id).unwrap();
+                let kept = std::fs::read(&own).unwrap();
+                std::fs::remove_file(&own).unwrap();
+                assert!(terminal_of(label).is_err(), "a selected record that vanished");
+                std::os::unix::fs::symlink(root().join("missing"), &own).unwrap();
+                assert!(terminal_of(label).is_err(), "a dangling link where the record was");
+                std::fs::remove_file(&own).unwrap();
+                atomic(&own, std::str::from_utf8(&kept).unwrap()).unwrap();
+                session_id::clear();
+                assert_eq!(terminal_of("claude/example/untracked").unwrap(), "claude/example/untracked");
+                let legacy = storage::label_record_path("claude/example/linked");
+                std::os::unix::fs::symlink(root().join("missing"), &legacy).unwrap();
+                assert!(terminal_of("claude/example/linked").is_err(), "a dangling link at a label's path");
             }
             other => panic!("unknown control {other}"),
         }

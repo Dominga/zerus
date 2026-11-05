@@ -590,7 +590,7 @@ class WatchStream(unittest.TestCase):
 
     def test_git_follows_commits_checkouts_and_session_edits_until_unsubscribed(self):
         repo = self.repository()
-        stream, *_ = self.start()
+        stream, hello, *_ = self.start()
         stream.send(op='subscribe', topic='git', path=str(repo))
         first = stream.next(self.git_state(repo), timeout=10)
         volatile = ('sampled_at', 'remote_age_seconds')
@@ -622,7 +622,10 @@ class WatchStream(unittest.TestCase):
         (repo / 'tracked').write_text('edited by the agent\n')
         stream.quiet(self.git_state(repo, lambda v: v['changed_files'] == 1), 1.5)
         self.journal('PostToolUse', name=name, tool='Edit', detail=str(repo / 'tracked'))
-        edited = stream.next(self.git_state(repo, lambda v: v['changed_files'] == 1), timeout=5)
+        # Use the stream's advertised liveness bound, still well before the
+        # 30 s safety poll could conceal a missed file-changing hook.
+        edited = stream.next(self.git_state(repo, lambda v: v['changed_files'] == 1),
+                             timeout=hello['heartbeat_ms'] / 1000)
         self.assertEqual(edited['value']['branch'], 'feature')
         self.assertLess(time.monotonic() - started, 25)
         # An unchanged checkout sends nothing more, and unsubscribed nothing at all.
@@ -633,6 +636,40 @@ class WatchStream(unittest.TestCase):
         self.git('-C', str(repo), 'checkout', '-q', 'main')
         stream.quiet(lambda f: f['t'] == 'state' and f['topic'] == 'git', 2.5)
         self.assertTrue(all(len(line.encode()) <= 1 << 20 for line in stream.raw))
+        self.assertEqual(stream.close(), 0)
+
+    def test_git_rechecks_after_a_file_changing_hook_commits_through_a_busy_journal(self):
+        repo = self.repository()
+        name = 'codex/git-busy-journal'
+        saved = dict(version=1, name=name, agent='codex', run_id=str(uuid.uuid4()),
+                     conversation_id=str(uuid.uuid4()), cwd=str(repo), activity='idle', phase='idle',
+                     active_tools={}, subagents={}, last_event_at=time.time(), created=time.time())
+        (self.state / (hashlib.sha256(name.encode()).hexdigest() + '.json')).write_text(json.dumps(saved))
+        self.journal('UserPromptSubmit', name=name)
+        stream, hello, *_ = self.start()
+        stream.send(op='subscribe', topic='git', path=str(repo))
+        first = stream.next(self.git_state(repo))
+        self.assertEqual(first['value']['changed_files'], 0)
+        # Let Git's own late index metadata write settle before the edit.
+        stream.quiet(lambda f: False, 1.5)
+        with sqlite3.connect(self.state / 'events.sqlite3') as db:
+            db.execute('BEGIN EXCLUSIVE')
+            (repo / 'tracked').write_text('edited while the journal is busy\n')
+            payload = dict(type='PostToolUse', at=time.time(), agent_id='', tool='Edit',
+                           detail=str(repo / 'tracked'))
+            db.execute('INSERT INTO events(name, conversation, payload) VALUES (?, ?, ?)',
+                       (name, saved['conversation_id'], json.dumps(payload)))
+            # The real reader's 250 ms SQLite budget expires while the write
+            # is uncommitted; reopening must not baseline away this hook.
+            stream.quiet(lambda f: False, 1.5)
+        db.close()
+        # A conservative recheck may already have seen the edit while the
+        # journal was locked. Keep that frame rather than waiting for a duplicate.
+        matches = self.git_state(repo, lambda v: v.get('changed_files') == 1)
+        changed = next((frame for frame in stream.seen if matches(frame)), None)
+        if changed is None:
+            changed = stream.next(matches, timeout=hello['heartbeat_ms'] / 1000)
+        self.assertGreater(changed['rev'], first['rev'])
         self.assertEqual(stream.close(), 0)
 
     def test_git_folders_answer_like_git_status_and_are_limited(self):

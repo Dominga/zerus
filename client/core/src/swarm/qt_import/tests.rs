@@ -456,6 +456,7 @@ fn a_changed_source_or_mismatched_receipt_leaves_the_family_pending() {
             assert!(read_only, "changed source must never reach initialize");
             Ok(status(false, false))
         },
+        || panic!("a changed source is retried, never bootstrapped"),
     );
     assert_eq!(result.unwrap_err(), CHANGED);
     assert!(matches!(
@@ -538,4 +539,275 @@ fn already_imported_catalogs_do_not_read_qt_or_create_a_new_family_record() {
         OrganizationImport::Unhandled
     );
     assert!(!scratch.0.join("settings.json").exists());
+}
+
+/// A real Qt store that never saved an organization: Qt writes
+/// `workspace/organization` only after its organization first changes.
+fn qt_profile_without_organization(scratch: &Scratch) {
+    fs::write(
+        scratch.source().path(),
+        "<plist version=\"1.0\"><dict><key>workspace.language</key><string>ru</string>\
+         <key>window.geometry</key><data>AAAA</data><key>accounts.default</key><string>claude</string></dict></plist>",
+    )
+    .unwrap();
+}
+
+#[test]
+fn a_qt_profile_that_never_saved_an_organization_imports_the_default_once() {
+    // win-accept-cl importonce: a real Qt store without workspace/organization
+    // left the catalog uninitialized, so Projects could never add a project.
+    let scratch = Scratch::new();
+    qt_profile_without_organization(&scratch);
+    let source = scratch.source();
+    let original = fs::read(source.path()).unwrap();
+    let settings = scratch.settings();
+    let mut imports = 0;
+    recover_with(&source, &settings, NODE, |read_only, request| {
+        if read_only {
+            Ok(status(false, false))
+        } else {
+            imports += 1;
+            assert_eq!(request["organization"], shared(None, NODE).unwrap());
+            assert_eq!(
+                request["source_sha256"],
+                zerus_desktop_migration::sha256(&original)
+            );
+            Ok(receipt(&request))
+        }
+    })
+    .unwrap();
+    assert_eq!(imports, 1);
+    assert_eq!(fs::read(source.path()).unwrap(), original);
+    assert_eq!(
+        scratch.saved()["g3"]["families"]["shared-organization"]["sha256"],
+        zerus_desktop_migration::sha256(&original)
+    );
+    recover_with(&source, &settings, NODE, |_, _| {
+        panic!("a handled first use never imports again")
+    })
+    .unwrap();
+}
+
+#[test]
+fn a_pending_record_from_a_read_store_names_its_organization_or_nothing() {
+    let scratch = Scratch::new();
+    scratch.write(&organization());
+    let settings = scratch.settings();
+    assert!(
+        recover_with(&scratch.source(), &settings, NODE, |read_only, _| {
+            if read_only {
+                Ok(status(false, false))
+            } else {
+                Err(IMPORT_FAILED.into())
+            }
+        })
+        .is_err()
+    );
+    drop(settings);
+    let mut saved = scratch.saved();
+    saved["g3_shared_organization_pending"]["record"]["keys"] = json!(["window/geometry"]);
+    fs::write(
+        scratch.0.join("settings.json"),
+        serde_json::to_vec(&saved).unwrap(),
+    )
+    .unwrap();
+    assert_eq!(
+        scratch.settings().organization_import(),
+        Err("unsupported pending project import".into())
+    );
+}
+
+/// One Qt INI store, as Linux `hgs-tray.conf` and Windows `hgs-tray.ini`.
+fn ini(scratch: &Scratch, text: &str) -> QtStore {
+    let path = scratch.0.join("hgs-tray.conf");
+    fs::write(&path, text).unwrap();
+    QtStore::Ini(path)
+}
+/// Recovery on an uninitialized catalog: Ok(true) when it imported the
+/// default first-use organization, the error when it refused before importing.
+fn first_use(source: &QtStore, settings: &Settings) -> Result<bool, String> {
+    let mut imported = false;
+    recover_with(source, settings, NODE, |read_only, request| {
+        if read_only {
+            Ok(status(false, false))
+        } else {
+            assert_eq!(request["organization"], shared(None, NODE).unwrap());
+            imported = true;
+            Ok(receipt(&request))
+        }
+    })?;
+    Ok(imported)
+}
+
+#[test]
+fn a_clean_qt_ini_without_an_organization_imports_the_default_once() {
+    let scratch = Scratch::new();
+    let source = ini(
+        &scratch,
+        "[General]\nlanguage=ru\n\n[window]\ngeometry=@ByteArray(AAAA)\n\n[accounts]\ndefault=claude\n",
+    );
+    let settings = scratch.settings();
+    assert_eq!(first_use(&source, &settings), Ok(true));
+    assert_eq!(
+        settings.organization_import(),
+        Ok(OrganizationImport::Handled)
+    );
+}
+
+#[test]
+fn damaged_or_ambiguous_qt_stores_are_never_taken_for_a_first_use() {
+    // migrate-u's reader probe: QSettings-permissive INI parsing lets a damaged
+    // earlier value swallow a later organization line, so the decoded map has
+    // no key although the store holds an organization.
+    for text in [
+        "[workspace]\nother=\"unterminated\norganization={}\n",
+        "[workspace]\nother=continued\\\norganization={}\n",
+        // Conservatively, any mention of the key in the exact bytes read.
+        "[General]\nnote=organization planning\n",
+        // A Qt backup of an organization without the organization itself.
+        "[workspace]\norganizationBeforeProjects={}\n",
+    ] {
+        let scratch = Scratch::new();
+        let source = ini(&scratch, text);
+        let snapshot = source.snapshot().unwrap().unwrap();
+        assert!(!snapshot.values.contains_key(KEY), "{text:?}");
+        let settings = scratch.settings();
+        assert_eq!(
+            first_use(&source, &settings),
+            Err(SOURCE_FAILED.into()),
+            "{text:?}"
+        );
+        assert_eq!(
+            settings.organization_import(),
+            Ok(OrganizationImport::Unhandled)
+        );
+    }
+    // A plist maps every entry; its organization backup is not a first use either.
+    let scratch = Scratch::new();
+    fs::write(
+        scratch.source().path(),
+        "<plist version=\"1.0\"><dict><key>workspace.organizationBeforeSwarm</key><string>{}</string></dict></plist>",
+    )
+    .unwrap();
+    assert_eq!(
+        first_use(&scratch.source(), &scratch.settings()),
+        Err(SOURCE_FAILED.into())
+    );
+}
+
+/// Recovery with the given catalog status: the result, how many imports and
+/// how many CLI first-use bootstraps it made.
+fn recover_counting(
+    source: &QtStore,
+    settings: &Settings,
+    initialized: bool,
+    pending: bool,
+    bootstrapped: Result<(), String>,
+) -> (Result<(), String>, usize, usize) {
+    let (mut imports, mut bootstraps) = (0, 0);
+    let result = recover_read(
+        source,
+        settings,
+        NODE,
+        || source.snapshot().map_err(|_| SOURCE_FAILED.into()),
+        |read_only, request| {
+            if read_only {
+                Ok(status(initialized, pending))
+            } else {
+                imports += 1;
+                Ok(receipt(&request))
+            }
+        },
+        || {
+            bootstraps += 1;
+            bootstrapped.clone()
+        },
+    );
+    (result, imports, bootstraps)
+}
+
+#[test]
+fn an_unreadable_qt_organization_still_sets_up_projects_and_stays_visible() {
+    // P1 (b): an unreadable or malformed Qt organization left the catalog
+    // uninitialized for good. The CLI first-use bootstrap sets it up and keeps
+    // the pending GUI import; the refusal stays visible for review.
+    let damaged = |scratch: &Scratch| {
+        ini(
+            scratch,
+            "[workspace]\nother=\"unterminated\norganization={}\n",
+        )
+    };
+    let malformed = |scratch: &Scratch| {
+        scratch.write(&json!({"version":99}));
+        scratch.source()
+    };
+    // A directory where the store should be: present, but its read fails.
+    let unreadable = |scratch: &Scratch| {
+        let store = scratch.0.join("hgs-tray.conf");
+        fs::create_dir(&store).unwrap();
+        QtStore::Ini(store)
+    };
+    for (name, make) in [
+        ("damaged INI", &damaged as &dyn Fn(&Scratch) -> QtStore),
+        ("malformed organization", &malformed),
+        ("unreadable store", &unreadable),
+    ] {
+        let scratch = Scratch::new();
+        let source = make(&scratch);
+        let settings = scratch.settings();
+        assert_eq!(
+            recover_counting(&source, &settings, false, false, Ok(())),
+            (Err(SOURCE_FAILED.into()), 0, 1),
+            "{name}"
+        );
+        assert_eq!(
+            settings.organization_import(),
+            Ok(OrganizationImport::Unhandled),
+            "{name}"
+        );
+        // Once bootstrapped (initialized with its pending GUI import), the next
+        // start reads Qt again and never bootstraps twice.
+        assert_eq!(
+            recover_counting(&source, &settings, true, true, Ok(())),
+            (Err(SOURCE_FAILED.into()), 0, 0),
+            "{name}"
+        );
+    }
+    // A failed bootstrap reports its own reason instead.
+    let scratch = Scratch::new();
+    let source = malformed(&scratch);
+    assert_eq!(
+        recover_counting(
+            &source,
+            &scratch.settings(),
+            false,
+            false,
+            Err(NEEDS_HGS.into())
+        ),
+        (Err(NEEDS_HGS.into()), 0, 1)
+    );
+    // A first use imports its default and never bootstraps.
+    let scratch = Scratch::new();
+    qt_profile_without_organization(&scratch);
+    assert_eq!(
+        recover_counting(&scratch.source(), &scratch.settings(), false, false, Ok(())),
+        (Ok(()), 1, 0)
+    );
+}
+
+#[test]
+fn a_later_readable_organization_fills_a_bootstrapped_catalog_once() {
+    // After the bootstrap the CLI reports initialized with its pending GUI
+    // import; a now readable organization is imported through the same G3 call.
+    let scratch = Scratch::new();
+    scratch.write(&organization());
+    let settings = scratch.settings();
+    assert_eq!(
+        recover_counting(&scratch.source(), &settings, true, true, Ok(())),
+        (Ok(()), 1, 0)
+    );
+    assert_eq!(
+        settings.organization_import(),
+        Ok(OrganizationImport::Handled)
+    );
 }

@@ -529,6 +529,63 @@ fn processes_tasks_and_organization_keep_their_native_pages_and_keys() {
     }
     assert_eq!(f.adapter.groups.len(), 3);
 }
+/// zerus-1fb4q: the GUI's exact Tasks follow (topic, project and its bounded
+/// window) is admitted, and its window reaches the native subscription; a
+/// window out of range, on another topic, misspelt, or another one for a
+/// project already followed is refused before any control.
+#[test]
+fn the_gui_s_bounded_tasks_follow_is_admitted_with_its_window() {
+    let gui = serde_json::to_value(zerus_watch_protocol::Subscription {
+        topic: zerus_watch_protocol::topic::TASKS.into(),
+        project: Some("p".into()),
+        window: Some(zerus_client_core::tasks::WINDOW),
+        ..Default::default()
+    })
+    .unwrap();
+    assert_eq!(gui, json!({"topic":"tasks","project":"p","window":50}));
+    let mut f = Fixture::new();
+    let (lease, _queue) = f.open();
+    assert_eq!(f.follow(&lease, &id(), gui.clone())["accepted"], true, "the GUI's own follow");
+    while f
+        .adapter
+        .groups
+        .values()
+        .any(|g| matches!(g.phase, Phase::Fence { .. }))
+    {
+        f.pong();
+    }
+    let subscribed: Vec<Subscription> = f
+        .commands
+        .iter()
+        .flatten()
+        .filter_map(|control| match control {
+            Control::Subscribe(s) if s.topic == zerus_watch_protocol::topic::TASKS => Some(s.clone()),
+            _ => None,
+        })
+        .collect();
+    assert!(!subscribed.is_empty(), "the native subscription was sent");
+    assert!(subscribed.iter().all(|s| s.window == Some(50)), "{subscribed:?}");
+    // A second view of the same project with the same window shares it.
+    let (other, _other_queue) = f.open();
+    assert_eq!(f.follow(&other, &id(), gui.clone())["accepted"], true);
+    let sent = f.commands.len();
+    for (spec, code) in [
+        (json!({"topic":"tasks","project":"p","window":25}), "conflicting_detail_window"),
+        (json!({"topic":"tasks","project":"q","window":0}), "invalid_detail_subscription"),
+        (json!({"topic":"tasks","project":"q","window":201}), "invalid_detail_subscription"),
+        // An unknown field is refused when the request is read, as `window`
+        // itself was before this fix.
+        (json!({"topic":"tasks","project":"q","windows":50}), "invalid_detail_request"),
+        (json!({"topic":"organization","window":50}), "invalid_detail_subscription"),
+        (json!({"topic":"processes","session":{"name":"claude/example/a"},"window":50}), "invalid_detail_subscription"),
+    ] {
+        let refused = f.follow(&other, &id(), spec.clone());
+        assert_eq!((refused["accepted"].clone(), refused["code"].clone()), (json!(false), json!(code)), "{spec}");
+    }
+    assert_eq!(f.commands.len(), sent, "no refusal admitted a control");
+    // The largest window is admitted.
+    assert_eq!(f.follow(&other, &id(), json!({"topic":"tasks","project":"r","window":200}))["accepted"], true);
+}
 #[test]
 fn process_refresh_keeps_revision_and_native_interval_instead_of_replacing_the_view() {
     let mut f = Fixture::new();

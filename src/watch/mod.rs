@@ -918,6 +918,12 @@ impl<'a> Watch<'a> {
         if let Some(db) = &self.journal {
             self.data_version = source::data_version(db).ok();
             self.journal_max = source::bounds(db).map_or(0, |(_, max)| max);
+            // A newly available or reopened journal may already contain a
+            // file-changing call missed while it was unavailable. Recheck
+            // only the existing Git subscriptions, without replaying history.
+            if !self.git.is_empty() {
+                self.writers = Writers::All;
+            }
             // Rows written before this connection opened: read after each cursor.
             for sub in self.subs.iter_mut().filter(|sub| !sub.native) {
                 sub.more = true;
@@ -939,8 +945,9 @@ impl<'a> Watch<'a> {
         if Some(version) == self.data_version {
             return Journal::Unchanged;
         }
-        self.data_version = Some(version);
         let Ok((_, max)) = source::bounds(db) else { return Journal::Unknown };
+        // A busy bounds read must retry this version on the next pulse.
+        self.data_version = Some(version);
         if max < self.journal_max {
             // A replaced journal: every cursor is meaningless now.
             for sub in self.subs.iter_mut().filter(|sub| !sub.native) {

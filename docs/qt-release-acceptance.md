@@ -1014,6 +1014,127 @@ the main account.
 clicks, terminal, voice/video, UI/durable parity and Qt rollback. Those rows stay
 unchecked, and this record ticks no broader checkbox.
 
+### Earlier va-kids row evidence (owner decision 4)
+
+These rows ran on va-kids on 2026-11-04, in private fixture profiles, before the
+owner accepted private-profile evidence (owner decision 4). They are recorded
+here as earlier evidence under that decision. They tick no checkbox; the same
+rows are rerun on the latest integrate artifact in the approved order: voice,
+terminal, upgrade, readiness, tray and lifecycle, Qt rollback, UI parity.
+
+Each row used CI artifacts of its exact source and a fresh private stage and
+fixture profile. It ran in the owner's console session 1, started by a one-shot
+SYSTEM task, and ended with teardown, cleanup and a residue check.
+
+- **Upgrade with live agents: PASS.**
+  - Row `up-4` at `0fca73f5` (CI run 41783655673, artifact 13301922603): 23/23.
+  - Row `p14-up-1` at `73a9f785` (CI run 41831170444, artifact 13325617629): 25/25.
+  - The starting point was the CI Qt portable ZIP and its stable CLI, with a
+    live fixture agent session that answered.
+  - Starting the Next GUI restaged the exact Next CLI. The same session, run and
+    conversation survived, and no host, ConPTY or agent process restarted.
+  - The upgraded CLI delivered to the same conversation, which answered. The
+    Next GUI showed the turns from before and after the upgrade in one session.
+  - A round trip followed. The Qt-era install restaged its own CLI, read the
+    state Next had written and delivered to the same conversation. Starting
+    Next again restaged the exact Next CLI, with the same session and no
+    process restarts.
+  - No desktop service owned the fixture, so no revoke or drain took part.
+- **Terminal: partial.** Row `terminal-9` at `0fca73f5`.
+  - The attach client ran with an exact non-ASCII session name and path.
+  - Paste through the console reached the live session.
+  - The session stayed live after its own Windows Terminal window closed, and
+    reattach showed the same pane with the pasted text.
+  - Not covered: resize, PowerShell compared with Windows Terminal, and exact
+    selection through UI Automation.
+- **Voice and video: PASS for the documented refusal.** Row `voice-5` at
+  `0fca73f5`: local Windows voice refuses visibly.
+- **UI walk: partial.** Row `walk-1` at `0fca73f5`: every rail screen rendered,
+  and the fixture session showed its reply. The full inventory walk and a
+  durable frontend request round trip were not covered.
+- **Service readiness: FAILED then.** Rows `readiness-1` to `readiness-7` at
+  `0fca73f5`.
+  - The task-started service was IPC-ready with the UI closed, and it admitted
+    the service-mode GUI with current ownership.
+  - No maintained route then selected background mode.
+  - Settings > About now offers the first background choice (`zerus-yfbd.1`,
+    [#1398](https://github.com/ufna/zerus/pull/1398) and
+    [#1399](https://github.com/ufna/zerus/pull/1399)). Its qualification on
+    integrate `347c8f1c` (firstchoice 35/35, attention ready through the real
+    Task Scheduler path) is recorded in `zerus-yfbd.1` and `zerus-emphh`. The
+    readiness rerun goes through that choice.
+
+### va-kids rows on the latest integrate artifacts (owner decision 4)
+
+These rows reran in the approved order on 2026-11-05, in private fixture
+profiles, under the same rules as above. Each row had its own fresh stage,
+teardown, cleanup and residue check. A guard removed the test AUMID's
+notification-settings key only when a stage had created it, and changed no other
+app's settings. Rows A–C used integrate `faa4d324` (CI run 41944519612,
+artifact 13380445725). Rows D–H used integrate `58cce17f` with #1441 (CI run
+41951499758, artifact 13382023595).
+
+- **A, voice and video: PASS for the documented refusal** (2/2). Local Windows
+  voice refuses visibly.
+- **B, terminal: PASS** (9/9).
+  - A Windows Terminal attach ran with a non-ASCII name and path. Paste reached
+    the live session.
+  - Resizing the Windows Terminal window resized the attached pane (120x30 to
+    128x33).
+  - The app selected exactly this session through UI Automation.
+  - The session stayed live after its terminal client exited, and reattach
+    showed the same pane.
+- **C, upgrade with live agents: PASS** (25/25). This is the Qt ZIP to Next
+  upgrade and round trip described above, on `faa4d324`.
+- **D, service registration and readiness: PASS** (12/12).
+  - The registered task runs as the interactive user with the least privilege,
+    never LocalSystem.
+  - Settings > About > "Use background mode…" settled background mode.
+  - With the UI closed, background mode was IPC-ready with writers enabled, and
+    fleet, presence, reads and attention were ready.
+  - The named-pipe server is the engine of the registered task's only instance,
+    in session 1, as this user. The live fixture session is listed with no GUI.
+- **E, tray and lifecycle: PASS** (12/12).
+  - Close to the notification area works. A second start shows the first
+    instance. Quit from the app's own tray menu works.
+  - Login start uses the documented `--install-login-item` and
+    `--remove-login-item` route; Windows has no Settings toggle for it.
+  - Draft-safe exit: an unsent draft typed through UI Automation was on disk
+    after Quit and was restored exactly on the next start.
+  - A background start shows no window but owns its tray icon.
+- **F, Qt rollback: rollback PASS; the return is BLOCKED without a restart.**
+  - After background mode, `desktop revoke --reason rollback` settled for the
+    exact request and configuration, and writers went off. The CI Qt ZIP
+    restaged the Qt-era CLI, which reached the same session, run and
+    conversation and got an answer. The draft stayed on disk.
+  - Returning while the revoked service still ran from the renamed-aside Next
+    image left the person with no sessions in either GUI mode
+    (`zerus-5wmh.66.3.40.3.4`, blocked by `.66.3.40.3.3`).
+  - After a fixture-only simulated sign-out/in (stopping only that task
+    instance, then one Run), the full return passed 32/32. The service was
+    passive with `explicit_handoff_required`, the default GUI was admitted,
+    the draft and the Qt-era turn were back, and writers stayed off.
+- **G, UI/durable parity: PASS** (20/20).
+  - The UI Automation walk matched the CLI's catalog, session and versions.
+  - One composer Send through the ready service reached the same conversation
+    and was answered. The route was direct, because Windows does not advertise
+    the Linux-only deferred send ABI.
+  - Automatic approvals stayed off. With the UI closed, the service alone
+    stayed ready.
+  - Findings: `zerus-5wmh.92` (session rows have no accessible name, on Windows
+    and Linux), `zerus-5wmh.66.3.31.14` and `zerus-5wmh.66.3.31.15`.
+- **H, notifications:**
+  - **H1, mandatory question: BLOCKED.** The service cannot notify a question
+    that precedes the first conversation (`zerus-5wmh.66.3.30.14`).
+  - **H2, unread reply: Delivered PROVEN; banner BLOCKED, cause undetermined.**
+    The journal and our AUMID's History show exactly one post. Do not disturb
+    was off, the foreground was not full-screen and the per-app setting was
+    Enabled, yet UI Automation saw no banner surface.
+  - **H3, cold GUI click: deferred** to an owner-present console run.
+  - **H4, withdrawal: PASS.** After `hgs read` on the exact reply, the service
+    removed its own History entry within about 1.2 s and retired the mapping.
+    Nothing opened or launched afterwards.
+
 ## Deletion PR merge gate
 
 The coordinator records per-platform acceptance and any exceptions against the

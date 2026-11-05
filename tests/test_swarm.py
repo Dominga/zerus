@@ -604,6 +604,10 @@ class Swarm(unittest.TestCase):
                   ('replica-exchange', 'refused', {}), ('replica-exchange', 'refused', 'none'),
                   ('replica-exchange', 'refused', [{'uuid': 1}]),
                   ('replica-exchange', 'imported'), ('replica-exchange', 'imported', '1'),
+                  # zerus-tfqd6: more than the page carried, up to the largest
+                  # unsigned count, is unknown and never added up.
+                  ('replica-exchange', 'imported', 1), ('replica-exchange', 'imported', 2 ** 64 - 1),
+                  ('replica-exchange', 'refused', [{'uuid': str(uuid.UUID(int=1)), 'error': 'not sent'}]),
                   ('replica-exchange', 'damaged'), ('replica-exchange', 'damaged', -1),
                   ('replica-exchange', 'damaged', '0'), ('replica-exchange', 'more'),
                   ('replica-exchange', 'more', 'false'), ('replica-exchange', 'updates', 'none'),

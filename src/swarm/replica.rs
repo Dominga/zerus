@@ -496,6 +496,7 @@ fn exchange_pages(
             let (page, more) = store.updates_for(&mine, &theirs, PAGE).map_err(|e| (Incomplete::Busy, e.into()))?;
             (mine, page, more)
         };
+        let sent = page.len();
         let response = transport::remote(
             config,
             alias,
@@ -512,14 +513,18 @@ fn exchange_pages(
             return Err(malformed(anyhow::anyhow!("no page marker")));
         };
         // What the member did with this page: both its count and its list of
-        // refusals, each in a form this reads, or unknown.
+        // refusals, each in a form this reads, or unknown. It changed or
+        // refused at most the documents the page carried; a larger count is
+        // unknown too, never added up.
         let import = response["imported"]
             .as_u64()
-            .zip(serde_json::from_value::<Vec<Damaged>>(response["refused"].clone()).ok());
+            .and_then(|imported| usize::try_from(imported).ok())
+            .zip(serde_json::from_value::<Vec<Damaged>>(response["refused"].clone()).ok())
+            .filter(|(imported, refused)| imported.checked_add(refused.len()).is_some_and(|count| count <= sent));
         shown.refusals(import.as_ref().map(|(_, refused)| !refused.is_empty()));
         // The member's count after this page, not only before it.
         shown.damage(response["damaged"].as_u64());
-        let mut changed = import.map_or(0, |(imported, _)| imported as usize);
+        let mut changed = import.map_or(0, |(imported, _)| imported);
         if !updates.is_empty() {
             let Some(store) = open(&root)? else {
                 return busy();

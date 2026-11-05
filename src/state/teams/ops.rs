@@ -546,10 +546,7 @@ fn plan(team: &mut Team, input: &Value, actor: &Actor, events: &mut Vec<Event>) 
     for value in input["tasks"].as_array().into_iter().flatten() {
         let mut task = parse_task(value)?;
         // The plan may queue tasks of later phases; phase 1 stays the default.
-        task.phase = match value["phase"].as_u64() {
-            None => 1,
-            Some(phase) => u32::try_from(phase).ok().filter(|phase| *phase > 0).context("A task phase is a number from 1")?,
-        };
+        task.phase = task_phase(value)?;
         ensure!(tasks.iter().all(|t: &Task| t.id != task.id), "Task #{} is used twice", task.id);
         tasks.push(task);
     }
@@ -759,6 +756,68 @@ fn mark_decided(task: &mut Task) {
 }
 
 /// The approval new phases wait for: their own setting, else the plan's.
+/// The phase a plan or a draft gives a task: its "phase", 1 when it names none.
+fn task_phase(value: &Value) -> anyhow::Result<u32> {
+    match value.get("phase").filter(|phase| !phase.is_null()) {
+        None => Ok(1),
+        Some(phase) => phase
+            .as_u64()
+            .and_then(|phase| u32::try_from(phase).ok())
+            .filter(|phase| *phase > 0)
+            .context("A task phase is a number from 1"),
+    }
+}
+
+/// Task 23: a draft's phases 2..N, as `plan` keeps them: the phases the draft
+/// lists ({n, title, barrier}; `listed` when this update sets them, else the
+/// ones it has) and every phase a task names, each a Draft phase in order with
+/// its tasks. Team 33fbafeb: the draft's tasks named phases 1, 2 and 3, and
+/// the created team had all of them in phase 1.
+fn draft_phases(team: &mut Team, listed: Option<&Value>, by: &str) -> anyhow::Result<()> {
+    let approval = phase_approval(team);
+    let mut phases: Vec<Phase> = match listed {
+        None => team.phases.clone(),
+        Some(value) => {
+            let mut phases: Vec<Phase> = Vec::new();
+            for value in value.as_array().context("Phases are a list of {\"n\",\"title\",\"barrier\"}")? {
+                let n = value["n"]
+                    .as_u64()
+                    .and_then(|n| u32::try_from(n).ok())
+                    .filter(|n| *n >= 2)
+                    .context("A planned phase is numbered from 2")?;
+                ensure!(phases.iter().all(|phase| phase.n != n), "Phase {n} is used twice");
+                let old = team.phases.iter().find(|old| old.n == n);
+                phases.push(Phase {
+                    n,
+                    title: clean(value["title"].as_str().unwrap_or_default().trim(), 120, "A phase title")?,
+                    barrier: value["barrier"].as_bool() == Some(true),
+                    // A phase the draft had keeps its place and its proposer.
+                    order: old.map_or(0, |old| old.order()),
+                    added_by: old.map_or_else(|| by.to_owned(), |old| old.added_by.clone()),
+                    added_at: old.map_or_else(now, |old| old.added_at),
+                    ..Default::default()
+                });
+            }
+            phases
+        }
+    };
+    let named: BTreeSet<u32> = team.tasks.iter().map(|task| task.phase).filter(|phase| *phase > 1).collect();
+    for n in named {
+        if phases.iter().all(|phase| phase.n != n) {
+            phases.push(Phase { n, added_by: by.to_owned(), added_at: now(), ..Default::default() });
+        }
+    }
+    phases.sort_by_key(|phase| (if phase.order == 0 { u32::MAX } else { phase.order }, phase.n));
+    for (index, phase) in phases.iter_mut().enumerate() {
+        phase.order = index as u32 + 2;
+        phase.approval = approval;
+        phase.state = PhaseState::Draft;
+        phase.tasks = team.tasks.iter().filter(|task| task.phase == phase.n).map(|task| task.id).collect();
+    }
+    team.phases = phases;
+    Ok(())
+}
+
 fn phase_approval(team: &Team) -> Approval {
     team.settings.phase_approval.unwrap_or(team.settings.approval)
 }
@@ -4209,6 +4268,7 @@ fn draft(team: &mut Team, input: &Value, actor: &Actor, offline: &BTreeSet<Strin
             ensure!(revision == state.revision, "Draft revision is {} now; read it again", state.revision);
             let set = input["set"].as_object().context("A draft update names the fields to set")?;
             let mut changed = Vec::new();
+            let mut phases_changed = false;
             for (field, value) in set {
                 if !human && state.owner_edited.contains(field) {
                     bail!("Owner changed {field}");
@@ -4274,14 +4334,26 @@ fn draft(team: &mut Team, input: &Value, actor: &Actor, offline: &BTreeSet<Strin
                         team.members = members;
                     }
                     "tasks" => {
+                        // Task 23: each task keeps the phase it names, as in a plan.
                         let tasks: Vec<Task> = value
                             .as_array()
                             .context("Tasks are a list")?
                             .iter()
-                            .map(parse_task)
+                            .map(|value| {
+                                let mut task = parse_task(value)?;
+                                task.phase = task_phase(value)?;
+                                Ok(task)
+                            })
                             .collect::<anyhow::Result<Vec<_>>>()?;
+                        for (index, task) in tasks.iter().enumerate() {
+                            ensure!(tasks[..index].iter().all(|t| t.id != task.id), "Task #{} is used twice", task.id);
+                        }
                         team.tasks = tasks;
+                        phases_changed = true;
                     }
+                    // Task 23: the phases 2..N the tasks name, with their titles
+                    // and barriers, as in a plan.
+                    "phases" => phases_changed = true,
                     // Feedback 7: the plan mode is set in the draft too: the
                     // owner chooses it, the lead offers it.
                     "plan_mode" => {
@@ -4295,10 +4367,14 @@ fn draft(team: &mut Team, input: &Value, actor: &Actor, offline: &BTreeSet<Strin
                     }
                     "plan_mode_reason" => team.plan_mode_reason = clean(value.as_str().unwrap_or_default().trim(), 500, "A plan mode reason")?,
                     other => bail!(
-                        "A draft sets name, goal, addendum, settings, members, tasks, plan_mode or plan_mode_reason, not {other}"
+                        "A draft sets name, goal, addendum, settings, members, tasks, phases, plan_mode or plan_mode_reason, not {other}"
                     ),
                 }
                 changed.push(field.clone());
+            }
+            if phases_changed {
+                let by = actor.label(team);
+                draft_phases(team, set.get("phases"), &by)?;
             }
             if human {
                 for field in &changed {
@@ -4336,6 +4412,14 @@ fn draft(team: &mut Team, input: &Value, actor: &Actor, offline: &BTreeSet<Strin
                 validation.errors.len(),
                 validation.errors.iter().map(|finding| finding.text.as_str()).collect::<Vec<_>>().join("; ")
             );
+            // Task 23: the draft's phases 2..N become the team's Draft phases,
+            // approved in order; a listed phase without tasks is refused as in
+            // a plan.
+            let by = actor.label(team);
+            draft_phases(team, None, &by)?;
+            if let Some(empty) = team.phases.iter().find(|phase| phase.tasks.is_empty()) {
+                bail!("Phase {} has no tasks: give it tasks or remove it from the draft's phases", empty.n);
+            }
             let approve = input["approve"].as_bool() == Some(true);
             if approve {
                 ensure!(

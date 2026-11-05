@@ -1464,10 +1464,15 @@ computer's default account for its agent, which the preflight names.
 `max_members` counts the members besides the lead.
 
 `draft get` answers the draft's `fields` (name, goal, addendum, settings,
-members, tasks and plan mode). A draft update sets only the fields it names;
+members, tasks, phases and plan mode). A draft update sets only the fields it names;
 `members` is a list that replaces them all or an object of changes by member
 id, where null removes a member and a new id adds one. `plan_mode` is a draft
 field: the owner chooses it and the lead offers it with `plan_mode_reason`.
+A draft's tasks keep their `phase` and its `phases` list phases 2..N
+(`{"n":2,"title":"...","barrier":true}`), as a plan's do; a phase a task names
+but the list leaves out is kept untitled. Create keeps them all as Draft phases
+in order, which the owner approves one after another; a listed phase without
+tasks is refused.
 
 A swap card names, for each member, what changes (`agent`, `model`, `effort`,
 `account`, `prompt` or `session`), or `"fresh": true` for a new session with

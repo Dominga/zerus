@@ -1881,6 +1881,15 @@ fn a_full_test_run_needs_the_teams_policy_or_the_owners_grant() {
     use crate::state::teams::model::{FullTests, FullTestsGrant};
     assert!(super::full_test_run("cargo-test", &json!({})));
     assert!(!super::full_test_run("cargo-test", &json!({"filter":"teams"})));
+    // Task 53: the request hgs test affected prints for a client crate is
+    // narrowed by its filters; without filters (skips or a manifest alone,
+    // or only empty filters) it is still the whole suite.
+    let printed = json!({"filters":["teams::tests::","teams::catalog_edit::"],"skips":["teams::tests::slow"],"manifest":["client/core/Cargo.toml"]});
+    assert!(!super::full_test_run("cargo-test", &printed));
+    assert!(super::full_test_run("cargo-test", &json!({"manifest":["client/core/Cargo.toml"]})));
+    assert!(super::full_test_run("cargo-test", &json!({"skips":["teams::"],"manifest":["client/core/Cargo.toml"]})));
+    assert!(super::full_test_run("cargo-test", &json!({"filters":[],"manifest":["client/core/Cargo.toml"]})));
+    assert!(super::full_test_run("cargo-test", &json!({"filters":[" "]})));
     assert!(!super::full_test_run("qt-test", &json!({"suite":"test_teams"})));
     assert!(super::full_test_run("android-test", &json!({})));
     assert!(!super::full_test_run("cargo-build", &json!({})));

@@ -238,13 +238,8 @@ fn consume(delivery: Delivery, available: bool) -> crate::desk::Outcome {
         ..ViewRow::default()
     };
     let computer = ComputerId(target.computer);
-    let mut desk = DeskLoop::new(
-        zerus_client_core::menubar::OpenMode::Automatic,
-        None,
-        Instant::now(),
-    );
-    let mut publish =
-        |_: &zerus_client_core::menubar::Desk, _: zerus_client_core::menubar::OpenMode| {};
+    let mut desk = DeskLoop::new(None, Instant::now());
+    let mut publish = |_: &zerus_client_core::menubar::Desk| {};
     let mut optional = || false;
     let mut marks = || None;
     let mut notice = || "fixture".to_owned();

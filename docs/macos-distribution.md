@@ -748,11 +748,10 @@ The coordinator runs this on the owner's Mac after Tasks 1 to 9 are merged to ma
    ```
    Then check:
    - **The tile:** counts, amber attention and the stale dot, on a light and a dark menu bar; the tooltip lines.
-   - **The menu:** computers; sessions with the marker, "(paused)" and "(stopped)"; "Open in" with Terminal.app and Clipboard; Quit.
+   - **The menu:** Open Zerus; one line per computer (its sessions count, or unreachable or polling); Quit. It has no session rows and no "Open in" (the owner, 0.48.0).
    - **The window:** a primary click opens and raises it. Closing hides it and the Dock icon goes. A Dock click restores a minimised window.
    - **`--sessions` while minimised:** minimise the window, then start the executable again with `--sessions`. The window comes back in front and active, as Qt's `activateWindow` brings it (`TrayAgent.cpp:781-783`).
    - **Closing in native fullscreen:** put the window in fullscreen with its green button, then close it. It hides, and no empty Space is left behind in Mission Control.
-   - **Session entries:** a running session opens in Terminal.app. Clipboard copies its command and shows "Zerus: copied to the clipboard".
    - **Second start:** the same executable started again with `--sessions` raises the first window and exits with "already running".
    - **Notifications:**
      - allow the one-time prompt for the dev app;
@@ -768,7 +767,7 @@ The coordinator runs this on the owner's Mac after Tasks 1 to 9 are merged to ma
      - **The Dock badge after a closed window.** Let attention arrive while the window is closed. Opening the window shows the Dock badge with the count, and the badge survives closing and reopening the window.
      - **A fleet that cannot start.** Start with `ZERUS_CLIENT_HGS=/nonexistent/hgs`: a right-click still shows Open Zerus and Quit, and Quit works.
      - **`&` in a name.** A session or computer name containing `&` shows a single `&` in the menu.
-     - **Other menus.** After using the app menu, a webview context menu and the Open in submenu, tile updates resume once each has closed.
+     - **Other menus.** After using the app menu and a webview context menu, tile updates resume once each has closed.
      - **A theme switch with the menu open.** Switch light and dark while the status item's menu is open: the tile redraws in the new colour once the menu closes.
    Quit the dev app from its menu.
 

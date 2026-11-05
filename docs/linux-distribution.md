@@ -263,8 +263,9 @@ The coordinator and owner then check on the real display:
 
 - hidden login start, the desktop entry, and a second `--sessions` invocation
   produce one instance and one tray item;
-- the tray icon, tooltip, session menu, and attention state match Qt, including
-  `Update available: Zerus N` and `Restart to finish update` when applicable;
+- the tray icon, tooltip, menu (Open Zerus, one line per computer, Quit, with
+  no session rows) and attention state, including `Update available: Zerus N`
+  and `Restart to finish update` when applicable;
 - attention banners open their exact session and withdraw when it clears;
 - Qt and development-client drafts and the seeded settings are present;
 - native agents, tmux, hgs services, and the mobile connector are unchanged;

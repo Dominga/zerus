@@ -4,8 +4,10 @@ use super::*;
 use std::{ffi::OsString, io::Write};
 
 mod completion;
+mod identity;
 mod publication;
 pub use completion::Settlement;
+pub use identity::CheckId;
 pub use publication::Status as PublicationStatus;
 
 pub const BYTES: usize = 96 << 10;
@@ -320,23 +322,24 @@ pub struct Journal {
 impl Journal {
     /// Explicit preparation only. Existing originals retain their reconcile
     /// ID and phase; a missing lookup never calls this on an offered record.
-    pub fn prepare(source: Captured, reconcile_id: &str) -> Result<Self, Error> {
-        Self::prepare_in(source, reconcile_id, None)
+    pub fn prepare(source: Captured, proposal: &CheckId) -> Result<Self, Error> {
+        Self::prepare_in(source, proposal, None)
     }
     /// A separate explicit Check AFTER a confirmed discard of an unsent check.
     /// Never infer this choice from missing data or an unavailable result.
     pub fn prepare_after_discard(
         source: Captured,
-        reconcile_id: &str,
+        proposal: &CheckId,
         cancelled_id: &str,
     ) -> Result<Self, Error> {
-        Self::prepare_in(source, reconcile_id, Some(cancelled_id))
+        Self::prepare_in(source, proposal, Some(cancelled_id))
     }
     fn prepare_in(
         source: Captured,
-        reconcile_id: &str,
+        proposal: &CheckId,
         cancelled_id: Option<&str>,
     ) -> Result<Self, Error> {
+        let reconcile_id = proposal.as_str();
         let candidate = source
             .intent(reconcile_id)
             .map_err(|_| Error::Unavailable)?;
@@ -344,8 +347,13 @@ impl Journal {
         let slot = Slot::open(&source.selected, &key.project, &key.task)
             .map_err(|_| Error::Unavailable)?;
         let before = Disk::open(&slot, &key.project, &key.task).map_err(|_| Error::Unavailable)?;
-        if before.is_none() && cancelled_id.is_some() {
-            return Err(Error::Unavailable);
+        if before.is_none() {
+            if cancelled_id.is_some() {
+                return Err(Error::Unavailable);
+            }
+            // Refuse a proposal for retained history before creating an empty
+            // slot's lock. The adoption guard still runs under that lock.
+            proposal.check_before(None)?;
         }
         // First use creates the lock exclusively. A leftover lock plus missing
         // journal is uncertainty, never evidence that another offer is safe.
@@ -369,6 +377,7 @@ impl Journal {
                 {
                     return Err(Error::Unavailable);
                 }
+                proposal.check_before(Some(&disk))?;
                 let next = new_record(cancelled_id.map(str::to_owned));
                 publish(
                     &slot,
@@ -396,6 +405,7 @@ impl Journal {
                 if before.is_some() || cancelled_id.is_some() {
                     return Err(Error::Unavailable);
                 }
+                proposal.check_before(None)?;
                 let record = new_record(None);
                 let bytes = encode(&record)?;
                 let mut file = slot

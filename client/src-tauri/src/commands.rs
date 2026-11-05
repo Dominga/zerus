@@ -526,7 +526,9 @@ mod live {
                         #[cfg(all(test, target_os = "linux"))]
                         mode_helpers: None,
                         notification_controls: self.notification_controls.get().cloned(),
-                        retained_sources: self.retained_import_source.get().cloned(),
+                        retained_sources: self.retained_import_source.get().cloned().and_then(
+                            crate::desktop_service::retained_import::Inputs::for_runtime_report,
+                        ),
                         projections: self
                             .service_projections
                             .lock()

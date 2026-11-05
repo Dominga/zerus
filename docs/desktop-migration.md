@@ -1,5 +1,31 @@
 # Desktop import evidence and writer handoff
 
+## Release 0.48.0 scope (owner, 2026-11-05)
+
+The release imports Qt projects/organization and uses shared `hgs` accounts;
+already delivered preference imports remain. Other Qt state is configure again:
+drafts, unsent organization edits, pending operations, task-message/task-Start
+outboxes and markers, unknown deliveries, attention/notification history and
+identities, repository clone settings and caches. Qt files/blobs stay untouched
+for manual recovery. Their operations are neither executed, replayed nor
+re-offered as Next recovery choices, including from older private reports.
+
+Production runtime-report execution is disabled. Existing Next preload guards
+remain with their original writers; no new source family is added. The adapters, immutable
+records and transport contracts below remain historical/component documentation,
+not promises of full-family migration. Next's own interim stores, original IDs,
+recovery-only rules and service-handoff markers remain active; an unreadable or
+incomplete reservation pair refuses a fresh attempt. Next dev drafts remain
+eligible from their separate roots; Qt draft import and Saved drafts recovery
+are disabled. Previously imported Next copies are not purged.
+
+One GUI explanation per production profile lists the omissions. **Got it** saves
+only Next notice metadata; failed persistence keeps the notice available. It
+changes no pending record, permission, consent or retry. The
+[G3 release scope](qt-release-acceptance.md#g3-scope-for-0480--owner-decision-2026-11-05)
+replaces the former complete-source-family requirement. Platform and native
+caller qualifications remain separate.
+
 G1 (`hgs desktop`) and G3 (read-only migration) agreed this v1 contract on
 2026-10-30. The shared Rust crate is `crates/desktop-migration`, package
 `zerus-desktop-migration`. It contains structural types and pure validation,
@@ -616,6 +642,43 @@ fresh identity/hash recheck before publication. Every snapshot/manifest keeps
 `automatic_approvals:false`; evidence grants no opt-in, writes no setting or
 approval reservation and never delivers a request. Source discovery and G1's
 policy/UI integration remain separate.
+
+## Legacy per-computer project lists
+
+The production switch also checks the retained Qt `imported_machines` markers.
+A verified online computer already marked there is recorded as complete without
+reading its legacy list again. Other online computers use the existing bounded
+`project ls --json` read on the Organization worker; there is no new poller.
+Only missing POSIX links are added. Existing locations in any project preserve
+renames and moves; Next fields, defaults, order, assignments and tombstones win.
+Windows lists refuse with `legacy_projects_windows_unsupported` rather than send
+Windows paths to the POSIX shared writer.
+
+The separate private `legacy_project_lists_v1` family is bounded and records one
+reservation per physical computer before dispatch. Its original catalog/route
+binding and digest witnesses contain no project names or paths. A lost or unknown
+apply remains observation-only across restart, never an ordinary retrying draft.
+Completion needs a fresh checked catalog and matching live source after the
+original child and its pipes have drained. The Migration report shows key names
+and fixed reasons only. Ambiguous retained history and the 2 MiB proposal cap
+are explicit blocked outcomes requiring review; neither silently drops data. A
+proposal carries no session assignments: both of its sides omit them, so the
+writer leaves every assignment as it is, and the catalog itself is bounded only by
+the 8 MiB `swarm get` read.
+
+If a post-import catalog/configuration read fails, the same worker retries only
+those reads, backing off from 250 ms to a 30 s cap. The reservation remains pending
+and Apply is never dispatched again. After three failures, Projects and the
+Migration report show a blocked verification state while reads continue; a fresh
+verified read clears that state and releases the catalog fence. A failure alone
+never releases it. Separate desktops have separate reservations, as Qt did;
+concurrent imports can add copies before sync, and the location rule prevents
+further additions once those copies are visible.
+
+A computer whose catalog, configuration or route changed during its import
+(`legacy_projects_changed`) is not retried in the same session: its list is
+checked again the next time Zerus starts, and the Migration report says so.
+The worker adds no in-session retry for it.
 
 ## Retained Qt shared organization
 

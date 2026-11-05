@@ -6,7 +6,10 @@ use std::{fs, os::unix::fs::symlink};
 fn prepared(f: &Fixture) -> Journal {
     let until = std::time::Instant::now() + std::time::Duration::from_secs(8);
     loop {
-        match Journal::prepare(f.capture().unwrap(), &f.intent.reconcile_id) {
+        match Journal::prepare(
+            f.capture().unwrap(),
+            &CheckId::fixture_initial(&f.intent.reconcile_id),
+        ) {
             Ok(journal) => return journal,
             // Another parallel fixture's fork may briefly retain the same
             // CLOEXEC description until exec. Busy is a no-write refusal;
@@ -143,7 +146,11 @@ fn recorded_original_is_the_only_candidate_removed_and_reading_never_mutates() {
         tracked
     );
     assert_eq!(
-        Journal::prepare(f.capture().unwrap(), &f.intent.reconcile_id).err(),
+        Journal::prepare(
+            f.capture().unwrap(),
+            &CheckId::fixture_initial(&f.intent.reconcile_id)
+        )
+        .err(),
         Some(Error::Busy)
     );
     drop(journal);
@@ -537,7 +544,8 @@ fn real_writer_death_keeps_one_slot_and_recovers_only_the_recorded_original() {
             intent.scope,
         )
         .unwrap();
-        let journal = Journal::prepare(source, &intent.reconcile_id).unwrap();
+        let journal =
+            Journal::prepare(source, &CheckId::fixture_initial(&intent.reconcile_id)).unwrap();
         crash_cut(&journal, Path::new(&root), &cut);
         unreachable!();
     }
@@ -706,9 +714,10 @@ fn abort_after_candidate_fsync_no_longer_blocks_any_metadata_publisher() {
         assert_eq!(saved(&f).publication_status(), Status::Recoverable);
         if action == "discard" {
             saved(&f).discard_prepared(&f.intent.reconcile_id).unwrap();
+            let proposal = saved(&f).next_check_id().unwrap();
             let mut explicit = Journal::prepare_after_discard(
                 f.capture().unwrap(),
-                "00000009-1111-4111-8111-111111111111",
+                &proposal,
                 &f.intent.reconcile_id,
             )
             .unwrap();

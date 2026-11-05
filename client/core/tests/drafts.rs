@@ -729,9 +729,9 @@ fn the_import_never_reads_the_stores_own_folder() {
 }
 
 #[test]
-fn a_read_right_after_import_at_start_sees_the_imported_draft() {
+fn startup_import_keeps_next_interim_drafts_but_ignores_qt() {
     const CHILD: &str = "ZERUS_TEST_IMPORT_AT_START";
-    const NAME: &str = "a_read_right_after_import_at_start_sees_the_imported_draft";
+    const NAME: &str = "startup_import_keeps_next_interim_drafts_but_ignores_qt";
     let other = "studio\nclaude/sample-project/other";
     if let Some(scratch) = std::env::var_os(CHILD).map(PathBuf::from) {
         // In the child, Qt's and the dev app's stores are under the scratch
@@ -746,9 +746,11 @@ fn a_read_right_after_import_at_start_sees_the_imported_draft() {
         };
         let dev = data.join("dev.zerus.next/drafts");
         seed(&dev, &[(other, draft("from the dev app", &[]))]);
+        let before_qt = snapshot(&qt_root().unwrap());
         let store = DraftStore::open(scratch.join("here"));
         import_at_start(&store);
-        assert_eq!(load(&store, KEY).draft.draft.text, "from Qt");
+        assert!(load(&store, KEY).draft.draft.text.is_empty());
+        assert_eq!(snapshot(&qt_root().unwrap()), before_qt);
         assert_eq!(load(&store, other).draft.draft.text, "from the dev app");
         return;
     }
@@ -769,7 +771,7 @@ fn a_read_right_after_import_at_start_sees_the_imported_draft() {
     assert!(output.status.success(), "{stdout}{stderr}");
     assert!(stdout.contains("1 passed"), "{stdout}");
     assert!(
-        stderr.contains("drafts import: 2 imported, 0 identical, 0 conflicts, 0 invalid"),
+        stderr.contains("drafts import: 1 imported, 0 identical, 0 conflicts, 0 invalid"),
         "{stderr}"
     );
 }

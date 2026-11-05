@@ -26,7 +26,11 @@ fn saved(f: &Fixture) -> Saved {
     .unwrap()
 }
 fn prepared(f: &Fixture) -> Journal {
-    Journal::prepare(f.capture().unwrap(), &f.intent.reconcile_id).unwrap()
+    Journal::prepare(
+        f.capture().unwrap(),
+        &CheckId::fixture_initial(&f.intent.reconcile_id),
+    )
+    .unwrap()
 }
 
 #[test]
@@ -98,7 +102,7 @@ fn ui_exit_and_absent_outbox_only_reopen_the_same_original_read_identity() {
     );
     f.write();
     assert_eq!(
-        Journal::prepare(f.capture().unwrap(), NEXT).err(),
+        Journal::prepare(f.capture().unwrap(), &CheckId::fixture_initial(NEXT)).err(),
         Some(Error::Unavailable)
     );
     assert_eq!(
@@ -114,7 +118,8 @@ fn prepared_reopen_reuses_the_original_id_with_only_a_fresh_service_scope() {
     drop(prepared(&f));
     let bytes = fs::read(&f.file).unwrap();
     f.intent.scope.service_epoch = NEXT.into();
-    let mut journal = Journal::prepare(f.capture().unwrap(), READ).unwrap();
+    let mut journal =
+        Journal::prepare(f.capture().unwrap(), &CheckId::fixture_initial(READ)).unwrap();
     assert_eq!(journal.saved().phase(), Phase::Prepared);
     assert_eq!(journal.saved().reconcile_id(), f.intent.reconcile_id);
     let offered = journal.offer().unwrap();
@@ -122,7 +127,8 @@ fn prepared_reopen_reuses_the_original_id_with_only_a_fresh_service_scope() {
     assert_eq!(offered.scope, f.intent.scope);
     assert_eq!(offered.original.as_bytes(), bytes);
     drop(journal);
-    let mut reloaded = Journal::prepare(f.capture().unwrap(), READ).unwrap();
+    let mut reloaded =
+        Journal::prepare(f.capture().unwrap(), &CheckId::fixture_initial(READ)).unwrap();
     assert_eq!(reloaded.offer().err(), Some(Error::OfferedUnknown));
     assert_eq!(reloaded.saved().reconcile_id(), f.intent.reconcile_id);
 }
@@ -132,14 +138,14 @@ fn another_writer_or_changed_source_cannot_rotate_or_replace_a_saved_original() 
     let mut f = Fixture::new();
     let first = prepared(&f);
     assert_eq!(
-        Journal::prepare(f.capture().unwrap(), NEXT).err(),
+        Journal::prepare(f.capture().unwrap(), &CheckId::fixture_initial(NEXT)).err(),
         Some(Error::Busy)
     );
     let original = fs::read(f.file.with_extension("reconcile")).unwrap();
     drop(first);
     f.change(|v| v["opaque_future"] = json!("changed source"));
     assert_eq!(
-        Journal::prepare(f.capture().unwrap(), NEXT).err(),
+        Journal::prepare(f.capture().unwrap(), &CheckId::fixture_initial(NEXT)).err(),
         Some(Error::Unavailable)
     );
     assert_eq!(
@@ -295,7 +301,7 @@ fn invalid_or_changed_preparation_creates_no_journal_or_metadata_lock() {
         let f = Fixture::new();
         let before = names(&f);
         assert_eq!(
-            Journal::prepare(f.capture().unwrap(), bad_id).err(),
+            Journal::prepare(f.capture().unwrap(), &CheckId::fixture_initial(bad_id)).err(),
             Some(Error::Unavailable)
         );
         assert_eq!(names(&f), before);
@@ -305,7 +311,7 @@ fn invalid_or_changed_preparation_creates_no_journal_or_metadata_lock() {
     f.change(|v| v["opaque_future"] = json!("changed before preparation"));
     let before = names(&f);
     assert_eq!(
-        Journal::prepare(source, NEXT).err(),
+        Journal::prepare(source, &CheckId::fixture_initial(NEXT)).err(),
         Some(Error::Unavailable)
     );
     assert_eq!(names(&f), before);
@@ -329,16 +335,19 @@ fn explicit_discard_only_retires_the_exact_never_offered_metadata() {
     f.write();
     assert_eq!(fs::read(&f.file).unwrap(), original);
     assert_eq!(
-        Journal::prepare(f.capture().unwrap(), NEXT).err(),
+        Journal::prepare(f.capture().unwrap(), &CheckId::fixture_initial(NEXT)).err(),
         Some(Error::Cancelled)
     );
+    let proposal = saved(&f).next_check_id().unwrap();
+    let next_id = proposal.as_str().to_owned();
     assert_eq!(
-        Journal::prepare_after_discard(f.capture().unwrap(), NEXT, READ).err(),
+        Journal::prepare_after_discard(f.capture().unwrap(), &proposal, READ).err(),
         Some(Error::Unavailable)
     );
     let mut next =
-        Journal::prepare_after_discard(f.capture().unwrap(), NEXT, &f.intent.reconcile_id).unwrap();
-    assert_eq!(next.saved().reconcile_id(), NEXT);
+        Journal::prepare_after_discard(f.capture().unwrap(), &proposal, &f.intent.reconcile_id)
+            .unwrap();
+    assert_eq!(next.saved().reconcile_id(), next_id);
     assert_eq!(
         next.saved.disk.record.previous_cancelled.as_deref(),
         Some(f.intent.reconcile_id.as_str())
@@ -346,7 +355,10 @@ fn explicit_discard_only_retires_the_exact_never_offered_metadata() {
     next.offer().unwrap();
     drop(next);
     let bytes = fs::read(f.file.with_extension("reconcile")).unwrap();
-    assert_eq!(saved(&f).discard_prepared(NEXT), Err(Error::OfferedUnknown));
+    assert_eq!(
+        saved(&f).discard_prepared(&next_id),
+        Err(Error::OfferedUnknown)
+    );
     assert_eq!(fs::read(f.file.with_extension("reconcile")).unwrap(), bytes);
     assert_eq!(fs::read(&f.file).unwrap(), original);
 }
@@ -378,7 +390,7 @@ fn stale_prepared_snapshot_and_missing_lock_never_discard_an_offered_or_unknown_
     );
     assert_eq!(saved(&f).phase(), Phase::Prepared);
     assert_eq!(
-        Journal::prepare(f.capture().unwrap(), NEXT).err(),
+        Journal::prepare(f.capture().unwrap(), &CheckId::fixture_initial(NEXT)).err(),
         Some(Error::Unavailable)
     );
 }
@@ -398,11 +410,16 @@ fn missing_journal_beside_its_original_lock_never_creates_another_reconciliation
     )
     .is_err());
     assert_eq!(
-        Journal::prepare(f.capture().unwrap(), NEXT).err(),
+        Journal::prepare(f.capture().unwrap(), &CheckId::fixture_initial(NEXT)).err(),
         Some(Error::Unavailable)
     );
     assert_eq!(
-        Journal::prepare_after_discard(f.capture().unwrap(), NEXT, &f.intent.reconcile_id).err(),
+        Journal::prepare_after_discard(
+            f.capture().unwrap(),
+            &CheckId::fixture_initial(NEXT),
+            &f.intent.reconcile_id
+        )
+        .err(),
         Some(Error::Unavailable)
     );
     assert_eq!(names(&f), before);
@@ -434,13 +451,17 @@ fn invalid_next_record_is_refused_before_publication_and_replaced_preparation_is
     );
     drop(lock);
     drop(snapshot);
+    let proposal = saved(&f).next_check_id().unwrap();
+    let next_id = proposal.as_str().to_owned();
     let first =
-        Journal::prepare_after_discard(f.capture().unwrap(), NEXT, &f.intent.reconcile_id).unwrap();
+        Journal::prepare_after_discard(f.capture().unwrap(), &proposal, &f.intent.reconcile_id)
+            .unwrap();
     drop(first);
     let repeated =
-        Journal::prepare_after_discard(f.capture().unwrap(), NEXT, &f.intent.reconcile_id).unwrap();
+        Journal::prepare_after_discard(f.capture().unwrap(), &proposal, &f.intent.reconcile_id)
+            .unwrap();
     assert_eq!(repeated.saved().phase(), Phase::Prepared);
-    assert_eq!(repeated.saved().reconcile_id(), NEXT);
+    assert_eq!(repeated.saved().reconcile_id(), next_id);
 }
 
 #[test]
@@ -462,7 +483,8 @@ fn killing_the_original_private_frontend_process_preserves_offered_unknown() {
             intent.scope.clone(),
         )
         .unwrap();
-        let mut journal = Journal::prepare(source, &intent.reconcile_id).unwrap();
+        let mut journal =
+            Journal::prepare(source, &CheckId::fixture_initial(&intent.reconcile_id)).unwrap();
         journal.offer().unwrap();
         crate::fsx::write_private_durable(&Path::new(&root).join("ready"), b"offered").unwrap();
         // Only this marked leaf waits on its ORIGINAL parent's stdin pipe.
@@ -501,7 +523,8 @@ fn killing_the_original_private_frontend_process_preserves_offered_unknown() {
         read.query(f.intent.scope.clone(), READ).unwrap().binding,
         f.intent.binding
     );
-    let mut reopened = Journal::prepare(f.capture().unwrap(), NEXT).unwrap();
+    let mut reopened =
+        Journal::prepare(f.capture().unwrap(), &CheckId::fixture_initial(NEXT)).unwrap();
     assert_eq!(reopened.offer().err(), Some(Error::OfferedUnknown));
     assert_eq!(reopened.saved().reconcile_id(), f.intent.reconcile_id);
 }
@@ -525,7 +548,8 @@ fn abort_after_candidate_sync_can_reoffer_the_same_prepared_original() {
             intent.scope,
         )
         .unwrap();
-        let mut journal = Journal::prepare(source, &intent.reconcile_id).unwrap();
+        let mut journal =
+            Journal::prepare(source, &CheckId::fixture_initial(&intent.reconcile_id)).unwrap();
         journal
             .offer_with_sync(|file, directory| {
                 if !directory {
@@ -584,4 +608,24 @@ fn abort_after_candidate_sync_can_reoffer_the_same_prepared_original() {
     );
     assert_eq!(fs::read(&f.file).unwrap(), outbox);
     assert_eq!(fs::read(&f.marker).unwrap(), marker);
+}
+
+#[test]
+fn older_cancelled_id_cannot_return_after_a_second_explicit_discard() {
+    let f = Fixture::new();
+    let first = CheckId::fixture_initial(&f.intent.reconcile_id);
+    drop(Journal::prepare(f.capture().unwrap(), &first).unwrap());
+    saved(&f).discard_prepared(first.as_str()).unwrap();
+    let next = saved(&f).next_check_id().unwrap();
+    drop(Journal::prepare_after_discard(f.capture().unwrap(), &next, first.as_str()).unwrap());
+    saved(&f).discard_prepared(next.as_str()).unwrap();
+    let before = fs::read(f.file.with_extension("reconcile")).unwrap();
+    assert_eq!(
+        Journal::prepare_after_discard(f.capture().unwrap(), &first, next.as_str()).err(),
+        Some(Error::Unavailable)
+    );
+    assert_eq!(
+        fs::read(f.file.with_extension("reconcile")).unwrap(),
+        before
+    );
 }

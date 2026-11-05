@@ -3511,7 +3511,9 @@ A hello's replica part lists the node's verified direct peers (`peers`) and its
 `fence` capability. `swarm replica-relay` forwards one hello, or another relay,
 only to the relaying member's own verified alias for the next node. It passes
 on what is left of the deadline and the hops, and answers with the reply
-checked to come from that node.
+checked to come from that node. Its budget starts when the request arrives:
+its catalog lock, its store identity and the forwarded call all count
+against it, and it never answers after it.
 
 The check reports:
 - `universe`: this computer's node, store and replica root, and every node with
@@ -3522,11 +3524,18 @@ The check reports:
   - `unreachable`, `unverified` (another computer answered), or `unroutable`
     (a catalog machine that no verified route reaches);
   - `protocol`, `task_schema` below 7, `store`, or `fence_unsupported`;
-  - `busy` (the catalog lock was not free within the budget), `deadline`, or
-    `too_many_nodes`.
+  - `unavailable` (the node's own replica cannot be read now: its hello sends
+    an explicit unavailable part, and it stays a writer);
+  - `busy` (the catalog lock was not free within the budget), `deadline`,
+    `discovery_bound` (a node still unseen beyond 16 hops), or
+    `too_many_nodes` (more than 256 candidates, from the catalog, every
+    visited node's writers and the nodes found over peers, counted as they
+    are added). A partial universe is never certified.
 - `proof`: null until the proof itself lands (C3c2).
 
-A node whose hello has no replica key shares no tasks, so it alone is left out.
+A node whose hello has no replica key, as an older build sends, shares no
+tasks, so it alone is left out. A node whose replica cannot be read sends a
+present part instead, and is never left out.
 The nodes behind it are not left out: with no other route they close the fence
 as `unroutable`. The check holds no lock across the network, creates no floor
 and no attempt, and grants nothing.

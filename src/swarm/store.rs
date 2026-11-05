@@ -18,6 +18,18 @@ const REPLICA_OUTDATED: &str = "replica-outdated-peers.json";
 /// Members whose last sync listed the `session_id` catalog kind, kept the same
 /// way (zerus-ucck P2c-1).
 const SESSION_IDS: &str = "session-id-peers.json";
+/// This computer's membership incarnation: an epoch, new whenever the file
+/// cannot be read, and a generation that rises whenever its peers change. A
+/// separate file, so the catalog file an older build reads is unchanged.
+const MEMBERSHIP: &str = "membership.json";
+
+#[derive(Serialize, Deserialize)]
+struct Membership {
+    epoch: String,
+    generation: u64,
+    /// The digest of the peers (alias and node) this generation counts.
+    peers: String,
+}
 
 #[derive(Clone, Debug, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
@@ -372,6 +384,34 @@ impl LockedStore {
         // A member's replica record goes with its membership, at this save.
         super::replica_members::prune(&self.path.with_file_name(super::replica_members::FILE), peers)
     }
+    /// This computer's membership incarnation, `epoch:generation`: any
+    /// enrolment, disconnection or change of a peer's node, even one undone
+    /// later, gives another one (review-n on #1452). Unknown when unreadable.
+    pub fn membership(&self) -> Option<String> {
+        let bytes = fs::read(self.path.with_file_name(MEMBERSHIP)).ok()?;
+        let membership: Membership = serde_json::from_slice(&bytes).ok()?;
+        Some(format!("{}:{}", membership.epoch, membership.generation))
+    }
+    fn record_membership(&self) -> Result<()> {
+        use sha2::{Digest, Sha256};
+        let path = self.path.with_file_name(MEMBERSHIP);
+        let peers: BTreeMap<&String, &String> =
+            self.data.peers.iter().map(|(alias, peer)| (alias, &peer.node)).collect();
+        let digest = format!("{:x}", Sha256::digest(serde_json::to_vec(&peers)?));
+        let current = fs::read(&path)
+            .ok()
+            .and_then(|bytes| serde_json::from_slice::<Membership>(&bytes).ok());
+        let next = match current {
+            Some(current) if current.peers == digest => return Ok(()),
+            Some(current) => Membership {
+                epoch: current.epoch,
+                generation: current.generation + 1,
+                peers: digest,
+            },
+            None => Membership { epoch: new_id(), generation: 1, peers: digest },
+        };
+        replace(&path, &serde_json::to_vec(&next)?)
+    }
     /// Persist only the catalog and its session ID memberships. Scoped
     /// assignment must not prune peer metadata.
     pub fn save_catalog_only(&mut self) -> Result<()> {
@@ -381,6 +421,8 @@ impl LockedStore {
             replace(&self.path, &bytes)?;
             self.original = bytes;
         }
+        // Under the catalog lock, with the peers just saved.
+        self.record_membership()?;
         // Twins name operations of one swarm: a join starts with none.
         if self.data.twins.swarm_id != self.data.catalog.swarm_id {
             self.data.twins = super::session_ids::Twins::new(&self.data.catalog.swarm_id);

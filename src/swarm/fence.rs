@@ -48,9 +48,20 @@ const RELAYED: [&str; 2] = ["hello", "replica-relay"];
 /// together with this member's node and store. It only forwards: nothing
 /// here reads or writes a task.
 pub fn relay(config: &Config, request: Relay) -> Result<Value> {
+    // The budget starts on arrival and only shrinks: no wait here earns a
+    // fresh one (desktop-u on #1452).
+    let deadline = Instant::now() + Duration::from_millis(request.remaining_ms).min(transport::CALL_LIMIT);
     ensure!(RELAYED.contains(&request.command.as_str()), "{} is not relayed", request.command);
     ensure!(request.hops < MAX_HOPS, "the route is too long");
-    let store = LockedStore::load(config)?;
+    // A nested request is an object, checked before anything reads or
+    // changes it (review-n on #1452).
+    ensure!(
+        request.command == "hello" || request.input.is_object(),
+        "a relayed {} needs its request as an object",
+        request.command
+    );
+    let store = LockedStore::load_until(config, deadline)?
+        .ok_or_else(|| anyhow::anyhow!("the catalog is busy past the relay's deadline"))?;
     ensure!(request.swarm_id == store.data.catalog.swarm_id, "the request comes from another swarm");
     let node = store.data.node_id.clone();
     let alias = store
@@ -61,7 +72,8 @@ pub fn relay(config: &Config, request: Relay) -> Result<Value> {
         .map(|(alias, _)| alias.clone())
         .ok_or_else(|| anyhow::anyhow!("no verified route to {} here", request.to))?;
     drop(store);
-    let deadline = Instant::now() + Duration::from_millis(request.remaining_ms).min(transport::CALL_LIMIT);
+    let own = zerus_replica::ProjectStore::store_id_until(&config.state.join("replica"), deadline)?;
+    ensure!(!left(deadline).is_zero(), "no time left to relay");
     let input = if request.command == "replica-relay" {
         ensure!(request.hops > 0, "the route is longer than its hops");
         let mut inner = request.input.clone();
@@ -72,7 +84,8 @@ pub fn relay(config: &Config, request: Relay) -> Result<Value> {
         None
     };
     let reply = transport::remote_until(config, &alias, &request.command, input.as_ref(), deadline)?;
-    let store = zerus_replica::ProjectStore::store_id(&config.state.join("replica")).ok();
+    ensure!(!left(deadline).is_zero(), "the relay's deadline passed");
+    let store = own;
     // Another computer answering is told apart from one that does not, so
     // the requester names it `unverified`, not `unreachable`.
     let answered = answering_store(&request.command, &reply);
@@ -116,6 +129,36 @@ pub(crate) struct Route<'a> {
     pub alias: &'a str,
     pub nodes: &'a [String],
     pub stores: &'a [Option<String>],
+}
+
+/// How the fence reaches a node: over SSH and relays (`Ssh`), or in process
+/// in its tests. Each answer is checked to come from the node, and store,
+/// it is bound to.
+pub(crate) trait Net {
+    fn call(
+        &self,
+        swarm: &str,
+        route: Route<'_>,
+        command: &str,
+        input: Option<&Value>,
+        deadline: Instant,
+    ) -> Result<Value>;
+}
+
+/// The members' own transport.
+pub(crate) struct Ssh<'a>(pub &'a Config);
+
+impl Net for Ssh<'_> {
+    fn call(
+        &self,
+        swarm: &str,
+        route: Route<'_>,
+        command: &str,
+        input: Option<&Value>,
+        deadline: Instant,
+    ) -> Result<Value> {
+        call(self.0, swarm, route, command, input, deadline)
+    }
 }
 
 /// One call to the node at the end of `route`, relayed by every node before
@@ -196,6 +239,8 @@ pub struct Node {
     pub task_schema: Option<i64>,
     pub store: Option<String>,
     pub fence: Option<u64>,
+    /// Its membership incarnation, from its hello.
+    pub membership: Option<String>,
     /// Why this node keeps the fence closed, when it does.
     pub closed: Option<&'static str>,
 }
@@ -206,6 +251,8 @@ pub struct Me {
     pub node: String,
     pub store: Option<String>,
     pub root: String,
+    /// This computer's membership incarnation (`LockedStore::membership`).
+    pub membership: Option<String>,
 }
 
 /// Every node that may hold a task of this swarm: this one, every catalog
@@ -246,24 +293,11 @@ impl Universe {
     }
 }
 
-/// Discovers the universe within `deadline`: the catalog read under its lock
-/// (waiting no later than the deadline), then a fresh hello to every node
-/// over the shortest verified route, with no lock held across the network.
-pub fn universe(config: &Config, deadline: Instant) -> Result<Universe> {
-    let root = config.state.join("replica");
-    let Some(store) = LockedStore::load_until(config, deadline)? else {
-        return Ok(Universe {
-            me: Me { node: String::new(), store: None, root: root.display().to_string() },
-            nodes: BTreeMap::new(),
-            stopped: Some("busy"),
-        });
-    };
-    let me = store.data.node_id.clone();
-    let swarm = store.data.catalog.swarm_id.clone();
+/// Every machine `store`'s catalog knows has joined, as the machine it now
+/// is (a redirected one counts as its new identity), this one excepted.
+pub(crate) fn catalog_machines(store: &LockedStore) -> BTreeSet<String> {
     let identities = store.data.catalog.identities().unwrap_or_default();
-    // Every machine that ever joined wrote its name; a redirected one counts
-    // as the machine it now is.
-    let catalog: BTreeSet<String> = store
+    store
         .data
         .catalog
         .values()
@@ -274,8 +308,34 @@ pub fn universe(config: &Config, deadline: Instant) -> Result<Universe> {
             }
             _ => None,
         })
-        .filter(|id| id != &me)
-        .collect();
+        .filter(|id| id != &store.data.node_id)
+        .collect()
+}
+
+/// Discovers the universe within `deadline`: the catalog read under its lock
+/// (waiting no later than the deadline), then a fresh hello to every node
+/// over the shortest verified route, with no lock held across the network.
+pub fn universe(config: &Config, deadline: Instant) -> Result<Universe> {
+    universe_with(config, &Ssh(config), deadline)
+}
+
+pub(crate) fn universe_with(config: &Config, net: &dyn Net, deadline: Instant) -> Result<Universe> {
+    let root = config.state.join("replica");
+    let Some(store) = LockedStore::load_until(config, deadline)? else {
+        return Ok(Universe {
+            me: Me { node: String::new(), store: None, root: root.display().to_string(), membership: None },
+            nodes: BTreeMap::new(),
+            stopped: Some("busy"),
+        });
+    };
+    let me = store.data.node_id.clone();
+    let swarm = store.data.catalog.swarm_id.clone();
+    // Every machine that ever joined wrote its name; a redirected one counts
+    // as the machine it now is. Each node visited adds the writers its own
+    // catalog knows, so one that only ever reached another member is still
+    // covered (review-n on #1452).
+    let mut known = catalog_machines(&store);
+    let membership = store.membership();
     let peers: Vec<(String, String)> = store
         .data
         .peers
@@ -286,8 +346,9 @@ pub fn universe(config: &Config, deadline: Instant) -> Result<Universe> {
     drop(store);
     let me = Me {
         node: me,
-        store: zerus_replica::ProjectStore::store_id(&root).ok(),
+        store: zerus_replica::ProjectStore::store_id_until(&root, deadline).ok().flatten(),
         root: root.display().to_string(),
+        membership,
     };
     let mut nodes = BTreeMap::new();
     let mut stopped = None;
@@ -299,35 +360,65 @@ pub fn universe(config: &Config, deadline: Instant) -> Result<Universe> {
         .collect();
     let mut seen: BTreeSet<String> = queue.iter().map(|(_, route, _)| route[0].clone()).collect();
     seen.insert(me.node.clone());
+    known.remove(&me.node);
+    // Every candidate, from every source, counts against one bound as it is
+    // added: the nodes queued or seen and the writers known. Past it the
+    // universe stops closed and no more work is queued (review-n on #1452).
+    let over = |seen: &BTreeSet<String>, known: &BTreeSet<String>| seen.union(known).count() > MAX_NODES + 1;
+    if over(&seen, &known) {
+        stopped = Some("too_many_nodes");
+        queue.clear();
+    }
     while let Some((alias, route, stores)) = queue.pop_front() {
-        if nodes.len() >= MAX_NODES {
-            stopped = Some("too_many_nodes");
+        let node = route[route.len() - 1].clone();
+        let (found, peers, writers) =
+            observe(net, &swarm, Route { alias: &alias, nodes: &route, stores: &stores }, deadline);
+        for writer in writers {
+            if writer != me.node && known.insert(writer) && over(&seen, &known) {
+                stopped = Some("too_many_nodes");
+                break;
+            }
+        }
+        if stopped.is_some() {
+            nodes.insert(node, found);
             break;
         }
-        let node = route[route.len() - 1].clone();
-        let (found, peers) = observe(config, &swarm, &alias, &route, &stores, deadline);
         if found.closed == Some("deadline") {
             nodes.insert(node, found);
             stopped = Some("deadline");
             break;
         }
-        // Only a node that relays leads on to its peers.
-        if found.closed.is_none() && !found.no_replica && route.len() < MAX_HOPS {
+        // Only a node that relays leads on to its peers; one still unseen
+        // beyond the hop bound closes discovery (desktop-u on #1452).
+        if found.closed.is_none() && !found.no_replica {
             for peer in peers {
-                if seen.insert(peer.clone()) {
-                    let mut further = route.clone();
-                    further.push(peer);
-                    let mut known = stores.clone();
-                    *known.last_mut().expect("a route has a node") = found.store.clone();
-                    known.push(None);
-                    queue.push_back((alias.clone(), further, known));
+                if seen.contains(&peer) {
+                    continue;
                 }
+                if route.len() >= MAX_HOPS {
+                    stopped = Some("discovery_bound");
+                    break;
+                }
+                seen.insert(peer.clone());
+                if over(&seen, &known) {
+                    stopped = Some("too_many_nodes");
+                    break;
+                }
+                let mut further = route.clone();
+                further.push(peer);
+                let mut hops = stores.clone();
+                *hops.last_mut().expect("a route has a node") = found.store.clone();
+                hops.push(None);
+                queue.push_back((alias.clone(), further, hops));
             }
         }
         nodes.insert(node, found);
+        if stopped.is_some() {
+            break;
+        }
     }
-    // A catalog machine no verified route reached closes the fence.
-    for id in catalog {
+    // Every known writer no verified route reached closes the fence.
+    for id in known {
         nodes.entry(id.clone()).or_insert_with(|| Node {
             node: id,
             route: Vec::new(),
@@ -337,6 +428,7 @@ pub fn universe(config: &Config, deadline: Instant) -> Result<Universe> {
             task_schema: None,
             store: None,
             fence: None,
+            membership: None,
             closed: Some("unroutable"),
         });
     }
@@ -344,14 +436,8 @@ pub fn universe(config: &Config, deadline: Instant) -> Result<Universe> {
 }
 
 /// A fresh hello to the node at the end of `route`, and the peers it lists.
-fn observe(
-    config: &Config,
-    swarm: &str,
-    alias: &str,
-    route: &[String],
-    stores: &[Option<String>],
-    deadline: Instant,
-) -> (Node, Vec<String>) {
+fn observe(net: &dyn Net, swarm: &str, whole: Route<'_>, deadline: Instant) -> (Node, Vec<String>, Vec<String>) {
+    let Route { alias, nodes: route, .. } = whole;
     let node = route[route.len() - 1].clone();
     let mut found = Node {
         node: node.clone(),
@@ -362,9 +448,10 @@ fn observe(
         task_schema: None,
         store: None,
         fence: None,
+        membership: None,
         closed: None,
     };
-    let hello = match call(config, swarm, Route { alias, nodes: route, stores }, "hello", None, deadline) {
+    let hello = match net.call(swarm, whole, "hello", None, deadline) {
         Ok(hello) => hello,
         Err(error) => {
             let expired = left(deadline).is_zero();
@@ -376,12 +463,12 @@ fn observe(
             } else {
                 "unreachable"
             });
-            return (found, Vec::new());
+            return (found, Vec::new(), Vec::new());
         }
     };
     if hello["swarm_id"] != swarm {
         found.closed = Some("unverified");
-        return (found, Vec::new());
+        return (found, Vec::new(), Vec::new());
     }
     let replica = &hello["replica"];
     found.no_replica = hello.get("replica").is_none();
@@ -390,21 +477,26 @@ fn observe(
     found.store = replica["store"].as_str().filter(|s| ids::is_uuid(s)).map(str::to_owned);
     found.fence = replica["fence"].as_u64();
     let peers: Option<Vec<String>> = serde_json::from_value(replica["peers"].clone()).ok();
+    let writers: Option<Vec<String>> = serde_json::from_value(replica["writers"].clone()).ok();
+    found.membership = replica["membership"].as_str().map(str::to_owned);
     if found.no_replica {
-        return (found, Vec::new());
+        return (found, Vec::new(), Vec::new());
     }
-    found.closed = if found.protocol != Some(PROTOCOL) {
+    // A member that cannot read its own replica now is still a writer.
+    found.closed = if replica.get("unavailable").is_some() {
+        Some("unavailable")
+    } else if found.protocol != Some(PROTOCOL) {
         Some("protocol")
     } else if found.task_schema.is_none_or(|schema| schema < TASK_SCHEMA) {
         Some("task_schema")
     } else if found.store.is_none() {
         Some("store")
-    } else if found.fence != Some(FENCE) || peers.is_none() {
+    } else if found.fence != Some(FENCE) || peers.is_none() || writers.is_none() || found.membership.is_none() {
         Some("fence_unsupported")
     } else {
         None
     };
-    (found, peers.unwrap_or_default())
+    (found, peers.unwrap_or_default(), writers.unwrap_or_default())
 }
 
 #[cfg(test)]
@@ -475,6 +567,226 @@ mod tests {
         let route = vec!["aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaaa".to_owned(), "b".to_owned()];
         let error = call(&config, "swarm", to(&route, &[None, None]), "hello", None, Instant::now()).unwrap_err();
         assert!(format!("{error:#}").contains("no time left"), "{error:#}");
+    }
+
+    /// Hellos served in process: each node lists `peers[node]` as its
+    /// verified peers; `unavailable` nodes cannot read their replica.
+    struct Hellos {
+        swarm: String,
+        peers: BTreeMap<String, Vec<String>>,
+        /// What each node's catalog knows has joined, beyond its peers.
+        writers: BTreeMap<String, Vec<String>>,
+        unavailable: BTreeSet<String>,
+    }
+
+    impl Net for Hellos {
+        fn call(&self, swarm: &str, route: Route<'_>, command: &str, _: Option<&Value>, _: Instant) -> Result<Value> {
+            assert_eq!((swarm, command), (self.swarm.as_str(), "hello"));
+            let node = route.nodes.last().unwrap();
+            let store = format!("{:0>8}-0000-4000-8000-000000000000", node.len() % 10);
+            let writers = self.writers.get(node).cloned().unwrap_or_default();
+            let mut replica = json!({"protocol": PROTOCOL, "task_schema": TASK_SCHEMA, "store": store,
+                                     "fence": FENCE, "peers": self.peers.get(node).cloned().unwrap_or_default(),
+                                     "writers": writers, "membership": "00000000-0000-4000-8000-000000000000:1"});
+            if self.unavailable.contains(node) {
+                replica = json!({"protocol": PROTOCOL, "unavailable": "the replica root is not a directory"});
+            }
+            Ok(json!({"node_id": node, "swarm_id": self.swarm, "replica": replica}))
+        }
+    }
+
+    /// The universe of a fixture whose one direct peer is the first node.
+    fn universe_of(peers: BTreeMap<String, Vec<String>>, unavailable: &[&str]) -> Universe {
+        universe_known(peers, BTreeMap::new(), unavailable)
+    }
+
+    fn universe_known(
+        peers: BTreeMap<String, Vec<String>>,
+        writers: BTreeMap<String, Vec<String>>,
+        unavailable: &[&str],
+    ) -> Universe {
+        let (_dir, config) = fixture();
+        let store = LockedStore::load(&config).unwrap();
+        let swarm = store.data.catalog.swarm_id.clone();
+        drop(store);
+        let unavailable = unavailable.iter().map(|n| n.to_string()).collect();
+        let net = Hellos { swarm, peers, writers, unavailable };
+        universe_with(&config, &net, Instant::now() + Duration::from_secs(5)).unwrap()
+    }
+
+    /// A chain from the direct peer: node i lists i-1 and i+1.
+    fn chain(length: usize) -> BTreeMap<String, Vec<String>> {
+        let name = |i: usize| if i == 0 { PEER.to_owned() } else { format!("node-{i}") };
+        (0..length)
+            .map(|i| {
+                let mut peers = vec![];
+                if i > 0 {
+                    peers.push(name(i - 1));
+                }
+                if i + 1 < length {
+                    peers.push(name(i + 1));
+                }
+                (name(i), peers)
+            })
+            .collect()
+    }
+
+    const PEER: &str = "aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaaa";
+
+    /// desktop-u on #1452: a node still unseen beyond the hop bound, or past
+    /// the node bound, closes discovery; the exact bound with nothing unseen
+    /// stays open.
+    #[test]
+    fn a_writer_beyond_the_discovery_bound_closes_it() {
+        let exact = universe_of(chain(MAX_HOPS), &[]);
+        assert_eq!((exact.nodes.len(), exact.closed()), (MAX_HOPS, None));
+        let beyond = universe_of(chain(MAX_HOPS + 1), &[]);
+        assert_eq!(beyond.closed(), Some((None, "discovery_bound")));
+        // The node bound: the peer lists every other node directly.
+        let star = |others: usize| -> BTreeMap<String, Vec<String>> {
+            let leaves: Vec<String> = (1..=others).map(|i| format!("leaf-{i}")).collect();
+            let mut peers = BTreeMap::from([(PEER.to_owned(), leaves.clone())]);
+            peers.extend(leaves.into_iter().map(|leaf| (leaf, vec![PEER.to_owned()])));
+            peers
+        };
+        let full = universe_of(star(MAX_NODES - 1), &[]);
+        assert_eq!((full.nodes.len(), full.closed()), (MAX_NODES, None));
+        let over = universe_of(star(MAX_NODES), &[]);
+        assert_eq!(over.closed(), Some((None, "too_many_nodes")));
+        // A node advertising more writers than one universe covers stops it
+        // closed as soon as the bound is passed, whatever the list's length.
+        let writers: Vec<String> = (0..10 * MAX_NODES).map(|i| format!("writer-{i}")).collect();
+        let flooded = universe_known(chain(1), BTreeMap::from([(PEER.to_owned(), writers)]), &[]);
+        assert_eq!(flooded.closed(), Some((None, "too_many_nodes")));
+        assert!(flooded.nodes.len() <= MAX_NODES + 1, "{}", flooded.nodes.len());
+    }
+
+    /// review-n on #1452: a writer that only ever reached the peer (it joined
+    /// the peer, which never enrolled it) is known to the peer's catalog,
+    /// so it is covered; with no route it closes the fence.
+    #[test]
+    fn a_writer_only_a_visited_node_knows_is_covered() {
+        let universe = universe_known(chain(1), BTreeMap::from([(PEER.to_owned(), vec!["incoming".to_owned()])]), &[]);
+        assert_eq!(universe.closed(), Some((Some("incoming"), "unroutable")));
+        // Known and reachable, it is covered and open.
+        let mut peers = chain(1);
+        peers.get_mut(PEER).unwrap().push("incoming".to_owned());
+        peers.insert("incoming".to_owned(), vec![PEER.to_owned()]);
+        let reached = universe_known(peers, BTreeMap::from([(PEER.to_owned(), vec!["incoming".to_owned()])]), &[]);
+        assert_eq!(reached.closed(), None);
+        assert_eq!(reached.nodes["incoming"].route, vec![PEER.to_owned(), "incoming".to_owned()]);
+    }
+
+    /// review-n on #1452: a nested request that is not an object is refused
+    /// with an error, never a panic.
+    #[test]
+    fn a_relayed_request_that_is_not_an_object_is_refused() {
+        let (_dir, config) = fixture();
+        let swarm = LockedStore::load(&config).unwrap().data.catalog.swarm_id.clone();
+        for input in [json!(true), json!(1), json!("relay"), json!([]), Value::Null] {
+            let relay = Relay {
+                swarm_id: swarm.clone(),
+                to: PEER.into(),
+                command: "replica-relay".into(),
+                input: input.clone(),
+                hops: 1,
+                remaining_ms: 1000,
+                store: None,
+            };
+            let error = super::relay(&config, relay).unwrap_err();
+            assert!(format!("{error:#}").contains("as an object"), "{input}: {error:#}");
+        }
+    }
+
+    /// review-n on #1452: catalog-only candidates count against the cap too.
+    #[test]
+    fn catalog_only_candidates_count_against_the_cap() {
+        let (_dir, config) = fixture();
+        let mut store = LockedStore::load(&config).unwrap();
+        let node = store.data.node_id.clone();
+        for i in 0..MAX_NODES {
+            let id = format!("{:08x}-0000-4000-8000-{:012x}", i, i);
+            store
+                .data
+                .catalog
+                .set(&node, super::super::catalog::Key::machine(&id, "name"), json!(format!("m{i}")))
+                .unwrap();
+        }
+        let swarm = store.data.catalog.swarm_id.clone();
+        store.save().unwrap();
+        drop(store);
+        let net = Hellos { swarm, peers: chain(1), writers: BTreeMap::new(), unavailable: BTreeSet::new() };
+        let universe = universe_with(&config, &net, Instant::now() + Duration::from_secs(5)).unwrap();
+        assert_eq!(universe.closed(), Some((None, "too_many_nodes")));
+    }
+
+    /// review-n on #1452: an unreadable store identity alone keeps the
+    /// replica part present, with a null store, and not unavailable.
+    #[test]
+    fn an_unreadable_store_identity_alone_is_a_present_part_with_no_store() {
+        let (_dir, config) = fixture();
+        let root = config.state.join("replica");
+        std::fs::create_dir_all(root.join("store-id")).unwrap();
+        let hello = transport::hello(&config, false).unwrap();
+        let replica = &hello["replica"];
+        assert!(replica.is_object(), "{hello}");
+        assert_eq!((replica["protocol"].clone(), replica["store"].clone()), (json!(PROTOCOL), Value::Null), "{hello}");
+        assert!(replica.get("unavailable").is_none(), "{hello}");
+    }
+
+    /// desktop-u on #1452: a member that cannot read its own replica sends
+    /// an explicit part, stays a writer and closes the fence; only a missing
+    /// part, as an older build sends, leaves a member out.
+    #[test]
+    fn an_unreadable_replica_stays_a_writer_and_closes_the_fence() {
+        let (_dir, config) = fixture();
+        let root = config.state.join("replica");
+        std::fs::create_dir_all(root.parent().unwrap()).unwrap();
+        let _ = std::fs::remove_dir_all(&root);
+        std::fs::write(&root, b"not a directory").unwrap();
+        let hello = transport::hello(&config, false).unwrap();
+        assert_eq!(hello["replica"]["protocol"], json!(PROTOCOL), "{hello}");
+        assert!(hello["replica"]["unavailable"].is_string(), "{hello}");
+        let universe = universe_of(chain(2), &["node-1"]);
+        let node = &universe.nodes["node-1"];
+        assert_eq!((node.no_replica, node.closed), (false, Some("unavailable")));
+        assert_eq!(universe.closed(), Some((Some("node-1"), "unavailable")));
+    }
+
+    /// desktop-u on #1452: a relay's budget starts on arrival. A catalog
+    /// lock held past it refuses the relay within the budget, before any
+    /// call is forwarded, never with a fresh budget after the wait.
+    #[test]
+    fn a_relay_never_renews_its_budget_after_a_wait() {
+        let (_dir, config) = fixture();
+        let held = LockedStore::load(&config).unwrap();
+        let swarm = held.data.catalog.swarm_id.clone();
+        let relay = Relay {
+            swarm_id: swarm,
+            to: PEER.into(),
+            command: "hello".into(),
+            input: Value::Null,
+            hops: 0,
+            remaining_ms: 50,
+            store: None,
+        };
+        let started = Instant::now();
+        let refused = super::relay(&config, relay);
+        let waited = started.elapsed();
+        drop(held);
+        assert!(format!("{:#}", refused.unwrap_err()).contains("past the relay's deadline"));
+        assert!(waited >= Duration::from_millis(50) && waited < Duration::from_secs(2), "{waited:?}");
+        // An exhausted budget is refused even with the catalog free.
+        let relay = Relay {
+            swarm_id: String::new(),
+            to: PEER.into(),
+            command: "hello".into(),
+            input: Value::Null,
+            hops: 0,
+            remaining_ms: 0,
+            store: None,
+        };
+        assert!(super::relay(&config, relay).is_err());
     }
 
     /// A route longer than the hop bound, and an empty one, are refused

@@ -22,16 +22,15 @@ const SCAN_TIME: Duration = Duration::from_millis(500);
 pub(super) fn cutover(config: &Config, args: &[String]) -> Result<Value> {
     let who = actor(&machines(config)?.here, args, false)?;
     let (id, name) = project_arg(config, args, &who)?;
-    let store = store(config, &id)?;
     if let Some(task) = option(args, "--task")? {
+        // The one budget starts here and covers the project's own lock too.
+        let deadline = std::time::Instant::now() + FENCE_BUDGET;
         if !flag(args, "--check") || option(args, "--hold")?.is_some() {
             return Err(fail("--task takes --check, and nothing else"));
         }
-        let uuid = store.find(task).map_err(fail)?.uuid().to_owned();
-        // No project lock is held across the network.
-        drop(store);
-        return check(config, &id, &name, &uuid);
+        return fence_check(config, &id, &name, task, deadline);
     }
+    let store = store(config, &id)?;
     if let Some(hold) = option(args, "--hold")? {
         let on = match hold {
             "on" => true,
@@ -149,13 +148,26 @@ fn closing(member: &TaskMember, project: &str, latest: Option<i64>) -> Option<Va
     None
 }
 
+/// `--task T --check` from its entry: the project's lock, the task's name
+/// and the universe all within `deadline` (review-n and desktop-u on #1452).
+fn fence_check(config: &Config, id: &str, name: &str, task: &str, deadline: std::time::Instant) -> Result<Value> {
+    let wait = deadline.saturating_duration_since(std::time::Instant::now());
+    let store = zerus_replica::ProjectStore::open_within(&config.state.join("replica"), id, wait)
+        .map_err(fail)?
+        .filter(|_| std::time::Instant::now() < deadline)
+        .ok_or_else(|| fail("the project's tasks are busy past the check's budget"))?;
+    let uuid = store.find(task).map_err(fail)?.uuid().to_owned();
+    // No project lock is held across the network.
+    drop(store);
+    check(config, id, name, &uuid, deadline)
+}
+
 /// `--task T --check`: the fence's writer universe for the task, read now
 /// within one budget: every node that may hold it, the route to each, what
 /// its fresh hello showed, and the first reason the fence is closed. It
 /// creates no floor and no attempt, and grants nothing; the proof itself
 /// comes with C3c2 (`proof` is null until then).
-fn check(config: &Config, id: &str, name: &str, uuid: &str) -> Result<Value> {
-    let deadline = std::time::Instant::now() + FENCE_BUDGET;
+fn check(config: &Config, id: &str, name: &str, uuid: &str, deadline: std::time::Instant) -> Result<Value> {
     let universe = swarm::fence::universe(config, deadline).map_err(fail)?;
     let closed = universe
         .closed()
@@ -191,6 +203,37 @@ fn prose(closed: &Value, project: &str) -> String {
 mod tests {
     use super::*;
     use crate::swarm::ReplicaMember;
+
+    /// review-n on #1452: the check's budget covers its own project lock. A
+    /// lock held past the budget refuses within it, never blocking past it
+    /// and never answering after it.
+    #[test]
+    fn the_check_s_budget_covers_its_project_lock() {
+        let dir = tempfile::tempdir().unwrap();
+        let config = Config {
+            home: dir.path().to_str().unwrap().into(),
+            dir: dir.path().join("config"),
+            state: dir.path().join("state"),
+            selves: vec!["example-local".into()],
+            peers: vec![],
+            base_peers: vec![],
+            peers_from_environment: false,
+            machines: std::collections::BTreeMap::new(),
+            tab: false,
+            tab_colors: String::new(),
+        };
+        let held = zerus_replica::ProjectStore::open(&config.state.join("replica"), "p").unwrap();
+        let started = std::time::Instant::now();
+        let refused = fence_check(&config, "p", "P", "T-000001", started + Duration::from_millis(150));
+        let waited = started.elapsed();
+        drop(held);
+        assert!(format!("{}", refused.unwrap_err()).contains("past the check's budget"));
+        assert!(waited >= Duration::from_millis(150) && waited < Duration::from_secs(3), "{waited:?}");
+        // An exhausted budget is refused at once, even with the lock free.
+        let started = std::time::Instant::now();
+        assert!(fence_check(&config, "p", "P", "T-000001", started).is_err());
+        assert!(started.elapsed() < Duration::from_secs(1));
+    }
 
     fn member(replica: Option<ReplicaMember>) -> TaskMember {
         TaskMember {

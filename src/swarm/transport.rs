@@ -136,24 +136,23 @@ fn run_within(
     let mut stdin = ssh.stdin.unwrap();
     let mut stdout = ssh.stdout.unwrap();
     let mut stderr = ssh.stderr.unwrap();
-    let writer = thread::spawn(move || stdin.write_all(&bytes));
-    let reader = thread::spawn(move || {
-        let mut bytes = Vec::new();
-        stdout
-            .by_ref()
-            .take(MAX_BYTES + 1)
-            .read_to_end(&mut bytes)
-            .map(|_| bytes)
-    });
-    let errors = thread::spawn(move || {
-        let mut bytes = Vec::new();
-        stderr
-            .by_ref()
-            .take(65536)
-            .read_to_end(&mut bytes)
-            .map(|_| bytes)
-    });
     let started = Instant::now();
+    let _writer = thread::spawn(move || stdin.write_all(&bytes));
+    // The readers report through channels, so draining them is bounded by
+    // the call's limit too: a descendant that keeps the pipe open past it
+    // is left behind, never waited for (review-n on #1452).
+    let (output_sent, output_read) = std::sync::mpsc::channel();
+    thread::spawn(move || {
+        let mut bytes = Vec::new();
+        let read = stdout.by_ref().take(MAX_BYTES + 1).read_to_end(&mut bytes).map(|_| bytes);
+        let _ = output_sent.send(read);
+    });
+    let (errors_sent, errors_read) = std::sync::mpsc::channel();
+    thread::spawn(move || {
+        let mut bytes = Vec::new();
+        let read = stderr.by_ref().take(65536).read_to_end(&mut bytes).map(|_| bytes);
+        let _ = errors_sent.send(read);
+    });
     let status = loop {
         if let Some(status) = child.try_wait()? {
             break Some(status);
@@ -165,14 +164,18 @@ fn run_within(
         }
         thread::sleep(Duration::from_millis(25));
     };
-    let _ = writer.join();
-    let output = reader
-        .join()
-        .map_err(|_| anyhow::anyhow!("swarm output reader failed"))??;
-    let errors = errors
-        .join()
-        .map_err(|_| anyhow::anyhow!("swarm error reader failed"))??;
     ensure!(status.is_some(), "connection to {alias} timed out");
+    let drained = |read: &std::sync::mpsc::Receiver<std::io::Result<Vec<u8>>>| -> Result<Vec<u8>> {
+        let left = limit.saturating_sub(started.elapsed());
+        match read.recv_timeout(left) {
+            Ok(bytes) => Ok(bytes?),
+            Err(_) => anyhow::bail!("connection to {alias} timed out while its answer was read"),
+        }
+    };
+    let output = drained(&output_read)?;
+    let errors = drained(&errors_read)?;
+    // An answer complete only after the limit is not accepted.
+    ensure!(started.elapsed() <= limit, "connection to {alias} timed out");
     ensure!(
         status.unwrap().success(),
         "{alias}: {}",
@@ -195,6 +198,11 @@ pub fn hello(config: &Config, inventory: bool) -> Result<Value> {
         result["known"] = json!(store.data.catalog.operations.keys().collect::<Vec<_>>());
         result["known_twins"] = json!(store.data.twins.known());
     }
+    // For the fence (C3c1): every machine this catalog knows has joined (a
+    // writer this computer may have exchanged tasks with, whether or not it
+    // is a peer), and the membership incarnation.
+    let writers = super::fence::catalog_machines(&store);
+    let membership = store.membership();
     // The verified direct peers, for the fence's routes (C3c1).
     let peers: std::collections::BTreeSet<String> = store
         .data
@@ -212,10 +220,18 @@ pub fn hello(config: &Config, inventory: bool) -> Result<Value> {
     match replica::hello(config) {
         Ok(mut replica) => {
             replica["peers"] = json!(peers);
+            replica["writers"] = json!(writers);
+            replica["membership"] = json!(membership);
             replica["fence"] = json!(super::fence::FENCE);
             result["replica"] = replica
         }
-        Err(error) => eprintln!("hgs swarm: tasks: {error:#}"),
+        Err(error) => {
+            eprintln!("hgs swarm: tasks: {error:#}");
+            // A replica this computer cannot read now is still a replica:
+            // an explicit part keeps the member eligible and its fence
+            // closed. Only an older build sends no part, sharing no tasks.
+            result["replica"] = json!({"protocol": replica::PROTOCOL, "unavailable": format!("{error:#}")});
+        }
     }
     Ok(result)
 }

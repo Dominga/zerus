@@ -594,6 +594,19 @@ impl ProjectStore {
     /// another computer has its `store-id` deleted, so a new one is created
     /// and other computers see a changed store.
     pub fn store_id(root: &Path) -> Result<String> {
+        Ok(Self::store_id_with(root, None)?.expect("an untimed store identity waits for its lock"))
+    }
+
+    /// `store_id`, waiting for the creation lock no later than `deadline`:
+    /// none when the deadline has passed or another creator still holds it.
+    pub fn store_id_until(root: &Path, deadline: Instant) -> Result<Option<String>> {
+        if Instant::now() >= deadline {
+            return Ok(None);
+        }
+        Self::store_id_with(root, Some(deadline))
+    }
+
+    fn store_id_with(root: &Path, deadline: Option<Instant>) -> Result<Option<String>> {
         private_dir(root)?;
         let path = root.join("store-id");
         let read = |path: &Path| -> Result<Option<String>> {
@@ -604,7 +617,7 @@ impl ProjectStore {
             }
         };
         if let Some(id) = read(&path)? {
-            return Ok(id);
+            return Ok(Some(id));
         }
         // Creating it, or replacing a malformed one, is one step across
         // processes: under this lock the file is read again, and only then
@@ -615,9 +628,19 @@ impl ProjectStore {
             .truncate(false)
             .write(true)
             .open(root.join("store-id.lock"))?;
-        lock.lock_exclusive()?;
+        match deadline {
+            None => lock.lock_exclusive()?,
+            Some(deadline) => {
+                while lock.try_lock_exclusive().is_err() {
+                    if Instant::now() >= deadline {
+                        return Ok(None);
+                    }
+                    std::thread::sleep(Duration::from_millis(10));
+                }
+            }
+        }
         if let Some(id) = read(&path)? {
-            return Ok(id);
+            return Ok(Some(id));
         }
         let id = ids::new_uuid();
         #[cfg(test)]
@@ -627,7 +650,7 @@ impl ProjectStore {
             }
         });
         write_atomic(&path, format!("{id}\n").as_bytes())?;
-        Ok(id)
+        Ok(Some(id))
     }
 
     /// Opens the project's directory below `root` and waits for its lock.

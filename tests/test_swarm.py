@@ -35,6 +35,12 @@ if (root / ('spoil-' + alias)).exists() and args[1:2] == [json.loads((root / ('s
     if 'value' in spoil: output[spoil['field']] = spoil['value']
     else: output.pop(spoil['field'], None)
     print(json.dumps(output)); sys.exit(0)
+if (root / ('linger-' + alias)).exists() and args[1:2] == ['hello']:
+    # The answer comes at once, but a descendant keeps the pipe open.
+    result = subprocess.run([os.environ['SWARM_TEST_HGS'], *args], input=sys.stdin.read(), env=env, text=True, capture_output=True)
+    sys.stdout.write(result.stdout); sys.stdout.flush()
+    subprocess.Popen(['sleep', (root / ('linger-' + alias)).read_text()], stdout=sys.stdout)
+    sys.exit(result.returncode)
 if (root / ('reset-store-' + alias)).exists() and args[1:2] == ['replica-inventory']:
     # The member's replica root is replaced after its hello: the store
     # identity it answers with is created again.
@@ -620,6 +626,64 @@ class Swarm(unittest.TestCase):
         (self.root / 'noreplica-b').unlink()
         # The check runs only with --check, and changes no task.
         self.assertEqual(self.task('a', 'get', task['id'], '--project', 'a')['task']['stage'], task['stage'])
+
+    def test_the_fence_check_covers_unreadable_incoming_and_re_enrolled_writers(self):
+        # C3c1 R2 (desktop-u and review-n on #1452).
+        self.join('a', 'b'); self.join('b', 'a')
+        for n in 'abab':
+            self.call(n, 'sync')
+        task = self.task('a', 'add', '--project', 'a', text='Add rate limiting')['task']
+        ids = {n: self.call(n, 'hello')['node_id'] for n in 'abc'}
+        baseline = self.fence_check('a', task['id'])
+        self.assertEqual(baseline['closed'], None, baseline)
+        # A member whose replica cannot be read stays a writer and closes it.
+        replica = self.root / 'b/state/replica'
+        replica.rename(self.root / 'b-replica')
+        replica.write_text('not a directory')
+        check = self.fence_check('a', task['id'])
+        node = check['universe']['nodes'][ids['b']]
+        self.assertEqual((node['no_replica'], node['closed']), (False, 'unavailable'), node)
+        self.assertEqual(check['closed'], {'node': ids['b'], 'reason': 'unavailable'})
+        replica.unlink(); (self.root / 'b-replica').rename(replica)
+        self.assertEqual(self.fence_check('a', task['id'])['closed'], None)
+        # A writer that only joined b (b never enrolled it) holds a's tasks
+        # through b; b's catalog knows it, so a covers it: no route closes it.
+        self.join('c', 'b')
+        self.call('c', 'sync')
+        self.assertNotIn(ids['c'], self.call('b', 'hello')['replica']['peers'])
+        self.assertIn(ids['c'], self.call('b', 'hello')['replica']['writers'])
+        self.assertEqual(self.fence_check('a', task['id'])['closed'], {'node': ids['c'], 'reason': 'unroutable'})
+        self.join('b', 'c')
+        self.converge()
+        reached = self.fence_check('a', task['id'])
+        self.assertEqual(reached['closed'], None, reached)
+        # Membership ABA: b disconnected and enrolled again, with its node and
+        # store unchanged, is another incarnation.
+        before = reached['incarnation']
+        self.call('a', 'disconnect', 'b')
+        self.assertEqual(self.fence_check('a', task['id'])['closed']['reason'], 'unroutable')
+        self.join('a', 'b')
+        again = self.fence_check('a', task['id'])
+        self.assertEqual(again['closed'], None, again)
+        self.assertNotEqual(again['incarnation'], before)
+        self.assertNotEqual(again['universe']['me']['membership'], reached['universe']['me']['membership'])
+
+    def test_a_relay_never_answers_after_its_budget(self):
+        # review-n on #1452: an answer whose pipe a descendant keeps open past
+        # the relay's budget is never accepted after it.
+        self.join('a', 'b'); self.join('b', 'a'); self.join('c', 'b'); self.join('b', 'c')
+        self.converge()
+        ids = {n: self.call(n, 'hello')['node_id'] for n in 'abc'}
+        swarm = self.call('b', 'hello')['swarm_id']
+        relay = dict(swarm_id=swarm, to=ids['c'], command='hello', input={}, hops=0, remaining_ms=800)
+        self.assertEqual(self.call('b', 'replica-relay', data=relay)['reply']['node_id'], ids['c'])
+        (self.root / 'linger-c').write_text('2.5')
+        started = time.monotonic()
+        error = self.call('b', 'replica-relay', data=relay, ok=False)
+        elapsed = time.monotonic() - started
+        (self.root / 'linger-c').unlink()
+        self.assertLess(elapsed, 2.0, error)
+        self.assertIn('timed out', error)
 
     def test_a_member_whose_hello_fails_has_no_complete_project(self):
         # review-n on #1432: a failed hello records every project known here

@@ -18,6 +18,10 @@ use zerus_desktop_migration::{canonical_uuid, sha256};
 
 /// The record version written now.
 pub const VERSION: u32 = 1;
+/// The version of a compact-to-send checkpoint that also reserves its send
+/// (zerus-5wmh.66.4.8): both request IDs, saved together before the desktop
+/// service is offered the pair. A reload never derives another send ID.
+pub const COMPACT_TO_SEND_VERSION: u32 = 2;
 /// The longest run, conversation, question or row identity kept.
 const MAX_ID: usize = 512;
 
@@ -96,6 +100,10 @@ pub struct Checkpoint {
     /// Whether the user gave the cold-cache consent at the click: recorded
     /// intent, never a permission.
     pub consent: bool,
+    /// The send a version 2 compact-to-send reserved with its compaction;
+    /// absent in every version 1 record.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub send_request_id: Option<String>,
 }
 
 /// What a checkpoint binds about its dispatch, besides a fresh request id.
@@ -129,7 +137,21 @@ impl Checkpoint {
             start: intent.start,
             retry_of: intent.retry_of,
             consent: intent.consent,
+            send_request_id: None,
         }
+    }
+
+    /// Reserves both request IDs of a compact-to-send the desktop service
+    /// runs as one operation: `request_id` for the compaction and
+    /// `send_request_id` for the send after it. `None` unless `intent` is a
+    /// compact-to-send.
+    pub fn reserve_compact_to_send(intent: Intent) -> Option<Self> {
+        (intent.kind == Kind::CompactToSend).then(|| {
+            let mut checkpoint = Self::reserve(intent);
+            checkpoint.version = COMPACT_TO_SEND_VERSION;
+            checkpoint.send_request_id = Some(uuid::Uuid::new_v4().to_string());
+            checkpoint
+        })
     }
 
     /// Every field consistent: the version, a canonical request id, the
@@ -137,7 +159,15 @@ impl Checkpoint {
     /// exactly for an answer and a start exactly for a resume-then-send.
     pub fn valid(&self) -> bool {
         let id = |value: &str| value.len() <= MAX_ID && !value.chars().any(char::is_control);
-        self.version == VERSION
+        // Version 2 is exactly a compact-to-send with its own, distinct send.
+        let version = match (self.version, self.send_request_id.as_deref()) {
+            (VERSION, None) => true,
+            (COMPACT_TO_SEND_VERSION, Some(send)) => {
+                self.kind == Kind::CompactToSend && canonical_uuid(send) && send != self.request_id
+            }
+            _ => false,
+        };
+        version
             && canonical_uuid(&self.request_id)
             && self.receipts == self.kind.receipts()
             && digest(&self.message_sha256)

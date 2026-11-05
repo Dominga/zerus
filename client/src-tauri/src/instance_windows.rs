@@ -726,7 +726,14 @@ mod tests {
             let mode = control["case"].as_str().unwrap().to_owned();
             if matches!(
                 mode.as_str(),
-                "mode_check" | "mode_switch" | "mode_cancel" | "mode_review"
+                "mode_check"
+                    | "mode_switch"
+                    | "mode_cancel"
+                    | "mode_review"
+                    | "mode_refresh_info"
+                    | "mode_refresh"
+                    | "mode_refresh_result"
+                    | "mode_refresh_cancel"
             ) {
                 report_chain(std::process::id());
                 let mut args = vec![
@@ -772,6 +779,39 @@ mod tests {
                         "--json".into(),
                         "--request-id".into(),
                         id.into(),
+                    ];
+                }
+                if mode == "mode_refresh_info" {
+                    args = vec![
+                        "desktop".into(),
+                        "registration".into(),
+                        "refresh-info".into(),
+                        "--json".into(),
+                    ];
+                } else if mode == "mode_refresh" {
+                    args = vec![
+                        "desktop".into(),
+                        "registration".into(),
+                        "refresh".into(),
+                        "--json".into(),
+                        "--request-id".into(),
+                        control["request_id"].as_str().unwrap().into(),
+                        "--scope".into(),
+                        serde_json::to_string(&control["target"]).unwrap(),
+                    ];
+                } else if matches!(mode.as_str(), "mode_refresh_result" | "mode_refresh_cancel") {
+                    args = vec![
+                        "desktop".into(),
+                        "registration".into(),
+                        if mode == "mode_refresh_result" {
+                            "refresh-result"
+                        } else {
+                            "cancel-refresh"
+                        }
+                        .into(),
+                        "--json".into(),
+                        "--request-id".into(),
+                        control["request_id"].as_str().unwrap().into(),
                     ];
                 }
                 let invocation = zerus_client_core::Invocation {

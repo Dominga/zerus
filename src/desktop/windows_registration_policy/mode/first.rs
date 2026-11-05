@@ -77,6 +77,7 @@ impl Record {
             canonical_id(&first.request)
                 && self.first_choices.len() < FIRST
                 && !self.first_choices.iter().any(|r| r.request == first.request)
+                && !self.refreshes.iter().any(|r| r.request == first.request)
                 && self.completed.as_deref() != Some(first.request.as_str())
                 && self.cancelled.as_deref() != Some(first.request.as_str()),
             "This first choice was already offered or its history is full; read its original mode-result, never replay it."

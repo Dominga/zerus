@@ -60,9 +60,21 @@ impl Loaded {
         );
         Ok(value)
     }
-    pub(super) fn check(&self, process: &impl AsRawHandle) -> Result<()> {
+    pub(super) fn ids(
+        &self,
+    ) -> (
+        zerus_client_core::desktop::windows::image::FileId,
+        zerus_client_core::desktop::windows::image::FileId,
+    ) {
+        (self.original.id(), self.selected.id())
+    }
+    pub(super) fn check_files(&self) -> Result<()> {
         self.selected.revalidate()?;
         self.original.revalidate()?;
+        Ok(())
+    }
+    pub(super) fn check(&self, process: &impl AsRawHandle) -> Result<()> {
+        self.check_files()?;
         self.original.matches_process(process)?;
         Ok(())
     }

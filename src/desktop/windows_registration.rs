@@ -20,6 +20,38 @@ pub(super) fn entry(args: &[String]) -> Option<i32> {
     }
 }
 
+pub(super) fn refresh_info(config: &Config, location: &Location) -> Result<Value> {
+    native::mode::command(
+        config,
+        location,
+        json!({"schema":1,"operation":"refresh_info","configuration":location.configuration}),
+    )
+}
+pub(super) fn refresh_command(
+    config: &Config,
+    location: &Location,
+    id: &str,
+    target: &str,
+) -> Result<Value> {
+    let target =
+        super::windows_registration_policy::mode::refresh::Target::decode(target.as_bytes())?;
+    native::mode::command(
+        config,
+        location,
+        json!({"schema":1,"operation":"refresh","request_id":id,"target":target}),
+    )
+}
+pub(super) fn refresh_result(config: &Config, location: &Location, id: &str) -> Result<Value> {
+    native::mode::refresh_result(config, location, id)
+}
+pub(super) fn cancel_refresh(config: &Config, location: &Location, id: &str) -> Result<Value> {
+    native::mode::command(
+        config,
+        location,
+        json!({"schema":1,"operation":"refresh_cancel","request_id":id}),
+    )
+}
+
 pub(super) fn mode_command(config: &Config, location: &Location, mode: &str) -> Result<Value> {
     ensure!(
         matches!(mode, "passive" | "background"),

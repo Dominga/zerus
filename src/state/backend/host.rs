@@ -440,6 +440,13 @@ impl<C: Connector> HostBackend<C> {
     /// happens without a host, as no session runs then, nor with a host that
     /// supervises none (one of an older version): a later request reaches the
     /// host that replaces it.
+    /// Task #33: the session the host finds this process in, by the job that
+    /// holds it; None without a host, outside every session, or from a host
+    /// that does not know the question.
+    pub(crate) fn caller_session(&self) -> Option<protocol::CallerSession> {
+        self.call::<protocol::CallerSession>(Op::CallerSession).ok()
+    }
+
     pub(crate) fn supervise_recovery(&self) -> Result<()> {
         match self.call::<Done>(Op::RecoveryWorker) {
             Ok(_) | Err(Failure::NoHost) => Ok(()),

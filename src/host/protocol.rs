@@ -623,6 +623,12 @@ pub enum Op {
     /// worker`, until the host exits (D14): started now unless it runs,
     /// restarted after it exits. `unsupported` where the host supervises none.
     RecoveryWorker,
+    /// Task #33: the session whose job holds this connection's own client
+    /// process, as the kernel names the client (`CallerSession`); `not_found`
+    /// outside every session. It proves the caller where its process chain
+    /// broke: a Git Bash wrapper (`bash -c`, `env`, `timeout`, ...) ends the
+    /// Windows process between the session and hgs, but never leaves the job.
+    CallerSession,
     /// An op this host does not know; answered with `unsupported`.
     #[serde(other)]
     Unsupported,
@@ -857,6 +863,19 @@ pub struct Resolved {
     pub name: String,
     /// `%N`
     pub pane: String,
+}
+
+/// `caller_session`: the session that holds the asking process, with the run
+/// marker its launch recorded.
+#[derive(Clone, Debug, Default, PartialEq, Eq, Serialize, Deserialize)]
+pub struct CallerSession {
+    /// `$N`
+    pub session: String,
+    pub name: String,
+    /// `%N`
+    pub pane: String,
+    #[serde(default)]
+    pub run_marker: String,
 }
 
 /// `pane_info`: every fact the backend's `PaneField` names.

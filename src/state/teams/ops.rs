@@ -3943,7 +3943,31 @@ fn ask(team: &mut Team, input: &Value, actor: &Actor, events: &mut Vec<Event>) -
         })
         .collect();
     let target = |task: usize| team.tasks[task].id;
-    let (task, asked) = match given {
+    // Task #29: a named attempt (or stage run) must be the work the question
+    // is filed on. Before, a member proven by its session could name any id:
+    // it was ignored and the question went to whatever was open.
+    let named = text(input, "attempt").trim().to_owned();
+    let id_of = |task: usize, asked: &AskTarget| match asked {
+        AskTarget::Attempt(attempt) => team.tasks[task].attempts[*attempt].id.clone(),
+        AskTarget::Stage(run) => {
+            team.tasks[task].pipeline_run.as_ref().and_then(|pipeline| pipeline.runs.get(*run)).map(|run| run.id.clone()).unwrap_or_default()
+        }
+    };
+    let by_attempt = (!named.is_empty() && given.is_none())
+        .then(|| {
+            open.iter()
+                .map(|(task, attempt)| (*task, AskTarget::Attempt(*attempt)))
+                .chain(stages.iter().map(|(task, run)| (*task, AskTarget::Stage(*run))))
+                .find(|(task, asked)| id_of(*task, asked) == named)
+        })
+        .flatten();
+    ensure!(
+        named.is_empty() || given.is_some() || by_attempt.is_some(),
+        "Attempt {named} is not your open attempt or stage; your task and attempt: hgs team current --json"
+    );
+    let (task, asked) = match (by_attempt, given) {
+        (Some(found), _) => found,
+        (None, given) => match given {
         Some(id) => {
             let found = open
                 .iter()
@@ -3961,7 +3985,15 @@ fn ask(team: &mut Team, input: &Value, actor: &Actor, events: &mut Vec<Event>) -
                 bail!("You have {} open pieces of work: {}; name one with \"task\"", tasks.len(), tasks.join(", "));
             }
         },
+        },
     };
+    if !named.is_empty() {
+        ensure!(
+            id_of(task, &asked) == named,
+            "Attempt {named} is not your open attempt or stage on task #{}; your task and attempt: hgs team current --json",
+            target(task)
+        );
+    }
     let question = next_question(team);
     let role = team.role_of(member);
     let task_id = team.tasks[task].id;

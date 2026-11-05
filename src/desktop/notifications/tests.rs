@@ -1102,3 +1102,45 @@ fn click_source_query_failure_retains_the_callback_instead_of_losing_its_policy_
     assert_eq!(f.outbox.poll(&mut f.store, Instant::now()).len(), 1);
     assert_eq!(f.outbox.status()["callbacks"], 0);
 }
+
+#[test]
+fn getter_failure_is_retained_as_its_original_refusal_without_a_retry() {
+    let mut f = Fixture::new();
+    let (request, dispatch) = f.queued();
+    dispatch.finish(Outcome::Refused {
+        code: Refusal::GetterFailed,
+    });
+    assert!(f.outbox.poll(&mut f.store, Instant::now()).is_empty());
+    assert_eq!(f.state(&request), "refused");
+    let raw: String = f
+        .store
+        .db
+        .query_row(
+            "SELECT receipt FROM desktop_attempts WHERE request_id=?1",
+            [&request.request_id],
+            |row| row.get(0),
+        )
+        .unwrap();
+    let receipt: Receipt = serde_json::from_str(&raw).unwrap();
+    assert_eq!(receipt.binding.request_id, request.request_id);
+    assert_eq!(
+        receipt.outcome,
+        Outcome::Refused {
+            code: Refusal::GetterFailed
+        }
+    );
+    assert_eq!(
+        serde_json::from_str::<Value>(&raw).unwrap()["outcome"]["code"],
+        "getter_failed"
+    );
+    assert!(matches!(
+        f.outbox
+            .offer(&mut f.store, request.clone(), Instant::now())
+            .unwrap(),
+        Offered::Existing(_)
+    ));
+    assert!(
+        f.host.try_next().is_err(),
+        "a retained getter refusal cannot replay the original post"
+    );
+}

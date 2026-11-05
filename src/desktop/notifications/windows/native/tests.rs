@@ -375,3 +375,49 @@ fn a_real_notifier_released_before_the_apartment_ends_leaves_the_process_intact(
     .join()
     .unwrap();
 }
+
+#[test]
+fn identity_bootstrap_toast_is_suppressed_expiring_and_has_only_its_exact_identity() {
+    let ticks = || {
+        std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .unwrap()
+            .as_nanos()
+            / 100
+            + 116_444_736_000_000_000
+    };
+    let before = ticks();
+    let value = bootstrap_toast("b0123456789abcde").unwrap();
+    let after = ticks();
+    assert!(value.SuppressPopup().unwrap());
+    assert_eq!(value.Tag().unwrap(), "b0123456789abcde");
+    assert_eq!(value.Group().unwrap(), BOOTSTRAP_GROUP);
+    let expiry = value
+        .ExpirationTime()
+        .unwrap()
+        .Value()
+        .unwrap()
+        .UniversalTime as u128;
+    assert!(
+        (before + BOOTSTRAP_SECONDS * 10_000_000..=after + BOOTSTRAP_SECONDS * 10_000_000)
+            .contains(&expiry)
+    );
+    assert_eq!(texts(&value), ["Zerus"]);
+    let document = value.Content().unwrap();
+    assert_eq!(
+        document
+            .DocumentElement()
+            .unwrap()
+            .GetAttribute(&HSTRING::from("launch"))
+            .unwrap(),
+        ""
+    );
+    assert_eq!(
+        document
+            .GetElementsByTagName(&HSTRING::from("action"))
+            .unwrap()
+            .Length()
+            .unwrap(),
+        0
+    );
+}

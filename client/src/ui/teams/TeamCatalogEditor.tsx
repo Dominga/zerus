@@ -3,7 +3,13 @@ import type { JSX } from "solid-js";
 import { tr, trNoop } from "../../i18n";
 import { Icon } from "../lib/icons";
 import { LISTS, createCatalogEditor, type CatalogEditorStore } from "../../store/catalogEditor";
+import { teamRoleModels } from "../../bridge";
 import type { CatalogFieldSpec, CatalogKind, CatalogList } from "../../types";
+import type { CatalogProposal } from "./catalog";
+import {
+  ICON_GLYPH, ROLE_ICONS, SWATCHES, agentChange, chosenIcon, chosenSwatch, createModelCatalogs, dropBlock, effortOptions, fieldDiff, iconValue,
+  includeBlock, modelOptions, moveBlock, plateAnswers, promptBlocks, proposalMark, proposalOf, swatchColor, type ModelChoice, type PromptChange,
+} from "./catalogControls";
 import "../styles/catalog.css";
 
 // Task #44: Qt's TeamCatalogEditor. The header holds Open Team designer,
@@ -41,6 +47,20 @@ export interface TeamCatalogEditorProps {
   /** The designer's draft, when there is one: Discard draft and Apply. */
   draft?: CatalogDraftControls;
   onOpenDesigner?: () => void;
+  /** Task 50: the designer's proposals, drawn as a plate on each item they touch, and their Keep/Reject/Undo. */
+  proposals?: CatalogProposal[];
+  decide?: (proposal: string, decision: "keep" | "reject" | "undo") => void;
+  /** Task 50: an account's models for the model and effort menus (default: the core's team_role_models). */
+  models?: (computer: string, agent: string, account: string) => Promise<ModelChoice[]>;
+  /** The appearance the swatches are drawn for. */
+  dark?: boolean;
+}
+
+/** What a role's own controls need from the editor. */
+interface RoleContext {
+  catalogs: ReturnType<typeof createModelCatalogs>;
+  tick: () => number;
+  dark: boolean;
 }
 
 const str = (value: unknown) => (typeof value === "string" ? value : value == null ? "" : String(value));
@@ -49,6 +69,12 @@ const splitWords = (text: string) => text.split(",").map((word) => word.trim()).
 
 export function TeamCatalogEditor(props: TeamCatalogEditorProps): JSX.Element {
   const editor = props.editor ?? createCatalogEditor();
+  const [modelTick, setModelTick] = createSignal(0);
+  const roles: RoleContext = {
+    catalogs: createModelCatalogs((computer, agent, account) => (props.models ?? teamRoleModels)(computer, agent, account), () => setModelTick((n) => n + 1)),
+    tick: modelTick,
+    dark: props.dark ?? true,
+  };
   const [tab, setTab] = createSignal<Tab>("roles");
   const [current, setCurrent] = createSignal<Partial<Record<Tab, string>>>({});
   onMount(() => void editor.load());
@@ -124,7 +150,8 @@ export function TeamCatalogEditor(props: TeamCatalogEditorProps): JSX.Element {
               </aside>
               <div class="cat-form">
                 <Show when={chosen()} fallback={<p class="cat-empty">{tr("Nothing here yet.")}</p>}>
-                  {(item) => <ItemForm editor={editor} kind={KIND[tab()]!} item={item()} set={set} />}
+                  {(item) => <ItemForm editor={editor} kind={KIND[tab()]!} item={item()} set={set} roles={roles}
+                    proposal={proposalOf(props.proposals, KIND[tab()]!, str(item().id))} decide={props.decide} />}
                 </Show>
               </div>
             </div>
@@ -139,10 +166,148 @@ export function TeamCatalogEditor(props: TeamCatalogEditorProps): JSX.Element {
   );
 }
 
+/** Task 50 (Qt proposalPlate): the designer's proposal on this item: its mark, title, Keep/Reject or Undo, reason and what it changes. */
+export function ProposalPlate(props: { proposal: CatalogProposal; item?: Item; decide?: (proposal: string, decision: "keep" | "reject" | "undo") => void }) {
+  const mark = () => proposalMark(props.proposal);
+  const diff = () => fieldDiff(props.item, props.proposal);
+  const label = (decision: "keep" | "reject" | "undo") => (decision === "keep" ? tr("Keep") : decision === "reject" ? tr("Reject") : tr("Undo"));
+  return (
+    <div class="cat-plate" data-proposal={props.proposal.id} data-state={props.proposal.state}>
+      <div class="cat-plate-head">
+        <span class={`cat-mark tone-${mark().tone}`}>{mark().text}</span>
+        <b class="cat-plate-title" classList={{ struck: props.proposal.state === "rejected" }}>{props.proposal.title}</b>
+        <span class="grow" />
+        <Show when={props.proposal.state !== "proposed"}>
+          <span class={props.proposal.state === "kept" ? "cat-kept" : "cat-rejected"}>{props.proposal.state === "kept" ? tr("Kept") : tr("Rejected")}</span>
+        </Show>
+        <For each={plateAnswers(props.proposal.state)}>{(decision) => (
+          <button type="button" class="btn small" classList={{ ghost: decision !== "keep" }} disabled={!props.decide}
+            onClick={() => props.decide?.(props.proposal.id, decision)}>{label(decision)}</button>
+        )}</For>
+      </div>
+      <Show when={props.proposal.reason}><p class="cat-hint">{props.proposal.reason}</p></Show>
+      <Show when={diff().length > 0}>
+        <dl class="cat-diff">
+          <For each={diff()}>{(change) => (
+            <div class="cat-diff-row" data-field={change.field}>
+              <dt>{change.field}</dt>
+              <dd><Show when={change.from}><del>{change.from}</del></Show><ins>{change.to || tr("(empty)")}</ins></dd>
+            </div>
+          )}</For>
+        </dl>
+      </Show>
+    </div>
+  );
+}
+
+/** Task 50 (Qt teamRoleSwatch/teamRoleIcon): the palette's swatches and the role icons; a click stores the name. */
+export function LookPicker(props: { item: Item; dark: boolean; onColor: (name: string) => void; onIcon: (value: string) => void }) {
+  const color = () => chosenSwatch(props.item);
+  const icon = () => chosenIcon(props.item);
+  return (
+    <div class="cat-look">
+      <div class="cat-swatches" role="radiogroup" aria-label={tr("Color")}>
+        <For each={SWATCHES}>{(swatch) => (
+          <button type="button" role="radio" class="cat-swatch" aria-checked={swatch.name === color()} aria-label={swatch.name} title={swatch.name}
+            data-swatch={swatch.name} style={{ background: props.dark ? swatch.dark : swatch.light }} classList={{ on: swatch.name === color() }}
+            onClick={() => props.onColor(swatch.name)} />
+        )}</For>
+      </div>
+      <div class="cat-icons" role="radiogroup" aria-label={tr("Icon")}>
+        <For each={ROLE_ICONS}>{(name) => (
+          <button type="button" role="radio" class="cat-icon" aria-checked={name === icon()} aria-label={name} title={name} data-icon={name}
+            classList={{ on: name === icon() }} style={name === icon() ? { color: swatchColor(color(), props.dark) || undefined } : undefined}
+            onClick={() => props.onIcon(iconValue(name))}><Icon name={ICON_GLYPH[name]} size={14} /></button>
+        )}</For>
+      </div>
+    </div>
+  );
+}
+
+/** Task 50 (Qt promptOrder): the blocks in order, each with include and moves; a row may be dragged to its place. */
+export function PromptOrder(props: { item: Item; apply: (change: PromptChange) => void }) {
+  const [dragged, setDragged] = createSignal<number | null>(null);
+  const blocks = () => promptBlocks(props.item);
+  const apply = (change: PromptChange | undefined) => { if (change) props.apply(change); };
+  return (
+    <div class="cat-prompt-order" role="list" aria-label={tr("Prompt order")}>
+      <For each={blocks()}>{(block, index) => (
+        <div class="cat-prompt-block" role="listitem" data-block={block.key} classList={{ off: block.off, dragging: dragged() === index() }} draggable="true"
+          onDragStart={(event) => { setDragged(index()); event.dataTransfer?.setData("text/plain", block.key); }}
+          onDragOver={(event) => event.preventDefault()}
+          onDrop={(event) => { event.preventDefault(); const from = dragged(); setDragged(null); if (from !== null) apply(dropBlock(props.item, from, index())); }}
+          onDragEnd={() => setDragged(null)}>
+          <Icon name="grip-vertical" size={13} />
+          <span class="cat-prompt-title">{tr("%1. %2", index() + 1, block.title)}</span>
+          <span class="grow" />
+          <label class="cat-prompt-include"><input type="checkbox" checked={!block.off} onChange={(event) => apply(includeBlock(props.item, block.key, event.currentTarget.checked))} />{tr("include")}</label>
+          <button type="button" class="icon-btn small" aria-label={tr("Move up")} disabled={index() === 0} onClick={() => apply(moveBlock(props.item, index(), -1))}><Icon name="arrow-up" size={12} /></button>
+          <button type="button" class="icon-btn small" aria-label={tr("Move down")} disabled={index() === blocks().length - 1} onClick={() => apply(moveBlock(props.item, index(), 1))}><Icon name="arrow-down" size={12} /></button>
+        </div>
+      )}</For>
+      <span class="cat-hint">{tr("Blocks are sent top to bottom; switched-off blocks are skipped.")}</span>
+    </div>
+  );
+}
+
+/** Task 50 (Qt teamRoleModel/teamRoleEffort): the model as an editable menu of the account's models, the effort from that model's efforts. */
+export function ModelMenu(props: { item: Item; roles: RoleContext; value: string; onChange: (value: string) => void; label: string }) {
+  const listId = `cat-models-${Math.random().toString(36).slice(2)}`;
+  const options = () => (props.roles.tick(), modelOptions(props.item, props.roles.catalogs.get(props.item)));
+  onMount(() => props.roles.catalogs.request(props.item));
+  createEffect(on(() => `${str(props.item.computer)}\n${str(props.item.account)}\n${str(props.item.agent)}`, () => props.roles.catalogs.request(props.item), { defer: true }));
+  return (
+    <>
+      <input class="cat-model" list={listId} value={props.value} placeholder={tr("default model")} aria-label={props.label}
+        onChange={(event) => props.onChange(event.currentTarget.value.trim())} />
+      <datalist id={listId}><For each={options()}>{(option) => <option value={option.id}>{option.label}</option>}</For></datalist>
+    </>
+  );
+}
+
+export function EffortMenu(props: { item: Item; roles: RoleContext; model: string; value: string; onChange: (value: string) => void; label: string }) {
+  const options = () => (props.roles.tick(), effortOptions(props.model, props.roles.catalogs.get(props.item), props.value));
+  return (
+    <select class="cat-effort" value={props.value} aria-label={props.label} onChange={(event) => props.onChange(event.currentTarget.value)}>
+      <For each={options()}>{(effort) => <option value={effort}>{effort || "—"}</option>}</For>
+    </select>
+  );
+}
+
 /** One item's fields, Duplicate and Delete. */
-function ItemForm(props: { editor: CatalogEditorStore; kind: CatalogKind; item: Item; set: (kind: CatalogKind, id: string, field: string, value: unknown) => Promise<boolean> }) {
-  const specs = () => props.editor.schema()?.[LISTS[props.kind]] ?? [];
+function ItemForm(props: { editor: CatalogEditorStore; kind: CatalogKind; item: Item; set: (kind: CatalogKind, id: string, field: string, value: unknown) => Promise<boolean>;
+  roles: RoleContext; proposal?: CatalogProposal; decide?: (proposal: string, decision: "keep" | "reject" | "undo") => void }) {
+  const specs = () => (props.editor.schema()?.[LISTS[props.kind]] ?? [])
+    // Task 50: the switched-off blocks are part of Prompt order; Icon is drawn with Color.
+    .filter((spec) => props.kind !== "role" || (spec.name !== "prompt_off" && spec.name !== "icon"));
   const id = () => str(props.item.id);
+  const setField = (field: string, value: unknown) => props.set(props.kind, id(), field, value);
+  const applyPrompt = async (change: PromptChange) => {
+    if (change.task_template !== undefined && !(await setField("task_template", change.task_template))) return;
+    if (await setField("prompt_order", change.prompt_order)) await setField("prompt_off", change.prompt_off);
+  };
+  /** Another agent: its first model and the default account (Qt teamRoleAgent). */
+  const changeAgent = async (agent: unknown): Promise<boolean> => {
+    const next = agentChange(str(agent));
+    if (!(await setField("agent", next.agent))) return false;
+    await setField("account", next.account);
+    return setField("model", next.model);
+  };
+  const special = (spec: CatalogFieldSpec): JSX.Element | undefined => {
+    if (props.kind !== "role") return undefined;
+    switch (spec.name) {
+      case "color":
+        return <LookPicker item={props.item} dark={props.roles.dark} onColor={(name) => void setField("color", name)} onIcon={(value) => void setField("icon", value)} />;
+      case "model":
+        return <ModelMenu item={props.item} roles={props.roles} value={str(props.item.model)} label={tr(spec.label)} onChange={(value) => void setField("model", value)} />;
+      case "effort":
+        return <EffortMenu item={props.item} roles={props.roles} model={str(props.item.model)} value={str(props.item.effort)} label={tr(spec.label)} onChange={(value) => void setField("effort", value)} />;
+      case "prompt_order":
+        return <PromptOrder item={props.item} apply={(change) => void applyPrompt(change)} />;
+      default:
+        return undefined;
+    }
+  };
   return (
     <div class="cat-item">
       <div class="cat-item-head">
@@ -152,8 +317,10 @@ function ItemForm(props: { editor: CatalogEditorStore; kind: CatalogKind; item: 
         <button type="button" class="btn ghost small" disabled={props.editor.busy()} onClick={() => void props.editor.edit({ op: "duplicate", kind: props.kind, id: id() })}><Icon name="copy" size={12} />{tr("Duplicate")}</button>
         <button type="button" class="btn ghost small danger" disabled={props.editor.busy()} onClick={() => void props.editor.remove(props.kind, id())}><Icon name="x" size={12} />{tr("Delete")}</button>
       </div>
+      <Show when={props.proposal}>{(proposal) => <ProposalPlate proposal={proposal()} item={props.item} decide={props.decide} />}</Show>
       <For each={specs()}>{(spec) => (
-        <Field editor={props.editor} spec={spec} value={props.item[spec.name]} onChange={(value) => props.set(props.kind, id(), spec.name, value)} />
+        <Field editor={props.editor} spec={spec} value={props.item[spec.name]} custom={special(spec)} roleItem={props.kind === "role" ? props.item : undefined} roles={props.roles}
+          onChange={(value) => (props.kind === "role" && spec.name === "agent" ? changeAgent(value) : props.set(props.kind, id(), spec.name, value))} />
       )}</For>
     </div>
   );
@@ -171,11 +338,21 @@ function references(editor: CatalogEditorStore, spec: CatalogFieldSpec): [string
 }
 
 /** One field, drawn from its schema type; each change goes to core at once. */
-function Field(props: { editor: CatalogEditorStore; spec: CatalogFieldSpec; value: unknown; onChange: (value: unknown) => Promise<boolean> | void; compact?: boolean }) {
-  const label = () => tr(props.spec.label);
+function Field(props: { editor: CatalogEditorStore; spec: CatalogFieldSpec; value: unknown; onChange: (value: unknown) => Promise<boolean> | void; compact?: boolean;
+  /** Task 50: a control drawn instead of the schema's plain one. */
+  custom?: JSX.Element;
+  /** Task 50: the role whose rows (Models) get the model and effort menus. */
+  roleItem?: Item; roles?: RoleContext; row?: Item }) {
+  const label = () => (props.spec.name === "color" && props.custom ? tr("Icon / color") : tr(props.spec.label));
   const fieldId = `cat-field-${Math.random().toString(36).slice(2)}`;
   const input = (): JSX.Element => {
     const spec = props.spec;
+    if (props.custom) return props.custom;
+    // A Models row: the role's account models and that model's efforts.
+    if (props.roleItem && props.roles && props.row && spec.name === "model")
+      return <ModelMenu item={props.roleItem} roles={props.roles} value={str(props.value)} label={label()} onChange={(value) => void props.onChange(value)} />;
+    if (props.roleItem && props.roles && props.row && spec.name === "effort")
+      return <EffortMenu item={props.roleItem} roles={props.roles} model={str(props.row.model)} value={str(props.value)} label={label()} onChange={(value) => void props.onChange(value)} />;
     const refs = spec.type === "text" ? references(props.editor, spec) : undefined;
     if (refs) {
       const value = str(props.value);
@@ -199,7 +376,7 @@ function Field(props: { editor: CatalogEditorStore; spec: CatalogFieldSpec; valu
       case "words":
         return <input id={fieldId} value={words(props.value)} placeholder={tr("Comma-separated")} onChange={(event) => void props.onChange(splitWords(event.currentTarget.value))} />;
       case "list":
-        return <Rows editor={props.editor} spec={spec} value={Array.isArray(props.value) ? (props.value as Item[]) : []} onChange={props.onChange} />;
+        return <Rows editor={props.editor} spec={spec} value={Array.isArray(props.value) ? (props.value as Item[]) : []} onChange={props.onChange} roleItem={props.roleItem} roles={props.roles} />;
       default:
         return <input id={fieldId} value={str(props.value)} onChange={(event) => void props.onChange(event.currentTarget.value)} />;
     }
@@ -214,7 +391,7 @@ function Field(props: { editor: CatalogEditorStore; spec: CatalogFieldSpec; valu
 }
 
 /** A list field's rows (roster, task skeleton, stages, models): add, remove, reorder. */
-function Rows(props: { editor: CatalogEditorStore; spec: CatalogFieldSpec; value: Item[]; onChange: (value: unknown) => Promise<boolean> | void }) {
+function Rows(props: { editor: CatalogEditorStore; spec: CatalogFieldSpec; value: Item[]; onChange: (value: unknown) => Promise<boolean> | void; roleItem?: Item; roles?: RoleContext }) {
   const fields = () => props.spec.fields ?? [];
   const blank = (): Item => Object.fromEntries(fields().map((field) => [field.name, field.type === "number" ? field.min ?? 0 : field.type === "bool" ? false : field.type === "words" ? [] : field.type === "choice" ? field.options?.[0]?.[0] ?? "" : ""]));
   const replace = (index: number, row: Item | undefined) => {
@@ -234,7 +411,8 @@ function Rows(props: { editor: CatalogEditorStore; spec: CatalogFieldSpec; value
         <div class="cat-rowedit">
           <span class="cat-rownum">{index + 1}</span>
           <For each={fields()}>{(field) => (
-            <Field editor={props.editor} spec={field} value={row()[field.name]} compact onChange={(value) => replace(index, { ...row(), [field.name]: value })} />
+            <Field editor={props.editor} spec={field} value={row()[field.name]} compact roleItem={props.spec.name === "models" ? props.roleItem : undefined} roles={props.roles} row={row()}
+              onChange={(value) => replace(index, { ...row(), [field.name]: value })} />
           )}</For>
           <button type="button" class="icon-btn small" aria-label={tr("Move up")} disabled={index === 0} onClick={() => move(index, -1)}><Icon name="arrow-up" size={12} /></button>
           <button type="button" class="icon-btn small" aria-label={tr("Move down")} disabled={index === props.value.length - 1} onClick={() => move(index, 1)}><Icon name="arrow-down" size={12} /></button>

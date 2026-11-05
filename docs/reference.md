@@ -1159,6 +1159,17 @@ output and records the run under the session; the same `request_id` never runs
 twice, and asking again reads its state. `hgs run --list --json` lists the
 session's newest runs.
 
+On Windows a Git Bash wrapper (`bash -c`, `env`, `nohup`, `timeout`, `xargs`,
+`sh -c`, `npx -c`) ends a Windows process between the session and hgs, so the
+process ancestry stops at a process that no longer exists. hgs then asks the
+session host which session's job holds it (`caller_session`): the host answers
+for the connection's own client, by the process ID the kernel gives it, and
+the session, pane and run marker must be exactly those of the record that
+`HGS_SESSION` and `HGS_RUN_ID` name. A leaked or stale session environment
+therefore never names the caller, and a process outside every session is still
+refused. A host from before this question answers `unsupported`, and the caller
+stays unproven as before.
+
 A job the session started otherwise makes it wait only while it waits for it. A
 long-lived process it does not wait for, such as a dev server, a watcher or a
 tunnel, a job past its declared budget, and any other job that still runs after

@@ -2003,3 +2003,64 @@ fn the_target_check_counts_the_label_holder_with_its_twins() {
     private(&twin, record("run-other").as_bytes());
     assert!(current());
 }
+
+/// #1437 review (desktop-u, R3): the target reads the label index through the
+/// CLI's own proof. A listed label's file must list one or more canonical IDs;
+/// any other shape refuses, even with a matching digest, and never hides a
+/// twin behind the label's matching record.
+#[test]
+fn the_target_check_refuses_every_malformed_listed_index() {
+    use sha2::Digest;
+    let temp = tempfile::tempdir().unwrap();
+    let state = state_root(temp.path());
+    let verified = original(&"a".repeat(64), &uuid::Uuid::new_v4().to_string());
+    let plan = &verified.plan;
+    session_record(&state, SESSION, "claude", RUN, CONVERSATION);
+    let current = || target::current(&super::receipt::Roots::open(&state).unwrap(), plan);
+    let private = |path: &Path, bytes: &[u8]| {
+        std::fs::create_dir_all(path.parent().unwrap()).unwrap();
+        mode(path.parent().unwrap(), 0o700);
+        std::fs::write(path, bytes).unwrap();
+        mode(path, 0o600);
+    };
+    let id = uuid::Uuid::new_v4().to_string();
+    let twin = json!({"name": SESSION, "agent": "claude", "run_id": "run-other",
+        "conversation_id": CONVERSATION, "session_id": id, "layout": "id"});
+    private(&state.join("sessions").join(format!("{id}.json")), twin.to_string().as_bytes());
+    let key = format!("{:x}", sha2::Sha256::digest(SESSION.as_bytes()));
+    let prove = |index: Value| {
+        let bytes = index.to_string();
+        private(&state.join("labels").join(format!("{key}.json")), bytes.as_bytes());
+        let digest = format!("{:x}", sha2::Sha256::digest(bytes.as_bytes()));
+        private(
+            &state.join("labels").join(".complete"),
+            json!({"version": 1, "labels": {&key: digest}}).to_string().as_bytes(),
+        );
+    };
+    prove(json!({"version": 1, "label": SESSION, "ids": [id]}));
+    assert!(current(), "a well-formed index whose twin runs another run");
+    for ids in [
+        None,
+        Some(Value::Null),
+        Some(json!({})),
+        Some(json!([])),
+        Some(json!([1])),
+        Some(json!(["not-an-id"])),
+        Some(json!([id, "not-an-id"])),
+        Some(json!([id, 1])),
+    ] {
+        let mut index = json!({"version": 1, "label": SESSION});
+        if let Some(ids) = ids.clone() {
+            index["ids"] = ids;
+        }
+        prove(index);
+        assert!(!current(), "a listed index with ids {ids:?}");
+    }
+    // A manifest is well formed as a whole, or proves nothing.
+    prove(json!({"version": 1, "label": SESSION, "ids": [id]}));
+    let manifest = state.join("labels").join(".complete");
+    let mut whole: Value = serde_json::from_slice(&std::fs::read(&manifest).unwrap()).unwrap();
+    whole["labels"]["another"] = json!(1);
+    private(&manifest, whole.to_string().as_bytes());
+    assert!(!current(), "a manifest with a malformed entry");
+}

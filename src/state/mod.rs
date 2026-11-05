@@ -52,6 +52,10 @@ mod session_limits;
 pub(crate) mod session_id;
 mod session_index;
 mod labels;
+/// How every reader decides what the label index proves (zerus-ucck P3a);
+/// the native readers that need it outside this module run on Unix.
+#[cfg(unix)]
+pub(crate) use labels::prove as prove_label_index;
 mod provider_messages;
 mod processes;
 mod prompt_suggestion;

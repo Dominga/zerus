@@ -88,8 +88,12 @@ fn manifest() -> Option<Manifest> {
 }
 
 fn read_manifest(state: &Path) -> Option<Manifest> {
-    let bytes = read_file(&manifest_in(state), MANIFEST_BYTES).ok()??;
-    let value: Value = serde_json::from_slice(&bytes).ok()?;
+    parse_manifest(&read_file(&manifest_in(state), MANIFEST_BYTES).ok()??)
+}
+
+/// The manifest in `bytes`; None when it is not well formed.
+fn parse_manifest(bytes: &[u8]) -> Option<Manifest> {
+    let value: Value = serde_json::from_slice(bytes).ok()?;
     if value["version"] != 1 {
         return None;
     }
@@ -132,11 +136,27 @@ fn listed(label: &str) -> Option<Vec<String>> {
 
 /// [`listed`], under the state root `state`.
 pub(super) fn listed_in(state: &Path, label: &str) -> Option<Vec<String>> {
-    let manifest = read_manifest(state)?;
+    let manifest = read_file(&manifest_in(state), MANIFEST_BYTES).ok()??;
+    prove(label, &manifest, || read_file(&path_in(state, label), INDEX_BYTES).ok().flatten())
+}
+
+/// The IDs the label index proves for `label`, given the manifest's bytes
+/// and a reader of the label's file, which runs only when the manifest lists
+/// the label. None when the manifest lists no entry for the label; else exactly
+/// what the label's file lists, which must be there, hash to the entry and
+/// list one or more canonical IDs. None, never fewer IDs, when anything is
+/// malformed, missing or changed (#1437 review). Every reader of the index,
+/// the native ones included, decides through this (`prove_label_index`).
+pub(crate) fn prove(
+    label: &str,
+    manifest: &[u8],
+    file: impl FnOnce() -> Option<Vec<u8>>,
+) -> Option<Vec<String>> {
+    let manifest = parse_manifest(manifest)?;
     let Some(expected) = manifest.get(&key(label)) else {
         return Some(Vec::new());
     };
-    let bytes = read_file(&path_in(state, label), INDEX_BYTES).ok()??;
+    let bytes = file()?;
     if digest(&bytes) != *expected {
         return None;
     }
@@ -408,6 +428,53 @@ mod tests {
             "{stdout}{}",
             String::from_utf8_lossy(&output.stderr)
         );
+    }
+
+    /// #1437 review: every reader of the label index outside this module
+    /// decides through `prove_label_index`, the same proof label resolution
+    /// uses, and never parses an index file's IDs itself. A new reader fails
+    /// here until it is listed.
+    #[test]
+    fn every_label_index_reader_proves_through_the_shared_parser() {
+        const READERS: [&str; 2] = ["src/desktop/deferred_send/target.rs", "src/state/task_reconcile.rs"];
+        let root = std::path::Path::new(env!("CARGO_MANIFEST_DIR"));
+        let mut found = Vec::new();
+        let mut stack = vec![root.join("src")];
+        while let Some(dir) = stack.pop() {
+            for entry in std::fs::read_dir(&dir).unwrap().flatten() {
+                let path = entry.path();
+                if path.is_dir() {
+                    if path.file_name().is_none_or(|name| name != "tests") {
+                        stack.push(path);
+                    }
+                    continue;
+                }
+                let relative = path.strip_prefix(root).unwrap().to_string_lossy().replace('\\', "/");
+                if path.extension().is_none_or(|extension| extension != "rs")
+                    || relative == "src/state/labels.rs"
+                    || relative.ends_with("/tests.rs")
+                {
+                    continue;
+                }
+                let text = std::fs::read_to_string(&path).unwrap();
+                // Production code only: an inline test module comes last.
+                let production = text
+                    .split("#[cfg(test)]\nmod tests")
+                    .next()
+                    .unwrap()
+                    .split("#[cfg(all(test, unix))]\nmod tests")
+                    .next()
+                    .unwrap();
+                if !(production.contains("\"labels\"") && production.contains(".complete")) {
+                    continue;
+                }
+                assert!(production.contains("prove_label_index("), "{relative} reads the label index without the shared proof");
+                assert!(!production.contains("\"ids\""), "{relative} parses an index file's IDs itself");
+                found.push(relative);
+            }
+        }
+        found.sort();
+        assert_eq!(found, READERS, "the label index's readers changed; review the new one");
     }
 
     /// #1430 review: every source file that lists a binding directory also

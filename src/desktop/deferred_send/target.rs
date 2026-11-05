@@ -110,34 +110,15 @@ pub(super) fn current(roots: &Roots, plan: &Plan) -> bool {
     found == 1
 }
 
-/// The IDs the label index proves for the plan's label: none when the
-/// manifest does not list the label, else exactly what the label's file
-/// lists, which must hash to the manifest's entry. None when that cannot be
-/// proven.
+/// The IDs the label index proves for the plan's label, through the CLI's
+/// own proof (`state::prove_label_index`): none when the manifest does not
+/// list the label, else exactly what the label's file lists. None when that
+/// cannot be proven.
 fn proven(roots: &Roots, plan: &Plan, file: &str) -> Option<Vec<String>> {
-    let key = format!("{:x}", Sha256::digest(plan.session.as_bytes()));
     let manifest = bytes_at(roots, &["labels", ".complete"], MANIFEST_BYTES).ok()??;
-    let manifest = serde_json::from_slice::<serde_json::Value>(&manifest).ok()?;
-    if manifest["version"] != 1 || !manifest["labels"].is_object() {
-        return None;
-    }
-    let Some(expected) = manifest["labels"].get(&key) else {
-        return Some(Vec::new());
-    };
-    let index = bytes_at(roots, &["labels", file], RECORD_BYTES).ok()??;
-    if expected.as_str() != Some(format!("{:x}", Sha256::digest(&index)).as_str()) {
-        return None;
-    }
-    let index = serde_json::from_slice::<serde_json::Value>(&index).ok()?;
-    if index["version"] != 1 || string(&index, "label") != plan.session {
-        return None;
-    }
-    let canonical = |id: &str| uuid::Uuid::parse_str(id).is_ok_and(|uuid| uuid.hyphenated().to_string() == id);
-    index["ids"]
-        .as_array()?
-        .iter()
-        .map(|id| id.as_str().filter(|id| canonical(id)).map(str::to_owned))
-        .collect()
+    crate::state::prove_label_index(&plan.session, &manifest, || {
+        bytes_at(roots, &["labels", file], RECORD_BYTES).ok().flatten()
+    })
 }
 
 /// The bytes at `path` under the held root, bounded: `Ok(None)` only when it
@@ -155,4 +136,3 @@ fn bytes_at(roots: &Roots, path: &[&str], limit: u64) -> io::Result<Option<Vec<u
     }
     Ok(Some(bytes))
 }
-

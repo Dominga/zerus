@@ -437,34 +437,26 @@ fn read_in_id_layout(
         );
         return Ok(None);
     };
-    let manifest: Value = serde_json::from_slice(&manifest)?;
-    ensure!(manifest["version"] == 1 && manifest["labels"].is_object(), "executor label index cannot be proven");
+    // The CLI's own proof (`state::prove_label_index`): no entry means no
+    // session in the ID layout; a present entry needs its file to hash to it
+    // and list one or more canonical IDs, else the proof refuses.
     let key = format!("{:x}", Sha256::digest(name.as_bytes()));
-    let Some(expected) = manifest["labels"].get(&key) else {
-        // The manifest proves this label has no session in the ID layout.
-        return Ok(None);
-    };
-    let mut index = optional(&labels, &format!("{key}.json"), false)?
-        .context("executor label index cannot be proven")?;
-    let index = bounded(&mut index)?;
-    ensure!(
-        expected.as_str() == Some(format!("{:x}", Sha256::digest(&index)).as_str()),
-        "executor label index cannot be proven"
-    );
-    let index: Value = serde_json::from_slice(&index)?;
-    ensure!(
-        index["version"] == 1 && index["label"] == name,
-        "executor label index does not match"
-    );
+    let ids = crate::state::prove_label_index(name, &manifest, || {
+        optional(&labels, &format!("{key}.json"), false)
+            .ok()
+            .flatten()
+            .and_then(|mut file| bounded(&mut file).ok())
+    })
+    .context("executor label index cannot be proven")?;
     let mut found = None;
-    for id in index["ids"].as_array().into_iter().flatten() {
-        let Some(id) = id.as_str() else { continue };
-        let Some(record) = read_by_id(directory, id)? else {
+    for id in ids {
+        // A listed session whose file is gone is a stale entry.
+        let Some(record) = read_by_id(directory, &id)? else {
             continue;
         };
         if binds(&record, name, executor) {
             ensure!(found.is_none(), "executor binds more than one session");
-            found = Some((record, id.to_owned()));
+            found = Some((record, id));
         }
     }
     Ok(found)
@@ -942,5 +934,55 @@ mod tests {
         fs::write(&manifest, json!({"version":1,"labels":{}}).to_string()).unwrap();
         fs::set_permissions(&manifest, fs::Permissions::from_mode(0o600)).unwrap();
         f.capture().unwrap();
+    }
+    /// #1437 review (desktop-u, R3): the executor proof reads the label index
+    /// through the CLI's own proof. A listed label's file must list one or more
+    /// canonical IDs; any other shape refuses and is never "no candidates".
+    #[test]
+    fn an_executor_refuses_every_malformed_listed_index() {
+        let f = Fixture::new();
+        f.capture().unwrap();
+        let private = |path: &Path, bytes: &[u8]| {
+            fs::create_dir_all(path.parent().unwrap()).unwrap();
+            fs::set_permissions(path.parent().unwrap(), fs::Permissions::from_mode(0o700)).unwrap();
+            fs::write(path, bytes).unwrap();
+            fs::set_permissions(path, fs::Permissions::from_mode(0o600)).unwrap();
+        };
+        let id = uuid::Uuid::new_v4().to_string();
+        let mut twin = f.record.clone();
+        twin["session_id"] = json!(id);
+        twin["layout"] = json!("id");
+        twin["run_id"] = json!(uuid::Uuid::new_v4().to_string());
+        private(&f.root.path().join("sessions").join(format!("{id}.json")), twin.to_string().as_bytes());
+        let name = "private-task-executor";
+        let key = format!("{:x}", Sha256::digest(name.as_bytes()));
+        let prove = |index: Value| {
+            let bytes = index.to_string();
+            private(&f.root.path().join("labels").join(format!("{key}.json")), bytes.as_bytes());
+            let digest = format!("{:x}", Sha256::digest(bytes.as_bytes()));
+            private(
+                &f.root.path().join("labels").join(".complete"),
+                json!({"version":1,"labels":{&key: digest}}).to_string().as_bytes(),
+            );
+        };
+        prove(json!({"version":1,"label":name,"ids":[id]}));
+        f.capture().unwrap();
+        for ids in [
+            None,
+            Some(Value::Null),
+            Some(json!({})),
+            Some(json!([])),
+            Some(json!([1])),
+            Some(json!(["not-an-id"])),
+            Some(json!([id, "not-an-id"])),
+            Some(json!([id, 1])),
+        ] {
+            let mut index = json!({"version":1,"label":name});
+            if let Some(ids) = ids.clone() {
+                index["ids"] = ids;
+            }
+            prove(index);
+            assert!(f.capture().is_err(), "a listed index with ids {ids:?}");
+        }
     }
 }

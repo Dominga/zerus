@@ -1227,7 +1227,9 @@ class SessionIdentity(Harness):
         # resolved, an option's value is never a label, and an archive ID
         # already selects exactly.
         def call(*args):
-            return subprocess.run([str(HGS), *args], env=self.env, capture_output=True, text=True, timeout=20)
+            # `hooks NAME --json` reads its request on stdin: give it none.
+            return subprocess.run([str(HGS), *args], env=self.env, capture_output=True, text=True,
+                                  timeout=20, input="")
         for args in (["hooks", "--account", name, "--json"], ["hooks", name, "--json"]):
             self.assertNotEqual(call(*args).returncode, 5, args)
         archive_id = str(uuid.uuid4())

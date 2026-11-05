@@ -184,6 +184,13 @@ fn actions() -> Vec<(TeamAction, &'static str, Value)> {
             "draft",
             json!({"action": "discard", "stop_lead": true}),
         ),
+        (
+            TeamAction::Settings {
+                settings: json!({"branch_per_task": true, "land": false}),
+            },
+            "settings",
+            json!({"settings": {"branch_per_task": true, "land": false}}),
+        ),
     ]
 }
 
@@ -442,6 +449,24 @@ fn a_refusal_fails_and_an_unknown_outcome_is_uncertain_and_never_sent_again() {
         ),
         TeamOutcome::Uncertain { .. }
     ));
+    // An owner-only settings change refused by hgs is failed, with hgs's
+    // own words, and is never resent.
+    reply(
+        &fake,
+        "settings",
+        "",
+        json!({"exit": 1, "stderr": "hgs: only the owner can change team settings\n"}),
+    );
+    let settings = TeamAction::Settings {
+        settings: json!({"land": true}),
+    };
+    let before = requests(&fake).len();
+    let outcome = run(&fake.path(), &call(settings.clone()));
+    assert!(
+        matches!(&outcome, TeamOutcome::Failed { detail, .. } if detail == "hgs: only the owner can change team settings"),
+        "{outcome:?}"
+    );
+    assert_eq!(requests(&fake).len(), before + 1, "a refusal is not resent");
 }
 
 #[test]
@@ -517,6 +542,9 @@ fn requests_that_cannot_be_made_never_run_and_a_peer_gets_its_alias() {
         revision: 1,
         set: json!({})
     })));
+    assert!(refused(call(TeamAction::Settings {
+        settings: json!({})
+    })));
     assert!(requests(&fake).is_empty(), "no refused request ran");
     // A peer: `hgs @studio team ...`, Qt's 45 s.
     let (invocation, _) = prepare(&TeamCall {
@@ -579,4 +607,9 @@ fn the_webview_names_an_action_by_its_kind() {
     )
     .unwrap();
     assert_eq!(decide.op(), "decide-proposal");
+    let settings: TeamAction = serde_json::from_value(
+        json!({"kind": "settings", "settings": {"land": true}}),
+    )
+    .unwrap();
+    assert_eq!(settings.op(), "settings");
 }

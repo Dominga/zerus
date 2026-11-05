@@ -148,6 +148,9 @@ pub enum TeamAction {
         #[serde(default)]
         reason: String,
     },
+    /// The owner's settings patch, merged by `hgs team settings`: only the
+    /// fields that differ from the team's current settings.
+    Settings { settings: Value },
 }
 
 /// What the owner is asked before a destructive action or an approval.
@@ -275,6 +278,7 @@ impl TeamAction {
             | Self::DraftSeen { .. }
             | Self::DraftCreate { .. }
             | Self::DraftDiscard { .. } => "draft",
+            Self::Settings { .. } => "settings",
         }
     }
 
@@ -379,6 +383,12 @@ impl TeamAction {
             }
             Self::DraftCreate { .. } => Ok(()),
             Self::DraftDiscard { reason, .. } => plain(reason, "A reason", 2000),
+            Self::Settings { settings } => {
+                if !settings.as_object().is_some_and(|fields| !fields.is_empty()) {
+                    return Err("A settings change names the fields it sets.".into());
+                }
+                Ok(())
+            }
         }
     }
 
@@ -535,6 +545,9 @@ impl TeamAction {
                 if !reason.is_empty() {
                     put("reason", json!(reason));
                 }
+            }
+            Self::Settings { settings } => {
+                put("settings", settings.clone());
             }
         }
         input

@@ -104,3 +104,92 @@ export interface PlanGraph {
   edges: GraphEdge[];
   layers: number;
 }
+
+export interface FindingView {
+  severity: string;
+  code: string;
+  text: string;
+  task?: number;
+  member?: string;
+}
+
+export interface ValidationView {
+  errors: FindingView[];
+  warnings: FindingView[];
+}
+
+export interface DraftView {
+  revision: number;
+  unseen: string[];
+  owner_edited: string[];
+}
+
+export interface DraftMember {
+  id: string;
+  role: string;
+  agent: string;
+  model: string;
+  effort: string;
+  account: string;
+  permissions: string;
+  computer: string;
+  folder: string;
+  prompt: string;
+  lead: boolean;
+  session: SessionView | null;
+}
+
+export interface NewTeamView {
+  team: string;
+  name: string;
+  goal: string;
+  addendum: string;
+  folder: string;
+  settings: Record<string, unknown>;
+  members: DraftMember[];
+  tasks: TaskView[];
+  draft: DraftView;
+  validation: ValidationView;
+  updated: number;
+}
+
+export interface SessionView {
+  host: string;
+  name: string;
+  run_id: string;
+  conversation_id: string;
+}
+
+export type TeamSettings = Record<string, unknown>;
+
+export type TeamAction =
+  | {
+      kind: "draft_start";
+      folder: string;
+      name?: string;
+      lead: DraftMember;
+      project?: string;
+      project_id?: string;
+      template?: string;
+    }
+  | { kind: "draft_update"; revision: number; set: Record<string, unknown> }
+  | { kind: "draft_seen"; fields: string[] }
+  | { kind: "draft_create"; approve?: boolean; confirm_widening?: boolean }
+  | { kind: "draft_discard"; stop_lead?: boolean; reason?: string }
+  | { kind: "settings"; settings: TeamSettings };
+
+export interface TeamCall {
+  computer?: string;
+  team?: string;
+  team_name?: string;
+  action: TeamAction;
+  confirmed?: boolean;
+  request_id?: string;
+}
+
+export type TeamOutcome =
+  | { outcome: "done"; receipt: Record<string, unknown>; request_id: string }
+  | { outcome: "failed"; detail: string; request_id: string }
+  | { outcome: "uncertain"; detail: string; request_id: string }
+  | { outcome: "confirm"; confirmation: { name: string; title: string; text: string; action: string } };
+

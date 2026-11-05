@@ -68,6 +68,7 @@ fn compatible_adapter(ping: &Value) -> bool {
 const BRIDGE: &str = include_str!("../dsh/bridge.mjs");
 const COMMAND_GUARD: &str = include_str!("../dsh/command-guard.mjs");
 const CONFIG_PRESETS: &str = include_str!("../dsh/config-presets.mjs");
+const CONFIG_MODELS: &str = include_str!("../dsh/config-models.mjs");
 fn bindings() -> PathBuf {
     root().join("dsh/bindings")
 }
@@ -132,7 +133,9 @@ fn catalog_models(catalog: &Value) -> Vec<Value> {
         })
         .collect()
 }
-/// The native account's model catalog through its resident host, never a host start.
+/// The native account's model catalog through its resident host, never a host
+/// start. Task #19: without a running host, the models the composed profile
+/// configures ([`config_models`]), named as the host names them.
 pub(crate) fn account_models(home: &Path) -> Value {
     let record = json!({"agent_home":home});
     match rpc(&record, "catalog", json!({})) {
@@ -142,7 +145,89 @@ pub(crate) fn account_models(home: &Path) -> Value {
             models.truncate(64);
             json!({"models":models,"truncated":truncated})
         }
-        Err(error) => json!({"models":[],"truncated":false,"reason":error}),
+        Err(error) => match cached_config_models(home) {
+            Ok(mut models) if !models.is_empty() => {
+                let truncated = models.len() > 64;
+                models.truncate(64);
+                json!({"models":models,"truncated":truncated,"source":"dsh-profile"})
+            }
+            _ => json!({"models":[],"truncated":false,"reason":error}),
+        },
+    }
+}
+
+/// Task #19: the composed profile's configuration is read again after this
+/// long; account listings and the New team form ask repeatedly.
+const MODELS_CACHE_SECONDS: f64 = 15.0;
+static MODELS_CACHE: std::sync::Mutex<Option<(String, f64, Vec<Value>)>> = std::sync::Mutex::new(None);
+
+fn cached_config_models(home: &Path) -> Result<Vec<Value>> {
+    let key = home.display().to_string();
+    if let Ok(cache) = MODELS_CACHE.lock() {
+        if let Some((cached, at, models)) = cache.as_ref() {
+            if cached == &key && now() - *at < MODELS_CACHE_SECONDS {
+                return Ok(models.clone());
+            }
+        }
+    }
+    let models = config_models(home)?;
+    if let Ok(mut cache) = MODELS_CACHE.lock() {
+        *cache = Some((key, now(), models.clone()));
+    }
+    Ok(models)
+}
+
+/// Task #19: the models the composed profile's API-key route (`deepseek-official`)
+/// offers: the `models` its `llm-deepseek` entry configures, else the
+/// installed transport's bundled catalog, resolved by the transport itself
+/// (`dsh --profile hgs --dump-config`, which starts no host). Never a guess:
+/// a profile or harness that cannot be read gives an error.
+fn config_models(home_dir: &Path) -> Result<Vec<Value>> {
+    let dump = composed_config_dump(home_dir)?;
+    let text = String::from_utf8(dump).map_err(|_| "The DeepSeek Harness reported an unreadable profile".to_owned())?;
+    let mut request = json!({"dump":text});
+    if let Some(root) = dsh_package_root() {
+        request["packageRoot"] = json!(root.to_string_lossy().into_owned());
+    }
+    let value = node_json(CONFIG_MODELS, &request, Duration::from_secs(5), 64 * 1024)?;
+    Ok(profile_models(&value))
+}
+
+/// The helper's models in the host catalog's shape: `provider/model` ids and
+/// `Name (DeepSeek)` labels, the official route's group name.
+fn profile_models(value: &Value) -> Vec<Value> {
+    value["models"]
+        .as_array()
+        .into_iter()
+        .flatten()
+        .filter(|model| !string(model, "provider").is_empty() && !string(model, "id").is_empty())
+        .take(256)
+        .map(|model| {
+            let name = if string(model, "name").is_empty() { string(model, "id") } else { string(model, "name") };
+            json!({
+                "id":format!("{}/{}",string(model,"provider"),string(model,"id")),
+                "label":format!("{name} (DeepSeek)"),
+                "effort_options":model["efforts"].as_array().cloned().unwrap_or_default(),
+                "default_effort":model["defaultEffort"].clone(),
+            })
+        })
+        .collect()
+}
+
+/// Task #19: a model named without its provider (`deepseek-flash`, as a team
+/// member or the owner may name it) is the one catalog group that has it;
+/// None when no group or several do.
+fn qualified_model(catalog: &Value, model: &str) -> Option<String> {
+    let groups: Vec<&str> = catalog["groups"]
+        .as_array()
+        .into_iter()
+        .flatten()
+        .filter(|group| group["models"].as_array().is_some_and(|models| models.iter().any(|entry| entry["id"] == model)))
+        .map(|group| string(group, "id"))
+        .collect();
+    match groups.as_slice() {
+        [group] if !group.is_empty() => Some(format!("{group}/{model}")),
+        _ => None,
     }
 }
 /// One configured permission preset the installed harness actually offers.
@@ -2549,6 +2634,14 @@ pub(crate) fn dispatch(command: &str, args: &[String]) -> Result<i32> {
                 } else {
                     string(&request, "model")
                 };
+                // Task #19: a bare model id takes the one provider that offers it.
+                let selected = if selected.contains('/') {
+                    selected.to_owned()
+                } else {
+                    let catalog = rpc(&record, "catalog", json!({}))?;
+                    qualified_model(&catalog, selected).ok_or("Choose a native provider and model")?
+                };
+                let selected = selected.as_str();
                 let (provider, model) = selected
                     .split_once('/')
                     .ok_or("Choose a native provider and model")?;
@@ -3435,6 +3528,72 @@ mod permissions_compat_tests {
 #[cfg(test)]
 mod account_model_tests {
     use super::*;
+
+    /// Task #19: the profile's models in the host catalog's shape, as the New
+    /// team form and `account model-settings` show them.
+    #[test]
+    fn profile_models_take_the_host_catalogs_ids_and_labels() {
+        let helper = json!({"ok":true,"models":[
+            {"provider":"deepseek-official","id":"deepseek-flash","name":"DeepSeek-V4.1-Flash","efforts":["off","low","high","max"],"defaultEffort":"high"},
+            {"provider":"deepseek-official","id":"deepseek-v4-pro","name":"","efforts":["off"],"defaultEffort":"off"},
+            {"provider":"","id":"stray"}
+        ]});
+        let models = profile_models(&helper);
+        assert_eq!(models.len(), 2);
+        assert_eq!(models[0], json!({"id":"deepseek-official/deepseek-flash","label":"DeepSeek-V4.1-Flash (DeepSeek)",
+            "effort_options":["off","low","high","max"],"default_effort":"high"}));
+        assert_eq!(models[1]["label"], "deepseek-v4-pro (DeepSeek)");
+    }
+
+    /// Task #19: a bare model id is the one provider group that offers it.
+    #[test]
+    fn a_bare_model_takes_the_one_provider_that_offers_it() {
+        let catalog = json!({"groups":[
+            {"id":"deepseek-official","models":[{"id":"deepseek-flash"},{"id":"deepseek-v4-pro"}]},
+            {"id":"deepseek-account","models":[{"id":"deepseek-v4-pro"}]}
+        ]});
+        assert_eq!(qualified_model(&catalog, "deepseek-flash").as_deref(), Some("deepseek-official/deepseek-flash"));
+        assert_eq!(qualified_model(&catalog, "deepseek-v4-pro"), None, "two providers offer it");
+        assert_eq!(qualified_model(&catalog, "gpt-5"), None);
+        assert_eq!(qualified_model(&json!({}), "deepseek-flash"), None);
+    }
+
+    /// Task #19: the installed harness's own catalog for the API-key route:
+    /// its bundled models without a `models` entry, the configured list with
+    /// one, `off` alone with thinking disabled; never a computed value.
+    #[test]
+    fn the_profile_catalog_is_the_installed_transports() {
+        if Command::new("node").arg("--version").output().is_err() {
+            return;
+        }
+        let Some(root) = dsh_package_root() else { return };
+        let ask = |dump: &str| {
+            node_json(
+                CONFIG_MODELS,
+                &json!({"dump":dump,"packageRoot":root.to_string_lossy().into_owned()}),
+                Duration::from_secs(20),
+                64 * 1024,
+            )
+        };
+        let row = "- id: llm-deepseek\n  name: '@deepseek-ai/dsh-llm-deepseek-api-key'\n";
+        let agent = "- id: agent\n  name: '@deepseek-ai/dsh-agent'\n";
+        let Ok(bundled) = ask(&format!("{agent}{row}")) else { return };
+        let models = profile_models(&bundled);
+        let flash = models.iter().find(|model| model["id"] == "deepseek-official/deepseek-flash").expect("the bundled catalog offers deepseek-flash");
+        assert!(flash["label"].as_str().unwrap().ends_with(" (DeepSeek)"), "{flash}");
+        assert!(flash["effort_options"].as_array().unwrap().contains(&json!("high")), "{flash}");
+        // A configured list replaces the bundled one; a later layer merges.
+        let custom = format!(
+            "{row}  config:\n    models:\n      - id: deepseek-flash\n        name: Flash here\n{row}  config:\n    thinking: disabled\n"
+        );
+        let configured = profile_models(&ask(&custom).unwrap());
+        assert_eq!(configured, vec![json!({"id":"deepseek-official/deepseek-flash","label":"Flash here (DeepSeek)",
+            "effort_options":["off"],"default_effort":"off"})]);
+        // A disabled route offers nothing; a computed list is never guessed.
+        assert_eq!(ask(&format!("{row}  disabled: true\n")).unwrap_err(), "provider");
+        assert_eq!(ask(&format!("{row}  config:\n    models: !!js 'ctx.models'\n")).unwrap_err(), "computed");
+        assert_eq!(ask(agent).unwrap_err(), "provider");
+    }
 
     #[test]
     fn native_catalog_projects_provider_models_and_efforts() {

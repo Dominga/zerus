@@ -3198,12 +3198,16 @@ pub(crate) fn agent_args(agent: &str, model: &str, effort: &str) -> Vec<String> 
     args
 }
 
-/// DeepSeek's model is provider/model; a bare name keeps the session's own.
+/// A DeepSeek member's model and effort, after its session starts: the model as
+/// `provider/model` or a bare id (`deepseek-flash`) hgs resolves (task #19).
 fn apply_settings(member: &Member) -> anyhow::Result<()> {
     let session = member.session.as_ref().context("no session")?;
     let mut input = json!({"request_id":uuid::Uuid::new_v4().to_string(),"expected_run_id":session.run_id,
         "expected_conversation_id":session.conversation_id});
-    if member.model.contains('/') {
+    // Task #19: only a DeepSeek member gets its settings this way; hgs takes
+    // its model as `provider/model` or as the bare id one provider offers
+    // (`deepseek-flash`), which was dropped before.
+    if !member.model.is_empty() {
         input["model"] = json!(member.model);
     }
     if !member.effort.is_empty() {

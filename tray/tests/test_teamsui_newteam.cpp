@@ -74,6 +74,7 @@ private slots:
     void cleanup() { tearDown(); }
     void newTeamStartsTheLeadWithTheTemplate();
     void newTeamOffersEachAgentsModels();
+    void newTeamTabOffersDeepSeeksModels();
     void newTeamRowErrorsKeepAnOpenListOpen();
     void newTeamTabKeepsAMemberListOpenUntilItCloses();
     void newTeamMaxMembersStepsUpAndDown();
@@ -1047,6 +1048,60 @@ void TestTeamsUiNewteam::draftCreateRefusalAndMemberLimitAreShown()
     QTRY_VERIFY(create->isEnabled());
     create->click();
     QTRY_COMPARE(created, QStringLiteral("draft-1"));
+}
+
+// Task #19 (owner, 2026-11-05): the New team tab's member rows offer each
+// account's model catalog from `account model-settings`, DeepSeek's too:
+// a DeepSeek row lists deepseek-flash as dsh names it, and picking it is the
+// member's model.
+void TestTeamsUiNewteam::newTeamTabOffersDeepSeeksModels()
+{
+    const auto model = [](const QString &id, const QString &label) {
+        return QJsonObject{{"id", id}, {"label", label}, {"effort_options", QJsonArray{"off", "low", "high", "max"}}};
+    };
+    const QJsonObject catalogs{
+        {"native-codex", QJsonArray{model("gpt-5.5", "GPT-5.5")}},
+        {"native-kimi", QJsonArray{model("kimi-code/k3.1-pro", "K3.1 Pro")}},
+        {"native-dsh", QJsonArray{model("deepseek-official/deepseek-flash", "DeepSeek-V4.1-Flash (DeepSeek)"),
+                                  model("deepseek-official/deepseek-v4-pro", "DeepSeek-V4-Pro (DeepSeek)")}},
+    };
+    QVERIFY(FakeCli::replace(script() + ".models", QJsonDocument(catalogs).toJson(QJsonDocument::Compact)));
+    HgsClient client(FakeCli::program(script()));
+    TeamController controller(&client);
+    controller.refreshCatalog();
+    QTRY_VERIFY(controller.catalogReady());
+    QTemporaryDir folder;
+    const QString path = QDir::toNativeSeparators(folder.path());
+    TeamNewTab tab(&controller, &client, {{QString(), "this computer", true}},
+                   TeamNewTab::Coordinator{"claude/checkout/coord", "claude", "Opus", "", path, "msi", "Ready", false}, "Checkout");
+    tab.resize(1400, 900); tab.show();
+    QVERIFY(chooseTemplate(&tab, "feature"));
+    QTRY_COMPARE(tab.findChildren<QFrame *>("teamNewMemberRow").size(), 2);
+    const auto models = [&](int row) {
+        QStringList ids;
+        auto *box = tab.findChildren<QFrame *>("teamNewMemberRow").at(row)->findChild<QComboBox *>("teamNewModel");
+        for (int i = 0; i < box->count(); ++i) ids << box->itemData(i).toString();
+        return ids;
+    };
+    // Each account's catalog, once read; the Codex row lists its model.
+    QTRY_VERIFY2(models(0).contains("gpt-5.5"), qPrintable(models(0).join(", ")));
+    QTRY_VERIFY(models(1).contains("kimi-code/k3.1-pro"));
+    // The backend row switches to DeepSeek: its account's models follow.
+    auto *agent = tab.findChildren<QFrame *>("teamNewMemberRow").at(0)->findChild<QComboBox *>("teamNewAgent");
+    agent->setCurrentIndex(agent->findData("dsh"));
+    emit agent->activated(agent->currentIndex());
+    QTRY_VERIFY2(models(0).contains("deepseek-official/deepseek-flash"), qPrintable(models(0).join(", ")));
+    auto *box = tab.findChildren<QFrame *>("teamNewMemberRow").at(0)->findChild<QComboBox *>("teamNewModel");
+    QVERIFY(box->isEnabled());
+    const int flash = box->findData("deepseek-official/deepseek-flash");
+    QCOMPARE(box->itemData(flash, Qt::ToolTipRole).toString(), QStringLiteral("DeepSeek-V4.1-Flash (DeepSeek)"));
+    box->setCurrentIndex(flash);
+    // The pick is the member's model, sent with Start planning's first save.
+    QTRY_COMPARE(tab.findChildren<QFrame *>("teamNewMemberRow").at(0)->findChild<QComboBox *>("teamNewModel")->currentText(),
+                 QStringLiteral("deepseek-official/deepseek-flash"));
+    // No account list was lost to the model replies on the shared client.
+    auto *account = tab.findChildren<QFrame *>("teamNewMemberRow").at(1)->findChild<QComboBox *>("teamNewAccount");
+    QVERIFY(account->count() >= 1);
 }
 
 // F6: many templates in a compact list with a search field and favourites; the

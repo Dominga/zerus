@@ -778,7 +778,11 @@ void TeamNewTab::renderMembers()
             ach->addWidget(w.duplicate); ach->addWidget(w.remove);
             g->addWidget(w.role, 0, 0); g->addWidget(agentBox, 0, 1); g->addWidget(w.model, 0, 2); g->addWidget(w.effort, 0, 3);
             g->addWidget(w.permissions, 0, 4); g->addWidget(w.computer, 0, 5); g->addWidget(w.worktree, 0, 6, Qt::AlignCenter); g->addWidget(actions, 0, 7);
-            w.account->hide();   // the table has no account column; the role's account applies
+            // The table has no account column; the role's account applies. The
+            // hidden box still belongs to its row (task 46: unparented, it
+            // leaked and no lookup under the row found it).
+            w.account->setParent(line);
+            w.account->hide();
             if (!errors.isEmpty()) {
                 auto *error = label(errors.join(QStringLiteral(" · ")), c.danger, 11); error->setObjectName("teamNewRowError");
                 g->addWidget(error, 1, 0, 1, widths.size());

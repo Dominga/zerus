@@ -378,6 +378,9 @@ fn only_an_exact_round_trip_for_the_current_folders_is_a_previous_image() {
     }
 }
 
+/// One change applied to an otherwise exact earlier registration.
+type Edit<'a> = Box<dyn Fn(&mut Fake) + 'a>;
+
 fn earlier_plan() -> Plan {
     Plan::new(&"a".repeat(64),"S-1-5-21-1000",r#""C:\Old copy\hgs.exe" --desktop-notification-activation --config-dir C:\Example\config --state-dir C:\Example\state"#).unwrap()
 }
@@ -422,7 +425,7 @@ fn a_foreign_partial_older_or_other_configuration_registration_is_no_previous_im
     let class = &earlier.keys[0].0;
     let server = &earlier.keys[1].0;
     let application = &earlier.keys[2].0;
-    let edits: Vec<(&str, Box<dyn Fn(&mut Fake)>)> = vec![
+    let edits: Vec<(&str, Edit<'_>)> = vec![
         (
             "other configuration hash",
             Box::new(|r: &mut Fake| {
@@ -537,4 +540,146 @@ fn a_foreign_partial_older_or_other_configuration_registration_is_no_previous_im
         )
         .unwrap()
         .is_none());
+}
+
+/// Counts admissions and confirmations; either can be made to refuse.
+struct FakeGate {
+    admit: Result<(), &'static str>,
+    confirm: Result<(), &'static str>,
+    admitted: std::cell::Cell<usize>,
+    confirmed: std::cell::Cell<usize>,
+}
+impl FakeGate {
+    fn new(admit: Result<(), &'static str>, confirm: Result<(), &'static str>) -> Self {
+        Self {
+            admit,
+            confirm,
+            admitted: 0.into(),
+            confirmed: 0.into(),
+        }
+    }
+}
+impl Gate for FakeGate {
+    fn admit(&self) -> anyhow::Result<()> {
+        self.admitted.set(self.admitted.get() + 1);
+        self.admit.map_err(|reason| anyhow::anyhow!(reason))
+    }
+    fn confirm(&self) -> anyhow::Result<()> {
+        self.confirmed.set(self.confirmed.get() + 1);
+        self.confirm.map_err(|reason| anyhow::anyhow!(reason))
+    }
+}
+
+const FOLDERS: (&str, &str, &str) = (
+    r"C:\Example\hgs.exe",
+    r"C:\Example\config",
+    r"C:\Example\state",
+);
+
+fn with_earlier() -> Fake {
+    let mut r = Fake::default();
+    earlier_plan().apply(&mut r, "install").unwrap();
+    r.effects = 0;
+    r
+}
+
+#[test]
+fn a_previous_image_is_removed_only_through_an_admitted_gate_then_install_is_separate() {
+    let mut r = with_earlier();
+    let gate = std::rc::Rc::new(FakeGate::new(Ok(()), Ok(())));
+    struct Shared(std::rc::Rc<FakeGate>);
+    impl Gate for Shared {
+        fn admit(&self) -> anyhow::Result<()> {
+            self.0.admit()
+        }
+        fn confirm(&self) -> anyhow::Result<()> {
+            self.0.confirm()
+        }
+    }
+    let shared = Shared(gate.clone());
+    let (reply, previous) = run(&plan(), &mut r, "remove", FOLDERS, || Ok(Some(shared))).unwrap();
+    assert!(previous);
+    assert_eq!(
+        reply,
+        Reply {
+            registered: false,
+            changed: true
+        }
+    );
+    assert!(r.keys.is_empty());
+    assert_eq!((gate.admitted.get(), gate.confirmed.get()), (1, 1));
+    let (installed, previous) =
+        run(&plan(), &mut r, "install", FOLDERS, || Ok(None::<FakeGate>)).unwrap();
+    assert!(installed.registered && !previous);
+}
+
+#[test]
+fn a_refusing_guard_leaves_a_valid_previous_registration_untouched() {
+    for refusal in ["guard", "admit"] {
+        let mut r = with_earlier();
+        let before = r.keys.clone();
+        let result = run(&plan(), &mut r, "remove", FOLDERS, || {
+            if refusal == "guard" {
+                anyhow::bail!("current rollback proof refused")
+            }
+            Ok(Some(FakeGate::new(Err("exclusion changed"), Ok(()))))
+        });
+        assert!(result.is_err(), "{refusal}");
+        assert_eq!((r.effects, &r.keys), (0, &before), "{refusal}");
+    }
+}
+
+#[test]
+fn install_and_status_never_fall_back_to_a_previous_image() {
+    for operation in ["install", "status"] {
+        let mut r = with_earlier();
+        let before = r.keys.clone();
+        let error = run(&plan(), &mut r, operation, FOLDERS, || {
+            Ok(Some(FakeGate::new(Ok(()), Ok(()))))
+        })
+        .unwrap_err();
+        assert!(
+            error
+                .to_string()
+                .contains("foreign_or_incomplete_notification_registration_kept"),
+            "{operation}: {error}"
+        );
+        assert_eq!((r.effects, &r.keys), (0, &before), "{operation}");
+    }
+}
+
+#[test]
+fn a_partial_previous_removal_is_unknown_and_never_falls_back_repeats_or_installs() {
+    let mut r = with_earlier();
+    r.fail_at = Some(2);
+    let error = run(&plan(), &mut r, "remove", FOLDERS, || {
+        Ok(Some(FakeGate::new(Ok(()), Ok(()))))
+    })
+    .unwrap_err();
+    assert!(error.to_string().contains("outcome unknown"), "{error}");
+    assert_eq!(
+        r.effects, 2,
+        "one removal, then the failing one; nothing more"
+    );
+    let partial = r.keys.clone();
+    assert!(!partial.is_empty() && partial.len() < 3);
+    for operation in ["remove", "install", "status"] {
+        let result = run(&plan(), &mut r, operation, FOLDERS, || {
+            Ok(Some(FakeGate::new(Ok(()), Ok(()))))
+        });
+        assert!(result.is_err(), "{operation}");
+        assert_eq!((r.effects, &r.keys), (2, &partial), "{operation}");
+    }
+}
+
+#[test]
+fn a_confirmation_failure_after_the_effect_is_reported_not_retried() {
+    let mut r = with_earlier();
+    let error = run(&plan(), &mut r, "remove", FOLDERS, || {
+        Ok(Some(FakeGate::new(Ok(()), Err("exclusion changed"))))
+    })
+    .unwrap_err();
+    assert!(error.to_string().contains("exclusion changed"), "{error}");
+    assert!(r.keys.is_empty(), "the effect happened");
+    assert_eq!(r.effects, 3, "three exact removals, no retry");
 }

@@ -354,6 +354,19 @@ impl RemovalGuard {
             .context("desktop exclusion changed during removal; outcome unknown, inspect status before retrying")
     }
 }
+/// The removal guard bound to its location, as the shared execution's Gate.
+struct Held<'a> {
+    guard: RemovalGuard,
+    location: &'a Location,
+}
+impl super::Gate for Held<'_> {
+    fn admit(&self) -> Result<()> {
+        self.guard.admit(self.location)
+    }
+    fn confirm(&self) -> Result<()> {
+        self.guard.confirm(self.location)
+    }
+}
 pub(super) fn command(
     config: &Config,
     operation: &str,
@@ -371,53 +384,46 @@ pub(super) fn command(
         .context("desktop registration arguments unavailable")?;
     ensure!(args.len() == 7, "desktop registration arguments changed");
     let cli = args[0].as_str().context("selected CLI unavailable")?;
+    let config_dir = args[4].as_str().context("configuration unavailable")?;
+    let state_dir = args[6].as_str().context("state unavailable")?;
     // The same formatter the service compares with (zerus-mgw2v).
-    let command = super::expected_command(
-        cli,
-        args[4].as_str().context("configuration unavailable")?,
-        args[6].as_str().context("state unavailable")?,
-    )
-    .map_err(|reason| anyhow::anyhow!(reason))?;
+    let command = super::expected_command(cli, config_dir, state_dir)
+        .map_err(|reason| anyhow::anyhow!(reason))?;
     let plan =
         Plan::new(&location.configuration, &sid, &command).map_err(|v| anyhow::anyhow!(v))?;
     let _lock = Lock::acquire(&plan.sid)?;
     let mut registry = Local;
-    plan.inspect(&mut registry)
-        .map_err(|v| anyhow::anyhow!(v))?;
-    if operation == "install" {
-        // The service installer stages the stable CLI first. Comparing held bounded
-        // files ensures a stale selected CLI cannot receive an unknown cold flag.
-        let cli = platform::canonical(Path::new(cli))
-            .context("install the maintained desktop registration before Toast registration")?;
-        ensure!(fingerprint(&cli)?==fingerprint(&std::env::current_exe()?)?,"selected CLI differs; install the maintained desktop registration before Toast registration");
-    }
-    let removal = if operation == "remove" {
-        Some(RemovalGuard::verified(
-            &location,
-            request_id.context("remove requires the retained original revoke request UUID")?,
-        )?)
-    } else {
-        ensure!(request_id.is_none(), "unexpected revoke request UUID");
-        None
-    };
-    if let Some(guard) = &removal {
-        guard.admit(&location)?;
-    }
-    let reply = plan.apply(&mut registry, operation).map_err(|failure| {
-        anyhow::anyhow!(
-            "{}{}",
-            failure.reason,
-            if failure.uncertain {
-                "; outcome unknown, inspect status before retrying"
-            } else {
-                "; registration kept"
+    let (reply, previous) = super::run(
+        &plan,
+        &mut registry,
+        operation,
+        (cli, config_dir, state_dir),
+        || {
+            if operation == "install" {
+                // The service installer stages the stable CLI first. Comparing held bounded
+                // files ensures a stale selected CLI cannot receive an unknown cold flag.
+                let cli = platform::canonical(Path::new(cli)).context(
+                    "install the maintained desktop registration before Toast registration",
+                )?;
+                ensure!(fingerprint(&cli)?==fingerprint(&std::env::current_exe()?)?,"selected CLI differs; install the maintained desktop registration before Toast registration");
             }
-        )
-    })?;
-    if let Some(guard) = &removal {
-        guard.confirm(&location)?;
+            if operation == "remove" {
+                let id = request_id
+                    .context("remove requires the retained original revoke request UUID")?;
+                Ok(Some(Held {
+                    guard: RemovalGuard::verified(&location, id)?,
+                    location: &location,
+                }))
+            } else {
+                ensure!(request_id.is_none(), "unexpected revoke request UUID");
+                Ok(None)
+            }
+        },
+    )?;
+    let mut value = serde_json::json!({"schema":1,"abi":MARKER,"operation":operation,"configuration":plan.configuration,"registered":reply.registered,"changed":reply.changed,"started":false,"stopped":false});
+    if previous {
+        // An exact earlier image's registration of these folders was removed.
+        value["previous_image"] = true.into();
     }
-    Ok(
-        serde_json::json!({"schema":1,"abi":MARKER,"operation":operation,"configuration":plan.configuration,"registered":reply.registered,"changed":reply.changed,"started":false,"stopped":false}),
-    )
+    Ok(value)
 }

@@ -291,6 +291,74 @@ trait Registry {
     fn remove_exact(&mut self, path: &str, contents: &Contents) -> Result<(), &'static str>;
 }
 
+/// The removal guard as the execution sees it: on Windows the offline
+/// exclusion with its current rollback proof; in tests a fake.
+trait Gate {
+    /// Right before the registry effect.
+    fn admit(&self) -> anyhow::Result<()>;
+    /// After the effect; a failure leaves its outcome unknown.
+    fn confirm(&self) -> anyhow::Result<()>;
+}
+
+/// The Plan an operation acts on, fixed under the registration lock before
+/// any guard or effect: the current image's, or, for `remove` only after a
+/// fully read current-image mismatch, the exact earlier image's of the same
+/// folders (zerus-5wmh.66.3.30.8.5.1). Install and status never fall back.
+fn select(
+    plan: &Plan,
+    registry: &mut impl Registry,
+    operation: &str,
+    image: &str,
+    config: &str,
+    state: &str,
+) -> Result<(Plan, bool), &'static str> {
+    const MISMATCH: &str = "foreign_or_incomplete_notification_registration_kept";
+    match plan.inspect(registry) {
+        Ok(_) => Ok((plan.clone(), false)),
+        Err(MISMATCH) if operation == "remove" => {
+            match plan.previous(registry, image, config, state)? {
+                Some(previous) => Ok((previous, true)),
+                None => Err(MISMATCH),
+            }
+        }
+        Err(reason) => Err(reason),
+    }
+}
+
+/// One explicit operation under the held registration lock: select the Plan,
+/// obtain the guard (`guard` refuses before any effect), admit, apply the
+/// unchanged Plan (which inspects its exact contents again first), confirm.
+/// Nothing is retried, and no other Plan is tried after an effect.
+fn run<G: Gate>(
+    plan: &Plan,
+    registry: &mut impl Registry,
+    operation: &str,
+    (image, config, state): (&str, &str, &str),
+    guard: impl FnOnce() -> anyhow::Result<Option<G>>,
+) -> anyhow::Result<(Reply, bool)> {
+    let (selected, previous) = select(plan, registry, operation, image, config, state)
+        .map_err(|reason| anyhow::anyhow!(reason))?;
+    let gate = guard()?;
+    if let Some(gate) = &gate {
+        gate.admit()?;
+    }
+    let reply = selected.apply(registry, operation).map_err(|failure| {
+        anyhow::anyhow!(
+            "{}{}",
+            failure.reason,
+            if failure.uncertain {
+                "; outcome unknown, inspect status before retrying"
+            } else {
+                "; registration kept"
+            }
+        )
+    })?;
+    if let Some(gate) = &gate {
+        gate.confirm()?;
+    }
+    Ok((reply, previous))
+}
+
 #[cfg(windows)]
 pub(in crate::desktop) fn command(
     config: &crate::config::Config,

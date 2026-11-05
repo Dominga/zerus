@@ -150,6 +150,24 @@ fn admit(config: &Config, request: &Request) -> Result<String> {
 /// `admit` for any replica request naming `swarm_id` and `project`.
 pub(crate) fn admit_project(config: &Config, swarm_id: &str, project: &str) -> Result<String> {
     let store = LockedStore::load(config)?;
+    admitted_project(config, store, swarm_id, project)
+}
+
+/// `admit_project`, waiting for the catalog lock no later than `deadline`:
+/// none when the catalog is busy past it.
+pub(crate) fn admit_project_until(
+    config: &Config,
+    swarm_id: &str,
+    project: &str,
+    deadline: std::time::Instant,
+) -> Result<Option<String>> {
+    let Some(store) = LockedStore::load_until(config, deadline)? else {
+        return Ok(None);
+    };
+    admitted_project(config, store, swarm_id, project).map(Some)
+}
+
+fn admitted_project(config: &Config, store: LockedStore, swarm_id: &str, project: &str) -> Result<String> {
     ensure!(swarm_id == store.data.catalog.swarm_id, "the request comes from another swarm");
     let node = store.data.node_id.clone();
     let alive = alive(config, &store);

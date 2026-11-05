@@ -581,17 +581,23 @@ pub struct TaskRequest {
 /// one the requester observed imports nothing and answers only its own, so
 /// the requester closes its proof as a changed identity.
 pub fn task(config: &Config, request: TaskRequest) -> Result<Value> {
-    let node = replica::admit_project(config, &request.swarm_id, &request.project)?;
+    // One deadline from this answer's entry covers the catalog, the store
+    // identity, the project and the store's admission, and no answer is
+    // given after it (review-n on #1464).
+    let deadline = Instant::now() + Duration::from_millis(request.remaining_ms).min(transport::CALL_LIMIT);
+    let busy = || anyhow::anyhow!("busy past the task exchange's deadline");
     ensure!(ids::is_uuid(&request.task), "a task UUID");
+    let theirs = canonical_version(&request.version)
+        .ok_or_else(|| anyhow::anyhow!("the requester's version is not canonical"))?;
+    let node = replica::admit_project_until(config, &request.swarm_id, &request.project, deadline)?
+        .ok_or_else(busy)?;
     let root = config.state.join("replica");
-    let own = ProjectStore::store_id(&root)?;
+    let own = ProjectStore::store_id_until(&root, deadline)?.ok_or_else(busy)?;
     let base = json!({"node_id": node, "store": own, "task": request.task});
     if own != request.store {
         return Ok(base);
     }
-    let theirs = canonical_version(&request.version)
-        .ok_or_else(|| anyhow::anyhow!("the requester's version is not canonical"))?;
-    let wait = Duration::from_millis(request.remaining_ms).min(PROJECT_WAIT);
+    let wait = deadline.saturating_duration_since(Instant::now()).min(PROJECT_WAIT);
     let Some(store) = ProjectStore::open_within(&root, &request.project, wait)? else {
         let mut busy = base;
         busy["busy"] = json!(true);
@@ -605,8 +611,10 @@ pub fn task(config: &Config, request: TaskRequest) -> Result<Value> {
     let imported = store.import_updates(updates)?;
     let mut reply = base;
     reply["refused"] = json!(imported.refused);
-    // The coherent reread, after the import's durable save.
-    match store.load(&request.task) {
+    // The coherent reread, after the import's durable save, inside the
+    // store's admission within the deadline.
+    let mut admitted = store.admit_until(deadline).ok_or_else(busy)?;
+    match admitted.load(&request.task) {
         Ok(task) => {
             let version = task.applied_version();
             let updates = task.export_since_version(&theirs)?;
@@ -625,6 +633,7 @@ pub fn task(config: &Config, request: TaskRequest) -> Result<Value> {
             reply["error"] = json!(error.to_string());
         }
     }
+    ensure!(Instant::now() < deadline, "the task exchange's deadline passed");
     Ok(reply)
 }
 
@@ -1376,6 +1385,35 @@ mod tests {
         let older = held(&members, "c", task.uuid()).unwrap();
         assert_eq!(older.fence_ready(), None, "c's older copy is healthy");
         assert_ne!(older.applied_version(), newer.applied_version());
+    }
+
+    /// review-n on #1464: a task exchange's one deadline starts on arrival
+    /// and covers the catalog lock: held past it, a 100 ms exchange is
+    /// refused within it, never answered after it.
+    #[test]
+    fn a_task_exchange_is_refused_within_its_deadline() {
+        let members = chain_abc();
+        let task = floored(&members, "a");
+        let b = &members.configs["b"];
+        let request = |remaining_ms: u64| -> TaskRequest {
+            serde_json::from_value(json!({
+                "swarm_id": LockedStore::load(&members.configs["a"]).unwrap().data.catalog.swarm_id,
+                "project": "p", "task": task.uuid(), "version": {}, "updates": [],
+                "store": ProjectStore::store_id(&b.state.join("replica")).unwrap(),
+                "remaining_ms": remaining_ms,
+            }))
+            .unwrap()
+        };
+        let control = super::task(b, request(5000)).unwrap();
+        assert_eq!(control["loads"], json!(false), "b holds no copy yet");
+        let early = request(100);
+        let held = LockedStore::load(b).unwrap();
+        let started = Instant::now();
+        let refused = super::task(b, early);
+        let waited = started.elapsed();
+        drop(held);
+        assert!(format!("{:#}", refused.unwrap_err()).contains("deadline"));
+        assert!(waited >= Duration::from_millis(100) && waited < Duration::from_secs(2), "{waited:?}");
     }
 
     /// A reply from another store than the hello showed closes the proof.

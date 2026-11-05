@@ -131,6 +131,7 @@ mod worktree_cleanup;
 mod worktree_caches;
 mod worktree_inspection;
 mod worktree_lifecycle;
+mod worktree_lock;
 mod worktree_maintenance;
 
 /// Read the selected account's native catalog without starting an agent.

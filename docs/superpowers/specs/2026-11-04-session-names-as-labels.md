@@ -301,6 +301,14 @@ The lock keeps worktree maintenance below the floor from removing the checkout o
    - The floor honours `zerus:` locks, and P3c releases them on archive and forget, so none lingers after a rollback to the floor. That release applies rules 3 and 4: it verifies ownership and the current lock, never forces, and keeps the protection while another live or saved session uses the checkout.
    - Plain `git worktree remove`, `move` and `prune` refuse a locked checkout, and a checkout deleted by hand keeps its branch pinned until it is unlocked; `docs/reference.md` says so.
    - Zerus does not lock a checkout again after the person unlocks it: the person chose.
+   - **As built in P3c** (coordinator, 2026-11-05: L1–L4 with conditions):
+     - **Trigger.** The release runs under the writer lock when a session leaves. A session leaves by `archive::save` (manual archive, terminate, the supervisor and reconcile), by `terminate --forget`, or by forgetting its archive. Only the exact text `zerus:<session_id>`, with or without Git's newline, is a candidate.
+     - **Ownership.** The record's `worktree_owner` must match `worktree_lifecycle::owned` by nonce and metadata entry.
+     - **Other sessions.** `worktree_cleanup::bindings` is the strict, bounded scan of live and saved sessions: by folder, and now by ownership ID. Since this change it reads a session in the ID layout from its own record, never its label's holder. Any of these keeps the lock: another user, an unreadable binding or more than 5,000 bindings.
+     - **Take.** A durable intent in `worktree-locks/` comes first. The lock is then renamed to `locked.zerus-release-<nonce>` beside it. Its text is checked exactly, and only then is it removed. Any failure after the take puts it back with a hard link that never replaces a lock that appeared meanwhile. If one did appear, a taken lock with the exact text goes and any other stays for review.
+     - **Recovery.** It settles each intent right after the writer lock is taken, and never fails that lock.
+     - **Reporting.** A kept lock is reported on standard error and never fails the archive or forget.
+     - **The shared case.** A lock whose session left while another still uses the checkout keeps that session's text. Transferring the reason is P3e's.
 
 P3e's controls for the lock:
 - a lock that fails or is interrupted before publication;

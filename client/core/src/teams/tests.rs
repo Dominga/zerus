@@ -203,6 +203,33 @@ fn the_catalog_reply_is_projected_and_its_read_names_the_catalog() {
     );
     assert_eq!(catalog.templates[0].max_members, 6);
     assert_eq!(catalog.templates[0].roster[0].role, "tester");
+    // Task 42: what New team copies from a role and a template.
+    let tester = &catalog.roles[1];
+    assert_eq!(
+        (
+            tester.effort.as_str(),
+            tester.account.as_str(),
+            tester.permissions.as_str(),
+            tester.computer.as_str(),
+            tester.folder.as_str()
+        ),
+        ("high", "work", "auto", "studio", "read_only")
+    );
+    assert_eq!(
+        (
+            catalog.templates[0].phase_approval.as_str(),
+            catalog.templates[0].lead_protocol.as_str()
+        ),
+        ("auto", "Split by layer.")
+    );
+    assert_eq!(
+        catalog.templates[0]
+            .tasks
+            .iter()
+            .map(|task| (task.title.as_str(), task.role.as_str(), task.deps.clone()))
+            .collect::<Vec<_>>(),
+        vec![("Tests", "tester", vec![]), ("Fix", "lead", vec![0])]
+    );
     assert_eq!(catalog.routing[0].r#use, "feature");
     assert_eq!(catalog.pipelines[0].stages[0].kind, "test");
     assert_eq!(catalog.proposals[0].state, "kept");

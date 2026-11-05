@@ -1087,6 +1087,13 @@ pub struct CatalogRoleView {
     pub agent: String,
     pub model: String,
     pub prompt: String,
+    /// Task 42: what New team copies into a member of this role.
+    pub effort: String,
+    pub account: String,
+    pub permissions: String,
+    pub computer: String,
+    /// `worktree`, `shared` or `read_only`: the role's folder.
+    pub folder: String,
 }
 
 #[derive(Clone, Debug, Default, PartialEq, Serialize)]
@@ -1106,6 +1113,20 @@ pub struct CatalogTemplateView {
     pub max_members: u64,
     pub pipeline: String,
     pub roster: Vec<CatalogSeatView>,
+    /// Task 42: the approval of later phases and the lead protocol New team
+    /// takes from the template.
+    pub phase_approval: String,
+    pub lead_protocol: String,
+    /// Task 42: the template's tasks (Use template tasks): title, the role
+    /// that does it and the indexes of the tasks it waits for.
+    pub tasks: Vec<CatalogTaskView>,
+}
+
+#[derive(Clone, Debug, Default, PartialEq, Serialize)]
+pub struct CatalogTaskView {
+    pub title: String,
+    pub role: String,
+    pub deps: Vec<u64>,
 }
 
 #[derive(Clone, Debug, Default, PartialEq, Serialize)]
@@ -1183,6 +1204,11 @@ pub fn catalog(value: &Value) -> CatalogView {
                 agent: name(role, "agent"),
                 model: name(role, "model"),
                 prompt: text(role, "prompt", TEXT_CHARS),
+                effort: name(role, "effort"),
+                account: name(role, "account"),
+                permissions: name(role, "permissions"),
+                computer: name(role, "computer"),
+                folder: name(role, "folder"),
             })
             .collect(),
         templates: array(catalog, "templates")
@@ -1199,6 +1225,20 @@ pub fn catalog(value: &Value) -> CatalogView {
                     .and_then(Value::as_u64)
                     .unwrap_or(6),
                 pipeline: name(template, "pipeline"),
+                phase_approval: name(template, "phase_approval"),
+                lead_protocol: text(template, "lead_protocol", TEXT_CHARS),
+                tasks: array(template, "tasks")
+                    .iter()
+                    .take(TASKS_KEPT)
+                    .map(|task| CatalogTaskView {
+                        title: text(task, "title", LINE_CHARS),
+                        role: name(task, "role"),
+                        deps: array(task, "deps")
+                            .iter()
+                            .filter_map(Value::as_u64)
+                            .collect(),
+                    })
+                    .collect(),
                 roster: array(template, "roster")
                     .iter()
                     .take(MEMBERS_KEPT)

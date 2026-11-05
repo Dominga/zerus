@@ -45,7 +45,19 @@
   z-index: 4;
 }
 .nt-settings .nt-body { gap: 12px; }
+/* Task 42: Qt's New team fields. */
+.nt-inline { display: flex; align-items: center; gap: 8px; flex-wrap: wrap; }
+.nt-inline .grow { flex: 1; min-width: 0; }
+.nt-unseen { border: 0; background: none; padding: 0 2px; color: var(--z-color-accent); cursor: pointer; font-size: 10px; }
+.nt-add { position: relative; }
+.nt-add-menu { position: absolute; right: 0; top: calc(100% + 4px); z-index: 5; min-width: 220px; }
+.nt-member { grid-template-columns: minmax(110px, 1.2fr) 96px minmax(110px, 1fr) 90px 90px 120px 130px auto 28px 28px; }
+.nt-options { display: flex; flex-direction: column; gap: 8px; padding-top: 6px; border-top: 1px solid var(--z-color-divider); }
+.nt-max { width: 80px; }
+.nt-lead { display: flex; flex-direction: column; gap: 6px; margin: 0; padding: 10px 12px; border: 1px solid var(--z-color-card-border); border-radius: 9px; }
+.nt-lead legend { padding: 0 4px; font-size: var(--fs-sm); color: var(--z-color-text-2); }
+.nt-lead-row { grid-template-columns: 110px minmax(120px, 1fr) 100px 140px; }
 @media (max-width: 700px) {
-  .nt-row { grid-template-columns: 1fr; }
+  .nt-row, .nt-member, .nt-lead-row { grid-template-columns: 1fr; }
   .nt-settings { left: 12px; right: 12px; width: auto; }
 }

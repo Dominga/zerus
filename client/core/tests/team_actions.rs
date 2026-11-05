@@ -153,6 +153,58 @@ fn actions() -> Vec<(TeamAction, &'static str, Value)> {
             "use-last-reply",
             json!({"task": 6, "attempt": "a1"}),
         ),
+        // Task 11: the answers of Waiting for you.
+        (
+            TeamAction::Answer {
+                member: "backend".into(),
+                question_id: "claude-approval:6f2b0e3a".into(),
+                expected_question_hash: "6f2b0e3a".into(),
+                answers: json!([{"question_id": "approval", "selected_option_ids": ["1"], "text": ""}]),
+            },
+            "answer",
+            json!({"member": "backend", "question_id": "claude-approval:6f2b0e3a", "expected_question_hash": "6f2b0e3a",
+                   "answers": [{"question_id": "approval", "selected_option_ids": ["1"], "text": ""}]}),
+        ),
+        (
+            TeamAction::AddToPhase {
+                phase: 1,
+                confirm: "add-1".into(),
+                confirmation: "add".into(),
+                decline: false,
+            },
+            "add-to-phase",
+            json!({"phase": 1, "confirm": "add-1", "confirmation": "add"}),
+        ),
+        (
+            TeamAction::AddToPhase {
+                phase: 1,
+                confirm: "add-1".into(),
+                confirmation: "add".into(),
+                decline: true,
+            },
+            "add-to-phase",
+            json!({"phase": 1, "confirm": "add-1", "decline": true}),
+        ),
+        (
+            TeamAction::AcceptPhase { phase: 1 },
+            "accept-phase",
+            json!({"phase": 1}),
+        ),
+        (
+            TeamAction::SendBackPhase {
+                phase: 1,
+                comment: "Add the migration steps".into(),
+            },
+            "send-back-phase",
+            json!({"phase": 1, "comment": "Add the migration steps"}),
+        ),
+        (
+            TeamAction::Release { task: 7 },
+            "release",
+            json!({"task": 7}),
+        ),
+        (TeamAction::Retry { task: 7 }, "retry", json!({"task": 7})),
+        (TeamAction::Finish, "finish", json!({})),
         (
             TeamAction::DraftUpdate {
                 revision: 3,
@@ -256,6 +308,60 @@ fn every_action_sends_its_request_once_and_gives_the_receipt() {
         (Some("C:\\work\\example"), Some("feature"))
     );
     assert_eq!(request["lead"]["session"]["name"], "claude/example/lead");
+    // Task 11: a tool offer belongs to no team; Deny sends its reason, Allow none.
+    for (allow, fields) in [
+        (
+            false,
+            json!({"offer": "a1", "allow": false, "reason": "Not on this laptop"}),
+        ),
+        (true, json!({"offer": "a1", "allow": true})),
+    ] {
+        reply(
+            &fake,
+            "decide-tool",
+            "",
+            json!({"stdout": {"state": "denied"}}),
+        );
+        let tool = TeamAction::DecideTool {
+            offer: "a1".into(),
+            allow,
+            reason: "Not on this laptop".into(),
+        };
+        let outcome = run(
+            &fake.path(),
+            &TeamCall {
+                team: String::new(),
+                ..call(tool)
+            },
+        );
+        let TeamOutcome::Done { request_id, .. } = &outcome else {
+            panic!("{outcome:?}")
+        };
+        let (op, request) = requests(&fake).pop().unwrap();
+        assert_eq!(op, "decide-tool");
+        let mut expected = fields.as_object().unwrap().clone();
+        expected.insert("by".into(), json!("human"));
+        expected.insert("request_id".into(), json!(request_id));
+        assert_eq!(request, Value::Object(expected));
+    }
+    // A send back without a comment and an answer without a choice never run.
+    let before = requests(&fake).len();
+    for action in [
+        TeamAction::SendBackPhase {
+            phase: 1,
+            comment: "  ".into(),
+        },
+        TeamAction::Answer {
+            member: "backend".into(),
+            question_id: "q".into(),
+            expected_question_hash: String::new(),
+            answers: json!([]),
+        },
+    ] {
+        let outcome = run(&fake.path(), &call(action));
+        assert!(matches!(outcome, TeamOutcome::Failed { .. }), "{outcome:?}");
+    }
+    assert_eq!(requests(&fake).len(), before);
 }
 
 #[test]
@@ -263,6 +369,7 @@ fn destructive_actions_and_approvals_ask_first_and_send_nothing() {
     let fake = fake("team_actions_confirm");
     for action in [
         TeamAction::Stop,
+        TeamAction::Finish,
         TeamAction::Archive,
         TeamAction::Cancel {
             task: 6,

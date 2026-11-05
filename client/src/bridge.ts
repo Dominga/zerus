@@ -62,6 +62,12 @@ export const readTaskDetails = (project: string, task: string, before: string | 
 /** Teams (src-tauri teams.rs): follows one computer's team list, Waiting and at most one team; nothing stops reading it. */
 export const teamsFollow = (computer: ComputerId, follow: { list: boolean; waiting: boolean; team: string | null }) =>
   inTauri() ? invoke<void>("teams_follow", { computer, list: follow.list, waiting: follow.waiting, team: follow.team }) : Promise.resolve();
+/** Task 11: one owner action on a team (core action.rs); the outcome says whether it was applied, refused, unknown or must be confirmed first. */
+export const teamAction = (call: import("./types").TeamCall) =>
+  inTauri() ? invoke<import("./types").TeamOutcome>("team_action", { call }) : Promise.reject(new Error("Teams need the desktop app."));
+/** Task 11: reads one team once, as an answer in Waiting for you does before it sends. */
+export const teamRead = (computer: ComputerId, team: string) =>
+  inTauri() ? invoke<import("./types").TeamView>("team_read", { computer, team }) : Promise.reject(new Error("Teams need the desktop app."));
 /** Reads the watched team's feed page before the oldest event shown; false when there is none to read. */
 export const teamsOlder = (computer: ComputerId) => inTauri() ? invoke<boolean>("teams_older", { computer }) : Promise.resolve(false);
 export const openTaskAttachment = (path: string) => desktop<string | null>("task_attachment_open", { path });

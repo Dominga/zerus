@@ -111,9 +111,9 @@ mod task_settings;
 #[cfg(feature = "live")]
 mod task_start;
 #[cfg(feature = "live")]
-mod terminal;
-#[cfg(feature = "live")]
 mod teams;
+#[cfg(feature = "live")]
+mod terminal;
 #[cfg(feature = "live")]
 mod termination_cleanup;
 #[cfg(feature = "live")]
@@ -1438,6 +1438,7 @@ fn handler() -> impl Fn(tauri::ipc::Invoke) -> bool + Send + Sync + 'static {
         teams::teams_spans,
         teams::teams_profile,
         teams::team_action,
+        teams::team_read,
         task_details::task_details,
         task_details::task_assign,
         task_details::task_board_action,

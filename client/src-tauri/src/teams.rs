@@ -198,6 +198,28 @@ pub async fn team_action(teams: State<'_, Teams>, call: TeamCall) -> Result<Team
     Ok(outcome)
 }
 
+/// Task 11: reads one team once, as a Waiting for you answer does before it
+/// sends (Qt's TeamWaitingAnswer::read): the projected `team status`.
+#[tauri::command]
+pub async fn team_read(
+    teams: State<'_, Teams>,
+    computer: String,
+    team: String,
+) -> Result<zerus_client_core::teams::view::TeamView, String> {
+    if teams.replay {
+        return Err("Teams need hgs; a replay has none.".into());
+    }
+    let target = self::computer(&computer)?;
+    tauri::async_runtime::spawn_blocking(move || {
+        let read = zerus_client_core::teams::read::TeamRead::Status { team };
+        zerus_client_core::teams::read::read(&default_hgs(), &target, &read)
+            .map(|value| zerus_client_core::teams::view::team(&value))
+            .map_err(|error| error.to_string())
+    })
+    .await
+    .map_err(|error| error.to_string())?
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;

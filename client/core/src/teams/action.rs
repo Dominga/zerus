@@ -111,6 +111,52 @@ pub enum TeamAction {
         #[serde(default)]
         attempt: String,
     },
+    /// Task 11: answers a member's pending permission request or question
+    /// (`hgs team answer`) with its question id and hash and the session
+    /// card's answers (`[{question_id, selected_option_ids, text}]`).
+    Answer {
+        member: String,
+        question_id: String,
+        expected_question_hash: String,
+        answers: Value,
+    },
+    /// Task 11: confirms (`confirmation`, the typed word if any) or declines
+    /// the addition `confirm` waiting for a running phase (`add-to-phase`).
+    AddToPhase {
+        phase: u64,
+        confirm: String,
+        #[serde(default)]
+        confirmation: String,
+        #[serde(default)]
+        decline: bool,
+    },
+    /// Task 11: accepts a phase that waits for the owner's acceptance.
+    AcceptPhase {
+        phase: u64,
+    },
+    /// Task 11: sends a phase back to the lead with the owner's comment.
+    SendBackPhase {
+        phase: u64,
+        comment: String,
+    },
+    /// Task 11: the owner's answer to a missing tool's offer: Allow installs
+    /// it with the command shown; Deny (with a reason) is remembered.
+    DecideTool {
+        offer: String,
+        allow: bool,
+        #[serde(default)]
+        reason: String,
+    },
+    /// Task 11: releases a task the owner held.
+    Release {
+        task: u64,
+    },
+    /// Task 11: retries a task's step Zerus could not take.
+    Retry {
+        task: u64,
+    },
+    /// Task 11: finishes a team whose tasks are all decided.
+    Finish,
     /// Starts a draft team (no team id yet): its folder, name, lead and
     /// template as New team's Start planning sends them.
     DraftStart {
@@ -270,6 +316,14 @@ impl TeamAction {
             Self::Archive => "archive",
             Self::DecideProposal { .. } => "decide-proposal",
             Self::UseLastReply { .. } => "use-last-reply",
+            Self::Answer { .. } => "answer",
+            Self::AddToPhase { .. } => "add-to-phase",
+            Self::AcceptPhase { .. } => "accept-phase",
+            Self::SendBackPhase { .. } => "send-back-phase",
+            Self::DecideTool { .. } => "decide-tool",
+            Self::Release { .. } => "release",
+            Self::Retry { .. } => "retry",
+            Self::Finish => "finish",
             Self::DraftStart { .. }
             | Self::DraftUpdate { .. }
             | Self::DraftSeen { .. }
@@ -278,9 +332,10 @@ impl TeamAction {
         }
     }
 
-    /// Whether the call names an existing team (all but a draft start).
+    /// Whether the call names an existing team (all but a draft start and a
+    /// tool offer, which belongs to no team).
     pub fn names_team(&self) -> bool {
-        !matches!(self, Self::DraftStart { .. })
+        !matches!(self, Self::DraftStart { .. } | Self::DecideTool { .. })
     }
 
     /// Checks what the action sends before anything runs.
@@ -337,7 +392,58 @@ impl TeamAction {
                     .as_deref()
                     .map_or(Ok(()), |choice| word(choice, "sub-team choice"))
             }
-            Self::Pause | Self::Resume | Self::Stop | Self::Archive => Ok(()),
+            Self::Pause | Self::Resume | Self::Stop | Self::Archive | Self::Finish => Ok(()),
+            Self::Answer {
+                member,
+                question_id,
+                expected_question_hash,
+                answers,
+            } => {
+                word(member, "member id")?;
+                word(question_id, "question id")?;
+                if !expected_question_hash.is_empty() {
+                    word(expected_question_hash, "question hash")?;
+                }
+                if !answers
+                    .as_array()
+                    .is_some_and(|answers| !answers.is_empty() && answers.len() <= 32)
+                {
+                    return Err("An answer names what was chosen.".into());
+                }
+                Ok(())
+            }
+            Self::AddToPhase {
+                phase,
+                confirm,
+                confirmation,
+                ..
+            } => {
+                if *phase == 0 {
+                    return Err("Not a phase number.".into());
+                }
+                word(confirm, "pending addition")?;
+                plain(confirmation, "A confirmation", 200)
+            }
+            Self::AcceptPhase { phase } => {
+                if *phase == 0 {
+                    return Err("Not a phase number.".into());
+                }
+                Ok(())
+            }
+            Self::SendBackPhase { phase, comment } => {
+                if *phase == 0 {
+                    return Err("Not a phase number.".into());
+                }
+                if comment.trim().is_empty() {
+                    return Err("Say what the lead should change.".into());
+                }
+                plain(comment, "A comment", TEXT_CHARS)
+            }
+            Self::DecideTool { offer, reason, .. } => {
+                word(offer, "tool offer")?;
+                plain(reason, "A reason", 2000)
+            }
+            Self::Release { task: id } | Self::Retry { task: id } => task(*id),
             Self::DecideProposal {
                 proposal,
                 expected_hash,
@@ -462,7 +568,51 @@ impl TeamAction {
                     put("subteam", json!(choice));
                 }
             }
-            Self::Pause | Self::Resume | Self::Stop | Self::Archive => {}
+            Self::Pause | Self::Resume | Self::Stop | Self::Archive | Self::Finish => {}
+            Self::Answer {
+                member,
+                question_id,
+                expected_question_hash,
+                answers,
+            } => {
+                put("member", json!(member));
+                put("question_id", json!(question_id));
+                if !expected_question_hash.is_empty() {
+                    put("expected_question_hash", json!(expected_question_hash));
+                }
+                put("answers", answers.clone());
+            }
+            Self::AddToPhase {
+                phase,
+                confirm,
+                confirmation,
+                decline,
+            } => {
+                put("phase", json!(phase));
+                put("confirm", json!(confirm));
+                if *decline {
+                    put("decline", json!(true));
+                } else if !confirmation.is_empty() {
+                    put("confirmation", json!(confirmation));
+                }
+            }
+            Self::AcceptPhase { phase } => put("phase", json!(phase)),
+            Self::SendBackPhase { phase, comment } => {
+                put("phase", json!(phase));
+                put("comment", json!(comment));
+            }
+            Self::DecideTool {
+                offer,
+                allow,
+                reason,
+            } => {
+                put("offer", json!(offer));
+                put("allow", json!(allow));
+                if !allow && !reason.is_empty() {
+                    put("reason", json!(reason));
+                }
+            }
+            Self::Release { task } | Self::Retry { task } => put("task", json!(task)),
             Self::DecideProposal {
                 proposal,
                 accept,
@@ -562,6 +712,12 @@ impl TeamAction {
                     "Stop {name}? Every open task is cancelled and no task is handed out again. Member sessions keep running; their current turns finish."
                 ),
                 "Stop team",
+            )),
+            Self::Finish => Some(ask(
+                "teamFinishConfirm",
+                "Finish team?",
+                format!("Finish {name}? Every task is decided; the team is done and hands out nothing more."),
+                "Finish team",
             )),
             Self::Archive => Some(ask(
                 "teamArchiveConfirm",

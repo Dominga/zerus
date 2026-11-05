@@ -1324,7 +1324,7 @@ Do not touch unrelated desktop/apps/settings.
 | [x] Service registration/readiness — fixture profile | PASS (12/12) on integrate `861e0baf`; see the [va-kids `861e0baf` record](#va-kids-unattended-rows-on-861e0baf--2026-11-05). Private fixture-profile evidence (owner decision 4); the row reruns once on the final release candidate (`zerus-5wmh.66.8.1.1.6`). | `.66.3.27.3`, `.66.3.31`, [#912](https://github.com/ufna/zerus/pull/912); fixes-u/desktop-u |
 | [x] Standard-user passive registration | Install, status, idempotent reinstall and removal passed on an existing non-administrator console token; see the evidence below. Actual login triggering and service readiness remain in the preceding unchecked row. | `.66.8.1`, [#912](https://github.com/ufna/zerus/pull/912) review follow-up; fixes-u |
 | [x] Windows frontend native authentication subchecks | Native process/ancestry and request-evidence checks, six canonical-pipe cases and a separate departed-launcher GUI ancestry probe passed; see the scoped evidence below. This does not check off a durable policy change or whole UI parity. | `.66.3.37`, [#931](https://github.com/ufna/zerus/pull/931), [#955](https://github.com/ufna/zerus/pull/955); fleet-c |
-| [ ] Notifications/clicks | In the real desktop, receive one service-owned toast/badge, click to exact session, reject stale clicks and check lock/idle state without manipulating unrelated apps. | `.66.3.30`, `.66.6.15`, [#907](https://github.com/ufna/zerus/pull/907) ledger, [#914](https://github.com/ufna/zerus/pull/914) discovery; fixes-u |
+| [x] Notifications/clicks — owner-present | PASS with the owner present on #1475's head `8cf223aa` (13:12–13:20 MSK). H2: the owner saw the banner and clicked it; the click reached the service and the GUI selected exactly the target session. H3: with the GUI quit, the owner clicked the entry in the notification center (Win+N); exactly one GUI cold-started on the same session. Withdrawal (H4) passed earlier. See "Owner-present H2/H3" in the [va-kids 0.48.0 record](#va-kids-rows-for-0480-continued--2026-11-05). The H2 row's strict journal count saw two delivered attempts (likely the read-mark withdrawal), recorded there. | `.66.3.30`, `.66.6.15`, [#907](https://github.com/ufna/zerus/pull/907) ledger, [#914](https://github.com/ufna/zerus/pull/914) discovery; fixes-u |
 | [x] Tray/lifecycle — fixture profile | PASS (12/12) on integrate `861e0baf`; see the [va-kids `861e0baf` record](#va-kids-unattended-rows-on-861e0baf--2026-11-05). Private fixture-profile evidence (owner decision 4); the row reruns once on the final release candidate (`zerus-5wmh.66.8.1.1.6`). | [#874](https://github.com/ufna/zerus/pull/874), `.66.6.15` |
 | [x] Terminal — fixture profile | PASS (9/9) on integrate `861e0baf`; see the [va-kids `861e0baf` record](#va-kids-unattended-rows-on-861e0baf--2026-11-05). Private fixture-profile evidence (owner decision 4); the row reruns once on the final release candidate (`zerus-5wmh.66.8.1.1.6`). | `.52`, `.66.6.15`, Windows native contracts; fixes-u |
 | [x] Voice/video — documented refusal | PASS for the documented visible refusal (2/2): local Windows voice refuses visibly, on `faa4d324`; see the [va-kids latest-artifacts record](#va-kids-rows-on-the-latest-integrate-artifacts-owner-decision-4). Private fixture-profile evidence (owner decision 4); the row reruns once on the final release candidate (`zerus-5wmh.66.8.1.1.6`). | G2 `.66.4.5`, inventory voice/media rows |
@@ -1807,13 +1807,12 @@ contain.
 
 ## Deletion PR merge gate
 
-**Owner waiver and gate state (2026-11-05).** The owner waived every row that had
-no recorded evidence (see the decision at the top). With the evidence ticked
-above, the #906a gate, complete macOS and Linux acceptance records, is met. One
-va-kids row is neither evidenced nor in that waiver: **Windows notifications/
-clicks**. Delivery and withdrawal are recorded (13/13 on `8cf223aa`, H4 PASS),
-but no click was observed (H3). The #906b gate needs that row accepted on this
-evidence or waived.
+**Owner waiver and gate state (2026-11-05).** Every platform row above is ticked
+with its recorded evidence or marked "WAIVED — owner 2026-11-05": the owner waived
+every row that had no recorded evidence (see the decision at the top). **The
+Deletion PR merge gate is satisfied for #906a and #906b** on that record. The
+Windows rows still rerun once on the final release candidate
+(`zerus-5wmh.66.8.1.1.6`).
 
 The coordinator records per-platform acceptance and any exceptions against the
 inventory; unmet G1–G5/G7 responsibilities remain blockers. The owner approved

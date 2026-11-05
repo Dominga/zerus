@@ -36,7 +36,7 @@ class Activation(unittest.TestCase):
         self.assertEqual(compiled.returncode, 0, compiled.stderr)
         self.frontend.chmod(0o700)
 
-    def begin(self, operation='activation_wait', wrong_birth=False, marked=False, task_reconcile=False, sealed=None, wrong_config=False, wrong_attempt=False, wrong_frontend=False, termination=False, missing_reference=False):
+    def begin(self, operation='activation_wait', wrong_birth=False, marked=False, task_reconcile=False, sealed=None, wrong_config=False, wrong_attempt=False, wrong_frontend=False, termination=False, missing_reference=False, rendezvous=False):
         if sealed is not None:
             # Hosted debuginfo can exceed the 256 MiB image bound. A private
             # stripped CLI normally supplies both service and relay; never raise
@@ -91,7 +91,7 @@ class Activation(unittest.TestCase):
             selected_frontend = self.root / 'unselected-frontend'
             shutil.copyfile(self.frontend, selected_frontend)
             selected_frontend.chmod(0o700)
-        frontend = subprocess.Popen([str(selected_frontend), str(self.root / 'tmp/hgs-tray'), str(relay_hgs)] + ([sealed] if sealed else []),
+        frontend = subprocess.Popen([str(selected_frontend), str(self.root / 'tmp/hgs-tray'), str(relay_hgs)] + (['rendezvous'] if rendezvous else ([sealed] if sealed else [])),
                                     env=env, stdin=subprocess.PIPE, stdout=subprocess.PIPE,
                                     stderr=subprocess.PIPE, text=True)
         self.addCleanup(self.finish_child, frontend)
@@ -173,6 +173,38 @@ class Activation(unittest.TestCase):
         self.assertFalse(status['automatic_approvals'])
         self.assertEqual(status['writers_enabled'], initial['writers_enabled'])
         self.assertEqual(status['desktop_ownership']['revision'], 0)
+
+    def test_original_rendezvous_keeps_the_closed_platform_command_and_retention(self):
+        if sys.platform == 'darwin':
+            import macos_ancestry
+            chain = macos_ancestry.topology()
+            unsupported = macos_ancestry.unsupported_hosted_foreign(chain, os.getuid(), os.environ)
+            if unsupported is not None:
+                self.skipTest('observed unsupported hosted foreign ancestor: ' + json.dumps(unsupported))
+        frontend, request, service = self.begin(termination=True, rendezvous=True)
+        reply, error = self.result(frontend)
+        if sys.platform != 'darwin':
+            # Linux still accepts ONLY the original exact argv. The shared
+            # transport entry is not new native relay permission there.
+            # The nested termination UUID is not decoded/promoted before
+            # authentication; this exact refusal intentionally has no ID.
+            self.assertEqual(reply, dict(request_id=None, accepted=False, durable=False,
+                                         code='frontend_authentication_refused'))
+            self.assertIn('proofs=0 original_reaped=1', error)
+            return
+        self.assertTrue(reply['accepted'], reply)
+        self.assertTrue(reply['durable'], reply)
+        self.assertFalse(reply['cleanup_authorized'])
+        self.assertIn('proofs=1 original_reaped=1', error)
+        from contextlib import closing
+        import sqlite3
+        with closing(sqlite3.connect(self.desktop / 'state.sqlite3')) as db:
+            rows = db.execute('SELECT request_id,original FROM desktop_termination_outcomes').fetchall()
+        self.assertEqual(len(rows), 1)
+        self.assertEqual(rows[0][0], request)
+        original = json.loads(rows[0][1])
+        self.assertEqual(original['scope'], dict(configuration=service['configuration'], service_epoch=service['epoch']))
+        self.assertEqual(json.loads(original['original'])['request_id'], request)
 
     @unittest.skipUnless(sys.platform == 'linux', 'Linux kernel sealed relay')
     def test_sealed_original_relay_reaches_the_real_native_activation_receiver(self):

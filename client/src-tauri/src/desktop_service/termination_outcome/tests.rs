@@ -21,6 +21,7 @@ fn inspect_fixture(
 
 type RefusedObserver = Box<dyn FnOnce(&mut std::process::Child)>;
 thread_local! {
+    static RENDEZVOUS: std::cell::Cell<bool> = const { std::cell::Cell::new(false) };
     // Observe only a REAL failed binding, before the SAME child is returned to
     // run_owned. A hook never substitutes a binding result or supplies consent.
     static AFTER_SPAWN_CHECK: std::cell::RefCell<Option<Box<dyn FnOnce()>>> = const { std::cell::RefCell::new(None) };
@@ -1117,6 +1118,119 @@ fn offer_physical_finish_diagnostic_keeps_the_original_rpc_charge_until_real_rel
         );
         assert!(context.busy.load(Ordering::Acquire));
         drop(held);
+        assert!(!context.busy.load(Ordering::Acquire));
+        assert!(effects(&calls(&f)).is_empty());
+        service.join().await.unwrap();
+    });
+}
+
+pub(super) fn rendezvous_enabled() -> bool {
+    RENDEZVOUS.get()
+}
+struct Rendezvous;
+impl Rendezvous {
+    fn enter() -> Self {
+        RENDEZVOUS.set(true);
+        Self
+    }
+}
+impl Drop for Rendezvous {
+    fn drop(&mut self) {
+        RENDEZVOUS.set(false);
+    }
+}
+
+#[test]
+fn mac_transport_prefix_covers_rpc_reads_and_exact_native_invocation() {
+    let _process = crate::PROCESS_TREE.read().unwrap();
+    tauri::async_runtime::block_on(async {
+        let f = fixture(json!({}));
+        let (service, _cache) = connected(&f).await;
+        let _transport = Rendezvous::enter();
+        let mut controller = confirm(service.clone(), Arc::new(Pending::default()))
+            .bind(Arc::new(()))
+            .unwrap();
+        let invocation = controller.invocation().clone();
+        controller.retain().unwrap();
+        controller.begin_dispatch(&invocation).unwrap();
+        let outcome = controller.run_native(&invocation);
+        assert!(matches!(outcome, Exit::Code { code: 0, .. }), "{outcome:?}");
+        let wrapped: Vec<Vec<String>> = std::fs::read_to_string(f.0.join("rendezvous-calls"))
+            .unwrap()
+            .lines()
+            .map(|line| serde_json::from_str(line).unwrap())
+            .collect();
+        assert_eq!(
+            wrapped.iter().filter(|args| **args == ["--help"]).count(),
+            3
+        );
+        assert!(wrapped
+            .iter()
+            .any(|args| args.iter().any(|arg| arg == "inspect")));
+        assert_eq!(
+            wrapped
+                .iter()
+                .filter(|args| **args == invocation.args)
+                .count(),
+            1
+        );
+        let native = effects(&calls(&f));
+        assert_eq!(native.len(), 1);
+        assert_eq!(
+            native[0]["value"],
+            serde_json::from_slice::<Value>(invocation.stdin.as_ref().unwrap()).unwrap()
+        );
+        assert_eq!(
+            native[0]["value"]["request_id"],
+            invocation.request_id.unwrap()
+        );
+        service.join().await.unwrap();
+    });
+}
+
+#[test]
+fn mac_transport_refusal_during_observation_releases_no_prefix_or_private_input() {
+    let _process = crate::PROCESS_TREE.read().unwrap();
+    tauri::async_runtime::block_on(async {
+        let f = fixture(json!({}));
+        let (service, _cache) = connected(&f).await;
+        let _transport = Rendezvous::enter();
+        let context = Context::new_supported(service.clone(), Arc::new(())).unwrap();
+        let changed = context.clone();
+        AFTER_OBSERVATION.with_borrow_mut(|hook| {
+            *hook = Some(Box::new(move |_| {
+                changed.cancel.store(true, Ordering::Release);
+            }))
+        });
+        let path = f.0.join("rendezvous-refused-input");
+        let saw_eof = Arc::new(AtomicBool::new(false));
+        let observed = saw_eof.clone();
+        REFUSED_OBSERVER.with_borrow_mut(|hook| {
+            *hook = Some(Box::new(move |child| {
+                // Observe the exact child's actual EOF before the owned runner
+                // handles cancellation. Never panic/drop custody in spawn.
+                let until = std::time::Instant::now() + Duration::from_secs(2);
+                while !path.exists() && std::time::Instant::now() < until {
+                    std::thread::sleep(Duration::from_millis(1));
+                }
+                observed.store(
+                    child.stdin.is_none()
+                        && child.stdout.is_some()
+                        && child.stderr.is_some()
+                        && std::fs::read(path).is_ok_and(|bytes| bytes.is_empty()),
+                    Ordering::Release,
+                );
+            }));
+        });
+        assert!(context
+            .rpc(
+                vec!["desktop".into(), "frontend-request".into(), "--json".into()],
+                Some(b"private-fixture-frame\n".to_vec()),
+                None
+            )
+            .is_err());
+        assert!(saw_eof.load(Ordering::Acquire));
+        assert!(!f.0.join("rendezvous-calls").exists());
         assert!(!context.busy.load(Ordering::Acquire));
         assert!(effects(&calls(&f)).is_empty());
         service.join().await.unwrap();

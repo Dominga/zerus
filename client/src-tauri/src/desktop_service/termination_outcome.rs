@@ -312,9 +312,10 @@ impl Controller {
         // This is the original accounted runner and ORIGINAL invocation
         // timeout (45 local / 60 peer), not run_owned's 30-second RPC cap.
         let current = self.context.clone();
+        let invocation = helper_invocation(invocation);
         run::run_accounted_frozen(
             self.context.image.executable(),
-            invocation,
+            &invocation,
             &self.context.environment,
             NATIVE_RECEIPT_LIMIT,
             &AtomicBool::new(false),
@@ -325,6 +326,21 @@ impl Controller {
         .filter(|_| !self.context.rejected.load(Ordering::Acquire))
         .unwrap_or_else(|| Exit::StartFailed(UNCONFIRMED.into()))
     }
+}
+// The Mac observer checks a live original Child before the owned runner can
+// write stdin. Even --help must wait for that check; EOF/refusal never dispatches.
+// Linux/Windows keep their existing immutable/retained-image execution paths.
+fn helper_invocation(original: &Invocation) -> Invocation {
+    #[cfg(unix)]
+    {
+        let required = cfg!(target_os = "macos");
+        #[cfg(all(test, target_os = "linux"))]
+        let required = required || tests::rendezvous_enabled();
+        if required {
+            return run::rendezvous::prepare(original);
+        }
+    }
+    original.clone()
 }
 fn same_invocation(a: &Invocation, b: &Invocation) -> bool {
     a.args == b.args && a.stdin == b.stdin && a.timeout == b.timeout && a.request_id == b.request_id
@@ -641,6 +657,7 @@ impl Context {
             timeout: RPC_WAIT,
             request_id: None,
         };
+        let invocation = helper_invocation(&invocation);
         let result = run::run_owned_observed(
             self.image.executable(),
             &invocation,
@@ -685,9 +702,10 @@ impl Context {
             return Exit::StartFailed(UNCONFIRMED.into());
         };
         let original = self.clone();
+        let invocation = helper_invocation(invocation);
         let exit = run::run_accounted_frozen(
             self.image.executable(),
-            invocation,
+            &invocation,
             &self.environment,
             zerus_client_core::worktree_review::REVIEW_LIMIT,
             &self.cancel,

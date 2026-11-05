@@ -4,6 +4,21 @@ import sys, os, json
 __file__ = FIXTURE_SOURCE
 from pathlib import Path
 root = Path(__file__).absolute().parent
+# Only transport-enabled component controls use this prefix. Actual CLI
+# dispatch/prefix/timeout behavior is tested through the real hgs binary.
+if sys.argv[1:2] == ['--desktop-helper-rendezvous-v1']:
+    release = b'HGS-ORIGINAL-CHILD-V1\n'
+    received = b''
+    while len(received) < len(release):
+        part = os.read(0, len(release) - len(received))
+        if not part:
+            (root / 'rendezvous-refused-input').write_bytes(received)
+            sys.exit(2)
+        received += part
+    assert received == release
+    del sys.argv[1]
+    with (root / 'rendezvous-calls').open('a') as log:
+        log.write(json.dumps(sys.argv[1:]) + '\n')
 original_args = sys.argv[1:]
 args = list(original_args)
 if args and args[0].startswith('@'):

@@ -141,6 +141,24 @@ original check; later exit, marker or resource errors cannot replace it. No
 child output, environment, paths, tokens or session data enter this diagnostic.
 The existing `termination_native_image_unavailable` notice stays unchanged.
 
+The Mac caller prefixes these original invocations with the private transport
+marker `--desktop-helper-rendezvous-v1`. Before ordinary CLI dispatch (including
+`--help`), the helper waits at most five seconds for a fixed public prefix on its
+original stdin pipe. The parent writes that prefix only through the existing
+owned runner, after the same original-child image and current-context checks,
+and registration when required. EOF, wrong input, a non-pipe or timeout refuses
+without dispatch. The prefix is consumed without buffering any original request
+bytes. Original argv, input JSON, request UUID and operation timeout remain
+unchanged behind it; RPC, read and native effect calls all use the same barrier.
+The Mac service's raw-argv guard accepts exactly this one leading transport
+marker before the same `desktop frontend-request --json` command; duplicate or
+misplaced markers and extra/other command arguments still refuse. Linux and
+Windows retain the original exact command check.
+This keeps a fast helper alive for observation; the prefix itself provides no
+caller proof or effect authority, and no environment opt-in reaches descendants.
+Older helpers refuse the unknown marker; there is no ungated fallback. The
+Linux/Windows caller paths keep their existing execution mechanisms.
+
 For example, `abi_probe / original_child_exited` means the existing native
 birth check observed the original helper's actual exit before it could admit
 input. A fast `--help` child can do this while full signature revalidation runs.

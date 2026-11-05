@@ -265,7 +265,7 @@ pub(crate) fn failed(detail: impl Into<String>) -> Outcome {
     }
 }
 
-fn uncertain(detail: impl Into<String>) -> Outcome {
+pub(crate) fn uncertain(detail: impl Into<String>) -> Outcome {
     Outcome::Uncertain {
         detail: detail.into(),
     }
@@ -1189,11 +1189,11 @@ pub fn classify(target: &Target, action: &Action, invocation: &Invocation, exit:
             ..
         } => classify_settings(target, invocation, model, effort, *without_terminal, exit),
         Action::Interrupt { .. } | Action::CompactContext => {
-            classify_session_action(target, invocation, exit, &["submitted"], None)
+            classify_typed(target, invocation, exit, &["submitted"])
         }
         // A clear may be confirmed at once.
         Action::ClearContext { .. } => {
-            classify_session_action(target, invocation, exit, &["submitted", "confirmed"], None)
+            classify_typed(target, invocation, exit, &["submitted", "confirmed"])
         }
         Action::StageFiles {
             expected_created, ..
@@ -1276,6 +1276,46 @@ fn classify_settings(
 
 /// `runSessionAction`: the receipt must echo this exact request and session,
 /// in the state the action reaches, and the creation time it checked.
+/// An interrupt, compaction or clear types into the native agent, as an
+/// answer does (`classify_answer`): only a refusal proven before any input
+/// is definite, a call that never started or `hgs`'s typed refusal (exit 1
+/// without "delivery uncertain"). A refusal naming an earlier attempt of the
+/// same request may follow that attempt's input, and any other end may come
+/// after the input, so each stays uncertain with the same detail
+/// (zerus-1wchz).
+fn classify_typed(
+    target: &Target,
+    invocation: &Invocation,
+    exit: Exit,
+    states: &[&str],
+) -> Outcome {
+    let definite = match &exit {
+        Exit::StartFailed(_) => true,
+        Exit::Code {
+            code: 1, stderr, ..
+        } => !possibly_typed(stderr),
+        _ => false,
+    };
+    match classify_session_action(target, invocation, exit, states, None) {
+        Outcome::Failed { detail } if !definite => uncertain(detail),
+        outcome => outcome,
+    }
+}
+
+/// `hgs`'s own words for a refusal that may follow input: "delivery
+/// uncertain", or an earlier attempt of this request ("This compact was
+/// already attempted", DeepSeek's "Compaction was already requested").
+fn possibly_typed(stderr: &str) -> bool {
+    let stderr = stderr.to_lowercase();
+    [
+        "delivery uncertain",
+        "already attempted",
+        "already requested",
+    ]
+    .iter()
+    .any(|words| stderr.contains(words))
+}
+
 fn classify_session_action(
     target: &Target,
     invocation: &Invocation,
@@ -2663,7 +2703,7 @@ mod tests {
         ));
         assert_eq!(
             outcome(&Action::CompactContext, "confirmed"),
-            failed("Invalid acknowledgement. Check Terminal before retrying.")
+            uncertain("Invalid acknowledgement. Check Terminal before retrying.")
         );
         let compact = invocation(&t, &Action::CompactContext, "req-9").unwrap();
         assert_eq!(compact.args[1], "compact-context");
@@ -2683,6 +2723,153 @@ mod tests {
             &json!({"run_id": "r", "conversation_id": "", "clear_context_supported": true})
         ));
         assert!(!clearable(&json!({"run_id": "r", "conversation_id": "c"})));
+    }
+
+    /// zerus-1wchz: an interrupt, compaction or clear types into the native
+    /// agent. Only a call that never started or `hgs`'s refusal before any
+    /// input is definite; every other end is uncertain with today's detail.
+    #[test]
+    fn typed_session_actions_are_definite_only_before_input() {
+        let t = target("");
+        let receipt = |status: &str, request: &str| {
+            json!({"status": status, "request_id": request, "name": "claude/sample-project/review",
+                   "run_id": "run-1", "conversation_id": "conv-1"})
+            .to_string()
+        };
+        for action in [
+            Action::Interrupt { turn_started: 1.0 },
+            Action::CompactContext,
+            Action::ClearContext {
+                dismiss_prompt: false,
+            },
+            Action::ClearContext {
+                dismiss_prompt: true,
+            },
+        ] {
+            let inv = invocation(&t, &action, "req-1").unwrap();
+            let run = |exit: Exit| classify(&t, &action, &inv, exit);
+            // Definite: nothing started, or hgs refused before any input.
+            assert_eq!(
+                run(Exit::StartFailed("No such file or directory".into())),
+                failed("No such file or directory"),
+                "{action:?}"
+            );
+            for stderr in [
+                "hgs: This turn is no longer working\n",
+                "hgs: The session or turn changed; nothing was stopped\n",
+                "hgs: Wait for the agent to become idle before clearing context\n",
+                "hgs: DeepSeek host changed\n",
+            ] {
+                assert_eq!(
+                    run(exit(1, b"", stderr)),
+                    failed(stderr.trim()),
+                    "{action:?}"
+                );
+            }
+            assert_eq!(
+                run(exit(1, b"", "")),
+                failed("Could not complete the request. Check Terminal."),
+                "{action:?}"
+            );
+            // Uncertain, with the detail a definite failure showed before.
+            assert_eq!(
+                run(Exit::TimedOut),
+                uncertain("Request timed out. Check Terminal before retrying."),
+                "{action:?}"
+            );
+            assert_eq!(
+                run(Exit::WriteFailed),
+                uncertain("Transfer failed. Check Terminal before retrying."),
+                "{action:?}"
+            );
+            assert_eq!(
+                run(Exit::Abnormal {
+                    stderr: "signal 9\n".into()
+                }),
+                uncertain("signal 9"),
+                "{action:?}"
+            );
+            assert_eq!(
+                run(Exit::Abnormal {
+                    stderr: String::new()
+                }),
+                uncertain("Could not complete the request. Check Terminal."),
+                "{action:?}"
+            );
+            for stderr in [
+                "hgs: Compact delivery uncertain: pane gone. Check Terminal before retrying\n",
+                "hgs: Clear Delivery Uncertain: lock busy\n",
+                "hgs: Native request delivery uncertain: Broken pipe\n",
+                "hgs: This compact was already attempted. Check Terminal before trying again\n",
+                "hgs: This clear was already attempted. Check Terminal before trying again\n",
+                "hgs: This interrupt was already attempted. Check Terminal before trying again\n",
+                "hgs: Compaction was already requested\n",
+            ] {
+                assert_eq!(
+                    run(exit(1, b"", stderr)),
+                    uncertain(stderr.trim()),
+                    "{action:?}"
+                );
+            }
+            for code in [2, 5, 101, 255] {
+                assert_eq!(
+                    run(exit(code, b"", "ssh: connection closed\n")),
+                    uncertain("ssh: connection closed"),
+                    "{action:?} exit {code}"
+                );
+                assert_eq!(
+                    run(exit(code, b"", "")),
+                    uncertain("Could not complete the request. Check Terminal."),
+                    "{action:?} exit {code}"
+                );
+            }
+            // Exit 0: only the exact echo is done; anything else ran unconfirmed.
+            assert!(
+                matches!(
+                    run(exit(0, receipt("submitted", "req-1").as_bytes(), "")),
+                    Outcome::Done { .. }
+                ),
+                "{action:?}"
+            );
+            for stdout in [
+                receipt("submitted", "req-2"),
+                receipt("failed", "req-1"),
+                "not json".to_owned(),
+                String::new(),
+            ] {
+                assert_eq!(
+                    run(exit(0, stdout.as_bytes(), "")),
+                    uncertain("Invalid acknowledgement. Check Terminal before retrying."),
+                    "{action:?} {stdout}"
+                );
+            }
+        }
+        // Staging files types nothing: every failure stays definite.
+        let stage = Action::StageFiles {
+            paths: vec!["/home/example/a.txt".into()],
+            expected_created: None,
+        };
+        let inv = invocation(&t, &Action::CompactContext, "req-1").unwrap();
+        for (exit, detail) in [
+            (
+                Exit::TimedOut,
+                "Request timed out. Check Terminal before retrying.",
+            ),
+            (
+                Exit::WriteFailed,
+                "Transfer failed. Check Terminal before retrying.",
+            ),
+            (
+                exit(2, b"", "hgs: delivery uncertain\n"),
+                "hgs: delivery uncertain",
+            ),
+            (
+                exit(0, b"{}", ""),
+                "Invalid acknowledgement. Check Terminal before retrying.",
+            ),
+        ] {
+            assert_eq!(classify(&t, &stage, &inv, exit), failed(detail));
+        }
     }
 
     #[test]
@@ -3259,19 +3446,19 @@ mod tests {
         ));
         assert_eq!(
             classify(&t, &a, &inv, exit0(b"{}", "")),
-            Outcome::Failed {
+            Outcome::Uncertain {
                 detail: "Invalid acknowledgement. Check Terminal before retrying.".into()
             }
         );
         assert_eq!(
             classify(&t, &a, &inv, Exit::TimedOut),
-            Outcome::Failed {
+            Outcome::Uncertain {
                 detail: "Request timed out. Check Terminal before retrying.".into()
             }
         );
         assert_eq!(
             classify(&t, &a, &inv, Exit::WriteFailed),
-            Outcome::Failed {
+            Outcome::Uncertain {
                 detail: "Transfer failed. Check Terminal before retrying.".into()
             }
         );

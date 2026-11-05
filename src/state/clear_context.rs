@@ -707,29 +707,45 @@ pub(super) fn dispatch(args: &[String]) -> Result<i32> {
         Ok(())
     })();
     drop(guard); // SessionStart hooks must be able to commit the new identity.
-    result.map_err(|e:String|format!("Clear delivery uncertain: {e}. Check Terminal before retrying"))?;
-    let deadline=Instant::now()+Duration::from_secs(4);
-    let mut status="submitted";
-    loop {
-        let mut current=read(name)?;
-        if current["run_id"]!=record["run_id"] || current["pid"]!=record["pid"] {break;}
-        if !string(&current,"conversation_id").is_empty() && current["conversation_id"]!=record["conversation_id"] {
-            status="confirmed";break;
-        }
-        {
-            let _guard=lock(None)?;
-            current=read(name)?;
-            if current["run_id"]==record["run_id"] && current["pid"]==record["pid"]
-                && (observe_terminal(&mut current).unwrap_or(false) || awaiting_start(&current)) {
-                status="confirmed";break;
+
+    // From the typed command on, every error may follow input (zerus-1wchz).
+    let uncertain =
+        |e: String| format!("Clear delivery uncertain: {e}. Check Terminal before retrying");
+    result.map_err(uncertain)?;
+    let status = (|| -> Result<&str> {
+        let deadline = Instant::now() + Duration::from_secs(4);
+        loop {
+            let mut current = read(name)?;
+            if current["run_id"] != record["run_id"] || current["pid"] != record["pid"] {
+                return Ok("submitted");
             }
+            if !string(&current, "conversation_id").is_empty()
+                && current["conversation_id"] != record["conversation_id"]
+            {
+                return Ok("confirmed");
+            }
+            {
+                let _guard = lock(None)?;
+                current = read(name)?;
+                if current["run_id"] == record["run_id"]
+                    && current["pid"] == record["pid"]
+                    && (observe_terminal(&mut current).unwrap_or(false) || awaiting_start(&current))
+                {
+                    return Ok("confirmed");
+                }
+            }
+            if Instant::now() >= deadline {
+                return Ok("submitted");
+            }
+            std::thread::sleep(Duration::from_millis(80));
         }
-        if Instant::now()>=deadline {break;}
-        std::thread::sleep(Duration::from_millis(80));
-    }
+    })()
+    .map_err(uncertain)?;
     let receipt=json!({"request_id":request.request_id,"name":name,"run_id":request.expected_run_id,
         "conversation_id":request.expected_conversation_id,"status":status});
-    atomic(&path,&receipt.to_string())?;println!("{receipt}");Ok(0)
+    atomic(&path, &receipt.to_string()).map_err(uncertain)?;
+    println!("{receipt}");
+    Ok(0)
 }
 #[cfg(test)] mod tests {
     use super::*;

@@ -88,14 +88,21 @@ pub(super) fn dispatch(args: &[String]) -> Result<i32> {
         backend::current().send(string(&current,"pane"), &[backend::Key::Named("Enter")])?;
         Ok(())
     })();
+    // From the typed command on, every error may follow input (zerus-1wchz).
+    let uncertain = |error: String| {
+        format!("Compact delivery uncertain: {error}. Check Terminal before retrying")
+    };
     if let Err(error) = result {
         receipt["status"] = json!("uncertain");
-        record["compact_context_request"] = receipt.clone(); write(&mut record)?;
-        atomic(&path, &receipt.to_string())?;
-        return Err(format!("Compact delivery uncertain: {error}. Check Terminal before retrying"));
+        record["compact_context_request"] = receipt.clone();
+        let recorded = write(&mut record).and_then(|()| atomic(&path, &receipt.to_string()));
+        return Err(uncertain(match recorded {
+            Ok(()) => error,
+            Err(failed) => format!("{error}; {failed}"),
+        }));
     }
     drop(guard); // Native hooks must be free to report start/completion.
-    atomic(&path, &receipt.to_string())?;
+    atomic(&path, &receipt.to_string()).map_err(uncertain)?;
     println!("{receipt}"); Ok(0)
 }
 

@@ -751,8 +751,8 @@ the acceptance mode switch on the owner's behalf. Default install is passive;
 normal refreshes preserve selection. Mac uses its own maintained route below;
 Windows switching remains separate work. Linux results do not qualify them.
 
-For Linux passive rollback, use `install --mode passive --json` with the same
-selections **before** the GUI rollback. It durably retains one revoke UUID and
+For an admitted Linux passive restoration, use `install --mode passive --json`
+with the same selections. It durably retains one revoke UUID and
 requires the original checkpointed drain before changing/restarting only
 `hgs-desktop.service`. Record `last_revoke_request_id` on success. On uncertainty,
 `status.transition.request_id` is the original ID; inspect it and resume only
@@ -790,8 +790,9 @@ revoke, no Aqua or a custom plist refuses; do not repair it by changing files or
 starting another service. Only the owned desktop LaunchAgent reloads; neither
 GUI nor agents restart. Normal GUI installs and CLI-only refresh preserve mode.
 
-Before GUI rollback, use this helper with the same selections and `--mode
-passive --json`. It retains one original revoke UUID and requires its exact
+For an admitted Mac passive restoration, use this helper with the same
+selections and `--mode passive --json`. It retains one original revoke UUID and
+requires its exact
 checkpointed runtime/resource drain and the original native hold through
 bootout/rewrite/bootstrap and passive readiness. Require the matching release,
 actual child exit and both pipe EOFs before transition completion. Record
@@ -838,32 +839,30 @@ an unbounded full listing or the GUI's local overlay.
 | Uncertain result, lookup, no replay | During a controlled owned-service transition on the main account, submit one Approvals or Updates/Recovery configuration change through its existing UI and retain its original ID. Once the actual UI reports unconfirmed, use **Check result** while transport is unavailable, then after the service returns; check twice. For maintenance, retain the full update-and-recovery configuration; do not submit a second subsystem change while it is pending. | Unavailable lookup stays pending; the logical ID and operation do not change, and no new frontend mutation is sent. A durable receipt settles the original result. Only a later exact negative lookup after confirmed original child exit can settle not-applied; unverified exit remains pending. A fresh opposite intent is allowed only after settlement. If the transition produces only a definitive result/refusal, record that outcome and leave the unknown case incomplete; do not invent an unknown, replay, fake native authority or alter SQL/helper identity to obtain one. |
 | Revoke, rollback and return to Next | Waived by owner 2026-11-05: no Qt rollback or return segment is prepared or run. | — |
 
-### Revoke and rollback commands
+### Revoke and drain commands
 
 On Linux/macOS, use the appropriate maintained `--mode passive` command above
 and retain its original revoke ID. A read-only lookup uses that same original
 ID; it does not repeat revoke. Never create a second revoke while the helper
 has a pending original transition.
-The GUI rollback path is its actual installed path, not a staged copy.
+Qt rollback is waived by owner 2026-11-05; no updater rollback command is run.
+The remaining commands apply only to an admitted service transition or cleanup.
 
 ```bash
-: "${INSTALLED_GUI:?actual installed GUI}"
 # Only if the helper result was uncertain, read its original receipt:
 : "${REVOKE_ID:?original ID from the helper transition}"
 printf '{"op":"revoke_status","request_id":"%s"}\n' "$REVOKE_ID" |
   env HGS_CONFIG_DIR="$CFG" HGS_STATE_DIR="$STATE" "$SERVICE_HGS" desktop request --json
-
-# Only after the matching settled result and actual owned drain:
-python3 tray/update-installed.py --rollback "$INSTALLED_GUI"
 ```
 
 Require matching request/configuration and `accepted`, `durable`, `revoked`,
 `checkpointed`. The explicit `applicable:false`, `handoff:none`, `revoked:true`,
 `nothing_written` no-op is a separate no-work case; it does not prove that an
-active runtime drained. Unknown keeps Qt stopped. PID disappearance, a native
-Stop or `writers_enabled:false` alone is not original-resource drain. The
-updater's quit/draft/type-switch/rollback checks remain mandatory. Recheck the
-new candidate and actual fresh grant/rearm source before returning to Next.
+active runtime drained. Unknown stops the cleanup sequence. PID disappearance,
+a native Stop or `writers_enabled:false` alone is not original-resource drain.
+For the normal Next restore, preserve the draft-safe Quit checks and verify the
+installed candidate and actual fresh grant/rearm source. The Qt waiver does not
+turn an unsettled service cleanup into a successful drain.
 
 ### Record and restore the main account
 

@@ -1382,8 +1382,15 @@ class SessionIdentity(Harness):
             result = call("read", name, "--json", request=mark(record))
             self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
             self.assertNotEqual(json.loads(result.stdout).get("error"), "not_found", result.stdout)
-        nobody = call("read", name, "--json", request=mark(dict(twin, run_id=str(uuid.uuid4()))))
-        self.assertNotEqual(nobody.returncode, 5, nobody.stdout + nobody.stderr)
+        # A run that none of them carries selects none and reopens none: the
+        # stale refusal, exit 1, and the first holder's marks stay untouched
+        # (#1454 review).
+        marks = state / "read-marks.json"
+        marks_before = marks.read_bytes() if marks.exists() else None
+        nobody = call("read", name, "--json", request=mark(dict(first, run_id=str(uuid.uuid4()))))
+        self.assertEqual(nobody.returncode, 1, nobody.stdout + nobody.stderr)
+        self.assertIn("refresh and retry", nobody.stderr)
+        self.assertEqual(marks.read_bytes() if marks.exists() else None, marks_before)
         # Identities that several of them carry select none: the command
         # refuses with the ambiguity report, exit 5, and its value under --json.
         label.write_text(json.dumps(dict(first, run_id=twin["run_id"],

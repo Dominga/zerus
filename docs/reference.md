@@ -370,7 +370,10 @@ its own terminal, with its pane and run, or while a launch of its own label
 holds that terminal; a tmux session another launch started under its terminal
 name never makes it live and never hides it from `hgs ls`. When hgs cannot
 read a terminal's environment to tell whose launch it is, it refuses and
-starts nothing.
+starts nothing. A new launch, fork, rename or restore still refuses a label
+that any tmux session holds. A build older than this one finds no pane for a
+session whose terminal is named otherwise, shows it as not live and drops
+`terminal_name` when it rewrites the record.
 
 When several sessions share a label (zerus-ucck P3c), a command picks one by
 the identities it carries. These come from its command line
@@ -378,17 +381,16 @@ the identities it carries. These come from its command line
 `--conversation`) or from its JSON request (`expected_run_id` and
 `expected_conversation_id`; `run_id` and `conversation_id` for `hgs read` and
 `hgs notifications`).
-- Exactly one session carrying them is the one.
-- None leaves the command's usual refusal of a changed session.
+- Exactly one session carrying them is the one, and every later read in that
+  command still checks both identities against it.
+- None carrying them is refused as a changed session (exit status 1). The
+  command then reads none of the sessions under that label.
 - With several, or with no identities at all, the command exits with status 5
   and lists the candidates (as JSON under `--json`). This holds for `inspect`,
   `pause`, `rename`, `archive`, `kill` and others that take no identities.
 - `--session-id` and references always select exactly.
 - `pause --all` and `resume --all` refuse a label that several sessions share;
-  act on each with `--session-id`. A new launch, fork, rename or restore still refuses a
-label that any tmux session holds. A build older than this one finds no pane
-for a session whose terminal is named otherwise, shows it as not live and
-drops `terminal_name` when it rewrites the record.
+  act on each with `--session-id`.
 
 The desktop client adds `--session-id` only to explicit actions: send, send
 now, answer, queued-message removal, clear and compact, interrupt, model

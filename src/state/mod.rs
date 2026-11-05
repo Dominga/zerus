@@ -826,6 +826,20 @@ pub(crate) enum LabelGuard {
     Request,
 }
 
+/// A label resolution that refused (zerus-ucck P3a, P3c): its text, the
+/// ambiguity report's `--json` value when there is one, and its exit status.
+#[derive(Debug)]
+pub(crate) struct Unresolved {
+    pub text: String,
+    pub value: Option<Value>,
+    pub code: i32,
+}
+impl Unresolved {
+    fn ambiguous((text, value): (String, Value)) -> Self {
+        Self { text, value: Some(value), code: session_id::AMBIGUOUS }
+    }
+}
+
 /// zerus-ucck P3a: a label a command names without a selection, resolved
 /// among its candidates. A label whose only holder is in the ID layout selects
 /// that session, so every read of the label in this command reaches it. A
@@ -835,9 +849,10 @@ pub(crate) enum LabelGuard {
 /// its text and its `--json` value, with exit status 5. A candidate set that
 /// cannot be proven complete is refused the same way, never settled on the
 /// label's first holder.
-pub(crate) fn resolve_label(name: &str, guard: LabelGuard) -> std::result::Result<(), (String, Option<Value>)> {
+pub(crate) fn resolve_label(name: &str, guard: LabelGuard) -> std::result::Result<(), Unresolved> {
     labels::repair();
-    let candidates = labels::candidates(name).map_err(|error| (error, None))?;
+    let candidates = labels::candidates(name)
+        .map_err(|text| Unresolved { text, value: None, code: session_id::AMBIGUOUS })?;
     match (candidates.first, candidates.by_id.as_slice()) {
         (_, []) => Ok(()),
         (false, [only]) => {
@@ -847,9 +862,14 @@ pub(crate) fn resolve_label(name: &str, guard: LabelGuard) -> std::result::Resul
         _ => {
             let report = ambiguity_report(name, &candidates);
             match guard {
-                LabelGuard::None => Err((report.0, Some(report.1))),
+                LabelGuard::None => Err(Unresolved::ambiguous(report)),
                 LabelGuard::Given { run, conversation } => {
-                    select_among(name, &run, &conversation, report).map_err(|(text, value)| (text, Some(value)))
+                    match select_among(name, &run, &conversation, report).map_err(Unresolved::ambiguous)? {
+                        true => Ok(()),
+                        // None carries them: the stale refusal (exit 1), as
+                        // for one session that changed, never a resolution.
+                        false => Err(Unresolved { text: stale(name), value: None, code: 1 }),
+                    }
                 }
                 LabelGuard::Request => {
                     session_id::defer(name, report.0, report.1);
@@ -864,29 +884,50 @@ pub(crate) fn resolve_label(name: &str, guard: LabelGuard) -> std::result::Resul
 /// `hgs hooks NAME` or a scoped recovery action, the identities its request
 /// expects select among the sessions that share `name`, as at dispatch.
 pub(crate) fn select_by(name: &str, run: &str, conversation: &str) -> Result<()> {
-    resolve_label(name, LabelGuard::Given { run: run.into(), conversation: conversation.into() })
-        .map_err(|(text, value)| session_id::refuse((text, value.unwrap_or(Value::Null))))
+    resolve_label(name, LabelGuard::Given { run: run.into(), conversation: conversation.into() }).map_err(
+        |refusal| match refusal.code {
+            session_id::AMBIGUOUS => session_id::refuse((refusal.text, refusal.value.unwrap_or(Value::Null))),
+            _ => refusal.text,
+        },
+    )
 }
 
 /// zerus-ucck P3c: the identities a command's request expects, `run` and
 /// `conversation`, select among the sessions that share `name` when its
-/// ambiguity was deferred to them. Exactly one carrying them is selected;
-/// none leaves the command's own check to refuse the stale target; several,
-/// or no identity at all, is the ambiguity report (exit status 5). Without a
-/// deferred ambiguity this does nothing.
+/// ambiguity was deferred to them. Exactly one carrying them is selected
+/// with them. None carrying them is the stale refusal, as for one session
+/// that changed, and every later read of `name` refuses too (#1454 review).
+/// Several, or no identity at all, is the ambiguity report (exit status 5).
+/// Without a deferred ambiguity this does nothing.
 pub(crate) fn expect(name: &str, run: &str, conversation: &str) -> Result<()> {
     let Some(report) = session_id::take_deferred(name) else {
         return Ok(());
     };
-    select_among(name, run, conversation, report).map_err(session_id::refuse)
+    match select_among(name, run, conversation, report).map_err(session_id::refuse)? {
+        true => Ok(()),
+        false => Err(stale(name)),
+    }
 }
 
+/// The refusal when no session sharing `name` carries the identities a
+/// command expects.
+fn stale(name: &str) -> String {
+    session_id::selected()
+        .filter(|selection| selection.name == name)
+        .map_or_else(|| format!("{name} changed; refresh and retry"), |selection| selection.changed())
+}
+
+/// Selects among the sessions sharing `name` the one carrying the identities
+/// a command expects, keeping them with it (`session_id::select_guarded`):
+/// `true` when exactly one does. `false` when none does: the guarded selection
+/// then has no session ID, so every record under `name` is refused as changed
+/// (#1454 review). Several, or no identities at all, is the report.
 fn select_among(
     name: &str,
     run: &str,
     conversation: &str,
     report: (String, Value),
-) -> std::result::Result<(), (String, Value)> {
+) -> std::result::Result<bool, (String, Value)> {
     if run.is_empty() && conversation.is_empty() {
         return Err(report);
     }
@@ -904,15 +945,14 @@ fn select_among(
         })
         .collect();
     match chosen.as_slice() {
-        [] => Ok(()),
+        [] => {
+            session_id::select_guarded(name, "", run, conversation);
+            Ok(false)
+        }
         [one] => {
-            let id = string(one, "session_id");
-            if session_id::canonical(id) {
-                session_id::select(name, id);
-            } else {
-                session_id::select_reference(name, "", string(one, "conversation_id"), string(one, "run_id"));
-            }
-            Ok(())
+            let id = Some(string(one, "session_id")).filter(|id| session_id::canonical(id)).unwrap_or_default();
+            session_id::select_guarded(name, id, run, conversation);
+            Ok(true)
         }
         _ => Err(report),
     }

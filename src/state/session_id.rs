@@ -98,6 +98,24 @@ pub(crate) fn select(name: &str, id: &str) {
     });
 }
 
+/// Records the session that the identities a command expects selected among
+/// several sharing `name` (zerus-ucck P3c): its session ID, when it has one,
+/// and both supplied identities, run and conversation, kept together. Every
+/// later read must still carry each of them, on the selected session's fixed
+/// route (#1454 review). Without a session ID, no session carried them: every
+/// record under `name` is then refused as changed, and no reader reaches the
+/// label's first holder or another candidate's route.
+pub(crate) fn select_guarded(name: &str, id: &str, run: &str, conversation: &str) {
+    set(Selection {
+        name: name.into(),
+        session_id: id.into(),
+        conversation: conversation.into(),
+        run: run.into(),
+        id_layout: in_id_layout_under(name, id),
+        label: "The expected session".into(),
+    });
+}
+
 /// Whether `id` is, right now, the session in the ID layout under `name`.
 fn in_id_layout_under(name: &str, id: &str) -> bool {
     canonical(id) && storage::read_id(id).is_ok_and(|record| string(&record, "name") == name)

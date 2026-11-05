@@ -681,7 +681,7 @@ mod tests {
         session_id::select(shared, &twin_id);
         assert_eq!(read(shared).unwrap()["run_id"], "run-twin");
         session_id::clear();
-        let (text, value) = resolve_label(shared, LabelGuard::None).unwrap_err();
+        let Unresolved { text, value, .. } = resolve_label(shared, LabelGuard::None).unwrap_err();
         assert!(
             text.starts_with("2 sessions on this computer are named claude/example/shared"),
             "{text}"
@@ -899,6 +899,18 @@ mod tests {
     /// command's guard, every reader of the label refuses, one written later
     /// included, with the ambiguity report; the guard selects its session.
     #[test]
+    fn an_unmatched_guard_never_reopens_the_first_holder() {
+        control("unmatched-guard");
+    }
+    #[test]
+    fn a_selection_keeps_the_expected_run() {
+        control("guard-run-continuity");
+    }
+    #[test]
+    fn a_selection_keeps_the_expected_conversation() {
+        control("guard-conversation-continuity");
+    }
+    #[test]
     fn a_deferred_ambiguity_refuses_every_reader_until_the_guard_selects() {
         control("deferred");
     }
@@ -962,7 +974,7 @@ mod tests {
         let (twin, id) = by_id(label, "run-twin");
         assert!(manifest().is_some_and(|manifest| manifest.contains_key(&key(label))));
         let ambiguous = || {
-            let (text, _) = resolve_label(label, LabelGuard::None).unwrap_err();
+            let text = resolve_label(label, LabelGuard::None).unwrap_err().text;
             assert!(text.starts_with("2 sessions on this computer are named"), "{text}");
         };
         match case.as_str() {
@@ -1170,6 +1182,42 @@ mod tests {
                 std::os::unix::fs::symlink(root().join("missing"), &legacy).unwrap();
                 assert!(terminal_of("claude/example/linked").is_err(), "a dangling link at a label's path");
             }
+            // desktop-u's #1454 reproducers, kept as controls.
+            "unmatched-guard" => {
+                resolve_label(label, LabelGuard::Request).unwrap();
+                let attempted = expect(label, "a-run-that-no-candidate-holds", "");
+                assert!(attempted.is_err() && read(label).is_err(), "an unmatched guard reopened the first holder");
+            }
+            "guard-run-continuity" | "guard-conversation-continuity" => {
+                // At dispatch from the command line and from the request alike,
+                // the selection keeps both identities given with it.
+                for request in [true, false] {
+                    let own = storage::id_record_path(&id).unwrap();
+                    let kept = std::fs::read(&own).unwrap();
+                    if request {
+                        resolve_label(label, LabelGuard::Request).unwrap();
+                        expect(label, "run-twin", "conversation-run-twin").unwrap();
+                    } else {
+                        let guard =
+                            LabelGuard::Given { run: "run-twin".into(), conversation: "conversation-run-twin".into() };
+                        resolve_label(label, guard).unwrap();
+                    }
+                    assert_eq!(read(label).unwrap()["session_id"], id.as_str());
+                    let mut changed: Value = serde_json::from_slice(&kept).unwrap();
+                    if case == "guard-run-continuity" {
+                        changed["run_id"] = json!("changed-run");
+                    } else {
+                        changed["conversation_id"] = json!("changed-conversation");
+                    }
+                    atomic(&own, &changed.to_string()).unwrap();
+                    assert!(
+                        read(label).is_err(),
+                        "{case} ({request}): the selection kept the ID but dropped an identity"
+                    );
+                    atomic(&own, std::str::from_utf8(&kept).unwrap()).unwrap();
+                    session_id::clear();
+                }
+            }
             "deferred" => {
                 resolve_label(label, LabelGuard::Request).unwrap();
                 // Every reader: the label's path, the twin's own path, records.
@@ -1182,13 +1230,36 @@ mod tests {
                 expect(label, "run-twin", "").unwrap();
                 assert_eq!(read(label).unwrap()["session_id"], id.as_str());
                 session_id::clear();
-                // No identity at all, or one several carry, refuses; one that
-                // none carries leaves the command's own stale refusal.
+                // No identity at all, or one several carry, refuses.
                 resolve_label(label, LabelGuard::Request).unwrap();
                 assert!(expect(label, "", "").is_err());
+                // One that none carries selects no session and reopens none:
+                // the stale refusal at the guard and at every reader, and no
+                // other candidate's route (#1454 review).
+                session_id::clear();
                 resolve_label(label, LabelGuard::Request).unwrap();
-                expect(label, "run-nobody", "").unwrap();
-                assert_eq!(read(label).unwrap()["run_id"], "run-first");
+                let stale = expect(label, "run-nobody", "").unwrap_err();
+                assert!(stale.contains("refresh and retry"), "{stale}");
+                assert!(read(label).unwrap_err().contains("refresh and retry"));
+                assert!(storage::read_label(label).is_err());
+                assert!(storage::read_id(&id).is_err());
+                assert!(storage::records().unwrap().iter().all(|record| record["name"] != label));
+                session_id::clear();
+                // The same at dispatch, from the command line: the stale
+                // refusal, exit status 1, never a resolution.
+                let refusal = resolve_label(label, LabelGuard::Given { run: "run-nobody".into(), conversation: String::new() })
+                    .unwrap_err();
+                assert_eq!((refusal.code, refusal.value.is_none()), (1, true), "{}", refusal.text);
+                assert!(read(label).is_err());
+                session_id::clear();
+                // And for hooks and scoped recovery, which select by their
+                // request: stale, never an ambiguity report.
+                let refused = session_id::refused();
+                let stale = select_by(label, "run-nobody", "").unwrap_err();
+                assert!(stale.contains("refresh and retry"), "{stale}");
+                assert_eq!(session_id::refused().map(|report| report.0), refused.map(|report| report.0));
+                assert!(read(label).is_err());
+                session_id::clear();
                 assert!(resolve_label(label, LabelGuard::Given { run: "run-first".into(), conversation: String::new() }).is_ok());
                 assert_eq!(read(label).unwrap()["run_id"], "run-first");
                 session_id::clear();

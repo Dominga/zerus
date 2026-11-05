@@ -1415,11 +1415,11 @@ fn resolve_label(command: &str, args: &[String]) -> Result<()> {
         return Ok(());
     };
     local_sessions()?;
-    state::resolve_label(name, label_guard(command, args)).map_err(|(text, value)| {
-        if let Some(value) = value.filter(|_| args.iter().any(|arg| arg == "--json")) {
+    state::resolve_label(name, label_guard(command, args)).map_err(|refusal| {
+        if let Some(value) = refusal.value.filter(|_| args.iter().any(|arg| arg == "--json")) {
             println!("{value}");
         }
-        Error::new(state::session_id::AMBIGUOUS, text)
+        Error::new(refusal.code, refusal.text)
     })
 }
 

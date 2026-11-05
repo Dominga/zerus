@@ -2,6 +2,61 @@
 use super::{UnreadableWorktreeProcess, WorktreeProcesses};
 use std::{io, path::PathBuf, time::Instant};
 
+// Native object selection is used only by the explicit program manifest; the
+// existing generic/manual cleanup sampler keeps its original contract.
+#[allow(dead_code)]
+pub(crate) mod objects;
+
+/// A completed, read-only native program review. This type owns no stop
+/// permission. Access-denied halves are omitted; readable membership wins.
+#[allow(dead_code)]
+pub(crate) fn programs(
+    scope: &objects::Scope,
+    deadline: Instant,
+) -> io::Result<Vec<zerus_client_core::worktree_programs::Program>> {
+    let inventory = scope.inventory(deadline)?;
+    #[cfg(target_os = "linux")]
+    let rows = linux::programs(&inventory, deadline)?;
+    #[cfg(target_os = "macos")]
+    let rows = macos::programs(&inventory, deadline)?;
+    inventory.current(scope, deadline)?;
+    Ok(rows)
+}
+
+/// Fresh observation of ONE original process for the later per-signal gate.
+/// This does not signal, adopt a reused PID or turn a denied read into known
+/// use. The executing owner must also keep its original PinnedProcess.
+#[allow(dead_code)]
+pub(crate) fn original_member(
+    scope: &objects::Scope,
+    original: &zerus_client_core::worktree_programs::Program,
+    deadline: Instant,
+) -> io::Result<bool> {
+    if original.pid <= 1 || original.pid == std::process::id() {
+        return Err(limit());
+    }
+    let inventory = scope.inventory(deadline)?;
+    let identity = || super::process_identity(original.pid).ok_or_else(limit);
+    let before = identity()?;
+    if before.birth != original.birth {
+        return Err(limit());
+    }
+    #[cfg(target_os = "linux")]
+    let found = linux::member(
+        &PathBuf::from(format!("/proc/{}", original.pid)),
+        &inventory,
+        deadline,
+    )?;
+    #[cfg(target_os = "macos")]
+    let found = macos::member(original.pid, &inventory, deadline)?;
+    let after = identity()?;
+    if before != after {
+        return Err(limit());
+    }
+    inventory.current(scope, deadline)?;
+    Ok(found)
+}
+
 #[cfg(target_os = "linux")]
 mod linux;
 #[cfg(target_os = "linux")]
@@ -112,5 +167,73 @@ mod tests {
             rows.paths.is_empty(),
             "exhaustion must not publish a partial inventory as complete"
         );
+    }
+
+    struct Child(std::process::Child);
+    impl Drop for Child {
+        fn drop(&mut self) {
+            let _ = self.0.kill();
+            let _ = self.0.wait();
+        }
+    }
+    #[test]
+    fn original_kernel_cwd_or_open_file_is_required_and_a_replacement_name_is_not_enough() {
+        use std::{
+            fs,
+            process::{Command, Stdio},
+        };
+        let parent = tempfile::tempdir().unwrap();
+        let parent = parent.path().canonicalize().unwrap();
+        let root = parent.join("work");
+        fs::create_dir(&root).unwrap();
+        let path = root.join("held");
+        fs::write(&path, b"original").unwrap();
+        let until = || Instant::now() + std::time::Duration::from_secs(5);
+        let scope = objects::Scope::open(&root, until()).unwrap();
+        // spawn returns only after exec: cwd and inherited FDs are established,
+        // with no timer or guessed child-ready interval.
+        let child = Child(
+            Command::new("/bin/sleep")
+                .arg("300")
+                .current_dir(&parent)
+                .stdin(Stdio::from(fs::File::open(&path).unwrap()))
+                .stdout(Stdio::null())
+                .stderr(Stdio::null())
+                .spawn()
+                .unwrap(),
+        );
+        let original = zerus_client_core::worktree_programs::Program {
+            pid: child.0.id(),
+            birth: super::super::process_identity(child.0.id()).unwrap().birth,
+            label: "fixture".into(),
+        };
+        assert!(original_member(&scope, &original, until()).unwrap());
+        fs::rename(&path, parent.join("old")).unwrap();
+        fs::write(&path, b"replacement").unwrap();
+        assert!(!original_member(&scope, &original, until()).unwrap());
+        let recycled = zerus_client_core::worktree_programs::Program {
+            birth: "different-original".into(),
+            ..original.clone()
+        };
+        assert!(original_member(&scope, &recycled, until()).is_err());
+        assert!(original_member(&scope, &original, Instant::now()).is_err());
+        let cwd_child = Child(
+            Command::new("/bin/sleep")
+                .arg("300")
+                .current_dir(&root)
+                .stdin(Stdio::null())
+                .stdout(Stdio::null())
+                .stderr(Stdio::null())
+                .spawn()
+                .unwrap(),
+        );
+        let cwd = zerus_client_core::worktree_programs::Program {
+            pid: cwd_child.0.id(),
+            birth: super::super::process_identity(cwd_child.0.id())
+                .unwrap()
+                .birth,
+            label: "fixture".into(),
+        };
+        assert!(original_member(&scope, &cwd, until()).unwrap());
     }
 }

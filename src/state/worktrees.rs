@@ -384,7 +384,7 @@ pub(super) fn dispatch(args: &[String]) -> Result<i32> {
     let action = args.first().map(String::as_str);
     if let Some(
         action @ ("create" | "status" | "cancel" | "review" | "inspect" | "remove" | "keep-folder"
-        | "leftovers" | "delete-leftover" | "policy" | "sweep"),
+        | "leftovers" | "delete-leftover" | "policy" | "sweep" | "programs"),
     ) = action
     {
         let value = match action {
@@ -392,6 +392,12 @@ pub(super) fn dispatch(args: &[String]) -> Result<i32> {
             "create" => create(&args[1..])?,
             "status" | "cancel" => super::worktree_requests::control(action, &args[1..])?,
             "review" => super::worktree_cleanup::review_command(&args[1..])?,
+            "programs" => {
+                #[cfg(any(target_os = "linux", target_os = "macos"))]
+                { super::worktree_programs::discover(&args[1..])? }
+                #[cfg(not(any(target_os = "linux", target_os = "macos")))]
+                { return Err("Native worktree program discovery is unavailable on this computer".into()); }
+            }
             "keep-folder" => {
                 let (result, attempted) = super::worktree_cleanup::keep_folder_command(&args[1..]);
                 if let Err(detail) = &result {

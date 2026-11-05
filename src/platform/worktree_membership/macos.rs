@@ -154,7 +154,11 @@ fn image(pid: u32) -> io::Result<PathBuf> {
     }
     path(&bytes)
 }
-fn files(pid: u32, deadline: Instant) -> io::Result<Files> {
+fn vnode_files(
+    pid: u32,
+    deadline: Instant,
+    mut visit: impl FnMut(&libc::vnode_info_path) -> io::Result<()>,
+) -> io::Result<bool> {
     // A full buffer is ambiguous/truncated, never a complete roster.
     let mut fds: Vec<libc::proc_fdinfo> = (0..=MAX_FILES)
         .map(|_| unsafe { std::mem::zeroed() })
@@ -171,11 +175,10 @@ fn files(pid: u32, deadline: Instant) -> io::Result<Files> {
         )
     };
     let error = errno();
-    let mut result = Files::default();
+    let mut access_denied = false;
     if used < 0 || used == 0 && error.raw_os_error() != Some(0) {
         if denied(&error) {
-            result.denied = true;
-            return Ok(result);
+            return Ok(true);
         }
         return Err(failed(error));
     }
@@ -206,17 +209,156 @@ fn files(pid: u32, deadline: Instant) -> io::Result<Files> {
             )
         };
         if used == size_of::<VnodeFile>() as i32 {
-            result.push(vnode_path(&unsafe { value.assume_init() }.vnode)?)?;
+            visit(&unsafe { value.assume_init() }.vnode)?;
         } else {
             let error = failed(errno());
             match error.raw_os_error() {
                 Some(libc::EBADF | libc::ENOENT) => {} // This enumerated descriptor closed.
-                _ if denied(&error) => result.denied = true,
+                _ if denied(&error) => access_denied = true,
                 _ => return Err(error),
             }
         }
     }
-    Ok(result)
+    Ok(access_denied)
+}
+
+fn files(pid: u32, deadline: Instant) -> io::Result<Files> {
+    let mut files = Files::default();
+    files.denied = vnode_files(pid, deadline, |vnode| files.push(vnode_path(vnode)?))?;
+    Ok(files)
+}
+
+fn vnode_object(value: &libc::vnode_info_path) -> objects::Object {
+    objects::Object {
+        device: u64::from(value.vip_vi.vi_stat.vst_dev),
+        inode: value.vip_vi.vi_stat.vst_ino,
+    }
+}
+
+pub(super) fn member(
+    pid: u32,
+    inventory: &objects::Inventory,
+    deadline: Instant,
+) -> io::Result<bool> {
+    let mut found = false;
+    match info::<libc::proc_vnodepathinfo>(pid, libc::PROC_PIDVNODEPATHINFO) {
+        Ok(cwd) => found |= inventory.contains(vnode_object(&cwd.pvi_cdir)),
+        Err(e) if denied(&e) => {}
+        Err(e) => return Err(e),
+    }
+    // Known native membership wins even when the cwd or another FD was denied.
+    vnode_files(pid, deadline, |file| {
+        found |= inventory.contains(vnode_object(file));
+        Ok(())
+    })?;
+    Ok(found)
+}
+
+fn ancestors(deadline: Instant) -> io::Result<std::collections::BTreeMap<u32, Identity>> {
+    let mut rows = std::collections::BTreeMap::new();
+    let mut pid = std::process::id();
+    while pid > 1 {
+        if rows.len() >= 128 || rows.contains_key(&pid) || Instant::now() >= deadline {
+            return Err(limit());
+        }
+        let current = snapshot(pid)?;
+        if current.zombie {
+            return Err(limit());
+        }
+        let parent = current.identity.parent;
+        rows.insert(pid, current.identity);
+        pid = parent;
+    }
+    Ok(rows)
+}
+
+pub(super) fn programs(
+    inventory: &objects::Inventory,
+    deadline: Instant,
+) -> io::Result<Vec<zerus_client_core::worktree_programs::Program>> {
+    let uid = unsafe { libc::getuid() };
+    let invocation = ancestors(deadline)?;
+    let mut rows = Vec::new();
+    let mut pids = BTreeSet::new();
+    for kind in [4, 5] {
+        let mut buffer = vec![0i32; 32_768];
+        let size = (buffer.len() * size_of::<i32>()) as i32;
+        let used = unsafe { libc::proc_listpids(kind, uid, buffer.as_mut_ptr().cast(), size) };
+        if used <= 0 || used >= size || !(used as usize).is_multiple_of(size_of::<i32>()) {
+            return Err(limit());
+        }
+        pids.extend(
+            buffer
+                .into_iter()
+                .take(used as usize / size_of::<i32>())
+                .filter(|pid| *pid > 0),
+        );
+        if pids.len() >= 32_768 {
+            return Err(limit());
+        }
+    }
+    if !pids.contains(&(std::process::id() as i32)) {
+        return Err(limit());
+    }
+    for pid in pids.into_iter().map(|pid| pid as u32) {
+        // The observer deliberately holds the root FD, and is never a signal target.
+        if pid <= 1 || pid == std::process::id() {
+            continue;
+        }
+        if Instant::now() >= deadline {
+            return Err(limit());
+        }
+        let before = match snapshot(pid) {
+            Ok(value) => value,
+            Err(e) if e.raw_os_error() == Some(libc::ESRCH) => continue,
+            Err(e) => return Err(e),
+        };
+        if before.zombie || before.identity.uid != uid && before.identity.ruid != uid {
+            continue;
+        }
+        let membership = member(pid, inventory, deadline);
+        let after = match snapshot(pid) {
+            Ok(value) => value,
+            Err(e) if e.raw_os_error() == Some(libc::ESRCH) => continue,
+            Err(e) => return Err(e),
+        };
+        if after.zombie {
+            continue;
+        }
+        if before.identity != after.identity {
+            return Err(limit());
+        }
+        if !membership? {
+            continue;
+        }
+        if invocation.get(&pid) == Some(&before.identity) {
+            return Err(io::Error::other(
+                "a program in the checkout is needed to settle this action",
+            ));
+        }
+        // The original PinnedProcess signal primitive uses this native birth
+        // spelling. Short/unique identity alone never substitutes for it.
+        let original = crate::platform::process_identity(pid).ok_or_else(limit)?;
+        if snapshot(pid)?.identity != before.identity {
+            return Err(limit());
+        }
+        let label = before.command;
+        if label.is_empty() || label.len() > 512 || label.chars().any(char::is_control) {
+            return Err(limit());
+        }
+        rows.push(zerus_client_core::worktree_programs::Program {
+            pid,
+            birth: original.birth,
+            label,
+        });
+        if rows.len() > zerus_client_core::worktree_programs::MAX_PROGRAMS {
+            return Err(limit());
+        }
+    }
+    if ancestors(deadline)? != invocation {
+        return Err(limit());
+    }
+    Ok(rows)
 }
 
 pub(in crate::platform) fn sample(deadline: Instant) -> Result<WorktreeProcesses, String> {

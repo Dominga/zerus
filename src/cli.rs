@@ -188,6 +188,8 @@ pub(crate) const USAGE: &str = r#"usage: hgs [@host] <cmd> [project] [-c [ID]] [
        hgs [@host] worktrees status|cancel --request-id UUID --json   original creation receipt
        Worktree creation ABI: worktree-requests-v1
        hgs [@host] worktrees review --path PATH [--worktree WORKTREE] [--json]   cleanup verdicts and fingerprints
+       hgs [@host] worktrees programs --json   bounded read-only native program manifest (stdin)
+       Worktree programs ABI: worktree-programs-v1
        hgs [@host] worktrees policy get|set --json   worktree-maintenance-v1 (host-local cleanup rules)
        hgs [@host] worktrees sweep --json   one bounded automatic cleanup step
        hgs [@host] worktrees inspect --path WORKTREE --common-dir DIR [--file RELATIVE_PATH] [--json]   bounded read-only changes

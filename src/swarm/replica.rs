@@ -104,12 +104,12 @@ pub fn fingerprint(config: &Config) -> Result<String> {
 /// One update on the wire: the document and its Loro updates in base64.
 /// Requests and updates ignore fields a later hgs adds.
 #[derive(Serialize, Deserialize)]
-struct Wire {
+pub(crate) struct Wire {
     document: Document,
     bytes: String,
 }
 
-fn encode(updates: Vec<Update>) -> Vec<Wire> {
+pub(crate) fn encode(updates: Vec<Update>) -> Vec<Wire> {
     updates
         .into_iter()
         .map(|u| Wire {
@@ -119,7 +119,7 @@ fn encode(updates: Vec<Update>) -> Vec<Wire> {
         .collect()
 }
 
-fn decode(wire: Vec<Wire>) -> Result<Vec<Update>> {
+pub(crate) fn decode(wire: Vec<Wire>) -> Result<Vec<Update>> {
     wire.into_iter()
         .map(|w| {
             Ok(Update {
@@ -144,15 +144,19 @@ pub struct Request {
 /// Admits a member's request: it comes from this swarm and names a project
 /// this member knows (stored here, or alive in the catalog). This member's node.
 fn admit(config: &Config, request: &Request) -> Result<String> {
+    admit_project(config, &request.swarm_id, &request.project)
+}
+
+/// `admit` for any replica request naming `swarm_id` and `project`.
+pub(crate) fn admit_project(config: &Config, swarm_id: &str, project: &str) -> Result<String> {
     let store = LockedStore::load(config)?;
-    ensure!(request.swarm_id == store.data.catalog.swarm_id, "the request comes from another swarm");
+    ensure!(swarm_id == store.data.catalog.swarm_id, "the request comes from another swarm");
     let node = store.data.node_id.clone();
     let alive = alive(config, &store);
     drop(store);
     ensure!(
-        alive.contains(&request.project) || ProjectStore::stored(&root(config))?.contains(&request.project),
-        "no project {:?} here",
-        request.project
+        alive.contains(project) || ProjectStore::stored(&root(config))?.iter().any(|id| id == project),
+        "no project {project:?} here"
     );
     Ok(node)
 }

@@ -581,7 +581,9 @@ class Swarm(unittest.TestCase):
                              (1, 7, 1, None), node)
             self.assertRegex(node['store'], r'^[0-9a-f-]{36}$')
         self.assertEqual(nodes[ids['c']]['store'], self.call('c', 'hello')['replica']['store'])
-        self.assertEqual((check['closed'], check['proof'], check['task']), (None, None, task['uuid']))
+        self.assertEqual((check['universe_closed'], check['proof'], check['task']), (None, None, task['uuid']))
+        # An unfloored task has no proof: the fence closes before any exchange.
+        self.assertEqual(check['closed'], {'node': None, 'reason': 'no_floor'})
         self.assertNotEqual(check['incarnation'], before['incarnation'])
         self.assertEqual(check['universe']['me']['node'], ids['a'])
         # A second read of an unchanged universe has the same incarnation.
@@ -590,29 +592,29 @@ class Swarm(unittest.TestCase):
         (self.root / 'c/state/replica/store-id').unlink()
         changed = self.fence_check('a', task['id'])
         self.assertNotEqual(changed['incarnation'], check['incarnation'])
-        self.assertEqual(changed['closed'], None)
+        self.assertEqual(changed['universe_closed'], None)
         # A node answering as another computer behind the relay is unverified.
         (self.root / 'spoil-c').write_text(json.dumps({'command': 'hello', 'field': 'node_id',
                                                         'value': str(uuid.UUID(int=3))}))
-        self.assertEqual(self.fence_check('a', task['id'])['closed'],
+        self.assertEqual(self.fence_check('a', task['id'])['universe_closed'],
                          {'node': ids['c'], 'reason': 'unverified'})
         (self.root / 'spoil-c').unlink()
         # A hop that answers the relay from another store, or names none,
         # breaks the route's binding to the store its hello showed.
         for value in [{'value': str(uuid.UUID(int=5))}, {}]:
             (self.root / 'spoil-b').write_text(json.dumps({'command': 'replica-relay', 'field': 'store', **value}))
-            self.assertEqual(self.fence_check('a', task['id'])['closed'],
+            self.assertEqual(self.fence_check('a', task['id'])['universe_closed'],
                              {'node': ids['c'], 'reason': 'unverified'}, value)
         (self.root / 'spoil-b').unlink()
         # The same for a direct peer, which only this computer checks.
         (self.root / 'spoil-b').write_text(json.dumps({'command': 'hello', 'field': 'node_id',
                                                         'value': str(uuid.UUID(int=4))}))
-        self.assertEqual(self.fence_check('a', task['id'])['closed'],
+        self.assertEqual(self.fence_check('a', task['id'])['universe_closed'],
                          {'node': ids['b'], 'reason': 'unverified'})
         (self.root / 'spoil-b').unlink()
         # A node that does not answer keeps the fence closed.
         (self.root / 'offline-c').touch()
-        self.assertEqual(self.fence_check('a', task['id'])['closed'],
+        self.assertEqual(self.fence_check('a', task['id'])['universe_closed'],
                          {'node': ids['c'], 'reason': 'unreachable'})
         (self.root / 'offline-c').unlink()
         # A hop without task replication excludes only itself: the node
@@ -622,7 +624,7 @@ class Swarm(unittest.TestCase):
         nodes = check['universe']['nodes']
         self.assertEqual((nodes[ids['b']]['no_replica'], nodes[ids['b']]['closed']), (True, None))
         self.assertEqual((nodes[ids['c']]['route'], nodes[ids['c']]['closed']), ([], 'unroutable'))
-        self.assertEqual(check['closed'], {'node': ids['c'], 'reason': 'unroutable'})
+        self.assertEqual(check['universe_closed'], {'node': ids['c'], 'reason': 'unroutable'})
         (self.root / 'noreplica-b').unlink()
         # The check runs only with --check, and changes no task.
         self.assertEqual(self.task('a', 'get', task['id'], '--project', 'a')['task']['stage'], task['stage'])
@@ -635,7 +637,7 @@ class Swarm(unittest.TestCase):
         task = self.task('a', 'add', '--project', 'a', text='Add rate limiting')['task']
         ids = {n: self.call(n, 'hello')['node_id'] for n in 'abc'}
         baseline = self.fence_check('a', task['id'])
-        self.assertEqual(baseline['closed'], None, baseline)
+        self.assertEqual(baseline['universe_closed'], None, baseline)
         # A member whose replica cannot be read stays a writer and closes it.
         replica = self.root / 'b/state/replica'
         replica.rename(self.root / 'b-replica')
@@ -643,30 +645,65 @@ class Swarm(unittest.TestCase):
         check = self.fence_check('a', task['id'])
         node = check['universe']['nodes'][ids['b']]
         self.assertEqual((node['no_replica'], node['closed']), (False, 'unavailable'), node)
-        self.assertEqual(check['closed'], {'node': ids['b'], 'reason': 'unavailable'})
+        self.assertEqual(check['universe_closed'], {'node': ids['b'], 'reason': 'unavailable'})
         replica.unlink(); (self.root / 'b-replica').rename(replica)
-        self.assertEqual(self.fence_check('a', task['id'])['closed'], None)
+        self.assertEqual(self.fence_check('a', task['id'])['universe_closed'], None)
         # A writer that only joined b (b never enrolled it) holds a's tasks
         # through b; b's catalog knows it, so a covers it: no route closes it.
         self.join('c', 'b')
         self.call('c', 'sync')
         self.assertNotIn(ids['c'], self.call('b', 'hello')['replica']['peers'])
         self.assertIn(ids['c'], self.call('b', 'hello')['replica']['writers'])
-        self.assertEqual(self.fence_check('a', task['id'])['closed'], {'node': ids['c'], 'reason': 'unroutable'})
+        self.assertEqual(self.fence_check('a', task['id'])['universe_closed'], {'node': ids['c'], 'reason': 'unroutable'})
         self.join('b', 'c')
         self.converge()
         reached = self.fence_check('a', task['id'])
-        self.assertEqual(reached['closed'], None, reached)
+        self.assertEqual(reached['universe_closed'], None, reached)
         # Membership ABA: b disconnected and enrolled again, with its node and
         # store unchanged, is another incarnation.
         before = reached['incarnation']
         self.call('a', 'disconnect', 'b')
-        self.assertEqual(self.fence_check('a', task['id'])['closed']['reason'], 'unroutable')
+        self.assertEqual(self.fence_check('a', task['id'])['universe_closed']['reason'], 'unroutable')
         self.join('a', 'b')
         again = self.fence_check('a', task['id'])
-        self.assertEqual(again['closed'], None, again)
+        self.assertEqual(again['universe_closed'], None, again)
         self.assertNotEqual(again['incarnation'], before)
         self.assertNotEqual(again['universe']['me']['membership'], reached['universe']['me']['membership'])
+
+    def test_replica_task_answers_from_its_reread_and_its_own_store(self):
+        # C3c2: the fence's task exchange over the real CLI, directly and
+        # through a relay; it grants nothing and writes no floor.
+        self.join('a', 'b'); self.join('b', 'a'); self.join('c', 'b'); self.join('b', 'c')
+        self.converge()
+        task = self.task('a', 'add', '--project', 'a', text='Add rate limiting')['task']
+        self.converge()
+        hello = {n: self.call(n, 'hello') for n in 'abc'}
+        swarm = hello['a']['swarm_id']
+        request = dict(swarm_id=swarm, project='a', task=task['uuid'], version={}, updates=[],
+                       store=hello['b']['replica']['store'], remaining_ms=5000)
+        reply = self.call('b', 'replica-task', data=request)
+        self.assertEqual((reply['node_id'], reply['store'], reply['task']),
+                         (hello['b']['node_id'], request['store'], task['uuid']))
+        self.assertEqual((reply['loads'], reply['applied'], reply['floor']), (True, True, False), reply)
+        self.assertIsInstance(reply['stored_schema'], int)
+        self.assertTrue(reply['version'] and all(k.isdigit() and v > 0 for k, v in reply['version'].items()), reply)
+        self.assertEqual(len(reply['updates']), 1)
+        # Its own version sent back: the same version answers.
+        self.assertEqual(self.call('b', 'replica-task', data=dict(request, version=reply['version']))['version'],
+                         reply['version'])
+        # Asked as another store, it imports nothing and names its own.
+        other = self.call('b', 'replica-task', data=dict(request, store=str(uuid.UUID(int=7))))
+        self.assertEqual((other['store'], 'version' in other), (request['store'], False))
+        # A version not in its canonical form is refused.
+        self.call('b', 'replica-task', data=dict(request, version={'012': 1}), ok=False)
+        # Through b's relay to c, bound to c's store.
+        relay = dict(swarm_id=swarm, to=hello['c']['node_id'], command='replica-task', hops=0, remaining_ms=5000,
+                     input=dict(request, store=hello['c']['replica']['store']))
+        relayed = self.call('b', 'replica-relay', data=relay)
+        self.assertEqual((relayed['to'], relayed['reply']['store'], relayed['reply']['loads']),
+                         (hello['c']['node_id'], hello['c']['replica']['store'], True))
+        # The check closes before any exchange for a task that never cut over.
+        self.assertEqual(self.fence_check('a', task['id'])['closed'], {'node': None, 'reason': 'no_floor'})
 
     def test_a_relay_never_answers_after_its_budget(self):
         # review-n on #1452: an answer whose pipe a descendant keeps open past

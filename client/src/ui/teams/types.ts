@@ -21,6 +21,10 @@ export interface TaskView {
   pinned: boolean;
   output: string[];
   waits: string;
+  /** Task 40: held by the owner, the plan's pipeline and its run. */
+  held?: boolean;
+  pipeline?: string;
+  pipeline_run?: import("../../types").TeamPipelineRun | null;
 }
 
 export interface PhaseView {

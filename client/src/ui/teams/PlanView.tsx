@@ -20,6 +20,7 @@ import {
   type PlanPhase,
   type PlanRow,
 } from "./plan";
+import { stageName } from "./actions";
 import "../styles/plan.css";
 
 export interface PlanViewProps {
@@ -29,6 +30,8 @@ export interface PlanViewProps {
   onOpenTask?: (id: number) => void;
   onApprovePhase?: (n: number) => void;
   onDiscardPhase?: (n: number) => void;
+  /** Task 40: the task card's actions (ui/teams/TeamActions.tsx TaskActions), drawn under the task's detail. */
+  taskActions?: (id: number) => JSX.Element;
   class?: string;
 }
 
@@ -221,6 +224,15 @@ export function PlanView(props: PlanViewProps): JSX.Element {
           <Show when={task?.pinned}>
             <span class="pt-badge">{tr("Pinned")}</span>
           </Show>
+          <Show when={task?.held}>
+            <span class="pt-badge">{tr("Held")}</span>
+          </Show>
+          <Show when={task?.pipeline_run?.open}>{(open) => (
+            <span class="pt-badge" data-stage={open().kind} title={tr("Pipeline stage")}>{stageName(open().kind)}</span>
+          )}</Show>
+          <Show when={!task?.pipeline_run && task?.pipeline && task.pipeline !== "none"}>
+            <span class="pt-badge" title={tr("Pipeline")}>{task!.pipeline}</span>
+          </Show>
         </span>
         <span class="pt-card-l2">
           <span class="pt-role">{placed.node.role || task?.assignee || tr("Unassigned")}</span>
@@ -338,6 +350,7 @@ export function PlanView(props: PlanViewProps): JSX.Element {
         <Show when={task.decided_by}>
           <p class="pt-detail-note">{tr("Decided by %1", task.decided_by)}</p>
         </Show>
+        <Show when={props.taskActions}>{(actions) => actions()(task.id)}</Show>
       </aside>
     );
   };

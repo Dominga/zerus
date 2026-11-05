@@ -189,9 +189,18 @@ fn replies_are_checked_for_the_shape_each_view_relies_on() {
 fn the_catalog_reply_is_projected_and_its_read_names_the_catalog() {
     let value = fixture("catalog");
     let catalog = view::catalog(&value);
-    assert_eq!((catalog.version, catalog.builtin, catalog.draft_base), (3, false, 2));
+    assert_eq!(
+        (catalog.version, catalog.builtin, catalog.draft_base),
+        (3, false, 2)
+    );
     assert_eq!(catalog.roles.len(), 2);
-    assert_eq!((catalog.roles[1].id.as_str(), catalog.roles[1].model.as_str()), ("tester", "kimi-k2"));
+    assert_eq!(
+        (
+            catalog.roles[1].id.as_str(),
+            catalog.roles[1].model.as_str()
+        ),
+        ("tester", "kimi-k2")
+    );
     assert_eq!(catalog.templates[0].max_members, 6);
     assert_eq!(catalog.templates[0].roster[0].role, "tester");
     assert_eq!(catalog.routing[0].r#use, "feature");
@@ -330,6 +339,41 @@ fn a_status_projects_the_team_tab_and_its_plan_graph() {
         .eq([2, 19, 23, 26]));
     // A running team is no New team form.
     assert!(view::new_team(&value, &team).is_none());
+}
+
+#[test]
+fn task_40_status_carries_held_tasks_pipelines_widenings_and_sub_teams() {
+    let status = json!({"id":"t1","name":"Checkout","status":"planning","lead":"lead",
+        "members":[{"id":"lead","role":"Lead"},{"id":"api","role":"Backend","profile_widening":{"from":"auto","to":"bypass"}}],
+        "tasks":[{"id":1,"title":"API","status":"in_review","held":false,"pipeline":"code","subteam":{"team":"s1"},
+                  "pipeline_run":{"name":"Code","accept":"lead","round":1,"max_rounds":3,
+                      "stages":[{"kind":"review"},{"kind":"test"}],
+                      "runs":[{"stage":0,"kind":"review","member":"rev","state":"delivered"}]}},
+                 {"id":2,"title":"Docs","status":"pending","held":true}],
+        "children":[{"team":"s1","name":"Sub","status":"running","done":0,"total":2}]});
+    let view = super::view::team(&status);
+    assert_eq!(
+        view.widenings,
+        vec![json!({"member":"api","role":"Backend","from":"auto","to":"bypass"})]
+    );
+    assert_eq!(
+        view.children,
+        vec![json!({"team":"s1","name":"Sub","status":"running"})]
+    );
+    let api = &view.tasks[0];
+    assert!(api.subteam && !api.held && api.pipeline == "code");
+    let run = api.pipeline_run.as_ref().unwrap();
+    assert_eq!(
+        (run.stages.clone(), run.accept.as_str(), run.max_rounds),
+        (vec!["review".to_owned(), "test".to_owned()], "lead", 3)
+    );
+    assert_eq!(
+        run.open
+            .as_ref()
+            .map(|open| (open.stage, open.kind.as_str(), open.member.as_str())),
+        Some((0, "review", "rev"))
+    );
+    assert!(view.tasks[1].held && view.tasks[1].pipeline_run.is_none() && !view.tasks[1].subteam);
 }
 
 #[test]

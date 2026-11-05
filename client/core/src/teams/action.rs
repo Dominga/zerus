@@ -155,8 +155,37 @@ pub enum TeamAction {
     Retry {
         task: u64,
     },
-    /// Task 11: finishes a team whose tasks are all decided.
-    Finish,
+    /// Task 11/40: finishes a team whose tasks are all decided, with the
+    /// owner's summary for the lead (hgs requires one, at most 4000 chars).
+    Finish {
+        #[serde(default)]
+        summary: String,
+    },
+    /// Task 40: drops a plan in Planning (Discard plan); the team stops.
+    Discard,
+    /// Task 40: parks a pending task with its reason until it is released.
+    Hold {
+        task: u64,
+        reason: String,
+    },
+    /// Task 40: ends a task's open pipeline stage (skip-stage) with a reason.
+    SkipStage {
+        task: u64,
+        reason: String,
+    },
+    /// Task 40: sends a task in a pipeline back to its implementer.
+    SendBack {
+        task: u64,
+        reason: String,
+    },
+    /// Task 40: moves a task that has not started to another phase, against
+    /// the plan revision it was read at.
+    MoveTask {
+        task: u64,
+        phase: u64,
+        #[serde(default)]
+        revision: Option<u64>,
+    },
     /// Starts a draft team (no team id yet): its folder, name, lead and
     /// template as New team's Start planning sends them.
     DraftStart {
@@ -196,11 +225,18 @@ pub enum TeamAction {
     },
     /// The owner's settings patch, merged by `hgs team settings`: only the
     /// fields that differ from the team's current settings.
-    Settings { settings: Value },
+    Settings {
+        settings: Value,
+    },
     /// The designer's change, left for the owner to keep or reject.
-    CatalogPropose { change: Value },
+    CatalogPropose {
+        change: Value,
+    },
     /// The owner's decision on one catalog proposal: keep, reject or undo.
-    CatalogDecide { proposal: String, decision: String },
+    CatalogDecide {
+        proposal: String,
+        decision: String,
+    },
     /// Writes the kept proposals as the next catalog version.
     CatalogApply,
     /// Ends the catalog draft, undecided changes included.
@@ -334,7 +370,12 @@ impl TeamAction {
             Self::DecideTool { .. } => "decide-tool",
             Self::Release { .. } => "release",
             Self::Retry { .. } => "retry",
-            Self::Finish => "finish",
+            Self::Finish { .. } => "finish",
+            Self::Discard => "discard",
+            Self::Hold { .. } => "hold",
+            Self::SkipStage { .. } => "skip-stage",
+            Self::SendBack { .. } => "send-back",
+            Self::MoveTask { .. } => "move-task",
             Self::DraftStart { .. }
             | Self::DraftUpdate { .. }
             | Self::DraftSeen { .. }
@@ -427,7 +468,31 @@ impl TeamAction {
                     .as_deref()
                     .map_or(Ok(()), |choice| word(choice, "sub-team choice"))
             }
-            Self::Pause | Self::Resume | Self::Stop | Self::Archive | Self::Finish => Ok(()),
+            Self::Pause | Self::Resume | Self::Stop | Self::Archive | Self::Discard => Ok(()),
+            Self::Finish { summary } => {
+                if summary.trim().is_empty() {
+                    return Err("A summary is required.".into());
+                }
+                plain(summary, "A summary", 4000)
+            }
+            Self::Hold { task: id, reason }
+            | Self::SkipStage { task: id, reason }
+            | Self::SendBack { task: id, reason } => {
+                task(*id)?;
+                if reason.trim().is_empty() {
+                    return Err("Say why.".into());
+                }
+                plain(reason, "A reason", TEXT_CHARS)
+            }
+            Self::MoveTask {
+                task: id, phase, ..
+            } => {
+                task(*id)?;
+                if *phase == 0 {
+                    return Err("Not a phase number.".into());
+                }
+                Ok(())
+            }
             Self::Answer {
                 member,
                 question_id,
@@ -521,7 +586,10 @@ impl TeamAction {
             Self::DraftCreate { .. } => Ok(()),
             Self::DraftDiscard { reason, .. } => plain(reason, "A reason", 2000),
             Self::Settings { settings } => {
-                if !settings.as_object().is_some_and(|fields| !fields.is_empty()) {
+                if !settings
+                    .as_object()
+                    .is_some_and(|fields| !fields.is_empty())
+                {
                     return Err("A settings change names the fields it sets.".into());
                 }
                 Ok(())
@@ -532,10 +600,7 @@ impl TeamAction {
                 }
                 Ok(())
             }
-            Self::CatalogDecide {
-                proposal,
-                decision,
-            } => {
+            Self::CatalogDecide { proposal, decision } => {
                 word(proposal, "proposal id")?;
                 if !matches!(decision.as_str(), "keep" | "reject" | "undo") {
                     return Err("A catalog decision is keep, reject or undo.".into());
@@ -626,7 +691,25 @@ impl TeamAction {
                     put("subteam", json!(choice));
                 }
             }
-            Self::Pause | Self::Resume | Self::Stop | Self::Archive | Self::Finish => {}
+            Self::Pause | Self::Resume | Self::Stop | Self::Archive | Self::Discard => {}
+            Self::Finish { summary } => put("summary", json!(summary.trim())),
+            Self::Hold { task, reason }
+            | Self::SkipStage { task, reason }
+            | Self::SendBack { task, reason } => {
+                put("task", json!(task));
+                put("reason", json!(reason.trim()));
+            }
+            Self::MoveTask {
+                task,
+                phase,
+                revision,
+            } => {
+                put("task", json!(task));
+                put("phase", json!(phase));
+                if let Some(revision) = revision {
+                    put("revision", json!(revision));
+                }
+            }
             Self::Answer {
                 member,
                 question_id,
@@ -750,10 +833,7 @@ impl TeamAction {
             Self::CatalogPropose { change } => {
                 put("change", change.clone());
             }
-            Self::CatalogDecide {
-                proposal,
-                decision,
-            } => {
+            Self::CatalogDecide { proposal, decision } => {
                 put("proposal", json!(proposal));
                 put("decision", json!(decision));
             }
@@ -785,7 +865,13 @@ impl TeamAction {
                 ),
                 "Stop team",
             )),
-            Self::Finish => Some(ask(
+            Self::Discard => Some(ask(
+                "teamDiscardConfirm",
+                "Discard plan?",
+                format!("Discard the plan of {name}? The team stops before any member starts."),
+                "Discard plan",
+            )),
+            Self::Finish { .. } => Some(ask(
                 "teamFinishConfirm",
                 "Finish team?",
                 format!("Finish {name}? Every task is decided; the team is done and hands out nothing more."),

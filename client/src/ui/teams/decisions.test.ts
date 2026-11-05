@@ -572,7 +572,7 @@ describe("confirmations", () => {
     expect(answered).toEqual([answerItems().held.id]);
     // act() itself: a refused call that never ran is failed, never thrown.
     const broken: DecisionPort = { ...port, async send() { throw new Error("Teams need the desktop app."); } };
-    expect(await act(broken, { computer: "", team: "team-1", team_name: "Live", action: { kind: "finish" } })).toMatchObject({ outcome: "failed" });
+    expect(await act(broken, { computer: "", team: "team-1", team_name: "Live", action: { kind: "finish", summary: "Done" } })).toMatchObject({ outcome: "failed" });
   });
 });
 

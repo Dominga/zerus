@@ -104,8 +104,8 @@ macOS automation may run without a separate owner window under the existing
 rules. Ask the owner to perform any new microphone/camera, Apple Events, screen
 lock/unlock or authentication consent; never approve privacy prompts for them.
 Voice/video quality and any sensory result not observable in the retained
-record require their observation. The Arch display checks wait for the owner's
-rescheduled window; nondisplay source/package evidence can be prepared meanwhile.
+record require their observation. Arch uses the 2026-11-05 idle/display admission above for unattended rows;
+the owner-only rows remain in its one scheduled owner session.
 Windows PC execution waits for its separate acceptance. Neither this scheduling
 nor the exception permits clearing state, creating a replacement account or
 restarting agents, tmux or a live DeepSeek host.
@@ -181,7 +181,7 @@ subchecks, not the clean-install exception's exact-candidate CI/package proof.
 | Registration and selected/running mode | Maintained installed helper `--check` passes; read-only status reports selected and running `background`, IPC ready, no pending restart or transition. One user-manager backend has no drop-ins. |
 | Background readiness | Same backend PID/birth; lifecycle `serving`, background mode and actual attention host ready, delivery writer ready; automatic approvals remain OFF. No mode switch, Grant/Rearm or service restart was performed. Closed-GUI read delivery and host ACK still need their actual observations. |
 | Custom registration refusal | Maintained helper `--check` against one private custom unit refuses before any `systemctl` execution. Both that unit and the real owner unit remain byte-identical. This is a private refusal subcheck, not an installed custom-unit mutation. |
-| Display admission | A passive Wayland input observer and one retained display flock admitted bounded screenshot inspection. AT-SPI's advertised socket refused connection; no accessibility action occurred. Input resumed before a later Settings admission, so it refused before issuing a click. Terminal, interactive parity and lifecycle cases remain pending. |
+| Display admission | A passive Wayland input observer and one retained display flock admitted bounded screenshot inspection. AT-SPI's advertised socket refused connection; no accessibility action occurred. Input resumed before a later Settings admission, so it refused before issuing a click. A subsequent admitted maintained navigation selected the exact live linux-shell-u target in the same original GUI; a separately admitted single click focused its verified empty composer. Draft/Terminal preparation, interactive parity and lifecycle cases remain pending. |
 | Upgrade preparation | A private bounded manifest retains original native PID/births and draft hashes. The next coordinator-announced maintained rollout, after #1467 and #1470, is the live-agent upgrade row. The coordinator waits for a fresh **manifests ready** receipt before updating; this preparation is not upgrade survival evidence. |
 | Qt artifact | The retained previous GUI reports clean Qt source `3a28fb2219fa0c4e7a367933d35b4c1882f607d6`, Dev 1595. Build-info inspection opened no Qt window; rollback/drain/return remain owner-only and unqualified. |
 
@@ -210,7 +210,8 @@ available; no privacy or notification preference is silently changed.
    cancel, transcription and draft retention, with the owner confirming sound
    and image quality. Do not send an uncertain recording again.
 3. **Qt rollback and return (8–12 minutes).** Use the maintained service-aware
-   rollback only after the original revoke and actual drain settle. Verify the
+   rollback from the authenticated Settings route or a foreground terminal outside
+   Zerus, only after the original revoke and actual drain settle. Verify the
    original agents/jobs, draft and settings under Qt, then return through the
    maintained Next route and actual authenticated handoff. Unknown drain or
    missing return authority stops the round trip; no marker/store deletion or
@@ -654,12 +655,15 @@ candidate/window and result correlation. Platform checkboxes remain unchanged.
 
 ## Installed client cutover on Linux and macOS
 
-**Preparation only; no installed case below has been executed or accepted.**
+**Historical preparation baseline:** the source limitations in this section
+describe the earlier prepared candidate. Dated installed records above supply
+scoped results; execute remaining cases under the 2026-11-05 admission and owner
+session decision. Unrecorded cases remain pending.
 Client procedure: `.66.3.31.1.1`, webkit-c; results and checkbox ledger: G6,
 migrate-u. Select and record the exact current-integration candidate, never the
 Qt-deletion draft. Run macOS first after all source gates below have merged,
-without a separate owner window; the Linux installed run waits for the owner to
-reschedule Arch acceptance.
+without a separate owner window for unattended rows; current Arch execution uses
+the 2026-11-05 idle/display admission above.
 The installer/service primitives below were checked at `c319a25f` and remain
 unchanged at preparation baseline `1729e5c6`; recheck the selected candidate.
 
@@ -694,9 +698,9 @@ A staging prefix, different development app ID, fake manager, altered unit label
 or source test is not installed canonical authority.
 
 Use the owner's actual main graphical login's HOME, runtime, bus and temporary
-directory. File/profile overrides do not authenticate a frontend. Arch GUI
-acceptance remains deferred. When the owner reschedules it, the coordinator
-brackets that run with START/END and load snapshots, holds
+directory. File/profile overrides do not authenticate a frontend. For an Arch
+owner session, the coordinator brackets the run with START/END and load snapshots
+and the executor holds
 `flock -w 1800 /tmp/zerus-arch-display.lock` for the display run, and stops if the
 screen locks or sleeps. Never replace the lock or invent display/bus values.
 Mac GUI/native acceptance needs no separate owner window after the source gates

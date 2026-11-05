@@ -337,7 +337,12 @@ that is not a consent field and does not matter.
 A draft holds one such identity until it is resolved. A definite outcome
 resolves it, as does a cancellation before its call was dispatched or, for a
 start or compaction, the session seen ready for the send. An uncertain outcome
-keeps it. Once its call is dispatched, a Cancel send, an interruption or a time
+keeps it. A compaction, like an interrupt, a clear or an answer, types into the
+agent, so its outcome is definite only when `hgs` never started or refused
+before any input (exit 1 without "delivery uncertain"). A timeout, a broken
+transfer, any other exit, a mismatched acknowledgement and a refusal naming an
+earlier attempt of the same request are uncertain. `hgs` reports every failure
+after the typed command, Enter or Escape as "delivery uncertain". Once its call is dispatched, a Cancel send, an interruption or a time
 limit keeps it too, and the call's own late answer then decides: a definite one
 resolves it, an uncertain one keeps it. Only calls still in flight are tracked
 for that late answer, at most 32; past that the oldest goes, and its draft

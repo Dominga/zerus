@@ -106,6 +106,7 @@ fn search_rpc(_: &Value, _: Value) -> Result<Value> {
 fn ensure_host(_: &Value) -> Result<()> {
     Err(UNSUPPORTED.into())
 }
+const HOST_UNAVAILABLE: &str = "DeepSeek host is unavailable; resume the session to reconnect";
 #[cfg(unix)]
 fn rpc(record: &Value, method: &str, params: Value) -> Result<Value> {
     rpc_within(record, method, params, Duration::from_secs(35))
@@ -119,15 +120,26 @@ fn search_rpc(record: &Value, params: Value) -> Result<Value> {
 }
 #[cfg(unix)]
 fn rpc_within(record: &Value, method: &str, params: Value, read_timeout: Duration) -> Result<Value> {
-    let mut socket = UnixStream::connect(host_dir(record).join("host.sock"))
-        .map_err(|_| "DeepSeek host is unavailable; resume the session to reconnect")?;
+    rpc_at(
+        &host_dir(record).join("host.sock"),
+        method,
+        params,
+        read_timeout,
+    )
+}
+#[cfg(unix)]
+fn rpc_at(path: &Path, method: &str, params: Value, read_timeout: Duration) -> Result<Value> {
+    let mut socket = UnixStream::connect(path).map_err(|_| HOST_UNAVAILABLE)?;
     socket
         .set_read_timeout(Some(read_timeout))
         .map_err(|e| e.to_string())?;
     socket
         .set_write_timeout(Some(Duration::from_secs(10)))
         .map_err(|e| e.to_string())?;
-    writeln!(socket, "{}", json!({"method":method,"params":params})).map_err(|e| e.to_string())?;
+    // A write that fails after the request's last byte still delivers it: the
+    // host reads a final line at end of input (zerus-1wchz).
+    writeln!(socket, "{}", json!({"method":method,"params":params}))
+        .map_err(|e| format!("Native request delivery uncertain: {e}"))?;
     let mut response = String::new();
     BufReader::new(socket.take(32 * 1024 * 1024))
         .read_line(&mut response)
@@ -1250,6 +1262,23 @@ pub(super) fn interrupt(snapshot: &Value) -> Result<Value> {
         return Err("DeepSeek session changed before interruption".into());
     }
     rpc(&record,"interrupt",json!({"sessionId":record["conversation_id"],"generation":snapshot["host_generation"],"turnStarted":snapshot["turn_started"]}))
+        .map_err(interrupt_refusal)
+}
+/// The host disarms goals and aborts a compaction before its native cancel,
+/// so only a refusal before those effects is definite (zerus-1wchz): no host
+/// to reach, or one of the bridge's own checks ahead of them.
+fn interrupt_refusal(error: String) -> String {
+    const BEFORE_EFFECTS: [&str; 4] = [
+        HOST_UNAVAILABLE,
+        "DeepSeek host changed",
+        "Use the parent to manage a subagent",
+        "DeepSeek turn changed; nothing was stopped",
+    ];
+    if BEFORE_EFFECTS.contains(&error.as_str()) || error.contains("delivery uncertain") {
+        error
+    } else {
+        format!("Interrupt delivery uncertain: {error}")
+    }
 }
 
 fn checked_request(record: &Value) -> Result<Value> {
@@ -1770,6 +1799,82 @@ mod compatibility_tests {
         for ping in [json!({"protocol":1,"version":"0.2.1-rc.5"}),
             json!({"protocol":2,"version":"0.2.1-rc.2"}), json!({"protocol":1})] {
             assert!(!compatible_adapter(&ping));
+        }
+    }
+}
+
+#[cfg(all(test, unix))]
+mod delivery_tests {
+    use super::*;
+    use std::os::unix::net::UnixListener;
+
+    /// zerus-1wchz: a host that takes the connection and goes away while the
+    /// request is still being written. The request may have reached it, so
+    /// the error says the delivery is uncertain, never a plain refusal.
+    #[test]
+    fn a_send_whose_request_write_fails_is_delivery_uncertain() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("host.sock");
+        let listener = UnixListener::bind(&path).unwrap();
+        let host = std::thread::spawn(move || drop(listener.accept().unwrap()));
+        // Larger than any socket buffer: the write is still running when the
+        // host closes, so it fails rather than the read.
+        let content = "x".repeat(16 * 1024 * 1024);
+        let error = rpc_at(
+            &path,
+            "send",
+            json!({"sessionId":"session-A","content":content}),
+            Duration::from_secs(5),
+        )
+        .unwrap_err();
+        host.join().unwrap();
+        assert!(
+            error.starts_with("Native request delivery uncertain: "),
+            "{error}"
+        );
+    }
+
+    #[test]
+    fn no_host_to_reach_is_a_definite_refusal() {
+        let dir = tempfile::tempdir().unwrap();
+        let error = rpc_at(
+            &dir.path().join("host.sock"),
+            "send",
+            json!({}),
+            Duration::from_secs(1),
+        )
+        .unwrap_err();
+        assert_eq!(error, HOST_UNAVAILABLE);
+        assert_eq!(interrupt_refusal(error), HOST_UNAVAILABLE);
+    }
+
+    /// The bridge's own checks ahead of its effects stay definite; anything
+    /// after them may follow a stopped turn.
+    #[test]
+    fn only_an_interrupt_refused_before_its_effects_is_definite() {
+        for definite in [
+            "DeepSeek host changed",
+            "Use the parent to manage a subagent",
+            "DeepSeek turn changed; nothing was stopped",
+            HOST_UNAVAILABLE,
+        ] {
+            assert_eq!(interrupt_refusal(definite.into()), definite);
+        }
+        for already in [
+            "Native request delivery uncertain: Broken pipe (os error 32)",
+            "Invalid native response; delivery uncertain: EOF while parsing a value",
+        ] {
+            assert_eq!(interrupt_refusal(already.into()), already);
+        }
+        for after in [
+            "Session not found",
+            "DeepSeek host changed; refresh Processes",
+            "",
+        ] {
+            assert_eq!(
+                interrupt_refusal(after.into()),
+                format!("Interrupt delivery uncertain: {after}")
+            );
         }
     }
 }

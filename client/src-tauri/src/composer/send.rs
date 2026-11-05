@@ -6579,6 +6579,163 @@ mod continuations {
         );
     }
 
+    /// zerus-1wchz: a compaction `hgs` may have typed ends uncertain, so the
+    /// draft keeps that call's identity and Send stays locked until Allow
+    /// retry; a refusal before any input still ends definitely and frees the
+    /// draft. The real core classifier decides each end.
+    #[test]
+    fn a_compaction_that_may_have_typed_keeps_its_identity_until_allow_retry() {
+        use zerus_client_core::actions::{classify, invocation};
+        type Case = (&'static str, fn() -> Exit, bool, &'static str);
+        let cases: [Case; 9] = [
+            (
+                "start",
+                || Exit::StartFailed("hgs is missing".into()),
+                false,
+                "hgs is missing",
+            ),
+            (
+                "refused",
+                || Exit::Code {
+                    code: 1,
+                    stdout: Vec::new(),
+                    stderr: "hgs: The session is no longer ready\n".into(),
+                },
+                false,
+                "hgs: The session is no longer ready",
+            ),
+            (
+                "typed",
+                || {
+                    Exit::Code {
+                    code: 1,
+                    stdout: Vec::new(),
+                    stderr: "hgs: Compact delivery uncertain: pane gone. Check Terminal before retrying\n".into(),
+                }
+                },
+                true,
+                "hgs: Compact delivery uncertain: pane gone. Check Terminal before retrying",
+            ),
+            (
+                "duplicate",
+                || {
+                    Exit::Code {
+                    code: 1,
+                    stdout: Vec::new(),
+                    stderr: "hgs: This compact was already attempted. Check Terminal before trying again\n".into(),
+                }
+                },
+                true,
+                "hgs: This compact was already attempted. Check Terminal before trying again",
+            ),
+            (
+                "peer",
+                || Exit::Code {
+                    code: 255,
+                    stdout: Vec::new(),
+                    stderr: "ssh: connection closed\n".into(),
+                },
+                true,
+                "ssh: connection closed",
+            ),
+            (
+                "timeout",
+                || Exit::TimedOut,
+                true,
+                "Request timed out. Check Terminal before retrying.",
+            ),
+            (
+                "write",
+                || Exit::WriteFailed,
+                true,
+                "Transfer failed. Check Terminal before retrying.",
+            ),
+            (
+                "abnormal",
+                || Exit::Abnormal {
+                    stderr: "signal 9\n".into(),
+                },
+                true,
+                "signal 9",
+            ),
+            (
+                "acknowledgement",
+                || Exit::Code {
+                    code: 0,
+                    stdout: b"{}".to_vec(),
+                    stderr: String::new(),
+                },
+                true,
+                "Invalid acknowledgement. Check Terminal before retrying.",
+            ),
+        ];
+        for (name, exit, uncertain, detail) in cases {
+            let root = dir(&format!("typed-compact-{name}"));
+            let store = drafts(&root);
+            let (c, fake) = send_hub_on(&store);
+            *lock(&fake.outcome) = Box::new(move |action, id| match action {
+                Action::CompactContext => {
+                    let target = Target {
+                        computer: String::new(),
+                        name: "claude/example/review".into(),
+                        run_id: "run-1".into(),
+                        conversation_id: "conv-1".into(),
+                    };
+                    let inv = invocation(&target, action, id).unwrap();
+                    classify(&target, action, &inv, exit())
+                }
+                _ => receipt(action, id),
+            });
+            let seen = record_checkpoints(&fake, &root);
+            let view = opened(&c, cold());
+            let SendReply::Cold { token, .. } =
+                c.send_message(view.handle, 1, view.text_epoch, "compact me".into(), 0, 0)
+            else {
+                panic!("{name}: no cold question")
+            };
+            let compact = Answer::Cold {
+                action: ColdAction::Compact,
+            };
+            assert_eq!(c.answer(token, compact), SendReply::Sending, "{name}");
+            let view = until(&c, |v| !v.sending && !v.compacting && v.status_error);
+            store.flush();
+            let held = on_disk(&root);
+            let first = lock(&seen)[0].1.clone();
+            assert_eq!(view.uncertain, uncertain, "{name}");
+            let again = |rev| {
+                let view = c.current().unwrap();
+                c.send_message(view.handle, rev, view.text_epoch, "compact me".into(), 0, 0)
+            };
+            if uncertain {
+                assert_eq!(
+                    view.status,
+                    zerus_client_core::local_messages::uncertain_detail(detail),
+                    "{name}"
+                );
+                assert_eq!(
+                    held.map(|checkpoint| checkpoint.request_id),
+                    Some(first),
+                    "{name}: the draft keeps the compaction's identity"
+                );
+                assert_eq!(again(2), SendReply::Busy, "{name}: locked");
+                c.allow_retry(view.handle);
+                assert!(!c.current().unwrap().uncertain, "{name}");
+                assert!(
+                    matches!(again(3), SendReply::Cold { .. }),
+                    "{name}: Allow retry frees it"
+                );
+            } else {
+                assert_eq!(view.status, detail, "{name}");
+                assert!(held.is_none(), "{name}: no identity kept");
+                assert!(
+                    matches!(again(2), SendReply::Cold { .. }),
+                    "{name}: a definite refusal frees the draft"
+                );
+            }
+            assert_eq!(lock(&seen).len(), 1, "{name}: one call");
+        }
+    }
+
     /// review-n's #1316 probe (zerus-5wmh.66.4.4).
     #[test]
     fn an_inflight_cancel_or_timeout_does_not_lose_an_unknown_action() {

@@ -250,6 +250,7 @@ fn parse_member_as(value: &Value, what: &str, example: &str) -> anyhow::Result<M
         member.models = super::catalog::models_for(&member.role);
     }
     super::models::check_choices(&member.models)?;
+    super::dispatcher::sandbox_folder(&mut member);
     member.state = match member.session {
         Some(_) => MemberState::Active,
         None => MemberState::NotCreated,
@@ -864,6 +865,7 @@ fn settings(team: &mut Team, input: &Value, actor: &Actor, events: &mut Vec<Even
         }
         if let Some(folder) = update.get("folder") {
             member.folder = serde_json::from_value(folder.clone()).context("A folder is shared, worktree or clone")?;
+            super::dispatcher::sandbox_folder(member);
         }
         if let Some(directory) = update.get("directory") {
             member.directory = clean(directory.as_str().unwrap_or_default(), 500, "A directory")?;
@@ -3603,6 +3605,11 @@ fn swap_one(team: &mut Team, input: &Value, id: &str, keep_session: bool, actor:
             member.state = if member.session.is_some() { MemberState::Active } else { MemberState::NotCreated };
         } else {
             member.launch_after_swap = false;
+        }
+        // Task #28 (5): a member swapped to DeepSeek before it has a folder
+        // gets a clone, not the worktree its old agent had.
+        if member.session.is_none() {
+            super::dispatcher::sandbox_folder(member);
         }
         member.launch_id.clear();
         member.error.clear();

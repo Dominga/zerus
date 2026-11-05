@@ -3211,6 +3211,40 @@ fn queue_write(op: &str, input: &Value, wait: bool) -> anyhow::Result<Value> {
     })))
 }
 
+/// Task #28: a sandboxed member's own request to the team worker - `run`
+/// (`hgs run`) or `read` (a host read) - waits in its folder as a report does
+/// (U20). The member is the one whose session `caller` is (a dsh member by
+/// the conversation its harness exports) in a team that runs; the worker
+/// applies the request on its next tick. Returns the folder, where the
+/// worker's outcome appears, and that outcome when the request was answered.
+pub(crate) fn queue_for_sandbox(caller: &Value, op: &str, request_id: &str, input: &Value) -> anyhow::Result<(std::path::PathBuf, Option<Value>)> {
+    ensure!(matches!(op, "session-run" | "read"), "Unknown sandbox request {op}");
+    ensure!(super::store::canonical_uuid(request_id), "A canonical request_id is required");
+    let store = Store::open(false)?;
+    let teams = store.active_teams(ACTIVE_TEAMS)?;
+    let (team, member_id) = teams
+        .iter()
+        .filter(|team| matches!(team.status, TeamStatus::Running | TeamStatus::Paused))
+        .find_map(|team| calling_member(team, caller).filter(|member| *member != team.lead).map(|member| (team, member)))
+        .context("The sandbox blocks this here, and only a member of a running team can ask the team worker to do it")?;
+    let member = team.member(&member_id).context("Unknown member")?;
+    let folder = member_outbox_folder(team, member)?;
+    if let Some(result) = super::outbox::result(&folder, request_id) {
+        return Ok((folder, Some(result)));
+    }
+    let request = json!({"op":op, "request_id":request_id, "team":team.id, "member":member_id, "input":input});
+    match super::outbox::request(&folder, request_id) {
+        Some(queued) => ensure!(
+            queued["op"] == request["op"] && queued["input"] == request["input"],
+            "request_id {request_id} already queues another request; use a new request_id"
+        ),
+        None => {
+            super::outbox::push(&folder, &request)?;
+        }
+    }
+    Ok((folder, None))
+}
+
 /// The teams a finished team's `left_running` looks at: only the ones that
 /// still run, from the indexed query, never every stored team (C1).
 fn active_team_records(store: &Store) -> anyhow::Result<Vec<Team>> {

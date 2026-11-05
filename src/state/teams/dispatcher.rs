@@ -2746,6 +2746,18 @@ pub(crate) fn default_folder(agent: &str) -> MemberFolder {
     }
 }
 
+/// Task #28 (5): a sandboxed dsh member cannot write a worktree's git
+/// metadata (it lives in the main checkout's `.git`, outside the sandbox), so
+/// its own folder is a clone whatever asked for a worktree: a role default, a
+/// template, the New team form or the worktree policy, which a clone also
+/// meets. Before, the preflight only warned and the member could not commit.
+/// An adopted session keeps the folder it works in.
+pub(crate) fn sandbox_folder(member: &mut Member) {
+    if member.agent == "dsh" && member.folder == MemberFolder::Worktree && member.session.is_none() {
+        member.folder = MemberFolder::Clone;
+    }
+}
+
 /// The folder the member works in, computed without creating anything: the
 /// team's (or its own) folder, or the worktree/clone path a writing member
 /// gets.
@@ -6934,6 +6946,14 @@ fn take_outbox_with(
             if request["member"].as_str() != Some(member.id.as_str()) && shares_folder(team, &request, seen, &found.cwd) {
                 continue;
             }
+            // Task #28: a sandboxed member's own `hgs run` and its host reads.
+            if matches!(request["op"].as_str(), Some("session-run" | "read")) {
+                let outcome = sandbox_request(member, folder, &request);
+                if let Err(error) = super::outbox::settle(folder, &request, &outcome) {
+                    eprintln!("hgs team worker: {}: outbox {}: {error}", team.name, path.display());
+                }
+                continue;
+            }
             if request["op"] == "run" {
                 match start_run(store, team, member, folder, &request, spawn) {
                     // A refusal is answered now; a claim needs no answer - the
@@ -6961,6 +6981,51 @@ fn take_outbox_with(
         }
     }
     Ok(())
+}
+
+/// Task #28: what the worker does for a sandboxed member that its sandbox
+/// cannot. `session-run` records and starts the member's `hgs run` as its
+/// session's work, at the sandbox's Low integrity (`builds::start_for_sandbox`);
+/// `read` answers one host read the sandbox cannot reach
+/// (`outbox::sandbox_read_allowed`). The folder proves the member (U20); a
+/// refusal is the answer, never a retry.
+fn sandbox_request(member: &Member, folder: &Path, request: &Value) -> Value {
+    let id = request["request_id"].as_str().unwrap_or_default();
+    let refused = |error: String| json!({"status":"refused","request_id":id,"error":error});
+    let Some(session) = member.session.as_ref().filter(|session| session.host.is_empty()) else {
+        return refused("the member has no session on this computer".into());
+    };
+    match request["op"].as_str() {
+        Some("session-run") => {
+            let session = json!({"name":session.name,"run_id":session.run_id,"conversation_id":session.conversation_id});
+            super::super::builds::start_for_sandbox(id, &request["input"], session, folder).unwrap_or_else(refused)
+        }
+        _ => {
+            let argv: Vec<String> =
+                request["input"]["argv"].as_array().into_iter().flatten().filter_map(Value::as_str).map(str::to_owned).collect();
+            if !super::outbox::sandbox_read_allowed(&argv) {
+                return refused(format!("a sandbox asks only for hgs ls and hgs inspect, not: hgs {}", argv.join(" ")));
+            }
+            let words: Vec<&str> = argv.iter().map(String::as_str).collect();
+            match hgs("", &words, None, Duration::from_secs(45)) {
+                Ok(output) => {
+                    let mut stdout = String::from_utf8_lossy(&output.stdout).into_owned();
+                    let truncated = stdout.len() > super::outbox::READ_STDOUT;
+                    if truncated {
+                        let mut end = super::outbox::READ_STDOUT;
+                        while !stdout.is_char_boundary(end) {
+                            end -= 1;
+                        }
+                        stdout.truncate(end);
+                    }
+                    let stderr: String = String::from_utf8_lossy(&output.stderr).chars().take(64 * 1024).collect();
+                    json!({"status":"ran","request_id":id,"exit":output.status.code().unwrap_or(1),"stdout":stdout,
+                        "stderr":stderr,"truncated":truncated})
+                }
+                Err(error) => refused(format!("{error:#}")),
+            }
+        }
+    }
 }
 
 /// N1: the branch the lead's own folder is on: what a member merges. It is read

@@ -296,6 +296,11 @@ impl Integrity {
 
 /// The refusal a client below the host's integrity level gets (D5).
 pub const ELEVATED_HOST: &str = "the session host on this computer runs elevated";
+/// Task #28: what a process in a sandbox below Medium integrity (a DeepSeek
+/// member's confined shell) hears instead: the host is not elevated, the
+/// caller is below it, and the host keeps such processes out on purpose.
+pub const SANDBOXED_CLIENT: &str =
+    "this process runs in a sandbox below the session host's integrity level, and the session host keeps sandboxed processes out";
 
 /// The host's identity, sent in answer to an accepted hello.
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]

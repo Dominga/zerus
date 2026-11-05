@@ -1151,8 +1151,9 @@ Start builds and long tests through Zerus so they show as work:
 `hgs team run` for a team member's templates (`hgs guide team-run`), and
 `hgs run --json [--wait]` with `{request_id, label, command, cwd?,
 timeout_minutes?}` for any session (`hgs guide run`). `hgs run` names the
-calling session by its process ancestry, runs the command in `sh -c` (`cmd /C`
-on Windows) in a detached runner with its whole process tree stopped after the
+calling session by its process ancestry, or a DeepSeek session by the
+conversation its harness exports as `DSH_SESSION_ID`, runs the command in
+`sh -c` (`cmd /C` on Windows) in a detached runner with its whole process tree stopped after the
 timeout (30 minutes by default, at most 240), keeps the last 4000 characters of
 output and records the run under the session; the same `request_id` never runs
 twice, and asking again reads its state. `hgs run --list --json` lists the
@@ -5362,6 +5363,37 @@ missing the session does not start, and the member's error — shown in the Lead
 inbox — says `the DeepSeek sandbox needs full control of <folder>` with the
 one-line fix `icacls "<folder>" /grant *<SID>:(OI)(CI)F`. A member never repairs
 ACLs itself: it reports the exact error to the Lead.
+
+**DeepSeek members in their sandbox.** On Windows a DeepSeek member's shell runs
+in DeepSeek's sandbox at Low integrity. It reads Zerus state but may not write
+it, and the session host keeps it out (a sandboxed caller hears
+`this process runs in a sandbox below the session host's integrity level`).
+Such a member still does its work through its own folder, where its sandbox
+writes, and the team worker applies what it leaves there on its next tick
+(about three seconds):
+
+- `hgs team report`, `ask`, `commit` and `hgs team run` wait there as before.
+- `hgs run` waits there too. The worker records the run as the member
+  session's work, so the session is Building, and starts it at Low integrity
+  with its temporary files in `<folder>/.zerus-team/tmp`: a member's run never
+  runs above its sandbox. `--wait` and `--list` read the run's record as for
+  any session.
+- `hgs ls` and `hgs inspect <session>` (with `--skip-processes` or
+  `--after N`) are answered by the worker, which runs the read outside the
+  sandbox and leaves the output in the folder. These reads write, send, start
+  and attach nothing, and the sandbox already reads every file they read.
+  Every other command, such as `send`, `launch` or `attach`, stays closed to a
+  sandbox.
+
+This needs a running team: a sandboxed DeepSeek session outside a team is told
+so. The worker runs a member's `hgs run` at Low integrity but outside
+DeepSeek's own confinement, so the run, like any Low process, may use the
+network and named pipes of Low processes.
+
+A DeepSeek member's own folder is a clone: a worktree's git metadata lives in
+the main checkout's `.git`, which its sandbox may not write. A worktree asked
+for it (by a role, a template, the New team form or the worktree policy, which
+a clone also meets) becomes a clone; an adopted session keeps its folder.
 
 **DeepSeek session-log upload.** Zerus starts and resumes DeepSeek sessions with
 the official session-log upload off, unless the owner turns the block off in

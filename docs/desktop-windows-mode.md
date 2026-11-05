@@ -150,6 +150,80 @@ itself. Ordinary same-mode selection still does nothing. Native Windows PC
 qualification remains outstanding; portable tests and Linux actor models do not
 qualify the Task Scheduler or installed Settings path.
 
+## Explicit original-instance refresh controller
+
+`desktop-registration-refresh-v1` adds a distinct same-mode refresh for an
+already retiring Windows service whose selected CLI was replaced. Ordinary
+same-mode selection and `registration install --json` keep their existing
+behavior. This operation never toggles mode, updates the unchanged definition,
+reinstalls, revokes, Rearms or creates a Grant. The Settings call site and
+installed PC qualification are separate follow-ups.
+
+The closed command forms are:
+
+```text
+hgs desktop registration refresh-info --json
+hgs desktop registration refresh --json --request-id NEW_UUID --scope TARGET_JSON
+hgs desktop registration refresh-result --json --request-id SAME_UUID
+hgs desktop registration cancel-refresh --json --request-id SAME_UUID
+```
+
+`TARGET_JSON` is the bounded `target` object from `refresh-info`, retained
+without changing its original/configuration/selection/image/Grant fields. It
+is selection data, not permission. The operation captures its own actual native
+Caller and checked current Service Grant, and requires the same original COM
+instance, process birth, pipe epoch/generation, images and owned definition.
+A changed target refuses before a new reservation. The caller is the existing
+genuine installed/portable frontend or the maintained foreground classic-console
+route; JSON roles and Windows Terminal/ConPTY do not replace that proof.
+
+The primary mode journal holds the distinct refresh scope and original UUID in
+its single pending slot. Before any manager effect it reserves bytes for the
+largest completion, review barrier and archive. A separate private anchor outside
+the state loss domain keeps a missing/replaced journal from becoming a fresh
+request. An unavailable anchor, an overlapping layout, an eight-archive bound
+or the shared 8 KiB record limit refuses. Keep both records and the selected
+mode; inspect the original result. There is no maintained history rollover or
+loss-reset operation.
+
+The controller keeps the original Caller, Grant/database/Origin, both image
+pins and handoff exclusion. Runtime, owner loans, pipe connections and durable
+operations must drain on the authenticated original endpoint before Stop.
+The status observer reads through real EOF. The original selection is checked
+before StopOffered, at the writer's entry/pre-persist/post-persist callbacks and
+again before the original COM Stop; the existing Stop deadline is never renewed.
+Only physical exit and original GUID disappearance permit one RunEx of the
+unchanged selected definition. Its first native process/COM objects, exact
+loaded replacement and endpoint stay retained through readiness and final save.
+
+An existing UUID is result-only, including Prepared, Held and lost replies. No
+result read adopts a runtime, repeats an effect, or converts readiness into old
+completion. A pre-manager cancellation changes only that original's metadata,
+with the existing native caller/configuration/passive-Grant checks. After an
+effect was offered, uncertainty stays Unknown and uses the original Review/boot
+barrier; no phase is downgraded. Refresh receipts neither rewrite historical
+mode-choice receipts nor open the consumer's business or scheduling gates.
+
+A failed final fence, directory sync or reply can occur after the settled
+refresh receipt is published. Refresh error recovery reads that SAME UUID and
+the independent loss evidence: it returns the exact read-only receipt or
+Unknown, with uncertain effect fields. An empty pending slot never proves that
+no Stop/RunEx occurred. A bounded timing trace records phase/operation wall and
+monotonic timestamps, remaining budget and retained-process exit observations;
+these diagnostics are never admission or cleanup evidence. Exit polling
+validates the current owned definition once and uses that same checked task
+for GUID disappearance, under the original Stop deadline.
+
+This first controller supports a current, identity-current Service Grant only.
+Revoked, blocked, changed-origin and unsupported actors are explicitly refused;
+refresh cannot obtain a Grant through retirement. In particular, it does not
+fix the revoked-service return-to-Next case in either GUI mode, including the
+default native-takeover path (zerus-5wmh.66.3.40.3.4). An IPC-only blocked-state
+transition needs its own native admission/startup proof and G1 review. Native
+Task Scheduler/Caller tests on a disposable runner, portable transition models
+and Linux actor controls remain separate from installed Settings and the
+owner-gated Fast Startup/Restart qualification.
+
 ## Original task and rollback custody
 
 Each transition checks the actual owned Task Scheduler definition, principal,

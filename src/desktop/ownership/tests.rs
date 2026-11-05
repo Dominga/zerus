@@ -932,6 +932,7 @@ fn registration_refresh_keeps_the_same_grant_but_refuses_revoke_and_rearm() {
     let request = f.request(Action::Grant);
     f.apply(request);
     let original = RegistrationGrant::capture(&f.location).unwrap().unwrap();
+    let binding = original.refresh_binding(&f.location).unwrap();
     let before = f.current();
     let requests = f.count();
     for _ in 0..3 {
@@ -943,8 +944,10 @@ fn registration_refresh_keeps_the_same_grant_but_refuses_revoke_and_rearm() {
     let request = f.request(Action::Grant);
     f.apply(request);
     original.check(&f.location).unwrap();
+    assert_eq!(original.refresh_binding(&f.location).unwrap(), binding);
     invalidate(&f.store.db).unwrap();
     assert!(original.check(&f.location).is_err());
+    assert!(original.refresh_binding(&f.location).is_err());
     assert!(RegistrationGrant::capture(&f.location).unwrap().is_none());
     let request = f.request(Action::Rearm);
     f.apply(request);
@@ -959,11 +962,9 @@ fn registration_refresh_keeps_the_same_grant_but_refuses_revoke_and_rearm() {
         original.check(&f.location).is_err(),
         "new Rearm replaced the original Grant"
     );
-    RegistrationGrant::capture(&f.location)
-        .unwrap()
-        .unwrap()
-        .check(&f.location)
-        .unwrap();
+    let replacement = RegistrationGrant::capture(&f.location).unwrap().unwrap();
+    replacement.check(&f.location).unwrap();
+    assert_ne!(replacement.refresh_binding(&f.location).unwrap(), binding);
 }
 
 #[test]

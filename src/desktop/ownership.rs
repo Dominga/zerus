@@ -222,6 +222,16 @@ impl RegistrationGrant {
     pub(super) fn incarnation(&self) -> (String, String) {
         (self.original.journal.clone(), self.original.owner_epoch.clone())
     }
+    /// History fence for an original refresh, never a reconstructed Grant.
+    /// Recheck the SAME checked database/incarnation/Origin before copying it.
+    pub(super) fn refresh_binding(&self, location: &Location) -> Result<String> {
+        use sha2::{Digest, Sha256};
+        self.check(location)?;
+        let bytes = serde_json::to_vec(&(1u8, self.database.identity()?,
+            &self.original.configuration, &self.original.journal,
+            &self.original.owner_epoch, &self.original.origin))?;
+        Ok(format!("{:x}", Sha256::digest(bytes)))
+    }
     pub(super) fn capture(location: &Location) -> Result<Option<Self>> {
         let (row, database) = registration_row(location)?;
         if row.status.state != State::Service

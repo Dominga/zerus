@@ -11,6 +11,7 @@ use crate::{
 };
 use policy::mode::{Budget, Mode, Phase, Record, RECORD_BYTES};
 mod recovery;
+mod refresh;
 pub(super) mod stop;
 mod boot;
 mod review;
@@ -116,6 +117,9 @@ pub(in crate::desktop::windows_registration) fn command(
     reply["operation"] = request["operation"].clone();
     reply["requested_mode"] = request["mode"].clone();
     if reply["error"].is_string() {
+        if matches!(request["operation"].as_str(), Some("refresh" | "refresh_cancel")) {
+            return Ok(refresh::after_error(config, location, &request, reply["error"].as_str().expect("error")));
+        }
         reply["configuration"] = location.configuration.clone().into();
         reply["task_name"] = plan["task_name"].clone();
         reply["ok"] = false.into();
@@ -137,14 +141,27 @@ pub(in crate::desktop::windows_registration) fn command(
         .remove("pending")
         .unwrap_or(Value::Null);
     reply["ok"] = pending.is_null().into();
-    reply["outcome"] = if request["operation"] == "review" { "unknown" } else if pending.is_null() {
-        "settled"
-    } else {
-        "pending"
+    if !reply["refresh_abi"].is_string() {
+        reply["outcome"] = if request["operation"] == "review" {
+            "unknown"
+        } else if pending.is_null() {
+            "settled"
+        } else {
+            "pending"
+        }.into();
+    } else if reply["outcome"].is_null() {
+        reply["outcome"] = if request["operation"] == "refresh_cancel" {
+            "refused"
+        } else {
+            "observed"
+        }.into();
     }
-    .into();
     reply["pending_transition"] = pending;
     Ok(reply)
+}
+
+pub(in crate::desktop::windows_registration) fn refresh_result(config: &Config, location: &Location, id: &str) -> Result<Value> {
+    refresh::result(config,location,id)
 }
 
 fn plans(config: &Config, location: &Location, sid: &str) -> Result<(Plan, Plan)> {
@@ -247,7 +264,8 @@ fn journal(
 ) -> Result<(Record, Option<String>)> {
     let _lock = Lock::acquire(sid)?;
     let record = load(location, plan)?;
-    let lost = record.first_lost(read_anchor(config, location, plan)?.as_deref());
+    let lost = record.first_lost(read_anchor(config, location, plan)?.as_deref())
+        .or(refresh::lost(config, location, plan, &record)?);
     Ok((record, lost))
 }
 /// Durable before the record save that reserves this first choice.
@@ -390,7 +408,6 @@ impl Fence<'_> {
             "Mode transition deadline reached; retain its original UUID."
         );
         self.admission.check()?;
-        if let Some(grant) = &self.grant { grant.check(self.location)?; }
         let held = platform::FileIdentity::of(&self.source)?;
         let (_, current) = instances::selected_image(self.image)?;
         ensure!(
@@ -415,7 +432,13 @@ impl Fence<'_> {
                 }
             }
         }
-        if self.background {
+        // The retained guard checks the SAME database/Origin/incarnation and
+        // current Service state. Do that stronger read at final admission;
+        // reading it earlier AND then rereading a Boolean duplicated database
+        // I/O at every publication/Stop fence without adding a condition.
+        if let Some(grant) = &self.grant {
+            grant.check(self.location)?;
+        } else if self.background {
             ensure!(
                 ownership::registration_granted(self.location)?,
                 "Grant or Rearm from Zerus Settings is required before background mode."
@@ -812,7 +835,7 @@ fn operation(args: &[String]) -> Result<Value> {
     let request = policy::read_frame(&mut std::io::stdin().lock(), length)?;
     let op = request["operation"].as_str().unwrap_or("");
     ensure!(
-        request["schema"] == 1 && matches!(op, "switch" | "cancel_rollback" | "review"),
+        request["schema"] == 1 && matches!(op, "switch" | "cancel_rollback" | "review" | "refresh" | "refresh_info" | "refresh_cancel"),
         "Unsupported mode request."
     );
     let keys = request.as_object().context("Invalid mode request.")?;
@@ -821,10 +844,13 @@ fn operation(args: &[String]) -> Result<Value> {
     let first_form = op == "switch" && keys.len() == 4 && request["mode"] == "background"
         && request["request_id"].is_string() && !keys.contains_key("after_review");
     ensure!(
-        (keys.len() == 3 || first_form || (op == "switch" && keys.len() == 5
+        ((op == "refresh" && keys.len() == 4 && keys.contains_key("target") && keys.contains_key("request_id"))
+            || (keys.len() == 3 && op != "refresh") || first_form || (op == "switch" && keys.len() == 5
             && request["after_review"].is_string() && request["request_id"].is_string()))
             && if op == "switch" {
                 keys.contains_key("mode")
+            } else if op == "refresh_info" {
+                keys.contains_key("configuration")
             } else {
                 keys.contains_key("request_id")
             },
@@ -847,10 +873,41 @@ fn operation(args: &[String]) -> Result<Value> {
     let _lock = Lock::acquire(&sid)?;
     // No mode operation runs while the journal and its independent
     // first-choice anchor disagree: lost is never "never written".
-    if let Some(lost) = load(&location, &passive)?
-        .first_lost(read_anchor(&config, &location, &passive)?.as_deref())
+    let checked_record = load(&location, &passive)?;
+    if let Some(lost) = checked_record.first_lost(read_anchor(&config, &location, &passive)?.as_deref())
+        .or(refresh::lost(&config, &location, &passive, &checked_record)?)
     {
         anyhow::bail!("The desktop mode journal no longer shows first choice {lost}; keep both records and inspect status. No mode operation is admitted.");
+    }
+    if op == "refresh_cancel" {
+        let id = request["request_id"].as_str().context("Original refresh UUID required.")?;
+        let mut record = load(&location, &passive)?;
+        ensure!(record.pending.as_ref().is_some_and(|p|p.request_id == id && p.refresh.is_some()),
+            "Original pre-manager refresh is absent; lookup never adopts another operation.");
+        let needs_grant = record.cancellation_requires_grant(id)?;
+        let mut check = || {
+            admission.check()?;
+            if needs_grant { ensure!(ownership::registration_granted(&location)?,
+                "Current Service Grant required for this passive metadata cancellation."); }
+            Ok(())
+        };
+        check()?;
+        record.cancel(id)?;
+        save(&location,&passive,&record,&mut check)?;
+        return Ok(json!({"abi":MODE_ABI,"refresh_abi":policy::mode::refresh::ABI,"schema":1,
+            "configuration":location.configuration,"request_id":id,"pending":null,
+            "receipt":record.refreshes.iter().find(|r|r.request==id),
+            "changed":true,"manager_changed":false,"authority_changed":false}));
+    }
+    // A repeated refresh is ONLY its original result, before any COM/current
+    // instance acquisition. Even Prepared has no continuation on this frame.
+    if op == "refresh" {
+        let id = request["request_id"].as_str().context("Original refresh UUID required.")?;
+        let target = policy::mode::refresh::Target::decode(&serde_json::to_vec(&request["target"])?)?;
+        ensure!(target.configuration == location.configuration, "Refresh configuration changed.");
+        if checked_record.refreshes.iter().any(|r|r.request == id) {
+            return Ok(refresh::view(&location,&checked_record,id));
+        }
     }
     let mut offered_cancel = None;
     if op == "cancel_rollback" {
@@ -899,6 +956,19 @@ fn operation(args: &[String]) -> Result<Value> {
         folder: unsafe { scheduler.GetFolder(&BSTR::from("\\")) }?,
         scheduler: scheduler.clone(),
     };
+    if op == "refresh_info" {
+        ensure!(request["configuration"] == location.configuration, "Refresh configuration changed.");
+        return refresh::info(Runtime { config:&config,location:&location,native:&mut native,
+            scheduler:&scheduler,admission:&admission,passive:&passive,background:&background });
+    }
+    if op == "refresh" {
+        let id = request["request_id"].as_str().context("Original refresh UUID required.")?;
+        ensure!(uuid::Uuid::parse_str(id).is_ok_and(|u| !u.is_nil() && u.to_string() == id),
+            "Invalid original refresh UUID.");
+        let target = policy::mode::refresh::Target::decode(&serde_json::to_vec(&request["target"])?)?;
+        return refresh::effect(Runtime { config:&config,location:&location,native:&mut native,
+            scheduler:&scheduler,admission:&admission,passive:&passive,background:&background },id,target);
+    }
     if op == "review" {
         let id = request["request_id"].as_str().context("Original transition UUID required.")?;
         return review::command(recovery::Inputs { config: &config, location: &location,

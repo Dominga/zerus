@@ -40,7 +40,7 @@ export const accountFilterSet = createMemo(() => new Set(accountFilter()));
 export const [folderFilter, setFolderFilter] = createSignal<FolderScope>();
 export const [multi, setMulti] = createStore<Record<string, boolean>>({});
 export const [peek, setPeek] = createSignal(false);
-export type DetailTab = "activity" | "terminal" | "native" | "processes" | "taskview";
+export type DetailTab = "activity" | "terminal" | "native" | "processes" | "taskview" | "team";
 export const [detailTab, setDetailTab] = createSignal<DetailTab>("activity");
 export const [subagentOpen, setSubagentOpen] = createSignal<string | undefined>();
 export const [search, setSearch] = createSignal(params.get("q") ?? "");

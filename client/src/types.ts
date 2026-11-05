@@ -219,6 +219,8 @@ export interface Batch {
   processes_view?: ProcessesView;
   /** Notices and Terminal requests that arrived after their call, at most 16. */
   composer_events?: ComposerEvent[];
+  /** The Teams views that changed (core batch.rs `TeamsOut`), at most one per computer and key. */
+  teams?: TeamsOut[];
 }
 
 /** A row of the Processes tab (processes.rs `RowView`). */
@@ -275,7 +277,7 @@ export const emptyBatch = (): Batch => ({ upserts: [], removes: [], replaces: []
 /** A batch with nothing to apply. A composer view or a draft key set is content: Rust sends each once. */
 export const isEmptyBatch = (b: Batch) =>
   !b.upserts.length && !b.removes.length && !b.replaces.length && !b.computers.length && !b.machines?.length && !b.activity.length
-  && !b.desktop_service && !b.tasks?.length && !b.groups?.length && !b.grouping && !b.processes_view && !b.composer && !b.draft_keys && !b.composer_events?.length;
+  && !b.desktop_service && !b.tasks?.length && !b.groups?.length && !b.grouping && !b.processes_view && !b.composer && !b.draft_keys && !b.composer_events?.length && !b.teams?.length;
 
 /** One Activity event as `inspect` returns it; unknown fields are kept. */
 export interface ActivityEvent {
@@ -898,3 +900,65 @@ export const emptyUpdatesView = (): UpdatesView => ({
   version: "",
   quiet: false,
 });
+
+// ---------------------------------------------------------------------------
+// Teams (client/core/src/teams/view.rs): the projected views the Team tab
+// shows. The webview never reads an hgs team reply itself.
+
+/** One Teams view of a computer: `list`, `waiting`, `team:<id>`, `feed:<id>`, `inbox:<id>`... */
+export interface TeamsOut {
+  computer: ComputerId;
+  key: string;
+  /** The view's name, `failed` ({code, message}; the view keeps what it showed) or `ended` (no longer followed). */
+  kind: string;
+  payload: unknown;
+}
+
+/** A member's session; `host` is empty on the team's own computer. */
+export interface TeamSessionView { host: string; name: string; run_id: string; conversation_id: string }
+
+export interface TeamListedMember { id: string; role: string; agent: string; state: string; lead: boolean; session: TeamSessionView | null }
+
+export interface TeamSummary {
+  id: string; name: string; status: string; project: string; folder: string; plan_mode: string; lead: string;
+  members: TeamListedMember[]; tasks: number; accepted: number; submitted: number; in_review: number; in_test: number;
+  attention: number; open_proposals: number; waiting_for_lead: boolean; pending_phase: number | null; updated: number; revision: number;
+}
+
+export interface TeamList { teams: TeamSummary[]; truncated: boolean }
+
+export interface TeamMemberView {
+  id: string; role: string; agent: string; model: string; effort: string; account: string; computer: string; folder: string;
+  /** `not_created`, `active`, `paused`, `removed`... */
+  state: string;
+  /** What its session does now (`busy`, `idle`...), and the hand-off phase (`working`, `asking`...). */
+  activity: string; phase: string; error: string; lead: boolean; session: TeamSessionView | null;
+  /** Seen live at the last listing; null: never seen. */
+  live: boolean | null; stuck: boolean; question: boolean;
+  /** Its open task first, then the tasks returned to it. */
+  queue: number[]; minutes_without_progress: number; host_shared: boolean;
+}
+
+export interface TeamTaskView {
+  id: number; title: string; status: string; assignee: string; phase: number; deps: { task: number; hard: boolean }[];
+  estimate_minutes: number; attempts: number;
+  /** The newest attempt's state (`delivering`, `delivered`, `unconfirmed`, `reported`...), empty without one. */
+  attempt_state: string; decided_by: string; pinned: boolean; output: string[]; waits: string;
+}
+
+export interface TeamPhaseView {
+  n: number; title: string; state: string; status: string; done: number; total: number; barrier: boolean; auto: boolean;
+  acceptance: string; paused: boolean; health: string;
+}
+
+export interface TeamFinding { kind: string; text: string; task: number | null; member: string }
+
+export interface TeamView {
+  id: string; name: string; status: string; project: string; folder: string; goal: string; plan_mode: string; lead: string;
+  revision: number; created: number; updated: number; waiting_for_lead: boolean; pending_phase: number | null;
+  settings: Record<string, unknown>; members: TeamMemberView[]; tasks: TeamTaskView[]; phases: TeamPhaseView[];
+  proposals: { id: string; kind: string; by: string; at: number; reason: string; hash: string; summary: string; lines: string[] }[];
+  attention: unknown[]; validation: { errors: TeamFinding[]; warnings: TeamFinding[] };
+  health: { critical_path: number; parallelism: number; warnings: string[] };
+  ready: number[]; cycle: number[]; draft: { revision: number; unseen: string[]; owner_edited: string[] } | null; truncated: boolean;
+}

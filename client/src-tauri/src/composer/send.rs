@@ -1539,17 +1539,22 @@ impl Composers {
                 detail: "The send ended abnormally.".into(),
             },
         };
+        self.delivered(&delivery, &outcome, service);
+    }
+
+    /// Records the end of `delivery`'s one call in its row and its draft;
+    /// `service`: the desktop service's own line, shown as is.
+    pub(super) fn delivered(&self, delivery: &Delivery, outcome: &Outcome, service: bool) {
+        let (key, request_id) = (&delivery.key, &delivery.request_id);
         let detail = if service {
-            self.lock()
-                .local
-                .finished_as_is(&key, &request_id, &outcome)
+            self.lock().local.finished_as_is(key, request_id, outcome)
         } else {
-            self.lock().local.finished(&key, &request_id, &outcome)
+            self.lock().local.finished(key, request_id, outcome)
         };
         let ok = matches!(outcome, Outcome::Done { .. });
         let uncertain = matches!(outcome, Outcome::Uncertain { .. });
-        self.push_finished(&request_id, ok, uncertain);
-        self.ended(&delivery, ok, &detail, uncertain);
+        self.push_finished(request_id, ok, uncertain);
+        self.ended(delivery, ok, &detail, uncertain);
         // `finishMessage`: the open session is read again (`inspect()`).
         if self.lock().open_key.as_deref() == Some(key.as_str()) {
             self.refresh_details();
@@ -2506,7 +2511,7 @@ impl Composers {
             Some(retry) => message_digest(&retry.text, &retry.attachments),
             None => message_digest(&composer.draft.text, &composer.draft.attachments),
         };
-        let checkpoint = Checkpoint::reserve(Intent {
+        let intent = Intent {
             kind: if start {
                 Kind::ResumeToSend
             } else {
@@ -2524,7 +2529,15 @@ impl Composers {
             }),
             retry_of: retry.map(|r| r.id),
             consent: false,
-        });
+        };
+        // A compaction also reserves the send it waits for (version 2), so
+        // the desktop service can take the whole compact-to-send; the
+        // direct path reserves its send again when it sends.
+        let checkpoint = if start {
+            Checkpoint::reserve(intent)
+        } else {
+            Checkpoint::reserve_compact_to_send(intent).expect("a compaction's checkpoint")
+        };
         let request_id = checkpoint.request_id.clone();
         composer.checkpoint = Some(checkpoint);
         let stored = composer.stored();
@@ -2689,6 +2702,12 @@ impl Composers {
                 if !id.is_empty() {
                     pending.call = Call::Running;
                 }
+            }
+            // The desktop service takes the whole compact-to-send, decided
+            // before any offer; once offered, nothing falls back.
+            if !start && !id.is_empty() && me.hand_compaction(&owned, revision) {
+                me.changed();
+                return;
             }
             let dispatch = &me.0.deps.dispatch;
             let request = id.clone();
@@ -2867,7 +2886,7 @@ impl Composers {
     /// identity: the draft, if it still holds exactly that identity, shows
     /// its end as a plain error again. An uncertain one leaves it held until
     /// the user allows a retry.
-    fn settle_orphan(&self, hub: &mut Hub, request: &str, definite: bool) {
+    pub(super) fn settle_orphan(&self, hub: &mut Hub, request: &str, definite: bool) {
         let Some(at) = hub.orphans.iter().position(|o| o.request == request) else {
             return;
         };
@@ -2897,7 +2916,7 @@ impl Composers {
     /// (4531, 4768), and the composer ends only while it still waits for
     /// this one, so a late cancel never ends a newer continuation or the
     /// delivery that followed.
-    fn cancel(&self, key: &str, start: bool, revision: u64, text: &str) {
+    pub(super) fn cancel(&self, key: &str, start: bool, revision: u64, text: &str) {
         let pending = {
             let mut hub = self.lock();
             let Some(pending) = take_pending(&mut hub, key, start, revision) else {

@@ -31,7 +31,7 @@ pub mod queue;
 pub mod saved;
 pub mod send;
 #[cfg(any(target_os = "linux", target_os = "macos"))]
-pub use handed::DeferredRoute;
+pub use handed::{CompactRoute, DeferredRoute};
 #[cfg(any(target_os = "linux", target_os = "macos"))]
 pub use questions::AnswerRoute;
 #[cfg(feature = "media")]
@@ -354,6 +354,9 @@ pub struct ComposerView {
     /// "Cancel send": a start or a compaction waits to send this draft
     /// (`SessionsWindow.cpp:3763`).
     pub cancel_send: bool,
+    /// Cancel send stays shown but locked, with its reason as the title:
+    /// the desktop service holds this "Compact and continue".
+    pub cancel_locked: bool,
     /// A compaction waits to send this draft (compact-to-send).
     pub compacting: bool,
     /// Clear session and the cache popover's Clear context (`clearContext`).
@@ -658,6 +661,9 @@ pub(crate) struct Shared {
     opened: Condvar,
     /// The selected desktop service's deferred send route, if any.
     pub(crate) deferred: Mutex<Option<Arc<handed::DeferredRoute>>>,
+    /// The selected service's compact-to-send route: Linux and macOS in
+    /// desktop-service mode only.
+    pub(crate) compact: Mutex<Option<Arc<handed::CompactRoute>>>,
     /// Its deferred answer route, if any.
     pub(crate) answer_route: Mutex<Option<Arc<questions::AnswerRoute>>>,
     /// The ticker sleeps (tests wait for it).
@@ -714,6 +720,7 @@ impl Composers {
             changes: AtomicU64::new(0),
             opened: Condvar::new(),
             deferred: Mutex::new(None),
+            compact: Mutex::new(None),
             answer_route: Mutex::new(None),
             #[cfg(test)]
             parked: Default::default(),
@@ -1668,7 +1675,8 @@ impl Composers {
             error.clone()
         } else if let Some(waiting) = &composer.waiting {
             waiting.clone()
-        } else if composer.error || composer.uncertain {
+        } else if composer.error || composer.uncertain || composer.handed.is_some() {
+            // A held original shows the service's line from its hand-over.
             composer.notice.clone()
         } else {
             String::new()
@@ -1694,6 +1702,10 @@ impl Composers {
             || (status == session.session_status && session.session_status_error);
         // Qt's `locked` includes the session status's lock (1149).
         let locked = composer.busy() || !composer.loaded || session.session_blocks_input;
+        let compact_handed = composer
+            .handed
+            .as_ref()
+            .is_some_and(handed::Handed::compacts);
         Some(ComposerView {
             handle: composer.handle,
             key: composer.key.clone(),
@@ -1768,7 +1780,9 @@ impl Composers {
             context: session.context,
             local: hub.local.rows(&composer.key).to_vec(),
             cancel_send: hub.compacts.contains_key(key)
-                || hub.start.as_ref().is_some_and(|(p, _)| p.key == key),
+                || hub.start.as_ref().is_some_and(|(p, _)| p.key == key)
+                || compact_handed,
+            cancel_locked: compact_handed,
             compacting: hub.compacts.contains_key(key),
             clear: session.clear,
             question,

@@ -1018,6 +1018,31 @@ fn launch(context: tauri::Context<tauri::Wry>, startup: Startup) {
                             desktop_service::deferred_send::check(service, plan)
                         }),
                     });
+                    // "Compact and continue" the service takes whole
+                    // (compact_to_send), the same way; every other one stays
+                    // direct.
+                    let (compacting, checking) = (app.handle().clone(), app.handle().clone());
+                    composers.set_compact(composer::CompactRoute {
+                        offer: std::sync::Arc::new(
+                            move |session, checkpoint, compaction, stdin, handing| {
+                                let service =
+                                    compacting.state::<commands::AppState>().desktop_service();
+                                desktop_service::compact_to_send::call(
+                                    service,
+                                    session,
+                                    checkpoint,
+                                    compaction,
+                                    stdin,
+                                    handing,
+                                    &std::sync::atomic::AtomicBool::new(false),
+                                )
+                            },
+                        ),
+                        check: std::sync::Arc::new(move |plan| {
+                            let service = checking.state::<commands::AppState>().desktop_service();
+                            desktop_service::compact_to_send::check(service, plan)
+                        }),
+                    });
                     // Question answers the service takes (deferred_answer),
                     // the same way; every other answer stays direct.
                     let (answering, checking) = (app.handle().clone(), app.handle().clone());

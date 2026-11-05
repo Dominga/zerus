@@ -193,6 +193,10 @@ thread_local! {
     pub(in crate::desktop) static SPAWNED: std::cell::Cell<Option<u32>> = const { std::cell::Cell::new(None) };
     /// Runs once on this thread after the final check, right before spawn.
     pub(in crate::desktop) static AFTER_FINAL_CHECK: std::cell::RefCell<Option<Box<dyn FnOnce()>>> = const { std::cell::RefCell::new(None) };
+    /// Runs once on this thread right after the spawn, before any input.
+    pub(in crate::desktop) static AFTER_SPAWN: std::cell::RefCell<Option<Box<dyn FnOnce()>>> = const { std::cell::RefCell::new(None) };
+    /// How many input bytes the last child on this thread was offered.
+    pub(in crate::desktop) static OFFERED: std::cell::Cell<Option<usize>> = const { std::cell::Cell::new(None) };
 }
 
 /// An original output pipe.
@@ -327,6 +331,11 @@ fn start(
                 if let Some(hook) = AFTER_FINAL_CHECK.with(|hook| hook.borrow_mut().take()) {
                     hook();
                 }
+                // The never-renewed deadline, last before the spawn: a budget
+                // the checks or the wait for this turn spent starts nothing.
+                if Instant::now() >= deadline {
+                    return Err(std::io::ErrorKind::TimedOut.into());
+                }
                 command.spawn()
             })
     };
@@ -337,6 +346,10 @@ fn start(
     };
     #[cfg(test)]
     SPAWNED.with(|spawned| spawned.set(Some(child.id())));
+    #[cfg(test)]
+    if let Some(hook) = AFTER_SPAWN.with(|hook| hook.borrow_mut().take()) {
+        hook();
+    }
     // The frozen stdin, written without blocking inside the same drain loop,
     // so neither side can block the other and no writer outlives this call.
     let mut chunk = vec![0u8; if input.is_some() { 64 << 10 } else { 0 }];
@@ -372,7 +385,10 @@ fn start(
     // A pipe that cannot be read is never taken as its end.
     let mut unreadable = false;
     let ended = loop {
-        if let (Some(pipe), Some(input)) = (stdin.as_mut(), input.as_ref()) {
+        // No input byte is offered once the deadline passed: the child that
+        // exists is then killed below, and its result stays Unknown.
+        let offering = Instant::now() < deadline;
+        if let (Some(pipe), Some(input), true) = (stdin.as_mut(), input.as_ref(), offering) {
             loop {
                 if written == input.len() {
                     // All of it: close the input so the child sees its end.
@@ -501,6 +517,8 @@ fn start(
         std::thread::sleep(Duration::from_millis(5));
     };
     drop(stdin);
+    #[cfg(test)]
+    OFFERED.with(|offered| offered.set(Some(written)));
     // A descendant may still hold an original output pipe: with a guard, it
     // keeps that guard until the pipe's real end, separately from the result
     // returned here; without one, the pipe closes now.
@@ -514,5 +532,104 @@ fn start(
             Ended::Unknown(unwritten)
         }
         ended => ended,
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    const TEST_CODES: Codes = Codes {
+        unobserved: "test_unobserved",
+        unreadable: "test_unreadable",
+        signalled: "test_signalled",
+        timed_out: "test_timed_out",
+        retained: "test_retained",
+    };
+    fn spec(input: &[u8]) -> Spec<'_> {
+        Spec {
+            custody_env: "HGS_TEST_ORIGINAL_CUSTODY_FD",
+            input: Input::Frozen {
+                stdin: Stdin::Bytes(input),
+                unwritten: "test_unwritten",
+            },
+            output: Output::Stdout {
+                bytes: 4096,
+                too_large: "test_too_large",
+            },
+            codes: TEST_CODES,
+            retain: None,
+        }
+    }
+    fn custody() -> Arc<InheritedLock> {
+        InheritedLock::try_lock(tempfile::tempfile().unwrap()).unwrap()
+    }
+    fn cat(deadline: Instant, check: impl FnOnce(&mut Command) -> std::io::Result<()>) -> Ended {
+        SPAWNED.with(|spawned| spawned.set(None));
+        OFFERED.with(|offered| offered.set(None));
+        run(
+            Path::new("/bin/cat"),
+            &[],
+            spec(b"private input"),
+            &custody(),
+            deadline,
+            check,
+        )
+    }
+
+    /// desktop-u's G1 on #1433: the never-renewed deadline is checked last
+    /// before the spawn, so a spent budget never creates a child.
+    #[test]
+    fn a_spent_deadline_starts_no_child() {
+        // Already expired at the call.
+        let ended = cat(Instant::now() - Duration::from_millis(1), |_| Ok(()));
+        assert_eq!(ended, Ended::NotStarted);
+        assert_eq!(SPAWNED.with(|spawned| spawned.take()), None);
+        // Spent by the last check inside the spawn turn.
+        let ended = cat(Instant::now() + Duration::from_millis(20), |_| {
+            std::thread::sleep(Duration::from_millis(60));
+            Ok(())
+        });
+        assert_eq!(ended, Ended::NotStarted);
+        assert_eq!(SPAWNED.with(|spawned| spawned.take()), None);
+        // The same for a child that holds no custody.
+        SPAWNED.with(|spawned| spawned.set(None));
+        let ended = run_unheld(
+            Path::new("/bin/cat"),
+            &[],
+            spec(b"private input"),
+            Instant::now() - Duration::from_millis(1),
+            |_| Ok(()),
+        );
+        assert_eq!(ended, Ended::NotStarted);
+        assert_eq!(SPAWNED.with(|spawned| spawned.take()), None);
+    }
+
+    /// A deadline that passes after the spawn offers no input: the child is
+    /// killed, and its result stays Unknown.
+    #[test]
+    fn no_input_is_offered_past_the_deadline() {
+        AFTER_SPAWN.with(|hook| {
+            *hook.borrow_mut() = Some(Box::new(|| std::thread::sleep(Duration::from_millis(80))))
+        });
+        let ended = cat(Instant::now() + Duration::from_millis(40), |_| Ok(()));
+        assert_eq!(ended, Ended::Unknown("test_timed_out"));
+        assert!(SPAWNED.with(|spawned| spawned.take()).is_some());
+        assert_eq!(OFFERED.with(|offered| offered.take()), Some(0));
+        assert!(AFTER_SPAWN.with(|hook| hook.borrow().is_none()));
+    }
+
+    /// Within its budget, the same child runs and reads all of its input.
+    #[test]
+    fn a_child_within_its_deadline_runs() {
+        let ended = cat(Instant::now() + Duration::from_secs(20), |_| Ok(()));
+        assert_eq!(
+            ended,
+            Ended::Exited {
+                code: 0,
+                output: b"private input".to_vec()
+            }
+        );
+        assert_eq!(OFFERED.with(|offered| offered.take()), Some(13));
     }
 }

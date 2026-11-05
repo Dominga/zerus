@@ -1162,3 +1162,47 @@ mod actor {
         assert_eq!(f.row(&original).receipt.code, "creation_interrupted");
     }
 }
+
+/// desktop-u's G1 on #1433: this kind's child runner checks the
+/// never-renewed deadline last before the spawn and before any input.
+#[cfg(any(target_os = "linux", target_os = "macos"))]
+mod spent_deadline {
+    use crate::desktop::original_child::{OFFERED, SPAWNED};
+    use std::path::Path;
+    use std::sync::Arc;
+    use std::time::{Duration, Instant};
+    use zerus_client_core::run::custody::InheritedLock;
+
+    pub(super) fn custody() -> Arc<InheritedLock> {
+        InheritedLock::try_lock(tempfile::tempfile().unwrap()).unwrap()
+    }
+    pub(super) fn cat() -> &'static Path {
+        Path::new("/bin/cat")
+    }
+    pub(super) fn clear() {
+        SPAWNED.with(|spawned| spawned.set(None));
+        OFFERED.with(|offered| offered.set(None));
+    }
+    pub(super) fn spawned() -> Option<u32> {
+        SPAWNED.with(|spawned| spawned.take())
+    }
+    pub(super) fn expired() -> Instant {
+        Instant::now() - Duration::from_millis(1)
+    }
+    pub(super) fn soon() -> Instant {
+        Instant::now() + Duration::from_secs(20)
+    }
+
+    #[test]
+    fn a_launch_child_never_starts_once_its_deadline_is_spent() {
+        use super::super::child::{run, Ended};
+        clear();
+        assert_eq!(run(cat(), &[], &custody(), expired()), Ended::NotStarted);
+        assert_eq!(spawned(), None);
+        clear();
+        assert!(matches!(
+            run(cat(), &[], &custody(), soon()),
+            Ended::Exited { code: 0, .. }
+        ));
+    }
+}

@@ -46,8 +46,10 @@ def identity(card):
 
 
 def tree(root):
-    """Every entry under `root`: its kind, mode, size, content digest and
-    modification time, so that any write, lock file or directory shows."""
+    """Every entry under `root`, the whole fixture root (HOME, configuration,
+    tmux socket, state, agent homes and wire files): its kind, mode, size,
+    content digest and modification time, so that any write, lock file or
+    directory shows."""
     entries = {}
     for directory, folders, files in os.walk(root):
         for name in folders + files:
@@ -79,9 +81,9 @@ def check(case, source):
     cards = [card for card in case.inspect()['pending_questions'] if card.get('source') == source]
     case.assertEqual(len(cards), 1, f'{source}: {cards}')
     card = cards[0]
-    before, height = tree(case.state), window_height(case)
+    before, height = tree(case.root), window_height(case)
     seen = observe(case, card['question_id'])
-    case.assertEqual(tree(case.state), before, f'{source}: the observation changed the state tree')
+    case.assertEqual(tree(case.root), before, f'{source}: the observation changed the fixture tree')
     case.assertEqual(window_height(case), height, f'{source}: the observation resized the terminal')
     case.assertEqual(seen, dict(found=True, consent_identity=identity(card)), source)
     # Another question, run or conversation is never found.
@@ -89,7 +91,7 @@ def check(case, source):
     case.assertEqual(observe(case, 'question-elsewhere'), absent)
     case.assertEqual(observe(case, card['question_id'], expected_run_id=str(uuid.uuid4())), absent)
     case.assertEqual(observe(case, card['question_id'], expected_conversation_id='conversation-elsewhere'), absent)
-    case.assertEqual(tree(case.state), before)
+    case.assertEqual(tree(case.root), before)
 
 
 def observing(name, base, source, prepare=None):
@@ -270,9 +272,9 @@ class DirectSource(test_questions.Questions):
                        tool_input=dict(questions=self.items)))
         card = self.inspect()['pending_questions'][0]
         self.assertEqual(card['source'], 'hook')
-        before = tree(self.state)
+        before = tree(self.root)
         self.assertEqual(observe(self, card['question_id']), dict(found=False, consent_identity=None))
-        self.assertEqual(tree(self.state), before)
+        self.assertEqual(tree(self.root), before)
 
 
     def test_a_session_that_cannot_answer_is_never_observed(self):
@@ -288,9 +290,9 @@ class DirectSource(test_questions.Questions):
             self.record.update(update)
             self.write_record()
             try:
-                before = tree(self.state)
+                before = tree(self.root)
                 self.assertEqual(observe(self, question_id), dict(found=False, consent_identity=None), update)
-                self.assertEqual(tree(self.state), before)
+                self.assertEqual(tree(self.root), before)
             finally:
                 self.record.clear()
                 self.record.update(original)
@@ -329,11 +331,11 @@ class KimiClippedPanel(unittest.TestCase):
         self.tmux('resize-window', '-t', '=' + self.name + ':', '-y', '10')
         os.kill(self.record['pid'], signal.SIGUSR1)
         self.wait_for(lambda: window_height(self) == '10')
-        before, height = tree(self.state), window_height(self)
+        before, height = tree(self.root), window_height(self)
         seen = observe(self, 'kimi-trust:' + 'a' * 64)
         self.assertEqual(seen, dict(found=False, consent_identity=None))
         self.assertEqual(window_height(self), height, 'the observation fitted the panel')
-        self.assertEqual(tree(self.state), before)
+        self.assertEqual(tree(self.root), before)
         # A complete panel again, as a fit leaves it: both agree, and
         # observing still writes nothing.
         self.tmux('resize-window', '-t', '=' + self.name + ':', '-y', '30')

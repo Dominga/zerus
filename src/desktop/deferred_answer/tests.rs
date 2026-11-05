@@ -2247,3 +2247,79 @@ os._exit(0)"#;
         assert_eq!(f.row(&original).receipt.phase, Phase::Recorded);
     }
 }
+
+/// desktop-u's G1 on #1433: this kind's child runner checks the
+/// never-renewed deadline last before the spawn and before any input.
+#[cfg(any(target_os = "linux", target_os = "macos"))]
+mod spent_deadline {
+    use crate::desktop::original_child::{OFFERED, SPAWNED};
+    use std::path::Path;
+    use std::sync::Arc;
+    use std::time::{Duration, Instant};
+    use zerus_client_core::run::custody::InheritedLock;
+
+    pub(super) fn custody() -> Arc<InheritedLock> {
+        InheritedLock::try_lock(tempfile::tempfile().unwrap()).unwrap()
+    }
+    pub(super) fn resources() -> Arc<dyn Send + Sync> {
+        Arc::new(())
+    }
+    pub(super) fn cat() -> &'static Path {
+        Path::new("/bin/cat")
+    }
+    pub(super) fn clear() {
+        SPAWNED.with(|spawned| spawned.set(None));
+        OFFERED.with(|offered| offered.set(None));
+    }
+    pub(super) fn spawned() -> Option<u32> {
+        SPAWNED.with(|spawned| spawned.take())
+    }
+    pub(super) fn expired() -> Instant {
+        Instant::now() - Duration::from_millis(1)
+    }
+    pub(super) fn crossed() -> Instant {
+        Instant::now() + Duration::from_millis(20)
+    }
+    pub(super) fn slow(_: &mut std::process::Command) -> std::io::Result<()> {
+        std::thread::sleep(Duration::from_millis(60));
+        Ok(())
+    }
+    pub(super) fn soon() -> Instant {
+        Instant::now() + Duration::from_secs(20)
+    }
+
+    #[test]
+    fn an_answer_child_never_starts_once_its_deadline_is_spent() {
+        use super::super::child::{run, Ended};
+        let input = b"private fixture answer";
+        for deadline in [expired(), crossed()] {
+            clear();
+            let ended = run(cat(), &[], input, &custody(), &resources(), deadline, slow);
+            assert_eq!(ended, Ended::NotStarted);
+            assert_eq!(spawned(), None, "no child after its deadline");
+        }
+        // Within its budget, the same child runs with all of its input.
+        clear();
+        let ended = run(cat(), &[], input, &custody(), &resources(), soon(), |_| {
+            Ok(())
+        });
+        assert_eq!(ended, Ended::Exited { code: 0 });
+        assert!(spawned().is_some());
+        assert_eq!(OFFERED.with(|offered| offered.take()), Some(input.len()));
+    }
+
+    #[test]
+    fn an_observation_child_never_starts_once_its_deadline_is_spent() {
+        use super::super::child::observe;
+        for deadline in [expired(), crossed()] {
+            clear();
+            assert_eq!(observe(cat(), &[], b"{}", deadline, slow), None);
+            assert_eq!(spawned(), None);
+        }
+        clear();
+        assert_eq!(
+            observe(cat(), &[], b"{}", soon(), |_| Ok(())),
+            Some(b"{}".to_vec())
+        );
+    }
+}

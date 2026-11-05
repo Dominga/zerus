@@ -324,6 +324,10 @@ fn execute(config: &Config, args: &[String]) -> Result<Value> {
                 ensure!(args == ["initialize", "--g3", "--json"], "usage: hgs swarm initialize --g3 --json");
                 Some(bootstrap::G3Import::parse(request.clone())?)
             } else { None };
+            let g3_bootstrap = if action == "initialize" && args.iter().any(|arg|arg == "--g3-bootstrap") {
+                ensure!(args == ["initialize", "--g3-bootstrap", "--json"], "usage: hgs swarm initialize --g3-bootstrap --json");
+                Some(bootstrap::G3Bootstrap::parse(request.clone())?)
+            } else { None };
             let export_kinds = request["kinds"].clone();
             let mut store = LockedStore::load(config)?;
             let previous: std::collections::BTreeSet<_> = store.data.catalog.operations.keys().cloned().collect();
@@ -331,6 +335,7 @@ fn execute(config: &Config, args: &[String]) -> Result<Value> {
                 "get" => { bootstrap::maybe(&mut store, config)?; }
                 "initialize" => {
                     if let Some(import) = &g3 { import.initialize(&mut store)?; }
+                    else if let Some(first) = &g3_bootstrap { first.bootstrap(&mut store)?; }
                     else { bootstrap::initialize(&mut store, &request)?; }
                 }
                 "apply" => { ensure!(store.data.imported,"initialize the local project catalog first"); store.data.apply(serde_json::from_value(request)?)?; }
@@ -350,6 +355,7 @@ fn execute(config: &Config, args: &[String]) -> Result<Value> {
             }
             let mut snapshot = store.snapshot(config);
             if let Some(import) = &g3 { snapshot["g3_import"] = import.receipt(); }
+            if let Some(first) = &g3_bootstrap { snapshot["g3_bootstrap"] = first.receipt(); }
             snapshot["worker"] = worker.unwrap_or_else(|| service::status(config)).json();
             let mut written: std::collections::BTreeMap<String,Vec<String>> = std::collections::BTreeMap::new();
             for op in store.data.catalog.operations.values().filter(|op| !previous.contains(&op.id)) {

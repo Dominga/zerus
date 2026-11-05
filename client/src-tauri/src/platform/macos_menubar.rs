@@ -23,11 +23,10 @@ use objc2_foundation::{
     NSNotification, NSNotificationCenter, NSOperationQueue, NSPoint, NSRect, NSSize, NSString,
 };
 use tauri::image::Image;
-use tauri::menu::{CheckMenuItem, Menu, MenuItem, PredefinedMenuItem, Submenu};
+use tauri::menu::{Menu, MenuItem, PredefinedMenuItem};
 use tauri::tray::{MouseButton, MouseButtonState, TrayIconBuilder, TrayIconEvent};
 use tauri::{AppHandle, Manager, Wry};
-use zerus_client_core::menubar::{Apply, Entry, Face, OpenMode};
-use zerus_client_core::text::Text;
+use zerus_client_core::menubar::{Apply, Entry, Face};
 use zerus_client_core::trayicon::{self, Rgb, Step, Tile};
 
 pub use crate::desk::MenuAction;
@@ -41,8 +40,6 @@ pub const TILE_PIXELS: usize = 36;
 struct Glue {
     bar: Bar,
     menu: Menu<Wry>,
-    /// The "Open in" entries of the menu, so one stays checked.
-    open_in: Vec<(CheckMenuItem<Wry>, OpenMode)>,
     configured: Option<Rgb>,
     /// The face and colour the tile was drawn with.
     drawn: Option<(Face, Rgb)>,
@@ -92,7 +89,6 @@ pub fn install(app: &AppHandle, configured: Option<Rgb>) -> tauri::Result<()> {
     app.manage(MenuBarState(Mutex::new(Glue {
         bar: Bar::default(),
         menu,
-        open_in: Vec::new(),
         configured,
         drawn,
     })));
@@ -176,7 +172,6 @@ fn rebuild(app: &AppHandle, glue: &mut Glue, entries: &[Entry]) -> tauri::Result
     for position in (0..glue.menu.items()?.len()).rev() {
         glue.menu.remove_at(position)?;
     }
-    glue.open_in.clear();
     for item in items {
         match item {
             Item::Action { id, text } => {
@@ -188,18 +183,6 @@ fn rebuild(app: &AppHandle, glue: &mut Glue, entries: &[Entry]) -> tauri::Result
                     .append(&MenuItem::with_id(app, id, text, false, None::<&str>)?)?
             }
             Item::Separator => glue.menu.append(&PredefinedMenuItem::separator(app)?)?,
-            Item::OpenIn { id, modes } => {
-                let title = crate::native_text::render(&zerus_client_core::text!("Open in"));
-                let submenu = Submenu::with_id(app, id, title, true)?;
-                for (id, mode, checked) in modes {
-                    let label = crate::native_text::render(&Text::new(mode.label()));
-                    let check =
-                        CheckMenuItem::with_id(app, id, label, true, checked, None::<&str>)?;
-                    submenu.append(&check)?;
-                    glue.open_in.push((check, mode));
-                }
-                glue.menu.append(&submenu)?;
-            }
         }
     }
     Ok(())
@@ -221,26 +204,6 @@ pub fn menu_event(app: &AppHandle, id: &str) {
             if let Err(error) = crate::updates::restart_app(app) {
                 eprintln!("zerus-client: could not restart into the installed bundle: {error}");
             }
-        }
-        Some(MenuAction::Session {
-            computer,
-            key,
-            running: false,
-            ..
-        }) => crate::desk::open_session(app, &computer, &key),
-        Some(MenuAction::Session {
-            computer,
-            name,
-            running: true,
-            ..
-        }) => crate::desk::open_running(app, &computer, &name),
-        Some(MenuAction::Mode(mode)) => {
-            // A check item toggles itself on a click; Qt's exclusive group
-            // keeps exactly the chosen mode checked, the same one clicked again too.
-            for (item, shown) in &lock(&state).open_in {
-                let _ = item.set_checked(*shown == mode);
-            }
-            crate::desk::set_mode(app, mode);
         }
         Some(MenuAction::Quit) => crate::exit_flush::quit_with_flush(app, 0),
         Some(MenuAction::Refresh) => {}

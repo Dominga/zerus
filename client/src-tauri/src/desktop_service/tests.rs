@@ -1755,7 +1755,7 @@ fn temporary_rpc_admission_pressure_retries_follow_without_halting_the_view() {
 }
 #[test]
 fn service_catalog_completion_populates_the_tray_like_the_gui_with_device_attention() {
-    use zerus_client_core::menubar::{Desk, DeviceMarks, Entry, Face, OpenMode};
+    use zerus_client_core::menubar::{Desk, DeviceMarks, Entry, Face};
     let _process = crate::PROCESS_TREE.read().unwrap();
     tauri::async_runtime::block_on(async {
         let fixture = Fixture::new(json!({"details":true,"project_peer":true}));
@@ -1806,13 +1806,12 @@ fn service_catalog_completion_populates_the_tray_like_the_gui_with_device_attent
                     "1 on studio"
                 ]
             );
-            let menu = desk.menu(OpenMode::Automatic);
-            assert_eq!(
-                menu.iter()
-                    .filter(|entry| matches!(entry, Entry::Session { .. }))
-                    .count(),
-                2
-            );
+            let menu = desk.menu();
+            // One line per computer, no session rows (the owner, 0.48.0).
+            assert!(menu.contains(&Entry::Label(zerus_client_core::text!("%1 here", 1usize))));
+            assert!(menu.contains(&Entry::Label(zerus_client_core::text!(
+                "%1 on %2", 1usize, "studio"
+            ))));
             assert!(!menu.iter().any(
                 |entry| matches!(entry,Entry::Label(text) if text.english().contains("polling"))
             ));

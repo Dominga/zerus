@@ -20,7 +20,7 @@ fn round(
     desk.round(
         inputs,
         &mut Context {
-            publish: &mut |_, _| {},
+            publish: &mut |_| {},
             now,
             unix: 2000,
             focused: false,
@@ -84,11 +84,7 @@ impl Fixture {
             super::super::write_private(&path, bytes).unwrap();
         }
         let load = owner.track(Box::new(move || Attention::load(path, || None)));
-        let desk = DeskLoop::new(
-            super::super::OpenMode::Terminal,
-            Some(load()),
-            Instant::now(),
-        );
+        let desk = DeskLoop::new(Some(load()), Instant::now());
         Self {
             root,
             sender,
@@ -143,14 +139,22 @@ fn ordered_stop_keeps_prior_batch_and_ui_live_but_stops_timer_and_detector() {
         thread::yield_now();
     }
     f.sender
-        .send(DeskInput::Mode(super::super::OpenMode::Automatic))
+        .send(DeskInput::Updates {
+            version: Some("9.9.9".into()),
+            restart: false,
+        })
         .unwrap();
+    let offered = |desk: &DeskLoop| {
+        desk.desk
+            .menu()
+            .contains(&zerus_client_core::menubar::Entry::Update("9.9.9".into()))
+    };
     let first = f.inputs.recv().unwrap();
     let mut batch = Batch::new(Some(first), &f.inputs);
     let before = round(&mut f.desk, &mut batch, Instant::now());
     assert_eq!(before.changes.raised.len(), 1);
-    assert_eq!(
-        before.save_mode, None,
+    assert!(
+        !offered(&f.desk),
         "input after barrier is not in this batch"
     );
     let command = batch.barrier.take().unwrap();
@@ -162,7 +166,7 @@ fn ordered_stop_keeps_prior_batch_and_ui_live_but_stops_timer_and_detector() {
         Instant::now() + SWEEP * 2,
     );
     assert!(after.publish);
-    assert_eq!(after.save_mode, Some(super::super::OpenMode::Automatic));
+    assert!(offered(&f.desk));
     assert!(after.changes.raised.is_empty());
     assert_eq!(
         f.desk.wait(Instant::now() + SWEEP * 2),
@@ -279,10 +283,7 @@ fn timed_out_checkpoint_keeps_actual_worker_and_frozen_value_charged() {
     let command = f.command();
     let (entered, waiting) = mpsc::sync_channel(1);
     let (release, released) = mpsc::sync_channel(1);
-    let mut desk = std::mem::replace(
-        &mut f.desk,
-        DeskLoop::new(super::super::OpenMode::Terminal, None, Instant::now()),
-    );
+    let mut desk = std::mem::replace(&mut f.desk, DeskLoop::new(None, Instant::now()));
     let worker = thread::spawn(move || {
         command.run_with(&mut desk, |attention| {
             entered.send(()).unwrap();

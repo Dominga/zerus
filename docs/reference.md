@@ -804,6 +804,17 @@ input, approvals, errors and unread main-agent replies. An offline host retains
 its last total but adds no live attention requests; a dot marks incomplete data.
 Linux application badges and the macOS Dock show the attention count, hiding zero.
 
+Zerus Next's tray menu (on Linux, macOS and Windows) has:
+- **Open Zerus**, and an update's entries when there is one;
+- one line per computer: how many sessions it has (`12 here`, `5 on mac`), or
+  that it is unreachable or still polling;
+- **Quit**.
+
+It lists no sessions: open them from the workspace. It has no **Open in**
+either. New sessions and folder shells still open the way `open-mode=` in
+`tray.conf`, or a mode chosen earlier, says ([external terminal
+modes](#external-terminal-modes)).
+
 The session menu's **Mute** disables notifications for that conversation on all
 devices and removes it from their notification counters and bells. The session's
 host stores the preference; other desktops and phones receive it in their next

@@ -373,20 +373,8 @@ pub enum Entry {
     /// "Restart to finish update".
     Restart,
     Separator,
-    /// A line that cannot be chosen: a computer's header or its state.
+    /// A line that cannot be chosen: a computer's sessions count or its state.
     Label(Text),
-    /// A session; `text` is what the entry shows, its name with `&` doubled.
-    Session {
-        computer: ComputerId,
-        key: String,
-        name: String,
-        text: Text,
-        running: bool,
-        /// First attached local client's TTY, captured with the session.
-        tty: String,
-    },
-    /// The "Open in" submenu with the chosen mode checked.
-    OpenIn(OpenMode),
     Refresh,
     Quit,
 }
@@ -397,16 +385,6 @@ pub fn escape(text: &str) -> String {
 }
 
 /// The text Qt shows for a session (`TrayMenu.cpp:23-31`).
-pub fn session_text(row: &ViewRow) -> Text {
-    let label = escape(&row.name);
-    match row.state.as_str() {
-        "paused" => crate::text!("%1%2", label, crate::text!("  (paused)")),
-        "stopped" => crate::text!("%1%2", label, crate::text!("  (stopped)")),
-        _ if row.notify.attached => Text::verbatim(format!("\u{25cf} {label}")),
-        _ => Text::verbatim(label),
-    }
-}
-
 /// The fleet as the menu bar sees it, kept from the core's changes, with
 /// this device's marks applied to its rows as `FleetState` applies them.
 #[derive(Clone, Debug, Default)]
@@ -616,8 +594,11 @@ impl Desk {
         lines
     }
 
-    /// The menu Qt builds, without Refresh.
-    pub fn menu(&self, mode: OpenMode) -> Vec<Entry> {
+    /// The menu: Open Zerus, an update's entries, one line per computer (how
+    /// many sessions it has, or its state) and Quit. It lists no sessions:
+    /// with their numbers a row each stopped being useful (the owner, 0.48.0),
+    /// and nothing builds or refreshes such rows.
+    pub fn menu(&self) -> Vec<Entry> {
         let mut menu = vec![Entry::Open];
         if let Some(version) = &self.update_version {
             menu.push(Entry::Update(version.clone()));
@@ -629,72 +610,29 @@ impl Desk {
         let local = self.local();
         let local_section = local.is_none_or(|computer| computer.local_sessions);
         if local_section {
-            let header = local
-                .and_then(|computer| computer.host.clone())
-                .filter(|host| !host.is_empty())
-                .map(|host| Text::verbatim(escape(&host)))
-                .unwrap_or_else(|| crate::text!("this box"));
-            menu.push(Entry::Label(header));
-            // Qt keys "polling…" on a non-empty host, which in practice comes from the
-            // same listing; keying on the listing never hides sessions when the host is empty.
-            match local.filter(|computer| computer.listed) {
-                None => menu.push(Entry::Label(crate::text!("polling…"))),
-                Some(computer) => sessions(&mut menu, &ComputerId::local(), computer),
-            }
+            menu.push(Entry::Label(
+                match local.filter(|computer| computer.listed) {
+                    Some(computer) => crate::text!("%1 here", computer.visible()),
+                    None => crate::text!("%1: polling…", crate::text!("this box")),
+                },
+            ));
         }
         let peers: Vec<(&str, &Computer)> = self.peers().collect();
         if !local_section && peers.is_empty() {
             menu.push(Entry::Label(crate::text!("No remote machines")));
         }
-        for (index, (alias, computer)) in peers.into_iter().enumerate() {
-            if local_section || index > 0 {
-                menu.push(Entry::Separator);
-            }
-            let alias_text = escape(alias);
-            menu.push(Entry::Label(Text::verbatim(alias_text.clone())));
-            if !computer.listed {
-                menu.push(Entry::Label(crate::text!("%1: polling…", alias_text)));
+        for (alias, computer) in peers {
+            let alias = escape(alias);
+            menu.push(Entry::Label(if !computer.listed {
+                crate::text!("%1: polling…", alias)
             } else if !computer.fresh() {
-                menu.push(Entry::Label(crate::text!("%1: unreachable", alias_text)));
+                crate::text!("%1: unreachable", alias)
             } else {
-                sessions(&mut menu, &ComputerId::from(alias), computer);
-            }
+                crate::text!("%1 on %2", computer.visible(), alias)
+            }));
         }
-        menu.extend([Entry::Separator, Entry::OpenIn(mode), Entry::Quit]);
+        menu.extend([Entry::Separator, Entry::Quit]);
         menu
-    }
-}
-
-/// A computer's sessions by name, or "no sessions" (`TrayMenu.cpp:178-195`).
-fn sessions(menu: &mut Vec<Entry>, computer: &ComputerId, state: &Computer) {
-    let mut rows: Vec<(&String, &ViewRow)> = state
-        .rows
-        .iter()
-        .filter(|(_, row)| row.state != "archived")
-        .collect();
-    if rows.is_empty() {
-        menu.push(Entry::Label(crate::text!("no sessions")));
-        return;
-    }
-    // The core does not carry hgs's listing order (Replace is key-sorted), so sessions
-    // sort by name, then key; a deliberate deviation from Qt's TrayMenu order.
-    rows.sort_by(|a, b| a.1.name.cmp(&b.1.name).then_with(|| a.0.cmp(b.0)));
-    for (key, row) in rows {
-        menu.push(Entry::Session {
-            computer: computer.clone(),
-            key: key.clone(),
-            name: row.name.clone(),
-            text: session_text(row),
-            running: row.state == "running",
-            tty: if computer == &ComputerId::local()
-                && row.state == "running"
-                && row.notify.attached
-            {
-                row.notify.client_tty.clone()
-            } else {
-                String::new()
-            },
-        });
     }
 }
 
@@ -898,7 +836,7 @@ mod tests {
             assert_eq!(a.face(), b.face());
             assert_eq!(a.badge(), b.badge());
             assert_eq!(tip(a), tip(b));
-            assert_eq!(a.menu(OpenMode::Automatic), b.menu(OpenMode::Automatic));
+            assert_eq!(a.menu(), b.menu());
         };
         same(&native, &service);
         assert_eq!((service.total(), service.attention()), (4, 3));
@@ -1342,7 +1280,7 @@ mod tests {
     }
 
     #[test]
-    fn the_menu_lists_computers_and_sessions_in_qt_order() {
+    fn the_menu_lists_each_computer_on_one_line_and_no_sessions() {
         let mut desk = Desk::default();
         host(&mut desk, "", "arch&co", true);
         let mut attached = row("claude/R&D/main", "running");
@@ -1364,79 +1302,29 @@ mod tests {
             "win",
             ComputerStatus::Reconnecting { attempt: 1 },
         );
-        let local = ComputerId::local();
         assert_eq!(
-            desk.menu(OpenMode::Clipboard),
+            desk.menu(),
             vec![
                 Entry::Open,
                 Entry::Separator,
-                Entry::Label(Text::verbatim("arch&&co")),
-                Entry::Session {
-                    computer: local.clone(),
-                    key: "k1".into(),
-                    name: "claude/R&D/main".into(),
-                    text: Text::verbatim("\u{25cf} claude/R&&D/main"),
-                    running: true,
-                    tty: String::new(),
-                },
-                Entry::Session {
-                    computer: local,
-                    key: "k2".into(),
-                    name: "codex/p/zeta".into(),
-                    text: crate::text!("%1%2", "codex/p/zeta", crate::text!("  (stopped)")),
-                    running: false,
-                    tty: String::new(),
-                },
-                Entry::Separator,
-                Entry::Label(Text::verbatim("mac&&m")),
-                Entry::Label(crate::text!("no sessions")),
-                Entry::Separator,
-                Entry::Label(Text::verbatim("studio")),
+                Entry::Label(crate::text!("%1 here", 2usize)),
+                Entry::Label(crate::text!("%1 on %2", 0usize, "mac&&m")),
                 Entry::Label(crate::text!("%1: polling…", "studio")),
-                Entry::Separator,
-                Entry::Label(Text::verbatim("win")),
                 Entry::Label(crate::text!("%1: unreachable", "win")),
                 Entry::Separator,
-                Entry::OpenIn(OpenMode::Clipboard),
                 Entry::Quit,
             ]
         );
-    }
-
-    #[test]
-    fn only_a_running_attached_local_session_captures_its_terminal() {
-        let mut desk = Desk::default();
-        let mut attached = row("sh/sample-project", "running");
-        attached.notify.attached = true;
-        attached.notify.client_tty = "/dev/pts/7".into();
-        let mut saved = attached.clone();
-        saved.name = "sh/saved-project".into();
-        saved.state = "paused".into();
-        let mut detached = attached.clone();
-        detached.name = "sh/detached-project".into();
-        detached.notify.attached = false;
+        // A session changing changes no entry: the menu holds only counts.
+        let before = desk.menu();
+        let mut paused = row("codex/p/zeta", "paused");
+        paused.notify.attached = true;
         listed(
             &mut desk,
             "",
-            vec![
-                ("attached", attached.clone()),
-                ("saved", saved),
-                ("detached", detached),
-            ],
+            vec![("k2", paused), ("k1", row("claude/R&D/main", "running"))],
         );
-        listed(&mut desk, "peer", vec![("remote", attached)]);
-        let targets: BTreeMap<String, String> = desk
-            .menu(OpenMode::Automatic)
-            .into_iter()
-            .filter_map(|entry| match entry {
-                Entry::Session { key, tty, .. } => Some((key, tty)),
-                _ => None,
-            })
-            .collect();
-        assert_eq!(targets["attached"], "/dev/pts/7");
-        for key in ["saved", "detached", "remote"] {
-            assert_eq!(targets[key], "", "{key}");
-        }
+        assert_eq!(desk.menu(), before);
     }
 
     #[test]
@@ -1464,12 +1352,13 @@ mod tests {
     fn a_local_computer_that_has_not_answered_is_this_box_polling() {
         let desk = Desk::default();
         assert_eq!(
-            &desk.menu(OpenMode::Terminal)[..4],
-            &[
+            desk.menu(),
+            vec![
                 Entry::Open,
                 Entry::Separator,
-                Entry::Label(crate::text!("this box")),
-                Entry::Label(crate::text!("polling…")),
+                Entry::Label(crate::text!("%1: polling…", crate::text!("this box"))),
+                Entry::Separator,
+                Entry::Quit,
             ]
         );
     }
@@ -1480,13 +1369,12 @@ mod tests {
         host(&mut desk, "", "win", false);
         listed(&mut desk, "", vec![]);
         assert_eq!(
-            desk.menu(OpenMode::Terminal),
+            desk.menu(),
             vec![
                 Entry::Open,
                 Entry::Separator,
                 Entry::Label(crate::text!("No remote machines")),
                 Entry::Separator,
-                Entry::OpenIn(OpenMode::Terminal),
                 Entry::Quit,
             ]
         );
@@ -1505,26 +1393,6 @@ mod tests {
             Some(ComputerId::from("mac"))
         );
         assert!(desk.computers().is_empty());
-    }
-
-    #[test]
-    fn session_text_follows_qt_suffixes() {
-        assert_eq!(
-            session_text(&row("a/b", "paused")).english(),
-            "a/b  (paused)"
-        );
-        assert_eq!(
-            session_text(&row("a/b", "stopped")).english(),
-            "a/b  (stopped)"
-        );
-        assert_eq!(session_text(&row("a/b&c", "running")).english(), "a/b&&c");
-        let mut attached = row("a/b", "paused");
-        attached.notify.attached = true;
-        assert_eq!(
-            session_text(&attached).english(),
-            "a/b  (paused)",
-            "a saved session shows no attachment"
-        );
     }
 
     #[test]
@@ -1579,17 +1447,17 @@ mod tests {
         assert!(desk.set_updates(Some("0.47.0".into()), true));
         assert!(!desk.set_updates(Some("0.47.0".into()), true));
         assert_eq!(
-            &desk.menu(OpenMode::Terminal)[..5],
+            &desk.menu()[..5],
             &[
                 Entry::Open,
                 Entry::Update("0.47.0".into()),
                 Entry::Restart,
                 Entry::Separator,
-                Entry::Label(crate::text!("this box")),
+                Entry::Label(crate::text!("%1: polling…", crate::text!("this box"))),
             ]
         );
         assert!(desk.set_updates(None, false));
-        assert_eq!(desk.menu(OpenMode::Terminal)[1], Entry::Separator);
+        assert_eq!(desk.menu()[1], Entry::Separator);
     }
 
     #[test]

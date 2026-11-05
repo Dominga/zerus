@@ -253,9 +253,18 @@ fn actions() -> Vec<(TeamAction, &'static str, Value)> {
         (
             TeamAction::Settings {
                 settings: json!({"branch_per_task": true, "land": false}),
+                members_update: vec![],
             },
             "settings",
             json!({"settings": {"branch_per_task": true, "land": false}}),
+        ),
+        (
+            TeamAction::Settings {
+                settings: json!({"build_broker": true}),
+                members_update: vec![json!({"id": "dev", "iron_rules": ["Run the tests"]})],
+            },
+            "settings",
+            json!({"settings": {"build_broker": true}, "members_update": [{"id": "dev", "iron_rules": ["Run the tests"]}]}),
         ),
     ]
 }
@@ -691,6 +700,7 @@ fn a_refusal_fails_and_an_unknown_outcome_is_uncertain_and_never_sent_again() {
     );
     let settings = TeamAction::Settings {
         settings: json!({"land": true}),
+        members_update: vec![],
     };
     let before = requests(&fake).len();
     let outcome = run(&fake.path(), &call(settings.clone()));
@@ -775,7 +785,8 @@ fn requests_that_cannot_be_made_never_run_and_a_peer_gets_its_alias() {
         set: json!({})
     })));
     assert!(refused(call(TeamAction::Settings {
-        settings: json!({})
+        settings: json!({}),
+        members_update: vec![],
     })));
     assert!(requests(&fake).is_empty(), "no refused request ran");
     // A peer: `hgs @studio team ...`, Qt's 45 s.

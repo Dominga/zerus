@@ -938,6 +938,8 @@ export interface TeamMemberView {
   live: boolean | null; stuck: boolean; question: boolean;
   /** Its open task first, then the tasks returned to it. */
   queue: number[]; minutes_without_progress: number; host_shared: boolean;
+  /** The owner's mandatory additions to the member's rules. */
+  iron_rules?: string[];
   /** Task 11: the pending question or permission request as hgs sends it (`members[].question`), null without one. */
   permission?: TeamMemberQuestion | null;
 }
@@ -1063,7 +1065,7 @@ export type TeamAction =
   | { kind: "draft_seen"; fields: string[] }
   | { kind: "draft_create"; approve?: boolean; confirm_widening?: boolean }
   | { kind: "draft_discard"; stop_lead?: boolean; reason?: string }
-  | { kind: "settings"; settings: Record<string, unknown> }
+  | { kind: "settings"; settings: Record<string, unknown>; members_update?: unknown[] }
   | { kind: "catalog_propose"; change: Record<string, unknown> }
   | { kind: "catalog_decide"; proposal: string; decision: "keep" | "reject" | "undo" }
   | { kind: "catalog_apply" }

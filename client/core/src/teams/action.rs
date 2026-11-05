@@ -195,8 +195,13 @@ pub enum TeamAction {
         reason: String,
     },
     /// The owner's settings patch, merged by `hgs team settings`: only the
-    /// fields that differ from the team's current settings.
-    Settings { settings: Value },
+    /// fields that differ from the team's current settings, plus any member
+    /// updates (their iron rules) sent in the same call.
+    Settings {
+        settings: Value,
+        #[serde(default)]
+        members_update: Vec<Value>,
+    },
     /// The designer's change, left for the owner to keep or reject.
     CatalogPropose { change: Value },
     /// The owner's decision on one catalog proposal: keep, reject or undo.
@@ -520,8 +525,13 @@ impl TeamAction {
             }
             Self::DraftCreate { .. } => Ok(()),
             Self::DraftDiscard { reason, .. } => plain(reason, "A reason", 2000),
-            Self::Settings { settings } => {
-                if !settings.as_object().is_some_and(|fields| !fields.is_empty()) {
+            Self::Settings {
+                settings,
+                members_update,
+            } => {
+                if !settings.as_object().is_some_and(|fields| !fields.is_empty())
+                    && members_update.is_empty()
+                {
                     return Err("A settings change names the fields it sets.".into());
                 }
                 Ok(())
@@ -744,8 +754,16 @@ impl TeamAction {
                     put("reason", json!(reason));
                 }
             }
-            Self::Settings { settings } => {
-                put("settings", settings.clone());
+            Self::Settings {
+                settings,
+                members_update,
+            } => {
+                if settings.as_object().is_some_and(|fields| !fields.is_empty()) {
+                    put("settings", settings.clone());
+                }
+                if !members_update.is_empty() {
+                    put("members_update", json!(members_update));
+                }
             }
             Self::CatalogPropose { change } => {
                 put("change", change.clone());

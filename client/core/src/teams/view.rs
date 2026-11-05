@@ -253,6 +253,8 @@ pub struct MemberView {
     pub question: bool,
     /// Its open task first, then the tasks returned to it.
     pub queue: Vec<u64>,
+    /// The owner's mandatory additions to the member's rules, as lines.
+    pub iron_rules: Vec<String>,
     pub minutes_without_progress: u64,
     pub host_shared: bool,
     /// Task 11: the member's pending question or permission request as hgs
@@ -475,6 +477,7 @@ fn member(value: &Value, lead: &str) -> MemberView {
                     .or_else(|| entry.get("task").and_then(Value::as_u64))
             })
             .collect(),
+        iron_rules: lines(value, "iron_rules", TEXT_CHARS),
         minutes_without_progress: count(value, "minutes_without_progress"),
         host_shared: flag(value, "host_shared"),
         permission: bounded(

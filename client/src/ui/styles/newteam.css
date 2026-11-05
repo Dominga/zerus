@@ -49,3 +49,6 @@
   .nt-row { grid-template-columns: 1fr; }
   .nt-settings { left: 12px; right: 12px; width: auto; }
 }
+.nt-confirm { margin: 8px 14px; padding: 10px 12px; border: 1px solid var(--z-color-warn); border-radius: var(--z-radius-md); background: var(--z-color-warn-bg); }
+.nt-confirm p { margin: 0 0 8px; font-size: var(--fs-sm); }
+.nt-confirm-actions { display: flex; gap: 6px; justify-content: flex-end; }

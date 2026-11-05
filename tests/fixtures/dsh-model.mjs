@@ -11,7 +11,12 @@ class Adapter extends LlmAdapter {
   failedRecovery = new Set();
   providerInfo(provider) { return { id: provider, name: 'HGS test model' }; }
   async listModels(provider) { return [{ provider, id: 'test-a', name: 'Test A' }, { provider, id: 'test-b', name: 'Test B' }]; }
-  async resolveModel(provider,model) { return { provider,id:model,name:model,
+  async resolveModel(provider,model) {
+    const candidate = model === 'test-b' && this.holds && join(this.holds, 'MODEL_ADMISSION_HOLD');
+    const gate = candidate && existsSync(candidate + '.entered') && candidate;
+    if (gate && existsSync(gate)) writeFileSync(gate + '.resolving', '');
+    for (let i = 0; gate && existsSync(gate) && i < 300; i++) await new Promise(resolve => setTimeout(resolve, 50));
+    return { provider,id:model,name:model,inputModalities: model === 'test-b' ? ['text'] : ['text','image'],
     reasoning:{efforts:[{id:'off',name:'Off'},{id:'high',name:'High'}],defaultEffort:'high'} }; }
   async *stream(options) {
     await new Promise(resolve => setTimeout(resolve, 120));
@@ -68,7 +73,10 @@ class Adapter extends LlmAdapter {
     }
     // The official Schedule tool, when its optional bundle is loaded.
     if (text.includes('SCHEDULE_FIXTURE') && last?.role !== 'tool') {
-      const args=JSON.stringify({prompt:'Scheduled fixture check',title:'Fixture check',every_seconds:3600});
+      const modern = typeof this.schedule?.()?.edit === 'function';
+      const start = new Date(Date.now() + 3600000).toISOString().replace(/[-:]/g, '').replace(/\.\d{3}Z$/, 'Z');
+      const args=JSON.stringify({prompt:'Scheduled fixture check',title:'Fixture check',...(modern
+        ? { rrule:`DTSTART:${start}\nRRULE:FREQ=HOURLY`, target:'this_session' } : {every_seconds:3600})});
       yield {type:'block-start',index:0,blockType:'tool-call'};
       yield {type:'tool-call-delta',index:0,id:'schedule-call',name:'schedule_create',argumentsDelta:args};
       yield {type:'block-end',index:0,block:{type:'tool-call',id:'schedule-call',name:'schedule_create',arguments:args}};
@@ -96,7 +104,27 @@ class Adapter extends LlmAdapter {
 }
 export const inject=['llm','goals','tools','approval','jobs','agents'];
 export function apply(ctx,config) {
-  ctx.llm.registerAdapter(['hgs-test'],new Adapter());
+  const adapter = new Adapter();
+  adapter.holds = config?.holds;
+  adapter.schedule = () => ctx.get('schedule');
+  ctx.llm.registerAdapter(['hgs-test'],adapter);
+  // Instrument the SAME upstream serializer, without supplying a second queue.
+  // The second entry proves an image prompt reached admission while settings
+  // was blocked in native model resolution inside the first queue entry.
+  ctx.inject(['sessionController'], scope => {
+    const control = scope.sessionController.agents, serialize = control.serializeImageAdmission;
+    let entered = 0;
+    control.serializeImageAdmission = function(agent, operation) {
+      const gate = config?.holds && join(config.holds, 'MODEL_ADMISSION_HOLD');
+      if (gate && existsSync(gate) && ++entered === 2) writeFileSync(gate + '.queued', '');
+      if (!gate || !existsSync(gate)) entered = 0;
+      return serialize.call(this, agent, () => {
+        if (gate && existsSync(gate)) writeFileSync(gate + '.entered', '');
+        return operation();
+      });
+    };
+    return () => { control.serializeImageAdmission = serialize; };
+  });
   // Hold a marked child's first step, before it records its subagent
   // descriptor, until the test creates the release file (as a slow checkpoint).
   // An ARMED hold also arms the child's goal while it waits, so a test can see

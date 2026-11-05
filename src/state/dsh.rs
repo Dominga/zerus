@@ -18,7 +18,7 @@ use std::{
 // Resident bridge identity is independent of the installed harness release.
 const ADAPTER_VERSION: &str = "0.2.1-rc.2";
 #[cfg(unix)]
-const REVIEWED_VERSIONS: &[&str] = &["0.2.1-rc.2", "0.2.1-rc.5"];
+const REVIEWED_VERSIONS: &[&str] = &["0.2.1-rc.2", "0.2.1-rc.5", "0.2.2-rc.1"];
 #[cfg(unix)]
 fn reviewed_harness_version(version: &str) -> bool {
     REVIEWED_VERSIONS.contains(&version)
@@ -991,7 +991,7 @@ fn schedule_item(entry: &Value) -> Value {
         for key in ["sessionId", "status", "lastDelivery"] { fields.remove(key); }
     }
     let next = chrono::DateTime::parse_from_rfc3339(string(entry, "scheduledAt")).map(|at| at.timestamp_millis() as f64 / 1000.0).ok();
-    let recurring = ["every", "daily", "weekly", "cron"].contains(&string(entry, "kind"));
+    let recurring = ["every", "daily", "weekly", "cron", "rrule"].contains(&string(entry, "kind"));
     let delivery = entry.get("lastDelivery").cloned().unwrap_or(Value::Null);
     json!({"id":entry["id"],"title":entry["title"],"prompt":entry["prompt"],"kind":entry["kind"],"status":entry["status"],
         "recurring":recurring,"scheduled_at":next,"last_delivery":delivery,"record":record})
@@ -1746,6 +1746,15 @@ mod native_operation_tests {
             "expression":"0 9 * * 1-5","timeZone":"UTC","scheduledAt":"2026-10-16T09:00:00.000Z"}));
         assert_eq!((item["recurring"].as_bool(), item["scheduled_at"].as_f64()), (Some(true), Some(1792141200.0)));
         assert_eq!(item["last_delivery"]["messageId"], "m");
+        let modern = json!({"id":"schedule-2","kind":"rrule","title":"Check","prompt":"Check",
+            "rrule":"DTSTART:20261105T200000Z\nRRULE:FREQ=HOURLY","scheduledAt":"2026-11-05T20:00:00.000Z",
+            "target":{"kind":"session","sessionId":"original"},"involvedSessionIds":["editor","original"],
+            "updatedAt":"2026-11-05T18:00:00.001Z","status":"active"});
+        let item = schedule_item(&modern);
+        assert_eq!(item["recurring"], true);
+        let mut expected = modern;
+        expected.as_object_mut().unwrap().remove("status");
+        assert_eq!(item["record"], expected);
     }
 }
 
@@ -1803,8 +1812,9 @@ mod compatibility_tests {
     fn startup_accepts_only_the_explicitly_reviewed_harness_releases() {
         assert!(reviewed_harness_version("0.2.1-rc.2"));
         assert!(reviewed_harness_version("0.2.1-rc.5"));
+        assert!(reviewed_harness_version("0.2.2-rc.1"));
         for unknown in ["0.2.1-rc.1", "0.2.1-rc.3", "0.2.1-rc.4", "0.2.1-rc.6",
-            "0.2.1-rc.50", "0.2.1", "0.3.0", "0.2.1-rc.5+unreviewed", "0.2.1-rc.5\nother"] {
+            "0.2.1-rc.50", "0.2.1", "0.2.2", "0.2.2-rc.2", "0.3.0", "0.2.1-rc.5+unreviewed", "0.2.1-rc.5\nother"] {
             assert!(!reviewed_harness_version(unknown), "{unknown}");
         }
     }
@@ -1812,7 +1822,7 @@ mod compatibility_tests {
     #[test]
     fn reviewed_engine_versions_do_not_change_the_resident_adapter_identity() {
         assert!(compatible_adapter(&json!({"protocol":1,"version":"0.2.1-rc.2"})));
-        for ping in [json!({"protocol":1,"version":"0.2.1-rc.5"}),
+        for ping in [json!({"protocol":1,"version":"0.2.1-rc.5"}), json!({"protocol":1,"version":"0.2.2-rc.1"}),
             json!({"protocol":2,"version":"0.2.1-rc.2"}), json!({"protocol":1})] {
             assert!(!compatible_adapter(&ping));
         }

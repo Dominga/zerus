@@ -1,24 +1,154 @@
-// HGS adapter for the reviewed official @deepseek-ai/dsh rc.2 and rc.5 hosts
-// (0.2.1). Its ping version identifies this adapter, not the harness release.
+// HGS adapter for reviewed official @deepseek-ai/dsh 0.2.1 rc.2/rc.5 and
+// 0.2.2-rc.1 hosts. Its ping version identifies the adapter, not the harness.
 // Loaded through its supported Cordis --patch extension mechanism. No fork of
 // the engine, credential copying, HTTP authentication bypass or PTY injection.
 import net from 'node:net';
 import fs from 'node:fs/promises';
-import { randomUUID } from 'node:crypto';
+import { createHash, randomUUID } from 'node:crypto';
 import { AsyncLocalStorage } from 'node:async_hooks';
+import { isDeepStrictEqual } from 'node:util';
 
 export const name = 'hgs-native-dsh';
 export const inject = ['sessionController', 'agents', 'goals', 'llm', 'agentDefaultModel', 'sessionQuery', 'userQuestions', 'workspaceRegistry', 'subagents', 'permissionPresets', 'approval', 'commands'];
 
+// 0.2.2 moved selection from the controller's WeakMap to the Agent's native
+// model object. Both reads are side-effect-free; never use selectionFor or
+// public selectModel (which also saves the profile default) as a fallback.
+export function modelSelectionAdapter(control) {
+  const incompatible = () => new Error('HGS: incompatible official dsh session controller');
+  if (typeof control?.composeAgent !== 'function' || typeof control?.presetForObservation !== 'function'
+      || typeof control?.serializeImageAdmission !== 'function') throw incompatible();
+  const legacy = control.selections instanceof WeakMap && typeof control.selectForNextRequest === 'function';
+  // A partial old interface is not the reviewed new interface.
+  if (!legacy && (control.selections !== undefined || control.selectForNextRequest !== undefined)) throw incompatible();
+  const modelOf = agent => {
+    const model = agent?.model;
+    if (typeof model?.current !== 'function' || typeof model?.select !== 'function') throw incompatible();
+    return model;
+  };
+  return {
+    legacy,
+    async compose(preset) {
+      const composition = await control.composeAgent(preset);
+      if (legacy) return composition;
+      if (typeof composition?.setup !== 'function') throw incompatible();
+      // The native factory runs setup before publishing/starting the Agent.
+      return { ...composition, setup(agentCtx, agent) {
+        modelOf(agent);
+        return composition.setup(agentCtx, agent);
+      } };
+    },
+    has(agent) { return legacy ? control.selections.has(agent) : Boolean(modelOf(agent)); },
+    current(agent, projections) {
+      if (!legacy) {
+        const current = modelOf(agent).current();
+        return current === undefined ? null : { ...current };
+      }
+      const installed = control.selections.get(agent);
+      if (installed) return { ...installed.current };
+      const stored = projections?.modelSelection?.next;
+      if (stored) return stored;
+      const { provider, model, reasoningEffort } = agent.options ?? {};
+      return provider && model ? { provider, model, ...(reasoningEffort === undefined ? {} : { reasoningEffort }) } : null;
+    },
+    // Called only inside the SAME native serializeImageAdmission chain used
+    // by image prompts. No private queue, global default write or option edit.
+    select(agent, selection) {
+      if (legacy) control.selectForNextRequest(agent, selection);
+      else modelOf(agent).select(selection);
+    },
+  };
+}
+
+function prefixHash(events, count) {
+  if (!Array.isArray(events) || !Number.isSafeInteger(count) || count < 1 || count > events.length) return null;
+  const hash = createHash('sha256');
+  for (let i = 0; i < count; i++) {
+    if (events[i]?.seq !== i) return null;
+    hash.update(JSON.stringify(events[i])); hash.update('\n');
+  }
+  return hash.digest('hex');
+}
+
+// 0.2.2 intentionally omits parentSession on ordinary forks. Pin an exact
+// completed source cut BEFORE the call, then verify its immutable inherited
+// bytes and native seed boundary. Missing parent metadata alone proves nothing.
+export function completedForkCut(source) {
+  const atSeq = source.events.findLastIndex(event => event.type === 'turn/end');
+  const sha256 = prefixHash(source.events, atSeq + 1);
+  if (sha256 === null) throw new Error('Wait for a completed reply before forking');
+  return { atSeq, sha256 };
+}
+
+export function matchesForkCut(created, cut) {
+  const count = cut.atSeq + 1, marker = created.events[count];
+  return created.header.isSeeded === true && created.header.parentSession === undefined
+    && created.inheritedEventCount === count && marker?.seq === count
+    && marker.type === 'session/end-seed' && marker.data?.inherited === true
+    && prefixHash(created.events, count) === cut.sha256;
+}
+
+// A 0.2.2 task belongs to the Host; only its actual destination binds it to
+// this session. Being a creator/editor in involvedSessionIds is insufficient.
+export function scheduleSession(entry) {
+  if (Object.hasOwn(entry, 'target'))
+    return entry.target?.kind === 'session' ? entry.target.sessionId : undefined;
+  return entry.sessionId;
+}
+
+function scheduleRecord(entry) {
+  const record = { ...entry };
+  for (const key of ['sessionId', 'status', 'lastDelivery']) delete record[key];
+  return record;
+}
+
+// Preserve the session-scoped wire contract over the reviewed Host-wide v2
+// service. Its version compare happens INSIDE the native edit queue, so a
+// retarget after our read refuses instead of mutating another session's task.
+export async function manageSchedule(schedule, p) {
+  const exact = { sessionId: p.sessionId, id: p.id };
+  const history = { id: p.id, limit: p.limit, ...(p.before === undefined ? {} : { before: p.before }) };
+  if (typeof schedule.update === 'function' && typeof schedule.delete === 'function') {
+    if (p.action === 'history') return schedule.history({ ...exact, ...history });
+    if (p.action === 'delete') return schedule.delete(exact);
+    return schedule.update({ ...exact, expected: p.expected,
+      ...Object.fromEntries(['title', 'prompt', 'change'].filter(key => p[key] !== undefined).map(key => [key, p[key]])) });
+  }
+  if (schedule.update !== undefined || schedule.delete !== undefined
+      || typeof schedule.view !== 'function' || typeof schedule.edit !== 'function')
+    throw new Error('HGS: incompatible official dsh schedule service');
+  const current = await schedule.view({ id: p.id });
+  if (scheduleSession(current) !== p.sessionId)
+    return { id: p.id, code: 'schedule_not_found', ...(p.action === 'delete' ? { deleted: false } : p.action === 'update' ? { updated: false } : {}) };
+  if (p.action === 'history') {
+    const result = await schedule.history(history);
+    const after = await schedule.view({ id: p.id });
+    if (scheduleSession(after) !== p.sessionId || after.updatedAt !== current.updatedAt)
+      return { id: p.id, code: 'schedule_not_found' };
+    // A Host task can have been retargeted earlier too. Its opaque native
+    // cursor is preserved, but another destination's deliveries stay private.
+    return Array.isArray(result.records) ? { ...result, records: result.records.filter(row => row.targetSessionId === p.sessionId) } : result;
+  }
+  if (p.action === 'update' && !isDeepStrictEqual(p.expected, scheduleRecord(current)))
+    return { id: p.id, updated: false, code: 'schedule_conflict' };
+  const request = { id: p.id, action: p.action, expectedUpdatedAt: current.updatedAt ?? null };
+  if (p.action === 'update') {
+    request.patch = Object.fromEntries(['title', 'prompt'].filter(key => p[key] !== undefined).map(key => [key, p[key]]));
+    if (p.change !== undefined) {
+      if (!['after', 'at', 'every', 'daily', 'weekly', 'cron', 'rrule'].includes(p.change?.kind))
+        throw new Error('Unsupported native schedule timing');
+      request.patch.timing = p.change;
+    }
+  }
+  const result = await schedule.edit(request);
+  if (p.action === 'delete') return result;
+  return result.code ? { ...result, updated: false } : { id: p.id, updated: true, record: scheduleRecord(result) };
+}
+
 export function apply(ctx, config) {
   const api = ctx.sessionController;
-  // These extension seams are deliberately pinned to the reviewed releases.
-  // In particular the public selectModel also changes the profile default, and
-  // only the private selection map tells whether an Agent has a selection.
   const control = api.agents;
-  if (typeof control?.composeAgent !== 'function' || typeof control?.serializeImageAdmission !== 'function'
-      || typeof control?.selectForNextRequest !== 'function' || !(control.selections instanceof WeakMap))
-    throw new Error('HGS: incompatible official dsh session controller');
+  const models = modelSelectionAdapter(control);
   const owned = new Map(), opening = new Map(), questions = new Map();
   const generation = randomUUID();
   const shellContext = new AsyncLocalStorage(), shellCalls = new Map(), jobCalls = new Map();
@@ -51,20 +181,21 @@ export function apply(ctx, config) {
   const forkReceipts = new Map(), forking = new Map();
   // Optional official Schedule bundle. Absent means unknown, never "no tasks".
   const scheduleService = () => ctx.get('schedule');
-  const recurringKinds = new Set(['every', 'daily', 'weekly', 'cron']);
+  const recurringKinds = new Set(['every', 'daily', 'weekly', 'cron', 'rrule']);
   async function scheduleSummaries() {
     const schedule = scheduleService();
     if (typeof schedule?.catalog !== 'function') return null;
     try {
       const summaries = new Map();
       for (const entry of await schedule.catalog()) {
-        if (entry.status !== 'active') continue;
-        const summary = summaries.get(entry.sessionId) ?? { count: 0, recurring: 0, nextAt: null };
+        const sessionId = scheduleSession(entry);
+        if (entry.status !== 'active' || typeof sessionId !== 'string' || !sessionId) continue;
+        const summary = summaries.get(sessionId) ?? { count: 0, recurring: 0, nextAt: null };
         const at = Date.parse(entry.scheduledAt) / 1000;
         summary.count += 1;
         if (recurringKinds.has(entry.kind)) summary.recurring += 1;
         if (Number.isFinite(at) && (summary.nextAt === null || at < summary.nextAt)) summary.nextAt = at;
-        summaries.set(entry.sessionId, summary);
+        summaries.set(sessionId, summary);
       }
       return summaries;
     } catch { return null; }
@@ -133,7 +264,7 @@ export function apply(ctx, config) {
       const observation = await ctx.sessionQuery.observeSession(sessionId);
       try {
         if (observation.header.origin === 'subagent') throw new Error('Use the parent to manage a subagent');
-        const composition = await control.composeAgent(control.presetForObservation(observation));
+        const composition = await models.compose(control.presetForObservation(observation));
         const { provider, model } = ctx.agentDefaultModel.currentSelection();
         const handle = await ctx.agents.resume({ resumeSessionId: sessionId, agentOptions: { provider, model }, setup: composition.setup });
         applyPermissions(handle.agent, permissionMode);
@@ -145,20 +276,13 @@ export function apply(ctx, config) {
     opening.set(sessionId, work);
     return work;
   }
-  // Upstream installs a model selection while composing a top-level Agent or
+  // The 0.2.1 controller installs a selection while composing a top-level Agent or
   // changing its model. selectionFor would also install one on a read of any
   // other Agent, such as a child: prompt listeners that take over its request
   // route (the profile default before its first request), and an effect Cordis
   // rejects on an unloading scope. Reads never install one; an Agent without
   // one reports its stored selection, or before its first request its own route.
-  const selectionOf = (agent, projections) => {
-    const installed = control.selections.get(agent);
-    if (installed) return { ...installed.current };
-    const stored = projections?.modelSelection?.next;
-    if (stored) return stored;
-    const { provider, model, reasoningEffort } = agent.options ?? {};
-    return provider && model ? { provider, model, ...(reasoningEffort === undefined ? {} : { reasoningEffort }) } : null;
-  };
+  const selectionOf = (agent, projections) => models.current(agent, projections);
   // A child lives in its parent's Agent scope and belongs to subagent routing:
   // upstream neither prompts nor reconfigures one directly, offers it no
   // commands and interrupts it only through its parent's address. HGS messages
@@ -297,16 +421,18 @@ export function apply(ctx, config) {
     if (typeof api.fork !== 'function') throw new Error('Native fork is unavailable');
     const work = (async () => {
       const source = await ctx.sessionQuery.observeSession(p.sessionId, { projectionMode: 'none' });
-      let cwd;
+      let cwd, cut;
       try {
         if (source.header.origin === 'subagent') throw new Error('Fork the parent session; a child belongs to its parent');
         if (typeof p.cwd !== 'string' || source.header.cwd !== p.cwd) throw new Error('Native session belongs to another folder');
         cwd = source.header.cwd;
+        if (!models.legacy) cut = completedForkCut(source);
       } finally { source[Symbol.dispose](); }
-      const { sessionId } = await api.fork({ sessionId: p.sessionId });
+      const { sessionId } = await api.fork({ sessionId: p.sessionId, ...(cut ? { atSeq: cut.atSeq } : {}) });
       const created = await ctx.sessionQuery.observeSession(sessionId, { projectionMode: 'none' });
       try {
-        if (sessionId === p.sessionId || created.header.parentSession !== p.sessionId || created.header.cwd !== cwd
+        if (sessionId === p.sessionId || created.header.id !== sessionId
+            || (cut ? !matchesForkCut(created, cut) : created.header.parentSession !== p.sessionId) || created.header.cwd !== cwd
             || created.header.origin === 'subagent')
           throw new Error(`Native fork ${sessionId} does not match its source; inspect Native UI`);
       } finally { created[Symbol.dispose](); }
@@ -378,24 +504,14 @@ export function apply(ctx, config) {
     if (typeof p.sessionId !== 'string' || !p.sessionId) throw new Error('Choose a native session');
     if (!schedule) return { available: false, generation };
     if (p.action === 'list') {
-      const items = (await schedule.catalog()).filter(entry => entry.sessionId === p.sessionId);
+      const items = (await schedule.catalog()).filter(entry => scheduleSession(entry) === p.sessionId);
       return { available: true, generation, items };
     }
     if (p.generation !== generation) throw new Error('DeepSeek host changed; refresh schedules');
     if (typeof p.id !== 'string' || !p.id) throw new Error('Choose a scheduled task');
-    const exact = { sessionId: p.sessionId, id: p.id };
-    switch (p.action) {
-      case 'history': return { available: true, generation, result: await schedule.history({ ...exact, limit: p.limit,
-        ...(p.before === undefined ? {} : { before: p.before }) }) };
-      case 'delete': return { available: true, generation, result: await schedule.delete(exact) };
-      case 'update': {
-        if (!p.expected || typeof p.expected !== 'object') throw new Error('Expected task record is required');
-        const request = { ...exact, expected: p.expected };
-        for (const key of ['title', 'prompt', 'change']) if (p[key] !== undefined) request[key] = p[key];
-        return { available: true, generation, result: await schedule.update(request) };
-      }
-      default: throw new Error('Unsupported schedule action');
-    }
+    if (!['history', 'delete', 'update'].includes(p.action)) throw new Error('Unsupported schedule action');
+    if (p.action === 'update' && (!p.expected || typeof p.expected !== 'object')) throw new Error('Expected task record is required');
+    return { available: true, generation, result: await manageSchedule(schedule, p) };
   }
   async function execute(request) {
     if (closing) throw new Error('Native host is stopping');
@@ -515,7 +631,7 @@ export function apply(ctx, config) {
         } catch (error) {
           if (error?.code !== 'SESSION_QUERY_SESSION_NOT_FOUND') throw error;
         }
-        const composition = await control.composeAgent('standard');
+        const composition = await models.compose('standard');
         const { provider, model } = ctx.agentDefaultModel.currentSelection();
         const handle = await ctx.agents.create({ sessionId, agentOptions: { provider, model },
           meta: { cwd: p.cwd, agentPreset: composition.agentPreset }, setup: composition.setup });
@@ -584,7 +700,7 @@ export function apply(ctx, config) {
         if (!agent) throw new Error('Resume this session before sending a message');
         // Read as list and inspect do. A top-level Agent upstream composed has an
         // installed selection; another one, such as a webhook root, gets none here.
-        const selection = selectionOf(agent, control.selections.has(agent) ? undefined
+        const selection = selectionOf(agent, models.has(agent) ? undefined
           : (await api.projections({ sessionId: p.sessionId }, new AbortController().signal))?.values);
         if (needsSignIn(selection, await accountStatus()))
           throw new Error('Sign in to DeepSeek in the native UI before sending a message');
@@ -601,7 +717,7 @@ export function apply(ctx, config) {
             ...(p.reasoningEffort === undefined ? {} : { reasoningEffort: p.reasoningEffort }) });
           const selection = { provider: resolved.provider, model: resolved.model,
             ...(resolved.reasoningEffort === undefined ? {} : { reasoningEffort: resolved.reasoningEffort }) };
-          control.selectForNextRequest(agent, selection);
+          models.select(agent, selection);
           return { selected: selection, scope: 'session' };
         });
       }

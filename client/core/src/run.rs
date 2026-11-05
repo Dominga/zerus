@@ -1,6 +1,8 @@
 //! Runs one [`Invocation`] and reports how it ended as an [`Exit`].
 #[cfg(any(windows, test))]
 mod hidden;
+#[cfg(unix)]
+pub mod rendezvous;
 pub(crate) mod startup;
 #[cfg(windows)]
 pub use hidden::{HiddenError, ProcessIdentity};

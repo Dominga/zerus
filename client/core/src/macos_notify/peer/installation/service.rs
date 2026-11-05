@@ -108,7 +108,7 @@ pub(super) struct Birth {
 }
 pub(super) fn birth(child: &mut Child) -> Result<Birth, Refusal> {
     if child.try_wait().map_err(|_| Refusal::Child)?.is_some() {
-        return Err(Refusal::Child);
+        return Err(Refusal::ChildExited);
     }
     let pid = child.id();
     if pid == 0 || pid > i32::MAX as u32 {

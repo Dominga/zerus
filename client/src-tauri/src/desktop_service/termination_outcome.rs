@@ -1,7 +1,9 @@
 //! Native confirmation only. Retention is data admission, never Terminate
 //! consent. A consumed live confirmation can invoke its frozen native call once.
 use super::*;
+mod diagnostic;
 mod image;
+use diagnostic::{Phase, Reason, Trace};
 use image::Image;
 use serde::Deserialize;
 use zerus_client_core::{
@@ -19,6 +21,15 @@ pub(crate) const UNCONFIRMED: &str =
 const RPC_LIMIT: usize = 64 << 10;
 // Capture::completed accepts at most this many original receipt bytes.
 const NATIVE_RECEIPT_LIMIT: usize = 64 << 10;
+
+/// The existing GUI offer fence can fail before there is a Service/Context.
+/// Keep that same refusal identifiable without constructing either one.
+pub(crate) fn missing_offer_service() -> String {
+    let trace = Trace::default();
+    trace
+        .finish::<()>(Err(trace.refuse(Reason::ServiceMissing)))
+        .unwrap_err()
+}
 
 /// Bounded correlation/bookkeeping only. No controller can be rebuilt from
 /// these records. Durable client recovery is a separate follow-up.
@@ -55,16 +66,28 @@ impl Selected {
         target: &zerus_client_core::Target,
         machine: &str,
     ) -> Result<(Option<Capture>, Self), String> {
-        context.probe_abi()?;
-        context.check_scope()?;
-        let helper = context.helper.clone();
-        let runner = |_: &std::path::Path, invocation: &Invocation| context.read(invocation);
-        crate::termination_cleanup::probe(&helper, target, &runner)?;
-        let value = crate::termination_cleanup::inspection(&helper, target, machine, &runner)?;
-        let capture = Capture::from_inspection(target, machine, &value)?;
-        // The offer keeps its immutable selection/pins, not an idle I/O charge.
-        let selected = context.with_hold(Arc::new(()))?;
-        Ok((capture, Self(selected)))
+        let trace = context.trace.clone();
+        let result = (|| {
+            trace.phase(Phase::AbiProbe);
+            context.probe_abi()?;
+            trace.phase(Phase::ServiceScope);
+            context.check_scope()?;
+            let helper = context.helper.clone();
+            let runner = |_: &std::path::Path, invocation: &Invocation| context.read(invocation);
+            trace.phase(Phase::LifecycleProbe);
+            crate::termination_cleanup::probe(&helper, target, &runner)?;
+            trace.phase(Phase::InspectRead);
+            let value = crate::termination_cleanup::inspection(&helper, target, machine, &runner)?;
+            trace.phase(Phase::Capture);
+            let capture = Capture::from_inspection(target, machine, &value)?;
+            #[cfg(all(test, target_os = "linux"))]
+            tests::after_capture();
+            // The offer keeps its immutable selection/pins, not an idle I/O charge.
+            trace.phase(Phase::FinalOfferCurrent);
+            let selected = context.with_hold(Arc::new(()))?;
+            Ok((capture, Self(selected)))
+        })();
+        trace.finish(result)
     }
 }
 
@@ -289,9 +312,10 @@ impl Controller {
         // This is the original accounted runner and ORIGINAL invocation
         // timeout (45 local / 60 peer), not run_owned's 30-second RPC cap.
         let current = self.context.clone();
+        let invocation = helper_invocation(invocation);
         run::run_accounted_frozen(
             self.context.image.executable(),
-            invocation,
+            &invocation,
             &self.context.environment,
             NATIVE_RECEIPT_LIMIT,
             &AtomicBool::new(false),
@@ -302,6 +326,21 @@ impl Controller {
         .filter(|_| !self.context.rejected.load(Ordering::Acquire))
         .unwrap_or_else(|| Exit::StartFailed(UNCONFIRMED.into()))
     }
+}
+// The Mac observer checks a live original Child before the owned runner can
+// write stdin. Even --help must wait for that check; EOF/refusal never dispatches.
+// Linux/Windows keep their existing immutable/retained-image execution paths.
+fn helper_invocation(original: &Invocation) -> Invocation {
+    #[cfg(unix)]
+    {
+        let required = cfg!(target_os = "macos");
+        #[cfg(all(test, target_os = "linux"))]
+        let required = required || tests::rendezvous_enabled();
+        if required {
+            return run::rendezvous::prepare(original);
+        }
+    }
+    original.clone()
 }
 fn same_invocation(a: &Invocation, b: &Invocation) -> bool {
     a.args == b.args && a.stdin == b.stdin && a.timeout == b.timeout && a.request_id == b.request_id
@@ -369,6 +408,7 @@ struct Context {
     hold: Arc<dyn Send + Sync>,
     busy: Arc<AtomicBool>,
     rejected: Arc<AtomicBool>,
+    trace: Arc<Trace>,
 }
 struct CallLifetime {
     hold: Option<Arc<dyn Send + Sync>>,
@@ -390,31 +430,52 @@ impl Context {
         service: Arc<Service>,
         hold: Arc<dyn Send + Sync>,
     ) -> Result<Arc<Self>, String> {
+        let trace = Arc::new(Trace::default());
+        let result = Self::prepare_context(service, hold, trace.clone());
+        // Successful construction stays open through the final offer check;
+        // errors before a Context exists are still phase-bound diagnostics.
+        match result {
+            Ok(context) => Ok(context),
+            Err(error) => trace.finish(Err(error)),
+        }
+    }
+    fn prepare_context(
+        service: Arc<Service>,
+        hold: Arc<dyn Send + Sync>,
+        trace: Arc<Trace>,
+    ) -> Result<Arc<Self>, String> {
         let snapshot = service.snapshot();
         let shared = &service.shared;
-        if !shared.allowed || !snapshot.connected {
-            return Err(UNCONFIRMED.into());
+        if !shared.allowed {
+            return Err(trace.refuse(Reason::Disallowed));
+        }
+        if !snapshot.connected {
+            return Err(trace.refuse(Reason::Disconnected));
         }
         let configuration = shared
             .configuration
             .lock()
             .unwrap_or_else(PoisonError::into_inner)
             .clone()
-            .ok_or(UNCONFIRMED)?;
+            .ok_or_else(|| trace.refuse(Reason::ConfigurationMissing))?;
         let cancel = shared
             .cancellation
             .lock()
             .unwrap_or_else(PoisonError::into_inner)
             .clone()
-            .ok_or(UNCONFIRMED)?;
+            .ok_or_else(|| trace.refuse(Reason::CancellationMissing))?;
         let routing = shared
             .relay
             .lock()
             .unwrap_or_else(PoisonError::into_inner)
             .clone()
-            .ok_or(UNCONFIRMED)?;
-        let helper = routing.executable()?.to_owned();
+            .ok_or_else(|| trace.refuse(Reason::RelayMissing))?;
+        let helper = routing
+            .executable()
+            .map_err(|_| trace.refuse(Reason::RelayUnavailable))?
+            .to_owned();
         let image = Arc::new(Image::selected(routing.clone()).map_err(|_| {
+            trace.fail(Reason::ImageSelection);
             if cfg!(target_os = "macos") {
                 image::MAC_UNAVAILABLE
             } else {
@@ -425,17 +486,23 @@ impl Context {
             service,
             scope: wire::Scope {
                 configuration,
-                service_epoch: snapshot.epoch.ok_or(UNCONFIRMED)?,
+                service_epoch: snapshot
+                    .epoch
+                    .ok_or_else(|| trace.refuse(Reason::EpochMissing))?,
             },
-            generation: snapshot.generation.ok_or(UNCONFIRMED)?,
+            generation: snapshot
+                .generation
+                .ok_or_else(|| trace.refuse(Reason::GenerationMissing))?,
             routing,
             image,
             helper,
             cancel,
-            environment: FrozenEnvironment::capture().map_err(|_| UNCONFIRMED)?,
+            environment: FrozenEnvironment::capture()
+                .map_err(|_| trace.refuse(Reason::EnvironmentCapture))?,
             hold,
             busy: Arc::new(AtomicBool::new(false)),
             rejected: Arc::new(AtomicBool::new(false)),
+            trace,
         });
         context.current_or_refuse()?;
         Ok(context)
@@ -454,6 +521,7 @@ impl Context {
             hold,
             busy: Arc::new(AtomicBool::new(false)),
             rejected: self.rejected.clone(),
+            trace: self.trace.clone(),
         }))
     }
     fn current(&self) -> bool {
@@ -493,26 +561,47 @@ impl Context {
             && self.routing.executable().is_ok_and(|p| p == self.helper)
     }
     fn current_or_refuse(&self) -> Result<(), String> {
-        if !self.current() || self.busy.load(Ordering::Acquire) {
-            Err(UNCONFIRMED.into())
+        self.current_or_refuse_at(Reason::ContextCurrent)
+    }
+    fn current_or_refuse_at(&self, reason: Reason) -> Result<(), String> {
+        if !self.current() {
+            Err(self.trace.refuse(reason))
+        } else if self.busy.load(Ordering::Acquire) {
+            Err(self.trace.refuse(Reason::Busy))
         } else {
             Ok(())
         }
     }
     fn spawn(&self, command: &mut std::process::Command) -> std::io::Result<std::process::Child> {
         if !self.current() {
+            self.trace.fail(Reason::PreSpawnCurrent);
             return Err(std::io::ErrorKind::PermissionDenied.into());
         }
-        self.image.before_spawn(command)?;
+        self.image
+            .before_spawn(command)
+            .inspect_err(|_| self.trace.fail(Reason::ImageBeforeSpawn))?;
         #[cfg(all(test, target_os = "linux"))]
         tests::after_spawn_check();
-        let mut child = command.spawn()?;
-        let observed = self.image.matches_child(&mut child);
+        let mut child = command
+            .spawn()
+            .inspect_err(|_| self.trace.fail(Reason::Spawn))?;
+        let observed = self.image.observe_child(&mut child);
+        if let Err(failure) = &observed {
+            self.trace.fail(match failure {
+                #[cfg(not(target_os = "macos"))]
+                image::ChildFailure::Observation => Reason::OriginalChildObservation,
+                image::ChildFailure::Exited => Reason::OriginalChildExited,
+                image::ChildFailure::Changed => Reason::ImageAfterObservation,
+                #[cfg(target_os = "macos")]
+                image::ChildFailure::Native(failure) => Reason::OriginalChildNative(*failure),
+            });
+        }
         #[cfg(all(test, target_os = "linux"))]
         tests::after_image_observation(&mut child);
         // Native image observation may be slow; it does not check the Service
         // epoch/configuration/cancellation. Recheck the SAME Context last.
-        if !observed || !self.same_context() {
+        if observed.is_err() || !self.same_context() {
+            self.trace.fail(Reason::ContextAfterObservation);
             self.reject_child(&mut child);
             #[cfg(all(test, target_os = "linux"))]
             tests::observe_refused_child(&mut child);
@@ -532,10 +621,10 @@ impl Context {
             .shared
             .rpc
             .admit(Role::Fleet)
-            .map_err(|_| UNCONFIRMED)?;
+            .map_err(|_| self.trace.refuse(Reason::RpcCapacity))?;
         self.busy
             .compare_exchange(false, true, Ordering::AcqRel, Ordering::Acquire)
-            .map_err(|_| UNCONFIRMED)?;
+            .map_err(|_| self.trace.refuse(Reason::Busy))?;
         Ok(Arc::new(CallLifetime {
             hold: Some(self.hold.clone()),
             rpc: Some(rpc),
@@ -552,7 +641,7 @@ impl Context {
             .as_ref()
             .is_some_and(|s| s.len() > zerus_watch_protocol::CONTROL_LINE_BYTES)
         {
-            return Err(UNCONFIRMED.into());
+            return Err(self.trace.refuse(Reason::InvalidInput));
         }
         let resources = self.start_call()?;
         let resources: Arc<dyn Send + Sync> = Arc::new((
@@ -568,7 +657,8 @@ impl Context {
             timeout: RPC_WAIT,
             request_id: None,
         };
-        let result = run::run_owned(
+        let invocation = helper_invocation(&invocation);
+        let result = run::run_owned_observed(
             self.image.executable(),
             &invocation,
             &[],
@@ -583,6 +673,11 @@ impl Context {
                 #[cfg(all(test, target_os = "linux"))]
                 tests::after_original_binding(&mut child);
                 if refused || !original.same_context() {
+                    original.trace.fail(if refused {
+                        Reason::OriginalRegistration
+                    } else {
+                        Reason::ContextAfterBinding
+                    });
                     // Withhold the envelope but keep THIS child in the owned
                     // runner's stop/reap/pipe custody, including on refusal.
                     original.reject_child(&mut child);
@@ -592,12 +687,13 @@ impl Context {
                 Ok(child)
             },
             resources,
+            |error, _| self.trace.owned(error),
         );
         self.finish_call()?;
         let result = result.map_err(|_| UNCONFIRMED)?;
-        self.current_or_refuse()?;
+        self.current_or_refuse_at(Reason::ContextAfterExchange)?;
         if result.len() > RPC_LIMIT {
-            return Err(UNCONFIRMED.into());
+            return Err(self.trace.refuse(Reason::OutputBound));
         }
         Ok(result)
     }
@@ -606,16 +702,22 @@ impl Context {
             return Exit::StartFailed(UNCONFIRMED.into());
         };
         let original = self.clone();
+        let invocation = helper_invocation(invocation);
         let exit = run::run_accounted_frozen(
             self.image.executable(),
-            invocation,
+            &invocation,
             &self.environment,
             zerus_client_core::worktree_review::REVIEW_LIMIT,
             &self.cancel,
             Arc::new((self.clone(), resources)),
             move |command| original.spawn(command),
         );
-        if self.finish_call().is_err() || self.current_or_refuse().is_err() {
+        self.trace.read(&exit);
+        if self.finish_call().is_err()
+            || self
+                .current_or_refuse_at(Reason::ContextAfterExchange)
+                .is_err()
+        {
             return Exit::StartFailed(UNCONFIRMED.into());
         }
         exit.unwrap_or_else(|_| Exit::StartFailed(UNCONFIRMED.into()))
@@ -624,7 +726,7 @@ impl Context {
         let until = std::time::Instant::now() + Duration::from_secs(2);
         while self.busy.load(Ordering::Acquire) {
             if std::time::Instant::now() >= until {
-                return Err(UNCONFIRMED.into());
+                return Err(self.trace.refuse(Reason::PhysicalFinish));
             }
             std::thread::sleep(Duration::from_millis(1));
         }
@@ -632,14 +734,15 @@ impl Context {
     }
     fn probe_abi(self: &Arc<Self>) -> Result<(), String> {
         let help = self.rpc(vec!["--help".into()], None, None)?;
-        let text = std::str::from_utf8(&help).map_err(|_| UNCONFIRMED)?;
+        let text =
+            std::str::from_utf8(&help).map_err(|_| self.trace.refuse(Reason::AbiEncoding))?;
         for marker in [
             HELP,
             wire::HELP_MARKER,
             zerus_client_core::desktop::ui_requests::HELP_MARKER,
         ] {
             if !text.lines().any(|line| line.trim() == marker) {
-                return Err(UNCONFIRMED.into());
+                return Err(self.trace.refuse(Reason::AbiMarker));
             }
         }
         Ok(())
@@ -650,13 +753,14 @@ impl Context {
             None,
             None,
         )?;
-        let status: Value = serde_json::from_slice(&bytes).map_err(|_| UNCONFIRMED)?;
+        let status: Value =
+            serde_json::from_slice(&bytes).map_err(|_| self.trace.refuse(Reason::StatusReply))?;
         if status["abi"] != zerus_client_core::desktop::service::ABI
             || status["running"] != true
             || status["configuration"] != self.scope.configuration
             || status["epoch"] != self.scope.service_epoch
         {
-            return Err(UNCONFIRMED.into());
+            return Err(self.trace.refuse(Reason::StatusScope));
         }
         Ok(())
     }

@@ -65,6 +65,12 @@ fn process_consent(row: &Value, common: &Path, issued: u64) -> String {
 }
 
 fn valid_process_consent(proof: &str, row: &Value, common: &Path, at: u64) -> bool {
+    let proof = if let Some(original) = proof.strip_prefix(zerus_client_core::worktree_review::PERMISSION_DENIALS_PREFIX) {
+        if !zerus_client_core::worktree_review::permission_denials_complete(row) {
+            return false;
+        }
+        original
+    } else { proof };
     let Some(issued) = proof.strip_prefix("v2:").and_then(|s| s.split_once(':'))
         .and_then(|(issued, _)| issued.parse::<u64>().ok()) else { return false; };
     if issued > at || at - issued >= PROCESS_CONSENT_SECONDS
@@ -581,12 +587,18 @@ fn occupants(path: &Path, context: &Context, row: &mut Value, reasons: &mut Vec<
     // Without the running processes' folders, nothing may count as unused.
     let mut samples: Vec<_> = match &context.processes {
         Ok(processes) => {
+            row["process_coverage"] = json!({
+                "abi": zerus_client_core::worktree_review::PERMISSION_DENIALS_ABI,
+                "complete": processes.membership_complete,
+                "open_files_checked": processes.membership_complete,
+                "permission_denials": processes.unreadable.len(),
+            });
+            row["unreadable_processes"] = json!(processes.unreadable);
             if !processes.unreadable.is_empty() {
                 reasons.push(reason("processes_unavailable", format!(
                     "Zerus cannot check whether some running programs use this folder ({} with hidden paths).",
                     plural(processes.unreadable.len(), "process")
                 )));
-                row["unreadable_processes"] = json!(processes.unreadable);
             }
             processes.paths.iter()
                 .filter(|(_, cwd, _)| inside(cwd, path))
@@ -2573,6 +2585,55 @@ fn remove(args: &[String], attempted: &mut bool, observed: &mut Option<Value>) -
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn explicit_denial_proof_revalidates_current_native_coverage_before_its_v2_binding() {
+        use zerus_client_core::worktree_review::{PERMISSION_DENIALS_ABI, PERMISSION_DENIALS_PREFIX};
+        let common = Path::new("/fixture/repository/.git");
+        let mut row = json!({"fingerprint":"original-checkout", "process_fingerprint":"available",
+            "verdict":"blocked", "reasons":[{"code":"processes_unavailable"}],
+            "unreadable_processes":[{"pid":7,"identity":"original-birth","cwd":true,"executable":false,"files":true}],
+            "process_coverage":{"abi":PERMISSION_DENIALS_ABI,"complete":true,"open_files_checked":true,"permission_denials":1}});
+        let proof = format!("{PERMISSION_DENIALS_PREFIX}{}", process_consent(&row, common, 1000));
+        assert!(valid_process_consent(&proof, &row, common, 1000));
+        assert!(!valid_process_consent(&proof, &row, common, 1300));
+        let original = row.clone();
+        for key in ["complete", "open_files_checked"] {
+            row = original.clone(); row["process_coverage"][key] = json!(false);
+            assert!(!valid_process_consent(&proof, &row, common, 1001), "{key}");
+        }
+        row = original.clone(); row["process_coverage"] = Value::Null;
+        assert!(!valid_process_consent(&proof, &row, common, 1001));
+        row = original.clone(); row["reasons"] = json!([{"code":"processes"}]); row["process_fingerprint"] = Value::Null;
+        assert!(!valid_process_consent(&proof, &row, common, 1001), "new known use wins");
+        row = original.clone(); row["fingerprint"] = json!("replacement-checkout");
+        assert!(!valid_process_consent(&proof, &row, common, 1001));
+        row = original; row["verdict"] = json!("ready"); row["reasons"] = json!([]);
+        row["unreadable_processes"] = json!([]); row["process_fingerprint"] = Value::Null;
+        row["process_coverage"]["permission_denials"] = json!(0);
+        assert!(valid_process_consent(&proof, &row, common, 1001), "fresh complete no-denial roster remains clear");
+    }
+
+    #[test]
+    fn readable_membership_is_not_erased_by_a_denied_half_of_the_same_sample() {
+        let dir = tempfile::tempdir().unwrap();
+        let file = dir.path().join("open-original");
+        fs::write(&file, "fixture").unwrap();
+        let context = Context { common: dir.path().into(), bases: vec![],
+            processes: Ok(crate::platform::WorktreeProcesses {
+                paths: vec![(7, file, "known-holder".into())],
+                unreadable: vec![crate::platform::UnreadableWorktreeProcess { pid:7, identity:"original-birth".into(), command:"known-holder".into(),
+                    cwd:true, executable:false, files:false, invocation_ancestor:false }], membership_complete:true }),
+            bindings:vec![], bindings_complete:true, archives:vec![], archives_complete:true };
+        let mut row = json!({}); let mut reasons = vec![];
+        occupants(dir.path(), &context, &mut row, &mut reasons);
+        assert_eq!(row["process_count"], 1);
+        assert_eq!(row["processes"][0]["pid"], 7);
+        assert!(reasons.iter().any(|r| r["code"] == "processes"));
+        assert!(reasons.iter().any(|r| r["code"] == "processes_unavailable"));
+        assert!(zerus_client_core::worktree_review::permission_denials_complete(&row));
+        assert!(row.get("process_fingerprint").is_none(), "known use is not process-uncertainty consent");
+    }
 
     #[test]
     fn manual_process_consent_expires_and_binds_the_checkout() {

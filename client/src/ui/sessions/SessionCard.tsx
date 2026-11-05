@@ -240,6 +240,16 @@ export function folderOf(s: Session) {
   return s.cwd.split(/[\\/]/).filter(Boolean).pop() ?? "";
 }
 
+/** Optional questions remain separate from blocking input and session status. */
+function OptionalQuestionsChip(props: { session: Session }) {
+  const optionalCount = () => optionalQuestionCount(props.session, computerFresh(props.session.computer));
+  return <Show when={optionalCount()}>
+    <span class="qchip" classList={{ muted: !!props.session.muted }} title={tr(optionalCount() === 1 ? "%1 optional question waiting\nThe agent can continue without an answer. Answer or skip it in Activity.\nClick to open." : "%1 optional questions waiting\nThe agent can continue without an answer. Answer or skip it in Activity.\nClick to open.", optionalCount())}>
+      <Icon name="question" size={16} />{optionalQuestionCountText(optionalCount())}
+    </span>
+  </Show>;
+}
+
 export function SessionCard(props: {
   session: Session;
   selected: boolean;
@@ -249,7 +259,6 @@ export function SessionCard(props: {
 }) {
   const s = () => props.session;
   const kind = () => badgeKind(s());
-  const optionalCount = () => optionalQuestionCount(s(), computerFresh(s().computer));
   return (
     <div class="scard" classList={{ selected: props.selected, offline: statusOf(s()) === "offline", muted: !!s().muted }} data-emphasis={emphasis(s())}>
       <div class="sc-l1">
@@ -259,11 +268,7 @@ export function SessionCard(props: {
         <Show when={visibleUnreadReply(s(), computerFresh(s().computer)) && (s().status === "working" || s().status === "attention" || s().draft)}>
           <span class="sc-extra"><StatusBadge kind={s().muted ? "muted-unread" : "unread"} caption="" iconOnly /></span>
         </Show>
-        <Show when={optionalCount()}>
-          <span class="qchip" classList={{ muted: !!s().muted }} title={tr(optionalCount() === 1 ? "%1 optional question waiting\nThe agent can continue without an answer. Answer or skip it in Activity.\nClick to open." : "%1 optional questions waiting\nThe agent can continue without an answer. Answer or skip it in Activity.\nClick to open.", optionalCount())}>
-            <Icon name="question" size={16} />{optionalQuestionCountText(optionalCount())}
-          </span>
-        </Show>
+        <OptionalQuestionsChip session={s()} />
         <span class="grow" />
         <AgentBadge agent={s().agent} />
       </div>
@@ -323,8 +328,8 @@ export function ChildCard(props: { parent: Session; child: Subagent; last: boole
 }
 
 /**
- * Compact (collapsed) row, 40 px: title, then status, provider and mute at the
- * right, then the expand button (SessionCardDelegate::compactLayout).
+ * Compact (collapsed) row, 40 px: title, then status, optional questions,
+ * provider and mute at the right, then the expand button.
  */
 export function CompactCard(props: { session: Session; selected: boolean; onExpand: () => void }) {
   const s = () => props.session;
@@ -333,6 +338,7 @@ export function CompactCard(props: { session: Session; selected: boolean; onExpa
       aria-description={tr("Collapsed session row. Press Right to expand.")}>
       <span class="sc-title ell" style={titleReserve(s().title, 60)} title={s().name}>{s().title}</span>
       <StatusBadge kind={badgeKind(s())} caption={statusCaption(s())} />
+      <OptionalQuestionsChip session={s()} />
       <AgentBadge agent={s().agent} />
       <Show when={s().muted}><Icon name="mute" size={14} class="sc-mute" /></Show>
       <button class="cc-expand" title={tr("Expand session row")} onClick={(e) => { e.stopPropagation(); props.onExpand(); }} onDblClick={(e) => e.stopPropagation()}>

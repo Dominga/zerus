@@ -1,4 +1,4 @@
-// Loaded only for retained cleanup outcomes or their review dialog.
+// Native cleanup phases, retained outcomes and their review dialog.
 import { createSignal } from "solid-js";
 import * as bridge from "../bridge";
 import type { Outcome } from "../types";
@@ -16,6 +16,7 @@ interface Warning {
 }
 const seen = new Map<string, string>();
 const owned = new Map<string, string>();
+const progress = new Map<string, number>();
 // Only visible notices need callback captures. The native store owns the rows.
 const warnings = new Map<string, Warning>();
 const [restoring, setRestoring] = createSignal(new Set<string>());
@@ -31,7 +32,7 @@ function publish(warning: Warning) {
     catch (error) { bus.notify("error", errorText(error), true); publish(warning); }
   } }];
   if (warning.restore) actions.push({ label: tr("Restore session"), style: "primary", icon: "play", disabled, run: () => restoreCleanup(warning.restore!) });
-  bus.notify("warn", warning.text, true, warning.key, tr("Session archived"), { actions });
+  bus.notify("warn", warning.text, false, warning.key, tr("Session archived"), { actions });
   warnings.set(warning.key, warning);
   const showing = new Set(bus.notices().map((n) => n.key));
   for (const key of warnings.keys()) if (!showing.has(key)) warnings.delete(key);
@@ -40,13 +41,25 @@ function publish(warning: Warning) {
 export function syncCleanupNotices() {
   const rows = cleanup().rows;
   const ids = new Set(rows.map((r) => r.id));
+  const active = new Set(rows.filter((r) => r.busy && r.source).map((r) => r.id));
+  for (const [id, notice] of progress) if (!active.has(id)) { bus.dismiss(notice); progress.delete(id); seen.delete(id); }
   for (const [key, id] of owned) if (!ids.has(id)) {
     bus.clearNotice(key); owned.delete(key); warnings.delete(key);
   }
   for (const id of seen.keys()) if (!ids.has(id)) seen.delete(id);
   for (const row of rows) {
-    if (!row.source || !row.notice) continue;
+    if (!row.source) continue;
     const key = sessionNoticeKey(row.source.computer, row.source.name);
+    if (row.busy) {
+      const signature = `progress:${row.status}`;
+      if (seen.get(row.id) === signature) continue;
+      seen.set(row.id, signature); owned.set(key, row.id);
+      progress.set(row.id, bus.notify("info", row.label, true, key,
+        row.status === "removing" ? tr("Removing working folder…") : tr("Checking working folder…"),
+        { busy: true, dismissible: false }));
+      continue;
+    }
+    if (!row.notice) { seen.delete(row.id); continue; }
     const signature = `${row.notice}\n${row.restore?.archive_id ?? ""}`;
     if (seen.get(row.id) === signature) continue;
     seen.set(row.id, signature);
@@ -98,6 +111,8 @@ export async function reportCleanup(outcome: Extract<Outcome, { outcome: "done" 
 export function restoreCleanupRow(row: CleanupRow) { return row.restore ? restoreCleanup(row.restore) : Promise.resolve(); }
 
 export function clearCleanupNotices() {
+  for (const notice of progress.values()) bus.dismiss(notice);
+  progress.clear();
   for (const key of warnings.keys()) bus.clearNotice(key);
   warnings.clear(); owned.clear(); seen.clear();
 }

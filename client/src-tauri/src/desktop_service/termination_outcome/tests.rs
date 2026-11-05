@@ -21,12 +21,19 @@ fn inspect_fixture(
 
 type RefusedObserver = Box<dyn FnOnce(&mut std::process::Child)>;
 thread_local! {
+    static RENDEZVOUS: std::cell::Cell<bool> = const { std::cell::Cell::new(false) };
     // Observe only a REAL failed binding, before the SAME child is returned to
     // run_owned. A hook never substitutes a binding result or supplies consent.
     static AFTER_SPAWN_CHECK: std::cell::RefCell<Option<Box<dyn FnOnce()>>> = const { std::cell::RefCell::new(None) };
     static REFUSED_OBSERVER: std::cell::RefCell<Option<RefusedObserver>> = const { std::cell::RefCell::new(None) };
     static AFTER_OBSERVATION: std::cell::RefCell<Option<RefusedObserver>> = const { std::cell::RefCell::new(None) };
     static AFTER_BINDING: std::cell::RefCell<Option<RefusedObserver>> = const { std::cell::RefCell::new(None) };
+    static AFTER_CAPTURE: std::cell::RefCell<Option<Box<dyn FnOnce()>>> = const { std::cell::RefCell::new(None) };
+}
+pub(super) fn after_capture() {
+    if let Some(hook) = AFTER_CAPTURE.with_borrow_mut(Option::take) {
+        hook();
+    }
 }
 pub(super) fn after_image_observation(child: &mut std::process::Child) {
     if let Some(observer) = AFTER_OBSERVATION.with_borrow_mut(Option::take) {
@@ -60,6 +67,7 @@ fn accounted_read_cannot_release_input_if_scope_changes_during_observation() {
             let key = crate::actions::Lane::key(&capture().target, &Action::Terminate);
             let hold = actions.begin(key.clone(), &Action::Terminate).unwrap();
             let context = Context::new_supported(service.clone(), Arc::new(hold)).unwrap();
+            context.trace.phase(Phase::InspectRead);
             let checked = context.clone();
             let check_actions = actions.clone();
             let check_key = key.clone();
@@ -119,6 +127,14 @@ fn accounted_read_cannot_release_input_if_scope_changes_during_observation() {
             assert!(!std::path::Path::new(&format!("/proc/{pid}")).exists());
             assert!(context.rejected.load(Ordering::Acquire));
             assert!(!context.busy.load(Ordering::Acquire));
+            let detail = context
+                .trace
+                .finish::<()>(Err(UNCONFIRMED.into()))
+                .unwrap_err();
+            assert!(
+                detail.ends_with("Removal check: inspect_read / context_after_observation."),
+                "{detail}"
+            );
             drop(context);
             assert!(actions.begin(key, &Action::Terminate).is_some());
             assert!(effects(&calls(&f)).is_empty());
@@ -992,5 +1008,231 @@ fn an_in_place_rewrite_after_the_last_spawn_check_cannot_replace_native_code() {
             if serde_json::from_slice::<Value>(&stdout).unwrap()["status"] == "completed"));
         assert!(!replacement);
         assert_eq!(native_calls, 1);
+    });
+}
+
+#[test]
+fn read_only_offer_diagnostics_pin_real_refusal_stages_without_effects_or_child_text() {
+    let _process = crate::PROCESS_TREE.read().unwrap();
+    tauri::async_runtime::block_on(async {
+        for (case, expected) in [
+            ("abi", "abi_probe / abi_marker"),
+            ("status", "service_scope / status_scope"),
+            ("lifecycle", "lifecycle_probe / check_refused"),
+            ("inspect_exit", "inspect_read / child_exit"),
+            ("inspect_json", "inspect_read / check_refused"),
+            ("capture", "capture / check_refused"),
+            ("final", "final_offer_current / context_current"),
+        ] {
+            let f = fixture(json!({}));
+            let (service, _cache) = connected(&f).await;
+            // Change reply DATA only after the real connection is ready. The
+            // retained executable remains the same immutable Linux snapshot.
+            let temporary = f.0.join("fixture-diagnostic.json");
+            std::fs::write(
+                &temporary,
+                json!({"termination_offer_case": case}).to_string(),
+            )
+            .unwrap();
+            std::fs::rename(temporary, f.0.join("fixture.json")).unwrap();
+            let checked = service.clone();
+            let original = capture();
+            let result = tauri::async_runtime::spawn_blocking(move || {
+                if case == "final" {
+                    let cancel = checked.shared.cancellation.lock().unwrap().clone().unwrap();
+                    AFTER_CAPTURE.with_borrow_mut(|hook| {
+                        *hook = Some(Box::new(move || cancel.store(true, Ordering::Release)));
+                    });
+                }
+                let result =
+                    inspect_fixture(checked, &original.target, &original.machine, Arc::new(()));
+                AFTER_CAPTURE.with_borrow_mut(|hook| {
+                    hook.take();
+                });
+                result
+            })
+            .await
+            .unwrap();
+            let detail = result
+                .err()
+                .expect("the actual read-only offer must refuse");
+            assert_eq!(detail, format!("{UNCONFIRMED}\nRemoval check: {expected}."));
+            for private in [
+                "private fixture",
+                "/srv/example",
+                "original-run",
+                "original-owner",
+            ] {
+                assert!(!detail.contains(private), "{detail}");
+            }
+            assert!(requests(&calls(&f), "termination_outcome").is_empty());
+            assert!(effects(&calls(&f)).is_empty());
+            service.join().await.unwrap();
+        }
+    });
+}
+
+#[test]
+fn disconnected_offer_context_is_diagnostic_without_spawning_a_native_effect() {
+    let _process = crate::PROCESS_TREE.read().unwrap();
+    tauri::async_runtime::block_on(async {
+        let f = fixture(json!({}));
+        let (service, _pump) = f.start(false);
+        let original = capture();
+        let detail = inspect_fixture(
+            service.clone(),
+            &original.target,
+            &original.machine,
+            Arc::new(()),
+        )
+        .err()
+        .expect("disallowed context cannot inspect");
+        assert_eq!(
+            detail,
+            format!("{UNCONFIRMED}\nRemoval check: context_prepare / disallowed.")
+        );
+        assert!(effects(&calls(&f)).is_empty());
+        service.join().await.unwrap();
+    });
+}
+
+#[test]
+fn offer_physical_finish_diagnostic_keeps_the_original_rpc_charge_until_real_release() {
+    let _process = crate::PROCESS_TREE.read().unwrap();
+    tauri::async_runtime::block_on(async {
+        let f = fixture(json!({}));
+        let (service, _cache) = connected(&f).await;
+        let context = Context::new_supported(service.clone(), Arc::new(())).unwrap();
+        context.trace.phase(Phase::AbiProbe);
+        let held = context.start_call().unwrap();
+        assert!(context.busy.load(Ordering::Acquire));
+        assert!(service.shared.rpc.snapshot().unwrap().count(Role::Fleet) > 0);
+        assert!(context.finish_call().is_err());
+        let detail = context
+            .trace
+            .finish::<()>(Err(UNCONFIRMED.into()))
+            .unwrap_err();
+        assert_eq!(
+            detail,
+            format!("{UNCONFIRMED}\nRemoval check: abi_probe / physical_finish.")
+        );
+        assert!(context.busy.load(Ordering::Acquire));
+        drop(held);
+        assert!(!context.busy.load(Ordering::Acquire));
+        assert!(effects(&calls(&f)).is_empty());
+        service.join().await.unwrap();
+    });
+}
+
+pub(super) fn rendezvous_enabled() -> bool {
+    RENDEZVOUS.get()
+}
+struct Rendezvous;
+impl Rendezvous {
+    fn enter() -> Self {
+        RENDEZVOUS.set(true);
+        Self
+    }
+}
+impl Drop for Rendezvous {
+    fn drop(&mut self) {
+        RENDEZVOUS.set(false);
+    }
+}
+
+#[test]
+fn mac_transport_prefix_covers_rpc_reads_and_exact_native_invocation() {
+    let _process = crate::PROCESS_TREE.read().unwrap();
+    tauri::async_runtime::block_on(async {
+        let f = fixture(json!({}));
+        let (service, _cache) = connected(&f).await;
+        let _transport = Rendezvous::enter();
+        let mut controller = confirm(service.clone(), Arc::new(Pending::default()))
+            .bind(Arc::new(()))
+            .unwrap();
+        let invocation = controller.invocation().clone();
+        controller.retain().unwrap();
+        controller.begin_dispatch(&invocation).unwrap();
+        let outcome = controller.run_native(&invocation);
+        assert!(matches!(outcome, Exit::Code { code: 0, .. }), "{outcome:?}");
+        let wrapped: Vec<Vec<String>> = std::fs::read_to_string(f.0.join("rendezvous-calls"))
+            .unwrap()
+            .lines()
+            .map(|line| serde_json::from_str(line).unwrap())
+            .collect();
+        assert_eq!(
+            wrapped.iter().filter(|args| **args == ["--help"]).count(),
+            3
+        );
+        assert!(wrapped
+            .iter()
+            .any(|args| args.iter().any(|arg| arg == "inspect")));
+        assert_eq!(
+            wrapped
+                .iter()
+                .filter(|args| **args == invocation.args)
+                .count(),
+            1
+        );
+        let native = effects(&calls(&f));
+        assert_eq!(native.len(), 1);
+        assert_eq!(
+            native[0]["value"],
+            serde_json::from_slice::<Value>(invocation.stdin.as_ref().unwrap()).unwrap()
+        );
+        assert_eq!(
+            native[0]["value"]["request_id"],
+            invocation.request_id.unwrap()
+        );
+        service.join().await.unwrap();
+    });
+}
+
+#[test]
+fn mac_transport_refusal_during_observation_releases_no_prefix_or_private_input() {
+    let _process = crate::PROCESS_TREE.read().unwrap();
+    tauri::async_runtime::block_on(async {
+        let f = fixture(json!({}));
+        let (service, _cache) = connected(&f).await;
+        let _transport = Rendezvous::enter();
+        let context = Context::new_supported(service.clone(), Arc::new(())).unwrap();
+        let changed = context.clone();
+        AFTER_OBSERVATION.with_borrow_mut(|hook| {
+            *hook = Some(Box::new(move |_| {
+                changed.cancel.store(true, Ordering::Release);
+            }))
+        });
+        let path = f.0.join("rendezvous-refused-input");
+        let saw_eof = Arc::new(AtomicBool::new(false));
+        let observed = saw_eof.clone();
+        REFUSED_OBSERVER.with_borrow_mut(|hook| {
+            *hook = Some(Box::new(move |child| {
+                // Observe the exact child's actual EOF before the owned runner
+                // handles cancellation. Never panic/drop custody in spawn.
+                let until = std::time::Instant::now() + Duration::from_secs(2);
+                while !path.exists() && std::time::Instant::now() < until {
+                    std::thread::sleep(Duration::from_millis(1));
+                }
+                observed.store(
+                    child.stdin.is_none()
+                        && child.stdout.is_some()
+                        && child.stderr.is_some()
+                        && std::fs::read(path).is_ok_and(|bytes| bytes.is_empty()),
+                    Ordering::Release,
+                );
+            }));
+        });
+        assert!(context
+            .rpc(
+                vec!["desktop".into(), "frontend-request".into(), "--json".into()],
+                Some(b"private-fixture-frame\n".to_vec()),
+                None
+            )
+            .is_err());
+        assert!(saw_eof.load(Ordering::Acquire));
+        assert!(!f.0.join("rendezvous-calls").exists());
+        assert!(!context.busy.load(Ordering::Acquire));
+        assert!(effects(&calls(&f)).is_empty());
+        service.join().await.unwrap();
     });
 }

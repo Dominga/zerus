@@ -103,22 +103,52 @@ Explicit desktop termination cleanup may remove verified generated caches only
 after its Remove worktree choice and exact successful termination. Keep branch
 and archive-restore identity. Bind cleanup to the checkout ownership recorded
 at session launch and bind removal fingerprints to that nonce. Missing or
-replaced ownership, unknown local data, source changes, other occupants and
-uncertain process use require fresh manual review. Background
-maintenance continues to preserve all ignored data. Never stop unrelated system
-services to make a worktree removable; uncertain removals are never replayed.
+replaced ownership, unknown local data, source changes, other session references
+and unconfirmed process use require fresh manual review, except for the explicit
+permission-denial rule below. Background maintenance continues to preserve all
+ignored data. Uncertain removals are never replayed.
 Termination cleanup runs in the background after its original confirmation.
 Show removed, kept and unknown outcomes with explicit review actions. Only a
 verified refusal before deletion may be checked for a new removal; never replay
-an unknown outcome. Manual acceptance of unreadable process paths lasts five
-minutes for the exact checkout review and tolerates unrelated process churn.
-Fresh known-use, session, ownership and file protections still apply; automatic
-cleanup never uses that manual acceptance.
+an unknown outcome. Outside the explicit Terminate/Remove permission-denial
+exception, manual acceptance of unreadable process paths lasts five minutes for
+the exact checkout review and tolerates unrelated process churn. Fresh known-use,
+session, ownership and file protections still apply; automatic cleanup never
+uses that manual acceptance.
 On Linux and macOS, Terminate must confirm the exit of the selected agent's
 verified background process trees before worktree cleanup. Pin birth identities
 before terminal teardown loses ancestry; bound verification and restore temporary
-stops on refusal. Folder paths, executable names and shared process groups never
-authorize stopping other programs. Keep Pause and native Stop semantics unchanged.
+stops on refusal.
+
+Owner decisions of 2026-11-05 apply only to explicit Terminate with Remove
+working folder: Zerus may stop every program proven by its cwd or open files to
+use that session's verified generated worktree, including editors and terminals
+the person opened there. A complete bounded native manifest lists those programs
+before native confirmation and binds the original checkout object, ownership
+nonce, session/run/archive identity, selected CLI and configuration. Renderer
+PIDs or paths grant no authority. Before each signal, recheck the process
+birth/pin and actual membership in that same checkout; new or changed members
+require fresh review. Never signal the executing custodian or an ancestor or
+resource needed to verify and settle the action.
+
+For this explicit Remove choice, processes whose cwd/open-file membership cannot
+be inspected because of EACCES or EPERM are ignored for the removal decision:
+do not list or signal them, and they do not keep the folder. Apply this rule
+from the actual inspection result, never from executable names or an allowlist
+of system programs. Proven occupants remain listed and must be stopped first. This
+exception grants no signal authority and does not relax checkout ownership,
+process identity, confirmation, custody or unknown-removal protections.
+
+Normal stop is bounded and distinguishes confirmed exit, known surviving
+originals and unknown outcomes. Force is a separate native-confirmed action with
+a new request UUID, bound to the original stop result and freshly verified
+survivors, only after the prior writer/helper and pipes physically settle. Never
+escalate automatically or infer Force authority from a timeout. Stop-incomplete
+and removal-Unknown remain distinct; Force, restart, status and Retry never
+resume or replay an unknown removal or reconstruct consent. Keep branch and
+archive identity. Background cleanup, Pause and native Stop keep their existing
+scope; outside this explicit confirmed Remove choice, folder paths, executable
+names and shared process groups never authorize stopping other programs.
 
 An idle agent with confirmed owned live shell or native jobs shows `Background`,
 remains in Active and accepts new messages. Native work and explicit attention

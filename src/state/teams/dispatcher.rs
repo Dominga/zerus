@@ -66,6 +66,9 @@ pub(crate) struct Seen {
     /// #511 N1: a build Zerus runs for the session (`hgs run`, or a claimed
     /// `hgs team run` in its folder) is work, as the listing's `build` says.
     pub building: bool,
+    /// Task 36: that build's request id and label, empty when not building.
+    pub build_run: String,
+    pub build_label: String,
     /// The MCP servers and services it runs, which are not Background work
     /// (G7).
     pub services: Vec<SeenService>,
@@ -211,6 +214,8 @@ pub(crate) fn seen(listing: &Value) -> Vec<Seen> {
                 background,
                 work,
                 building: record["build"].is_object(),
+                build_run: record["build"]["request_id"].as_str().unwrap_or_default().to_owned(),
+                build_label: record["build"]["label"].as_str().unwrap_or_default().to_owned(),
                 services,
                 asking: live && matches!(field("phase"), "question" | "input" | "approval"),
                 last_event_at: record["last_event_at"].as_f64(),
@@ -314,6 +319,14 @@ pub(crate) enum Step {
     /// Gives the member the lead's answer as a message (A3).
     AnswerQuestion { task: u32, question: String },
     TurnEnded { task: u32, at: f64, reply: String },
+    /// Task 36: the member's session is Building on its own run during the
+    /// attempt: remember the run, so its end is noticed.
+    RunAwaited { task: u32, run: String, label: String },
+    /// Task 36: the awaited run settled. `wake`: the member's turn is over
+    /// (the session is quiet), so it is told once to read the result and go
+    /// on, and its finished turn is not captured; otherwise the member already
+    /// works again and the run is only forgotten.
+    RunSettled { task: u32, wake: bool },
     /// The capture gate was seen open: the report timeout counts from here (C2).
     GateOpen { task: u32 },
     /// A question or Background work holds a finished turn: the timeout
@@ -649,6 +662,26 @@ pub(crate) fn steps_with(team: &Team, seen: &[Seen], now: f64, listed: Option<&B
                 {
                     // A1: delivered and never started; Zerus re-sends nothing.
                     steps.push(Step::StartLate { task: task.id });
+                }
+            }
+            // Task 36 (audit P8): a member that ends its turn while its own
+            // Zerus build runs is not done: nothing would tell it when the run
+            // settles, and the quiet session would turn into a captured
+            // "waiting for my build" or No report. The run it waits on is
+            // remembered; once it settles with the turn over, the member is
+            // woken once and this tick captures nothing.
+            if let Some(found) = found.filter(|found| found.live) {
+                if found.building {
+                    let run = if found.build_run.is_empty() { "build".to_owned() } else { found.build_run.clone() };
+                    if attempt.awaited_run != run {
+                        steps.push(Step::RunAwaited { task: task.id, run, label: found.build_label.clone() });
+                    }
+                } else if !attempt.awaited_run.is_empty() {
+                    let wake = capture_open(found) && attempt.open_question().is_none();
+                    steps.push(Step::RunSettled { task: task.id, wake });
+                    if wake {
+                        continue;
+                    }
                 }
             }
             // A2/C2: the capture gate. A turn end is recorded only for a quiet
@@ -5127,6 +5160,63 @@ fn tell_lead_start_late(store: &mut Store, team: &Team, task_id: u32) -> anyhow:
 }
 
 /// Gives the member the lead's answer as a message, once (A3).
+/// Task 36: the message that wakes a member whose own run settled after its
+/// turn ended.
+pub(crate) fn run_settled_text(task: &Task, attempt: &Attempt) -> String {
+    let what = if attempt.awaited_label.is_empty() { "build".to_owned() } else { format!("build ({})", attempt.awaited_label) };
+    let read = if attempt.awaited_run == "build" {
+        "Read its result".to_owned()
+    } else {
+        format!("Read its result (ask again with request_id {})", attempt.awaited_run)
+    };
+    format!(
+        "[Zerus team] Your {what} for task #{} {} has finished. {read}, then go on with the task and finish it with hgs team report (attempt {}). Zerus does not take a reply that only says you are waiting as your report.",
+        task.id, task.title, attempt.id
+    )
+}
+
+/// Task 36: the awaited run settled. With the member's turn over it is woken
+/// once and its finished turn starts again: the report timeout counts anew
+/// from the wake, so a member that still does nothing gets No report then.
+fn run_settled(store: &mut Store, team: &Team, task_id: u32, wake: bool) -> anyhow::Result<()> {
+    let task = team.task(task_id).context("unknown task")?;
+    let attempt = task.attempts.last().context("no attempt")?;
+    if attempt.state != AttemptState::Delivered || attempt.awaited_run.is_empty() {
+        return Ok(());
+    }
+    let run = attempt.awaited_run.clone();
+    let mut sent = None;
+    if wake {
+        let session = team.member(&attempt.member).and_then(|m| m.session.clone()).context("the member has no session")?;
+        let notice = uuid::Uuid::new_v4().to_string();
+        sent = Some(send(&session, &notice, &run_settled_text(task, attempt)));
+    }
+    let role = team.role_of(&attempt.member);
+    change(store, &team.id, |team, events| {
+        let Some(attempt) = team.task_mut(task_id).and_then(|t| t.attempts.last_mut()) else { return Ok(()) };
+        if attempt.state != AttemptState::Delivered || attempt.awaited_run != run {
+            return Ok(());
+        }
+        attempt.awaited_run.clear();
+        attempt.awaited_label.clear();
+        if let Some(sent) = sent {
+            // Woken once, whatever the delivery: a refused wake leaves the
+            // finished turn to the usual capture.
+            if !matches!(sent, Sent::Refused(_)) {
+                attempt.turn_ended_at = None;
+                attempt.turn_reply.clear();
+                attempt.report_ready_at = None;
+                attempt.blocked_since = None;
+            }
+            events.push(Event::new(
+                "run_settled_woken",
+                json!({"member":role,"task":task_id,"attempt":attempt.n,"run":run,"delivered":!matches!(sent, Sent::Refused(_))}),
+            ));
+        }
+        Ok(())
+    })
+}
+
 fn send_answer(store: &mut Store, team: &Team, task_id: u32, question_id: &str) -> anyhow::Result<()> {
     let task = team.task(task_id).context("unknown task")?;
     // #630 N6: the answer may belong to an attempt or to a stage member's run.
@@ -6682,6 +6772,16 @@ fn run_step(store: &mut Store, team: &Team, step: &Step, host: &str) -> anyhow::
             }
             Ok(())
         }),
+        Step::RunAwaited { task, run, label } => change(store, &team.id, |team, _| {
+            if let Some(attempt) = team.task_mut(*task).and_then(|t| t.attempts.last_mut()) {
+                if attempt.state == AttemptState::Delivered {
+                    attempt.awaited_run = run.clone();
+                    attempt.awaited_label = label.clone();
+                }
+            }
+            Ok(())
+        }),
+        Step::RunSettled { task, wake } => run_settled(store, team, *task, *wake),
         Step::GateOpen { task } => change(store, &team.id, |team, _| {
             // An old record (or a reopened gate): the timeout starts now (C2).
             if let Some(attempt) = team.task_mut(*task).and_then(|t| t.attempts.last_mut()) {

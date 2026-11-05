@@ -1948,3 +1948,58 @@ fn the_target_check_never_ignores_an_unreadable_listed_candidate() {
     private(&state.join("sessions").join(format!("{b}.json")), b"{");
     assert!(!current(), "the target check skipped an unreadable listed session");
 }
+
+/// #1437 review (desktop-u, R2): a matching label holder is counted with the
+/// label's sessions in the ID layout, under the same proof; it never answers
+/// before them.
+#[test]
+fn the_target_check_counts_the_label_holder_with_its_twins() {
+    use sha2::Digest;
+    let temp = tempfile::tempdir().unwrap();
+    let state = state_root(temp.path());
+    let verified = original(&"a".repeat(64), &uuid::Uuid::new_v4().to_string());
+    let plan = &verified.plan;
+    session_record(&state, SESSION, "claude", RUN, CONVERSATION);
+    let current = || target::current(&super::receipt::Roots::open(&state).unwrap(), plan);
+    assert!(current(), "no ID layout: the label's record decides");
+    let private = |path: &Path, bytes: &[u8]| {
+        std::fs::create_dir_all(path.parent().unwrap()).unwrap();
+        mode(path.parent().unwrap(), 0o700);
+        std::fs::write(path, bytes).unwrap();
+        mode(path, 0o600);
+    };
+    let sessions = state.join("sessions");
+    std::fs::create_dir_all(&sessions).unwrap();
+    mode(&sessions, 0o700);
+    assert!(!current(), "the ID layout exists and nothing proves the label");
+    let key = format!("{:x}", sha2::Sha256::digest(SESSION.as_bytes()));
+    let manifest = state.join("labels").join(".complete");
+    private(&manifest, json!({"version": 1, "labels": {}}).to_string().as_bytes());
+    assert!(current(), "the manifest proves the label has no twin");
+    let id = uuid::Uuid::new_v4().to_string();
+    let index = json!({"version": 1, "label": SESSION, "ids": [id]}).to_string();
+    private(&state.join("labels").join(format!("{key}.json")), index.as_bytes());
+    let digest = format!("{:x}", sha2::Sha256::digest(index.as_bytes()));
+    private(&manifest, json!({"version": 1, "labels": {&key: digest}}).to_string().as_bytes());
+    let twin = sessions.join(format!("{id}.json"));
+    private(&twin, b"{");
+    assert!(!current(), "a listed twin that cannot be read");
+    let record = |run: &str| {
+        json!({"name": SESSION, "agent": "claude", "run_id": run,
+            "conversation_id": CONVERSATION, "session_id": id, "layout": "id"})
+        .to_string()
+    };
+    private(&twin, record("run-other").as_bytes());
+    assert!(current(), "a twin on another run: the label's record is the one");
+    private(&twin, record(RUN).as_bytes());
+    assert!(!current(), "the label's record and a twin both carry the plan: never one of them");
+    // A label record that cannot be read is never absent, even when a twin
+    // alone would carry the plan.
+    let label = state.join(format!("{key}.json"));
+    let kept = std::fs::read(&label).unwrap();
+    private(&label, b"{");
+    assert!(!current(), "a label record that cannot be read is never absent");
+    private(&label, &kept);
+    private(&twin, record("run-other").as_bytes());
+    assert!(current());
+}

@@ -252,7 +252,17 @@ impl Original {
         let filename = format!("{:x}.json", Sha256::digest(name.as_bytes()));
         // An executor in the ID layout (zerus-ucck P3a) is read by its ID.
         let (record, routed, by_id) = match read_in_id_layout(&directory, name, executor)? {
-            Some((record, id)) => (record, false, Some(id)),
+            Some((record, id)) => {
+                // The label's own record counts with the ID layout's (#1437
+                // review): it must not bind this executor as well.
+                if let Some((legacy, _)) = optional_read(&directory, &filename)? {
+                    ensure!(
+                        !binds(&legacy, name, executor),
+                        "executor binds more than one session"
+                    );
+                }
+                (record, false, Some(id))
+            }
             None => {
                 let (record, routed) = read(&directory, &filename)?;
                 (record, routed, None)
@@ -452,18 +462,38 @@ fn read_in_id_layout(
         let Some(record) = read_by_id(directory, id)? else {
             continue;
         };
-        let binds = binding(&record).is_ok_and(|binding| {
-            binding.name == name
-                && binding.run == executor.run_id
-                && binding.conversation == executor.conversation_id
-                && binding.session == executor.session_id
-        });
-        if binds {
+        if binds(&record, name, executor) {
             ensure!(found.is_none(), "executor binds more than one session");
             found = Some((record, id.to_owned()));
         }
     }
     Ok(found)
+}
+
+/// Whether `record` binds `executor` under the label `name`.
+fn binds(record: &Value, name: &str, executor: &Executor) -> bool {
+    binding(record).is_ok_and(|binding| {
+        binding.name == name
+            && binding.run == executor.run_id
+            && binding.conversation == executor.conversation_id
+            && binding.session == executor.session_id
+    })
+}
+
+/// The label's own record, as [`read`] reads it; None only when it verifiably
+/// does not exist.
+fn optional_read(directory: &File, filename: &str) -> Result<Option<(Value, bool)>> {
+    match read(directory, filename) {
+        Ok(found) => Ok(Some(found)),
+        Err(error)
+            if error
+                .downcast_ref::<std::io::Error>()
+                .is_some_and(|e| e.kind() == std::io::ErrorKind::NotFound) =>
+        {
+            Ok(None)
+        }
+        Err(error) => Err(error),
+    }
 }
 
 /// The record at `sessions/<id>.json`, when there is one: it must say it is
@@ -876,6 +906,15 @@ mod tests {
         f.record["activity"] = json!("working");
         private(&own, &serde_json::to_vec(&f.record).unwrap());
         original.current(until()).unwrap();
+        // The label's own record counts too: when it binds the executor as
+        // well, the proof refuses (#1437 review).
+        let mut double = f.record.clone();
+        double.as_object_mut().unwrap().remove("layout");
+        double["session_id"] = json!(uuid::Uuid::new_v4().to_string());
+        fs::write(f.path(), serde_json::to_vec(&double).unwrap()).unwrap();
+        assert!(f.capture().is_err(), "two sessions bind the executor");
+        fs::write(f.path(), serde_json::to_vec(&first).unwrap()).unwrap();
+        f.capture().unwrap();
         // A changed index no longer matches its manifest entry, even when it
         // still lists the executor.
         let stale = uuid::Uuid::new_v4().to_string();

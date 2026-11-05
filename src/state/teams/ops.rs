@@ -2801,8 +2801,6 @@ fn close_questions(task: &mut Task) {
     }
 }
 
-/// The task's open attempt must be revoked before another starts. The
-/// dispatcher interrupts the old worker separately.
 /// Task 24: the member and number of the task's attempt still being worked on
 /// (sent or delivered, not yet reported), read before a revoke ends it.
 fn working_attempt(task: &Task) -> Option<(String, u32)> {
@@ -2839,6 +2837,8 @@ fn tell_revoked(team: &mut Team, task: u32, working: Option<(String, u32)>, reas
     team.stops.drain(..excess);
 }
 
+/// The task's open attempt must be revoked before another starts. The
+/// dispatcher interrupts the old worker separately.
 fn revoke(task: &mut Task, why: &str) -> Option<u32> {
     // Spec 0 (U45, U46, U48): a retry, a reassignment, a take-over or a
     // decision ends a wait for Zerus; the next hand-out prepares again.
@@ -4919,8 +4919,10 @@ fn describe_owner_op(team: &Team, op: &str, input: &Value) -> (String, Vec<Strin
                 lines.push(if before.is_null() { format!("{field}: {value}") } else { format!("{field}: {before} → {value}") });
             }
             for update in input["members_update"].as_array().into_iter().flatten() {
-                let fields: Vec<&str> = update.as_object().into_iter().flatten().map(|(key, _)| key.as_str()).filter(|key| *key != "id").collect();
-                lines.push(format!("{}: {}", member_name(team, text(update, "id")), fields.join(", ")));
+                let name = member_name(team, text(update, "id"));
+                for (field, value) in update.as_object().into_iter().flatten().filter(|(key, _)| *key != "id") {
+                    lines.push(format!("{name}: {field}: {value}"));
+                }
             }
             "Change the team's settings".to_owned()
         }

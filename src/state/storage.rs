@@ -87,6 +87,7 @@ pub(super) fn lock(path: Option<&Path>) -> Result<Guard> {
     if path == default {
         rename::recover_locked()?;
         rename::sync_legacy_locked()?;
+        worktree_lock::recover_locked();
     }
     Ok(guard)
 }
@@ -114,6 +115,7 @@ pub(super) fn writer_until(deadline: std::time::Instant) -> Result<Option<Guard>
     let Some(guard) = lock_until(&root().join(".lock"), deadline)? else { return Ok(None); };
     rename::recover_locked()?;
     rename::sync_legacy_locked()?;
+    worktree_lock::recover_locked();
     Ok(Some(guard))
 }
 

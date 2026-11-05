@@ -47,6 +47,11 @@ pub(crate) mod audit;
 mod cache;
 mod catalog;
 mod catalog_relay;
+/// The composer's "Compact and continue" handed to the service
+/// (zerus-5wmh.66.4.8, slice 3). Only Linux and macOS route it; Windows
+/// keeps it direct.
+#[cfg_attr(windows, allow(dead_code))]
+pub(crate) mod compact_to_send;
 pub(crate) mod creation_clone;
 pub(crate) mod creation_launch;
 pub(crate) mod creation_worktree;

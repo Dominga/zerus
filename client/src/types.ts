@@ -779,7 +779,7 @@ export interface ComposerView {
   /** The open session's last read failed (Qt's m_inspectError). */
   inspect_error: boolean;
   cache: Chip; cache_warning: string; cache_details: string; context: ContextChip; local: LocalMessage[];
-  cancel_send: boolean; compacting: boolean; clear: ClearControl;
+  cancel_send: boolean; cancel_locked?: boolean; compacting: boolean; clear: ClearControl;
   /** The agent's question card shown in the composer (A2). */
   question: QuestionView | null;
   /** False while a required card stands in for the editor and the action row (Qt's setInputVisible). */

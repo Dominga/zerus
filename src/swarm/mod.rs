@@ -3,6 +3,7 @@
 //! locked, atomically replaced store; initialized snapshots read it lock-free.
 mod bootstrap;
 mod catalog;
+pub(crate) mod fence;
 mod launch_project;
 mod infer_project;
 pub(crate) use infer_project::{directory_project, infer_new_session, inherit_fork_project};
@@ -179,6 +180,42 @@ pub(crate) fn projects(config: &Config) -> Result<Vec<(String, String)>> {
         .collect())
 }
 
+/// The catalog lock, held for a test until dropped.
+#[cfg(test)]
+pub(crate) fn lock_catalog_for_tests(config: &Config) -> impl Sized {
+    LockedStore::load(config).expect("a test catalog")
+}
+
+/// This computer's identity and the catalog's projects (ID, name), read in
+/// one catalog admission waited for no later than `deadline`: none when the
+/// catalog is busy past it. For a command whose whole budget starts at its
+/// entry (the fence check).
+/// This computer's node and the catalog's projects (ID, name).
+pub(crate) type IdentityAndProjects = (String, Vec<(String, String)>);
+
+pub(crate) fn identity_and_projects_until(
+    config: &Config,
+    deadline: std::time::Instant,
+) -> Result<Option<IdentityAndProjects>> {
+    let Some(mut store) = LockedStore::load_until(config, deadline)? else {
+        return Ok(None);
+    };
+    let id = uuid::Uuid::parse_str(&store.data.node_id)?;
+    ensure!(
+        !id.is_nil() && id.to_string() == store.data.node_id,
+        "invalid persisted machine identity"
+    );
+    store.save()?;
+    let snapshot = store.snapshot(config);
+    let projects = snapshot["organization"]["projects"]
+        .as_array()
+        .into_iter()
+        .flatten()
+        .filter_map(|p| Some((p["id"].as_str()?.to_owned(), p["name"].as_str().unwrap_or_default().to_owned())))
+        .collect();
+    Ok(Some((store.data.node_id.clone(), projects)))
+}
+
 /// The live catalog project (ID, name) that this computer's session `name`
 /// belongs to, if any.
 pub(crate) fn session_project(config: &Config, name: &str) -> Result<Option<(String, String)>> {
@@ -271,6 +308,7 @@ fn execute(config: &Config, args: &[String]) -> Result<Value> {
         "exchange" => transport::exchange(config,serde_json::from_value(input()?)?),
         "replica-inventory" => replica::inventory(config,serde_json::from_value(input()?)?),
         "replica-exchange" => replica::exchange(config,serde_json::from_value(input()?)?),
+        "replica-relay" => fence::relay(config,serde_json::from_value(input()?)?),
         "sync" => transport::sync(config),
         "get" | "initialize" | "apply" | "export" | "resolve" | "disconnect" => {
             // Read stdin before taking the lock: slow clients cannot monopolize it.

@@ -33,8 +33,12 @@ pub(super) const AWAITING_DRAIN: &str = "awaiting_resource_drain";
 const NOT_STARTED_PENDING: &str = "awaiting_not_started_drain";
 /// Restart, revoke or a lost preparation ended the operation's execution.
 pub(super) const INTERRUPTED: &str = "compact_to_send_interrupted";
-/// This slice ends after the compaction: the send is never reserved.
-pub(super) const SEND_UNAVAILABLE: &str = "compact_to_send_send_unavailable";
+/// The wait's own budget ended before the compaction completed.
+pub(super) const WAIT_EXPIRED: &str = "compact_to_send_wait_expired";
+/// The operation's overall deadline ended before the send.
+pub(super) const CHAIN_EXPIRED: &str = "compact_to_send_chain_expired";
+/// A stop, a revoke or a lost source ended the wait.
+pub(super) const VETOED: &str = "compact_to_send_vetoed";
 
 pub(super) fn migrate(tx: &Transaction<'_>) -> Result<()> {
     tx.execute_batch("CREATE TABLE desktop_compact_to_send_budget(
@@ -599,12 +603,40 @@ fn record(tx: &Transaction<'_>, row: &Row, code: &str) -> Result<()> {
 }
 /// Settles the active child at its physical drain, from the CLI receipt read
 /// after it. A compaction that never started also ends the send, which then
-/// can never start; with `last`, every child not yet reserved is recorded as
-/// never started and the operation drains. Takes the transaction, the exact
-/// released lock and the objects the read used, so none is released before
-/// commit.
+/// can never start; after one that ran or may have, the send stays Queued
+/// for the wait. Takes the transaction, the exact released lock and the
+/// objects the read used, so none is released before commit.
 #[cfg(any(target_os = "linux", target_os = "macos"))]
 pub(super) fn drained(
+    tx: Transaction<'_>,
+    row: Row,
+    observed: super::super::custody::Observation,
+    cli: &Observed,
+    evidence: receipt::Evidence,
+) -> Result<Receipt> {
+    settle(tx, row, observed, cli, evidence, false)
+}
+/// Store recovery's drain of an original that no live runtime holds. The
+/// active child is Unknown (UNHELD): no receipt is read and nothing proves
+/// it never started. No runtime is left to continue the operation, so a
+/// child never reserved never starts (`compact_to_send_interrupted`).
+#[cfg(any(target_os = "linux", target_os = "macos"))]
+pub(super) fn unheld(
+    tx: Transaction<'_>,
+    row: Row,
+    observed: super::super::custody::Observation,
+) -> Result<Receipt> {
+    settle(
+        tx,
+        row,
+        observed,
+        &Observed::Unknown(receipt::UNHELD),
+        receipt::Evidence::default(),
+        true,
+    )
+}
+#[cfg(any(target_os = "linux", target_os = "macos"))]
+fn settle(
     tx: Transaction<'_>,
     row: Row,
     observed: super::super::custody::Observation,
@@ -682,14 +714,14 @@ pub(super) fn drained(
             Step::Unknown
         }
     };
-    // A send never follows a compaction that never started; with `last`
-    // nothing further starts at all.
+    // A send never follows a compaction that never started, nor one that no
+    // runtime holds.
     if next.send.step == Step::Queued
         && (last || (child == Child::Compaction && settled == Step::NotStarted))
     {
         set(&mut next, Child::Send, Step::NotStarted, wire::NOT_STARTED);
-        if child == Child::Compaction && settled != Step::NotStarted {
-            next.code = SEND_UNAVAILABLE.into();
+        if last {
+            next.code = INTERRUPTED.into();
         }
     }
     next.drained = next.compaction.step.terminal() && next.send.step.terminal();
@@ -698,6 +730,25 @@ pub(super) fn drained(
     drop(evidence);
     drop(observed);
     Ok(next)
+}
+/// Ends the operation after its compaction without the send, for the closed
+/// reason `code`: the send was never reserved, so this ledger proves it
+/// never started.
+pub(super) fn wait_ended(tx: &Transaction<'_>, row: &Row, code: &str) -> Result<()> {
+    ensure!(
+        !row.receipt.drained
+            && row.receipt.compaction.step.terminal()
+            && row.receipt.send.step == Step::Queued
+            && row.send.is_none()
+            && !code.is_empty(),
+        "compact-to-send is not waiting"
+    );
+    let mut next = row.receipt.clone();
+    next.revision += 1;
+    set(&mut next, Child::Send, Step::NotStarted, wire::NOT_STARTED);
+    next.code = code.into();
+    next.drained = true;
+    state(tx, row, &next)
 }
 /// Settles `child` without an outcome: NotStarted or Unknown.
 fn set(next: &mut Receipt, child: Child, step: Step, code: &str) {

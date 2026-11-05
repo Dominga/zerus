@@ -1,11 +1,14 @@
 //! One fixed local compact-to-send executor (zerus-5wmh.66.4.8, slice 3),
-//! independent of the UI lifetime. Native admission, the original
-//! compaction child and its resource drain are separate; only the drain,
-//! through the CLI's own receipt, settles it. This slice ends the operation
-//! after the compaction's drain: the send is never reserved.
+//! independent of the UI lifetime. Native admission, each original child and
+//! its resource drain are separate; only the drain, through the CLI's own
+//! receipt, settles a child. After a compaction that ran or may have, the
+//! same live operation waits, off the actor and within one never-renewed
+//! budget, for the session's slot to show it completed, and only then
+//! prepares, reserves and spawns the send. A restart never resumes a wait.
 use super::child::{self, Ended};
 use super::ledger::{self, Child};
 use super::receipt::{self, Evidence, Observed, Roots};
+use super::slot::{self, Slot};
 use super::{consent::Consent, target};
 use crate::desktop::creation_clone::lease::{Lease, Machine};
 use crate::desktop::custody::Observation;
@@ -47,6 +50,14 @@ pub(super) const DEADLINE: Duration = Duration::from_secs(30);
 pub(super) const READ_WAIT: Duration = Duration::from_secs(5);
 /// How often a draining original's custody is observed again.
 const PROBE_EVERY: Duration = Duration::from_millis(250);
+/// The wait for the compaction to complete: one budget from the
+/// compaction's drain, never renewed.
+pub(super) const WAIT: Duration = Duration::from_secs(600);
+/// How often the waiting operation reads its slot again.
+const POLL_EVERY: Duration = Duration::from_millis(500);
+/// The whole operation from its admission: both children, both receipt
+/// reads, the wait and a margin. Nothing starts after it.
+pub(super) const CHAIN: Duration = Duration::from_secs(690);
 #[cfg(test)]
 type Hook = Arc<dyn Fn() + Send + Sync>;
 
@@ -67,8 +78,8 @@ struct Original {
     _custody: Arc<InheritedLock>,
     _consent: Arc<Consent>,
 }
-/// What preparation opens off the actor before any child: the exact custody
-/// and the original receipt store.
+/// What preparation opens off the actor before a child: the exact custody
+/// and that child's receipt store under the original root.
 type Prepared2 = (Prepared, Arc<InheritedLock>, Arc<Roots>);
 /// One drain observation: the custody, and after its release the receipt
 /// read from the original store, with the objects that read used.
@@ -85,14 +96,23 @@ struct Probe {
     worker: JoinHandle<()>,
     result: mpsc::Receiver<(Record, Drain)>,
 }
+/// One read of the waiting operation's slot, off the actor.
+struct SlotProbe {
+    worker: JoinHandle<()>,
+    result: mpsc::Receiver<Slot>,
+}
 enum Work {
     Preparing {
+        child: Child,
         ticket: Ticket,
         consent: Arc<Consent>,
         worker: JoinHandle<()>,
         result: mpsc::Receiver<Result<Prepared2>>,
+        /// The operation's ownership token, once its compaction reserved.
+        token: Option<Arc<()>>,
     },
     Running {
+        child: Child,
         ticket: Ticket,
         consent: Arc<Consent>,
         worker: JoinHandle<()>,
@@ -102,11 +122,21 @@ enum Work {
         token: Arc<()>,
     },
     Draining {
+        child: Child,
         id: String,
         consent: Arc<Consent>,
         roots: Arc<Roots>,
         token: Arc<()>,
         probe: Option<Probe>,
+        next: Instant,
+    },
+    Waiting {
+        id: String,
+        consent: Arc<Consent>,
+        roots: Arc<Roots>,
+        token: Arc<()>,
+        probe: Option<SlotProbe>,
+        until: Instant,
         next: Instant,
     },
 }
@@ -134,12 +164,23 @@ pub(in crate::desktop) struct Runtime {
     image: Option<Arc<Pin>>,
     /// The receipt read's deadline after the drain ([`READ_WAIT`]).
     read_wait: Duration,
+    /// The wait's budget ([`WAIT`]), its read interval ([`POLL_EVERY`]) and
+    /// the whole operation's deadline from admission ([`CHAIN`]).
+    wait: Duration,
+    poll_every: Duration,
+    chain: Duration,
     /// Runs in the final spawn turn, before the consent veto.
     #[cfg(test)]
     spawn_hook: Option<Hook>,
     /// Runs in the drain worker after the receipt bytes are read.
     #[cfg(test)]
     read_hook: Option<Hook>,
+    /// Runs first in each preparation worker.
+    #[cfg(test)]
+    prepare_hook: Option<Hook>,
+    /// Runs first in each read of the waiting operation's slot.
+    #[cfg(test)]
+    slot_hook: Option<Hook>,
 }
 impl Runtime {
     pub fn new(config: &Config, epoch: &str, owner: Arc<platform::FileLock>) -> Result<Self> {
@@ -168,10 +209,17 @@ impl Runtime {
                 .ok()
                 .map(Arc::new),
             read_wait: READ_WAIT,
+            wait: WAIT,
+            poll_every: POLL_EVERY,
+            chain: CHAIN,
             #[cfg(test)]
             spawn_hook: None,
             #[cfg(test)]
             read_hook: None,
+            #[cfg(test)]
+            prepare_hook: None,
+            #[cfg(test)]
+            slot_hook: None,
         })
     }
     pub fn observe(&mut self, event: &fleet::FleetEvent) {
@@ -289,7 +337,7 @@ impl Runtime {
                 self.exclusion.as_ref(),
             )?;
             let original = ledger::load(&tx, &id)?;
-            let consent = Consent::admitted(verified, lease.clone())?;
+            let consent = Consent::admitted(verified, lease.clone(), Instant::now() + self.chain)?;
             let row = ledger::admit(
                 &tx,
                 &consent.original,
@@ -322,7 +370,7 @@ impl Runtime {
         db: &rusqlite::Connection,
         consent: &Consent,
         row: &ledger::Row,
-        ticket: Option<&Ticket>,
+        ticket: Option<(Child, &Ticket)>,
     ) -> Result<()> {
         ensure!(
             !self.stopping && !self.failed,
@@ -340,7 +388,7 @@ impl Runtime {
             self.machine.as_ref(),
             self.exclusion.as_ref(),
         )?;
-        consent.check(row, ticket.map(|ticket| (Child::Compaction, ticket)))
+        consent.check(row, ticket)
     }
     pub fn poll(&mut self, store: &mut Store, exclusion: Option<Arc<HandoffLock>>) {
         // Also advance exact original custody inside a bounded drain turn;
@@ -357,17 +405,21 @@ impl Runtime {
         if let Some(work) = self.work.take() {
             match work {
                 Work::Preparing {
+                    child,
                     ticket,
                     consent,
                     worker,
                     result,
+                    token,
                 } => {
                     if !worker.is_finished() {
                         self.work = Some(Work::Preparing {
+                            child,
                             ticket,
                             consent,
                             worker,
                             result,
+                            token,
                         });
                         return Ok(());
                     }
@@ -384,8 +436,8 @@ impl Runtime {
                         prepared,
                         helper: None,
                     };
-                    let token = Arc::new(());
                     let id = ticket.admission_id.clone();
+                    // The reservation commits before the worker exists.
                     let reserved = (|| -> Result<()> {
                         let tx = store
                             .db
@@ -396,7 +448,7 @@ impl Runtime {
                             ticket.lease == consent.lease.id,
                             "compact-to-send lease changed"
                         );
-                        ledger::reserve(&tx, &row, Child::Compaction, &ticket, &record)?;
+                        ledger::reserve(&tx, &row, child, &ticket, &record)?;
                         tx.commit()?;
                         Ok(())
                     })();
@@ -406,7 +458,9 @@ impl Runtime {
                         return Ok(());
                     }
                     // This runtime drains its own original from the store it
-                    // opened; Store recovery skips it while the token lives.
+                    // opened; Store recovery skips it while the token lives,
+                    // through the wait and both children.
+                    let token = token.unwrap_or_else(|| Arc::new(()));
                     store
                         .compact_owned()
                         .lock()
@@ -427,29 +481,33 @@ impl Runtime {
                     let hook = self.spawn_hook.clone();
                     #[cfg(target_os = "linux")]
                     let image = self.image.clone();
-                    let spawned =
-                        thread::Builder::new()
-                            .name("compact-to-send".into())
-                            .spawn(move || {
-                                // The target and the consent veto run in the
-                                // final spawn turn, from these retained roots.
-                                let value = compact(
-                                    &selected,
-                                    &store_roots,
-                                    &lock,
-                                    &guard,
-                                    #[cfg(target_os = "linux")]
-                                    image,
-                                    #[cfg(test)]
-                                    executor,
-                                    #[cfg(test)]
-                                    hook,
-                                );
-                                let _ = done_send.send(value);
-                            });
+                    let name = match child {
+                        Child::Compaction => "compact-to-send-compaction",
+                        Child::Send => "compact-to-send-send",
+                    };
+                    let spawned = thread::Builder::new().name(name.into()).spawn(move || {
+                        // The target, the send's slot and the consent veto
+                        // run in the final spawn turn, from these retained
+                        // roots.
+                        let value = original(
+                            child,
+                            &selected,
+                            &store_roots,
+                            &lock,
+                            &guard,
+                            #[cfg(target_os = "linux")]
+                            image,
+                            #[cfg(test)]
+                            executor,
+                            #[cfg(test)]
+                            hook,
+                        );
+                        let _ = done_send.send(value);
+                    });
                     match spawned {
                         Ok(worker) => {
                             self.work = Some(Work::Running {
+                                child,
                                 ticket,
                                 consent,
                                 worker,
@@ -467,6 +525,7 @@ impl Runtime {
                     }
                 }
                 Work::Running {
+                    child,
                     ticket,
                     consent,
                     worker,
@@ -477,6 +536,7 @@ impl Runtime {
                 } => {
                     if !worker.is_finished() {
                         self.work = Some(Work::Running {
+                            child,
                             ticket,
                             consent,
                             worker,
@@ -498,7 +558,7 @@ impl Runtime {
                     let row = ledger::load(&tx, &ticket.admission_id)?
                         .context("compact-to-send disappeared")?;
                     ensure!(
-                        row.compaction.as_ref().map(|r| &r.ticket) == Some(&ticket),
+                        row.reserved(child).map(|r| &r.ticket) == Some(&ticket),
                         "compact-to-send original ticket changed"
                     );
                     match ended {
@@ -516,6 +576,7 @@ impl Runtime {
                     // lock, so the drain waits for all of them.
                     drop(resources);
                     self.work = Some(Work::Draining {
+                        child,
                         id: ticket.admission_id,
                         consent,
                         roots,
@@ -525,13 +586,23 @@ impl Runtime {
                     });
                 }
                 Work::Draining {
+                    child,
                     id,
                     consent,
                     roots,
                     token,
                     probe,
                     next,
-                } => return self.drain(store, id, consent, roots, token, probe, next),
+                } => return self.drain(store, child, id, consent, roots, token, probe, next),
+                Work::Waiting {
+                    id,
+                    consent,
+                    roots,
+                    token,
+                    probe,
+                    until,
+                    next,
+                } => return self.wait(store, id, consent, roots, token, probe, until, next),
             }
             return Ok(());
         }
@@ -554,15 +625,34 @@ impl Runtime {
         let Some(row) = ledger::pending(&store.db)? else {
             return Ok(());
         };
+        let id = row.id().to_owned();
         if row.receipt.compaction.step != Step::Queued || !row.receipt.code.is_empty() {
+            // An operation past its compaction with no live work lost its
+            // wait: it never resumes one.
+            if row.receipt.compaction.step.terminal() && row.receipt.send.step == Step::Queued {
+                self.retire(store, &id)?;
+            }
             return Ok(());
         }
-        let id = row.id().to_owned();
         let Some(consent) = self.admitted.get(&id).cloned() else {
             self.retire(store, &id)?;
             return Ok(());
         };
         self.check(&store.db, &consent, &row, None)?;
+        self.prepare(&row, Child::Compaction, consent, None)
+    }
+    /// Starts `child`'s preparation off the actor: its exact custody and its
+    /// receipt store. The compaction's store is the CLI state root opened
+    /// now; the send's is the same held root (`carry`), never resolved
+    /// again.
+    fn prepare(
+        &mut self,
+        row: &ledger::Row,
+        child: Child,
+        consent: Arc<Consent>,
+        carry: Option<(Arc<Roots>, Arc<()>)>,
+    ) -> Result<()> {
+        let id = row.id().to_owned();
         let ticket = Ticket {
             operation_id: row
                 .verified
@@ -587,41 +677,60 @@ impl Runtime {
             root: self.location.root.clone(),
             configuration: self.location.configuration.clone(),
         };
+        let (roots, token) = match carry {
+            Some((roots, token)) => (Some(roots), Some(token)),
+            None => (None, None),
+        };
+        #[cfg(test)]
+        let hook = self.prepare_hook.clone();
         let (send, result) = mpsc::sync_channel(1);
         let worker = thread::Builder::new()
             .name("compact-to-send-prepare".into())
             .spawn(move || {
+                #[cfg(test)]
+                if let Some(hook) = &hook {
+                    hook();
+                }
                 let _original = held;
-                // The original receipt store, opened before any child: the
-                // CLI's state root, of which this service's root is a folder.
-                let prepared = location
-                    .root
-                    .parent()
-                    .context("compact-to-send state unavailable")
-                    .and_then(|state| Ok(Arc::new(Roots::open(state, receipt::COMPACTION_FOLDER)?)))
-                    .and_then(|roots| {
-                        let (prepared, held) = custody::prepare(&location, &original)?;
-                        Ok((prepared, held, roots))
-                    });
+                let prepared = match roots {
+                    // The send's folder under the held original root.
+                    Some(roots) => roots.sibling(receipt::INPUT_FOLDER).map_err(Into::into),
+                    // The original receipt store, opened before any child:
+                    // the CLI's state root, of which this service's root is a
+                    // folder.
+                    None => location
+                        .root
+                        .parent()
+                        .context("compact-to-send state unavailable")
+                        .and_then(|state| Ok(Roots::open(state, receipt::COMPACTION_FOLDER)?)),
+                }
+                .and_then(|roots| {
+                    let (prepared, held) = custody::prepare(&location, &original)?;
+                    Ok((prepared, held, Arc::new(roots)))
+                });
                 let _ = send.send(prepared);
             })?;
         self.work = Some(Work::Preparing {
+            child,
             ticket,
             consent,
             worker,
             result,
+            token,
         });
         Ok(())
     }
-    /// One drain turn of this runtime's own original: the custody probe off
-    /// the actor and, after its release, the one bounded read of the CLI's
+    /// One drain turn of this runtime's own child: the custody probe off the
+    /// actor and, after its release, the one bounded read of the CLI's
     /// receipt from the original store. The worker holds the serve-owner and
     /// the original's consent loans and the ownership token until it
-    /// physically ends, so neither a stop nor a teardown passes it.
+    /// physically ends, so neither a stop nor a teardown passes it. After a
+    /// compaction that ran or may have, the same operation waits.
     #[allow(clippy::too_many_arguments)]
     fn drain(
         &mut self,
         store: &mut Store,
+        child: Child,
         id: String,
         consent: Arc<Consent>,
         roots: Arc<Roots>,
@@ -631,6 +740,7 @@ impl Runtime {
     ) -> Result<()> {
         let keep = |me: &mut Self, probe: Option<Probe>, next: Instant| {
             me.work = Some(Work::Draining {
+                child,
                 id: id.clone(),
                 consent: consent.clone(),
                 roots: roots.clone(),
@@ -663,17 +773,31 @@ impl Runtime {
                         .transaction_with_behavior(TransactionBehavior::Immediate)?;
                     let row = ledger::load(&tx, &id)?.context("compact-to-send disappeared")?;
                     ensure!(
-                        row.compaction.as_ref().map(|r| &r.custody) == Some(&record),
+                        row.reserved(child).map(|r| &r.custody) == Some(&record),
                         "compact-to-send custody scope changed"
                     );
-                    if row.receipt.drained {
+                    let settled = if row.receipt.drained {
                         tx.commit()?;
+                        row.receipt
                     } else {
-                        // This slice ends the operation here: the send is
-                        // never reserved.
-                        ledger::drained(tx, row, observation, &cli, evidence, true)?;
+                        ledger::drained(tx, row, observation, &cli, evidence)?
+                    };
+                    if child == Child::Compaction && !settled.drained {
+                        // One budget from here, never renewed, within the
+                        // operation's own deadline.
+                        let until = (Instant::now() + self.wait).min(consent.chain);
+                        self.work = Some(Work::Waiting {
+                            id: id.clone(),
+                            consent: consent.clone(),
+                            roots: roots.clone(),
+                            token: token.clone(),
+                            probe: None,
+                            until,
+                            next: Instant::now(),
+                        });
+                    } else {
+                        self.admitted.remove(&id);
                     }
-                    self.admitted.remove(&id);
                     Ok(())
                 }
                 Some((_, Drain::Held)) => {
@@ -696,8 +820,7 @@ impl Runtime {
             return Ok(());
         }
         let record = row
-            .compaction
-            .as_ref()
+            .reserved(child)
             .map(|r| r.custody.clone())
             .context("compact-to-send has no original custody")?;
         let plan = row.verified.plan.clone();
@@ -728,7 +851,10 @@ impl Runtime {
                                 hook();
                             }
                         };
-                        let (cli, evidence) = receipt::compaction(&store_roots, &plan, &between);
+                        let (cli, evidence) = match child {
+                            Child::Compaction => receipt::compaction(&store_roots, &plan, &between),
+                            Child::Send => receipt::send(&store_roots, &plan, &between),
+                        };
                         let cli = if Instant::now() > deadline {
                             Observed::Unknown(receipt::TIMED_OUT)
                         } else {
@@ -752,6 +878,123 @@ impl Runtime {
                 return Err(error.into());
             }
         }
+        Ok(())
+    }
+    /// One turn of the wait for the compaction to complete, in the same live
+    /// operation only. A stop, a revoke or a lost source ends it at once; so
+    /// does a replaced root, an ended slot, the budget or the deadline. Each
+    /// read of the slot runs off the actor with the operation's loans, and
+    /// only a completed slot prepares the send.
+    #[allow(clippy::too_many_arguments)]
+    fn wait(
+        &mut self,
+        store: &mut Store,
+        id: String,
+        consent: Arc<Consent>,
+        roots: Arc<Roots>,
+        token: Arc<()>,
+        probe: Option<SlotProbe>,
+        until: Instant,
+        next: Instant,
+    ) -> Result<()> {
+        // A read in flight finishes first: it holds the loans, and it is
+        // bounded.
+        let slot = match probe {
+            Some(probe) if !probe.worker.is_finished() => {
+                self.work = Some(Work::Waiting {
+                    id,
+                    consent,
+                    roots,
+                    token,
+                    probe: Some(probe),
+                    until,
+                    next,
+                });
+                return Ok(());
+            }
+            Some(probe) => Some(
+                probe
+                    .worker
+                    .join()
+                    .ok()
+                    .and_then(|_| probe.result.try_recv().ok())
+                    .unwrap_or(Slot::Ended(slot::UNREAD)),
+            ),
+            None => None,
+        };
+        let row = ledger::load(&store.db, &id)?.context("compact-to-send disappeared")?;
+        if consent.cancel.load(Ordering::Acquire)
+            || self.check(&store.db, &consent, &row, None).is_err()
+        {
+            return self.end_wait(store, &id, ledger::VETOED);
+        }
+        match slot {
+            Some(Slot::Completed) if Instant::now() < consent.chain => {
+                return self.prepare(&row, Child::Send, consent, Some((roots, token)));
+            }
+            Some(Slot::Completed) => return self.end_wait(store, &id, ledger::CHAIN_EXPIRED),
+            Some(Slot::Ended(code)) => return self.end_wait(store, &id, code),
+            Some(Slot::Waiting) | None => {}
+        }
+        let now = Instant::now();
+        if now >= until {
+            let code = if until >= consent.chain {
+                ledger::CHAIN_EXPIRED
+            } else {
+                ledger::WAIT_EXPIRED
+            };
+            return self.end_wait(store, &id, code);
+        }
+        if now < next {
+            self.work = Some(Work::Waiting {
+                id,
+                consent,
+                roots,
+                token,
+                probe: None,
+                until,
+                next,
+            });
+            return Ok(());
+        }
+        let plan = row.verified.plan.clone();
+        let loans = (self.owner.clone(), consent.clone(), token.clone());
+        let store_roots = roots.clone();
+        #[cfg(test)]
+        let hook = self.slot_hook.clone();
+        let (send, result) = mpsc::sync_channel(1);
+        let worker = thread::Builder::new()
+            .name("compact-to-send-wait".into())
+            .spawn(move || {
+                let _loans = loans;
+                #[cfg(test)]
+                if let Some(hook) = &hook {
+                    hook();
+                }
+                let _ = send.send(slot::read(&store_roots, &plan));
+            })?;
+        self.work = Some(Work::Waiting {
+            id,
+            consent,
+            roots,
+            token,
+            probe: Some(SlotProbe { worker, result }),
+            until,
+            next: now + self.poll_every,
+        });
+        Ok(())
+    }
+    /// Ends the wait without the send, for the closed reason `code`.
+    fn end_wait(&mut self, store: &mut Store, id: &str, code: &str) -> Result<()> {
+        let tx = store
+            .db
+            .transaction_with_behavior(TransactionBehavior::Immediate)?;
+        let row = ledger::load(&tx, id)?.context("compact-to-send disappeared")?;
+        if !row.receipt.drained {
+            ledger::wait_ended(&tx, &row, code)?;
+        }
+        tx.commit()?;
+        self.admitted.remove(id);
         Ok(())
     }
     fn retire(&mut self, store: &mut Store, id: &str) -> Result<()> {
@@ -795,6 +1038,24 @@ impl Runtime {
     pub(super) fn fixture_machine(&mut self, machine: &str) {
         self.machine = Some(Machine::fixture(machine));
     }
+    /// Runs `hook` first in each read of the waiting operation's slot.
+    #[cfg(test)]
+    pub(super) fn fixture_slot_hook(&mut self, hook: Hook) {
+        self.slot_hook = Some(hook);
+    }
+    /// Runs `hook` first in each preparation worker.
+    #[cfg(test)]
+    pub(super) fn fixture_prepare_hook(&mut self, hook: Hook) {
+        self.prepare_hook = Some(hook);
+    }
+    /// Sets the wait's budget, its read interval and the operation's
+    /// deadline from admission.
+    #[cfg(test)]
+    pub(super) fn fixture_wait(&mut self, wait: Duration, every: Duration, chain: Duration) {
+        self.wait = wait;
+        self.poll_every = every;
+        self.chain = chain;
+    }
     #[cfg(test)]
     pub(super) fn fixture_mac_fence(&mut self, on: bool) {
         self.mac_fence = on;
@@ -817,10 +1078,12 @@ impl Runtime {
         self.image = Some(Arc::new(Pin::open(path).unwrap()));
     }
 }
-/// The original compaction child: `hgs compact-context <session> --json`
-/// with the frozen stdin. Nothing exists before the spawn, so every refusal
-/// here never started.
-fn compact(
+/// One original child: `hgs compact-context <session> --json` or `hgs send
+/// <session> --json`, each with its frozen stdin. Nothing exists before the
+/// spawn, so every refusal here never started.
+#[allow(clippy::too_many_arguments)]
+fn original(
+    child: Child,
     consent: &Consent,
     roots: &Roots,
     lock: &Arc<InheritedLock>,
@@ -830,8 +1093,16 @@ fn compact(
     #[cfg(test)] hook: Option<Hook>,
 ) -> Ended {
     let plan = &consent.original.plan;
-    let args = plan.compaction_args().to_vec();
-    let input = consent.original.intent.compaction.as_bytes();
+    let (args, input) = match child {
+        Child::Compaction => (
+            plan.compaction_args().to_vec(),
+            consent.original.intent.compaction.as_bytes(),
+        ),
+        Child::Send => (
+            plan.send_args().to_vec(),
+            consent.original.intent.original.as_bytes(),
+        ),
+    };
     // The test executor receives exactly what the child would; it stands in
     // for the spawn turn, so the veto runs before it as in `child::run`.
     #[cfg(test)]
@@ -839,14 +1110,19 @@ fn compact(
         if let Some(hook) = &hook {
             hook();
         }
-        if !target::current(roots, plan) || consent.cancel.load(Ordering::Acquire) {
+        // The chain stands in for the runner's own deadline check, last.
+        if !target::current(roots, plan)
+            || (child == Child::Send && slot::read(roots, plan) != Slot::Completed)
+            || consent.cancel.load(Ordering::Acquire)
+            || Instant::now() >= consent.chain
+        {
             return Ended::NotStarted;
         }
         return executor(plan, &args, input, lock, resources);
     }
     #[cfg(target_os = "linux")]
     if let Some(image) = image {
-        let deadline = Instant::now() + DEADLINE;
+        let deadline = (Instant::now() + DEADLINE).min(consent.chain);
         return child::run(
             image.executable(),
             &args,
@@ -860,11 +1136,13 @@ fn compact(
                     hook();
                 }
                 // Last before the spawn, after every slow check and the turn
-                // wait: the selected session's actual record, read again
-                // from the retained original roots, then a consent stopped
-                // since the worker began (a revoke, a lost source, a stop).
-                // The runner's own deadline check follows.
+                // wait: the selected session's actual record and, for the
+                // send, its completed slot, read again from the retained
+                // original roots, then a consent stopped since the worker
+                // began (a revoke, a lost source, a stop). The runner's own
+                // deadline check follows, bounded by the chain.
                 if !target::current(roots, plan)
+                    || (child == Child::Send && slot::read(roots, plan) != Slot::Completed)
                     || consent.cancel.load(Ordering::Acquire)
                     || !image.current()
                 {
@@ -876,7 +1154,7 @@ fn compact(
     }
     // No pinned image (a unit-test image, or one already gone), and macOS,
     // whose admission refuses first: nothing starts.
-    let _ = (roots, args, input, lock, resources);
+    let _ = (roots, args, input, lock, resources, child);
     #[cfg(test)]
     let _ = hook;
     Ended::NotStarted

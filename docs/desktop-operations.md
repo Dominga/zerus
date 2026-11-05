@@ -410,15 +410,56 @@ compaction the way it runs a deferred send:
 
 A reserved child counts as never started only from the runner's no-spawn
 result together with a read of the held store that finds no record of it.
-An original no runtime holds is never read, so it stays Unknown. Restart, revoke or a
-lost preparation retires the operation (`compact_to_send_interrupted`). A
-child never reserved is then recorded as never started from the ledger. A
-reserved one keeps its custody for the read-only drain, and Store recovery
-drains an earlier run's Unknown without reading any receipt.
+An original no runtime holds is never read, so it stays Unknown. Restart,
+revoke or a lost preparation retires the operation
+(`compact_to_send_interrupted`). A child never reserved is then recorded as
+never started from the ledger. A reserved one keeps its custody for the
+read-only drain. Store recovery drains an earlier run's Unknown without
+reading any receipt, and records a send never reserved as never started
+(`compact_to_send_interrupted`): no runtime is left to continue it.
 
-This slice ends after the compaction: the send is recorded as never started
-(`compact_to_send_send_unavailable`), and no help marker is advertised. The
-wait for the compaction to complete and the send follow. macOS refuses every
+A compaction that never started also ends the send. After one that ran or
+may have, the same live operation waits, and only it: a restart never resumes
+a wait. The wait has one budget of 600 seconds from the compaction's drain,
+never renewed, inside the operation's own deadline of 690 seconds from
+admission.
+
+Off the actor, with the operation's loans, each read checks the selected
+session's own record from the held original root, with the root checked
+before and after. It continues only while that record's
+`compact_context_request` names this request, run and conversation:
+- `completed`, not superseded, on a session whose activity and phase are both
+  idle: the send may start;
+- `submitted`, `compacting`, or completed while the session is busy: read
+  again;
+- anything else ends the wait without the send (`compact_to_send_slot_ended`).
+
+The slot is a continuation condition only. Hooks carry no request ID, so a
+`/compact` typed in Terminal meanwhile completes it too, and the compaction
+keeps what its own receipt proved.
+
+These end the wait without the send:
+- a stop, a revoke or a lost source (`compact_to_send_vetoed`);
+- another session record (`compact_to_send_session_changed`);
+- a replaced root (`compact_to_send_root_changed`);
+- the budget (`compact_to_send_wait_expired`);
+- the deadline (`compact_to_send_chain_expired`).
+
+The send was then never reserved, so the ledger proves it never started.
+
+Once the slot completes:
+- The send's `input_receipts` folder is opened under the same held root,
+  never resolved again.
+- Its custody is reserved.
+- In its spawn turn, after its wait, the session's own record and the slot
+  are read again from the held root, then the consent veto runs. The
+  runner's deadline, bounded by the operation's own, comes last.
+- The original `hgs send <session> --json` runs once with its frozen stdin,
+  whose `expected_compaction_id` the CLI checks again under its input lock.
+- The send is Recorded only from its exact `submitted` input receipt; a
+  refusal printed after a possible start stays Unknown.
+
+Linux advertises `desktop-deferred-compact-to-send-v1`. macOS refuses every
 original before any row (`compact_to_send_native_image_unavailable`) and
 Windows refuses it too (`compact_to_send_unsupported`).
 

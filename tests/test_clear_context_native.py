@@ -486,6 +486,41 @@ wire_api="responses"
         test_input.InputTransport.send(self, test_input.InputTransport.payload(self, text='First fixture message'))
         self.assert_new_conversation(fresh['session_clear']['at'])
 
+    def test_a_confirmed_clear_then_old_session_end_accepts_the_first_new_message(self):
+        import test_clear_context
+        self.resumed()
+        test_input.InputTransport.send(self, test_input.InputTransport.payload(self, text='Confirm the fixture conversation'))
+        def initial_idle():
+            record = json.loads(self.record_path.read_text())
+            return record.get('phase') == 'idle' and not record.get('expected_id')
+        self.settle(initial_idle, 'Initial native turn did not settle')
+        self.assertEqual(test_clear_context.ClearContext.clear(self)['status'], 'confirmed')
+        self.assert_reset_decoration()
+        # Only this ordering is modeled; the following real clear SessionStart,
+        # prompt submission, response and Stop all come from the native Codex.
+        test_clear_context.ClearContext.hook(self, dict(hook_event_name='SessionEnd',
+            session_id=self.conversation_id, reason='other'))
+        ended = json.loads(self.record_path.read_text())
+        self.assertTrue(ended['session_clear']['awaiting_session_start'])
+        self.assertEqual(ended['conversation_id'], self.conversation_id)
+        self.assertEqual(ended['conversation_state'], 'ended')
+        message = 'First fixture message after the old conversation ended'
+        receipt = test_input.InputTransport.send(self, test_input.InputTransport.payload(self, text=message))
+        self.assertEqual(receipt['status'], 'submitted')
+        fresh = self.settle(lambda: (value if (value := test_clear_context.ClearContext.inspect(self)).get('conversation_id') != self.conversation_id
+                            and value.get('phase') == 'idle' else None), 'The native successor did not finish its first turn')
+        self.assertEqual(fresh['conversation_state'], 'active')
+        self.assertEqual(fresh['run_id'], self.run_id)
+        self.assertEqual(fresh['prompt'], message)
+        rollout = next((self.native_home / 'sessions').rglob('*' + fresh['conversation_id'] + '.jsonl'))
+        def submitted_messages():
+            rows = [json.loads(line) for line in rollout.read_text().splitlines()]
+            return [row for row in rows if row.get('type') == 'response_item'
+                    and row.get('payload', {}).get('role') == 'user'
+                    and row['payload'].get('content') == [dict(type='input_text', text=message)]]
+        # The successor's retained-message rollout need not have legacy event_msg rows.
+        self.assertEqual(len(self.settle(submitted_messages, 'Native rollout did not record the submitted prompt')), 1)
+
     def test_archive_restored_conversation_clears_and_settles_on_its_real_start(self):
         import test_clear_context
         test_clear_context.ResumedClearContext.restored(self)

@@ -49,6 +49,34 @@ pub fn remote(config: &Config, alias: &str, action: &str, input: Option<&Value>)
     run(config, alias, &["swarm", action], input)
 }
 
+/// `remote`, ended at `deadline` (never later than an ordinary call): one
+/// past it fails before it connects, and one still running then is stopped.
+pub fn remote_until(
+    config: &Config,
+    alias: &str,
+    action: &str,
+    input: Option<&Value>,
+    deadline: Instant,
+) -> Result<Value> {
+    ensure!(Instant::now() < deadline, "no time left to reach {alias}");
+    // The ABSOLUTE deadline goes down to the call, never a duration whose
+    // clock starts later (review-n on #1452).
+    let deadline = deadline.min(Instant::now() + CALL_LIMIT);
+    run_within(config, alias, &["swarm", action], input, deadline)
+}
+
+#[cfg(test)]
+thread_local! {
+    /// The program a test runs in place of ssh, and delays a test puts after
+    /// the spawn and after a successful wait (review-n's seams on #1452).
+    pub(crate) static TEST_SSH: std::cell::RefCell<Option<std::path::PathBuf>> = const { std::cell::RefCell::new(None) };
+    pub(crate) static AFTER_SPAWN: std::cell::Cell<Duration> = const { std::cell::Cell::new(Duration::ZERO) };
+    pub(crate) static AFTER_WAIT: std::cell::Cell<Duration> = const { std::cell::Cell::new(Duration::ZERO) };
+}
+
+/// How long one call to a member may run.
+pub(crate) const CALL_LIMIT: Duration = Duration::from_secs(25);
+
 /// The twins among `values` that parse; the rest are skipped, as derived data.
 fn parsed(values: &[Value]) -> Vec<Twin> {
     values
@@ -71,6 +99,16 @@ fn export(config: &Config, alias: &str) -> Result<Value> {
 /// `hgs WORDS…` on the member behind `alias`, with `input` as JSON on its
 /// standard input; its JSON answer.
 pub fn run(config: &Config, alias: &str, words: &[&str], input: Option<&Value>) -> Result<Value> {
+    run_within(config, alias, words, input, Instant::now() + CALL_LIMIT)
+}
+
+fn run_within(
+    config: &Config,
+    alias: &str,
+    words: &[&str],
+    input: Option<&Value>,
+    deadline: Instant,
+) -> Result<Value> {
     ensure!(
         config.peers.iter().any(|p| p == alias) && !config.is_self(alias),
         "choose a locally configured remote machine"
@@ -84,6 +122,12 @@ pub fn run(config: &Config, alias: &str, words: &[&str], input: Option<&Value>) 
         bytes.len() as u64 <= MAX_BYTES,
         "swarm exchange is too large"
     );
+    #[cfg(test)]
+    let mut command = TEST_SSH
+        .with(|program| program.borrow().clone())
+        .map(std::process::Command::new)
+        .unwrap_or_else(platform::ssh);
+    #[cfg(not(test))]
     let mut command = platform::ssh();
     command
         .args([
@@ -103,47 +147,60 @@ pub fn run(config: &Config, alias: &str, words: &[&str], input: Option<&Value>) 
             words.iter().map(|word| platform::remote_quote(word)).collect::<Vec<_>>().join(" ")
         ));
     let ssh = platform::spawn_ssh(&mut command, true, true, true).context("start swarm connection")?;
+    #[cfg(test)]
+    thread::sleep(AFTER_SPAWN.with(|delay| delay.get()));
     let mut child = ssh.child;
+    let expired = || Instant::now() >= deadline;
+    if expired() {
+        let _ = child.kill();
+        let _ = child.wait();
+        anyhow::bail!("connection to {alias} timed out as it started");
+    }
     let mut stdin = ssh.stdin.unwrap();
     let mut stdout = ssh.stdout.unwrap();
     let mut stderr = ssh.stderr.unwrap();
-    let writer = thread::spawn(move || stdin.write_all(&bytes));
-    let reader = thread::spawn(move || {
+    let _writer = thread::spawn(move || stdin.write_all(&bytes));
+    // The readers report through channels, so draining them is bounded by
+    // the call's limit too: a descendant that keeps the pipe open past it
+    // is left behind, never waited for (review-n on #1452).
+    let (output_sent, output_read) = std::sync::mpsc::channel();
+    thread::spawn(move || {
         let mut bytes = Vec::new();
-        stdout
-            .by_ref()
-            .take(MAX_BYTES + 1)
-            .read_to_end(&mut bytes)
-            .map(|_| bytes)
+        let read = stdout.by_ref().take(MAX_BYTES + 1).read_to_end(&mut bytes).map(|_| bytes);
+        let _ = output_sent.send(read);
     });
-    let errors = thread::spawn(move || {
+    let (errors_sent, errors_read) = std::sync::mpsc::channel();
+    thread::spawn(move || {
         let mut bytes = Vec::new();
-        stderr
-            .by_ref()
-            .take(65536)
-            .read_to_end(&mut bytes)
-            .map(|_| bytes)
+        let read = stderr.by_ref().take(65536).read_to_end(&mut bytes).map(|_| bytes);
+        let _ = errors_sent.send(read);
     });
-    let started = Instant::now();
     let status = loop {
         if let Some(status) = child.try_wait()? {
             break Some(status);
         }
-        if started.elapsed() > Duration::from_secs(25) {
+        if expired() {
             let _ = child.kill();
             let _ = child.wait();
             break None;
         }
         thread::sleep(Duration::from_millis(25));
     };
-    let _ = writer.join();
-    let output = reader
-        .join()
-        .map_err(|_| anyhow::anyhow!("swarm output reader failed"))??;
-    let errors = errors
-        .join()
-        .map_err(|_| anyhow::anyhow!("swarm error reader failed"))??;
+    #[cfg(test)]
+    thread::sleep(AFTER_WAIT.with(|delay| delay.get()));
     ensure!(status.is_some(), "connection to {alias} timed out");
+    let drained = |read: &std::sync::mpsc::Receiver<std::io::Result<Vec<u8>>>| -> Result<Vec<u8>> {
+        let left = deadline.saturating_duration_since(Instant::now());
+        match read.recv_timeout(left) {
+            Ok(bytes) => Ok(bytes?),
+            Err(_) => anyhow::bail!("connection to {alias} timed out while its answer was read"),
+        }
+    };
+    let output = drained(&output_read)?;
+    let errors = drained(&errors_read)?;
+    // An answer complete only after the deadline is not accepted: a channel
+    // already full answers even a zero wait (review-n on #1452).
+    ensure!(!expired(), "connection to {alias} timed out");
     ensure!(
         status.unwrap().success(),
         "{alias}: {}",
@@ -153,8 +210,10 @@ pub fn run(config: &Config, alias: &str, words: &[&str], input: Option<&Value>) 
         output.len() as u64 <= MAX_BYTES,
         "remote catalog is too large"
     );
-    serde_json::from_slice(&output)
-        .context("remote HGS does not provide a valid swarm response; update HGS on that machine")
+    let answer = serde_json::from_slice(&output)
+        .context("remote HGS does not provide a valid swarm response; update HGS on that machine")?;
+    ensure!(!expired(), "connection to {alias} timed out");
+    Ok(answer)
 }
 
 pub fn hello(config: &Config, inventory: bool) -> Result<Value> {
@@ -166,6 +225,21 @@ pub fn hello(config: &Config, inventory: bool) -> Result<Value> {
         result["known"] = json!(store.data.catalog.operations.keys().collect::<Vec<_>>());
         result["known_twins"] = json!(store.data.twins.known());
     }
+    // For the fence (C3c1): every machine this catalog knows has joined (a
+    // writer this computer may have exchanged tasks with, whether or not it
+    // is a peer), and the membership incarnation.
+    // One more than a universe covers is enough to close it.
+    let writers: Vec<String> =
+        super::fence::catalog_machines(&store).into_iter().take(super::fence::MAX_NODES + 1).collect();
+    let membership = store.membership();
+    // The verified direct peers, for the fence's routes (C3c1).
+    let peers: std::collections::BTreeSet<String> = store
+        .data
+        .peers
+        .values()
+        .filter(|peer| !peer.node.is_empty())
+        .map(|peer| peer.node.clone())
+        .collect();
     // Project stores are opened after the catalog lock is released. Tasks
     // that cannot be read never stop the catalog. Only hello reads them.
     drop(store);
@@ -173,8 +247,20 @@ pub fn hello(config: &Config, inventory: bool) -> Result<Value> {
         return Ok(result);
     }
     match replica::hello(config) {
-        Ok(replica) => result["replica"] = replica,
-        Err(error) => eprintln!("hgs swarm: tasks: {error:#}"),
+        Ok(mut replica) => {
+            replica["peers"] = json!(peers);
+            replica["writers"] = json!(writers);
+            replica["membership"] = json!(membership);
+            replica["fence"] = json!(super::fence::FENCE);
+            result["replica"] = replica
+        }
+        Err(error) => {
+            eprintln!("hgs swarm: tasks: {error:#}");
+            // A replica this computer cannot read now is still a replica:
+            // an explicit part keeps the member eligible and its fence
+            // closed. Only an older build sends no part, sharing no tasks.
+            result["replica"] = json!({"protocol": replica::PROTOCOL, "unavailable": format!("{error:#}")});
+        }
     }
     Ok(result)
 }

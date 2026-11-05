@@ -99,8 +99,9 @@ if they cannot be observed on the main account.
 The 2026-11-03 exception replaces all three clean-account subcases with exact
 candidate CI install/package checks **and** the owner-account upgrade. Keep links
 and results for both halves beside each platform row. It does not waive upgrade,
-one-time import, service readiness, notifications, rollback or genuine default-OFF
-checks. Staging prefixes and fake service managers remain component evidence.
+one-time import, service readiness, notifications or genuine default-OFF
+checks. Qt rollback is separately waived by the 2026-11-05 owner decision.
+Staging prefixes and fake service managers remain component evidence.
 
 macOS automation may run without a separate owner window under the existing
 rules. Ask the owner to perform any new microphone/camera, Apple Events, screen
@@ -177,7 +178,7 @@ until the coordinator's maintained owner route verifies readiness, presentation,
 click routing, stale/withdrawn refusal and Wayland behavior.
 
 
-### Arch 0.48 preparation and nondisplay subchecks — 2026-11-05
+### Arch 0.48 pre-owner preparation and nondisplay subchecks — 2026-11-05
 
 Installed source: `7a60dceeb61423853766cd7072357c0a8e5b03c7`, clean,
 `0.47.1-preview.design-polish.7a60dce`. The canonical GUI and CLI hashes match
@@ -223,9 +224,10 @@ after upgrade, including the exact text/attachment and unsent identity. The
 owner physically selected Terminal and supplied screenshots before and after:
 both show the exact linux-shell-u target **Connected**, its live Codex TUI and
 unchanged tmux session. The post-upgrade screenshot does **not** show the
-composer: draft preservation is a byte-level observation, not an owner visual
-confirmation. Automated tab/screenshot checks were incomplete; their failure
-is not attributed to a product defect.
+composer. The later 11:58 MSK microphone-preview screenshot does show that
+exact synthetic draft still unsent, adding owner-provided visual corroboration
+to the byte-level check. Automated tab/screenshot checks were incomplete; their
+failure is not attributed to a product defect.
 
 Exact-candidate package/CI evidence remains separate. At rollout time no run was
 yet dispatched for `8e74aa884`; the coordinator reported green integrate run
@@ -234,7 +236,60 @@ labelled exact-candidate CI/package proof. Existing-session Terminal survival is
 recorded; folder/argv/resize/paste and the other full acceptance rows retain
 their separate checks.
 
-### Arch owner session — at most 35 minutes
+### Recorded Arch notification, media and unattended results — 2026-11-05
+
+These observations use clean installed source
+`8e74aa88460d9b166542a98b57c8344606b1d5f8` and the maintained repaired
+WebKitGTK/JavaScriptCore 2.54.2 prefix. The owner session began at 11:19 MSK;
+the owner confirmed the final video discard and ended participation at
+12:05:43 MSK. This exceeded the original 35-minute plan. No further owner input
+is requested for this recorded run. Qt rollback was waived and never executed.
+
+| Subcheck | Result and exact scope |
+|---|---|
+| Open session after GUI Quit (`.66.3.42`, desktop-u) | **PASS.** Normal Quit and original GUI exit preceded the sole synthetic Post. Exactly one native alert, ID 1460, received the owner's one physical Open-session click: matching Wayland activation token, `ActionInvoked/open-session`, then close reason 3. One new GUI using the same installed executable opened and selected the exact nonce-bearing target and conversation, confirmed by the owner screenshot. The synthetic label was restored; backend PID, epoch, generation and configuration were unchanged. No injected callback, automated click, second Post or retry occurred. Popup appearance, stale/withdrawn clicks and lock/unlock are separate unqualified subcases. |
+| Microphone and playback | **PASS for capture, stopped preview, audible playback and owner-confirmed discard.** The three-second recording used the existing speech profile; the owner confirmed everything was audible. The first Discard screenshot still showed the confirmation dialog; the later explicit owner confirmation establishes the discard. The recording and original composer draft were not sent. Transcription and recording recovery across exit were not exercised. |
+| Camera and playback | **Capture/control/discard PASS with P2 quality observation `zerus-6ioin`.** The owner recorded a five-second video, reported all controls working, but described playback as darker/lower quality. No controlled capture/playback comparison establishes its cause. This recording was in a **different session**, with an empty composer and model `claude-opus-5-5`; its exact session identity was not captured, so it is not attributed to the linux-shell-u upgrade target. The owner explicitly confirmed Discard at 12:05:43 MSK. No Send was requested; no data loss or privacy fault was observed. |
+| Native tray lifecycle, unattended idle window | **PASS for the exercised functional route.** Under fresh idle60 and the original display flock, a fresh actual tray-menu Quit exited the retained GUI (pidfd confirmed). The same background backend stayed serving/IPC-ready while it was absent. One maintained GUI-unit start produced the same-source GUI and one active tray object, initially without a visible window. A second background invocation preserved that GUI's PID/birth; actual StatusNotifier primary activation showed its one window. All three nonempty Next composer drafts retained their keys, text and attachments. Panel artwork/menu appearance and lock/unlock were not freshly qualified by this route. |
+| Service registration and current readiness | **PASS for installed registration/readiness and the private custom-definition refusal.** Installed helper status reports selected/running background, no transition or pending restart. Actual attention/native host and delivery writer are ready; approvals remain OFF. The custom unit refused before any manager call and both unit files stayed unchanged. No additional Grant/Rearm, mode switch or backend restart was performed. |
+| Bounded catalog and exact host read | **PASS for the observed read-only data.** A bounded indexed local service page was complete, online and current (49 rows at that observation); no catalog contents are published. Exact-target `inspect --read-observation` returned complete/observed/present metadata and the matching current run/conversation and raw reply read mark after the owner activation. Its generation/time are retained privately. This is one host acknowledgement, not proof of a pending read delivered while the GUI was closed. |
+| Longer closed-GUI presence/read probe | **NOT RUN.** The later bounded five-minute admission found no idle60; it performed zero Quit/start/catalog/presence steps. The earlier short closed-GUI lifecycle observation proves backend continuity, not a new presence heartbeat or durable read delivery during that absence. No input source is inferred from the observer, and no idle guard was bypassed. |
+
+The actual activation-started GUI was initially outside the GUI unit
+(`MainPID=0`); that did not authorize another GUI. Only after its confirmed
+normal exit did the unattended lifecycle run start the maintained unit. At
+closeout that managed GUI is running from the same installed object, the
+original backend is still background/serving with attention and delivery ready,
+and approvals remain OFF. The passive input observer and bounded owned job
+joined; display flocks are released. No native agent, tmux server or DeepSeek
+host was restarted or stopped. The discarded recordings were not submitted.
+A read-only observation of the original GUI's process tree found no Qt/KF/
+WebEngine mappings or directly held camera/audio device handles; it does not
+claim coverage of another app or the whole PipeWire graph.
+
+Private selected evidence is under
+`.ci-build/arch-048-acceptance-20261105/` in linux-shell-u's checkout:
+`upgrade-result.json`, `root-42-result.json`, `root-42-callback-proof.json`,
+`media-voice-preview-observation.json`, `media-camera-observation.json`,
+`unattended-tray-summary.json`, `target-host-read-observation.json` and
+`closeout-observation.json`. `selected-evidence-index.json` binds these eight
+selected records (each below 64 KiB) by size/hash. Desktop-u retains the full bounded DBus callback
+capture and sender/process/image mapping under
+`.ci-build/g6-arch-42-owner-arch42-n35fa2/`. Owner images and message contents
+stay private. These independently scoped records are not a full platform PASS.
+
+Remaining cases stay with `zerus-5wmh.66.8.1.22`: the exact candidate CI/package
+half of the clean-install exception; the approved private-profile once-only
+import/notice fixture; extended UI-closed presence/read delivery; stale/
+withdrawn notification and lock/idle cases; folder terminal with spaces and
+non-ASCII, argv/resize/paste; transcription/exit recovery; and the remaining
+inventory UI/durable walk. Actual current OFF is observed; clean-default origin,
+authenticated opt-in and unknown-result handling are not inferred from it.
+The owner segment is finished; these gaps do not request another owner action
+or waive their guards. Keep the corresponding broad Linux rows pending until
+the missing observations or a specific owner decision closes them.
+
+### Arch owner session plan — original limit 35 minutes
 
 Prepare first: build and stage the coordinator-selected candidate through the
 maintained route, without updating yet. Finish nondisplay checks. Take the
@@ -944,9 +999,10 @@ computer/session/run/conversation/reply/attention identities privately. Observe
 the actual UI and its existing native responses without adding another batch
 consumer or editing stores. Missing required observations leave a case BLOCKED
 or INCOMPLETE, not inferred from a fixture, local overlay or aggregate count.
-Use the selected host's bounded `hgs inspect "$TARGET_REFERENCE"` (or
-`hgs @configured-alias inspect "$TARGET_REFERENCE"`) for a current journal-backed
-main session. Require `read_observation.complete:true`, `freshness:"observed"`,
+Use the selected host's bounded
+`hgs inspect "$TARGET_REFERENCE" --read-observation` (or
+`hgs @configured-alias inspect "$TARGET_REFERENCE" --read-observation`) for a
+current journal-backed main session. Require `read_observation.complete:true`, `freshness:"observed"`,
 `source_state:"present"`, its content `generation` and host `observed_at` from
 this invocation. Match **both** the top-level and `read_observation.target`
 run/conversation to the captured original target; reference resolution alone may
@@ -1502,14 +1558,14 @@ Shared routes the cells refer to:
 | Clean install / package (exception) | **Have:** source-install identity and no Qt/KF6/WebEngine in the dependency closure (11-02, `a1023d4`); today's `0fca73f5` source install has clean source identity. Neither is a package transaction or a clean-account install. **Auto:** the exact candidate's CI Arch package job. Owner-account upgrade half: covered by the maintained owner-account Next→Next upgrades in the next row (coordinator, 2026-11-05). **Owner:** none. | **Have:** clean frozen `b72dea32` pair/seal verified today. **Auto:** the exact candidate's CI signed/notarized bundle check. Owner-account upgrade half: covered by the maintained owner-account Next→Next upgrades in the next row (coordinator, 2026-11-05). **Owner:** none. | **Have:** PASS. CI install/package checks plus setup 16/16 and legacy 22/22 on `0fca73f5`. The owner-account half is recorded under the exception: no Qt install exists. **Owner:** none. |
 | Upgrade with live agents | **Have:** today all 63 original native PID/births survived GUI Quit/restart; rollouts keep 63–64 agents. Both are Next→Next only. **Covered (coordinator, 2026-11-05):** the maintained owner-account Next→Next upgrades with live agents. On arch, linux-shell-u's owner session moved `7a60dceeb` → `8e74aa884` with the same Codex/hgs/tmux/job/pane, exact draft bytes and 57 native processes untouched (#1472). On the Mac, the queue rollouts moved `7ae0c2bf6` → `7a60dceeb` → `0f6017973` with native processes untouched and drafts kept. Existing Qt users' Qt→Next path is covered by the CI install/package checks and the updater suites (`test_tray_update`, `test_macos_switch_updater`); an owner-account Qt→Next run is waived with the Qt rollback. **Owner:** none. | **Have:** rollouts keep agents (Next→Next). **Covered (coordinator, 2026-11-05):** the maintained owner-account Next→Next upgrades with live agents. On arch, linux-shell-u's owner session moved `7a60dceeb` → `8e74aa884` with the same Codex/hgs/tmux/job/pane, exact draft bytes and 57 native processes untouched (#1472). On the Mac, the queue rollouts moved `7ae0c2bf6` → `7a60dceeb` → `0f6017973` with native processes untouched and drafts kept. Existing Qt users' Qt→Next path is covered by the CI install/package checks and the updater suites (`test_tray_update`, `test_macos_switch_updater`); an owner-account Qt→Next run is waived with the Qt rollback. **Owner:** none. | **Have:** legacy case, Qt ZIP→Next installer in its own folder, with seeded config, drafts and session files preserved; no agents. **Auto:** a private profile running a fixture-agent session and ConPTY job through the Qt ZIP's `hgs.exe`, upgraded to Next; verify the same session, run, conversation, job and draft. **Owner:** question 5. |
 | One-time import | **Have:** 9 handled preference families unchanged (11-02); retained-source warning `.66.5.11`. **Blocked:** G3 source work `.66.5.2.1/.66.5.2/.66.5.4` (migrate-u). **Auto after G3:** an unattended PRIVATE-profile fixture, like va-kids importonce (coordinator, 2026-11-05). Seed Qt state: preferences, a Qt draft, a legacy per-computer project list and shared accounts. Start Next: the once-only notice, Got it, then two restarts with no notice, reseed or replay. Qt sources stay byte-identical; projects are imported, drafts are not; check the Migration report. linux-shell-u runs it after their owner segment. | **Blocked:** G3 as on arch. **Auto after G3:** the same fixture, run by macbundle-u after their owner segment. **Owner:** none. | **Have:** none. The owner account has no Qt registry or INI state (inventory 06:10Z). **Auto:** none on the main account; seeding a legacy source there would manufacture state. **Owner:** question 5. |
-| Service registration / readiness | **Have:** readiness PASS (`5c110055`); today a background no-op, with presence, reads and delivery continuing while the GUI was absent. Custom-unit refusal still PENDING. **Auto:** custom-unit refusal against a private unit directory; one exact-target delivered read with the UI closed, on a synthetic session. **Owner:** none. | **Have:** today the service and host were ready, drain and revoke settled, and wrapper `.4.11` failed closed (macbundle-u fix). **Auto:** inspect the `zerus-setup` LaunchAgent; foreign-definition refusal against a private directory; UI-closed duties on a synthetic session. **Owner:** none. | **Have:** passive registration [x] (11-02); today install/status/remove, cold activation refusal and no service start. **Auto:** start the registered task in session 1; check the pipe identity and readiness with the UI closed; remove it afterwards. **Owner:** the real logon trigger needs a sign-out/sign-in (question 6). |
-| Notifications / clicks | **Have:** today one Post Delivered, with its native ID in the history. The click FAILED to reopen the GUI (`.66.3.42`); banner appearance was not observed. **Auto after the `.42` fix:** one synthetic Post, then a uinput click on the banner (question 3), plus stale and withdrawn refusal. **Owner:** the click if question 3 is declined; lock/idle (question 6). | **Have:** a Post plus an owner click into the project (`f1833dec`; selection unqualified; drain FAILED). Today a Post was Delivered and drain settled; Withdraw is Unknown; no click. **Auto:** Post, drain and withdraw rerun after `.4.11`; selection readback (#1210). **Owner:** the click and selection (question 1); lock/idle (question 6). | **Have:** none. The GUI routes #1170/#1174/#1175 are merged. **Auto:** a service-owned Toast from a synthetic session, clicked through UI Automation, with stale and withdrawn refusal and a cold-GUI launch (win-notify-cl plan `.66.3.30.8`). **Owner:** lock/idle (question 6). |
-| Tray / menu bar / lifecycle | **Have:** today the panel tooltip, menu and primary reopen; normal Quit and maintained unit start; drafts byte-identical. **Auto:** second-instance routing, background start, Quit with a pending draft. **Owner:** none. | **Have:** none. **Auto:** reopen and second instance through `open`; maintained Quit. **Owner:** menu-bar clicks, Services, Hide and Show All (question 1). | **Have:** legacy case first-start window, own tray menu (Open Zerus / No remote machines / Open in / Quit) and native Quit (fixture). **Auto:** on the main install, second instance, background start, draft-safe exit, and setting/removing the login opt-in, all through UI Automation. **Owner:** the real login start (question 6). |
-| Terminal | **Have:** none. **Auto:** a synthetic session and a folder terminal on fixture paths with spaces and non-ASCII; exact argv from `/proc`; resize, paste and reattach after client exit. **Owner:** none. | **Have:** none. **Auto:** none; driving Terminal.app needs AX. **Owner:** the expected Apple Events consent and GUI driving (questions 1 and 2). | **Have:** none. **Auto:** a fixture session through Windows Terminal, PowerShell and ConPTY on paths with spaces and non-ASCII; exact selection through UI Automation; paste and resize through SendInput; continuity after GUI exit. **Owner:** none. |
-| Voice / video | **Have:** today microphone record, Escape to preview, playback state and discard PASS. Camera FAILED (`.66.3.41`; fix #1338 merged, awaiting rollout). Audible playback and transcription unqualified. **Auto:** real-camera preview and cancel after the rollout; espeak-ng speech into a virtual source, then transcription with the existing speech profile; playback proven by sink-monitor capture. **Owner:** question 4. A new speech-provider credential, if no profile exists. | **Have:** none. **Auto:** none; consent state is unknown, and synthetic input needs a virtual audio driver. **Owner:** question 2. | **Have:** none. Voice for local Windows sessions is unsupported by design (installation docs). **Auto:** check through UI Automation that the refusal is visible. **Owner:** none. |
-| UI / durable parity | **Have:** approvals OFF and generic-agent refusal (11-02); today 128 draft records byte-identical. **Auto:** a fixture walk of the installed build in a private Xvfb; on the owner account, read-only service queries plus a uinput-driven walk (question 3); one authenticated frontend request round trip. **Owner:** none if question 3 is approved. | **Have:** none. **Auto:** read-only service and catalog queries. **Owner:** the GUI walk (question 1). | **Have:** first-start window only. **Auto:** a UI Automation walk against a fixture profile with a synthetic session; one frontend request through a ready service to its durable result. **Owner:** none. |
+| Service registration / readiness | **Have (8e74aa884):** selected/running background and real host/delivery readiness; private custom-unit refusal before any manager call; same backend during normal GUI Quit. One exact host read is observed. **Auto:** extended closed-GUI presence/read delivery remains; the latest five-minute idle admission did not run. **Owner:** none for the recorded checks. | **Have:** today the service and host were ready, drain and revoke settled, and wrapper `.4.11` failed closed (macbundle-u fix). **Auto:** inspect the `zerus-setup` LaunchAgent; foreign-definition refusal against a private directory; UI-closed duties on a synthetic session. **Owner:** none. | **Have:** passive registration [x] (11-02); today install/status/remove, cold activation refusal and no service start. **Auto:** start the registered task in session 1; check the pipe identity and readiness with the UI closed; remove it afterwards. **Owner:** the real logon trigger needs a sign-out/sign-in (question 6). |
+| Notifications / clicks | **Have (8e74aa884):** `.66.3.42` PASS: one Post, one physical Open-session click, exact Wayland/native callback, one relaunch and exact target selection (desktop-u). **Auto:** stale/withdrawn refusal. **Owner:** lock/idle remains separately pending; no repeated Post/click in this completed slot. | **Have:** a Post plus an owner click into the project (`f1833dec`; selection unqualified; drain FAILED). Today a Post was Delivered and drain settled; Withdraw is Unknown; no click. **Auto:** Post, drain and withdraw rerun after `.4.11`; selection readback (#1210). **Owner:** the click and selection (question 1); lock/idle (question 6). | **Have:** none. The GUI routes #1170/#1174/#1175 are merged. **Auto:** a service-owned Toast from a synthetic session, clicked through UI Automation, with stale and withdrawn refusal and a cold-GUI launch (win-notify-cl plan `.66.3.30.8`). **Owner:** lock/idle (question 6). |
+| Tray / menu bar / lifecycle | **Have (8e74aa884):** native menu Quit, original exit, maintained background start, second-instance routing and primary Activate PASS; three nonempty drafts retained and backend unchanged. **Auto:** remaining visual panel/menu and lock/idle subcases. **Owner:** none for the recorded checks. | **Have:** none. **Auto:** reopen and second instance through `open`; maintained Quit. **Owner:** menu-bar clicks, Services, Hide and Show All (question 1). | **Have:** legacy case first-start window, own tray menu (Open Zerus / No remote machines / Open in / Quit) and native Quit (fixture). **Auto:** on the main install, second instance, background start, draft-safe exit, and setting/removing the login opt-in, all through UI Automation. **Owner:** the real login start (question 6). |
+| Terminal | **Have (7a60dceeb -> 8e74aa884):** owner screenshots before/after show the same connected live Terminal and tmux session; original agent/wrapper/server/pane/job identities survived. **Auto:** folder terminal, spaces/non-ASCII, exact argv, resize, paste and reattach subcases. **Owner:** none for the recorded checks. | **Have:** none. **Auto:** none; driving Terminal.app needs AX. **Owner:** the expected Apple Events consent and GUI driving (questions 1 and 2). | **Have:** none. **Auto:** a fixture session through Windows Terminal, PowerShell and ConPTY on paths with spaces and non-ASCII; exact selection through UI Automation; paste and resize through SendInput; continuity after GUI exit. **Owner:** none. |
+| Voice / video | **Have (8e74aa884):** three-second voice preview, owner-confirmed audible playback/discard; five-second video and working controls in a different session, owner-confirmed discard. **P2:** darker/lower-quality playback `zerus-6ioin`, cause unassigned. **Auto:** transcription/exit-recovery subcases. **Owner:** completed for this run. | **Have:** none. **Auto:** none; consent state is unknown, and synthetic input needs a virtual audio driver. **Owner:** question 2. | **Have:** none. Voice for local Windows sessions is unsupported by design (installation docs). **Auto:** check through UI Automation that the refusal is visible. **Owner:** none. |
+| UI / durable parity | **Have:** byte-exact upgrade draft preservation; later owner image confirms the unsent draft; bounded current catalog and one exact host read ACK on 8e74aa884; approvals stayed OFF. **Auto:** the remaining inventory walk and current authenticated policy/result cases under normal guards. **Owner:** no further instruction for the completed segment. | **Have:** none. **Auto:** read-only service and catalog queries. **Owner:** the GUI walk (question 1). | **Have:** first-start window only. **Auto:** a UI Automation walk against a fixture profile with a synthetic session; one frontend request through a ready service to its durable result. **Owner:** none. |
 | Qt rollback / reimport | Waived by owner 2026-11-05 on every platform; no Qt round trip. | Waived by owner 2026-11-05. | Waived by owner 2026-11-05; question 5 no longer covers Qt rollback. |
-| Open failures | `.66.3.41`: rerun the real camera after the rollout (desktop-u). `.66.3.42`: rerun after macbundle-u's fix, with the click as above. | `.66.3.30.2.4`: click and navigation owner-pending (AX untrusted, loginwindow frontmost); wrapper `.4.11`. | `.66.8.1.11` (P2, installer refuses a non-owned folder), `.66.8.1.10` (CR CR LF), both win-accept-cl; `.66.8.1.12` (P4 log line). |
+| Open failures | `zerus-6ioin` (P2 camera playback quality). The earlier `.66.3.41` capture failure and `.66.3.42` launch failure have successful scoped 8e74aa884 reruns above; this does not close unrelated remaining acceptance cases. | `.66.3.30.2.4`: click and navigation owner-pending (AX untrusted, loginwindow frontmost); wrapper `.4.11`. | `.66.8.1.11` (P2, installer refuses a non-owned folder), `.66.8.1.10` (CR CR LF), both win-accept-cl; `.66.8.1.12` (P4 log line). |
 
 ### Batched owner questions
 

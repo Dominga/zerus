@@ -1266,6 +1266,7 @@ fn serve(config: &Config, location: Location, background_mode: bool) -> Result<(
                                         | "task_message_input_release"
                                         | "deferred_send"
                                         | "deferred_answer"
+                                        | "compact_to_send"
                                         | "task_start_reconcile"
                                 )
                             )

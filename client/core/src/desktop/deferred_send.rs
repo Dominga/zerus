@@ -300,6 +300,47 @@ fn cli_rules(send: &Send) -> Option<Vec<Vec<u8>>> {
     }
     Some(files)
 }
+/// A frozen `hgs send` stdin as the CLI takes it: its identities and the
+/// digest of its exact message. `compact_to_send` holds its send to exactly
+/// these rules.
+pub(super) struct Frozen {
+    pub request_id: String,
+    pub run_id: String,
+    pub conversation_id: String,
+    pub compaction_id: String,
+    pub message_sha256: String,
+}
+/// Why a stdin is not a send the CLI takes: not its strict shape, or a
+/// message its own rules refuse.
+#[derive(Debug, PartialEq, Eq)]
+pub(super) enum Unsendable {
+    Invalid,
+    Refused,
+}
+/// Decodes `original` strictly and applies the CLI's own rules.
+pub(super) fn frozen(original: &str) -> Result<Frozen, Unsendable> {
+    let send: Send = serde_json::from_str(original).map_err(|_| Unsendable::Invalid)?;
+    let files = cli_rules(&send).ok_or(Unsendable::Refused)?;
+    let message_sha256 = deferred_input::message_sha256(
+        &send.text,
+        send.attachments.iter().zip(&files).map(|(a, bytes)| {
+            (
+                a.name.as_str(),
+                a.mime.as_str(),
+                a.reference.as_str(),
+                bytes.as_slice(),
+            )
+        }),
+    );
+    Ok(Frozen {
+        request_id: send.request_id,
+        run_id: send.expected_run_id,
+        conversation_id: send.expected_conversation_id,
+        compaction_id: send.expected_compaction_id,
+        message_sha256,
+    })
+}
+
 /// `[Image #n]` or `[File #n]`, n from 1 with at most nine digits.
 fn reference_label(value: &str) -> bool {
     let Some(inner) = value.strip_prefix('[').and_then(|v| v.strip_suffix(']')) else {

@@ -349,6 +349,54 @@ Kimi's cache hint includes its idle time in the question's hash, so a
 redraw between the click and the observation changes the identity and
 refuses. Claude's resume prompt keeps `can_answer` outside the hash, but
 that is not a consent field and does not matter.
+The third kind, `compact_to_send` (`desktop::compact_to_send`, ABI
+`desktop-deferred-compact-to-send-v1`), defines its closed wire for one cold
+Compact and send: one `hgs compact-context <session> --json` and then, only
+in the same live admitted operation, one `hgs send <session> --json` whose
+frozen stdin names that compaction:
+- **Checkpoint.** A version 2 `compact_to_send` checkpoint reserves both
+  request IDs, the compaction's (`request_id`) and the send's
+  (`send_request_id`), distinct canonical UUIDs saved together with the draft
+  before the offer. Version 2 is exactly that pair, and a reload never derives
+  another send ID. A version 1 checkpoint keeps today's direct semantics.
+- **Intent.** The local session, both request IDs, the checkpoint's exact
+  JSON and the exact stdin of each child.
+- **Verification.** Strict typed decoding of the checkpoint and both stdins.
+  The compaction's stdin is the CLI's own three fields. The send's stdin is
+  held to the deferred send's rules (`deferred_send::frozen`), and its
+  `expected_compaction_id` must be this compaction: the CLI checks it again
+  under its input lock before the first input byte. One session, run and
+  non-empty conversation run across the checkpoint and both stdins, and the
+  checkpoint's message digest is the send's. Only a local terminal agent's
+  session is taken: DeepSeek and OpenCode (`compact_to_send_agent_refused`),
+  another computer and an original larger than the control frame stay direct,
+  decided before any offer. A plain deferred send still refuses
+  `expected_compaction_id`.
+- **Plan and binding.** The two fixed calls and both raw stdin digests. The
+  operation's key is its compaction request; another send under it conflicts.
+- **Receipts.** Each child has its own step: Queued, Running (durably
+  reserved, so it may have started), Recorded, NotStarted or Unknown. The
+  compaction is Recorded only from the exact `compact_receipts` record of its
+  request, session, run and conversation with status `submitted`; the
+  `in_progress` placeholder, `uncertain` and anything else are not. The send
+  is Recorded only by the deferred send's own `input_receipts` rule.
+  NotStarted (`compact_to_send_not_started`) is only for a child the
+  operation's own ledger proves never crossed its reservation. Exit codes,
+  stderr and a refusal printed after a possible start never decide. The send
+  never runs after a compaction that never started, and never before the
+  compaction settled. Evidence only moves forward (`Receipt::follows`): a
+  settled child never changes, so nothing can overwrite a recorded compaction
+  or send.
+- **Settlement and lookup.** Only the drained receipt settles. The send's
+  exact receipt means sent. Neither child started means nothing ran. A send
+  that never started after a compaction that ran or may have leaves the
+  compaction's identity. A send that may have started is unknown. The lookup
+  is read-only and keyed by the compaction request and the plan fingerprint.
+
+The request has its own ordered lane and is refused by the service
+(`compact_to_send_unsupported`) until its actor lands; no help marker is
+advertised yet.
+
 A draft holds one such identity until it is resolved. A definite outcome
 resolves it, as does a cancellation before its call was dispatched or, for a
 start or compaction, the session seen ready for the send. An uncertain outcome

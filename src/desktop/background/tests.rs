@@ -339,6 +339,67 @@ fn deferred_answer_intent(
     }
 }
 
+/// A valid compact-to-send, built as the client builds it.
+fn compact_to_send_intent(
+    configuration: String,
+    epoch: String,
+) -> zerus_client_core::desktop::compact_to_send::Intent {
+    use zerus_client_core::{
+        desktop::compact_to_send::{Intent, Scope},
+        operation_recovery::deferred_input as checkpoint,
+    };
+    let reserved = checkpoint::Checkpoint::reserve_compact_to_send(checkpoint::Intent {
+        kind: checkpoint::Kind::CompactToSend,
+        draft_revision: 1,
+        message_sha256: checkpoint::message_sha256("after compaction", std::iter::empty()),
+        run_id: "run-1".into(),
+        conversation_id: "conversation-1".into(),
+        question: None,
+        start: None,
+        retry_of: None,
+        consent: true,
+    })
+    .unwrap();
+    let compaction = serde_json::json!({"request_id": reserved.request_id,
+        "expected_run_id": "run-1", "expected_conversation_id": "conversation-1"});
+    let original = serde_json::json!({"request_id": reserved.send_request_id,
+        "text": "after compaction", "attachments": [], "expected_run_id": "run-1",
+        "expected_conversation_id": "conversation-1", "expected_compaction_id": reserved.request_id});
+    Intent {
+        scope: Scope {
+            configuration,
+            service_epoch: epoch,
+        },
+        session: "claude/private-compact".into(),
+        request_id: reserved.request_id.clone(),
+        send_request_id: reserved.send_request_id.clone().unwrap(),
+        checkpoint: serde_json::to_string(&reserved).unwrap(),
+        compaction: compaction.to_string(),
+        original: original.to_string(),
+    }
+}
+
+/// zerus-5wmh.66.4.8: until its actor lands, a compact-to-send is
+/// recognized and refused on every platform, before any row or child.
+#[test]
+fn a_compact_to_send_is_recognized_and_refused_until_its_actor_lands() {
+    let mut f = Fixture::new();
+    let intent = compact_to_send_intent(
+        f.location.configuration.clone(),
+        uuid::Uuid::new_v4().to_string(),
+    );
+    intent.clone().verify().unwrap();
+    let request = zerus_client_core::desktop::ui_requests::Request::CompactToSend {
+        intent: Box::new(intent.clone()),
+    };
+    let authority = crate::desktop::ui_authority::Validated::fixture(&serde_json::json!(request));
+    assert_eq!(
+        f.runtime.frontend_request(&mut f.store, authority),
+        serde_json::json!({"request_id": intent.request_id, "accepted": false,
+            "durable": false, "code": "compact_to_send_unsupported"})
+    );
+}
+
 #[test]
 fn a_deferred_answer_reaches_its_actor_which_refuses_without_a_lease() {
     let mut f = Fixture::new();

@@ -589,8 +589,13 @@ stops an idle session host without disabling anything.
   and stays unavailable. It never switches image, reinstalls or retries an
   effect. `notification-registration install` refuses an existing registration
   for another image (`foreign_or_incomplete_notification_registration_kept`).
-  Replacing it takes the explicit removal below, run with the same CLI and
-  profile that wrote it, then an install from the CLI the background task runs.
+  Replacing it takes the explicit removal below, then an install from the CLI
+  the background task runs. After a reinstall to another path, the removal also
+  takes the registration of the earlier CLI image when it is exactly what this
+  build writes for that image with the same configuration and state folders;
+  the reply then reports `previous_image: true`. Another configuration or state,
+  an older registration format, extra or missing values or keys never qualify.
+  The earlier image is only compared, never started or read.
   The three current-user keys are `HKCU\Software\Classes\AppUserModelId\com.hgdev.hgs-tray`,
   `HKCU\Software\Classes\CLSID\{0F0F70A2-1D40-47D8-AC5E-D6A9B789605F}`,
   and `HKCU\Software\Classes\CLSID\{0F0F70A2-1D40-47D8-AC5E-D6A9B789605F}\LocalServer32`.

@@ -5290,7 +5290,17 @@ cold activation entry refuses before configuration or owner acquisition. No
 worker repairs registration or enables background consent. The background
 service checks the registration against its own running image and configuration
 folders, not its `HOME`; another registered image is reported as
-`notification_registration_other_image` and changes nothing.
+`notification_registration_other_image` and changes nothing. That diagnostic is
+never removal authority. Only `notification-registration remove`, after a fully
+read mismatch with the current image's registration, may select an earlier
+image's registration instead. The registered command must be byte for byte what
+this build writes for that absolute image with the CURRENT configuration and
+state folders, and all three keys must match this build's exact contents for it
+(same SID and configuration hash, this ABI marker, no extra or missing value or
+key). The selection is fixed under the registration lock before the offline
+guard and removed through the same guarded exact removal; the reply adds
+`previous_image: true`. Install and status never take it, and nothing falls back
+after an effect.
 
 Explicit removal uses `notification-registration remove --json --request-id UUID`
 after a settled `desktop revoke --json --request-id UUID --reason rollback` with

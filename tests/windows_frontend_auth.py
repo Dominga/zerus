@@ -1692,6 +1692,14 @@ $later=@{guid=$guid;pid=$q.Id;birth=$q.StartTime.ToFileTimeUtc()};
             self.assertIsNone(shell.poll())
             rollback = self.mode('passive')
             self.assertTrue(rollback['ok'], rollback)
+            # zerus-1an7q: with attention ready, the background service drained
+            # it and exited without an access violation; its revoke settled
+            # (ownership 'revoked' below). History may be unavailable: data.
+            history = self.task_history(background['instance']['guid'])
+            faults = [event for event in history['events'] for key in ('ResultCode', 'ReturnCode', 'ErrorCode', 'ErrorValue')
+                      if str(event['data'].get(key, '')).lower() in ('3221225477', '0xc0000005', '-1073741819')]
+            self.assertEqual(faults, [], history)
+            print('MODE_TASK_BACKGROUND_EXIT ' + json.dumps(history), file=sys.stderr)
             self.latest = rollback['instance']
             self.pin_original(self.latest)  # Keep this OLD PID unavailable for reuse through review.
             self.assert_exact_user_created_state()

@@ -36,10 +36,11 @@ export async function followTasks(project: string | null): Promise<void> {
   await invoke("tasks_follow", { project });
 }
 
-/** Follows one computer's team list, Waiting list and at most one team. */
-export async function followTeams(computer: string, team: string | null): Promise<void> {
+/** Follows one computer's team list, Waiting list, team and catalog. The
+ * catalog is read only while its page is open. */
+export async function followTeams(computer: string, team: string | null, catalog = false): Promise<void> {
   if (!inTauri()) return;
-  await invoke("teams_follow", { computer, list: false, waiting: false, team });
+  await invoke("teams_follow", { computer, list: false, waiting: false, team, catalog });
 }
 
 /** One guarded `hgs team` action; the core runs it, the webview never does. */

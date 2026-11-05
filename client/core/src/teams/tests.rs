@@ -146,6 +146,7 @@ fn replies_are_checked_for_the_shape_each_view_relies_on() {
             "spans",
         ),
         (TeamRead::Profile { team: TEAM.into() }, "profile"),
+        (TeamRead::Catalog, "catalog"),
     ] {
         let value = fixture(name);
         assert_eq!(decode(&read, exit(&value)).as_ref(), Ok(&value), "{name}");
@@ -165,6 +166,7 @@ fn replies_are_checked_for_the_shape_each_view_relies_on() {
     };
     assert!(invalid(&TeamRead::List, "[]"));
     assert!(invalid(&TeamRead::List, r#"{"items": {}}"#));
+    assert!(invalid(&TeamRead::Catalog, r#"{"roles": []}"#));
     assert!(invalid(&status(), r#"{"id": "t", "members": []}"#));
     assert!(invalid(&status(), "not json"));
     assert_eq!(
@@ -181,6 +183,24 @@ fn replies_are_checked_for_the_shape_each_view_relies_on() {
             message: "hgs: Unknown team".into()
         })
     );
+}
+
+#[test]
+fn the_catalog_reply_is_projected_and_its_read_names_the_catalog() {
+    let value = fixture("catalog");
+    let catalog = view::catalog(&value);
+    assert_eq!((catalog.version, catalog.builtin, catalog.draft_base), (3, false, 2));
+    assert_eq!(catalog.roles.len(), 2);
+    assert_eq!((catalog.roles[1].id.as_str(), catalog.roles[1].model.as_str()), ("tester", "kimi-k2"));
+    assert_eq!(catalog.templates[0].max_members, 6);
+    assert_eq!(catalog.templates[0].roster[0].role, "tester");
+    assert_eq!(catalog.routing[0].r#use, "feature");
+    assert_eq!(catalog.pipelines[0].stages[0].kind, "test");
+    assert_eq!(catalog.proposals[0].state, "kept");
+    assert_eq!(catalog.proposals[0].value["model"], "Sonnet");
+    let request = invocation(&ComputerId::local(), &TeamRead::Catalog).unwrap();
+    assert_eq!(request.args, ["team", "catalog", "get", "--json"]);
+    assert_eq!(request.stdin.as_deref(), Some(&b"{}"[..]));
 }
 
 #[test]
@@ -360,6 +380,7 @@ fn follow_team() -> TeamsFollow {
         list: true,
         waiting: true,
         team: Some(TEAM.into()),
+        catalog: false,
     }
 }
 
@@ -388,6 +409,7 @@ fn replies(read: &TeamRead) -> Value {
         TeamRead::Waiting { .. } => fixture("waiting"),
         TeamRead::Spans { .. } => fixture("spans"),
         TeamRead::Profile { .. } => fixture("profile"),
+        TeamRead::Catalog => fixture("catalog"),
     }
 }
 
@@ -476,6 +498,7 @@ fn a_new_follow_ends_the_views_it_no_longer_shows_and_drops_late_replies() {
             list: true,
             waiting: false,
             team: Some("other".into()),
+            catalog: false,
         },
         start + POLL,
     );

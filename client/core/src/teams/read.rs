@@ -42,6 +42,8 @@ pub enum TeamRead {
     Spans { team: String, after: u64 },
     /// `team profile` with `{team}`: the team's profile (losses, roles, tokens).
     Profile { team: String },
+    /// `team catalog get` with `{}`: the catalog and the designer's draft.
+    Catalog,
 }
 
 impl TeamRead {
@@ -55,6 +57,7 @@ impl TeamRead {
             Self::Waiting { .. } => "waiting",
             Self::Spans { .. } => "spans",
             Self::Profile { .. } => "profile",
+            Self::Catalog => "catalog",
         }
     }
 
@@ -66,7 +69,7 @@ impl TeamRead {
             | Self::Inbox { team }
             | Self::Spans { team, .. }
             | Self::Profile { team } => Some(team),
-            Self::List | Self::Waiting { .. } => None,
+            Self::List | Self::Waiting { .. } | Self::Catalog => None,
         }
     }
 
@@ -94,6 +97,7 @@ impl TeamRead {
                 json!({"team": team, "after": after, "limit": SPANS_PAGE})
             }
             Self::Profile { team } => json!({"team": team}),
+            Self::Catalog => json!({}),
         }
     }
 
@@ -106,6 +110,7 @@ impl TeamRead {
             Self::Status { .. } => &[("id", false), ("members", true), ("tasks", true)],
             Self::Spans { .. } => &[("tasks", true)],
             Self::Profile { .. } => &[],
+            Self::Catalog => &[],
         }
     }
 }
@@ -145,7 +150,11 @@ pub fn invocation(computer: &ComputerId, read: &TeamRead) -> Result<Invocation, 
         .map(|alias| format!("@{alias}"))
         .into_iter()
         .collect();
-    args.extend(["team".to_owned(), read.op().to_owned(), "--json".to_owned()]);
+    if matches!(read, &TeamRead::Catalog) {
+        args.extend(["team".to_owned(), "catalog".to_owned(), "get".to_owned(), "--json".to_owned()]);
+    } else {
+        args.extend(["team".to_owned(), read.op().to_owned(), "--json".to_owned()]);
+    }
     Ok(Invocation {
         args,
         stdin: Some(read.request().to_string().into_bytes()),
@@ -171,6 +180,11 @@ pub fn decode(read: &TeamRead, exit: Exit) -> Result<Value, ReadError> {
         if !fits {
             return Err(invalid(&format!("team {} gives no {key}", read.op())));
         }
+    }
+    if matches!(read, &TeamRead::Catalog)
+        && !object.get("catalog").is_some_and(Value::is_object)
+    {
+        return Err(invalid("team catalog gives no catalog"));
     }
     Ok(value)
 }

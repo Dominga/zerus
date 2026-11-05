@@ -176,7 +176,11 @@ export type TeamAction =
   | { kind: "draft_seen"; fields: string[] }
   | { kind: "draft_create"; approve?: boolean; confirm_widening?: boolean }
   | { kind: "draft_discard"; stop_lead?: boolean; reason?: string }
-  | { kind: "settings"; settings: TeamSettings };
+  | { kind: "settings"; settings: TeamSettings }
+  | { kind: "catalog_propose"; change: Record<string, unknown> }
+  | { kind: "catalog_decide"; proposal: string; decision: "keep" | "reject" | "undo" }
+  | { kind: "catalog_apply" }
+  | { kind: "catalog_discard" };
 
 export interface TeamCall {
   computer?: string;

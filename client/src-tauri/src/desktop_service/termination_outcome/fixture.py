@@ -42,7 +42,7 @@ elif args[:1] in [['inspect'], ['session-action']] or args[:2] in [['desktop', '
         target = capture['target']
         changed = config.get('termination_changed_capture') and (root / 'termination-retained').exists()
         print(json.dumps(dict(name=target['name'], run_id=target['run_id'], conversation_id=target['conversation_id'],
-            state='running', tracked=True, cmd='codex', git_worktree=True,
+            runtime_state='live', tracked=True, agent='codex', git_worktree=True,
             git_root=capture['root'], git_common_dir=capture['common_dir'],
             worktree_owner_id='replacement-owner' if changed else capture['owner_id'])), flush=True)
     elif args[:1] == ['session-action']:

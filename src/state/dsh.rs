@@ -107,6 +107,11 @@ fn ensure_host(_: &Value) -> Result<()> {
     Err(UNSUPPORTED.into())
 }
 const HOST_UNAVAILABLE: &str = "DeepSeek host is unavailable; resume the session to reconnect";
+/// A request the host never got whole. Every `bridge.mjs` since the first
+/// runs a request only once a chunk holds its terminating newline and has no
+/// end handler, so a request cut short never runs: a definite refusal
+/// (zerus-1wchz, pinned by `the_bridge_runs_only_a_newline_terminated_request`).
+const INCOMPLETE: &str = "The DeepSeek host never received a complete request";
 #[cfg(unix)]
 fn rpc(record: &Value, method: &str, params: Value) -> Result<Value> {
     rpc_within(record, method, params, Duration::from_secs(35))
@@ -130,16 +135,14 @@ fn rpc_within(record: &Value, method: &str, params: Value, read_timeout: Duratio
 #[cfg(unix)]
 fn rpc_at(path: &Path, method: &str, params: Value, read_timeout: Duration) -> Result<Value> {
     let mut socket = UnixStream::connect(path).map_err(|_| HOST_UNAVAILABLE)?;
-    socket
-        .set_read_timeout(Some(read_timeout))
-        .map_err(|e| e.to_string())?;
-    socket
-        .set_write_timeout(Some(Duration::from_secs(10)))
-        .map_err(|e| e.to_string())?;
-    // A write that fails after the request's last byte still delivers it: the
-    // host reads a final line at end of input (zerus-1wchz).
-    writeln!(socket, "{}", json!({"method":method,"params":params}))
-        .map_err(|e| format!("Native request delivery uncertain: {e}"))?;
+    // The request's last byte is its newline, and the compact JSON holds no
+    // other, so a failed write never wrote it and the host never ran it.
+    (|| -> io::Result<()> {
+        socket.set_read_timeout(Some(read_timeout))?;
+        socket.set_write_timeout(Some(Duration::from_secs(10)))?;
+        writeln!(socket, "{}", json!({"method":method,"params":params}))
+    })()
+    .map_err(|e| format!("{INCOMPLETE}: {e}"))?;
     let mut response = String::new();
     BufReader::new(socket.take(32 * 1024 * 1024))
         .read_line(&mut response)
@@ -1261,12 +1264,22 @@ pub(super) fn interrupt(snapshot: &Value) -> Result<Value> {
     if record["run_id"]!=snapshot["run_id"] || record["conversation_id"]!=snapshot["conversation_id"] {
         return Err("DeepSeek session changed before interruption".into());
     }
-    rpc(&record,"interrupt",json!({"sessionId":record["conversation_id"],"generation":snapshot["host_generation"],"turnStarted":snapshot["turn_started"]}))
+    interrupt_with(&record, snapshot, rpc)
+}
+/// The interrupt request of `snapshot`'s turn, through `rpc`, with each
+/// error classified by [`interrupt_refusal`].
+fn interrupt_with(
+    record: &Value,
+    snapshot: &Value,
+    rpc: impl FnOnce(&Value, &str, Value) -> Result<Value>,
+) -> Result<Value> {
+    rpc(record,"interrupt",json!({"sessionId":record["conversation_id"],"generation":snapshot["host_generation"],"turnStarted":snapshot["turn_started"]}))
         .map_err(interrupt_refusal)
 }
 /// The host disarms goals and aborts a compaction before its native cancel,
 /// so only a refusal before those effects is definite (zerus-1wchz): no host
-/// to reach, or one of the bridge's own checks ahead of them.
+/// to reach, a request it never got whole, or one of the bridge's own checks
+/// ahead of them.
 fn interrupt_refusal(error: String) -> String {
     const BEFORE_EFFECTS: [&str; 4] = [
         HOST_UNAVAILABLE,
@@ -1274,7 +1287,10 @@ fn interrupt_refusal(error: String) -> String {
         "Use the parent to manage a subagent",
         "DeepSeek turn changed; nothing was stopped",
     ];
-    if BEFORE_EFFECTS.contains(&error.as_str()) || error.contains("delivery uncertain") {
+    if BEFORE_EFFECTS.contains(&error.as_str())
+        || error.starts_with(INCOMPLETE)
+        || error.contains("delivery uncertain")
+    {
         error
     } else {
         format!("Interrupt delivery uncertain: {error}")
@@ -1809,10 +1825,10 @@ mod delivery_tests {
     use std::os::unix::net::UnixListener;
 
     /// zerus-1wchz: a host that takes the connection and goes away while the
-    /// request is still being written. The request may have reached it, so
-    /// the error says the delivery is uncertain, never a plain refusal.
+    /// request is still being written. The bridge runs only a whole,
+    /// newline-terminated request, so this one never ran: a definite refusal.
     #[test]
-    fn a_send_whose_request_write_fails_is_delivery_uncertain() {
+    fn a_request_cut_short_is_a_definite_refusal() {
         let dir = tempfile::tempdir().unwrap();
         let path = dir.path().join("host.sock");
         let listener = UnixListener::bind(&path).unwrap();
@@ -1828,10 +1844,72 @@ mod delivery_tests {
         )
         .unwrap_err();
         host.join().unwrap();
-        assert!(
-            error.starts_with("Native request delivery uncertain: "),
-            "{error}"
+        assert!(error.starts_with(INCOMPLETE), "{error}");
+        assert!(!error.contains("delivery uncertain"), "{error}");
+        assert_eq!(interrupt_refusal(error.clone()), error);
+    }
+
+    /// Every shipped bridge, the running ones included (a resident host is
+    /// never reloaded), runs a request only from a chunk holding its newline
+    /// and has no end handler. If that changes, a cut-short request may run,
+    /// and `INCOMPLETE` stops being a definite refusal.
+    #[test]
+    fn the_bridge_runs_only_a_newline_terminated_request() {
+        assert_eq!(BRIDGE.matches("socket.on('data', chunk => {").count(), 1);
+        assert_eq!(
+            BRIDGE.matches("if (!chunk.includes(10)) return;").count(),
+            1
         );
+        for handler in [
+            "readline",
+            "createInterface",
+            "on('end'",
+            "once('end'",
+            "on('close'",
+            "once('close'",
+        ] {
+            assert!(!BRIDGE.contains(handler), "{handler}");
+        }
+    }
+
+    /// The production interrupt path, answered by a host: a failure after the
+    /// bridge's own checks is uncertain, one of those checks stays definite.
+    #[test]
+    fn an_interrupt_refused_after_its_effects_is_uncertain_through_the_host() {
+        let record = json!({"conversation_id":"session-A"});
+        let snapshot = json!({"host_generation":"host-1","turn_started":1793000000.5});
+        for (error, expected) in [
+            (
+                "Session not found",
+                "Interrupt delivery uncertain: Session not found",
+            ),
+            (
+                "DeepSeek turn changed; nothing was stopped",
+                "DeepSeek turn changed; nothing was stopped",
+            ),
+            ("DeepSeek host changed", "DeepSeek host changed"),
+        ] {
+            let dir = tempfile::tempdir().unwrap();
+            let path = dir.path().join("host.sock");
+            let listener = UnixListener::bind(&path).unwrap();
+            let host = std::thread::spawn(move || {
+                let (mut socket, _) = listener.accept().unwrap();
+                let mut request = String::new();
+                BufReader::new(&socket).read_line(&mut request).unwrap();
+                writeln!(socket, "{}", json!({"ok":false,"error":error})).unwrap();
+                serde_json::from_str::<Value>(&request).unwrap()
+            });
+            let answer = interrupt_with(&record, &snapshot, |record, method, params| {
+                assert_eq!(record["conversation_id"], "session-A");
+                rpc_at(&path, method, params, Duration::from_secs(5))
+            });
+            assert_eq!(answer.unwrap_err(), expected);
+            assert_eq!(
+                host.join().unwrap(),
+                json!({"method":"interrupt","params":{"sessionId":"session-A",
+                    "generation":"host-1","turnStarted":1793000000.5}})
+            );
+        }
     }
 
     #[test]
@@ -1860,6 +1938,8 @@ mod delivery_tests {
         ] {
             assert_eq!(interrupt_refusal(definite.into()), definite);
         }
+        let incomplete = format!("{INCOMPLETE}: Broken pipe (os error 32)");
+        assert_eq!(interrupt_refusal(incomplete.clone()), incomplete);
         for already in [
             "Native request delivery uncertain: Broken pipe (os error 32)",
             "Invalid native response; delivery uncertain: EOF while parsing a value",

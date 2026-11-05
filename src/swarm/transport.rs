@@ -1,6 +1,8 @@
 use super::{
     catalog::{self, Catalog, Key, Operation},
-    replica, service,
+    replica,
+    replica_members::Incomplete,
+    service,
     session_ids::Twin,
     store::{LockedStore, Peer},
 };
@@ -209,17 +211,45 @@ pub fn exchange(config: &Config, request: Exchange) -> Result<Value> {
 }
 
 pub fn sync_peer(config: &Config, alias: &str) -> Result<()> {
-    let identity = remote(config, alias, "hello", None)?;
+    // Information only: with no verified hello, or no catalog sync after
+    // it, every project known here is incomplete for the member.
+    let identity = match catalog_sync(config, alias) {
+        Ok(identity) => identity,
+        Err((reason, error)) => {
+            replica::unreachable(config, alias, reason);
+            return Err(error);
+        }
+    };
+    replica::sync_peer(config, alias, &identity)?;
     let mut local = LockedStore::load(config)?;
+    if let Some(peer) = local.data.peers.get_mut(alias) {
+        peer.last_sync = now();
+        peer.error.clear();
+    }
+    local.save()
+}
+
+/// The member's verified hello and the catalog exchange after it; a failure
+/// says whether the member answered as another computer.
+fn catalog_sync(config: &Config, alias: &str) -> std::result::Result<Value, (Incomplete, anyhow::Error)> {
+    let unreachable = |error: anyhow::Error| (Incomplete::Unreachable, error);
+    let identity = remote(config, alias, "hello", None).map_err(unreachable)?;
+    let local = LockedStore::load(config).map_err(unreachable)?;
     let peer = local
         .data
         .peers
         .get(alias)
-        .ok_or_else(|| anyhow::anyhow!("machine is not enrolled in this swarm"))?;
-    ensure!(
-        identity["schema"] == 1 && identity["node_id"] == peer.node,
-        "the machine behind {alias} changed identity"
-    );
+        .ok_or_else(|| unreachable(anyhow::anyhow!("machine is not enrolled in this swarm")))?;
+    if !(identity["schema"] == 1 && identity["node_id"] == peer.node) {
+        return Err((
+            Incomplete::ChangedIdentity,
+            anyhow::anyhow!("the machine behind {alias} changed identity"),
+        ));
+    }
+    catalog_exchange(config, alias, identity, local).map_err(unreachable)
+}
+
+fn catalog_exchange(config: &Config, alias: &str, identity: Value, mut local: LockedStore) -> Result<Value> {
     ensure!(
         identity["swarm_id"] == local.data.catalog.swarm_id,
         "{alias} belongs to a different swarm"
@@ -325,13 +355,7 @@ pub fn sync_peer(config: &Config, alias: &str) -> Result<()> {
     } else {
         drop(local);
     }
-    replica::sync_peer(config, alias, &identity)?;
-    let mut local = LockedStore::load(config)?;
-    if let Some(peer) = local.data.peers.get_mut(alias) {
-        peer.last_sync = now();
-        peer.error.clear();
-    }
-    local.save()
+    Ok(identity)
 }
 
 pub fn sync(config: &Config) -> Result<Value> {

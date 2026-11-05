@@ -1,9 +1,12 @@
 //! What this computer last learned of each member's task replica, kept
-//! beside the catalog in `replica-members.json`: the task schema its hello
-//! advertised, its replica store and each project's last exchange with it
-//! (zerus-cg5h.4 S2b.2 C2). Information only: it grants nothing, and a
-//! member's entry goes when its membership does.
-use super::store::{replace, LockedStore};
+//! beside the catalog in `replica-members.json`: what its last verified
+//! hello said (the replica protocol, the task schema it writes, its replica
+//! store) and each project's last exchange with it (zerus-cg5h.4 S2b.2 C2).
+//! Information only: it grants nothing. Every record is bound to the exact
+//! verified observation it came from, a changed observation retires the
+//! completions recorded under the old one, and a member's entry goes at the
+//! membership change itself.
+use super::store::{replace, LockedStore, Peer};
 use crate::config::Config;
 use anyhow::Result;
 use serde::{Deserialize, Serialize};
@@ -11,9 +14,9 @@ use serde_json::Value;
 use std::collections::{BTreeMap, BTreeSet};
 use std::fs;
 use std::io::Read;
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
 
-const FILE: &str = "replica-members.json";
+pub const FILE: &str = "replica-members.json";
 /// A file larger than this is damaged and read as empty.
 const MAX_BYTES: u64 = 4 * 1024 * 1024;
 
@@ -21,6 +24,13 @@ const MAX_BYTES: u64 = 4 * 1024 * 1024;
 pub struct Member {
     /// The verified node this entry belongs to.
     pub node: String,
+    /// The replica protocol its last hello spoke; none when it said none.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub protocol: Option<u64>,
+    /// Its last verified hello carried no replica part at all: it does not
+    /// share tasks, so it holds none of a project's documents.
+    #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+    pub no_replica: bool,
     /// The highest task schema its last hello advertised; none for an hgs
     /// that does not say, which counts as older.
     #[serde(default, skip_serializing_if = "Option::is_none")]
@@ -31,7 +41,7 @@ pub struct Member {
     /// When that hello was answered, in milliseconds.
     #[serde(default)]
     pub seen_at: u64,
-    /// Each project's last exchange with it.
+    /// Each project's last exchange with it, under that observation.
     #[serde(default, skip_serializing_if = "BTreeMap::is_empty")]
     pub projects: BTreeMap<String, Exchanged>,
 }
@@ -39,8 +49,13 @@ pub struct Member {
 /// How one project's last exchange with a member ended.
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
 pub struct Exchanged {
-    /// Both sides' inventories were exchanged in full and nothing was refused.
+    /// Both sides' whole inventories were exchanged: every page, nothing
+    /// refused, no task damaged or left out on either side.
     pub complete: bool,
+    /// The readable documents were exchanged in full, whether or not the
+    /// project was complete.
+    #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+    pub exchanged: bool,
     /// When it ended, in milliseconds.
     pub at: u64,
     #[serde(default, skip_serializing_if = "Option::is_none")]
@@ -61,6 +76,13 @@ pub enum Incomplete {
     PageBudget,
     /// The member answered as another computer.
     ChangedIdentity,
+    /// A task of the project does not load on one side: its readable
+    /// documents can agree while the project is not complete.
+    DamagedTasks,
+    /// The member's digests left the project out (busy or unreadable there).
+    Omitted,
+    /// The member's answer did not say what it holds in a form this reads.
+    Malformed,
 }
 
 impl Incomplete {
@@ -71,7 +93,49 @@ impl Incomplete {
             Incomplete::RefusedDocuments => "refused_documents",
             Incomplete::PageBudget => "page_budget",
             Incomplete::ChangedIdentity => "changed_identity",
+            Incomplete::DamagedTasks => "damaged_tasks",
+            Incomplete::Omitted => "omitted",
+            Incomplete::Malformed => "malformed",
         }
+    }
+}
+
+/// One project's outcome: complete, or why not and whether its readable
+/// documents were exchanged all the same.
+pub type Outcome = std::result::Result<(), (Incomplete, bool)>;
+
+/// What a verified hello showed of a member. Records are written only for
+/// this exact observation: a changed computer, store, protocol or schema
+/// retires the completions of the old one, and an outcome that arrives for
+/// an observation that is no longer the member's is refused.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct Observed {
+    pub node: String,
+    pub protocol: Option<u64>,
+    pub no_replica: bool,
+    pub task_schema: Option<i64>,
+    pub store: Option<String>,
+}
+
+impl Observed {
+    /// What the hello `identity` (verified to come from `node`) says.
+    pub fn of(node: &str, identity: &Value) -> Self {
+        let replica = &identity["replica"];
+        Self {
+            node: node.to_owned(),
+            protocol: replica["protocol"].as_u64(),
+            no_replica: !replica.is_object(),
+            task_schema: replica["task_schema"].as_i64(),
+            store: replica["store"].as_str().map(str::to_owned),
+        }
+    }
+
+    fn holds(&self, member: &Member) -> bool {
+        member.node == self.node
+            && member.protocol == self.protocol
+            && member.no_replica == self.no_replica
+            && member.task_schema == self.task_schema
+            && member.store == self.store
     }
 }
 
@@ -86,31 +150,51 @@ fn path(config: &Config) -> PathBuf {
     config.dir.join("swarm").join(FILE)
 }
 
-/// Every member's entry, read without the lock. A missing, oversized or
-/// damaged file reads as none.
-pub fn read(config: &Config) -> BTreeMap<String, Member> {
+fn read_at(path: &Path) -> BTreeMap<String, Member> {
     let mut bytes = Vec::new();
-    let read = fs::File::open(path(config))
-        .and_then(|file| file.take(MAX_BYTES + 1).read_to_end(&mut bytes));
+    let read = fs::File::open(path).and_then(|file| file.take(MAX_BYTES + 1).read_to_end(&mut bytes));
     if read.is_err() || bytes.len() as u64 > MAX_BYTES {
         return BTreeMap::new();
     }
     serde_json::from_slice(&bytes).unwrap_or_default()
 }
 
-/// Changes the entry of the member behind `alias` under the catalog lock,
-/// keeping only entries of current members. An entry of another node starts
-/// again; projects no longer held or alive here are dropped.
+/// Every member's entry, read without the lock. A missing, oversized or
+/// damaged file reads as none.
+pub fn read(config: &Config) -> BTreeMap<String, Member> {
+    read_at(&path(config))
+}
+
+/// Keeps only the entries of current members, at the membership change
+/// itself (the catalog store's save): a member removed and enrolled again
+/// starts with no hello and no inventory. The catalog lock is held.
+pub fn prune(path: &Path, peers: &BTreeMap<String, Peer>) -> Result<()> {
+    if !path.exists() {
+        return Ok(());
+    }
+    let mut members = read_at(path);
+    let before = members.len();
+    members.retain(|alias, member| peers.get(alias).is_some_and(|peer| peer.node == member.node));
+    if members.len() != before {
+        replace(path, &serde_json::to_vec(&members)?)?;
+    }
+    Ok(())
+}
+
+/// Changes the member behind `alias` under the catalog lock, only while its
+/// enrolment is still `node`; `projects` are the projects this computer
+/// still holds or knows alive. False when nothing was written.
 fn update(
     config: &Config,
     alias: &str,
+    node: &str,
     projects: Option<&BTreeSet<String>>,
-    change: impl FnOnce(&mut Member),
-) -> Result<()> {
+    change: impl FnOnce(&mut Member) -> bool,
+) -> Result<bool> {
     let store = LockedStore::load(config)?;
-    let Some(peer) = store.data.peers.get(alias) else {
-        return Ok(());
-    };
+    if store.data.peers.get(alias).is_none_or(|peer| peer.node != node) {
+        return Ok(false);
+    }
     let mut members = read(config);
     members.retain(|alias, member| {
         store
@@ -120,57 +204,257 @@ fn update(
             .is_some_and(|peer| peer.node == member.node)
     });
     let member = members.entry(alias.to_owned()).or_default();
-    if member.node != peer.node {
+    if member.node != node {
         *member = Member {
-            node: peer.node.clone(),
+            node: node.to_owned(),
             ..Member::default()
         };
     }
-    change(member);
+    if !change(member) {
+        return Ok(false);
+    }
     if let Some(projects) = projects {
         for member in members.values_mut() {
             member.projects.retain(|project, _| projects.contains(project));
         }
     }
-    let bytes = serde_json::to_vec(&members)?;
-    replace(&path(config), &bytes)?;
+    replace(&path(config), &serde_json::to_vec(&members)?)?;
     drop(store);
-    Ok(())
+    Ok(true)
 }
 
-/// Records the replica part of the hello the member behind `alias`
-/// answered, once its identity was verified.
-pub fn seen(config: &Config, alias: &str, replica: &Value, at: u64) -> Result<()> {
-    update(config, alias, None, |member| {
-        member.task_schema = replica["task_schema"].as_i64();
-        member.store = replica["store"].as_str().map(str::to_owned);
+/// Records what a verified hello showed of the member behind `alias`, only
+/// while `observed.node` is still its enrolment. Any change from the last
+/// observation retires the project completions recorded under it.
+pub fn seen(config: &Config, alias: &str, observed: &Observed, at: u64) -> Result<bool> {
+    update(config, alias, &observed.node, None, |member| {
+        if !observed.holds(member) {
+            member.projects.clear();
+        }
+        member.protocol = observed.protocol;
+        member.no_replica = observed.no_replica;
+        member.task_schema = observed.task_schema;
+        member.store = observed.store.clone();
         member.seen_at = at;
+        true
     })
 }
 
-/// Records how projects' exchanges with the member behind `alias` ended,
-/// in one write; `projects` are those this computer still holds or knows
-/// alive. Equal digests are a complete exchange.
+/// Records projects' outcomes for the member behind `alias` in one write,
+/// only while its enrolment and its recorded observation are still exactly
+/// `observed`: an outcome begun under another observation is refused.
 pub fn exchanged(
     config: &Config,
     alias: &str,
-    outcomes: &[(String, std::result::Result<(), Incomplete>)],
+    observed: &Observed,
+    outcomes: &[(String, Outcome)],
     projects: &BTreeSet<String>,
     at: u64,
-) -> Result<()> {
+) -> Result<bool> {
     if outcomes.is_empty() {
-        return Ok(());
+        return Ok(false);
     }
-    update(config, alias, Some(projects), |member| {
+    update(config, alias, &observed.node, Some(projects), |member| {
+        if !observed.holds(member) {
+            return false;
+        }
         for (project, outcome) in outcomes {
+            let (complete, exchanged, reason) = match outcome {
+                Ok(()) => (true, true, None),
+                Err((reason, exchanged)) => (false, *exchanged, Some(*reason)),
+            };
             member.projects.insert(
                 project.clone(),
                 Exchanged {
-                    complete: outcome.is_ok(),
+                    complete,
+                    exchanged,
                     at,
-                    reason: outcome.err(),
+                    reason,
                 },
             );
         }
+        true
     })
+}
+
+/// Records that no verified hello came from the member behind `alias`:
+/// every project known here is incomplete for the observation recorded for
+/// its current enrolment (never complete for another).
+pub fn unreachable(
+    config: &Config,
+    alias: &str,
+    reason: Incomplete,
+    projects: &BTreeSet<String>,
+    at: u64,
+) -> Result<bool> {
+    let Some(node) = LockedStore::load(config)?
+        .data
+        .peers
+        .get(alias)
+        .map(|peer| peer.node.clone())
+    else {
+        return Ok(false);
+    };
+    update(config, alias, &node, Some(projects), |member| {
+        for project in projects {
+            member.projects.insert(
+                project.clone(),
+                Exchanged {
+                    complete: false,
+                    exchanged: false,
+                    at,
+                    reason: Some(reason),
+                },
+            );
+        }
+        !projects.is_empty()
+    })
+}
+
+#[cfg(test)]
+mod tests {
+    //! review-n and desktop-u on #1432: records are bound to the exact
+    //! verified observation and go with the membership.
+    use super::*;
+    use serde_json::json;
+
+    const A: &str = "11111111-1111-4111-8111-111111111111";
+    const B: &str = "22222222-2222-4222-8222-222222222222";
+
+    fn fixture() -> (tempfile::TempDir, Config) {
+        let dir = tempfile::tempdir().unwrap();
+        let config = Config {
+            home: dir.path().to_str().unwrap().into(),
+            dir: dir.path().join("config"),
+            state: dir.path().join("state"),
+            selves: vec!["example-local".into()],
+            peers: vec!["peer".into()],
+            base_peers: vec![],
+            peers_from_environment: false,
+            machines: BTreeMap::new(),
+            tab: false,
+            tab_colors: String::new(),
+        };
+        enrol(&config, "node-a");
+        (dir, config)
+    }
+
+    fn enrol(config: &Config, node: &str) {
+        let mut store = LockedStore::load(config).unwrap();
+        store.data.peers.insert(
+            "peer".into(),
+            Peer {
+                node: node.into(),
+                ..Peer::default()
+            },
+        );
+        store.save().unwrap();
+    }
+
+    fn observed(node: &str, store: &str) -> Observed {
+        Observed::of(
+            node,
+            &json!({"replica": {"protocol": 1, "task_schema": 7, "store": store}}),
+        )
+    }
+
+    fn complete(config: &Config, observed: &Observed) -> bool {
+        exchanged(config, "peer", observed, &[("p".into(), Ok(()))], &BTreeSet::from(["p".into()]), 20)
+            .unwrap()
+    }
+
+    fn record(config: &Config) -> Option<Member> {
+        read(config).remove("peer")
+    }
+
+    #[test]
+    fn a_changed_observation_retires_the_old_one_s_completions() {
+        let (_dir, config) = fixture();
+        let a = observed("node-a", A);
+        assert!(seen(&config, "peer", &a, 10).unwrap());
+        assert!(complete(&config, &a));
+        assert!(record(&config).unwrap().projects["p"].complete);
+        // The same hello again keeps them.
+        assert!(seen(&config, "peer", &a, 11).unwrap());
+        assert!(record(&config).unwrap().projects["p"].complete);
+        // Another store, protocol or schema starts again.
+        let changes = [
+            observed("node-a", B),
+            Observed { protocol: Some(2), ..a.clone() },
+            Observed { task_schema: Some(6), ..a.clone() },
+            Observed { store: None, ..a.clone() },
+        ];
+        for change in changes {
+            assert!(seen(&config, "peer", &a, 12).unwrap());
+            assert!(complete(&config, &a));
+            assert!(seen(&config, "peer", &change, 13).unwrap());
+            assert!(record(&config).unwrap().projects.is_empty(), "{change:?}");
+            // An outcome begun under the old observation is refused.
+            assert!(!complete(&config, &a), "{change:?}");
+            assert!(record(&config).unwrap().projects.is_empty());
+        }
+    }
+
+    #[test]
+    fn a_late_outcome_or_hello_is_never_credited_to_a_replaced_member() {
+        let (_dir, config) = fixture();
+        let a = observed("node-a", A);
+        assert!(seen(&config, "peer", &a, 10).unwrap());
+        // The alias moves to node-b while node-a's exchange is outstanding.
+        enrol(&config, "node-b");
+        assert!(!complete(&config, &a));
+        assert!(record(&config).is_none_or(|m| m.projects.is_empty() && m.node != "node-b"));
+        // A hello verified for node-a is not node-b's capability either.
+        assert!(!seen(&config, "peer", &a, 11).unwrap());
+        assert!(record(&config).is_none_or(|m| m.node != "node-b" || m.store.is_none()));
+        // node-b's own hello and outcome are its own.
+        let b = observed("node-b", B);
+        assert!(seen(&config, "peer", &b, 12).unwrap());
+        assert!(complete(&config, &b));
+        let member = record(&config).unwrap();
+        assert_eq!((member.node.as_str(), member.store.as_deref()), ("node-b", Some(B)));
+    }
+
+    #[test]
+    fn a_removed_member_enrolled_again_starts_with_nothing() {
+        let (_dir, config) = fixture();
+        let a = observed("node-a", A);
+        assert!(seen(&config, "peer", &a, 10).unwrap());
+        assert!(complete(&config, &a));
+        let mut store = LockedStore::load(&config).unwrap();
+        store.data.peers.remove("peer");
+        store.save().unwrap();
+        drop(store);
+        assert!(record(&config).is_none(), "pruned at the removal itself");
+        enrol(&config, "node-a");
+        let members = crate::swarm::task_members(&config).unwrap();
+        assert_eq!(members.len(), 1);
+        assert!(members[0].replica.is_none());
+    }
+
+    #[test]
+    fn an_unreachable_member_has_no_complete_project() {
+        let (_dir, config) = fixture();
+        let a = observed("node-a", A);
+        assert!(seen(&config, "peer", &a, 10).unwrap());
+        assert!(complete(&config, &a));
+        let known = BTreeSet::from(["p".to_owned(), "q".to_owned()]);
+        assert!(unreachable(&config, "peer", Incomplete::Unreachable, &known, 30).unwrap());
+        let member = record(&config).unwrap();
+        for project in ["p", "q"] {
+            let outcome = &member.projects[project];
+            assert!(!outcome.complete && !outcome.exchanged);
+            assert_eq!(outcome.reason, Some(Incomplete::Unreachable));
+        }
+        // The observation is kept: it is the member's last verified one.
+        assert_eq!(member.store.as_deref(), Some(A));
+    }
+
+    #[test]
+    fn a_hello_without_a_replica_part_establishes_no_replica() {
+        let none = Observed::of("node-a", &json!({"schema": 1}));
+        assert!(none.no_replica && none.protocol.is_none());
+        let other = Observed::of("node-a", &json!({"replica": {"protocol": 2}}));
+        assert!(!other.no_replica && other.protocol == Some(2));
+    }
 }

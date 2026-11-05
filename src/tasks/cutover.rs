@@ -7,7 +7,12 @@ use crate::config::Config;
 use crate::swarm::{self, TaskMember};
 use serde_json::{json, Value};
 use std::time::UNIX_EPOCH;
+use std::time::Duration;
 use zerus_replica::{Actor, TASK_SCHEMA};
+
+/// The most task folder entries, and the longest time, one status reads.
+const SCAN_ENTRIES: usize = 200_000;
+const SCAN_TIME: Duration = Duration::from_millis(500);
 
 /// `task cutover --project P [--hold on|off [--confirm]]`.
 pub(super) fn cutover(config: &Config, args: &[String]) -> Result<Value> {
@@ -35,16 +40,27 @@ pub(super) fn cutover(config: &Config, args: &[String]) -> Result<Value> {
         store.save_project(&doc).map_err(fail)?;
     }
     let hold = store.project().map_err(fail)?.cutover_hold();
-    let (cut_over, latest) = store.cut_over().map_err(fail)?;
-    let latest = latest
-        .and_then(|t| t.duration_since(UNIX_EPOCH).ok())
-        .map(|d| d.as_millis() as i64);
+    // A bounded count: past its budget the phase is unknown, never a guess,
+    // and the project is released within it.
+    let scanned = store.cut_over_within(SCAN_ENTRIES, SCAN_TIME).map_err(fail)?;
+    let (cut_over, latest) = match scanned {
+        Some((count, latest)) => (
+            Some(count),
+            latest
+                .and_then(|t| t.duration_since(UNIX_EPOCH).ok())
+                .map(|d| d.as_millis() as i64),
+        ),
+        None => (None, None),
+    };
     let members = swarm::task_members(config).map_err(fail)?;
-    let closed = (cut_over > 0)
-        .then(|| members.iter().find_map(|m| closing(m, &id, latest)))
-        .flatten();
+    let closed = match cut_over {
+        None => Some(json!({"member": null, "project": id, "reason": "scan_budget", "at": null})),
+        Some(0) => None,
+        Some(_) => members.iter().find_map(|m| closing(m, &id, latest)),
+    };
     let phase = match (cut_over, &closed) {
-        (0, _) => "not_cut_over",
+        (None, _) => "unknown",
+        (Some(0), _) => "not_cut_over",
         (_, Some(_)) => "cutting_over",
         (_, None) => "active",
     };
@@ -77,6 +93,7 @@ fn member(member: &TaskMember, project: &str) -> Value {
     json!({
         "alias": member.alias,
         "node": member.node,
+        "protocol": replica.and_then(|r| r.protocol),
         "task_schema": replica.and_then(|r| r.task_schema),
         "store": replica.and_then(|r| r.store.clone()),
         "seen_at": replica.map(|r| ms(r.seen_at)),
@@ -85,8 +102,10 @@ fn member(member: &TaskMember, project: &str) -> Value {
 }
 
 /// The first reason this member keeps the project's cutover open, if any:
-/// never seen, an older task schema, no exchange of the project, an
-/// incomplete one, or none since the latest cutover write here.
+/// never seen, another replica protocol, an older task schema, no valid
+/// store, no exchange of the project, one not complete (whatever reason it
+/// gives, or none), or none since the latest cutover write here. It fails
+/// closed: anything this does not positively know as complete keeps it open.
 fn closing(member: &TaskMember, project: &str, latest: Option<i64>) -> Option<Value> {
     let closed = |reason: &str, at: Option<i64>| {
         Some(json!({"member": member.alias, "project": project, "reason": reason, "at": at}))
@@ -94,14 +113,22 @@ fn closing(member: &TaskMember, project: &str, latest: Option<i64>) -> Option<Va
     let Some(replica) = &member.replica else {
         return closed("unseen", None);
     };
+    let seen = Some(ms(replica.seen_at));
+    if replica.protocol != Some(swarm::REPLICA_PROTOCOL) {
+        return closed("protocol", seen);
+    }
     if replica.task_schema.is_none_or(|schema| schema < TASK_SCHEMA) {
-        return closed("task_schema", Some(ms(replica.seen_at)));
+        return closed("task_schema", seen);
+    }
+    if replica.store.as_deref().is_none_or(|store| !zerus_replica::ids::is_uuid(store)) {
+        return closed("store", seen);
     }
     let Some(exchanged) = replica.projects.get(project) else {
         return closed("no_inventory", None);
     };
-    if let Some(reason) = exchanged.reason.filter(|_| !exchanged.complete) {
-        return closed(reason.as_str(), Some(ms(exchanged.at)));
+    if !exchanged.complete {
+        let reason = exchanged.reason.map_or("incomplete", |reason| reason.as_str());
+        return closed(reason, Some(ms(exchanged.at)));
     }
     if latest.is_some_and(|latest| ms(exchanged.at) < latest) {
         return closed("inventory_before_cutover", Some(ms(exchanged.at)));
@@ -115,6 +142,9 @@ fn prose(closed: &Value, project: &str) -> String {
     match closed["reason"].as_str().unwrap_or_default() {
         "unseen" => format!("{member} has not answered since it joined"),
         "task_schema" => format!("{member}'s Zerus does not write the execution task schema yet"),
+        "protocol" => format!("{member}'s Zerus speaks another task replica protocol"),
+        "store" => format!("{member} did not name a valid replica store"),
+        "scan_budget" => format!("the tasks of {project} were too many to count here in time"),
         "no_inventory" => format!("{member} has not exchanged the tasks of {project}"),
         "inventory_before_cutover" => {
             format!("{member}'s last inventory of {project} predates the latest cutover here")
@@ -140,17 +170,31 @@ mod tests {
         closing(member, "p1", latest).map(|c| c["reason"].as_str().unwrap().to_owned())
     }
 
+    const STORE: &str = "11111111-1111-4111-8111-111111111111";
+
+    fn complete() -> ReplicaMember {
+        serde_json::from_value(json!({
+            "node": "node-1", "protocol": 1, "task_schema": 7, "store": STORE, "seen_at": 30,
+            "projects": {"p1": {"complete": true, "exchanged": true, "at": 30}},
+        }))
+        .unwrap()
+    }
+
     #[test]
     fn a_member_keeps_the_cutover_open_for_its_first_reason() {
         assert_eq!(reason(&member(None), None).as_deref(), Some("unseen"));
-        let mut replica: ReplicaMember = serde_json::from_value(json!({
-            "node": "node-1", "task_schema": 5, "seen_at": 10,
-        }))
-        .unwrap();
+        let mut replica = complete();
+        replica.protocol = Some(2);
+        assert_eq!(reason(&member(Some(replica.clone())), None).as_deref(), Some("protocol"));
+        replica.protocol = None;
+        assert_eq!(reason(&member(Some(replica.clone())), None).as_deref(), Some("protocol"));
+        replica.protocol = Some(1);
+        replica.task_schema = Some(6);
         assert_eq!(reason(&member(Some(replica.clone())), None).as_deref(), Some("task_schema"));
         replica.task_schema = None;
         assert_eq!(reason(&member(Some(replica.clone())), None).as_deref(), Some("task_schema"));
         replica.task_schema = Some(TASK_SCHEMA);
+        replica.projects.clear();
         assert_eq!(reason(&member(Some(replica.clone())), None).as_deref(), Some("no_inventory"));
         replica.projects = serde_json::from_value(json!({
             "p1": {"complete": false, "at": 20, "reason": "page_budget"},
@@ -162,11 +206,41 @@ mod tests {
             json!({"member": "mac", "project": "p1", "reason": "page_budget", "at": 20})
         );
         assert!(prose(&closed, "orchard").contains("incomplete (page_budget)"));
-        replica.projects = serde_json::from_value(json!({"p1": {"complete": true, "at": 30}})).unwrap();
+        let replica = complete();
         assert_eq!(reason(&member(Some(replica.clone())), Some(30)), None);
         assert_eq!(
             reason(&member(Some(replica)), Some(31)).as_deref(),
             Some("inventory_before_cutover")
         );
+    }
+
+    /// review-n and desktop-u on #1432: a status fails closed. A missing or
+    /// invalid store, or a project not complete (with or without a reason),
+    /// keeps the cutover open.
+    #[test]
+    fn anything_not_known_complete_keeps_the_cutover_open() {
+        assert!(closing(&member(Some(complete())), "p1", Some(30)).is_none());
+        for store in [None, Some(""), Some("not-a-store")] {
+            let mut replica = complete();
+            replica.store = store.map(str::to_owned);
+            assert_eq!(reason(&member(Some(replica)), Some(30)).as_deref(), Some("store"), "{store:?}");
+        }
+        let mut replica = complete();
+        let project = replica.projects.get_mut("p1").unwrap();
+        project.complete = false;
+        project.reason = None;
+        assert_eq!(reason(&member(Some(replica)), Some(30)).as_deref(), Some("incomplete"));
+        // An exchanged readable subset is still not a complete project.
+        let mut replica = complete();
+        let project = replica.projects.get_mut("p1").unwrap();
+        project.complete = false;
+        project.exchanged = true;
+        project.reason = Some(crate::swarm::Incomplete::DamagedTasks);
+        assert_eq!(reason(&member(Some(replica)), Some(30)).as_deref(), Some("damaged_tasks"));
+        assert!(prose(
+            &json!({"member": null, "project": "p1", "reason": "scan_budget", "at": null}),
+            "orchard"
+        )
+        .contains("too many"));
     }
 }

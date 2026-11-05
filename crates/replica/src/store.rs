@@ -415,6 +415,13 @@ enum Marked {
 
 #[cfg(test)]
 thread_local! {
+    /// Runs while a first store identity is being created, under its lock.
+    pub(crate) static STORE_ID_CREATING: std::cell::RefCell<Option<Box<dyn FnMut()>>> =
+        const { std::cell::RefCell::new(None) };
+}
+
+#[cfg(test)]
+thread_local! {
     /// Runs inside an observation, between its read and its stamps.
     pub(crate) static OBSERVING: std::cell::RefCell<Option<Box<dyn FnMut()>>> =
         const { std::cell::RefCell::new(None) };
@@ -462,26 +469,26 @@ impl ProjectStore {
         if let Some(id) = read(&path)? {
             return Ok(id);
         }
-        let id = ids::new_uuid();
-        if !path.exists() {
-            // Two processes that create it at once agree on the first.
-            match private_options().create_new(true).write(true).open(&path) {
-                Ok(mut file) => {
-                    file.write_all(format!("{id}\n").as_bytes())?;
-                    file.sync_all()?;
-                    #[cfg(unix)]
-                    File::open(root)?.sync_all()?;
-                    return Ok(id);
-                }
-                Err(error) if error.kind() == ErrorKind::AlreadyExists => {
-                    if let Some(id) = read(&path)? {
-                        return Ok(id);
-                    }
-                }
-                Err(error) => return Err(error.into()),
-            }
+        // Creating it, or replacing a malformed one, is one step across
+        // processes: under this lock the file is read again, and only then
+        // written whole (an atomic replace), so a creator never replaces
+        // another's identity and nothing reads a partial one.
+        let lock = private_options()
+            .create(true)
+            .truncate(false)
+            .write(true)
+            .open(root.join("store-id.lock"))?;
+        lock.lock_exclusive()?;
+        if let Some(id) = read(&path)? {
+            return Ok(id);
         }
-        // A malformed one is replaced: a new identity closes what the old bound.
+        let id = ids::new_uuid();
+        #[cfg(test)]
+        STORE_ID_CREATING.with(|hook| {
+            if let Some(hook) = hook.borrow_mut().as_mut() {
+                hook();
+            }
+        });
         write_atomic(&path, format!("{id}\n").as_bytes())?;
         Ok(id)
     }
@@ -758,13 +765,21 @@ impl ProjectStore {
 
     /// How many tasks this store cut over to the execution schema (each has
     /// a mark), and when the latest of their saves wrote its mark. Names and
-    /// stamps only: no task is read.
-    pub fn cut_over(&self) -> Result<(usize, Option<SystemTime>)> {
+    /// stamps only, no task is read, within `entries` directory entries and
+    /// `time`: none when either runs out first, never a partial count.
+    pub fn cut_over_within(
+        &self,
+        entries: usize,
+        time: Duration,
+    ) -> Result<Option<(usize, Option<SystemTime>)>> {
+        let started = Instant::now();
         let mut count = 0;
         let mut latest: Option<SystemTime> = None;
-        for entry in fs::read_dir(self.dir.join("tasks"))? {
-            let entry = entry?;
-            let path = entry.path();
+        for (seen, entry) in fs::read_dir(self.dir.join("tasks"))?.enumerate() {
+            if seen >= entries || started.elapsed() > time {
+                return Ok(None);
+            }
+            let path = entry?.path();
             let marked = path.extension().and_then(|e| e.to_str()) == Some("managed")
                 && path
                     .file_stem()
@@ -777,7 +792,7 @@ impl ProjectStore {
                 }
             }
         }
-        Ok((count, latest))
+        Ok(Some((count, latest)))
     }
 
     pub fn uuids(&self) -> Result<Vec<String>> {
@@ -1753,5 +1768,75 @@ mod tests {
             .changes_since(&start.generation, start.offset)
             .unwrap();
         assert_eq!(read.documents, Some(uuids));
+    }
+
+    /// review-n on #1432: two first hellos at once agree on one store
+    /// identity; a creator under the lock is never replaced by another, and
+    /// a malformed one is replaced once.
+    #[test]
+    fn concurrent_first_hellos_agree_on_one_store_identity() {
+        let dir = tempfile::tempdir().unwrap();
+        let root = dir.path().join("replica");
+        let (ready, waiting) = std::sync::mpsc::channel();
+        let (release, released) = std::sync::mpsc::channel::<()>();
+        let (one, two) = std::thread::scope(|scope| {
+            let root_one = root.clone();
+            let one = scope.spawn(move || {
+                STORE_ID_CREATING.with(|hook| {
+                    *hook.borrow_mut() = Some(Box::new(move || {
+                        ready.send(()).unwrap();
+                        released.recv().unwrap();
+                    }))
+                });
+                ProjectStore::store_id(&root_one).unwrap()
+            });
+            waiting.recv().unwrap();
+            // The first creator holds the lock: the second waits, then reads it.
+            let root_two = root.clone();
+            let two = scope.spawn(move || ProjectStore::store_id(&root_two).unwrap());
+            std::thread::sleep(Duration::from_millis(100));
+            let waited = !two.is_finished();
+            release.send(()).unwrap();
+            let ids = (one.join().unwrap(), two.join().unwrap());
+            assert!(waited, "the second creator did not wait");
+            ids
+        });
+        assert_eq!(one, two);
+        assert_eq!(ProjectStore::store_id(&root).unwrap(), one);
+        assert!(ids::is_uuid(&one));
+        // A malformed identity is replaced once, and then kept.
+        fs::write(root.join("store-id"), b"not an identity").unwrap();
+        let replaced = ProjectStore::store_id(&root).unwrap();
+        assert!(ids::is_uuid(&replaced) && replaced != one);
+        assert_eq!(ProjectStore::store_id(&root).unwrap(), replaced);
+    }
+
+    /// The cutover status counts marks within a strict budget, and past it
+    /// says nothing rather than a partial count.
+    #[test]
+    fn the_cut_over_count_stays_within_its_budget() {
+        let dir = tempfile::tempdir().unwrap();
+        let store = ProjectStore::open(dir.path(), "p").unwrap();
+        for n in 0..3 {
+            let mut task = TaskDoc::create(NewTask {
+                project: "p",
+                id: &format!("T-00000{n}"),
+                text: "Floored",
+                stage: Stage::Todo,
+                target: Target::Any,
+                author: Actor::Person,
+                rank: "V",
+                now: 1,
+            })
+            .unwrap();
+            assert!(task.floor().unwrap());
+            store.save(&mut task).unwrap();
+        }
+        let long = Duration::from_secs(60);
+        let (count, latest) = store.cut_over_within(1_000, long).unwrap().unwrap();
+        assert_eq!(count, 3);
+        assert!(latest.is_some());
+        assert_eq!(store.cut_over_within(2, long).unwrap(), None);
+        assert_eq!(store.cut_over_within(1_000, Duration::ZERO).unwrap(), None);
     }
 }

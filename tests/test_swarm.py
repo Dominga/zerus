@@ -530,6 +530,26 @@ class Swarm(unittest.TestCase):
         self.assertTrue(self.call('b', 'sync')['c']['ok'])
         self.assertEqual({m['alias'] for m in self.task('b', 'cutover', '--project', 'a')['members']}, {'a'})
 
+    def test_a_member_whose_hello_fails_has_no_complete_project(self):
+        # review-n on #1432: a failed hello records every project known here
+        # as unreachable for that member, never leaving an old completion.
+        self.join('a', 'b'); self.join('b', 'a')
+        for n in 'abab':
+            self.call(n, 'sync')
+        self.task('a', 'add', '--project', 'a', text='Offline outcome fixture')
+        for n in 'abab':
+            self.call(n, 'sync')
+        path = self.root / 'b/swarm/replica-members.json'
+        before = json.loads(path.read_text())['a']['projects']['a']
+        self.assertTrue(before['complete'])
+        (self.root / 'offline-a').touch()
+        self.assertFalse(self.call('b', 'sync')['a']['ok'])
+        after = json.loads(path.read_text())['a']['projects']['a']
+        self.assertEqual((after['complete'], after.get('reason')), (False, 'unreachable'))
+        (self.root / 'offline-a').unlink()
+        self.call('b', 'sync')
+        self.assertTrue(json.loads(path.read_text())['a']['projects']['a']['complete'])
+
     def test_a_large_project_travels_in_pages(self):
         self.join('a', 'b'); self.join('b', 'a')
         self.call('a', 'sync'); self.call('b', 'sync')

@@ -3441,25 +3441,42 @@ here goes out within seconds. Changes made on several computers at once merge.
 A member whose Zerus does not share tasks keeps syncing the catalog and is
 named in the Swarm settings. A hello's replica part also carries
 `task_schema`, the highest task schema that Zerus writes (7, which reads the
-floor; absent in an older one), and `store`, the random identity of its
-replica root (`replica/store-id`, created on first use). This computer keeps
-what each member last advertised and how each project's last exchange with
-it ended (`complete`, or a reason: `unreachable`, `busy`, `refused_documents`,
-`page_budget`, `changed_identity`; equal digests count as complete) in
-`replica-members.json` beside the catalog, information only, pruned with
-membership.
+floor; absent in an older one), `store`, the random identity of its replica
+root (`replica/store-id`, created once under a lock), and for its projects
+how many tasks do not load (`damaged`) and which it left out this time
+(`omitted`, busy or unreadable). This computer keeps what each member's last
+verified hello showed (its computer, replica protocol, task schema and store)
+and how each project's last exchange with it ended in
+`replica-members.json` beside the catalog, information only. Each record is
+bound to that exact observation: a changed store, protocol or schema retires
+the completions recorded under the old one, an outcome that arrives for an
+observation that is no longer the member's is refused, and a member's record
+goes at the membership change itself. A project is `complete` only when both
+sides' whole inventories were exchanged: every page, nothing refused, and no
+task damaged or left out on either side (equal digests of the readable tasks
+alone are an exchanged subset, not a complete project). Otherwise it names a
+reason: `unreachable` (also for every project known here when the member's
+hello fails), `busy`, `refused_documents`, `page_budget`, `changed_identity`,
+`damaged_tasks`, `omitted` or `malformed` (an answer this cannot read is never
+taken for an empty, complete one). Every project this computer stores or knows
+alive gets an outcome on each sync.
 
 `task cutover --project P` shows the project's cutover to execution attempts
 as this computer knows it, read only and bounded by its members: `phase`
 (`not_cut_over` while no task here has a floor or attempts, `cutting_over`
-while a member keeps it open, `active` otherwise), `hold`, `cut_over_tasks`,
+while a member keeps it open, `active` otherwise, `unknown` past its count's
+budget), `hold`, `cut_over_tasks`,
 `last_cutover_write`, every eligible member with its advertised task schema,
 store, when it was seen and its last inventory of the project, and `closed`:
 the first reason it is open as `{member, project, reason, at}` (`unseen`,
-`task_schema` for a member below 7, `no_inventory`, an incomplete exchange's
-reason, or `inventory_before_cutover`), with `closed_text` as prose. Eligible
-members are the project's swarm members that receive its documents: every
-verified member whose Zerus shares tasks. It grants nothing and dispatches
+`protocol` for another or no replica protocol, `task_schema` for a member below
+7, `store` for a missing or invalid store identity, `no_inventory`, an
+incomplete exchange's reason or `incomplete`, or `inventory_before_cutover`),
+with `closed_text` as prose. Anything not known as complete keeps it open. The
+count of cut-over tasks has a strict budget (entries and time): past it the
+phase is `unknown` and the reason `scan_budget`. Eligible members are the
+project's swarm members that may hold its documents: every verified member
+except one whose verified hello showed it shares no tasks at all. It grants nothing and dispatches
 nothing. `--hold on` sets the project's cutover hold, a replicated value that
 names who set it and when (concurrent changes: the last writer wins). While on,
 no task of the project takes a new floor or a first attempt, where those are

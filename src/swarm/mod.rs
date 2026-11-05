@@ -28,6 +28,9 @@ use store::LockedStore;
 #[cfg(unix)]
 pub(crate) use catalog::MOBILE_DELIVERY;
 pub(crate) use replica::{exchange_project as exchange_tasks, replicate};
+pub(crate) use replica::PROTOCOL as REPLICA_PROTOCOL;
+#[cfg(test)]
+pub(crate) use replica_members::Incomplete;
 pub(crate) use replica_members::Member as ReplicaMember;
 
 /// A verified member that receives the projects' tasks (its hgs speaks the
@@ -38,8 +41,10 @@ pub(crate) struct TaskMember {
     pub replica: Option<ReplicaMember>,
 }
 
-/// Every member that receives tasks, by alias, read without the lock.
-/// Information only.
+/// Every member that may hold the projects' tasks, by alias, read without
+/// the lock. Only a member whose verified hello established that it shares
+/// no tasks at all is left out; an unknown or another replica protocol stays
+/// in (and keeps a cutover open). Information only.
 pub(crate) fn task_members(config: &Config) -> Result<Vec<TaskMember>> {
     let snapshot = store::read_snapshot(config)?;
     let mut records = replica_members::read(config);
@@ -48,10 +53,10 @@ pub(crate) fn task_members(config: &Config) -> Result<Vec<TaskMember>> {
         let Some(node) = peer["node"].as_str() else {
             continue;
         };
-        if peer["tasks_outdated"] == true {
+        let replica = records.remove(alias).filter(|record| record.node == node);
+        if replica.as_ref().is_some_and(|record| record.no_replica) {
             continue;
         }
-        let replica = records.remove(alias).filter(|record| record.node == node);
         members.push(TaskMember {
             alias: alias.clone(),
             node: node.to_owned(),

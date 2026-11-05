@@ -326,15 +326,26 @@ fn an_unsafe_or_replaced_database_or_marker_refuses() {
     std::fs::hard_link(&database, &alias).unwrap();
     refused(&f.location, &request, "single-link");
     std::fs::remove_file(&alias).unwrap();
-    // Replaced after the proof: a copy renamed over the checked database.
+    // A copy renamed over the checked database after the proof: refused at
+    // admission on Unix; on Windows the retained Verification (no delete
+    // sharing) prevents the replacement itself.
     let offline = Offline::acquire(&f.location, &request).unwrap();
     let copy = f.location.root.join("database-copy");
     std::fs::copy(&database, &copy).unwrap();
-    std::fs::rename(&copy, &database).unwrap();
-    assert!(
-        format!("{:#}", offline.admit(&f.location, &request).unwrap_err())
-            .contains("desktop state changed")
-    );
+    #[cfg(unix)]
+    {
+        std::fs::rename(&copy, &database).unwrap();
+        assert!(
+            format!("{:#}", offline.admit(&f.location, &request).unwrap_err())
+                .contains("desktop state changed")
+        );
+    }
+    #[cfg(windows)]
+    {
+        assert!(std::fs::rename(&copy, &database).is_err());
+        offline.admit(&f.location, &request).unwrap();
+        std::fs::remove_file(&copy).unwrap();
+    }
     drop(offline);
     // A marker changed after the proof.
     let offline = Offline::acquire(&f.location, &request).unwrap();
@@ -375,4 +386,98 @@ fn the_read_only_lookup_keeps_the_database_and_adds_only_reader_sidecars() {
         snapshot(&f.location)["state.sqlite3"],
         before["state.sqlite3"]
     );
+}
+
+/// desktop-u's G1 control on #1453: a held lock file renamed aside and a new
+/// holder of the lock at the original pathname. Unix cannot prevent it, so
+/// admission and confirmation refuse; on Windows the pin prevents both the
+/// rename and the deletion, and the held exclusion stays admitted.
+fn replaced_exclusion(leaf: &str) {
+    let mut f = Fixture::new();
+    let request = id();
+    f.settle(&request);
+    f.stop();
+    let offline = admitted(&f.location, &request);
+    let path = f.location.root.join(leaf);
+    let kept = f.location.root.join(format!("{leaf}.kept"));
+    #[cfg(unix)]
+    {
+        std::fs::rename(&path, &kept).unwrap();
+        let _other: Box<dyn std::any::Any> = if leaf == "owner.lock" {
+            Box::new(f.location.lock().unwrap())
+        } else {
+            Box::new(f.location.handoff_lock().unwrap())
+        };
+        assert!(
+            format!("{:#}", offline.admit(&f.location, &request).unwrap_err())
+                .contains("desktop exclusion changed"),
+            "{leaf}"
+        );
+        assert!(offline.confirm(&f.location).is_err(), "{leaf}");
+    }
+    #[cfg(windows)]
+    {
+        assert!(std::fs::rename(&path, &kept).is_err(), "{leaf} is pinned");
+        assert!(std::fs::remove_file(&path).is_err(), "{leaf} is pinned");
+        offline.admit(&f.location, &request).unwrap();
+        offline.confirm(&f.location).unwrap();
+    }
+}
+
+#[test]
+fn a_replaced_owner_lock_never_keeps_the_offline_proof() {
+    replaced_exclusion("owner.lock");
+}
+
+#[test]
+fn a_replaced_handoff_lock_never_keeps_the_offline_proof() {
+    replaced_exclusion(zerus_desktop_migration::HANDOFF_LOCK);
+}
+
+/// A held lock whose pathname disappears, or a replaced location folder,
+/// refuses on Unix; on Windows the pinned folder cannot be renamed.
+#[test]
+fn a_missing_lock_or_replaced_location_never_keeps_the_offline_proof() {
+    let mut f = Fixture::new();
+    let request = id();
+    f.settle(&request);
+    f.stop();
+    let offline = admitted(&f.location, &request);
+    let aside = f.location.root.with_file_name("desktop-aside");
+    #[cfg(unix)]
+    {
+        std::fs::remove_file(f.location.root.join("owner.lock")).unwrap();
+        assert!(offline.admit(&f.location, &request).is_err());
+        assert!(offline.confirm(&f.location).is_err());
+        drop(offline);
+        let offline = admitted(&f.location, &request);
+        std::fs::rename(&f.location.root, &aside).unwrap();
+        f.location.prepare().unwrap();
+        assert!(offline.admit(&f.location, &request).is_err());
+        assert!(offline.confirm(&f.location).is_err());
+    }
+    #[cfg(windows)]
+    {
+        assert!(std::fs::rename(&f.location.root, &aside).is_err());
+        offline.admit(&f.location, &request).unwrap();
+        offline.confirm(&f.location).unwrap();
+    }
+}
+
+/// A stable held exclusion stays admitted and confirmed, and excludes a
+/// second removal until it is released.
+#[test]
+fn a_held_exclusion_stays_admitted_and_excludes_a_second_removal() {
+    let mut f = Fixture::new();
+    let request = id();
+    f.settle(&request);
+    f.stop();
+    let offline = admitted(&f.location, &request);
+    offline.confirm(&f.location).unwrap();
+    assert!(Offline::acquire(&f.location, &request).is_err());
+    offline.admit(&f.location, &request).unwrap();
+    offline.confirm(&f.location).unwrap();
+    drop(offline);
+    let again = admitted(&f.location, &request);
+    again.confirm(&f.location).unwrap();
 }

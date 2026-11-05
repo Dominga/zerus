@@ -346,6 +346,13 @@ impl RemovalGuard {
     fn admit(&self, location: &Location) -> Result<()> {
         self.offline.admit(location, &self.request_id)
     }
+    /// After the registry effect: the same exclusion objects were held
+    /// throughout, or the outcome is unknown. Nothing is replayed.
+    fn confirm(&self, location: &Location) -> Result<()> {
+        self.offline
+            .confirm(location)
+            .context("desktop exclusion changed during removal; outcome unknown, inspect status before retrying")
+    }
 }
 pub(super) fn command(
     config: &Config,
@@ -407,6 +414,9 @@ pub(super) fn command(
             }
         )
     })?;
+    if let Some(guard) = &removal {
+        guard.confirm(&location)?;
+    }
     Ok(
         serde_json::json!({"schema":1,"abi":MARKER,"operation":operation,"configuration":plan.configuration,"registered":reply.registered,"changed":reply.changed,"started":false,"stopped":false}),
     )

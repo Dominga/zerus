@@ -19,6 +19,11 @@ pub struct HandoffLock {
     configuration: String,
 }
 impl HandoffLock {
+    /// The identity of the exact lock file object held.
+    #[cfg_attr(not(any(windows, test)), allow(dead_code))]
+    pub fn identity(&self) -> std::io::Result<platform::FileIdentity> {
+        self._lock.identity()
+    }
     pub fn verify(&self, location: &Location) -> Result<()> {
         ensure!(
             self.root == location.root && self.configuration == location.configuration,

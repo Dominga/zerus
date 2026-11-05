@@ -198,6 +198,12 @@ impl FileLock {
     pub fn held(file: File) -> Self {
         Self(file)
     }
+
+    /// The identity of the exact file object this lock is held on.
+    #[cfg_attr(not(any(windows, test)), allow(dead_code))]
+    pub fn identity(&self) -> io::Result<FileIdentity> {
+        FileIdentity::of(&self.0)
+    }
 }
 
 impl Drop for FileLock {

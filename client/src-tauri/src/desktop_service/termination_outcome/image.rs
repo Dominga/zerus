@@ -14,6 +14,16 @@ use zerus_client_core::desktop::relay;
 
 pub(super) const MAC_UNAVAILABLE: &str = "termination_native_image_unavailable";
 
+#[cfg_attr(not(target_os = "macos"), allow(dead_code))]
+pub(super) enum ChildFailure {
+    #[cfg(not(target_os = "macos"))]
+    Observation,
+    Exited,
+    Changed,
+    #[cfg(target_os = "macos")]
+    Native(relay::OriginalHelperFailure),
+}
+
 pub(super) fn prepare<T>(prepare: impl FnOnce() -> Result<T, String>) -> Result<T, String> {
     prepare()
 }
@@ -124,15 +134,22 @@ impl Image {
     }
     /// False withholds stdin; callers must return THIS Child to the runner's
     /// physical stop/reap/pipe custody, never return Err after a successful spawn.
+    #[cfg(all(test, any(windows, target_os = "linux")))]
     pub(super) fn matches_child(&self, child: &mut Child) -> bool {
+        self.observe_child(child).is_ok()
+    }
+    pub(super) fn observe_child(&self, child: &mut Child) -> Result<(), ChildFailure> {
         #[cfg(windows)]
         {
-            self.pin.matches_process(child).is_ok() && self.pin.revalidate().is_ok()
+            self.pin
+                .matches_process(child)
+                .map_err(|_| ChildFailure::Observation)?;
+            self.pin.revalidate().map_err(|_| ChildFailure::Changed)
         }
         #[cfg(target_os = "linux")]
         {
             let _ = child;
-            true /* The kernel executed the original sealed snapshot. */
+            Ok(()) /* The kernel executed the original sealed snapshot. */
         }
         #[cfg(target_os = "macos")]
         {
@@ -141,7 +158,7 @@ impl Image {
         #[cfg(not(any(windows, target_os = "linux", target_os = "macos")))]
         {
             let _ = child;
-            false
+            Err(ChildFailure::Observation)
         }
     }
 }
@@ -153,8 +170,14 @@ fn observe_mac_child(
     routing: &relay::Connection,
     child: &mut Child,
     route_current: impl FnOnce() -> bool,
-) -> bool {
-    routing.observe_original_helper(child).is_ok() && route_current()
+) -> Result<(), ChildFailure> {
+    routing
+        .observe_original_helper_diagnostic(child)
+        .map_err(|failure| match failure {
+            relay::OriginalHelperFailure::ChildExited => ChildFailure::Exited,
+            other => ChildFailure::Native(other),
+        })?;
+    route_current().then_some(()).ok_or(ChildFailure::Changed)
 }
 
 #[cfg(all(test, target_os = "macos"))]

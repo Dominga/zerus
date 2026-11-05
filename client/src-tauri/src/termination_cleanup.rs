@@ -793,7 +793,7 @@ pub async fn termination_cleanup_offer(
     let service = if crate::desktop_service::mode() {
         Some(
             app.desktop_service()
-                .ok_or(crate::desktop_service::termination_outcome::UNCONFIRMED)?,
+                .ok_or_else(crate::desktop_service::termination_outcome::missing_offer_service)?,
         )
     } else {
         None

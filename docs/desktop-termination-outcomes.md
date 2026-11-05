@@ -133,6 +133,24 @@ This is a point-in-time observation, with a remaining exec window after its
 last native check; it is not a constrained-spawn proof or new effect permission.
 Ordinary/native/replay paths and the old Service fallback refusal are unchanged.
 
+A failed read-only Remove offer now adds a closed diagnostic to its existing
+error details: `Removal check: PHASE / REASON.` The phases distinguish context
+preparation, ABI, service scope, lifecycle support, inspection, Capture and the
+final `with_hold` freshness check. The first failure stays attached to that
+original check; later exit, marker or resource errors cannot replace it. No
+child output, environment, paths, tokens or session data enter this diagnostic.
+The existing `termination_native_image_unavailable` notice stays unchanged.
+
+For example, `abi_probe / original_child_exited` means the existing native
+birth check observed the original helper's actual exit before it could admit
+input. A fast `--help` child can do this while full signature revalidation runs.
+It still refuses: an exited helper is not accepted, no observation is skipped,
+and deadlines are unchanged. `physical_finish` means the existing resource
+hold has not actually released. A failed offer creates no confirmation or
+Terminate request; this diagnostic is not an uncertain effect receipt or a
+reason to retry an effect. A direct SSH help/inspection read does not qualify
+the genuine GUI's native-child observation or prove that its offer will appear.
+
 Actual installed-pair qualification remains separate under
 `zerus-5wmh.66.3.40.4`: macbundle-u's next coordinated Mac window must use the
 reviewed maintained signed pair and explicitly confirm Terminate with Remove

@@ -102,6 +102,8 @@ fn check(
         return Err(Refusal::Child);
     }
     revalidate()?;
+    #[cfg(test)]
+    tests::after_revalidation(child);
     let before = birth(child)?;
     let task = TaskName::acquire(child)?;
     let token = task.audit(child)?;

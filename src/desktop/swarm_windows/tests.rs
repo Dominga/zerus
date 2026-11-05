@@ -1,6 +1,8 @@
 use super::*;
 use std::{collections::BTreeMap, fs, io::Write, path::Path};
 
+pub(super) mod diagnostics;
+
 struct OwnedChild(Option<platform::Spawned>);
 impl Drop for OwnedChild {
     fn drop(&mut self) {
@@ -182,11 +184,26 @@ fn owned_worker_child() {
         .append(true)
         .open(marker)
         .unwrap();
+    // A private first-start barrier makes the open-before-write interval real.
+    // The parent owns this child/job and still cleans it up if a check panics.
+    let hold = marker.with_extension("hold");
+    if hold.exists() {
+        fs::write(marker.with_extension("opened"), b"opened").unwrap();
+        while hold.exists() {
+            thread::sleep(Duration::from_millis(10));
+        }
+    }
     writeln!(file, "{}", std::process::id()).unwrap();
     file.sync_all().unwrap();
     loop {
         thread::sleep(Duration::from_secs(1));
     }
+}
+fn original_started(status: &Value, marker: &Path) -> bool {
+    status["starts"] == 1
+        && status["pid"].as_u64().is_some_and(|pid| {
+            fs::read_to_string(marker).is_ok_and(|text| text == format!("{pid}\n"))
+        })
 }
 #[test]
 fn restart_and_unknown_cleanup_retain_only_the_original_worker_and_service_owner() {
@@ -203,9 +220,47 @@ fn restart_and_unknown_cleanup_retain_only_the_original_worker_and_service_owner
     fs2::FileExt::try_lock_exclusive(&file).unwrap();
     let owner = Arc::new(platform::FileLock::held(file));
     let mut runtime = Runtime::new(&config, owner.clone());
+    // Keep status readable after explicit Runtime drop, without an owner loan.
+    let _shared = runtime.shared.clone();
+    let diagnostic = diagnostics::Guard::new(&runtime, &owner, root.path());
     let marker = root.path().join("started");
+    let hold = marker.with_extension("hold");
+    fs::write(&hold, b"hold before the original PID acknowledgement").unwrap();
     runtime.start(Launch::Fixture(marker.clone())).unwrap();
-    until(|| runtime.status()["starts"] == 1 && marker.exists(), 10);
+    diagnostic.thread(&runtime);
+    diagnostic.phase("initial_ready", || {
+        let mut released = false;
+        until(
+            || {
+                let status = runtime.status();
+                if !released && status["starts"] == 1 && marker.with_extension("opened").exists() {
+                    // The old predicate is true, but the SAME original child is
+                    // paused before writing its first complete PID line.
+                    assert!(marker.exists());
+                    assert!(
+                        !original_started(&status, &marker),
+                        "file open is not the original worker's complete acknowledgement"
+                    );
+                    let pid = status["pid"].as_u64().unwrap();
+                    fs::write(&marker, pid.to_string()).unwrap();
+                    assert!(
+                        !original_started(&status, &marker),
+                        "partial PID line was acknowledged"
+                    );
+                    fs::write(&marker, b"0\n").unwrap();
+                    assert!(
+                        !original_started(&status, &marker),
+                        "a different PID was acknowledged"
+                    );
+                    fs::write(&marker, b"").unwrap();
+                    fs::remove_file(&hold).unwrap();
+                    released = true;
+                }
+                released && original_started(&status, &marker)
+            },
+            10,
+        );
+    });
     let first = runtime.status()["pid"].as_u64().unwrap() as u32;
     let handle = unsafe { OpenProcess(PROCESS_SYNCHRONIZE, 0, first) };
     assert!(!handle.is_null());
@@ -215,17 +270,19 @@ fn restart_and_unknown_cleanup_retain_only_the_original_worker_and_service_owner
         WAIT_TIMEOUT
     );
     assert_eq!(runtime.restart()["accepted"], true);
-    until(
-        || {
-            runtime.status()["starts"] == 2
-                && fs::read_to_string(&marker)
-                    .unwrap_or_default()
-                    .lines()
-                    .count()
-                    == 2
-        },
-        10,
-    );
+    diagnostic.phase("restarted_ready", || {
+        until(
+            || {
+                runtime.status()["starts"] == 2
+                    && fs::read_to_string(&marker)
+                        .unwrap_or_default()
+                        .lines()
+                        .count()
+                        == 2
+            },
+            10,
+        );
+    });
     assert_eq!(
         unsafe { WaitForSingleObject(original.as_raw_handle(), 0) },
         WAIT_OBJECT_0
@@ -239,14 +296,16 @@ fn restart_and_unknown_cleanup_retain_only_the_original_worker_and_service_owner
     // refund custody, admit another worker or complete the actor's drain.
     runtime.shared.hold_cleanup.store(true, Ordering::Release);
     runtime.request_stop();
-    until(|| runtime.status()["cleanup_unknown"] == true, 8);
+    diagnostic.phase("cleanup_unknown_notice", || {
+        until(|| runtime.status()["cleanup_unknown"] == true, 8)
+    });
     assert!(!runtime.drained());
     assert!(!runtime.confirmed_drained());
     assert_eq!(runtime.restart()["accepted"], false);
     assert_eq!(runtime.status()["starts"], 2);
     assert!(Arc::strong_count(&owner) >= 3);
     runtime.shared.hold_cleanup.store(false, Ordering::Release);
-    until(|| runtime.drained(), 3);
+    diagnostic.phase("final_drain", || until(|| runtime.drained(), 3));
     assert!(runtime.confirmed_drained());
     assert_eq!(runtime.status()["cleanup_unknown"], false);
     assert_eq!(runtime.status()["pid"], Value::Null);

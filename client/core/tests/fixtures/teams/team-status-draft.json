@@ -493,7 +493,7 @@
    "auto": false,
    "barrier": false,
    "done": 8,
-   "health_line": "path 9 · par 2.1 · 2 warnings",
+   "health_line": "path 9 \u00b7 par 2.1 \u00b7 2 warnings",
    "n": 1,
    "pause": null,
    "start_ahead": false,

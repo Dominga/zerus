@@ -1198,7 +1198,7 @@ fn draft_get_in(store: &mut Store, input: &Value) -> anyhow::Result<Value> {
     // Feedback 2026-11-04 (5): the answer carries what the draft holds, so the
     // lead and the owner can check what was saved.
     let fields = json!({"name":team.name,"goal":team.goal,"addendum":team.lead_protocol,"settings":team.settings,
-        "members":team.members,"tasks":team.tasks,"plan_mode":team.plan_mode,"plan_mode_offer":team.plan_mode_offer,
+        "members":team.members,"tasks":team.tasks,"phases":team.phases,"plan_mode":team.plan_mode,"plan_mode_offer":team.plan_mode_offer,
         "plan_mode_reason":team.plan_mode_reason});
     Ok(json!({"draft":draft,"revision":draft.revision,"unseen":draft.unseen,"owner_edited":cleared,"preflight":validation,"fields":fields}))
 }

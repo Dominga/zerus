@@ -36,6 +36,7 @@ export async function followTasks(project: string | null): Promise<void> {
   await invoke("tasks_follow", { project });
 }
 
+
 export const taskEditorOpen = (target: import("./store/taskEditor").TaskEditorTarget) => desktop<import("./store/taskEditor").TaskEditorView>("task_editor_open", { ...target });
 export const taskEditorEdit = (input: Pick<import("./store/taskEditor").TaskEditorView, "handle" | "rev" | "text" | "position" | "anchor">) => desktop<import("./store/taskEditor").TaskEditorView>("task_editor_edit", { input });
 export const taskEditorPick = (handle: number, start: number, end: number) => desktop<import("./store/taskEditor").TaskEditorView>("task_editor_pick", { handle, start, end });
@@ -59,6 +60,22 @@ export const taskFormSubmit = (input: import("./store/taskForms").FormSubmit) =>
 export const taskFormCancel = (kind: import("./store/taskForms").FormKind, handle: number, rev: number) => desktop<import("./store/taskEditor").TaskEditorView<import("./store/taskForms").FormKind>>("task_form_cancel", { kind, handle, rev });
 export const assignTask = (project: string, task: string, target: { computer: string; name: string; run_id: string; conversation_id: string } | null, catalogKey: string | null, sessionId: string | null, mode?: "session" | "subagent" | "new_session") => desktop<void>("task_assign", { input: { project, task, target, catalog_key: catalogKey, session_id: sessionId, mode: mode ?? null } });
 export const readTaskDetails = (project: string, task: string, before: string | null) => desktop<unknown>("task_details", { project, task, before });
+/**
+ * Teams (src-tauri teams.rs): what one computer reads - its team list, Waiting
+ * for you, at most one team and the catalog. The core keeps one follow per
+ * computer, so only the store's one owner (store/teams.ts) calls this, with
+ * every view's needs merged; nothing stops reading it.
+ */
+export const teamsFollow = (computer: ComputerId, follow: import("./store/teamsView").TeamsFollow) =>
+  inTauri() ? invoke<void>("teams_follow", { computer, list: follow.list, waiting: follow.waiting, team: follow.team, catalog: follow.catalog }) : Promise.resolve();
+/** One guarded owner action on a team (core action.rs); the outcome says whether it was applied, refused, unknown or must be confirmed first. The core runs `hgs team`, the webview never does. */
+export const teamAction = (call: import("./types").TeamCall) =>
+  inTauri() ? invoke<import("./types").TeamOutcome>("team_action", { call }) : Promise.reject(new Error("Teams need the desktop app."));
+/** Task 11: reads one team once, as an answer in Waiting for you does before it sends. */
+export const teamRead = (computer: ComputerId, team: string) =>
+  inTauri() ? invoke<import("./types").TeamView>("team_read", { computer, team }) : Promise.reject(new Error("Teams need the desktop app."));
+/** Reads the watched team's feed page before the oldest event shown; false when there is none to read. */
+export const teamsOlder = (computer: ComputerId) => inTauri() ? invoke<boolean>("teams_older", { computer }) : Promise.resolve(false);
 export const openTaskAttachment = (path: string) => desktop<string | null>("task_attachment_open", { path });
 
 /** `next_batch` answers with raw JSON bytes (`ipc::Response`), so large batches skip script evaluation. */

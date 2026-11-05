@@ -1807,6 +1807,14 @@ impl Supervisor {
                 if self.state.organization().is_followed() {
                     self.subscribe_organization();
                 }
+                // Task 8: the team heads, so the Teams poller reads a team
+                // when it changed; a peer without the topic keeps polling.
+                if self.state.team_offered() {
+                    self.write(&Control::Subscribe(Subscription {
+                        topic: topic::TEAM.into(),
+                        ..Subscription::default()
+                    }));
+                }
             }
             Body::Snapshot(snapshot)
                 if snapshot.topic == topic::CATALOG_META

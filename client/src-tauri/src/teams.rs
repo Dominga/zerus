@@ -5,11 +5,12 @@
 //! never runs or parses an `hgs team` read. [`team_action`] runs the team
 //! actions (task #7). A replay never runs `hgs`.
 use std::collections::BTreeMap;
-use std::sync::{Mutex, MutexGuard, PoisonError};
+use std::sync::{Arc, Mutex, MutexGuard, PoisonError};
 
 use tauri::State;
 use zerus_client_core::fleet::valid_alias;
 use zerus_client_core::teams::read::valid_team;
+use zerus_client_core::teams::Heads;
 use zerus_client_core::{default_hgs, ComputerId, TeamCall, TeamOutcome, TeamsFollow, TeamsPoller};
 
 use crate::commands::AppState;
@@ -20,6 +21,9 @@ const COMPUTERS: usize = 16;
 /// The pollers by computer.
 pub struct Teams {
     pollers: Mutex<BTreeMap<ComputerId, TeamsPoller>>,
+    /// Task 8: each computer's latest stream team heads, for a poller that
+    /// starts later; None or absent: it polls.
+    heads: Mutex<BTreeMap<ComputerId, Arc<Heads>>>,
     replay: bool,
 }
 
@@ -27,6 +31,7 @@ impl Teams {
     pub fn new(replay: bool) -> Self {
         Self {
             pollers: Mutex::new(BTreeMap::new()),
+            heads: Mutex::new(BTreeMap::new()),
             replay,
         }
     }
@@ -63,12 +68,40 @@ impl Teams {
                 pump.push(change)
             })
             .map_err(|error| format!("The Teams reader did not start: {error}"))?;
+            if let Some(heads) = self
+                .heads
+                .lock()
+                .unwrap_or_else(PoisonError::into_inner)
+                .get(&computer)
+            {
+                poller.heads(Some(Arc::clone(heads)));
+            }
             pollers.insert(computer.clone(), poller);
         }
         if let Some(poller) = pollers.get(&computer) {
             poller.follow(follow);
         }
         Ok(())
+    }
+
+    /// Task 8: the team heads of a computer's watch stream (its `team`
+    /// topic), or None while it gives none. With heads its poller reads a
+    /// team again when its revision moved instead of every 3 s.
+    pub fn heads(&self, computer: &ComputerId, heads: Option<Arc<Heads>>) {
+        {
+            let mut known = self.heads.lock().unwrap_or_else(PoisonError::into_inner);
+            match &heads {
+                Some(heads) => {
+                    known.insert(computer.clone(), Arc::clone(heads));
+                }
+                None => {
+                    known.remove(computer);
+                }
+            }
+        }
+        if let Some(poller) = self.lock().get(computer) {
+            poller.heads(heads);
+        }
     }
 
     fn with(&self, computer: &ComputerId, ask: impl FnOnce(&TeamsPoller) -> bool) -> bool {
@@ -98,6 +131,7 @@ pub fn teams_follow(
     list: bool,
     waiting: bool,
     team: Option<String>,
+    catalog: bool,
 ) -> Result<(), String> {
     let team = team.filter(|team| !team.is_empty());
     if team.as_deref().is_some_and(|team| !valid_team(team)) {
@@ -111,6 +145,7 @@ pub fn teams_follow(
             list,
             waiting,
             team,
+            catalog,
         },
     )
 }
@@ -163,6 +198,28 @@ pub async fn team_action(teams: State<'_, Teams>, call: TeamCall) -> Result<Team
         });
     }
     Ok(outcome)
+}
+
+/// Task 11: reads one team once, as a Waiting for you answer does before it
+/// sends (Qt's TeamWaitingAnswer::read): the projected `team status`.
+#[tauri::command]
+pub async fn team_read(
+    teams: State<'_, Teams>,
+    computer: String,
+    team: String,
+) -> Result<zerus_client_core::teams::view::TeamView, String> {
+    if teams.replay {
+        return Err("Teams need hgs; a replay has none.".into());
+    }
+    let target = self::computer(&computer)?;
+    tauri::async_runtime::spawn_blocking(move || {
+        let read = zerus_client_core::teams::read::TeamRead::Status { team };
+        zerus_client_core::teams::read::read(&default_hgs(), &target, &read)
+            .map(|value| zerus_client_core::teams::view::team(&value))
+            .map_err(|error| error.to_string())
+    })
+    .await
+    .map_err(|error| error.to_string())?
 }
 
 #[cfg(test)]

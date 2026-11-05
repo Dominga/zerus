@@ -59,6 +59,33 @@ fn text(rows: &[&str]) -> String {
     lines.join("\n").trim().to_owned()
 }
 
+/// Task 2: Claude's unnumbered chooser, read as `claude_approval` reads it
+/// after a turn: the panel's last row is "Enter to confirm · Esc to ...", and
+/// the rows right above it (after a blank row), two to nine with exactly one
+/// marked, are its options. "Claude in Chrome extension detected" at startup
+/// showed its options as body text before.
+fn hinted(panel: &[&str]) -> Option<Choice> {
+    let last = panel.iter().rposition(|row| !row.is_empty())?;
+    if !super::claude_approval::confirm_hint(panel[last]) {
+        return None;
+    }
+    let end = panel[..last].iter().rposition(|row| !row.is_empty())?;
+    let start = panel[..=end].iter().rposition(|row| row.is_empty())? + 1;
+    let options = &panel[start..=end];
+    if !(2..=9).contains(&options.len())
+        || options.iter().filter(|row| marked(row).is_some()).count() != 1
+        || options.iter().any(|row| row.starts_with(MARKERS) && marked(row).is_none())
+    {
+        return None;
+    }
+    let title = panel[..start].iter().position(|row| !row.is_empty())?;
+    Some(Choice {
+        title: panel[title].into(),
+        body: text(&panel[title + 1..start]),
+        options: options.iter().map(|row| option(row).to_owned()).collect(),
+    })
+}
+
 fn parse(screen: &str) -> Option<Choice> {
     let rows: Vec<&str> = screen.lines().map(str::trim_end).collect();
     let end = rows.iter().rposition(|row| !row.trim().is_empty())? + 1;
@@ -69,8 +96,14 @@ fn parse(screen: &str) -> Option<Choice> {
     let panel: Vec<&str> = rows[top..bottom].iter().map(|row| row.trim()).collect();
     let selected = selected - top;
     if numbered(option(panel[selected])).is_none() {
-        // Unnumbered choices cannot be told apart from their descriptions, so
-        // the panel stays verbatim. Its native key hint shows it is a chooser.
+        // Task 2: Claude's own unnumbered chooser ends with "Enter to confirm ·
+        // Esc to ..."; its options are the rows right above that hint.
+        if let Some(choice) = hinted(&panel) {
+            return Some(choice);
+        }
+        // Other unnumbered choices cannot be told apart from their
+        // descriptions, so the panel stays verbatim. Its native key hint
+        // shows it is a chooser.
         if !panel.iter().any(|row| hint(row)) {
             return None;
         }
@@ -242,13 +275,33 @@ mod tests {
     }
     #[test]
     fn unnumbered_choices_stay_verbatim_inside_their_frame() {
+        // Task 2: Claude's own chooser ("Enter to confirm · Esc to ...") has
+        // its options, still read-only; another hint keeps the panel verbatim.
         let claude = parse(&CLAUDE_TRUST.replace("No, exit", "No, quit")).unwrap();
         assert_eq!(claude.title, "Accessing workspace:");
-        assert!(claude.body.contains("17 tool permissions") && claude.body.contains("❯ No, quit"));
-        assert!(claude.options.is_empty());
+        assert!(claude.body.contains("17 tool permissions") && !claude.body.contains("No, quit"));
+        assert_eq!(claude.options, ["No, quit", "Yes, I trust this folder"]);
+        let other = parse(&CLAUDE_TRUST.replace("No, exit", "No, quit").replace("Enter to confirm · Esc to cancel", "Enter to continue · Esc to quit")).unwrap();
+        assert!(other.body.contains("❯ No, quit") && other.options.is_empty());
         let kimi = parse(&format!("unrelated launcher output\n{KIMI_TRUST}")).unwrap();
         assert_eq!(kimi.title, "Trust this folder?");
         assert!(!kimi.body.contains("launcher") && kimi.body.ends_with("Exit Kimi Code. Asked again next launch."));
+    }
+    #[test]
+    fn the_claude_in_chrome_panel_at_startup_has_its_two_options() {
+        // Task 2: Claude Code 2.1.318 asks this before the first conversation.
+        const CHROME: &str = include_str!("../../tests/fixtures/claude-chrome-detected.txt");
+        let choice = parse(CHROME).unwrap();
+        assert_eq!(choice.title, "Claude in Chrome extension detected");
+        assert_eq!(choice.options, ["Yes, use my browser", "No, keep browser tools off"]);
+        assert!(choice.body.starts_with("Claude will use your Chrome browser") && !choice.body.contains("use my browser"), "{}", choice.body);
+        let question = card(&record("claude"), &choice).unwrap();
+        assert_eq!((question["source"].clone(), question["can_answer"].clone()), (json!("startup_terminal_choice"), json!(false)));
+        let options = question["questions"][0]["options"].as_array().unwrap();
+        assert_eq!((options.len(), options[1]["label"].clone()), (2, json!("No, keep browser tools off")));
+        // Two marked rows, or one option, is no chooser of this kind.
+        assert!(parse(&CHROME.replace("   No, keep", " ❯ No, keep")).is_some_and(|choice| choice.options.is_empty()));
+        assert!(parse(&CHROME.replace("   No, keep browser tools off\n", "")).is_some_and(|choice| choice.options.is_empty()));
     }
     #[test]
     fn composers_and_incomplete_lists_are_not_choices() {

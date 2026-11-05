@@ -1,0 +1,198 @@
+import { describe, expect, it } from "vitest";
+import type { DraftMember, NewTeamView, TeamCall, TeamOutcome } from "../ui/teams/types";
+import {
+  createNewTeam,
+  memberRowErrors,
+  mergeDraft,
+  settingsChanges,
+  type ComputerChoice,
+  type NewTeamFields,
+  type NewTeamPort,
+} from "./teamsNew";
+
+const TEAM = "33fbafeb-8291-4eda-a00c-6e1448ec6f20";
+
+class Port implements NewTeamPort {
+  calls: TeamCall[] = [];
+  reply: TeamOutcome = { outcome: "done", receipt: { team: TEAM }, request_id: "11111111-1111-4111-8111-111111111111" };
+  async action(call: TeamCall): Promise<TeamOutcome> {
+    this.calls.push(call);
+    return this.reply;
+  }
+}
+
+function member(overrides: Partial<DraftMember> = {}): DraftMember {
+  return {
+    id: "lead",
+    role: "Lead",
+    agent: "dsh",
+    model: "deepseek-v4",
+    effort: "high",
+    account: "work",
+    permissions: "bypass",
+    computer: "studio",
+    folder: "",
+    prompt: "",
+    lead: true,
+    session: null,
+    ...overrides,
+  };
+}
+
+function draftView(overrides: Partial<NewTeamView> = {}): NewTeamView {
+  return {
+    team: TEAM,
+    name: "Orbit",
+    goal: "Ship it",
+    addendum: "",
+    folder: "C:\\plain-folder",
+    settings: { branch_per_task: false, land: false },
+    members: [member()],
+    tasks: [],
+    draft: { revision: 3, unseen: [], owner_edited: [] },
+    validation: { errors: [], warnings: [] },
+    updated: 0,
+    ...overrides,
+  };
+}
+
+const COMPUTERS: ComputerChoice[] = [
+  { alias: "studio", label: "Studio", online: true },
+  { alias: "laptop", label: "Laptop", online: false },
+];
+
+describe("New team creation rules", () => {
+  it("creates nothing when the form is opened", () => {
+    const port = new Port();
+    const store = createNewTeam(port);
+    store.openNew();
+    expect(store.open()).toBe(true);
+    expect(port.calls).toHaveLength(0);
+  });
+
+  it("Start planning sends only the draft start, in a non-Git folder", async () => {
+    const port = new Port();
+    const store = createNewTeam(port);
+    store.openNew();
+    const lead = member();
+    const result = await store.startPlanning({ folder: "C:\\plain-folder", name: "Orbit", lead });
+    expect(result.ok).toBe(true);
+    expect(port.calls).toHaveLength(1);
+    const call = port.calls[0];
+    expect(call.action.kind).toBe("draft_start");
+    if (call.action.kind !== "draft_start") throw new Error("kind");
+    expect(call.action.folder).toBe("C:\\plain-folder");
+    expect(call.action.lead).toBe(lead);
+    expect(call.team).toBe("");
+    expect(store.draftId()).toBe(TEAM);
+    // No create, no member session and no worktree request is sent.
+    expect(port.calls.some((item) => item.action.kind === "draft_create")).toBe(false);
+    expect(port.calls.some((item) => JSON.stringify(item).includes("worktree"))).toBe(false);
+  });
+
+  it("refuses an empty folder before any call", async () => {
+    const port = new Port();
+    const store = createNewTeam(port);
+    const result = await store.startPlanning({ folder: "  ", lead: member() });
+    expect(result.ok).toBe(false);
+    expect(port.calls).toHaveLength(0);
+  });
+
+  it("Create team sends only the draft create once the draft is read", async () => {
+    const port = new Port();
+    const store = createNewTeam(port);
+    store.applyView(draftView());
+    const result = await store.createTeam();
+    expect(result.ok).toBe(true);
+    expect(port.calls.map((call) => call.action.kind)).toEqual(["draft_create"]);
+  });
+
+  it("flushes the owner's dirty fields before Create team", async () => {
+    const port = new Port();
+    const store = createNewTeam(port);
+    store.applyView(draftView());
+    store.edit("goal", "My unsaved goal");
+    await store.createTeam();
+    expect(port.calls.map((call) => call.action.kind)).toEqual(["draft_update", "draft_create"]);
+    const update = port.calls[0];
+    if (update.action.kind !== "draft_update") throw new Error("kind");
+    expect(update.action.revision).toBe(3);
+    expect(update.action.set).toEqual({ goal: "My unsaved goal" });
+  });
+
+  it("shows member row errors live and allows a non-Git folder", () => {
+    expect(memberRowErrors(member({ role: "" }), COMPUTERS)).toEqual([{ code: "role" }]);
+    expect(memberRowErrors(member({ computer: "laptop" }), COMPUTERS)).toEqual([
+      { code: "computer-offline", alias: "laptop" },
+    ]);
+    expect(memberRowErrors(member({ computer: "studio" }), COMPUTERS)).toEqual([]);
+  });
+});
+
+describe("draft polling", () => {
+  it("keeps the owner's unsaved fields and takes every other lead edit in one poll", () => {
+    const store = createNewTeam(new Port());
+    store.applyView(draftView());
+    store.edit("goal", "My unsaved goal");
+    store.edit("settings", { branch_per_task: false, land: true });
+    const polled = draftView({
+      name: "Orbit by the lead",
+      goal: "The lead's goal",
+      settings: { branch_per_task: true, land: false },
+      members: [member({ role: "Lead" }), member({ id: "backend", role: "Backend", lead: false })],
+      draft: { revision: 4, unseen: ["name", "goal", "settings", "members"], owner_edited: ["goal"] },
+    });
+    store.applyView(polled);
+    expect(store.fields().name).toBe("Orbit by the lead");
+    expect(store.fields().goal).toBe("My unsaved goal");
+    expect(store.fields().settings).toEqual({ branch_per_task: false, land: true });
+    expect(store.fields().members).toHaveLength(2);
+    expect(store.unseen()).toEqual(["name", "goal", "settings", "members"]);
+  });
+
+  it("merges a polled view without touching dirty fields", () => {
+    const local: NewTeamFields = {
+      name: "Local",
+      goal: "Local goal",
+      addendum: "",
+      folder: "",
+      settings: { land: false },
+      members: [],
+      tasks: [],
+    };
+    const merged = mergeDraft(local, new Set(["name", "goal"]), draftView());
+    expect(merged.name).toBe("Local");
+    expect(merged.goal).toBe("Local goal");
+    expect(merged.members).toHaveLength(1);
+    expect(merged.folder).toBe("C:\\plain-folder");
+  });
+});
+
+describe("team settings", () => {
+  it("sends only the changed settings to hgs team settings", async () => {
+    const port = new Port();
+    const store = createNewTeam(port);
+    store.applyView(draftView({ settings: { branch_per_task: false, land: false } }));
+    await store.saveSettings({ branch_per_task: false, land: true, restart_crashed: true });
+    expect(port.calls).toHaveLength(1);
+    const call = port.calls[0];
+    expect(call.team).toBe(TEAM);
+    expect(call.action.kind).toBe("settings");
+    if (call.action.kind !== "settings") throw new Error("kind");
+    expect(call.action.settings).toEqual({ land: true, restart_crashed: true });
+  });
+
+  it("round-trips the saved settings back into the open form", () => {
+    const store = createNewTeam(new Port());
+    store.applyView(draftView({ settings: { land: false } }));
+    const after = draftView({ settings: { land: true }, draft: { revision: 4, unseen: ["settings"], owner_edited: [] } });
+    store.applyView(after);
+    expect(store.fields().settings).toEqual({ land: true });
+    expect(store.unseen()).toEqual(["settings"]);
+  });
+
+  it("computes changes without dropping an explicitly cleared value", () => {
+    expect(settingsChanges({ branch: "main", land: false }, { branch: "next", land: false })).toEqual({ branch: "next" });
+    expect(settingsChanges({ intake: "code" }, { intake: null as unknown as string })).toEqual({ intake: null });
+  });
+});

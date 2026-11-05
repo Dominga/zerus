@@ -154,6 +154,8 @@ pub struct CatalogState {
     processes: ProcessesState,
     tasks: TasksState,
     organization: crate::OrganizationState,
+    /// Task 8: the `team` topic's rows.
+    team_heads: crate::teams::TeamHeads,
     live: bool,
     failed: bool,
     failures: u32,
@@ -173,6 +175,9 @@ impl CatalogState {
             Body::Hello(hello) => {
                 self.hello = Some(hello.clone());
                 self.begin();
+                // Task 8: no team heads until this stream's snapshot; a
+                // stream without the topic keeps the Teams poller polling.
+                self.lose_team_heads(computer, &mut changes);
                 // Retain display facts across reconnects, but bind the physical
                 // identity to this hello. An unknown/legacy hello clears it,
                 // including when the new host caption is absent.
@@ -339,6 +344,29 @@ impl CatalogState {
             }
             Body::Error(error) if error.topic.as_deref() == Some(topic::ORGANIZATION) => {
                 changes.extend(self.organization.error(computer, error));
+            }
+            Body::Snapshot(snapshot) if snapshot.topic == topic::TEAM => {
+                if let Some(heads) = self.team_heads.snapshot(snapshot) {
+                    changes.push(Change::TeamHeads {
+                        computer: computer.clone(),
+                        heads: Some(heads),
+                    });
+                }
+            }
+            Body::Delta(delta) if delta.topic == topic::TEAM => {
+                if let Some(heads) = self.team_heads.delta(delta) {
+                    changes.push(Change::TeamHeads {
+                        computer: computer.clone(),
+                        heads: Some(heads),
+                    });
+                }
+            }
+            // A gap or a failed read: poll until the next complete snapshot.
+            Body::Gap(gap) if gap.topic == topic::TEAM => {
+                self.lose_team_heads(computer, &mut changes)
+            }
+            Body::Error(error) if !error.fatal && error.topic.as_deref() == Some(topic::TEAM) => {
+                self.lose_team_heads(computer, &mut changes);
             }
             Body::Snapshot(snapshot) if snapshot.topic == topic::TASKS => {
                 changes.extend(self.tasks.snapshot(computer, snapshot));
@@ -710,6 +738,8 @@ impl CatalogState {
                 attempt: self.failures,
             },
         }];
+        // Task 8: the Teams poller polls while the stream is down.
+        self.lose_team_heads(computer, &mut changes);
         let keys: Vec<String> = self.tasks.keys().cloned().collect();
         for key in keys {
             changes.extend(self.tasks.unavailable(
@@ -811,6 +841,26 @@ impl CatalogState {
         self.hello
             .as_ref()
             .is_some_and(|hello| hello.topics.iter().any(|name| name == topic::ORGANIZATION))
+    }
+
+    /// Task 8: forgets the team rows; heads that were known become None, so
+    /// the Teams poller polls until the next complete snapshot.
+    fn lose_team_heads(&mut self, computer: &ComputerId, changes: &mut Vec<Change>) {
+        let known = self.team_heads.heads().is_some();
+        self.team_heads.reset();
+        if known {
+            changes.push(Change::TeamHeads {
+                computer: computer.clone(),
+                heads: None,
+            });
+        }
+    }
+
+    /// Task 8: whether the latest `hello` offers the team topic.
+    pub fn team_offered(&self) -> bool {
+        self.hello
+            .as_ref()
+            .is_some_and(|hello| hello.topics.iter().any(|name| name == topic::TEAM))
     }
 
     /// The followed task lists; see [`crate::tasks`].
@@ -1128,6 +1178,74 @@ mod tests {
 
     fn frame(value: Value) -> Frame {
         serde_json::from_value(value).unwrap()
+    }
+
+    fn heads_of(changes: &[Change]) -> Vec<Option<Vec<(String, i64)>>> {
+        changes
+            .iter()
+            .filter_map(|change| match change {
+                Change::TeamHeads { heads, .. } => Some(
+                    heads
+                        .as_ref()
+                        .map(|heads| heads.iter().map(|(id, rev)| (id.clone(), *rev)).collect()),
+                ),
+                _ => None,
+            })
+            .collect()
+    }
+
+    #[test]
+    fn the_team_topic_gives_heads_and_a_gap_or_a_lost_stream_returns_to_polling() {
+        // Task 8: subscribe (a snapshot), a change (a delta), a gap, the end.
+        let computer = ComputerId::local();
+        let mut state = CatalogState::new();
+        let hello = |seq: u64, topics: &[&str]| {
+            frame(
+                json!({"v":1,"seq":seq,"t":"hello","host":"h","hgs_version":"1","stream":"s",
+            "heartbeat_ms":10000,"max_frame_bytes":1048576,"topics":topics,"limits":{"activity_subscriptions":16,"page_bytes":524288,
+            "queue_bytes":4194304,"activity_tail":100,"activity_read":200,"control_line_bytes":65536}}),
+            )
+        };
+        assert!(
+            heads_of(&state.apply(&computer, &hello(1, &["catalog", "team"]))).is_empty(),
+            "nothing known yet"
+        );
+        assert!(state.team_offered());
+        let snapshot = frame(
+            json!({"v":1,"seq":2,"t":"snapshot","topic":"team","page":0,"last":true,"cursor":1,"items":[
+            {"key":"team:a","row":{"id":"a","revision":3}},{"key":"teams","row":{"count":1,"truncated":false}}]}),
+        );
+        assert_eq!(
+            heads_of(&state.apply(&computer, &snapshot)),
+            [Some(vec![("a".into(), 3)])]
+        );
+        let delta = frame(
+            json!({"v":1,"seq":3,"t":"delta","topic":"team","upsert":[{"key":"team:a","row":{"id":"a","revision":4}}],"remove":[],"cursor":2}),
+        );
+        assert_eq!(
+            heads_of(&state.apply(&computer, &delta)),
+            [Some(vec![("a".into(), 4)])]
+        );
+        let gap = frame(json!({"v":1,"seq":4,"t":"gap","topic":"team","reason":"overflow"}));
+        assert_eq!(heads_of(&state.apply(&computer, &gap)), [None]);
+        assert_eq!(
+            heads_of(&state.apply(&computer, &snapshot)),
+            [Some(vec![("a".into(), 3)])]
+        );
+        let failed = frame(
+            json!({"v":1,"seq":5,"t":"error","code":"team_failed","message":"locked","topic":"team","fatal":false}),
+        );
+        assert_eq!(heads_of(&state.apply(&computer, &failed)), [None]);
+        state.apply(&computer, &snapshot);
+        assert_eq!(
+            heads_of(&state.end(&computer, Instant::now())),
+            [None],
+            "a lost stream polls"
+        );
+        // An older peer's hello has no team topic: no heads, the poller polls.
+        let mut older = CatalogState::new();
+        assert!(heads_of(&older.apply(&computer, &hello(1, &["catalog", "activity"]))).is_empty());
+        assert!(!older.team_offered());
     }
 
     fn apply_all(state: &mut CatalogState, computer: &ComputerId, frames: &[Frame]) -> Vec<Change> {

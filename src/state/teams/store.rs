@@ -6,13 +6,33 @@ use super::model::Team;
 use anyhow::{bail, ensure, Context};
 use rusqlite::{params, Connection, OpenFlags, OptionalExtension, TransactionBehavior};
 use sha2::{Digest, Sha256};
-use std::{fs, time::Duration};
+use std::{
+    fs,
+    time::{Duration, Instant},
+};
 
 /// Feed entries per page.
 pub(crate) const PAGE: i64 = 50;
 
 pub(crate) fn path() -> PathBuf {
     root().join("teams/teams.sqlite3")
+}
+
+/// Task 8: the heads of the teams at `path` (see [`Store::heads`]); no store
+/// yet is no team.
+pub(crate) fn heads_at(path: &Path, limit: usize) -> anyhow::Result<(Vec<Value>, bool)> {
+    if !path.exists() {
+        return Ok((Vec::new(), false));
+    }
+    Store::open_at(path, false)?.heads(limit)
+}
+
+/// Task 8: the files whose stat changes when a team changes: the store and
+/// its rollback journal.
+pub(crate) fn files(path: &Path) -> Vec<PathBuf> {
+    let mut journal = path.as_os_str().to_owned();
+    journal.push("-journal");
+    vec![path.to_path_buf(), PathBuf::from(journal)]
 }
 
 /// One feed entry to append with a mutation.
@@ -43,6 +63,64 @@ pub(crate) fn canonical_uuid(value: &str) -> bool {
 
 /// U20: a member's write the sandbox blocks says what to do, not a bare SQLite
 /// error. Everything else is passed through unchanged.
+/// Task 25: how long one SQLite call waits for the lock another process holds
+/// (a reader in rollback-journal mode holds it until its read ends).
+const BUSY_WAIT: Duration = Duration::from_secs(30);
+/// Task 25: how long a team write as a whole keeps waiting for the database:
+/// SQLite answers some contention at once, without its busy wait.
+const WRITE_WAIT: Duration = Duration::from_secs(60);
+
+/// Task 25: the database is held by another connection right now.
+fn busy(error: &rusqlite::Error) -> bool {
+    matches!(error, rusqlite::Error::SqliteFailure(failure, _)
+        if matches!(failure.code, rusqlite::ErrorCode::DatabaseBusy | rusqlite::ErrorCode::DatabaseLocked))
+}
+
+/// Task 25: a write that still found the database busy after `WRITE_WAIT`
+/// changed nothing; the same request id applies it once when run again.
+fn busy_error(error: rusqlite::Error) -> anyhow::Error {
+    if busy(&error) {
+        anyhow::anyhow!(
+            "The team database stayed busy for {} s (another Zerus process was writing or reading it); nothing was changed. \
+             Run the same command again with the same request_id: it is applied once.",
+            WRITE_WAIT.as_secs()
+        )
+    } else {
+        error.into()
+    }
+}
+
+/// Task 25: starts a write transaction, waiting while another connection
+/// (the dispatcher, a member's command, a status read) holds the database.
+/// Team 33fbafeb: `hgs team reassign` failed with "database is locked" after
+/// the 2 s busy wait while the dispatcher wrote.
+fn begin(db: &Connection) -> anyhow::Result<rusqlite::Transaction<'_>> {
+    let deadline = Instant::now() + WRITE_WAIT;
+    loop {
+        match rusqlite::Transaction::new_unchecked(db, TransactionBehavior::Immediate) {
+            Ok(transaction) => return Ok(transaction),
+            Err(error) if busy(&error) && Instant::now() < deadline => std::thread::sleep(Duration::from_millis(50)),
+            Err(error) => return Err(busy_error(error)),
+        }
+    }
+}
+
+/// Task 25: commits, waiting for readers to finish. A COMMIT that fails with
+/// SQLITE_BUSY leaves the transaction open, so it is tried again; any other
+/// failure (or the deadline) rolls the whole change back.
+fn commit(transaction: rusqlite::Transaction<'_>) -> anyhow::Result<()> {
+    let deadline = Instant::now() + WRITE_WAIT;
+    loop {
+        match transaction.execute_batch("COMMIT") {
+            // The connection is back in autocommit: dropping the
+            // transaction does nothing more.
+            Ok(()) => return Ok(()),
+            Err(error) if busy(&error) && Instant::now() < deadline => std::thread::sleep(Duration::from_millis(50)),
+            Err(error) => return Err(busy_error(error)),
+        }
+    }
+}
+
 pub(crate) fn write_error(error: impl std::fmt::Display) -> anyhow::Error {
     let text = error.to_string();
     if text.contains("readonly database") || text.contains("read-only database") {
@@ -104,7 +182,9 @@ impl Store {
             path,
             if write { OpenFlags::SQLITE_OPEN_READ_WRITE } else { OpenFlags::SQLITE_OPEN_READ_ONLY },
         )?;
-        db.busy_timeout(Duration::from_millis(2000))?;
+        // Task 25: a write waits for the lock (it used to give up after 2 s);
+        // a read waits less.
+        db.busy_timeout(if write { BUSY_WAIT } else { Duration::from_secs(10) })?;
         // Task #28: a sorted read (`team list`, `team current`) spilled to a
         // temporary file in %TEMP%, which a sandboxed member at Low integrity
         // may not create: "unable to open database file". Sorts stay in
@@ -312,9 +392,34 @@ impl Store {
         Ok((items, cut))
     }
 
+    /// Task 8: every team's head for the watch stream's `team` topic: its id,
+    /// name, lead, status, revision and the time of its last change, the most
+    /// recently changed first, at most `limit`, and whether more exist. One
+    /// indexed query: the payload is read only for the name and the lead.
+    pub(crate) fn heads(&self, limit: usize) -> anyhow::Result<(Vec<Value>, bool)> {
+        let mut statement = self.db.prepare(
+            "SELECT id,revision,status,updated,json_extract(payload,'$.name'),json_extract(payload,'$.lead')
+             FROM teams ORDER BY updated DESC, id LIMIT ?1",
+        )?;
+        let rows = statement.query_map(params![limit.saturating_add(1) as i64], |row| {
+            Ok(json!({
+                "id": row.get::<_, String>(0)?,
+                "revision": row.get::<_, i64>(1)?,
+                "status": row.get::<_, String>(2)?,
+                "updated": row.get::<_, f64>(3)?,
+                "name": row.get::<_, Option<String>>(4)?.unwrap_or_default(),
+                "lead": row.get::<_, Option<String>>(5)?.unwrap_or_default(),
+            }))
+        })?;
+        let mut heads = rows.collect::<std::result::Result<Vec<_>, _>>()?;
+        let more = heads.len() > limit;
+        heads.truncate(limit);
+        Ok((heads, more))
+    }
+
     /// Creates a team. A replay of the same request returns its first receipt.
     pub(crate) fn create(&mut self, request_id: &str, input: &Value, mut team: Team, events: Vec<Event>) -> anyhow::Result<Value> {
-        let transaction = self.db.transaction_with_behavior(TransactionBehavior::Immediate)?;
+        let transaction = begin(&self.db)?;
         if let Some(receipt) = replay(&transaction, request_id, input)? {
             return Ok(receipt);
         }
@@ -330,7 +435,7 @@ impl Store {
         append(&transaction, &team.id, at, &events)?;
         let receipt = json!({"status":"created","request_id":request_id,"team":team.id,"revision":team.revision});
         record(&transaction, request_id, input, &receipt, at)?;
-        transaction.commit()?;
+        commit(transaction)?;
         Ok(receipt)
     }
 
@@ -356,7 +461,7 @@ impl Store {
         expected_revision: Option<u64>,
         change: impl FnOnce(&mut Team, &mut Vec<Event>) -> anyhow::Result<Value>,
     ) -> anyhow::Result<Value> {
-        let transaction = self.db.transaction_with_behavior(TransactionBehavior::Immediate)?;
+        let transaction = begin(&self.db)?;
         if let Some((id, input)) = request {
             if let Some(receipt) = replay(&transaction, id, input)? {
                 return Ok(receipt);
@@ -387,7 +492,7 @@ impl Store {
             }
             record(&transaction, id, input, &receipt, at)?;
         }
-        transaction.commit()?;
+        commit(transaction)?;
         Ok(receipt)
     }
 }
@@ -488,6 +593,112 @@ mod tests {
         Team { id: id.into(), name: "Checkout".into(), lead: "lead".into(), ..Default::default() }
     }
     const REQUEST: &str = "11111111-1111-4111-8111-111111111111";
+
+    /// Task 25: another connection holds the database for `hold`: a writer
+    /// (`BEGIN IMMEDIATE`, as the dispatcher's change) or a reader (a read
+    /// transaction, as a status). Returns once it holds it.
+    fn hold(path: &Path, write: bool, hold: Duration) -> std::thread::JoinHandle<()> {
+        let path = path.to_path_buf();
+        let (held, ready) = std::sync::mpsc::channel();
+        let holder = std::thread::spawn(move || {
+            let db = Connection::open(&path).unwrap();
+            if write {
+                db.execute_batch("BEGIN IMMEDIATE; UPDATE teams SET updated=updated;").unwrap();
+            } else {
+                db.execute_batch("BEGIN").unwrap();
+                let _: i64 = db.query_row("SELECT COUNT(*) FROM teams", [], |row| row.get(0)).unwrap();
+            }
+            held.send(()).unwrap();
+            std::thread::sleep(hold);
+            db.execute_batch("COMMIT").unwrap();
+        });
+        ready.recv().unwrap();
+        holder
+    }
+
+    /// The lead's `hgs team reassign` as the store applies it.
+    fn reassign(store: &mut Store, request: &str) -> anyhow::Result<Value> {
+        let input = json!({"task":4,"member":"ui2"});
+        store.mutate(Some((request, &input)), "t1", None, |team, events| {
+            team.name.push('+');
+            events.push(Event::new("reassigned", json!({"task":4})));
+            Ok(json!({"status":"reassigned","task":4}))
+        })
+    }
+
+    #[test]
+    fn a_team_write_waits_for_the_dispatchers_write_instead_of_failing() {
+        // Task 25, team 33fbafeb: `hgs team reassign` failed with "hgs:
+        // database is locked" while the dispatcher wrote, after a 2 s wait.
+        let (dir, mut store) = store();
+        let path = dir.path().join("teams/teams.sqlite3");
+        store.create(REQUEST, &json!({}), team("t1"), vec![]).unwrap();
+        let holder = hold(&path, true, Duration::from_millis(3500));
+        let started = Instant::now();
+        let mut lead = Store::open_at(&path, true).unwrap();
+        let receipt = reassign(&mut lead, "22222222-2222-4222-8222-222222222222");
+        holder.join().unwrap();
+        let receipt = receipt.expect("the write waits for the other writer");
+        assert!(started.elapsed() >= Duration::from_secs(3), "it waited");
+        assert_eq!((receipt["status"].as_str(), receipt["revision"].as_u64()), (Some("reassigned"), Some(2)));
+        // A reader holding the database at the commit is waited for too.
+        let holder = hold(&path, false, Duration::from_millis(3500));
+        let receipt = reassign(&mut lead, "33333333-3333-4333-8333-333333333333");
+        holder.join().unwrap();
+        assert_eq!(receipt.unwrap()["revision"].as_u64(), Some(3));
+        assert_eq!(store.load("t1").unwrap().unwrap().name, "Checkout++");
+    }
+
+    #[test]
+    fn concurrent_writes_wait_and_one_request_applies_once() {
+        // Task 25: the dispatcher's write and the lead's, and the lead's
+        // command run twice by hand, all while the database is held: every
+        // write succeeds, the repeated request takes effect once.
+        let (dir, mut store) = store();
+        let path = dir.path().join("teams/teams.sqlite3");
+        store.create(REQUEST, &json!({}), team("t1"), vec![]).unwrap();
+        let holder = hold(&path, true, Duration::from_millis(2500));
+        let writers: Vec<_> = (0..4)
+            .map(|n| {
+                let path = path.clone();
+                std::thread::spawn(move || {
+                    let mut store = Store::open_at(&path, true).unwrap();
+                    if n == 0 {
+                        // The dispatcher's own change: no request id.
+                        store.mutate(None, "t1", None, |team, _| {
+                            team.lead.push('!');
+                            Ok(Value::Null)
+                        })
+                    } else {
+                        reassign(&mut store, "44444444-4444-4444-8444-444444444444")
+                    }
+                })
+            })
+            .collect();
+        holder.join().unwrap();
+        let results: Vec<Value> = writers.into_iter().map(|writer| writer.join().unwrap().unwrap()).collect();
+        let receipts: Vec<&Value> = results[1..].iter().collect();
+        assert!(receipts.iter().all(|receipt| *receipt == receipts[0]), "{receipts:?}");
+        let saved = store.load("t1").unwrap().unwrap();
+        assert_eq!((saved.name.as_str(), saved.lead.as_str(), saved.revision), ("Checkout+", "lead!", 3));
+        let kinds: Vec<String> = store.events("t1", None, 50).unwrap()["items"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .map(|event| event["kind"].as_str().unwrap_or_default().to_owned())
+            .collect();
+        assert_eq!(kinds.iter().filter(|kind| *kind == "reassigned").count(), 1, "{kinds:?}");
+    }
+
+    #[test]
+    fn a_database_still_busy_says_nothing_changed_and_how_to_retry() {
+        let error = busy_error(rusqlite::Error::SqliteFailure(
+            rusqlite::ffi::Error::new(rusqlite::ffi::SQLITE_BUSY),
+            Some("database is locked".into()),
+        ))
+        .to_string();
+        assert!(error.contains("nothing was changed") && error.contains("same request_id"), "{error}");
+    }
 
     #[test]
     fn create_is_idempotent_and_a_reused_id_is_refused() {

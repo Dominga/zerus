@@ -8,6 +8,8 @@ import { nativeBinding, nativeEntry, nativeRoute } from "./native-entry";
 import { nativeUi } from "../../store/native-ui";
 import { pageHidden } from "../../store/visibility";
 import { ProcessesTab } from "./Processes";
+import { TeamTab } from "../teams/TeamTab";
+import { selectedTeam } from "../../store/teams";
 import { drops } from "../../store/drops";
 import { processes, processesTab } from "../../store/processes";
 import { flag } from "../../store/settings";
@@ -210,6 +212,8 @@ const tabs = () => {
     { id: "native" as const, label: tr("Native UI"), show: selected()?.agent === "deepseek" && !subagentOpen() },
     processesTab(flag("processes/enabled"), count),
     { id: "taskview" as const, label: tr("Task View"), show: detailTab() === "taskview" && !!selectedTask() },
+    // Task 9: the selected session's team (its lead's or a member's session).
+    { id: "team" as const, label: tr("Team"), show: !!selectedTeam() && !subagentOpen() },
   ];
   const s = selected();
   return s ? detailTabs(s.key, all) : all;
@@ -251,7 +255,7 @@ export function SessionDetail() {
           <div class="work-main">
             <div class="detail-tabs tabs" role="tablist">
               <For each={tabs().filter((t) => t.show)}>{(t) => (
-                <button class="tab" role="tab" classList={{ on: detailTab() === t.id }} aria-selected={detailTab() === t.id} onClick={() => { if (t.id === "terminal") terminal.opened(); setDetailTab(t.id); }}>{t.label}</button>
+                <button class="tab" role="tab" classList={{ on: detailTab() === t.id }} aria-selected={detailTab() === t.id} onClick={() => { if (t.id === "terminal") terminal.opened(); setDetailTab(t.id); }}>{t.label}<Show when={t.id === "team" && (selectedTeam()?.attention ?? 0) > 0}><span class="tab-count" data-tip={tr("Needs your answer")}>?{selectedTeam()!.attention}</span></Show></button>
               )}</For>
               <span class="grow" />
               <Show when={!inspectorOpen()}><button class="icon-btn small" data-cmd="show-side-panel" aria-label={tr("Show side panel")} data-tip={inspectorHint(tr("Show tasks, plan, agents, details and worktrees"))} data-tip-pos="left" onClick={() => setInspectorOpen(true)}><Icon name="panel-right" size={15} /></button></Show>
@@ -277,6 +281,7 @@ export function SessionDetail() {
                 <Match when={detailTab() === "terminal"}><TerminalTab /></Match>
                 <Match when={detailTab() === "native"}><NativeUiTab /></Match>
                 <Match when={detailTab() === "processes"}><ProcessesTab /></Match>
+                <Match when={detailTab() === "team" && selectedTeam()}>{(team) => <TeamTab computer={selected()!.computer} team={team().id} />}</Match>
               </Switch>
             </div>
           </div>

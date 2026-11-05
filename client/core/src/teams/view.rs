@@ -255,6 +255,10 @@ pub struct MemberView {
     pub queue: Vec<u64>,
     pub minutes_without_progress: u64,
     pub host_shared: bool,
+    /// Task 11: the member's pending question or permission request as hgs
+    /// sends it (`members[].question`, at most [`DETAIL_BYTES`]): its id,
+    /// hash, tool, command, reason and the card's own allow and deny ids.
+    pub permission: Value,
 }
 
 /// One dependency: the task it waits for, hard or soft.
@@ -277,6 +281,10 @@ pub struct TaskView {
     pub attempts: u64,
     /// The newest attempt's state (`delivered`, `reported`...), empty without one.
     pub attempt_state: String,
+    /// Task 11: the newest attempt's id, which Use last reply names.
+    pub attempt_id: String,
+    /// Task 11: the newest attempt's member got no report in (`no_report`).
+    pub no_report: bool,
     pub decided_by: String,
     pub pinned: bool,
     pub output: Vec<String>,
@@ -316,6 +324,10 @@ pub struct ProposalView {
     /// The exact change (at most [`DETAIL_BYTES`]), for the kinds that list it.
     pub change: Value,
     pub member: Value,
+    /// Task 11: a next goal's text and a plan mode switch's mode, which the
+    /// proposal carries beside its change.
+    pub goal: String,
+    pub mode: String,
 }
 
 /// One preflight finding.
@@ -396,6 +408,9 @@ pub struct TeamView {
     pub proposals: Vec<ProposalView>,
     /// The attention items as hgs words them (bounded).
     pub attention: Vec<Value>,
+    /// Task 11: additions to a running phase that wait for the owner's
+    /// confirmation (`pending_additions`, each bounded): id, phase, tasks.
+    pub additions: Vec<Value>,
     pub validation: Validation,
     pub health: HealthView,
     pub ready: Vec<u64>,
@@ -442,6 +457,11 @@ fn member(value: &Value, lead: &str) -> MemberView {
             .collect(),
         minutes_without_progress: count(value, "minutes_without_progress"),
         host_shared: flag(value, "host_shared"),
+        permission: bounded(
+            value
+                .get("question")
+                .filter(|question| question.is_object()),
+        ),
     }
 }
 
@@ -472,6 +492,13 @@ fn task(value: &Value) -> TaskView {
             .last()
             .map(|attempt| name(attempt, "state"))
             .unwrap_or_default(),
+        attempt_id: attempts
+            .last()
+            .map(|attempt| name(attempt, "id"))
+            .unwrap_or_default(),
+        no_report: attempts
+            .last()
+            .is_some_and(|attempt| flag(attempt, "no_report")),
         decided_by: name(value, "decided_by"),
         pinned: flag(value, "pinned"),
         output: lines(value, "output", LINE_CHARS),
@@ -516,6 +543,8 @@ fn proposal(value: &Value) -> ProposalView {
         lines: lines(change, "lines", LINE_CHARS),
         change: bounded(value.get("change")),
         member: bounded(value.get("member")),
+        goal: text(value, "goal", TEXT_CHARS),
+        mode: name(value, "mode"),
     }
 }
 
@@ -566,6 +595,11 @@ pub fn team(value: &Value) -> TeamView {
             .map(|found| proposal(found))
             .collect(),
         attention: array(value, "attention")
+            .iter()
+            .take(ITEMS_KEPT)
+            .map(|item| bounded(Some(item)))
+            .collect(),
+        additions: array(value, "pending_additions")
             .iter()
             .take(ITEMS_KEPT)
             .map(|item| bounded(Some(item)))
@@ -864,6 +898,10 @@ pub struct WaitingItem {
     pub action: String,
     pub since: f64,
     pub proposal: Value,
+    /// Task 11: the whole item as hgs lists it (at most [`DETAIL_BYTES`]):
+    /// its phase, task, member, member id or tool offer, which an answer in
+    /// place names.
+    pub detail: Value,
 }
 
 /// The first page of `team waiting`, with how many wait in all.
@@ -889,6 +927,7 @@ pub fn waiting(value: &Value) -> WaitingView {
                 action: name(item, "action"),
                 since: number(item, "since"),
                 proposal: bounded(item.get("proposal")),
+                detail: bounded(Some(item)),
             })
             .collect(),
         total: count(value, "total"),
@@ -933,5 +972,189 @@ pub fn profile(team: &str, value: &Value) -> ProfileView {
     ProfileView {
         team: team.to_owned(),
         profile: value.clone(),
+    }
+}
+
+/// One catalog role as the editor lists it.
+#[derive(Clone, Debug, Default, PartialEq, Serialize)]
+pub struct CatalogRoleView {
+    pub id: String,
+    pub name: String,
+    pub agent: String,
+    pub model: String,
+    pub prompt: String,
+}
+
+#[derive(Clone, Debug, Default, PartialEq, Serialize)]
+pub struct CatalogSeatView {
+    pub role: String,
+    pub count: u64,
+    pub optional: bool,
+}
+
+#[derive(Clone, Debug, Default, PartialEq, Serialize)]
+pub struct CatalogTemplateView {
+    pub id: String,
+    pub name: String,
+    pub description: String,
+    pub planning: String,
+    pub approval: String,
+    pub max_members: u64,
+    pub pipeline: String,
+    pub roster: Vec<CatalogSeatView>,
+}
+
+#[derive(Clone, Debug, Default, PartialEq, Serialize)]
+pub struct CatalogRuleView {
+    pub id: String,
+    pub when: String,
+    pub template: String,
+    pub r#use: String,
+    pub approval: String,
+}
+
+#[derive(Clone, Debug, Default, PartialEq, Serialize)]
+pub struct CatalogStageView {
+    pub kind: String,
+    pub role: String,
+    pub member: String,
+    pub command: String,
+}
+
+#[derive(Clone, Debug, Default, PartialEq, Serialize)]
+pub struct CatalogPipelineView {
+    pub id: String,
+    pub name: String,
+    pub stages: Vec<CatalogStageView>,
+    pub max_rounds: u64,
+    pub folder: String,
+    pub accept: String,
+}
+
+#[derive(Clone, Debug, Default, PartialEq, Serialize)]
+pub struct CatalogProposalView {
+    pub id: String,
+    pub kind: String,
+    pub action: String,
+    pub target: String,
+    pub title: String,
+    pub reason: String,
+    pub state: String,
+    pub value: Value,
+    pub text: String,
+    pub at: f64,
+}
+
+/// `team catalog get`: the saved catalog and the designer's draft. Roles,
+/// templates, rules, pipelines and proposals are bounded; texts and changes
+/// are capped, and the webview never parses an hgs reply.
+#[derive(Clone, Debug, Default, PartialEq, Serialize)]
+pub struct CatalogView {
+    pub version: u64,
+    pub builtin: bool,
+    pub roles: Vec<CatalogRoleView>,
+    pub templates: Vec<CatalogTemplateView>,
+    pub routing: Vec<CatalogRuleView>,
+    pub planning_rules: String,
+    pub pipelines: Vec<CatalogPipelineView>,
+    pub draft_base: u64,
+    pub proposals: Vec<CatalogProposalView>,
+}
+
+pub fn catalog(value: &Value) -> CatalogView {
+    let catalog = value.get("catalog").unwrap_or(&Value::Null);
+    let draft = value.get("draft").unwrap_or(&Value::Null);
+    CatalogView {
+        version: catalog.get("version").and_then(Value::as_u64).unwrap_or(0),
+        builtin: value.get("builtin").and_then(Value::as_bool).unwrap_or(false),
+        roles: array(catalog, "roles")
+            .iter()
+            .take(PROPOSALS_KEPT)
+            .map(|role| CatalogRoleView {
+                id: name(role, "id"),
+                name: name(role, "name"),
+                agent: name(role, "agent"),
+                model: name(role, "model"),
+                prompt: text(role, "prompt", TEXT_CHARS),
+            })
+            .collect(),
+        templates: array(catalog, "templates")
+            .iter()
+            .take(PROPOSALS_KEPT)
+            .map(|template| CatalogTemplateView {
+                id: name(template, "id"),
+                name: name(template, "name"),
+                description: text(template, "description", TEXT_CHARS),
+                planning: name(template, "planning"),
+                approval: name(template, "approval"),
+                max_members: template
+                    .get("max_members")
+                    .and_then(Value::as_u64)
+                    .unwrap_or(6),
+                pipeline: name(template, "pipeline"),
+                roster: array(template, "roster")
+                    .iter()
+                    .take(MEMBERS_KEPT)
+                    .map(|seat| CatalogSeatView {
+                        role: name(seat, "role"),
+                        count: seat.get("count").and_then(Value::as_u64).unwrap_or(1),
+                        optional: seat.get("optional").and_then(Value::as_bool).unwrap_or(false),
+                    })
+                    .collect(),
+            })
+            .collect(),
+        routing: array(catalog, "routing")
+            .iter()
+            .take(PROPOSALS_KEPT)
+            .map(|rule| CatalogRuleView {
+                id: name(rule, "id"),
+                when: text(rule, "when", TEXT_CHARS),
+                template: name(rule, "template"),
+                r#use: name(rule, "use"),
+                approval: name(rule, "approval"),
+            })
+            .collect(),
+        planning_rules: text(catalog, "planning_rules", TEXT_CHARS),
+        pipelines: array(catalog, "pipelines")
+            .iter()
+            .take(PROPOSALS_KEPT)
+            .map(|pipeline| CatalogPipelineView {
+                id: name(pipeline, "id"),
+                name: name(pipeline, "name"),
+                stages: array(pipeline, "stages")
+                    .iter()
+                    .take(ITEMS_KEPT)
+                    .map(|stage| CatalogStageView {
+                        kind: name(stage, "kind"),
+                        role: name(stage, "role"),
+                        member: name(stage, "member"),
+                        command: text(stage.get("command").unwrap_or(&Value::Null), "command", TEXT_CHARS),
+                    })
+                    .collect(),
+                max_rounds: pipeline.get("max_rounds").and_then(Value::as_u64).unwrap_or(0),
+                folder: name(pipeline, "folder"),
+                accept: name(pipeline, "accept"),
+            })
+            .collect(),
+        draft_base: draft.get("base").and_then(Value::as_u64).unwrap_or(0),
+        proposals: array(draft, "proposals")
+            .iter()
+            .take(PROPOSALS_KEPT)
+            .map(|proposal| {
+                let change = proposal.get("value").cloned().unwrap_or(Value::Null);
+                CatalogProposalView {
+                    id: name(proposal, "id"),
+                    kind: name(proposal, "kind"),
+                    action: name(proposal, "action"),
+                    target: name(proposal, "target"),
+                    title: text(proposal, "title", TEXT_CHARS),
+                    reason: text(proposal, "reason", TEXT_CHARS),
+                    state: text(proposal, "state", NAME_CHARS),
+                    text: change.as_str().unwrap_or_default().to_owned(),
+                    value: bounded(Some(&change)),
+                    at: number(proposal, "at"),
+                }
+            })
+            .collect(),
     }
 }

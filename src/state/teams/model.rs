@@ -193,6 +193,11 @@ pub(crate) struct Settings {
     /// U56: the lead may interrupt or relaunch a stuck member; the owner sets it.
     #[serde(default, skip_serializing_if = "std::ops::Not::not")]
     pub lead_restarts_stuck: bool,
+    /// Task 24: a member still working on an attempt that a reassign, a
+    /// take-over or a cancel revoked has its turn interrupted once, before its
+    /// stop notice; off by default, only the owner sets it.
+    #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+    pub interrupt_revoked: bool,
     /// U63 (owner, 2026-10-31): the lead removes its own phase pause by
     /// itself; off by default, when it needs the owner's word.
     #[serde(default, skip_serializing_if = "std::ops::Not::not")]
@@ -315,6 +320,7 @@ impl Default for Settings {
             restart_crashed: true,
             stuck_minutes: 0,
             lead_restarts_stuck: false,
+            interrupt_revoked: false,
             lead_removes_own_pause: false,
             phase_acceptance: PhaseAcceptance::Lead,
             build_broker: false,
@@ -450,6 +456,12 @@ pub(crate) struct Member {
     /// until you relaunch it.
     #[serde(default)]
     pub error: String,
+    /// Task 22: starts that failed only because the DeepSeek host was still
+    /// starting. The dispatcher starts the member again by itself, at most
+    /// `HOST_WAITS` times, before it records the error; a start or a
+    /// relaunch clears it.
+    #[serde(default, skip_serializing_if = "is_zero_u32")]
+    pub host_waits: u32,
     /// The role's instructions from the catalog, given with every task.
     #[serde(default)]
     pub prompt: String,
@@ -1404,6 +1416,16 @@ pub(crate) struct Attempt {
     /// The member's turn ended long enough ago without a report.
     #[serde(default)]
     pub no_report: bool,
+    /// Task 36 (audit P8): the Zerus build the member's session was seen
+    /// Building on for this attempt (a claimed `hgs team run`, or `hgs run`):
+    /// its request id, or "build" when the listing names none. While it is
+    /// set and the build has settled, the finished turn is not captured: the
+    /// member is woken once to read the result and go on.
+    #[serde(default, skip_serializing_if = "String::is_empty")]
+    pub awaited_run: String,
+    /// What that build runs, for the wake message.
+    #[serde(default, skip_serializing_if = "String::is_empty")]
+    pub awaited_label: String,
     /// The newest session event the dispatcher read for this attempt when the
     /// listing's `last_event_at` did not advance (a DeepSeek session's native
     /// tool events, #628). It keeps the silent check from reading the session
@@ -2239,7 +2261,9 @@ pub(crate) struct Team {
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub pending_additions: Vec<PendingAddition>,
     /// #511 N3: members to tell that their worked-ahead attempt was revoked
-    /// with its phase, newest last, at most 20.
+    /// with its phase, newest last, at most 20. Task 24: also a member whose
+    /// attempt in progress was revoked by a reassign, a take-over or a cancel
+    /// (phase 0).
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub stops: Vec<StopNotice>,
     /// U51: the owner's intake keys; the key itself is never stored, only its
@@ -2275,6 +2299,13 @@ pub(crate) struct StopNotice {
     /// Refused sends so far; after ten it is left unconfirmed for the lead.
     #[serde(default, skip_serializing_if = "is_zero_u32")]
     pub refused: u32,
+    /// Task 24: the owner's interrupt_revoked held when the attempt was
+    /// revoked: a busy session is interrupted once before the notice.
+    #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+    pub interrupt: bool,
+    /// Task 24: that interrupt was asked for; it is never repeated.
+    #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+    pub interrupted: bool,
 }
 
 impl Team {

@@ -111,9 +111,9 @@ mod task_settings;
 #[cfg(feature = "live")]
 mod task_start;
 #[cfg(feature = "live")]
-mod terminal;
-#[cfg(feature = "live")]
 mod teams;
+#[cfg(feature = "live")]
+mod terminal;
 #[cfg(feature = "live")]
 mod termination_cleanup;
 #[cfg(feature = "live")]
@@ -619,6 +619,11 @@ fn launch(context: tauri::Context<tauri::Wry>, startup: Startup) {
                 app.manage(speech_settings::SpeechPage::default());
                 // Task #6: the Teams views' reads; a replay runs no hgs.
                 app.manage(teams::Teams::new(replay));
+                // Task 8: a stream's team heads reach the computer's poller.
+                let heads_app = app.handle().clone();
+                app.state::<commands::AppState>().pump().on_team_heads(std::sync::Arc::new(move |computer, heads| {
+                    heads_app.state::<teams::Teams>().heads(computer, heads);
+                }));
                 app.manage(termination_cleanup::TerminationCleanup::default());
                 app.manage(worktree_cleanup::WorktreeCleanup::default());
                 app.manage(recovery::start(app.handle()));
@@ -984,8 +989,16 @@ fn launch(context: tauri::Context<tauri::Wry>, startup: Startup) {
                 #[cfg(windows)]
                 {
                     let conf = desk::tray_conf();
-                    platform::windows::tray::install(app.handle(), conf.as_deref())?;
                     let identity = app.state::<identity::Identity>().inner().clone();
+                    // A dev build still works without a notification area (a
+                    // remote session or an Explorer that is not up yet); the
+                    // installed switch keeps its tray as the only way back.
+                    if let Err(error) = platform::windows::tray::install(app.handle(), conf.as_deref()) {
+                        if identity.is_switch() {
+                            return Err(error.into());
+                        }
+                        eprintln!("zerus-client: no notification-area icon: {error}");
+                    }
                     let posts = !desktop_service::mode() && (!identity.is_switch() || app.try_state::<desktop_ownership::NativeReady>().is_some()) && identity.notifications(identity::flag("ZERUS_CLIENT_NOTIFICATIONS"), replay);
                     let switch = identity.is_switch();
                     let attention = posts.then(|| {
@@ -1433,6 +1446,7 @@ fn handler() -> impl Fn(tauri::ipc::Invoke) -> bool + Send + Sync + 'static {
         teams::teams_spans,
         teams::teams_profile,
         teams::team_action,
+        teams::team_read,
         task_details::task_details,
         task_details::task_assign,
         task_details::task_board_action,
@@ -1746,6 +1760,20 @@ pub fn create_main_window(app: &AppHandle) -> tauri::Result<WebviewWindow> {
         true => "index.html".to_owned(),
         false => format!("index.html?{}", query.join("&")),
     };
+    // WebView2's default user data folder is LocalAppData, which an agent
+    // process can be denied; the app's own data directory is the one it may
+    // write (Decision 5). Keep it beside the client's other data.
+    #[cfg(windows)]
+    let webview_data = {
+        let path = crate::data_dir(app).join("webview2");
+        if let Err(error) = std::fs::create_dir_all(&path) {
+            return Err(tauri::Error::Io(std::io::Error::new(
+                error.kind(),
+                format!("WebView2 data directory {}: {error}", path.display()),
+            )));
+        }
+        path
+    };
     #[allow(unused_mut)]
     let mut builder = WebviewWindowBuilder::new(app, MAIN_WINDOW, WebviewUrl::App(page.into()))
         .on_navigation(app_navigation_allowed)
@@ -1764,7 +1792,16 @@ pub fn create_main_window(app: &AppHandle) -> tauri::Result<WebviewWindow> {
                 builder.with_webview_configuration(platform::macos::webview_configuration(mtm));
         }
     }
-    let window = builder.build()?;
+    #[cfg(windows)]
+    {
+        builder = builder.data_directory(webview_data);
+    }
+    let window = builder.build().map_err(|error| {
+        tauri::Error::Io(std::io::Error::new(
+            std::io::ErrorKind::Other,
+            format!("WebView2 window creation: {error}"),
+        ))
+    })?;
     #[cfg(feature = "live")]
     if let Some(store) = app.try_state::<settings::Store>() {
         window_geometry::attach(&window, store.0.clone());

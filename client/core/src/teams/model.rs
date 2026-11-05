@@ -11,8 +11,8 @@
 //! `feed:`, `inbox:`, `spans:`, `profile:` followed by the team id.
 use super::read::{TeamRead, FEED_PAGE};
 use super::view::{
-    self, FeedEvent, FeedView, InboxView, NewTeamView, PlanGraph, ProfileView, SpansView, TeamList,
-    TeamView, WaitingView,
+    self, CatalogView, FeedEvent, FeedView, InboxView, NewTeamView, PlanGraph, ProfileView,
+    SpansView, TeamList, TeamView, WaitingView,
 };
 use crate::reads::ReadError;
 use serde::Serialize;
@@ -25,6 +25,10 @@ use std::time::{Duration, Instant};
 
 /// How often a followed read runs, as Qt's `TeamController` polls.
 pub const POLL: Duration = Duration::from_secs(3);
+/// Task 8: with the stream's team heads, a followed read is due when its
+/// team's revision moved, and otherwise only this often (what a revision
+/// does not show, such as a member's live session).
+pub const STREAM_POLL: Duration = Duration::from_secs(60);
 /// Feed events one watched team keeps; Load older stops there.
 pub const FEED_KEPT: usize = 500;
 /// On-demand reads that may wait at once (older pages, spans, profile).
@@ -41,6 +45,8 @@ pub struct TeamsFollow {
     pub waiting: bool,
     /// The team whose tab, plan or New team form is open.
     pub team: Option<String>,
+    /// The team catalog and the designer's draft.
+    pub catalog: bool,
 }
 
 /// One change of a Teams view, keyed as the module says.
@@ -55,6 +61,7 @@ pub enum TeamsUpdate {
     Waiting(Arc<WaitingView>),
     Spans(Arc<SpansView>),
     Profile(Arc<ProfileView>),
+    Catalog(Arc<CatalogView>),
     /// The read failed; the view keeps what it showed.
     Failed {
         code: String,
@@ -77,6 +84,7 @@ impl TeamsUpdate {
             Self::Waiting(_) => "waiting",
             Self::Spans(_) => "spans",
             Self::Profile(_) => "profile",
+            Self::Catalog(_) => "catalog",
             Self::Failed { .. } => "failed",
             Self::Ended => "ended",
         }
@@ -97,6 +105,7 @@ impl TeamsUpdate {
             Self::Waiting(view) => value(&**view),
             Self::Spans(view) => value(&**view),
             Self::Profile(view) => value(&**view),
+            Self::Catalog(view) => value(&**view),
             Self::Failed { code, message } => serde_json::json!({"code": code, "message": message}),
             Self::Ended => Value::Null,
         }
@@ -123,6 +132,7 @@ enum Slot {
     Status,
     Inbox,
     Feed,
+    Catalog,
 }
 
 #[derive(Debug, Default)]
@@ -142,6 +152,11 @@ pub struct TeamsModel {
     feed: Feed,
     /// The digest of the last update sent per key.
     shown: BTreeMap<String, u64>,
+    /// Task 8: the team revisions the computer's watch stream gives; None
+    /// while it gives none (no `team` topic, a gap, a lost stream): poll.
+    heads: Option<std::sync::Arc<super::heads::Heads>>,
+    /// Slots whose head moved while their read ran: due again at its reply.
+    again: std::collections::BTreeSet<Slot>,
 }
 
 fn digest(update: &TeamsUpdate) -> u64 {
@@ -188,6 +203,7 @@ impl TeamsModel {
             (Slot::Status, self.follow.team.is_some()),
             (Slot::Inbox, self.follow.team.is_some()),
             (Slot::Feed, self.follow.team.is_some()),
+            (Slot::Catalog, self.follow.catalog),
         ];
         for (slot, on) in wanted {
             if on {
@@ -201,6 +217,9 @@ impl TeamsModel {
         }
         if !self.follow.waiting {
             self.end("waiting", &mut out);
+        }
+        if !self.follow.catalog {
+            self.end("catalog", &mut out);
         }
         out
     }
@@ -286,6 +305,7 @@ impl TeamsModel {
             (Slot::Status, Some(team)) => TeamRead::Status { team },
             (Slot::Inbox, Some(team)) => TeamRead::Inbox { team },
             (Slot::Feed, Some(team)) => TeamRead::Events { team, before: None },
+            (Slot::Catalog, _) => TeamRead::Catalog,
             // A team slot without a watched team: it cannot be due again.
             _ => {
                 self.due.remove(&slot);
@@ -294,6 +314,53 @@ impl TeamsModel {
         };
         self.due.insert(slot, now + IN_FLIGHT);
         Some(read)
+    }
+
+    /// Task 8: the team heads of the computer's stream, or None. A moved
+    /// revision makes the list and Waiting due at once, and the watched
+    /// team's reads when its own revision moved (or it appeared or left).
+    /// Losing the heads makes every followed read due within [`POLL`] again.
+    pub fn heads(&mut self, heads: Option<std::sync::Arc<super::heads::Heads>>, now: Instant) {
+        let previous = std::mem::replace(&mut self.heads, heads);
+        let mut moved: Vec<Slot> = Vec::new();
+        match (&previous, &self.heads) {
+            (Some(old), Some(new)) => {
+                if old != new {
+                    moved.extend([Slot::List, Slot::Waiting]);
+                }
+                if let Some(team) = self.watched() {
+                    if old.get(team) != new.get(team) {
+                        moved.extend([Slot::Status, Slot::Inbox, Slot::Feed]);
+                    }
+                }
+            }
+            // Still none (a stream's hello before its snapshot): as before.
+            (None, None) => {}
+            // Heads came or went: everything followed is read now, once.
+            _ => moved.extend([
+                Slot::List,
+                Slot::Waiting,
+                Slot::Status,
+                Slot::Inbox,
+                Slot::Feed,
+            ]),
+        }
+        for slot in moved {
+            if let Some(due) = self.due.get_mut(&slot) {
+                // A read in flight holds its slot far beyond any interval:
+                // it is read again at its reply.
+                if *due > now + STREAM_POLL {
+                    self.again.insert(slot);
+                } else {
+                    *due = (*due).min(now);
+                }
+            }
+        }
+    }
+
+    /// Whether the stream's team heads drive the reads (task 8).
+    pub fn streamed(&self) -> bool {
+        self.heads.is_some()
     }
 
     /// How long until a read is due, at most [`POLL`].
@@ -316,6 +383,7 @@ impl TeamsModel {
             TeamRead::Status { .. } => Some(Slot::Status),
             TeamRead::Inbox { .. } => Some(Slot::Inbox),
             TeamRead::Events { before: None, .. } => Some(Slot::Feed),
+            TeamRead::Catalog => Some(Slot::Catalog),
             _ => None,
         }
     }
@@ -329,6 +397,7 @@ impl TeamsModel {
             TeamRead::Events { team, .. } => team_key("feed", team),
             TeamRead::Spans { team, .. } => team_key("spans", team),
             TeamRead::Profile { team } => team_key("profile", team),
+            TeamRead::Catalog => "catalog".into(),
         }
     }
 
@@ -351,8 +420,15 @@ impl TeamsModel {
     ) -> Vec<(String, TeamsUpdate)> {
         let mut out = Vec::new();
         if let Some(slot) = Self::slot(read) {
+            // With the stream's heads a slot waits for its revision to move.
+            let every = if self.heads.is_some() {
+                STREAM_POLL
+            } else {
+                POLL
+            };
+            let again = self.again.remove(&slot);
             if let Some(due) = self.due.get_mut(&slot) {
-                *due = now + POLL;
+                *due = if again { now } else { now + every };
             }
         }
         if read.team().is_some_and(|team| Some(team) != self.watched()) {
@@ -430,6 +506,11 @@ impl TeamsModel {
             TeamRead::Profile { team } => self.send(
                 team_key("profile", team),
                 TeamsUpdate::Profile(Arc::new(view::profile(team, &value))),
+                &mut out,
+            ),
+            TeamRead::Catalog => self.send(
+                "catalog".into(),
+                TeamsUpdate::Catalog(Arc::new(view::catalog(&value))),
                 &mut out,
             ),
         }

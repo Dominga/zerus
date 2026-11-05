@@ -14,6 +14,7 @@ mod processes;
 mod stamps;
 mod organization;
 mod tasks;
+mod team;
 mod writer;
 
 use crate::cli::{Error, Result};
@@ -82,6 +83,8 @@ enum Input {
     Tasks(tasks::Done),
     /// An organization read finished on its worker.
     Organization(organization::Done),
+    /// A read of the team heads finished on its worker.
+    Team(team::Done),
     End,
 }
 
@@ -145,6 +148,7 @@ pub(crate) fn run(config: &Config, args: &[String], dry: bool) -> Result<i32> {
             Ok(Input::Processes(done)) => watch.processes_done(done),
             Ok(Input::Tasks(done)) => watch.tasks_done(done),
             Ok(Input::Organization(done)) => watch.organization_done(done),
+            Ok(Input::Team(done)) => watch.team_done(done),
             Ok(Input::End) | Err(mpsc::RecvTimeoutError::Disconnected) => return Ok(0),
             Err(mpsc::RecvTimeoutError::Timeout) => {}
         }
@@ -168,6 +172,7 @@ pub(crate) fn run(config: &Config, args: &[String], dry: bool) -> Result<i32> {
         watch.flush_processes();
         watch.flush_tasks();
         watch.flush_organization();
+        watch.flush_team();
     }
 }
 
@@ -346,6 +351,8 @@ struct Watch<'a> {
     tasks_pool: Option<tasks::Pool>,
     organization: organization::Organization,
     organization_pool: Option<organization::Pool>,
+    team: team::Team,
+    team_pool: Option<team::Pool>,
     writers: Writers,
 }
 
@@ -394,6 +401,8 @@ impl<'a> Watch<'a> {
             tasks_pool: None,
             organization: organization::Organization::new(),
             organization_pool: None,
+            team: team::Team::new(),
+            team_pool: None,
             writers: Writers::None,
         }
     }
@@ -406,7 +415,7 @@ impl<'a> Watch<'a> {
             stream: uuid::Uuid::new_v4().to_string(),
             heartbeat_ms: protocol::HEARTBEAT_MS,
             max_frame_bytes: protocol::MAX_FRAME_BYTES,
-            topics: [topic::CATALOG, topic::CATALOG_META, topic::ACTIVITY, topic::GIT, topic::PROCESSES, topic::TASKS, topic::ORGANIZATION]
+            topics: [topic::CATALOG, topic::CATALOG_META, topic::ACTIVITY, topic::GIT, topic::PROCESSES, topic::TASKS, topic::ORGANIZATION, topic::TEAM]
                 .map(str::to_owned)
                 .to_vec(),
             limits: protocol::Limits::default(),
@@ -847,6 +856,9 @@ impl<'a> Watch<'a> {
         }
         if let Some(job) = self.organization.pulse(now, stamps::files) {
             self.run_organization(job);
+        }
+        if let Some(job) = self.team.pulse(now, stamps::files) {
+            self.run_team(job);
         }
     }
 
@@ -1412,6 +1424,88 @@ impl<'a> Watch<'a> {
         }
     }
 
+    // ---- Team --------------------------------------------------------------
+
+    fn subscribe_team(&mut self) {
+        let store = crate::state::teams::store::path();
+        let files = crate::state::teams::store::files(&store);
+        let stamp = stamps::files(&files);
+        let job = self.team.subscribe(files, stamp, Instant::now());
+        self.run_team(job);
+    }
+
+    /// Hands a read to the team worker, started with the first one.
+    fn run_team(&mut self, job: team::Job) {
+        let pool = self.team_pool.get_or_insert_with(|| {
+            let results = self.git_results.clone();
+            team::Pool::spawn(crate::state::teams::store::path(), move |done| {
+                let _ = results.send(Input::Team(done));
+            })
+        });
+        match pool.run(job) {
+            Ok(()) => {}
+            Err(mpsc::TrySendError::Full(job)) => self.team.defer(job, Instant::now()),
+            Err(mpsc::TrySendError::Disconnected(job)) => {
+                self.team_done(team::Done { token: job.token, value: Some(Err("Team worker is unavailable".into())) });
+            }
+        }
+    }
+
+    fn team_done(&mut self, done: team::Done) {
+        if let Some(error) = self.team.done(done) {
+            self.out.failure("team_failed", &error, Some(topic::TEAM), None);
+        }
+    }
+
+    /// Sends the teams' changed heads: the first rows as a paged snapshot,
+    /// later ones as one offered delta. A delta the client is too far behind
+    /// to take is a `gap`, then a snapshot once it caught up.
+    fn flush_team(&mut self) {
+        if self.out.writer.backlog() > DEFER_BYTES {
+            return;
+        }
+        let Some(plan) = self.team.plan(PAGE_LIMIT) else { return };
+        let cursor = self.team.next_rev();
+        let item = |(key, row): (String, Value)| json!({"key": key, "row": row});
+        match plan {
+            team::Plan::Snapshot { gap, pages } => {
+                if gap && !self.out.put(&Body::Gap(protocol::Gap { topic: topic::TEAM.into(), key: None, reason: reason::OVERFLOW.into() })) {
+                    return;
+                }
+                let count = pages.len();
+                let delivered = pages.into_iter().enumerate().all(|(page, rows)| {
+                    self.out.put(&Body::Snapshot(protocol::Snapshot {
+                        topic: topic::TEAM.into(),
+                        key: None,
+                        items: Some(rows.into_iter().map(item).collect()),
+                        value: None,
+                        page: page as u32,
+                        last: page + 1 == count,
+                        cursor,
+                    }))
+                });
+                if delivered {
+                    self.team.sent();
+                } else {
+                    self.team.missed();
+                }
+            }
+            team::Plan::Delta { upsert, remove } => {
+                let body = Body::Delta(protocol::Delta {
+                    topic: topic::TEAM.into(),
+                    upsert: upsert.into_iter().map(|(key, row)| protocol::CatalogItem { key, row }).collect(),
+                    remove: remove.into_iter().map(|key| protocol::Removal { key, reason: None }).collect(),
+                    cursor,
+                });
+                if self.out.offer(&body, None) {
+                    self.team.sent();
+                } else {
+                    self.team.missed();
+                }
+            }
+        }
+    }
+
     // ---- Control -----------------------------------------------------------
 
     fn control(&mut self, text: &str) {
@@ -1441,6 +1535,8 @@ impl<'a> Watch<'a> {
                     }
                 } else if subscription.topic == topic::ORGANIZATION {
                     self.organization.unsubscribe();
+                } else if subscription.topic == topic::TEAM {
+                    self.team.unsubscribe();
                 } else if let Some(session) = subscription.session.as_ref().filter(|_| subscription.topic == topic::PROCESSES) {
                     self.processes.unsubscribe(&session.key());
                 } else if let Some(session) = subscription.session.filter(|_| subscription.topic == topic::ACTIVITY) {
@@ -1458,6 +1554,7 @@ impl<'a> Watch<'a> {
             topic::PROCESSES => return self.subscribe_processes(request.session, request.interval_ms, request.refresh == Some(true)),
             topic::TASKS => return self.subscribe_tasks(request.project.as_deref()),
             topic::ORGANIZATION => return self.subscribe_organization(),
+            topic::TEAM => return self.subscribe_team(),
             topic::ACTIVITY => {}
             other => {
                 self.out.error(
@@ -1684,6 +1781,7 @@ mod tests {
                 Input::Processes(done) => format!("<processes {}>", done.key),
                 Input::Tasks(done) => format!("<tasks {}>", done.key),
                 Input::Organization(_) => "<organization>".into(),
+                Input::Team(_) => "<team>".into(),
                 Input::End => "<end>".into(),
             })
             .collect()

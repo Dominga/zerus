@@ -10,6 +10,7 @@ import { newSessionFromRail } from "../sessions/newsession-view";
 import { shortcutTooltip } from "../../store/shortcuts";
 import { openAbout } from "../../store/desk";
 import { trNoop, tr } from "../../i18n";
+import { waiting } from "../../store/teams";
 
 // The side screen switcher stays on the side (owner decision 2026-10-27).
 // Order follows SessionsWindow: brand -> Overview, New session, Sessions,
@@ -22,6 +23,8 @@ const ITEMS: { id: Page; icon: string; label: string; tip: string; command: stri
   { id: "projects", icon: "projects", label: "Projects", tip: "Projects", command: "go.projects" },
   { id: "machines", icon: "machines", label: "Machines", tip: trNoop("Machines and connection status"), command: "go.machines" },
   { id: "accounts", icon: "accounts", label: "Accounts", tip: trNoop("Agent accounts"), command: "go.accounts" },
+  // Task 11: what waits for the owner across this computer's teams.
+  { id: "waiting", icon: "bell", label: "Waiting for you", tip: trNoop("Waiting for you"), command: "go.waiting" },
 ];
 
 /** "0.1.0" -> "0.1 Dev": the rail shows major.minor and the channel. */
@@ -48,6 +51,9 @@ export function Rail() {
             <Icon name={item.icon} size={24} />
             <Show when={item.id === "sessions" && counts().attention > 0}>
               <span class="rail-badge">{counts().attention}</span>
+            </Show>
+            <Show when={item.id === "waiting" && (waiting()?.total ?? 0) > 0}>
+              <span class="rail-badge">{waiting()!.total}</span>
             </Show>
             <Show when={labeled()}><span>{tr(item.label)}</span></Show>
           </button>

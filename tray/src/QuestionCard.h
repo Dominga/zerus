@@ -80,6 +80,8 @@ private:
         QHash<QString, QAbstractButton *> options;
         QAbstractButton *other = nullptr;
         QLineEdit *text = nullptr;
+        QLabel *mode = nullptr;   // "Select one"/"Select at least N"
+        bool modeShown = false;   // the mode applies; hidden while the options show as a plain list
     };
     bool refreshNativeBody(const QJsonObject &question);
     void rebuild();

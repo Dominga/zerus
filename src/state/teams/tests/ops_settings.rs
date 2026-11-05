@@ -349,6 +349,36 @@ fn settings_change_planning_members_and_keep_a_widening_for_the_owner() {
 }
 
 #[test]
+fn a_settings_card_names_each_changed_member_field_with_its_value() {
+    let (mut team, _) = create("t", &json!({"name":"T","lead":{"id":"lead","agent":"claude"}})).unwrap();
+    let mut events = Vec::new();
+    plan(
+        &mut team,
+        &json!({"members":[{"id":"dev","role":"Backend","agent":"claude"}],"tasks":[{"id":1,"title":"A","assignee":"dev"}]}),
+        &Actor::Human,
+        &mut events,
+    )
+    .unwrap();
+    let (title, lines) = describe_owner_op(
+        &team,
+        "settings",
+        &json!({"members_update":[{"id":"dev","role":"API","folder":"clone","permissions_profile":"commit"}],
+            "settings":{"report_timeout_seconds":90}}),
+    );
+    assert_eq!(title, "Change the team's settings");
+    for (field, value) in [("role", "API"), ("folder", "clone"), ("permissions_profile", "commit")] {
+        assert!(
+            lines.iter().any(|line| line.contains(field) && line.contains(value)),
+            "{field}={value} is in {lines:?}"
+        );
+    }
+    assert!(
+        !lines.iter().any(|line| line.ends_with(": role, folder, permissions_profile")),
+        "the fields alone are not enough: {lines:?}"
+    );
+}
+
+#[test]
 fn only_the_owner_sets_a_members_context_before_a_task() {
     let (mut team, _) = create("t", &json!({"name":"T","lead":{"id":"lead","agent":"claude"}})).unwrap();
     let mut events = Vec::new();

@@ -757,8 +757,12 @@ export function paneStates(source: ActivitySource, s: Session | undefined) {
   };
 }
 
-export function ActivityView(props: { source?: ActivitySource }) {
-  const s = () => selected();
+/**
+ * The transcript of `source` (the live follow by default). `session` is the row
+ * it shows when that is not the selected session (the Team tab's coordinator).
+ */
+export function ActivityView(props: { source?: ActivitySource; session?: () => Session | undefined }) {
+  const s = () => (props.session ? props.session() : selected());
   const preview = () => {
     const p = searchPreview(), row = s();
     return p && row && p.key === row.key && p.run === (row.runId ?? "") && p.conversation === (row.conversationId ?? "") && !subagentOpen() ? p : undefined;

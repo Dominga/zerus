@@ -6,6 +6,8 @@
   "client/lightSkin": "zerus-light",
   "client/overviewFullWidth": false,
   "client/overviewWidth": 1200,
+  "client/teamMembersShare": 45,
+  "client/teamSideWidth": 420,
   "client/windowGeometry": "",
   "downloads/cacheBytes": 0,
   "downloads/folder": "",

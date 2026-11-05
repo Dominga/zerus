@@ -127,7 +127,9 @@ function Card(props: { arrived: boolean }) {
       {/* The hint on the left, the actions on the right; they wrap under it when the column is narrow. */}
       <div class="qcard-actions">
         <p class="qcard-status" classList={{ error: c().status_error }} title={trText(c().status)} role="status" aria-live="polite">{trText(c().status)}</p>
-        <button type="button" class="btn small ghost" disabled={native() ? !nativeBinding(selected()) : !terminal.texts()?.available} title={terminalTip()}
+        {/* A card only Terminal can answer makes Open Terminal its primary action. */}
+        <button type="button" class="btn small" classList={{ primary: c().read_only, ghost: !c().read_only }}
+          disabled={native() ? !nativeBinding(selected()) : !terminal.texts()?.available} title={terminalTip()}
           onClick={() => { if (native()) openNative(); else { terminal.opened(); setDetailTab("terminal"); } }}>{trText(q().terminal_label)}</button>
         <Show when={c().skip.visible}><button type="button" class="btn small ghost" title={trText(c().skip_tip)} disabled={!questions.enabled(c().skip)} onClick={() => void questions.skip()}>{trText(c().skip.label)}</button></Show>
         <Show when={c().retry}><button type="button" class="btn small ghost" title={trText(c().retry_tip)} onClick={() => void questions.allowRetry()}>{tr("Allow retry")}</button></Show>
@@ -199,8 +201,20 @@ function Choice(props: { form: FormView; id?: string; group: string; other?: boo
   const toggle = (checked: boolean) => questions.edit(props.other
     ? { kind: "other", item: props.form.id, checked }
     : { kind: "option", item: props.form.id, option: props.id ?? "", checked });
+  // A card only Terminal can answer lists its options plainly, with nothing to select.
+  const plain = () => !!questions.view()?.view.read_only;
   return (
     <Show when={o()?.visible}>
+      <Show when={!plain()} fallback={
+        <div class="qchoice plain">
+          <span class="qchoice-copy">
+            <span class="qchoice-title">{o() ? trText(o()!.label) : ""}</span>
+            <Show when={o() && trText(o()!.description)}>
+              <Show when={o()?.markdown} fallback={<span class="qchoice-desc wrap-pre">{o() ? trText(o()!.description) : ""}</span>}><span class="qchoice-desc"><Body text={o() ? trText(o()!.description) : ""} /></span></Show>
+            </Show>
+          </span>
+        </div>
+      }>
       <label class="qchoice" classList={{ on: !!o()?.checked, off: !o()?.enabled }}>
         <input ref={input} type={props.form.multi ? "checkbox" : "radio"} name={props.group} checked={!!o()?.checked} disabled={!o()?.enabled}
           onChange={(e) => toggle(e.currentTarget.checked)} onKeyDown={props.onKey} />
@@ -211,6 +225,7 @@ function Choice(props: { form: FormView; id?: string; group: string; other?: boo
           </Show>
         </span>
       </label>
+      </Show>
     </Show>
   );
 }

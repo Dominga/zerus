@@ -218,7 +218,48 @@ fn actions() -> Vec<(TeamAction, &'static str, Value)> {
             json!({"task": 7}),
         ),
         (TeamAction::Retry { task: 7 }, "retry", json!({"task": 7})),
-        (TeamAction::Finish, "finish", json!({})),
+        (
+            TeamAction::Finish {
+                summary: " Shipped the API. ".into(),
+            },
+            "finish",
+            json!({"summary": "Shipped the API."}),
+        ),
+        // Task 40: the team bar's Discard plan and the task card's actions.
+        (TeamAction::Discard, "discard", json!({})),
+        (
+            TeamAction::Hold {
+                task: 6,
+                reason: "After the release".into(),
+            },
+            "hold",
+            json!({"task": 6, "reason": "After the release"}),
+        ),
+        (
+            TeamAction::SkipStage {
+                task: 6,
+                reason: "Reviewed by hand".into(),
+            },
+            "skip-stage",
+            json!({"task": 6, "reason": "Reviewed by hand"}),
+        ),
+        (
+            TeamAction::SendBack {
+                task: 6,
+                reason: "Paging is missing".into(),
+            },
+            "send-back",
+            json!({"task": 6, "reason": "Paging is missing"}),
+        ),
+        (
+            TeamAction::MoveTask {
+                task: 6,
+                phase: 2,
+                revision: Some(9),
+            },
+            "move-task",
+            json!({"task": 6, "phase": 2, "revision": 9}),
+        ),
         (
             TeamAction::DraftUpdate {
                 revision: 3,
@@ -439,7 +480,10 @@ fn catalog_actions_send_their_requests_and_apply_and_discard_ask_first() {
         expected.insert("by".into(), json!("human"));
         expected.insert("request_id".into(), json!(request_id));
         assert_eq!(request, &Value::Object(expected), "{sub}");
-        assert!(request.get("team").is_none(), "a catalog call names no team");
+        assert!(
+            request.get("team").is_none(),
+            "a catalog call names no team"
+        );
     }
     // Apply and discard end the draft, so both ask the owner first.
     for (action, dialog) in [
@@ -459,7 +503,11 @@ fn catalog_actions_send_their_requests_and_apply_and_discard_ask_first() {
         };
         assert_eq!(confirmation.name, dialog);
     }
-    assert_eq!(catalog_requests(&fake).len(), sent, "nothing ran before confirmation");
+    assert_eq!(
+        catalog_requests(&fake).len(),
+        sent,
+        "nothing ran before confirmation"
+    );
     // The exact command is `hgs team catalog decide --json`.
     let (invocation, _) = prepare(&TeamCall {
         team: String::new(),
@@ -469,10 +517,7 @@ fn catalog_actions_send_their_requests_and_apply_and_discard_ask_first() {
         })
     })
     .unwrap();
-    assert_eq!(
-        invocation.args,
-        ["team", "catalog", "decide", "--json"]
-    );
+    assert_eq!(invocation.args, ["team", "catalog", "decide", "--json"]);
     // hgs's own refusal is failed, never uncertain or resent.
     reply(
         &fake,
@@ -501,7 +546,10 @@ fn destructive_actions_and_approvals_ask_first_and_send_nothing() {
     let fake = fake("team_actions_confirm");
     for action in [
         TeamAction::Stop,
-        TeamAction::Finish,
+        TeamAction::Finish {
+            summary: "Done".into(),
+        },
+        TeamAction::Discard,
         TeamAction::Archive,
         TeamAction::Cancel {
             task: 6,
@@ -839,10 +887,8 @@ fn the_webview_names_an_action_by_its_kind() {
     )
     .unwrap();
     assert_eq!(decide.op(), "decide-proposal");
-    let settings: TeamAction = serde_json::from_value(
-        json!({"kind": "settings", "settings": {"land": true}}),
-    )
-    .unwrap();
+    let settings: TeamAction =
+        serde_json::from_value(json!({"kind": "settings", "settings": {"land": true}})).unwrap();
     assert_eq!(settings.op(), "settings");
 }
 

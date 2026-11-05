@@ -957,6 +957,14 @@ export interface TeamTaskView {
   attempt_state: string; decided_by: string; pinned: boolean; output: string[]; waits: string;
   /** Task 11: the newest attempt's id, and whether its member got no report in. */
   attempt_id?: string; no_report?: boolean;
+  /** Task 40: held by the owner, its pipeline and the run's stages and open stage, a sub-team. */
+  held?: boolean; pipeline?: string; pipeline_run?: TeamPipelineRun | null; subteam?: boolean;
+}
+
+/** A task's pipeline run (core PipelineRunView). */
+export interface TeamPipelineRun {
+  name: string; accept: string; round: number; max_rounds: number; stages: string[];
+  open: { stage: number; kind: string; member: string; state: string } | null;
 }
 
 export interface TeamPhaseView {
@@ -974,6 +982,9 @@ export interface TeamView {
   attention: unknown[];
   /** Task 11: additions to a running phase that wait for the owner (`pending_additions`). */
   additions?: TeamAddition[];
+  /** Task 40: permission widenings Approve & Run confirms, and the direct sub-teams. */
+  widenings?: { member?: string; role?: string; from?: string; to?: string }[];
+  children?: { team: string; name?: string; status?: string }[];
   validation: { errors: TeamFinding[]; warnings: TeamFinding[] };
   health: { critical_path: number; parallelism: number; warnings: string[] };
   ready: number[]; cycle: number[]; draft: { revision: number; unseen: string[]; owner_edited: string[] } | null; truncated: boolean;
@@ -1017,7 +1028,19 @@ export type TeamAction =
   | { kind: "decide_tool"; offer: string; allow: boolean; reason?: string }
   | { kind: "release"; task: number }
   | { kind: "retry"; task: number }
-  | { kind: "finish" }
+  | { kind: "finish"; summary: string }
+  | { kind: "reassign"; task: number; member: string; subteam?: string | null }
+  | { kind: "take_over"; task: number }
+  | { kind: "cancel"; task: number; subteam?: string | null }
+  | { kind: "pause" }
+  | { kind: "resume" }
+  | { kind: "stop" }
+  | { kind: "archive" }
+  | { kind: "discard" }
+  | { kind: "hold"; task: number; reason: string }
+  | { kind: "skip_stage"; task: number; reason: string }
+  | { kind: "send_back"; task: number; reason: string }
+  | { kind: "move_task"; task: number; phase: number; revision?: number | null }
   | { kind: "draft_start"; folder: string; name?: string; lead: DraftMember; project?: string; project_id?: string; template?: string }
   | { kind: "draft_update"; revision: number; set: Record<string, unknown> }
   | { kind: "draft_seen"; fields: string[] }

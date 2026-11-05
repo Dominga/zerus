@@ -6,6 +6,7 @@ use crate::settings::{OrganizationImport, QtSnapshot, QtStore, Settings};
 use crate::{run_limited, Exit, Invocation};
 use serde_json::{json, Value};
 use std::collections::BTreeSet;
+use std::io::Read;
 use std::path::Path;
 use std::time::Duration;
 
@@ -157,6 +158,34 @@ pub fn shared(snapshot: Option<&QtSnapshot>, node: &str) -> Result<Value, &'stat
     Ok(shared)
 }
 
+/// Qt saves its organization only once it first changes, so a store read
+/// without one never had an organization: the same first use as an absent
+/// store. A Qt backup of an organization is not that evidence. Plist sources
+/// map every entry; the INI reader is QSettings-permissive, where a damaged
+/// earlier value can swallow a later `organization=` line, so the exact bytes
+/// read (the same hash) must not mention it at all. Anything else stays for
+/// review.
+fn never_saved(source: &QtStore, snapshot: &QtSnapshot) -> bool {
+    if snapshot.values.keys().any(|key| key.starts_with(KEY)) {
+        return false;
+    }
+    match source {
+        QtStore::Plist { .. } => matches!(snapshot.source, "qt-plist" | "qt-defaults"),
+        QtStore::Ini(path) => {
+            let mut bytes = Vec::new();
+            snapshot.source == "qt-ini"
+                && std::fs::File::open(path)
+                    .and_then(|file| file.take(MAX_INPUT as u64 + 1).read_to_end(&mut bytes))
+                    .is_ok()
+                && bytes.len() <= MAX_INPUT
+                && zerus_desktop_migration::sha256(&bytes) == snapshot.sha256
+                && !bytes
+                    .windows(b"organization".len())
+                    .any(|word| word.eq_ignore_ascii_case(b"organization"))
+        }
+    }
+}
+
 fn call(
     hgs: &Path,
     environment: &[(&str, &str)],
@@ -293,7 +322,8 @@ fn recover_read(
     }
     let path = zerus_desktop_migration::canonical(source.path()).map_err(|_| SOURCE_FAILED)?;
     let snapshot = read()?;
-    let organization = shared(snapshot.as_ref(), node)?;
+    let first_use = snapshot.as_ref().is_some_and(|s| never_saved(source, s));
+    let organization = shared(if first_use { None } else { snapshot.as_ref() }, node)?;
     if !settings.prepare_organization_import(node, source, snapshot.as_ref())? {
         return Ok(());
     }

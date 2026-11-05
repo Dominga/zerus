@@ -2084,6 +2084,55 @@ mod tests {
     }
 
     #[test]
+    fn a_qt_profile_without_an_organization_still_sets_up_projects() {
+        // win-accept-cl importonce: Qt saves workspace/organization only once
+        // its organization first changes. A real store without it left the
+        // catalog uninitialized, so Projects could never add a project.
+        let fake = Fake::landing();
+        let node = "11111111-1111-4111-8111-111111111111";
+        let qt = fake.dir.join("synthetic-qt.conf");
+        let ini = "[General]\nlanguage=ru\n\n[window]\ngeometry=@ByteArray(AAAA)\n\n[accounts]\ndefault=claude\n";
+        std::fs::write(&qt, ini).unwrap();
+        let hash = zerus_client_core::settings::QtStore::Ini(qt.clone())
+            .snapshot()
+            .unwrap()
+            .unwrap()
+            .sha256;
+        let inbox = swarm::qt_import::shared(None, node).unwrap();
+        std::fs::write(fake.dir.join("config.json"),json!({"g3-status":[{"stdout":{"version":1,"node_id":node,"initialized":false,"gui_import_pending":false}}],
+            "g3-import":[{"stdout":{"schema":1,"node_id":node,"initialized":true,"organization":inbox,"g3_import":{"version":1,"source_sha256":hash}}}]}).to_string()).unwrap();
+        let settings =
+            zerus_client_core::settings::Settings::open(fake.dir.join("settings.json"), None);
+        let organization = fake.organization(&Pump::default(), true);
+        organization.recover_qt(
+            Some(zerus_client_core::settings::QtStore::Ini(qt.clone())),
+            settings.clone(),
+        );
+        let mut observed = full("d1");
+        observed["node_id"] = json!(node);
+        observed["initialized"] = json!(false);
+        organization.set_source(snapshot_of(&observed));
+        organization.observe(&state_of(&observed));
+        wait_until("the first-use import", || {
+            settings.organization_import().unwrap()
+                == zerus_client_core::settings::OrganizationImport::Handled
+        });
+        let log = std::fs::read_to_string(fake.dir.join("log.ndjson")).unwrap();
+        let imports: Vec<_> = log
+            .lines()
+            .filter(|line| line.contains("\"--g3\""))
+            .collect();
+        assert_eq!(imports.len(), 1);
+        let request = input(imports[0]);
+        assert_eq!(request["organization"], inbox);
+        assert_eq!(request["source_sha256"], hash);
+        assert!(organization.lock().notice.is_none());
+        assert_eq!(std::fs::read_to_string(qt).unwrap(), ini);
+        drop(settings);
+        fake.finish(organization);
+    }
+
+    #[test]
     fn qt_recovery_uses_the_existing_worker_without_holding_ui_or_checkpoint_locks() {
         let fake = Fake::landing();
         let node = "11111111-1111-4111-8111-111111111111";

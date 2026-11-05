@@ -132,7 +132,11 @@ fn pending_organization(contents: &Contents) -> Result<Option<PendingOrganizatio
     if pending.version != VERSION
         || !crate::creation::canonical_uuid(&pending.node_id)
         || !valid_record(SHARED_ORGANIZATION, &pending.record)
-        || (pending.record.source != "none" && pending.record.keys != ["workspace/organization"])
+        // A read Qt store names its organization, or none at all when Qt never
+        // saved one (the same first use as an absent store).
+        || (pending.record.source != "none"
+            && !pending.record.keys.is_empty()
+            && pending.record.keys != ["workspace/organization"])
     {
         return Err("unsupported pending project import");
     }

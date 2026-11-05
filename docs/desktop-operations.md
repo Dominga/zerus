@@ -289,7 +289,16 @@ The second kind, `deferred_answer` (`desktop::deferred_answer`, ABI
   conversation, question, question hash and stdin digest with status
   `answered` or `submitted` (Codex's asynchronous submission, not the
   provider's completion). Its `open_terminal` flag is only data for an
-  explicit Open Terminal action. Failed only at the no-spawn boundary
+  explicit Open Terminal action. For Codex's update question (a
+  `codex-update:` ID, which only the `codex_update` source may have), the
+  record's `codex_update` phase travels in the outcome, strictly paired: it
+  is present if and only if the answer is Update now (`answered` with
+  `open_terminal`). Absence is the only "none"; `installing` or `exited` is
+  the receipt's own observation, and `exited` does not prove the update
+  succeeded. Any other value or shape, a phase on another status or answer,
+  or Update now without one is Unknown (`deferred_answer_receipt_phase`),
+  and the serialized outcome, receipt and lookup keep the same pairing.
+  Failed only at the no-spawn boundary
   (`deferred_answer_not_started`) or from the exact `rejected` record
   (`deferred_answer_rejected`). Everything else after a possibly started
   child is Unknown and never resent.
@@ -324,7 +333,13 @@ or at the no-spawn boundary when no record exists
 earlier run is Unknown however exact its record. macOS refuses every
 original before any row (`deferred_answer_native_image_unavailable`),
 Windows refuses it too (`deferred_answer_unsupported`), and only Linux
-advertises the help marker. An unauthenticated hello naming it gets
+advertises the help marker. Linux also advertises
+`desktop-deferred-answer-update-phase-v1`. The client offers a Codex update
+answer only to a service with that line, checked on the same route before
+any offer, and keeps it direct otherwise. A Recorded update answer shows its
+phase notice. Only the click that asked may open Terminal: a later check or
+a reload's lookup only observes, and never opens Terminal, answers or offers
+again. An unauthenticated hello naming the kind gets
 `frontend_authentication_required`, like its siblings.
 
 The observation fails closed by design. A Kimi panel that the person's

@@ -11,7 +11,7 @@ use serde_json::json;
 use std::collections::VecDeque;
 use std::sync::Mutex;
 use std::time::Duration;
-use zerus_client_core::desktop::deferred_answer::Outcome as Settled;
+use zerus_client_core::desktop::deferred_answer::{Outcome as Settled, UpdatePhase};
 use zerus_client_core::drafts::read_draft;
 
 type Reply = Box<dyn Fn(&Plan) -> AnswerResult + Send + Sync>;
@@ -56,6 +56,7 @@ fn recorded_by(plan: &Plan) -> AnswerResult {
         status: "answered".into(),
         input_sha256: plan.input_sha256.clone(),
         open_terminal: false,
+        codex_update: None,
     })
 }
 /// This computer's own session, the only one v1 offers.
@@ -181,7 +182,7 @@ fn an_offered_answer_carries_the_exact_direct_stdin_and_a_recorded_one_answers_t
 }
 
 #[test]
-fn a_peer_a_codex_update_and_a_declined_offer_take_the_unchanged_direct_path() {
+fn a_peer_and_a_declined_offer_take_the_unchanged_direct_path() {
     // Another computer's session is never offered.
     let root = dir("answer-handed-peer");
     let (c, fake) = send_hub_on(&drafts(&root));
@@ -196,18 +197,21 @@ fn a_peer_a_codex_update_and_a_declined_offer_take_the_unchanged_direct_path() {
     status_is(&c, "Answer sent. Waiting for the agent…");
     assert_eq!(sent(&fake).len(), 1);
     assert!(lock(&service.offered).is_empty());
-    // Codex's update stays direct until the wire carries its phase.
+    // Codex's update goes to the route now; a service without its phase
+    // line declines it there, before any request (zerus-5wmh.66.4.7.2).
     let root = dir("answer-handed-update");
     let (c, fake) = send_hub_on(&drafts(&root));
     *lock(&fake.outcome) = Box::new(answered);
-    route(&c, &service);
+    let update_service = Arc::new(Service::default());
+    route(&c, &update_service);
+    reply(&update_service, |_| AnswerResult::Direct);
     let mut update = wire_card("codex-update:x");
     update["source"] = json!("codex_update");
     opened_local(&c, asking(vec![update]));
     let card = chosen(&c);
     submit(&c, &card);
     eventually(|| sent(&fake).len() == 1);
-    assert!(lock(&service.offered).is_empty());
+    assert_eq!(lock(&update_service.offered).len(), 1);
     // A route that does not take it: the direct path, once.
     let root = dir("answer-handed-direct");
     let (c, fake) = send_hub_on(&drafts(&root));
@@ -454,6 +458,7 @@ fn a_recorded_outcome_carries_the_cards_hash_run_and_terminal_hand_off() {
                 status: "answered".into(),
                 input_sha256: "a".repeat(64),
                 open_terminal,
+                codex_update: None,
             },
         );
         let Outcome::Done { receipt, .. } = outcome else {
@@ -467,6 +472,38 @@ fn a_recorded_outcome_carries_the_cards_hash_run_and_terminal_hand_off() {
             ),
             (&json!(HASH), &json!("run-1"), &json!(open_terminal))
         );
+    }
+    // Codex's update phase travels into the receipt the card's follow-up
+    // reads, exactly as the service recorded it (zerus-5wmh.66.4.7.2).
+    let a = Answering {
+        question: Question::from_value(&card_json("codex-update:x")),
+        ..a
+    };
+    for (phase, raw) in [
+        (UpdatePhase::Installing, "installing"),
+        (UpdatePhase::Exited, "exited"),
+    ] {
+        let Outcome::Done { receipt, .. } = recorded(
+            &a,
+            &Settled {
+                request_id: a.request_id.clone(),
+                status: "answered".into(),
+                input_sha256: "a".repeat(64),
+                open_terminal: true,
+                codex_update: Some(phase),
+            },
+        ) else {
+            panic!("recorded")
+        };
+        assert_eq!(receipt["codex_update"], json!(raw));
+        let follow = rules::answered_follow_up(&a.question, &receipt, Some("run-1"), "s (m)");
+        assert!(follow
+            .notice
+            .is_some_and(|text| text.contains(if raw == "installing" {
+                "is installing its update"
+            } else {
+                "exited after its update"
+            })));
     }
 }
 
@@ -587,4 +624,145 @@ fn a_lookup_mark_goes_with_its_draft() {
     hub.answers.probed.insert("gone".into());
     Composers::trim_answers(&mut hub, &HashSet::new());
     assert_eq!(hub.answers.probed, HashSet::from([kept]));
+}
+
+/// Codex's update card, as a local session's inspection shows it.
+fn update_card() -> Value {
+    let mut card = wire_card("codex-update:x");
+    card["source"] = json!("codex_update");
+    card["answer_transport"] = json!("codex_tui");
+    card
+}
+fn update_now(plan: &Plan, phase: UpdatePhase) -> AnswerResult {
+    AnswerResult::Recorded(Settled {
+        request_id: plan.request_id.clone(),
+        status: "answered".into(),
+        input_sha256: plan.input_sha256.clone(),
+        open_terminal: true,
+        codex_update: Some(phase),
+    })
+}
+/// Whether `events` hold an Open Terminal, and the notice they hold.
+fn terminal_and_notice(events: &[ComposerEvent]) -> (bool, Option<String>) {
+    (
+        events
+            .iter()
+            .any(|e| matches!(e, ComposerEvent::OpenTerminal { .. })),
+        events.iter().find_map(|e| match e {
+            ComposerEvent::Notice { text, .. } => Some(text.clone()),
+            _ => None,
+        }),
+    )
+}
+
+/// zerus-5wmh.66.4.7.2: the click that answered Update now may open
+/// Terminal; a later check or a reload's lookup shows the same phase notice
+/// but never opens Terminal, answers or offers again.
+#[test]
+fn a_codex_update_opens_terminal_only_from_its_click() {
+    // The click's own answer.
+    let root = dir("answer-update-click");
+    let (c, fake) = send_hub_on(&drafts(&root));
+    let service = Arc::new(Service::default());
+    route(&c, &service);
+    reply(&service, |plan| update_now(plan, UpdatePhase::Installing));
+    opened_local(&c, asking(vec![update_card()]));
+    let card = chosen(&c);
+    c.take_events();
+    submit(&c, &card);
+    status_is(&c, "Answer sent. Waiting for the agent…");
+    let (terminal, notice) = terminal_and_notice(&c.take_events());
+    assert!(terminal, "the click asked for Terminal");
+    assert!(notice.is_some_and(|text| text.contains("is installing its update")));
+    assert!(sent(&fake).is_empty(), "never direct once offered");
+    // A held answer that a check settles: the notice, no Terminal.
+    let root = dir("answer-update-check");
+    let (c, fake) = send_hub_on(&drafts(&root));
+    let service = Arc::new(Service::default());
+    route(&c, &service);
+    reply(&service, |plan| {
+        AnswerResult::Pending(Box::new(plan.clone()))
+    });
+    opened_local(&c, asking(vec![update_card()]));
+    let card = chosen(&c);
+    submit(&c, &card);
+    status_is(&c, STILL_ANSWERING);
+    let plan = c.lock().answers.handed[&card].plan.clone();
+    lock(&service.checks).push_back(Checked::Settled(update_now(&plan, UpdatePhase::Exited)));
+    c.take_events();
+    ticks(&c, &fake, FIRST, || {
+        !c.lock().answers.handed.contains_key(&card)
+    });
+    let (terminal, notice) = terminal_and_notice(&c.take_events());
+    assert!(!terminal, "a check is no click");
+    assert!(notice.is_some_and(|text| text.contains("exited after its update")));
+    assert!(sent(&fake).is_empty());
+    assert_eq!(lock(&service.offered).len(), 1);
+}
+
+/// After a restart, the held update answer is only looked up: a recorded
+/// phase shows its notice without Terminal; an unknown result keeps the one
+/// original for Allow retry; nothing is answered or offered again.
+#[test]
+fn a_reload_of_a_held_codex_update_never_opens_terminal_or_answers() {
+    for settled in [true, false] {
+        let root = dir(if settled {
+            "answer-update-reload"
+        } else {
+            "answer-update-reload-unknown"
+        });
+        let store = drafts(&root);
+        let service = Arc::new(Service::default());
+        let card = {
+            let (c, _) = send_hub_on(&store);
+            route(&c, &service);
+            reply(&service, |plan| {
+                AnswerResult::Pending(Box::new(plan.clone()))
+            });
+            opened_local(&c, asking(vec![update_card()]));
+            let card = chosen(&c);
+            submit(&c, &card);
+            status_is(&c, STILL_ANSWERING);
+            eventually(|| read_draft(&root.join("drafts"), &card).draft.uncertain);
+            card
+        };
+        store.flush();
+        let original = lock(&service.offered)[0].clone();
+        let plan =
+            deferred_answer::plan(&original.0, &original.1, &original.2, &original.3).unwrap();
+        let (c, fake) = send_hub_on(&store);
+        route(&c, &service);
+        opened_local(&c, asking(vec![update_card()]));
+        card_view(&c);
+        c.take_events();
+        lock(&service.checks).push_back(Checked::Settled(if settled {
+            update_now(&plan, UpdatePhase::Installing)
+        } else {
+            AnswerResult::Unconfirmed(UNCONFIRMED.into())
+        }));
+        ticks(&c, &fake, 0.0, || lock(&service.checked).len() == 1);
+        let q = until(&c, |v| {
+            v.question
+                .as_ref()
+                .is_some_and(|q| q.view.status.english() != STILL_ANSWERING)
+                || v.question.is_none()
+        });
+        let (terminal, notice) = terminal_and_notice(&c.take_events());
+        assert!(!terminal, "a reload is no click ({settled})");
+        assert_eq!(lock(&service.checked)[0], plan);
+        assert_eq!(lock(&service.offered).len(), 1, "never offered again");
+        assert!(sent(&fake).is_empty(), "never answered directly");
+        if settled {
+            assert!(notice.is_some_and(|text| text.contains("is installing its update")));
+        } else {
+            assert!(notice.is_none());
+            let q = q.question.unwrap();
+            assert!(q.view.retry && q.view.status.english() == UNCONFIRMED);
+            assert_eq!(
+                held(&c, &card).map(|checkpoint| checkpoint.request_id),
+                Some(plan.request_id.clone()),
+                "the one original stays"
+            );
+        }
+    }
 }

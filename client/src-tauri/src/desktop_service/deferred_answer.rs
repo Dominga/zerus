@@ -126,6 +126,14 @@ pub(crate) fn call(
         if !read.supports(wire::HELP_MARKER).map_err(|_| ())? {
             return Ok(AnswerResult::Direct);
         }
+        // Codex's update answer needs its phase carried back: a service
+        // without that line keeps it direct, before any offer
+        // (zerus-5wmh.66.4.7.2).
+        if pinned.get("source").and_then(Value::as_str) == Some("codex_update")
+            && !read.supports(wire::UPDATE_PHASE_MARKER).map_err(|_| ())?
+        {
+            return Ok(AnswerResult::Direct);
+        }
         let Some(intent) = intent(&read.scope, session, checkpoint, pinned, stdin) else {
             return Ok(AnswerResult::Direct);
         };

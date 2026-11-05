@@ -12,9 +12,15 @@ fn scope() -> wire::Scope {
         service_epoch: EPOCH.into(),
     }
 }
-/// A native question of `source`, as the card holds it.
+/// A native question of `source`, as the card holds it. Codex's update
+/// question, and only it, has a `codex-update:` ID.
 pub(super) fn question(source: &str) -> Value {
-    json!({"question_id": "q-1", "question_hash": HASH, "run_id": "run-1",
+    let id = if source == "codex_update" {
+        format!("codex-update:{HASH}")
+    } else {
+        "q-1".to_owned()
+    };
+    json!({"question_id": id, "question_hash": HASH, "run_id": "run-1",
         "conversation_id": "conversation-1", "source": source, "answer_transport": "claude_tui",
         "questions": [{"id": "q-1", "question": "Allow this folder?",
             "options": [{"id": "yes", "label": "Yes"}, {"id": "no", "label": "No"}]}],
@@ -43,7 +49,7 @@ pub(super) fn original(source: &str, option: &str) -> (Checkpoint, Value, Vec<u8
         run_id: "run-1".into(),
         conversation_id: "conversation-1".into(),
         question: Some(checkpoint::Question {
-            id: "q-1".into(),
+            id: question["question_id"].as_str().unwrap().into(),
             identity_sha256: checkpoint::identity_sha256(&pinned),
         }),
         start: None,
@@ -84,6 +90,7 @@ fn receipt(
             status: wire::ANSWERED.into(),
             input_sha256: verified.plan.input_sha256.clone(),
             open_terminal: false,
+            codex_update: None,
         }),
     }
 }

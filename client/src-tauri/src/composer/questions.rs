@@ -1165,7 +1165,14 @@ impl Composers {
     /// `finishQuestion` (5177-5186) and the receipt's follow-ups (1156-1186):
     /// the card says how it ended. Nothing is sent again by itself.
     fn answer_finished(&self, a: &Answering, outcome: Outcome) {
-        self.answer_ended(a, outcome, false);
+        self.answer_ended(a, outcome, false, true);
+    }
+
+    /// An answer's end that a later check or a reload's lookup observed: the
+    /// same card state and notice, but never an Open Terminal, which only
+    /// the click that asked for it may bring (zerus-5wmh.66.4.7.2).
+    pub(super) fn answer_observed(&self, a: &Answering, outcome: Outcome) {
+        self.answer_ended(a, outcome, false, false);
     }
 
     /// An answer the desktop service could not confirm: uncertain, with the
@@ -1177,10 +1184,11 @@ impl Composers {
                 detail: line.to_owned(),
             },
             true,
+            false,
         );
     }
 
-    fn answer_ended(&self, a: &Answering, outcome: Outcome, as_is: bool) {
+    fn answer_ended(&self, a: &Answering, outcome: Outcome, as_is: bool, click: bool) {
         let mut hub = self.lock();
         // Only this answer's own entry: another card's of the session stays.
         if hub.answers.in_flight.get(&a.key) == Some(&a.card) {
@@ -1222,7 +1230,7 @@ impl Composers {
         }
         self.save_answer(&mut hub, &a.card, false, None);
         if let Some(follow) = follow {
-            if follow.open_terminal {
+            if follow.open_terminal && click {
                 self.event(&mut hub, ComposerEvent::OpenTerminal { key: a.key.clone() });
             }
             if let Some(text) = follow.notice {

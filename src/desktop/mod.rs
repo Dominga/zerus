@@ -68,6 +68,9 @@ mod upgrade;
 mod windows_registration;
 #[cfg(any(windows, test))]
 mod windows_registration_policy;
+#[cfg(all(test, not(windows)))]
+#[path = "windows_registration/native/mode/stop.rs"]
+mod windows_mode_stop;
 
 use crate::{cli, config::Config, platform};
 use anyhow::{ensure, Context, Result};

@@ -1041,6 +1041,15 @@ class WindowsTaskMode(unittest.TestCase):
         path.write_text(json.dumps(record), encoding='utf-8')
         grant = self.cli('desktop', 'ownership-status', '--json')
         before = self.observe()['instances']
+        # Historical StopOffered cannot be inferred to mean 'no Stop' or
+        # downgraded to Held by this ordering fix.
+        saved = path.read_bytes()
+        refused = self.cancel(request)
+        self.assertFalse(refused['ok'], refused)
+        self.assertIn('recorded original start', refused['error'])
+        self.assertEqual(path.read_bytes(), saved)
+        self.assertEqual(self.observe()['instances'], before)
+        self.assertEqual(self.cli('desktop', 'ownership-status', '--json'), grant)
         reply = self.review_mode(request)
         self.assertEqual(reply['code'], 'reviewed_unknown', reply)
         self.assertEqual(reply['outcome'], 'unknown', reply)
@@ -1526,17 +1535,12 @@ $later=@{guid=$guid;pid=$q.Id;birth=$q.StartTime.ToFileTimeUtc()};
         self.assertEqual(Path(metadata['image']).resolve(strict=True), self.cli_image)
         return dict(guid=guid, pid=instances[0]['engine_pid'], birth=metadata['birth'])
 
-    def test_first_choice_instance_drift_stays_unknown_at_stop_offered_with_no_stop(self):
-        """Debug held seam (zerus-yfbd.1), in its own fixture because it ends
-        at a reboot-gated Review. The passive instance changes while a first
-        choice is held after its durable reservation: an armed worker restarts
-        it and releases the hold within the Stop deadline the hold consumes,
-        so expiry cannot mask the instance check (expired_hold_refuses_at_held
-        covers expiry). Production order: the StopOffered save passes its fence
-        (caller, Grant, image, handoff, deadline), then stop_original refuses
-        the changed task selection before any stop. The same original stays
-        Unknown at StopOffered with zero Stop/Update/Start, and its same-boot
-        Review is reboot-gated."""
+    def test_first_choice_instance_drift_refuses_at_held_and_cancels_without_stop(self):
+        """The same timely Held arrangement now refuses before StopOffered.
+        The original UUID remains Unknown at Held until explicit metadata
+        cancellation; neither refusal nor cancellation touches the proven
+        replacement. The hold still spends the original Stop deadline, and
+        the precise selection error must win rather than an expiry error."""
         initial = self.cli('desktop', 'registration', 'status', '--json')
         self.assertFalse(initial['registered'], 'Task-mode fixture requires an unused disposable runner')
         self.task = initial['task_name']
@@ -1573,7 +1577,8 @@ $later=@{guid=$guid;pid=$q.Id;birth=$q.StartTime.ToFileTimeUtc()};
             marker.unlink()
             record = json.loads(path.read_text(encoding='utf-8'))
             self.assertEqual((record['pending']['request_id'], record['pending']['phase']),
-                             (request, 'stop_offered'), record)
+                             (request, 'held'), record)
+            self.assertEqual(record['pending']['original'], passive['instance'])
             status = self.cli('desktop', 'registration', 'status', '--json')
             self.assertEqual(status['selected_mode'], 'passive', 'no update was sent')
             self.assertEqual((status['first_choice']['request'], status['first_choice']['phase']),
@@ -1584,23 +1589,31 @@ $later=@{guid=$guid;pid=$q.Id;birth=$q.StartTime.ToFileTimeUtc()};
             self.assertTrue(same_replacement(arranged, self.exact_later_instance(arranged['guid'], wait=0)))
             result = self.cli('desktop', 'registration', 'mode-result', '--json', '--request-id', request)
             self.assertEqual((result['outcome'], result['receipt']['phase']), ('unknown', 'unknown'), result)
-            # The arranged later instance is live on the same boot: Review
-            # needs a reboot barrier and changes nothing.
-            reviewed = self.review_mode(request)
-            self.assertEqual(reviewed['code'], 'reboot_required', reviewed)
-            self.assertEqual(reviewed['outcome'], 'unknown', reviewed)
-            self.assertFalse(reviewed['manager_changed'], reviewed)
-            self.assertFalse(reviewed['authority_changed'], reviewed)
+            endpoint = self.cli('desktop', 'status', '--json')
+            self.assertTrue(endpoint['running'], endpoint)
+            self.assertEqual(endpoint['lifecycle']['pid'], arranged['pid'])
+            # This is the maintained explicit pre-manager metadata operation,
+            # after the original helper/caller child has physically completed.
+            cancelled = self.cancel(request)
+            self.assertTrue(cancelled['ok'], cancelled)
+            self.assertFalse(cancelled['manager_changed'], cancelled)
+            self.assertEqual(cancelled['cancelled_request_id'], request)
+            after = self.cli('desktop', 'registration', 'status', '--json')
+            self.assertIsNone(after['pending_transition'], after)
+            self.assertEqual(after['cancelled_request_id'], request)
+            self.assertEqual(after['selected_mode'], 'passive')
+            result = self.cli('desktop', 'registration', 'mode-result', '--json', '--request-id', request)
+            self.assertEqual((result['outcome'], result['receipt']['phase']), ('refused', 'refused'), result)
+            self.assertEqual(self.cli('desktop', 'ownership-status', '--json'), granted)
             self.assertTrue(same_replacement(arranged, self.exact_later_instance(arranged['guid'], wait=0)))
-            # Teardown: stop exactly the proven replacement, then remove.
+            current = self.cli('desktop', 'status', '--json')
+            self.assertEqual((current['epoch'], current['generation'], current['lifecycle']['pid']),
+                             (endpoint['epoch'], endpoint['generation'], arranged['pid']))
+            # Teardown is a separate fixture operation on that exact proved
+            # replacement, never a capability supplied by cancellation.
             stopped = self.stop_exact_passive(dict(guid=arranged['guid'], pid=arranged['pid'],
                                                    birth=arranged['birth']))
             self.assertTrue(stopped['stopped'], stopped)
-            # Evidence for zerus-aucth: Review once nothing of the task runs.
-            again = self.review_mode(request)
-            self.assertFalse(again['manager_changed'], again)
-            print('MODE_TASK_DRIFT_REVIEW ' + json.dumps({key: again.get(key) for key in
-                  ('code', 'outcome', 'manager_changed', 'authority_changed')}), file=sys.stderr)
             self.assertFalse(self.cli('desktop', 'status', '--json')['running'])
             self.assertFalse(self.cli('desktop', 'registration', 'remove', '--json')['registered'])
             self.installed = False

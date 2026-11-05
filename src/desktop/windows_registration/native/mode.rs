@@ -11,6 +11,7 @@ use crate::{
 };
 use policy::mode::{Budget, Mode, Phase, Record, RECORD_BYTES};
 mod recovery;
+pub(super) mod stop;
 mod boot;
 mod review;
 #[cfg(debug_assertions)]
@@ -23,7 +24,7 @@ use std::{
 
 pub(in crate::desktop::windows_registration) const ENTRY: &str = "__desktop-registration-mode";
 const MODE_ABI: &str = "desktop-registration-mode-v1";
-const RECORD: &str = "windows-registration-mode.json";
+const RECORD: &str = stop::RECORD;
 
 struct Admission {
     scope: ui_authority::Scope,
@@ -345,24 +346,14 @@ fn save(
     location: &Location,
     plan: &Plan,
     record: &Record,
-    fence: &mut impl FnMut() -> Result<()>,
+    fence: &mut dyn FnMut() -> Result<()>,
 ) -> Result<()> {
-    fence()?;
-    location.prepare()?;
-    let bytes = record.encode(plan)?;
-    let mut file = tempfile::NamedTempFile::new_in(&location.root)?;
-    platform::make_private(file.as_file())?;
-    ensure!(
-        platform::verify_private_file(file.as_file())?,
-        "Mode record is not private."
-    );
-    file.write_all(&bytes)?;
-    file.as_file().sync_all()?;
-    fence()?;
-    platform::persist(file, location.root.join(RECORD)).map_err(|error| error.error)?;
-    platform::sync_dir(&location.root)?;
-    fence()
+    stop::publish(&location.root, fence, || {
+        location.prepare()?;
+        record.encode(plan)
+    })
 }
+
 fn selected(native: &mut Native, passive: &Plan, background: &Plan) -> Result<Mode> {
     let current = native
         .read(&passive.name)?
@@ -716,8 +707,17 @@ fn effect(
         held_pause::wait(config, &id);
     }
     if let Some(original) = &mut original {
-        record.advance(Phase::Held, Phase::StopOffered)?;
-        save(location, passive, &record, &mut || fence.check())?;
+        let until = fence.until;
+        let shape = wanted(old)?;
+        stop::offer(
+            &mut record,
+            original,
+            &mut || fence.check(),
+            |original, check| {
+                instances::check_original_selection(native, old, &shape, original, until, check)
+            },
+            |record, check| save(location, passive, record, check),
+        )?;
         instances::stop_original(
             native,
             old,

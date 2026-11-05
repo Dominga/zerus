@@ -282,6 +282,16 @@ the obsolete saved rollback metadata:
 hgs desktop registration cancel-rollback --json --request-id UUID
 ```
 
+Before publishing `StopOffered`, the helper rechecks the same retained original
+instance, task definition/owner/ACL and authenticated process/pipe under the
+registration lock. A refusal proven before publication stays at `Held` and can
+use the explicit cancellation above. The original Stop deadline includes these
+reads and any debug hold; it is not renewed. A post-persist check failure,
+directory-sync uncertainty or lost save reply remains `StopOffered`/Unknown.
+The immediate selection and original-instance checks before COM Stop remain.
+Historical offered records are never downgraded. Status, Retry and reconnect
+do not cancel, and Settings currently has no Held-cancellation action.
+
 Cancellation checks the original pending UUID and native caller twice. It can
 discard any pre-manager record for either mode, including stale background
 preparation after a restart. Passive rollback additionally requires a current

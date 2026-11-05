@@ -5,11 +5,13 @@ use crate::desktop::{protocol, store::Location, transport};
 use std::{
     fs::File,
     io::{BufReader, Write},
-    path::{Path, PathBuf},
+    path::Path,
     sync::Arc,
     time::Duration,
 };
 use zerus_client_core::desktop::windows::process::Original;
+
+mod image;
 
 fn task(folder: &ITaskFolder, plan: &Plan, wanted: &Shape) -> Result<IRegisteredTask> {
     let task = unsafe { folder.GetTask(&BSTR::from(&plan.name)) }?;
@@ -112,9 +114,7 @@ pub(super) fn selected_image(path: &Path) -> Result<(File, crate::platform::File
 
 struct Service {
     process: Arc<Original>,
-    _image: File,
-    image: crate::platform::FileIdentity,
-    selected: PathBuf,
+    image: image::Loaded,
     epoch: String,
     generation: u64,
 }
@@ -184,13 +184,10 @@ impl Service {
         // The original instance/pipe/kernel binding above selects this exact
         // runtime. An installer may have moved its image aside during upgrade;
         // retain that image independently of the replacement's selected file.
-        let (image, identity) = selected_image(Path::new(&process.image))?;
-        let selected = PathBuf::from(&process.image);
+        let image = image::Loaded::capture(&process.handle(), Path::new(&plan.argv[0]), until)?;
         let value = Self {
             process,
-            _image: image,
-            image: identity,
-            selected,
+            image,
             epoch: epoch.into(),
             generation,
         };
@@ -236,15 +233,7 @@ impl Service {
     }
     fn check(&self) -> Result<()> {
         ensure!(self.process.current(), "Original desktop process changed.");
-        let actual = crate::platform::FileIdentity::of(&self._image)?;
-        let (_, selected) = selected_image(&self.selected)?;
-        ensure!(
-            actual.device == self.image.device
-                && actual.inode == self.image.inode
-                && selected.device == self.image.device
-                && selected.inode == self.image.inode,
-            "Original desktop image changed."
-        );
+        self.image.check(&self.process.handle())?;
         ensure!(self.process.current(), "Original desktop process changed.");
         Ok(())
     }

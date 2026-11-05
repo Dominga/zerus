@@ -182,7 +182,7 @@ fn aside_name() -> String {
 }
 
 /// Whether `name` is one `aside_name` gave; nothing else is ever deleted.
-fn is_aside(name: &str) -> bool {
+pub(crate) fn is_aside(name: &str) -> bool {
     name.strip_prefix(ASIDE_PREFIX)
         .and_then(|rest| rest.split_once('-'))
         .is_some_and(|(seconds, random)| {

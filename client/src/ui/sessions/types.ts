@@ -22,7 +22,7 @@ export type Status =
 export interface Subagent {
   id: string;
   name: string;
-  state: "working" | "ready" | "attention" | "error" | "paused";
+  state: "working" | "ready" | "attention" | "error" | "paused" | "unknown" | "ended";
   summary: string;
   /** Qt's inactiveChild: hidden unless completed children, this child or its draft is retained. */
   inactive?: boolean;
@@ -92,6 +92,8 @@ export interface Session {
   turnStarted?: number;
   runId?: string;
   launchId?: string;
+  /** The listing's durable session ID, when canonical: it keys the drafts. */
+  sessionId?: string;
   conversationId?: string;
   /** Exact/fallback device-local density identity, calculated in Rust. */
   compactKeys?: [string, string];
@@ -110,6 +112,7 @@ export interface Session {
   /** The raw activity (`idle`, `busy`, ...). */
   activity: string;
   processState: string;
+  conversationState?: string;
   archiveId?: string;
   /** The latest reply and the attention it raised, for marking them read. */
   replyId?: string;
@@ -226,6 +229,8 @@ export interface ActivityItem {
   local?: LocalItem;
   /** Codex question replies the message holds, shown as Question and Your answer blocks (ActivityView.cpp:347-363). */
   replies?: Reply[];
+  /** History a fork began from, shown read-only and muted. */
+  inherited?: boolean;
 }
 
 export type VoiceState =
@@ -235,6 +240,8 @@ export type VoiceState =
 export interface MediaMessage {
   id: string;
   kind: "media";
+  /** A recording a fork inherited: its source's, never played through the fork. */
+  inherited?: boolean;
   media: "voice" | "video";
   at: string;
   state: VoiceState;

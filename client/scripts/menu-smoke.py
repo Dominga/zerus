@@ -7,6 +7,7 @@ For the Arch desktop, use flock -w 1800 /tmp/zerus-arch-display.lock and
 No CLI, native agent, installed app or owner data is opened.
 """
 import argparse
+from contextlib import ExitStack
 import json
 import os
 from pathlib import Path
@@ -21,12 +22,15 @@ parser.add_argument("--url", default="http://127.0.0.1:1437/scripts/menu-smoke.h
 parser.add_argument("--real-display", action="store_true")
 parser.add_argument("--title", default="Zerus menu regression (synthetic)")
 parser.add_argument("--probe-display", action="store_true", help="verify the isolated display without opening a window")
+parser.add_argument("--accessibility", action="store_true", help="check reported semantics through AT-SPI on private buses")
 parser.add_argument("--xvfb-child", action="store_true", help=argparse.SUPPRESS)
 parser.add_argument("--paint-column", type=int, metavar="X",
                     help="check the presented frames of a page that reports `morphs` (a 4 px column at X through "
                          "a magenta collapsing card must never grow again, row-collapse-smoke), `landings` (a magenta "
                          "reading anchor must keep its top while an older page lands, activity-older-smoke) or `opens` "
-                         "(the magenta loading heading and the cyan placed heading never in one frame, activity-open-smoke)")
+                         "(the magenta loading heading and the cyan placed heading never in one frame, activity-open-smoke) "
+                         "or `shows` (a magenta card, once fully painted, is never drawn dimmer again, task-view-flicker-smoke "
+                         "and entrance-survey-smoke)")
 parser.add_argument("--paint-row", type=int, metavar="Y",
                     help="check the presented frames of a page that reports `slides`: the right edge of a "
                          "magenta panel on a 4 px row at Y must only move with each slide (panel-slide-smoke)")
@@ -37,6 +41,8 @@ if not args.url.startswith("http://127.0.0.1:"):
     parser.error("use the local Vite server")
 if args.real_display and (args.xvfb_child or args.probe_display):
     parser.error("display probes are private virtual-display checks")
+if args.real_display and args.accessibility:
+    parser.error("accessibility checks require the private virtual display")
 
 if not args.real_display and not args.xvfb_child:
     # Own this server even when invoked from a Wayland desktop or an existing
@@ -51,6 +57,9 @@ if not args.real_display and not args.xvfb_child:
         command += ["--paint-row", str(args.paint_row)]
     if args.probe_display:
         command.append("--probe-display")
+    if args.accessibility:
+        env["ZERUS_MENU_A11Y_PARENT_BUS"] = os.environ.get("DBUS_SESSION_BUS_ADDRESS", "")
+        command = ["dbus-run-session", "--", *command, "--accessibility"]
     # Debian/Ubuntu xvfb-run runs its command with 2>&1. Hand the child this
     # stderr as an inherited descriptor, so its reasons (a missing GTK stack,
     # a refused display) stay on stderr and stdout carries only the result.
@@ -223,13 +232,47 @@ def painted_once(frames, opens, height):
             "paint_failures": failures}
 
 
-with tempfile.TemporaryDirectory(prefix="zerus-menu-") as scratch:
+def painted_steady(frames, shows, ends, height):
+    """Once an opened magenta card (a Task View result, an entrance) is fully painted, no later
+    presented frame of that open draws it dimmer: no blink after it appeared."""
+    def level(data):
+        stride = len(data) // height
+        best = 0
+        for y in range(height):
+            b, g, r = data[y * stride + 4], data[y * stride + 5], data[y * stride + 6]
+            if g < 60:
+                best = max(best, min(r, b))
+        return best
+    cases, failures = [], []
+    for index, start in enumerate(shows):
+        # Each open's window ends before the page closes or switches it.
+        end = ends[index] if index < len(ends) else shows[index + 1] if index + 1 < len(shows) else float("inf")
+        seen = [(round((t - start / 1000) * 1000), level(data)) for t, data in frames if start / 1000 <= t < end / 1000]
+        full = next((i for i, (_, value) in enumerate(seen) if value >= 230), None)
+        dimmer = [(ms, value) for ms, value in seen[full + 1:] if value < 200] if full is not None else []
+        # A fade-in starts near black; its first painted card frame says whether the entrance shows at all.
+        first = next(((ms, value) for ms, value in seen if value > 20), None)
+        cases.append({"open": index, "painted_frames": len(seen), "first_card": first,
+                      "full_at": seen[full][0] if full is not None else None, "dimmer": dimmer[:5]})
+        if full is None:
+            failures.append(f"open {index}: the magenta card was never fully painted")
+        elif dimmer:
+            failures.append(f"open {index}: {len(dimmer)} painted frames dimmed the magenta card after it was fully shown "
+                            f"(ms after the open, level: {dimmer[:5]})")
+    return {"paint": cases, "paint_failures": failures}
+
+
+with tempfile.TemporaryDirectory(prefix="zerus-menu-") as scratch, ExitStack() as cleanup:
     for variable, directory in [("HOME", "home"), ("XDG_CONFIG_HOME", "config"),
                                 ("XDG_DATA_HOME", "data"), ("XDG_CACHE_HOME", "cache")]:
         path = Path(scratch, directory)
         path.mkdir()
         os.environ[variable] = str(path)
     os.environ["GSETTINGS_BACKEND"] = "memory"
+    if args.accessibility:
+        from accessibility_smoke import check_lists, private_bus
+        import threading
+        cleanup.enter_context(private_bus(scratch))
     import gi
     gi.require_version("Gtk", "3.0")
     gi.require_version("Gdk", "3.0")
@@ -267,7 +310,22 @@ with tempfile.TemporaryDirectory(prefix="zerus-menu-") as scratch:
         Gtk.main_quit()
 
     def received(_manager, value):
-        finish(json.loads(value.get_js_value().to_string()))
+        report = json.loads(value.get_js_value().to_string())
+        if not args.accessibility:
+            finish(report)
+            return
+
+        def inspect():
+            try:
+                native = check_lists(report.get("accessibility_lists"), os.getpid(), report.get("accessibility_descriptions"))
+                report.update(native)
+                if native.get("accessibility_failure"):
+                    report.setdefault("failures", []).append(native["accessibility_failure"])
+            except Exception as error:
+                report.setdefault("failures", []).append(f"Accessibility read failed: {error}")
+            GLib.idle_add(lambda: finish(report))
+
+        threading.Thread(target=inspect, daemon=True).start()
 
     def deadline():
         finish({"failures": [f"{args.title} exceeded 30 seconds"]})
@@ -319,6 +377,9 @@ with tempfile.TemporaryDirectory(prefix="zerus-menu-") as scratch:
     if args.paint_column is not None and "opens" in result:
         result = {**result, **painted_once(painted, result["opens"], PAINT_HEIGHT)}
         result["failures"] = result.get("failures", []) + result.pop("paint_failures")
+    elif args.paint_column is not None and "shows" in result:
+        result = {**result, **painted_steady(painted, result["shows"], result.get("ends", []), PAINT_HEIGHT)}
+        result["failures"] = result.get("failures", []) + result.pop("paint_failures")
     elif args.paint_column is not None and "landings" in result:
         result = {**result, **painted_anchor(painted, result["landings"], PAINT_HEIGHT)}
         result["failures"] = result.get("failures", []) + result.pop("paint_failures")
@@ -328,6 +389,9 @@ with tempfile.TemporaryDirectory(prefix="zerus-menu-") as scratch:
     if args.paint_row is not None:
         result = {**result, **painted_slide(painted, result.get("slides", []), PAINT_WIDTH, surface.get_stride())}
         result["failures"] = result.get("failures", []) + result.pop("paint_failures")
+    if args.paint_column is None and "shows" in result:
+        # Its pass is the painted check; without the column it would pass unseen.
+        result["failures"] = result.get("failures", []) + ["this page reports `shows`: run it with --paint-column"]
     print(json.dumps({**result, **display_info, "real_display": args.real_display,
                       "webkit": f"{WebKit2.get_major_version()}.{WebKit2.get_minor_version()}.{WebKit2.get_micro_version()}"}, indent=2))
     raise SystemExit(1 if result.get("failures") else 0)

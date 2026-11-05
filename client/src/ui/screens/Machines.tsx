@@ -232,9 +232,9 @@ export function MachinesScreen() {
         <Show when={view().error}>{(error) => <Status kind="error"><Lines text={error()} /></Status>}</Show>
         <div class="mach-body">
           <div class="mach-list" role="list" aria-label={tr("Machines")}>
-            <MachineCard selection={LOCAL} alias={local().name} line={local().line} tile={connectionOf(catalog.computers[""]?.status).tile} meta={machineCards[""]} showMeta={!local().console} offline={false} />
-            <Index each={peers()}>{(p) => <MachineCard selection={p().row.alias} alias={p().row.alias} line={p().state.line} tile={p().state.tile} meta={machineCards[p().row.alias]} showMeta offline={!p().state.live} />}</Index>
-            <Show when={editor.isNew()}><button class="mach-card draft on" aria-current title={tr("This connection is a draft. Save it to add the machine to Zerus.")}><span class="row"><span class="entity mach-label" style={{ "--entity": "var(--z-entity-palette-7)" }}>{tr("New machine")}</span></span><span class="mach-state">{tr("Unsaved connection")}</span></button></Show>
+            <div role="listitem"><MachineCard selection={LOCAL} alias={local().name} line={local().line} tile={connectionOf(catalog.computers[""]?.status).tile} meta={machineCards[""]} showMeta={!local().console} offline={false} /></div>
+            <Index each={peers()}>{(p) => <div role="listitem"><MachineCard selection={p().row.alias} alias={p().row.alias} line={p().state.line} tile={p().state.tile} meta={machineCards[p().row.alias]} showMeta offline={!p().state.live} /></div>}</Index>
+            <Show when={editor.isNew()}><div role="listitem"><button class="mach-card draft on" aria-current title={tr("This connection is a draft. Save it to add the machine to Zerus.")}><span class="row"><span class="entity mach-label" style={{ "--entity": "var(--z-entity-palette-7)" }}>{tr("New machine")}</span></span><span class="mach-state">{tr("Unsaved connection")}</span></button></div></Show>
           </div>
           <Editor local={local()} peers={peers()} />
         </div>

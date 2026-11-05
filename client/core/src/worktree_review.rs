@@ -429,7 +429,8 @@ fn leftover_decision(row: &Value) -> Vec<String> {
 }
 
 /// A checkout blocked only because the OS hides some programs' folder paths:
-/// the user may accept that after checking.
+/// the user may accept that after checking. A surface without a discard
+/// consent (the repository Worktrees dialog) offers only this.
 pub fn process_reviewable(row: &Value) -> bool {
     let reasons = row["reasons"].as_array().cloned().unwrap_or_default();
     text(row, "kind") == "linked"
@@ -438,6 +439,33 @@ pub fn process_reviewable(row: &Value) -> bool {
         && text(&reasons[0], "code") == "processes_unavailable"
         && !text(row, "fingerprint").is_empty()
         && !text(row, "process_fingerprint").is_empty()
+        && (!local_data(row) || !text(row, "ignored_fingerprint").is_empty())
+}
+
+/// Changes the user may discard in a checkout some hidden programs might
+/// use: its removal needs both the discard and the process consent
+/// (zerus-k2ga), so only a surface that asks for both offers it (the cleanup
+/// with explicit consents). An older hgs never offers this.
+pub fn discardable_with_processes(row: &Value) -> bool {
+    let codes: Vec<_> = row["reasons"]
+        .as_array()
+        .into_iter()
+        .flatten()
+        .map(|reason| text(reason, "code"))
+        .collect();
+    text(row, "kind") == "linked"
+        && text(row, "verdict") == "blocked"
+        && row["discardable_with_process_consent"] == json!(true)
+        && !text(row, "fingerprint").is_empty()
+        && !text(row, "discard_fingerprint").is_empty()
+        && !text(row, "process_fingerprint").is_empty()
+        && codes.contains(&"processes_unavailable")
+        && codes
+            .iter()
+            .any(|code| matches!(*code, "changes" | "untracked"))
+        && codes
+            .iter()
+            .all(|code| matches!(*code, "changes" | "untracked" | "processes_unavailable"))
         && (!local_data(row) || !text(row, "ignored_fingerprint").is_empty())
 }
 

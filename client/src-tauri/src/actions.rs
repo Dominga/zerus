@@ -23,6 +23,7 @@ use std::sync::{Arc, Condvar, Mutex, OnceLock, PoisonError};
 use std::time::Duration;
 
 use tauri::State;
+mod local_read_capture;
 mod read_barrier;
 pub(crate) use read_barrier::{CapturedReads, FrozenReads};
 use zerus_client_core::actions::{
@@ -34,8 +35,9 @@ use zerus_client_core::details::{
     Details, SubagentIdentity,
 };
 use zerus_client_core::marks::{AttentionMarks, Mark};
-use zerus_client_core::readmarks::{ReadMark, ReadMarks};
+use zerus_client_core::readmarks::{Queued, ReadMark, ReadMarks};
 use zerus_client_core::reads::{self, ArchivePage};
+use zerus_client_core::session_selector::{self, selected_invocation};
 use zerus_client_core::shell::{current_shell, open_command};
 use zerus_client_core::{default_hgs, run, Action, Batch, ComputerId, Outcome, Target, ViewRow};
 
@@ -249,8 +251,12 @@ pub struct Actions {
     /// Computer, session name and the run each succeeded termination ended,
     /// oldest first.
     terminated: Arc<Mutex<VecDeque<(String, String, String)>>>,
-    /// The archive placement capture, set once before the source starts.
+    /// The change pump, set once before the source starts: the archive
+    /// placement capture, and the listed rows explicit actions read their
+    /// session ID from.
     termination_pump: Arc<OnceLock<crate::pump::WeakPump>>,
+    /// Which computers' `hgs` selects a session by ID (zerus-ucck P1c).
+    selectors: Arc<Mutex<session_selector::Answers>>,
     /// Hears every change of the pending marks.
     pub(crate) listener: MarksListener,
 }
@@ -285,8 +291,27 @@ impl Actions {
             hook: Arc::default(),
             terminated: Arc::default(),
             termination_pump: Arc::default(),
+            selectors: Arc::default(),
             listener: MarksListener::default(),
         }
+    }
+
+    /// The durable session ID of the row the target names by its exact run
+    /// (catalog key `run:<id>`), when the listing reports one (zerus-ucck
+    /// P1c). The row's current name is not compared: a session renamed since
+    /// the action was chosen keeps its run, so the CLI refuses the old name.
+    /// A target without a run, or a run the listing no longer shows, has none
+    /// and keeps its name and run form.
+    fn listed_session_id(&self, target: &Target) -> Option<String> {
+        self.run_session_id(&target.computer, &target.run_id)
+    }
+
+    /// The durable session ID the listing reports for `computer`'s exact run.
+    fn run_session_id(&self, computer: &str, run: &str) -> Option<String> {
+        self.termination_pump
+            .get()?
+            .upgrade()?
+            .run_session_id(computer, run)
     }
 
     /// Sets, once, what runs whenever a write mark appears or goes: the
@@ -451,11 +476,22 @@ impl Actions {
     /// (`ReadMarkStore::add`), wakes the delivery worker and returns what is
     /// pending. No file I/O: the worker writes the marks before it sends any
     /// ([`Actions::flush_marks`]).
-    pub fn queue_marks(&self, marks: Vec<ReadMark>) -> Result<Vec<ReadMark>, String> {
+    ///
+    /// Each mark is queued under the durable session ID the listing reports
+    /// for its exact run (zerus-ucck P2c-2b), read from Rust's own rows
+    /// before the queue is locked; the webview never supplies one.
+    pub fn queue_marks(&self, marks: Vec<ReadMark>) -> Result<Vec<Queued>, String> {
         let _admission = self.admit_marks()?;
+        let identified: Vec<_> = marks
+            .into_iter()
+            .map(|mark| {
+                let id = self.run_session_id(&mark.computer, &mark.run_id);
+                (mark, id)
+            })
+            .collect();
         let (added, pending) = {
             let mut store = self.marks.lock().unwrap_or_else(PoisonError::into_inner);
-            (store.add_all(marks), store.pending())
+            (store.add_identified(identified), store.queued())
         };
         self.wake.notify();
         if added {
@@ -499,6 +535,14 @@ impl Actions {
         if dropped {
             self.listener.changed();
         }
+    }
+
+    /// The marks not settled yet, with their session IDs.
+    pub(crate) fn queued_marks(&self) -> Vec<Queued> {
+        self.marks
+            .lock()
+            .unwrap_or_else(PoisonError::into_inner)
+            .queued()
     }
 
     /// The marks not settled yet.
@@ -572,7 +616,12 @@ impl Actions {
                 .iter()
                 .map(|out| out.row.name.as_str())
                 .collect();
-            changed |= marks.drop_unlisted(&replace.computer.0, &names);
+            let ids: HashSet<&str> = replace
+                .rows
+                .iter()
+                .filter_map(|out| out.row.session_id.as_deref())
+                .collect();
+            changed |= marks.drop_unlisted(&replace.computer.0, &names, &ids);
         }
         drop(marks);
         if changed {
@@ -629,6 +678,8 @@ pub struct AttentionOrder {
 }
 
 struct AttentionShared {
+    listener: MarksListener,
+    capture: Option<Arc<zerus_client_core::migration::preload::Capture>>,
     state: Mutex<AttentionState>,
     /// Signals a load, a change, a finished write and the end.
     signal: Condvar,
@@ -636,6 +687,8 @@ struct AttentionShared {
 
 #[derive(Default)]
 struct AttentionState {
+    source_paused: bool,
+    source_loaded: bool,
     /// None until the writer thread has read the file.
     marks: Option<AttentionMarks>,
     /// A change the file does not have yet.
@@ -651,25 +704,59 @@ pub type MarkMaps = (u64, BTreeMap<String, Mark>, BTreeMap<String, String>);
 
 impl Attention {
     pub fn new(path: PathBuf) -> Self {
+        Self::new_with_capture(path, None)
+    }
+    pub(crate) fn new_with_capture(
+        path: PathBuf,
+        capture: Option<Arc<zerus_client_core::migration::preload::Capture>>,
+    ) -> Self {
+        Self::new_with_spawn(path, capture, |job| {
+            std::thread::Builder::new()
+                .name("zerus-attention-marks".into())
+                .spawn(job)
+                .map(|_| ())
+        })
+    }
+    fn new_with_spawn(
+        path: PathBuf,
+        capture: Option<Arc<zerus_client_core::migration::preload::Capture>>,
+        spawn: impl FnOnce(Box<dyn FnOnce() + Send>) -> std::io::Result<()>,
+    ) -> Self {
+        let listener = MarksListener::default();
         let shared = Arc::new(AttentionShared {
-            state: Mutex::new(AttentionState::default()),
+            listener: listener.clone(),
+            state: Mutex::new(AttentionState {
+                source_paused: capture.is_some(),
+                ..AttentionState::default()
+            }),
+            capture,
             signal: Condvar::new(),
         });
+        if let Some(capture) = &shared.capture {
+            let weak = Arc::downgrade(&shared);
+            capture.retry_hook(Arc::new(move || {
+                if let Some(shared) = weak.upgrade() {
+                    // Serialize the wake with the existing condition wait.
+                    let _state = shared.lock();
+                    shared.signal.notify_all();
+                }
+            }));
+        }
         let writer = Arc::clone(&shared);
         let file = path.clone();
-        let spawned = std::thread::Builder::new()
-            .name("zerus-attention-marks".into())
-            .spawn(move || writer.write_changes(file));
-        if let Err(error) = spawned {
-            // Kept in memory only: commands still answer.
+        if let Err(error) = spawn(Box::new(move || writer.write_changes(file))) {
             eprintln!("zerus-client: the attention-marks writer did not start: {error}");
-            shared.lock().marks = Some(AttentionMarks::load(path));
+            // Never perform a capture/write fallback on the GUI thread.
+            let view = if let Some(capture) = &shared.capture {
+                capture.local_read_owner_unavailable();
+                AttentionMarks::from_bytes(path, None)
+            } else {
+                AttentionMarks::load(path)
+            };
+            shared.lock().marks = Some(view);
             shared.signal.notify_all();
         }
-        Self {
-            shared,
-            listener: MarksListener::default(),
-        }
+        Self { shared, listener }
     }
 
     /// Both maps by key once the file has been read, with their version;
@@ -678,6 +765,9 @@ impl Attention {
     /// thread, so a reader copies them only after they changed.
     pub fn marks_since(&self, seen: Option<u64>) -> Option<MarkMaps> {
         let state = self.shared.loaded();
+        if self.shared.capture.is_some() && (state.source_paused || state.marks.is_none()) {
+            return None;
+        }
         if seen == Some(state.version) {
             return None;
         }
@@ -691,18 +781,26 @@ impl Attention {
 
     #[cfg(test)]
     pub fn snapshot(&self) -> AttentionSnapshot {
-        self.shared.snapshot()
+        self.shared.snapshot_checked().unwrap_or_default()
     }
 
     /// A delta: `Some` writes an entry, `None` removes it. Memory only; the
     /// writer thread saves a change.
-    pub fn update(
+    pub fn try_update(
         &self,
         marks: BTreeMap<String, Option<Mark>>,
         replies: BTreeMap<String, Option<String>>,
-    ) {
+    ) -> Result<(), String> {
         let changed = {
             let mut state = self.shared.loaded();
+            if state.closed
+                || self.shared.capture.is_some() && !state.source_loaded
+                || state.marks.is_none()
+            {
+                return Err(
+                    "Local read marks are paused. Review the migration report and retry.".into(),
+                );
+            }
             let changed = state
                 .marks
                 .as_mut()
@@ -717,6 +815,15 @@ impl Attention {
         if changed {
             self.listener.changed();
         }
+        Ok(())
+    }
+    #[cfg(test)]
+    pub fn update(
+        &self,
+        marks: BTreeMap<String, Option<Mark>>,
+        replies: BTreeMap<String, Option<String>>,
+    ) {
+        self.try_update(marks, replies).unwrap();
     }
 
     /// Waits at most `limit` until the file holds every change made so far,
@@ -729,10 +836,10 @@ impl Attention {
             .shared
             .signal
             .wait_timeout_while(state, limit, |state| {
-                state.marks.is_none() || state.dirty || state.writing
+                state.marks.is_none() || state.dirty || state.writing || state.source_paused
             })
             .unwrap_or_else(PoisonError::into_inner);
-        !(state.marks.is_none() || state.dirty || state.writing)
+        !(state.marks.is_none() || state.dirty || state.writing || state.source_paused)
     }
 
     /// Waits until the file holds every change made so far.
@@ -743,7 +850,7 @@ impl Attention {
             .shared
             .signal
             .wait_while(state, |state| {
-                state.marks.is_none() || state.dirty || state.writing
+                state.marks.is_none() || state.dirty || state.writing || state.source_paused
             })
             .unwrap_or_else(PoisonError::into_inner);
     }
@@ -763,32 +870,45 @@ impl AttentionShared {
 
     /// The state once the file has been read.
     fn loaded(&self) -> std::sync::MutexGuard<'_, AttentionState> {
+        // Source capture never blocks a GUI presentation read.
+        if self.capture.is_some() {
+            return self.lock();
+        }
         self.signal
             .wait_while(self.lock(), |state| state.marks.is_none())
             .unwrap_or_else(PoisonError::into_inner)
     }
 
-    fn snapshot(&self) -> AttentionSnapshot {
+    fn snapshot_checked(&self) -> Result<AttentionSnapshot, String> {
         let state = self.loaded();
+        if self.capture.is_some() && (state.source_paused || state.marks.is_none()) {
+            return Err(
+                "Local read marks are paused. Review the migration report and retry.".into(),
+            );
+        }
         let Some(store) = state.marks.as_ref() else {
-            return AttentionSnapshot::default();
+            return Ok(AttentionSnapshot::default());
         };
         let (marks, replies) = store.snapshot();
         let (mark_order, reply_order) = store.order();
-        AttentionSnapshot {
+        Ok(AttentionSnapshot {
             marks,
             replies,
             order: AttentionOrder {
                 marks: mark_order,
                 replies: reply_order,
             },
-        }
+        })
     }
 
     /// The writer thread: reads the file, then writes the latest state after
     /// each change (changes made meanwhile go into one write). A copy is taken
     /// under the lock and written without it.
     fn write_changes(&self, path: PathBuf) {
+        if let Some(capture) = &self.capture {
+            self.write_captured(path, capture);
+            return;
+        }
         let loaded = AttentionMarks::load(path);
         self.lock().marks = Some(loaded);
         self.signal.notify_all();
@@ -1227,6 +1347,41 @@ pub(crate) async fn dispatch_cleanup_reserved(
     .await
 }
 
+/// Only the consumed native Remove confirmation can enter this service path.
+/// Its frozen UUID/input and selected controller never pass through reselection.
+pub(crate) async fn dispatch_cleanup_native(
+    state: &Actions,
+    native: crate::desktop_service::termination_outcome::Confirmation,
+    delayed: Option<(zerus_client_core::end_action::Captured, Arc<Claim>)>,
+) -> Result<Outcome, String> {
+    if blocked() {
+        return Ok(failed(REPLAY_NEEDS_HGS));
+    }
+    let capture = native.capture().clone();
+    let request_id = native
+        .invocation()
+        .request_id
+        .clone()
+        .ok_or(zerus_client_core::termination_cleanup::STATE_CHANGED)?;
+    dispatch_reserved_original(
+        state,
+        capture.target.clone(),
+        Action::Terminate,
+        request_id,
+        |_, _, _| {
+            zerus_client_core::Exit::StartFailed(
+                crate::desktop_service::termination_outcome::UNCONFIRMED.into(),
+            )
+        },
+        CleanupPlan {
+            capture: Some(capture),
+            native: Some(native),
+        },
+        delayed,
+    )
+    .await
+}
+
 /// The Clear handler keeps its composer checks and reply wording; only its
 /// final dispatcher call uses this already elapsed native reservation.
 pub(crate) async fn dispatch_delayed(
@@ -1281,6 +1436,72 @@ async fn dispatch_reserved_plan(
     cleanup: Option<zerus_client_core::termination_cleanup::Capture>,
     delayed: Option<(zerus_client_core::end_action::Captured, Arc<Claim>)>,
 ) -> Result<Outcome, String> {
+    dispatch_reserved_original(
+        state,
+        target,
+        action,
+        request_id,
+        runner,
+        CleanupPlan {
+            capture: cleanup,
+            native: None,
+        },
+        delayed,
+    )
+    .await
+}
+
+/// Whether `computer`'s `hgs` selects a session by ID: a kept answer, else
+/// its help read now through `read` and kept (zerus-ucck P1c). The lock is
+/// never held while the help is read.
+fn selector_confirmed(
+    selectors: &Mutex<session_selector::Answers>,
+    hgs: &std::path::Path,
+    computer: &str,
+    read: impl FnOnce(&zerus_client_core::Invocation) -> zerus_client_core::Exit,
+) -> bool {
+    let lock = || selectors.lock().unwrap_or_else(PoisonError::into_inner);
+    if let Some(answer) = lock().get(hgs, computer, std::time::Instant::now()) {
+        return answer;
+    }
+    let exit = read(&session_selector::probe(computer));
+    lock().record(hgs, computer, &exit, std::time::Instant::now())
+}
+
+struct CleanupPlan {
+    capture: Option<zerus_client_core::termination_cleanup::Capture>,
+    native: Option<crate::desktop_service::termination_outcome::Confirmation>,
+}
+
+async fn dispatch_reserved_original(
+    state: &Actions,
+    target: Target,
+    action: Action,
+    request_id: String,
+    runner: impl Fn(
+            &std::path::Path,
+            &zerus_client_core::Invocation,
+            Option<&crate::readsync::NativeRead>,
+        ) -> zerus_client_core::Exit
+        + Send
+        + 'static,
+    cleanup: CleanupPlan,
+    delayed: Option<(zerus_client_core::end_action::Captured, Arc<Claim>)>,
+) -> Result<Outcome, String> {
+    let CleanupPlan {
+        capture: cleanup,
+        native,
+    } = cleanup;
+    if native.as_ref().is_some_and(|n| {
+        cleanup.as_ref() != Some(n.capture())
+            || target != n.capture().target
+            || action != Action::Terminate
+            || n.invocation().request_id.as_deref() != Some(request_id.as_str())
+    }) {
+        return Ok(failed(
+            zerus_client_core::termination_cleanup::STATE_CHANGED,
+        ));
+    }
     if let Some(refusal) = refused_before_claim(&target, &action) {
         return Ok(failed(refusal));
     }
@@ -1305,13 +1526,21 @@ async fn dispatch_reserved_plan(
         }
         None => state.begin(key, &action),
     };
-    let Some(_running) = running else {
+    let Some(running) = running else {
         return match Lane::of(&action) {
             Lane::Send => Ok(failed(ALREADY_SENDING)),
             Lane::Answer => Ok(failed(ALREADY_ANSWERING)),
             _ => Err(BUSY.into()),
         };
     };
+    // The service case moves this SAME native claim into its I/O resources.
+    // Dropping the async future cannot release it while a helper/pipe survives.
+    let (_running, native_hold): (Option<Running>, Option<Arc<dyn Send + Sync>>) =
+        if native.is_some() {
+            (None, Some(Arc::new(running)))
+        } else {
+            (Some(running), None)
+        };
     let mut read_call = if matches!(action, Action::MarkRead { .. }) {
         Some(state.read_delivery.admit().ok_or(BUSY)?)
     } else {
@@ -1324,24 +1553,40 @@ async fn dispatch_reserved_plan(
     {
         // Admission precedes both persistence and the native read effect.
         let _admission = state.admit_marks()?;
+        // Queued under the session ID the listing reports for the run, as
+        // queue_read_marks does (#1421 review), read before the queue lock.
+        let session_id = state.run_session_id(&target.computer, &target.run_id);
         // Saved before the call, so the mark survives a crash during it.
         state
             .marks
             .lock()
             .unwrap_or_else(PoisonError::into_inner)
-            .add(ReadMark {
-                computer: target.computer.clone(),
-                name: target.name.clone(),
-                run_id: target.run_id.clone(),
-                conversation_id: target.conversation_id.clone(),
-                reply_id: reply_id.clone(),
-                attention_signature: attention_signature.clone(),
-            });
+            .add_with_id(
+                ReadMark {
+                    computer: target.computer.clone(),
+                    name: target.name.clone(),
+                    run_id: target.run_id.clone(),
+                    conversation_id: target.conversation_id.clone(),
+                    reply_id: reply_id.clone(),
+                    attention_signature: attention_signature.clone(),
+                },
+                session_id,
+            );
     }
     // Building the call may read dropped files, so it runs off the async
     // workers with the call itself.
-    let hgs = default_hgs();
+    let ordinary_hgs = native.is_none().then(default_hgs);
     let (call_target, call_action) = (target.clone(), action.clone());
+    // An explicit action also selects its session by the acted-on row's ID.
+    // Delayed, cleanup and service confirmations keep their frozen scoped
+    // envelope, which already names the exact run and conversation.
+    let session_id = (native.is_none()
+        && cleanup.is_none()
+        && delayed.is_none()
+        && session_selector::selects(&action))
+    .then(|| state.listed_session_id(&target))
+    .flatten();
+    let selectors = Arc::clone(&state.selectors);
     let termination: Option<crate::pump::Termination> = (WriteKind::of(&action)
         == WriteKind::Terminate
         && !matches!(action, Action::TerminateShell { .. }))
@@ -1357,39 +1602,88 @@ async fn dispatch_reserved_plan(
     let delayed_receipt = delayed.as_ref().map(|(captured, _)| captured.clone());
     let native_read = read_call.as_mut().map(crate::readsync::Call::native);
     let ran = tauri::async_runtime::spawn_blocking(move || {
-        let plain =
-            |hgs: &std::path::Path, inv: &zerus_client_core::Invocation| runner(hgs, inv, None);
-        if let Some((captured, _)) = &delayed {
-            captured.checked_inspection(plain(&hgs, &captured.inspection()?))?;
+        let mut native = native
+            .map(|confirmation| {
+                confirmation.bind(
+                    native_hold.ok_or(crate::desktop_service::termination_outcome::UNCONFIRMED)?,
+                )
+            })
+            .transpose()?;
+        let hgs = match &native {
+            Some(controller) => controller.executable().to_owned(),
+            None => ordinary_hgs.ok_or(zerus_client_core::termination_cleanup::STATE_CHANGED)?,
+        };
+        let mut inv = {
+            let plain = |hgs: &std::path::Path, inv: &zerus_client_core::Invocation| match &native {
+                Some(controller) => controller.read(inv),
+                None => runner(hgs, inv, None),
+            };
+            if let Some((captured, _)) = &delayed {
+                captured.checked_inspection(plain(&hgs, &captured.inspection()?))?;
+            }
+            if let Some(capture) = &cleanup {
+                crate::termination_cleanup::probe(&hgs, &capture.target, &plain)?;
+                let fresh = crate::termination_cleanup::inspection(
+                    &hgs,
+                    &capture.target,
+                    &capture.machine,
+                    &plain,
+                )?;
+                if !capture.recheck(&fresh) {
+                    return Err(zerus_client_core::termination_cleanup::STATE_CHANGED.into());
+                }
+            }
+            if matches!(call_action, Action::Recovery { .. }) {
+                let inspection = details_invocation(&call_target, None);
+                recovery_preflight(&call_target, &call_action, plain(&hgs, &inspection))?;
+            }
+            if let Some(controller) = &native {
+                controller.invocation().clone()
+            } else if let Some(capture) = &cleanup {
+                capture.invocation(&request_id)?
+            } else if let Some((captured, _)) = &delayed {
+                captured.invocation(&request_id)?
+            } else {
+                let id = session_id.as_deref().filter(|_| {
+                    selector_confirmed(&selectors, &hgs, &call_target.computer, |probe| {
+                        runner(&hgs, probe, None)
+                    })
+                });
+                selected_invocation(&call_target, &call_action, &request_id, id)?
+            }
+        };
+        if native.is_none() {
+            if let Some(capture) = &cleanup {
+                zerus_client_core::worktrees::guard(&mut inv.args, &capture.machine);
+            }
         }
-        if let Some(capture) = &cleanup {
-            crate::termination_cleanup::probe(&hgs, &capture.target, &plain)?;
+        let exit = if let Some(mut controller) = native.take() {
+            controller.retain()?;
+            controller.recheck_scope()?;
+            if let Some((captured, _)) = &delayed {
+                captured.checked_inspection(controller.read(&captured.inspection()?))?;
+            }
+            let capture = controller.capture();
             let fresh = crate::termination_cleanup::inspection(
                 &hgs,
                 &capture.target,
                 &capture.machine,
-                &plain,
+                &|_, invocation| controller.read(invocation),
             )?;
-            if !capture.recheck(&fresh) {
+            if !capture.recheck(&fresh) || !controller.current() {
                 return Err(zerus_client_core::termination_cleanup::STATE_CHANGED.into());
             }
-        }
-        if matches!(call_action, Action::Recovery { .. }) {
-            let inspection = details_invocation(&call_target, None);
-            let fresh = plain(&hgs, &inspection);
-            recovery_preflight(&call_target, &call_action, fresh)?;
-        }
-        let mut inv = if let Some(capture) = &cleanup {
-            capture.invocation(&request_id)?
-        } else if let Some((captured, _)) = &delayed {
-            captured.invocation(&request_id)?
+            controller.begin_dispatch(&inv)?;
+            controller.run_native(&inv)
         } else {
-            invocation(&call_target, &call_action, &request_id)?
+            runner(&hgs, &inv, native_read.as_ref())
         };
-        if let Some(capture) = &cleanup {
-            zerus_client_core::worktrees::guard(&mut inv.args, &capture.machine);
+        if session_selector::unsupported(&call_target, &inv, &exit) {
+            selectors
+                .lock()
+                .unwrap_or_else(PoisonError::into_inner)
+                .forget(&hgs, &call_target.computer);
         }
-        let exit = runner(&hgs, &inv, native_read.as_ref());
         drop(native_read);
         Ok::<_, String>((inv, exit))
     })
@@ -1866,7 +2160,7 @@ pub fn copy_command(computer: String, name: String, archive_id: Option<String>) 
 
 /// Read marks the host has not shown yet, for the store to apply optimistically.
 #[tauri::command]
-pub fn pending_read_marks(state: State<'_, Actions>) -> Vec<ReadMark> {
+pub fn pending_read_marks(state: State<'_, Actions>) -> Vec<Queued> {
     if crate::desktop_service::mode() {
         // Service rows get indexed retained overlays at next_batch instead of
         // mirroring the complete frozen queue into the webview a second time.
@@ -1876,7 +2170,7 @@ pub fn pending_read_marks(state: State<'_, Actions>) -> Vec<ReadMark> {
         .marks
         .lock()
         .unwrap_or_else(PoisonError::into_inner)
-        .pending()
+        .queued()
 }
 
 /// Queues read marks for their hosts (`FleetState::queueRead`): each is merged
@@ -1888,7 +2182,7 @@ pub fn pending_read_marks(state: State<'_, Actions>) -> Vec<ReadMark> {
 pub fn queue_read_marks(
     state: State<'_, Actions>,
     marks: Vec<ReadMark>,
-) -> Result<Vec<ReadMark>, String> {
+) -> Result<Vec<Queued>, String> {
     if crate::desktop_service::mode() {
         return Err("Use the background service read-intent route.".into());
     }
@@ -1901,9 +2195,9 @@ pub fn queue_read_marks(
 #[tauri::command]
 pub async fn attention_marks(state: State<'_, Attention>) -> Result<AttentionSnapshot, String> {
     let shared = Arc::clone(&state.shared);
-    tauri::async_runtime::spawn_blocking(move || shared.snapshot())
+    tauri::async_runtime::spawn_blocking(move || shared.snapshot_checked())
         .await
-        .map_err(|error| error.to_string())
+        .map_err(|error| error.to_string())?
 }
 
 /// Writes (`Some`) or removes (`None`) attention marks and read replies; each
@@ -1915,8 +2209,8 @@ pub fn update_attention_marks(
     state: State<'_, Attention>,
     marks: BTreeMap<String, Option<Mark>>,
     replies: BTreeMap<String, Option<String>>,
-) {
-    state.update(marks, replies);
+) -> Result<(), String> {
+    state.try_update(marks, replies)
 }
 
 #[cfg(test)]
@@ -2752,6 +3046,393 @@ mod tests {
         assert!(weak.upgrade().is_none());
     }
 
+    /// zerus-ucck P2c-2b: a queued mark takes the session ID the listing
+    /// reports for its exact run, so two sessions that share a label keep
+    /// their own marks; a run the listing does not show stays by name.
+    #[test]
+    fn read_marks_are_queued_by_the_listed_session_id() {
+        use zerus_client_core::{Change, ComputerStatus};
+        let path =
+            std::env::temp_dir().join(format!("zerus-marks-by-id-{}.json", std::process::id()));
+        let _ = std::fs::remove_file(&path);
+        let actions = Actions::new(path.clone());
+        let pump = crate::pump::Pump::default();
+        let computer = ComputerId::from("mac");
+        pump.push(Change::Computer {
+            computer: computer.clone(),
+            status: ComputerStatus::Live,
+        });
+        let ids = [
+            "3f2a9c1d-6b7e-4c2a-9d1f-0a1b2c3d4e5f",
+            "7be01d44-6b7e-4c2a-9d1f-0a1b2c3d4e5f",
+        ];
+        for (run, id) in [("run-a", ids[0]), ("run-b", ids[1])] {
+            pump.push(Change::Upsert {
+                computer: computer.clone(),
+                key: format!("run:{run}"),
+                row: ViewRow {
+                    name: "claude/sample-project/review".into(),
+                    run_id: Some(run.into()),
+                    session_id: Some(id.into()),
+                    state: "running".into(),
+                    ..Default::default()
+                },
+            });
+        }
+        actions.set_termination_pump(pump.clone());
+        let mark = |run: &str, reply: &str| ReadMark {
+            computer: "mac".into(),
+            name: "claude/sample-project/review".into(),
+            run_id: run.into(),
+            conversation_id: format!("conv-{run}"),
+            reply_id: Some(reply.into()),
+            attention_signature: None,
+        };
+        let queued = actions
+            .queue_marks(vec![
+                mark("run-a", "r1"),
+                mark("run-b", "r2"),
+                mark("run-gone", "r3"),
+            ])
+            .unwrap();
+        let mut found: Vec<_> = queued
+            .iter()
+            .map(|q| (q.mark.run_id.as_str(), q.session_id.as_deref()))
+            .collect();
+        found.sort();
+        assert_eq!(
+            found,
+            [
+                ("run-a", Some(ids[0])),
+                ("run-b", Some(ids[1])),
+                ("run-gone", None)
+            ]
+        );
+        let _ = std::fs::remove_file(&path);
+        drop(pump);
+    }
+
+    /// #1421 review (1): an explicit Mark read is queued, and saved before
+    /// its call, under the session ID the listing reports for its run.
+    #[test]
+    fn an_explicit_mark_read_is_queued_by_the_listed_session_id() {
+        use zerus_client_core::{Change, ComputerStatus};
+        let target = Target {
+            computer: "studio".into(),
+            ..review()
+        };
+        let path =
+            std::env::temp_dir().join(format!("zerus-markread-by-id-{}.json", std::process::id()));
+        let _ = std::fs::remove_file(&path);
+        let actions = Actions::new(path.clone());
+        let pump = crate::pump::Pump::default();
+        let computer = ComputerId::from("studio");
+        pump.push(Change::Computer {
+            computer: computer.clone(),
+            status: ComputerStatus::Live,
+        });
+        pump.push(Change::Upsert {
+            computer,
+            key: format!("run:{}", target.run_id),
+            row: ViewRow {
+                name: target.name.clone(),
+                run_id: Some(target.run_id.clone()),
+                session_id: Some(SELECTED.into()),
+                state: "running".into(),
+                ..Default::default()
+            },
+        });
+        actions.set_termination_pump(pump.clone());
+        // The host cannot be reached: the saved mark stays to be retried.
+        let (outcome, _) = selector_dispatch(
+            &actions,
+            &target,
+            Action::MarkRead {
+                reply_id: Some("r1".into()),
+                attention_signature: None,
+            },
+            exit(0, "usage\n", ""),
+            exit(255, "", "ssh: connect to host studio: Connection refused"),
+        );
+        let queued = ReadMarks::load(path.clone()).queued();
+        assert_eq!(queued.len(), 1, "{outcome:?}");
+        assert_eq!(queued[0].session_id.as_deref(), Some(SELECTED));
+        assert_eq!(queued[0].mark.name, target.name);
+        let _ = std::fs::remove_file(&path);
+        drop(pump);
+    }
+
+    /// zerus-ucck P1c fixture: a live computer listing `target`'s run under
+    /// `name`, with `session_id`, and the calls a stand-in `hgs` received.
+    fn selector_fixture(
+        target: &Target,
+        name: &str,
+        session_id: Option<&str>,
+    ) -> (Actions, crate::pump::Pump) {
+        use zerus_client_core::{Change, ComputerStatus};
+        let actions = Actions::new(std::env::temp_dir().join("zerus-selector-test-marks.json"));
+        let pump = crate::pump::Pump::default();
+        let computer = ComputerId::from(target.computer.as_str());
+        pump.push(Change::Computer {
+            computer: computer.clone(),
+            status: ComputerStatus::Live,
+        });
+        pump.push(Change::Upsert {
+            computer,
+            key: format!("run:{}", target.run_id),
+            row: ViewRow {
+                name: name.into(),
+                run_id: Some(target.run_id.clone()),
+                session_id: session_id.map(str::to_owned),
+                state: "running".into(),
+                ..Default::default()
+            },
+        });
+        actions.set_termination_pump(pump.clone());
+        (actions, pump)
+    }
+
+    /// One dispatch through a stand-in `hgs` that answers `--help` with
+    /// `help` and every other call with `answer`; the calls it received.
+    fn selector_dispatch(
+        actions: &Actions,
+        target: &Target,
+        action: Action,
+        help: zerus_client_core::Exit,
+        answer: zerus_client_core::Exit,
+    ) -> (Outcome, Vec<Vec<String>>) {
+        let calls = Arc::new(Mutex::new(Vec::new()));
+        let seen = Arc::clone(&calls);
+        let outcome = tauri::async_runtime::block_on(dispatch_with(
+            actions,
+            target.clone(),
+            action,
+            uuid::Uuid::new_v4().to_string(),
+            move |_, inv| {
+                seen.lock().unwrap().push(inv.args.clone());
+                if inv.args.last().is_some_and(|arg| arg == "--help") {
+                    help.clone()
+                } else {
+                    answer.clone()
+                }
+            },
+        ))
+        .unwrap();
+        let calls = calls.lock().unwrap().clone();
+        (outcome, calls)
+    }
+
+    const SELECTED: &str = "3f2a9c1d-0b4e-4d6a-9c1d-2e3f4a5b6c7d";
+
+    fn exit(code: i32, stdout: &str, stderr: &str) -> zerus_client_core::Exit {
+        zerus_client_core::Exit::Code {
+            code,
+            stdout: stdout.as_bytes().to_vec(),
+            stderr: stderr.into(),
+        }
+    }
+
+    /// An explicit action selects the listed session by ID after the name,
+    /// here and on a peer, once that computer's help confirms the selector.
+    /// The answer is kept, so the next action reads no help.
+    #[test]
+    fn an_explicit_action_selects_the_listed_session_by_id_once_confirmed() {
+        let marker = exit(0, "usage\n       session-id-selector-v1\n", "");
+        for computer in ["studio", ""] {
+            let target = Target {
+                computer: computer.into(),
+                ..review()
+            };
+            // Renamed since the action was chosen: the run still names it,
+            // and the CLI refuses the old name.
+            let (actions, _pump) =
+                selector_fixture(&target, "claude/sample-project/renamed", Some(SELECTED));
+            let alias: Vec<String> = (!computer.is_empty())
+                .then(|| format!("@{computer}"))
+                .into_iter()
+                .collect();
+            let with = |rest: &[&str]| -> Vec<String> {
+                alias
+                    .iter()
+                    .cloned()
+                    .chain(rest.iter().map(|s| s.to_string()))
+                    .collect()
+            };
+            let paused = with(&["pause", &target.name, "--session-id", SELECTED]);
+            let (outcome, calls) = selector_dispatch(
+                &actions,
+                &target,
+                Action::Pause,
+                marker.clone(),
+                exit(0, "", ""),
+            );
+            assert!(matches!(outcome, Outcome::Done { .. }), "{outcome:?}");
+            assert_eq!(calls, [with(&["--help"]), paused.clone()]);
+            let (_, calls) = selector_dispatch(
+                &actions,
+                &target,
+                Action::Pause,
+                marker.clone(),
+                exit(0, "", ""),
+            );
+            assert_eq!(calls, [paused], "the confirmed answer is kept");
+            // A non-selecting action, and another run, keep the name form.
+            let stop = Action::StopProcess {
+                process_id: "p-1".into(),
+                archive_id: None,
+                generation: None,
+            };
+            let (_, calls) =
+                selector_dispatch(&actions, &target, stop, marker.clone(), exit(1, "", "x"));
+            assert!(
+                calls
+                    .iter()
+                    .all(|call| !call.contains(&"--session-id".to_owned())),
+                "{calls:?}"
+            );
+            let resumed = Target {
+                run_id: "run-2".into(),
+                ..target.clone()
+            };
+            let (_, calls) = selector_dispatch(
+                &actions,
+                &resumed,
+                Action::Pause,
+                marker.clone(),
+                exit(0, "", ""),
+            );
+            assert_eq!(calls, [with(&["pause", &target.name])]);
+        }
+    }
+
+    /// Without a listed ID, on an older computer, or when its help cannot be
+    /// read, the action keeps its name form. Only a finished answer is kept.
+    #[test]
+    fn an_older_or_unreachable_computer_keeps_the_name_form() {
+        let target = review();
+        let paused = vec!["@studio".to_owned(), "pause".into(), target.name.clone()];
+        let help = vec!["@studio".to_owned(), "--help".into()];
+        let (actions, _pump) = selector_fixture(&target, &target.name, None);
+        let (_, calls) = selector_dispatch(
+            &actions,
+            &target,
+            Action::Pause,
+            exit(0, "session-id-selector-v1\n", ""),
+            exit(0, "", ""),
+        );
+        assert_eq!(
+            calls,
+            std::slice::from_ref(&paused),
+            "no listed ID: no probe"
+        );
+
+        let (actions, _pump) = selector_fixture(&target, &target.name, Some(SELECTED));
+        for _ in 0..2 {
+            let (_, calls) = selector_dispatch(
+                &actions,
+                &target,
+                Action::Pause,
+                exit(255, "", "ssh: unreachable"),
+                exit(0, "", ""),
+            );
+            assert_eq!(
+                calls,
+                [help.clone(), paused.clone()],
+                "an unread help is asked again"
+            );
+        }
+        let older = exit(0, "usage\n  session-id-selector-v10\n", "");
+        let (_, calls) = selector_dispatch(
+            &actions,
+            &target,
+            Action::Pause,
+            older.clone(),
+            exit(0, "", ""),
+        );
+        assert_eq!(calls, [help.clone(), paused.clone()]);
+        let (_, calls) =
+            selector_dispatch(&actions, &target, Action::Pause, older, exit(0, "", ""));
+        assert_eq!(calls, [paused], "the older answer is kept");
+    }
+
+    /// A refused ID is a stale target: the one call fails as a changed
+    /// session and nothing retries it. A peer that lost the selector drops
+    /// its kept answer, so the next action reads its help again.
+    #[test]
+    fn a_refused_session_id_is_a_stale_target_and_is_never_retried() {
+        let target = review();
+        let marker = exit(0, "session-id-selector-v1\n", "");
+        let (actions, _pump) = selector_fixture(&target, &target.name, Some(SELECTED));
+        let send = Action::Send {
+            text: "hello".into(),
+            attachments: Vec::new(),
+            agent_id: None,
+            expected_compaction_id: None,
+        };
+        for (action, code, stderr) in [
+            (
+                Action::Pause,
+                1,
+                format!(
+                    "hgs: Session ID {SELECTED} is claude/sample-project/renamed, not {}\n",
+                    target.name
+                ),
+            ),
+            (
+                send.clone(),
+                1,
+                format!("hgs: No live or saved session has ID {SELECTED}\n"),
+            ),
+            (
+                send,
+                5,
+                format!("hgs: Several sessions carry ID {SELECTED}: a, b\n"),
+            ),
+        ] {
+            let (outcome, calls) = selector_dispatch(
+                &actions,
+                &target,
+                action,
+                marker.clone(),
+                exit(code, "", &stderr),
+            );
+            assert_eq!(
+                outcome,
+                Outcome::Failed {
+                    detail: zerus_client_core::termination_cleanup::STATE_CHANGED.into()
+                }
+            );
+            let effects = calls
+                .iter()
+                .filter(|call| call.last() != Some(&"--help".to_owned()));
+            assert_eq!(effects.count(), 1, "{calls:?}");
+        }
+        let gate = exit(
+            1,
+            "",
+            "hgs: update the selected computer to select sessions by ID\n",
+        );
+        let (outcome, calls) =
+            selector_dispatch(&actions, &target, Action::Pause, marker.clone(), gate);
+        assert!(matches!(outcome, Outcome::Failed { .. }));
+        assert_eq!(calls.len(), 1, "the kept answer was used: {calls:?}");
+        let (_, calls) = selector_dispatch(
+            &actions,
+            &target,
+            Action::Pause,
+            exit(0, "usage\n", ""),
+            exit(0, "", ""),
+        );
+        assert_eq!(
+            calls,
+            [
+                vec!["@studio".to_owned(), "--help".into()],
+                vec!["@studio".to_owned(), "pause".into(), target.name.clone()],
+            ],
+            "the dropped answer is read again"
+        );
+    }
+
     #[test]
     fn a_send_carries_the_callers_request_id_into_its_one_call() {
         use zerus_client_core::Exit;
@@ -3482,7 +4163,8 @@ mod tests {
             ])
             .unwrap();
         let expected = vec![mark("claude/sample-project/review", Some("r1"), Some("s1"))];
-        assert_eq!(pending, expected);
+        let marks: Vec<ReadMark> = pending.into_iter().map(|queued| queued.mark).collect();
+        assert_eq!(marks, expected);
         assert_eq!(actions.pending_marks(), expected);
         // The command does no file I/O; the worker flushes before it sends.
         assert!(!path.exists());

@@ -48,10 +48,15 @@ pub(super) fn binding(name: &str) -> Result<Value> {
     {
         return Err("Invalid DeepSeek binding".into());
     }
+    session_id::verify(&value)?;
     Ok(value)
 }
-fn save(value: &Value) -> Result<()> {
-    atomic(&binding_path(string(value, "name")), &value.to_string())
+/// Saves the binding, keeping its durable session ID on the caller's record.
+pub(super) fn save(value: &mut Value) -> Result<()> {
+    ensure_session_id(value);
+    atomic(&binding_path(string(value, "name")), &value.to_string())?;
+    session_index::note(value, session_index::Kind::DeepSeek);
+    Ok(())
 }
 fn native_home() -> PathBuf {
     nonempty_env("DSH_HOME")
@@ -101,6 +106,12 @@ fn search_rpc(_: &Value, _: Value) -> Result<Value> {
 fn ensure_host(_: &Value) -> Result<()> {
     Err(UNSUPPORTED.into())
 }
+const HOST_UNAVAILABLE: &str = "DeepSeek host is unavailable; resume the session to reconnect";
+/// A request the host never got whole. Every `bridge.mjs` since the first
+/// runs a request only once a chunk holds its terminating newline and has no
+/// end handler, so a request cut short never runs: a definite refusal
+/// (zerus-1wchz, pinned by `the_bridge_runs_only_a_newline_terminated_request`).
+const INCOMPLETE: &str = "The DeepSeek host never received a complete request";
 #[cfg(unix)]
 fn rpc(record: &Value, method: &str, params: Value) -> Result<Value> {
     rpc_within(record, method, params, Duration::from_secs(35))
@@ -114,15 +125,24 @@ fn search_rpc(record: &Value, params: Value) -> Result<Value> {
 }
 #[cfg(unix)]
 fn rpc_within(record: &Value, method: &str, params: Value, read_timeout: Duration) -> Result<Value> {
-    let mut socket = UnixStream::connect(host_dir(record).join("host.sock"))
-        .map_err(|_| "DeepSeek host is unavailable; resume the session to reconnect")?;
-    socket
-        .set_read_timeout(Some(read_timeout))
-        .map_err(|e| e.to_string())?;
-    socket
-        .set_write_timeout(Some(Duration::from_secs(10)))
-        .map_err(|e| e.to_string())?;
-    writeln!(socket, "{}", json!({"method":method,"params":params})).map_err(|e| e.to_string())?;
+    rpc_at(
+        &host_dir(record).join("host.sock"),
+        method,
+        params,
+        read_timeout,
+    )
+}
+#[cfg(unix)]
+fn rpc_at(path: &Path, method: &str, params: Value, read_timeout: Duration) -> Result<Value> {
+    let mut socket = UnixStream::connect(path).map_err(|_| HOST_UNAVAILABLE)?;
+    // The request's last byte is its newline, and the compact JSON holds no
+    // other, so a failed write never wrote it and the host never ran it.
+    (|| -> io::Result<()> {
+        socket.set_read_timeout(Some(read_timeout))?;
+        socket.set_write_timeout(Some(Duration::from_secs(10)))?;
+        writeln!(socket, "{}", json!({"method":method,"params":params}))
+    })()
+    .map_err(|e| format!("{INCOMPLETE}: {e}"))?;
     let mut response = String::new();
     BufReader::new(socket.take(32 * 1024 * 1024))
         .read_line(&mut response)
@@ -406,7 +426,7 @@ pub(crate) fn launch(
         create_session(&mut record)?;
         record["paused"] = json!(false);
         record["run_id"] = json!(uuid::Uuid::new_v4().to_string());
-        save(&record)?;
+        save(&mut record)?;
         return Ok(());
     }
     let cwd = crate::platform::canonical(cwd).map_err(|e| e.to_string())?;
@@ -668,6 +688,9 @@ fn normalize(record: &Value, row: &Value, inspected: &Value) -> Value {
         "prompt":outline.map(|v|v["prompt"].clone()),"activity_detail":outline.map(|v|v["response"].clone()),
         "reply_id":reply.map(|v|format!("dsh-turn-{}",v["seq"].as_u64().unwrap_or(0))),"reply_at":if reply.is_some(){row["updatedAt"].as_f64().unwrap_or(0.0)/1000.0}else{0.0},
         "native_ui_available":true,"settings_change_supported":alive,"send_available":alive && !auth_required && record["permissions_pending"] != true});
+    if !string(record, "session_id").is_empty() {
+        value["session_id"] = record["session_id"].clone();
+    }
     if pending {
         // Native question IDs distinguish one request from the next for read
         // marks and notifications; their generation-bound hashes do not.
@@ -688,8 +711,10 @@ fn normalize(record: &Value, row: &Value, inspected: &Value) -> Value {
     }
     value["account_id"] = json!("native-dsh");
     value["account_home"] = record["agent_home"].clone();
+    // Always present, null for a non-fork: as fork::summary, so a client tells
+    // a session that is not a fork from an older hgs without these fields.
     for key in ["fork_parent_id", "fork_source_name"] {
-        if record[key].is_string() { value[key] = record[key].clone(); }
+        value[key] = if record[key].is_string() { record[key].clone() } else { Value::Null };
     }
     // Present only while the official Schedule bundle is loaded.
     if row["schedules"].is_object() {
@@ -862,8 +887,9 @@ pub(super) fn fork(
     {
         return Err("source session changed; refresh before forking".into());
     }
+    // An archived session's name is free for a new one, as for other agents.
     let mut occupied: std::collections::BTreeSet<String> = binding_records().iter()
-        .chain(records()?.iter()).chain(archive::records()?.iter())
+        .chain(records()?.iter())
         .map(|record| string(record, "name").to_owned()).collect();
     occupied.insert(name.to_owned());
     let target = fork::choose_name(name, tag, &occupied)?;
@@ -911,10 +937,16 @@ pub(super) fn fork(
         return Err("DeepSeek fork acknowledgement did not match; check Native UI".into());
     }
     let run = uuid::Uuid::new_v4().to_string();
-    save(&json!({"backend":"dsh","name":target,"agent":"dsh","agent_home":record["agent_home"],"cwd":record["cwd"],
+    save(&mut json!({"backend":"dsh","name":target,"agent":"dsh","agent_home":record["agent_home"],"cwd":record["cwd"],
         "conversation_id":child,"run_id":run,"created":now(),"launch_id":null,"paused":false,
         "fork_parent_id":record["conversation_id"],"fork_source_name":name}))?;
     let _ = fs::remove_file(&pending);
+    // A fork starts in its source session's project (zerus-zjsj), written
+    // after the bindings lock is released (zerus-wx3k).
+    drop(_guard);
+    if let Ok(config) = crate::config::Config::load() {
+        crate::swarm::inherit_fork_project(&config, &target, name, None, &run, &json!(child));
+    }
     match scope {
         Some(scope) => scope.result(&target, &run, child, None),
         None => println!("hgs: forked {name} as {target}"),
@@ -1232,7 +1264,37 @@ pub(super) fn interrupt(snapshot: &Value) -> Result<Value> {
     if record["run_id"]!=snapshot["run_id"] || record["conversation_id"]!=snapshot["conversation_id"] {
         return Err("DeepSeek session changed before interruption".into());
     }
-    rpc(&record,"interrupt",json!({"sessionId":record["conversation_id"],"generation":snapshot["host_generation"],"turnStarted":snapshot["turn_started"]}))
+    interrupt_with(&record, snapshot, rpc)
+}
+/// The interrupt request of `snapshot`'s turn, through `rpc`, with each
+/// error classified by [`interrupt_refusal`].
+fn interrupt_with(
+    record: &Value,
+    snapshot: &Value,
+    rpc: impl FnOnce(&Value, &str, Value) -> Result<Value>,
+) -> Result<Value> {
+    rpc(record,"interrupt",json!({"sessionId":record["conversation_id"],"generation":snapshot["host_generation"],"turnStarted":snapshot["turn_started"]}))
+        .map_err(interrupt_refusal)
+}
+/// The host disarms goals and aborts a compaction before its native cancel,
+/// so only a refusal before those effects is definite (zerus-1wchz): no host
+/// to reach, a request it never got whole, or one of the bridge's own checks
+/// ahead of them.
+fn interrupt_refusal(error: String) -> String {
+    const BEFORE_EFFECTS: [&str; 4] = [
+        HOST_UNAVAILABLE,
+        "DeepSeek host changed",
+        "Use the parent to manage a subagent",
+        "DeepSeek turn changed; nothing was stopped",
+    ];
+    if BEFORE_EFFECTS.contains(&error.as_str())
+        || error.starts_with(INCOMPLETE)
+        || error.contains("delivery uncertain")
+    {
+        error
+    } else {
+        format!("Interrupt delivery uncertain: {error}")
+    }
 }
 
 fn checked_request(record: &Value) -> Result<Value> {
@@ -1287,7 +1349,7 @@ pub(super) fn session_action(name: &str, action: &str, new_name: Option<&str>, s
         "forget"=>{archive::remove_synced(&binding_path(name))?;return Ok(());},
         _=>unreachable!(),
     }
-    save(&record)?;
+    save(&mut record)?;
     if action=="rename" && new_name!=Some(name) {
         archive::remove_synced(&binding_path(name))?;
         // The rename is done; losing read marks only shows a reply as unread again.
@@ -1534,7 +1596,7 @@ pub(crate) fn dispatch(command: &str, args: &[String]) -> Result<i32> {
             if command == "resume" {
                 record["run_id"] = json!(uuid::Uuid::new_v4().to_string());
             }
-            save(&record)?;
+            save(&mut record)?;
         }
         "rename" => {
             let new = args.get(1).ok_or("Choose a new session name")?;
@@ -1559,7 +1621,7 @@ pub(crate) fn dispatch(command: &str, args: &[String]) -> Result<i32> {
             notifications::anchor(&mut record);
             record["name"] = json!(new);
             recovery::rename_job(name,new,string(&record,"run_id"))?;
-            save(&record)?;
+            save(&mut record)?;
             fs::remove_file(binding_path(name)).map_err(|e| e.to_string())?;
             // The rename is done; losing read marks only shows a reply as unread again.
             let _ = read_marks::rename_owner(name, new);
@@ -1753,6 +1815,146 @@ mod compatibility_tests {
         for ping in [json!({"protocol":1,"version":"0.2.1-rc.5"}),
             json!({"protocol":2,"version":"0.2.1-rc.2"}), json!({"protocol":1})] {
             assert!(!compatible_adapter(&ping));
+        }
+    }
+}
+
+#[cfg(all(test, unix))]
+mod delivery_tests {
+    use super::*;
+    use std::os::unix::net::UnixListener;
+
+    /// zerus-1wchz: a host that takes the connection and goes away while the
+    /// request is still being written. The bridge runs only a whole,
+    /// newline-terminated request, so this one never ran: a definite refusal.
+    #[test]
+    fn a_request_cut_short_is_a_definite_refusal() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("host.sock");
+        let listener = UnixListener::bind(&path).unwrap();
+        let host = std::thread::spawn(move || drop(listener.accept().unwrap()));
+        // Larger than any socket buffer: the write is still running when the
+        // host closes, so it fails rather than the read.
+        let content = "x".repeat(16 * 1024 * 1024);
+        let error = rpc_at(
+            &path,
+            "send",
+            json!({"sessionId":"session-A","content":content}),
+            Duration::from_secs(5),
+        )
+        .unwrap_err();
+        host.join().unwrap();
+        assert!(error.starts_with(INCOMPLETE), "{error}");
+        assert!(!error.contains("delivery uncertain"), "{error}");
+        assert_eq!(interrupt_refusal(error.clone()), error);
+    }
+
+    /// Every shipped bridge, the running ones included (a resident host is
+    /// never reloaded), runs a request only from a chunk holding its newline
+    /// and has no end handler. If that changes, a cut-short request may run,
+    /// and `INCOMPLETE` stops being a definite refusal.
+    #[test]
+    fn the_bridge_runs_only_a_newline_terminated_request() {
+        assert_eq!(BRIDGE.matches("socket.on('data', chunk => {").count(), 1);
+        assert_eq!(
+            BRIDGE.matches("if (!chunk.includes(10)) return;").count(),
+            1
+        );
+        for handler in [
+            "readline",
+            "createInterface",
+            "on('end'",
+            "once('end'",
+            "on('close'",
+            "once('close'",
+        ] {
+            assert!(!BRIDGE.contains(handler), "{handler}");
+        }
+    }
+
+    /// The production interrupt path, answered by a host: a failure after the
+    /// bridge's own checks is uncertain, one of those checks stays definite.
+    #[test]
+    fn an_interrupt_refused_after_its_effects_is_uncertain_through_the_host() {
+        let record = json!({"conversation_id":"session-A"});
+        let snapshot = json!({"host_generation":"host-1","turn_started":1793000000.5});
+        for (error, expected) in [
+            (
+                "Session not found",
+                "Interrupt delivery uncertain: Session not found",
+            ),
+            (
+                "DeepSeek turn changed; nothing was stopped",
+                "DeepSeek turn changed; nothing was stopped",
+            ),
+            ("DeepSeek host changed", "DeepSeek host changed"),
+        ] {
+            let dir = tempfile::tempdir().unwrap();
+            let path = dir.path().join("host.sock");
+            let listener = UnixListener::bind(&path).unwrap();
+            let host = std::thread::spawn(move || {
+                let (mut socket, _) = listener.accept().unwrap();
+                let mut request = String::new();
+                BufReader::new(&socket).read_line(&mut request).unwrap();
+                writeln!(socket, "{}", json!({"ok":false,"error":error})).unwrap();
+                serde_json::from_str::<Value>(&request).unwrap()
+            });
+            let answer = interrupt_with(&record, &snapshot, |record, method, params| {
+                assert_eq!(record["conversation_id"], "session-A");
+                rpc_at(&path, method, params, Duration::from_secs(5))
+            });
+            assert_eq!(answer.unwrap_err(), expected);
+            assert_eq!(
+                host.join().unwrap(),
+                json!({"method":"interrupt","params":{"sessionId":"session-A",
+                    "generation":"host-1","turnStarted":1793000000.5}})
+            );
+        }
+    }
+
+    #[test]
+    fn no_host_to_reach_is_a_definite_refusal() {
+        let dir = tempfile::tempdir().unwrap();
+        let error = rpc_at(
+            &dir.path().join("host.sock"),
+            "send",
+            json!({}),
+            Duration::from_secs(1),
+        )
+        .unwrap_err();
+        assert_eq!(error, HOST_UNAVAILABLE);
+        assert_eq!(interrupt_refusal(error), HOST_UNAVAILABLE);
+    }
+
+    /// The bridge's own checks ahead of its effects stay definite; anything
+    /// after them may follow a stopped turn.
+    #[test]
+    fn only_an_interrupt_refused_before_its_effects_is_definite() {
+        for definite in [
+            "DeepSeek host changed",
+            "Use the parent to manage a subagent",
+            "DeepSeek turn changed; nothing was stopped",
+            HOST_UNAVAILABLE,
+        ] {
+            assert_eq!(interrupt_refusal(definite.into()), definite);
+        }
+        let incomplete = format!("{INCOMPLETE}: Broken pipe (os error 32)");
+        assert_eq!(interrupt_refusal(incomplete.clone()), incomplete);
+        for already in [
+            "Native request delivery uncertain: Broken pipe (os error 32)",
+            "Invalid native response; delivery uncertain: EOF while parsing a value",
+        ] {
+            assert_eq!(interrupt_refusal(already.into()), already);
+        }
+        for after in [
+            "Session not found",
+            "DeepSeek host changed; refresh Processes",
+            "",
+        ] {
+            assert_eq!(
+                interrupt_refusal(after.into()),
+                format!("Interrupt delivery uncertain: {after}")
+            );
         }
     }
 }

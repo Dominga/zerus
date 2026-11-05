@@ -1,6 +1,8 @@
 use super::*;
 use serde_json::json;
 
+mod upgrade;
+
 const EPOCH: &str = "00000000-0000-4000-8000-000000000001";
 const REQUEST: &str = "00000000-0000-4000-8000-000000000002";
 
@@ -49,6 +51,47 @@ fn notification_preferences_can_only_be_attached_by_the_native_client() {
     let mut state = state();
     state.status(&value).unwrap();
     assert!(state.snapshot().notification_preferences.is_none());
+}
+
+#[test]
+fn held_task_message_inputs_are_read_from_each_status_and_never_guessed() {
+    let mut state = state();
+    state.frame(&frame(0, "hello", status())).unwrap();
+    assert_eq!(
+        state.snapshot().task_message_inputs,
+        None,
+        "an older service"
+    );
+    let mut value = status();
+    value["operation_queue"]["kinds"]["task_message"]["inputs"] =
+        json!({"charged":3,"bytes":9,"review":2,"full":true});
+    state.frame(&frame(1, "status", value.clone())).unwrap();
+    assert_eq!(
+        state.snapshot().task_message_inputs,
+        Some(HeldInputs {
+            review: 2,
+            full: true
+        })
+    );
+    // A malformed or missing field is unknown, never zero.
+    for broken in [
+        json!({"review":-1,"full":true}),
+        json!({"review":2}),
+        json!(null),
+    ] {
+        value["operation_queue"]["kinds"]["task_message"]["inputs"] = broken;
+        state.frame(&frame(2, "heartbeat", value.clone())).unwrap();
+        assert_eq!(state.snapshot().task_message_inputs, None);
+    }
+    value["operation_queue"]["kinds"]["task_message"]["inputs"] =
+        json!({"charged":0,"bytes":0,"review":0,"full":false});
+    state.frame(&frame(3, "status", value)).unwrap();
+    assert_eq!(
+        state.snapshot().task_message_inputs,
+        Some(HeldInputs::default())
+    );
+    state.disconnect("offline");
+    assert_eq!(state.snapshot().task_message_inputs, None);
 }
 
 #[test]

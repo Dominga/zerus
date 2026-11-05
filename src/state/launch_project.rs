@@ -45,7 +45,7 @@ pub(crate) fn with_launch_binding<T>(
     } else {
         let record = read(name).map_err(anyhow::Error::msg)?;
         anyhow::ensure!(
-            matches(&record, live().map_err(anyhow::Error::msg)?.get(name)),
+            matches(&record, panes_of(&live().map_err(anyhow::Error::msg)?, &record)),
             "Native launch is no longer live"
         );
         record

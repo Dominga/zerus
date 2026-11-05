@@ -1,0 +1,12 @@
+/* Held task message copies: the review list and its confirmation. */
+@layer components {
+  .held-copies { list-style: none; margin: 10px 0 0; padding: 0; border-top: 1px solid var(--z-color-divider); }
+  .held-copy { display: grid; grid-template-columns: minmax(0, 1fr) auto; align-items: center; gap: 2px 12px; padding: 8px 0; border-bottom: 1px solid color-mix(in srgb, var(--z-color-divider) 55%, transparent); }
+  .held-copy .held-facts { grid-column: 1; display: flex; flex-wrap: wrap; align-items: baseline; gap: 2px 16px; min-width: 0; font-size: var(--fs-sm); }
+  .held-copy .held-facts code { font-size: var(--fs-xs); }
+  .held-copy .held-action { grid-column: 2; grid-row: 1 / 3; display: flex; flex-wrap: wrap; align-items: center; justify-content: flex-end; gap: 4px 8px; max-width: 240px; font-size: var(--fs-sm); text-align: right; }
+  .held-more { display: flex; flex-wrap: wrap; align-items: center; justify-content: center; gap: 8px; padding-top: 10px; }
+  .held-confirm { display: grid; grid-template-columns: auto minmax(0, 1fr); gap: 4px 16px; margin: 12px 0 0; }
+  .held-confirm dt { color: var(--z-color-label); }
+  .held-confirm dd { margin: 0; min-width: 0; overflow-wrap: anywhere; }
+}

@@ -1,6 +1,6 @@
 import { describe, expect, it } from "vitest";
 import { createRoot, createSignal } from "solid-js";
-import { keptItem, moveFocusOff } from "./composer-ui";
+import { allowRetryShown, keptItem, moveFocusOff } from "./composer-ui";
 import type { AttachmentView } from "../../types";
 
 const file = (reference: string, name: string): AttachmentView => ({ name, mime: "text/plain", reference, bytes: 10, path: `draft/1/1/${reference}`, excerpt: null });
@@ -52,5 +52,16 @@ describe("moveFocusOff", () => {
     moveFocusOff(() => false, detached);
     moveFocusOff(() => false, undefined);
     expect(disabled.focused + detached.focused).toBe(0);
+  });
+});
+
+describe("allowRetryShown", () => {
+  it("shows for an uncertain draft, never while the desktop service still sends it", () => {
+    expect(allowRetryShown({ uncertain: true }, false)).toBe(true);
+    expect(allowRetryShown({ uncertain: true, delivery_pending: false }, false)).toBe(true);
+    expect(allowRetryShown({ uncertain: true, delivery_pending: true }, false)).toBe(false);
+    expect(allowRetryShown({ uncertain: false }, false)).toBe(false);
+    expect(allowRetryShown({ uncertain: true }, true)).toBe(false);
+    expect(allowRetryShown(undefined, false)).toBe(false);
   });
 });

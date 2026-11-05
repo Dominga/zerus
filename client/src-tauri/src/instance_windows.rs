@@ -20,8 +20,15 @@ use windows_sys::Win32::{
     Foundation::*,
     Storage::FileSystem::*,
     System::{Pipes::*, Threading::*},
-    UI::WindowsAndMessaging::AllowSetForegroundWindow,
 };
+
+#[cfg(test)]
+use adversarial::allow_foreground as AllowSetForegroundWindow;
+#[cfg(not(test))]
+use windows_sys::Win32::UI::WindowsAndMessaging::AllowSetForegroundWindow;
+#[cfg(test)]
+#[path = "instance_windows_adversarial.rs"]
+mod adversarial;
 
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub enum Activation {
@@ -717,7 +724,17 @@ mod tests {
             assert!(bytes.len() <= 4096);
             let control: serde_json::Value = serde_json::from_slice(&bytes).unwrap();
             let mode = control["case"].as_str().unwrap().to_owned();
-            if matches!(mode.as_str(), "mode_check" | "mode_switch" | "mode_cancel") {
+            if matches!(
+                mode.as_str(),
+                "mode_check"
+                    | "mode_switch"
+                    | "mode_cancel"
+                    | "mode_review"
+                    | "mode_refresh_info"
+                    | "mode_refresh"
+                    | "mode_refresh_result"
+                    | "mode_refresh_cancel"
+            ) {
                 report_chain(std::process::id());
                 let mut args = vec![
                     "desktop".into(),
@@ -736,16 +753,65 @@ mod tests {
                         desired.into(),
                         "--json".into(),
                     ];
-                } else if mode == "mode_cancel" {
+                    if let Some(reviewed) = control["after_review"].as_str() {
+                        args.extend([
+                            "--after-review".into(),
+                            reviewed.into(),
+                            "--request-id".into(),
+                            control["request_id"].as_str().unwrap().into(),
+                        ]);
+                    } else if let Some(request) = control["request_id"].as_str() {
+                        // The first-choice form: the caller's NEW UUID only.
+                        args.extend(["--request-id".into(), request.into()]);
+                    }
+                } else if matches!(mode.as_str(), "mode_cancel" | "mode_review") {
                     let id = control["request_id"].as_str().unwrap();
                     assert!(uuid::Uuid::parse_str(id).is_ok());
                     args = vec![
                         "desktop".into(),
                         "registration".into(),
-                        "cancel-rollback".into(),
+                        if mode == "mode_review" {
+                            "review-mode"
+                        } else {
+                            "cancel-rollback"
+                        }
+                        .into(),
                         "--json".into(),
                         "--request-id".into(),
                         id.into(),
+                    ];
+                }
+                if mode == "mode_refresh_info" {
+                    args = vec![
+                        "desktop".into(),
+                        "registration".into(),
+                        "refresh-info".into(),
+                        "--json".into(),
+                    ];
+                } else if mode == "mode_refresh" {
+                    args = vec![
+                        "desktop".into(),
+                        "registration".into(),
+                        "refresh".into(),
+                        "--json".into(),
+                        "--request-id".into(),
+                        control["request_id"].as_str().unwrap().into(),
+                        "--scope".into(),
+                        serde_json::to_string(&control["target"]).unwrap(),
+                    ];
+                } else if matches!(mode.as_str(), "mode_refresh_result" | "mode_refresh_cancel") {
+                    args = vec![
+                        "desktop".into(),
+                        "registration".into(),
+                        if mode == "mode_refresh_result" {
+                            "refresh-result"
+                        } else {
+                            "cancel-refresh"
+                        }
+                        .into(),
+                        "--json".into(),
+                        "--request-id".into(),
+                        control["request_id"].as_str().unwrap().into(),
                     ];
                 }
                 let invocation = zerus_client_core::Invocation {
@@ -757,6 +823,7 @@ mod tests {
                 let environment: Vec<_> = std::env::vars()
                     .filter(|(key, _)| {
                         !key.eq_ignore_ascii_case("HGS_SESSION")
+                            && !key.eq_ignore_ascii_case("HGS_SESSION_ID")
                             && !key.eq_ignore_ascii_case("HGS_RUN_ID")
                     })
                     .collect();
@@ -821,7 +888,15 @@ mod tests {
             } else {
                 configuration.into()
             }));
-            let request = if matches!(mode.as_str(), "ownership_grant" | "ownership_rearm") {
+            let request = if mode == "ownership_observe" {
+                use zerus_client_core::desktop::ownership::{observation::Query, Mode};
+                assert!(responder.configure_ownership_mode_once(Mode::Service));
+                Request::DesktopOwnershipObserve {
+                    query: Box::new(
+                        serde_json::from_value::<Query>(control["query"].clone()).unwrap(),
+                    ),
+                }
+            } else if matches!(mode.as_str(), "ownership_grant" | "ownership_rearm") {
                 use zerus_client_core::desktop::ownership::{Action, Mode};
                 assert!(responder.configure_ownership_mode_once(Mode::Service));
                 Request::DesktopOwnership {
@@ -878,6 +953,32 @@ mod tests {
                 panic!("private canonical fixture claim")
             };
             report_chain(std::process::id());
+            if let Request::DesktopOwnershipObserve { query } = &envelope.request {
+                let controller = crate::desktop_ownership::Controller::new(
+                    control["cli"].as_str().unwrap().into(),
+                    Some(responder.clone()),
+                    zerus_client_core::desktop::ownership::Mode::Service,
+                );
+                let result = controller.observe_current(
+                    (**query).clone(),
+                    Arc::new(AtomicBool::new(false)),
+                    Arc::new(()),
+                );
+                let result = match result {
+                    Ok(current) => serde_json::json!({"checked":true,"current":current.status()}),
+                    Err(code) => serde_json::json!({"checked":false,"code":code}),
+                };
+                assert!(
+                    !controller.granted(),
+                    "a read cannot reconstruct an issued receipt"
+                );
+                assert!(controller.view().request_id.is_none());
+                println!("\nOWNERSHIP_OBSERVATION {}", result);
+                assert!(claimed.activations.try_recv().is_err());
+                drop(claimed);
+                drop(responder);
+                return;
+            }
             let inv = zerus_client_core::Invocation {
                 args: vec!["desktop".into(), "frontend-request".into(), "--json".into()],
                 stdin: Some(serde_json::to_vec(&envelope).unwrap()),

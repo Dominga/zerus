@@ -111,7 +111,7 @@ class Step4ServiceOrder(unittest.TestCase):
     def step4(self, update):
         script = (ROOT / 'tray/install.sh').read_text()
         begin = script.index('# --- 4. load ')
-        end = script.index('\nif [ "${GUI}" = "client" ]; then\n    HINT_SELFTEST', begin)
+        end = script.index('\nHINT_SELFTEST=', begin)
         prefix = r'''set -euo pipefail
 python3() { "$TEST_PYTHON" "$TEST_DRIVER" "$TEST_REPO" "$TEST_ROOT" python "$@"; }
 launchctl() { "$TEST_PYTHON" "$TEST_DRIVER" "$TEST_REPO" "$TEST_ROOT" launchctl "$@"; }

@@ -121,7 +121,7 @@ fn stale_compare_partial_future_and_replaced_snapshot_do_not_reset_identity() {
     assert!(j.save(stale.record, Some(&stale.sha256)).is_err());
     let bytes = fs::read(s.0.join(FILE)).unwrap();
     let mut changed = attempted.record.clone();
-    changed.source = Scratch::new().reference();
+    changed.source = Scratch::new().reference().into();
     assert!(j.save(changed, Some(&attempted.sha256)).is_err());
     assert_eq!(fs::read(s.0.join(FILE)).unwrap(), bytes);
     crate::fsx::write_private_durable(&s.0.join(FILE), b"{partial").unwrap();
@@ -386,4 +386,136 @@ fn only_lock_contention_is_waited_for() {
         assert!(!contended_on(&error, true));
         assert!(!contended_on(&error, false));
     }
+}
+
+#[test]
+fn local_read_journal_has_a_closed_scope_and_never_adopts_the_creation_record() {
+    let s = Scratch::new();
+    let original = s.initial();
+    let j = Journal::for_group(Group::LocalReads, &s.0, &"a".repeat(64)).unwrap();
+    assert!(j.load().unwrap().is_none());
+    assert!(j.save(original.record.clone(), None).is_err());
+    let local = Record::new_group(Group::LocalReads, "a".repeat(64), s.reference(), 1).unwrap();
+    assert_eq!(local.version, 2);
+    assert_ne!(local.scope, original.record.scope);
+    let local = j.save(local, None).unwrap();
+    assert_eq!(s.journal().load().unwrap().unwrap().sha256, original.sha256);
+    assert_ne!(local.sha256, original.sha256);
+    assert!(s
+        .journal()
+        .save(local.record.clone(), Some(&original.sha256))
+        .is_err());
+    let mut v1 = local.record.clone();
+    v1.version = 1;
+    v1.recorded_attempt = None;
+    assert!(!v1.valid());
+    assert!(j.save(v1, Some(&local.sha256)).is_err());
+    let mut other = local.record.clone();
+    other.scope = SCOPE.into();
+    assert!(other.valid()); // Structural validity does not change the selected journal.
+    assert!(j.save(other, Some(&local.sha256)).is_err());
+    assert_eq!(j.load().unwrap().unwrap().sha256, local.sha256);
+}
+#[test]
+fn local_read_attempt_recovery_fences_the_old_callback_and_unknown_stays_lookup_only() {
+    let s = Scratch::new();
+    let j = Journal::for_group(Group::LocalReads, &s.0, &"a".repeat(64)).unwrap();
+    let initial = j
+        .save(
+            Record::new_group(Group::LocalReads, "a".repeat(64), s.reference(), 1).unwrap(),
+            None,
+        )
+        .unwrap();
+    let attempt = update(&j, initial, |r| {
+        r.attempt = 1;
+        r.phase = Phase::Attempted;
+    });
+    let fenced = j.fence_preparation(&attempt).unwrap();
+    assert_ne!(fenced.sha256, attempt.sha256);
+    assert!(j
+        .save(
+            attempt
+                .record
+                .with_expected(&receipt(&attempt.record))
+                .unwrap(),
+            Some(&attempt.sha256)
+        )
+        .is_err());
+    let next = update(&j, fenced, |r| {
+        r.attempt += 1;
+        r.phase = Phase::Attempted;
+    });
+    let gated = j
+        .save(
+            next.record.with_expected(&receipt(&next.record)).unwrap(),
+            Some(&next.sha256),
+        )
+        .unwrap();
+    assert_eq!(gated.record.recorded_attempt, Some(2));
+    assert!(!gated.record.preparation_recoverable());
+    let unknown = update(&j, gated, |r| r.phase = Phase::Unknown);
+    assert!(j.fence_preparation(&unknown).is_err());
+    let mut replay = unknown.record.clone();
+    replay.attempt += 1;
+    replay.phase = Phase::Attempted;
+    assert!(j.save(replay, Some(&unknown.sha256)).is_err());
+    assert_eq!(j.load().unwrap().unwrap().sha256, unknown.sha256);
+}
+
+/// A preload record's serialized source is exactly its reference, as before
+/// the download group was added: the untagged source adds nothing.
+#[test]
+fn a_preload_source_serializes_exactly_as_its_reference() {
+    let s = Scratch::new();
+    let reference = s.reference();
+    assert_eq!(
+        serde_json::to_vec(&Source::Preload(reference.clone())).unwrap(),
+        serde_json::to_vec(&reference).unwrap()
+    );
+    let back: Source = serde_json::from_slice(&serde_json::to_vec(&reference).unwrap()).unwrap();
+    assert_eq!(back, Source::Preload(reference));
+}
+
+#[test]
+fn cache_journal_isolated_from_existing_groups_and_legacy_versions() {
+    let s = Scratch::new();
+    let original = s.initial();
+    let j = Journal::for_group(Group::WorktreeCache, &s.0, &"a".repeat(64)).unwrap();
+    let local_journal = Journal::for_group(Group::LocalReads, &s.0, &"a".repeat(64)).unwrap();
+    let local_record =
+        Record::new_group(Group::LocalReads, "a".repeat(64), s.reference(), 1).unwrap();
+    let local_original = local_journal.save(local_record, None).unwrap();
+    let local_bytes = fs::read(s.0.join(Group::LocalReads.file())).unwrap();
+    let creation_bytes = fs::read(s.0.join(Group::Creations.file())).unwrap();
+    assert!(j.load().unwrap().is_none());
+    assert!(j.save(local_original.record, None).is_err());
+    assert!(j.save(original.record.clone(), None).is_err());
+    let local = Record::new_group(Group::WorktreeCache, "a".repeat(64), s.reference(), 1).unwrap();
+    assert_eq!(local.version, 2);
+    assert_ne!(local.scope, original.record.scope);
+    let local = j.save(local, None).unwrap();
+    assert_eq!(s.journal().load().unwrap().unwrap().sha256, original.sha256);
+    assert_ne!(local.sha256, original.sha256);
+    assert!(s
+        .journal()
+        .save(local.record.clone(), Some(&original.sha256))
+        .is_err());
+    let mut v1 = local.record.clone();
+    v1.version = 1;
+    v1.recorded_attempt = None;
+    assert!(!v1.valid());
+    assert!(j.save(v1, Some(&local.sha256)).is_err());
+    let mut other = local.record.clone();
+    other.scope = SCOPE.into();
+    assert!(other.valid()); // Structural validity does not change the selected journal.
+    assert!(j.save(other, Some(&local.sha256)).is_err());
+    assert_eq!(j.load().unwrap().unwrap().sha256, local.sha256);
+    assert_eq!(
+        fs::read(s.0.join(Group::LocalReads.file())).unwrap(),
+        local_bytes
+    );
+    assert_eq!(
+        fs::read(s.0.join(Group::Creations.file())).unwrap(),
+        creation_bytes
+    );
 }

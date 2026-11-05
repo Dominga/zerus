@@ -187,6 +187,10 @@ mod tests {
 
     #[test]
     fn canonical_recovery_uses_a_new_immutable_mode_and_never_reuses_native_evidence() {
+        #[cfg(unix)]
+        if crate::test_context::non_agent() {
+            return;
+        }
         fn responder(mode: Mode) -> Arc<Responder> {
             let value = Arc::new(Responder::new(
                 "com.hgdev.hgs-tray".into(),

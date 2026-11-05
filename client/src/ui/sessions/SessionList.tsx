@@ -12,8 +12,10 @@ import {
   emphasis, childStatus, gitTooltip, paletteIndex, folderOf, ProviderGlyph,
 } from "./SessionCard";
 import { agentKind, catalog, computerFresh, computerOffline } from "../../store/catalog";
+import { servicePausedEmpty } from "../components/DesktopServiceStatus";
 import { visibleUnreadReply } from "../../store/attention";
 import { optionalQuestionCount } from "./optional-questions";
+import { currentChildren } from "./subagents";
 import { runningCommandsEntry } from "../../store/processes";
 import { flag } from "../../store/settings";
 import { archiveCount, archiveTip } from "../../store/archive";
@@ -180,7 +182,7 @@ function clearReadFor(s: Session) {
     if (!catalog.rows[s.key] || !online) {
       clearRead = { id, checking: false };
     } else {
-      const session: SessionRef = { computer: s.computer, key: s.catalogKey, name: s.name, archive_id: s.archiveId ?? null };
+      const session: SessionRef = { computer: s.computer, key: s.catalogKey, name: s.name, archive_id: s.archiveId ?? null, session_id: s.sessionId ?? null };
       const read = clearRead;
       read.pending = composerClearControl(session).then((control) => {
         read.checking = false;
@@ -214,7 +216,7 @@ function clearEntry(s: Session, prepared?: ClearRead): MenuEntry {
       if (catalog.rows[s.key]?.state !== s.state) { notify("error", tr(STATE_CHANGED), true); return; }
       if (selected) { composer.openClear(); return; }
       if (!read?.control?.enabled || clearRead?.id !== read.id) return;
-      const session: SessionRef = { computer: s.computer, key: s.catalogKey, name: s.name, archive_id: s.archiveId ?? null };
+      const session: SessionRef = { computer: s.computer, key: s.catalogKey, name: s.name, archive_id: s.archiveId ?? null, session_id: s.sessionId ?? null };
       const control = read.control;
       setSelectedKey(s.key);
       setSubagentOpen(undefined);
@@ -818,12 +820,19 @@ function NoMatches() {
   );
 }
 
-/** Before the first rows: skeleton cards while a computer is still starting, then the empty states. */
+/** Before the first rows: skeleton cards while a computer is still starting, then the empty states;
+ * a passive service shows no skeletons, since nothing is loading until Resume. */
 function ListPlaceholder() {
   const computers = () => Object.values(catalog.computers);
   const waiting = () => !computers().length || computers().some((c) => c.status === "probing");
   const unsupported = () => computers().length > 0 && computers().every((c) => c.status === "unsupported");
   return (
+    <Show when={!servicePausedEmpty()} fallback={
+      <div class="empty sp-empty sp-paused">
+        <Icon name="pause" size={30} />
+        <p>{tr("Sessions appear here after background work resumes.")}</p>
+      </div>
+    }>
     <Show when={!waiting()} fallback={
       <div class="sp-scroll">
         <For each={[0, 1, 2, 3, 4]}>
@@ -848,6 +857,7 @@ function ListPlaceholder() {
           <p>{tr("This computer's hgs has no event stream (Event stream ABI: watch-v1). Update hgs to see its sessions here.")}</p>
         </Show>
       </div>
+    </Show>
     </Show>
   );
 }
@@ -887,6 +897,10 @@ function Strip(props: { onEnter: () => void; onToggle: () => void }) {
   );
 }
 
+/** Both the strip tooltip and badge use this parent's current-state evidence. */
+export const stripChildStatus = (row: Extract<Row, { type: "child" }>) =>
+  childStatus(row.child, currentChildren(row.parent, !computerOffline(row.parent.computer)));
+
 function StripRow(props: { id: string; list: RowSource }) {
   const row = () => props.list.byId().get(props.id);
   const top = () => props.list.startOf().get(props.id) ?? 0;
@@ -895,9 +909,9 @@ function StripRow(props: { id: string; list: RowSource }) {
       <Show when={row()?.type === "header" ? (row() as Extract<Row, { type: "header" }>) : undefined}>{(h) => <StripBand row={h()} />}</Show>
       <Show when={row()?.type === "child" ? (row() as Extract<Row, { type: "child" }>) : undefined}>
         {(c) => (
-          <button class="strip-child" title={`${c().child.name}\n${childStatus(c().child).caption}`}
+          <button class="strip-child" title={`${c().child.name}\n${stripChildStatus(c()).caption}`}
             onClick={() => { setSelectedKey(c().parent.key); setSubagentOpen(c().child.id); }}>
-            <StatusBadge kind={childStatus(c().child).kind} caption="" iconOnly />
+            <StatusBadge kind={stripChildStatus(c()).kind} caption="" iconOnly />
             <span class="ell">{c().child.name}</span>
           </button>
         )}

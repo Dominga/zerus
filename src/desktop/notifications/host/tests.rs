@@ -290,6 +290,9 @@ fn exercise_driver(chatty: bool, churn: bool) {
             .first()
             .is_some_and(|p| p.shared.reply.lock().unwrap().is_some())
     });
+    // The reply can arrive just after the poll above: settle it with one more
+    // poll before reading the receipt.
+    outbox.poll(&mut store, Instant::now());
     let state = |store: &Store| -> String {
         store
             .db

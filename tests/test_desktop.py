@@ -24,21 +24,31 @@ HGS = Path(os.environ.get('HGS_TEST_BIN', Path(__file__).resolve().parents[1] / 
 
 
 def current_store_schema():
-    """Read the selected Rust constant, including its standalone leaf alias."""
+    """Read the selected Rust constant, following its leaf alias: a leaf's
+    constant, or one more alias into that leaf's own child module."""
     desktop = Path(__file__).resolve().parents[1] / 'src/desktop'
 
-    def expression(path):
-        match = re.search(r'\bconst\s+SCHEMA\s*:\s*i64\s*=\s*([^;]+);', path.read_text(encoding='utf-8'))
+    def expression(path, name='SCHEMA'):
+        match = re.search(rf'\bconst\s+{name}\s*:\s*i64\s*=\s*([^;]+);', path.read_text(encoding='utf-8'))
         if match is None:
             raise ValueError(f'No Store schema constant in {path.name}')
         return match[1].strip()
 
+    def module(base, name):
+        file = base / (name + '.rs')
+        return file if file.exists() else base / name / 'mod.rs'
+
     selected = expression(desktop / 'store.rs')
     if not selected.isdecimal():
-        leaf = re.fullmatch(r'super::([a-z][a-z_0-9]*)::SCHEMA', selected)
+        leaf = re.fullmatch(r'super::([a-z][a-z_0-9]*)::([A-Z][A-Z_]*)', selected)
         if leaf is None:
             raise ValueError('Unsupported Store schema expression; update the fixture reader')
-        selected = expression(desktop / (leaf[1] + '.rs'))
+        selected = expression(module(desktop, leaf[1]), leaf[2])
+        if not selected.isdecimal():
+            child = re.fullmatch(r'([a-z][a-z_0-9]*)::SCHEMA', selected)
+            if child is None:
+                raise ValueError('Unsupported Store schema expression; update the fixture reader')
+            selected = expression(module(desktop / leaf[1], child[1]))
     return int(selected)
 
 
@@ -184,7 +194,7 @@ finally:
             self.assertEqual(db.execute('SELECT rows,bytes,active FROM desktop_creation_clone_budget').fetchone(), (0, 0, 0))
         self.assertEqual(status['operation_queue']['kinds']['creation_clone']['undrained'], 0)
 
-    def test_creation_worktree_is_closed_and_not_yet_advertised(self):
+    def test_creation_worktree_is_a_closed_native_intent_with_scoped_read_only_lookup(self):
         self.serve()
         status = self.cli('desktop', 'status', '--json')
         scope = dict(configuration=status['configuration'], service_epoch=status['epoch'])
@@ -199,11 +209,29 @@ finally:
         refused = self.cli('desktop', 'request', '--json', data=dict(op='creation_worktree', intent=intent))
         self.assertFalse(refused['accepted'])
         self.assertEqual(refused['code'], 'frontend_authentication_required')
+        query = dict(request_id=str(uuid.uuid4()), scope=scope, creation_id=creation, worktree_request_id=request,
+                     plan_sha256='a' * 64)
+        result = self.cli('desktop', 'request', '--json', data=dict(op='creation_worktree_result', query=query))
+        self.assertEqual(result['abi'], 'desktop-creation-worktree-v1')
+        self.assertEqual(result['scope'], scope)
+        self.assertTrue(result['read_only'])
+        self.assertFalse(result['found'])
+        self.assertIsNone(result['receipt'])
+        bad = dict(query, scope=dict(scope, service_epoch=str(uuid.uuid4())))
+        self.assertEqual(self.cli('desktop', 'request', '--json', data=dict(op='creation_worktree_result', query=bad))['code'], 'creation_result_unavailable')
+        with closing(sqlite3.connect(self.desktop / 'state.sqlite3')) as db:
+            self.assertEqual(db.execute('SELECT count(*) FROM desktop_creation_worktrees').fetchone()[0], 0)
+            self.assertEqual(db.execute('SELECT rows,bytes,active FROM desktop_creation_worktree_budget').fetchone(), (0, 0, 0))
+        status = self.cli('desktop', 'status', '--json')
+        self.assertEqual(status['operation_queue']['kinds']['creation_worktree']['undrained'], 0)
         help_text = subprocess.run([str(HGS), '--help'], env=self.env, capture_output=True, text=True).stdout
-        self.assertIn('Desktop creation clone ABI: desktop-creation-clone-v1', help_text)
-        self.assertNotIn('desktop-creation-worktree', help_text)
+        # Only Linux binds the owned checkout's Git to a descriptor link.
+        if sys.platform.startswith('linux'):
+            self.assertIn('Desktop creation worktree ABI: desktop-creation-worktree-v1', help_text)
+        else:
+            self.assertNotIn('desktop-creation-worktree', help_text)
 
-    def test_task_start_reconcile_is_closed_and_not_yet_advertised(self):
+    def test_task_start_reconcile_is_closed_and_only_unix_advertises_the_native_caller(self):
         self.serve()
         status = self.cli('desktop', 'status', '--json')
         intent = dict(scope=dict(configuration=status['configuration'], service_epoch=status['epoch']),
@@ -212,11 +240,286 @@ finally:
         self.assertFalse(refused['accepted'])
         self.assertEqual(refused['code'], 'frontend_authentication_required')
         help_text = subprocess.run([str(HGS), '--help'], env=self.env, capture_output=True, text=True).stdout
-        self.assertNotIn('Desktop task Start reconcile ABI:', help_text)
-        self.assertNotIn('task-start-reconcile-v1', help_text)
+        marker = 'Desktop task start reconcile ABI: desktop-task-start-reconcile-v1'
+        if sys.platform.startswith(('linux', 'darwin')):
+            self.assertIn(marker, [line.strip() for line in help_text.splitlines()])
+        else:
+            self.assertNotIn(marker, help_text)
         with closing(sqlite3.connect(self.desktop / 'state.sqlite3')) as db:
             self.assertEqual(db.execute('SELECT count(*) FROM desktop_operations').fetchone()[0], 0)
             self.assertEqual(db.execute('SELECT count(*) FROM desktop_operation_attempts').fetchone()[0], 0)
+
+    def test_task_message_is_a_closed_native_intent_with_scoped_read_only_lookup(self):
+        self.serve()
+        status = self.cli('desktop', 'status', '--json')
+        scope = dict(configuration=status['configuration'], service_epoch=status['epoch'])
+        request = str(uuid.uuid4())
+        task = str(uuid.uuid4())
+        content = dict(text='hello', attachments=[])
+        record = dict(id=request, intent=dict(content=content, mode='queue', dispatch=''),
+                      input_sha256=hashlib.sha256(json.dumps(content, separators=(',', ':'), sort_keys=True).encode()).hexdigest())
+        intent = dict(scope=scope, project='example', task_id=task, request_id=request,
+                      original=json.dumps(record, separators=(',', ':')))
+        # Only the native frontend lane carries it.
+        refused = self.cli('desktop', 'request', '--json', data=dict(op='task_message', intent=intent))
+        self.assertFalse(refused['accepted'])
+        self.assertEqual(refused['code'], 'frontend_authentication_required')
+        query = dict(scope=scope, project='example', task_id=task, request_id=request, plan_sha256='a' * 64)
+        result = self.cli('desktop', 'request', '--json', data=dict(op='task_message_result', query=query))
+        self.assertEqual(result['abi'], 'desktop-task-message-v1')
+        self.assertEqual(result['scope'], scope)
+        self.assertEqual(result['request_id'], request)
+        self.assertTrue(result['read_only'])
+        self.assertFalse(result['found'])
+        self.assertIsNone(result['receipt'])
+        bad = dict(query, scope=dict(scope, service_epoch=str(uuid.uuid4())))
+        self.assertEqual(self.cli('desktop', 'request', '--json', data=dict(op='task_message_result', query=bad))['code'],
+                         'task_message_result_unavailable')
+        with closing(sqlite3.connect(self.desktop / 'state.sqlite3')) as db:
+            self.assertEqual(db.execute('SELECT count(*) FROM desktop_task_messages').fetchone()[0], 0)
+            self.assertEqual(db.execute('SELECT rows,bytes,active FROM desktop_task_message_budget').fetchone(), (0, 0, 0))
+        status = self.cli('desktop', 'status', '--json')
+        self.assertEqual(status['operation_queue']['kinds']['task_message']['undrained'], 0)
+        self.assertEqual(status['operation_queue']['kinds']['task_message']['inputs'],
+                         dict(charged=0, bytes=0, review=0, full=False))
+        help_text = subprocess.run([str(HGS), '--help'], env=self.env, capture_output=True, text=True).stdout
+        # macOS refuses every original until a qualified child seam exists.
+        if sys.platform.startswith('linux'):
+            self.assertIn('Desktop task message ABI: desktop-task-message-v1', help_text)
+            self.assertIn('Desktop task message references: desktop-task-message-reference-v1', help_text)
+            self.assertIn('Desktop task message input review: desktop-task-message-input-review-v1', help_text)
+        else:
+            self.assertNotIn('desktop-task-message', help_text)
+        # The staging path is read-only routing data for the exact scope.
+        staging = self.cli('desktop', 'request', '--json', data=dict(op='task_message_staging', scope=scope))
+        # Only an existing private directory, which the actor creates when it
+        # starts, is ever named.
+        held = self.desktop / 'task-message-staging'
+        if (sys.platform.startswith('linux') or sys.platform == 'darwin') and held.is_dir():
+            self.assertEqual(staging['scope'], scope)
+            self.assertTrue(staging['read_only'])
+            self.assertEqual(Path(staging['staging']), held)
+            self.assertEqual(held.stat().st_mode & 0o777, 0o700)
+        else:
+            self.assertEqual(staging['code'], 'task_message_staging_unavailable')
+        moved = dict(scope, service_epoch=str(uuid.uuid4()))
+        self.assertEqual(self.cli('desktop', 'request', '--json', data=dict(op='task_message_staging', scope=moved))['code'],
+                         'task_message_staging_unavailable')
+
+    def test_deferred_send_is_a_closed_native_intent_with_scoped_read_only_lookup(self):
+        self.serve()
+        status = self.cli('desktop', 'status', '--json')
+        scope = dict(configuration=status['configuration'], service_epoch=status['epoch'])
+        request = str(uuid.uuid4())
+        session = 'claude/private-send'
+        stdin = dict(request_id=request, text='hello', attachments=[], expected_run_id='run-1',
+                     expected_conversation_id='conversation-1')
+        intent = dict(scope=scope, session=session, request_id=request, checkpoint='{}',
+                      original=json.dumps(stdin, separators=(',', ':')))
+        # Only the native frontend lane carries it.
+        refused = self.cli('desktop', 'request', '--json', data=dict(op='deferred_send', intent=intent))
+        self.assertFalse(refused['accepted'])
+        self.assertEqual(refused['code'], 'frontend_authentication_required')
+        query = dict(scope=scope, session=session, request_id=request, plan_sha256='a' * 64)
+        result = self.cli('desktop', 'request', '--json', data=dict(op='deferred_send_result', query=query))
+        self.assertEqual(result['abi'], 'desktop-deferred-send-v1')
+        self.assertEqual(result['scope'], scope)
+        self.assertTrue(result['read_only'])
+        self.assertFalse(result['found'])
+        self.assertIsNone(result['receipt'])
+        for bad in (dict(query, scope=dict(scope, service_epoch=str(uuid.uuid4()))),
+                    dict(query, session='@peer/claude'), dict(query, request_id='not-a-uuid')):
+            self.assertEqual(self.cli('desktop', 'request', '--json', data=dict(op='deferred_send_result', query=bad)),
+                             dict(accepted=False, read_only=True, code='deferred_send_result_unavailable'))
+        with closing(sqlite3.connect(self.desktop / 'state.sqlite3')) as db:
+            self.assertEqual(db.execute('SELECT count(*) FROM desktop_deferred_sends').fetchone()[0], 0)
+            self.assertEqual(db.execute('SELECT rows,bytes,active FROM desktop_deferred_send_budget').fetchone(), (0, 0, 0))
+        status = self.cli('desktop', 'status', '--json')
+        self.assertEqual(status['operation_queue']['kinds']['deferred_send']['undrained'], 0)
+        self.assertFalse(status['operation_queue']['kinds']['deferred_send']['authority'])
+        help_text = subprocess.run([str(HGS), '--help'], env=self.env, capture_output=True, text=True).stdout
+        # macOS refuses every original until a qualified child seam exists.
+        if sys.platform.startswith('linux'):
+            self.assertIn('Desktop deferred send ABI: desktop-deferred-send-v1',
+                          [line.strip() for line in help_text.splitlines()])
+        else:
+            self.assertNotIn('desktop-deferred-send', help_text)
+
+    def test_deferred_answer_is_a_closed_native_intent_with_scoped_read_only_lookup(self):
+        self.serve()
+        status = self.cli('desktop', 'status', '--json')
+        scope = dict(configuration=status['configuration'], service_epoch=status['epoch'])
+        request = str(uuid.uuid4())
+        session = 'claude/private-answer'
+        stdin = dict(request_id=request, question_id='q-1', expected_question_hash='a' * 64,
+                     expected_run_id='run-1', expected_conversation_id='conversation-1',
+                     answers=[dict(question_id='q-1', selected_option_ids=['yes'], text='')])
+        intent = dict(scope=scope, session=session, request_id=request, checkpoint='{}', pinned='{}',
+                      original=json.dumps(stdin, separators=(',', ':')))
+        # Only the native frontend lane carries it.
+        refused = self.cli('desktop', 'request', '--json', data=dict(op='deferred_answer', intent=intent))
+        self.assertFalse(refused['accepted'])
+        self.assertEqual(refused['code'], 'frontend_authentication_required')
+        query = dict(scope=scope, session=session, request_id=request, plan_sha256='a' * 64)
+        result = self.cli('desktop', 'request', '--json', data=dict(op='deferred_answer_result', query=query))
+        self.assertEqual(result['abi'], 'desktop-deferred-answer-v1')
+        self.assertEqual(result['scope'], scope)
+        self.assertTrue(result['read_only'])
+        self.assertFalse(result['found'])
+        self.assertIsNone(result['receipt'])
+        for bad in (dict(query, scope=dict(scope, service_epoch=str(uuid.uuid4()))),
+                    dict(query, session='@peer/claude'), dict(query, session='dsh/example'),
+                    dict(query, request_id='not-a-uuid')):
+            self.assertEqual(self.cli('desktop', 'request', '--json', data=dict(op='deferred_answer_result', query=bad)),
+                             dict(accepted=False, read_only=True, code='deferred_answer_result_unavailable'))
+        with closing(sqlite3.connect(self.desktop / 'state.sqlite3')) as db:
+            self.assertEqual(db.execute('SELECT count(*) FROM desktop_deferred_answers').fetchone()[0], 0)
+            self.assertEqual(db.execute('SELECT rows,bytes,active FROM desktop_deferred_answer_budget').fetchone(),
+                             (0, 0, 0))
+        status = self.cli('desktop', 'status', '--json')
+        self.assertEqual(status['operation_queue']['kinds']['deferred_answer']['undrained'], 0)
+        self.assertFalse(status['operation_queue']['kinds']['deferred_answer']['authority'])
+        help_text = subprocess.run([str(HGS), '--help'], env=self.env, capture_output=True, text=True).stdout
+        # macOS refuses every original until a qualified child seam exists.
+        if sys.platform.startswith('linux'):
+            self.assertIn('Desktop deferred answer ABI: desktop-deferred-answer-v1',
+                          [line.strip() for line in help_text.splitlines()])
+            self.assertIn('Desktop deferred answer update phase: desktop-deferred-answer-update-phase-v1',
+                          [line.strip() for line in help_text.splitlines()])
+        else:
+            self.assertNotIn('desktop-deferred-answer', help_text)
+
+    def test_compact_to_send_is_a_closed_native_intent_with_scoped_read_only_lookup(self):
+        self.serve()
+        status = self.cli('desktop', 'status', '--json')
+        scope = dict(configuration=status['configuration'], service_epoch=status['epoch'])
+        request, send_request = str(uuid.uuid4()), str(uuid.uuid4())
+        session = 'claude/private-compact'
+        compaction = dict(request_id=request, expected_run_id='run-1', expected_conversation_id='conversation-1')
+        stdin = dict(request_id=send_request, text='hello', expected_run_id='run-1',
+                     expected_conversation_id='conversation-1', expected_compaction_id=request)
+        intent = dict(scope=scope, session=session, request_id=request, send_request_id=send_request,
+                      checkpoint='{}', compaction=json.dumps(compaction, separators=(',', ':')),
+                      original=json.dumps(stdin, separators=(',', ':')))
+        # Only the native frontend lane carries it.
+        refused = self.cli('desktop', 'request', '--json', data=dict(op='compact_to_send', intent=intent))
+        self.assertFalse(refused['accepted'])
+        self.assertEqual(refused['code'], 'frontend_authentication_required')
+        query = dict(scope=scope, session=session, request_id=request, plan_sha256='a' * 64)
+        result = self.cli('desktop', 'request', '--json', data=dict(op='compact_to_send_result', query=query))
+        self.assertEqual(result['abi'], 'desktop-deferred-compact-to-send-v1')
+        self.assertEqual(result['scope'], scope)
+        self.assertTrue(result['read_only'])
+        self.assertFalse(result['found'])
+        self.assertIsNone(result['receipt'])
+        for bad in (dict(query, scope=dict(scope, service_epoch=str(uuid.uuid4()))),
+                    dict(query, session='@peer/claude'), dict(query, request_id='not-a-uuid')):
+            self.assertEqual(self.cli('desktop', 'request', '--json', data=dict(op='compact_to_send_result', query=bad)),
+                             dict(accepted=False, read_only=True, code='compact_to_send_result_unavailable'))
+        with closing(sqlite3.connect(self.desktop / 'state.sqlite3')) as db:
+            self.assertEqual(db.execute('SELECT count(*) FROM desktop_compact_to_sends').fetchone()[0], 0)
+        status = self.cli('desktop', 'status', '--json')
+        self.assertEqual(status['operation_queue']['kinds']['compact_to_send']['undrained'], 0)
+        self.assertFalse(status['operation_queue']['kinds']['compact_to_send']['authority'])
+        help_text = subprocess.run([str(HGS), '--help'], env=self.env, capture_output=True, text=True).stdout
+        # macOS refuses every original until a qualified child seam exists.
+        if sys.platform.startswith('linux'):
+            self.assertIn('Desktop deferred compact to send ABI: desktop-deferred-compact-to-send-v1',
+                          [line.strip() for line in help_text.splitlines()])
+        else:
+            self.assertNotIn('desktop-deferred-compact-to-send', help_text)
+
+    def test_creation_launch_is_a_closed_native_intent_with_scoped_read_only_lookup(self):
+        self.serve()
+        status = self.cli('desktop', 'status', '--json')
+        scope = dict(configuration=status['configuration'], service_epoch=status['epoch'])
+        creation = str(uuid.uuid4())
+        original = dict(id=creation, creation_schema=1, created=1, revision=6, cmd='codex', tag='example',
+                        host='', state='launching', auto=False, target='/srv/repo', launch_id=creation,
+                        launch_dispatched=True, expected_machine='22222222-2222-4222-8222-222222222222')
+        intent = dict(scope=scope, creation_id=creation, launch_id=creation, revision=6,
+                      original=json.dumps(original, separators=(',', ':')))
+        refused = self.cli('desktop', 'request', '--json', data=dict(op='creation_launch', intent=intent))
+        self.assertFalse(refused['accepted'])
+        self.assertEqual(refused['code'], 'frontend_authentication_required')
+        query = dict(request_id=str(uuid.uuid4()), scope=scope, creation_id=creation, launch_id=creation,
+                     plan_sha256='a' * 64)
+        result = self.cli('desktop', 'request', '--json', data=dict(op='creation_launch_result', query=query))
+        self.assertEqual(result['abi'], 'desktop-creation-launch-v1')
+        self.assertEqual(result['scope'], scope)
+        self.assertTrue(result['read_only'])
+        self.assertFalse(result['found'])
+        self.assertIsNone(result['receipt'])
+        self.assertIsNone(result['observation'], 'no evidence without an original')
+        bad = dict(query, scope=dict(scope, service_epoch=str(uuid.uuid4())))
+        self.assertEqual(self.cli('desktop', 'request', '--json', data=dict(op='creation_launch_result', query=bad))['code'], 'creation_result_unavailable')
+        with closing(sqlite3.connect(self.desktop / 'state.sqlite3')) as db:
+            self.assertEqual(db.execute('SELECT count(*) FROM desktop_creation_launches').fetchone()[0], 0)
+            self.assertEqual(db.execute('SELECT rows,bytes,active FROM desktop_creation_launch_budget').fetchone(), (0, 0, 0))
+        status = self.cli('desktop', 'status', '--json')
+        self.assertEqual(status['operation_queue']['kinds']['creation_launch']['undrained'], 0)
+        help_text = subprocess.run([str(HGS), '--help'], env=self.env, capture_output=True, text=True).stdout
+        if sys.platform.startswith('linux') or sys.platform == 'darwin':
+            self.assertIn('Desktop creation launch ABI: desktop-creation-launch-v1', help_text)
+        else:
+            self.assertNotIn('desktop-creation-launch', help_text)
+
+    @unittest.skipUnless(sys.platform.startswith('linux') or sys.platform == 'darwin', 'POSIX actor custody')
+    def test_a_launch_or_message_child_holds_custody_but_no_program_it_starts_inherits_it(self):
+        # The real binary's main() marks the inherited custody descriptor
+        # close-on-exec before anything else: the Git (or tmux) it starts, and
+        # their own children, never hold the actor's custody lock.
+        for variable, name in (('HGS_CREATION_LAUNCH_CUSTODY_FD', 'creation launch'),
+                               ('HGS_TASK_MESSAGE_CUSTODY_FD', 'task message')):
+            with self.subTest(variable=variable):
+                self.check_custody_adoption(variable, name)
+
+    def check_custody_adoption(self, variable, name):
+        import fcntl
+        # hgs prepends HOME/.local/bin and the package-manager directories to
+        # PATH. A fixture only in the caller's PATH loses to Homebrew Git on
+        # macOS, so use the private user-install directory created by setUp.
+        fake = self.root / '.local/bin'
+        record = self.root / f'custody-record-{variable}'
+        git = fake / 'git'
+        git.write_text('#!/bin/sh\n'
+                       'python3 -c "import os,sys\ntry:\n os.fstat(int(sys.argv[1]))\n print(\'open\')\n'
+                       'except OSError:\n print(\'closed\')" "$CUSTODY_PROBE_FD" >> "$CUSTODY_RECORD"\n'
+                       # A child that outlives the command, as a tmux server would.
+                       'sleep 3 </dev/null >/dev/null 2>&1 &\n'
+                       'exit 128\n')
+        git.chmod(0o700)
+        lock_path = self.root / f'custody-{variable}.lock'
+        held = os.open(lock_path, os.O_RDWR | os.O_CREAT, 0o600)
+        fcntl.flock(held, fcntl.LOCK_EX)
+        os.set_inheritable(held, True)
+        repo = self.root / f'not-a-repository-{variable}'
+        repo.mkdir()
+        env = dict(self.env, PATH=f"{fake}{os.pathsep}{self.env.get('PATH', '')}",
+                   CUSTODY_PROBE_FD=str(held), CUSTODY_RECORD=str(record))
+        env[variable] = str(held)
+        try:
+            result = subprocess.run([str(HGS), 'worktrees', '--path', str(repo), '--json'], env=env,
+                                    pass_fds=(held,), capture_output=True, text=True, timeout=20)
+        finally:
+            os.close(held)
+        self.assertTrue(record.is_file(), f'Custody Git fixture did not run: {result}')
+        observed = record.read_text().split()
+        self.assertIn('closed', observed, result.stderr)
+        self.assertNotIn('open', observed)
+        # The command and its programs have exited: nothing holds the lock,
+        # although the program's own child is still running.
+        probe = os.open(lock_path, os.O_RDWR)
+        try:
+            fcntl.flock(probe, fcntl.LOCK_EX | fcntl.LOCK_NB)
+        finally:
+            os.close(probe)
+        # A malformed descriptor refuses before anything starts.
+        bad = dict(self.env)
+        bad[variable] = 'not-a-descriptor'
+        refused = subprocess.run([str(HGS), '--help'], env=bad, capture_output=True, text=True, timeout=10)
+        self.assertEqual(refused.returncode, 2)
+        self.assertIn(f'Invalid {name} custody', refused.stderr)
 
     @unittest.skipUnless(sys.platform.startswith('linux') or sys.platform == 'darwin', 'Unix registration mode')
     def test_registration_variant_is_read_only_and_service_reports_its_requested_mode(self):
@@ -260,6 +563,7 @@ finally:
 #include <stdio.h>
 int main(int argc, char **argv) {
     if (argc != 2) return 90;
+    fprintf(stderr, "MODE_CALLER_CONSUMER=%ld\n", (long)getpid());
     pid_t child = fork();
     if (child < 0) return 91;
     if (child == 0) {
@@ -296,7 +600,7 @@ try:
   env.pop('HGS_SESSION',None);env.pop('HGS_RUN_ID',None)
  child=subprocess.run([sys.argv[3],'desktop','registration','mode-check','--json'],env=env,
                       stdin=subprocess.DEVNULL,stdout=subprocess.PIPE,stderr=subprocess.PIPE,timeout=5)
- print(json.dumps(dict(code=child.returncode,out=child.stdout.decode(),error=child.stderr.decode())))
+ print(json.dumps(dict(code=child.returncode,out=child.stdout.decode(),error=child.stderr.decode(),consumer_pid=os.getpid())))
 finally:
  if tty is not None: os.close(tty)
 '''
@@ -350,9 +654,20 @@ finally:
         foreground = case(sys.executable, terminal=True)
         self.assertEqual(foreground['code'], 0, foreground)
         self.assertEqual(json.loads(foreground['out'])['source'], 'interactive_terminal')
+        foreground_consumer = json.loads(foreground['out'])['consumer']
+        self.assertEqual(foreground_consumer['pid'], foreground['consumer_pid'])
         gui = case(frontend, native=True)
         self.assertEqual(gui['code'], 0, gui)
         self.assertEqual(json.loads(gui['out'])['source'], 'installed_frontend')
+        gui_consumer = json.loads(gui['out'])['consumer']
+        self.assertEqual(gui_consumer['pid'], int(re.search(r'MODE_CALLER_CONSUMER=(\d+)', gui['error'])[1]))
+        for value in (foreground_consumer, gui_consumer):
+            self.assertGreater(len(value['birth']), 0)
+            for field in ('machine', 'boot'):
+                self.assertEqual(str(uuid.UUID(value[field])), value[field])
+                self.assertNotEqual(uuid.UUID(value[field]).int, 0)
+        self.assertEqual(foreground_consumer['machine'], gui_consumer['machine'])
+        self.assertEqual(foreground_consumer['boot'], gui_consumer['boot'])
 
     def test_approval_audit_is_selected_scoped_and_does_not_create_a_journal(self):
         self.serve()
@@ -479,7 +794,7 @@ finally:
                 program.chmod(0o700)
 
     def cli(self, *args, data=None, ok=True, env=None):
-        result = subprocess.run([str(HGS), *args], input=None if data is None else json.dumps(data),
+        result = subprocess.run([str(getattr(self, 'hgs', HGS)), *args], input=None if data is None else json.dumps(data),
                                 env=env or self.env, capture_output=True, text=True, timeout=10)
         if ok:
             self.assertEqual(result.returncode, 0, result.stderr)
@@ -498,7 +813,7 @@ finally:
         # The service must create a private endpoint even when its launcher
         # supplies a permissive mask; probing readiness races socket creation.
         options = {'umask': 0} if os.name != 'nt' else {}
-        args = [str(HGS), 'desktop', 'serve'] + (['--background'] if background else [])
+        args = [str(getattr(self, 'hgs', HGS)), 'desktop', 'serve'] + (['--background'] if background else [])
         process = subprocess.Popen(args, env=self.env,
                                    stdin=subprocess.DEVNULL, stdout=subprocess.PIPE, stderr=subprocess.PIPE, text=True, **options)
         self.addCleanup(self.stop, process)
@@ -514,6 +829,32 @@ finally:
 
     def failed_serve(self, env=None):
         return self.cli('desktop', 'serve', ok=False, env=env)
+
+    def test_termination_retention_requires_native_proof_and_status_is_original_id_only(self):
+        _, service = self.serve()
+        original_id = str(uuid.uuid4())
+        capture = dict(target=dict(computer='', name='codex/example/source', run_id='run', conversation_id='conversation'),
+                       machine=str(uuid.uuid4()), root='/srv/example/work', common_dir='/srv/example/main/.git', owner_id='original-owner')
+        original = dict(request_id=original_id, action='terminate', expected_run_id='run', expected_conversation_id='conversation')
+        intent = dict(scope=dict(configuration=service['configuration'], service_epoch=service['epoch']),
+                      confirmation_id=str(uuid.uuid4()), choice='remove_after_terminate', request_id=original_id,
+                      capture=capture, original=json.dumps(original))
+        refused = self.cli('desktop', 'request', '--json', data=dict(op='termination_outcome', intent=intent, confirmed=True, role='frontend'))
+        self.assertFalse(refused['accepted'])
+        self.assertFalse(refused['durable'])
+        self.assertEqual(refused['code'], 'frontend_authentication_required')
+        query = dict(op='termination_outcome_status', request_id=str(uuid.uuid4()), original_request_id=original_id, configuration=service['configuration'])
+        result = self.cli('desktop', 'request', '--json', data=query)
+        self.assertTrue(result['accepted'])
+        self.assertFalse(result['durable'])
+        self.assertFalse(result['found'])
+        self.assertIsNone(result['status'])
+        self.assertFalse(result['cleanup_authorized'])
+        query['allow_retry'] = True
+        self.assertFalse(self.cli('desktop', 'request', '--json', data=query)['accepted'])
+        status = self.cli('desktop', 'status', '--json')
+        self.assertFalse(status['writers_enabled'])
+        self.assertFalse(status['automatic_approvals'])
 
     def test_pending_read_import_requires_native_frontend_and_lookup_stays_read_only(self):
         self.serve()
@@ -839,6 +1180,28 @@ finally:
         self.assertFalse((self.state / 'desktop-presence.json').exists())
         self.assertFalse((self.state / 'read-marks.json').exists())
         self.assertFalse((self.root / 'unexpected-tool').exists())
+
+    @unittest.skipUnless(os.name == 'posix', 'SQLite POSIX record locks')
+    def test_live_actor_retains_sqlite_lock_until_original_exit(self):
+        import fcntl
+        self.env['HGS_PEERS'] = ''
+        database = self.desktop / 'state.sqlite3'
+        # SQLite's shared database lock occupies this byte range even in WAL
+        # mode. A raw descriptor closed after SQLite opened would drop it and
+        # let another connection mistake itself for the last WAL user.
+        previous_epoch = None
+        for restart in range(2):
+            with self.subTest(restart=restart):
+                process, status = self.serve(background=True)
+                self.assertNotEqual(status['epoch'], previous_epoch)
+                previous_epoch = status['epoch']
+                with database.open('r+b') as file:
+                    with self.assertRaises(BlockingIOError,
+                                           msg='live actor lost its SQLite shared lock'):
+                        fcntl.lockf(file, fcntl.LOCK_EX | fcntl.LOCK_NB, 512, 0x40000000)
+                self.stop(process)
+                with database.open('r+b') as file:
+                    fcntl.lockf(file, fcntl.LOCK_EX | fcntl.LOCK_NB, 512, 0x40000000)
 
     def test_background_fleet_lifetime_revoke_and_stale_epoch(self):
         self.env['HGS_PEERS'] = ''
@@ -1276,7 +1639,27 @@ finally:
 
     @staticmethod
     def remove_catalog_reason_schema(db):
-        # Rewind the later schema-22 leaf too, never leaving it labelled older.
+        # Rewind the later leaves too, never leaving one labelled older: the
+        # schema-30 compact-to-send, schema-29 deferred answer, schema-28
+        # deferred send, schema-27 task
+        # message inputs, schema-26 task message, schema-25 termination
+        # retention, creation launch/worktree, then the schema-22 catalog
+        # approval.
+        db.execute('DROP TABLE desktop_compact_to_sends')
+        db.execute('DROP TABLE desktop_compact_to_send_budget')
+        db.execute('DROP TABLE desktop_deferred_answers')
+        db.execute('DROP TABLE desktop_deferred_answer_budget')
+        db.execute('DROP TABLE desktop_deferred_sends')
+        db.execute('DROP TABLE desktop_deferred_send_budget')
+        db.execute('DROP TABLE desktop_task_message_inputs')
+        db.execute('DROP TABLE desktop_task_message_input_budget')
+        db.execute('DROP TABLE desktop_task_messages')
+        db.execute('DROP TABLE desktop_task_message_budget')
+        db.execute('DROP TABLE desktop_termination_outcomes')
+        db.execute('DROP TABLE desktop_creation_launches')
+        db.execute('DROP TABLE desktop_creation_launch_budget')
+        db.execute('DROP TABLE desktop_creation_worktrees')
+        db.execute('DROP TABLE desktop_creation_worktree_budget')
         db.execute('DROP INDEX desktop_catalog_approval')
         db.execute('DROP INDEX desktop_catalog_approval_pending')
         db.execute('ALTER TABLE desktop_catalog_rows DROP COLUMN approval')

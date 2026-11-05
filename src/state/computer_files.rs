@@ -18,6 +18,9 @@ fn bounded(value: &Value, key: &str, max: usize) -> Result<String> {
     Ok(text.to_owned())
 }
 fn binding(name: &str, input: &Value) -> Result<Value> {
+    // zerus-ucck P3c: the request's identities select among sessions that
+    // share the label.
+    expect(name, string(input, "expected_run_id"), string(input, "expected_conversation_id"))?;
     let archived = string(input, "archive_id");
     let record = if !archived.is_empty() {
         archive::read_archive(name, archived)?

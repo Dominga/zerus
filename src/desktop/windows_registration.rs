@@ -20,6 +20,38 @@ pub(super) fn entry(args: &[String]) -> Option<i32> {
     }
 }
 
+pub(super) fn refresh_info(config: &Config, location: &Location) -> Result<Value> {
+    native::mode::command(
+        config,
+        location,
+        json!({"schema":1,"operation":"refresh_info","configuration":location.configuration}),
+    )
+}
+pub(super) fn refresh_command(
+    config: &Config,
+    location: &Location,
+    id: &str,
+    target: &str,
+) -> Result<Value> {
+    let target =
+        super::windows_registration_policy::mode::refresh::Target::decode(target.as_bytes())?;
+    native::mode::command(
+        config,
+        location,
+        json!({"schema":1,"operation":"refresh","request_id":id,"target":target}),
+    )
+}
+pub(super) fn refresh_result(config: &Config, location: &Location, id: &str) -> Result<Value> {
+    native::mode::refresh_result(config, location, id)
+}
+pub(super) fn cancel_refresh(config: &Config, location: &Location, id: &str) -> Result<Value> {
+    native::mode::command(
+        config,
+        location,
+        json!({"schema":1,"operation":"refresh_cancel","request_id":id}),
+    )
+}
+
 pub(super) fn mode_command(config: &Config, location: &Location, mode: &str) -> Result<Value> {
     ensure!(
         matches!(mode, "passive" | "background"),
@@ -37,6 +69,38 @@ pub(super) fn cancel_rollback(config: &Config, location: &Location, id: &str) ->
         location,
         json!({"schema":1,"operation":"cancel_rollback","request_id":id}),
     )
+}
+
+pub(super) fn review_mode(config: &Config, location: &Location, id: &str) -> Result<Value> {
+    ensure!(uuid::Uuid::parse_str(id).is_ok_and(|u| !u.is_nil() && u.to_string() == id),
+        "Pass the exact original transition UUID.");
+    native::mode::command(config, location, json!({"schema":1,"operation":"review","request_id":id}))
+}
+
+pub(super) fn mode_after_review(config: &Config, location: &Location, mode: &str, reviewed: &str, request: &str) -> Result<Value> {
+    ensure!(matches!(mode, "background" | "passive") && [reviewed, request].iter().all(|s|
+        uuid::Uuid::parse_str(s).is_ok_and(|u| !u.is_nil() && u.to_string() == *s)) && reviewed != request,
+        "Select the exact reviewed UUID and a NEW canonical request UUID.");
+    native::mode::command(config, location,
+        json!({"schema":1,"operation":"switch","mode":mode,"after_review":reviewed,"request_id":request}))
+}
+
+/// A FIRST explicit background choice from a plain passive registration, with
+/// the caller's retained NEW request UUID. The native helper refuses it while
+/// any original is pending, interrupted or reviewed.
+pub(super) fn first_choice(config: &Config, location: &Location, request: &str) -> Result<Value> {
+    ensure!(uuid::Uuid::parse_str(request).is_ok_and(|u| !u.is_nil() && u.to_string() == request),
+        "Select a NEW canonical request UUID.");
+    // Before caller capture and the helper spawn; the helper fences it again.
+    native::mode::ensure_first_layout(config, location)?;
+    native::mode::command(config, location,
+        json!({"schema":1,"operation":"switch","mode":"background","request_id":request}))
+}
+
+pub(super) fn mode_result(config: &Config, location: &Location, request: &str) -> Result<Value> {
+    ensure!(uuid::Uuid::parse_str(request).is_ok_and(|u| !u.is_nil() && u.to_string() == request),
+        "Pass the exact original choice UUID.");
+    native::mode::result(config, location, request)
 }
 
 fn helper_environment(trace_path: &str) -> Result<Vec<(String, String)>> {
@@ -162,10 +226,16 @@ pub(super) fn command(config: &Config, location: &Location, operation: &str) -> 
         &plan,
     )?;
     if operation == "status" {
-        let record = native::mode::pending_status(location, &plan)?;
+        let record = native::mode::pending_status(config, location, &plan)?;
         checked["pending_transition"] = record["pending_transition"].clone();
         checked["cancelled_request_id"] = record["cancelled_request_id"].clone();
         checked["completed_request_id"] = record["completed_request_id"].clone();
+        checked["reviewed_transition"] = record["reviewed_transition"].clone();
+        checked["activation_automatic_blocked"] = record["activation_automatic_blocked"].clone();
+        checked["mode_choice"] = record["mode_choice"].clone();
+        checked["first_choice"] = record["first_choice"].clone();
+        checked["first_choice_lost"] = record["first_choice_lost"].clone();
+        checked["first_choice_unavailable"] = record["first_choice_unavailable"].clone();
         let status = super::status(location)?;
         let lifecycle = &status["lifecycle"];
         checked["running_mode"] = if lifecycle["configuration"] == location.configuration
@@ -175,6 +245,10 @@ pub(super) fn command(config: &Config, location: &Location, operation: &str) -> 
         } else {
             Value::Null
         };
+        if lifecycle["configuration"] == location.configuration && lifecycle["ipc_ready"] == true {
+            checked["service_epoch"] = lifecycle["epoch"].clone();
+            checked["service_generation"] = lifecycle["generation"].clone();
+        }
         checked["pending_restart"] = (checked["registered"] == true
             && (checked["pending_transition"].is_object()
                 || checked["selected_mode"] != checked["running_mode"]))

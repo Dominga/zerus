@@ -20,6 +20,8 @@ use zerus_client_core::desktop::{
 const RECEIPTS: i64 = 4096;
 const RECORD_BYTES: usize = 8192;
 
+pub(super) mod observation;
+
 /// Captured from the authenticated canonical process and cached native Build,
 /// never decoded from a request. Serialization is private store data only.
 #[derive(Clone, Debug, Deserialize, Serialize, PartialEq, Eq)]
@@ -172,13 +174,21 @@ pub(super) fn service_granted(store: &Store, configuration: &str) -> Result<bool
 /// is a prerequisite, never a runtime permit; startup still owns admission.
 #[cfg(windows)]
 pub(super) fn registration_granted(location: &Location) -> Result<bool> {
-    let status = registration_status(location)?;
-    Ok(status.state == State::Service && status.identity_current && !status.rearm_required)
+    let Some(original) = RegistrationGrant::capture(location)? else {
+        return Ok(false);
+    };
+    original.check(location)?;
+    Ok(true)
 }
 
 #[cfg(windows)]
 pub(super) fn registration_status(location: &Location) -> Result<Status> {
-    let (db, _verification) = super::revoke::hold::database(location)?;
+    Ok(registration_row(location)?.0.status)
+}
+
+#[cfg(any(windows, test))]
+fn registration_row(location: &Location) -> Result<(Row, super::revoke::hold::Verification)> {
+    let (db, verification) = super::revoke::hold::database(location)?;
     let version: i64 = db.query_row("PRAGMA user_version", [], |r| r.get(0))?;
     ensure!(
         (15..=super::store::SCHEMA).contains(&version),
@@ -193,7 +203,68 @@ pub(super) fn registration_status(location: &Location) -> Result<Status> {
         configuration == location.configuration,
         "ownership configuration changed"
     );
-    Ok(row(&db, &location.configuration)?.status)
+    Ok((row(&db, &location.configuration)?, verification))
+}
+
+/// Read-only registration evidence for one already granted incarnation. This
+/// is neither a runtime permit nor a Grant/Rearm operation. No Status, receipt
+/// or decoded request can construct it; capture reads the checked database.
+#[cfg(any(windows, test))]
+pub(super) struct RegistrationGrant {
+    original: Grant,
+    database: super::revoke::hold::Verification,
+}
+#[cfg(any(windows, test))]
+impl RegistrationGrant {
+    /// Routing observation from this retained actual database incarnation.
+    /// Copying it cannot reconstruct this guard or authorize any operation.
+    #[cfg(windows)]
+    pub(super) fn incarnation(&self) -> (String, String) {
+        (self.original.journal.clone(), self.original.owner_epoch.clone())
+    }
+    /// History fence for an original refresh, never a reconstructed Grant.
+    /// Recheck the SAME checked database/incarnation/Origin before copying it.
+    pub(super) fn refresh_binding(&self, location: &Location) -> Result<String> {
+        use sha2::{Digest, Sha256};
+        self.check(location)?;
+        let bytes = serde_json::to_vec(&(1u8, self.database.identity()?,
+            &self.original.configuration, &self.original.journal,
+            &self.original.owner_epoch, &self.original.origin))?;
+        Ok(format!("{:x}", Sha256::digest(bytes)))
+    }
+    pub(super) fn capture(location: &Location) -> Result<Option<Self>> {
+        let (row, database) = registration_row(location)?;
+        if row.status.state != State::Service
+            || !row.status.identity_current
+            || row.status.rearm_required
+        {
+            return Ok(None);
+        }
+        let original = grant_from_row(&location.configuration, row)?
+            .context("registration grant unavailable")?;
+        original.revalidate_image()?;
+        Ok(Some(Self { original, database }))
+    }
+    pub(super) fn check(&self, location: &Location) -> Result<()> {
+        ensure!(
+            self.original.configuration == location.configuration,
+            "registration grant configuration changed"
+        );
+        let (current, database) = registration_row(location)?;
+        let held = self.database.identity()?;
+        let actual = database.identity()?;
+        ensure!(
+            held.1 != 0 && held == actual,
+            "registration grant database changed"
+        );
+        ensure!(
+            current.status.state == State::Service
+                && current.status.identity_current
+                && self.original.matches(&current),
+            "original registration grant changed"
+        );
+        self.original.revalidate_image()
+    }
 }
 /// A retained grant read by the sole actor. It cannot be constructed from a
 /// status/receipt or caller JSON. Runtime preparations retain this exact owner
@@ -207,14 +278,15 @@ pub(super) struct Grant {
 }
 impl Grant {
     pub(super) fn current(&self, store: &Store) -> Result<bool> {
-        let now = row(&store.db, &self.configuration)?;
-        Ok(
-            matches!(now.status.state, State::Service | State::IdentityChanged)
-                && !now.status.rearm_required
-                && now.status.journal.as_ref() == Some(&self.journal)
-                && now.status.owner_epoch.as_ref() == Some(&self.owner_epoch)
-                && now.origin.as_ref() == Some(&self.origin),
-        )
+        Ok(self.matches(&row(&store.db, &self.configuration)?))
+    }
+    fn matches(&self, now: &Row) -> bool {
+        matches!(now.status.state, State::Service | State::IdentityChanged)
+            && !now.status.rearm_required
+            && now.status.configuration == self.configuration
+            && now.status.journal.as_ref() == Some(&self.journal)
+            && now.status.owner_epoch.as_ref() == Some(&self.owner_epoch)
+            && now.origin.as_ref() == Some(&self.origin)
     }
     #[cfg(any(target_os = "linux", windows))]
     pub(super) fn image(&self) -> &Path {
@@ -243,7 +315,9 @@ impl Grant {
     }
 }
 pub(super) fn grant(store: &Store, configuration: &str) -> Result<Option<Grant>> {
-    let row = row(&store.db, configuration)?;
+    grant_from_row(configuration, row(&store.db, configuration)?)
+}
+fn grant_from_row(configuration: &str, row: Row) -> Result<Option<Grant>> {
     if !matches!(row.status.state, State::Service | State::IdentityChanged)
         || row.status.rearm_required
     {

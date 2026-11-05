@@ -49,6 +49,7 @@ import androidx.compose.runtime.saveable.rememberSaveable
 import androidx.compose.runtime.saveable.Saver
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
+import androidx.compose.ui.draw.alpha
 import androidx.compose.ui.draw.clipToBounds
 import androidx.compose.ui.draw.rotate
 import androidx.compose.ui.geometry.Offset
@@ -1091,7 +1092,21 @@ private class MainListPullMotion(private val scope:CoroutineScope,private val ma
                     if (unavailableSaved) Text("Your saved reading position is outside the loaded messages. Showing the earliest available messages.",
                         color = Muted, style = MaterialTheme.typography.bodySmall)
                 }
+                // A fork's inherited rows: each source under its label, then where the fork begins.
+                var inheritedSource = ""
                 events.forEach { event ->
+                    if (event.inheritedFrom != inheritedSource) {
+                        val label = if (event.inheritedFrom.isNotBlank()) "Inherited from ${event.inheritedFrom}: the history this fork began from"
+                            else "Forked here: this session's own activity continues below"
+                        item(key = "history:inherited:" + event.id) {
+                            Row(Modifier.fillMaxWidth(), verticalAlignment = Alignment.CenterVertically, horizontalArrangement = Arrangement.spacedBy(12.dp)) {
+                                HorizontalDivider(Modifier.weight(1f), color = Muted.copy(alpha = .4f))
+                                Text(label, Modifier.weight(3f, fill = false), color = Muted, style = MaterialTheme.typography.labelMedium)
+                                HorizontalDivider(Modifier.weight(1f), color = Muted.copy(alpha = .4f))
+                            }
+                        }
+                        inheritedSource = event.inheritedFrom
+                    }
                     if (event.id == unreadBoundary) item(key = "history:unread") {
                         Row(Modifier.fillMaxWidth(), verticalAlignment = Alignment.CenterVertically, horizontalArrangement = Arrangement.spacedBy(12.dp)) {
                             HorizontalDivider(Modifier.weight(1f), color = Mint.copy(alpha = .4f))
@@ -1166,11 +1181,13 @@ private class MainListPullMotion(private val scope:CoroutineScope,private val ma
     val roundVideo = event.voice?.video != null
     val messageColor = if (roundVideo && own) MaterialTheme.colorScheme.primary.copy(alpha = .14f)
         .compositeOver(MaterialTheme.colorScheme.surface) else if (own) Color(0xFF203733) else Surface
-    Row(Modifier.fillMaxWidth(), horizontalArrangement = if (own) Arrangement.End else Arrangement.Start) {
+    // A fork's inherited row is its source's history: dimmed, and never acting on this session.
+    val inherited = event.inheritedFrom.isNotBlank()
+    Row(Modifier.fillMaxWidth().alpha(if (inherited) .72f else 1f), horizontalArrangement = if (own) Arrangement.End else Arrangement.Start) {
         Surface(color = if (roundVideo) Color.Transparent else messageColor,
             shape = if (roundVideo) RectangleShape else RoundedCornerShape(17.dp),
             modifier = Modifier.fillMaxWidth(if (own) .92f else 1f).semantics {
-                contentDescription = if (own) "You" else agent.ifBlank { "Agent" }
+                contentDescription = (if (inherited) "Inherited, " else "") + if (own) "You" else agent.ifBlank { "Agent" }
             }) {
             Column(Modifier.padding(horizontal = if (roundVideo) 0.dp else 12.dp,
                 vertical = if (roundVideo) 0.dp else 8.dp), verticalArrangement = Arrangement.spacedBy(4.dp)) {
@@ -1199,7 +1216,8 @@ private class MainListPullMotion(private val scope:CoroutineScope,private val ma
                         }
                     }
                 }
-                if (event.voice == null) AttachmentRows(event.attachments, model.selected?.target, model)
+                if (inherited) event.attachments.forEach { Text("Attachment: ${it.name}", color = Muted, style = MaterialTheme.typography.labelSmall) }
+                else if (event.voice == null) AttachmentRows(event.attachments, model.selected?.target, model)
                 if(event.detailTruncated) Text("Message text shortened",color = Amber,style = MaterialTheme.typography.labelSmall)
                 if (event.voice == null && (event.delivery.isNotBlank() || event.at > 0)) Row(Modifier.fillMaxWidth(),
                     horizontalArrangement = Arrangement.End, verticalAlignment = Alignment.CenterVertically) {

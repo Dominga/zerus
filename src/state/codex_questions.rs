@@ -631,6 +631,41 @@ fn recover_submissions(record: &Value, cache: &mut Value) -> Result<()> {
     Ok(())
 }
 
+/// A failure once input may have reached Codex (`touched`) is never a
+/// refusal: the answer, or its Skip, may already be there.
+fn after_input(touched: bool, error: String) -> String {
+    if touched && !error.contains("delivery uncertain") {
+        format!("delivery uncertain: {error}")
+    } else {
+        error
+    }
+}
+
+/// Codex's own Skip of `card`: its key while the panel is `visible`, then
+/// the skip recorded in the question cache at `path`. Once the key may have
+/// reached Codex (`touched`), every later failure, the key's own included,
+/// is uncertain: it may already have dismissed the panel.
+fn skip<T: Transport>(
+    terminal: &mut T,
+    touched: fn(&T) -> bool,
+    visible: bool,
+    path: &Path,
+    card: &Value,
+) -> Result<()> {
+    let skipped = (|| -> Result<()> {
+        if visible {
+            terminal.key("C-]")?;
+        }
+        let _guard = lock(Some(&path.with_extension("lock")))?;
+        let mut cache: Value =
+            serde_json::from_str(&fs::read_to_string(path).map_err(|e| e.to_string())?)
+                .map_err(|e| e.to_string())?;
+        cache["items"][string(card, "question_id")]["skipped"] = json!(true);
+        atomic(path, &cache.to_string())
+    })();
+    skipped.map_err(|error| after_input(touched(terminal), error))
+}
+
 pub(super) fn answer(
     record: &Value,
     card: &Value,
@@ -640,22 +675,14 @@ pub(super) fn answer(
     let mut terminal = Native::new(record, card);
     let screen = terminal.screen()?;
     if answers[0]["skip"] == true {
-        if visible_panel(&screen, card)? && unambiguous(record, card)? {
-            terminal.key("C-]")?;
-        }
-        let path = cache_path(record)?;
-        let _guard = lock(Some(&path.with_extension("lock")))?;
-        let mut cache: Value =
-            serde_json::from_str(&fs::read_to_string(&path).map_err(|e| e.to_string())?)
-                .map_err(|e| e.to_string())?;
-        cache["items"][string(card, "question_id")]["skipped"] = json!(true);
-        atomic(&path, &cache.to_string()).map_err(|e| {
-            if terminal.touched() {
-                format!("delivery uncertain: {e}")
-            } else {
-                e
-            }
-        })?;
+        let visible = visible_panel(&screen, card)? && unambiguous(record, card)?;
+        skip(
+            &mut terminal,
+            Native::touched,
+            visible,
+            &cache_path(record)?,
+            card,
+        )?;
         return Ok("answered");
     }
     available(record, card)?;
@@ -674,15 +701,13 @@ pub(super) fn answer(
             terminal.key("Enter")
         })();
         if let Err(error) = result {
-            return Err(if terminal.touched() {
-                format!("delivery uncertain: {error}")
-            } else {
-                error
-            });
+            return Err(after_input(terminal.touched(), error));
         }
     } else {
+        // Its own submission refuses pending settings, whose keys would
+        // reach the terminal before this answer: only its paste may.
         let payload = json!({"request_id":request_id,"text":envelope(card,&text),"expected_run_id":record["run_id"],"expected_conversation_id":record["conversation_id"]});
-        input::submit(string(record, "name"), payload.to_string().as_bytes(), None)?;
+        input::submit_answer(string(record, "name"), payload.to_string().as_bytes())?;
     }
     save_submission(record, card, answers, request_id)
         .map_err(|e| format!("delivery uncertain: {e}"))?;
@@ -818,6 +843,86 @@ mod tests {
         // Every line but the last one ended a call, each oversized line included.
         assert_eq!(calls, lines.len());
         assert_eq!(pending(&record, &complete).len(), 2);
+    }
+    /// zerus-cqkoh: a Skip whose key may have reached Codex never fails as
+    /// a refusal; one that sent nothing does.
+    #[test]
+    fn a_skip_after_its_key_never_fails_as_a_refusal() {
+        struct Keys {
+            touched: bool,
+            fail: bool,
+        }
+        impl Transport for Keys {
+            fn screen(&mut self) -> Result<String> {
+                Ok(String::new())
+            }
+            fn key(&mut self, _: &str) -> Result<()> {
+                self.touched = true;
+                if self.fail {
+                    return Err("key not sent".into());
+                }
+                Ok(())
+            }
+            fn paste(&mut self, _: &str) -> Result<()> {
+                Ok(())
+            }
+            fn resolved(&mut self) -> Result<Option<Value>> {
+                Ok(None)
+            }
+        }
+        let touched = |keys: &Keys| keys.touched;
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("cache.json");
+        let card = json!({"question_id": "codex-async:call_one:0"});
+        // The key's own failure, after it may have gone out.
+        let mut keys = Keys {
+            touched: false,
+            fail: true,
+        };
+        let error = skip(&mut keys, touched, true, &path, &card).unwrap_err();
+        assert!(
+            error.starts_with("delivery uncertain: key not sent"),
+            "{error}"
+        );
+        // The cache after a sent key.
+        let mut keys = Keys {
+            touched: false,
+            fail: false,
+        };
+        let error = skip(&mut keys, touched, true, &path, &card).unwrap_err();
+        assert!(error.starts_with("delivery uncertain: "), "{error}");
+        // Nothing sent: the same failure is a refusal.
+        let mut keys = Keys {
+            touched: false,
+            fail: false,
+        };
+        let error = skip(&mut keys, touched, false, &path, &card).unwrap_err();
+        assert!(!error.contains("delivery uncertain"), "{error}");
+        assert!(!keys.touched);
+        // A sent key and a readable cache record the skip.
+        fs::write(&path, json!({"items": {}}).to_string()).unwrap();
+        let mut keys = Keys {
+            touched: false,
+            fail: false,
+        };
+        skip(&mut keys, touched, true, &path, &card).unwrap();
+        let cache: Value = serde_json::from_str(&fs::read_to_string(&path).unwrap()).unwrap();
+        assert_eq!(cache["items"]["codex-async:call_one:0"]["skipped"], true);
+    }
+    #[test]
+    fn a_failure_after_possible_input_is_uncertain() {
+        assert_eq!(
+            after_input(false, "cache unreadable".into()),
+            "cache unreadable"
+        );
+        assert_eq!(
+            after_input(true, "cache unreadable".into()),
+            "delivery uncertain: cache unreadable"
+        );
+        assert_eq!(
+            after_input(true, "delivery uncertain: late".into()),
+            "delivery uncertain: late"
+        );
     }
     #[test]
     fn only_complete_native_question_panels_accept_input() {

@@ -92,6 +92,33 @@ impl AppState {
             .map(|inputs| inputs.creations.clone())
     }
 
+    pub(crate) fn worktree_cache_capture(
+        &self,
+    ) -> Option<Arc<zerus_client_core::migration::preload::Capture>> {
+        self.live
+            .retained_import_source
+            .get()
+            .map(|inputs| inputs.worktree_cache.clone())
+    }
+
+    pub(crate) fn local_read_capture(
+        &self,
+    ) -> Option<Arc<zerus_client_core::migration::preload::Capture>> {
+        self.live
+            .retained_import_source
+            .get()
+            .map(|inputs| inputs.local_reads.clone())
+    }
+
+    pub(crate) fn draft_capture(
+        &self,
+    ) -> Option<Arc<zerus_client_core::migration::draft_preload::Capture>> {
+        self.live
+            .retained_import_source
+            .get()
+            .map(|inputs| inputs.drafts.clone())
+    }
+
     #[cfg(any(target_os = "linux", target_os = "macos", windows))]
     pub fn set_desktop_responder(&self, responder: Arc<zerus_client_core::desktop::Responder>) {
         let _ = self.live.desktop_responder.set(responder);
@@ -367,6 +394,7 @@ mod live {
                             zerus_watch_protocol::Subscription {
                                 topic: zerus_watch_protocol::topic::TASKS.into(),
                                 project: Some(next.clone()),
+                                window: Some(zerus_client_core::tasks::WINDOW),
                                 ..Default::default()
                             },
                         )?;
@@ -495,6 +523,8 @@ mod live {
                     drain,
                     self.desktop_responder.get().cloned(),
                     crate::desktop_service::Observers {
+                        #[cfg(all(test, target_os = "linux"))]
+                        mode_helpers: None,
                         notification_controls: self.notification_controls.get().cloned(),
                         retained_sources: self.retained_import_source.get().cloned(),
                         projections: self

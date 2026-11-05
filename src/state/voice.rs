@@ -517,6 +517,9 @@ fn record(name: &str) -> Result<Value> {
     }
 }
 fn checked(name: &str, request: &Value) -> Result<Value> {
+    // zerus-ucck P3c: the request's identities select among sessions that
+    // share the label.
+    expect(name, string(request, "expected_run_id"), string(request, "expected_conversation_id"))?;
     let value = record(name)?;
     if value["run_id"] != request["expected_run_id"]
         || value["conversation_id"] != request["expected_conversation_id"]
@@ -820,7 +823,7 @@ fn current(job: &Value) -> Result<Value> {
     }
     let mut candidates = records()?.into_iter().filter(matches).collect::<Vec<_>>();
     // DSH bindings are separate; inspect only private bounded manifests.
-    for entry in ["dsh/bindings","opencode/bindings"].into_iter().flat_map(|directory| fs::read_dir(root().join(directory)))
+    for entry in ["dsh/bindings","opencode/bindings","dsh/sessions","opencode/sessions"].into_iter().flat_map(|directory| fs::read_dir(root().join(directory)))
         .flatten()
         .flatten()
         .take(10000)

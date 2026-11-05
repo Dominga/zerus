@@ -27,6 +27,7 @@ impl Composers {
         let (run, conversation) = (ctx.run(), ctx.conversation());
         let archived = ctx.session.archived();
         Some(Target {
+            legacy_key: super::legacy_draft_key(&ctx.session).unwrap_or_default(),
             key: ctx.key,
             host: ctx.session.computer,
             session: ctx.session.name,

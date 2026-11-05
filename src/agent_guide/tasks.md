@@ -7,7 +7,7 @@ Own session/project; PROJECT/T-xxxxxx selects another. Text: stdin; --json: task
   hgs task add [--backlog] [--position N] [--title TEXT] [--request-id UUID]
   hgs task add --start
   hgs task start REF
-  hgs task report REF
+  hgs task report REF [--progress]
   hgs task comment REF
   hgs task rename REF
   hgs task edit REF
@@ -21,7 +21,7 @@ Own session/project; PROJECT/T-xxxxxx selects another. Text: stdin; --json: task
   hgs task cancel REF [--reason TEXT]
 
 Add queues later work; add --start or start REF records current work without
-resending. Report changes, checks and remaining work/blockers: it moves to Review.
+resending. Report changes, checks, remaining work/blockers: it moves to Review.
 Only the person accepts Done.
 You cannot cancel your dispatched task; report instead. Handoff transfers active
 ownership after native submission; messages do not transfer it.

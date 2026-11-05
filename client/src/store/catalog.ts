@@ -1,4 +1,4 @@
-import { batch } from "solid-js";
+import { batch, createSignal } from "solid-js";
 import { applyMachines } from "./machines";
 import { createStore, produce, reconcile, unwrap } from "solid-js/store";
 import type { Batch, ComputerId, RowOut, ViewRow } from "../types";
@@ -6,6 +6,7 @@ import type { AgentKind, Session, Status } from "../ui/sessions/types";
 import { marks as appMarks, type RowMarks } from "./marks";
 import { connectionOf } from "./overview";
 import { childRows } from "../ui/sessions/subagents";
+import { draftKey, nameDraftKey } from "./draftKeys";
 import { tr } from "../i18n";
 
 // The catalog: every live session row of every computer, keyed by
@@ -137,6 +138,7 @@ export function toSession(computer: ComputerId, key: string, v: ViewRow, marks: 
     turnStarted: typeof v.turn_started === "number" && v.turn_started > 0 ? v.turn_started : undefined,
     runId: optional(v.run_id),
     launchId: optional(v.launch_id),
+    sessionId: optional(v.session_id),
     conversationId: optional(v.conversation_id),
     compactKeys: v.compact_keys,
     cmd: text(v.agent),
@@ -150,6 +152,7 @@ export function toSession(computer: ComputerId, key: string, v: ViewRow, marks: 
     resumable: !!v.resumable,
     activity: text(v.activity),
     processState: text(v.process_state),
+    conversationState: text(v.conversation_state),
     archiveId: optional(v.archive_id),
     replyId: optional(v.reply_id),
     attentionSignature: optional(v.attention_signature),
@@ -199,9 +202,14 @@ const REPLACED_MS = 10_000;
 export function createCatalog(given?: RowMarks, onMachines?: (b: Batch) => void) {
   const marks = given ?? appMarks;
   const [catalog, setCatalog] = createStore<CatalogState>({ rows: {}, order: [], computers: {} });
+  // Bumped with every change to the rows, their order or the computers, once
+  // per batch: whole-catalog aggregates track this instead of each field of
+  // every row (zerus-5wmh.66.50).
+  const [revision, setRevision] = createSignal(0);
+  const changed = () => setRevision((n) => n + 1);
   // A marks change applies the overlay again to the rows it touched, in place.
   // The marks only read the rows, so they scan the plain objects (no proxy reads).
-  given?.attach({ rows: () => unwrap(catalog.rows), patch: (id, fields) => setCatalog("rows", id, fields) });
+  given?.attach({ rows: () => unwrap(catalog.rows), patch: (id, fields) => { setCatalog("rows", id, fields); changed(); } });
   // `replaced` removals by computer + name, so the next run of that name can
   // inherit selection and drafts (the remove and its upsert may land in
   // different batches).
@@ -249,9 +257,11 @@ export function createCatalog(given?: RowMarks, onMachines?: (b: Batch) => void)
   };
   /** The draft keys of the nonempty drafts (Rust's `draft_keys`): a row's `draft` mark. */
   let drafts = new Set<string>(), childDraftParents = new Set<string>();
-  const drafted = (row: Pick<Session, "computer" | "name">) => {
-    const owner = `${row.computer}\n${row.name}`;
-    return drafts.has(owner) || childDraftParents.has(owner);
+  // A row keyed by session ID also counts a draft still under its name key,
+  // which moves to the ID key when its composer opens.
+  const drafted = (row: Pick<Session, "computer" | "catalogKey" | "name" | "sessionId">) => {
+    const ref = { computer: row.computer, key: row.catalogKey, name: row.name, archive_id: null, session_id: row.sessionId ?? null };
+    return [draftKey(ref), nameDraftKey(ref)].some((owner) => drafts.has(owner) || childDraftParents.has(owner));
   };
 
   const put = (id: string, next: Session, fresh: string[], delta = true) => {
@@ -378,6 +388,7 @@ export function createCatalog(given?: RowMarks, onMachines?: (b: Batch) => void)
         for (const listener of replacedListeners) listener(from, to);
       }
       for (const next of upserted) inheritReplaced(next);
+      if (b.computers.length || b.replaces.length || b.removes.length || b.upserts.length) changed();
     });
   }
 
@@ -388,8 +399,9 @@ export function createCatalog(given?: RowMarks, onMachines?: (b: Batch) => void)
 
   /**
    * The sessions with a nonempty draft (Qt's SessionDelegate draft status):
-   * Rust's draft keys, `computer + "\n" + name` for a live session. Rows that
-   * arrive later take their mark from the same set.
+   * Rust's draft keys, `computer + "\n" + name` for a live session, or
+   * `computer + "\nid:" + session ID` once it has one. Rows that arrive later
+   * take their mark from the same set.
    */
   function setDraftKeys(keys: readonly string[]) {
     drafts = new Set(keys);
@@ -397,16 +409,35 @@ export function createCatalog(given?: RowMarks, onMachines?: (b: Batch) => void)
     batch(() => {
       for (const id of catalog.order) {
         const row = catalog.rows[id];
-        if (row && row.draft !== drafted(row)) setCatalog("rows", id, "draft", drafted(row));
+        if (row && row.draft !== drafted(row)) { setCatalog("rows", id, "draft", drafted(row)); changed(); }
       }
     });
   }
 
-  return { catalog, applyBatch, onReplaced, setDraftKeys, hasDraftKey: (key: string) => drafts.has(key) };
+  /**
+   * The ordered rows as plain objects, for whole-catalog aggregates such as
+   * the Overview's tiles: they track only the catalog's revision, never each
+   * field of every row, which would be ten subscriptions per row and batch at
+   * tens of thousands of sessions. They are the store's own objects: never
+   * mutate them. Their fields are not reactive: render a row through
+   * `catalog.rows[row.key]`.
+   */
+  const plainRows = (): Session[] => {
+    revision();
+    const state = unwrap(catalog);
+    return state.order.map((id) => state.rows[id]).filter(Boolean);
+  };
+  /** The computers as plain objects, tracking only the catalog's revision; never mutate them. */
+  const plainComputers = (): CatalogState["computers"] => {
+    revision();
+    return unwrap(catalog).computers;
+  };
+
+  return { catalog, applyBatch, onReplaced, setDraftKeys, hasDraftKey: (key: string) => drafts.has(key), revision, plainRows, plainComputers };
 }
 
 /** The app's catalog. Tests build their own with `createCatalog`. */
-export const { catalog, applyBatch, onReplaced, setDraftKeys, hasDraftKey } = createCatalog(appMarks, applyMachines);
+export const { catalog, applyBatch, onReplaced, setDraftKeys, hasDraftKey, plainRows, plainComputers } = createCatalog(appMarks, applyMachines);
 
 /** Rows in display order. */
 export const orderedRows = () => catalog.order.map((id) => catalog.rows[id]).filter(Boolean);

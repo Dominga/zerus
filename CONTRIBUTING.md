@@ -76,6 +76,18 @@ On Linux, the three worktree modules run through `scripts/ci/worktree-tests.py`
 in a fresh PID/mount namespace, including their live process blockers and private
 tmux servers. Production cleanup retains folders when a host process cannot be
 inspected, so a shared host cannot establish the positive removal controls.
+On an active desktop, protected same-user processes can correctly make a direct
+worktree test report `processes_unavailable`. For local real-Git fixtures, map the
+current UID into a private process namespace so permission tests remain active
+and the fixture sees only its own processes:
+
+```sh
+export HGS_TEST_BIN="$PWD/target/debug/hgs"
+(cd tests && env -u HGS_SESSION -u HGS_RUN_ID \
+  unshare --user --map-current-user --pid --fork --mount-proc --kill-child=KILL \
+  python3 -m unittest -v test_worktrees)
+```
+
 Local isolation requires `unshare` and `setpriv`; hosted disposable runners use
 passwordless sudo only for namespace creation, then run fixtures as the original
 user with no capabilities or supplementary groups. A real nondumpable child

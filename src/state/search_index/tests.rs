@@ -108,11 +108,78 @@ impl Fixture {
                 return progress;
             }
             assert!(
-                progress.stopped || Instant::now() >= budget.deadline,
+                Instant::now() >= budget.deadline,
                 "completed fixture slice consumed {consumed} records, expected {expected}"
             );
         }
         panic!("fixture record checkpoint did not finish within 32 bounded slices");
+    }
+    /// Exactly `expected` records over bounded slices, each asking for no
+    /// more than the remainder, so the preparation never crosses its
+    /// checkpoint. A slice that yields early must have met its deadline, the
+    /// only legal reason here: no test sets the cancel flag, and a stop for a
+    /// records, bytes or files budget, or a deferred source, is not one
+    /// (zerus-0dmh, #1357 review).
+    fn consume_exactly(&self, store: &mut Store, expected: usize) -> Progress {
+        let mut consumed = 0;
+        for _ in 0..32 {
+            let budget = self.budget(expected - consumed);
+            let progress = store
+                .step(
+                    &self.state,
+                    std::slice::from_ref(&self.identity),
+                    &budget,
+                    &AtomicBool::new(false),
+                )
+                .unwrap();
+            assert!(progress.errors.is_empty(), "{:?}", progress.errors);
+            assert!(progress.records <= expected - consumed);
+            consumed += progress.records;
+            if consumed == expected {
+                return progress;
+            }
+            assert!(
+                Instant::now() >= budget.deadline,
+                "completed fixture slice consumed {consumed} records, expected {expected}"
+            );
+        }
+        panic!("fixture record checkpoint did not finish within 32 bounded slices");
+    }
+    /// One publication over bounded pages: it continues from a page's cursor
+    /// only when that page met its deadline, the legal yield under parallel
+    /// load (zerus-0dmh); any other early cursor still fails. Returns the last
+    /// page with every page's results and the most unavailable sessions one
+    /// page reported.
+    fn publish_pages(&self, store: &mut Store, query: &str, budget: impl Fn() -> Budget) -> Value {
+        let mut results = Vec::new();
+        let mut unavailable = 0;
+        let mut cursor: Option<String> = None;
+        for _ in 0..32 {
+            let budget = budget();
+            let mut page = store
+                .publish(
+                    &self.state,
+                    query,
+                    50,
+                    cursor.as_deref(),
+                    &budget,
+                    &AtomicBool::new(false),
+                )
+                .unwrap();
+            results.extend(page["results"].as_array().unwrap().iter().cloned());
+            unavailable = unavailable.max(page["unavailable_sessions"].as_u64().unwrap());
+            let Some(next) = page["next_cursor"].as_str().map(str::to_owned) else {
+                page["results"] = json!(results);
+                page["unavailable_sessions"] = json!(unavailable);
+                return page;
+            };
+            assert!(
+                Instant::now() >= budget.deadline,
+                "a publication page stopped before its deadline: {page}"
+            );
+            cursor = Some(next);
+        }
+        panic!("fixture publication did not finish within 32 bounded pages");
     }
     fn cursor(&self, store: &Store) -> Cursor {
         let raw: String = store
@@ -202,16 +269,7 @@ fn large_shell_job_bindings_stay_searchable_and_are_reverified() {
         fixture.append(&Fixture::event(1, "public large binding needle", "final"));
         let mut store = fixture.store();
         fixture.consume_records(&mut store, 128, 1);
-        let page = store
-            .publish(
-                &fixture.state,
-                "needle",
-                50,
-                None,
-                &fixture.budget(128),
-                &AtomicBool::new(false),
-            )
-            .unwrap();
+        let page = fixture.publish_pages(&mut store, "needle", || fixture.budget(128));
         assert_eq!(
             page["results"].as_array().unwrap().len(),
             1,
@@ -244,42 +302,20 @@ fn large_shell_job_bindings_stay_searchable_and_are_reverified() {
             .unwrap();
         assert!(deferred.stopped && deferred.errors.is_empty());
         assert!(deferred.bytes <= small.bytes);
-        let deferred = store
-            .publish(
-                &fixture.state,
-                "needle",
-                50,
-                None,
-                &small,
-                &AtomicBool::new(false),
-            )
-            .unwrap();
+        // zerus-0dmh: a loaded runner can meet the first page's deadline.
+        fixture.expired_slices.set(1);
+        let deferred = fixture.publish_pages(&mut store, "needle", || Budget {
+            bytes: RECORD_BYTES,
+            ..fixture.budget(128)
+        });
         assert!(deferred["results"].as_array().unwrap().is_empty());
         assert_eq!(deferred["unavailable_sessions"], 1);
         assert!(deferred["next_cursor"].is_null());
-        let resumed = store
-            .publish(
-                &fixture.state,
-                "needle",
-                50,
-                None,
-                &fixture.budget(128),
-                &AtomicBool::new(false),
-            )
-            .unwrap();
+        let resumed = fixture.publish_pages(&mut store, "needle", || fixture.budget(128));
         assert_eq!(resumed["results"].as_array().unwrap().len(), 2);
         fixture.record["run_id"] = json!("replaced-run");
         fs::write(&fixture.binding, fixture.record.to_string()).unwrap();
-        let page = store
-            .publish(
-                &fixture.state,
-                "needle",
-                50,
-                None,
-                &fixture.budget(128),
-                &AtomicBool::new(false),
-            )
-            .unwrap();
+        let page = fixture.publish_pages(&mut store, "needle", || fixture.budget(128));
         assert!(page["results"].as_array().unwrap().is_empty());
     }
 }
@@ -329,16 +365,7 @@ fn large_public_snapshots_do_not_hide_transcripts_in_ingestion_sweep_or_publicat
                 )
                 .unwrap();
             assert!(progress.bytes > RECORD_BYTES && progress.bytes <= budget.bytes);
-            let page = store
-                .publish(
-                    &fixture.state,
-                    "needle",
-                    50,
-                    None,
-                    &fixture.budget(128),
-                    &AtomicBool::new(false),
-                )
-                .unwrap();
+            let page = fixture.publish_pages(&mut store, "needle", || fixture.budget(128));
             assert_eq!(page["results"].as_array().unwrap().len(), 1, "{page}");
             assert_eq!(page["results"][0]["content"], "public transcript needle");
             assert_eq!(page["unavailable_sessions"], 0);
@@ -348,16 +375,7 @@ fn large_public_snapshots_do_not_hide_transcripts_in_ingestion_sweep_or_publicat
             // neither the large-text exception nor a prior proof may adopt it.
             fixture.record["conversation_id"] = json!(uuid::Uuid::new_v4().to_string());
             fs::write(&fixture.binding, fixture.record.to_string()).unwrap();
-            let replaced = store
-                .publish(
-                    &fixture.state,
-                    "needle",
-                    50,
-                    None,
-                    &fixture.budget(128),
-                    &AtomicBool::new(false),
-                )
-                .unwrap();
+            let replaced = fixture.publish_pages(&mut store, "needle", || fixture.budget(128));
             assert!(replaced["results"].as_array().unwrap().is_empty());
         }
     }
@@ -783,3 +801,5 @@ fn copied_loose_modes_links_and_other_configuration_are_refused() {
     fs::copy(&db, other_dir.join("index.sqlite3")).unwrap();
     assert!(Store::open(&other_dir).is_err());
 }
+
+mod chunks;

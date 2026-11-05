@@ -14,6 +14,8 @@
 use crate::attachments::{
     Attachment, Draft, MAX_ATTACHMENTS, MAX_ATTACHMENT_BYTES, MAX_TOTAL_BYTES,
 };
+use crate::migration::draft_preload;
+use crate::operation_recovery::deferred_input::Checkpoint;
 use serde::{Deserialize, Serialize};
 use serde_json::{json, Map, Value};
 use sha2::{Digest, Sha256};
@@ -43,14 +45,41 @@ pub fn dir(replay: bool) -> &'static str {
 }
 
 pub const NOT_RESTORED: &str =
-    "Could not restore this draft completely. Saved files have been kept locally.";
+    crate::source!("Could not restore this draft completely. Saved files have been kept locally.");
 pub const INTERRUPTED: &str =
-    "Delivery was interrupted. Check Activity or Terminal before sending again.";
+    crate::source!("Delivery was interrupted. Check Activity or Terminal before sending again.");
+/// A reloaded draft that holds a reserved deferred input but was not saved
+/// while sending (a continuation's start or compaction may have run): it
+/// stays uncertain until the user allows a retry (zerus-5wmh.66.4.4).
+pub const UNCONFIRMED: &str =
+    crate::source!("Delivery is not confirmed. Check Terminal before retrying.");
 pub const ALREADY_EXISTS: &str =
     "Another draft already exists here. Recover the previous one from Saved drafts.";
+/// A write refused for this run: the store's earlier drafts could not be
+/// recorded first (zerus-5wmh.66.5.2.1.2), so nothing is overwritten.
+pub const NOT_RECORDED: &str = "Drafts are not being saved: their earlier versions could not be recorded. Check access to the Zerus data folder, then use Retry in Saved drafts.";
+/// A draft whose deferred-input checkpoint is inconsistent is never written:
+/// no dispatch may follow a save that did not record its identity.
+pub const NOT_SAVED_CHECKPOINT: &str =
+    "Draft not saved: its delivery identity is invalid. Nothing was sent.";
+/// The manifest field of a reserved deferred input ([`StoredDraft::checkpoint`]).
+const CHECKPOINT: &str = "deferred_input";
 /// Saved drafts skips larger manifests.
 pub(crate) const MAX_MANIFEST: u64 = 1024 * 1024;
 const PREVIEW_CHARS: usize = 200;
+/// The session part of a draft key for a session with a durable ID
+/// (`machine\nid:<session_id>`), zerus-ucck P2c-2. Session names never hold
+/// `:` (tmux turns it into `_`), so the part never names a session.
+pub const SESSION_ID_PREFIX: &str = "id:";
+
+/// A draft key's session part: `id:<session_id>` when the session carries a
+/// canonical durable ID, else its name, as every key was before.
+pub fn session_part(name: &str, session_id: Option<&str>) -> String {
+    match session_id.filter(|id| crate::creation::canonical_uuid(id)) {
+        Some(id) => format!("{SESSION_ID_PREFIX}{id}"),
+        None => name.to_owned(),
+    }
+}
 
 /// One stored draft: the composer's text and attachments and what Qt keeps
 /// with them.
@@ -64,14 +93,46 @@ pub struct StoredDraft {
     pub label: String,
     /// The owner's form fields, such as a task's title.
     pub form_state: Map<String, Value>,
+    /// The session's label at the save of a draft keyed by session ID:
+    /// Saved drafts names the draft by it while its session is not listed.
+    /// Empty for every other key, whose manifest then keeps its exact bytes.
+    pub session_label: String,
     /// Saved while the message was being sent.
     pub sending: bool,
     pub uncertain: bool,
+    /// The deferred input reserved before its dispatch (zerus-5wmh.66.4.4):
+    /// its request identity and consent checkpoint, saved with the draft.
+    /// Data only: nothing sends from it, and an imported or recovered draft
+    /// never carries one.
+    pub checkpoint: Option<Box<Checkpoint>>,
+}
+
+/// Whether two stored drafts are the same in everything they store: text,
+/// attachment bytes, cursor, label, form state, delivery flags and reserved
+/// input. Only the session label, which a move adds, may differ.
+fn same_apart_from_label(a: &StoredDraft, b: &StoredDraft) -> bool {
+    let unlabelled = |draft: &StoredDraft| StoredDraft {
+        session_label: String::new(),
+        ..draft.clone()
+    };
+    unlabelled(a) == unlabelled(b)
 }
 
 impl StoredDraft {
     fn is_empty(&self) -> bool {
         self.draft.text.is_empty() && self.draft.attachments.is_empty()
+    }
+
+    /// Something a rename, recover or import never overwrites: content, or
+    /// an unresolved deferred input even without content.
+    fn occupied(&self) -> bool {
+        !self.is_empty() || self.checkpoint.is_some()
+    }
+
+    /// Anything a one-time move carries or must never overwrite: content, a
+    /// reserved input, or form state such as an answer's chosen options.
+    fn held(&self) -> bool {
+        self.occupied() || !self.form_state.is_empty()
     }
 }
 
@@ -95,6 +156,9 @@ pub struct Summary {
     /// The manifest's modification time, in seconds since the epoch.
     pub modified: f64,
     pub attachments: usize,
+    /// [`StoredDraft::session_label`].
+    #[serde(default)]
+    pub session_label: String,
 }
 
 /// Whose conversation a draft key names. Message, subagent, question-answer,
@@ -126,6 +190,10 @@ pub struct Owner {
     pub subagent: String,
     pub project: String,
     pub task: String,
+    /// The durable session ID of a key whose session part is
+    /// `id:<session_id>`; [`Owner::session`] then holds that part.
+    #[serde(default)]
+    pub session_id: String,
 }
 
 /// The owner of a draft key (`ComposerDraftStore::owner`).
@@ -186,6 +254,12 @@ pub fn owner(key: &str) -> Owner {
         session: parts[1].into(),
         ..Owner::default()
     };
+    if let Some(id) = parts[1].strip_prefix(SESSION_ID_PREFIX) {
+        if !crate::creation::canonical_uuid(id) {
+            return Owner::default();
+        }
+        result.session_id = id.into();
+    }
     if parts.len() == 4 {
         if parts[3].is_empty() {
             return Owner::default();
@@ -313,7 +387,7 @@ fn save_direct(root: &Path, key: &str, draft: &StoredDraft) -> Result<(), String
             "sha256": digest, "bytes": attachment.bytes.len(),
         }));
     }
-    let manifest = json!({
+    let mut manifest = json!({
         "version": 1, "key": key, "text": draft.draft.text,
         "position": draft.position, "anchor": draft.anchor, "label": draft.label,
         "form_state": draft.form_state,
@@ -321,6 +395,19 @@ fn save_direct(root: &Path, key: &str, draft: &StoredDraft) -> Result<(), String
         "sending": draft.sending, "uncertain": draft.uncertain,
         "attachments": attachments,
     });
+    // Only a draft keyed by session ID adds its session's label.
+    if !draft.session_label.is_empty() {
+        manifest["session_label"] = json!(draft.session_label);
+    }
+    // Only a reserved deferred input adds its field: every other manifest
+    // keeps its exact earlier bytes.
+    if let Some(checkpoint) = &draft.checkpoint {
+        if !checkpoint.valid() {
+            return Err(NOT_SAVED_CHECKPOINT.into());
+        }
+        manifest[CHECKPOINT] =
+            serde_json::to_value(checkpoint).map_err(|_| NOT_SAVED_CHECKPOINT.to_owned())?;
+    }
     atomic_write(&path.join("draft.json"), manifest.to_string().as_bytes())?;
     // The committed manifest is authoritative: a crash during this cleanup
     // cannot bring sent attachments back.
@@ -390,10 +477,21 @@ fn load_once(root: &Path, key: &str) -> (StoredDraft, bool) {
             .and_then(Value::as_object)
             .cloned()
             .unwrap_or_default(),
+        session_label: text("session_label"),
         sending: flag("sending"),
         uncertain: flag("uncertain"),
+        checkpoint: None,
     };
     let mut valid = true;
+    // Only an absent field is a draft without a deferred input. A present
+    // one that does not parse or is inconsistent is never dropped as absent:
+    // the draft is not restored, and its files stay.
+    if let Some(value) = object.get(CHECKPOINT) {
+        match serde_json::from_value::<Checkpoint>(value.clone()) {
+            Ok(checkpoint) if checkpoint.valid() => draft.checkpoint = Some(Box::new(checkpoint)),
+            _ => valid = false,
+        }
+    }
     let mut total = 0;
     let listed = object
         .get("attachments")
@@ -439,9 +537,16 @@ fn load_once(root: &Path, key: &str) -> (StoredDraft, bool) {
 
 fn loaded((mut draft, valid): (StoredDraft, bool)) -> Loaded {
     let storage_error = (!valid).then(|| NOT_RESTORED.to_owned());
-    // A draft saved during a send may have been delivered.
-    draft.uncertain = draft.uncertain || draft.sending;
-    let notice = draft.uncertain.then(|| INTERRUPTED.to_owned());
+    // A draft saved during a send may have been delivered. One holding a
+    // reserved deferred input may have had its call run: it stays uncertain
+    // until the user allows a retry, never continued from here.
+    let held = draft.checkpoint.is_some() && !draft.uncertain && !draft.sending;
+    draft.uncertain = draft.uncertain || draft.sending || draft.checkpoint.is_some();
+    let notice = if held {
+        Some(UNCONFIRMED.to_owned())
+    } else {
+        draft.uncertain.then(|| INTERRUPTED.to_owned())
+    };
     Loaded {
         draft,
         storage_error,
@@ -516,18 +621,21 @@ fn summary(root: &Path, folder: &str, modified_ns: u64) -> Option<(String, Summa
                 .collect()
         })
         .unwrap_or_default();
-    let label = object
-        .get("label")
-        .and_then(Value::as_str)
-        .unwrap_or("")
-        .into();
+    let field = |name: &str| {
+        object
+            .get(name)
+            .and_then(Value::as_str)
+            .unwrap_or("")
+            .into()
+    };
     Some((
         key.to_owned(),
         Summary {
-            label,
+            label: field("label"),
             preview,
             modified: modified_ns as f64 / 1e9,
             attachments,
+            session_label: field("session_label"),
         },
     ))
 }
@@ -671,7 +779,44 @@ impl Writer {
 pub struct DraftStore {
     root: PathBuf,
     writer: Arc<Writer>,
+    fence: Arc<Mutex<Fence>>,
     thread: Option<JoinHandle<()>>,
+}
+
+/// What the store's first job allows the jobs after it (G3 drafts capture,
+/// zerus-5wmh.66.5.2.1.2). Only writer jobs read or change it, in queue order.
+struct Fence {
+    capture: Option<Arc<draft_preload::Capture>>,
+    gate: draft_preload::Gate,
+    /// The one-time import's sources while it waits for an explicit Retry.
+    parked: Option<Vec<ImportSource>>,
+}
+
+impl Default for Fence {
+    fn default() -> Self {
+        Fence {
+            capture: None,
+            gate: draft_preload::Gate {
+                writes: true,
+                import: true,
+            },
+            parked: None,
+        }
+    }
+}
+
+/// Every draft write of the store: refused for the run while the capture's
+/// lineage is not durable, so no original is overwritten without it.
+fn save_fenced(
+    fence: &Mutex<Fence>,
+    root: &Path,
+    key: &str,
+    draft: &StoredDraft,
+) -> Result<(), String> {
+    if !lock(fence).gate.writes {
+        return Err(NOT_RECORDED.into());
+    }
+    save_direct(root, key, draft)
 }
 
 impl DraftStore {
@@ -688,8 +833,31 @@ impl DraftStore {
         DraftStore {
             root,
             writer,
+            fence: Arc::default(),
             thread: Some(thread),
         }
+    }
+
+    /// Opens the store with the G3 capture ([`draft_preload::Capture`]) as
+    /// its first job, queued before any other job can be: Next's manifests
+    /// are recorded as they were before this run's first load, save, recovery
+    /// or import. A failed attempt pauses the one-time import until
+    /// [`DraftStore::retry_import`]; a capture without durable lineage
+    /// refuses every write for the run ([`NOT_RECORDED`]).
+    pub fn open_captured(root: PathBuf, capture: Arc<draft_preload::Capture>) -> DraftStore {
+        let store = DraftStore::open(root);
+        let fence = Arc::clone(&store.fence);
+        store.writer.enqueue(
+            "",
+            false,
+            Box::new(move || {
+                let gate = capture.prepare();
+                let mut fence = lock(&fence);
+                fence.gate = gate;
+                fence.capture = Some(capture);
+            }),
+        );
+        store
     }
 
     pub fn root(&self) -> &Path {
@@ -707,11 +875,11 @@ impl DraftStore {
         if key.is_empty() {
             return;
         }
-        let (root, owned) = (self.root.clone(), key.to_owned());
+        let (root, owned, fence) = (self.root.clone(), key.to_owned(), self.fence.clone());
         self.writer.enqueue(
             key,
             true,
-            Box::new(move || done(save_direct(&root, &owned, &draft))),
+            Box::new(move || done(save_fenced(&fence, &root, &owned, &draft))),
         );
     }
 
@@ -722,11 +890,11 @@ impl DraftStore {
         draft: StoredDraft,
         done: impl FnOnce(Result<(), String>) + Send + 'static,
     ) {
-        let (root, owned) = (self.root.clone(), key.to_owned());
+        let (root, owned, fence) = (self.root.clone(), key.to_owned(), self.fence.clone());
         self.writer.enqueue(
             key,
             false,
-            Box::new(move || done(save_direct(&root, &owned, &draft))),
+            Box::new(move || done(save_fenced(&fence, &root, &owned, &draft))),
         );
     }
 
@@ -761,7 +929,7 @@ impl DraftStore {
         clear: bool,
         done: impl FnOnce(Result<bool, String>) + Send + 'static,
     ) {
-        let (root, owned) = (self.root.clone(), key.to_owned());
+        let (root, owned, fence) = (self.root.clone(), key.to_owned(), self.fence.clone());
         self.writer.enqueue(
             key,
             false,
@@ -781,7 +949,7 @@ impl DraftStore {
                     }
                     current.sending = false;
                     current.uncertain = false;
-                    save_direct(&root, &owned, &current).map(|()| true)
+                    save_fenced(&fence, &root, &owned, &current).map(|()| true)
                 };
                 done(result);
             }),
@@ -798,7 +966,7 @@ impl DraftStore {
         next: StoredDraft,
         done: impl FnOnce(Result<bool, String>) + Send + 'static,
     ) {
-        let (root, owned) = (self.root.clone(), key.to_owned());
+        let (root, owned, fence) = (self.root.clone(), key.to_owned(), self.fence.clone());
         self.writer.enqueue(
             key,
             false,
@@ -812,7 +980,7 @@ impl DraftStore {
                 } else if current != expected {
                     Ok(false)
                 } else {
-                    save_direct(&root, &owned, &next).map(|()| true)
+                    save_fenced(&fence, &root, &owned, &next).map(|()| true)
                 };
                 done(result);
             }),
@@ -837,18 +1005,77 @@ impl DraftStore {
         done: impl FnOnce(Result<(), String>) + Send + 'static,
     ) {
         let (root, old, new) = (self.root.clone(), old.to_owned(), new.to_owned());
+        let fence = self.fence.clone();
         let key = old.clone();
         self.writer.enqueue(
             &key,
             false,
             Box::new(move || {
                 let destination = loaded(load_once(&root, &new));
-                if !destination.draft.is_empty() || destination.storage_error.is_some() {
+                if destination.draft.occupied() || destination.storage_error.is_some() {
                     return done(Err(ALREADY_EXISTS.into()));
                 }
-                let result = save_direct(&root, &new, &draft)
-                    .and_then(|()| save_direct(&root, &old, &StoredDraft::default()));
+                let result = save_fenced(&fence, &root, &new, &draft)
+                    .and_then(|()| save_fenced(&fence, &root, &old, &StoredDraft::default()));
                 done(result)
+            }),
+        );
+    }
+
+    /// The one-time move of a session's draft from its name key to its
+    /// session ID key (zerus-ucck P2c-2), on the writer like a rename: only
+    /// when `key` holds nothing and `legacy` holds a valid draft. The draft
+    /// moves as stored, with its delivery state and reserved input, and is
+    /// labelled `session_label` when it has no label of its own. The old key
+    /// is emptied only after the new one is durable, so a failure leaves both
+    /// recoverable and nothing is overwritten: a draft with content, a
+    /// reserved input or form state counts. When the ID key already holds the
+    /// same draft, apart from the session label the move adds, a crash cut an
+    /// earlier move short, and the name key is emptied now. `done` gets
+    /// whether it moved or finished a move.
+    pub fn adopt(
+        &self,
+        legacy: &str,
+        key: &str,
+        session_label: &str,
+        done: impl FnOnce(bool) + Send + 'static,
+    ) {
+        let (root, fence) = (self.root.clone(), self.fence.clone());
+        let (legacy, owned, label) = (legacy.to_owned(), key.to_owned(), session_label.to_owned());
+        self.writer.enqueue(
+            key,
+            false,
+            Box::new(move || {
+                if legacy.is_empty() || legacy == owned {
+                    return done(false);
+                }
+                let (here, valid) = load_once(&root, &owned);
+                if !valid {
+                    return done(false);
+                }
+                let (mut draft, valid) = load_once(&root, &legacy);
+                if !valid || !draft.held() {
+                    return done(false);
+                }
+                if here.held() {
+                    // A move a crash interrupted after its first write left
+                    // the same draft at both keys: it ends now. Different
+                    // drafts are never merged or chosen between; both stay.
+                    if same_apart_from_label(&here, &draft) {
+                        let _ = save_fenced(&fence, &root, &legacy, &StoredDraft::default());
+                        return done(true);
+                    }
+                    return done(false);
+                }
+                if draft.session_label.is_empty() {
+                    draft.session_label = label;
+                }
+                if save_fenced(&fence, &root, &owned, &draft).is_err() {
+                    return done(false);
+                }
+                // The draft is durable at its new key: the old copy goes.
+                let _ = save_fenced(&fence, &root, &legacy, &StoredDraft::default());
+                done(true)
             }),
         );
     }
@@ -862,35 +1089,88 @@ impl DraftStore {
         done: impl FnOnce(Result<Loaded, String>) + Send + 'static,
     ) {
         let (root, qt_root, owned) = (self.root.clone(), qt_root.to_path_buf(), key.to_owned());
+        let fence = self.fence.clone();
         self.writer.enqueue(
             key,
             false,
             Box::new(move || {
                 let here = loaded(load_once(&root, &owned));
-                if !here.draft.is_empty() || here.storage_error.is_some() {
+                if here.draft.occupied() || here.storage_error.is_some() {
                     return done(Err(ALREADY_EXISTS.into()));
                 }
-                let copy = read_draft(&qt_root, &owned);
+                let mut copy = read_draft(&qt_root, &owned);
                 if copy.storage_error.is_some() {
                     return done(Ok(copy));
                 }
-                done(save_direct(&root, &owned, &copy.draft).map(|()| copy))
+                // A recovered draft never carries a deferred input either.
+                copy.draft.checkpoint = None;
+                done(save_fenced(&fence, &root, &owned, &copy.draft).map(|()| copy))
             }),
         );
     }
 
     /// The one-time import ([`import_once`]) on this store's writer, so it
-    /// runs between the client's own writes.
+    /// runs between the client's own writes. While the G3 capture has not
+    /// recorded Next's drafts, an import not done yet waits, with its sources,
+    /// for [`DraftStore::retry_import`]; its report says so.
     pub fn import(
         &self,
         sources: Vec<ImportSource>,
         done: impl FnOnce(ImportReport) + Send + 'static,
     ) {
-        let root = self.root.clone();
+        let (root, fence) = (self.root.clone(), self.fence.clone());
         self.writer.enqueue(
             "",
             false,
-            Box::new(move || done(import_once(&root, &sources))),
+            Box::new(move || {
+                let mut fence = lock(&fence);
+                if fence.gate.import || root.join(IMPORT_MARKER).exists() {
+                    drop(fence);
+                    return done(import_once(&root, &sources));
+                }
+                let report = ImportReport {
+                    sources: sources.iter().map(|source| source.name.clone()).collect(),
+                    unfinished: vec![IMPORT_PAUSED.into()],
+                    ..ImportReport::default()
+                };
+                fence.parked = Some(sources);
+                if let Some(capture) = &fence.capture {
+                    capture.set_paused(true);
+                }
+                drop(fence);
+                eprintln!("zerus-client-core: drafts import: {IMPORT_PAUSED}");
+                done(report)
+            }),
+        );
+    }
+
+    /// Retry (zerus-5wmh.66.5.2.1.2). A run whose capture lineage was not
+    /// durable wrote nothing and imported nothing, so it attempts the capture
+    /// again. After a recorded attempt, Retry runs the waiting import; the
+    /// attempt stays not captured: no original is backfilled.
+    pub fn retry_import(&self) {
+        let (root, fence) = (self.root.clone(), self.fence.clone());
+        self.writer.enqueue(
+            "",
+            false,
+            Box::new(move || {
+                let mut fence = lock(&fence);
+                let Some(capture) = fence.capture.clone() else {
+                    return;
+                };
+                if !fence.gate.writes {
+                    fence.gate = capture.prepare();
+                    if !fence.gate.import {
+                        return;
+                    }
+                }
+                let Some(sources) = fence.parked.take() else {
+                    return;
+                };
+                drop(fence);
+                capture.set_paused(false);
+                import_once(&root, &sources);
+            }),
         );
     }
 
@@ -965,6 +1245,9 @@ pub struct ImportConflict {
 
 /// Marks this store's one-time import (`<root>/.imported-v1.json`).
 pub const IMPORT_MARKER: &str = ".imported-v1.json";
+
+/// Why an import waits: the G3 capture did not record Next's drafts first.
+pub const IMPORT_PAUSED: &str = "paused until Retry: earlier drafts were not recorded";
 
 /// The draft roots of the dev app (`dev.zerus.next` and its phase builds)
 /// that exist on this computer: Tauri's app data folder plus `drafts`.
@@ -1169,7 +1452,7 @@ pub fn import_once(root: &Path, sources: &[ImportSource]) -> ImportReport {
     for copies in candidates.chunk_by(|a, b| a.key == b.key) {
         let key = &copies[0].key;
         let here = loaded(load_once(root, key));
-        let mut kept = (here.storage_error.is_some() || !here.draft.is_empty())
+        let mut kept = (here.storage_error.is_some() || here.draft.occupied())
             .then(|| content_hash(&here.draft));
         drop(here);
         for copy in copies {
@@ -1189,7 +1472,16 @@ pub fn import_once(root: &Path, sources: &[ImportSource]) -> ImportReport {
                     key: key.clone(),
                     source: source.name.clone(),
                 }),
-                None => match save_direct(root, key, &found.draft) {
+                // An imported draft never carries another app's deferred
+                // input: its original belongs there, never re-sent here.
+                None => match save_direct(
+                    root,
+                    key,
+                    &StoredDraft {
+                        checkpoint: None,
+                        ..found.draft.clone()
+                    },
+                ) {
                     Ok(()) => {
                         report.imported += 1;
                         kept = Some(hash);
@@ -1288,6 +1580,50 @@ mod tests {
             (OwnerKind::Question, "claude/p/a")
         );
         assert_eq!(owner("lonely").kind, OwnerKind::Unknown);
+        // zerus-ucck P2c-2: a session keyed by its durable ID.
+        let id = "3f2a9c1d-6b7e-4c2a-9d1f-0a1b2c3d4e5f";
+        for (key, kind) in [
+            (format!("studio\nid:{id}"), OwnerKind::Message),
+            (
+                format!("studio\nid:{id}\nconv-1\nagent-2"),
+                OwnerKind::Subagent,
+            ),
+            (
+                format!("voice-message-draft\nstudio\nid:{id}"),
+                OwnerKind::Voice,
+            ),
+            (
+                format!("question\n[\"studio\\nid:{id}\",\"q-1\"]\nanswer"),
+                OwnerKind::Question,
+            ),
+        ] {
+            let parsed = owner(&key);
+            assert_eq!(
+                (
+                    parsed.kind,
+                    parsed.session_id.as_str(),
+                    parsed.machine.as_str()
+                ),
+                (kind, id, "studio"),
+                "{key:?}"
+            );
+        }
+        assert_eq!(owner("studio\nclaude/p/a").session_id, "");
+        for bad in [
+            "id:",
+            "id:3F2A9C1D-6B7E-4C2A-9D1F-0A1B2C3D4E5F",
+            "id:not-a-uuid",
+        ] {
+            assert_eq!(
+                owner(&format!("studio\n{bad}")).kind,
+                OwnerKind::Unknown,
+                "{bad}"
+            );
+        }
+        assert_eq!(session_part("claude/p/a", Some(id)), format!("id:{id}"));
+        for other in [None, Some(""), Some("3F2A9C1D-6B7E-4C2A-9D1F-0A1B2C3D4E5F")] {
+            assert_eq!(session_part("claude/p/a", other), "claude/p/a");
+        }
         assert_eq!(owner("a\n\nb").kind, OwnerKind::Unknown);
         assert_eq!(owner("a\nb\nc\nd\ne").kind, OwnerKind::Unknown);
     }

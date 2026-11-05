@@ -1,0 +1,36 @@
+diff --git a/gdk/wayland/gdkwindow-wayland.c b/gdk/wayland/gdkwindow-wayland.c
+index 533d06f..f076d12 100644
+--- a/gdk/wayland/gdkwindow-wayland.c
++++ b/gdk/wayland/gdkwindow-wayland.c
+@@ -1086,11 +1086,27 @@ gdk_window_impl_wayland_end_paint (GdkWindow *window)
+       impl->pending_commit = TRUE;
+     }
+   else if (window->current_paint.use_gl &&
+-           window->current_paint.surface_needs_composite &&
+-           impl->pending_commit)
++           window->current_paint.surface_needs_composite)
+     {
+-      /* Discard issuing pending commit, as when we reach here, it means it'll
+-       * be done implicitly by eglSwapBuffers(). */
++      GdkFrameClock *clock = gdk_window_get_frame_clock (window);
++      struct wl_callback *callback;
++
++      /* Arm the frame callback before eglSwapBuffers() issues the commit. */
++      if (window->update_freeze_count == 0 && !impl->awaiting_frame)
++        {
++          _gdk_frame_clock_freeze (clock);
++
++          if (impl->surface_callback == NULL)
++            {
++              callback = wl_surface_frame (impl->display_server.wl_surface);
++              wl_callback_add_listener (callback, &frame_listener, window);
++              impl->surface_callback = callback;
++            }
++
++          impl->pending_frame_counter = gdk_frame_clock_get_frame_counter (clock);
++          impl->awaiting_frame = TRUE;
++        }
++
+       impl->pending_commit = FALSE;
+     }
+ 

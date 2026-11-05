@@ -5,7 +5,7 @@ use crate::{config::Config, desktop::revoke};
 use std::fs;
 
 struct Fixture {
-    _temp: tempfile::TempDir,
+    _temp: Option<tempfile::TempDir>,
     root: std::path::PathBuf,
     location: Location,
     runtime: Runtime,
@@ -14,7 +14,13 @@ struct Fixture {
 impl Fixture {
     fn new() -> Self {
         let temp = tempfile::tempdir().unwrap();
-        let root = temp.path().canonicalize().unwrap();
+        let mut fixture = Self::open(temp.path());
+        fixture._temp = Some(temp);
+        fixture
+    }
+    fn open(root: &Path) -> Self {
+        fs::create_dir_all(root).unwrap();
+        let root = root.canonicalize().unwrap();
         let config = Config {
             home: root.to_str().unwrap().into(),
             dir: root.join("config"),
@@ -35,7 +41,7 @@ impl Fixture {
         let store = Store::open(&location, &epoch).unwrap();
         let runtime = Runtime::new(&location, &epoch, owner);
         Self {
-            _temp: temp,
+            _temp: None,
             root,
             location,
             runtime,
@@ -65,13 +71,23 @@ impl Fixture {
         self.prepare_timing(root, revision, "immediate")
     }
     fn prepare_timing(&mut self, root: &Path, revision: u64, timing: &str) -> (String, String) {
+        self.prepare_from(root, revision, timing, "")
+    }
+    fn prepare_from(
+        &mut self,
+        root: &Path,
+        revision: u64,
+        timing: &str,
+        application: &str,
+    ) -> (String, String) {
         let prepare = id();
         let operation = id();
         let value = json!({"op":"cache_maintenance","request_id":prepare,"command":{"phase":"prepare",
             "operation_id":operation,"configuration":self.location.configuration,"root":root,"limit":1,"revision":revision,"timing":timing,"policy_change":true}});
-        let result = self
-            .runtime
-            .frontend_request(&mut self.store, Validated::fixture(&value));
+        let result = self.runtime.frontend_request(
+            &mut self.store,
+            Validated::fixture_from(&value, application),
+        );
         assert_eq!(result["phase"], "preparing", "{result}");
         assert_eq!(self.store.operation_undrained().unwrap(), 1);
         let end = Instant::now() + Duration::from_secs(5);
@@ -108,6 +124,39 @@ impl Fixture {
             thread::sleep(Duration::from_millis(2));
         }
         assert_eq!(self.store.operation_undrained().unwrap(), 0);
+    }
+}
+
+/// G3 (zerus-5wmh.66.5.2.1.3): only the maintained production build's
+/// passes record the folder's original index, inside the admitted execution;
+/// preparation writes nothing and a development build never records.
+#[test]
+fn only_the_maintained_build_records_the_original_index_and_only_when_executing() {
+    use zerus_client_core::download_cache::evidence;
+    for (application, records) in [
+        (evidence::MAINTAINED_APPLICATION, true),
+        ("dev.zerus.next", false),
+    ] {
+        let mut f = Fixture::new();
+        let root = f.save();
+        let original = fs::read(root.join(".zerus-files.json")).unwrap();
+        let (prepare, operation) = f.prepare_from(&root, 0, "immediate", application);
+        assert!(
+            !root.join(evidence::DIR).exists(),
+            "preparation writes nothing"
+        );
+        assert_eq!(f.execute(&prepare, &operation)["accepted"], true);
+        f.drain();
+        assert!(!root.join("report.txt").exists());
+        match evidence::evidence(&root) {
+            evidence::Evidence::Captured(receipt) if records => {
+                assert_eq!(receipt.bytes, original.len() as u64);
+            }
+            evidence::Evidence::None if !records => {
+                assert!(!root.join(evidence::DIR).exists());
+            }
+            other => panic!("{application}: {other:?}"),
+        }
     }
 }
 
@@ -228,7 +277,7 @@ fn schema_upgrades_exactly_from_real_creation_seventeen_without_a_placeholder() 
         .store
         .db
         .prepare(
-            "SELECT name,sql FROM sqlite_schema WHERE name LIKE 'desktop_creation_%' ORDER BY name",
+            "SELECT name,sql FROM sqlite_schema WHERE name LIKE 'desktop_creation_clone%' ORDER BY name",
         )
         .unwrap()
         .query_map([], |r| Ok((r.get(0)?, r.get(1)?)))
@@ -263,7 +312,7 @@ fn schema_upgrades_exactly_from_real_creation_seventeen_without_a_placeholder() 
     let creation_after: Vec<(String, String)> = store
         .db
         .prepare(
-            "SELECT name,sql FROM sqlite_schema WHERE name LIKE 'desktop_creation_%' ORDER BY name",
+            "SELECT name,sql FROM sqlite_schema WHERE name LIKE 'desktop_creation_clone%' ORDER BY name",
         )
         .unwrap()
         .query_map([], |r| Ok((r.get(0)?, r.get(1)?)))
@@ -375,8 +424,24 @@ fn owned_cache_crash_fixture() {
         return;
     };
     let base = std::path::PathBuf::from(base);
-    let mut f = Fixture::new();
-    let root = f.save();
+    // Cold schema creation and cache population belong to parent setup, not
+    // the bounded wait for this original child's reservation. Refuse a missing
+    // or stale setup rather than silently doing migrations inside that wait.
+    let prepared = base.join("original");
+    let db = rusqlite::Connection::open_with_flags(
+        prepared.join("state/desktop/state.sqlite3"),
+        rusqlite::OpenFlags::SQLITE_OPEN_READ_ONLY,
+    )
+    .unwrap();
+    assert_eq!(
+        db.query_row("PRAGMA user_version", [], |r| r.get::<_, i64>(0))
+            .unwrap(),
+        crate::desktop::store::SCHEMA
+    );
+    drop(db);
+    let mut f = Fixture::open(&prepared);
+    let root = f.root.join("cache");
+    assert!(root.join("report.txt").is_file());
     let (entered, wait) = mpsc::sync_channel(1);
     let (release, receive) = mpsc::sync_channel(1);
     let after_started = std::env::var("ZERUS_CACHE_CRASH_AFTER_START").as_deref() == Ok("1");
@@ -448,14 +513,68 @@ fn killing_during_the_real_grace_recovers_original_kept_without_an_unknown_fence
 fn killing_after_committed_effect_start_recovers_unknown_and_never_replays() {
     kill_original_and_recover(true);
 }
+
+// A failed readiness assertion must not abandon the still-owned original. No
+// PID lookup or group termination is used, and an unconfirmed stop retains the
+// original handle and private files instead of claiming cleanup.
+struct CrashChild {
+    child: Option<std::process::Child>,
+    stop_requested: bool,
+}
+impl CrashChild {
+    fn child(&mut self) -> &mut std::process::Child {
+        self.child.as_mut().unwrap()
+    }
+    fn stop(&mut self) -> std::io::Result<()> {
+        if self.stop_requested {
+            return Ok(());
+        }
+        self.stop_requested = true;
+        self.child().kill()
+    }
+    fn retain(&mut self) {
+        std::mem::forget(self.child.take().unwrap());
+        eprintln!("original fixture stop unconfirmed; handle/private files retained");
+    }
+}
+impl Drop for CrashChild {
+    fn drop(&mut self) {
+        match self.child().try_wait() {
+            Ok(Some(_)) => return,
+            Ok(None) => (),
+            Err(_) => return self.retain(),
+        }
+        let _ = self.stop();
+        let end = Instant::now() + Duration::from_secs(3);
+        loop {
+            match self.child().try_wait() {
+                Ok(Some(_)) => return,
+                Ok(None) => (),
+                Err(_) => return self.retain(),
+            }
+            if Instant::now() >= end {
+                return self.retain();
+            }
+            thread::sleep(Duration::from_millis(2));
+        }
+    }
+}
+
 fn kill_original_and_recover(after_started: bool) {
     use std::io::Read;
     use std::process::{Command, Stdio};
     let base = tempfile::tempdir().unwrap().keep();
-    let mut child = Command::new(std::env::current_exe().unwrap())
+    {
+        let initialized = Fixture::open(&base.join("original"));
+        initialized.save();
+        // Drop the actual parent owner/Store before the child acquires its own
+        // owner and performs the real Prepare/Execute admission.
+    }
+    let child = Command::new(std::env::current_exe().unwrap())
         .args([
             "--exact",
             "desktop::cache_maintenance::tests::owned_cache_crash_fixture",
+            "--test-threads=1",
             "--nocapture",
         ])
         .env("ZERUS_CACHE_CRASH_FIXTURE", &base)
@@ -468,11 +587,15 @@ fn kill_original_and_recover(after_started: bool) {
         .stderr(Stdio::null())
         .spawn()
         .unwrap();
+    let mut original = CrashChild {
+        child: Some(child),
+        stop_requested: false,
+    };
     let end = Instant::now() + Duration::from_secs(10);
     let marker = base.join("ready.json");
     while !marker.exists() {
         assert!(
-            child.try_wait().unwrap().is_none(),
+            original.child().try_wait().unwrap().is_none(),
             "original fixture exited before reservation; retained private files"
         );
         assert!(
@@ -489,10 +612,10 @@ fn kill_original_and_recover(after_started: bool) {
         .unwrap();
     assert!(bytes.len() <= 16 * 1024);
     let marker: Value = serde_json::from_slice(&bytes).unwrap();
-    let original_birth = platform::process_identity(child.id()).unwrap();
-    child.kill().unwrap(); // ONLY this still-owned original child, never a group
+    let original_birth = platform::process_identity(original.child().id()).unwrap();
+    original.stop().unwrap(); // ONLY this still-owned original child, never a group
     let end = Instant::now() + Duration::from_secs(3);
-    while child.try_wait().unwrap().is_none() {
+    while original.child().try_wait().unwrap().is_none() {
         assert!(
             Instant::now() < end,
             "original termination remains pending; retained private files"
@@ -500,9 +623,10 @@ fn kill_original_and_recover(after_started: bool) {
         thread::sleep(Duration::from_millis(2));
     }
     assert_ne!(
-        platform::process_identity(child.id()).as_ref(),
+        platform::process_identity(original.child().id()).as_ref(),
         Some(&original_birth)
     );
+    drop(original);
     let root = std::path::PathBuf::from(marker["root"].as_str().unwrap());
     let location = Location {
         root: std::path::PathBuf::from(marker["state"].as_str().unwrap()),
@@ -659,6 +783,25 @@ fn a_missing_original_start_ack_never_unlinks_or_invents_an_unknown_fence() {
     );
     assert_eq!(f.store.operation_undrained().unwrap(), 1);
     assert!(root.join("report.txt").is_file());
+    // Keep the original sender connected across several 50 ms receive polls.
+    // A timeout must not manufacture a permit; Disconnected is a separate path.
+    let unanswered_until = Instant::now() + Duration::from_millis(300);
+    while Instant::now() < unanswered_until {
+        assert_eq!(
+            fs::read(root.join("report.txt")).unwrap(),
+            b"cached original"
+        );
+        assert!(!f
+            .runtime
+            .job
+            .as_ref()
+            .unwrap()
+            .thread
+            .as_ref()
+            .unwrap()
+            .is_finished());
+        thread::sleep(Duration::from_millis(10));
+    }
     drop(reply); // Only the original private reply; no actor commit or permit.
     f.drain();
     let row = ledger::load(&f.store.db, &operation).unwrap().unwrap();
@@ -716,6 +859,64 @@ fn a_start_commit_write_failure_does_not_release_a_permit_or_unlink() {
         [ledger::FileState::Kept]
     );
     assert!(root.join("report.txt").is_file());
+}
+
+#[test]
+fn a_start_commit_veto_after_the_update_never_releases_a_permit() {
+    let mut f = Fixture::new();
+    let root = f.save();
+    let (prepare, operation) = f.prepare(&root, 0);
+    f.execute(&prepare, &operation);
+    let updates = Arc::new(std::sync::atomic::AtomicUsize::new(0));
+    let observed = Arc::clone(&updates);
+    f.store.db.update_hook(Some(
+        move |action: rusqlite::hooks::Action, _database: &str, table: &str, _row: i64| {
+            if action == rusqlite::hooks::Action::SQLITE_UPDATE
+                && table == "desktop_cache_operations"
+            {
+                observed.fetch_add(1, Ordering::AcqRel);
+            }
+        },
+    ));
+    let commits = Arc::new(std::sync::atomic::AtomicUsize::new(0));
+    let observed = Arc::clone(&commits);
+    f.store.db.commit_hook(Some(move || {
+        observed.fetch_add(1, Ordering::AcqRel);
+        true // Roll back at commit, after start_effects completed its UPDATE.
+    }));
+    let until = Instant::now() + Duration::from_secs(3);
+    while !f.runtime.error {
+        f.runtime.poll(&mut f.store);
+        assert!(Instant::now() < until, "start commit veto was not observed");
+        thread::sleep(Duration::from_millis(1));
+    }
+    f.store.db.commit_hook(None::<fn() -> bool>);
+    f.store
+        .db
+        .update_hook(None::<fn(rusqlite::hooks::Action, &str, &str, i64)>);
+    assert_eq!(updates.load(Ordering::Acquire), 1);
+    assert_eq!(commits.load(Ordering::Acquire), 1);
+    assert!(
+        !ledger::load(&f.store.db, &operation)
+            .unwrap()
+            .unwrap()
+            .effect_started
+    );
+    assert!(root.join("report.txt").is_file());
+    // Removing the veto only permits settlement, never a replacement start ACK.
+    f.drain();
+    let row = ledger::load(&f.store.db, &operation).unwrap().unwrap();
+    assert_eq!(row.phase, ledger::Phase::Settled);
+    assert!(!row.effect_started);
+    assert_eq!(
+        row.receipt.as_ref().unwrap().files,
+        [ledger::FileState::Kept]
+    );
+    assert_eq!(row.receipt, row.kept_receipt);
+    assert_eq!(
+        fs::read(root.join("report.txt")).unwrap(),
+        b"cached original"
+    );
 }
 
 #[test]

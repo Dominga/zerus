@@ -167,8 +167,20 @@ impl Fixture {
         self.runtime.sources.native_fixture(&self.store, computer);
     }
     fn tick_until(&mut self, predicate: impl Fn(&Runtime) -> bool) {
+        self.poll_until(predicate, false);
+    }
+    /// Collect only the original jobs. Fairness fixtures advance discovery in
+    /// explicit scans; a loaded runner must not sneak in another scan during
+    /// collection and replace the completed jobs before the predicate sees it.
+    fn collect_until(&mut self, predicate: impl Fn(&Runtime) -> bool) {
+        self.poll_until(predicate, true);
+    }
+    fn poll_until(&mut self, predicate: impl Fn(&Runtime) -> bool, collect_only: bool) {
         let end = Instant::now() + Duration::from_secs(5);
         loop {
+            if collect_only {
+                self.runtime.scan_at = end;
+            }
             self.runtime.poll(&mut self.store);
             if predicate(&self.runtime) {
                 break;
@@ -318,6 +330,19 @@ fn actual_root_projection_is_consumed_by_the_client_without_ready_json_fixtures(
     let mut f = Fixture::new(quiet());
     let mut client = State::new(f.location.configuration.clone()).unwrap();
     let mut output = Vec::new();
+    // A passive service: no background runtime decorates its lifecycle, so
+    // all five components stay not_started (the Windows passive GUI state).
+    let passive = f.passive_projection();
+    client.status(&passive).unwrap();
+    assert!(client.snapshot().connected);
+    assert!(!client.snapshot().background_ready());
+    for component in ["fleet", "presence", "reads", "attention", "approvals"] {
+        assert_eq!(
+            passive["lifecycle"]["background"][component]["code"], "not_started",
+            "{component}"
+        );
+    }
+    output.push(json!({"case":"passive","status":passive}));
     let mut check = |case: &str, f: &Fixture, reads: bool, approvals: bool| {
         let value = f.projection();
         client.status(&value).unwrap();
@@ -1035,6 +1060,25 @@ fn an_approval_at_the_end_of_a_large_catalog_is_found_on_the_first_scan() {
 }
 
 #[test]
+fn a_source_older_than_fresh_is_not_scanned_until_it_is_observed_again() {
+    // zerus-e04p, #1357 review: a source last observed more than FRESH ago,
+    // without a heartbeat, takes no part in discovery.
+    let (run, seen) = inspections();
+    let mut f = Fixture::new(run);
+    f.active();
+    f.enabled(true);
+    f.source_rows(idle_then_approval(1));
+    f.runtime.sources.age_fixture(Duration::from_secs(16));
+    f.scan();
+    f.tick_until(|r| r.jobs.is_empty());
+    assert!(seen.lock().unwrap().is_empty());
+    f.runtime.sources.heartbeat_fixture(&f.store);
+    f.scan();
+    f.tick_until(|r| r.jobs.is_empty());
+    assert!(seen.lock().unwrap().iter().any(|a| a == "claude/example/a"));
+}
+
+#[test]
 fn rows_stored_before_the_index_are_found_once_the_scan_backfills_them() {
     let (run, seen) = inspections();
     let mut f = Fixture::new(run.clone());
@@ -1090,9 +1134,12 @@ fn idle(count: usize) -> Vec<CatalogItem> {
 }
 
 impl Fixture {
-    /// One scan, its inspections settled, then a second passes: the 5 s
-    /// inspection cooldown counts it.
+    /// A live source's heartbeat, one scan with its inspections settled, then
+    /// a second passes: the 5 s inspection cooldown counts it. The heartbeat
+    /// keeps a test's sources current however slow the runner; without it,
+    /// more than `FRESH` of real time made every later scan skip them.
     fn second(&mut self) {
+        self.runtime.sources.heartbeat_fixture(&self.store);
         self.scan();
         self.tick_until(|r| r.jobs.is_empty());
         for (_, at) in self.runtime.recent.iter_mut() {
@@ -1172,6 +1219,8 @@ fn a_pass_ends_where_it_began_so_arrivals_cannot_hide_an_older_row() {
         .unwrap();
     let mut arrived = 20;
     for _ in 0..4 {
+        // zerus-e04p: a loaded runner can spend more than FRESH between scans.
+        f.runtime.sources.age_fixture(Duration::from_secs(16));
         for _ in 0..16 {
             let row = named(&format!("untracked-{arrived}"), "approval", false);
             let json = row.row.to_string();
@@ -1265,7 +1314,7 @@ impl Held {
             sequence: AtomicUsize::new(0),
         });
         let record = held.clone();
-        let run: Runner = Arc::new(move |inv, _, _, _| {
+        let run: Runner = Arc::new(move |inv, _, cancel, _| {
             assert!(inv.args.iter().any(|a| a == "inspect"));
             if let Some(name) = inv.args.iter().find(|a| a.starts_with("claude/example/")) {
                 record.names.lock().unwrap().push(name.clone());
@@ -1277,7 +1326,14 @@ impl Held {
                 sequence,
                 release,
             ));
-            let _ = wait.recv_timeout(Duration::from_secs(30));
+            // This fixture holds by scan count, not wall time. Slow scheduling
+            // must not release a slot early; panic/drop still cancels it.
+            while !cancel.load(Ordering::Acquire) {
+                match wait.recv_timeout(Duration::from_millis(10)) {
+                    Err(mpsc::RecvTimeoutError::Timeout) => (),
+                    _ => break,
+                }
+            }
             Exit::TimedOut
         });
         (run, held)
@@ -1300,7 +1356,8 @@ impl Held {
                     }
                 });
             let held = self.calls.lock().unwrap().len();
-            f.tick_until(|r| r.jobs.len() == held);
+            f.collect_until(|r| r.jobs.len() == held);
+            f.runtime.sources.heartbeat_fixture(&f.store);
             f.scan();
             // Every inspection the scan started has reached the runner.
             let launched = f.runtime.jobs.len();
@@ -1316,7 +1373,7 @@ impl Held {
         for (_, _, release) in self.calls.lock().unwrap().drain(..) {
             let _ = release.send(());
         }
-        f.tick_until(|r| r.jobs.is_empty());
+        f.collect_until(|r| r.jobs.is_empty());
     }
 }
 
@@ -1326,6 +1383,46 @@ fn slow_rows(f: &mut Fixture) {
             .map(|n| named(&format!("slow-{n}"), "approval", true))
             .collect(),
     );
+}
+
+#[test]
+fn collecting_released_inspections_never_performs_a_scheduled_scan() {
+    let (run, held) = Held::runner();
+    let mut f = Fixture::new(run);
+    f.active();
+    f.enabled(true);
+    slow_rows(&mut f);
+    f.scan();
+    let launched = f.runtime.jobs.len();
+    assert_eq!(launched, APPROVALS);
+    let until = Instant::now() + Duration::from_secs(5);
+    while held.calls.lock().unwrap().len() < launched {
+        assert!(Instant::now() < until, "the original inspections never ran");
+        thread::sleep(Duration::from_millis(1));
+    }
+    for (_, _, release) in held.calls.lock().unwrap().drain(..) {
+        release.send(()).unwrap();
+    }
+    // Make the interleaving exact: both original threads have returned before
+    // the actor's next turn. The regression must not depend on a lucky race
+    // between releasing a worker and its thread actually finishing.
+    let until = Instant::now() + Duration::from_secs(5);
+    while f.runtime.jobs.iter().any(|job| {
+        job.thread
+            .as_ref()
+            .is_none_or(|thread| !thread.is_finished())
+    }) {
+        assert!(
+            Instant::now() < until,
+            "the original threads never finished"
+        );
+        thread::sleep(Duration::from_millis(1));
+    }
+    // The same scheduling point reached after a loaded runner spends one
+    // second between explicit scans, without a machine-speed-dependent sleep.
+    f.runtime.scan_at = Instant::now();
+    f.collect_until(|r| r.jobs.is_empty());
+    assert_eq!(held.sequence.load(Ordering::SeqCst), launched);
 }
 
 #[test]

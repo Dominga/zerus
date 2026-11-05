@@ -1,5 +1,16 @@
 # Universal prepared replacement policy
 
+**Status: PARKED, 2026-11-04.** No production producer prepare/controller is
+planned since the owner direction of 2026-11-01 recorded in `zerus-5wmh.66.3.23`
+(`hgs desktop` owns background duties and Zerus Next is UI only; no
+universal-old-binary proof gate). `zerus-5wmh.66.3.23.18.2` was closed as
+superseded, not as qualified. This contract is kept for a reactivation: any
+future production producer prepare/controller reopens that bead and must satisfy
+both conditions below first. Behavior is unchanged: all production prepare
+remains fenced. The startup, presence and revoke guards stay active; only their
+prepared-row branch sees no production-created row, and it still refuses one.
+Existing per-kind and current-ownership safeguards are unaffected.
+
 Status: contract and source inventory only, 2026-11-01. Tracks
 `zerus-5wmh.66.3.23.18.2.2` under the Qt retirement epic. This document changes
 no startup, installer, rollback, service, writer or protocol behavior. All

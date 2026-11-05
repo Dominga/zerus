@@ -22,6 +22,9 @@ pub(super) fn dispatch(args: &[String]) -> Result<i32> {
     if bytes.len()>8192 {return Err("Interrupt request is too large".into());}
     let request:Request=serde_json::from_slice(&bytes).map_err(|e|e.to_string())?;
     let uuid=uuid::Uuid::parse_str(&request.request_id).map_err(|_|"Invalid request identity")?;
+    let uncertain =
+        |e: String| format!("Interrupt delivery uncertain: {e}. Check Terminal before retrying");
+    expect(&args[0], &request.expected_run_id, &request.expected_conversation_id)?;
     let guard=lock(None)?;
     let name=&args[0];let open_native=opencode::exists(name);let native=dsh::exists(name) || open_native;
     let record=if open_native {opencode::own_state(name)?} else if native {dsh::inspect(name,None)?} else {read(name)?};
@@ -38,7 +41,7 @@ pub(super) fn dispatch(args: &[String]) -> Result<i32> {
         if !eligible(&record) {return Err("This turn is no longer working".into());}
         kimi_tui_choice::identity(&record)?;
     }
-    recovery::cancel_for_input(name)?;
+    recovery::cancel_for_input(&record)?;
     atomic(&path,&json!({"status":"in_progress"}).to_string())?;
     let mut seen=None;
     if open_native {opencode::interrupt(&record)?;}
@@ -52,11 +55,12 @@ pub(super) fn dispatch(args: &[String]) -> Result<i32> {
         compact_context::observe(&mut current,&json!({"hook_event_name":"Interrupt"}));
         write(&mut current)?;
         backend::current().send(string(&current,"pane"),&[backend::Key::Named("Escape")])
-            .map_err(|e|format!("Interrupt delivery uncertain: {e}. Check Terminal before retrying"))?;
+            .map_err(uncertain)?;
     }
     let mut receipt=json!({"request_id":request.request_id,"name":name,"run_id":request.expected_run_id,
         "conversation_id":request.expected_conversation_id,"status":"submitted"});
-    atomic(&path,&receipt.to_string())?;
+    // The interrupt was delivered or may have been (zerus-1wchz).
+    atomic(&path, &receipt.to_string()).map_err(uncertain)?;
     if let Some(seen)=seen {
         // Hooks must not wait while Claude redraws.
         drop(guard);

@@ -59,6 +59,7 @@ HGS_TRAY_QUIT_TIMEOUT and HGS_TRAY_START_TIMEOUT (seconds, default 35) bound the
 waits for the old GUI to quit and the new one to start.
 """
 import argparse
+from contextlib import contextmanager
 import datetime
 import errno
 import hashlib
@@ -70,10 +71,12 @@ import re
 import shutil
 import signal
 import socket
+import stat
 import subprocess
 import sys
 import tempfile
 import time
+from typing import NamedTuple
 import uuid
 
 MAC = sys.platform == 'darwin'
@@ -486,31 +489,57 @@ def snapshot(destination, roots):
     return count
 
 
+class KeptDrafts(NamedTuple):
+    """What the drafts saved when the old GUI quit held, once verified.
+
+    `total` counts every verified draft. Each counts once as `unsent` (text
+    or files) or `forms` (saved form state only, such as an answered or
+    submitted question form), and `held` counts the drafts holding a delivery
+    identity (`deferred_input`, zerus-5wmh.66.4.4), with or without content.
+    """
+    total: int = 0
+    unsent: int = 0
+    forms: int = 0
+    held: int = 0
+
+
 def changed_drafts(saved, roots):
-    """Nonempty drafts saved when the old GUI quit that are missing or different now."""
-    problems, preserved = [], 0
+    """Drafts saved when the old GUI quit that are missing or different now.
+
+    Every draft holding unsent input, saved form state or a held delivery
+    identity is compared, and the counts tell those apart (zerus-8iwj).
+    """
+    problems, total, unsent, forms, held = [], 0, 0, 0, 0
     for label, current in roots:
         prefix = '' if label == 'qt' else f'{label} '
         kept = saved / label
         for before in sorted(kept.rglob('draft.json')):
             relative = before.relative_to(kept).parent
             original = json.loads(before.read_text())
-            if not (original.get('text') or original.get('attachments') or original.get('form_state')):
+            content = bool(original.get('text') or original.get('attachments'))
+            form = bool(original.get('form_state'))
+            identity = 'deferred_input' in original
+            if not (content or form or identity):
                 continue
             after = current / relative / 'draft.json'
             if not after.exists():
                 problems.append(f'{prefix}{relative}: missing')
                 continue
             restored = json.loads(after.read_text())
-            if any(original.get(key) != restored.get(key) for key in ('key', 'text', 'attachments', 'form_state')):
+            keys = ('key', 'text', 'attachments', 'form_state', 'deferred_input')
+            if any(original.get(key) != restored.get(key) for key in keys):
                 problems.append(f'{prefix}{relative}: changed')
                 continue
             for attachment in original.get('attachments') or []:
                 blob = after.parent / (attachment['sha256'] + '.bin')
                 if not blob.exists() or digest(blob) != attachment['sha256']:
                     problems.append(f'{prefix}{relative}: attachment changed')
-            preserved += 1
-    return preserved, problems
+            total += 1
+            unsent += content
+            forms += form and not content
+            # A present but null field is compared, never counted as held.
+            held += original.get('deferred_input') is not None
+    return KeptDrafts(total, unsent, forms, held), problems
 
 
 def running_image_matches(pid, installed):
@@ -542,11 +571,13 @@ def build_info(path):
     return info
 
 
-def provenance(installed, info, installed_at, preserved, retained):
+def provenance(installed, info, installed_at, kept, retained):
     record = {'schema': 1, 'sourceCommit': info.get('sourceCommit') or None, 'sourceDirty': info.get('sourceDirty'),
               'guiVersion': info.get('version'), 'guiVersionName': info.get('versionName'),
               'guiSha256': digest(executable(installed)), 'installedAt': installed_at, 'verifiedAt': now(),
-              'preservedDrafts': preserved, 'nativeRetained': retained}
+              'preservedDrafts': kept.total,
+              'keptDrafts': {'unsentInput': kept.unsent, 'formState': kept.forms, 'heldIdentities': kept.held},
+              'nativeRetained': retained}
     if CLI.exists():
         record['cliSha256'] = digest(CLI)
         try:
@@ -1009,7 +1040,7 @@ def legacy_desktop_state_absent():
                       'cannot check desktop revocation; keep Qt stopped and upgrade or repair hgs')
 
 
-def revoke_configuration():
+def revoke_configuration(with_status=False):
     """The selected CLI's supported, read-only configuration, never an approximation."""
     try:
         help_result = subprocess.run([CLI, '--help'], capture_output=True, text=True, timeout=10)
@@ -1033,7 +1064,120 @@ def revoke_configuration():
         raise UpdateError(f'cannot read the desktop configuration; keep Qt stopped: {error}')
     if status.returncode != 0 or not isinstance(result, dict) or not result.get('configuration'):
         raise UpdateError('the selected hgs did not report a canonical desktop configuration; keep Qt stopped')
-    return result['configuration']
+    return (result['configuration'], result) if with_status else result['configuration']
+
+
+def passive_before_qt(installed, configuration, status):
+    """Use the maintained helper, never raw manager verbs, to retain passive.
+
+    Legacy CLI/no-service paths keep their existing revoke-only behavior.
+    A current service must select passive before a future update can restart
+    it. The helper owns the SAME rollback UUID/hold through physical readiness.
+    """
+    lifecycle = status.get('lifecycle')
+    if not isinstance(lifecycle, dict) or lifecycle.get('abi') != 'desktop-lifecycle-v1':
+        return
+    helper = Path(__file__).resolve().parent.parent / 'scripts' / (
+        'install-macos-desktop-service.py' if MAC else 'install-linux-desktop-service.py')
+    backend = installed / 'Contents/MacOS/hgs' if MAC and (installed / 'Contents/MacOS/hgs').exists() else CLI
+    query = ([sys.executable, str(helper), str(backend), '--status', '--json'] if MAC else
+             [sys.executable, str(helper), 'status', '--hgs', str(CLI), '--json'])
+    try:
+        result = subprocess.run(query, capture_output=True, text=True, timeout=REVOKE_SECONDS)
+        registration = json.loads(result.stdout)
+    except (OSError, ValueError, subprocess.TimeoutExpired) as error:
+        raise UpdateError(f'desktop registration is unconfirmed; keep Qt stopped and inspect the maintained helper: {error}') from None
+    if (result.returncode != 0 or not isinstance(registration, dict)
+            or registration.get('schema') != 1 or registration.get('operation') != 'status'
+            or registration.get('configuration') != configuration
+            or type(registration.get('registered')) is not bool):
+        raise UpdateError('desktop registration is unconfirmed; keep Qt stopped and inspect the maintained helper')
+    # The CLI's lifecycle ABI also describes an unavailable service. Only the
+    # helper can establish an existing owned registration; Qt never creates one.
+    if registration['registered'] is False:
+        return
+    if registration.get('selected_mode') not in ('passive', 'background'):
+        raise UpdateError('desktop registration mode is unavailable; keep Qt stopped')
+    args = ([sys.executable, str(helper), str(backend), '--mode', 'passive', '--json'] if MAC else
+            [sys.executable, str(helper), 'install', '--hgs', str(CLI), '--mode', 'passive', '--json'])
+    try:
+        result = subprocess.run(args, capture_output=True, text=True, timeout=REVOKE_SECONDS)
+        receipt = json.loads(result.stdout)
+    except (OSError, ValueError, subprocess.TimeoutExpired) as error:
+        raise UpdateError(f'passive rollback is unconfirmed; keep Qt stopped and inspect the maintained helper: {error}') from None
+    if (result.returncode != 0 or not isinstance(receipt, dict) or receipt.get('configuration') != configuration
+            or receipt.get('ok') is not True or receipt.get('selected_mode') != 'passive'
+            or receipt.get('running_mode') != 'passive' or receipt.get('ipc_ready') is not True
+            or receipt.get('pending_restart') is not False or receipt.get('transition') is not None):
+        raise UpdateError('passive rollback is not settled; keep Qt stopped and inspect the SAME helper transition; do not Rearm')
+
+
+@contextmanager
+def qt_revoke_journal(configuration, before_offer):
+    """Private metadata and exclusion, never a native execution permission."""
+    directory = SNAPSHOTS.with_name('desktop-qt-revoke')
+    # Keep draft snapshots separate. If an earlier updater left an original in
+    # its old location, keep that exact journal rather than offering a new UUID.
+    legacy = SNAPSHOTS / '.qt-revoke'
+    if os.path.lexists(legacy):
+        if os.path.lexists(directory):
+            raise UpdateError('two Qt revoke journals require review; keep Qt stopped without another offer')
+        directory = legacy
+    directory.mkdir(mode=0o700, parents=True, exist_ok=True)
+    meta = directory.lstat()
+    if not stat.S_ISDIR(meta.st_mode) or meta.st_uid != os.getuid() or stat.S_IMODE(meta.st_mode) != 0o700:
+        raise UpdateError('the Qt revoke journal is not a private owned directory; keep Qt stopped')
+    flags = os.O_NOFOLLOW | os.O_NONBLOCK | os.O_CLOEXEC
+    import fcntl
+    fd = os.open(directory / 'original.lock', os.O_CREAT | os.O_RDWR | flags, 0o600)
+    try:
+        meta = os.fstat(fd)
+        if not stat.S_ISREG(meta.st_mode) or meta.st_uid != os.getuid() or meta.st_nlink != 1 or stat.S_IMODE(meta.st_mode) != 0o600:
+            raise UpdateError('the Qt revoke journal lock is not private; keep Qt stopped')
+        fcntl.flock(fd, fcntl.LOCK_EX | fcntl.LOCK_NB)
+        path = directory / 'original.json'
+        previous = None
+        try:
+            source = os.open(path, os.O_RDONLY | flags)
+        except FileNotFoundError:
+            pass
+        else:
+            with os.fdopen(source, 'rb') as original:
+                meta = os.fstat(original.fileno())
+                if not stat.S_ISREG(meta.st_mode) or meta.st_uid != os.getuid() or meta.st_nlink != 1 or stat.S_IMODE(meta.st_mode) != 0o600 or meta.st_size > 8192:
+                    raise UpdateError('the original Qt revoke record is unavailable; keep Qt stopped')
+                previous = json.loads(original.read(8193))
+            if (not isinstance(previous, dict) or set(previous) != {'schema', 'configuration', 'request_id', 'phase'}
+                    or previous.get('schema') != 1 or previous.get('configuration') != configuration
+                    or previous.get('phase') not in ('unknown', 'settled')
+                    or not isinstance(previous.get('request_id'), str)
+                    or str(uuid.UUID(previous['request_id'])) != previous['request_id']):
+                raise UpdateError('the original Qt revoke scope changed; keep Qt stopped and inspect that original')
+        def save(value):
+            out, temporary = tempfile.mkstemp(prefix='.original-', dir=directory)
+            try:
+                with os.fdopen(out, 'w') as target:
+                    json.dump(value, target); target.write('\n'); target.flush(); os.fsync(target.fileno())
+                os.replace(temporary, path)
+                parent = os.open(directory, os.O_RDONLY | os.O_DIRECTORY | os.O_CLOEXEC)
+                try:
+                    os.fsync(parent)
+                finally:
+                    os.close(parent)
+            finally:
+                Path(temporary).unlink(missing_ok=True)
+        fresh = previous is None or previous['phase'] == 'settled'
+        if fresh:
+            # An uncertain original bypasses even this maintained helper:
+            # only lookup runs after an updater restart.
+            before_offer()
+        record = ({'schema': 1, 'configuration': configuration, 'request_id': str(uuid.uuid4()), 'phase': 'unknown'}
+                  if fresh else previous)
+        if fresh:
+            save(record)  # Before offering the original command, including lost replies/crashes.
+        yield record, fresh, save
+    finally:
+        os.close(fd)
 
 
 def revocation_refusal(request_id, receipt=None):
@@ -1056,15 +1200,24 @@ def revocation_refusal(request_id, receipt=None):
             'Reboot only as a last resort.')
 
 
-def revoke_before_qt():
+def revoke_before_qt(installed):
     """Revoke migrated writers before any Qt start, with one retained request ID."""
-    configuration = revoke_configuration()
-    if configuration is None:
+    scope = revoke_configuration(with_status=True)
+    if scope is None:
         return
-    request_id = str(uuid.uuid4())
+    configuration, status = scope
+    try:
+        with qt_revoke_journal(configuration, lambda: passive_before_qt(installed, configuration, status)) as (record, fresh, save):
+            _revoke_before_qt(configuration, record['request_id'], fresh)
+            save(dict(record, phase='settled'))
+    except (OSError, ValueError, TypeError) as error:
+        raise UpdateError(f'cannot retain or read the original Qt rollback; keep Qt stopped: {error}') from None
+
+
+def _revoke_before_qt(configuration, request_id, fresh):
     args = [CLI, 'desktop', 'revoke', '--json', '--request-id', request_id, '--reason', 'rollback']
     try:
-        result = subprocess.run(args, capture_output=True, text=True, timeout=REVOKE_SECONDS)
+        result = subprocess.run(args, capture_output=True, text=True, timeout=REVOKE_SECONDS) if fresh else None
     except (OSError, subprocess.TimeoutExpired):
         result = None
     if result is not None and result.returncode == 0:
@@ -1103,7 +1256,7 @@ def update(built, installed, rollback=False):
         if refusal:
             raise UpdateError(refusal + ' Nothing was replaced.')
     if new_kind == 'qt':
-        revoke_before_qt()
+        revoke_before_qt(installed)
     switching = MAC and old_kind == 'qt' and new_kind == 'tauri'
     # Qt's settings follow the direction of the change: leaving the client for
     # Qt checks them before Qt runs again and writes its own (and can still
@@ -1223,7 +1376,7 @@ def update(built, installed, rollback=False):
             raise UpdateError('the new GUI runs, but ' + '; '.join(problems) + '; the replaced GUI was kept')
         settled = settle(aside if aside.exists() else None, progress)
         done = True
-        preserved, draft_problems = changed_drafts(saved, roots)
+        kept, draft_problems = changed_drafts(saved, roots)
         problems += draft_problems
         if to_client:
             late, notes = settings_report()
@@ -1237,11 +1390,12 @@ def update(built, installed, rollback=False):
         if problems:
             raise UpdateError('the new GUI runs, but ' + '; '.join(problems))
         retained = sum(after.get(p) == value for p, value in before.items())
-        provenance(installed, info, installed_at, preserved, retained)
+        provenance(installed, info, installed_at, kept, retained)
         shutil.rmtree(saved)
         saved = None
         sweep(installed.parent, folder)
-        say(f'Zerus {name} runs as pid {new}; {preserved} nonempty drafts kept, '
+        say(f'Zerus {name} runs as pid {new}; drafts kept: {kept.unsent} with unsent input, '
+            f'{kept.forms} with saved form state only, {kept.held} with a held delivery identity; '
             f'{retained} native processes untouched; {settled}')
         return 0
     except UpdateError:

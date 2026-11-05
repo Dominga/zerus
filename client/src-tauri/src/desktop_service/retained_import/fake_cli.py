@@ -37,6 +37,7 @@ elif args == ['desktop', 'import-evidence', '--json']:
     start = json.loads(pipe.readline(4097))
     total = snapshots = pages = 0
     record = raw = None
+    bodies = []
     mode = (root / 'mode').read_text()
     while True:
         line = pipe.readline(4097)
@@ -56,6 +57,8 @@ elif args == ['desktop', 'import-evidence', '--json']:
         assert total <= 64 << 20
         snapshots += header['t'] == 'snapshot'
         pages += header['t'] == 'page'
+        if header['t'] == 'snapshot':
+            bodies.append(raw.decode())
         if mode == 'partial':
             raise SystemExit(1)
     if record is None:
@@ -84,6 +87,8 @@ elif args == ['desktop', 'import-evidence', '--json']:
         (root / 'committed.json').write_text(json.dumps(receipt))
         (root / ('committed-' + start['import_id'] + '.json')).write_text(json.dumps(receipt))
         (root / ('record-' + start['import_id'] + '.json')).write_text(json.dumps(record))
+        # The published snapshot bodies, one per line, for content checks.
+        (root / ('snapshots-' + start['import_id'] + '.jsonl')).write_text('\n'.join(bodies))
         if mode != 'commit_lost':
             print(json.dumps(receipt))
 else:

@@ -371,7 +371,7 @@ if [ "${SCRATCH}" = "1" ]; then
 else
     if [ "${GUI}" = "client" ] && [ "${LIVE}" = "1" ]; then
         SERVICE_HELPER="${PREFIX}/lib/zerus/install-linux-desktop-service.py"
-        for SERVICE_SOURCE in desktop-revoke-hold.py install-linux-desktop-service.py; do
+        for SERVICE_SOURCE in desktop-service-activation.py desktop-revoke-hold.py install-linux-desktop-service.py; do
             SERVICE_DEST="${PREFIX}/lib/zerus/${SERVICE_SOURCE}"
             if ! cmp -s "${SCRIPT_DIR}/../scripts/${SERVICE_SOURCE}" "${SERVICE_DEST}"; then
                 install -Dm755 "${SCRIPT_DIR}/../scripts/${SERVICE_SOURCE}" "${SERVICE_DEST}.new"

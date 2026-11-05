@@ -220,16 +220,52 @@ fn a_record_beyond_this_slice_stays_pending_without_blocking_other_sessions() {
 
 #[test]
 fn invalid_metadata_is_marked_unavailable_without_a_fake_source_or_body() {
+    invalid_metadata_preparation(false);
+}
+
+#[test]
+fn invalid_metadata_preparation_resumes_after_an_expired_slice() {
+    invalid_metadata_preparation(true);
+}
+
+fn invalid_metadata_preparation(expire_first: bool) {
     let (_temp, state, mut store) = fixture(false);
     let path = state.join(format!(
         "{:x}.json",
         Sha256::digest(b"codex/example/search")
     ));
-    fs::write(path, "PRIVATE_INVALID_BODY").unwrap();
+    fs::write(&path, "PRIVATE_INVALID_BODY").unwrap();
     discover(&store, &state);
-    store
-        .consume(&state, &budget(128), &AtomicBool::new(false))
+    let done = |store: &Store| -> bool {
+        store
+            .index
+            .connection()
+            .query_row(
+                "SELECT done FROM catalog_queue WHERE path=?",
+                [path.to_str().unwrap()],
+                |row| row.get(0),
+            )
+            .unwrap()
+    };
+    let mut first = budget(128);
+    if expire_first {
+        first.deadline = Instant::now();
+    }
+    let progress = store
+        .consume(&state, &first, &AtomicBool::new(false))
         .unwrap();
+    if expire_first {
+        assert!(progress.ingestion.stopped);
+        assert!(
+            !done(&store),
+            "an expired slice must leave preparation pending"
+        );
+    }
+    // A valid bounded consume may yield before this row. Preparation waits
+    // for the exact queue outcome, retaining every slice's original limits.
+    if !done(&store) {
+        consume_until(&mut store, &state, done);
+    }
     let (done, skipped): (bool, i64) = store
         .index
         .connection()

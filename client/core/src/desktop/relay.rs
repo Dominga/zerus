@@ -23,6 +23,48 @@ pub struct Connection {
     native: Option<crate::macos_notify::peer::installation::Selection>,
 }
 impl Connection {
+    /// Route only the helper from this retained genuine Mac selection. An
+    /// ordinary/unpaired connection has no original-helper route. This is
+    /// routing freshness, not live child evidence or effect permission: call
+    /// observe_original_helper on EACH original child before private input.
+    #[cfg(target_os = "macos")]
+    pub fn original_helper_executable(&self) -> Result<&Path, &'static str> {
+        #[cfg(feature = "macos-native-peer")]
+        {
+            self.native
+                .as_ref()
+                .ok_or(UNAVAILABLE)?
+                .service_executable_if_unchanged()
+                .map_err(|_| UNAVAILABLE)
+        }
+        #[cfg(not(feature = "macos-native-peer"))]
+        Err(UNAVAILABLE)
+    }
+
+    /// Mac own-original-child observation only, before taking/writing stdin.
+    /// No caller-supplied PID, path, signature or reusable permission. Ordinary
+    /// routing has no native selection and refuses this operation. On failure
+    /// input is closed; the SAME Child stays with its caller for bounded
+    /// stop/reap/pipe custody. A success is point-in-time, not an exec fence or
+    /// G1 effect admission. Retain actual resources past any outer timeout.
+    #[cfg(target_os = "macos")]
+    pub fn observe_original_helper(
+        &self,
+        child: &mut std::process::Child,
+    ) -> Result<(), &'static str> {
+        #[cfg(feature = "macos-native-peer")]
+        let result = self.native.as_ref().ok_or(UNAVAILABLE).and_then(|native| {
+            native
+                .observe_original_helper(child)
+                .map_err(|_| UNAVAILABLE)
+        });
+        #[cfg(not(feature = "macos-native-peer"))]
+        let result = Err(UNAVAILABLE);
+        if result.is_err() {
+            drop(child.stdin.take());
+        }
+        result
+    }
     pub fn select(ordinary: &Path) -> Result<Self, &'static str> {
         #[cfg(target_os = "macos")]
         {

@@ -184,6 +184,38 @@ fn drafts_root(data_dir: &std::path::Path, replay: bool) -> std::path::PathBuf {
 #[cfg(all(test, unix))]
 pub(crate) static PROCESS_TREE: std::sync::RwLock<()> = std::sync::RwLock::new(());
 
+#[cfg(all(test, unix, feature = "live"))]
+mod test_context;
+
+/// Writes an executable test fixture without this process ever holding it
+/// open for writing. A test thread that forks while such a descriptor is open
+/// passes it to a child that has not exec'd yet, and running the file then
+/// fails with ETXTBSY (zerus-0b9f). The bytes go to a side file that never
+/// runs; a short-lived `cp` creates the executable, so its only writer has
+/// exited before anything runs it. An existing entry is removed first, so a
+/// fixture symlink to a checked-in script is never written through.
+#[cfg(all(test, unix))]
+pub(crate) fn write_executable(path: &std::path::Path, contents: impl AsRef<[u8]>) {
+    use std::os::unix::fs::PermissionsExt;
+    let name = path.file_name().expect("executable name").to_string_lossy();
+    let source = path.with_file_name(format!(".{name}.source"));
+    std::fs::write(&source, contents).unwrap();
+    match std::fs::remove_file(path) {
+        Err(error) if error.kind() != std::io::ErrorKind::NotFound => {
+            panic!("cannot replace {}: {error}", path.display())
+        }
+        _ => {}
+    }
+    let status = std::process::Command::new("/bin/cp")
+        .arg(&source)
+        .arg(path)
+        .status()
+        .unwrap();
+    assert!(status.success(), "cannot write {}", path.display());
+    std::fs::remove_file(&source).unwrap();
+    std::fs::set_permissions(path, std::fs::Permissions::from_mode(0o700)).unwrap();
+}
+
 /// What `run` settled before the app starts.
 pub struct Startup {
     pub identity: identity::Identity,
@@ -691,9 +723,13 @@ fn launch(context: tauri::Context<tauri::Wry>, startup: Startup) {
                         source:source.clone(),settings:app.state::<settings::Store>().0.clone()
                     });
                     app.manage(source);
+                    // The report shows the configured download folder's G3
+                    // evidence, resolved each time it is shown.
+                    let downloads_app = app.handle().clone();
                     if let Some(inputs) = desktop_service::retained_import::Inputs::native(
                         &app.state::<identity::Identity>().bundle_id, replay, dir.clone(),
                         app.state::<settings::Store>().0.clone(),
+                        std::sync::Arc::new(move || files::folder(&downloads_app)),
                     ) {
                         app.state::<commands::AppState>().set_retained_import_source(inputs);
                     }
@@ -702,7 +738,11 @@ fn launch(context: tauri::Context<tauri::Wry>, startup: Startup) {
                 app.manage(termination_cleanup::TerminationCleanup::default());
                 app.manage(worktree_cleanup::WorktreeCleanup::default());
                 app.manage(recovery::start(app.handle()));
-                app.manage(files::start());
+                // Only the maintained production build records the cache
+                // folder's original index before changing it (G3).
+                app.manage(files::start(zerus_client_core::download_cache::Writer {
+                    evidence: app.state::<identity::Identity>().records_evidence(replay),
+                }));
                 app.manage(analytics::start(app.handle()));
                 app.manage(worktree_policy::start(app.handle()));
                 app.manage(mobile::start(app.handle()));
@@ -742,7 +782,11 @@ fn launch(context: tauri::Context<tauri::Wry>, startup: Startup) {
                 app.manage(task_forms::TaskForms::default());
                 app.manage(task_start::TaskStarts::default());
                 app.manage(actions::ActivityReads::default());
-                app.manage(actions::Attention::new(dir.join(actions::attention_file(replay))));
+                let local_read_path = dir.join(actions::attention_file(replay));
+                app.manage(match app.state::<commands::AppState>().local_read_capture() {
+                    Some(capture) => actions::Attention::new_with_capture(local_read_path, Some(capture)),
+                    None => actions::Attention::new(local_read_path),
+                });
                 let pump = app.state::<commands::AppState>().pump();
                 app.manage(approvals::start(
                     pump.clone(),
@@ -793,19 +837,50 @@ fn launch(context: tauri::Context<tauri::Wry>, startup: Startup) {
                 app.manage(screens);
                 app.manage(newsession::NewSession::tauri(Some(dir.join(if replay {
                     "worktree-snapshots-replay.json"
-                } else { "worktree-snapshots.json" }))));
+                } else { "worktree-snapshots.json" })), app.state::<commands::AppState>().worktree_cache_capture()));
                 let creations = creations::start(app.handle(), &dir, replay, allowed);
                 app.state::<commands::AppState>().set_creations(creations.clone());
                 app.manage(creations);
                 app.manage(terminal::Terminals::new(zerus_client_core::default_hgs(), allowed));
                 // A replay never touches the real drafts either.
-                let drafts = std::sync::Arc::new(zerus_client_core::drafts::DraftStore::open(
-                    drafts_root(&dir, replay),
-                ));
+                let seeds_qt = app.state::<identity::Identity>().seeds_qt(replay);
+                // Every switch-build run records Next's drafts first (G3,
+                // zerus-5wmh.66.5.2.1.2), in service mode or not: the capture
+                // is the store's first job, before the import and any load
+                // or save. Only service mode publishes its status and Retry.
+                let capture = zerus_client_core::migration::draft_preload::Capture::for_run(
+                    seeds_qt,
+                    app.state::<commands::AppState>().draft_capture(),
+                    &dir,
+                );
+                let drafts = std::sync::Arc::new(match &capture {
+                    Some(capture) => zerus_client_core::drafts::DraftStore::open_captured(
+                        drafts_root(&dir, replay),
+                        capture.clone(),
+                    ),
+                    None => zerus_client_core::drafts::DraftStore::open(drafts_root(&dir, replay)),
+                });
+                if let Some(capture) = &capture {
+                    // Weak: the store flushes when the app drops it.
+                    let store = std::sync::Arc::downgrade(&drafts);
+                    capture.hook_retry(std::sync::Arc::new(move || {
+                        if let Some(store) = store.upgrade() {
+                            store.retry_import();
+                        }
+                    }));
+                    // Saved drafts shows the status and Retry in every mode
+                    // (zerus-5wmh.66.5.2.1.2.1); it reads the status again
+                    // whenever it opens, so a change before this is not lost.
+                    let changed = app.handle().clone();
+                    capture.hook(std::sync::Arc::new(move || {
+                        let _ = tauri::Emitter::emit(&changed, "draft-capture-changed", ());
+                    }));
+                }
+                app.manage(composer::saved::DraftCapture(capture.clone()));
                 // The switch build takes Qt's and the dev app's drafts once,
-                // as the store's first job (zerus-5wmh.13.1); the dev identity
+                // right after the capture (zerus-5wmh.13.1); the dev identity
                 // and a replay never import.
-                if app.state::<identity::Identity>().seeds_qt(replay) {
+                if seeds_qt {
                     zerus_client_core::drafts::import_at_start(&drafts);
                 }
                 #[cfg(feature = "media")]
@@ -922,6 +997,74 @@ fn launch(context: tauri::Context<tauri::Wry>, startup: Startup) {
                 app.manage(task_executor::TaskExecutors::start(app.handle()));
                 let composers = app.state::<composer::Composers>();
                 app.state::<actions::Actions>().on_writes(composers.changed_hook());
+                // Sends the desktop service takes (deferred_send) on Linux and
+                // macOS in desktop-service mode; every other Send stays direct.
+                #[cfg(any(target_os = "linux", target_os = "macos"))]
+                if desktop_service::mode() {
+                    let (sending, checking) = (app.handle().clone(), app.handle().clone());
+                    composers.set_deferred(composer::DeferredRoute {
+                        send: std::sync::Arc::new(move |session, checkpoint, stdin| {
+                            let service = sending.state::<commands::AppState>().desktop_service();
+                            desktop_service::deferred_send::call(
+                                service,
+                                session,
+                                checkpoint,
+                                stdin,
+                                &std::sync::atomic::AtomicBool::new(false),
+                            )
+                        }),
+                        check: std::sync::Arc::new(move |plan| {
+                            let service = checking.state::<commands::AppState>().desktop_service();
+                            desktop_service::deferred_send::check(service, plan)
+                        }),
+                    });
+                    // "Compact and continue" the service takes whole
+                    // (compact_to_send), the same way; every other one stays
+                    // direct.
+                    let (compacting, checking) = (app.handle().clone(), app.handle().clone());
+                    composers.set_compact(composer::CompactRoute {
+                        offer: std::sync::Arc::new(
+                            move |session, checkpoint, compaction, stdin, handing| {
+                                let service =
+                                    compacting.state::<commands::AppState>().desktop_service();
+                                desktop_service::compact_to_send::call(
+                                    service,
+                                    session,
+                                    checkpoint,
+                                    compaction,
+                                    stdin,
+                                    handing,
+                                    &std::sync::atomic::AtomicBool::new(false),
+                                )
+                            },
+                        ),
+                        check: std::sync::Arc::new(move |plan| {
+                            let service = checking.state::<commands::AppState>().desktop_service();
+                            desktop_service::compact_to_send::check(service, plan)
+                        }),
+                    });
+                    // Question answers the service takes (deferred_answer),
+                    // the same way; every other answer stays direct.
+                    let (answering, checking) = (app.handle().clone(), app.handle().clone());
+                    composers.set_answer_route(composer::AnswerRoute {
+                        send: std::sync::Arc::new(move |session, checkpoint, pinned, stdin| {
+                            let service =
+                                answering.state::<commands::AppState>().desktop_service();
+                            desktop_service::deferred_answer::call(
+                                service,
+                                session,
+                                checkpoint,
+                                pinned,
+                                stdin,
+                                &std::sync::atomic::AtomicBool::new(false),
+                            )
+                        }),
+                        check: std::sync::Arc::new(move |plan| {
+                            let service = checking.state::<commands::AppState>().desktop_service();
+                            desktop_service::deferred_answer::check(service, plan)
+                        }),
+                    });
+                }
                 // The composer's session part once a second (the cache chip)
                 // and the inspect fallback; it sleeps while no composer is open.
                 composers.start_ticker();
@@ -1439,12 +1582,17 @@ fn handler() -> impl Fn(tauri::ipc::Invoke) -> bool + Send + Sync + 'static {
         commands::perf_resize,
         desktop_service::desktop_service_mode,
         desktop_service::desktop_service_retry,
+        desktop_service::desktop_service_check_status,
         desktop_service::desktop_service_ownership_rearm,
         desktop_service::desktop_service_ownership_result,
+        desktop_service::desktop_service_mode_action,
+        desktop_service::desktop_service_first_choice,
         desktop_service::notification_controls::desktop_notification_preferences_set,
         desktop_service::notification_controls::desktop_notification_preferences_check,
         desktop_service::desktop_service_read_marks,
         desktop_service::desktop_service_automatic_approvals,
+        desktop_service::task_message_inputs::desktop_service_task_message_inputs,
+        desktop_service::task_message_inputs::desktop_service_task_message_input_release,
         desktop_service::frontend::desktop_service_maintenance_configure,
         desktop_service::frontend::desktop_service_maintenance_configuration,
         desktop_service::frontend::desktop_service_frontend_result,
@@ -1463,6 +1611,7 @@ fn handler() -> impl Fn(tauri::ipc::Invoke) -> bool + Send + Sync + 'static {
         settings::skins::user_skin_import,
         settings::skins::user_skins_open,
         settings::settings_get,
+        settings::settings_qt_preferences,
         settings::settings_set,
         desk::desk_take_pending,
         window_layer::window_layer_state,
@@ -1532,12 +1681,17 @@ fn handler() -> impl Fn(tauri::ipc::Invoke) -> bool + Send + Sync + 'static {
         actions::inspect_subagent_activity,
         commands::tasks_follow,
         task_details::task_details,
+        task_details::task_reference,
+        task_details::task_page,
+        task_details::task_attachment_read,
         task_details::task_assign,
         task_details::task_board_action,
         task_details::task_cancel_execution,
         task_start::task_start_open,
         task_start::task_start,
         task_start::task_start_release,
+        task_start::task_start_check,
+        task_start::task_start_discard_check,
         task_executor::task_executor_open,
         task_executor::task_executor_submit,
         task_executor::task_executor_release,
@@ -1597,6 +1751,7 @@ fn handler() -> impl Fn(tauri::ipc::Invoke) -> bool + Send + Sync + 'static {
         organization::overview::worktree_overview_candidates,
         organization::overview::worktree_overview_close,
         organization::overview::worktree_overview_inspect,
+        organization::overview::worktree_leftover_open_folder,
         organization::overview::worktree_leftover_keep,
         organization::overview::worktree_leftover_delete,
         organization::clones::project_clone_open,
@@ -1662,6 +1817,7 @@ fn handler() -> impl Fn(tauri::ipc::Invoke) -> bool + Send + Sync + 'static {
         terminal::terminal_drop,
         terminal::terminal_shown,
         composer::composer_open,
+        composer::composer_visibility,
         composer::composer_edit,
         composer::composer_pick,
         composer::composer_attach,
@@ -1707,6 +1863,8 @@ fn handler() -> impl Fn(tauri::ipc::Invoke) -> bool + Send + Sync + 'static {
         composer::saved::draft_conflicts,
         composer::saved::draft_recover,
         composer::saved::draft_restore,
+        composer::saved::draft_capture_status,
+        composer::saved::draft_capture_retry,
         composer::send::send_message,
         composer::queue::queue_send_now,
         composer::queue::send_push,

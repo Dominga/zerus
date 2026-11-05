@@ -358,7 +358,9 @@ fn collect(record: &Value, live: bool) -> (Jobs, Vec<String>) {
             let stale = !live
                 || job["run_id"] != record["run_id"]
                 || job["observed"] != true
-                || lost_foreground;
+                || lost_foreground
+                || (subagent_lifecycle::owner_unknown(record, string(job,"owner")) && !subagent_lifecycle::own_process_live(job))
+                || subagent_lifecycle::recorded_process_unknown(job);
             job["stale"] = json!(stale);
             if stale {
                 job["last_status"] = job["status"].clone();
@@ -547,7 +549,7 @@ pub(super) fn dispatch(args: &[String]) -> Result<i32> {
         println!("{}", control::stop(&record, id)?);
         return Ok(0);
     }
-    let live = archive.is_none() && matches(&record, live()?.get(name)) && process_alive(&record);
+    let live = archive.is_none() && matches(&record, panes_of(&live()?, &record)) && process_alive(&record);
     let (jobs, notes) = collect(&record, live);
     let value = if let Some(id) = output {
         let job = jobs

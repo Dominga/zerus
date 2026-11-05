@@ -1,4 +1,4 @@
-import { createMemo, type Accessor } from "solid-js";
+import { createMemo, untrack, type Accessor } from "solid-js";
 import type { ComputerState } from "./catalog";
 import { attentionNeeded, isActive, needsAttention } from "./attention";
 import type { ComputerId, MachineMeta } from "../types";
@@ -104,15 +104,24 @@ export function liveSessions(rows: readonly Session[], computers: Record<Compute
     || (a.key < b.key ? -1 : a.key > b.key ? 1 : 0));
 }
 
+/**
+ * The Overview's selectors, each recomputed once per catalog batch. Give
+ * them the catalog's plain rows and computers (`plainRows`, `plainComputers`),
+ * which track only its revision: reading every row through the store would
+ * subscribe to each field of tens of thousands of rows on every batch
+ * (zerus-5wmh.66.50). `view` maps a live session back to the row a card
+ * renders reactively (the store's `catalog.rows[s.key]`).
+ */
 export function createOverview(
   rows: Accessor<readonly Session[]>,
   computers: Accessor<Record<ComputerId, ComputerState>>,
   cards: Accessor<Record<ComputerId, MachineMeta>>,
   compute: typeof overviewStats = overviewStats,
+  view: (s: Session) => Session = (s) => s,
 ) {
   return {
     stats: createMemo(() => compute(rows(), computers())),
-    live: createMemo(() => liveSessions(rows(), computers())),
+    live: createMemo(() => { const live = liveSessions(rows(), computers()); return untrack(() => live.map(view)); }),
     cards: createMemo(() => fleetCards(computers(), cards())),
   };
 }

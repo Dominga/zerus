@@ -793,9 +793,9 @@ fn actual_worker_waits_for_restoration_then_posts_clicks_and_withdraws_once() {
         !clicked.is_empty()
     });
     assert_eq!(clicked.len(), 1);
-    assert_eq!(clicked[0].request_id, request.request_id);
+    assert_eq!(clicked[0].value.request_id, request.request_id);
     assert!(
-        matches!(&clicked[0].platform_context,Some(PlatformContext::Wayland { activation_token }) if activation_token=="fixture-wayland")
+        matches!(&clicked[0].value.platform_context,Some(PlatformContext::Wayland { activation_token }) if activation_token=="fixture-wayland")
     );
     assert!(h.mappings()[0].platform_context.is_none());
     ledger::withdraw(&mut h.store.db, &request.intent_id, 1).unwrap();
@@ -905,7 +905,7 @@ fn actual_restore_rebuilds_callbacks_without_notify_and_rejects_other_daemon() {
         clicked.extend(h.outbox.poll(&mut h.store, Instant::now()));
         !clicked.is_empty()
     });
-    assert_eq!(clicked[0].request_id, request.request_id);
+    assert_eq!(clicked[0].value.request_id, request.request_id);
     server
         .connection
         .release_name(zerus_freedesktop_notify::SERVICE)
@@ -1284,4 +1284,216 @@ fn root_service_grant_attaches_original_host_posts_and_routes_click_then_release
     drop(runtime);
     drop(owner);
     assert!(location.lock().is_ok());
+}
+
+#[test]
+fn open_session_after_frontend_quit_survives_native_close_and_launches_original_target() {
+    use crate::desktop::{
+        notifications::{activation, frontend},
+        ownership,
+    };
+    use std::{fs, io::Write};
+    use zerus_client_core::desktop::{self, activation as navigation};
+
+    // Native frontend component fixture, private bus and cooperative child
+    // lifetime. No owner GUI, desktop bus or display is accessed here.
+    struct Frontend {
+        child: frontend::linux::OwnedFrontend,
+        release: std::fs::File,
+        fixture: Arc<frontend::linux::tests::Fixture>,
+    }
+    impl Frontend {
+        fn start(
+            fixture: Arc<frontend::linux::tests::Fixture>,
+            launch: activation::Launch,
+        ) -> Self {
+            let release = fixture.hold();
+            let child = frontend::linux::OwnedFrontend::launch(fixture.select(), launch).unwrap();
+            let mut value = Self {
+                child,
+                release,
+                fixture,
+            };
+            until(|| {
+                value.child.poll();
+                assert!(!value.child.error());
+                assert!(!value.child.exited());
+                value.child.image_observed()
+            });
+            value
+        }
+        fn quit(&mut self) {
+            self.release.write_all(b"x").unwrap();
+            until(|| {
+                self.child.poll();
+                self.child.exited()
+            });
+            assert!(self.child.exit_status().unwrap().success());
+        }
+    }
+    impl Drop for Frontend {
+        fn drop(&mut self) {
+            if !self.child.exited() {
+                let _ = self.release.write_all(b"x");
+                let deadline = Instant::now() + Duration::from_secs(5);
+                while !self.child.exited() && Instant::now() < deadline {
+                    self.child.poll();
+                    std::thread::sleep(Duration::from_millis(5));
+                }
+                if !self.child.exited() {
+                    // Keep the original child's files if cleanup is unknown.
+                    std::mem::forget(self.fixture.clone());
+                    eprintln!(
+                        "private frontend fixture retained: {}",
+                        self.fixture.prefix.display()
+                    );
+                }
+            }
+        }
+    }
+
+    let _serial = frontend::linux::tests::SERIAL.lock().unwrap();
+    let bus = bus::Bus::new();
+    let server = Server::new(&bus);
+    let mut h = Harness::new();
+    let mut runtime = h.start(&bus.address);
+    Harness::activate(&runtime);
+    let target = navigation::Target {
+        computer: "peer.example".into(),
+        run: "run-1".into(),
+        conversation: "conversation-1".into(),
+    };
+    let fixture = Arc::new(frontend::linux::tests::Fixture::for_navigation(
+        navigation::NAVIGATION_ENV_HELP_MARKER,
+        &target,
+        "fixture-wayland",
+    ));
+    let initial = navigation::Open {
+        activation_id: uuid::Uuid::new_v4().to_string(),
+        post_request_id: uuid::Uuid::new_v4().to_string(),
+        target: target.clone(),
+        token: zerus_client_core::attention::encode_token(
+            json!({
+                "host":target.computer,"run":target.run,"conversation":target.conversation,
+                "name":"fixture","notice":"initial-frontend",
+            })
+            .as_object()
+            .unwrap(),
+        ),
+        platform_context: Some(PlatformContext::Wayland {
+            activation_token: "fixture-wayland".into(),
+        }),
+    };
+    let mut first = Frontend::start(
+        fixture.clone(),
+        activation::Launch::fixture(initial, "a".repeat(64)),
+    );
+    first.quit();
+    drop(first);
+    fs::remove_file(fixture.prefix.join("selected-target.json")).unwrap();
+    assert!(
+        runtime.status()["ready"].as_bool().unwrap(),
+        "backend remains serving"
+    );
+
+    let origin = ownership::Origin::capture(
+        &fixture.prefix.join("bin/hgs-tray"),
+        desktop::Build {
+            version: "1.2.3".into(),
+            source_commit: "a".repeat(40),
+            source_dirty: Some(false),
+        },
+    )
+    .unwrap();
+    h.store
+        .db
+        .execute(
+            "UPDATE desktop_ownership SET state='service',owner_epoch=?1,origin=?2 WHERE id=1",
+            rusqlite::params![
+                h.outbox.session.writer_epoch,
+                serde_json::to_string(&origin).unwrap()
+            ],
+        )
+        .unwrap();
+    let grant = ownership::grant(&h.store, &h.outbox.session.configuration)
+        .unwrap()
+        .unwrap();
+    let request = h.post();
+    server.called.recv_timeout(WAIT).unwrap();
+    h.settle(&request, "delivered");
+    server
+        .connection
+        .emit_signal(
+            None::<&str>,
+            native_path(),
+            zerus_freedesktop_notify::SERVICE,
+            "ActivationToken",
+            &(42_u32, "fixture-wayland"),
+        )
+        .unwrap();
+    server
+        .connection
+        .emit_signal(
+            None::<&str>,
+            native_path(),
+            zerus_freedesktop_notify::SERVICE,
+            "ActionInvoked",
+            &(42_u32, "open-session"),
+        )
+        .unwrap();
+    server
+        .connection
+        .emit_signal(
+            None::<&str>,
+            native_path(),
+            zerus_freedesktop_notify::SERVICE,
+            "NotificationClosed",
+            &(42_u32, 2_u32),
+        )
+        .unwrap();
+    until(|| h.outbox.event_count.load(Ordering::Acquire) == 2);
+    let clicks = h.outbox.poll(&mut h.store, Instant::now());
+    assert_eq!(clicks.len(), 1);
+    assert!(
+        h.mappings().is_empty(),
+        "closed native IDs cannot be restored"
+    );
+    let mut router = activation::Router::new(
+        &h.outbox.session.configuration,
+        &h.outbox.session.service_epoch,
+    );
+    assert!(router
+        .offer(&h.store, &h.outbox, clicks.into_iter().next().unwrap())
+        .unwrap());
+    let absence = desktop::probe_at(
+        &h._root.path().join("closed-frontend.sock"),
+        &uuid::Uuid::new_v4().to_string(),
+        &h.outbox.session.configuration,
+    );
+    assert!(matches!(absence, desktop::Observation::Absent));
+    let launch = router
+        .closed_frontend(&h.store, &h.outbox, &absence, Some(&grant))
+        .unwrap()
+        .unwrap();
+    assert_eq!(launch.open().post_request_id, request.request_id);
+    assert_eq!(launch.open().target, target);
+    assert!(
+        matches!(&launch.open().platform_context, Some(PlatformContext::Wayland { activation_token }) if activation_token == "fixture-wayland")
+    );
+    let mut reopened = Frontend::start(fixture.clone(), launch);
+    let selected = fs::read_to_string(fixture.prefix.join("selected-target.json")).unwrap();
+    assert_eq!(
+        navigation::decode_navigation(selected.trim()).unwrap(),
+        target
+    );
+    assert!(
+        router
+            .closed_frontend(&h.store, &h.outbox, &absence, Some(&grant))
+            .unwrap()
+            .is_none(),
+        "the same click cannot launch a second frontend"
+    );
+    reopened.quit();
+    drop(reopened);
+    h.stop(&mut runtime);
 }

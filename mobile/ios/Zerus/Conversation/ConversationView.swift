@@ -99,7 +99,14 @@ struct ConversationView: View {
                                     .font(.footnote).foregroundStyle(Theme.muted)
                             } else { Color.clear.frame(height: 0) }
                         }.id("history:missing-anchor")
-                        ForEach(events) { event in
+                        // A fork's inherited rows: each source under its label, then where the fork begins.
+                        ForEach(Array(events.enumerated()), id: \.element.id) { index, event in
+                            let source = event.inheritedFrom ?? ""
+                            if source != (index > 0 ? events[index - 1].inheritedFrom ?? "" : "") {
+                                inheritedDivider(source.isEmpty ? "Forked here: this session's own activity continues below"
+                                    : "Inherited from \(source): the history this fork began from")
+                                    .id("history:inherited:" + event.id)
+                            }
                             if event.id == unreadBoundary { unreadDivider.id("history:unread") }
                             MessageBubble(event: event, target: target, agent: agentName(session, raw), outgoing: model.outgoing.first { $0.requestId == event.outgoingId },
                                           onReviewOutgoing: { reviewOutgoing = $0 })
@@ -289,6 +296,14 @@ struct ConversationView: View {
             }
         } else {
             Color.clear.frame(height: 0)
+        }
+    }
+
+    private func inheritedDivider(_ label: String) -> some View {
+        HStack(spacing: 12) {
+            Rectangle().fill(Theme.muted.opacity(0.4)).frame(height: 1)
+            Text(label).font(.caption.weight(.semibold)).foregroundStyle(Theme.muted).multilineTextAlignment(.center)
+            Rectangle().fill(Theme.muted.opacity(0.4)).frame(height: 1)
         }
     }
 

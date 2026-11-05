@@ -343,7 +343,7 @@ fn queued_record(
     reader: &mut metadata::Reader,
 ) -> Result<metadata::Record> {
     let parents = match kind {
-        "binding" => vec![state.to_owned(), state.join("bindings")],
+        "binding" => vec![state.to_owned(), state.join("bindings"), state.join("sessions")],
         "archive" => vec![state.join("archives")],
         "native" => vec![state.join("dsh/bindings")],
         _ => return Err("Unknown queued source kind".into()),

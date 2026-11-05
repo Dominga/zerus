@@ -8,6 +8,7 @@ use std::sync::{
     atomic::{AtomicBool, Ordering},
     Arc,
 };
+use std::time::Instant;
 use zerus_client_core::desktop::compact_to_send::Verified;
 use zerus_desktop_ledger::operations::Ticket;
 
@@ -15,9 +16,12 @@ pub(super) struct Consent {
     pub original: Verified,
     pub lease: Arc<Lease>,
     pub cancel: AtomicBool,
+    /// The whole operation's deadline, fixed at admission: nothing starts
+    /// after it.
+    pub chain: Instant,
 }
 impl Consent {
-    pub fn admitted(original: Verified, lease: Arc<Lease>) -> Result<Arc<Self>> {
+    pub fn admitted(original: Verified, lease: Arc<Lease>, chain: Instant) -> Result<Arc<Self>> {
         // The operation names a local session; the lease's native source
         // still binds this service and computer.
         ensure!(
@@ -28,6 +32,7 @@ impl Consent {
             original,
             lease,
             cancel: AtomicBool::new(false),
+            chain,
         }))
     }
     /// The same live original, lease and writer as the row; with a ticket,

@@ -8,10 +8,7 @@
 //! ([`super::receipt::UNHELD`]). A live runtime drains its own originals
 //! itself, from the store objects it opened before their child
 //! ([`super::runtime`]); they are [`Owned`] and skipped here.
-use super::{
-    ledger,
-    receipt::{Evidence, Observed, UNHELD},
-};
+use super::ledger;
 use crate::desktop::{custody, store::Location};
 use anyhow::{ensure, Context, Result};
 use rusqlite::{Connection, TransactionBehavior};
@@ -118,14 +115,7 @@ impl Recovery {
                     // No original store observation exists for it: Unknown,
                     // never read from a path again, and nothing after it
                     // ever starts.
-                    ledger::drained(
-                        tx,
-                        row,
-                        original,
-                        &Observed::Unknown(UNHELD),
-                        Evidence::default(),
-                        true,
-                    )?;
+                    ledger::unheld(tx, row, original)?;
                 }
                 custody::Observation::Held => (),
                 custody::Observation::Unavailable => {

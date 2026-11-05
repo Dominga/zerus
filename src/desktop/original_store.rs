@@ -171,6 +171,34 @@ impl Roots {
         }
         Ok(roots)
     }
+    /// The same held root with another kind's receipt folder `name`, opened
+    /// under it without resolving the state path again: a later child's
+    /// store is the earlier one's own root, never a replacement.
+    pub(in crate::desktop) fn sibling(&self, name: &'static str) -> io::Result<Self> {
+        let root = self.root.try_clone()?;
+        let folder = match directory(&root, name) {
+            Ok(folder) => {
+                if !platform::verify_private_directory(&folder)? {
+                    return Err(io::ErrorKind::PermissionDenied.into());
+                }
+                let folder_id = id(&folder.metadata()?);
+                Some((folder, folder_id))
+            }
+            Err(error) if error.kind() == io::ErrorKind::NotFound => None,
+            Err(error) => return Err(error),
+        };
+        let roots = Self {
+            path: self.path.clone(),
+            root,
+            root_id: self.root_id,
+            name,
+            folder,
+        };
+        if !roots.root_current() {
+            return Err(io::ErrorKind::PermissionDenied.into());
+        }
+        Ok(roots)
+    }
     /// The state path, every ancestor included, still names the held root.
     pub(in crate::desktop) fn root_current(&self) -> bool {
         std::fs::symlink_metadata(&self.path)
@@ -329,18 +357,30 @@ pub(in crate::desktop) fn session_current(
     run: &str,
     conversation: &str,
 ) -> bool {
+    session_record(roots, session, run, conversation).is_some()
+}
+
+/// The one record of `session` that [`session_current`] proves: `None` unless
+/// exactly one of its records names a terminal agent running `run` and
+/// `conversation`, with no native binding, read from the held root.
+pub(in crate::desktop) fn session_record(
+    roots: &Roots,
+    session: &str,
+    run: &str,
+    conversation: &str,
+) -> Option<serde_json::Value> {
     let file = format!("{:x}.json", Sha256::digest(session.as_bytes()));
     // `hgs send` sends an OpenCode or DeepSeek name natively.
     for backend in ["opencode", "dsh"] {
         match roots.absent(&[backend, "bindings", &file]) {
             Ok(true) => (),
-            _ => return false,
+            _ => return None,
         }
     }
     // The CLI's record path: a routed record lives in `bindings`.
     let routed = match roots.absent(&["name_routes", &file]) {
         Ok(absent) => !absent,
-        Err(_) => return false,
+        Err(_) => return None,
     };
     let path: &[&str] = if routed {
         &["bindings", &file]
@@ -360,19 +400,19 @@ pub(in crate::desktop) fn session_current(
     // The label's own record, read whole: one that is there but cannot be
     // read refuses, as an unreadable candidate does.
     let legacy = match bytes_at(roots, path, RECORD_BYTES) {
-        Ok(None) => false,
+        Ok(None) => None,
         Ok(Some(bytes)) => match serde_json::from_slice::<serde_json::Value>(&bytes) {
-            Ok(record) => names_plan(&record),
-            Err(_) => return false,
+            Ok(record) => names_plan(&record).then_some(record),
+            Err(_) => return None,
         },
-        Err(_) => return false,
+        Err(_) => return None,
     };
     // With no `sessions/` there is no ID layout (zerus-ucck P3a): the label's
     // own record decides, as before.
     match roots.absent(&["sessions"]) {
         Ok(true) => return legacy,
         Ok(false) => {}
-        Err(_) => return false,
+        Err(_) => return None,
     }
     // Otherwise the label index must prove the label's sessions in the ID
     // layout before any answer (#1437 review), through the CLI's own proof.
@@ -380,37 +420,40 @@ pub(in crate::desktop) fn session_current(
     // path from elsewhere; one that is there but cannot be read refuses. The
     // label's own record and the candidates count together: exactly one may
     // carry the run and conversation.
-    let Some(manifest) = bytes_at(roots, &["labels", ".complete"], MANIFEST_BYTES).ok().flatten() else {
-        return false;
-    };
-    let Some(ids) = crate::state::prove_label_index(session, &manifest, || {
-        bytes_at(roots, &["labels", &file], RECORD_BYTES).ok().flatten()
-    }) else {
-        return false;
-    };
-    let mut found = usize::from(legacy);
+    let manifest = bytes_at(roots, &["labels", ".complete"], MANIFEST_BYTES)
+        .ok()
+        .flatten()?;
+    let ids = crate::state::prove_label_index(session, &manifest, || {
+        bytes_at(roots, &["labels", &file], RECORD_BYTES)
+            .ok()
+            .flatten()
+    })?;
+    let mut found: Vec<serde_json::Value> = legacy.into_iter().collect();
     for id in ids {
         match bytes_at(roots, &["sessions", &format!("{id}.json")], RECORD_BYTES) {
             // A stale entry: the session left the label.
             Ok(None) => {}
             Ok(Some(bytes)) => {
                 let Ok(record) = serde_json::from_slice::<serde_json::Value>(&bytes) else {
-                    return false;
+                    return None;
                 };
                 // A listed candidate that is there must establish its own
                 // identity, as every reader of the ID layout requires; one
                 // that cannot refuses, never leaving the rest to decide.
                 if !crate::state::is_id_layout_record(&record, &id) {
-                    return false;
+                    return None;
                 }
                 if names_plan(&record) {
-                    found += 1;
+                    found.push(record);
                 }
             }
-            Err(_) => return false,
+            Err(_) => return None,
         }
     }
-    found == 1
+    match <[serde_json::Value; 1]>::try_from(found) {
+        Ok([record]) => Some(record),
+        Err(_) => None,
+    }
 }
 
 /// The bytes at `path` under the held root, bounded: `Ok(None)` only when it

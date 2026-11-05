@@ -235,7 +235,7 @@ Environment:
 | Variable | Effect |
 | --- | --- |
 | `ZERUS_CLIENT_HGS` | The `hgs` to run (default: the first `hgs` on `PATH`, then in `~/.local/bin`, `/opt/homebrew/bin` and `/usr/local/bin`, since an app started from Finder or a launcher gets a short `PATH`) |
-| `ZERUS_CLIENT_DESKTOP_SERVICE` | Exact value `1` selects the experimental desktop-service source at startup (default off). No legacy Fleet, read delivery, automatic approval, notification or recovery-sync worker starts in that mode; unavailable service stays unavailable. This does not activate the service. |
+| `ZERUS_CLIENT_DESKTOP_SERVICE` | Exact `1` selects the Service consumer. When absent on Linux/macOS, it is selected only after read-only helper status confirms an owned registration; an unregistered or unconfirmed host stays guarded Native. Windows remains opt-in. Exact `0` and invalid explicit values stay guarded Native. No legacy Fleet, read-delivery, approval, notification or recovery-sync worker starts in Service mode. Source selection itself grants no authority; see [consumer activation and maintained Qt rollback](../docs/desktop-consumer-activation.md). |
 | `ZERUS_CLIENT_REPLAY` | Replay synthetic watch streams instead of running `hgs`: a path list (`:` on Unix), the first file is this computer, `alias=file` entries are peers, e.g. `fixtures/replay.ndjson:mac=fixtures/replay-mac.ndjson` |
 | `ZERUS_CLIENT_REPLAY_INTERVAL_MS` | The pause per `heartbeat` frame of a replay (default 900) |
 | `ZERUS_CLIENT_QUERY` | URL parameters for the window, e.g. `select=claude/sample-project/api-refactor` opens that session and `page=settings` that screen |

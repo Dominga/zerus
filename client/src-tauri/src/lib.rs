@@ -334,6 +334,14 @@ pub fn run() {
     #[cfg(all(feature = "live", target_os = "linux"))]
     let activation_token = cli::take_activation_token(options.target.is_some());
     let identity = identity::current(&context.config().identifier);
+    #[cfg(all(
+        feature = "live",
+        any(target_os = "linux", target_os = "macos", windows)
+    ))]
+    desktop_service::prepare_mode(
+        identity.is_switch()
+            && !std::env::var_os("ZERUS_CLIENT_REPLAY").is_some_and(|value| !value.is_empty()),
+    );
     let opens_sessions = options.opens_sessions(identity.is_switch());
     #[cfg(all(
         feature = "live",

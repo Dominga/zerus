@@ -1760,6 +1760,20 @@ pub fn create_main_window(app: &AppHandle) -> tauri::Result<WebviewWindow> {
         true => "index.html".to_owned(),
         false => format!("index.html?{}", query.join("&")),
     };
+    // WebView2's default user data folder is LocalAppData, which an agent
+    // process can be denied; the app's own data directory is the one it may
+    // write (Decision 5). Keep it beside the client's other data.
+    #[cfg(windows)]
+    let webview_data = {
+        let path = crate::data_dir(app).join("webview2");
+        if let Err(error) = std::fs::create_dir_all(&path) {
+            return Err(tauri::Error::Io(std::io::Error::new(
+                error.kind(),
+                format!("WebView2 data directory {}: {error}", path.display()),
+            )));
+        }
+        path
+    };
     #[allow(unused_mut)]
     let mut builder = WebviewWindowBuilder::new(app, MAIN_WINDOW, WebviewUrl::App(page.into()))
         .on_navigation(app_navigation_allowed)
@@ -1778,7 +1792,16 @@ pub fn create_main_window(app: &AppHandle) -> tauri::Result<WebviewWindow> {
                 builder.with_webview_configuration(platform::macos::webview_configuration(mtm));
         }
     }
-    let window = builder.build()?;
+    #[cfg(windows)]
+    {
+        builder = builder.data_directory(webview_data);
+    }
+    let window = builder.build().map_err(|error| {
+        tauri::Error::Io(std::io::Error::new(
+            std::io::ErrorKind::Other,
+            format!("WebView2 window creation: {error}"),
+        ))
+    })?;
     #[cfg(feature = "live")]
     if let Some(store) = app.try_state::<settings::Store>() {
         window_geometry::attach(&window, store.0.clone());

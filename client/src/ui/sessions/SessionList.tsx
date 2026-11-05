@@ -51,7 +51,8 @@ import type { ClearControl, SessionRef } from "../../types";
 import { motionReduced } from "../motion";
 import { composer } from "../../store/composer";
 import { composerClearControl } from "../../bridge";
-import { bulkSelect, clearMulti, multiCount, setAnchor, dragItem, setDragItem, drop, setDrop, endDrag, placement, applyDrop, SESSION_MIME, type DragItem } from "./organize";
+import { bulkSelect, clearMulti, multiCount, setAnchor, dragItem, setDragItem, drop, setDrop, endDrag, placement, applyDrop, SESSION_MIME, type DragItem, type Drop } from "./organize";
+import { POINTER_DRAG, pointerDrag } from "../lib/pointerDrag";
 
 import { SearchResults } from "./SearchResults";
 import { nativeEntry } from "./native-entry";
@@ -323,11 +324,12 @@ function batchMenu(): MenuEntry[] {
 }
 
 /** Project header: 40 px row, 32 px band (radius 6), Qt chevron, icon and counters. */
-function Header(props: { row: Extract<Row, { type: "header" }> }) {
+function Header(props: { row: Extract<Row, { type: "header" }>; list?: RowSource }) {
   const name = () => props.row.name;
   const open = () => !props.row.collapsed;
   return (
-    <button onDragOver={(e) => taskDragOver(e, props.row.project)} onDrop={(e) => taskDrop(e, props.row.project)} class="group-band entity" style={{ "--entity": projectColor(props.row) }} draggable="true" onDragStart={(e) => startDrag(e, { kind: "group", id: props.row.project })}
+    <button onDragOver={(e) => taskDragOver(e, props.row.project)} onDrop={(e) => taskDrop(e, props.row.project)} class="group-band entity" style={{ "--entity": projectColor(props.row) }} draggable={POINTER_DRAG ? undefined : "true"} onDragStart={(e) => startDrag(e, { kind: "group", id: props.row.project })}
+      onPointerDown={(e) => { if (props.list) pointerOrganize(e, { kind: "group", id: props.row.project }, props.list); }}
       aria-expanded={open()} onClick={() => setProjectCollapsed(props.row.project, !props.row.collapsed)}
       onContextMenu={(e) => openMenu(e, headerMenu(props.row.project))}
       title={tr("%1: %2 shown, %3 need a response, %4 working, %5 unread replies. Click to collapse or expand; drag to reorder.", name(), props.row.total, props.row.attention, props.row.working, props.row.unread)}>
@@ -762,6 +764,29 @@ function organizeDrop(e: DragEvent) {
   endDrag();
 }
 
+/** Where a pointer at client (x, y) would drop `item`: no target outside the list. */
+function placementAt(list: RowSource, scroller: HTMLElement, x: number, y: number, item: DragItem): Drop | undefined {
+  const box = scroller.getBoundingClientRect();
+  if (x < box.left || x > box.right || y < box.top || y > box.bottom) return undefined;
+  const over = document.elementFromPoint(x, y)?.closest<HTMLElement>(".vrow")?.dataset.key;
+  return placement(list.rows(), list.offsets(), list.heights(), over, y - box.top + scroller.scrollTop, item);
+}
+
+/** The same organisation by a pointer drag where the webview gets no HTML5 drag events (lib/pointerDrag). */
+function pointerOrganize(e: PointerEvent, item: DragItem, list: RowSource) {
+  if (!POINTER_DRAG || stripMode()) return;
+  const scroller = (e.currentTarget as Element).closest<HTMLElement>(".sp-scroll");
+  if (!scroller) return;
+  const stop = () => { endDrag(); document.body.classList.remove("pointer-dragging"); };
+  pointerDrag(e, {
+    start: () => { setDragItem(item); document.body.classList.add("pointer-dragging"); return true; },
+    move: (x, y) => setDrop(placementAt(list, scroller, x, y, item)),
+    drop: (x, y) => { const target = placementAt(list, scroller, x, y, item); stop(); if (target) applyDrop(item, target); },
+    cancel: stop,
+    scroller: () => scroller,
+  });
+}
+
 /** Qt's drop indicator: a 2 px accent line between rows, or a frame around a project header. */
 function DropIndicator() {
   return (
@@ -782,7 +807,7 @@ function ListRow(props: { id: string; list: RowSource }) {
   return (
     <div class="vrow" data-type={row()?.type} data-key={props.id} style={{ transform: `translateY(${top()}px)`, height: `${props.list.heightOf(props.id)}px` }}
       role="treeitem" aria-selected={props.id === selectedKey()}>
-      <Show when={row()?.type === "header" ? (row() as Extract<Row, { type: "header" }>) : undefined}>{(h) => <Header row={h()} />}</Show>
+      <Show when={row()?.type === "header" ? (row() as Extract<Row, { type: "header" }>) : undefined}>{(h) => <Header row={h()} list={props.list} />}</Show>
       <Show when={row()?.type === "child" ? (row() as Extract<Row, { type: "child" }>) : undefined}>
         {(c) => (
           <div class="rowhit" onClick={() => { setSelectedKey(c().parent.key); setSubagentOpen(c().child.id); }}>
@@ -794,7 +819,8 @@ function ListRow(props: { id: string; list: RowSource }) {
       <Show when={row()?.type === "card" ? (row() as Extract<Row, { type: "card" }>) : undefined}>
         {(v) => (
           <div onDragOver={(e) => taskDragOver(e, groupOf(v().session.key), v().session)} onDrop={(e) => taskDrop(e, groupOf(v().session.key), v().session)} class="rowhit" classList={{ "has-kids-open": v().expanded && !v().compactRow, multi: !!multi[v().session.key], dragged: dragItem()?.id === v().session.key, "context-target": visibleMenu()?.sessionKey === v().session.key }}
-            draggable="true" onDragStart={(e) => startDrag(e, { kind: "session", id: v().session.key })}
+            draggable={POINTER_DRAG ? undefined : "true"} onDragStart={(e) => startDrag(e, { kind: "session", id: v().session.key })}
+            onPointerDown={(e) => pointerOrganize(e, { kind: "session", id: v().session.key }, props.list)}
             onMouseDown={(e) => { if (e.shiftKey) e.preventDefault(); }} onClick={(e) => selectSession(v().session.key, e)}
             onContextMenu={(e) => sessionContextMenu(e, v().session)}
             onDblClick={(e) => { if (!e.ctrlKey && !e.metaKey && !e.shiftKey) setRowCompact(v().session.key, !compactRows[v().session.key]); }}>

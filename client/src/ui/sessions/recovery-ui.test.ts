@@ -44,6 +44,16 @@ describe("recovery presentation", () => {
     expect(limited.settingsVisible).toBe(true);
   });
 
+  it("explains a Codex account limit after a cleared conversation accepts its first turn", () => {
+    const details = { run_id: "same-run", conversation_id: "fresh-conversation", conversation_state: "active", phase: "error", goal: null,
+      provider_error: { error_kind: "quota", detail: "Usage limit reached for this account. Wait for the weekly limit to reset." } };
+    const view = recoveryView(details, true, NOW, false, "", "");
+    expect(view).toMatchObject({ active: true, failure: true, label: "Provider error", status: "Usage limit reached", detailFull: details.provider_error.detail });
+    expect(view.help).toContain("Wait for the limit to reset or restore account access");
+    expect(view.help).toContain("Zerus will not retry automatically");
+    expect(view.terminal).toEqual({ visible: true, enabled: true });
+  });
+
   it("keeps an action error and disables repeated clicks", () => {
     const view = recoveryView({ phase: "idle", recovery: { ...waiting(), session_limit_mode: "interval", due_at: NOW + 20 } }, true, NOW, true, "Recovery timed out", "");
     expect(view.detail).toBe("Recovery timed out");

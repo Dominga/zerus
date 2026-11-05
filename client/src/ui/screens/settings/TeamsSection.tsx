@@ -11,6 +11,7 @@ export function TeamsSection(): JSX.Element {
       <div class="set-actions">
         <button type="button" class="btn small" onClick={() => setPage("newteam")}>{tr("New team")}</button>
         <button type="button" class="btn ghost small" onClick={() => setPage("catalog")}>{tr("Team catalog")}</button>
+        <button type="button" class="btn ghost small" onClick={() => setPage("designer")}>{tr("Team designer")}</button>
         <button type="button" class="btn ghost small" onClick={() => setPage("sessions")}>{tr("Open the Team tab")}</button>
       </div>
     </div>

@@ -21,6 +21,7 @@ import { waiting } from "../../store/teams";
 const ITEMS: { id: Page; icon: string; label: string; tip: string; command: string }[] = [
   { id: "sessions", icon: "sessions", label: "Sessions", tip: "Sessions", command: "go.sessions" },
   { id: "newteam", icon: "users", label: "New team", tip: "New team", command: "go.newteam" },
+  { id: "designer", icon: "palette", label: "Team designer", tip: "Team designer", command: "go.designer" },
   { id: "projects", icon: "projects", label: "Projects", tip: "Projects", command: "go.projects" },
   { id: "machines", icon: "machines", label: "Machines", tip: trNoop("Machines and connection status"), command: "go.machines" },
   { id: "accounts", icon: "accounts", label: "Accounts", tip: trNoop("Agent accounts"), command: "go.accounts" },

@@ -1049,15 +1049,30 @@ pub(crate) fn execute_as(plan: &Plan, folder: &Path, timeout: Duration, env: &[(
     }
     let stdin = plan.commit.as_ref().map(|payload| serde_json::to_vec(payload).unwrap_or_default());
     let before = isolated.as_ref().map(super::isolation::Run::fingerprint);
-    let mut outcome = run_tree(&mut command, timeout.saturating_sub(started.elapsed()).max(Duration::from_secs(1)), stdin);
-    for (program, argv) in &plan.more {
-        let left = timeout.saturating_sub(started.elapsed());
-        if outcome.timed_out || left.is_zero() {
-            outcome.timed_out = true;
-            break;
+    let attempt = |command: &mut Command| {
+        let mut outcome = run_tree(command, timeout.saturating_sub(started.elapsed()).max(Duration::from_secs(1)), stdin.clone());
+        for (program, argv) in &plan.more {
+            let left = timeout.saturating_sub(started.elapsed());
+            if outcome.timed_out || left.is_zero() {
+                outcome.timed_out = true;
+                break;
+            }
+            let step = run_tree(&mut build(program, argv), left, None);
+            outcome = joined(outcome, step, program);
         }
-        let step = run_tree(&mut build(program, argv), left, None);
-        outcome = joined(outcome, step, program);
+        outcome
+    };
+    let mut outcome = attempt(&mut command);
+    // Task #35: one more run for a compiler that real-time scanning stopped.
+    if let Some(signature) = scanning_failure(&plan.template, &outcome) {
+        if !timeout.saturating_sub(started.elapsed()).is_zero() {
+            let first = outcome.exit;
+            outcome = attempt(&mut build(&plan.program, &plan.argv));
+            outcome.tail = last_chars(
+                &format!("{}\n{}", outcome.tail, scanning_note(signature, folder, first, outcome.exit)),
+                TAIL_BYTES,
+            );
+        }
     }
     outcome.ms = u64::try_from(started.elapsed().as_millis()).unwrap_or(u64::MAX);
     if !cache.note.is_empty() {
@@ -1068,6 +1083,46 @@ pub(crate) fn execute_as(plan: &Plan, folder: &Path, timeout: Duration, env: &[(
         checked(&mut outcome, run, &before, folder);
     }
     outcome
+}
+
+/// Task #35: the builds Zerus runs again once after a scanning failure. Never
+/// a commit, a merge or anything else whose second run would change more.
+const RETRIED_ON_SCANNING: &[&str] = &["cargo-build", "cargo-test", "cargo-clippy", "qt-configure", "qt-build", "qt-test"];
+
+/// Task #35: the two compiler failures real-time scanning gives a build in a
+/// folder it scans (team 33fbafeb, a DeepSeek member's clone without the
+/// Defender exclusion the earlier team's folders had): MSVC's C1083 "Cannot
+/// open compiler generated file ... Permission denied" while the scanner holds
+/// the new object file, and D8050 "cannot execute ... c1.dll: failed to get
+/// command line into debug records". Exactly these; any other failure is the
+/// build's own and runs once.
+fn scanning_failure(template: &str, outcome: &Outcome) -> Option<&'static str> {
+    if outcome.exit == Some(0) || outcome.timed_out || !RETRIED_ON_SCANNING.contains(&template) {
+        return None;
+    }
+    let text = format!("{}\n{}", outcome.excerpt, outcome.tail);
+    text.lines().find_map(|line| {
+        if line.contains("C1083") && line.contains("Cannot open compiler generated file") && line.contains("Permission denied") {
+            Some("C1083")
+        } else if line.contains("D8050") && line.contains("failed to get command line into debug records") {
+            Some("D8050")
+        } else {
+            None
+        }
+    })
+}
+
+/// What the run says after its second try: the signature, the folder and
+/// what to exclude from scanning.
+fn scanning_note(signature: &str, folder: &Path, first: Option<i32>, second: Option<i32>) -> String {
+    let result = if second == Some(0) { "the second run passed" } else { "the second run failed as well" };
+    format!(
+        "Zerus ran this build again once: the first run stopped with MSVC {signature} (exit {}), the failure real-time \
+         scanning (Microsoft Defender) gives a compiler in a folder it scans; {result}. The likely cause is scanning of {}: \
+         excluding its build outputs (.ci-build, target) from real-time scanning stops it.",
+        first.map_or_else(|| "none".to_owned(), |code| code.to_string()),
+        folder.display()
+    )
 }
 
 /// #741: one run of several commands: the first failure's exit and error
@@ -1539,6 +1594,55 @@ mod tests {
     fn shell_plan(windows: &str, unix: &str) -> Plan {
         let (program, flag, command) = if cfg!(windows) { ("cmd", "/c", windows) } else { ("sh", "-c", unix) };
         Plan { template: "test".into(), program: program.into(), argv: vec![flag.into(), command.into()], commit: None, more: Vec::new() }
+    }
+
+    /// Task #35: team 33fbafeb's qt-build in a DeepSeek member's clone stopped
+    /// with C1083 'Permission denied' on an object file while real-time
+    /// scanning held it, and a cargo test with D8050. Such a build runs once
+    /// more and names the folder; a build's own error runs once, and a commit
+    /// is never run twice.
+    #[test]
+    fn a_build_stopped_by_scanning_runs_once_more_and_names_the_folder() {
+        let dir = temp();
+        // Fails with the scanner's signature on the first run only.
+        let flaky = |template: &str, line: &str| {
+            let (windows, unix) = (
+                format!("if exist ran.txt (echo built & exit 0) else (echo ran> ran.txt & echo {line} & exit 2)"),
+                format!("if [ -f ran.txt ]; then echo built; exit 0; else echo ran > ran.txt; echo \"{line}\"; exit 2; fi"),
+            );
+            let mut plan = shell_plan(&windows, &unix);
+            plan.template = template.into();
+            plan
+        };
+        let c1083 = r"D:\w\.ci-build\gui\x.cpp : fatal error C1083: Cannot open compiler generated file: 'x.cpp.obj': Permission denied";
+        let outcome = execute(&flaky("qt-build", c1083), dir.path(), Duration::from_secs(60), &[]);
+        assert_eq!(outcome.exit, Some(0), "{outcome:?}");
+        assert!(outcome.tail.contains("built"), "{}", outcome.tail);
+        assert!(outcome.tail.contains("MSVC C1083") && outcome.tail.contains("the second run passed"), "{}", outcome.tail);
+        assert!(outcome.tail.contains(&dir.path().display().to_string()), "the folder is named: {}", outcome.tail);
+        std::fs::remove_file(dir.path().join("ran.txt")).unwrap();
+        let d8050 = r"cl : Command line error D8050 : cannot execute 'C:\VC\c1.dll': failed to get command line into debug records";
+        let outcome = execute(&flaky("cargo-test", d8050), dir.path(), Duration::from_secs(60), &[]);
+        assert_eq!(outcome.exit, Some(0), "{outcome:?}");
+        assert!(outcome.tail.contains("MSVC D8050"), "{}", outcome.tail);
+        std::fs::remove_file(dir.path().join("ran.txt")).unwrap();
+        // A build's own error, and the same text in a commit, run once.
+        let counted = |template: &str, line: &str| {
+            let (windows, unix) = (
+                format!("echo x>> runs.txt & echo {line} & exit 2"),
+                format!("echo x >> runs.txt; echo \"{line}\"; exit 2"),
+            );
+            let mut plan = shell_plan(&windows, &unix);
+            plan.template = template.into();
+            plan
+        };
+        let runs = || std::fs::read_to_string(dir.path().join("runs.txt")).map(|text| text.lines().count()).unwrap_or(0);
+        let own = execute(&counted("cargo-test", "src\\lib.rs(3): error C2065: 'x': undeclared identifier"), dir.path(), Duration::from_secs(60), &[]);
+        assert_eq!((own.exit, runs()), (Some(2), 1), "{own:?}");
+        assert!(!own.tail.contains("ran this build again"), "{}", own.tail);
+        std::fs::remove_file(dir.path().join("runs.txt")).unwrap();
+        let commit = execute(&counted("git-commit", c1083), dir.path(), Duration::from_secs(60), &[]);
+        assert_eq!((commit.exit, runs()), (Some(2), 1), "a commit never runs twice: {commit:?}");
     }
 
     #[test]

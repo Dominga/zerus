@@ -16,7 +16,7 @@ export function NewTeamPage(): JSX.Element {
         <h1>{tr("New team")}</h1>
         <button type="button" class="btn ghost small" onClick={() => setPage("sessions")}>{tr("Back to sessions")}</button>
       </header>
-      <NewTeam store={store} computer="" computers={[]} git={true} onOpenSettings={() => {}} onCreated={() => setPage("sessions")} />
+      <NewTeam store={store} computer="" computers={[]} git={true} onCreated={() => setPage("sessions")} />
     </div>
   );
 }

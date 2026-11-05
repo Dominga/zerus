@@ -902,3 +902,68 @@ fn the_webview_names_an_action_by_its_kind() {
         serde_json::from_value(json!({"kind": "settings", "settings": {"land": true}})).unwrap();
     assert_eq!(settings.op(), "settings");
 }
+
+/// Task #44: Qt's catalog editor in core. The owner edits a field, exports
+/// the working copy, imports it into another editor and saves: `hgs team
+/// catalog set` gets the catalog over the version it was read at, with
+/// `by: human`, once. The designer's start sends the project's folder, the
+/// first message as its goal and the chosen agent.
+#[test]
+fn catalog_set_import_export_and_designer_send_their_requests() {
+    use zerus_client_core::teams::catalog_edit::{CatalogEdit, CatalogEditor, Kind};
+    let fake = fake("team_actions_catalog_edit");
+    let get = json!({"builtin":false,"draft":{"base":4,"proposals":[]},"catalog":{"version":4,
+        "roles":[{"id":"backend","name":"Backend","agent":"codex","prompt":"Build it."}],
+        "templates":[{"id":"feature","name":"Feature","roster":[{"role":"backend","count":1}],"tasks":[]}],
+        "routing":[],"pipelines":[],"planning_rules":"(1) small phases"}});
+    let mut editor = CatalogEditor::default();
+    editor.load(&get).unwrap();
+    editor
+        .edit(&CatalogEdit::Set { kind: Kind::Role, id: "backend".into(), field: "about".into(), value: json!("The API") })
+        .unwrap();
+    // Export writes the working copy; Import reads it into another editor.
+    let file = editor.export_text();
+    let mut imported = CatalogEditor::default();
+    imported.load(&get).unwrap();
+    imported.import_text(&file).unwrap();
+    assert_eq!(imported.working()["roles"][0]["about"], "The API");
+    reply(&fake, "catalog set", "", json!({"stdout": {"status": "saved", "version": 5}, "echo": true}));
+    let outcome = run(&fake.path(), &TeamCall { team: String::new(), ..call(imported.save_action()) });
+    let TeamOutcome::Done { receipt, request_id } = &outcome else { panic!("{outcome:?}") };
+    assert_eq!(receipt["status"], "saved");
+    let log = catalog_requests(&fake);
+    assert_eq!(log.len(), 1, "saved once");
+    let (op, request) = &log[0];
+    assert_eq!(op, "catalog set");
+    assert_eq!(request["version"], 4, "over the version it was read at");
+    assert_eq!(request["catalog"]["roles"][0]["about"], "The API");
+    assert_eq!(request["catalog"]["planning_rules"], "(1) small phases");
+    assert_eq!((request["by"].as_str(), request["request_id"].as_str()), (Some("human"), Some(request_id.as_str())));
+    // A newer catalog refuses the save: nothing was written, and the
+    // refusal is the owner's to read.
+    reply(&fake, "catalog set", "", json!({"stderr": "hgs: The catalog changed (now v5); refresh and try again", "exit": 1}));
+    let refused = run(&fake.path(), &TeamCall { team: String::new(), ..call(imported.save_action()) });
+    let TeamOutcome::Failed { detail, .. } = &refused else { panic!("{refused:?}") };
+    assert!(detail.contains("catalog changed"), "{detail}");
+    // The designer's conversation starts for the selected project.
+    reply(&fake, "catalog designer", "", json!({"stdout": {"status": "started", "name": "claude/designer/team-designer"}, "echo": true}));
+    let designer = TeamAction::CatalogDesigner {
+        folder: "C:/work/orbit".into(),
+        goal: "A team for the payments service".into(),
+        agent: "claude".into(),
+        model: "opus".into(),
+        effort: String::new(),
+        project: "Orbit".into(),
+    };
+    let started = run(&fake.path(), &TeamCall { team: String::new(), ..call(designer) });
+    assert!(matches!(started, TeamOutcome::Done { .. }), "{started:?}");
+    let (op, request) = catalog_requests(&fake).last().unwrap().clone();
+    assert_eq!(op, "catalog designer");
+    assert_eq!(request["folder"], "C:/work/orbit");
+    assert_eq!(request["goal"], "A team for the payments service");
+    assert_eq!((request["agent"].as_str(), request["model"].as_str(), request["project"].as_str()), (Some("claude"), Some("opus"), Some("Orbit")));
+    assert!(request.get("effort").is_none(), "an empty choice is not sent");
+    // Without a folder nothing starts.
+    let none = TeamAction::CatalogDesigner { folder: String::new(), goal: "x".into(), agent: String::new(), model: String::new(), effort: String::new(), project: String::new() };
+    assert!(matches!(run(&fake.path(), &TeamCall { team: String::new(), ..call(none) }), TeamOutcome::Failed { .. }));
+}

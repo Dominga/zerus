@@ -51,9 +51,15 @@ impl Config {
             env::current_dir()?.join(raw_state)
         };
         env::set_var("HGS_STATE_DIR", &state);
+        // Task #48: in Codex's Windows sandbox (another user) the owner's
+        // configuration is unreadable by design: every command failed with
+        // "Access is denied". It stays the owner's: a foreign sandbox runs on
+        // the defaults, without peers, and its member calls go to the worker.
+        let foreign = sandbox_without_config();
         let values = match fs::read_to_string(dir.join("config")) {
             Ok(text) => configuration_values(&text, &dir, &home)?,
             Err(e) if e.kind() == std::io::ErrorKind::NotFound => HashMap::new(),
+            Err(e) if foreign && e.kind() == std::io::ErrorKind::PermissionDenied => HashMap::new(),
             Err(e) => return Err(e.into()),
         };
         let get = |key: &str, default: &str| {
@@ -77,7 +83,7 @@ impl Config {
             .split_whitespace()
             .map(String::from)
             .collect();
-        let machines = crate::machines::load(&dir)?;
+        let machines = if foreign && unreadable(&dir) { std::collections::BTreeMap::new() } else { crate::machines::load(&dir)? };
         let peers_from_environment = env::var("HGS_PEERS").is_ok();
         let peers =
             crate::machines::effective_peers(&base_peers, &machines, peers_from_environment);
@@ -248,6 +254,17 @@ fn configuration_values(
 /// The configuration directory below `home`: `HGS_CONFIG_DIR` when set, else
 /// `~/.config/hgs`. Also used without a loaded `Config` (the Windows
 /// local-sessions marker), so both always name the same directory.
+/// Task #48: whether this process is a sandbox of another user that may not
+/// read the owner's configuration (Codex's Windows sandbox).
+fn sandbox_without_config() -> bool {
+    platform::foreign_sandbox()
+}
+
+/// Whether `dir` cannot be listed for lack of rights.
+fn unreadable(dir: &Path) -> bool {
+    fs::read_dir(dir).is_err_and(|error| error.kind() == std::io::ErrorKind::PermissionDenied)
+}
+
 pub fn config_dir(home: &str) -> PathBuf {
     PathBuf::from(
         env::var("HGS_CONFIG_DIR").unwrap_or_else(|_| platform::below(home, ".config/hgs")),

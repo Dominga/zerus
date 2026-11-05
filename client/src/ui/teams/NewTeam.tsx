@@ -37,7 +37,7 @@ export interface NewTeamProps {
   /** Project of the folder, sent with Start planning. */
   project?: string;
   projectId?: string;
-  onOpenSettings: () => void;
+  onOpenSettings?: () => void;
   onAskDesigner?: () => void;
   onCreated?: (team: string) => void;
   onDiscarded?: (team: string) => void;
@@ -177,8 +177,8 @@ export function NewTeam(props: NewTeamProps): JSX.Element {
           <button type="button" class="btn ghost small" title={tr("The Team designer keeps the templates and roles; the lead plans this team with you")}
             onClick={() => props.onAskDesigner?.()}>{tr("Templates and roles: Team designer")}</button>
         </Show>
-        <Show when={draft()}>
-          <button type="button" class="btn ghost small" onClick={props.onOpenSettings}>{tr("Team settings")}</button>
+        <Show when={draft() && props.onOpenSettings}>
+          <button type="button" class="btn ghost small" onClick={() => props.onOpenSettings?.()}>{tr("Team settings")}</button>
         </Show>
         <button type="button" class="icon-btn small" aria-label={tr("Close")} onClick={store.close}><Icon name="x" size={14} /></button>
       </header>

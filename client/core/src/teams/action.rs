@@ -244,6 +244,25 @@ pub enum TeamAction {
     CatalogApply,
     /// Ends the catalog draft, undecided changes included.
     CatalogDiscard,
+    /// Task #44: Save catalog: the edited catalog as the next version, over
+    /// the version it was read at (`hgs team catalog set`), as Qt's editor
+    /// saves it (`super::catalog_edit`).
+    CatalogSet { version: u64, catalog: Value },
+    /// Task #44: starts the Team designer's conversation for a project
+    /// (`hgs team catalog designer`), with the owner's first message as its
+    /// goal and the agent Qt's page offers.
+    CatalogDesigner {
+        folder: String,
+        goal: String,
+        #[serde(default)]
+        agent: String,
+        #[serde(default)]
+        model: String,
+        #[serde(default)]
+        effort: String,
+        #[serde(default)]
+        project: String,
+    },
 }
 
 /// What the owner is asked before a destructive action or an approval.
@@ -388,7 +407,9 @@ impl TeamAction {
             Self::CatalogPropose { .. }
             | Self::CatalogDecide { .. }
             | Self::CatalogApply
-            | Self::CatalogDiscard => "catalog",
+            | Self::CatalogDiscard
+            | Self::CatalogSet { .. }
+            | Self::CatalogDesigner { .. } => "catalog",
         }
     }
 
@@ -399,6 +420,8 @@ impl TeamAction {
             Self::CatalogDecide { .. } => Some("decide"),
             Self::CatalogApply => Some("apply"),
             Self::CatalogDiscard => Some("discard"),
+            Self::CatalogSet { .. } => Some("set"),
+            Self::CatalogDesigner { .. } => Some("designer"),
             _ => None,
         }
     }
@@ -414,6 +437,8 @@ impl TeamAction {
                 | Self::CatalogDecide { .. }
                 | Self::CatalogApply
                 | Self::CatalogDiscard
+                | Self::CatalogSet { .. }
+                | Self::CatalogDesigner { .. }
         )
     }
 
@@ -613,6 +638,31 @@ impl TeamAction {
                 Ok(())
             }
             Self::CatalogApply | Self::CatalogDiscard => Ok(()),
+            Self::CatalogSet { catalog, .. } => {
+                if !catalog.as_object().is_some_and(|fields| fields.contains_key("roles") || fields.contains_key("templates")) {
+                    return Err("A catalog to save has roles and templates.".into());
+                }
+                if catalog.to_string().len() > 240 * 1024 {
+                    return Err("The catalog is too large to save.".into());
+                }
+                Ok(())
+            }
+            Self::CatalogDesigner { folder, goal, agent, model, effort, project } => {
+                if folder.trim().is_empty() || folder.chars().any(char::is_control) || folder.chars().count() > 1000 {
+                    return Err("Choose a project with a folder on this computer first.".into());
+                }
+                plain(goal, "The goal", TEXT_CHARS)?;
+                if goal.trim().is_empty() {
+                    return Err("Describe the work for the designer.".into());
+                }
+                if !agent.is_empty() && !matches!(agent.as_str(), "claude" | "codex" | "kimi" | "dsh" | "opencode") {
+                    return Err("The designer runs as Claude, Codex, Kimi, DeepSeek or OpenCode.".into());
+                }
+                for (value, what) in [(model, "A model"), (effort, "An effort"), (project, "A project")] {
+                    plain(value, what, 200)?;
+                }
+                Ok(())
+            }
         }
     }
 
@@ -851,6 +901,19 @@ impl TeamAction {
                 put("decision", json!(decision));
             }
             Self::CatalogApply | Self::CatalogDiscard => {}
+            Self::CatalogSet { version, catalog } => {
+                put("version", json!(version));
+                put("catalog", catalog.clone());
+            }
+            Self::CatalogDesigner { folder, goal, agent, model, effort, project } => {
+                put("folder", json!(folder));
+                put("goal", json!(goal));
+                for (key, value) in [("agent", agent), ("model", model), ("effort", effort), ("project", project)] {
+                    if !value.is_empty() {
+                        put(key, json!(value));
+                    }
+                }
+            }
         }
         input
     }
@@ -1024,8 +1087,13 @@ pub fn prepare(call: &TeamCall) -> Result<(Invocation, String), TeamOutcome> {
     let invocation = Invocation {
         args,
         stdin: Some(Value::Object(input).to_string().into_bytes()),
-        // Qt's requestTeam: 15 s here, 45 s on a peer.
-        timeout: Duration::from_secs(if call.computer.is_empty() { 15 } else { 45 }),
+        // Qt's requestTeam: 15 s here, 45 s on a peer. Task #44: the
+        // designer starts an agent session, which hgs gives 120 s.
+        timeout: Duration::from_secs(match (&call.action, call.computer.is_empty()) {
+            (TeamAction::CatalogDesigner { .. }, _) => 150,
+            (_, true) => 15,
+            (_, false) => 45,
+        }),
         request_id: Some(request_id.clone()),
     };
     Ok((invocation, request_id))

@@ -210,7 +210,9 @@ fn prepared_path(path: &OsStr, first: Option<PathBuf>, last: &[PathBuf]) -> Opti
 /// stay in the state directory, and a host crash must not turn the computer back
 /// into a control console.
 pub fn local_sessions() -> bool {
-    crate::host::staging::enabled()
+    // Task #48: Codex's sandbox user cannot see the owner's marker, yet it
+    // runs inside one of this computer's sessions.
+    crate::host::staging::enabled() || super::foreign_sandbox()
 }
 /// Windows reports every exit as a code; crash statuses read as signals (see `exit_info`).
 pub fn code(status: ExitStatus) -> i32 {
@@ -1263,6 +1265,44 @@ fn sid_string(sid: &[u8]) -> String {
         })
         .collect();
     format!("S-{revision}-{authority}-{}", subs.join("-"))
+}
+
+/// Task #48: whether `path` belongs to another user account than this
+/// process's user. Codex's Windows sandbox runs an agent's commands as its own
+/// local user (`CodexSandboxOffline`), so the hgs state it reads is another
+/// user's. A folder owned by Administrators or SYSTEM (an elevated process
+/// made it) is no other user's; nor is one whose owner cannot be read.
+pub fn owned_by_another_user(path: &Path) -> bool {
+    let Some(me) = process::current_user() else { return false };
+    let wide = wide_path(path);
+    let mut owner: PSID = std::ptr::null_mut();
+    let mut descriptor: PSECURITY_DESCRIPTOR = std::ptr::null_mut();
+    // SAFETY: `wide` is NUL-terminated; the out pointers are locals; the
+    // descriptor is freed by `Descriptor` and `owner` points into it.
+    let code = unsafe {
+        GetNamedSecurityInfoW(
+            wide.as_ptr(),
+            SE_FILE_OBJECT,
+            OWNER_SECURITY_INFORMATION,
+            &mut owner,
+            std::ptr::null_mut(),
+            std::ptr::null_mut(),
+            std::ptr::null_mut(),
+            &mut descriptor,
+        )
+    };
+    if code != ERROR_SUCCESS || owner.is_null() {
+        return false;
+    }
+    let _descriptor = Descriptor(descriptor);
+    // SAFETY: `owner` is a valid SID inside the live descriptor.
+    unsafe {
+        if IsWellKnownSid(owner, WinLocalSystemSid) != 0 || IsWellKnownSid(owner, WinBuiltinAdministratorsSid) != 0 {
+            return false;
+        }
+        let length = GetLengthSid(owner) as usize;
+        std::slice::from_raw_parts(owner as *const u8, length) != me
+    }
 }
 
 struct Descriptor(PSECURITY_DESCRIPTOR);

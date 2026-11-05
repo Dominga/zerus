@@ -8,10 +8,8 @@ import { SHARE, SIDE, dragShare, dragSide, teamLayout, type TeamLayout } from ".
 import { selected, setDetailTab, setSelectedKey } from "../../store/ui";
 import { teamTests, teamsProfile } from "../../bridge";
 import { PlanView } from "./PlanView";
-import { TeamCatalog } from "./TeamCatalog";
+import { TeamCatalogEditor } from "./TeamCatalogEditor";
 import { TeamSettingsDialog } from "./TeamSettingsDialog";
-import { catalogPort } from "../../store/teamsCatalog";
-import { parseCatalog } from "./catalog";
 import type { TeamTestsView } from "../../types";
 import { ActivityView } from "../sessions/Activity";
 import { Composer } from "../sessions/Composer";
@@ -69,10 +67,6 @@ function TeamWorkspace(props: { computer: ComputerId; team: TeamView; failure?: 
   const [tests, setTests] = createSignal<TeamTestsView | null>(null);
   const graph = () => teams.graph(props.computer, props.team.id);
   const profile = () => teams.profile(props.computer, props.team.id);
-  const catalog = () => {
-    const view = teams.catalog(props.computer);
-    return view ? parseCatalog(view) : null;
-  };
   let body!: HTMLDivElement;
   createEffect(() => {
     const hide = showTeam(props.computer, props.team.id);
@@ -145,8 +139,8 @@ function TeamWorkspace(props: { computer: ComputerId; team: TeamView; failure?: 
       <Show when={settingsOpen()}>
         <TeamSettingsDialog team={props.team} onClose={() => setSettingsOpen(false)} />
       </Show>
-      <Show when={catalogOpen() && catalog()}>
-        <TeamCatalog catalog={catalog()!} port={catalogPort} onClose={() => setCatalogOpen(false)} />
+      <Show when={catalogOpen()}>
+        <TeamCatalogEditor onOpenDesigner={() => setCatalogOpen(false)} />
       </Show>
     </>
   );

@@ -112,3 +112,33 @@
   .designer-body { flex-direction: column; }
   .designer-conversation { border-right: none; border-bottom: 1px solid var(--z-color-divider); min-width: 0; }
 }
+
+/* Task 50: Qt TeamCatalogEditor's role controls and proposal plates. */
+.cat-look { display: flex; flex-direction: column; gap: 6px; }
+.cat-swatches, .cat-icons { display: flex; flex-wrap: wrap; gap: 6px; }
+.cat-swatch { width: 20px; height: 20px; border-radius: 5px; border: 2px solid transparent; padding: 0; cursor: pointer; }
+.cat-swatch.on { border-color: var(--z-color-fg, var(--z-color-text)); }
+.cat-icon { width: 26px; height: 24px; display: grid; place-items: center; border: 1px solid var(--z-color-card-border); border-radius: 6px; background: transparent; color: var(--z-color-muted); cursor: pointer; }
+.cat-icon.on { border-color: currentColor; background: var(--z-color-field); }
+.cat-prompt-order { display: flex; flex-direction: column; gap: 4px; }
+.cat-prompt-block { display: flex; align-items: center; gap: 8px; padding: 6px 10px; border: 1px solid var(--z-color-card-border); border-radius: 8px; cursor: grab; }
+.cat-prompt-block.off { opacity: .5; }
+.cat-prompt-block.dragging { outline: 1px dashed var(--z-color-accent); }
+.cat-prompt-title { font-size: var(--fs-xs); font-weight: 600; text-transform: uppercase; color: var(--z-color-muted); }
+.cat-prompt-include { display: flex; align-items: center; gap: 4px; font-size: var(--fs-xs); }
+.cat-plate { display: flex; flex-direction: column; gap: 4px; padding: 8px 12px; border: 1px solid var(--z-color-card-border); border-radius: 9px; background: var(--z-color-field); }
+.cat-plate-head { display: flex; align-items: center; gap: 8px; }
+.cat-plate-title.struck { text-decoration: line-through; color: var(--z-color-dim); }
+.cat-mark { padding: 0 5px; border-radius: 4px; font-size: 10px; font-weight: 700; border: 1px solid currentColor; }
+.cat-mark.tone-accent { color: var(--z-color-accent); }
+.cat-mark.tone-danger { color: var(--z-color-danger); }
+.cat-mark.tone-folder { color: var(--z-color-info, var(--z-color-accent)); }
+.cat-mark.tone-dim { color: var(--z-color-dim); border-color: transparent; }
+.cat-kept { color: var(--z-color-accent); font-size: var(--fs-sm); }
+.cat-rejected { color: var(--z-color-danger); font-size: var(--fs-sm); }
+.cat-diff { margin: 0; display: flex; flex-direction: column; gap: 2px; font-size: var(--fs-xs); }
+.cat-diff-row { display: grid; grid-template-columns: 140px 1fr; gap: 8px; }
+.cat-diff-row dt { color: var(--z-color-muted); }
+.cat-diff-row dd { margin: 0; display: flex; gap: 6px; flex-wrap: wrap; min-width: 0; overflow-wrap: anywhere; }
+.cat-diff-row del { color: var(--z-color-danger); }
+.cat-diff-row ins { color: var(--z-color-accent); text-decoration: none; }

@@ -319,6 +319,9 @@ Defaults as proposed by REQUIREMENTS Prompt 2; confirmed by the owner.
    `subteam: <template>`; unknown templates and template cycles are catalog
    errors. `hgs guide team` and `designer` explain sub-leads.
    `hgs team status` shows `children: [{team, name, status, done, total}]`.
+   `hgs team list` gives each team its `parent: {team, task}` (null without
+   one), so a desktop counts a tree action's sub-teams and sessions at every
+   level, not only the direct children.
 Old teams have no parent and behave as today.
 
 ## 10. Plan health per phase and for the plan (C7, U9, G9 data)

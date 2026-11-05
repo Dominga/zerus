@@ -6514,7 +6514,9 @@ enforced: a team without a configuration keeps today's flow.
   `bin`, `manifest` (another crate), `filters` and `skips` (up to 512 each),
   `qt-test` with `suites` run one after another in the same run and
   `functions` as `suite:function` (a plain name, or `function:datatag`, with
-  one suite).
+  one suite). A Qt test runs with `QT_FORCE_STDERR_LOGGING=1`: without a
+  console QtTest would log to the debugger, and the run's tail keeps each
+  suite's own lines (`FAIL!`, `Totals`).
 - `hgs test durations --record LOG --provider NAME` keeps the slowest measured
   time per target from CTest, QtTest, Cargo (and libtest JSON), unittest or
   pytest output, or a JSON object of test ids to seconds.
@@ -6721,7 +6723,10 @@ The full run happens only before a release: the owner hears its estimate from
 run. A team setting `full_tests` says who may start one (`never`, `ask` or
 `allowed`; `ask` by default), and the owner may grant one run bound to a
 release; `hgs team run` refuses a full-suite template without that grant and
-names the estimate and the command that asks. `hgs team status` shows the
+names the estimate and the command that asks. A `cargo-test` is the full suite
+only when it names no `filter`, `bin`, `package` and no non-empty `filters`:
+the request `hgs test affected` prints for a crate (its `filters`, `skips` and
+`manifest`) is narrowed; `skips` or a `manifest` alone are not. `hgs team status` shows the
 policy and an active grant. Zerus computes a task's affected set from its own
 diff and accepts its report only with that set green on the merging commit. Every
 test is weighed by real need, speed first (owner, 2026-10-31): a run earns

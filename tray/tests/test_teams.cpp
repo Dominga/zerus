@@ -1365,6 +1365,17 @@ void TestTeams::feedLinesSpeakOfStartsQuestionsAndHolds()
     QCOMPARE(line("released", QJsonObject{{"by", "Lead"}, {"task", 3}}).text, QStringLiteral("Released #3 Held retry"));
     QCOMPARE(line("report_replaced", QJsonObject{{"task", 2}, {"attempt", 1}}).text,
              QStringLiteral("Replaced the captured reply · #2 Address form · attempt 1"));
+    // Task 52: a start waiting for its host (task 22) and a member woken by
+    // its own settled run (task 36) have their own lines.
+    const auto waiting = line("launch_waiting", QJsonObject{{"member", "Backend"}, {"reason", "hgs: DeepSeek host is still starting"}, {"wait", 2}, {"of", 20}});
+    QCOMPARE(waiting.text, QStringLiteral("The host is still starting; starting again (2 of 20)"));
+    QCOMPARE(waiting.by, QStringLiteral("Backend"));
+    QCOMPARE(waiting.tone, Tone::Muted);
+    const auto woken = line("run_settled_woken", QJsonObject{{"member", "Backend"}, {"task", 1}, {"attempt", 2}, {"run", "r1"}, {"delivered", true}});
+    QCOMPARE(woken.text, QStringLiteral("Woke Backend: its run settled · #1 Saved cards API · attempt 2"));
+    const auto refused = line("run_settled_woken", QJsonObject{{"member", "Backend"}, {"task", 1}, {"attempt", 2}, {"delivered", false}});
+    QCOMPARE(refused.text, QStringLiteral("Its run settled, but waking Backend was refused · #1 Saved cards API · attempt 2"));
+    QCOMPARE(refused.tone, Tone::Warn);
 }
 
 void TestTeams::feedLinesSpeakOfRosterChanges()

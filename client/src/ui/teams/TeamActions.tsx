@@ -4,7 +4,7 @@ import { Icon } from "../lib/icons";
 import { teams } from "../../store/teams";
 import { useModel, windowPort } from "./ProposalCards";
 import {
-  TeamActions, barActions, barChips, finishSummary, formText, moreItems, stageName, subtreeImpact, taskButtons,
+  TeamActions, barActions, barChips, finishSummary, formText, moreItems, openQuestions, questionClosed, stageName, subtreeImpact, taskButtons,
   type ActTask, type ActTeam, type BarAction, type BarChip, type TaskForm,
 } from "./actions";
 import type { ComputerId } from "../../types";
@@ -147,6 +147,12 @@ export function TaskActions(props: { computer: ComputerId; team: ActTeam; task: 
   };
   return (
     <div class="team-task-actions" data-task={props.task.id}>
+      <Show when={(props.task.questions ?? []).length > 0}>
+        <div class="team-task-questions">
+          <b>{tr("Questions")}</b>
+          <For each={props.task.questions ?? []}>{(question) => <QuestionAnswer computer={props.computer} team={props.team} task={props.task} question={question} />}</For>
+        </div>
+      </Show>
       <Show when={props.task.pipeline_run}>{(run) => (
         <div class="team-stage-chips" aria-label={tr("Pipeline %1", run().name || props.task.pipeline || "")}>
           <For each={run().stages}>{(kind, index) => (
@@ -198,6 +204,63 @@ export function TaskActions(props: { computer: ComputerId; team: ActTeam; task: 
       </Show>
       <Show when={read().notice}><div class="team-proposal-notice" role="status">{read().notice}</div></Show>
     </div>
+  );
+}
+
+/**
+ * Task 55: a member's question with the owner's answer (Qt teamTaskQuestion):
+ * the field keeps its text across polls, Send goes once and waits for hgs, a
+ * refusal says why here, and a closed question says so without a field.
+ */
+export function QuestionAnswer(props: { computer: ComputerId; team: ActTeam; task: ActTask; question: { id: string; text: string } }) {
+  const { model, tick } = useModel((changed) => new TeamActions(windowPort, () => ({ computer: props.computer, team: props.team }), changed));
+  const read = () => (tick(), model);
+  const [draft, setDraft] = createSignal("");
+  const [sent, setSent] = createSignal(false);
+  const assignee = () => props.team.members.find((member) => member.id === props.task.assignee)?.role || props.task.assignee;
+  const closed = () => questionClosed(props.task);
+  const send = async () => {
+    if (sent() || read().busy || !draft().trim()) return;
+    const outcome = await model.reply(props.task, props.question.id, draft());
+    if (outcome && outcome !== "cancelled" && outcome.outcome === "done") { setSent(true); setDraft(""); }
+  };
+  return (
+    <div class="team-question" data-question={props.question.id}>
+      <p class="team-question-text">{props.question.text}</p>
+      <Show when={!closed()} fallback={<p class="dim team-question-closed">{closed()}</p>}>
+        <Show when={!sent()} fallback={<p class="dim team-question-sent">{tr("Answer sent; it reaches %1 once.", assignee())}</p>}>
+          <div class="team-proposal-answers">
+            <input class="field" maxlength={4000} placeholder={tr("Answer %1…", assignee())} value={draft()} disabled={read().busy}
+              onInput={(event) => setDraft(event.currentTarget.value)} onKeyDown={(event) => { if (event.key === "Enter") void send(); }} />
+            <button type="button" class="btn small primary" disabled={read().busy || !draft().trim()}
+              title={tr("Send this answer to %1; it reaches the member as a message", assignee())} onClick={() => void send()}>
+              {read().busy ? tr("Sending…") : tr("Send")}
+            </button>
+          </div>
+          <Show when={read().notice}><p class="team-proposal-notice" role="status">{tr("Not sent: %1", read().notice)}</p></Show>
+        </Show>
+      </Show>
+    </div>
+  );
+}
+
+/** Task 55: the members' open questions on the team's side, each answered in place. */
+export function TeamQuestions(props: { computer: ComputerId; team: ActTeam }) {
+  const keys = createMemo(() => openQuestions(props.team).map((entry) => `${entry.task.id}:${entry.question.id}`));
+  const entry = (key: string) => openQuestions(props.team).find((found) => `${found.task.id}:${found.question.id}` === key);
+  return (
+    <Show when={keys().length > 0}>
+      <div class="team-questions" role="list" aria-label={tr("Questions")}>
+        <For each={keys()}>{(key) => (
+          <Show when={entry(key)}>{(found) => (
+            <div class="team-question-row" role="listitem">
+              <span class="dim">{tr("#%1 %2 asks:", found().task.id, props.team.members.find((member) => member.id === found().task.assignee)?.role || found().task.assignee)}</span>
+              <QuestionAnswer computer={props.computer} team={props.team} task={found().task} question={found().question} />
+            </div>
+          )}</Show>
+        )}</For>
+      </div>
+    </Show>
   );
 }
 

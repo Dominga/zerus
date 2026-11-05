@@ -1450,6 +1450,7 @@ fn handler() -> impl Fn(tauri::ipc::Invoke) -> bool + Send + Sync + 'static {
         teams::team_tests,
         teams::team_action,
         teams::team_read,
+        teams::team_role_models,
         teams::catalog_editor_schema,
         teams::catalog_editor_load,
         teams::catalog_editor_edit,

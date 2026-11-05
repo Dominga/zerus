@@ -56,17 +56,19 @@ export interface CatalogEditorPort {
   ask: (confirmation: TeamConfirmation) => Promise<boolean>;
 }
 
+// The bridge is read when a call is made, not when this module loads: a test
+// that mocks the bridge without these functions can still import it.
 export const desktopCatalogEditor: CatalogEditorPort = {
-  schema: bridge.catalogEditorSchema,
-  load: bridge.catalogEditorLoad,
-  edit: bridge.catalogEditorEdit,
-  revert: bridge.catalogEditorRevert,
-  save: bridge.catalogEditorSave,
-  resetRules: bridge.catalogEditorResetRules,
-  impact: bridge.catalogEditorImpact,
-  exportFile: bridge.catalogEditorExport,
-  importFile: bridge.catalogEditorImport,
-  route: bridge.catalogRoute,
+  schema: (...args) => bridge.catalogEditorSchema(...args),
+  load: (...args) => bridge.catalogEditorLoad(...args),
+  edit: (...args) => bridge.catalogEditorEdit(...args),
+  revert: (...args) => bridge.catalogEditorRevert(...args),
+  save: (...args) => bridge.catalogEditorSave(...args),
+  resetRules: (...args) => bridge.catalogEditorResetRules(...args),
+  impact: (...args) => bridge.catalogEditorImpact(...args),
+  exportFile: (...args) => bridge.catalogEditorExport(...args),
+  importFile: (...args) => bridge.catalogEditorImport(...args),
+  route: (...args) => bridge.catalogRoute(...args),
   ask: (confirmation) => teamConfirm.ask(confirmation),
 };
 

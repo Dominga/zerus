@@ -1,11 +1,11 @@
 import { describe, expect, it } from "vitest";
 import {
   TeamActions, allDecided, barActions, barChips, discardConfirmation, finishSummary, formAction, formText, moreItems, moveTargets,
-  pauseConfirmation, planApproval, retryConfirmation, sendBackMessage, stageName, stopConfirmation, subtreeImpact, taskButtons,
+  openQuestions, pauseConfirmation, planApproval, questionClosed, retryConfirmation, sendBackMessage, stageName, stopConfirmation, subtreeImpact, subteamQuestion, taskButtons,
   type ActTask, type ActTeam,
 } from "./actions";
 import type { DecisionPort } from "./decisions";
-import type { TeamCall, TeamConfirmation } from "../../types";
+import type { TeamCall, TeamChoice, TeamConfirmation } from "../../types";
 
 // Task 40: every team bar action and task action of Qt (TeamWorkspace
 // headerActionsContent, TeamPanel approvePlan/finishTeam, TeamTaskCard footer,
@@ -156,6 +156,26 @@ describe("team bar", () => {
     expect(f.sent.at(-1)).toMatchObject({ action: { kind: "archive" }, confirmed: true });
   });
 
+  it("Task 52: the impact counts the whole tree, through each listed team's parent", () => {
+    const tree = team({ children: [{ team: "s1" }] });
+    const session = (name: string) => ({ session: { name } });
+    const list = [
+      { id: "t1", members: [session("lead")], parent: "" },
+      { id: "s1", members: [session("a"), { session: null }], parent: "t1" },
+      { id: "s2", members: [session("b"), session("c")], parent: "s1" },
+      { id: "s3", members: [session("d")], parent: "s2" },
+      { id: "s4", members: [session("e")], parent: "t1" },
+      { id: "other", members: [session("f")], parent: "" },
+    ] as never[];
+    // s1 from the team's record and its list entry (once), s4 from the list
+    // only, s2 and s3 below them: four sub-teams, five sessions.
+    expect(subtreeImpact(tree, list)).toEqual({ teams: 4, sessions: 5 });
+    expect(stopConfirmation(tree, subtreeImpact(tree, list)).text).toContain("It stops 4 sub-teams and affects 5 member sessions in them.");
+    // A cycle in broken records is walked once.
+    const loop = [{ id: "s1", members: [], parent: "s2" }, { id: "s2", members: [], parent: "s1" }] as never[];
+    expect(subtreeImpact(team({ children: [{ team: "s1" }] }), loop)).toEqual({ teams: 2, sessions: 0 });
+  });
+
   it("Finish needs a summary of at most 4000 characters and sends it once", async () => {
     expect(finishSummary("")).toEqual({ count: "0 / 4000", ok: false });
     expect(finishSummary(" Shipped ")).toEqual({ count: "7 / 4000", ok: true });
@@ -284,5 +304,84 @@ describe("task card", () => {
     expect(f.sent.map((call) => [call.action.kind, call.confirmed])).toEqual([["take_over", true], ["cancel", true], ["retry", true]]);
     // A task never tried retries without asking.
     expect(retryConfirmation(task({ id: 2 }))).toBeUndefined();
+  });
+});
+
+describe("Task 52: a delegated task's sub-team", () => {
+  const delegated = task({ id: 4, status: "in_progress", attempts: 1, subteam: true, subteam_team: "child-team" });
+  const withChoice = (f: Fake, answers: (string | undefined)[]) => {
+    const asked: TeamChoice[] = [];
+    f.port.choose = async (choice) => { asked.push(choice); return answers.shift(); };
+    return asked;
+  };
+
+  it("Cancel asks first, then whether the sub-team stops, and sends the answer once", async () => {
+    const f = fake();
+    const asked = withChoice(f, ["stop"]);
+    await actionsOf(f, team({ tasks: [delegated] })).cancel(delegated);
+    expect(f.asked.map((confirmation) => confirmation.name)).toEqual(["teamCancelTaskConfirm"]);
+    expect(asked).toEqual([subteamQuestion(delegated, "Cancel")]);
+    expect(asked[0]).toMatchObject({ title: "Cancel task #4?", text: "Task #4 has the sub-team child-team. Stop that sub-team too, or keep it running?" });
+    expect(asked[0].choices.map((choice) => choice.id)).toEqual(["stop", "keep"]);
+    expect(f.sent.map((call) => [call.action, call.confirmed])).toEqual([[{ kind: "cancel", task: 4, subteam: "stop" }, true]]);
+  });
+
+  it("Reassign asks about the sub-team; Cancel in that question sends nothing", async () => {
+    const f = fake();
+    const asked = withChoice(f, ["keep", undefined]);
+    await actionsOf(f, team({ tasks: [delegated] })).reassign(delegated, "qa");
+    expect(asked[0].title).toBe("Reassign task #4?");
+    expect(f.sent.at(-1)!.action).toEqual({ kind: "reassign", task: 4, member: "qa", subteam: "keep" });
+    expect(await actionsOf(f, team({ tasks: [delegated] })).reassign(delegated, "qa")).toBe("cancelled");
+    expect(f.sent).toHaveLength(1);
+    // Declining Cancel's own question asks nothing more.
+    f.yes = false;
+    expect(await actionsOf(f, team({ tasks: [delegated] })).cancel(delegated)).toBe("cancelled");
+    expect(asked).toHaveLength(2);
+  });
+
+  it("a task without a sub-team asks nothing more; a sub-team without its id keeps it, as Qt", async () => {
+    const f = fake();
+    const asked = withChoice(f, []);
+    const plain = task({ id: 5 });
+    await actionsOf(f, team({ tasks: [plain] })).reassign(plain, "qa");
+    expect(f.sent.at(-1)!.action).toEqual({ kind: "reassign", task: 5, member: "qa" });
+    const unnamed = task({ id: 6, subteam: true });
+    expect(subteamQuestion(unnamed, "Cancel")).toBeUndefined();
+    await actionsOf(f, team({ tasks: [unnamed] })).cancel(unnamed);
+    expect(f.sent.at(-1)!.action).toEqual({ kind: "cancel", task: 6, subteam: "keep" });
+    expect(asked).toEqual([]);
+  });
+});
+
+describe("member questions (task 55)", () => {
+  const asks = task({ id: 15, assignee: "qa", status: "in_progress", attempts: 1, questions: [{ id: "q1", text: "Keep the old field?", at: 1720 }] });
+
+  it("the owner answers a member's question once, as hgs team reply", async () => {
+    const f = fake();
+    const t = team({ tasks: [asks] });
+    expect(openQuestions(t).map((entry) => [entry.task.id, entry.question.id])).toEqual([[15, "q1"]]);
+    const actions = actionsOf(f, t);
+    expect(await actions.reply(asks, "q1", "   ")).toBeUndefined();
+    // Two clicks while the first is on its way: one reply.
+    const first = actions.reply(asks, "q1", " Yes, keep it. ");
+    const second = actions.reply(asks, "q1", "Yes, keep it.");
+    await Promise.all([first, second]);
+    expect(f.sent.map((call) => [call.team, call.action])).toEqual([["t1", { kind: "reply", question: "q1", text: "Yes, keep it." }]]);
+    expect(f.asked).toEqual([]);
+  });
+
+  it("a refusal says why; a decided task's question says it is closed and sends nothing", async () => {
+    const f = fake();
+    f.refuse = "hgs: Question q1 was already answered";
+    const actions = actionsOf(f, team({ tasks: [asks] }));
+    await actions.reply(asks, "q1", "Yes");
+    expect(actions.notice).toBe("Question q1 was already answered");
+    const decided = { ...asks, status: "cancelled" };
+    expect(questionClosed(decided)).toBe("Task #15 is decided, so this question is closed; nobody can answer it any more.");
+    expect(questionClosed(asks)).toBe("");
+    const before = f.sent.length;
+    expect(await actions.reply(decided, "q1", "Yes")).toBeUndefined();
+    expect(f.sent).toHaveLength(before);
   });
 });

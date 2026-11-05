@@ -160,6 +160,9 @@ pub struct TeamSummary {
     pub pending_phase: Option<u64>,
     pub updated: f64,
     pub revision: u64,
+    /// Task 52: the team whose task this sub-team came from ("" for a team
+    /// with no parent), so a tree action counts the whole tree from the list.
+    pub parent: String,
 }
 
 impl TeamSummary {
@@ -216,6 +219,7 @@ pub fn list(value: &Value) -> TeamList {
                 pending_phase: item.get("pending_phase").and_then(Value::as_u64),
                 updated: number(item, "updated"),
                 revision: count(item, "revision"),
+                parent: item.get("parent").map(|parent| name(parent, "team")).unwrap_or_default(),
             }
         })
         .collect();
@@ -300,6 +304,39 @@ pub struct TaskView {
     pub pipeline_run: Option<PipelineRunView>,
     /// Task 40: the task delegates to a sub-team (`subteam`).
     pub subteam: bool,
+    /// Task 52: that sub-team's id, for Cancel's and Reassign's question.
+    pub subteam_team: String,
+    /// Task 55: the newest attempt's open questions to the lead (A3): the
+    /// owner answers them with `hgs team reply` too.
+    pub questions: Vec<QuestionView>,
+}
+
+/// Task 55: one open question of a member to the lead.
+#[derive(Clone, Debug, Default, PartialEq, Serialize)]
+pub struct QuestionView {
+    pub id: String,
+    pub text: String,
+    pub at: f64,
+}
+
+fn open_questions(value: &Value) -> Vec<QuestionView> {
+    let Some(attempt) = array(value, "attempts").last() else {
+        return Vec::new();
+    };
+    array(attempt, "questions")
+        .iter()
+        .filter(|question| {
+            text(question, "answer", 1).is_empty()
+                && question["answered_at"].as_f64().unwrap_or(0.0) <= 0.0
+        })
+        .take(ITEMS_KEPT)
+        .map(|question| QuestionView {
+            id: name(question, "id"),
+            text: text(question, "text", TEXT_CHARS),
+            at: number(question, "at"),
+        })
+        .filter(|question| !question.id.is_empty())
+        .collect()
 }
 
 /// Task 40: a task's pipeline run (`pipeline_run`): its stage kinds in order,
@@ -574,6 +611,8 @@ fn task(value: &Value) -> TaskView {
         pipeline: name(value, "pipeline"),
         pipeline_run: pipeline_run(value),
         subteam: value.get("subteam").is_some_and(Value::is_object),
+        subteam_team: value.get("subteam").map(|subteam| name(subteam, "team")).unwrap_or_default(),
+        questions: open_questions(value),
     }
 }
 

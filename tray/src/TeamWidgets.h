@@ -2510,24 +2510,30 @@ inline QWidget *iconSegmented(const QList<std::tuple<QString, QString, QString>>
 }
 
 // G1: how many sub-teams and sessions a tree action reaches (the team itself
-// is not counted; the list is the controller's current teams).
+// is not counted; the list is the controller's current teams). Task 52: a
+// listed team names only its parent (`team list` has no children), so the
+// walk takes a team's children from its own record and from every team whose
+// parent it is, and reaches every level of the tree.
 inline QPair<int, int> subtreeImpact(const Team &team, const QList<Team> &all)
 {
     int subteams = 0, sessions = 0;
-    QSet<QString> seen;
-    std::function<void(const Team &)> walk = [&](const Team &current) {
-        for (const auto &child : current.children) {
-            if (seen.contains(child.team)) continue;
-            seen.insert(child.team);
+    QSet<QString> seen{team.id};
+    std::function<void(const QString &, const QList<Subteam> &)> walk = [&](const QString &id, const QList<Subteam> &children) {
+        QStringList ids;
+        for (const auto &child : children) ids << child.team;
+        for (const auto &candidate : all) if (candidate.parent.known && candidate.parent.team == id) ids << candidate.id;
+        for (const auto &child : ids) {
+            if (child.isEmpty() || seen.contains(child)) continue;
+            seen.insert(child);
             ++subteams;
-            for (const auto &candidate : all) if (candidate.id == child.team) {
+            for (const auto &candidate : all) if (candidate.id == child) {
                 for (const auto &member : candidate.members) if (!member.session.isEmpty()) ++sessions;
-                walk(candidate);
+                walk(candidate.id, candidate.children);
                 break;
             }
         }
     };
-    walk(team);
+    walk(team.id, team.children);
     return {subteams, sessions};
 }
 

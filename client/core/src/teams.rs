@@ -25,6 +25,7 @@ pub mod heads;
 pub mod model;
 pub mod poller;
 pub mod read;
+pub mod role_models;
 pub mod view;
 
 pub use action::{TeamAction, TeamCall, TeamOutcome};

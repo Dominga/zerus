@@ -1096,6 +1096,10 @@ fn summary(team: &Team, include_cancelled: bool) -> Value {
         // U57: the lead's open proposals (at most 50), so the lead's session
         // window shows their cards from the polled list.
         "proposals":open_proposals(team),
+        // Task 52: the parent task of a sub-team, so a client walks the whole
+        // team tree from the list (a tree action's impact); null for a team
+        // with no parent.
+        "parent":team.parent.as_ref().map(|parent| json!({"team":parent.team,"task":parent.task})),
     })
 }
 
@@ -3968,8 +3972,14 @@ fn running_note(request_id: &str) -> Value {
 /// filter, binary or package and the Android unit tests run everything.
 fn full_test_run(template: &str, args: &Value) -> bool {
     let empty = |key: &str| text(args, key).is_empty();
+    // Task 53: the run hgs test affected prints for a crate names its tests in
+    // `filters` (with skips and the crate's manifest), not in `filter`: a
+    // non-empty filters list narrows the run. Skips or a manifest alone do not.
+    let filters = args["filters"].as_array().is_some_and(|filters| {
+        filters.iter().any(|filter| filter.as_str().is_some_and(|filter| !filter.trim().is_empty()))
+    });
     match template {
-        "cargo-test" => empty("filter") && empty("bin") && empty("package"),
+        "cargo-test" => empty("filter") && empty("bin") && empty("package") && !filters,
         "android-test" => true,
         _ => false,
     }

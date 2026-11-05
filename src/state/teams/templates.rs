@@ -861,6 +861,12 @@ fn template_environment(plan: &Plan, folder: &Path) -> Vec<(String, String)> {
         }
     }
     if plan.template == "qt-test" {
+        // Task 53: QtTest's plain logger writes to OutputDebugString instead of
+        // stdout when stderr has no console (Qt's shouldLogToStderr), and the
+        // worker has none: the suite's lines (FAIL!, Totals) never reached the
+        // pipe and the tail was empty. Qt's own switch sends them to the
+        // stream on every platform.
+        env.push(("QT_FORCE_STDERR_LOGGING".into(), "1".into()));
         if let Some(bin) = qt_bin(folder) {
             let path = env.iter().find(|(key, _)| key.eq_ignore_ascii_case("PATH")).map(|(_, value)| value.clone())
                 .unwrap_or_else(|| std::env::var("PATH").unwrap_or_default());
@@ -1382,6 +1388,8 @@ mod tests {
         let env = template_environment(&test, dir.path());
         let path = env.iter().find(|(key, _)| key == "PATH").map(|(_, value)| value.clone()).unwrap();
         assert!(path.starts_with(&qt.join("bin").display().to_string()), "{path}");
+        // Task 53: a Qt test writes its lines to the stream, not to the debugger.
+        assert!(env.iter().any(|(key, value)| key == "QT_FORCE_STDERR_LOGGING" && value == "1"), "{env:?}");
         // The Gradle wrapper is the folder's own; its home and cache stay in the folder.
         let android = dir.path().join("mobile").join("android");
         std::fs::create_dir_all(&android).unwrap();

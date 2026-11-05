@@ -26,10 +26,9 @@ Use a new request_id for every run; --wait returns the exit code when ready
 result; it never runs the command twice. Values are typed; a path outside your
 folder or a shell metacharacter is refused. The owner may turn the set off or
 add fixed templates.
-In a pipeline stage (review or test) the hand-out names your stage attempt;
-answer it with a verdict (hgs team report --json); edit none of its files.
-Command and land stages are Zerus', with no member. A role's context_before_task
-may compact or clear your context before a hand-out: it then carries the full
-task text.
+A pipeline stage (review or test) hand-out names your stage attempt: answer
+with a verdict (hgs team report --json); edit none of its files. Command and
+land stages are Zerus'. A role's context_before_task may compact or clear your
+context before a hand-out, which then carries the full task text.
 Build broker on: hgs guide team-broker.
 Anything else still asks the lead.

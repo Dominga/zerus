@@ -177,14 +177,39 @@ impl Entry {
             && (removable(&self.row) || self.discardable() || process_reviewable(&self.row))
     }
 
-    /// Ready for the background pass: verified, ready for exit cleanup, and
-    /// owned by the same checkout owner recorded at launch.
-    fn automatic_ready(&self) -> bool {
+    /// The native original Done+Remove scope may exclude only classified reads.
+    /// A retained row or an ordinary review cannot reconstruct that origin.
+    fn ignores_permission_denials(&self, confirmed_remove: bool) -> bool {
+        confirmed_remove
+            && self.verified
+            && self.exit_cleanup
+            && !self.expected_owner_id.is_empty()
+            && self.row["ownership_id"].as_str() == Some(self.expected_owner_id.as_str())
+            && crate::worktree_review::permission_denials_complete(&self.row)
+            && self.row["unreadable_processes"]
+                .as_array()
+                .is_some_and(|rows| !rows.is_empty())
+    }
+
+    /// Ready for the original exit pass, with the same launch ownership and
+    /// every file, session and readable process protection still enforced.
+    fn automatic_ready(&self, confirmed_remove: bool) -> bool {
+        let row = if self.ignores_permission_denials(confirmed_remove)
+            && self.row["process_fingerprint"]
+                .as_str()
+                .is_some_and(|s| !s.is_empty())
+        {
+            std::borrow::Cow::Owned(crate::worktree_review::without_permission_denials(
+                &self.row,
+            ))
+        } else {
+            std::borrow::Cow::Borrowed(&self.row)
+        };
         self.eligible()
             && self.exit_cleanup
             && !self.expected_owner_id.is_empty()
             && self.row["ownership_id"].as_str() == Some(self.expected_owner_id.as_str())
-            && exit_cleanup_ready(&self.row)
+            && exit_cleanup_ready(&row)
     }
 }
 
@@ -315,7 +340,11 @@ impl Cleanup {
         }
         let automatic = !self.auto_scheduled
             && (self.background
-                || (!self.entries.is_empty() && self.entries.iter().all(Entry::automatic_ready)));
+                || (!self.entries.is_empty()
+                    && self
+                        .entries
+                        .iter()
+                        .all(|entry| entry.automatic_ready(false))));
         if automatic {
             self.auto_scheduled = true;
             return self.start(true, Consents::default());
@@ -399,8 +428,8 @@ impl Cleanup {
         for entry in self.entries.iter().filter(|entry| entry.eligible()) {
             required.local_files |= local_data(&entry.row);
             required.discard_changes |= entry.discardable();
-            required.unchecked_processes |=
-                process_reviewable(&entry.row) || discardable_with_processes(&entry.row);
+            required.unchecked_processes |= !entry.ignores_permission_denials(self.background)
+                && (process_reviewable(&entry.row) || discardable_with_processes(&entry.row));
         }
         required
     }
@@ -436,7 +465,10 @@ impl Cleanup {
                 self.index += 1;
                 continue;
             }
-            if self.stop || !entry.eligible() || (automatic && !entry.automatic_ready()) {
+            if self.stop
+                || !entry.eligible()
+                || (automatic && !entry.automatic_ready(self.background))
+            {
                 entry.status = Some(Status::Kept);
                 if self.stop {
                     entry.verified = false;
@@ -463,7 +495,15 @@ impl Cleanup {
                 } else {
                     String::new()
                 },
-                process_fingerprint: if !automatic
+                process_fingerprint: if entry.ignores_permission_denials(self.background)
+                    && !text("process_fingerprint").is_empty()
+                {
+                    format!(
+                        "{}{}",
+                        crate::worktree_review::PERMISSION_DENIALS_PREFIX,
+                        text("process_fingerprint")
+                    )
+                } else if !automatic
                     && consents.unchecked_processes
                     && (process_reviewable(row) || discardable_with_processes(row))
                 {
@@ -544,6 +584,18 @@ impl Cleanup {
         }
     }
 
+    /// Only this in-memory original Done+Remove operation hides excluded reads.
+    /// Retained/imported/manual rows cannot acquire that origin from status.
+    pub fn presentation_row<'a>(&self, entry: &'a Entry) -> std::borrow::Cow<'a, Value> {
+        if entry.ignores_permission_denials(self.background) {
+            std::borrow::Cow::Owned(crate::worktree_review::without_permission_denials(
+                &entry.row,
+            ))
+        } else {
+            std::borrow::Cow::Borrowed(&entry.row)
+        }
+    }
+
     /// Why the first kept folder stayed.
     pub fn retained_reason(&self) -> Option<String> {
         let entry = self
@@ -564,8 +616,8 @@ impl Cleanup {
         if !entry.review_error.is_empty() {
             return Some(first(&entry.review_error));
         }
-        let row = &entry.row;
-        let has = |code: &str| crate::worktree_review::has_reason(row, &[code]);
+        let row = self.presentation_row(entry);
+        let has = |code: &str| crate::worktree_review::has_reason(&row, &[code]);
         Some(if has("processes") {
             "A running program uses the folder.".into()
         } else if has("sessions") {
@@ -574,14 +626,14 @@ impl Cleanup {
             "Some running programs could not be checked.".into()
         } else if entry.discardable() {
             "Uncommitted changes need review.".into()
-        } else if local_data(row) {
+        } else if local_data(&row) {
             "Local files need review.".into()
         } else if entry.expected_owner_id.is_empty()
             || row["ownership_id"].as_str() != Some(entry.expected_owner_id.as_str())
         {
             "Checkout ownership needs review.".into()
         } else {
-            crate::worktree_review::summary(row)
+            crate::worktree_review::summary(&row)
                 .join(" ")
                 .chars()
                 .take(180)
@@ -616,6 +668,162 @@ mod tests {
             None,
         )
         .unwrap()
+    }
+
+    fn denied_row() -> Value {
+        let mut row = ready_row("owner-1");
+        row["verdict"] = json!("blocked");
+        row["reasons"] = json!([{"code":"processes_unavailable","message":"hidden paths"}]);
+        row["process_fingerprint"] = json!("v2:1000:original-proof");
+        row["unreadable_processes"] = json!([{"pid":7,"command":"protected","identity":"original-birth","cwd":true,"executable":false,"files":true}]);
+        row["process_coverage"] = json!({"abi":crate::worktree_review::PERMISSION_DENIALS_ABI,
+            "complete":true,"open_files_checked":true,"permission_denials":1});
+        row
+    }
+
+    #[test]
+    fn original_done_remove_uses_only_the_strict_permission_denial_proof() {
+        let mut cleanup = Cleanup::after_termination(vec![terminated("owner-1")]);
+        assert!(matches!(cleanup.step(), Step::Review { .. }));
+        let row = denied_row();
+        let Step::Remove { removal, .. } = cleanup.reviewed(
+            "studio",
+            "/home/example/repo/.git",
+            Ok(&review_of(row.clone())),
+        ) else {
+            panic!("original confirmed Remove should ignore classified permission denials");
+        };
+        assert_eq!(
+            removal.process_fingerprint,
+            format!(
+                "{}v2:1000:original-proof",
+                crate::worktree_review::PERMISSION_DENIALS_PREFIX
+            )
+        );
+        assert!(!removal.delete_branch);
+        assert!(removal.preserve_archive_restore);
+        assert_eq!(
+            cleanup.entries[0].row, row,
+            "the original Root row/proof is unchanged"
+        );
+        let visible = cleanup.presentation_row(&cleanup.entries[0]);
+        assert_eq!(visible["unreadable_processes"], json!([]));
+        assert!(visible["reasons"].as_array().unwrap().is_empty());
+    }
+
+    #[test]
+    fn permission_denial_scope_never_comes_from_manual_or_retained_status() {
+        let row = denied_row();
+        let mut manual = Cleanup::manual(vec![terminated("owner-1")]);
+        assert!(matches!(manual.step(), Step::Review { .. }));
+        assert_eq!(
+            manual.reviewed(
+                "studio",
+                "/home/example/repo/.git",
+                Ok(&review_of(row.clone()))
+            ),
+            Step::Idle
+        );
+        assert!(manual.required().unchecked_processes);
+        assert_eq!(
+            manual.presentation_row(&manual.entries[0])["unreadable_processes"],
+            row["unreadable_processes"]
+        );
+        let mut original = Cleanup::after_termination(vec![terminated("owner-1")]);
+        original.entries[0].status = Some(Status::Unconfirmed);
+        original.entries[0].verified = true;
+        original.entries[0].row = row;
+        assert_eq!(
+            original.step(),
+            Step::Done,
+            "unknown removal remains terminal"
+        );
+        let retained = Cleanup::retained(original.entries.clone());
+        assert!(
+            !retained.presentation_row(&retained.entries[0])["unreadable_processes"]
+                .as_array()
+                .unwrap()
+                .is_empty()
+        );
+    }
+
+    #[test]
+    fn access_denials_do_not_hide_other_blockers_or_incomplete_evidence() {
+        let mutations: Vec<(&str, Value)> = vec![
+            ("old/generic uncertainty", Value::Null),
+            (
+                "incomplete",
+                json!({"abi":crate::worktree_review::PERMISSION_DENIALS_ABI,"complete":false,"open_files_checked":true,"permission_denials":1}),
+            ),
+            (
+                "files not checked",
+                json!({"abi":crate::worktree_review::PERMISSION_DENIALS_ABI,"complete":true,"open_files_checked":false,"permission_denials":1}),
+            ),
+            (
+                "mismatched count",
+                json!({"abi":crate::worktree_review::PERMISSION_DENIALS_ABI,"complete":true,"open_files_checked":true,"permission_denials":2}),
+            ),
+        ];
+        for (label, coverage) in mutations {
+            let mut cleanup = Cleanup::after_termination(vec![terminated("owner-1")]);
+            let mut row = denied_row();
+            row["process_coverage"] = coverage;
+            assert!(matches!(cleanup.step(), Step::Review { .. }));
+            assert!(
+                !matches!(
+                    cleanup.reviewed("studio", "/home/example/repo/.git", Ok(&review_of(row))),
+                    Step::Remove { .. }
+                ),
+                "{label}"
+            );
+        }
+        for process in [
+            json!({"pid":7}),
+            json!({"pid":7,"identity":"original-birth","cwd":false,"executable":false,"files":false}),
+            json!({"pid":7,"identity":"original-birth","cwd":true,"executable":false}),
+            json!({"pid":0,"identity":"original-birth","cwd":true,"executable":false,"files":false}),
+        ] {
+            let mut cleanup = Cleanup::after_termination(vec![terminated("owner-1")]);
+            let mut row = denied_row();
+            row["unreadable_processes"] = json!([process]);
+            assert!(matches!(cleanup.step(), Step::Review { .. }));
+            assert!(!matches!(
+                cleanup.reviewed("studio", "/home/example/repo/.git", Ok(&review_of(row))),
+                Step::Remove { .. }
+            ));
+        }
+        for reason in [
+            "processes",
+            "sessions",
+            "status_unavailable",
+            "changes",
+            "locked",
+        ] {
+            let mut cleanup = Cleanup::after_termination(vec![terminated("owner-1")]);
+            let mut row = denied_row();
+            row["reasons"]
+                .as_array_mut()
+                .unwrap()
+                .push(json!({"code":reason}));
+            assert!(matches!(cleanup.step(), Step::Review { .. }));
+            assert!(
+                !matches!(
+                    cleanup.reviewed("studio", "/home/example/repo/.git", Ok(&review_of(row))),
+                    Step::Remove { .. }
+                ),
+                "{reason}"
+            );
+        }
+        let mut cleanup = Cleanup::after_termination(vec![terminated("another-owner")]);
+        assert!(matches!(cleanup.step(), Step::Review { .. }));
+        assert!(!matches!(
+            cleanup.reviewed(
+                "studio",
+                "/home/example/repo/.git",
+                Ok(&review_of(denied_row()))
+            ),
+            Step::Remove { .. }
+        ));
     }
 
     #[test]

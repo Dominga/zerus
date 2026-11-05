@@ -110,7 +110,9 @@ pub(super) fn dispatch_scoped(args: &[String], dry: bool, scope: Option<&session
             None
         };
         if let Some(scope)=scope {scope.check(record.as_ref().ok_or("Scoped rename requires a tracked binding")?)?;}
-        let live_panes = snapshot.get(old);
+        // The session's own terminal (P3b); an untracked one by its name.
+        let terminal = record.as_ref().map_or(old.as_str(), terminal_name).to_owned();
+        let live_panes = snapshot.get(&terminal);
         if record.is_none() && live_panes.is_none() {
             return Err(format!("{old}: session not found"));
         }
@@ -126,7 +128,7 @@ pub(super) fn dispatch_scoped(args: &[String], dry: bool, scope: Option<&session
         }
         if old != new && !dry {
             let id = if live_panes.is_some() {
-                Some(session_id(old)?)
+                Some(session_id(&terminal)?)
             } else {
                 None
             };
@@ -141,8 +143,10 @@ pub(super) fn dispatch_scoped(args: &[String], dry: bool, scope: Option<&session
             });
             let mut record = record;
             if let Some(record) = &mut record { processes::compact(record); }
+            // The terminal moves to the new label by its `$N`, under the
+            // writer lock (P3b); recovery compares its name with `terminal`.
             let mut transaction = json!({"version":1,"old":old,"new":new,"record":record,
-                "session_id":id,"legacy":legacy,
+                "session_id":id,"terminal":terminal,"legacy":legacy,
                 "source_routed":!in_place && route_path(old).exists()});
             if in_place {
                 transaction["layout"] = json!("id");
@@ -169,6 +173,14 @@ pub(super) fn dispatch_scoped(args: &[String], dry: bool, scope: Option<&session
         if dry { "would have " } else { "" }
     );}
     Ok(0)
+}
+
+/// A rename that moved the session's terminal gives the record its new
+/// terminal name; one that did not keeps the terminal it had (P3b).
+fn moved_terminal(transaction: &Value, record: &mut Value) {
+    if transaction["session_id"].is_string() {
+        record["terminal_name"] = transaction["new"].clone();
+    }
 }
 
 fn anchor(record: &mut Value) {
@@ -222,6 +234,7 @@ fn commit_in_place(transaction: &Value, old: &str, new: &str) -> Result<()> {
         anchor(&mut current);
         current["name"] = json!(new);
         current["renamed_at"] = json!(now());
+        moved_terminal(transaction, &mut current);
         write(&mut current)?;
     }
     labels::remove(old, &id)?;
@@ -268,6 +281,7 @@ fn commit(transaction: &Value) -> Result<()> {
     anchor(&mut record);
     record["name"] = json!(new);
     record["renamed_at"] = json!(now());
+    moved_terminal(transaction, &mut record);
     if transaction["legacy"] == true {
         record["legacy_shadow"] = json!({"name":old,"run_id":record["run_id"]});
     }
@@ -317,8 +331,14 @@ pub(super) fn recover_locked() -> Result<()> {
         let new = string(&transaction, "new");
         validate(old, new)?;
         if let Some(id) = transaction["session_id"].as_str() {
+            // The terminal's name before the move: its own (P3b), or for a
+            // transaction an older hgs wrote, the old label.
+            let from = match string(&transaction, "terminal") {
+                "" => old,
+                terminal => terminal,
+            };
             if let Some(current) = current_session_name(id)? {
-                if current == old {
+                if current == from {
                     // tmux rename never happened. All durable bindings still
                     // use the old name, so aborting is lossless.
                     remove(&path)?;

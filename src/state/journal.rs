@@ -925,12 +925,14 @@ pub(super) fn inspection(name: &str, after: i64, archive_id: Option<&str>, inclu
     } else {
         read(name)?
     };
-    let (snapshot, names) = live_sessions()?;
+    let (snapshot, mut names) = live_sessions()?;
+    // The session's own terminal (P3b), never another under its label.
     let panes = if archive_id.is_some() {
         None
     } else {
-        snapshot.get(name)
+        panes_of(&snapshot, &record)
     };
+    workspace::relabel(&mut names, terminal_name(&record), name);
     if panes.is_some() && !matches(&record, panes) {
         drop(_guard);
         return Ok(untracked(workspace::snapshot_cwds(&names)));

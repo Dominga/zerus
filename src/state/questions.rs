@@ -460,7 +460,7 @@ fn observe_dispatch(name: &str) -> Result<i32> {
     // The answer path's own identity and availability rule, read only.
     let current = string(&record, "run_id") == request.expected_run_id
         && string(&record, "conversation_id") == request.expected_conversation_id
-        && matches(&record, live()?.get(name))
+        && matches(&record, panes_of(&live()?, &record))
         && process_alive(&record)
         && !pause_active(&record)
         && string(&record, "error").is_empty()
@@ -680,7 +680,7 @@ fn matching_record(name: &str, request: &AnswerRequest) -> Result<Value> {
     {
         return Err("session identity changed; refresh before answering".into());
     }
-    if !matches(&record, live()?.get(name))
+    if !matches(&record, panes_of(&live()?, &record))
         || !process_alive(&record)
         || pause_active(&record)
         || !string(&record, "error").is_empty()

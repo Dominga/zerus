@@ -13,6 +13,14 @@ pub(super) fn pane_cwds() -> BTreeMap<String, String> {
 /// ID (`$N`) in `names`. A rename keeps the ID, so a session renamed since that
 /// snapshot keeps its folder under the name the snapshot listed, and one that
 /// started since has none (zerus-18u1).
+/// Lists the terminal `terminal` under its session's label in `names`, so its
+/// pane folder goes to the row or inspection of that label (P3b).
+pub(super) fn relabel(names: &mut BTreeMap<String, String>, terminal: &str, label: &str) {
+    for name in names.values_mut().filter(|name| name.as_str() == terminal) {
+        *name = label.to_owned();
+    }
+}
+
 pub(super) fn snapshot_cwds(names: &BTreeMap<String, String>) -> BTreeMap<String, String> {
     cwds(Some(names))
 }

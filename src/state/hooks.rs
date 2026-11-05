@@ -1277,7 +1277,7 @@ fn track(name: String, token: String, mut event: Value, output: &mut StartOutput
     let Some(mut record) = record else {
         return Ok(0);
     };
-    if !matches(&record, panes.get(string(&record, "name"))) {
+    if !matches(&record, panes_of(&panes, &record)) {
         return Ok(0);
     }
     if let Some(scoped) = external_agents::route(&mut record, &event) {

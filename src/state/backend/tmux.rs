@@ -651,6 +651,16 @@ impl TerminalBackend for Tmux {
         let line = environment.trim_end_matches('\n');
         line.strip_prefix("HGS_CLIENT=").unwrap_or(line).to_owned()
     }
+    fn session_variable(&self, name: &str, key: &str) -> Option<String> {
+        let line = platform::capture(
+            "tmux",
+            &["show-environment", "-t", &format!("={name}"), key],
+        )?;
+        line.trim_end_matches('\n')
+            .strip_prefix(&format!("{key}="))
+            .filter(|value| !value.is_empty())
+            .map(str::to_owned)
+    }
     fn notify(&self, client: &str, text: &str) {
         platform::silent(
             "tmux",

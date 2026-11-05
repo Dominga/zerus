@@ -609,6 +609,27 @@ pub(super) fn live_sessions() -> Result<(Snapshot, BTreeMap<String, String>)> {
     Ok((result, names))
 }
 
+/// The terminal session `record`'s agent runs in (zerus-ucck P3b): its
+/// `terminal_name`, or for a record an older build wrote, its label, which
+/// was then its terminal's name too. Every step from a record to its
+/// terminal goes through this, never through the label.
+pub(crate) fn terminal_name(record: &Value) -> &str {
+    match string(record, "terminal_name") {
+        "" => string(record, "name"),
+        terminal => terminal,
+    }
+}
+
+/// The live panes of `record`'s own terminal, matched or not.
+pub(super) fn panes_of<'a>(snapshot: &'a Snapshot, record: &Value) -> Option<&'a Vec<Pane>> {
+    snapshot.get(terminal_name(record))
+}
+
+/// Whether `record`'s own terminal is live, whatever runs in it.
+pub(super) fn terminal_live(snapshot: &Snapshot, record: &Value) -> bool {
+    snapshot.contains_key(terminal_name(record))
+}
+
 pub(super) fn matches(record: &Value, panes: Option<&Vec<Pane>>) -> bool {
     panes
         .map(|panes| {

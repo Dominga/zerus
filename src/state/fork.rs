@@ -204,8 +204,8 @@ pub(super) fn start_scoped(
         return Err("source session changed; refresh before forking".into());
     }
     let snapshot = live()?;
-    let live_pane = archive_id.is_none() && snapshot.contains_key(name);
-    if live_pane && (!matches(&record, snapshot.get(name)) || !process_alive(&record)) {
+    let live_pane = archive_id.is_none() && terminal_live(&snapshot, &record);
+    if live_pane && (!matches(&record, panes_of(&snapshot, &record)) || !process_alive(&record)) {
         return Err("source process no longer matches its tracked session".into());
     }
     if let Some(reason) = unavailable(&record, live_pane) {
@@ -250,6 +250,8 @@ pub(super) fn start_scoped(
     let lineage = journal::fork_lineage(&record);
     let mut environment = BTreeMap::from([
         ("HGS_SESSION", target.clone()),
+        // A fork's terminal is its own new label (zerus-ucck P3b).
+        ("HGS_TERMINAL_NAME", target.clone()),
         ("HGS_AGENT", agent.into()),
         (
             "HGS_STATE_DIR",

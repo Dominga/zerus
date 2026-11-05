@@ -433,6 +433,11 @@ pub(crate) trait TerminalBackend: Sync {
     fn viewer(&self, _name: &str) -> String {
         String::new()
     }
+    /// A variable of the named terminal session's own environment, as its
+    /// launch set it; None when it is unset or cannot be read.
+    fn session_variable(&self, _name: &str, _key: &str) -> Option<String> {
+        None
+    }
     /// Show a short message on a client terminal.
     fn notify(&self, _client: &str, _text: &str) {}
     /// Hand a key to the pane whatever happened before (the paste binding).

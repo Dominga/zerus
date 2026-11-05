@@ -697,7 +697,7 @@ pub(super) fn observe() -> Result<Vec<Value>> {
     for record in records()? {
         let mut s = journal::summary(
             &record,
-            matches(&record, panes.get(string(&record, "name"))),
+            matches(&record, panes_of(&panes, &record)),
         );
         // The record's own key goes with its observation (#1437 review).
         for key in ["name", "agent", "run_id", "conversation_id", "session_id", "layout"] {

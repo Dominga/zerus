@@ -214,7 +214,7 @@ pub(crate) fn account_context(name: &str) -> Result<Value> {
     let _guard = lock(None)?;
     let record = read(name)?;
     let snapshot = live()?;
-    if snapshot.contains_key(name) && !matches(&record, snapshot.get(name)) {
+    if terminal_live(&snapshot, &record) && !matches(&record, panes_of(&snapshot, &record)) {
         return Err("Session account binding is no longer current.".into());
     }
     Ok(account_binding(&record))
@@ -397,7 +397,7 @@ pub fn merge_listing_archives(mut box_value: Value, ids: &BTreeMap<String, Strin
     // session would list twice (zerus-gd02). Archive reconciliation already
     // read both under this lock; the listing reuses those reads and releases
     // the lock before it summarizes the sessions.
-    let ((snapshot, names), (archived, bindings)) = if root().exists() {
+    let ((snapshot, mut names), (archived, bindings)) = if root().exists() {
         let _guard = lock(None)?;
         let (snapshot, names) = live_sessions()?;
         let saved = if include_archives { archive::reconcile_locked(&snapshot)? } else { (Vec::new(), archive::reconcile_active_locked(&snapshot)?) };
@@ -457,8 +457,12 @@ pub fn merge_listing_archives(mut box_value: Value, ids: &BTreeMap<String, Strin
             continue;
         }
         let name = string(&record, "name");
-        if let Some(index) = by_name.get(name) {
-            if matches(&record, snapshot.get(name)) {
+        // Live rows are the terminals' (P3b): a record finds its row by its
+        // own terminal, and that row then lists under the record's label.
+        if let Some(index) = by_name.get(terminal_name(&record)) {
+            if matches(&record, panes_of(&snapshot, &record)) {
+                label_row(&mut sessions[*index], &record);
+                workspace::relabel(&mut names, terminal_name(&record), name);
                 live_row(&mut sessions[*index], record, &shared, &mut process_work)?;
             }
             continue;
@@ -466,9 +470,10 @@ pub fn merge_listing_archives(mut box_value: Value, ids: &BTreeMap<String, Strin
         if string(&record, "conversation_id").is_empty() {
             continue;
         }
-        // A record whose name was reused by a different live pane is not a
-        // stopped session. Never offer its old identity as that pane's identity.
-        if snapshot.contains_key(name) {
+        // A record whose terminal name was reused by a different live pane is
+        // not a stopped session. Never offer its old identity as that pane's
+        // identity.
+        if terminal_live(&snapshot, &record) {
             continue;
         }
         let parts: Vec<&str> = name.splitn(3, '/').collect();
@@ -520,6 +525,20 @@ struct Shared<'a> {
 /// The row of a live session whose pane runs its saved binding `record`.
 /// `hgs watch` re-derives single rows through this same step
 /// (`watch_source::rows`).
+/// A live row of a terminal named otherwise than its session (P3b) lists
+/// under the session's label, as every other row does.
+fn label_row(session: &mut Value, record: &Value) {
+    let name = string(record, "name");
+    if string(session, "name") == name {
+        return;
+    }
+    let mut parts = name.splitn(3, '/');
+    session["cmd"] = json!(parts.next().unwrap_or(""));
+    session["project"] = json!(parts.next().filter(|s| !s.is_empty()));
+    session["tag"] = json!(parts.next().filter(|s| !s.is_empty()));
+    session["name"] = json!(name);
+}
+
 fn live_row(session: &mut Value, record: Value, shared: &Shared, process_work: &mut processes::WorkSample) -> Result<()> {
     // An approval answered in Terminal sends no hook.
     let record = claude_approval::reconcile(record);
@@ -599,14 +618,14 @@ pub fn find_requested_session(agent: &str, requested: &str) -> Result<Option<Str
             continue;
         }
         let name = string(&record, "name");
-        if snapshot.contains_key(name) && !matches(&record, snapshot.get(name)) {
+        if terminal_live(&snapshot, &record) && !matches(&record, panes_of(&snapshot, &record)) {
             continue;
         }
         let confirmed = string(&record, "conversation_id") == requested;
         let pending = string(&record, "conversation_id").is_empty()
             && string(&record, "requested_id") == requested
             && string(&record, "expected_id") == requested
-            && if snapshot.contains_key(name) {
+            && if terminal_live(&snapshot, &record) {
                 string(&record, "error").is_empty()
             } else {
                 attempts::retryable(&record, Some(requested))
@@ -633,6 +652,17 @@ pub fn startup_failure(name: &str) -> Result<Option<String>> {
 
 /// True means an exact confirmed binding; false is a matching pending request.
 /// A live name must still belong to the same pane/run, not merely an old record.
+/// The terminal session of the session `name` names (zerus-ucck P3b): its
+/// record's terminal, read through the command's selection. With no record,
+/// `name` itself names a terminal, as an untracked shell's does. A record
+/// that cannot be read is an error, never the label's terminal.
+pub(crate) fn terminal_of(name: &str) -> Result<String> {
+    if local_sessions().is_err() || !record_path(name).exists() {
+        return Ok(name.to_owned());
+    }
+    read(name).map(|record| terminal_name(&record).to_owned())
+}
+
 pub fn check_requested_session(name: &str, agent: &str, requested: &str) -> Result<bool> {
     local_sessions()?;
     let _guard = lock(None)?;
@@ -647,10 +677,10 @@ pub fn check_requested_session(name: &str, agent: &str, requested: &str) -> Resu
         };
     }
     let record = read(name)?;
-    let is_live = snapshot.contains_key(name);
+    let is_live = terminal_live(&snapshot, &record);
     if string(&record, "agent") != agent
         || !attempts::agent_home_matches(&record, agent)?
-        || (is_live && !matches(&record, snapshot.get(name)))
+        || (is_live && !matches(&record, panes_of(&snapshot, &record)))
     {
         return Err(format!("{name}: existing session belongs to a different or untracked context; choose another name"));
     }
@@ -790,7 +820,7 @@ pub(crate) fn resolve_label(name: &str) -> std::result::Result<(), (String, Opti
         _ => {
             let snapshot = live().unwrap_or_default();
             let state = |record: &Value| {
-                if matches(record, snapshot.get(string(record, "name"))) { "live" } else { "saved" }
+                if matches(record, panes_of(&snapshot, record)) { "live" } else { "saved" }
             };
             let mut listed: Vec<Value> = Vec::new();
             if candidates.first {

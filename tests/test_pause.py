@@ -1300,6 +1300,57 @@ class SessionIdentity(Harness):
         self.assertEqual(label(name).read_bytes(), first_bytes)
 
 
+    # zerus-ucck P3b: a terminal that hgs never started may hold a saved
+    # session's label. Resume then mints the session its own terminal name,
+    # label~<id8>, and every command acts on that terminal, never the other.
+    def test_a_resume_beside_an_untracked_terminal_takes_its_own_name(self):
+        name = self.start(tag="held")
+        session = self.binding(name)["session_id"]
+        self.send_event(name, "Stop", last_assistant_message="done")
+        self.hgs("pause", name)
+        own = f"{name}~{session[:8]}"
+        # A terminal some hgs launch started, such as this session's own
+        # resume still starting, keeps a resume away: never a second agent.
+        self.t("new-session", "-d", "-s", name, "-e", f"HGS_SESSION={name}", "sleep 600")
+        run = self.binding(name)["run_id"]
+        self.hgs("resume", name, "-d")
+        self.assertEqual(self.binding(name)["run_id"], run)
+        self.assertNotEqual(subprocess.run([str(self.bin / "tmux"), "has-session", "-t", "=" + own],
+                                           env=self.env, capture_output=True).returncode, 0)
+        self.t("kill-session", "-t", "=" + name)
+        self.t("new-session", "-d", "-s", name, "sleep 600")
+        self.resume(name)
+        record = self.binding(name)
+        self.assertEqual((record["session_id"], record["terminal_name"]), (session, own))
+        self.t("has-session", "-t", "=" + own)
+        self.t("has-session", "-t", "=" + name)
+        rows = json.loads(self.hgs("ls", "--local", "--json"))["sessions"]
+        mine = [row for row in rows if row.get("session_id") == session]
+        self.assertEqual(len(mine), 1, rows)
+        self.assertEqual((mine[0]["name"], mine[0]["tag"], mine[0]["run_id"]), (name, "held", record["run_id"]))
+        self.assertEqual(json.loads(self.hgs("inspect", name))["run_id"], record["run_id"])
+        self.assertIn("=" + own, self.hgs("kill", name, "--dry-run"))
+        # Pause stops the session's own terminal; the other one stays, and
+        # `--all` pauses sessions, not every terminal.
+        self.send_event(name, "Stop", last_assistant_message="done")
+        self.hgs("pause", "--all")
+        self.assertTrue(self.binding(name)["paused"])
+        self.t("has-session", "-t", "=" + name)
+        # A stale terminal name whose terminal is now another's: not live.
+        self.t("new-session", "-d", "-s", own, "sleep 600")
+        rows = json.loads(self.hgs("ls", "--local", "--json"))["sessions"]
+        self.assertFalse([row for row in rows if row.get("session_id") == session and row.get("run_id")
+                          and row.get("state") not in ("paused", "stopped")], rows)
+        # Both names taken: the whole session ID.
+        self.resume(name)
+        self.assertEqual(self.binding(name)["terminal_name"], f"{name}~{session}")
+        # Kill ends the session's own terminal only.
+        self.hgs("kill", name)
+        self.t("has-session", "-t", "=" + name)
+        self.t("has-session", "-t", "=" + own)
+        self.assertEqual(self.binding(name), {})
+
+
     # zerus-ucck P1b: --session-id selects the session a command names first,
     # and a hook prefers the record that carries its HGS_SESSION_ID without
     # depending on it: an older hgs can change a session's ID once.

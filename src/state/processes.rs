@@ -549,7 +549,7 @@ pub(super) fn dispatch(args: &[String]) -> Result<i32> {
         println!("{}", control::stop(&record, id)?);
         return Ok(0);
     }
-    let live = archive.is_none() && matches(&record, live()?.get(name)) && process_alive(&record);
+    let live = archive.is_none() && matches(&record, panes_of(&live()?, &record)) && process_alive(&record);
     let (jobs, notes) = collect(&record, live);
     let value = if let Some(id) = output {
         let job = jobs

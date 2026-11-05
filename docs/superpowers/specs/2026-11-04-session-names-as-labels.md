@@ -170,6 +170,14 @@ The owner's answers to questions 1 and 3 and the coordinator's decision on quest
 - A record without `terminal_name`, written by an older build, uses its label, which is then its terminal name.
 - A rename moves the terminal name to the new label only when that name is free.
 - The Windows host registry keys sessions by terminal name and still refuses a duplicate terminal name. It never sees a label.
+- **As built in P3b** (coordinator, 2026-11-05: D1–D7 with conditions):
+  - **Minting.** A launch mints its terminal: the label, else `label~<id8>`, else `label~<session ID>`, else it refuses (the 8-character suffix collision). It never attaches to or reuses an occupied name, and a name taken before the launch makes the launch fail.
+  - **When a suffix appears.** While labels are unique, only a resume or Start fresh of a saved session whose label an untracked tmux session holds gets a suffix. A terminal counts as untracked when its environment has no `HGS_SESSION`; a terminal some hgs launch started, the session's own resume still starting included, keeps a resume away as already live. A new launch, fork, rename and restore keep refusing a label that any tmux session holds.
+  - **The supervisor.** The launch passes `HGS_TERMINAL_NAME`. The supervisor records `terminal_name` from its pane's session name and keeps `HGS_SESSION` as the label when the two agree. Otherwise it keeps the earlier adoption of the pane's name as the label, but never adopts a terminal that another record claims. It selects a session in the ID layout under the label.
+  - **Routing.** `terminal_name` only routes. Every native action still verifies the pane, run marker and process it verified before; a mismatch refuses and never falls back to the label's terminal. A stale `terminal_name` whose terminal is gone, or now another's, shows the session as not live.
+  - **Rename.** A rename moves the terminal by its `$N` under the writer lock and records the new name. Its transaction keeps the terminal's name before the move for recovery; a failed move changes nothing.
+  - **Listings.** Live rows come from the terminals and are listed under the record's label; their pane folders follow.
+  - **Archives.** An archive and a restore drop `terminal_name`.
 
 ### Selection among sessions that share a label
 
@@ -234,7 +242,7 @@ The rollback floor for labels that repeat is the first build that contains P3a, 
 - the resolver and the in-place handling of the ID layout (P3a);
 - `terminal_name` routing for every native target, including rename's `Target::Name`, tmux `=NAME` targets and the Windows host registry (P3b);
 - exact selection by expected IDs (P3c);
-- releasing an owned `zerus:` worktree lock on archive and forget, so that no lock lingers after a rollback to the floor.
+- releasing an owned `zerus:` worktree lock on archive and forget, so that no lock lingers after a rollback to the floor (P3c; nothing creates such a lock before P3e, coordinator 2026-11-05).
 
 They stay separate PRs. A computer rolled back from P3e to that floor or later keeps every session that shares a label working, and never writes one to `sha256(label)`, where it would overwrite that label's first holder. Any later native dispatcher, helper or Service actor must also sit at that floor. Only a rollback below the floor after P3e is the "invisible but never deleted" case in the table.
 
@@ -258,7 +266,7 @@ They stay separate PRs. A computer rolled back from P3e to that floor or later k
    - The rollback-floor guard: no routes, shadows, mirrors or removals at label paths for ID-layout sessions; renames in place; the label index kept a superset, with crash-window tests.
    - The ambiguity report wired in, still unreachable.
 2. **P3b, terminal names.** `terminal_name` on new records, every tmux and host target through it, and the Windows host registry by terminal name. While labels are unique, every terminal name equals its label.
-3. **P3c, selection.** The expected IDs select among candidates, including `hgs read`'s `run_id`/`conversation_id` guards and every other command whose guards use other field names, and `--session-id` where the computer supports it. `hgs ls --json` merges by session ID, and `--all` iterates records.
+3. **P3c, selection.** The expected IDs select among candidates, including `hgs read`'s `run_id`/`conversation_id` guards and every other command whose guards use other field names, and `--session-id` where the computer supports it. `hgs ls --json` merges by session ID, and `--all` iterates records. P3c also releases an owned `zerus:` worktree lock on archive and forget (see the worktree lock, item 6).
 4. **P3d, the fleet gate and emission.** The `session-labels-v1` marker in the CLI, the gate with its cache, and the `session` field in references, `hgs self` and sender envelopes behind it. The gateway connector adds its own marker only with its work to resolve sessions and project membership by ID, which is a prerequisite of opening the gate and of P3f.
 5. **P3e, labels that repeat (CLI).** With the gate open:
    - launch `--new`, rename, restore and fork write the ID layout when the label is in use;
@@ -289,7 +297,7 @@ The lock keeps worktree maintenance below the floor from removing the checkout o
 4. **Shared checkouts.** A release considers all live or saved sessions that use the same checkout: forks share the checkout and its `worktree_owner`. Archiving or forgetting one must not remove another's protection. The reason is transferred under the writer and exclusion scope without a gap, or the unsupported shared case refuses. One session per worktree is never assumed, and protection stays when the evidence is unavailable.
 5. **A veto, not consent.** The lock never consents to a deletion. A confirmed removal keeps every existing check: ownership, source, files, other occupants, processes, drain and fingerprint. Releasing the lock never authorises deleting a branch or data, stopping an agent or archiving automatically.
 6. **Release at the floor, and the person's choices.**
-   - P3a–P3c honour `zerus:` locks and release them on archive and forget, so none lingers after a rollback to the floor. That release applies rules 3 and 4: it verifies ownership and the current lock, never forces, and keeps the protection while another live or saved session uses the checkout.
+   - The floor honours `zerus:` locks, and P3c releases them on archive and forget, so none lingers after a rollback to the floor. That release applies rules 3 and 4: it verifies ownership and the current lock, never forces, and keeps the protection while another live or saved session uses the checkout.
    - Plain `git worktree remove`, `move` and `prune` refuse a locked checkout, and a checkout deleted by hand keeps its branch pinned until it is unlocked; `docs/reference.md` says so.
    - Zerus does not lock a checkout again after the person unlocks it: the person chose.
 

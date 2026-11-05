@@ -141,6 +141,8 @@ pub(super) fn run(args: &[String]) -> Result<i32> {
     std::env::remove_var("HGS_ARCHIVE_ID");
     let resume_session_id = nonempty_env("HGS_RESUME_SESSION_ID").filter(|id| session_id::canonical(id));
     std::env::remove_var("HGS_RESUME_SESSION_ID");
+    let requested_terminal = nonempty_env("HGS_TERMINAL_NAME");
+    std::env::remove_var("HGS_TERMINAL_NAME");
     let fork_hint_revision = nonempty_env(agent_hint::FORK_REVISION_ENV);
     std::env::remove_var(agent_hint::FORK_REVISION_ENV);
     let _signals = crate::platform::ShutdownGuard::install().map_err(|e| e.to_string())?;
@@ -164,12 +166,14 @@ pub(super) fn run(args: &[String]) -> Result<i32> {
         if actual_name.is_empty() {
             return Err("launch pane has no session name".into());
         }
-        if name != actual_name {
-            name = actual_name;
-        }
+        // The terminal the launch asked for keeps the session's label (P3b).
+        // Any other name is adopted as the label, as before, but never one
+        // that another session claims as its terminal.
+        let terminal = actual_name;
+        name = launch_label(&name, &terminal, requested_terminal.as_deref(), records)?;
         // The session in the ID layout this run resumes is selected under its
-        // terminal's name, so every read of that name reaches its own record
-        // and verifies its ID (P3a).
+        // label, so every read of that label reaches its own record and
+        // verifies its ID (P3a).
         if let Some(id) = resume_session_id.as_deref() {
             session_id::select(&name, id);
         }
@@ -180,7 +184,7 @@ pub(super) fn run(args: &[String]) -> Result<i32> {
                 return Err(format!("{name}: saved binding changed before a fresh start"));
             }
             refuse_unsettled_clear(&previous)?;
-            attempts::prepare_replacement(&previous, &pane, &token, fresh, requested.as_deref())?;
+            attempts::prepare_replacement(&previous, &terminal, &pane, &token, fresh, requested.as_deref())?;
             replaced = Some(previous);
         } else if replaces.is_some() {
             return Err(format!("{name}: saved binding disappeared before a fresh start"));
@@ -307,7 +311,8 @@ pub(super) fn run(args: &[String]) -> Result<i32> {
         if !resumed && replaces.is_none() {
             journal_identity(&mut record, &name, retried);
         }
-        backend::current().set_run_marker(&name, &token)?;
+        record["terminal_name"] = json!(terminal);
+        backend::current().set_run_marker(&terminal, &token)?;
         if let Some(owner)=super::worktree_lifecycle::for_folder(std::path::Path::new(string(&record,"launch_dir"))) {
             record["worktree_owner"]=owner;
         }
@@ -461,7 +466,7 @@ pub(super) fn pausable(record: &Value, resumed_idle: impl FnOnce() -> bool) -> b
 
 fn pause_check(name: &str, snapshot: &Snapshot) -> Result<Value> {
     let record = read(name)?;
-    if !matches(&record, snapshot.get(name)) {
+    if !matches(&record, panes_of(snapshot, &record)) {
         return Err(format!(
             "{name}: live pane does not match its saved binding"
         ));
@@ -494,7 +499,7 @@ fn pause_one(record: &Value, scope: Option<&session_action::Scope>) -> Result<()
         if let Some(scope)=scope {scope.check(&current)?;}
         if current["run_id"] != record["run_id"]
             || !safe_to_pause(&current)
-            || !matches(&current, live()?.get(name))
+            || !matches(&current, panes_of(&live()?, record))
             || !process_alive(&current)
         {
             return Err("session changed while pausing".into());
@@ -514,7 +519,8 @@ fn pause_one(record: &Value, scope: Option<&session_action::Scope>) -> Result<()
     let deadline = Instant::now() + Duration::from_secs(10);
     let remaining = loop {
         let snapshot = live()?;
-        let panes = snapshot.get(name);
+        // The terminal the pause checked, never another under the label.
+        let panes = panes_of(&snapshot, record);
         if panes.is_none()
             || panes
                 .map(|panes| {
@@ -550,8 +556,7 @@ fn pause_one(record: &Value, scope: Option<&session_action::Scope>) -> Result<()
         // Revalidate the dead pane before deleting it: tmux may reuse IDs after
         // a server restart while a delayed pause command is still finishing.
         let snapshot = live()?;
-        if snapshot
-            .get(name)
+        if panes_of(&snapshot, record)
             .map(|panes| {
                 panes.len() == 1
                     && panes[0].0 == string(record, "pane")
@@ -571,8 +576,18 @@ pub(super) fn pause(names: &[String], dry: bool) -> Result<i32> { pause_scoped(n
 
 pub(super) fn pause_scoped(names: &[String], dry: bool, scope: Option<&session_action::Scope>) -> Result<i32> {
     let snapshot = live()?;
+    // `--all` is every session whose own terminal is live (P3b): a terminal
+    // with no record is not a session to pause.
     let names: Vec<String> = if names == ["--all"] {
-        snapshot.keys().cloned().collect()
+        // In label order, as the terminal names were.
+        let mut names: Vec<String> = records()?
+            .iter()
+            .filter(|record| terminal_live(&snapshot, record))
+            .map(|record| string(record, "name").to_owned())
+            .collect();
+        names.sort();
+        names.dedup();
+        names
     } else {
         names.to_vec()
     };
@@ -656,6 +671,65 @@ fn resume_spec(
     )
 }
 
+/// The terminal a launch of `record` takes (zerus-ucck P3b): its label when
+/// no terminal session has that name, else the label with `~` and the first
+/// 8 characters of its session ID, else with the whole ID. It only mints a
+/// free name: an occupied one is never attached to or reused, and when a
+/// terminal takes the name before the launch, the launch fails.
+fn pick_terminal(record: &Value, snapshot: &Snapshot) -> Result<String> {
+    let label = string(record, "name");
+    let id = string(record, "session_id");
+    let mut names = vec![label.to_owned()];
+    if session_id::canonical(id) {
+        names.push(format!("{label}~{}", &id[..8]));
+        names.push(format!("{label}~{id}"));
+    }
+    names
+        .into_iter()
+        .find(|name| !snapshot.contains_key(name))
+        .ok_or_else(|| format!("{label}: every terminal name this session may take is in use; close one and retry"))
+}
+
+/// The label a supervisor keeps (P3b, D4): `name`, from `HGS_SESSION`, when
+/// its pane's session is the terminal its launch asked for, or already the
+/// label. Any other terminal name is adopted as the label, as before, but
+/// never one that another session's record claims as its terminal. The
+/// records are read only then.
+fn launch_label(
+    name: &str,
+    terminal: &str,
+    requested: Option<&str>,
+    records: impl FnOnce() -> Result<Vec<Value>>,
+) -> Result<String> {
+    if requested == Some(terminal) || name == terminal {
+        return Ok(name.to_owned());
+    }
+    if records()?.iter().any(|record| {
+        string(record, "terminal_name") == terminal && string(record, "name") != terminal
+    }) {
+        return Err(format!(
+            "{terminal}: another session's terminal; this launch will not take it"
+        ));
+    }
+    Ok(terminal.to_owned())
+}
+
+/// Whether a terminal under `terminal` was started by some launch of hgs,
+/// such as this session's own resume still starting, rather than by hand:
+/// a launch always gives its terminal `HGS_SESSION`.
+fn launched_by_hgs(terminal: &str) -> bool {
+    backend::current().session_variable(terminal, "HGS_SESSION").is_some()
+}
+
+/// Whether `record` is already live: its own terminal runs it, or a launch
+/// of hgs holds that terminal (its own resume, still starting, included). A
+/// terminal under that name that hgs never started does not count (P3b): the
+/// session then resumes under another terminal name.
+fn already_live(record: &Value, snapshot: &Snapshot) -> bool {
+    matches(record, panes_of(snapshot, record))
+        || (terminal_live(snapshot, record) && launched_by_hgs(terminal_name(record)))
+}
+
 /// The saved recipe relaunched in its own tmux slot. `replaces` starts a new
 /// conversation in place of that exact stopped run instead of resuming it.
 fn session_spec(
@@ -672,11 +746,14 @@ fn session_spec(
             string(record, "launch_dir")
         ));
     }
+    let terminal = pick_terminal(record, &live()?)?;
     let executable = runner_executable()?;
     let hint_environment = crate::config::agent_hint_environment(string(record, "agent"));
     let launch = supervisor_command(record, &executable, argv, &hint_environment);
     let mut environment = BTreeMap::from([
         ("HGS_SESSION", name.to_owned()),
+        // The terminal this launch asks for; its supervisor keeps the label.
+        ("HGS_TERMINAL_NAME", terminal.clone()),
         ("HGS_AGENT", string(record, "agent").to_owned()),
         (
             "HGS_STATE_DIR",
@@ -709,7 +786,7 @@ fn session_spec(
         string(record, "agent_home").to_owned(),
     );
     Ok(backend::LaunchSpec {
-        name: name.into(),
+        name: terminal,
         cwd: string(record, "launch_dir").to_owned(),
         env: environment
             .into_iter()
@@ -764,6 +841,7 @@ fn resume_archive(name: &str, id: &str, dry: bool, scope: Option<&session_action
     let mut archived = archive::read_archive(name, id)?;
     if let Some(fields) = archived.as_object_mut() {
         fields.remove("layout");
+        fields.remove("terminal_name");
     }
     refuse_unsettled_clear(&archived)?;
     recipes::verify_history(&archived, true)?;
@@ -850,7 +928,7 @@ pub(super) fn resume_scoped(names: &[String], dry: bool, scope: Option<&session_
         records()?
             .iter()
             .filter(|record| {
-                !snapshot.contains_key(string(record, "name"))
+                !already_live(record, &snapshot)
                     && !string(record, "conversation_id").is_empty()
                     && !archive::equivalent(record, &archived)
             })
@@ -864,11 +942,11 @@ pub(super) fn resume_scoped(names: &[String], dry: bool, scope: Option<&session_
         if let Some(id) = &requested {
             verify_requested(&read(&name)?, &snapshot, id)?;
         }
-        if snapshot.contains_key(&name) {
+        let record = read(&name)?;
+        if already_live(&record, &snapshot) {
             if scope.is_some() {return Err("Session is already live; no resume was launched".into());}
             continue;
         }
-        let record = read(&name)?;
         if let Some(scope)=scope {scope.check(&record)?;}
         if archive::equivalent(&record, &archived) {
             return Err(format!(
@@ -891,9 +969,12 @@ pub(super) fn resume_scoped(names: &[String], dry: bool, scope: Option<&session_
         if let Some(id) = &requested {
             verify_requested(&current, &current_snapshot, id)?;
         }
-        if current_snapshot.contains_key(&name) {
+        if already_live(&current, &current_snapshot) {
             if scope.is_some() {return Err("Session became live before resume; no replacement was launched".into());}
             continue;
+        }
+        if current_snapshot.contains_key(&spec.name) {
+            return Err(format!("{name}: terminal {} was taken before the resume; retry", spec.name));
         }
         if current["run_id"] != original_run || current["conversation_id"] != original_conversation {
             return Err(format!("{name}: saved binding changed; retry resume"));
@@ -936,8 +1017,12 @@ pub(super) fn fresh(args: &[String], dry: bool) -> Result<i32> {
     let _guard = lock(None)?;
     let current = read(name)?;
     refuse_unsettled_clear(&current)?;
-    if live()?.contains_key(name) {
+    let snapshot = live()?;
+    if already_live(&current, &snapshot) {
         return Err(format!("{name}: the session is running; clear its context instead"));
+    }
+    if snapshot.contains_key(&spec.name) {
+        return Err(format!("{name}: terminal {} was taken before the fresh start; retry", spec.name));
     }
     if expected_run.is_some_and(|run| run != string(&current, "run_id"))
         || current["run_id"] != record["run_id"]
@@ -966,8 +1051,8 @@ fn verify_requested(record: &Value, snapshot: &Snapshot, requested: &str) -> Res
     if string(record, "conversation_id") != requested
         || name.split('/').next() != Some(agent)
         || !attempts::agent_home_matches(record, agent)?
-        || (snapshot.contains_key(name)
-            && (!matches(record, snapshot.get(name)) || !string(record, "error").is_empty()))
+        || (terminal_live(snapshot, record)
+            && (!matches(record, panes_of(snapshot, record)) || !string(record, "error").is_empty()))
     {
         return Err(format!(
             "{name}: saved or live binding no longer matches requested conversation {requested}"
@@ -978,6 +1063,42 @@ fn verify_requested(record: &Value, snapshot: &Snapshot, requested: &str) -> Res
 
 #[cfg(all(test, unix))]
 mod tests {
+    /// zerus-ucck P3b (D2): a launch mints the first free name of its label,
+    /// `label~<id8>` and `label~<id>`, and refuses when all are taken; it never
+    /// takes an occupied one.
+    #[test]
+    fn a_launch_mints_the_first_free_terminal_name() {
+        let id = "3f2a9c1d-0b4e-4d6a-9c1d-2e3f4a5b6c7d";
+        let record = json!({"name":"claude/p/one","session_id":id});
+        let held = |names: &[&str]| -> Snapshot {
+            names.iter().map(|name| (name.to_string(), Vec::new())).collect()
+        };
+        assert_eq!(pick_terminal(&record, &held(&[])).unwrap(), "claude/p/one");
+        assert_eq!(pick_terminal(&record, &held(&["claude/p/one"])).unwrap(), "claude/p/one~3f2a9c1d");
+        assert_eq!(
+            pick_terminal(&record, &held(&["claude/p/one", "claude/p/one~3f2a9c1d"])).unwrap(),
+            format!("claude/p/one~{id}")
+        );
+        let all = ["claude/p/one".to_owned(), "claude/p/one~3f2a9c1d".to_owned(), format!("claude/p/one~{id}")];
+        let all: Vec<&str> = all.iter().map(String::as_str).collect();
+        assert!(pick_terminal(&record, &held(&all)).is_err());
+        let older = json!({"name":"claude/p/one"});
+        assert!(pick_terminal(&older, &held(&["claude/p/one"])).is_err(), "no ID: no suffix");
+    }
+
+    /// zerus-ucck P3b (D4): the supervisor keeps its label when its pane's
+    /// session is the terminal its launch asked for; another name is adopted
+    /// as before, unless another session claims that terminal.
+    #[test]
+    fn a_supervisor_keeps_its_label_and_never_takes_a_claimed_terminal() {
+        let none = || -> Result<Vec<Value>> { panic!("no records are read when the names agree") };
+        assert_eq!(launch_label("claude/p/one", "claude/p/one~3f2a9c1d", Some("claude/p/one~3f2a9c1d"), none).unwrap(), "claude/p/one");
+        assert_eq!(launch_label("claude/p/one", "claude/p/one", None, none).unwrap(), "claude/p/one");
+        let other = json!({"name":"claude/p/two","terminal_name":"claude/p/two~3f2a9c1d"});
+        assert_eq!(launch_label("claude/p/one", "claude/p/one_x", None, || Ok(vec![other.clone()])).unwrap(), "claude/p/one_x");
+        assert!(launch_label("claude/p/one", "claude/p/two~3f2a9c1d", Some("claude/p/one"), || Ok(vec![other.clone()])).is_err());
+    }
+
     /// zerus-ucck P2b: a session a launch creates keeps its history under its
     /// durable ID and the label it was created with; a replacement keeps the
     /// journal it replaces, as before.

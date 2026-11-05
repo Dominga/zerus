@@ -762,6 +762,18 @@ while True: signal.pause()
         self.assertIn("input mode", self.send(success=False))
         self.assertEqual(self.received(), b"")
 
+    # zerus-ucck P3b: input goes to the session's own terminal, named apart
+    # from its label as a resume beside an untracked terminal names it; the
+    # input claim checks that terminal's name, never the label's.
+    def test_send_reaches_a_terminal_named_apart_from_its_label(self):
+        own = self.name + "~3f2a9c1d"
+        self.tmux("rename-session", "-t", "=" + self.name, own)
+        self.record["terminal_name"] = own
+        self.write_record()
+        self.screen("\x1b[2J\x1b[H› \x1b[?2004h", "2:0")
+        self.send()
+        self.wait_for(lambda: self.received().endswith(b"\r"))
+
     def test_empty_claude_prompt_is_supported(self):
         self.record["agent"] = "claude"
         self.write_record()

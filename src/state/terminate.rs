@@ -20,7 +20,8 @@ pub(super) fn dispatch_scoped(args: &[String], dry: bool, scope: Option<&session
             return Err("session changed before termination; refresh and try again".into());
         }
         let snapshot = live()?;
-        if let Some(panes) = snapshot.get(name) {
+        // The session's own terminal (P3b), never another under its label.
+        if let Some(panes) = panes_of(&snapshot, &record) {
             if panes.len() != 1
                 || panes[0].0 != string(&record, "pane")
                 || panes[0].2 != string(&record, "run_id")
@@ -82,7 +83,7 @@ pub(super) fn dispatch_scoped(args: &[String], dry: bool, scope: Option<&session
     // the exit, which takes the state lock, and ended (spec D11): wait for that
     // without the lock. tmux dropped it with kill-session already.
     #[cfg(windows)]
-    while listed(&live()?, name, string(&original, "run_id")) {
+    while listed(&live()?, terminal_name(&original), string(&original, "run_id")) {
         if Instant::now() >= deadline {
             return Err(
                 "terminal closed, but its supervisor has not ended; its saved binding was kept"
@@ -104,7 +105,12 @@ pub(super) fn dispatch_scoped(args: &[String], dry: bool, scope: Option<&session
             // first removal. A newly launched/awaiting restore owns its source.
             let current = if record_path(name).exists() {Some(read(name)?)} else {None};
             forget_archive_preflight(&archived,current.as_ref(),scope)?;
-            if live()?.contains_key(name) || current.as_ref().is_some_and(process_alive) {
+            let snapshot = live()?;
+            let running = match current.as_ref() {
+                Some(record) => terminal_live(&snapshot, record) || process_alive(record),
+                None => snapshot.contains_key(name),
+            };
+            if running {
                 return Err("Session is still running; no archive or binding was forgotten".into());
             }
             if let Some(scope)=scope {scope.changing();}
@@ -127,8 +133,8 @@ pub(super) fn dispatch_scoped(args: &[String], dry: bool, scope: Option<&session
             "session binding changed while terminating; the replacement was left intact".into(),
         );
     }
-    // No live instance with the same name may be removed from the catalog.
-    if live()?.contains_key(name) || process_alive(&record) {
+    // No live instance of the session may be removed from the catalog.
+    if terminal_live(&live()?, &record) || process_alive(&record) {
         return Err("session is still running; its saved binding was kept".into());
     }
     if let Some(scope)=scope {scope.changing();}
@@ -146,11 +152,12 @@ pub(super) fn dispatch_scoped(args: &[String], dry: bool, scope: Option<&session
     Ok(0)
 }
 
-/// Whether `snapshot` still lists `name` with a pane of run `run_id`.
+/// Whether `snapshot` still lists the terminal `terminal` with a pane of run
+/// `run_id`.
 #[cfg_attr(not(windows), allow(dead_code))]
-fn listed(snapshot: &Snapshot, name: &str, run_id: &str) -> bool {
+fn listed(snapshot: &Snapshot, terminal: &str, run_id: &str) -> bool {
     snapshot
-        .get(name)
+        .get(terminal)
         .is_some_and(|panes| panes.iter().any(|(_, _, run)| run == run_id))
 }
 

@@ -4018,11 +4018,11 @@ SSH launches; an `opencode` found earlier on PATH keeps precedence.
 ## Official DeepSeek Harness
 
 The native adapter accepts exactly the reviewed `@deepseek-ai/dsh` releases
-`0.2.1-rc.2` and `0.2.1-rc.5`. Install a reviewed release on the agent host,
+`0.2.1-rc.2`, `0.2.1-rc.5` and `0.2.2-rc.1`. Install a reviewed release on the agent host,
 sign in and choose **DeepSeek Harness** in New session:
 
 ```sh
-npm install -g @deepseek-ai/dsh@0.2.1-rc.5
+npm install -g @deepseek-ai/dsh@0.2.2-rc.1
 hgs account login native-dsh
 hgs dsh /path/to/project --new -n work
 ```
@@ -4044,6 +4044,26 @@ The adapter's private socket, protocol 1, per-host random generation and native
 methods are unchanged. Its ping version remains `0.2.1-rc.2`: that identifies
 the resident adapter, independently of the installed harness. Existing rc.2
 hosts remain accepted without a restart or extension reload.
+
+Reviewed adoption of `0.2.2-rc.1` (2026-11-05, `zerus-o8ftr`): model selection
+moved from the controller's selection map into each native Agent's model object.
+The adapter uses its pure `current()` read and session-local durable `select()`
+write. It still serializes settings through the same native image-admission
+chain; it never calls the public model command that also saves a profile default.
+The new model interface is checked before the native Agent setup is published,
+and a partial or missing interface refuses. The rc.2/rc.5 selection path, resident
+adapter identity and existing-host reuse remain unchanged. An owning host is
+never hot-reloaded to adopt a new bridge. CI continues to resolve and verify one
+official latest release, with no historical fallback.
+
+Ordinary forks in `0.2.2-rc.1` no longer name their parent in the native header. Zerus
+pins a completed source event boundary before forking and verifies the exact
+inherited prefix and native seed marker before accepting the new identity.
+The original parent-header check remains for rc.2/rc.5. Schedule tasks are now
+Host-wide: Zerus still lists and edits only a task whose explicit destination is
+the selected session, checks the original record and uses the native queued
+`expectedUpdatedAt` comparison. Creator/editor membership does not grant access
+through another session. Delivery-history pages omit other destinations.
 
 rc.5 adds a UI entry-customization plugin and changes conversation, settings,
 analytics and model-list UI. It shares model-listing/cache code between account
@@ -4127,7 +4147,7 @@ older adapter or a host that does not answer within 7 seconds reports that
 history as unavailable.
 
 The official Schedule plugin (**Automation tasks** in Native UI Plugins) is
-listed and managed per exact session. Both reviewed web bundles include it,
+listed and managed per exact session. The reviewed web bundles include it,
 and the profile Zerus creates layers that bundle, so it is on unless the
 profile's own patch disables it:
 

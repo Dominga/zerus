@@ -86,10 +86,27 @@ describe("an in-page pointer drag (macOS and Windows webviews)", () => {
     h.fire("pointermove", { pointerId: 2, clientX: 90, clientY: 90 });
     h.fire("pointerup", { pointerId: 2, clientX: 90, clientY: 90 });
     expect(r.calls).toEqual([]);
+    // Another pointer's release while dragging leaves this drag running.
+    h.fire("pointermove", { clientX: 10, clientY: 30 });
+    h.fire("pointerup", { pointerId: 2, clientX: 10, clientY: 30 });
+    h.fire("pointerup", { clientX: 10, clientY: 31 });
+    expect(r.calls).toEqual(["start", "move 10,30", "drop 10,31"]);
     const secondary = host(), s = recorder();
     pointerDrag(down({ button: 2 }), s.drag, secondary.win);
     secondary.fire("pointermove", { clientX: 90, clientY: 90 });
     expect(s.calls).toEqual([]);
+  });
+  it("a lost release cancels, and the pressed element holds the pointer while dragging", () => {
+    const h = host(), r = recorder(), held: string[] = [];
+    const target = { setPointerCapture: (id: number) => held.push(`set ${id}`), releasePointerCapture: (id: number) => held.push(`release ${id}`) };
+    pointerDrag(down({ target }), r.drag, h.win);
+    h.fire("pointermove", { clientX: 10, clientY: 30, buttons: 1 });
+    expect(held).toEqual(["set 1"]);
+    // Released outside the window: the next move has no button pressed.
+    h.fire("pointermove", { clientX: 12, clientY: 40, buttons: 0 });
+    h.fire("pointerup", { clientX: 12, clientY: 40 });
+    expect(r.calls).toEqual(["start", "move 10,30", "cancel"]);
+    expect(held).toEqual(["set 1", "release 1"]);
   });
   it("scrolls its scroller while the pointer is near an edge, updating the target", () => {
     const h = host(), r = recorder();

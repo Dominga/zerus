@@ -24,6 +24,7 @@ const ProjectFolderDialog = lazy(() => import("./ProjectFolderDialog"));
 import { catalogName, createCatalogEdits } from "./project-catalog";
 import { tr } from "../../i18n";
 import { legacyProjectStatus } from "../../store/legacyProjects";
+import { POINTER_DRAG, pointerDrag } from "../lib/pointerDrag";
 
 // Projects (ProjectsDialog.cpp), ported from design/webui/src/screens/Projects.tsx:
 // the shared project catalog the Sessions list groups by (the organization
@@ -130,6 +131,26 @@ export function ProjectsScreen() {
     if (!dragging()) return;
     event.preventDefault(); event.stopPropagation();
     void edits.drop(dragging()!, before); endDrag();
+  };
+  /** The same reorder by a pointer drag where the webview gets no HTML5 drag events (lib/pointerDrag). */
+  const pointerReorder = (e: PointerEvent, id: string) => {
+    const list = (e.currentTarget as Element).closest<HTMLElement>(".proj-list");
+    if (!POINTER_DRAG || !list || !edits.canEdit(id)) return;
+    // Before an editable project, or the end of the list; nothing outside it.
+    const target = (x: number, y: number): { before?: string } | undefined => {
+      const el = document.elementFromPoint(x, y);
+      if (!el || !list.contains(el)) return;
+      const before = el.closest<HTMLElement>("li[data-id]")?.dataset.id;
+      return before && edits.canEdit(before) ? { before } : {};
+    };
+    const stop = () => { endDrag(); document.body.classList.remove("pointer-dragging"); };
+    pointerDrag(e, {
+      start: () => { setDragging(id); document.body.classList.add("pointer-dragging"); return true; },
+      move: (x, y) => setDropBefore(target(x, y)?.before),
+      drop: (x, y) => { const at = target(x, y); stop(); if (at) void edits.drop(id, at.before); },
+      cancel: stop,
+      scroller: () => list,
+    });
   };
   // ProjectsDialog.cpp:520-522: the Folders button's New session… follows the selected folder.
   const launchFolder = () => selected() ?? NO_FOLDER;
@@ -243,11 +264,11 @@ export function ProjectsScreen() {
               <For each={projects().map((p) => p.id)}>{(id) => {
                 const p = createMemo<Project>((last) => projects().find((p) => p.id === id) ?? last, untrack(() => projects().find((p) => p.id === id)!));
                 return (
-                <li role="option" aria-selected={p().id === project()?.id} classList={{ "drop-before": dropBefore() === p().id }}
+                <li role="option" data-id={p().id} aria-selected={p().id === project()?.id} classList={{ "drop-before": dropBefore() === p().id }}
                   onDragOver={(event) => { if (dragging() && edits.canEdit(p().id)) { event.preventDefault(); event.stopPropagation(); setDropBefore(p().id); } }} onDrop={(event) => drop(event, p().id)}>
                   <Show when={p().accessible} fallback={<div class="proj-item remote" title={p().name}><ProjectLabel project={p()} /></div>}>
                     <button class="proj-item" classList={{ on: p().id === project()?.id, dragging: dragging() === p().id }} data-id={p().id} tabindex={p().id === project()?.id ? 0 : -1}
-                      draggable={edits.canEdit(p().id)} onDragStart={(event) => { if (!edits.canEdit(p().id)) { event.preventDefault(); return; } setDragging(p().id); event.dataTransfer?.setData("application/x-zerus-project", p().id); if (event.dataTransfer) event.dataTransfer.effectAllowed = "move"; }} onDragEnd={endDrag}
+                      draggable={!POINTER_DRAG && edits.canEdit(p().id)} onPointerDown={(event) => pointerReorder(event, p().id)} onDragStart={(event) => { if (!edits.canEdit(p().id)) { event.preventDefault(); return; } setDragging(p().id); event.dataTransfer?.setData("application/x-zerus-project", p().id); if (event.dataTransfer) event.dataTransfer.effectAllowed = "move"; }} onDragEnd={endDrag}
                       title={`${p().is_default ? tr("%1, default project for sessions started outside Zerus", p().name) : p().name}\n${tr("Drag to reorder, or use Alt+Up / Alt+Down.")}`}
                       onClick={() => choose(p())} onContextMenu={(e) => listMenu(e, p().id)}>
                       <ProjectLabel project={p()} />

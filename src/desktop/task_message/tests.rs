@@ -82,8 +82,8 @@ fn exact_previous_store_upgrade_adds_only_the_independent_message_leaf() {
         crate::desktop::store::SCHEMA
     );
     // Its own two tables, the task message input leaf's two, then the
-    // deferred send leaf's two.
-    assert_eq!(tables(&store.db), before + 2 + 2 + 2);
+    // deferred send and deferred answer leaves' two each.
+    assert_eq!(tables(&store.db), before + 2 + 2 + 2 + 2);
     assert_eq!(ledger::undrained(&store.db).unwrap(), 0);
 }
 
@@ -100,8 +100,9 @@ fn the_input_upgrade_adds_only_its_two_tables_with_no_charge() {
     let before = tables(&store.db);
     drop(store);
     let store = Store::open(&location, &uuid::Uuid::new_v4().to_string()).unwrap();
-    // Its own two tables, then the deferred send leaf's two.
-    assert_eq!(tables(&store.db), before + 2 + 2);
+    // Its own two tables, then the deferred send and deferred answer
+    // leaves' two each.
+    assert_eq!(tables(&store.db), before + 2 + 2 + 2);
     assert_eq!(inputs::totals(&store.db).unwrap(), (0, 0));
 }
 
@@ -587,7 +588,7 @@ print("custody: inherited" if f"{seen.st_dev}:{seen.st_ino}" == want else "custo
                 b"",
                 &held,
                 &guard(),
-                Instant::now() + Duration::from_millis(300),
+                Instant::now() + Duration::from_millis(1500),
                 |_| Ok(())
             ),
             Ended::Unknown("task_message_timed_out")
@@ -838,7 +839,7 @@ os._exit(0)"#;
                 b"",
                 &held,
                 &guard,
-                Instant::now() + Duration::from_millis(500),
+                Instant::now() + Duration::from_millis(1500),
                 |_| Ok(())
             ),
             Ended::Unknown("task_message_output_retained")
@@ -1299,7 +1300,7 @@ mod actor {
                 input,
                 lock,
                 resources,
-                Instant::now() + Duration::from_millis(500),
+                Instant::now() + Duration::from_millis(1500),
                 |_| Ok(()),
             )
         });
@@ -2074,7 +2075,7 @@ mod actor {
                     input,
                     lock,
                     resources,
-                    Instant::now() + Duration::from_millis(500),
+                    Instant::now() + Duration::from_millis(1500),
                     |_| Ok(()),
                 )
             });
@@ -3888,5 +3889,87 @@ mod staging_tests {
         std::fs::write(dir.join("unrelated"), b"kept").unwrap();
         staging::remove_staged(&roots, &request, &prepared.staged).unwrap();
         assert!(dir.join("unrelated").exists() && dir.exists());
+    }
+}
+
+/// desktop-u's G1 on #1433: this kind's child runner checks the
+/// never-renewed deadline last before the spawn and before any input.
+#[cfg(any(target_os = "linux", target_os = "macos"))]
+mod spent_deadline {
+    use crate::desktop::original_child::{crossed, OFFERED, SPAWNED};
+    use std::path::Path;
+    use std::sync::Arc;
+    use std::time::{Duration, Instant};
+    use zerus_client_core::run::custody::InheritedLock;
+
+    pub(super) fn custody() -> Arc<InheritedLock> {
+        InheritedLock::try_lock(tempfile::tempfile().unwrap()).unwrap()
+    }
+    pub(super) fn resources() -> Arc<dyn Send + Sync> {
+        Arc::new(())
+    }
+    pub(super) fn cat() -> &'static Path {
+        Path::new("/bin/cat")
+    }
+    pub(super) fn clear() {
+        SPAWNED.with(|spawned| spawned.set(None));
+        OFFERED.with(|offered| offered.set(None));
+    }
+    pub(super) fn spawned() -> Option<u32> {
+        SPAWNED.with(|spawned| spawned.take())
+    }
+    pub(super) fn expired() -> Instant {
+        Instant::now() - Duration::from_millis(1)
+    }
+    pub(super) fn soon() -> Instant {
+        Instant::now() + Duration::from_secs(20)
+    }
+
+    #[test]
+    fn a_task_message_child_never_starts_once_its_deadline_is_spent() {
+        use super::super::child::{run, Ended};
+        clear();
+        let ended = run(
+            cat(),
+            &[],
+            b"task",
+            &custody(),
+            &resources(),
+            expired(),
+            |_| Ok(()),
+        );
+        assert_eq!(ended, Ended::NotStarted);
+        assert_eq!(spawned(), None);
+        let ended = crossed(|deadline, check| {
+            clear();
+            run(
+                cat(),
+                &[],
+                b"task",
+                &custody(),
+                &resources(),
+                deadline,
+                check,
+            )
+        });
+        assert_eq!(ended, Ended::NotStarted);
+        assert_eq!(spawned(), None, "no child once the last check spent it");
+        clear();
+        let ended = run(
+            cat(),
+            &[],
+            b"task",
+            &custody(),
+            &resources(),
+            soon(),
+            |_| Ok(()),
+        );
+        assert_eq!(
+            ended,
+            Ended::Exited {
+                code: 0,
+                stdout: b"task".to_vec()
+            }
+        );
     }
 }

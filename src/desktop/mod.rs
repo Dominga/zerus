@@ -30,6 +30,9 @@ mod operations;
 // One bounded original-child runner for the launch and task message leaves.
 #[cfg(any(target_os = "linux", target_os = "macos"))]
 mod original_child;
+// The CLI state store one deferred original holds and reads.
+#[cfg(any(target_os = "linux", target_os = "macos"))]
+mod original_store;
 mod owner;
 mod ownership;
 mod pending_reads;
@@ -56,6 +59,7 @@ mod store;
 #[cfg(windows)]
 mod swarm_windows;
 /// The deferred send leaf (zerus-5wmh.66.4.4, slice 3).
+pub(crate) mod deferred_answer;
 pub(crate) mod deferred_send;
 pub(crate) mod task_message;
 #[cfg(any(target_os = "linux", target_os = "macos"))]
@@ -1194,6 +1198,12 @@ fn serve(config: &Config, location: Location, background_mode: bool) -> Result<(
                             .is_some_and(|v| v["op"] == "deferred_send_result")
                         {
                             deferred_send::query(&store, hello.request.as_ref().unwrap())
+                        } else if hello
+                            .request
+                            .as_ref()
+                            .is_some_and(|v| v["op"] == "deferred_answer_result")
+                        {
+                            deferred_answer::query(&store, hello.request.as_ref().unwrap())
                         } else if hello
                             .request
                             .as_ref()

@@ -3498,7 +3498,10 @@ on. Times are in milliseconds.
 
 `task cutover --project P --task T --check` reads the task's writer universe
 for the fence that the attempt writer will need (zerus-cg5h.4 S2b.2 C3), within
-one 15-second budget counted once. It covers every node that may hold a task
+one 15-second budget counted once from the command's entry. This computer's
+identity, the project's name and lock, every call (from its spawn to its
+parsed answer) and the result all count against it, and nothing is reported
+open after it. The check needs `--project`. It covers every node that may hold a task
 of the swarm, not only this computer's peers:
 - this computer;
 - every catalog machine not redirected away (each machine that ever joined
@@ -3519,7 +3522,11 @@ The check reports:
 - `universe`: this computer's node, store and replica root, and every node with
   its route and what its hello showed;
 - `incarnation`: a digest of all that, which changes when any of it does (a
-  replaced store, a new route or node);
+  replaced store, a new route or node, or any enrolment or disconnection:
+  each computer keeps `swarm/membership.json`, an epoch and a generation that
+  rises, durably before the catalog publishes the change, whenever its peers
+  change, including a change an older build made, which the next read
+  records);
 - `closed`: the first node that keeps the fence closed, and why:
   - `unreachable`, `unverified` (another computer answered), or `unroutable`
     (a catalog machine that no verified route reaches);

@@ -19,7 +19,7 @@ use zerus_replica::{ids, TASK_SCHEMA};
 /// answers the per-task proof.
 pub const FENCE: u64 = 1;
 /// The most nodes one universe covers, and the longest route to one.
-const MAX_NODES: usize = 256;
+pub(crate) const MAX_NODES: usize = 256;
 const MAX_HOPS: usize = 16;
 
 /// `swarm replica-relay`: one call forwarded towards `to`.
@@ -275,6 +275,11 @@ impl Universe {
         if self.me.store.is_none() {
             return Some((Some(self.me.node.as_str()), "store"));
         }
+        // No membership incarnation this computer can read: nothing tells
+        // a later read whether its membership changed (desktop-u on #1452).
+        if self.me.membership.is_none() {
+            return Some((Some(self.me.node.as_str()), "membership"));
+        }
         // The nearest node first; one no route reaches comes last.
         self.nodes
             .values()
@@ -417,8 +422,13 @@ pub(crate) fn universe_with(config: &Config, net: &dyn Net, deadline: Instant) -
             break;
         }
     }
-    // Every known writer no verified route reached closes the fence.
+    // Every known writer no verified route reached closes the fence. What is
+    // reported is bounded too: past the bound the universe already stopped
+    // closed, and no more than the bound is listed (review-n on #1452).
     for id in known {
+        if nodes.len() >= MAX_NODES {
+            break;
+        }
         nodes.entry(id.clone()).or_insert_with(|| Node {
             node: id,
             route: Vec::new(),
@@ -698,13 +708,59 @@ mod tests {
         }
     }
 
+    /// review-n on #1452 R2: a call is bound to its ABSOLUTE deadline. A
+    /// spawn that returns late, or a successful wait that resumes late with
+    /// its answer already read, is never accepted after it; the same call
+    /// with no delay is.
+    #[cfg(unix)]
+    #[test]
+    fn a_late_spawn_or_a_late_wait_is_never_accepted() {
+        use std::os::unix::fs::PermissionsExt;
+        let (dir, config) = fixture();
+        let script = dir.path().join("answer");
+        std::fs::write(&script, format!("#!/bin/sh\ncat > /dev/null\nprintf '{{\"node_id\":\"{PEER}\"}}'\n")).unwrap();
+        std::fs::set_permissions(&script, std::fs::Permissions::from_mode(0o755)).unwrap();
+        transport::TEST_SSH.with(|program| *program.borrow_mut() = Some(script.clone()));
+        let answered = transport::remote_until(&config, "peer", "hello", None, Instant::now() + Duration::from_secs(5));
+        let mut late = Vec::new();
+        for seam in [&transport::AFTER_SPAWN, &transport::AFTER_WAIT] {
+            seam.with(|delay| delay.set(Duration::from_millis(400)));
+            late.push(transport::remote_until(&config, "peer", "hello", None, Instant::now() + Duration::from_millis(200)));
+            seam.with(|delay| delay.set(Duration::ZERO));
+        }
+        transport::TEST_SSH.with(|program| *program.borrow_mut() = None);
+        assert_eq!(answered.unwrap()["node_id"], PEER);
+        for (seam, late) in ["spawn", "wait"].iter().zip(late) {
+            assert!(format!("{:#}", late.unwrap_err()).contains("timed out"), "{seam}");
+        }
+    }
+
+    /// desktop-u on #1452 R2: a universe without this computer's membership
+    /// incarnation is closed, whatever else it shows.
+    #[test]
+    fn a_universe_without_its_membership_incarnation_is_closed() {
+        let universe = universe_of(chain(1), &[]);
+        assert_eq!(universe.closed(), None);
+        let mut missing = universe.clone();
+        missing.me.membership = None;
+        assert_eq!(missing.closed(), Some((Some(missing.me.node.as_str()), "membership")));
+        // An unreadable record fails the catalog read itself: never open.
+        let (_dir, config) = fixture();
+        let record = config.dir.join("swarm/membership.json");
+        std::fs::remove_file(&record).unwrap();
+        std::fs::create_dir(&record).unwrap();
+        let swarm = String::new();
+        let net = Hellos { swarm, peers: chain(1), writers: BTreeMap::new(), unavailable: BTreeSet::new() };
+        assert!(universe_with(&config, &net, Instant::now() + Duration::from_secs(5)).is_err());
+    }
+
     /// review-n on #1452: catalog-only candidates count against the cap too.
     #[test]
     fn catalog_only_candidates_count_against_the_cap() {
         let (_dir, config) = fixture();
         let mut store = LockedStore::load(&config).unwrap();
         let node = store.data.node_id.clone();
-        for i in 0..MAX_NODES {
+        for i in 0..MAX_NODES + 44 {
             let id = format!("{:08x}-0000-4000-8000-{:012x}", i, i);
             store
                 .data
@@ -718,6 +774,8 @@ mod tests {
         let net = Hellos { swarm, peers: chain(1), writers: BTreeMap::new(), unavailable: BTreeSet::new() };
         let universe = universe_with(&config, &net, Instant::now() + Duration::from_secs(5)).unwrap();
         assert_eq!(universe.closed(), Some((None, "too_many_nodes")));
+        // What is reported is bounded as well as the work.
+        assert!(universe.nodes.len() <= MAX_NODES, "{}", universe.nodes.len());
     }
 
     /// review-n on #1452: an unreadable store identity alone keeps the

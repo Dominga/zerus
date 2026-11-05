@@ -2,7 +2,7 @@
 //! computer knows it, and the person's hold on it (zerus-cg5h.4 S2b.2 C2).
 //! Read-only and bounded by the project's members; information only: it
 //! grants nothing and dispatches nothing.
-use super::{actor, fail, flag, machines, now, option, project_arg, store, Result};
+use super::{actor, fail, flag, machines, now, option, project_arg, project_in, store, Result};
 use crate::config::Config;
 use crate::swarm::{self, TaskMember};
 use serde_json::{json, Value};
@@ -20,16 +20,14 @@ const SCAN_TIME: Duration = Duration::from_millis(500);
 /// `task cutover --project P [--hold on|off [--confirm]]`, or
 /// `task cutover --project P --task T --check`.
 pub(super) fn cutover(config: &Config, args: &[String]) -> Result<Value> {
+    if option(args, "--task")?.is_some() {
+        // The one budget starts at the command's entry: this computer's
+        // identity, the project's name, its lock and the universe all count
+        // against it (review-n on #1452).
+        return check_entry(config, args, std::time::Instant::now() + FENCE_BUDGET);
+    }
     let who = actor(&machines(config)?.here, args, false)?;
     let (id, name) = project_arg(config, args, &who)?;
-    if let Some(task) = option(args, "--task")? {
-        // The one budget starts here and covers the project's own lock too.
-        let deadline = std::time::Instant::now() + FENCE_BUDGET;
-        if !flag(args, "--check") || option(args, "--hold")?.is_some() {
-            return Err(fail("--task takes --check, and nothing else"));
-        }
-        return fence_check(config, &id, &name, task, deadline);
-    }
     let store = store(config, &id)?;
     if let Some(hold) = option(args, "--hold")? {
         let on = match hold {
@@ -148,6 +146,23 @@ fn closing(member: &TaskMember, project: &str, latest: Option<i64>) -> Option<Va
     None
 }
 
+/// `--project P --task T --check`, all within `deadline` from the command's
+/// entry: this computer's identity and the projects in one timed catalog
+/// admission, then the project's lock, the task and the fence.
+fn check_entry(config: &Config, args: &[String], deadline: std::time::Instant) -> Result<Value> {
+    let task = option(args, "--task")?.ok_or_else(|| fail("--check needs --task T"))?;
+    if !flag(args, "--check") || option(args, "--hold")?.is_some() {
+        return Err(fail("--task takes --check, and nothing else"));
+    }
+    let wanted = option(args, "--project")?.ok_or_else(|| fail("--check needs --project P"))?;
+    let (here, projects) = crate::swarm::identity_and_projects_until(config, deadline)
+        .map_err(fail)?
+        .ok_or_else(|| fail("the catalog is busy past the check's budget"))?;
+    actor(&here, args, false)?;
+    let (id, name) = project_in(&projects, wanted)?;
+    fence_check(config, &id, &name, task, deadline)
+}
+
 /// `--task T --check` from its entry: the project's lock, the task's name
 /// and the universe all within `deadline` (review-n and desktop-u on #1452).
 fn fence_check(config: &Config, id: &str, name: &str, task: &str, deadline: std::time::Instant) -> Result<Value> {
@@ -169,9 +184,12 @@ fn fence_check(config: &Config, id: &str, name: &str, task: &str, deadline: std:
 /// comes with C3c2 (`proof` is null until then).
 fn check(config: &Config, id: &str, name: &str, uuid: &str, deadline: std::time::Instant) -> Result<Value> {
     let universe = swarm::fence::universe(config, deadline).map_err(fail)?;
-    let closed = universe
-        .closed()
-        .map(|(node, reason)| json!({"node": node, "reason": reason}));
+    // A universe complete only after the budget is never reported open.
+    let closed = if std::time::Instant::now() >= deadline {
+        Some(json!({"node": null, "reason": "deadline"}))
+    } else {
+        universe.closed().map(|(node, reason)| json!({"node": node, "reason": reason}))
+    };
     Ok(json!({
         "project": {"id": id, "name": name},
         "task": uuid,
@@ -203,6 +221,34 @@ fn prose(closed: &Value, project: &str) -> String {
 mod tests {
     use super::*;
     use crate::swarm::ReplicaMember;
+
+    /// review-n on #1452 R2: the budget covers the check's entry too: a
+    /// catalog lock held past it refuses within it.
+    #[test]
+    fn the_check_s_budget_starts_at_its_entry() {
+        let dir = tempfile::tempdir().unwrap();
+        let config = Config {
+            home: dir.path().to_str().unwrap().into(),
+            dir: dir.path().join("config"),
+            state: dir.path().join("state"),
+            selves: vec!["example-local".into()],
+            peers: vec![],
+            base_peers: vec![],
+            peers_from_environment: false,
+            machines: std::collections::BTreeMap::new(),
+            tab: false,
+            tab_colors: String::new(),
+        };
+        let held = crate::swarm::lock_catalog_for_tests(&config);
+        let args: Vec<String> =
+            ["--project", "p", "--task", "T-000001", "--check"].iter().map(|a| a.to_string()).collect();
+        let started = std::time::Instant::now();
+        let refused = check_entry(&config, &args, started + Duration::from_millis(150));
+        let waited = started.elapsed();
+        drop(held);
+        assert!(format!("{}", refused.unwrap_err()).contains("past the check's budget"));
+        assert!(waited >= Duration::from_millis(150) && waited < Duration::from_secs(3), "{waited:?}");
+    }
 
     /// review-n on #1452: the check's budget covers its own project lock. A
     /// lock held past the budget refuses within it, never blocking past it

@@ -22,4 +22,6 @@ A team member in a sandbox (DeepSeek's Low integrity, Codex's Windows sandbox
 user) needs nothing else: its hgs run, team report, ask and team run wait in
 its folder and the team worker applies them within seconds, and hgs ls, hgs
 inspect and task list/get of a named project are answered the same way. A
+validation refusal is queued too: the command returns at once and the worker's
+later answer names the refusal. A
 run stays inside your sandbox: Codex's runs start in your own folder.

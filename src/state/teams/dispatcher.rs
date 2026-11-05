@@ -5171,7 +5171,6 @@ fn tell_lead_start_late(store: &mut Store, team: &Team, task_id: u32) -> anyhow:
     })
 }
 
-/// Gives the member the lead's answer as a message, once (A3).
 /// Task 36: the message that wakes a member whose own run settled after its
 /// turn ended.
 pub(crate) fn run_settled_text(task: &Task, attempt: &Attempt) -> String {
@@ -5229,6 +5228,7 @@ fn run_settled(store: &mut Store, team: &Team, task_id: u32, wake: bool) -> anyh
     })
 }
 
+/// Gives the member the lead's answer as a message, once (A3).
 fn send_answer(store: &mut Store, team: &Team, task_id: u32, question_id: &str) -> anyhow::Result<()> {
     let task = team.task(task_id).context("unknown task")?;
     // #630 N6: the answer may belong to an attempt or to a stage member's run.

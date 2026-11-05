@@ -61,8 +61,6 @@ pub(crate) fn canonical_uuid(value: &str) -> bool {
     uuid::Uuid::parse_str(value).is_ok_and(|id| !id.is_nil() && id.to_string() == value)
 }
 
-/// U20: a member's write the sandbox blocks says what to do, not a bare SQLite
-/// error. Everything else is passed through unchanged.
 /// Task 25: how long one SQLite call waits for the lock another process holds
 /// (a reader in rollback-journal mode holds it until its read ends).
 const BUSY_WAIT: Duration = Duration::from_secs(30);
@@ -121,6 +119,8 @@ fn commit(transaction: rusqlite::Transaction<'_>) -> anyhow::Result<()> {
     }
 }
 
+/// U20: a member's write the sandbox blocks says what to do, not a bare SQLite
+/// error. Everything else is passed through unchanged.
 pub(crate) fn write_error(error: impl std::fmt::Display) -> anyhow::Error {
     let text = error.to_string();
     if text.contains("readonly database") || text.contains("read-only database") {

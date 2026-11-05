@@ -113,8 +113,14 @@ class QtRollback(unittest.TestCase):
 
     def test_unconfirmed_registration_status_keeps_qt_stopped_without_mode_or_revoke(self):
         self.registration_status_ok = False
-        with self.assertRaisesRegex(updater.UpdateError, "registration"):
-            updater.revoke_before_qt(self.installed)
+        for mac in (False, True):
+            with self.subTest(mac=mac), patch.object(updater, "MAC", mac), patch.dict(
+                    updater.os.environ, {"XDG_CONFIG_HOME": str(self.root / "config")}):
+                with self.assertRaisesRegex(updater.UpdateError, "registration") as failure:
+                    updater.revoke_before_qt(self.installed)
+                record = (self.root / "Library/LaunchAgents/.com.hgdev.hgs-desktop.zerus-registration.json" if mac else
+                          self.root / "config/systemd/user/.hgs-desktop.zerus-registration.json")
+                self.assertIn(str(record), str(failure.exception))
         self.assertEqual(self.helper_installs(), [])
         self.assertEqual(self.command_calls("revoke"), [])
 

@@ -64,7 +64,7 @@ fn native_mac_current_routing_cannot_replace_original_observation_or_child_custo
             // Nominal routing freshness is not a native selection/permission.
             // Exercise the production observation boundary independently: if
             // that actual call is removed, this hostile child receives input.
-            if !observe_mac_child(&checked.routing, &mut child, || true) {
+            if observe_mac_child(&checked.routing, &mut child, || true).is_err() {
                 drop(child.stdin.take());
             }
             observed_closed.store(child.stdin.is_none(), Ordering::Release);

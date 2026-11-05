@@ -99,6 +99,7 @@ fn current_target(
         original_generation: running.scope().1,
         journal,
         owner_epoch,
+        grant_binding: grant.refresh_binding(location)?,
         original_image,
         replacement_image,
     };
@@ -236,7 +237,7 @@ fn before_stop(
             Instant::now() < until,
             "Original retirement/resource drain deadline expired; no Stop is admitted."
         );
-        thread::sleep(Duration::from_millis(10));
+        std::thread::sleep(Duration::from_millis(10));
     }
 }
 

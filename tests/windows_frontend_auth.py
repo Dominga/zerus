@@ -1660,13 +1660,14 @@ $later=@{guid=$guid;pid=$q.Id;birth=$q.StartTime.ToFileTimeUtc()};
             stable = path.read_bytes()
             # Same configuration with a changed confirmed selection must fail
             # before reserving an intent, and without any native effect.
-            wrong = dict(target, selection='0' * 64)
-            refused = self.refresh_call('mode_refresh', str(uuid.uuid4()), wrong)
-            self.assertFalse(refused['ok'], refused)
-            self.assertIn('target changed', refused['error'])
-            self.assertEqual(path.read_bytes(), stable)
-            self.assertEqual(self.observe()['instances'], before)
-            self.assertEqual(self.cli('desktop', 'ownership-status', '--json'), granted)
+            for key in ('selection', 'grant_binding'):
+                wrong = dict(target, **{key: '0' * 64})
+                refused = self.refresh_call('mode_refresh', str(uuid.uuid4()), wrong)
+                self.assertFalse(refused['ok'], refused)
+                self.assertIn('target changed', refused['error'])
+                self.assertEqual(path.read_bytes(), stable)
+                self.assertEqual(self.observe()['instances'], before)
+                self.assertEqual(self.cli('desktop', 'ownership-status', '--json'), granted)
             # A live original partial pipe blocks the real controller before
             # Held/Stop. Closing it is the actual EOF, not an invented drain.
             with self.partial_original_pipe(original, target['configuration']):

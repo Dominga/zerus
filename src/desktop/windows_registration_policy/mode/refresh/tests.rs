@@ -292,6 +292,7 @@ fn the_target_is_closed_bounded_selection_data_never_a_serialized_permission() {
         original_generation: receipt.scope.original_generation,
         journal: receipt.scope.journal.clone(),
         owner_epoch: receipt.scope.owner_epoch.clone(),
+        grant_binding: receipt.scope.grant_binding.clone(),
         original_image: receipt.scope.original_image.clone(),
         replacement_image: receipt.scope.replacement_image.clone(),
     };

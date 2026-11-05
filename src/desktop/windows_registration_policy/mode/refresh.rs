@@ -18,6 +18,7 @@ pub(in crate::desktop) struct Target {
     pub original_generation: u64,
     pub journal: String,
     pub owner_epoch: String,
+    pub grant_binding: String,
     pub original_image: String,
     pub replacement_image: String,
 }
@@ -29,6 +30,7 @@ impl Target {
                 && hex(&self.selection, 64)
                 && canonical_id(&self.journal)
                 && canonical_id(&self.owner_epoch)
+                && hex(&self.grant_binding, 64)
                 && self.original_generation <= 9_007_199_254_740_991
                 && hex(&self.original_image, 48)
                 && hex(&self.replacement_image, 48)

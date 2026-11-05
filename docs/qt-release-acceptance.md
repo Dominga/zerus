@@ -919,6 +919,57 @@ private input, configuration values or process identifiers:
 - Native membership evidence: `4b79af5e4ad15f16dff5fe6902dab17ba215a8e935dc5770887a3f00528400a1`.
 - Ordinary restore evidence: `e3639400cf8f770684d353da88ded1c0a9e98e8fd5720800739483d2c2ddebae`.
 
+### Recorded Mac installed Terminate-and-Removed positive — source `a9d5b41f`
+
+On 2026-11-05, macbundle-u ran a new coordinator-admitted, owner-present trial
+using the maintained signed installed pair
+`a9d5b41f88edcaaecd476bdf544b386b0cd5bb66`, reporting clean
+`0.47.1-preview.design-polish.a9d5b41`. This candidate includes the original-helper
+synchronization in [#1498](https://github.com/ufna/zerus/pull/1498) and the explicit
+Remove permission-denial rule in [#1501](https://github.com/ufna/zerus/pull/1501).
+The disposable target was fresh; the earlier archived target and its KEPT folder
+were not retried. **The installed-pair Terminate-and-Removed positive required by
+`.66.3.40.4` passed.** This result does not close the broader Mac platform rows or
+flip the Service default.
+
+| Subcheck | Result | Actual evidence and limit |
+|---|---|---|
+| Installed identity and original configuration | PASS | Build-info, image hashes, local pair, provenance and strict deep signature verification agreed on the frozen source. The rollout watcher was paused. One consumer GUI used the original configuration and owned registration, with its per-launch Service opt-in; the owner's explicit Resume produced current Service ownership with an owner epoch. No private profile, authority fallback or second GUI was used. |
+| Exact original confirmation and completed Terminate | PASS, one target and one confirmation | The owner opened the exact fresh target's dialog, checked Remove and pressed Stop and remove folder once. Exactly one immutable retained Intent matched the original configuration, service epoch, capture, run, conversation, checkout nonce, confirmation and request. Its original bytes matched the retained integrity hash; maintained same-original receipt lookup returned completed and the exact archive. The genuine paired caller retained the original helper/registration path; no direct helper substitute or exited-output adoption was used. |
+| Native exits and actual folder removal | PASS: 1 removed, 0 kept, 0 unknown | Direct native absence checks confirmed both the selected original agent and its supervisor had exited. The exact removal receipt reported removed with branch_deleted false. The generated checkout was absent and no longer Git-registered; its branch still pointed to the original head, and the same archived run/conversation/ownership identity remained readable with Restore available. No manual folder deletion, manual acceptance, force or effect replay was used. |
+| Operation resources | PASS, scoped observations | The exact checkout/removal queue rows were zero. Root reported undrained zero, unsettled zero, idle resource custody, no pending reads and no errors; no transport-marked helper remained under the consumer. After normal Quit and ordinary restoration, the original consumer and headless host were absent. These observations do not export a separate native helper exit-code receipt. |
+| Ordinary restore and drafts | PASS | After the owner's normal Quit and a zero-GUI witness, exactly one ordinary no-environment launch restored the same installed app to current Native ownership revision 48. The original desktop service's PID, native birth and epoch were unchanged. Exactly one ordinary GUI remained, the headless host was absent and notification_runtime was null. All 539 draft records matched the pretrial semantic manifest: 22 unsent, 319 form-only, held zero. The branch and archive were retained; the removed checkout stayed absent. |
+
+The acceptance commands did not signal or restart any owner's native agent,
+unrelated session, tmux server or DeepSeek host. The new fixture tmux server also
+exited naturally with the target: direct native absence checks found no original
+target agent, supervisor, fixture server, consumer or headless host remaining.
+No tmux stop command was sent. The synthetic repository/branch, archive and
+private fixture evidence remain for restoration identity and review. The owner
+reported that the Remove checkbox appeared after opening the dialog; no
+latency was measured, so this is only an observation for the existing progress
+work, not a timing qualification.
+
+This is a new result, independent of the earlier completed BLOCKED dependency
+and the `7ebe7307` KEPT result. Historical Unknown and KEPT outcomes retain their
+original identities and were not replayed or upgraded. No notification Post,
+click, selection readback, media or Qt rollback was performed in this trial; those
+rows retain their own recorded status and limits. Qt rollback remains waived by
+owner 2026-11-05.
+
+Macbundle-u retains the private records; these SHA-256 values identify their
+exact bytes without publishing process identities, configuration values,
+private input, SDK metadata or session bodies:
+
+| Private evidence filename | SHA-256 |
+|---|---|
+| `a9d5-admission-1793898615111027728.json` | `89a3caa77ee06e94058ea782c56895564180736b22f9946ec5fe4be63d3fff63` |
+| `a9d5-resume-verify-1793899101694793615.json` | `201bd90f7bff50bed95c1fb8a231fc0fb305867d064d23a019a13239d1f3c88d` |
+| `a9d5-termination-observe-1793899581918380684.json` | `f4553785a7a09fc6baaa6fd77ec8e4756fb3593ecd054d2209da8d1f2fd8350f` |
+| `a9d5-removed-proof-1793899753232087849.json` | `5cd78523fa8d6f04711044d3bd4742435326955dfe2f81fc2637f8a2d06b16b2` |
+| `a9d5-normal-restore-result-1793900050246897530.json` | `dacffcf870db825d2673fd5ee6df064361016a1711946e8e2e3ed9259bb88b90` |
+| `a9d5-final-residue-1793900289887254244.json` | `9a1d55c716598f62d8f0ead05e70f9da3616cc5d349c042693d2caf03b00c09d` |
+
 ## Installed client cutover on Linux and macOS
 
 **Historical preparation baseline:** the source limitations in this section

@@ -879,12 +879,7 @@ pub(super) fn submit_answer(name: &str, input: &[u8]) -> Result<Value> {
     submit_with(name, input, None, true)
 }
 
-fn submit_with(
-    name: &str,
-    input: &[u8],
-    recovery_id: Option<&str>,
-    answer: bool,
-) -> Result<Value> {
+fn submit_with(name: &str, input: &[u8], recovery_id: Option<&str>, answer: bool) -> Result<Value> {
     let request: Request =
         serde_json::from_slice(input).map_err(|e| format!("invalid send payload: {e}"))?;
     let files = validate(&request)?;

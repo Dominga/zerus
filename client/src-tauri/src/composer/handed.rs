@@ -116,12 +116,14 @@ impl Composers {
         }
     }
 
-    /// The open composer's held send is checked at once, its back-off
-    /// starting over: on opening its session, and on showing the window.
+    /// The open composer's held send, and its session's held answers, are
+    /// checked at once, their back-off starting over: on opening the
+    /// session, and on showing the window.
     pub(crate) fn restart_checks(hub: &mut Hub, now: f64) {
         let Some(key) = hub.open_key.clone() else {
             return;
         };
+        super::questions::restart_answer_checks(hub, &key, now);
         if let Some(handed) = hub
             .composers
             .get_mut(&key)

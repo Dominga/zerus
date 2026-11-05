@@ -45,13 +45,14 @@ pub fn dir(replay: bool) -> &'static str {
 }
 
 pub const NOT_RESTORED: &str =
-    "Could not restore this draft completely. Saved files have been kept locally.";
+    crate::source!("Could not restore this draft completely. Saved files have been kept locally.");
 pub const INTERRUPTED: &str =
-    "Delivery was interrupted. Check Activity or Terminal before sending again.";
+    crate::source!("Delivery was interrupted. Check Activity or Terminal before sending again.");
 /// A reloaded draft that holds a reserved deferred input but was not saved
 /// while sending (a continuation's start or compaction may have run): it
 /// stays uncertain until the user allows a retry (zerus-5wmh.66.4.4).
-pub const UNCONFIRMED: &str = "Delivery is not confirmed. Check Terminal before retrying.";
+pub const UNCONFIRMED: &str =
+    crate::source!("Delivery is not confirmed. Check Terminal before retrying.");
 pub const ALREADY_EXISTS: &str =
     "Another draft already exists here. Recover the previous one from Saved drafts.";
 /// A write refused for this run: the store's earlier drafts could not be

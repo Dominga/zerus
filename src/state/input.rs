@@ -964,7 +964,7 @@ fn submit_with(name: &str, input: &[u8], recovery_id: Option<&str>, answer: bool
     }
     if let Some(id) = recovery_id { recovery::check_submission(&read(name)?, id)?; }
     let submitted_at = now();
-    if recovery_id.is_none() { recovery::cancel_for_input(name)?; }
+    if recovery_id.is_none() { recovery::cancel_for_input(&record)?; }
     let mut receipt = json!({"request_id":request_id,"name":name,"run_id":request.expected_run_id,
         "conversation_id":string(&record,"conversation_id"),"first_message":string(&record,"conversation_id").is_empty(),"digest":digest,"status":"in_progress",
         "submitted_at":submitted_at,"submitted_text":text,"text":request.text.trim(),"attachments":paths,"transport":"terminal"});

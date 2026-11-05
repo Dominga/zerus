@@ -97,7 +97,7 @@ pub(super) fn retryable(record: &Value, requested: Option<&str>) -> bool {
 
 pub(super) fn binding_exists(name: &str) -> Result<bool> {
     let _guard = lock(None)?;
-    if !record_path(name).exists() {
+    if !storage::label_taken(name) {
         return Ok(false);
     }
     let record = read(name)?;

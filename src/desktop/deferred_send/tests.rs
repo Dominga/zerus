@@ -1863,6 +1863,214 @@ os._exit(0)"#;
     }
 }
 
+/// zerus-ucck P3a: a session in the ID layout, whose label's own record is
+/// another session's, is found through the label index at its fixed
+/// `sessions/<id>.json`. Without the index the check refuses, as with any
+/// unreadable record; a record without the layout, or two matches, refuse too.
+#[test]
+fn the_target_check_finds_a_session_in_the_id_layout() {
+    use sha2::Digest;
+    let temp = tempfile::tempdir().unwrap();
+    let state = state_root(temp.path());
+    let verified = original(&"a".repeat(64), &uuid::Uuid::new_v4().to_string());
+    let plan = &verified.plan;
+    session_record(&state, SESSION, "claude", "run-other", "conversation-other");
+    let current = || target::current(&super::receipt::Roots::open(&state, super::receipt::FOLDER).unwrap(), plan);
+    assert!(!current(), "the label's holder runs another run");
+    let private = |path: &Path, body: &Value| {
+        std::fs::create_dir_all(path.parent().unwrap()).unwrap();
+        mode(path.parent().unwrap(), 0o700);
+        std::fs::write(path, body.to_string()).unwrap();
+        mode(path, 0o600);
+    };
+    let ids = ["3f2a9c1d-6b7e-4c2a-9d1f-0a1b2c3d4e5f", "7be01d44-6b7e-4c2a-9d1f-0a1b2c3d4e5f"];
+    let session = |id: &str, layout: bool| {
+        let mut record = json!({"name": SESSION, "agent": "claude", "run_id": RUN,
+            "conversation_id": CONVERSATION, "session_id": id});
+        if layout {
+            record["layout"] = json!("id");
+        }
+        private(&state.join("sessions").join(format!("{id}.json")), &record);
+    };
+    session(ids[0], true);
+    assert!(!current(), "no label index: refused");
+    let key = format!("{:x}", sha2::Sha256::digest(SESSION.as_bytes()));
+    let index = state.join("labels").join(format!("{key}.json"));
+    let manifest = state.join("labels").join(".complete");
+    private(&index, &json!({"version": 1, "label": SESSION, "ids": [ids[0]]}));
+    assert!(!current(), "an index no manifest proves: refused");
+    // The manifest lists the label with its file's digest (#1437 review).
+    let prove = || {
+        let digest = format!("{:x}", sha2::Sha256::digest(std::fs::read(&index).unwrap()));
+        private(&manifest, &json!({"version": 1, "labels": {&key: digest}}));
+    };
+    prove();
+    assert!(current());
+    let stale = uuid::Uuid::new_v4().to_string();
+    private(&index, &json!({"version": 1, "label": SESSION, "ids": [ids[0], stale]}));
+    assert!(!current(), "a changed index no longer matches its manifest entry");
+    private(&index, &json!({"version": 1, "label": SESSION, "ids": [ids[0]]}));
+    prove();
+    session(ids[0], false);
+    assert!(!current(), "a record without the ID layout");
+    session(ids[0], true);
+    session(ids[1], true);
+    private(&index, &json!({"version": 1, "label": SESSION, "ids": ids}));
+    prove();
+    assert!(!current(), "two sessions carry the plan's run: never one of them");
+}
+
+/// #1437 review (desktop-u G1): a listed candidate that is there but cannot be
+/// read refuses the check; the one readable match of a subset is never enough.
+/// A listed session whose file is gone is a stale entry.
+#[test]
+fn the_target_check_never_ignores_an_unreadable_listed_candidate() {
+    use sha2::Digest;
+    let temp = tempfile::tempdir().unwrap();
+    let state = state_root(temp.path());
+    let verified = original(&"a".repeat(64), &uuid::Uuid::new_v4().to_string());
+    let plan = &verified.plan;
+    session_record(&state, SESSION, "claude", "run-other", "conversation-other");
+    let current = || target::current(&super::receipt::Roots::open(&state, super::receipt::FOLDER).unwrap(), plan);
+    let private = |path: &Path, bytes: &[u8]| {
+        std::fs::create_dir_all(path.parent().unwrap()).unwrap();
+        mode(path.parent().unwrap(), 0o700);
+        std::fs::write(path, bytes).unwrap();
+        mode(path, 0o600);
+    };
+    let (a, b) = (uuid::Uuid::new_v4().to_string(), uuid::Uuid::new_v4().to_string());
+    let record = json!({"name": SESSION, "agent": "claude", "run_id": RUN,
+        "conversation_id": CONVERSATION, "session_id": a, "layout": "id"});
+    private(&state.join("sessions").join(format!("{a}.json")), record.to_string().as_bytes());
+    let key = format!("{:x}", sha2::Sha256::digest(SESSION.as_bytes()));
+    let index = json!({"version": 1, "label": SESSION, "ids": [a, b]}).to_string();
+    private(&state.join("labels").join(format!("{key}.json")), index.as_bytes());
+    let digest = format!("{:x}", sha2::Sha256::digest(index.as_bytes()));
+    private(
+        &state.join("labels").join(".complete"),
+        json!({"version": 1, "labels": {&key: digest}}).to_string().as_bytes(),
+    );
+    assert!(current(), "a listed session whose file is gone is stale");
+    private(&state.join("sessions").join(format!("{b}.json")), b"{");
+    assert!(!current(), "the target check skipped an unreadable listed session");
+}
+
+/// #1437 review (desktop-u, R2): a matching label holder is counted with the
+/// label's sessions in the ID layout, under the same proof; it never answers
+/// before them.
+#[test]
+fn the_target_check_counts_the_label_holder_with_its_twins() {
+    use sha2::Digest;
+    let temp = tempfile::tempdir().unwrap();
+    let state = state_root(temp.path());
+    let verified = original(&"a".repeat(64), &uuid::Uuid::new_v4().to_string());
+    let plan = &verified.plan;
+    session_record(&state, SESSION, "claude", RUN, CONVERSATION);
+    let current = || target::current(&super::receipt::Roots::open(&state, super::receipt::FOLDER).unwrap(), plan);
+    assert!(current(), "no ID layout: the label's record decides");
+    let private = |path: &Path, bytes: &[u8]| {
+        std::fs::create_dir_all(path.parent().unwrap()).unwrap();
+        mode(path.parent().unwrap(), 0o700);
+        std::fs::write(path, bytes).unwrap();
+        mode(path, 0o600);
+    };
+    let sessions = state.join("sessions");
+    std::fs::create_dir_all(&sessions).unwrap();
+    mode(&sessions, 0o700);
+    assert!(!current(), "the ID layout exists and nothing proves the label");
+    let key = format!("{:x}", sha2::Sha256::digest(SESSION.as_bytes()));
+    let manifest = state.join("labels").join(".complete");
+    private(&manifest, json!({"version": 1, "labels": {}}).to_string().as_bytes());
+    assert!(current(), "the manifest proves the label has no twin");
+    let id = uuid::Uuid::new_v4().to_string();
+    let index = json!({"version": 1, "label": SESSION, "ids": [id]}).to_string();
+    private(&state.join("labels").join(format!("{key}.json")), index.as_bytes());
+    let digest = format!("{:x}", sha2::Sha256::digest(index.as_bytes()));
+    private(&manifest, json!({"version": 1, "labels": {&key: digest}}).to_string().as_bytes());
+    let twin = sessions.join(format!("{id}.json"));
+    private(&twin, b"{");
+    assert!(!current(), "a listed twin that cannot be read");
+    let record = |run: &str| {
+        json!({"name": SESSION, "agent": "claude", "run_id": run,
+            "conversation_id": CONVERSATION, "session_id": id, "layout": "id"})
+        .to_string()
+    };
+    private(&twin, record("run-other").as_bytes());
+    assert!(current(), "a twin on another run: the label's record is the one");
+    private(&twin, record(RUN).as_bytes());
+    assert!(!current(), "the label's record and a twin both carry the plan: never one of them");
+    // A label record that cannot be read is never absent, even when a twin
+    // alone would carry the plan.
+    let label = state.join(format!("{key}.json"));
+    let kept = std::fs::read(&label).unwrap();
+    private(&label, b"{");
+    assert!(!current(), "a label record that cannot be read is never absent");
+    private(&label, &kept);
+    private(&twin, record("run-other").as_bytes());
+    assert!(current());
+}
+
+/// #1437 review (desktop-u, R3): the target reads the label index through the
+/// CLI's own proof. A listed label's file must list one or more canonical IDs;
+/// any other shape refuses, even with a matching digest, and never hides a
+/// twin behind the label's matching record.
+#[test]
+fn the_target_check_refuses_every_malformed_listed_index() {
+    use sha2::Digest;
+    let temp = tempfile::tempdir().unwrap();
+    let state = state_root(temp.path());
+    let verified = original(&"a".repeat(64), &uuid::Uuid::new_v4().to_string());
+    let plan = &verified.plan;
+    session_record(&state, SESSION, "claude", RUN, CONVERSATION);
+    let current = || target::current(&super::receipt::Roots::open(&state, super::receipt::FOLDER).unwrap(), plan);
+    let private = |path: &Path, bytes: &[u8]| {
+        std::fs::create_dir_all(path.parent().unwrap()).unwrap();
+        mode(path.parent().unwrap(), 0o700);
+        std::fs::write(path, bytes).unwrap();
+        mode(path, 0o600);
+    };
+    let id = uuid::Uuid::new_v4().to_string();
+    let twin = json!({"name": SESSION, "agent": "claude", "run_id": "run-other",
+        "conversation_id": CONVERSATION, "session_id": id, "layout": "id"});
+    private(&state.join("sessions").join(format!("{id}.json")), twin.to_string().as_bytes());
+    let key = format!("{:x}", sha2::Sha256::digest(SESSION.as_bytes()));
+    let prove = |index: Value| {
+        let bytes = index.to_string();
+        private(&state.join("labels").join(format!("{key}.json")), bytes.as_bytes());
+        let digest = format!("{:x}", sha2::Sha256::digest(bytes.as_bytes()));
+        private(
+            &state.join("labels").join(".complete"),
+            json!({"version": 1, "labels": {&key: digest}}).to_string().as_bytes(),
+        );
+    };
+    prove(json!({"version": 1, "label": SESSION, "ids": [id]}));
+    assert!(current(), "a well-formed index whose twin runs another run");
+    for ids in [
+        None,
+        Some(Value::Null),
+        Some(json!({})),
+        Some(json!([])),
+        Some(json!([1])),
+        Some(json!(["not-an-id"])),
+        Some(json!([id, "not-an-id"])),
+        Some(json!([id, 1])),
+    ] {
+        let mut index = json!({"version": 1, "label": SESSION});
+        if let Some(ids) = ids.clone() {
+            index["ids"] = ids;
+        }
+        prove(index);
+        assert!(!current(), "a listed index with ids {ids:?}");
+    }
+    // A manifest is well formed as a whole, or proves nothing.
+    prove(json!({"version": 1, "label": SESSION, "ids": [id]}));
+    let manifest = state.join("labels").join(".complete");
+    let mut whole: Value = serde_json::from_slice(&std::fs::read(&manifest).unwrap()).unwrap();
+    whole["labels"]["another"] = json!(1);
+    private(&manifest, whole.to_string().as_bytes());
+    assert!(!current(), "a manifest with a malformed entry");
+}
+
 /// desktop-u's G1 on #1433: this kind's child runner checks the
 /// never-renewed deadline last before the spawn and before any input.
 #[cfg(any(target_os = "linux", target_os = "macos"))]
@@ -1937,4 +2145,56 @@ mod spent_deadline {
         );
         assert_eq!(ended, Ended::Exited { code: 0 });
     }
+}
+
+/// #1437 review (desktop-u, R4): a listed candidate that is there must
+/// establish its own identity, the ID layout and the ID its fixed path names,
+/// before it counts at all; one that cannot refuses, never leaving the label's
+/// matching record to decide alone.
+#[test]
+fn the_target_check_refuses_a_listed_candidate_without_its_identity() {
+    use sha2::Digest;
+    let temp = tempfile::tempdir().unwrap();
+    let state = state_root(temp.path());
+    let verified = original(&"a".repeat(64), &uuid::Uuid::new_v4().to_string());
+    let plan = &verified.plan;
+    session_record(&state, SESSION, "claude", RUN, CONVERSATION);
+    let current = || target::current(&super::receipt::Roots::open(&state, super::receipt::FOLDER).unwrap(), plan);
+    let private = |path: &Path, bytes: &[u8]| {
+        std::fs::create_dir_all(path.parent().unwrap()).unwrap();
+        mode(path.parent().unwrap(), 0o700);
+        std::fs::write(path, bytes).unwrap();
+        mode(path, 0o600);
+    };
+    let id = uuid::Uuid::new_v4().to_string();
+    let key = format!("{:x}", sha2::Sha256::digest(SESSION.as_bytes()));
+    let index = json!({"version": 1, "label": SESSION, "ids": [id]}).to_string();
+    private(&state.join("labels").join(format!("{key}.json")), index.as_bytes());
+    let digest = format!("{:x}", sha2::Sha256::digest(index.as_bytes()));
+    private(&state.join("labels").join(".complete"), json!({"version": 1, "labels": {&key: digest}}).to_string().as_bytes());
+    let twin = state.join("sessions").join(format!("{id}.json"));
+    let other = json!({"name": SESSION, "agent": "claude", "run_id": "run-other",
+        "conversation_id": CONVERSATION, "session_id": id, "layout": "id"});
+    private(&twin, other.to_string().as_bytes());
+    assert!(current(), "a valid twin on another run is a non-match");
+    for record in [
+        Value::Null,
+        json!({}),
+        json!({"name": SESSION, "agent": "claude", "run_id": "run-other", "session_id": id, "layout": "legacy"}),
+        json!({"name": SESSION, "agent": "claude", "run_id": "run-other", "session_id": uuid::Uuid::new_v4().to_string(), "layout": "id"}),
+    ] {
+        private(&twin, record.to_string().as_bytes());
+        assert!(!current(), "a listed candidate {record}");
+    }
+    // review-q2: while the label's record matches, a twin that cannot even be
+    // opened, a link or a file that is not private, refuses too.
+    std::fs::remove_file(&twin).unwrap();
+    std::os::unix::fs::symlink(state.join("missing"), &twin).unwrap();
+    assert!(!current(), "a listed twin that is a link");
+    std::fs::remove_file(&twin).unwrap();
+    private(&twin, other.to_string().as_bytes());
+    mode(&twin, 0o644);
+    assert!(!current(), "a listed twin that is not private");
+    mode(&twin, 0o600);
+    assert!(current());
 }

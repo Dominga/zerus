@@ -38,7 +38,7 @@ pub(super) fn dispatch(args: &[String]) -> Result<i32> {
         if !eligible(&record) {return Err("This turn is no longer working".into());}
         kimi_tui_choice::identity(&record)?;
     }
-    recovery::cancel_for_input(name)?;
+    recovery::cancel_for_input(&record)?;
     atomic(&path,&json!({"status":"in_progress"}).to_string())?;
     let mut seen=None;
     if open_native {opencode::interrupt(&record)?;}

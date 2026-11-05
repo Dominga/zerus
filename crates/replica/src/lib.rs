@@ -26,7 +26,7 @@ pub use schema::{
     MAX_TEXT, SCHEMA,
 };
 pub use store::{
-    Changes, Damaged, Keep, Position, ProjectStore, DEPENDS_ON_INCOMING_COPY, MARK_FORMAT,
+    Admitted, Changes, Damaged, Keep, Position, ProjectStore, DEPENDS_ON_INCOMING_COPY, MARK_FORMAT,
 };
 pub use sync::{Document, DonePage, DoneRow, Imported, Inventory, Update, Version};
 pub use task::{NewTask, Settled, Settlement, TaskDoc};

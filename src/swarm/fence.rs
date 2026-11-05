@@ -13,7 +13,11 @@ use serde_json::{json, Value};
 use sha2::{Digest, Sha256};
 use std::collections::{BTreeMap, BTreeSet, VecDeque};
 use std::time::{Duration, Instant};
-use zerus_replica::{ids, TASK_SCHEMA};
+use super::replica;
+use zerus_replica::{
+    canonical_version, ids, version_includes, Admitted, Document, ProjectStore, TaskDoc, Update, Version,
+    TASK_SCHEMA,
+};
 
 /// The fence capability a hello advertises: it relays, and (from C3c2) it
 /// answers the per-task proof.
@@ -41,7 +45,7 @@ pub struct Relay {
 }
 
 /// The commands a member relays.
-const RELAYED: [&str; 2] = ["hello", "replica-relay"];
+const RELAYED: [&str; 3] = ["hello", "replica-relay", "replica-task"];
 
 /// `swarm replica-relay`: forwards one call to this member's own verified
 /// alias for `to`, and answers with the reply, checked to come from `to`,
@@ -74,14 +78,22 @@ pub fn relay(config: &Config, request: Relay) -> Result<Value> {
     drop(store);
     let own = zerus_replica::ProjectStore::store_id_until(&config.state.join("replica"), deadline)?;
     ensure!(!left(deadline).is_zero(), "no time left to relay");
-    let input = if request.command == "replica-relay" {
-        ensure!(request.hops > 0, "the route is longer than its hops");
-        let mut inner = request.input.clone();
-        inner["hops"] = json!(request.hops - 1);
-        inner["remaining_ms"] = json!(left(deadline).as_millis() as u64);
-        Some(inner)
-    } else {
-        None
+    let input = match request.command.as_str() {
+        "replica-relay" => {
+            ensure!(request.hops > 0, "the route is longer than its hops");
+            let mut inner = request.input.clone();
+            inner["hops"] = json!(request.hops - 1);
+            inner["remaining_ms"] = json!(left(deadline).as_millis() as u64);
+            Some(inner)
+        }
+        // The member's own wait for the task's project is bounded by what
+        // is left of this one budget.
+        "replica-task" => {
+            let mut inner = request.input.clone();
+            inner["remaining_ms"] = json!(left(deadline).as_millis() as u64);
+            Some(inner)
+        }
+        _ => None,
     };
     let reply = transport::remote_until(config, &alias, &request.command, input.as_ref(), deadline)?;
     ensure!(!left(deadline).is_zero(), "the relay's deadline passed");
@@ -264,9 +276,30 @@ pub struct Universe {
     pub nodes: BTreeMap<String, Node>,
     /// Why discovery itself stopped early, when it did.
     pub stopped: Option<&'static str>,
+    /// This computer's own membership view, read under the catalog lock: its
+    /// node, peers, catalog machines and membership generation. The final
+    /// admission reads it again under that lock, which every membership
+    /// change takes (review-n on #1452, group 4).
+    pub view: String,
+    #[serde(skip)]
+    pub swarm: String,
 }
 
 impl Universe {
+    /// The store each node of the route to `node` showed; none for a node
+    /// no route reaches.
+    pub(crate) fn stores(&self, node: &Node) -> Option<Vec<Option<String>>> {
+        if node.route.is_empty() {
+            return None;
+        }
+        Some(
+            node.route
+                .iter()
+                .map(|hop| self.nodes.get(hop).and_then(|found| found.store.clone()))
+                .collect(),
+        )
+    }
+
     /// The first node that keeps the fence closed, and why.
     pub fn closed(&self) -> Option<(Option<&str>, &'static str)> {
         if let Some(reason) = self.stopped {
@@ -292,10 +325,22 @@ impl Universe {
     /// and every node with its route and what its hello showed. Two reads
     /// of the universe agree only when it did not change between them.
     pub fn incarnation(&self) -> String {
-        let canonical = serde_json::to_vec(&json!({"me": self.me, "nodes": self.nodes}))
+        let canonical = serde_json::to_vec(&json!({"me": self.me, "view": self.view, "nodes": self.nodes}))
             .expect("a universe serializes");
         format!("{:x}", Sha256::digest(canonical))
     }
+}
+
+/// This computer's membership view as `store` holds it, as one digest: its
+/// node, its peers, the catalog machines and its membership generation.
+pub(crate) fn view(store: &LockedStore) -> String {
+    let peers: BTreeMap<&String, &String> =
+        store.data.peers.iter().map(|(alias, peer)| (alias, &peer.node)).collect();
+    let canonical = serde_json::to_vec(&json!({"node": store.data.node_id, "peers": peers,
+                                                "machines": catalog_machines(store),
+                                                "membership": store.membership()}))
+        .expect("a view serializes");
+    format!("{:x}", Sha256::digest(canonical))
 }
 
 /// Every machine `store`'s catalog knows has joined, as the machine it now
@@ -320,10 +365,6 @@ pub(crate) fn catalog_machines(store: &LockedStore) -> BTreeSet<String> {
 /// Discovers the universe within `deadline`: the catalog read under its lock
 /// (waiting no later than the deadline), then a fresh hello to every node
 /// over the shortest verified route, with no lock held across the network.
-pub fn universe(config: &Config, deadline: Instant) -> Result<Universe> {
-    universe_with(config, &Ssh(config), deadline)
-}
-
 pub(crate) fn universe_with(config: &Config, net: &dyn Net, deadline: Instant) -> Result<Universe> {
     let root = config.state.join("replica");
     let Some(store) = LockedStore::load_until(config, deadline)? else {
@@ -331,6 +372,8 @@ pub(crate) fn universe_with(config: &Config, net: &dyn Net, deadline: Instant) -
             me: Me { node: String::new(), store: None, root: root.display().to_string(), membership: None },
             nodes: BTreeMap::new(),
             stopped: Some("busy"),
+            view: String::new(),
+            swarm: String::new(),
         });
     };
     let me = store.data.node_id.clone();
@@ -341,6 +384,7 @@ pub(crate) fn universe_with(config: &Config, net: &dyn Net, deadline: Instant) -
     // covered (review-n on #1452).
     let mut known = catalog_machines(&store);
     let membership = store.membership();
+    let view = view(&store);
     let peers: Vec<(String, String)> = store
         .data
         .peers
@@ -442,7 +486,7 @@ pub(crate) fn universe_with(config: &Config, net: &dyn Net, deadline: Instant) -
             closed: Some("unroutable"),
         });
     }
-    Ok(Universe { me, nodes, stopped })
+    Ok(Universe { me, nodes, stopped, view, swarm })
 }
 
 /// A fresh hello to the node at the end of `route`, and the peers it lists.
@@ -509,12 +553,359 @@ fn observe(net: &dyn Net, swarm: &str, whole: Route<'_>, deadline: Instant) -> (
     (found, peers.unwrap_or_default(), writers.unwrap_or_default())
 }
 
+/// The most rounds one proof exchanges before its confirmation.
+const ROUNDS: usize = 3;
+/// How long a member waits for the project it is asked about.
+const PROJECT_WAIT: Duration = Duration::from_secs(5);
+
+/// `swarm replica-task`: one task of one project, exchanged for the fence.
+#[derive(Deserialize)]
+pub struct TaskRequest {
+    swarm_id: String,
+    project: String,
+    task: String,
+    /// The requester's version of the task (canonical).
+    version: Version,
+    #[serde(default)]
+    updates: Vec<replica::Wire>,
+    /// The store this member's fresh hello over the requester's route showed.
+    store: String,
+    #[serde(default)]
+    remaining_ms: u64,
+}
+
+/// `swarm replica-task`: imports the requester's updates of the task (the
+/// store's locked import repairs the schema before anything answers), saves
+/// them, reads the task again from its files, and answers with what that
+/// read shows and the updates the requester lacks. A store other than the
+/// one the requester observed imports nothing and answers only its own, so
+/// the requester closes its proof as a changed identity.
+pub fn task(config: &Config, request: TaskRequest) -> Result<Value> {
+    // One deadline from this answer's entry covers the catalog, the store
+    // identity, the project and the store's admission, and no answer is
+    // given after it (review-n on #1464).
+    let deadline = Instant::now() + Duration::from_millis(request.remaining_ms).min(transport::CALL_LIMIT);
+    let busy = || anyhow::anyhow!("busy past the task exchange's deadline");
+    ensure!(ids::is_uuid(&request.task), "a task UUID");
+    let theirs = canonical_version(&request.version)
+        .ok_or_else(|| anyhow::anyhow!("the requester's version is not canonical"))?;
+    let node = replica::admit_project_until(config, &request.swarm_id, &request.project, deadline)?
+        .ok_or_else(busy)?;
+    let root = config.state.join("replica");
+    let own = ProjectStore::store_id_until(&root, deadline)?.ok_or_else(busy)?;
+    let base = json!({"node_id": node, "store": own, "task": request.task});
+    if own != request.store {
+        return Ok(base);
+    }
+    let wait = deadline.saturating_duration_since(Instant::now()).min(PROJECT_WAIT);
+    let Some(store) = ProjectStore::open_within(&root, &request.project, wait)? else {
+        let mut busy = base;
+        busy["busy"] = json!(true);
+        return Ok(busy);
+    };
+    let updates = replica::decode(request.updates)?;
+    ensure!(
+        updates.iter().all(|u| u.document == Document::Task(request.task.clone())),
+        "only this task's updates"
+    );
+    let imported = store.import_updates(updates)?;
+    let mut reply = base;
+    reply["refused"] = json!(imported.refused);
+    // The coherent reread, after the import's durable save, inside the
+    // store's admission within the deadline.
+    let mut admitted = store.admit_until(deadline).ok_or_else(busy)?;
+    match admitted.load(&request.task) {
+        Ok(task) => {
+            let version = task.applied_version();
+            let updates = task.export_since_version(&theirs)?;
+            reply["loads"] = json!(true);
+            reply["applied"] = json!(version.is_some());
+            reply["version"] = json!(version);
+            reply["stored_schema"] = json!(task.stored_schema());
+            reply["floor"] = json!(task.floor_record().is_some());
+            reply["updates"] = json!(replica::encode(vec![Update {
+                document: Document::Task(request.task.clone()),
+                bytes: updates,
+            }]));
+        }
+        Err(error) => {
+            reply["loads"] = json!(false);
+            reply["error"] = json!(error.to_string());
+        }
+    }
+    ensure!(Instant::now() < deadline, "the task exchange's deadline passed");
+    Ok(reply)
+}
+
+/// The fence's proof for one task: one common version every node of the
+/// universe, and this computer, hold, with a valid floor and a RAW stored
+/// schema of at least 7, read after each one's import, repair and save. It
+/// proves the schema barrier only: no exclusive delivery and no consent.
+#[derive(Clone, Debug, Serialize)]
+pub struct Proof {
+    pub project: String,
+    pub task: String,
+    pub version: Version,
+    pub incarnation: String,
+    #[serde(skip)]
+    pub view: String,
+    pub me: Me,
+    /// Every node that confirmed, with the store it answered from.
+    pub nodes: BTreeMap<String, String>,
+    pub rounds: usize,
+}
+
+/// Why a proof or a final admission is closed, and at which node.
+#[derive(Clone, Debug, PartialEq, Eq, Serialize)]
+pub struct Closed {
+    pub node: Option<String>,
+    pub reason: &'static str,
+}
+
+fn closed<T>(node: Option<&str>, reason: &'static str) -> Result<std::result::Result<T, Closed>> {
+    Ok(Err(Closed { node: node.map(str::to_owned), reason }))
+}
+
+/// What this computer's copy shows, read under the timed project lock and
+/// the store's timed admission.
+fn local(
+    config: &Config,
+    project: &str,
+    uuid: &str,
+    deadline: Instant,
+) -> Result<std::result::Result<TaskDoc, Closed>> {
+    let root = config.state.join("replica");
+    let Some(store) = ProjectStore::open_within(&root, project, left(deadline))? else {
+        return closed(None, "busy");
+    };
+    let Some(mut admitted) = store.admit_until(deadline) else {
+        return closed(None, "busy");
+    };
+    match admitted.load(uuid) {
+        Ok(task) => Ok(Ok(task)),
+        Err(_) => closed(None, "damaged"),
+    }
+}
+
+/// Why this copy cannot be the common version, when it cannot: the raw
+/// stored schema, the floor and a fully applied state (`fence_ready`).
+fn barrier(task: &TaskDoc) -> Option<&'static str> {
+    task.fence_ready()
+}
+
+/// Proves the fence for `uuid` within `deadline`: the universe, then rounds
+/// of `replica-task` with every node over its verified route, each ended by
+/// one confirmation pass over ONE version, then the universe again, which
+/// must be the same incarnation. Acknowledgements of different versions are
+/// never combined; no lock is held across the network.
+pub(crate) fn prove(
+    config: &Config,
+    net: &dyn Net,
+    project: &str,
+    uuid: &str,
+    deadline: Instant,
+) -> Result<(Universe, std::result::Result<Proof, Closed>)> {
+    let first = universe_with(config, net, deadline)?;
+    let proved = prove_over(config, net, &first, project, uuid, deadline)?;
+    Ok((first, proved))
+}
+
+fn prove_over(
+    config: &Config,
+    net: &dyn Net,
+    first: &Universe,
+    project: &str,
+    uuid: &str,
+    deadline: Instant,
+) -> Result<std::result::Result<Proof, Closed>> {
+    if let Some((node, reason)) = first.closed() {
+        return closed(node, reason);
+    }
+    let root = config.state.join("replica");
+    let nodes: Vec<&Node> = first.nodes.values().filter(|node| !node.no_replica).collect();
+    // The version each node last answered with: what it lacks is sent.
+    let mut theirs: BTreeMap<String, Version> = BTreeMap::new();
+    for round in 1..=ROUNDS {
+        let task = match local(config, project, uuid, deadline)? {
+            Ok(task) => task,
+            Err(closed) => return Ok(Err(closed)),
+        };
+        if let Some(reason) = barrier(&task) {
+            return closed(None, reason);
+        }
+        let version = task.applied_version().expect("barrier checked it");
+        let mut confirmed = true;
+        let mut answered = BTreeMap::new();
+        for node in &nodes {
+            let stores = first.stores(node).expect("a routed node");
+            let store = node.store.clone().expect("a node with a store");
+            let since = theirs.get(&node.node).cloned().unwrap_or_default();
+            let request = json!({
+                "swarm_id": first.swarm, "project": project, "task": uuid,
+                "version": version, "store": store,
+                "updates": replica::encode(vec![Update {
+                    document: Document::Task(uuid.to_owned()),
+                    bytes: task.export_since_version(&since)?,
+                }]),
+                "remaining_ms": left(deadline).as_millis() as u64,
+            });
+            let route = Route { alias: &node.alias, nodes: &node.route, stores: &stores };
+            let reply = match net.call(&first.swarm, route, "replica-task", Some(&request), deadline) {
+                Ok(reply) => reply,
+                Err(error) => {
+                    let reason = if error.downcast_ref::<Unverified>().is_some() {
+                        "unverified"
+                    } else if left(deadline).is_zero() {
+                        "deadline"
+                    } else {
+                        "unreachable"
+                    };
+                    return closed(Some(&node.node), reason);
+                }
+            };
+            if reply["store"].as_str() != Some(store.as_str()) {
+                return closed(Some(&node.node), "changed_identity");
+            }
+            if reply["busy"] == true {
+                return closed(Some(&node.node), "busy");
+            }
+            if reply["loads"] != true {
+                return closed(Some(&node.node), "damaged");
+            }
+            let Some(their) = serde_json::from_value::<Version>(reply["version"].clone())
+                .ok()
+                .and_then(|v| canonical_version(&v))
+                .filter(|_| reply["applied"] == true)
+            else {
+                return closed(Some(&node.node), "malformed");
+            };
+            let updates: Vec<Update> = serde_json::from_value(reply["updates"].clone())
+                .ok()
+                .and_then(|wire| replica::decode(wire).ok())
+                .ok_or_else(|| anyhow::anyhow!("{} sent an invalid task exchange", node.node))?;
+            let refused = reply["refused"].as_array().is_none_or(|r| !r.is_empty());
+            let floor = reply["floor"] == true;
+            let schema = reply["stored_schema"].as_i64().is_some_and(|s| s >= TASK_SCHEMA);
+            // Only a node that answered exactly this version, with nothing
+            // more for this copy, confirms it in this round.
+            let lacks = updates.iter().any(|u| !u.bytes.is_empty())
+                && !version_includes(&version, &their);
+            if their != version || lacks || refused || !floor || !schema {
+                confirmed = false;
+            }
+            if !version_includes(&version, &their) {
+                let Some(store) = ProjectStore::open_within(&root, project, left(deadline))? else {
+                    return closed(None, "busy");
+                };
+                store.import_updates(updates)?;
+            }
+            theirs.insert(node.node.clone(), their);
+            answered.insert(node.node.clone(), store);
+        }
+        if !confirmed {
+            continue;
+        }
+        // This copy still holds exactly that version after the pass.
+        let again = match local(config, project, uuid, deadline)? {
+            Ok(task) => task,
+            Err(closed) => return Ok(Err(closed)),
+        };
+        if barrier(&again).is_some() || again.applied_version().as_ref() != Some(&version) {
+            continue;
+        }
+        let second = universe_with(config, net, deadline)?;
+        if let Some((node, reason)) = second.closed() {
+            return closed(node, reason);
+        }
+        if second.incarnation() != first.incarnation() {
+            return closed(None, "membership_changed");
+        }
+        return Ok(Ok(Proof {
+            project: project.to_owned(),
+            task: uuid.to_owned(),
+            version,
+            incarnation: first.incarnation(),
+            view: first.view.clone(),
+            me: first.me.clone(),
+            nodes: answered,
+            rounds: round,
+        }));
+    }
+    if left(deadline).is_zero() {
+        return closed(None, "deadline");
+    }
+    closed(None, "not_converged")
+}
+
+impl Proof {
+    /// The final admission: in ONE critical section, taken in this order and
+    /// each no later than `deadline` (the catalog lock, which every
+    /// membership change takes; the project lock; the store's admission),
+    /// the membership view, this computer's store and root, the hold (when
+    /// the task records no attempt yet, so the next is its first), the
+    /// task's version holding the proof's, its floor and its RAW stored
+    /// schema are read again; only then does `then` run, with the admission
+    /// and the task. Nothing is held across the network.
+    pub(crate) fn admit<R>(
+        &self,
+        config: &Config,
+        deadline: Instant,
+        then: impl FnOnce(&mut Admitted<'_>, &mut TaskDoc) -> Result<R>,
+    ) -> Result<std::result::Result<R, Closed>> {
+        let Some(catalog) = LockedStore::load_until(config, deadline)? else {
+            return closed(None, "busy");
+        };
+        if view(&catalog) != self.view {
+            return closed(None, "membership_changed");
+        }
+        let root = config.state.join("replica");
+        // The store identity within the same deadline: a creator holding its
+        // lock past it is busy, never waited for (review-n on #1464).
+        let own = match ProjectStore::store_id_until(&root, deadline) {
+            Ok(Some(own)) => Some(own),
+            Ok(None) => return closed(None, "busy"),
+            Err(_) => None,
+        };
+        if own != self.me.store || root.display().to_string() != self.me.root {
+            return closed(Some(&self.me.node), "changed_identity");
+        }
+        let Some(store) = ProjectStore::open_within(&root, &self.project, left(deadline))? else {
+            return closed(None, "busy");
+        };
+        let held = store.project()?.cutover_hold().is_some_and(|hold| hold.on);
+        let Some(mut admitted) = store.admit_until(deadline) else {
+            return closed(None, "busy");
+        };
+        let Ok(mut task) = admitted.load(&self.task) else {
+            return closed(None, "damaged");
+        };
+        if held && !task.executes_attempts() {
+            return closed(None, "held");
+        }
+        if let Some(reason) = barrier(&task) {
+            return closed(None, reason);
+        }
+        let holds = task
+            .applied_version()
+            .is_some_and(|version| version_includes(&version, &self.version));
+        if !holds {
+            return closed(None, "changed_version");
+        }
+        let result = then(&mut admitted, &mut task)?;
+        drop(admitted);
+        drop(store);
+        drop(catalog);
+        Ok(Ok(result))
+    }
+}
+
 #[cfg(test)]
 mod tests {
     //! C3c1's local bounds; the routes themselves are pinned through the
     //! real CLI and the fake-SSH fixture (tests/test_swarm.py).
     use super::*;
     use crate::swarm::store::Peer;
+    use anyhow::ensure;
 
     fn fixture() -> (tempfile::TempDir, Config) {
         let dir = tempfile::tempdir().unwrap();
@@ -557,7 +948,7 @@ mod tests {
         let started = Instant::now();
         let refused = LockedStore::load_until(&config, started + Duration::from_millis(150)).unwrap();
         let waited = started.elapsed();
-        let universe = universe(&config, Instant::now() + Duration::from_millis(50)).unwrap();
+        let universe = universe_with(&config, &Ssh(&config), Instant::now() + Duration::from_millis(50)).unwrap();
         drop(held);
         assert!(refused.is_none(), "the catalog lock was taken while held");
         assert!(waited >= Duration::from_millis(150) && waited < Duration::from_secs(5), "{waited:?}");
@@ -752,6 +1143,425 @@ mod tests {
         let swarm = String::new();
         let net = Hellos { swarm, peers: chain(1), writers: BTreeMap::new(), unavailable: BTreeSet::new() };
         assert!(universe_with(&config, &net, Instant::now() + Duration::from_secs(5)).is_err());
+    }
+
+    /// An in-process swarm for the proof: real node configurations, each with
+    /// its own catalog store and replica root, sharing one swarm. `links`
+    /// enrol each node's verified peers (both ways).
+    struct Members {
+        _dir: tempfile::TempDir,
+        configs: BTreeMap<String, Config>,
+        ids: BTreeMap<String, String>,
+    }
+
+    fn members(names: &[&str], links: &[(&str, &str)]) -> Members {
+        let dir = tempfile::tempdir().unwrap();
+        let mut configs = BTreeMap::new();
+        let mut ids = BTreeMap::new();
+        let mut swarm = None;
+        for name in names {
+            let base = dir.path().join(name);
+            let peers: Vec<String> = links
+                .iter()
+                .filter_map(|(a, b)| (a == name).then(|| b.to_string()).or_else(|| (b == name).then(|| a.to_string())))
+                .collect();
+            let config = Config {
+                home: base.to_str().unwrap().into(),
+                dir: base.join("config"),
+                state: base.join("state"),
+                selves: vec![format!("{name}-local")],
+                peers,
+                base_peers: vec![],
+                peers_from_environment: false,
+                machines: BTreeMap::new(),
+                tab: false,
+                tab_colors: String::new(),
+            };
+            let mut store = LockedStore::load(&config).unwrap();
+            let shared = swarm.get_or_insert_with(|| store.data.catalog.swarm_id.clone()).clone();
+            store.data.catalog.swarm_id = shared;
+            ids.insert(name.to_string(), store.data.node_id.clone());
+            store.save().unwrap();
+            drop(store);
+            // The project is stored on every member.
+            ProjectStore::open(&config.state.join("replica"), "p").unwrap();
+            configs.insert(name.to_string(), config);
+        }
+        for name in names {
+            let mut store = LockedStore::load(&configs[*name]).unwrap();
+            for alias in configs[*name].peers.clone() {
+                store.data.peers.insert(alias.clone(), Peer { node: ids[&alias].clone(), ..Peer::default() });
+            }
+            store.save().unwrap();
+        }
+        Members { _dir: dir, configs, ids }
+    }
+
+    /// The members' calls in process: each one dispatched to the real
+    /// `hello` or `replica-task` of the node at the route's end, with the
+    /// faults a test asks for.
+    #[derive(Default)]
+    struct Faults {
+        /// Answer without importing what was sent (an answer before the save).
+        early: BTreeSet<String>,
+        /// Answer naming another store.
+        wrong_store: BTreeSet<String>,
+        offline: BTreeSet<String>,
+    }
+
+    struct InProcess<'a> {
+        members: &'a Members,
+        faults: Faults,
+        /// Runs once, at the first task exchange.
+        during: std::cell::RefCell<Option<Box<dyn FnOnce() + 'a>>>,
+    }
+
+    impl<'a> InProcess<'a> {
+        fn new(members: &'a Members, faults: Faults) -> Self {
+            Self { members, faults, during: std::cell::RefCell::new(None) }
+        }
+        fn node(&self, id: &str) -> &'a Config {
+            let name = self.members.ids.iter().find(|(_, node)| *node == id).expect("a member").0;
+            &self.members.configs[name]
+        }
+    }
+
+    impl Net for InProcess<'_> {
+        fn call(&self, _: &str, route: Route<'_>, command: &str, input: Option<&Value>, _: Instant) -> Result<Value> {
+            let node = route.nodes.last().unwrap();
+            ensure!(!self.faults.offline.contains(node), "{node} is offline");
+            let config = self.node(node);
+            match command {
+                "hello" => transport::hello(config, false),
+                "replica-task" => {
+                    if let Some(during) = self.during.borrow_mut().take() {
+                        during();
+                    }
+                    let mut request = input.unwrap().clone();
+                    if self.faults.early.contains(node) {
+                        request["updates"] = json!([]);
+                    }
+                    let mut reply = task(config, serde_json::from_value(request)?)?;
+                    if self.faults.wrong_store.contains(node) {
+                        reply["store"] = json!("99999999-9999-4999-8999-999999999999");
+                    }
+                    Ok(reply)
+                }
+                other => anyhow::bail!("{other} is not served here"),
+            }
+        }
+    }
+
+    /// A floored task in `name`'s store.
+    fn floored(members: &Members, name: &str) -> TaskDoc {
+        let store = ProjectStore::open(&members.configs[name].state.join("replica"), "p").unwrap();
+        let mut task = TaskDoc::create(zerus_replica::NewTask {
+            project: "p",
+            id: &store.unused_short_id().unwrap(),
+            text: "Add rate limiting",
+            stage: zerus_replica::Stage::Todo,
+            target: zerus_replica::Target::Any,
+            author: zerus_replica::Actor::Person,
+            rank: "V",
+            now: 1,
+        })
+        .unwrap();
+        assert!(task.floor().unwrap());
+        store.save(&mut task).unwrap();
+        task
+    }
+
+    fn held(members: &Members, name: &str, uuid: &str) -> Option<TaskDoc> {
+        ProjectStore::open(&members.configs[name].state.join("replica"), "p").unwrap().load(uuid).ok()
+    }
+
+    fn soon() -> Instant {
+        Instant::now() + Duration::from_secs(10)
+    }
+
+    fn chain_abc() -> Members {
+        members(&["a", "b", "c"], &[("a", "b"), ("b", "c")])
+    }
+
+    /// C3c2: over A-B-C (c reached only through b), one exchange brings the
+    /// floored task to every member, and one confirmation pass over ONE
+    /// version proves it; the final admission then runs the reservation's
+    /// place exactly once.
+    #[test]
+    fn a_floored_task_is_proved_over_every_writer_and_admitted() {
+        let members = chain_abc();
+        let task = floored(&members, "a");
+        let net = InProcess::new(&members, Faults::default());
+        let config = &members.configs["a"];
+        let (universe, proved) = prove(config, &net, "p", task.uuid(), soon()).unwrap();
+        assert_eq!(universe.closed(), None);
+        let proof = proved.unwrap();
+        assert_eq!(proof.nodes.keys().cloned().collect::<BTreeSet<_>>(),
+                   BTreeSet::from([members.ids["b"].clone(), members.ids["c"].clone()]));
+        assert_eq!(Some(&proof.version), task.applied_version().as_ref());
+        for name in ["b", "c"] {
+            let copy = held(&members, name, task.uuid()).expect("the member holds the task");
+            assert_eq!(copy.applied_version().as_ref(), Some(&proof.version), "{name}");
+            assert_eq!(copy.fence_ready(), None, "{name}");
+        }
+        let mut runs = 0;
+        let admitted = proof.admit(config, soon(), |_, task| {
+            runs += 1;
+            assert_eq!(task.applied_version().as_ref(), Some(&proof.version));
+            // A membership change waits for the admission: the catalog lock
+            // is held through it (review-n's atomic final admission).
+            assert!(LockedStore::load_until(config, Instant::now() + Duration::from_millis(50)).unwrap().is_none());
+            Ok(())
+        });
+        assert_eq!((admitted.unwrap(), runs), (Ok(()), 1));
+    }
+
+    /// desktop-u's control: a later winning lower schema write on one member
+    /// (a copy that never saw the floor) is repaired there, and only the
+    /// repaired common version, confirmed by every member, proves the fence.
+    #[test]
+    fn a_later_lower_schema_write_proves_only_after_its_repair_is_common() {
+        let members = chain_abc();
+        let store = ProjectStore::open(&members.configs["a"].state.join("replica"), "p").unwrap();
+        let mut task = TaskDoc::create(zerus_replica::NewTask {
+            project: "p",
+            id: &store.unused_short_id().unwrap(),
+            text: "Add rate limiting",
+            stage: zerus_replica::Stage::Todo,
+            target: zerus_replica::Target::Any,
+            author: zerus_replica::Actor::Person,
+            rank: "V",
+            now: 1,
+        })
+        .unwrap();
+        let before = task.snapshot().unwrap();
+        assert!(task.floor().unwrap());
+        store.save(&mut task).unwrap();
+        drop(store);
+        let mut stale = TaskDoc::from_bytes(&before).unwrap();
+        for n in 0..20 {
+            stale.comment(&format!("note {n}"), &zerus_replica::Actor::Person, 2 + n).unwrap();
+        }
+        stale.set_title("Rate limiting", &zerus_replica::Actor::Person, 30).unwrap();
+        // c holds the copy without the floor.
+        let c = ProjectStore::open(&members.configs["c"].state.join("replica"), "p").unwrap();
+        c.import_updates(vec![Update { document: Document::Task(task.uuid().to_owned()), bytes: stale.snapshot().unwrap() }]).unwrap();
+        drop(c);
+        let net = InProcess::new(&members, Faults::default());
+        let config = &members.configs["a"];
+        let proof = prove(config, &net, "p", task.uuid(), soon()).unwrap().1.unwrap();
+        assert!(proof.rounds >= 2, "the repair needs another round: {}", proof.rounds);
+        let here = held(&members, "a", task.uuid()).unwrap();
+        assert!(version_includes(&proof.version, &task.applied_version().unwrap()));
+        assert_ne!(Some(&proof.version), task.applied_version().as_ref(), "the common version holds the repair");
+        for name in ["a", "b", "c"] {
+            let copy = held(&members, name, task.uuid()).unwrap();
+            assert_eq!(copy.applied_version().as_ref(), Some(&proof.version), "{name}");
+            assert!(copy.stored_schema() >= TASK_SCHEMA, "{name}");
+        }
+        assert_eq!(here.title(), "Rate limiting");
+    }
+
+    /// desktop-u's control: a member that answers before it imports and
+    /// saves never confirms the version; the proof stays closed.
+    #[test]
+    fn an_answer_before_the_save_never_confirms() {
+        let members = chain_abc();
+        let task = floored(&members, "a");
+        let faults = Faults { early: BTreeSet::from([members.ids["c"].clone()]), ..Faults::default() };
+        let net = InProcess::new(&members, faults);
+        let closed = prove(&members.configs["a"], &net, "p", task.uuid(), soon()).unwrap().1.unwrap_err();
+        assert!(matches!(closed.reason, "not_converged" | "damaged"), "{closed:?}");
+        assert!(held(&members, "c", task.uuid()).is_none(), "c never imported the floor");
+        // c holds the floored task at an older version, healthy in every
+        // other way: answering before it imports, with nothing more to send,
+        // its version still differs, so the proof never confirms.
+        let proved = prove(&members.configs["a"], &InProcess::new(&members, Faults::default()), "p", task.uuid(), soon());
+        assert!(proved.unwrap().1.is_ok());
+        let a = ProjectStore::open(&members.configs["a"].state.join("replica"), "p").unwrap();
+        let mut newer = a.load(task.uuid()).unwrap();
+        newer.comment("after the first proof", &zerus_replica::Actor::Person, 5).unwrap();
+        a.save(&mut newer).unwrap();
+        drop(a);
+        let faults = Faults { early: BTreeSet::from([members.ids["c"].clone()]), ..Faults::default() };
+        let closed = prove(&members.configs["a"], &InProcess::new(&members, faults), "p", task.uuid(), soon())
+            .unwrap()
+            .1
+            .unwrap_err();
+        assert_eq!(closed.reason, "not_converged");
+        let older = held(&members, "c", task.uuid()).unwrap();
+        assert_eq!(older.fence_ready(), None, "c's older copy is healthy");
+        assert_ne!(older.applied_version(), newer.applied_version());
+    }
+
+    /// review-n on #1464: a task exchange's one deadline starts on arrival
+    /// and covers the catalog lock: held past it, a 100 ms exchange is
+    /// refused within it, never answered after it.
+    #[test]
+    fn a_task_exchange_is_refused_within_its_deadline() {
+        let members = chain_abc();
+        let task = floored(&members, "a");
+        let b = &members.configs["b"];
+        let request = |remaining_ms: u64| -> TaskRequest {
+            serde_json::from_value(json!({
+                "swarm_id": LockedStore::load(&members.configs["a"]).unwrap().data.catalog.swarm_id,
+                "project": "p", "task": task.uuid(), "version": {}, "updates": [],
+                "store": ProjectStore::store_id(&b.state.join("replica")).unwrap(),
+                "remaining_ms": remaining_ms,
+            }))
+            .unwrap()
+        };
+        let control = super::task(b, request(5000)).unwrap();
+        assert_eq!(control["loads"], json!(false), "b holds no copy yet");
+        let early = request(100);
+        let held = LockedStore::load(b).unwrap();
+        let started = Instant::now();
+        let refused = super::task(b, early);
+        let waited = started.elapsed();
+        drop(held);
+        assert!(format!("{:#}", refused.unwrap_err()).contains("deadline"));
+        assert!(waited >= Duration::from_millis(100) && waited < Duration::from_secs(2), "{waited:?}");
+    }
+
+    /// review-n on #1464 R2: the final admission reads this computer's
+    /// store identity within its deadline; a creator holding the identity's
+    /// lock past it gives busy within the deadline, never a wait.
+    #[test]
+    fn the_final_admission_never_waits_on_the_store_identity() {
+        use fs2::FileExt;
+        let members = chain_abc();
+        let task = floored(&members, "a");
+        let config = &members.configs["a"];
+        let net = InProcess::new(&members, Faults::default());
+        let proof = prove(config, &net, "p", task.uuid(), soon()).unwrap().1.unwrap();
+        let root = config.state.join("replica");
+        std::fs::remove_file(root.join("store-id")).unwrap();
+        let creator = std::fs::OpenOptions::new()
+            .create(true)
+            .truncate(false)
+            .write(true)
+            .open(root.join("store-id.lock"))
+            .unwrap();
+        creator.lock_exclusive().unwrap();
+        let started = Instant::now();
+        let mut runs = 0;
+        let refused = proof.admit(config, started + Duration::from_millis(100), |_, _| {
+            runs += 1;
+            Ok(())
+        });
+        let waited = started.elapsed();
+        drop(creator);
+        assert_eq!(refused.unwrap().unwrap_err().reason, "busy");
+        assert_eq!(runs, 0);
+        assert!(waited >= Duration::from_millis(100) && waited < Duration::from_secs(2), "{waited:?}");
+    }
+
+    /// A reply from another store than the hello showed closes the proof.
+    #[test]
+    fn a_reply_from_another_store_closes_the_proof() {
+        let members = chain_abc();
+        let task = floored(&members, "a");
+        let faults = Faults { wrong_store: BTreeSet::from([members.ids["c"].clone()]), ..Faults::default() };
+        let net = InProcess::new(&members, faults);
+        let closed = prove(&members.configs["a"], &net, "p", task.uuid(), soon()).unwrap().1.unwrap_err();
+        assert_eq!(closed, Closed { node: Some(members.ids["c"].clone()), reason: "changed_identity" });
+    }
+
+    /// An unreachable writer, an unfloored task and an exhausted budget all
+    /// close the proof.
+    #[test]
+    fn an_unreachable_writer_an_unfloored_task_or_no_time_closes_the_proof() {
+        let members = chain_abc();
+        let task = floored(&members, "a");
+        let faults = Faults { offline: BTreeSet::from([members.ids["c"].clone()]), ..Faults::default() };
+        let offline = InProcess::new(&members, faults);
+        let closed = prove(&members.configs["a"], &offline, "p", task.uuid(), soon()).unwrap().1.unwrap_err();
+        assert_eq!(closed, Closed { node: Some(members.ids["c"].clone()), reason: "unreachable" });
+        let store = ProjectStore::open(&members.configs["a"].state.join("replica"), "p").unwrap();
+        let mut plain = TaskDoc::create(zerus_replica::NewTask {
+            project: "p",
+            id: &store.unused_short_id().unwrap(),
+            text: "Not cut over",
+            stage: zerus_replica::Stage::Todo,
+            target: zerus_replica::Target::Any,
+            author: zerus_replica::Actor::Person,
+            rank: "W",
+            now: 1,
+        })
+        .unwrap();
+        store.save(&mut plain).unwrap();
+        drop(store);
+        let net = InProcess::new(&members, Faults::default());
+        let closed = prove(&members.configs["a"], &net, "p", plain.uuid(), soon()).unwrap().1.unwrap_err();
+        assert_eq!(closed.reason, "no_floor");
+        let closed = prove(&members.configs["a"], &net, "p", task.uuid(), Instant::now()).unwrap().1.unwrap_err();
+        assert!(matches!(closed.reason, "busy" | "deadline"), "{closed:?}");
+    }
+
+    /// review-n's membership ABA during the proof: b disconnects c and
+    /// enrols it again between the two reads of the universe; its membership
+    /// generation changes, so the proof closes.
+    #[test]
+    fn a_membership_change_during_the_proof_closes_it() {
+        let members = chain_abc();
+        let task = floored(&members, "a");
+        let net = InProcess::new(&members, Faults::default());
+        let b = &members.configs["b"];
+        let c = members.ids["c"].clone();
+        *net.during.borrow_mut() = Some(Box::new(move || {
+            let mut store = LockedStore::load(b).unwrap();
+            let peer = store.data.peers.remove("c").unwrap();
+            store.save().unwrap();
+            store.data.peers.insert("c".into(), peer);
+            store.save().unwrap();
+            assert_eq!(store.data.peers["c"].node, c);
+        }));
+        let closed = prove(&members.configs["a"], &net, "p", task.uuid(), soon()).unwrap().1.unwrap_err();
+        assert_eq!(closed.reason, "membership_changed");
+    }
+
+    /// The final admission reads everything again, in one critical section,
+    /// and runs nothing on any change: the hold for a first attempt, this
+    /// computer's membership (an ABA here), its store, a busy catalog.
+    #[test]
+    fn the_final_admission_refuses_every_drift_and_runs_nothing() {
+        let members = chain_abc();
+        let task = floored(&members, "a");
+        let config = &members.configs["a"];
+        let net = InProcess::new(&members, Faults::default());
+        let proof = prove(config, &net, "p", task.uuid(), soon()).unwrap().1.unwrap();
+        let mut runs = 0;
+        let mut admit = |deadline: Instant| proof.admit(config, deadline, |_, _| { runs += 1; Ok(()) }).unwrap();
+        // The hold, for a task that records no attempt yet.
+        let store = ProjectStore::open(&config.state.join("replica"), "p").unwrap();
+        let mut doc = store.project().unwrap();
+        doc.set_cutover_hold(true, &zerus_replica::Actor::Person, 2).unwrap();
+        store.save_project(&doc).unwrap();
+        drop(store);
+        assert_eq!(admit(soon()).unwrap_err().reason, "held");
+        let store = ProjectStore::open(&config.state.join("replica"), "p").unwrap();
+        let mut doc = store.project().unwrap();
+        doc.set_cutover_hold(false, &zerus_replica::Actor::Person, 3).unwrap();
+        store.save_project(&doc).unwrap();
+        drop(store);
+        // A busy catalog: refused within the deadline.
+        let catalog = LockedStore::load(config).unwrap();
+        assert_eq!(admit(Instant::now() + Duration::from_millis(50)).unwrap_err().reason, "busy");
+        drop(catalog);
+        // This computer's membership ABA: b disconnected and enrolled again.
+        let mut store = LockedStore::load(config).unwrap();
+        let peer = store.data.peers.remove("b").unwrap();
+        store.save().unwrap();
+        store.data.peers.insert("b".into(), peer);
+        store.save().unwrap();
+        drop(store);
+        assert_eq!(admit(soon()).unwrap_err().reason, "membership_changed");
+        assert_eq!(runs, 0, "nothing ran on any refusal");
+        // A fresh proof admits; then a replaced store identity refuses.
+        let proof = prove(config, &net, "p", task.uuid(), soon()).unwrap().1.unwrap();
+        std::fs::remove_file(config.state.join("replica").join("store-id")).unwrap();
+        let closed = proof.admit(config, soon(), |_, _| -> Result<()> { panic!("ran after a store change") }).unwrap();
+        assert_eq!(closed.unwrap_err().reason, "changed_identity");
     }
 
     /// review-n on #1452: catalog-only candidates count against the cap too.

@@ -176,13 +176,13 @@ fn settled(files: &[Option<Stamp>]) -> bool {
         .all(|Stamp(_, secs, nanos, _)| Duration::new(*secs, *nanos) + SETTLE <= now)
 }
 
-fn version(vv: &VersionVector) -> Version {
+pub(crate) fn version(vv: &VersionVector) -> Version {
     vv.iter()
         .map(|(peer, count)| (peer.to_string(), *count))
         .collect()
 }
 
-fn vector(version: &Version) -> Result<VersionVector> {
+pub(crate) fn vector(version: &Version) -> Result<VersionVector> {
     version
         .iter()
         .map(|(peer, count)| {
@@ -192,6 +192,27 @@ fn vector(version: &Version) -> Result<VersionVector> {
             Ok((peer, *count))
         })
         .collect()
+}
+
+/// A version received from another replica, in its one canonical form: each
+/// peer a canonical decimal u64 with a positive count; an entry of 0 says
+/// nothing and is dropped. None when any entry is not of that form, so two
+/// versions compare as the changes they name, never as their encodings
+/// (review-n on the C3 design: `TaskDoc::version` bytes are not canonical).
+pub fn canonical_version(version: &Version) -> Option<Version> {
+    version
+        .iter()
+        .filter(|(_, count)| **count != 0)
+        .map(|(peer, count)| {
+            let canonical = peer.parse::<u64>().ok()?.to_string() == *peer;
+            (canonical && *count > 0).then(|| (peer.clone(), *count))
+        })
+        .collect()
+}
+
+/// Whether `theirs` holds every change of `ours` (both canonical).
+pub fn version_includes(theirs: &Version, ours: &Version) -> bool {
+    includes(theirs, ours)
 }
 
 /// Whether `theirs` holds every change of `ours`.

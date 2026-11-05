@@ -332,14 +332,14 @@ fn a_check_task_needs_a_command_and_kind() {
     )
     .unwrap_err()
     .to_string();
-    assert_eq!(empty, "Task #1 is a check: its command is empty");
+    assert_eq!(empty, "Task #1: field \"check.command\" is empty");
     let timeout = plan_with(
         &mut team,
         json!({"id":1,"title":"Build","assignee":"dev","kind":"check","check":{"command":"cargo test","timeout_minutes":0}}),
     )
     .unwrap_err()
     .to_string();
-    assert_eq!(timeout, "Task #1: a check waits 1 to 1440 minutes");
+    assert_eq!(timeout, "Task #1: field \"check.timeout_minutes\": a check waits 1 to 1440 minutes");
     let no_kind = plan_with(
         &mut team,
         json!({"id":1,"title":"Build","assignee":"dev","check":{"command":"cargo test"}}),

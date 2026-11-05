@@ -126,11 +126,11 @@ fn role_and_task_text_normalises_crlf_and_names_a_control_character() {
     assert_eq!(member.role, "Back\nend");
     // A refused control character names the field and its position.
     let error = parse_task(&json!({"id":1,"title":"A\u{7}B","assignee":"dev"})).unwrap_err().to_string();
-    assert_eq!(error, "A task title has a control character at position 2");
+    assert_eq!(error, "Task #1: field \"title\": A task title has a control character at position 2");
     let error = parse_task(&json!({"id":1,"title":"A","description":"B\u{7}","assignee":"dev"})).unwrap_err().to_string();
-    assert_eq!(error, "A task description has a control character at position 2");
+    assert_eq!(error, "Task #1: field \"description\": A task description has a control character at position 2");
     let error = parse_member(&json!({"id":"dev","role":"B\u{7}","agent":"codex"})).unwrap_err().to_string();
-    assert_eq!(error, "A role has a control character at position 2");
+    assert_eq!(error, "A member \"dev\": field \"role\": A role has a control character at position 2");
     let error = parse_member(&json!({"id":"dev","role":"Backend","agent":"codex","prompt":"P\u{7}"})).unwrap_err().to_string();
-    assert_eq!(error, "A role prompt has a control character at position 2");
+    assert_eq!(error, "A member \"dev\": field \"prompt\": A role prompt has a control character at position 2");
 }

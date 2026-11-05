@@ -356,7 +356,11 @@ pub(crate) enum MemberFolder {
     /// A full clone with its own `.git`, so commit, merge and fetch work
     /// inside a sandboxed member's folder (B4/B6).
     Clone,
+    /// Task #26: the catalog's `read_only` folder (Architect, Reviewer,
+    /// Security, Researcher) is the shared folder with no own checkout, as
+    /// the desktop already reads it; a draft or plan member may name it.
     #[default]
+    #[serde(alias = "read_only")]
     Shared,
 }
 

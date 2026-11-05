@@ -1907,7 +1907,7 @@ fn a_proposal_allow_could_not_apply_is_refused_when_made() {
         "tasks":[{"id":2,"title":"Follow-up","assignee":"dev","deps":[1]}]});
     let error = ops::apply(&mut team, "propose", &bare, &lead, &BTreeSet::new(), &mut Vec::new()).unwrap_err();
     let error = format!("{error:#}");
-    assert!(error.contains("Allow could not apply") && error.contains("A task is invalid"), "{error}");
+    assert!(error.contains("Allow could not apply") && error.contains("A task \"2\" is invalid: field \"deps\""), "{error}");
     assert!(team.proposals.is_empty(), "nothing was proposed");
     // Unknown work is refused too.
     let unknown = json!({"kind":"cancel-tasks","reason":"drop","tasks":[99]});

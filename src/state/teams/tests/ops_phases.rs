@@ -821,7 +821,7 @@ fn only_you_decide_a_phase_and_only_while_the_team_runs() {
     let error = apply(&mut team, "approve-phase", &json!({"phase":2}), &Actor::Member("lead".into()), &none, &mut events)
         .unwrap_err()
         .to_string();
-    assert_eq!(error, "The lead approves a phase only on the owner's word: pass \"owner_word\"");
+    assert_eq!(error, "The lead approves a phase only on the owner's word: propose {\"kind\":\"approve-phase\"} as a card (hgs guide team-propose); the owner allows it with a click");
     // A finished team refuses both.
     for op in ["approve-phase", "discard-phase"] {
         let mut stopped = team.clone();
@@ -1531,7 +1531,7 @@ fn an_approved_phase_edits_until_its_work_starts() {
     let discarded = apply(&mut team, "discard-phase", &json!({"phase":3}), &Actor::Member("lead".into()), &none, &mut events).unwrap();
     assert_eq!(discarded["status"], "phase_discarded");
     let error = apply(&mut team, "approve-phase", &json!({"phase":3}), &Actor::Member("lead".into()), &none, &mut events).unwrap_err().to_string();
-    assert_eq!(error, "The lead approves a phase only on the owner's word: pass \"owner_word\"");
+    assert_eq!(error, "The lead approves a phase only on the owner's word: propose {\"kind\":\"approve-phase\"} as a card (hgs guide team-propose); the owner allows it with a click");
 }
 
 #[test]

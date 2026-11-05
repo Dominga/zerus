@@ -398,6 +398,9 @@ pub(crate) enum Step {
     /// #511 N3: tell a member its worked-ahead attempt was revoked with its
     /// phase, so it stops.
     TellStop { stop: String },
+    /// Task 24: interrupts a member's busy turn once before its stop notice
+    /// (the owner's interrupt_revoked).
+    InterruptStop { stop: String },
 }
 
 /// U18: the lead's turn has ended and it can take a message, also while its own
@@ -1089,10 +1092,17 @@ pub(crate) fn steps_with(team: &Team, seen: &[Seen], now: f64, listed: Option<&B
     }
     // #511 N3: a member whose worked-ahead attempt was revoked hears it once,
     // as soon as its session runs; the message waits behind its turn.
+    // Task 24: so does a member whose attempt in progress was reassigned,
+    // taken over or cancelled; with the owner's interrupt_revoked its busy turn
+    // is interrupted once first, so it stops at once and takes its next task.
     for stop in team.stops.iter().filter(|stop| stop.notice == Notice::Pending) {
-        if team.member(&stop.member).and_then(|member| session_of(member, seen)).is_some_and(|found| found.live) {
-            steps.push(Step::TellStop { stop: stop.id.clone() });
+        let Some(found) = team.member(&stop.member).and_then(|member| session_of(member, seen)).filter(|found| found.live) else {
+            continue;
+        };
+        if stop.interrupt && !stop.interrupted && !found.free {
+            steps.push(Step::InterruptStop { stop: stop.id.clone() });
         }
+        steps.push(Step::TellStop { stop: stop.id.clone() });
     }
     // U47/U48: a started stage command ends while the team is paused too; a
     // new one starts only while it runs.
@@ -3037,7 +3047,13 @@ fn file_in_project(team: &Team, computer: &str, session: &SessionRef) {
 /// The folder the member works in: the team's (or its own) folder, or a new
 /// worktree or clone of it, created now.
 fn member_folder(team: &Team, member: &Member) -> anyhow::Result<String> {
-    member_folder_with(team, member, &|host, args| hgs(host, args, None, Duration::from_secs(300)))
+    member_folder_with(team, member, &|host, args| {
+        // Task 20: `worktrees create --clone` of a large repository takes
+        // minutes on Windows (its clone step alone may take 25); the
+        // catalog reads stay short.
+        let minutes = if args.get(1) == Some(&"create") { 40 } else { 5 };
+        hgs(host, args, None, Duration::from_secs(minutes * 60))
+    })
 }
 
 /// `member_folder` with the `hgs` call it makes (`run(computer, args)`), so the
@@ -3071,15 +3087,22 @@ fn member_folder_with(team: &Team, member: &Member, run: &dyn Fn(&str, &[&str]) 
     }
     // C12: the member's own worktree or clone from an earlier start (a
     // relaunch, a swap) is used again; any other folder there is refused.
+    // Task 20: a clone whose create ran out of time after `git clone` has no
+    // branch of the member's yet; `worktrees create` finishes it (and checks
+    // there that it is such a clone) instead of the member failing again.
+    let clone = member.folder == MemberFolder::Clone;
     if remote {
         if let Some(found) = remote_checkout(run, &member.computer, &destination)? {
+            let unfinished = clone && !found.is_empty() && found != branch;
             anyhow::ensure!(
-                found == branch,
+                found == branch || unfinished,
                 "{destination} already exists on {} and is not this member's folder ({})",
                 member.computer,
                 if found.is_empty() { "no checkout of its own".to_owned() } else { format!("on {found}, not {branch}") }
             );
-            return Ok(destination);
+            if !unfinished {
+                return Ok(destination);
+            }
         }
     } else if Path::new(&destination).exists() {
         // A failed create may leave its empty reservation: it goes.
@@ -3087,13 +3110,22 @@ fn member_folder_with(team: &Team, member: &Member, run: &dyn Fn(&str, &[&str]) 
         if empty {
             std::fs::remove_dir(&destination)?;
         } else {
-            if let Some(problem) = folder_problem(&destination, &folder, Some(&branch)) {
+            let Some(problem) = folder_problem(&destination, &folder, Some(&branch)) else {
+                return Ok(destination);
+            };
+            let unfinished = clone
+                && folder_problem(&destination, &folder, None).is_none()
+                && git_at(&destination, &["rev-parse", "--verify", "--quiet", &format!("refs/heads/{branch}")]).is_none();
+            if !unfinished {
                 anyhow::bail!("{destination} already exists and is not this member's folder: {problem}");
             }
-            return Ok(destination);
         }
     }
-    let mut args: Vec<&str> = vec!["worktrees", "create", "--path", &folder, "--branch", &branch, "--destination", &destination, "--base", "HEAD", "--json"];
+    // Task 20: the member's branch starts from the team's base branch when
+    // one is set (U48), else from the HEAD of the team's folder (the lead's
+    // branch), never from a clone's default branch.
+    let base = if team.settings.base_branch.is_empty() { "HEAD".to_owned() } else { team.settings.base_branch.clone() };
+    let mut args: Vec<&str> = vec!["worktrees", "create", "--path", &folder, "--branch", &branch, "--destination", &destination, "--base", &base, "--json"];
     if member.folder == MemberFolder::Clone {
         args.insert(2, "--clone");
     }
@@ -3327,6 +3359,18 @@ mod set_aside_tests {
         assert_eq!(set_aside_replaced(&member).unwrap().as_deref(), Some("set aside codex/x/dev"));
         set_test_set_aside(None);
     }
+}
+
+/// Task 22: how many times a member is started again by itself when its
+/// DeepSeek host was still starting. Each start waits for the host (dsh's own
+/// bound), so a host that never answers fails once after about four of them.
+pub(crate) const HOST_WAITS: u32 = 3;
+
+/// Task 22: the start failed only because the DeepSeek host it started (or
+/// another start of it) did not answer yet. The host keeps starting on its
+/// own, so the next start finds it up.
+pub(crate) fn host_still_starting(error: &str) -> bool {
+    error.contains("DeepSeek host is still starting")
 }
 
 fn launch(team: &Team, member: &Member) -> anyhow::Result<()> {
@@ -3876,6 +3920,17 @@ fn task_waits(team: &mut Team, task_id: u32, member_id: &str, step: &PrepareStep
 /// #511 N3: the message that tells a member to stop a worked-ahead attempt
 /// Zerus revoked with its phase.
 pub(crate) fn stop_text(team: &Team, stop: &StopNotice) -> String {
+    // Task 24: an attempt in progress that a reassign, a take-over or a
+    // cancel revoked (no phase).
+    if stop.phase == 0 {
+        return format!(
+            "[Zerus team \u{b7} from: Zerus \u{b7} task: #{} \u{b7} stop]\n\
+             Stop working on task #{} {}: {}, so Zerus revoked your attempt {}. \
+             Stop the builds, tests and commands you started for it, do not report it and commit nothing more for it. \
+             Your next task comes in its own message (team {}).",
+            stop.task, stop.task, stop.title, stop.reason, stop.attempt, team.name
+        );
+    }
     format!(
         "[Zerus team \u{b7} from: Zerus \u{b7} task: #{} \u{b7} stop]\n\
          Stop working on task #{} {}: {}, so Zerus revoked your attempt {} that worked ahead of it. \
@@ -3912,6 +3967,34 @@ fn tell_stop(store: &mut Store, team: &Team, id: &str) -> anyhow::Result<()> {
                 events.push(Event::new("stop_unconfirmed", json!({"task":stop.task,"member":role,"attempt":stop.attempt,"error":error})));
             }
         }
+        Ok(())
+    })
+}
+
+/// Task 24: interrupts the busy turn of a member whose attempt was revoked,
+/// once (the owner's interrupt_revoked); the stop notice follows. A failed
+/// interrupt is recorded and not repeated: the notice still reaches the member.
+fn interrupt_stop(store: &mut Store, team: &Team, id: &str) -> anyhow::Result<()> {
+    let Some(stop) = team.stops.iter().find(|stop| stop.id == id && stop.notice == Notice::Pending && stop.interrupt && !stop.interrupted).cloned() else {
+        return Ok(());
+    };
+    let Some(session) = team.member(&stop.member).and_then(|member| member.session.clone()) else { return Ok(()) };
+    let input = json!({"run_id":session.run_id,"conversation_id":session.conversation_id});
+    let outcome = hgs(&session.host, &["interrupt", &session.name, "--json"], Some(&input), Duration::from_secs(60));
+    let error = match &outcome {
+        Ok(output) if output.status.success() => String::new(),
+        Ok(output) => String::from_utf8_lossy(&output.stderr).trim().to_owned(),
+        Err(error) => error.to_string(),
+    };
+    change(store, &team.id, |team, events| {
+        let role = team.role_of(&stop.member);
+        if let Some(found) = team.stops.iter_mut().find(|found| found.id == stop.id) {
+            found.interrupted = true;
+        }
+        events.push(Event::new(
+            "revoked_interrupted",
+            json!({"task":stop.task,"member":role,"attempt":stop.attempt,"ok":error.is_empty(),"error":error}),
+        ));
         Ok(())
     })
 }
@@ -6497,9 +6580,34 @@ fn run_step(store: &mut Store, team: &Team, step: &Step, host: &str) -> anyhow::
                 Err(error) => Err(error),
             };
             if let Err(error) = launched {
+                let error = error.to_string();
+                // Task 22: a host that is still starting is waited for: the
+                // member is started again on a later tick (a new launch id;
+                // nothing was saved for this one), with no error and no inbox
+                // item, until HOST_WAITS such starts have failed.
+                let waits = found.host_waits;
+                if host_still_starting(&error) && waits < HOST_WAITS {
+                    change(store, &team.id, |team, events| {
+                        let role = team.role_of(member);
+                        if let Some(record) = team.members.iter_mut().find(|m| m.id == *member && m.session.is_none()) {
+                            record.launch_id.clear();
+                            record.host_waits = waits + 1;
+                        }
+                        events.push(Event::new(
+                            "launch_waiting",
+                            json!({"member":role,"reason":error,"wait":waits + 1,"of":HOST_WAITS}),
+                        ));
+                        Ok(())
+                    })?;
+                    return Ok(());
+                }
+                let error = if host_still_starting(&error) {
+                    format!("{error} (started {} times while the DeepSeek host was starting; it did not answer)", waits + 1)
+                } else {
+                    error
+                };
                 // U54: a failed post-swap launch keeps `launch_after_swap`, so a
                 // relaunch starts it at once; the error names its fix.
-                let error = error.to_string();
                 let error = if swapped {
                     format!("{error}; fix the folder or the old session, then hgs team relaunch starts it at once")
                 } else {
@@ -6509,6 +6617,7 @@ fn run_step(store: &mut Store, team: &Team, step: &Step, host: &str) -> anyhow::
                     if let Some(found) = team.members.iter_mut().find(|m| m.id == *member && m.session.is_none()) {
                         found.error = error.clone();
                         found.launch_after_swap = swapped;
+                        found.host_waits = 0;
                     }
                     events.push(Event::new("launch_failed", json!({"member":team.role_of(member),"error":error})));
                     Ok(())
@@ -6517,6 +6626,7 @@ fn run_step(store: &mut Store, team: &Team, step: &Step, host: &str) -> anyhow::
                 change(store, &team.id, |team, _| {
                     if let Some(found) = team.members.iter_mut().find(|m| m.id == *member && m.session.is_none()) {
                         found.launch_after_swap = false;
+                        found.host_waits = 0;
                     }
                     Ok(())
                 })?;
@@ -6554,6 +6664,7 @@ fn run_step(store: &mut Store, team: &Team, step: &Step, host: &str) -> anyhow::
         Step::StageStalled { task, run, reason } => stall_stage_command(store, team, *task, run, reason),
         Step::StageSilent { task, run } => stage_silent_command(store, team, *task, run),
         Step::TellStop { stop } => tell_stop(store, team, stop),
+        Step::InterruptStop { stop } => interrupt_stop(store, team, stop),
         Step::Rebalanced { tasks } => tell_lead_rebalanced(store, team, tasks),
         Step::TurnEnded { task, at, reply } => change(store, &team.id, |team, _| {
             if let Some(attempt) = team.task_mut(*task).and_then(|t| t.attempts.last_mut()) {
@@ -7661,6 +7772,10 @@ mod dispatcher_stages;
 #[cfg(test)]
 #[path = "tests/dispatcher_restart.rs"]
 mod dispatcher_restart;
+
+#[cfg(test)]
+#[path = "tests/dispatcher_host_start.rs"]
+mod dispatcher_host_start;
 
 #[cfg(test)]
 #[path = "tests/dispatcher_delivery.rs"]

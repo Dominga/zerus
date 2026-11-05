@@ -191,6 +191,7 @@ private slots:
     void reviewCountdownAndNextNavigation();
     void nativeCountdownPreservesScrollChoiceAndReview();
     void terminalOnlyChoicesDoNotPretendToAcceptAnswers();
+    void unanswerableApprovalChoicesShowAsPlainList();
     void unanswerableOpenCodeFormPointsToOpenCode();
     void oversizedOpenCodeFormShowsReasonWithoutSubmit();
     void openCodeFormDefaultsSeedOnlyWithoutSavedDraft();
@@ -732,7 +733,52 @@ void TestQuestionCard::terminalOnlyChoicesDoNotPretendToAcceptAnswers()
     QVERIFY(!option(card, "opt_0_0")->isEnabled()); QVERIFY(submit(card)->isHidden());
     QSignalSpy sent(&card, &QuestionCard::answerRequested);
     option(card, "opt_0_0")->click(); QVERIFY(!option(card, "opt_0_0")->isChecked()); QCOMPARE(sent.size(), 0);
-    QVERIFY(card.findChild<QPushButton *>("questionOpenTerminal")->isEnabled());
+    auto *terminal = card.findChild<QPushButton *>("questionOpenTerminal");
+    QVERIFY(terminal->isEnabled());
+    // The options show as a plain list: their labels stay, nothing looks selectable,
+    // and Open Terminal is the card's primary action.
+    const auto controls = [&card] {
+        QList<QWidget *> shown;
+        for (auto *button : card.findChildren<QAbstractButton *>()) {
+            if (!button->isVisible()) continue;
+            const auto name = button->objectName();
+            if (name == "questionOption" || name == "questionOther") shown << button;
+        }
+        for (auto *field : card.findChildren<QLineEdit *>("questionFreeText")) if (field->isVisible()) shown << field;
+        return shown;
+    };
+    QVERIFY(controls().isEmpty());
+    for (auto *mode : card.findChildren<QLabel *>("questionMode")) QVERIFY(!mode->isVisible());
+    auto *row = option(card, "opt_0_0")->parentWidget();
+    QVERIFY(row->isVisible()); QVERIFY(row->property("readOnly").toBool());
+    bool titled = false;
+    for (auto *title : row->findChildren<QLabel *>("questionChoiceTitle")) titled |= title->isVisible() && title->text() == "Keep it focused";
+    QVERIFY(titled);
+    QVERIFY(terminal->property("prominent").toBool());
+    QCOMPARE(card.findChild<QLabel *>("questionStatus")->text(), QString("Answer this in Terminal."));
+    // An answerable card keeps its controls and its usual Open Terminal.
+    question["can_answer"] = true; question["question_hash"] = "hash-answerable";
+    setQuestionReady(card, "session", question);
+    QVERIFY(option(card, "opt_0_0")->isVisible()); QVERIFY(option(card, "opt_0_0")->isEnabled());
+    QVERIFY(!option(card, "opt_0_0")->parentWidget()->property("readOnly").toBool());
+    QVERIFY(!terminal->property("prominent").toBool()); QVERIFY(submit(card)->isVisible());
+}
+
+// An approval only Terminal can answer lists its native choices without controls.
+void TestQuestionCard::unanswerableApprovalChoicesShowAsPlainList()
+{
+    QuestionCard card; card.resize(700, 450); card.show();
+    auto approval = request("claude-approval:plain", "plain"); approval["approval"] = true; approval["approval_choices"] = true;
+    approval["source"] = "hook"; approval["can_answer"] = false;
+    approval["questions"] = QJsonArray{QJsonObject{{"id", "approval"}, {"question", "Allow this read?"}, {"allow_other", true},
+        {"options", QJsonArray{QJsonObject{{"id", "1"}, {"label", "Yes"}}, QJsonObject{{"id", "2"}, {"label", "No"}}}}}};
+    setQuestionReady(card, "session", approval);
+    QVERIFY(option(card, "1")->parentWidget()->isVisible()); QVERIFY(!option(card, "1")->isVisible());
+    QVERIFY(!option(card, "1")->isEnabled()); QVERIFY(submit(card)->isHidden());
+    for (auto *other : card.findChildren<QAbstractButton *>("questionOther")) QVERIFY(!other->parentWidget()->isVisible());
+    for (auto *field : card.findChildren<QLineEdit *>("questionFreeText")) QVERIFY(!field->isVisible());
+    QVERIFY(card.findChild<QPushButton *>("questionOpenTerminal")->property("prominent").toBool());
+    QCOMPARE(card.findChild<QLabel *>("questionStatus")->text(), QString("Answer this request in Terminal."));
 }
 
 // OpenCode reports why a form cannot be answered in Zerus on the card itself.

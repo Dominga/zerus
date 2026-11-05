@@ -165,6 +165,7 @@ private slots:
     void followUpsShowThePermissionAnswerAndPlanFixes();
     void proposalsAreAcceptedOrRejectedOnce();
     void proposalCardsNameTheChangeAndAStaleCardSendsNothing();
+    void everyOwnerGateIsACardAnsweredWithAClick();
     void aRefusedDecisionSaysWhyOnItsCard();
     void coordinatorQueuesASecondMessageWithCancel_data();
     void coordinatorQueuesASecondMessageWithCancel();
@@ -1095,6 +1096,120 @@ void TestTeamsUiWaiting::proposalCardsNameTheChangeAndAStaleCardSendsNothing()
     QVERIFY(!cardOf("p4")->findChild<QPushButton *>("teamProposalAllow"));
     cardOf("p4")->findChild<QPushButton *>("teamProposalDismiss")->click();
     QTRY_VERIFY(!cardOf("p4"));
+}
+
+// Task #21 (owner, 2026-11-05): every owner-gated operation is a card the
+// owner answers with a click, never a typed phrase. Each kind is drawn as hgs
+// writes it (its summary and lines), Allow sends that card's decision with its
+// hash once, a drain asks first, and Deny sends a rejection.
+void TestTeamsUiWaiting::everyOwnerGateIsACardAnsweredWithAClick()
+{
+    struct Kind { const char *kind, *label; QJsonObject input; QString summary; QStringList lines; };
+    const QList<Kind> kinds{
+        {"relaunch", "Relaunch", {{"member", "backend"}}, "Relaunch Backend", {}},
+        {"scale", "Members", {{"role", "Tester"}, {"agent", "claude"}, {"count", 2}}, "Add 2 × Tester", {"claude"}},
+        {"drain", "Drain", {{"member", "tester"}}, "Drain Tester", {"It finishes its open work, takes nothing new, then its session is paused and it leaves the team."}},
+        {"approve", "Approval", {}, "Approve the plan and run it", {"5 tasks, 2 members"}},
+        {"approve-phase", "Approval", {{"phase", 2}}, "Approve phase 2 (QA fixes)", {}},
+        {"return-to-draft", "Phase", {{"phase", 2}}, "Return phase 2 (QA fixes) to a draft", {}},
+        {"edit-draft", "Phase", {{"phase", 3}, {"tasks_update", QJsonArray{QJsonObject{{"id", 5}, {"title", "Review"}}}}}, "Change phase 3 (Polish)", {"1 task changes"}},
+        {"move-phase", "Phase", {{"phase", 3}, {"position", "before 2"}}, "Move phase 3 (Polish) before 2", {}},
+        {"unpause-phase", "Phase", {{"phase", 2}}, "Remove the pause of phase 2 (QA fixes)", {}},
+        {"phase-acceptance", "Phase", {{"phase", 3}, {"acceptance", "owner"}}, "phase 3 (Polish) is accepted by owner", {}},
+        {"accept-phase", "Phase", {{"phase", 2}}, "Accept phase 2 (QA fixes)", {}},
+        {"extend", "Phase", {{"tasks", QJsonArray{QJsonObject{{"title", "Load test"}}}}}, "Add a phase of 1 tasks", {"Load test"}},
+        {"settings", "Setting", {{"settings", QJsonObject{{"max_members", 8}}}}, "Change the team's settings", {"max_members: 6 → 8"}},
+        {"switch-setting", "Setting", {{"settings", QJsonObject{{"full_tests", "allowed"}}}}, "Change the team's settings", {"full_tests: \"ask\" → \"allowed\""}},
+        {"full-tests", "Tests", {{"release", "v1.2"}}, "Allow one full test run for v1.2", {}},
+        {"iron-rules", "Iron rules", {{"scope", "project"}, {"project", "proj-1"}, {"rules", QJsonArray{"Never push"}}, {"expected_revision", 3}},
+         "Set the project's iron rules (proj-1)", {"Never push"}},
+    };
+    auto running = phasedTeam();
+    QJsonArray proposals;
+    int n = 0;
+    for (const auto &kind : kinds) {
+        ++n;
+        QJsonArray lines; for (const auto &line : kind.lines) lines << line;
+        const QString op = kind.kind == QLatin1String("switch-setting") ? QStringLiteral("settings") : QString::fromLatin1(kind.kind);
+        QJsonObject change{{"op", op}, {"input", kind.input}, {"summary", kind.summary}, {"lines", lines}};
+        if (kind.kind == QLatin1String("switch-setting")) { change["setting"] = "full_tests"; change["value"] = "allowed"; }
+        proposals << QJsonObject{{"id", QStringLiteral("p%1").arg(n)}, {"kind", kind.kind}, {"by", "Lead"}, {"at", 2000.0 + n}, {"state", "open"},
+                                 {"hash", QStringLiteral("h%1").arg(n)}, {"reason", QStringLiteral("because %1").arg(n)}, {"change", change}};
+    }
+    // One more settings card, answered with Deny.
+    proposals << QJsonObject{{"id", "p99"}, {"kind", "settings"}, {"by", "Lead"}, {"at", 2999.0}, {"state", "open"}, {"hash", "h99"}, {"reason", "smaller"},
+                             {"change", QJsonObject{{"op", "settings"}, {"input", QJsonObject{{"settings", QJsonObject{{"max_members", 3}}}}},
+                                                    {"summary", "Change the team's settings"}, {"lines", QJsonArray{"max_members: 6 → 3"}}}}};
+    running["proposals"] = proposals;
+    setTeam(running);
+    HgsClient client(FakeCli::program(script()));
+    TeamController controller(&client);
+    TeamPanel panel(&controller);
+    TeamWorkspace workspace(&controller, &panel);
+    workspace.setLive(live);
+    workspace.resize(1400, 900); workspace.show();
+    controller.refresh();
+    panel.showTeam("team-1");
+    workspace.showTeam("team-1");
+    const auto cardOf = [&](const QString &id) -> QFrame * {
+        for (auto *card : workspace.findChildren<QFrame *>("teamProposalCard")) if (card->property("proposal") == id) return card;
+        return nullptr;
+    };
+    const auto linesOf = [&](const QString &id) {
+        QStringList lines; for (auto *line : cardOf(id)->findChildren<QLabel *>("teamProposalChange")) lines << line->text();
+        return lines;
+    };
+    QTRY_VERIFY(cardOf("p1") && cardOf("p99"));
+    n = 0;
+    for (const auto &kind : kinds) {
+        const QString id = QStringLiteral("p%1").arg(++n);
+        QTRY_VERIFY2(cardOf(id), kind.kind);
+        auto *card = cardOf(id);
+        QCOMPARE(card->property("kind").toString(), QString::fromLatin1(kind.kind));
+        QCOMPARE(card->findChild<QLabel *>("teamProposalWhat")->text(), kind.summary);
+        QCOMPARE(linesOf(id), kind.lines);
+        // The kind's pill names it in words, never the raw kind.
+        QStringList pills; for (auto *widget : card->findChildren<QWidget *>()) pills << widget->toolTip();
+        QVERIFY2(pills.contains(QString::fromLatin1(kind.label)), qPrintable(QStringLiteral("%1: %2").arg(kind.kind, pills.join(" | "))));
+        // No typed phrase anywhere: Allow and Deny are the answer.
+        QVERIFY(card->findChild<QPushButton *>("teamProposalAllow") && card->findChild<QPushButton *>("teamProposalDeny"));
+        QVERIFY(!card->findChild<QLineEdit *>("teamProposalAnswerText"));
+    }
+    if (shotsWanted()) shot(&workspace, "task21-owner-gate-cards");
+    n = 0;
+    for (const auto &kind : kinds) {
+        const QString id = QStringLiteral("p%1").arg(++n);
+        const int before = int(calls(script(), "decide-proposal").size());
+        QTRY_VERIFY2(cardOf(id) && cardOf(id)->findChild<QPushButton *>("teamProposalAllow")->isEnabled(), kind.kind);
+        if (kind.kind == QLatin1String("drain")) {
+            // A drain asks first; Cancel sends nothing.
+            armConfirm(&panel, true);
+            cardOf(id)->findChild<QPushButton *>("teamProposalAllow")->click();
+            QTest::qWait(100);
+            QCOMPARE(int(calls(script(), "decide-proposal").size()), before);
+            QTRY_VERIFY(cardOf(id) && cardOf(id)->findChild<QPushButton *>("teamProposalAllow")->isEnabled());
+            armConfirm(&panel, false);
+        }
+        cardOf(id)->findChild<QPushButton *>("teamProposalAllow")->click();
+        QTRY_COMPARE(int(calls(script(), "decide-proposal").size()), before + 1);
+        const auto input = calls(script(), "decide-proposal").last();
+        QCOMPARE(input["proposal"].toString(), id);
+        QVERIFY2(input["accept"].toBool(), kind.kind);
+        QCOMPARE(input["expected_hash"].toString(), QStringLiteral("h%1").arg(n));
+        QCOMPARE(input["team"].toString(), QStringLiteral("team-1"));
+        // Answered once: until the store takes it, its buttons stay off.
+        QTRY_VERIFY(cardOf(id) && !cardOf(id)->findChild<QPushButton *>("teamProposalAllow")->isEnabled());
+    }
+    // Deny sends a rejection with the card's hash; nothing else is sent.
+    const int before = int(calls(script(), "decide-proposal").size());
+    cardOf("p99")->findChild<QLineEdit *>("teamProposalDenyReason")->setText("keep six");
+    cardOf("p99")->findChild<QPushButton *>("teamProposalDeny")->click();
+    QTRY_COMPARE(int(calls(script(), "decide-proposal").size()), before + 1);
+    const auto denied = calls(script(), "decide-proposal").last();
+    QCOMPARE(denied["proposal"].toString(), QStringLiteral("p99"));
+    QVERIFY(!denied["accept"].toBool());
+    QCOMPARE(denied["expected_hash"].toString(), QStringLiteral("h99"));
+    QCOMPARE(denied["reason"].toString(), QStringLiteral("keep six"));
 }
 
 // #754 (owner, 2026-10-31: "I press Allow and nothing happens"): a refused

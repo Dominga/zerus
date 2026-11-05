@@ -1461,7 +1461,8 @@ leads and tasks are parsed strictly: an unknown field is refused with its name,
 the accepted fields and an example, and a wrong type with serde's reason. A
 task's text is `description`. A member without `account` starts on its
 computer's default account for its agent, which the preflight names.
-`max_members` counts the members besides the lead.
+`max_members` counts the members besides the lead; more members than that is a
+preflight error, so a plan, an approval and a draft's create are refused with it.
 
 `draft get` answers the draft's `fields` (name, goal, addendum, settings,
 members, tasks and plan mode). A draft update sets only the fields it names;
@@ -1667,6 +1668,35 @@ option or the owner's own words; the proposal becomes `answered` with `answer`,
 and the lead's inbox carries it with the question. Waiting for you lists the
 question and answers it in place, as it does a lead's own open AskUserQuestion
 (`hgs team answer` with the question's id and hash).
+
+Every change the lead may make only with the owner's consent is a card the
+owner answers with Allow or Reject (task #21, owner 2026-11-05); no flow needs a
+typed sentence. Besides the kinds above, a proposal's kind may be one of the
+owner-gated operations `relaunch`, `scale`, `drain`, `approve`, `approve-phase`,
+`return-to-draft`, `edit-draft`, `move-phase`, `unpause-phase`,
+`phase-acceptance`, `accept-phase`, `extend`, `settings` and `full-tests`, with
+the operation's own fields beside `kind` and `reason` (or in `"input":{...}`):
+
+```sh
+{"request_id":"<uuid>","team":"<id>","kind":"relaunch","member":"hgs",
+ "reason":"its session failed to start"} | hgs team propose --json
+{"request_id":"<uuid>","team":"<id>","kind":"settings","settings":{"max_members":8},
+ "reason":"two more testers"} | hgs team propose --json
+```
+
+The proposal's `change` keeps `op`, the checked `input`, and the `summary` and
+`lines` the card shows. Allow runs that operation as the owner's own `hgs team
+<op>` (the same checks, adoption, budgets and side effects) under the
+proposal's stored request id, so a retried Allow answers its receipt and never
+applies the change twice; Reject changes nothing. `proposal_decided` names the
+`op`, the `summary` and the `request` it ran under, beside the operation's own
+events by You. A `switch-setting` card also sets `base_branch`, `full_tests` or
+`max_members` through the settings operation, and `iron-rules` (with `scope`
+project or session, its `project` or session `name`, run and conversation ids,
+`rules` and `expected_revision`) sets those rules as `hgs rules set` does. A
+typed owner word stays a fallback: its quote may be part of the owner's
+message, one message pays once for each member it names, and the check reads
+the lead session's main messages, not its last 200 events of any kind.
 
 Integration and a build are ordinary lead tasks, not a phase barrier. The owner
 or the lead adds the build for the open phase (`hgs team integrate-build`) and
@@ -1883,6 +1913,18 @@ A draining member may finish its own reserved rework before leaving. Explicit
 reassignment clears the rework reservation and its wait age. Returning an
 unstarted phase to a draft also clears rework reservations. Member-wait inbox
 items exclude held rework and members available to take it.
+
+A reassign, a take-over or a cancel of a task whose attempt its member is still
+working on (sent or delivered, not reported) tells that member at once: one
+`[Zerus team · from: Zerus · task: #N · stop]` message names the task and why it
+left, asks it to stop the builds, tests and commands it started for it, not to
+report it and to commit nothing more for it (`stop_told`). It is sent as soon as the
+session runs, also while it is busy: an agent that reads messages mid-turn stops
+at once, others when the turn ends, and the member's next task then goes out
+without a message from the lead. With the owner's team setting
+`interrupt_revoked` (off by default; the lead cannot change it) a busy turn is
+interrupted once before the message (`revoked_interrupted`). A reported
+attempt, or a reassign to the same member, sends nothing.
 
 Tasks may declare `"output":["src/api.rs","src/protocol/"]`: repository-relative
 files or directories, with a directory covering all paths beneath it. Plan,
@@ -5323,6 +5365,29 @@ missing the session does not start, and the member's error — shown in the Lead
 inbox — says `the DeepSeek sandbox needs full control of <folder>` with the
 one-line fix `icacls "<folder>" /grant *<SID>:(OI)(CI)F`. A member never repairs
 ACLs itself: it reports the exact error to the Lead.
+
+**DeepSeek members whose host is starting.** One DeepSeek host serves every
+DeepSeek session of a user on a computer. A start launches it when none runs
+and waits 35 s for it to answer; a later start that finds a host launched
+recently and still running waits for that one instead of launching a second.
+When a member's start fails only with `DeepSeek host is still starting`, the
+dispatcher starts the member again by itself (a `launch_waiting` event, no
+error, no inbox item), up to three times. If the host still does not answer,
+the member fails once with that reason and the number of starts, and the
+Lead's inbox shows it; any other start failure is reported at once. A relaunch
+starts the count again.
+
+**Members' clones.** A clone member's folder is made by `hgs worktrees create
+--clone`: a full `git clone --local --no-hardlinks` of the team's repository (no
+hard links, because the folder's ACL grant would reach the source's files), then
+the member's branch, started from the team's base branch when one is set, else
+from the HEAD of the team's folder. The clone has its own 25-minute deadline and
+the checkout of the branch its own 10 minutes, so a large repository on Windows
+no longer fails with `Git operation cancelled or timed out`. When the clone
+finished but the branch was not made, the clone is kept: starting the member
+again finishes it (fetching the base when it moved on), provided the folder is a
+clone of this repository with no changes and without that branch. Any other
+folder there is refused, never changed.
 
 **DeepSeek session-log upload.** Zerus starts and resumes DeepSeek sessions with
 the official session-log upload off, unless the owner turns the block off in

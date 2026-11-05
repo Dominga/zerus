@@ -276,9 +276,10 @@ impl Question {
         self.approval || self.trust_request || !AUTHORED.contains(&self.source.as_str())
     }
 
-    /// Only Terminal can answer it, and the options show read-only.
+    /// Only Terminal can answer it and the card offers no Submit: the options
+    /// show as a plain list (Qt's `plain` in `QuestionCard::updateControls`).
     fn read_only(&self) -> bool {
-        !self.can_answer && TERMINAL_ONLY.contains(&self.source.as_str())
+        !self.can_answer && (self.approval || TERMINAL_ONLY.contains(&self.source.as_str()))
     }
 
     /// The native options are listed (all but a synthesized Approve/Deny).
@@ -1169,6 +1170,9 @@ pub struct CardView {
     pub status_error: bool,
     pub available: bool,
     pub locked: bool,
+    /// Only Terminal can answer the card: its options are a plain list
+    /// without selectable controls, and Open Terminal is its primary action.
+    pub read_only: bool,
     /// The review delay applies: an approval card.
     pub review: bool,
     pub created_at: f64,
@@ -1269,11 +1273,11 @@ pub fn card(question: &Question, draft: &AnswerDraft, ctx: &CardContext) -> Card
                 markdown: false,
                 checked: answer.other,
                 enabled: !locked && !read_only,
-                visible: true,
+                visible: !read_only,
             });
             let custom = item.options.is_empty() || answer.other;
             let text = item.allow_other.then(|| TextView {
-                visible: custom,
+                visible: custom && !read_only,
                 enabled: custom && !locked && !read_only,
                 value: answer.text.clone(),
                 placeholder: crate::text!("Write your answer…"),
@@ -1306,7 +1310,10 @@ pub fn card(question: &Question, draft: &AnswerDraft, ctx: &CardContext) -> Card
                 } else {
                     crate::text!("Select one")
                 },
-                mode_visible: !item.options.is_empty() && listed && !question.plan_review,
+                mode_visible: !item.options.is_empty()
+                    && listed
+                    && !question.plan_review
+                    && !read_only,
                 options,
                 other,
                 text,
@@ -1454,6 +1461,7 @@ pub fn card(question: &Question, draft: &AnswerDraft, ctx: &CardContext) -> Card
         status_error: draft.error || !draft.storage_error.is_empty(),
         available: ctx.available,
         locked,
+        read_only,
         review: question.approval,
         created_at: question.created_at,
         submit: ButtonView {

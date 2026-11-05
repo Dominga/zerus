@@ -96,7 +96,7 @@ export function createQuestions(port: QuestionPort, clock: Clock = browserClock)
     view, left, dialog, apply, label, enabled, submit, cancelCold,
     setActive(on: boolean) { active = on; tick(); },
     /** Every edit goes at once, naming the epoch the fields show; Rust drops one of an older epoch. */
-    edit(e: QuestionEdit) { const v = view(); if (v) void port.edit(v.card, v.epoch, e); },
+    edit(e: QuestionEdit) { const v = view(); if (v && !v.view.read_only) void port.edit(v.card, v.epoch, e); },
     async page(i: number) { const c = card(); if (c !== undefined) await port.page(c, i); },
     async navigate(direction: number) { await port.navigate(direction); },
     async allowRetry() { const c = card(); if (c !== undefined) await port.allowRetry(c); },

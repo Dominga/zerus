@@ -431,3 +431,58 @@ fn a_templates_file_in_the_members_folder_is_never_a_template_source() {
     assert!(!marker.exists(), "the folder's program ran");
     crate::state::teams::templates::settings_override(None);
 }
+
+/// Task #28 (1, 2, 3): the worker's side of what a sandboxed member cannot do
+/// itself. A host read (`hgs ls --json`, the read team 33fbafeb's DeepSeek
+/// member asked the lead to run unsandboxed) is answered from outside the
+/// sandbox; anything but a read is refused, never run; and the member's
+/// `hgs run` is recorded as its session's work and started at Low integrity.
+#[test]
+fn the_worker_answers_a_sandboxed_members_read_and_starts_its_run_at_low_integrity() {
+    let dir = tempfile::tempdir().unwrap();
+    crate::state::with_test_state_root(dir.path(), || {
+        let mut store = Store::open(true).unwrap();
+        let mut t = team();
+        t.status = TeamStatus::Running;
+        let folder = dir.path().join("work");
+        std::fs::create_dir_all(&folder).unwrap();
+        t.folder = folder.display().to_string();
+        store.create("11111111-1111-4111-8111-111111111111", &json!({}), t.clone(), vec![]).unwrap();
+        let read = "88888888-8888-4888-8888-888888888888";
+        let send = "99999999-9999-4999-8999-999999999999";
+        let run = "aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaaa";
+        for (id, op, input) in [
+            (read, "read", json!({"argv":["ls", "--json"]})),
+            (send, "read", json!({"argv":["send", "claude/x/lead", "--json"]})),
+            (run, "session-run", json!({"label":"cargo build","command":"cargo build","cwd":folder.display().to_string()})),
+        ] {
+            super::super::outbox::push(&folder, &json!({"op":op,"request_id":id,"team":t.id,"member":"dev","input":input})).unwrap();
+        }
+        let calls = std::rc::Rc::new(std::cell::RefCell::new(Vec::<Vec<String>>::new()));
+        let seen = calls.clone();
+        set_fake_hgs(Some(Box::new(move |_, args: &[&str], _: Option<&Value>| {
+            seen.borrow_mut().push(args.iter().map(|arg| (*arg).to_owned()).collect());
+            Ok(fake_output(0, r#"[{"name":"claude/x/lead"}]"#, ""))
+        })));
+        crate::state::builds::HELD_RUNNER.with(|held| held.set(true));
+        let mut member = session("codex/x/dev", "r1", true);
+        member.cwd = folder.to_string_lossy().into_owned();
+        let current = store.load(&t.id).unwrap().unwrap();
+        let spawn = |_: &Path, _: &Value| -> anyhow::Result<()> { anyhow::bail!("no template run was asked for") };
+        let taken = take_outbox_with(&mut store, &current, &[member], &spawn);
+        crate::state::builds::HELD_RUNNER.with(|held| held.set(false));
+        set_fake_hgs(None);
+        taken.unwrap();
+        let answered = super::super::outbox::result(&folder, read).unwrap();
+        assert_eq!((answered["status"].as_str(), answered["exit"].as_i64()), (Some("ran"), Some(0)), "{answered}");
+        assert!(answered["stdout"].as_str().unwrap().contains("claude/x/lead"), "{answered}");
+        assert_eq!(*calls.borrow(), vec![vec!["ls".to_owned(), "--json".to_owned()]], "only the read reached hgs");
+        let refused = super::super::outbox::result(&folder, send).unwrap();
+        assert_eq!(refused["status"], "refused", "{refused}");
+        assert!(refused["error"].as_str().unwrap().contains("only for hgs ls and hgs inspect"), "{refused}");
+        assert_eq!(super::super::outbox::result(&folder, run).unwrap()["status"], "running");
+        let claim = crate::state::builds::record(run, now()).unwrap();
+        assert_eq!((claim["integrity"].as_str(), claim["session"]["name"].as_str()), (Some("low"), Some("codex/x/dev")), "{claim}");
+        assert!(super::super::outbox::request(&folder, run).is_none(), "the request left the queue");
+    });
+}

@@ -1151,12 +1151,24 @@ Start builds and long tests through Zerus so they show as work:
 `hgs team run` for a team member's templates (`hgs guide team-run`), and
 `hgs run --json [--wait]` with `{request_id, label, command, cwd?,
 timeout_minutes?}` for any session (`hgs guide run`). `hgs run` names the
-calling session by its process ancestry, runs the command in `sh -c` (`cmd /C`
-on Windows) in a detached runner with its whole process tree stopped after the
+calling session by its process ancestry, or a DeepSeek session by the
+conversation its harness exports as `DSH_SESSION_ID`, runs the command in
+`sh -c` (`cmd /C` on Windows) in a detached runner with its whole process tree stopped after the
 timeout (30 minutes by default, at most 240), keeps the last 4000 characters of
 output and records the run under the session; the same `request_id` never runs
 twice, and asking again reads its state. `hgs run --list --json` lists the
 session's newest runs.
+
+On Windows a Git Bash wrapper (`bash -c`, `env`, `nohup`, `timeout`, `xargs`,
+`sh -c`, `npx -c`) ends a Windows process between the session and hgs, so the
+process ancestry stops at a process that no longer exists. hgs then asks the
+session host which session's job holds it (`caller_session`): the host answers
+for the connection's own client, by the process ID the kernel gives it, and
+the session, pane and run marker must be exactly those of the record that
+`HGS_SESSION` and `HGS_RUN_ID` name. A leaked or stale session environment
+therefore never names the caller, and a process outside every session is still
+refused. A host from before this question answers `unsupported`, and the caller
+stays unproven as before.
 
 A job the session started otherwise makes it wait only while it waits for it. A
 long-lived process it does not wait for, such as a dev server, a watcher or a
@@ -1465,10 +1477,15 @@ computer's default account for its agent, which the preflight names.
 preflight error, so a plan, an approval and a draft's create are refused with it.
 
 `draft get` answers the draft's `fields` (name, goal, addendum, settings,
-members, tasks and plan mode). A draft update sets only the fields it names;
+members, tasks, phases and plan mode). A draft update sets only the fields it names;
 `members` is a list that replaces them all or an object of changes by member
 id, where null removes a member and a new id adds one. `plan_mode` is a draft
 field: the owner chooses it and the lead offers it with `plan_mode_reason`.
+A draft's tasks keep their `phase` and its `phases` list phases 2..N
+(`{"n":2,"title":"...","barrier":true}`), as a plan's do; a phase a task names
+but the list leaves out is kept untitled. Create keeps them all as Draft phases
+in order, which the owner approves one after another; a listed phase without
+tasks is refused.
 
 A swap card names, for each member, what changes (`agent`, `model`, `effort`,
 `account`, `prompt` or `session`), or `"fresh": true` for a new session with
@@ -4198,6 +4215,15 @@ to save a choice. Omit effort to inherit the selected model's provider default;
 pass `--model ''` to return to provider settings. Revisions prevent overwriting
 another account edit made while the dialog was open.
 
+A DeepSeek account's catalog comes from its running host. Without one, it is
+what the composed profile configures (`dsh --profile hgs --dump-config`, which
+starts no host): the `models` of the `llm-deepseek` entry, or else the installed
+transport's bundled models, each named as dsh names it (for example
+`deepseek-official/deepseek-flash`, DeepSeek-V4.1-Flash). The answer then
+carries `"source":"dsh-profile"`. New team's member rows offer these models, and
+a DeepSeek member's model is applied after its session starts, as
+`provider/model` or as a bare id (`deepseek-flash`) that one provider offers.
+
 Accounts collects provider profiles from connected machines. Verified provider
 account ID, or email with organization, groups the same account across hosts;
 matching display names alone do not. Providers, organizations and conflicting
@@ -5389,6 +5415,37 @@ again finishes it (fetching the base when it moved on), provided the folder is a
 clone of this repository with no changes and without that branch. Any other
 folder there is refused, never changed.
 
+**DeepSeek members in their sandbox.** On Windows a DeepSeek member's shell runs
+in DeepSeek's sandbox at Low integrity. It reads Zerus state but may not write
+it, and the session host keeps it out (a sandboxed caller hears
+`this process runs in a sandbox below the session host's integrity level`).
+Such a member still does its work through its own folder, where its sandbox
+writes, and the team worker applies what it leaves there on its next tick
+(about three seconds):
+
+- `hgs team report`, `ask`, `commit` and `hgs team run` wait there as before.
+- `hgs run` waits there too. The worker records the run as the member
+  session's work, so the session is Building, and starts it at Low integrity
+  with its temporary files in `<folder>/.zerus-team/tmp`: a member's run never
+  runs above its sandbox. `--wait` and `--list` read the run's record as for
+  any session.
+- `hgs ls` and `hgs inspect <session>` (with `--skip-processes` or
+  `--after N`) are answered by the worker, which runs the read outside the
+  sandbox and leaves the output in the folder. These reads write, send, start
+  and attach nothing, and the sandbox already reads every file they read.
+  Every other command, such as `send`, `launch` or `attach`, stays closed to a
+  sandbox.
+
+This needs a running team: a sandboxed DeepSeek session outside a team is told
+so. The worker runs a member's `hgs run` at Low integrity but outside
+DeepSeek's own confinement, so the run, like any Low process, may use the
+network and named pipes of Low processes.
+
+A DeepSeek member's own folder is a clone: a worktree's git metadata lives in
+the main checkout's `.git`, which its sandbox may not write. A worktree asked
+for it (by a role, a template, the New team form or the worktree policy, which
+a clone also meets) becomes a clone; an adopted session keeps its folder.
+
 **DeepSeek session-log upload.** Zerus starts and resumes DeepSeek sessions with
 the official session-log upload off, unless the owner turns the block off in
 Settings. The promise is checked, not assumed: a session whose own records still
@@ -6304,6 +6361,24 @@ supervises the worker; a client that sees `false` runs one `hgs swarm get`,
 which restarts an outdated worker as before. Writes, including the first
 `swarm initialize`, stay with `hgs swarm`.
 
+The `team` topic follows every team of the computer's team store:
+`{"op":"subscribe","topic":"team"}`, one per stream. Its rows are keyed like
+the organization's: `team:<id>` is the team's head `{id, name, lead, status,
+revision, updated}`, and `teams` is `{count, truncated}`. Every change of a team
+(a command, the dispatcher, a member's report) raises its `revision`, so a
+client reads a team again with `hgs team status`, `inbox` and `events` when its
+revision moved instead of polling them. At most 1000 heads go out, the most
+recently changed first; `truncated` says more exist. A worker thread reads them
+with one indexed query and never writes. It reads again when a stat of the
+store or its rollback journal changes and at least every 30 s, at most once a
+second. The first rows go out as a paged `snapshot`, a later change as one
+`delta` of the changed rows and removed keys. A delta the client is too far
+behind to take becomes `gap` (`overflow`) and a fresh snapshot once it caught
+up. A read that fails, such as a store held by a writer, sends a non-fatal
+`team_failed`. A peer whose `hello` does not list `team` answers the
+subscription with `unsupported_topic`; read its teams with `hgs team` as
+before.
+
 The stream checks its sources every 250 ms. It stats the bindings, read marks,
 notification preferences, waits, launches, renames, name routes, the archive
 folder and the DeepSeek and OpenCode bindings, and holds a read-only connection
@@ -6340,7 +6415,13 @@ selected one first, then shown rows, at most 64, instead of starting
 `git-status` for each every 15 s. A followed value counts as checked every 15 s
 while the stream follows it; its remote's age keeps counting, so a remote shows
 verified for at most 60 s after its check. Refused folders, and all folders of
-a computer whose stream is not live, are polled as before. Listings are applied at most every
+a computer whose stream is not live, are polled as before. When the stream
+offers the `team` topic, the Team tab's reads of that computer (the team list,
+Waiting, and the watched team's status, inbox and feed) run when a team's
+revision moved, plus once a minute, instead of every 3 s; until the topic's
+first complete snapshot, after a `gap` or `team_failed`, while the stream is
+down, and on a peer without the topic they are polled every 3 s as before.
+Listings are applied at most every
 2 s, Activity within 50 ms. A stream that fails or stays silent for 30 s
 restarts after 5 s, 15 s, 60 s and then every 5 minutes, and the desktop polls
 meanwhile. `ZERUS_EVENT_STREAM=0` or the setting `dataPlane/eventStream=false`

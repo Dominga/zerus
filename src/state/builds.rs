@@ -16,6 +16,8 @@ use std::time::Duration;
 
 const USAGE: &str = "usage: hgs run --json [--wait] (JSON stdin: request_id, label, command, cwd?, timeout_minutes?) \
     | hgs run --list --json";
+/// The refusal for a process that is no session's (task #28 kept its words).
+const NO_SESSION: &str = "hgs run tracks a build as the calling session's work: run it from inside a Zerus session";
 /// Records kept: the newest finished ones beyond this are removed.
 const MAX_RECORDS: usize = 200;
 const DEFAULT_MINUTES: u64 = 30;
@@ -48,6 +50,7 @@ pub(super) fn dispatch(args: &[String]) -> Result<i32> {
     let flags: Vec<&str> = args.iter().map(String::as_str).collect();
     let output = match flags.as_slice() {
         ["--worker", id] => return worker(id),
+        ["--low-exec", id] => return low_exec(id),
         ["--list", "--json"] | ["--json", "--list"] => list()?,
         ["--json"] => start(&stdin_json()?, false)?,
         ["--json", "--wait"] | ["--wait", "--json"] => start(&stdin_json()?, true)?,
@@ -70,10 +73,28 @@ fn stdin_json() -> Result<Value> {
 /// The calling session's binding; a test sets its own.
 fn caller() -> Option<Value> {
     #[cfg(test)]
-    if let Some(caller) = tests::CALLER.with(|caller| caller.borrow().clone()) {
+    if let Some(caller) = TEST_CALLER.with(|caller| caller.borrow().clone()) {
         return caller;
     }
-    caller_record()
+    caller_record().or_else(dsh_caller)
+}
+
+/// Task #28 (1): a DeepSeek session has no hgs session environment and its
+/// tools run under the shared DeepSeek host, so neither `HGS_SESSION` nor
+/// the process ancestry names it: `hgs run` from a dsh member was refused as
+/// "not inside a Zerus session". The harness runs every tool command with
+/// the conversation as `DSH_SESSION_ID` (the identity `hgs team` takes for a
+/// dsh member, A3/A4); the caller is this computer's binding of it.
+fn dsh_caller() -> Option<Value> {
+    binding_for(&super::dsh::binding_records(), &nonempty_env("DSH_SESSION_ID")?)
+}
+
+/// The binding of `conversation` among `records`, with the run it names.
+fn binding_for(records: &[Value], conversation: &str) -> Option<Value> {
+    records
+        .iter()
+        .find(|record| record["conversation_id"] == conversation && !string(record, "run_id").is_empty() && !string(record, "name").is_empty())
+        .cloned()
 }
 
 fn session_of(record: &Value) -> Value {
@@ -85,8 +106,7 @@ fn start(input: &Value, wait: bool) -> Result<Value> {
     if !canonical_uuid(&id) {
         return Err("A canonical request_id is required; use a new UUID for every run".into());
     }
-    let caller = caller()
-        .ok_or("hgs run tracks a build as the calling session's work: run it from inside a Zerus session")?;
+    let caller = caller().ok_or(NO_SESSION)?;
     if let Some(done) = read(&result_path(&id)) {
         return Ok(done);
     }
@@ -96,6 +116,26 @@ fn start(input: &Value, wait: bool) -> Result<Value> {
         }
         return Ok(if wait { wait_for(&id) } else { running_note(&claim) });
     }
+    let (label, command, cwd, minutes) = fields(input)?;
+    if crate::platform::sandboxed() {
+        let request = json!({"label":label,"command":command,"cwd":cwd.display().to_string(),"timeout_minutes":minutes});
+        return sandboxed_start(&id, &caller, &request, wait);
+    }
+    private_dir(&dir())?;
+    prune();
+    let claim = json!({"request_id":id,"label":label,"command":command,"cwd":cwd.display().to_string(),
+        "session":session_of(&caller),"started":now(),"timeout_secs":minutes * 60,"source":"hgs_run"});
+    storage::atomic(&running_path(&id), &claim.to_string())?;
+    if let Err(error) = spawn(&id) {
+        let _ = fs::remove_file(running_path(&id));
+        return Err(format!("the runner did not start: {error}"));
+    }
+    Ok(if wait { wait_for(&id) } else { running_note(&claim) })
+}
+
+/// A run request's label, command, folder and bound, checked before anything
+/// is recorded or started.
+fn fields(input: &Value) -> Result<(String, String, PathBuf, u64)> {
     let label = string(input, "label").trim().to_owned();
     if label.is_empty() || label.chars().count() > LABEL_CHARS || label.chars().any(char::is_control) {
         return Err(format!("label is a short name of 1 to {LABEL_CHARS} characters, such as \"cargo test\""));
@@ -116,16 +156,113 @@ fn start(input: &Value, wait: bool) -> Result<Value> {
         value => value.as_u64().filter(|m| (1..=MAX_MINUTES).contains(m))
             .ok_or(format!("timeout_minutes is 1 to {MAX_MINUTES}"))?,
     };
+    Ok((label, command, cwd, minutes))
+}
+
+/// Task #28 (1): a sandboxed member reads Zerus state but may not write it,
+/// and its run must stay at its sandbox's level. The request waits in the
+/// member's folder (U20's path for reports); the team worker records it as
+/// this session's work and starts it at Low integrity (`start_for_sandbox`).
+/// The answer then is the run's own record, read here like any other.
+fn sandboxed_start(id: &str, caller: &Value, request: &Value, wait: bool) -> Result<Value> {
+    let (folder, answered) =
+        teams::commands::queue_for_sandbox(caller, "session-run", id, request).map_err(|error| format!("{error:#}"))?;
+    let until = now() + if wait { WAIT_SECONDS } else { 0.0 };
+    loop {
+        if let Some(done) = read(&result_path(id)) {
+            return Ok(done);
+        }
+        // The worker answers a refusal in the member's folder; a started run
+        // has its claim.
+        let outcome = answered.clone().or_else(|| teams::outbox::result(&folder, id));
+        if let Some(refused) = outcome.filter(|outcome| outcome["status"] == "refused") {
+            return Ok(refused);
+        }
+        let claim = read(&running_path(id));
+        if let Some(claim) = claim.as_ref().filter(|_| !wait) {
+            return Ok(running_note(claim));
+        }
+        if now() >= until {
+            return Ok(match claim {
+                Some(claim) => running_note(&claim),
+                None => json!({"status":"queued","request_id":id,
+                    "note":"The sandbox keeps a run at its own level: the team worker records it as this session's work and starts it within seconds. Ask again with the same request_id (or --wait) to read it."}),
+            });
+        }
+        std::thread::sleep(Duration::from_millis(250));
+    }
+}
+
+/// Task #28 (2): `hgs ls` and `hgs inspect` from a sandboxed member. Its
+/// shell cannot reach the session host: Low integrity is below the host's,
+/// and DeepSeek's confined token opens no named pipe, so the member saw "the
+/// session host on this computer runs elevated" and asked the lead to run
+/// the read unsandboxed (a permission card). The host keeps its protection;
+/// the read waits in the member's folder, and the team worker answers it from
+/// outside the sandbox (`outbox::sandbox_read_allowed` names the reads). None
+/// leaves every other command, and every process outside a sandbox, as it was.
+pub(crate) fn sandbox_read(args: &[String]) -> Option<Result<i32>> {
+    if !crate::platform::sandboxed() || !teams::outbox::sandbox_read_allowed(args) {
+        return None;
+    }
+    let caller = caller()?;
+    Some(brokered_read(&caller, args))
+}
+
+fn brokered_read(caller: &Value, args: &[String]) -> Result<i32> {
+    use std::io::Write;
+    let id = uuid::Uuid::new_v4().to_string();
+    let (folder, _) =
+        teams::commands::queue_for_sandbox(caller, "read", &id, &json!({"argv":args})).map_err(|error| format!("{error:#}"))?;
+    let outcome = teams::outbox::wait(&folder, &id, 45.0)
+        .ok_or("the team worker did not answer this read within 45 s; the sandbox cannot reach the session host itself")?;
+    let _ = fs::remove_file(teams::outbox::result_path(&folder, &id));
+    if outcome["status"] != "ran" {
+        return Err(string(&outcome, "error").to_owned());
+    }
+    let mut stdout = std::io::stdout().lock();
+    stdout.write_all(string(&outcome, "stdout").as_bytes()).map_err(|error| error.to_string())?;
+    stdout.flush().map_err(|error| error.to_string())?;
+    eprint!("{}", string(&outcome, "stderr"));
+    if outcome["truncated"] == true {
+        eprintln!("hgs: the answer was cut at {} MiB", teams::outbox::READ_STDOUT / 1024 / 1024);
+    }
+    Ok(outcome["exit"].as_i64().and_then(|code| i32::try_from(code).ok()).unwrap_or(1))
+}
+
+/// Task #28 (1): the team worker's side of a sandboxed member's `hgs run`:
+/// the claim, the runner and the record are Zerus's as for any session, so
+/// the member's session is Building while it runs. The command runs at Low
+/// integrity, as the member's own shell does (`low_exec`), with its
+/// temporary files in the member's folder, which its sandbox may write.
+pub(crate) fn start_for_sandbox(id: &str, input: &Value, session: Value, folder: &Path) -> Result<Value> {
+    if !canonical_uuid(id) {
+        return Err("A canonical request_id is required; use a new UUID for every run".into());
+    }
+    if let Some(done) = read(&result_path(id)) {
+        return Ok(done);
+    }
+    if let Some(claim) = read(&running_path(id)) {
+        if claim["session"]["run_id"] != session["run_id"] {
+            return Err(format!("request_id {id} belongs to another session; use a new UUID"));
+        }
+        return Ok(running_note(&claim));
+    }
+    let (label, command, cwd, minutes) = fields(input)?;
+    let temp = folder.join(".zerus-team").join("tmp");
+    fs::create_dir_all(&temp).map_err(|error| format!("the member's temporary folder: {error}"))?;
     private_dir(&dir())?;
     prune();
+    let temp = temp.display().to_string();
     let claim = json!({"request_id":id,"label":label,"command":command,"cwd":cwd.display().to_string(),
-        "session":session_of(&caller),"started":now(),"timeout_secs":minutes * 60,"source":"hgs_run"});
-    storage::atomic(&running_path(&id), &claim.to_string())?;
-    if let Err(error) = spawn(&id) {
-        let _ = fs::remove_file(running_path(&id));
+        "session":session,"started":now(),"timeout_secs":minutes * 60,"source":"hgs_run","integrity":"low",
+        "env":{"TEMP":temp,"TMP":temp}});
+    storage::atomic(&running_path(id), &claim.to_string())?;
+    if let Err(error) = spawn(id) {
+        let _ = fs::remove_file(running_path(id));
         return Err(format!("the runner did not start: {error}"));
     }
-    Ok(if wait { wait_for(&id) } else { running_note(&claim) })
+    Ok(running_note(&claim))
 }
 
 /// U47/U48: Zerus starts a pipeline's command or land stage itself, with no
@@ -223,12 +360,21 @@ fn wait_for(id: &str) -> Value {
 thread_local! {
     /// A test's runner runs on this thread at once: the test binary is not hgs.
     pub(crate) static INLINE_RUNNER: std::cell::Cell<bool> = const { std::cell::Cell::new(false) };
+    /// A test's claim that no runner takes: the test binary is not hgs.
+    pub(crate) static HELD_RUNNER: std::cell::Cell<bool> = const { std::cell::Cell::new(false) };
+    /// The caller a test names: Some(None) is no session, whatever session
+    /// runs the tests.
+    pub(crate) static TEST_CALLER: std::cell::RefCell<Option<Option<Value>>> = const { std::cell::RefCell::new(None) };
 }
 
 fn spawn(id: &str) -> std::io::Result<()> {
     #[cfg(test)]
     if INLINE_RUNNER.with(std::cell::Cell::get) {
         return worker(id).map(drop).map_err(|error| std::io::Error::other(error.to_string()));
+    }
+    #[cfg(test)]
+    if HELD_RUNNER.with(std::cell::Cell::get) {
+        return Ok(());
     }
     let mut command = Command::new(std::env::current_exe()?);
     command.args(["run", "--worker", id]).stdin(Stdio::null()).stdout(Stdio::null()).stderr(Stdio::null());
@@ -264,25 +410,15 @@ fn worker(id: &str) -> Result<i32> {
     let Some(mut claim) = read(&running_path(id)) else { return Ok(1) };
     claim["pid"] = json!(std::process::id());
     let _ = storage::atomic(&running_path(id), &claim.to_string());
-    let argv: Vec<String> = claim["argv"].as_array().into_iter().flatten().filter_map(Value::as_str).map(str::to_owned).collect();
-    let mut command = if argv.is_empty() {
-        shell(string(&claim, "command"))
-    } else {
-        // An argv claim runs without a shell: a Windows path or a quoted remote
-        // command is one argument, not shell text (U60 #658 N5).
-        let mut command = Command::new(&argv[0]);
-        command.args(&argv[1..]);
+    // Task #28: a sandboxed member's run starts through `low_exec`, which
+    // drops to Low integrity first; the runner itself writes the record.
+    let mut command = if claim["integrity"] == "low" {
+        let mut command = Command::new(std::env::current_exe().map_err(|error| error.to_string())?);
+        command.args(["run", "--low-exec", id]).current_dir(string(&claim, "cwd"));
         command
+    } else {
+        claim_command(&claim)
     };
-    command.current_dir(string(&claim, "cwd"));
-    // U47/U48: a stage's command gets the task, its branch and the checked commit.
-    if let Some(env) = claim["env"].as_object() {
-        for (key, value) in env {
-            if let Some(value) = value.as_str() {
-                command.env(key, value);
-            }
-        }
-    }
     let timeout = Duration::from_secs(claim["timeout_secs"].as_u64().unwrap_or(DEFAULT_MINUTES * 60));
     let outcome = teams::templates::run_tree(&mut command, timeout, None);
     let mut done = claim.clone();
@@ -302,6 +438,49 @@ fn worker(id: &str) -> Result<i32> {
     storage::atomic(&result_path(id), &done.to_string())?;
     let _ = fs::remove_file(running_path(id));
     Ok(0)
+}
+
+/// The claimed command with its folder and environment: argv without a shell,
+/// else the platform's shell.
+fn claim_command(claim: &Value) -> Command {
+    let argv: Vec<String> = claim["argv"].as_array().into_iter().flatten().filter_map(Value::as_str).map(str::to_owned).collect();
+    let mut command = if argv.is_empty() {
+        shell(string(claim, "command"))
+    } else {
+        // An argv claim runs without a shell: a Windows path or a quoted remote
+        // command is one argument, not shell text (U60 #658 N5).
+        let mut command = Command::new(&argv[0]);
+        command.args(&argv[1..]);
+        command
+    };
+    command.current_dir(string(claim, "cwd"));
+    // U47/U48: a stage's command gets the task, its branch and the checked commit.
+    if let Some(env) = claim["env"].as_object() {
+        for (key, value) in env {
+            if let Some(value) = value.as_str() {
+                command.env(key, value);
+            }
+        }
+    }
+    command
+}
+
+/// Task #28 (1): the step between the runner and a sandboxed member's
+/// command. It lowers itself to Low integrity, then runs the claimed command
+/// on the runner's pipes and ends with its exit code; the command and what it
+/// starts inherit Low. A process that cannot lower itself runs nothing.
+fn low_exec(id: &str) -> Result<i32> {
+    if !canonical_uuid(id) {
+        return Err(USAGE.into());
+    }
+    let claim = read(&running_path(id)).ok_or("the run's claim is gone")?;
+    if claim["integrity"] != "low" {
+        return Err("this run is not a sandboxed member's".into());
+    }
+    crate::platform::lower_to_low_integrity()
+        .map_err(|error| format!("the run did not start: it could not drop to the sandbox's Low integrity: {error}"))?;
+    let status = claim_command(&claim).status().map_err(|error| error.to_string())?;
+    Ok(status.code().unwrap_or(1))
 }
 
 /// Whether a claim still runs: inside its bound, and its runner alive once it
@@ -415,10 +594,191 @@ fn prune() {
 mod tests {
     use super::*;
 
-    thread_local! {
-        /// The caller a test names: Some(None) is no session, whatever
-        /// session runs the tests.
-        pub(super) static CALLER: std::cell::RefCell<Option<Option<Value>>> = const { std::cell::RefCell::new(None) };
+    use crate::state::teams::model::{Member, MemberState, SessionRef, Team, TeamStatus};
+    use crate::state::teams::store::Store;
+
+    const QA: &str = "session-10e9dd92-4a7a-49be-a139-da281115f842";
+
+    /// The DeepSeek member of team 33fbafeb as its binding names it.
+    fn qa_binding() -> Value {
+        json!({"name":"dsh/Zerus/zerus-next-for-the-fork-qa","run_id":"ba3d8c92-041c-4e14-81b2-b2e63f0e7ee7","conversation_id":QA})
+    }
+
+    /// A running team whose member qa is that DeepSeek session, in `folder`.
+    fn qa_team(folder: &Path) {
+        let session = |name: &str, run: &str, conversation: &str| SessionRef {
+            name: name.into(), run_id: run.into(), conversation_id: conversation.into(), ..Default::default()
+        };
+        let team = Team {
+            id: "33fbafeb-8291-4eda-a00c-6e1448ec6f20".into(),
+            name: "Zerus Next".into(),
+            lead: "lead".into(),
+            status: TeamStatus::Running,
+            folder: folder.display().to_string(),
+            members: vec![
+                Member { id: "lead".into(), agent: "claude".into(), state: MemberState::Active,
+                    session: Some(session("claude/Zerus/lead", "r-lead", "c-lead")), ..Default::default() },
+                Member { id: "qa".into(), role: "QA".into(), agent: "dsh".into(), state: MemberState::Active,
+                    directory: folder.display().to_string(),
+                    session: Some(session("dsh/Zerus/zerus-next-for-the-fork-qa", "ba3d8c92-041c-4e14-81b2-b2e63f0e7ee7", QA)),
+                    ..Default::default() },
+            ],
+            ..Default::default()
+        };
+        Store::open(true).unwrap().create("11111111-1111-4111-8111-111111111111", &json!({}), team, vec![]).unwrap();
+    }
+
+    /// Runs `body` as the sandboxed qa member: its binding is the caller and
+    /// this process counts as below Medium integrity.
+    fn as_sandboxed_qa<T>(body: impl FnOnce() -> T) -> T {
+        TEST_CALLER.with(|caller| *caller.borrow_mut() = Some(Some(qa_binding())));
+        crate::platform::set_test_sandboxed(Some(true));
+        let result = body();
+        crate::platform::set_test_sandboxed(None);
+        TEST_CALLER.with(|caller| *caller.borrow_mut() = None);
+        result
+    }
+
+    /// Task #28 (1): `hgs run` from team 33fbafeb's DeepSeek member was
+    /// refused as "run it from inside a Zerus session": no `HGS_SESSION`, and
+    /// no hgs process above it. Its harness exports the conversation as
+    /// `DSH_SESSION_ID`, and the binding of that conversation is the caller.
+    #[test]
+    fn a_deepseek_tool_command_is_its_sessions_caller() {
+        let other = json!({"name":"dsh/p/other","run_id":"r-other","conversation_id":"session-other"});
+        let records = vec![other.clone(), qa_binding(), json!({"name":"dsh/p/old","run_id":"","conversation_id":QA})];
+        assert_eq!(binding_for(&records, QA), Some(qa_binding()));
+        assert_eq!(binding_for(&records, "session-unknown"), None);
+        assert_eq!(binding_for(&records[2..], QA), None, "a binding without a run names no session");
+    }
+
+    /// Task #28 (1): in its sandbox the member may not write Zerus state, and
+    /// its run must stay at the sandbox's level. The request waits in its
+    /// folder; the worker records it as the member session's work and starts
+    /// it at Low integrity; asked again, the member reads the run's record.
+    #[test]
+    fn a_sandboxed_members_run_waits_in_its_folder_for_the_worker() {
+        let root = tempfile::tempdir().unwrap();
+        let folder = tempfile::tempdir().unwrap();
+        with_test_state_root(root.path(), || {
+            qa_team(folder.path());
+            let id = "55555555-5555-4555-8555-555555555555";
+            let request = json!({"request_id":id,"label":"cargo build","command":"cargo build","cwd":folder.path().display().to_string()});
+            let answer = as_sandboxed_qa(|| start(&request, false)).unwrap();
+            assert_eq!(answer["status"], "queued", "{answer}");
+            assert!(!dir().exists(), "the sandbox wrote no Zerus state");
+            let queued = teams::outbox::request(folder.path(), id).unwrap();
+            assert_eq!((queued["op"].as_str(), queued["member"].as_str()), (Some("session-run"), Some("qa")));
+            assert_eq!(queued["input"]["command"], "cargo build");
+            // The worker's side.
+            HELD_RUNNER.with(|held| held.set(true));
+            let running = start_for_sandbox(id, &queued["input"], session_of(&qa_binding()), folder.path());
+            HELD_RUNNER.with(|held| held.set(false));
+            assert_eq!(running.unwrap()["status"], "running");
+            let claim = read(&running_path(id)).unwrap();
+            assert_eq!(claim["integrity"], "low", "the run keeps the sandbox's level");
+            assert_eq!(claim["session"], session_of(&qa_binding()), "the member's session is Building");
+            let temp = claim["env"]["TEMP"].as_str().unwrap();
+            assert!(Path::new(temp).starts_with(folder.path()) && Path::new(temp).is_dir(), "{temp}");
+            assert!(active_for("dsh/Zerus/zerus-next-for-the-fork-qa", "ba3d8c92-041c-4e14-81b2-b2e63f0e7ee7"));
+            // Asked again from the sandbox, it is the run's own record.
+            assert_eq!(as_sandboxed_qa(|| start(&request, false)).unwrap()["status"], "running");
+            assert_eq!(as_sandboxed_qa(list).unwrap()["items"][0]["request_id"], id);
+            // A run the worker refused reaches the member as the refusal.
+            let refused = "66666666-6666-4666-8666-666666666666";
+            let mut second = request.clone();
+            second["request_id"] = json!(refused);
+            as_sandboxed_qa(|| start(&second, false)).unwrap();
+            teams::outbox::settle(folder.path(), &json!({"request_id":refused}),
+                &json!({"status":"refused","request_id":refused,"error":"the member has no session on this computer"})).unwrap();
+            let answer = as_sandboxed_qa(|| start(&second, true)).unwrap();
+            assert_eq!(answer["status"], "refused", "{answer}");
+        });
+    }
+
+    /// The helper side of the test below: a child process that lowers itself
+    /// as `low_exec` does, then tries to write a Medium folder.
+    #[cfg(windows)]
+    #[test]
+    fn low_exec_helper() {
+        let Some(target) = std::env::var_os("HGS_TEST_LOW_TARGET") else { return };
+        crate::platform::lower_to_low_integrity().unwrap();
+        let denied = fs::write(Path::new(&target).join("written.txt"), b"x").is_err();
+        println!("low={} denied={denied}", crate::host::token::below_medium());
+    }
+
+    /// Task #28 (1): the worker runs a sandboxed member's command, yet the
+    /// command must not run above the member's sandbox: `low_exec` drops to
+    /// Low integrity before it starts anything, and a Low process cannot write
+    /// a Medium folder (Zerus state, another member's checkout).
+    #[cfg(windows)]
+    #[test]
+    fn a_sandboxed_members_run_keeps_the_sandboxs_low_integrity() {
+        let target = tempfile::tempdir().unwrap();
+        let output = Command::new(std::env::current_exe().unwrap())
+            .args(["state::builds::tests::low_exec_helper", "--exact", "--nocapture", "--test-threads=1"])
+            .env("HGS_TEST_LOW_TARGET", target.path())
+            .stdin(Stdio::null())
+            .output()
+            .unwrap();
+        let text = String::from_utf8_lossy(&output.stdout);
+        assert!(text.contains("low=true denied=true"), "{text}\n{}", String::from_utf8_lossy(&output.stderr));
+        assert!(!target.path().join("written.txt").exists());
+        assert!(!crate::host::token::below_medium(), "the test process itself stays at its level");
+    }
+
+    /// Task #28 (1): a process that is no team member's in a sandbox hears
+    /// why, and nothing is queued anywhere.
+    #[test]
+    fn a_sandboxed_run_outside_a_team_is_refused_with_its_reason() {
+        let root = tempfile::tempdir().unwrap();
+        let folder = tempfile::tempdir().unwrap();
+        with_test_state_root(root.path(), || {
+            Store::open(true).unwrap();
+            let request = json!({"request_id":"77777777-7777-4777-8777-777777777777","label":"build","command":"true",
+                "cwd":folder.path().display().to_string()});
+            let error = as_sandboxed_qa(|| start(&request, false)).unwrap_err();
+            assert!(error.contains("only a member of a running team"), "{error}");
+            assert!(!teams::outbox::dir(folder.path()).exists());
+        });
+    }
+
+    /// Task #28 (2, 3): team 33fbafeb's DeepSeek member ran
+    /// `hgs ls --json` and heard "the session host on this computer runs
+    /// elevated" (its Low sandbox is below the host), then asked the lead to
+    /// run it unsandboxed: a permission card for a read. The read now waits in
+    /// its folder and the worker's answer is printed; other commands and
+    /// processes outside a sandbox take their usual way.
+    #[test]
+    fn a_sandboxed_members_host_read_is_answered_by_the_worker() {
+        let root = tempfile::tempdir().unwrap();
+        let folder = tempfile::tempdir().unwrap();
+        with_test_state_root(root.path(), || {
+            qa_team(folder.path());
+            let argv = |words: &[&str]| words.iter().map(|word| (*word).to_owned()).collect::<Vec<_>>();
+            assert!(sandbox_read(&argv(&["ls", "--json"])).is_none(), "outside a sandbox nothing changes");
+            assert!(as_sandboxed_qa(|| sandbox_read(&argv(&["send", "claude/p/t"]))).is_none(), "only reads");
+            // The worker, as a thread: it answers the one read it finds.
+            let worker_folder = folder.path().to_path_buf();
+            let worker = std::thread::spawn(move || {
+                let until = std::time::Instant::now() + Duration::from_secs(20);
+                while std::time::Instant::now() < until {
+                    if let Some((_, request)) = teams::outbox::pending(&worker_folder, 10).unwrap_or_default().into_iter().next() {
+                        let outcome = json!({"status":"ran","request_id":request["request_id"],"exit":0,"stdout":"[]","stderr":""});
+                        teams::outbox::settle(&worker_folder, &request, &outcome).unwrap();
+                        return Some(request);
+                    }
+                    std::thread::sleep(Duration::from_millis(50));
+                }
+                None
+            });
+            let answer = as_sandboxed_qa(|| sandbox_read(&argv(&["ls", "--json"])));
+            let request = worker.join().unwrap().expect("the read waited in the member's folder");
+            assert_eq!(answer.expect("a sandboxed read is brokered"), Ok(0));
+            assert_eq!((request["op"].as_str(), request["member"].as_str()), (Some("read"), Some("qa")));
+            assert_eq!(request["input"]["argv"], json!(["ls", "--json"]));
+            assert!(teams::outbox::result(folder.path(), request["request_id"].as_str().unwrap()).is_none(), "the answer is read once");
+        });
     }
 
     #[test]
@@ -486,13 +846,13 @@ mod tests {
         // session must not find that session, nor write its state.
         let root = tempfile::tempdir().unwrap();
         with_test_state_root(root.path(), || {
-            CALLER.with(|caller| *caller.borrow_mut() = Some(None));
+            TEST_CALLER.with(|caller| *caller.borrow_mut() = Some(None));
             let request = json!({"request_id":"33333333-3333-4333-8333-333333333333","label":"build","command":"true"});
             assert!(start(&request, false).unwrap_err().contains("inside a Zerus session"));
             assert!(list().unwrap_err().contains("inside a Zerus session"));
             assert!(start(&json!({"request_id":"x"}), false).unwrap_err().contains("canonical request_id"));
             // A session's request is checked before anything starts.
-            CALLER.with(|caller| *caller.borrow_mut() = Some(Some(json!({"name":"claude/p/t","run_id":"r","conversation_id":"c"}))));
+            TEST_CALLER.with(|caller| *caller.borrow_mut() = Some(Some(json!({"name":"claude/p/t","run_id":"r","conversation_id":"c"}))));
             let bad = |field: &str, value: Value| {
                 let mut request = request.clone();
                 request[field] = value;
@@ -503,7 +863,7 @@ mod tests {
             assert!(bad("cwd", json!("relative")).contains("cwd"));
             assert!(bad("timeout_minutes", json!(0)).contains("timeout_minutes"));
             assert!(!dir().exists(), "nothing was recorded");
-            CALLER.with(|caller| *caller.borrow_mut() = None);
+            TEST_CALLER.with(|caller| *caller.borrow_mut() = None);
             assert!(dispatch(&["--bogus".into()]).is_err());
         });
     }

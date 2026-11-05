@@ -1,4 +1,5 @@
 import type { Text } from "./text";
+import type { DraftMember } from "./ui/teams/types";
 // The batch the Rust side returns from `next_batch` (zerus-client-core
 // `Batch`, snake_case JSON). Rows arrive as compact view rows projected in
 // Rust; the webview never sees raw watch frames.
@@ -219,6 +220,8 @@ export interface Batch {
   processes_view?: ProcessesView;
   /** Notices and Terminal requests that arrived after their call, at most 16. */
   composer_events?: ComposerEvent[];
+  /** The Teams views that changed (core batch.rs `TeamsOut`), at most one per computer and key. */
+  teams?: TeamsOut[];
 }
 
 /** A row of the Processes tab (processes.rs `RowView`). */
@@ -275,7 +278,7 @@ export const emptyBatch = (): Batch => ({ upserts: [], removes: [], replaces: []
 /** A batch with nothing to apply. A composer view or a draft key set is content: Rust sends each once. */
 export const isEmptyBatch = (b: Batch) =>
   !b.upserts.length && !b.removes.length && !b.replaces.length && !b.computers.length && !b.machines?.length && !b.activity.length
-  && !b.desktop_service && !b.tasks?.length && !b.groups?.length && !b.grouping && !b.processes_view && !b.composer && !b.draft_keys && !b.composer_events?.length;
+  && !b.desktop_service && !b.tasks?.length && !b.groups?.length && !b.grouping && !b.processes_view && !b.composer && !b.draft_keys && !b.composer_events?.length && !b.teams?.length;
 
 /** One Activity event as `inspect` returns it; unknown fields are kept. */
 export interface ActivityEvent {
@@ -898,3 +901,144 @@ export const emptyUpdatesView = (): UpdatesView => ({
   version: "",
   quiet: false,
 });
+
+// ---------------------------------------------------------------------------
+// Teams (client/core/src/teams/view.rs): the projected views the Team tab
+// shows. The webview never reads an hgs team reply itself.
+
+/** One Teams view of a computer: `list`, `waiting`, `team:<id>`, `feed:<id>`, `inbox:<id>`... */
+export interface TeamsOut {
+  computer: ComputerId;
+  key: string;
+  /** The view's name, `failed` ({code, message}; the view keeps what it showed) or `ended` (no longer followed). */
+  kind: string;
+  payload: unknown;
+}
+
+/** A member's session; `host` is empty on the team's own computer. */
+export interface TeamSessionView { host: string; name: string; run_id: string; conversation_id: string }
+
+export interface TeamListedMember { id: string; role: string; agent: string; state: string; lead: boolean; session: TeamSessionView | null }
+
+export interface TeamSummary {
+  id: string; name: string; status: string; project: string; folder: string; plan_mode: string; lead: string;
+  members: TeamListedMember[]; tasks: number; accepted: number; submitted: number; in_review: number; in_test: number;
+  attention: number; open_proposals: number; waiting_for_lead: boolean; pending_phase: number | null; updated: number; revision: number;
+}
+
+export interface TeamList { teams: TeamSummary[]; truncated: boolean }
+
+export interface TeamMemberView {
+  id: string; role: string; agent: string; model: string; effort: string; account: string; computer: string; folder: string;
+  /** `not_created`, `active`, `paused`, `removed`... */
+  state: string;
+  /** What its session does now (`busy`, `idle`...), and the hand-off phase (`working`, `asking`...). */
+  activity: string; phase: string; error: string; lead: boolean; session: TeamSessionView | null;
+  /** Seen live at the last listing; null: never seen. */
+  live: boolean | null; stuck: boolean; question: boolean;
+  /** Its open task first, then the tasks returned to it. */
+  queue: number[]; minutes_without_progress: number; host_shared: boolean;
+  /** Task 11: the pending question or permission request as hgs sends it (`members[].question`), null without one. */
+  permission?: TeamMemberQuestion | null;
+}
+
+/** A member's pending question (`members[].question`): its id and hash, what it asks and the card's allow and deny ids. */
+export interface TeamMemberQuestion {
+  question_id?: string; question_hash?: string; expected_question_hash?: string; tool?: string; command?: string; reason?: string;
+  asked_at?: number; answered_at?: number; answer?: { question_id?: string; allow?: string; deny?: string } | string;
+  questions?: { id: string; header?: string; question?: string; multi_select?: boolean; allow_other?: boolean; options?: { id: string; label: string; description?: string }[] }[];
+  subagent_confirmation?: boolean;
+}
+
+export interface TeamTaskView {
+  id: number; title: string; status: string; assignee: string; phase: number; deps: { task: number; hard: boolean }[];
+  estimate_minutes: number; attempts: number;
+  /** The newest attempt's state (`delivering`, `delivered`, `unconfirmed`, `reported`...), empty without one. */
+  attempt_state: string; decided_by: string; pinned: boolean; output: string[]; waits: string;
+  /** Task 11: the newest attempt's id, and whether its member got no report in. */
+  attempt_id?: string; no_report?: boolean;
+}
+
+export interface TeamPhaseView {
+  n: number; title: string; state: string; status: string; done: number; total: number; barrier: boolean; auto: boolean;
+  acceptance: string; paused: boolean; health: string;
+}
+
+export interface TeamFinding { kind: string; text: string; task: number | null; member: string }
+
+export interface TeamView {
+  id: string; name: string; status: string; project: string; folder: string; goal: string; plan_mode: string; lead: string;
+  revision: number; created: number; updated: number; waiting_for_lead: boolean; pending_phase: number | null;
+  settings: Record<string, unknown>; members: TeamMemberView[]; tasks: TeamTaskView[]; phases: TeamPhaseView[];
+  proposals: TeamProposalView[];
+  attention: unknown[];
+  /** Task 11: additions to a running phase that wait for the owner (`pending_additions`). */
+  additions?: TeamAddition[];
+  validation: { errors: TeamFinding[]; warnings: TeamFinding[] };
+  health: { critical_path: number; parallelism: number; warnings: string[] };
+  ready: number[]; cycle: number[]; draft: { revision: number; unseen: string[]; owner_edited: string[] } | null; truncated: boolean;
+}
+
+/** An open proposal: `summary` and `lines` are what hgs wrote for an owner-gated operation, else the kind and nothing. */
+export interface TeamProposalView {
+  id: string; kind: string; by: string; at: number; reason: string; hash: string; summary: string; lines: string[];
+  /** The exact change and the proposed member (null when over the core's bound). */
+  change?: unknown; member?: unknown; goal?: string; mode?: string;
+}
+
+export interface TeamAddition { id: string; phase?: number; by?: string; request?: string; tasks?: { id?: number; title?: string }[] }
+
+/** One thing that waits for the owner (`hgs team waiting`); `detail` is the whole item as hgs lists it. */
+export interface TeamWaitingItem {
+  id: string; kind: string; team: string; team_name: string; title: string; action: string; since: number; proposal: unknown;
+  detail?: Record<string, unknown> | null;
+}
+
+export interface TeamWaitingView { items: TeamWaitingItem[]; total: number; more: boolean }
+
+/** The owner's confirmation of a team action, worded by the core. */
+export interface TeamConfirmation { name: string; title: string; text: string; action: string }
+
+/**
+ * A team action (client/core/src/teams/action.rs `TeamAction`), by its kind:
+ * the one definition for the Team tab, Waiting for you, New team, settings and
+ * the catalog (task 47).
+ */
+export type TeamAction =
+  | { kind: "approve"; phase?: number | null; plan_mode?: string | null; confirm_widening?: boolean; alongside?: boolean }
+  | { kind: "accept"; task: number; reason?: string; manual?: boolean }
+  | { kind: "reject"; task: number; reason: string; hold?: boolean; fresh?: boolean }
+  | { kind: "decide_proposal"; proposal: string; accept: boolean; expected_hash: string; reason?: string; answer?: string }
+  | { kind: "use_last_reply"; task: number; attempt: string }
+  | { kind: "answer"; member: string; question_id: string; expected_question_hash: string; answers: unknown[] }
+  | { kind: "add_to_phase"; phase: number; confirm: string; confirmation?: string; decline?: boolean }
+  | { kind: "accept_phase"; phase: number }
+  | { kind: "send_back_phase"; phase: number; comment: string }
+  | { kind: "decide_tool"; offer: string; allow: boolean; reason?: string }
+  | { kind: "release"; task: number }
+  | { kind: "retry"; task: number }
+  | { kind: "finish" }
+  | { kind: "draft_start"; folder: string; name?: string; lead: DraftMember; project?: string; project_id?: string; template?: string }
+  | { kind: "draft_update"; revision: number; set: Record<string, unknown> }
+  | { kind: "draft_seen"; fields: string[] }
+  | { kind: "draft_create"; approve?: boolean; confirm_widening?: boolean }
+  | { kind: "draft_discard"; stop_lead?: boolean; reason?: string }
+  | { kind: "settings"; settings: Record<string, unknown> }
+  | { kind: "catalog_propose"; change: Record<string, unknown> }
+  | { kind: "catalog_decide"; proposal: string; decision: "keep" | "reject" | "undo" }
+  | { kind: "catalog_apply" }
+  | { kind: "catalog_discard" };
+
+/**
+ * One call (core `TeamCall`): the computer ("" is this one), the team (empty
+ * for a draft start, a tool offer or the catalog), its name for the
+ * confirmation, whether the owner confirmed it, and the request id of an
+ * earlier attempt sent again.
+ */
+export interface TeamCall { computer?: ComputerId; team?: string; team_name?: string; action: TeamAction; confirmed?: boolean; request_id?: string | null }
+
+export type TeamOutcome =
+  | { outcome: "done"; receipt: Record<string, unknown>; request_id: string }
+  | { outcome: "failed"; detail: string; request_id: string }
+  | { outcome: "uncertain"; detail: string; request_id: string }
+  | { outcome: "confirm"; confirmation: TeamConfirmation };

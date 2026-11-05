@@ -66,6 +66,9 @@ pub(crate) struct Seen {
     /// #511 N1: a build Zerus runs for the session (`hgs run`, or a claimed
     /// `hgs team run` in its folder) is work, as the listing's `build` says.
     pub building: bool,
+    /// Task 36: that build's request id and label, empty when not building.
+    pub build_run: String,
+    pub build_label: String,
     /// The MCP servers and services it runs, which are not Background work
     /// (G7).
     pub services: Vec<SeenService>,
@@ -211,6 +214,8 @@ pub(crate) fn seen(listing: &Value) -> Vec<Seen> {
                 background,
                 work,
                 building: record["build"].is_object(),
+                build_run: record["build"]["request_id"].as_str().unwrap_or_default().to_owned(),
+                build_label: record["build"]["label"].as_str().unwrap_or_default().to_owned(),
                 services,
                 asking: live && matches!(field("phase"), "question" | "input" | "approval"),
                 last_event_at: record["last_event_at"].as_f64(),
@@ -314,6 +319,14 @@ pub(crate) enum Step {
     /// Gives the member the lead's answer as a message (A3).
     AnswerQuestion { task: u32, question: String },
     TurnEnded { task: u32, at: f64, reply: String },
+    /// Task 36: the member's session is Building on its own run during the
+    /// attempt: remember the run, so its end is noticed.
+    RunAwaited { task: u32, run: String, label: String },
+    /// Task 36: the awaited run settled. `wake`: the member's turn is over
+    /// (the session is quiet), so it is told once to read the result and go
+    /// on, and its finished turn is not captured; otherwise the member already
+    /// works again and the run is only forgotten.
+    RunSettled { task: u32, wake: bool },
     /// The capture gate was seen open: the report timeout counts from here (C2).
     GateOpen { task: u32 },
     /// A question or Background work holds a finished turn: the timeout
@@ -649,6 +662,26 @@ pub(crate) fn steps_with(team: &Team, seen: &[Seen], now: f64, listed: Option<&B
                 {
                     // A1: delivered and never started; Zerus re-sends nothing.
                     steps.push(Step::StartLate { task: task.id });
+                }
+            }
+            // Task 36 (audit P8): a member that ends its turn while its own
+            // Zerus build runs is not done: nothing would tell it when the run
+            // settles, and the quiet session would turn into a captured
+            // "waiting for my build" or No report. The run it waits on is
+            // remembered; once it settles with the turn over, the member is
+            // woken once and this tick captures nothing.
+            if let Some(found) = found.filter(|found| found.live) {
+                if found.building {
+                    let run = if found.build_run.is_empty() { "build".to_owned() } else { found.build_run.clone() };
+                    if attempt.awaited_run != run {
+                        steps.push(Step::RunAwaited { task: task.id, run, label: found.build_label.clone() });
+                    }
+                } else if !attempt.awaited_run.is_empty() {
+                    let wake = capture_open(found) && attempt.open_question().is_none();
+                    steps.push(Step::RunSettled { task: task.id, wake });
+                    if wake {
+                        continue;
+                    }
                 }
             }
             // A2/C2: the capture gate. A turn end is recorded only for a quiet
@@ -2756,6 +2789,18 @@ pub(crate) fn default_folder(agent: &str) -> MemberFolder {
     }
 }
 
+/// Task #28 (5): a sandboxed dsh member cannot write a worktree's git
+/// metadata (it lives in the main checkout's `.git`, outside the sandbox), so
+/// its own folder is a clone whatever asked for a worktree: a role default, a
+/// template, the New team form or the worktree policy, which a clone also
+/// meets. Before, the preflight only warned and the member could not commit.
+/// An adopted session keeps the folder it works in.
+pub(crate) fn sandbox_folder(member: &mut Member) {
+    if member.agent == "dsh" && member.folder == MemberFolder::Worktree && member.session.is_none() {
+        member.folder = MemberFolder::Clone;
+    }
+}
+
 /// The folder the member works in, computed without creating anything: the
 /// team's (or its own) folder, or the worktree/clone path a writing member
 /// gets.
@@ -3230,12 +3275,16 @@ pub(crate) fn agent_args(agent: &str, model: &str, effort: &str) -> Vec<String> 
     args
 }
 
-/// DeepSeek's model is provider/model; a bare name keeps the session's own.
+/// A DeepSeek member's model and effort, after its session starts: the model as
+/// `provider/model` or a bare id (`deepseek-flash`) hgs resolves (task #19).
 fn apply_settings(member: &Member) -> anyhow::Result<()> {
     let session = member.session.as_ref().context("no session")?;
     let mut input = json!({"request_id":uuid::Uuid::new_v4().to_string(),"expected_run_id":session.run_id,
         "expected_conversation_id":session.conversation_id});
-    if member.model.contains('/') {
+    // Task #19: only a DeepSeek member gets its settings this way; hgs takes
+    // its model as `provider/model` or as the bare id one provider offers
+    // (`deepseek-flash`), which was dropped before.
+    if !member.model.is_empty() {
         input["model"] = json!(member.model);
     }
     if !member.effort.is_empty() {
@@ -5123,6 +5172,63 @@ fn tell_lead_start_late(store: &mut Store, team: &Team, task_id: u32) -> anyhow:
 }
 
 /// Gives the member the lead's answer as a message, once (A3).
+/// Task 36: the message that wakes a member whose own run settled after its
+/// turn ended.
+pub(crate) fn run_settled_text(task: &Task, attempt: &Attempt) -> String {
+    let what = if attempt.awaited_label.is_empty() { "build".to_owned() } else { format!("build ({})", attempt.awaited_label) };
+    let read = if attempt.awaited_run == "build" {
+        "Read its result".to_owned()
+    } else {
+        format!("Read its result (ask again with request_id {})", attempt.awaited_run)
+    };
+    format!(
+        "[Zerus team] Your {what} for task #{} {} has finished. {read}, then go on with the task and finish it with hgs team report (attempt {}). Zerus does not take a reply that only says you are waiting as your report.",
+        task.id, task.title, attempt.id
+    )
+}
+
+/// Task 36: the awaited run settled. With the member's turn over it is woken
+/// once and its finished turn starts again: the report timeout counts anew
+/// from the wake, so a member that still does nothing gets No report then.
+fn run_settled(store: &mut Store, team: &Team, task_id: u32, wake: bool) -> anyhow::Result<()> {
+    let task = team.task(task_id).context("unknown task")?;
+    let attempt = task.attempts.last().context("no attempt")?;
+    if attempt.state != AttemptState::Delivered || attempt.awaited_run.is_empty() {
+        return Ok(());
+    }
+    let run = attempt.awaited_run.clone();
+    let mut sent = None;
+    if wake {
+        let session = team.member(&attempt.member).and_then(|m| m.session.clone()).context("the member has no session")?;
+        let notice = uuid::Uuid::new_v4().to_string();
+        sent = Some(send(&session, &notice, &run_settled_text(task, attempt)));
+    }
+    let role = team.role_of(&attempt.member);
+    change(store, &team.id, |team, events| {
+        let Some(attempt) = team.task_mut(task_id).and_then(|t| t.attempts.last_mut()) else { return Ok(()) };
+        if attempt.state != AttemptState::Delivered || attempt.awaited_run != run {
+            return Ok(());
+        }
+        attempt.awaited_run.clear();
+        attempt.awaited_label.clear();
+        if let Some(sent) = sent {
+            // Woken once, whatever the delivery: a refused wake leaves the
+            // finished turn to the usual capture.
+            if !matches!(sent, Sent::Refused(_)) {
+                attempt.turn_ended_at = None;
+                attempt.turn_reply.clear();
+                attempt.report_ready_at = None;
+                attempt.blocked_since = None;
+            }
+            events.push(Event::new(
+                "run_settled_woken",
+                json!({"member":role,"task":task_id,"attempt":attempt.n,"run":run,"delivered":!matches!(sent, Sent::Refused(_))}),
+            ));
+        }
+        Ok(())
+    })
+}
+
 fn send_answer(store: &mut Store, team: &Team, task_id: u32, question_id: &str) -> anyhow::Result<()> {
     let task = team.task(task_id).context("unknown task")?;
     // #630 N6: the answer may belong to an attempt or to a stage member's run.
@@ -6678,6 +6784,16 @@ fn run_step(store: &mut Store, team: &Team, step: &Step, host: &str) -> anyhow::
             }
             Ok(())
         }),
+        Step::RunAwaited { task, run, label } => change(store, &team.id, |team, _| {
+            if let Some(attempt) = team.task_mut(*task).and_then(|t| t.attempts.last_mut()) {
+                if attempt.state == AttemptState::Delivered {
+                    attempt.awaited_run = run.clone();
+                    attempt.awaited_label = label.clone();
+                }
+            }
+            Ok(())
+        }),
+        Step::RunSettled { task, wake } => run_settled(store, team, *task, *wake),
         Step::GateOpen { task } => change(store, &team.id, |team, _| {
             // An old record (or a reopened gate): the timeout starts now (C2).
             if let Some(attempt) = team.task_mut(*task).and_then(|t| t.attempts.last_mut()) {
@@ -7041,6 +7157,14 @@ fn take_outbox_with(
             if request["member"].as_str() != Some(member.id.as_str()) && shares_folder(team, &request, seen, &found.cwd) {
                 continue;
             }
+            // Task #28: a sandboxed member's own `hgs run` and its host reads.
+            if matches!(request["op"].as_str(), Some("session-run" | "read")) {
+                let outcome = sandbox_request(member, folder, &request);
+                if let Err(error) = super::outbox::settle(folder, &request, &outcome) {
+                    eprintln!("hgs team worker: {}: outbox {}: {error}", team.name, path.display());
+                }
+                continue;
+            }
             if request["op"] == "run" {
                 match start_run(store, team, member, folder, &request, spawn) {
                     // A refusal is answered now; a claim needs no answer - the
@@ -7068,6 +7192,51 @@ fn take_outbox_with(
         }
     }
     Ok(())
+}
+
+/// Task #28: what the worker does for a sandboxed member that its sandbox
+/// cannot. `session-run` records and starts the member's `hgs run` as its
+/// session's work, at the sandbox's Low integrity (`builds::start_for_sandbox`);
+/// `read` answers one host read the sandbox cannot reach
+/// (`outbox::sandbox_read_allowed`). The folder proves the member (U20); a
+/// refusal is the answer, never a retry.
+fn sandbox_request(member: &Member, folder: &Path, request: &Value) -> Value {
+    let id = request["request_id"].as_str().unwrap_or_default();
+    let refused = |error: String| json!({"status":"refused","request_id":id,"error":error});
+    let Some(session) = member.session.as_ref().filter(|session| session.host.is_empty()) else {
+        return refused("the member has no session on this computer".into());
+    };
+    match request["op"].as_str() {
+        Some("session-run") => {
+            let session = json!({"name":session.name,"run_id":session.run_id,"conversation_id":session.conversation_id});
+            super::super::builds::start_for_sandbox(id, &request["input"], session, folder).unwrap_or_else(refused)
+        }
+        _ => {
+            let argv: Vec<String> =
+                request["input"]["argv"].as_array().into_iter().flatten().filter_map(Value::as_str).map(str::to_owned).collect();
+            if !super::outbox::sandbox_read_allowed(&argv) {
+                return refused(format!("a sandbox asks only for hgs ls and hgs inspect, not: hgs {}", argv.join(" ")));
+            }
+            let words: Vec<&str> = argv.iter().map(String::as_str).collect();
+            match hgs("", &words, None, Duration::from_secs(45)) {
+                Ok(output) => {
+                    let mut stdout = String::from_utf8_lossy(&output.stdout).into_owned();
+                    let truncated = stdout.len() > super::outbox::READ_STDOUT;
+                    if truncated {
+                        let mut end = super::outbox::READ_STDOUT;
+                        while !stdout.is_char_boundary(end) {
+                            end -= 1;
+                        }
+                        stdout.truncate(end);
+                    }
+                    let stderr: String = String::from_utf8_lossy(&output.stderr).chars().take(64 * 1024).collect();
+                    json!({"status":"ran","request_id":id,"exit":output.status.code().unwrap_or(1),"stdout":stdout,
+                        "stderr":stderr,"truncated":truncated})
+                }
+                Err(error) => refused(format!("{error:#}")),
+            }
+        }
+    }
 }
 
 /// N1: the branch the lead's own folder is on: what a member merges. It is read

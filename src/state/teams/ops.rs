@@ -215,32 +215,42 @@ fn parse_member(value: &Value) -> anyhow::Result<Member> {
 /// itself, the accepted fields and an example.
 fn parse_member_as(value: &Value, what: &str, example: &str) -> anyhow::Result<Member> {
     let mut member: Member = super::strict::parse(value, &[], what, example)?;
-    member.iron_rules = super::super::iron_rules::validate(&json!(member.iron_rules))?;
-    member.id = member_id(&member.id)?;
-    member.role = clean_text(&member.role, 60, "A role")?;
-    ensure!(!member.agent.is_empty(), "Member {} needs an agent", member.id);
+    // Task #26: every refusal names the member and the field.
+    let who = format!("{what} \"{}\"", member.id);
+    let field = |name: &str| {
+        let who = who.clone();
+        let name = name.to_owned();
+        move |error: anyhow::Error| anyhow::anyhow!("{who}: field \"{name}\": {error:#}")
+    };
+    member.iron_rules = super::super::iron_rules::validate(&json!(member.iron_rules)).map_err(field("iron_rules"))?;
+    member.id = member_id(&member.id).map_err(field("id"))?;
+    member.role = clean_text(&member.role, 60, "A role").map_err(field("role"))?;
+    ensure!(!member.agent.is_empty(), "{who}: field \"agent\" is required, such as \"claude\"");
     // C3: `permissions` is the launch mode, the profile an agent's mode.
     ensure!(
         member.permissions.is_empty() || ["auto", "bypass"].contains(&member.permissions.as_str()),
-        "A permissions mode is auto or bypass"
+        "{who}: field \"permissions\" is auto or bypass, not \"{}\"",
+        member.permissions
     );
     ensure!(
         member.permissions_profile.is_empty() || ["read", "write", "build", "commit", "network"].contains(&member.permissions_profile.as_str()),
-        "A permissions profile is read, write, build, commit or network"
+        "{who}: field \"permissions_profile\" is read, write, build, commit or network, not \"{}\"",
+        member.permissions_profile
     );
     // U46: opt-in; empty inherits the role, "none" overrides it with none.
     ensure!(
         matches!(member.context_before_task.as_str(), "" | "none" | "compact" | "clear"),
-        "A context before a task is none, compact or clear"
+        "{who}: field \"context_before_task\" is none, compact or clear, not \"{}\"",
+        member.context_before_task
     );
     member.launch_id.clear();
     member.error.clear();
     member.host_waits = 0;
     member.inbox = Inbox::default();
     if !member.parent.is_empty() {
-        member.parent = member_id(&member.parent)?;
+        member.parent = member_id(&member.parent).map_err(field("parent"))?;
     }
-    member.prompt = clean_text(&member.prompt, 8000, "A role prompt")?;
+    member.prompt = clean_text(&member.prompt, 8000, "A role prompt").map_err(field("prompt"))?;
     // N3: copy the role's prompt blocks now; a later catalog edit changes no
     // running team mid-phase. An old member loaded from the store keeps None.
     if member.prompt_snapshot.is_none() {
@@ -250,7 +260,8 @@ fn parse_member_as(value: &Value, what: &str, example: &str) -> anyhow::Result<M
     if member.models.is_empty() {
         member.models = super::catalog::models_for(&member.role);
     }
-    super::models::check_choices(&member.models)?;
+    super::models::check_choices(&member.models).map_err(field("models"))?;
+    super::dispatcher::sandbox_folder(&mut member);
     member.state = match member.session {
         Some(_) => MemberState::Active,
         None => MemberState::NotCreated,
@@ -329,13 +340,20 @@ fn clean_output(paths: &mut Vec<String>) -> anyhow::Result<()> {
 
 fn parse_task(value: &Value) -> anyhow::Result<Task> {
     let mut task: Task = super::strict::parse(value, &[], "A task", super::strict::TASK_EXAMPLE)?;
-    ensure!(task.id > 0, "Task numbers start at 1");
-    task.title = clean_text(&task.title, 200, "A task title")?;
-    ensure!(!task.title.trim().is_empty(), "Task #{} needs a title", task.id);
-    task.description = clean_text(&task.description, 20_000, "A task description")?;
-    clean_output(&mut task.output)?;
+    // Task #26: every refusal names the task and the field.
+    let who = format!("Task #{}", task.id);
+    let field = |name: &str| {
+        let who = who.clone();
+        let name = name.to_owned();
+        move |error: anyhow::Error| anyhow::anyhow!("{who}: field \"{name}\": {error:#}")
+    };
+    ensure!(task.id > 0, "A task's field \"id\": task numbers start at 1");
+    task.title = clean_text(&task.title, 200, "A task title").map_err(field("title"))?;
+    ensure!(!task.title.trim().is_empty(), "{who}: field \"title\" is required");
+    task.description = clean_text(&task.description, 20_000, "A task description").map_err(field("description"))?;
+    clean_output(&mut task.output).map_err(field("output"))?;
     // U58: a task for a role keeps the role's text clean too.
-    task.role = clean_text(&task.role, 60, "A task role")?;
+    task.role = clean_text(&task.role, 60, "A task role").map_err(field("role"))?;
     // C5: a check carries its exact command and expected exit code; a plan
     // task may not hide one.
     match task.kind {
@@ -344,12 +362,11 @@ fn parse_task(value: &Value) -> anyhow::Result<Task> {
                 .check
                 .as_mut()
                 .with_context(|| format!("Task #{} is a check: add \"check\":{{\"command\":\"...\"}}", task.id))?;
-            check.command = clean(check.command.trim(), 2000, "A check command")?;
-            ensure!(!check.command.is_empty(), "Task #{} is a check: its command is empty", task.id);
+            check.command = clean(check.command.trim(), 2000, "A check command").map_err(field("check.command"))?;
+            ensure!(!check.command.is_empty(), "{who}: field \"check.command\" is empty");
             ensure!(
                 (1..=1440).contains(&check.timeout_minutes),
-                "Task #{}: a check waits 1 to 1440 minutes",
-                task.id
+                "{who}: field \"check.timeout_minutes\": a check waits 1 to 1440 minutes"
             );
         }
         TaskKind::Task => {
@@ -357,20 +374,20 @@ fn parse_task(value: &Value) -> anyhow::Result<Task> {
         }
     }
     for criterion in &mut task.criteria {
-        *criterion = clean_text(criterion, 500, "An acceptance criterion")?;
+        *criterion = clean_text(criterion, 500, "An acceptance criterion").map_err(field("criteria"))?;
     }
     let mut seen = BTreeSet::new();
     task.deps.retain(|dep| seen.insert(dep.task));
-    ensure!(task.deps.iter().all(|dep| dep.task != task.id), "Task #{} depends on itself", task.id);
+    ensure!(task.deps.iter().all(|dep| dep.task != task.id), "{who}: field \"deps\": the task depends on itself");
     // U27: the lane the task is drawn in; its number and label are bounded and
     // it changes nothing about hand-out.
     if let Some(lane) = task.lane.as_mut() {
-        clean_lane(lane, task.id)?;
+        clean_lane(lane, task.id).map_err(field("lane"))?;
     }
     // Owner 2026-10-31: the lead's estimate is in minutes; a task without one
     // gets Zerus' own from the per-computer history when it is shown.
     if let Some(minutes) = task.estimate_minutes {
-        ensure!((1.0..=1440.0).contains(&minutes), "Task #{}: an estimate is 1 to 1440 minutes", task.id);
+        ensure!((1.0..=1440.0).contains(&minutes), "{who}: field \"estimate_minutes\": an estimate is 1 to 1440 minutes");
         task.estimate_minutes = Some(minutes.round());
         task.estimate_source = "lead".into();
     } else {
@@ -388,9 +405,9 @@ fn parse_task(value: &Value) -> anyhow::Result<Task> {
     // U36: the plan names a preset; Zerus snapshots it when the task is
     // assigned, so a request can never carry its own run.
     task.pipeline_run = None;
-    check_pipeline(&task.pipeline)?;
+    check_pipeline(&task.pipeline).map_err(field("pipeline"))?;
     // U45: the models allowed for the task and a role instead of an assignee.
-    super::models::check_task(&mut task)?;
+    super::models::check_task(&mut task).map_err(field("models"))?;
     Ok(task)
 }
 
@@ -546,10 +563,7 @@ fn plan(team: &mut Team, input: &Value, actor: &Actor, events: &mut Vec<Event>) 
     for value in input["tasks"].as_array().into_iter().flatten() {
         let mut task = parse_task(value)?;
         // The plan may queue tasks of later phases; phase 1 stays the default.
-        task.phase = match value["phase"].as_u64() {
-            None => 1,
-            Some(phase) => u32::try_from(phase).ok().filter(|phase| *phase > 0).context("A task phase is a number from 1")?,
-        };
+        task.phase = task_phase(value)?;
         ensure!(tasks.iter().all(|t: &Task| t.id != task.id), "Task #{} is used twice", task.id);
         tasks.push(task);
     }
@@ -759,6 +773,68 @@ fn mark_decided(task: &mut Task) {
 }
 
 /// The approval new phases wait for: their own setting, else the plan's.
+/// The phase a plan or a draft gives a task: its "phase", 1 when it names none.
+fn task_phase(value: &Value) -> anyhow::Result<u32> {
+    match value.get("phase").filter(|phase| !phase.is_null()) {
+        None => Ok(1),
+        Some(phase) => phase
+            .as_u64()
+            .and_then(|phase| u32::try_from(phase).ok())
+            .filter(|phase| *phase > 0)
+            .context("A task phase is a number from 1"),
+    }
+}
+
+/// Task 23: a draft's phases 2..N, as `plan` keeps them: the phases the draft
+/// lists ({n, title, barrier}; `listed` when this update sets them, else the
+/// ones it has) and every phase a task names, each a Draft phase in order with
+/// its tasks. Team 33fbafeb: the draft's tasks named phases 1, 2 and 3, and
+/// the created team had all of them in phase 1.
+fn draft_phases(team: &mut Team, listed: Option<&Value>, by: &str) -> anyhow::Result<()> {
+    let approval = phase_approval(team);
+    let mut phases: Vec<Phase> = match listed {
+        None => team.phases.clone(),
+        Some(value) => {
+            let mut phases: Vec<Phase> = Vec::new();
+            for value in value.as_array().context("Phases are a list of {\"n\",\"title\",\"barrier\"}")? {
+                let n = value["n"]
+                    .as_u64()
+                    .and_then(|n| u32::try_from(n).ok())
+                    .filter(|n| *n >= 2)
+                    .context("A planned phase is numbered from 2")?;
+                ensure!(phases.iter().all(|phase| phase.n != n), "Phase {n} is used twice");
+                let old = team.phases.iter().find(|old| old.n == n);
+                phases.push(Phase {
+                    n,
+                    title: clean(value["title"].as_str().unwrap_or_default().trim(), 120, "A phase title")?,
+                    barrier: value["barrier"].as_bool() == Some(true),
+                    // A phase the draft had keeps its place and its proposer.
+                    order: old.map_or(0, |old| old.order()),
+                    added_by: old.map_or_else(|| by.to_owned(), |old| old.added_by.clone()),
+                    added_at: old.map_or_else(now, |old| old.added_at),
+                    ..Default::default()
+                });
+            }
+            phases
+        }
+    };
+    let named: BTreeSet<u32> = team.tasks.iter().map(|task| task.phase).filter(|phase| *phase > 1).collect();
+    for n in named {
+        if phases.iter().all(|phase| phase.n != n) {
+            phases.push(Phase { n, added_by: by.to_owned(), added_at: now(), ..Default::default() });
+        }
+    }
+    phases.sort_by_key(|phase| (if phase.order == 0 { u32::MAX } else { phase.order }, phase.n));
+    for (index, phase) in phases.iter_mut().enumerate() {
+        phase.order = index as u32 + 2;
+        phase.approval = approval;
+        phase.state = PhaseState::Draft;
+        phase.tasks = team.tasks.iter().filter(|task| task.phase == phase.n).map(|task| task.id).collect();
+    }
+    team.phases = phases;
+    Ok(())
+}
+
 fn phase_approval(team: &Team) -> Approval {
     team.settings.phase_approval.unwrap_or(team.settings.approval)
 }
@@ -865,6 +941,7 @@ fn settings(team: &mut Team, input: &Value, actor: &Actor, events: &mut Vec<Even
         }
         if let Some(folder) = update.get("folder") {
             member.folder = serde_json::from_value(folder.clone()).context("A folder is shared, worktree or clone")?;
+            super::dispatcher::sandbox_folder(member);
         }
         if let Some(directory) = update.get("directory") {
             member.directory = clean(directory.as_str().unwrap_or_default(), 500, "A directory")?;
@@ -881,7 +958,7 @@ fn settings(team: &mut Team, input: &Value, actor: &Actor, events: &mut Vec<Even
             let profile = profile.as_str().unwrap_or_default().to_owned();
             ensure!(
                 profile.is_empty() || ["read", "write", "build", "commit", "network"].contains(&profile.as_str()),
-                "A permissions profile is read, write, build, commit or network"
+                "Member \"{id}\": field \"permissions_profile\" is read, write, build, commit or network, not \"{profile}\""
             );
             if profile_rank(&profile) > profile_rank(&member.permissions_profile) {
                 widen.push(json!({"member":id,"from":member.permissions_profile,"to":profile}));
@@ -893,7 +970,10 @@ fn settings(team: &mut Team, input: &Value, actor: &Actor, events: &mut Vec<Even
         if let Some(context) = update.get("context_before_task") {
             ensure!(matches!(actor, Actor::Human), "Only you set a member's context before a task");
             let context = context.as_str().unwrap_or_default().to_owned();
-            ensure!(matches!(context.as_str(), "" | "none" | "compact" | "clear"), "A context before a task is none, compact or clear");
+            ensure!(
+                matches!(context.as_str(), "" | "none" | "compact" | "clear"),
+                "Member \"{id}\": field \"context_before_task\" is none, compact or clear, not \"{context}\""
+            );
             member.context_before_task = context;
         }
         // #581 N6, spec 2: the owner edits the models a member may switch
@@ -2540,7 +2620,7 @@ fn edit_draft(team: &mut Team, input: &Value, actor: &Actor, offline: &BTreeSet<
         if let Some(value) = value.get("title") {
             let old = task.title.clone();
             task.title = clean_text(value.as_str().unwrap_or_default().trim(), 200, "A task title")?;
-            ensure!(!task.title.is_empty(), "Task #{id} needs a title");
+            ensure!(!task.title.is_empty(), "Task #{id}: field \"title\" is required");
             if old != task.title {
                 changes.push(json!({"kind":"changed","task":id,"title":task.title,"field":"title","from":old,"to":task.title}));
             }
@@ -2578,10 +2658,12 @@ fn edit_draft(team: &mut Team, input: &Value, actor: &Actor, offline: &BTreeSet<
         }
         if let Some(value) = value.get("deps") {
             let old: Vec<String> = task.deps.iter().map(|dep| format!("#{}", dep.task)).collect();
-            task.deps = serde_json::from_value(value.clone()).context("Invalid dependencies")?;
+            task.deps = serde_json::from_value(value.clone()).map_err(|error| {
+                anyhow::anyhow!("Task #{id}: field \"deps\": {error}; a dependency is {{\"task\":1}} or {{\"task\":1,\"kind\":\"soft\"}}")
+            })?;
             let mut seen = BTreeSet::new();
             task.deps.retain(|dep| seen.insert(dep.task));
-            ensure!(task.deps.iter().all(|dep| dep.task != id), "Task #{id} depends on itself");
+            ensure!(task.deps.iter().all(|dep| dep.task != id), "Task #{id}: field \"deps\": the task depends on itself");
             let new: Vec<String> = task.deps.iter().map(|dep| format!("#{}", dep.task)).collect();
             if old != new {
                 changes.push(json!({"kind":"changed","task":id,"title":task.title,"field":"deps","from":old.join(", "),"to":new.join(", ")}));
@@ -2611,7 +2693,7 @@ fn edit_draft(team: &mut Team, input: &Value, actor: &Actor, offline: &BTreeSet<
                 Value::Null => None,
                 _ => {
                     let minutes = value.as_f64().context("estimate_minutes is a number of minutes or null")?;
-                    ensure!((1.0..=1440.0).contains(&minutes), "Task #{id}: an estimate is 1 to 1440 minutes");
+                    ensure!((1.0..=1440.0).contains(&minutes), "Task #{id}: field \"estimate_minutes\": an estimate is 1 to 1440 minutes");
                     Some(minutes.round())
                 }
             };
@@ -2665,7 +2747,8 @@ fn edit_draft(team: &mut Team, input: &Value, actor: &Actor, offline: &BTreeSet<
             let lane = if value.is_null() {
                 None
             } else {
-                let mut lane: super::model::Lane = serde_json::from_value(value.clone()).context("Invalid lane")?;
+                let mut lane: super::model::Lane =
+                    serde_json::from_value(value.clone()).map_err(|error| anyhow::anyhow!("Task #{id}: field \"lane\": {error}"))?;
                 clean_lane(&mut lane, id)?;
                 Some(lane)
             };
@@ -3644,6 +3727,11 @@ fn swap_one(team: &mut Team, input: &Value, id: &str, keep_session: bool, actor:
         } else {
             member.launch_after_swap = false;
         }
+        // Task #28 (5): a member swapped to DeepSeek before it has a folder
+        // gets a clone, not the worktree its old agent had.
+        if member.session.is_none() {
+            super::dispatcher::sandbox_folder(member);
+        }
         member.launch_id.clear();
         member.error.clear();
         member.host_waits = 0;
@@ -3855,7 +3943,31 @@ fn ask(team: &mut Team, input: &Value, actor: &Actor, events: &mut Vec<Event>) -
         })
         .collect();
     let target = |task: usize| team.tasks[task].id;
-    let (task, asked) = match given {
+    // Task #29: a named attempt (or stage run) must be the work the question
+    // is filed on. Before, a member proven by its session could name any id:
+    // it was ignored and the question went to whatever was open.
+    let named = text(input, "attempt").trim().to_owned();
+    let id_of = |task: usize, asked: &AskTarget| match asked {
+        AskTarget::Attempt(attempt) => team.tasks[task].attempts[*attempt].id.clone(),
+        AskTarget::Stage(run) => {
+            team.tasks[task].pipeline_run.as_ref().and_then(|pipeline| pipeline.runs.get(*run)).map(|run| run.id.clone()).unwrap_or_default()
+        }
+    };
+    let by_attempt = (!named.is_empty() && given.is_none())
+        .then(|| {
+            open.iter()
+                .map(|(task, attempt)| (*task, AskTarget::Attempt(*attempt)))
+                .chain(stages.iter().map(|(task, run)| (*task, AskTarget::Stage(*run))))
+                .find(|(task, asked)| id_of(*task, asked) == named)
+        })
+        .flatten();
+    ensure!(
+        named.is_empty() || given.is_some() || by_attempt.is_some(),
+        "Attempt {named} is not your open attempt or stage; your task and attempt: hgs team current --json"
+    );
+    let (task, asked) = match (by_attempt, given) {
+        (Some(found), _) => found,
+        (None, given) => match given {
         Some(id) => {
             let found = open
                 .iter()
@@ -3873,7 +3985,15 @@ fn ask(team: &mut Team, input: &Value, actor: &Actor, events: &mut Vec<Event>) -
                 bail!("You have {} open pieces of work: {}; name one with \"task\"", tasks.len(), tasks.join(", "));
             }
         },
+        },
     };
+    if !named.is_empty() {
+        ensure!(
+            id_of(task, &asked) == named,
+            "Attempt {named} is not your open attempt or stage on task #{}; your task and attempt: hgs team current --json",
+            target(task)
+        );
+    }
     let question = next_question(team);
     let role = team.role_of(member);
     let task_id = team.tasks[task].id;
@@ -4212,6 +4332,7 @@ fn draft(team: &mut Team, input: &Value, actor: &Actor, offline: &BTreeSet<Strin
             ensure!(revision == state.revision, "Draft revision is {} now; read it again", state.revision);
             let set = input["set"].as_object().context("A draft update names the fields to set")?;
             let mut changed = Vec::new();
+            let mut phases_changed = false;
             for (field, value) in set {
                 if !human && state.owner_edited.contains(field) {
                     bail!("Owner changed {field}");
@@ -4277,14 +4398,26 @@ fn draft(team: &mut Team, input: &Value, actor: &Actor, offline: &BTreeSet<Strin
                         team.members = members;
                     }
                     "tasks" => {
+                        // Task 23: each task keeps the phase it names, as in a plan.
                         let tasks: Vec<Task> = value
                             .as_array()
                             .context("Tasks are a list")?
                             .iter()
-                            .map(parse_task)
+                            .map(|value| {
+                                let mut task = parse_task(value)?;
+                                task.phase = task_phase(value)?;
+                                Ok(task)
+                            })
                             .collect::<anyhow::Result<Vec<_>>>()?;
+                        for (index, task) in tasks.iter().enumerate() {
+                            ensure!(tasks[..index].iter().all(|t| t.id != task.id), "Task #{} is used twice", task.id);
+                        }
                         team.tasks = tasks;
+                        phases_changed = true;
                     }
+                    // Task 23: the phases 2..N the tasks name, with their titles
+                    // and barriers, as in a plan.
+                    "phases" => phases_changed = true,
                     // Feedback 7: the plan mode is set in the draft too: the
                     // owner chooses it, the lead offers it.
                     "plan_mode" => {
@@ -4298,10 +4431,14 @@ fn draft(team: &mut Team, input: &Value, actor: &Actor, offline: &BTreeSet<Strin
                     }
                     "plan_mode_reason" => team.plan_mode_reason = clean(value.as_str().unwrap_or_default().trim(), 500, "A plan mode reason")?,
                     other => bail!(
-                        "A draft sets name, goal, addendum, settings, members, tasks, plan_mode or plan_mode_reason, not {other}"
+                        "A draft sets name, goal, addendum, settings, members, tasks, phases, plan_mode or plan_mode_reason, not {other}"
                     ),
                 }
                 changed.push(field.clone());
+            }
+            if phases_changed {
+                let by = actor.label(team);
+                draft_phases(team, set.get("phases"), &by)?;
             }
             if human {
                 for field in &changed {
@@ -4339,6 +4476,14 @@ fn draft(team: &mut Team, input: &Value, actor: &Actor, offline: &BTreeSet<Strin
                 validation.errors.len(),
                 validation.errors.iter().map(|finding| finding.text.as_str()).collect::<Vec<_>>().join("; ")
             );
+            // Task 23: the draft's phases 2..N become the team's Draft phases,
+            // approved in order; a listed phase without tasks is refused as in
+            // a plan.
+            let by = actor.label(team);
+            draft_phases(team, None, &by)?;
+            if let Some(empty) = team.phases.iter().find(|phase| phase.tasks.is_empty()) {
+                bail!("Phase {} has no tasks: give it tasks or remove it from the draft's phases", empty.n);
+            }
             let approve = input["approve"].as_bool() == Some(true);
             if approve {
                 ensure!(

@@ -162,38 +162,7 @@ export interface SessionView {
 
 export type TeamSettings = Record<string, unknown>;
 
-export type TeamAction =
-  | {
-      kind: "draft_start";
-      folder: string;
-      name?: string;
-      lead: DraftMember;
-      project?: string;
-      project_id?: string;
-      template?: string;
-    }
-  | { kind: "draft_update"; revision: number; set: Record<string, unknown> }
-  | { kind: "draft_seen"; fields: string[] }
-  | { kind: "draft_create"; approve?: boolean; confirm_widening?: boolean }
-  | { kind: "draft_discard"; stop_lead?: boolean; reason?: string }
-  | { kind: "settings"; settings: TeamSettings }
-  | { kind: "catalog_propose"; change: Record<string, unknown> }
-  | { kind: "catalog_decide"; proposal: string; decision: "keep" | "reject" | "undo" }
-  | { kind: "catalog_apply" }
-  | { kind: "catalog_discard" };
-
-export interface TeamCall {
-  computer?: string;
-  team?: string;
-  team_name?: string;
-  action: TeamAction;
-  confirmed?: boolean;
-  request_id?: string;
-}
-
-export type TeamOutcome =
-  | { outcome: "done"; receipt: Record<string, unknown>; request_id: string }
-  | { outcome: "failed"; detail: string; request_id: string }
-  | { outcome: "uncertain"; detail: string; request_id: string }
-  | { outcome: "confirm"; confirmation: { name: string; title: string; text: string; action: string } };
+// Task 47: the team action, call and outcome have one definition, in
+// client/src/types.ts, for the one core enum.
+export type { TeamAction, TeamCall, TeamConfirmation, TeamOutcome } from "../../types";
 

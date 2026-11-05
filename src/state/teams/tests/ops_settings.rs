@@ -193,7 +193,7 @@ fn a_wider_profile_waits_for_the_owner() {
     )
     .unwrap_err()
     .to_string();
-    assert_eq!(error, "A permissions profile is read, write, build, commit or network");
+    assert_eq!(error, "A member \"dev\": field \"permissions_profile\" is read, write, build, commit or network, not \"root\"");
     // C3: `permissions` stays the launch mode; bypass is accepted.
     let (mut bypass, _) = create("t3", &json!({"name":"T3","lead":{"id":"lead","agent":"claude"}})).unwrap();
     plan(
@@ -214,7 +214,7 @@ fn a_wider_profile_waits_for_the_owner() {
     )
     .unwrap_err()
     .to_string();
-    assert_eq!(error, "A permissions mode is auto or bypass");
+    assert_eq!(error, "A member \"dev\": field \"permissions\" is auto or bypass, not \"root\"");
 }
 
 #[test]
@@ -399,7 +399,7 @@ fn only_the_owner_sets_a_members_context_before_a_task() {
     let error = set(&mut team, &Actor::Member("lead".into()), "clear").unwrap_err().to_string();
     assert_eq!(error, "Only you set a member's context before a task");
     let error = set(&mut team, &Actor::Human, "sometimes").unwrap_err().to_string();
-    assert_eq!(error, "A context before a task is none, compact or clear");
+    assert_eq!(error, "Member \"dev\": field \"context_before_task\" is none, compact or clear, not \"sometimes\"");
     // Empty inherits the role again; "none" overrides a role's action.
     set(&mut team, &Actor::Human, "").unwrap();
     assert_eq!(team.member("dev").unwrap().context_before_task, "");

@@ -485,6 +485,89 @@ fn followed_reads_run_every_three_seconds_and_unchanged_replies_send_nothing() {
     assert_eq!(again, 5);
 }
 
+/// Task 8: the reads a moved revision makes due, in order.
+fn due_reads(model: &mut TeamsModel, now: Instant) -> Vec<String> {
+    let mut names = Vec::new();
+    while let Some(read) = model.next(now) {
+        names.push(match &read {
+            TeamRead::List => "list".to_owned(),
+            TeamRead::Waiting { .. } => "waiting".to_owned(),
+            TeamRead::Status { .. } => "status".to_owned(),
+            TeamRead::Inbox { .. } => "inbox".to_owned(),
+            TeamRead::Events { .. } => "feed".to_owned(),
+            other => format!("{other:?}"),
+        });
+        model.apply(&read, Ok(replies(&read)), now);
+    }
+    names.sort();
+    names
+}
+
+#[test]
+fn with_the_streams_team_heads_a_team_is_read_when_its_revision_moved() {
+    use std::sync::Arc;
+    let heads = |pairs: &[(&str, i64)]| {
+        Some(Arc::new(
+            pairs
+                .iter()
+                .map(|(id, rev)| ((*id).to_owned(), *rev))
+                .collect::<super::Heads>(),
+        ))
+    };
+    let start = Instant::now();
+    let mut model = TeamsModel::default();
+    model.follow(follow_team(), start);
+    assert_eq!(
+        due_reads(&mut model, start),
+        ["feed", "inbox", "list", "status", "waiting"]
+    );
+    // The stream's heads arrive: everything is read once more, then nothing
+    // is due after three seconds; a safety read comes after a minute.
+    model.heads(heads(&[(TEAM, 5), ("other", 1)]), start);
+    assert!(model.streamed());
+    assert_eq!(due_reads(&mut model, start).len(), 5);
+    assert!(
+        due_reads(&mut model, start + POLL * 3).is_empty(),
+        "no polling while the stream gives heads"
+    );
+    // Another team changed: only the list and Waiting are read.
+    model.heads(heads(&[(TEAM, 5), ("other", 2)]), start + POLL * 4);
+    assert_eq!(due_reads(&mut model, start + POLL * 4), ["list", "waiting"]);
+    // The watched team changed: its reads and the list.
+    model.heads(heads(&[(TEAM, 6), ("other", 2)]), start + POLL * 5);
+    assert_eq!(
+        due_reads(&mut model, start + POLL * 5),
+        ["feed", "inbox", "list", "status", "waiting"]
+    );
+    // A change while a read runs reads again at its reply, not a minute later.
+    let at = start + POLL * 6;
+    model.heads(heads(&[(TEAM, 7), ("other", 2)]), at);
+    let running = model.next(at).unwrap();
+    assert_eq!(running, TeamRead::List);
+    model.heads(heads(&[(TEAM, 8), ("other", 2)]), at);
+    model.apply(&running, Ok(replies(&running)), at);
+    assert_eq!(
+        due_reads(&mut model, at),
+        ["feed", "inbox", "list", "status", "waiting"],
+        "the list again, at once"
+    );
+    assert_eq!(model.next(at + POLL), None);
+    // The safety read after a minute.
+    assert_eq!(
+        due_reads(&mut model, at + super::STREAM_POLL + POLL).len(),
+        5
+    );
+    // The stream lost its heads (a gap, an older peer): polling again.
+    model.heads(None, at + super::STREAM_POLL * 2);
+    assert!(!model.streamed());
+    assert_eq!(due_reads(&mut model, at + super::STREAM_POLL * 2).len(), 5);
+    assert_eq!(
+        due_reads(&mut model, at + super::STREAM_POLL * 2 + POLL).len(),
+        5,
+        "every three seconds"
+    );
+}
+
 #[test]
 fn a_new_follow_ends_the_views_it_no_longer_shows_and_drops_late_replies() {
     let start = Instant::now();

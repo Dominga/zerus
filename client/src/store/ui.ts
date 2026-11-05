@@ -18,14 +18,14 @@ export type MenuEntry =
   | { separator: true }
   | { heading: string };
 
-export type Page = "dashboard" | "sessions" | "projects" | "machines" | "accounts" | "settings";
+export type Page = "dashboard" | "sessions" | "projects" | "machines" | "accounts" | "settings" | "waiting";
 export type StateFilter = "all" | "attention" | "active" | "paused" | "archived";
 /** The Zerus mark's motion; the owner chose the two-turn spin-up (2026-10-27). */
 export type LogoMotion = "spin";
 
 const params = new URLSearchParams(location.search);
 
-const PAGES: Page[] = ["dashboard", "sessions", "projects", "machines", "accounts", "settings"];
+const PAGES: Page[] = ["dashboard", "sessions", "projects", "machines", "accounts", "settings", "waiting"];
 // `?page=settings` opens a screen (headless screenshots), as in the mockup.
 export const [page, setPage] = createSignal<Page>(PAGES.find((p) => p === params.get("page")) ?? "sessions");
 export const [selectedKey, setSelectedKey] = createSignal<string | undefined>();
@@ -40,7 +40,7 @@ export const accountFilterSet = createMemo(() => new Set(accountFilter()));
 export const [folderFilter, setFolderFilter] = createSignal<FolderScope>();
 export const [multi, setMulti] = createStore<Record<string, boolean>>({});
 export const [peek, setPeek] = createSignal(false);
-export type DetailTab = "activity" | "terminal" | "native" | "processes" | "taskview";
+export type DetailTab = "activity" | "terminal" | "native" | "processes" | "taskview" | "team";
 export const [detailTab, setDetailTab] = createSignal<DetailTab>("activity");
 export const [subagentOpen, setSubagentOpen] = createSignal<string | undefined>();
 export const [search, setSearch] = createSignal(params.get("q") ?? "");

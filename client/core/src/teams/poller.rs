@@ -111,6 +111,14 @@ impl TeamsPoller {
     pub fn profile(&self) -> bool {
         self.ask(TeamsModel::request_profile)
     }
+
+    /// Task 8: the team heads of the computer's watch stream, or None: with
+    /// heads a team is read again when its revision moved, without them it
+    /// is polled.
+    pub fn heads(&self, heads: Option<Arc<super::heads::Heads>>) {
+        self.shared.lock().model.heads(heads, Instant::now());
+        self.shared.wake.notify_all();
+    }
 }
 
 impl Drop for TeamsPoller {

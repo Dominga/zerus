@@ -1705,14 +1705,22 @@ $later=@{guid=$guid;pid=$q.Id;birth=$q.StartTime.ToFileTimeUtc()};
             self.assertIsNone(shell.poll())
             rollback = self.mode('passive')
             self.assertTrue(rollback['ok'], rollback)
-            # zerus-1an7q: with attention ready, the background service drained
-            # it and exited without an access violation; its revoke settled
-            # (ownership 'revoked' below). History may be unavailable: data.
+            # zerus-1an7q: the rollback result above (ok, then ownership
+            # 'revoked' below) is the primary control for a clean drain with
+            # attention ready. The background instance's Task Scheduler history
+            # is a second check only where it exists (zerus-lpz3t): without it
+            # nothing is asserted and the subtest reports a skip, never a pass.
             history = self.task_history(background['instance']['guid'])
-            faults = [event for event in history['events'] for key in ('ResultCode', 'ReturnCode', 'ErrorCode', 'ErrorValue')
-                      if str(event['data'].get(key, '')).lower() in ('3221225477', '0xc0000005', '-1073741819')]
-            self.assertEqual(faults, [], history)
             print('MODE_TASK_BACKGROUND_EXIT ' + json.dumps(history), file=sys.stderr)
+            with self.subTest('background instance crash-code history'):
+                if not (history.get('available') and history.get('events')):
+                    print('MODE_TASK_CRASH_CODE crash-code history unavailable; relying on the rollback result',
+                          file=sys.stderr)
+                    self.skipTest('crash-code history unavailable; relying on the rollback result')
+                faults = [event for event in history['events']
+                          for key in ('ResultCode', 'ReturnCode', 'ErrorCode', 'ErrorValue')
+                          if str(event['data'].get(key, '')).lower() in ('3221225477', '0xc0000005', '-1073741819')]
+                self.assertEqual(faults, [], history)
             self.latest = rollback['instance']
             self.pin_original(self.latest)  # Keep this OLD PID unavailable for reuse through review.
             self.assert_exact_user_created_state()

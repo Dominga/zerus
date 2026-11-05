@@ -1236,7 +1236,25 @@ integrate `68b2c426` (CI run 41977902432, artifact 13394048639) and integrate
     **Enabled** at the baseline and delivered one post (13/13), so the removal
     did not make Windows forget the AUMID. What did so on va-kids that morning
     remains unknown.
-  - The visible banner and its click still need the owner-present H2/H3 run.
+  - **Owner-present H2/H3 on `8cf223aa`, 13:12–13:20 MSK.**
+    - H2: one History entry 1.5 s after the post. The owner saw the banner and
+      clicked it, the click reached the service, and the GUI selected exactly
+      the target session.
+    - H3: the GUI had been quit first. One delivery and one History entry
+      followed. The owner did not see the banner and clicked the entry in the
+      notification center (Win+N) instead. Exactly one GUI cold-started and
+      selected the same session.
+    - `Setting` read Enabled after each post. No bootstrap scratch entry
+      remained, and the owner saw no brand-only banner.
+    - The row's strict count failed for H2: the journal rose by two delivered
+      attempts. Its counters include withdrawals, and the click's selection
+      marks the reply read, which withdraws the toast. That is the likely
+      second attempt, but this row kept no database copy to prove it.
+  - The cold-started GUI ran with the user's real environment, because Windows
+    COM activation does not pass the fixture's profile redirection. It wrote
+    Zerus app data into the console user's real profile. Those three folders
+    were removed after checking that every item was created during the stage,
+    and the residue check was then clean.
 - **One-time import, G3 scope: PASS** (16/16, twice on `af07efb6`). Before Next
   first started, the fixture held Qt sources: a Qt INI and a Qt main draft in
   the redirected `APPDATA`, and a legacy per-computer project alias.

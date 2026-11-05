@@ -164,6 +164,7 @@ class Installer(windows_host.HostCase):
         args = [str(windows_host.HGS), 'desktop', command, operation, '--json']
         if command == 'notification-registration' and operation == 'remove':
             args += ['--request-id', self.backend_request]
+        print(f"installer survival: {self._testMethodName}: {command} {operation}", flush=True)
         result = subprocess.run(args, env=self.env, capture_output=True, text=True,
                                 encoding='utf-8', timeout=75, creationflags=HIDDEN)
         self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
@@ -203,7 +204,10 @@ class Installer(windows_host.HostCase):
     def setup(self):
         """Setup's exit code and log."""
         self.logs += 1
-        log = self.root / f"setup-{self.logs}.log"
+        log_root = Path(os.environ.get("HGS_TEST_INSTALLER_LOG_DIR", self.root))
+        log_root.mkdir(parents=True, exist_ok=True)
+        log = log_root / f"{self.unique}-setup-{self.logs}.log"
+        print(f"installer survival: {self._testMethodName}: setup {self.logs}", flush=True)
         if self.backend_tracking:
             self.backend_clean = False  # Unknown delivery keeps the selected paths.
         result = subprocess.run([str(self.setup_exe), "/VERYSILENT", "/SUPPRESSMSGBOXES", "/NORESTART",
@@ -222,6 +226,7 @@ class Installer(windows_host.HostCase):
     def uninstall(self):
         uninstaller = self.app / "uninstall" / "unins000.exe"
         self.assertTrue(uninstaller.is_file(), uninstaller)
+        print(f"installer survival: {self._testMethodName}: uninstall", flush=True)
         result = subprocess.run([str(uninstaller), "/VERYSILENT", "/SUPPRESSMSGBOXES", "/NORESTART"],
                                 env=self.installer_env, stdin=subprocess.DEVNULL, capture_output=True, timeout=SETUP_LIMIT,
                                 creationflags=HIDDEN)

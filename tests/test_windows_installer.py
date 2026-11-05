@@ -445,6 +445,7 @@ class InstallerEnvironment(unittest.TestCase):
             (root / 'uninstall').mkdir()
             (root / 'uninstall' / 'unins000.exe').write_bytes(b'synthetic uninstaller, never executed')
             case.logs = 0
+            case.unique = 'installer-environment-control'
             case.backend_tracking = False
             case.installer_env = {'HOME': str(root), 'USERPROFILE': 'C:/Users/example'}
             case.env = {'USERPROFILE': str(root)}
@@ -456,6 +457,33 @@ class InstallerEnvironment(unittest.TestCase):
             self.assertEqual(run.call_count, 2)
             for call in run.call_args_list:
                 self.assertIs(call.kwargs['env'], case.installer_env)
+
+    def test_setup_log_survives_the_private_profile_cleanup(self):
+        import os
+        from types import SimpleNamespace
+        from test_windows_installer_survival import Installer
+        with tempfile.TemporaryDirectory() as temporary:
+            root = Path(temporary)
+            profile, logs = root / 'profile', root / 'ci-logs'
+            profile.mkdir()
+            case = Installer()
+            case.root = case.app = profile
+            case.setup_exe = profile / 'synthetic-never-executed.exe'
+            case.logs = 0
+            case.unique = 'installer-persistent-log-control'
+            case.backend_tracking = False
+            case.installer_env = {}
+            def setup(argv, **kwargs):
+                path = Path(next(arg[5:] for arg in argv if arg.startswith('/LOG=')))
+                self.assertEqual(path.parent, logs)
+                path.write_text('synthetic setup progress before a hang')
+                return SimpleNamespace(returncode=0)
+            with patch.dict(os.environ, {'HGS_TEST_INSTALLER_LOG_DIR': str(logs)}), \
+                    patch('test_windows_installer_survival.subprocess.run', side_effect=setup):
+                self.assertEqual(Installer.setup(case), (0, 'synthetic setup progress before a hang'))
+            profile.rmdir()
+            self.assertEqual((logs / 'installer-persistent-log-control-setup-1.log').read_text(),
+                             'synthetic setup progress before a hang')
 
 
 class BackendProfileRetention(unittest.TestCase):

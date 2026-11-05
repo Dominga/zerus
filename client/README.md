@@ -263,6 +263,95 @@ this source is not a complete UI-only cutover.
 A build without the `live` feature (`--no-default-features`) has no data source;
 the frontend then uses its built-in replay.
 
+## Fork: the Windows dev build beside the Qt GUI
+
+The WhiteWh fork builds and runs Zerus Next on Windows next to the running Qt
+GUI. `tauri.windows.conf.json` is the installed switch: it gives the Windows
+build Qt's `com.hgdev.hgs-tray` identity and the `hgs-tray` executable name,
+and its first start imports Qt's settings once. A development build must not
+claim that identity while Qt runs, so the dev identity is passed last on the
+command line. The platform file is merged first and `--config` after it
+(tauri-cli 2.12), so the override wins.
+
+From `client/` in PowerShell:
+
+```powershell
+$identity = '{"identifier":"dev.zerus.next","productName":"Zerus Next (dev)","mainBinaryName":"zerus-client"}'
+New-Item -ItemType Directory -Force src-tauri/target | Out-Null
+Set-Content src-tauri/target/fork-dev-identity.json $identity -Encoding utf8
+$env:RUSTUP_TOOLCHAIN = "1.99.1"
+npm ci
+npm run tauri -- build --no-bundle --config src-tauri/target/fork-dev-identity.json
+.\src-tauri\target\release\zerus-client.exe --build-info
+```
+
+`--build-info` starts nothing; it must print `"CFBundleIdentifier":
+"dev.zerus.next"` and `"ZerusGUI": "tauri"`. If it names `com.hgdev.hgs-tray`,
+the override did not apply and the build must not run beside Qt.
+
+Run the build; on Windows the dev app opens its window by default:
+
+```powershell
+.\src-tauri\target\release\zerus-client.exe --hgs "$env:USERPROFILE\.local\bin\hgs.exe"
+```
+
+`--sessions` opens the window explicitly, `--background` starts in the
+notification area, and `ZERUS_CLIENT_QUERY=select=<session name>` selects a
+session on start. `npm run tauri -- dev --config
+src-tauri/target/fork-dev-identity.json` runs the same dev identity against the
+Vite server instead of the bundled frontend.
+
+Start it from a normal, non-elevated session: Explorer or a normal PowerShell.
+An elevated or non-interactive child cannot host WebView2; Tauri then stops with
+`Failed to setup app: ... Access is denied` at its webview attach, after the
+window has been created. That is a WebView2 restriction, not an identity
+collision, and Qt is not involved.
+
+To check it by hand:
+
+1. Start the build from Explorer, or run
+   `Start-Process .\src-tauri\target\release\zerus-client.exe` in a normal
+   PowerShell. The Zerus Next window opens.
+2. The session list on the left shows the local hgs sessions, grouped by
+   project. At the check below it listed 74 sessions.
+3. Click a session: Activity opens in the right pane.
+   `ZERUS_CLIENT_QUERY=select=<session name>` opens that session at start.
+4. Qt stays as it is: its window, tray icon, single instance and settings do not
+   change, and `Get-Process hgs-tray` still shows the same process.
+5. Quit the dev app from its own notification-area icon (or close its window
+   while that icon exists). It never stops or replaces the Qt GUI.
+
+| Piece | This dev build |
+| --- | --- |
+| Identifier | `dev.zerus.next` |
+| Executable | `zerus-client.exe` |
+| Settings, drafts, state | `%APPDATA%\dev.zerus.next`, never Qt's `%APPDATA%\hgdev\hgs-tray.ini`; the dev identity never seeds from Qt |
+| Attachment cache | `%LOCALAPPDATA%\dev.zerus.next`, never Qt's cache |
+| Single instance | none; set `ZERUS_CLIENT_SINGLE_INSTANCE=1` only to get its own `zerus-client-dev.zerus.next` pipe. Qt's `hgs-tray` lock, activation pipe and global kernel object are untouched |
+| Autostart | none: nothing registers itself, and `--install-login-item` refuses a non-switch identity with exit code 2 |
+| Tray | its own notification-area icon; its Quit ends only the dev app |
+| Notifications | off unless `ZERUS_CLIENT_NOTIFICATIONS=1`; a replay never posts |
+
+If no notification area is available (a remote or hidden session), the dev build
+logs `zerus-client: no notification-area icon: ...` and keeps its window; the
+installed switch still requires its tray, which is its only way back.
+
+Never pass `--install-login-item` to this build, and never run the plain
+`tauri.windows.conf.json` build beside Qt: that is the installed switch, which
+forwards to the running Qt or takes over when Qt is not running.
+
+Checked on this computer on 2026-11-05: the build through the Zerus build
+subsystem passed (`hgs run` exit 0, 5 min 46 s), and `--build-info` printed
+`"CFBundleIdentifier": "dev.zerus.next"` and `"ZerusGUI": "tauri"`. From an agent
+build child the client created its window in the owner's desktop session
+(session 1) beside Qt, `hgs ls` from the same child listed 74 local sessions,
+and Qt's process id, its per-user Run value and its `hgs-tray` instance lock
+stayed unchanged. The session cards and Activity were not seen in that run: the
+build child is elevated or non-interactive, and WebView2 refused with
+`Failed to setup app: ... Access is denied` at Tauri's webview attach. The
+manual steps above are the remaining check for the in-window session list and
+Activity, from the owner's normal desktop.
+
 ## Headless runs
 
 Development windows never open on a desktop someone is using. On Linux run the

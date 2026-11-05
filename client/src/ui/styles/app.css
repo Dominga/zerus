@@ -14,7 +14,7 @@
   .rail .rail-btn.on::before { content: ""; position: absolute; left: -8px; top: 10px; bottom: 10px; width: 3px; border-radius: 0 3px 3px 0; background: var(--z-color-accent); animation: grow var(--z-motion-base) var(--ease); }
   .rail .rail-btn.pin.pinned { color: var(--z-color-status-attention); }
   .rail-badge { position: absolute; top: 2px; right: 1px; min-width: 16px; height: 16px; padding: 0 4px; border-radius: 8px; background: var(--z-color-warn); color: var(--z-color-accent-text); font-size: 10px; font-weight: 700; display: grid; place-items: center; box-shadow: 0 0 0 2px var(--z-color-pane); }
-  .rail .rail-version { width: auto; height: 22px; padding: 0 4px; font-size: 10px; color: var(--z-color-dim); }
+  .rail .rail-version { width: auto; max-width: calc(100% - 8px); height: auto; min-height: 22px; padding: 0 4px; font-size: 10px; color: var(--z-color-dim); white-space: pre-line; overflow-wrap: anywhere; }
   .rail.labeled button { width: 72px; height: 48px; grid-template-rows: auto auto; gap: 2px; align-content: center; font-size: var(--fs-2xs); }
   .rail.labeled .rail-new { height: 40px; }
   .rail.labeled .rail-btn.on::before { left: -6px; }

@@ -80,8 +80,26 @@ impl Waiting {
     }
 }
 
+#[cfg(test)]
+thread_local! {
+    /// One injected failure of this thread's next write: before its rename
+    /// (`Some(false)`), or after it, as a failed folder sync (`Some(true)`).
+    static WRITE_FAULT: std::cell::Cell<Option<bool>> = const { std::cell::Cell::new(None) };
+}
+
 fn write(dir: &Path, name: &str, value: &Value) -> Result<()> {
-    atomic(&dir.join(name), &value.to_string())
+    #[cfg(test)]
+    let fault = WRITE_FAULT.with(std::cell::Cell::take);
+    #[cfg(test)]
+    if fault == Some(false) {
+        return Err("injected failure before the rename".into());
+    }
+    atomic(&dir.join(name), &value.to_string())?;
+    #[cfg(test)]
+    if fault == Some(true) {
+        return Err("injected folder sync failure".into());
+    }
+    Ok(())
 }
 
 fn read(dir: &Path, name: &str) -> Option<Value> {
@@ -100,15 +118,26 @@ fn live_in(dir: &Path, record: &Value, card: &Value) -> Option<Waiting> {
     waiting.serves(record, card).then_some(waiting)
 }
 
-/// Offer an answer. Only one offer ever exists per channel.
+/// Offer an answer. Only one offer ever exists per channel. The waiting
+/// process may claim it as soon as its rename lands, before the write
+/// returns (its folder sync may still fail), so an error that leaves any
+/// stage of it behind is never a refusal.
 pub(super) fn offer(dir: &Path, offer: &Value) -> Result<()> {
-    if [ANSWER, CLAIMED, RETRACTED, EMITTED]
-        .iter()
-        .any(|stage| dir.join(stage).exists())
-    {
+    let offered = || {
+        [ANSWER, CLAIMED, RETRACTED, EMITTED]
+            .iter()
+            .any(|stage| dir.join(stage).exists())
+    };
+    if offered() {
         return Err("an answer was already offered to this question".into());
     }
-    write(dir, ANSWER, offer)
+    write(dir, ANSWER, offer).map_err(|error| {
+        if offered() {
+            format!("delivery uncertain: the answer may already be with Claude: {error}")
+        } else {
+            error
+        }
+    })
 }
 
 /// Move the offered answer to `stage` if it is still offered. A rename alone
@@ -970,6 +999,28 @@ mod tests {
         let screen = std::cell::Cell::new(0);
         assert_eq!(delivered_within(temp.path(), &screen, Duration::from_secs(5)).unwrap(), "claude_hook");
         assert_eq!(screen.get(), 0);
+        waiting.join().unwrap();
+    }
+
+    /// zerus-cqkoh: a failure after the offer's rename may follow a claim,
+    /// so it is never the CLI's refusal; one before it leaves nothing.
+    #[test]
+    fn an_offer_that_may_be_visible_is_never_a_refusal() {
+        let screen = std::cell::Cell::new(0);
+        let (temp, waiting) = channel(|_| {});
+        WRITE_FAULT.with(|fault| fault.set(Some(false)));
+        let error = delivered(temp.path(), &screen).unwrap_err();
+        assert!(!error.contains("delivery uncertain"), "{error}");
+        assert!(!temp.path().join(ANSWER).exists());
+        WRITE_FAULT.with(|fault| fault.set(Some(true)));
+        let error = delivered(temp.path(), &screen).unwrap_err();
+        assert!(error.contains("delivery uncertain"), "{error}");
+        assert!(temp.path().join(ANSWER).exists());
+        assert_eq!(
+            screen.get(),
+            0,
+            "an offered answer never goes to the screen"
+        );
         waiting.join().unwrap();
     }
 

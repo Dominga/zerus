@@ -3088,6 +3088,7 @@ hgs task target orchard/T-a1b2c3 codex/api|any [--host ALIAS]
 hgs task target orchard/T-a1b2c3 new-session|subagent --parent codex/api [--host ALIAS] [--session-id ID]
 hgs task worker orchard/T-a1b2c3 --subagent CHILD_ID --request-id SENT_REQUEST_ID
 hgs task settings --project orchard [--set < settings.json]
+hgs task cutover --project orchard [--hold on|off [--confirm]]
 ```
 
 Plain `task get` retains the complete journal for existing clients. The optional
@@ -3143,14 +3144,19 @@ as a send an older build recorded concurrently, is listed in `unexplained`, sets
 No start, child or result is invented. A resume settles only the pauses it observed, so a
 pause that no resume observed keeps the attempt paused. A session's
 Stop, idle time, pause or elapsed time is never an attempt event and never
-moves a task. Attempts are kept beside the history under task schema 6, which a
-reader that does not know them shows read-only. The stored schema is one merged
+moves a task. Attempts are kept beside the history under task schema 7, which a
+reader that does not know them shows read-only: that includes the builds that
+already read schema 6 but know no floor. The stored schema is one merged
 value, so an older replica's concurrent upgrade can leave a lower one; this
 version raises it again for a task with attempts in every write and every live
 import, and before a task is read for an inventory, so the raised value is what
 other replicas receive. That repair is a new change, not proof that an older
-replica did nothing before it. This version reads attempts and guards reports
-against the current execution; recording attempts comes later.
+replica did nothing before it. A task can also take a floor before its first
+attempt: a cutover record that keeps schema 7 the same way, so a reader that
+does not know attempts or the floor refuses to write it, while every path that would start
+it without an attempt refuses it as cutting over. A floor this version cannot
+read still counts. This version reads attempts and guards reports against the
+current execution; recording attempts and floors comes later.
 
 Plain `task list` still returns every task for existing clients. With `--stage`
 and `--limit` (1–200) it returns one page of that stage in the same order and
@@ -3366,13 +3372,125 @@ bindings yet, so there `--host` is refused and other computers read null.
 Tasks are Loro documents below `HGS_STATE_DIR/replica`, one directory per
 project; a task file that fails to load is listed under `damaged` and left in
 place until another computer of the swarm sends its copy, which replaces it;
-the damaged file stays beside it as `<file>.damaged-<time>`. The swarm worker
+a copy of the damaged file stays beside it as `<file>.damaged-<time>`. A task
+this computer saved with attempts or a floor gets a mark, `<uuid>.managed`,
+naming the version this computer last saved and the exact first block of
+the updates file after the snapshot, sealed by a digest of its whole content
+so that a mark changed in any way cannot be read. The mark is rewritten before every save
+of such a task makes it durable (one small extra write per save), and every
+fold opens a new updates file with the operations at the document's
+frontiers, which every copy already holds, so it adds no change and differs
+from fold to fold. A copy whose files hold less than its mark records (they
+were cut short, a save did not finish, or an older Zerus wrote them so), or
+whose mark cannot be read, is damaged, not read without those changes:
+nothing sends, writes or folds it, not even a copy read before, until a person
+reviews it or a copy that covers the mark arrives. Files that hold more than the mark records (an older
+Zerus folded or appended) raise the mark to what they hold when the task is
+read, before anything lists, inventories or sends it. A task with only its
+mark left is still listed under `damaged`. Saves of a task go through one
+store in turn: a copy read before a later save of the same task is merged
+into what is saved, never written over it, and the mark never moves back. Its damaged copy is replaced only when the mark is readable and
+still describes the files (an older Zerus that folded or rewrote them, or a
+mark restored from before a later fold, leaves it stale), every
+update saved here applies, and the other copy merged with them holds that
+version, so no attempt fact is lost. A copy without a mark is replaced only
+when every update saved here applies and the result shows no attempts or
+floor. Otherwise the copy is kept: it stays under `damaged`, nothing is sent
+for it, and each copy another computer or a phone sends is refused and named
+in that exchange's refusals, not kept for later. A person reviews it: moving
+both damaged files (`<uuid>.loro` and `<uuid>.updates`) away keeps it refused
+while the mark remains, and removing the mark as well accepts the next copy
+sent, which may lack attempts. Any
+entry at the mark's path counts as a mark, even one that cannot be read.
+
+What this recovery supports, alone or combined: running an older Zerus
+after a rollback (its importer may fold, append or rewrite the task files as
+it always did), a crash at any point, damaged or truncated files, and an
+unreadable or dangling mark; in each it stays correct or keeps the copy. It
+also supports restoring or copying the whole replica root as one consistent
+older state, an ordinary rollback of local data: other computers supply the
+newer changes again. It does not support replacing, restoring or copying
+individual files under the replica root (a task's snapshot, updates or mark)
+from a backup or another computer while the rest stays newer, by any means,
+including file-level backup and sync tools: such a partial restore can put
+back an older pair of files that agree with each other, which nothing here
+can tell from a genuine one, and recovery may then accept another copy and
+lose what was written after that backup. Restore the replica root only as a
+whole, never copy task files back one by one, and keep file-level sync tools
+away from it. After restoring a replica root from a backup or copying it to
+another computer, delete its `store-id` file so a new one is created: other
+computers then see a changed store, and the cutover proof (which binds each
+member's verified computer and store) stays closed for it until a fresh,
+complete inventory with it.
+
+The damaged entries of `task list` (and its pages) say what is known here,
+read only: `kept: true` with `kept_reason` (`marked` for a copy cut over
+here, `unreadable_local_data` for torn or unreadable local updates) for a copy
+kept for a person's review whatever copy arrives, or `recovery:
+"depends_on_incoming_copy"` when what happens is decided against each copy
+that arrives; the listing never says a replacement is safe. A refusal names
+the decision against that copy: `kept` with `marked`, `attempt_evidence`,
+`pending` or `unreadable_local_data`, in `hgs` output, exchange refusals and
+the phone's `refused_there`.
+
+The swarm worker
 replicates them with the catalog: after each catalog
 sync it compares every project's digest with the member's and exchanges only
 the changes each side lacks, in pages of at most 1 MiB, and a task changed
 here goes out within seconds. Changes made on several computers at once merge.
 A member whose Zerus does not share tasks keeps syncing the catalog and is
-named in the Swarm settings.
+named in the Swarm settings. A hello's replica part also carries
+`task_schema`, the highest task schema that Zerus writes (7, which reads the
+floor; absent in an older one), `store`, the random identity of its replica
+root (`replica/store-id`, created once under a lock), and for each project
+it read how many tasks do not load (`damaged`, 0 included) and which it left
+out this time (`omitted`, busy or unreadable). This computer keeps what each member's last
+verified hello showed (its computer, replica protocol, task schema and store)
+and how each project's last exchange with it ended in
+`replica-members.json` beside the catalog, information only. Each record is
+bound to that exact observation: a changed store, protocol or schema retires
+the completions recorded under the old one, an outcome that arrives for an
+observation that is no longer the member's is refused, and a member's record
+goes at the membership change itself. A project is `complete` only when both
+sides' whole inventories were exchanged: every page, nothing refused, and no
+task damaged or left out on either side (equal digests of the readable tasks
+alone are an exchanged subset, not a complete project). Otherwise it names a
+reason: `unreachable` (also for every project known here when the member's
+hello fails), `busy` (also for every project known here when this computer's
+own pass cannot read its projects), `refused_documents`, `page_budget`, `changed_identity`,
+`damaged_tasks`, `omitted` or `malformed`. Absence or unreadability is never
+evidence of success: a project map, damaged count, refusal list or import
+count that is missing or in a form this does not read is `malformed`, never
+taken for an empty one. An exchange reply whose pages do not read stops the
+exchange; a reply whose evidence does not read (a member before this one sends
+no damaged counts) still exchanges documents and stays `malformed`. Every
+project this computer stores or knows alive gets an outcome on each sync.
+
+`task cutover --project P` shows the project's cutover to execution attempts
+as this computer knows it, read only and bounded by its members: `phase`
+(`not_cut_over` while no task here has a floor or attempts, `cutting_over`
+while a member keeps it open, `active` otherwise, `unknown` past its count's
+budget), `hold`, `cut_over_tasks`,
+`last_cutover_write`, every eligible member with its advertised task schema,
+store, when it was seen and its last inventory of the project, and `closed`:
+the first reason it is open as `{member, project, reason, at}` (`unseen`,
+`protocol` for another or no replica protocol, `task_schema` for a member below
+7, `store` for a missing or invalid store identity, `no_inventory`, an
+incomplete exchange's reason or `incomplete`, or `inventory_before_cutover`),
+with `closed_text` as prose. Anything not known as complete keeps it open. The
+count of cut-over tasks has a strict budget (entries and time): past it the
+phase is `unknown` and the reason `scan_budget`. Eligible members are the
+project's swarm members that may hold its documents: every verified member
+except one whose verified hello has no replica key at all; a replica part
+this cannot read keeps the member eligible and the cutover open as an
+unknown protocol. It grants nothing and dispatches
+nothing. `--hold on` sets the project's cutover hold, a replicated value that
+names who set it and when (concurrent changes: the last writer wins). While on,
+no task of the project takes a new floor or a first attempt, where those are
+written (they come with the attempt writer); it never lowers anything, and a
+task that never cut over keeps the legacy Start. Only a person sets or clears it,
+and clearing it takes `--hold off --confirm`. A hold that cannot be read is
+on. Times are in milliseconds.
 
 Phones reach a project's tasks through the mobile relay and the Rust mobile
 connector, which uses two commands of its own. `hgs task digests --json` prints

@@ -19,6 +19,7 @@ use zerus_replica::{
 
 mod answers;
 mod cancellation;
+mod cutover;
 mod dispatch;
 mod mobile;
 mod phone;
@@ -38,7 +39,7 @@ fn paste_uncertain(message: &str) -> bool {
     message.starts_with(SENT_UNRECORDED) || message.starts_with("delivery uncertain")
 }
 
-const USAGE: &str = "usage: hgs task list --project P [--stage S] | list --project P --stage S --limit 1..200 [--after CURSOR|--before CURSOR] [--if-revision R] | get REF [--history-limit 1..80 [--history-before CURSOR] [--attachments metadata]] | attachment REF --file N [--entry ID] | add --project P [--backlog] [--start] [--target SESSION|any [--host ALIAS]] [--title TITLE [--request-id UUID]] [--position N] | edit REF | rename REF | move REF --top|--before REF|--after REF|--position N | stage REF backlog|todo|done | target REF SESSION|any|new-session|subagent [--parent SESSION] [--host ALIAS] | send REF [--session SESSION [--host ALIAS]] | start-plan REF --json | start-deliver REF --json [--recover-only] | cancel REF [--reason TEXT] | cancel-execution REF --json (guard JSON on stdin) | handoff REF --session SESSION [--host ALIAS] | start REF | report REF [--progress|--ready] [--considered REV] | comment REF [--content-json] | message REF --request-id UUID --mode queue|send|reopen|note [--expect-dispatch ID] [--content-json] | worker REF --subagent ID --request-id REQUEST | settings --project P [--set] | digests --json | exchange --json | mobile-send|mobile-cancel|mobile-done --json
+const USAGE: &str = "usage: hgs task list --project P [--stage S] | list --project P --stage S --limit 1..200 [--after CURSOR|--before CURSOR] [--if-revision R] | get REF [--history-limit 1..80 [--history-before CURSOR] [--attachments metadata]] | attachment REF --file N [--entry ID] | add --project P [--backlog] [--start] [--target SESSION|any [--host ALIAS]] [--title TITLE [--request-id UUID]] [--position N] | edit REF | rename REF | move REF --top|--before REF|--after REF|--position N | stage REF backlog|todo|done | target REF SESSION|any|new-session|subagent [--parent SESSION] [--host ALIAS] | send REF [--session SESSION [--host ALIAS]] | start-plan REF --json | start-deliver REF --json [--recover-only] | cancel REF [--reason TEXT] | cancel-execution REF --json (guard JSON on stdin) | handoff REF --session SESSION [--host ALIAS] | start REF | report REF [--progress|--ready] [--considered REV] | comment REF [--content-json] | message REF --request-id UUID --mode queue|send|reopen|note [--expect-dispatch ID] [--content-json] | worker REF --subagent ID --request-id REQUEST | settings --project P [--set] | cutover --project P [--hold on|off [--confirm]] | digests --json | exchange --json | mobile-send|mobile-cancel|mobile-done --json
   REF is T-xxxxxx with --project P, or PROJECT/T-xxxxxx; texts and --set settings are read from stdin;
   a change an agent makes prints one line, and --json prints the task";
 
@@ -505,6 +506,7 @@ fn execute(config: &Config, args: &[String]) -> Result<Value> {
             change(config, action, args)
         }
         "settings" => settings(config, args),
+        "cutover" => cutover::cutover(config, args),
         // The phone's exchange through the relay; both take exactly --json.
         "digests" | "exchange" if args.len() == 1 && args[0] == "--json" => {
             if action == "digests" {
@@ -672,6 +674,7 @@ fn documents(store: &ProjectStore) -> Result<Documents> {
     }
     for damaged in &damaged {
         hash.update(format!("{}\n{}", damaged.uuid, damaged.error));
+        hash.update(serde_json::to_vec(damaged).unwrap_or_default());
     }
     let revision = format!("documents-{:x}", hash.finalize());
     Ok(Documents { rows, counts, damaged, revision })
@@ -718,7 +721,7 @@ fn page_of(docs: &Documents, project: &str, stage: Stage, limit: usize, anchor: 
         .damaged
         .iter()
         .take(index::DAMAGED_SHOWN)
-        .map(|d| json!({"uuid": d.uuid, "error": index::capped_error(&d.error)}))
+        .map(index::damaged_row)
         .collect();
     page_reply(stage, limit, page, start, next, previous, &docs.counts, (shown, docs.damaged.len()), docs.revision.clone())
 }

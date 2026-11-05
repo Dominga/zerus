@@ -29,10 +29,12 @@ use zerus_client_core::desktop::deferred_send as wire;
 // Merge-order allocation: the next free Store version when this lands. A
 // later schema merge renumbers this one constant, never standalone DDL.
 pub(super) const SCHEMA: i64 = 28;
-/// Test rewind of this leaf for older-version upgrade fixtures; dropping the
-/// tables drops their triggers and indexes.
+/// Test rewind of this leaf for older-version upgrade fixtures, the later
+/// deferred answer leaf first; dropping the tables drops their triggers and
+/// indexes.
 #[cfg(test)]
 pub(super) fn remove_fixture(db: &rusqlite::Connection) {
+    super::deferred_answer::remove_fixture(db);
     db.execute_batch("DROP TABLE desktop_deferred_sends; DROP TABLE desktop_deferred_send_budget;")
         .unwrap();
 }

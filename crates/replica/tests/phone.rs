@@ -5,6 +5,7 @@ use sha2::{Digest, Sha256};
 use std::collections::BTreeSet;
 use std::fs;
 use std::path::{Path, PathBuf};
+use zerus_replica::execution::EXECUTION_TASK_SCHEMA as EXECUTION;
 use zerus_replica::phone::{answer, Answer, Budget, Exchange, Progress, Request};
 use zerus_replica::{Actor, Inventory, NewTask, ProjectStore, SessionKey, Stage, Target, TaskDoc};
 
@@ -520,6 +521,153 @@ fn refused_documents_are_not_sent_again() {
     assert_eq!(refused, [stray]);
 }
 
+fn set_aside(root: &Path, uuid: &str) -> usize {
+    fs::read_dir(task_file(root, uuid).parent().unwrap())
+        .unwrap()
+        .filter(|e| {
+            let name = e.as_ref().unwrap().file_name();
+            let name = name.to_string_lossy();
+            name.starts_with(uuid) && name.contains(".damaged-")
+        })
+        .count()
+}
+
+/// zerus-cg5h.4 S2b.2 C1, review-n's control on #1409: an old phone's whole
+/// pre-attempt document never replaces the computer's copy that records an
+/// attempt. A damaged snapshot beside valid updates is rebuilt with every
+/// attempt fact; the phone gets the execution schema back.
+#[test]
+fn an_old_phone_s_copy_keeps_the_computer_s_outstanding_attempt() {
+    for damaged in [false, true] {
+        let (_a, b, phone, computer) = pair();
+        let task = add(&computer, "A phone still holds the pre-attempt copy");
+        settled(run(&phone, &computer, Budget::default()));
+        reserve_first_attempt(&computer, task.uuid());
+        let expected = execution(&computer, task.uuid());
+        comment(&phone, task.uuid(), "An ordinary offline comment");
+        if damaged {
+            let updates = task_file(b.path(), task.uuid()).with_extension("updates");
+            assert!(updates.exists());
+            fs::write(
+                task_file(b.path(), task.uuid()),
+                b"unreadable snapshot fixture",
+            )
+            .unwrap();
+        }
+        settled(run(&phone, &computer, Budget::default()));
+        let current = computer.load(task.uuid()).unwrap();
+        assert_eq!(
+            execution(&computer, task.uuid()),
+            expected,
+            "damaged={damaged}"
+        );
+        assert!(current.held().unwrap().is_some());
+        assert_eq!(current.schema(), EXECUTION);
+        assert!(current.check_send().is_err());
+        assert_eq!(comments(&computer, task.uuid()), 1);
+        assert_eq!(
+            set_aside(b.path(), task.uuid()),
+            if damaged { 2 } else { 0 }
+        );
+        assert_eq!(phone.load(task.uuid()).unwrap().schema(), EXECUTION);
+        assert_eq!(live_digest(&phone), live_digest(&computer));
+    }
+}
+
+/// When nothing left here proves the phone's copy covers the lost snapshot,
+/// the computer keeps its damaged copy for a person's review: nothing is set
+/// aside, the task stays unloadable and closed, and the phone is told.
+#[test]
+fn a_damaged_copy_the_phone_cannot_cover_is_kept_for_review() {
+    let (_a, b, phone, computer) = pair();
+    let task = add(&computer, "The attempt only the computer's snapshot holds");
+    settled(run(&phone, &computer, Budget::default()));
+    reserve_first_attempt(&computer, task.uuid());
+    // A cut append: the next save folds the attempt into the snapshot.
+    let updates = task_file(b.path(), task.uuid()).with_extension("updates");
+    let mut bytes = fs::read(&updates).unwrap();
+    let appended = bytes.len();
+    bytes.push(0);
+    fs::write(&updates, bytes).unwrap();
+    let mut folded = computer.load(task.uuid()).unwrap();
+    computer.save(&mut folded).unwrap();
+    // The fold leaves only the block of no changes that opens the file.
+    assert!(fs::read(&updates).unwrap().len() < appended);
+    comment(&phone, task.uuid(), "An ordinary offline comment");
+    fs::write(
+        task_file(b.path(), task.uuid()),
+        b"unreadable snapshot fixture",
+    )
+    .unwrap();
+    let done = settled(run(&phone, &computer, Budget::default()));
+    let refused: Vec<_> = done
+        .progress
+        .iter()
+        .flat_map(|p| p.refused_there.iter())
+        .filter(|d| d.uuid == task.uuid())
+        .collect();
+    assert!(!refused.is_empty());
+    assert!(
+        refused[0].error.contains("person's review"),
+        "{}",
+        refused[0].error
+    );
+    // The phone is told it is kept for review, not ordinary damage.
+    assert!(refused[0].kept);
+    assert!(computer.load(task.uuid()).is_err());
+    assert_eq!(
+        fs::read(task_file(b.path(), task.uuid())).unwrap(),
+        b"unreadable snapshot fixture"
+    );
+    assert_eq!(set_aside(b.path(), task.uuid()), 0);
+    assert!(phone
+        .load(task.uuid())
+        .unwrap()
+        .view()
+        .unwrap()
+        .execution
+        .is_none());
+    // The old phone's later edits are refused in each exchange, never queued
+    // here for a later replay.
+    comment(&phone, task.uuid(), "A later offline comment");
+    let again = settled(run(&phone, &computer, Budget::default()));
+    assert!(again
+        .progress
+        .iter()
+        .flat_map(|p| p.refused_there.iter())
+        .any(|d| d.uuid == task.uuid()));
+    assert!(computer.load(task.uuid()).is_err());
+    assert_eq!(set_aside(b.path(), task.uuid()), 0);
+    // A person's review: moving the damaged files away still keeps it; only
+    // removing the mark as well accepts the phone's copy.
+    let tasks = task_file(b.path(), task.uuid())
+        .parent()
+        .unwrap()
+        .to_owned();
+    for (file, aside) in [
+        ("loro", "reviewed-snapshot"),
+        ("updates", "reviewed-updates"),
+    ] {
+        fs::rename(
+            tasks.join(format!("{}.{file}", task.uuid())),
+            tasks.join(aside),
+        )
+        .unwrap();
+    }
+    settled(run(&phone, &computer, Budget::default()));
+    assert!(computer.load(task.uuid()).is_err());
+    fs::remove_file(tasks.join(format!("{}.managed", task.uuid()))).unwrap();
+    settled(run(&phone, &computer, Budget::default()));
+    assert_eq!(comments(&computer, task.uuid()), 2);
+    assert!(computer
+        .load(task.uuid())
+        .unwrap()
+        .view()
+        .unwrap()
+        .execution
+        .is_none());
+}
+
 #[test]
 fn an_answer_that_only_repeats_a_refusal_ends_the_exchange() {
     let (_a, _b, phone, computer) = pair();
@@ -733,7 +881,7 @@ fn a_phone_edit_beside_the_first_attempt_comes_back_at_the_execution_schema() {
     settled(run(&phone, &computer, Budget::default()));
     for side in [&phone, &computer] {
         let copy = side.load(task.uuid()).unwrap();
-        assert_eq!(copy.schema(), 6);
+        assert_eq!(copy.schema(), EXECUTION);
         assert!(!copy.needs_schema_repair());
         assert!(copy.held().unwrap().is_some());
     }
@@ -757,7 +905,7 @@ fn a_lost_answer_and_a_reconnect_still_bring_the_execution_schema() {
     comment(&phone, task.uuid(), "After it");
     settled(run(&phone, &computer, Budget::default()));
     let copy = phone.load(task.uuid()).unwrap();
-    assert!(!copy.needs_schema_repair() && copy.schema() == 6);
+    assert!(!copy.needs_schema_repair() && copy.schema() == EXECUTION);
     assert_eq!(comments(&computer, task.uuid()), 2);
     assert_eq!(live_digest(&phone), live_digest(&computer));
 }
@@ -790,7 +938,7 @@ fn held_tasks_arrive_at_the_execution_schema_across_pages() {
     );
     for (n, task) in tasks.iter().enumerate() {
         let copy = phone.load(task.uuid()).unwrap();
-        assert_eq!(copy.schema() == 6, n == 2 || n == 9, "task {n}");
+        assert_eq!(copy.schema() == EXECUTION, n == 2 || n == 9, "task {n}");
         assert!(!copy.needs_schema_repair());
     }
     assert_eq!(live_digest(&phone), live_digest(&computer));

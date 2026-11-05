@@ -270,7 +270,11 @@ fn write_cache(root: &Path, bytes: &[u8]) {
     fs::write(&cache, bytes).unwrap();
     fs::write(
         cache.with_file_name("inventory.repaired"),
-        format!("schema-repair-1 {:x}\n", Sha256::digest(bytes)),
+        format!(
+            "schema-repair-2 mark-{} {:x}\n",
+            zerus_replica::MARK_FORMAT,
+            Sha256::digest(bytes)
+        ),
     )
     .unwrap();
 }

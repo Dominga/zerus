@@ -436,7 +436,7 @@ mod tests {
     /// here until it is listed.
     #[test]
     fn every_label_index_reader_proves_through_the_shared_parser() {
-        const READERS: [&str; 2] = ["src/desktop/deferred_send/target.rs", "src/state/task_reconcile.rs"];
+        const READERS: [&str; 2] = ["src/desktop/original_store.rs", "src/state/task_reconcile.rs"];
         let root = std::path::Path::new(env!("CARGO_MANIFEST_DIR"));
         let mut found = Vec::new();
         let mut stack = vec![root.join("src")];

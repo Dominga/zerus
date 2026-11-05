@@ -249,6 +249,91 @@ refuses it too (`deferred_send_unsupported`), and only Linux advertises the
 help marker. An unauthenticated hello naming it gets
 `frontend_authentication_required`, like its siblings.
 
+The second kind, `deferred_answer` (`desktop::deferred_answer`, ABI
+`desktop-deferred-answer-v1`), defines its closed wire for one `hgs answer
+<session> --json` to a question card:
+- **Intent.** The local session, the reserved request ID, the checkpoint's
+  exact JSON, the question's consent identity as the person saw it at the
+  click (`pinned`, exactly the closed `CONSENT_FIELDS` projection) and the
+  exact stdin.
+- **Verification.** Strict typed decoding of the checkpoint and the stdin,
+  as the CLI decodes it. The checkpoint must be a valid `answer` checkpoint
+  of this request whose identity hash is that of `pinned`; `pinned`, the
+  checkpoint and the stdin name the same question, question hash, run and
+  conversation. The stdin's answers are exactly the client's answer items,
+  and the checkpoint's message digest is theirs. An empty conversation is
+  accepted only for the CLI's own startup question identities. v1 refuses
+  any `@` or other-machine session and any session but a terminal agent's,
+  and offers only the sources whose `rejected` receipt proves that nothing
+  was delivered: Claude permission mode, resume, usage limit and folder
+  trust, Codex hooks trust, update, rate limit and folder trust, and Kimi
+  folder trust, cache hint, plan review, tool approval and wire questions.
+  Codex asynchronous questions and goal resume, Claude hook questions and
+  Claude tool approvals stay on the direct path
+  (`deferred_answer_source_refused`), as do OpenCode and DeepSeek
+  (`deferred_answer_agent_refused`), decided before any offer.
+- **Plan and binding.** The fixed `answer <session> --json` call. The plan's
+  input digest is the SHA-256 of the raw stdin, which is the digest the
+  CLI's receipt records. Before its child the actor compares `pinned` again
+  with the native current question read from the original store
+  (`consent_current`); that fresh observation, never `pinned` alone, decides
+  source and transport. The observation is `hgs answer <session> --observe
+  --json` (stdin: the question ID and the expected run and conversation).
+  It gives `found` and the question's consent identity as `hgs inspect`
+  shows it, rebuilt only from these sources' pure reads: it never fits a
+  clipped panel, takes a lock, lists Claude's approval queue or writes a
+  receipt, cache or any other file. A question it cannot see without an
+  effect, or of another run, is not found, and the answer does not start.
+- **Receipt.** Recorded only from the CLI's own exact
+  `question_receipts/<request_id>.json` record of this session, run,
+  conversation, question, question hash and stdin digest with status
+  `answered` or `submitted` (Codex's asynchronous submission, not the
+  provider's completion). Its `open_terminal` flag is only data for an
+  explicit Open Terminal action. Failed only at the no-spawn boundary
+  (`deferred_answer_not_started`) or from the exact `rejected` record
+  (`deferred_answer_rejected`). Everything else after a possibly started
+  child is Unknown and never resent.
+- **Lookup.** A scoped read-only lookup by session, request ID and plan
+  fingerprint.
+
+The service actor executes it on Linux, as it executes a deferred send:
+the same native lane, admission after BEGIN IMMEDIATE under the current
+lease and scope, live consent for that admission alone (restart, import or
+reconnect retires a queued original as `deferred_answer_interrupted`), the
+original receipt store opened before any child (here the `question_receipts`
+folder), the reservation, the selected session's own record checked from
+that root, and the consent veto last in the actual spawn turn. Between the
+session check and the original child, the worker observes the native
+current question without any effect: `hgs answer <session> --observe
+--json` runs from this service's pinned image in its own process group,
+with its frozen stdin, no custody and its own 10-second deadline inside the
+answer's 30 seconds. The held state root and the selected session must be
+unchanged after its reply too. Only a reply that finds the question with
+exactly the pinned consent identity of a v1 source starts the original
+child; no reply, a failed or late one, a malformed or larger one, another
+identity or another source starts nothing, and the answer fails as never
+started. The original `hgs answer <session> --json` then runs once through
+the shared original-child runner with the exact stdin and the effect's
+close-only custody lock. After the physical drain, the drain worker reads
+the CLI's own `question_receipts/<request_id>.json` from the held objects,
+by the deferred send's rules, within the same never-renewed 5-second
+deadline. It settles Recorded from the exact `answered` or `submitted`
+record, Failed from the exact `rejected` record (`deferred_answer_rejected`)
+or at the no-spawn boundary when no record exists
+(`deferred_answer_not_started`), and Unknown otherwise; an original of an
+earlier run is Unknown however exact its record. macOS refuses every
+original before any row (`deferred_answer_native_image_unavailable`),
+Windows refuses it too (`deferred_answer_unsupported`), and only Linux
+advertises the help marker. An unauthenticated hello naming it gets
+`frontend_authentication_required`, like its siblings.
+
+The observation fails closed by design. A Kimi panel that the person's
+inspection fitted but that is clipped again when the observation reads it
+gives no card, or one without a transport, so the answer does not start.
+Kimi's cache hint includes its idle time in the question's hash, so a
+redraw between the click and the observation changes the identity and
+refuses. Claude's resume prompt keeps `can_answer` outside the hash, but
+that is not a consent field and does not matter.
 A draft holds one such identity until it is resolved. A definite outcome
 resolves it, as does a cancellation before its call was dispatched or, for a
 start or compaction, the session seen ready for the send. An uncertain outcome

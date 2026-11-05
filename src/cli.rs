@@ -73,6 +73,7 @@ pub(crate) const USAGE: &str = r#"usage: hgs [@host] <cmd> [project] [-c [ID]] [
        Desktop task message references: desktop-task-message-reference-v1
        Desktop task message input review: desktop-task-message-input-review-v1
        Desktop deferred send ABI: desktop-deferred-send-v1
+       Desktop deferred answer ABI: desktop-deferred-answer-v1
        Desktop task start reconcile ABI: desktop-task-start-reconcile-v1
        Desktop pending read import ABI: desktop-pending-reads-v1
        Desktop activation ABI: desktop-activation-v1
@@ -142,6 +143,7 @@ pub(crate) const USAGE: &str = r#"usage: hgs [@host] <cmd> [project] [-c [ID]] [
        hgs [@host] file-read <session> --json   read a document on the conversation computer
        hgs @host download --path REMOTE_PATH --output LOCAL_FILE   download a file through configured SSH
        hgs [@host] answer <session> --json   answer an exact pending question from JSON stdin
+       hgs [@host] answer <session> --observe --json   read a pending question's consent identity, changing nothing
        hgs [@host] read <session> --json   mark the current reply/attention read (JSON stdin)
        hgs [@host] subagent retire <session> --json   retire an exact stale child record (JSON stdin)
        Subagent retirement ABI: subagent-retire-v1
@@ -447,6 +449,7 @@ fn unix_only_usage(line: &str) -> bool {
         zerus_client_core::desktop::task_message::REFERENCE_HELP_MARKER,
         zerus_client_core::desktop::task_message::review::HELP_MARKER,
         zerus_client_core::desktop::deferred_send::HELP_MARKER,
+        zerus_client_core::desktop::deferred_answer::HELP_MARKER,
         zerus_client_core::desktop::task_start_reconcile::HELP_MARKER,
     ]
     .contains(&line.trim())
@@ -477,8 +480,8 @@ fn unix_only(command: &str, unix: bool) -> Result<()> {
 /// requests, so its text tells of none of them and does not name tmux.
 /// What this computer's `hgs --help` prints. The creation worktree executor
 /// binds Git to a `/proc/self/fd` link, and no qualified seam yet attests the
-/// code a macOS task message or deferred send child runs, so only Linux
-/// advertises those ABIs.
+/// code a macOS task message, deferred send or deferred answer child runs, so
+/// only Linux advertises those ABIs.
 fn help_text() -> Cow<'static, str> {
     advertised(usage_text(cfg!(unix)), cfg!(target_os = "linux"))
 }
@@ -492,6 +495,7 @@ fn advertised(usage: Cow<'static, str>, linux: bool) -> Cow<'static, str> {
         zerus_client_core::desktop::task_message::REFERENCE_HELP_MARKER,
         zerus_client_core::desktop::task_message::review::HELP_MARKER,
         zerus_client_core::desktop::deferred_send::HELP_MARKER,
+        zerus_client_core::desktop::deferred_answer::HELP_MARKER,
     ];
     usage
         .lines()
@@ -3167,6 +3171,8 @@ mod tests {
         assert!(USAGE.lines().any(|line| line.trim() == task_marker));
         let send_marker = zerus_client_core::desktop::deferred_send::HELP_MARKER;
         assert!(USAGE.lines().any(|line| line.trim() == send_marker));
+        let answer_marker = zerus_client_core::desktop::deferred_answer::HELP_MARKER;
+        assert!(USAGE.lines().any(|line| line.trim() == answer_marker));
         // Windows has no `hgs paste`, `hgs clip` or `hgs notify`, no Ctrl+V
         // that pulls a peer's image, and no POSIX creation-clone executor.
         // Its dry runs print the host's requests; every other line stays as is.
@@ -3177,6 +3183,7 @@ mod tests {
         assert!(!neutral.lines().any(|line| line.trim() == worktree_marker));
         assert!(!neutral.lines().any(|line| line.trim() == task_marker));
         assert!(!neutral.lines().any(|line| line.trim() == send_marker));
+        assert!(!neutral.lines().any(|line| line.trim() == answer_marker));
         assert_eq!(
             neutral,
             USAGE
@@ -3221,6 +3228,10 @@ mod tests {
                     ""
                 )
                 .replace(
+                    "       Desktop deferred answer ABI: desktop-deferred-answer-v1\n",
+                    ""
+                )
+                .replace(
                     "       Desktop task start reconcile ABI: desktop-task-start-reconcile-v1\n",
                     ""
                 )
@@ -3242,6 +3253,7 @@ mod tests {
         let references = zerus_client_core::desktop::task_message::REFERENCE_HELP_MARKER;
         let review = zerus_client_core::desktop::task_message::review::HELP_MARKER;
         let send = zerus_client_core::desktop::deferred_send::HELP_MARKER;
+        let answer = zerus_client_core::desktop::deferred_answer::HELP_MARKER;
         let clone = zerus_client_core::desktop::creation_clone::HELP_MARKER;
         assert_eq!(advertised(usage_text(true), true), USAGE);
         let mac = advertised(usage_text(true), false);
@@ -3250,6 +3262,7 @@ mod tests {
         assert!(!mac.lines().any(|line| line.trim() == references));
         assert!(!mac.lines().any(|line| line.trim() == review));
         assert!(!mac.lines().any(|line| line.trim() == send));
+        assert!(!mac.lines().any(|line| line.trim() == answer));
         assert!(mac.lines().any(|line| line.trim() == clone), "clone stays POSIX");
         assert_eq!(
             mac,
@@ -3274,8 +3287,12 @@ mod tests {
                     "       Desktop deferred send ABI: desktop-deferred-send-v1\n",
                     ""
                 )
+                .replace(
+                    "       Desktop deferred answer ABI: desktop-deferred-answer-v1\n",
+                    ""
+                )
         );
-        for marker in [marker, message, references, review, send] {
+        for marker in [marker, message, references, review, send, answer] {
             assert_eq!(
                 help_text().lines().any(|line| line.trim() == marker),
                 cfg!(target_os = "linux")

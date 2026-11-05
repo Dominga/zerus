@@ -344,6 +344,7 @@ impl Validated {
                     | Request::TaskMessage { .. }
                     | Request::TaskMessageInputRelease { .. }
                     | Request::DeferredSend { .. }
+                    | Request::DeferredAnswer { .. }
                     | Request::TaskStartReconcile { .. }
                     | Request::TerminationOutcome { .. }
             ),
@@ -379,6 +380,17 @@ impl Validated {
         self.check()?;
         let Request::DeferredSend { intent } = self.0 else {
             anyhow::bail!("not a deferred send");
+        };
+        Ok(*intent)
+    }
+    /// Only the deferred answer actor calls this, after BEGIN IMMEDIATE.
+    /// Cached native Service mode was bound to this exact original request
+    /// during admission.
+    #[cfg(any(target_os = "linux", target_os = "macos"))]
+    pub fn deferred_answer(self) -> Result<zerus_client_core::desktop::deferred_answer::Intent> {
+        self.check()?;
+        let Request::DeferredAnswer { intent } = self.0 else {
+            anyhow::bail!("not a deferred answer");
         };
         Ok(*intent)
     }
@@ -1043,6 +1055,14 @@ fn validate(
             "deferred send does not match the native service frontend"
         );
     }
+    if let Request::DeferredAnswer { intent } = &envelope.request {
+        ensure!(
+            reply.request.ownership_mode
+                == Some(zerus_client_core::desktop::ownership::Mode::Service)
+                && intent.scope.configuration == configuration,
+            "deferred answer does not match the native service frontend"
+        );
+    }
     if let Request::TaskStartReconcile { intent } = &envelope.request {
         ensure!(
             reply.request.ownership_mode
@@ -1126,6 +1146,7 @@ enum OrderedOperation {
     TaskMessage,
     TaskMessageInputRelease,
     DeferredSend,
+    DeferredAnswer,
     TaskStartReconcile,
     ActivationWait,
     AutomaticApprovals,
@@ -1148,6 +1169,7 @@ impl From<&Request> for OrderedOperation {
             Request::TaskMessage { .. } => Self::TaskMessage,
             Request::TaskMessageInputRelease { .. } => Self::TaskMessageInputRelease,
             Request::DeferredSend { .. } => Self::DeferredSend,
+            Request::DeferredAnswer { .. } => Self::DeferredAnswer,
             Request::TaskStartReconcile { .. } => Self::TaskStartReconcile,
             Request::ActivationWait { .. } => Self::ActivationWait,
             Request::AutomaticApprovals { .. } => Self::AutomaticApprovals,
@@ -1777,6 +1799,98 @@ mod tests {
         reply.request.fingerprint = envelope.request.fingerprint();
         assert!(validate(&envelope, &caller, &frontend, &reply, &"a".repeat(64)).is_err());
     }
+    /// A valid deferred answer to a Claude folder-trust question, built as the
+    /// client builds it.
+    fn deferred_answer_intent(
+        configuration: String,
+        epoch: String,
+    ) -> zerus_client_core::desktop::deferred_answer::Intent {
+        use zerus_client_core::{
+            desktop::deferred_answer::{Intent, Scope},
+            operation_recovery::deferred_input as checkpoint,
+            questions::{consent_identity, AnswerItem},
+        };
+        let question = serde_json::json!({"question_id": "q-1", "question_hash": "ab".repeat(32),
+            "run_id": "run-1", "conversation_id": "conversation-1", "source": "claude_folder_trust",
+            "answer_transport": "claude_tui", "questions": [{"id": "q-1", "question": "Trust?",
+                "options": [{"id": "yes", "label": "Yes"}]}]});
+        let answers = vec![AnswerItem::Choice {
+            question_id: "q-1".into(),
+            selected_option_ids: vec!["yes".into()],
+            text: String::new(),
+        }];
+        let identity = consent_identity(&question);
+        let reserved = checkpoint::Checkpoint::reserve(checkpoint::Intent {
+            kind: checkpoint::Kind::Answer,
+            draft_revision: 1,
+            message_sha256: checkpoint::message_sha256(
+                &serde_json::to_string(&answers).unwrap(),
+                std::iter::empty(),
+            ),
+            run_id: "run-1".into(),
+            conversation_id: "conversation-1".into(),
+            question: Some(checkpoint::Question {
+                id: "q-1".into(),
+                identity_sha256: checkpoint::identity_sha256(&identity),
+            }),
+            start: None,
+            retry_of: None,
+            consent: false,
+        });
+        let original = serde_json::json!({"request_id": reserved.request_id, "question_id": "q-1",
+            "expected_question_hash": "ab".repeat(32), "expected_run_id": "run-1",
+            "expected_conversation_id": "conversation-1", "answers": answers});
+        Intent {
+            scope: Scope {
+                configuration,
+                service_epoch: epoch,
+            },
+            session: "claude/private-answer".into(),
+            request_id: reserved.request_id.clone(),
+            checkpoint: serde_json::to_string(&reserved).unwrap(),
+            pinned: identity.to_string(),
+            original: original.to_string(),
+        }
+    }
+
+    #[test]
+    fn deferred_answer_has_its_own_lane_and_never_passes_the_generic_boundary() {
+        use zerus_client_core::desktop::ownership::Mode;
+        let (mut envelope, caller, frontend, mut reply) = fixture();
+        let intent = deferred_answer_intent("a".repeat(64), id(91));
+        envelope.request = Request::DeferredAnswer {
+            intent: Box::new(intent.clone()),
+        };
+        assert_eq!(
+            OrderedOperation::from(&envelope.request),
+            OrderedOperation::DeferredAnswer
+        );
+        for other in [
+            OrderedOperation::DeferredSend,
+            OrderedOperation::TaskMessage,
+            OrderedOperation::CreationLaunch,
+        ] {
+            assert_ne!(OrderedOperation::DeferredAnswer, other);
+        }
+        assert_eq!(envelope.request.id(), intent.request_id);
+        reply.request.request_id = intent.request_id.clone();
+        reply.request.fingerprint = envelope.request.fingerprint();
+        assert!(validate(&envelope, &caller, &frontend, &reply, &"a".repeat(64)).is_err());
+        reply.request.ownership_mode = Some(Mode::Native);
+        assert!(validate(&envelope, &caller, &frontend, &reply, &"a".repeat(64)).is_err());
+        reply.request.ownership_mode = Some(Mode::Service);
+        validate(&envelope, &caller, &frontend, &reply, &"a".repeat(64)).unwrap();
+        // Only a future typed actor accessor may consume it.
+        assert!(Validated::fixture(&serde_json::json!(envelope.request))
+            .into_request()
+            .is_err());
+        if let Request::DeferredAnswer { intent } = &mut envelope.request {
+            intent.scope.configuration = "b".repeat(64);
+        }
+        reply.request.fingerprint = envelope.request.fingerprint();
+        assert!(validate(&envelope, &caller, &frontend, &reply, &"a".repeat(64)).is_err());
+    }
+
     #[test]
     fn deferred_send_has_its_own_lane_and_never_passes_the_generic_boundary() {
         use zerus_client_core::{

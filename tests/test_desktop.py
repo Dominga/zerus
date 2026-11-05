@@ -345,6 +345,48 @@ finally:
         else:
             self.assertNotIn('desktop-deferred-send', help_text)
 
+    def test_deferred_answer_is_a_closed_native_intent_with_scoped_read_only_lookup(self):
+        self.serve()
+        status = self.cli('desktop', 'status', '--json')
+        scope = dict(configuration=status['configuration'], service_epoch=status['epoch'])
+        request = str(uuid.uuid4())
+        session = 'claude/private-answer'
+        stdin = dict(request_id=request, question_id='q-1', expected_question_hash='a' * 64,
+                     expected_run_id='run-1', expected_conversation_id='conversation-1',
+                     answers=[dict(question_id='q-1', selected_option_ids=['yes'], text='')])
+        intent = dict(scope=scope, session=session, request_id=request, checkpoint='{}', pinned='{}',
+                      original=json.dumps(stdin, separators=(',', ':')))
+        # Only the native frontend lane carries it.
+        refused = self.cli('desktop', 'request', '--json', data=dict(op='deferred_answer', intent=intent))
+        self.assertFalse(refused['accepted'])
+        self.assertEqual(refused['code'], 'frontend_authentication_required')
+        query = dict(scope=scope, session=session, request_id=request, plan_sha256='a' * 64)
+        result = self.cli('desktop', 'request', '--json', data=dict(op='deferred_answer_result', query=query))
+        self.assertEqual(result['abi'], 'desktop-deferred-answer-v1')
+        self.assertEqual(result['scope'], scope)
+        self.assertTrue(result['read_only'])
+        self.assertFalse(result['found'])
+        self.assertIsNone(result['receipt'])
+        for bad in (dict(query, scope=dict(scope, service_epoch=str(uuid.uuid4()))),
+                    dict(query, session='@peer/claude'), dict(query, session='dsh/example'),
+                    dict(query, request_id='not-a-uuid')):
+            self.assertEqual(self.cli('desktop', 'request', '--json', data=dict(op='deferred_answer_result', query=bad)),
+                             dict(accepted=False, read_only=True, code='deferred_answer_result_unavailable'))
+        with closing(sqlite3.connect(self.desktop / 'state.sqlite3')) as db:
+            self.assertEqual(db.execute('SELECT count(*) FROM desktop_deferred_answers').fetchone()[0], 0)
+            self.assertEqual(db.execute('SELECT rows,bytes,active FROM desktop_deferred_answer_budget').fetchone(),
+                             (0, 0, 0))
+        status = self.cli('desktop', 'status', '--json')
+        self.assertEqual(status['operation_queue']['kinds']['deferred_answer']['undrained'], 0)
+        self.assertFalse(status['operation_queue']['kinds']['deferred_answer']['authority'])
+        help_text = subprocess.run([str(HGS), '--help'], env=self.env, capture_output=True, text=True).stdout
+        # macOS refuses every original until a qualified child seam exists.
+        if sys.platform.startswith('linux'):
+            self.assertIn('Desktop deferred answer ABI: desktop-deferred-answer-v1',
+                          [line.strip() for line in help_text.splitlines()])
+        else:
+            self.assertNotIn('desktop-deferred-answer', help_text)
+
     def test_creation_launch_is_a_closed_native_intent_with_scoped_read_only_lookup(self):
         self.serve()
         status = self.cli('desktop', 'status', '--json')
@@ -1556,9 +1598,12 @@ finally:
     @staticmethod
     def remove_catalog_reason_schema(db):
         # Rewind the later leaves too, never leaving one labelled older: the
-        # schema-28 deferred send, schema-27 task message inputs, schema-26
-        # task message, schema-25 termination retention, creation
-        # launch/worktree, then the schema-22 catalog approval.
+        # schema-29 deferred answer, schema-28 deferred send, schema-27 task
+        # message inputs, schema-26 task message, schema-25 termination
+        # retention, creation launch/worktree, then the schema-22 catalog
+        # approval.
+        db.execute('DROP TABLE desktop_deferred_answers')
+        db.execute('DROP TABLE desktop_deferred_answer_budget')
         db.execute('DROP TABLE desktop_deferred_sends')
         db.execute('DROP TABLE desktop_deferred_send_budget')
         db.execute('DROP TABLE desktop_task_message_inputs')

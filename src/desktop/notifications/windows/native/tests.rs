@@ -335,3 +335,43 @@ fn relative_configuration_formats_exactly_as_the_registration_writer() {
         here.join("relative state dir").to_str().unwrap()
     );
 }
+
+#[test]
+fn the_last_native_object_is_released_inside_the_apartment_before_it_is_left() {
+    use std::{cell::RefCell, rc::Rc};
+    struct Marker(Rc<RefCell<Vec<&'static str>>>);
+    impl Drop for Marker {
+        fn drop(&mut self) {
+            self.0.borrow_mut().push("released");
+        }
+    }
+    let order = Rc::new(RefCell::new(Vec::new()));
+    let mut owned = Some(Marker(order.clone()));
+    release_then_uninitialize(&mut owned, || order.borrow_mut().push("uninitialized"));
+    assert!(owned.is_none());
+    assert_eq!(*order.borrow(), ["released", "uninitialized"]);
+    // An already released object leaves only the uninitialize step.
+    let mut none: Option<Marker> = None;
+    release_then_uninitialize(&mut none, || order.borrow_mut().push("uninitialized"));
+    assert_eq!(
+        *order.borrow(),
+        ["released", "uninitialized", "uninitialized"]
+    );
+}
+
+#[test]
+fn a_real_notifier_released_before_the_apartment_ends_leaves_the_process_intact() {
+    // The actual WinRT object in its own MTA thread, released by the same
+    // helper the backend uses; the reversed order faults (zerus-1an7q).
+    std::thread::spawn(|| {
+        unsafe { RoInitialize(RO_INIT_MULTITHREADED) }.unwrap();
+        let mut notifier = Some(
+            ToastNotificationManager::CreateToastNotifierWithId(&HSTRING::from(wire::APPLICATION))
+                .unwrap(),
+        );
+        release_then_uninitialize(&mut notifier, || unsafe { RoUninitialize() });
+        assert!(notifier.is_none());
+    })
+    .join()
+    .unwrap();
+}

@@ -134,6 +134,17 @@ database, or a stale frontend image. A same-origin Grant reconnect that keeps
 the ownership incarnation is allowed. This guard cannot be reconstructed from
 status or a receipt, cannot Grant/Rearm, and is not runtime launch authority.
 
+The retained native task now pins its loaded image with the shared executable
+pinning code and the kernel's `ProcessImageFileMapping` check, using the SAME
+held process handle. The selected replacement and the loaded old file are kept
+separately, including their normalized ancestor pins. If a stable-CLI update
+moved the old executable aside, discovery inspects only maintained
+`hgs.exe.old-<seconds>-<random>` names in the pinned selected directory, with at
+most 256 directory entries and the existing phase deadline. A pathname, an
+alias or identical bytes do not prove the mapping. Unavailable evidence or an
+exhausted directory/deadline bound refuses without selecting another process.
+These pins last through the original native consumer's checks and release.
+
 These are source prerequisites for an explicit refresh control, not that control
 itself. Ordinary same-mode selection still does nothing. Native Windows PC
 qualification remains outstanding; portable tests and Linux actor models do not
@@ -281,6 +292,16 @@ the obsolete saved rollback metadata:
 ```powershell
 hgs desktop registration cancel-rollback --json --request-id UUID
 ```
+
+Before publishing `StopOffered`, the helper rechecks the same retained original
+instance, task definition/owner/ACL and authenticated process/pipe under the
+registration lock. A refusal proven before publication stays at `Held` and can
+use the explicit cancellation above. The original Stop deadline includes these
+reads and any debug hold; it is not renewed. A post-persist check failure,
+directory-sync uncertainty or lost save reply remains `StopOffered`/Unknown.
+The immediate selection and original-instance checks before COM Stop remain.
+Historical offered records are never downgraded. Status, Retry and reconnect
+do not cancel, and Settings currently has no Held-cancellation action.
 
 Cancellation checks the original pending UUID and native caller twice. It can
 discard any pre-manager record for either mode, including stale background

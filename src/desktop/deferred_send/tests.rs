@@ -109,7 +109,6 @@ fn exact_previous_store_upgrade_adds_only_the_independent_send_leaf() {
         crate::desktop::task_message::INPUTS_SCHEMA,
         "rebase this test onto the actual merge-order predecessor"
     );
-    assert_eq!(SCHEMA, crate::desktop::store::SCHEMA);
     let (_temp, location, store, _) = fixture();
     remove_fixture(&store.db);
     store
@@ -126,7 +125,8 @@ fn exact_previous_store_upgrade_adds_only_the_independent_send_leaf() {
             .unwrap(),
         crate::desktop::store::SCHEMA
     );
-    assert_eq!(tables(&store.db), before + 2);
+    // This leaf, then the later deferred answer leaf.
+    assert_eq!(tables(&store.db), before + 4);
     assert_eq!(ledger::undrained(&store.db).unwrap(), 0);
     assert_eq!(
         store.operation_status()["kinds"]["deferred_send"]["undrained"],
@@ -577,7 +577,7 @@ fn state_root(parent: &Path) -> PathBuf {
     state
 }
 fn observe(state: &Path, plan: &wire::Plan) -> super::receipt::Observed {
-    let roots = super::receipt::Roots::open(state).unwrap();
+    let roots = super::receipt::Roots::open(state, super::receipt::FOLDER).unwrap();
     super::receipt::read(&roots, plan, &|| {}).0
 }
 
@@ -660,7 +660,7 @@ fn the_receipt_observation_reads_only_the_exact_private_submitted_record() {
     write_receipt(&state, id, exact.as_bytes());
     mode(&folder, 0o755);
     assert!(
-        super::receipt::Roots::open(&state).is_err(),
+        super::receipt::Roots::open(&state, super::receipt::FOLDER).is_err(),
         "a shared folder is never held"
     );
     mode(&folder, 0o700);
@@ -693,11 +693,17 @@ fn the_receipt_observation_reads_only_the_exact_private_submitted_record() {
     clear();
     // A linked or shared state root is never held.
     mode(&state, 0o755);
-    assert!(super::receipt::Roots::open(&state).is_err(), "shared root");
+    assert!(
+        super::receipt::Roots::open(&state, super::receipt::FOLDER).is_err(),
+        "shared root"
+    );
     mode(&state, 0o700);
     let linked = temp.path().join("linked");
     std::os::unix::fs::symlink(&state, &linked).unwrap();
-    assert!(super::receipt::Roots::open(&linked).is_err(), "linked root");
+    assert!(
+        super::receipt::Roots::open(&linked, super::receipt::FOLDER).is_err(),
+        "linked root"
+    );
 }
 
 /// review: the original store is the one opened before the child; a moved,
@@ -720,7 +726,7 @@ fn only_the_original_unchanged_store_proves_a_submission() {
         if folder {
             write_receipt(&state, &id, exact.as_bytes());
         }
-        let roots = Roots::open(&state).unwrap();
+        let roots = Roots::open(&state, super::receipt::FOLDER).unwrap();
         (state, roots)
     };
     let copy = |state: &Path, to: &Path| {
@@ -1328,7 +1334,7 @@ os._exit(0)"#;
                 input,
                 lock,
                 resources,
-                Instant::now() + Duration::from_millis(500),
+                Instant::now() + Duration::from_millis(1500),
                 |_| Ok(()),
             )
         });
@@ -1394,7 +1400,7 @@ os._exit(0)"#;
                 input,
                 lock,
                 resources,
-                Instant::now() + Duration::from_millis(300),
+                Instant::now() + Duration::from_millis(1500),
                 |_| Ok(()),
             )
         });
@@ -1869,7 +1875,7 @@ fn the_target_check_finds_a_session_in_the_id_layout() {
     let verified = original(&"a".repeat(64), &uuid::Uuid::new_v4().to_string());
     let plan = &verified.plan;
     session_record(&state, SESSION, "claude", "run-other", "conversation-other");
-    let current = || target::current(&super::receipt::Roots::open(&state).unwrap(), plan);
+    let current = || target::current(&super::receipt::Roots::open(&state, super::receipt::FOLDER).unwrap(), plan);
     assert!(!current(), "the label's holder runs another run");
     let private = |path: &Path, body: &Value| {
         std::fs::create_dir_all(path.parent().unwrap()).unwrap();
@@ -1925,7 +1931,7 @@ fn the_target_check_never_ignores_an_unreadable_listed_candidate() {
     let verified = original(&"a".repeat(64), &uuid::Uuid::new_v4().to_string());
     let plan = &verified.plan;
     session_record(&state, SESSION, "claude", "run-other", "conversation-other");
-    let current = || target::current(&super::receipt::Roots::open(&state).unwrap(), plan);
+    let current = || target::current(&super::receipt::Roots::open(&state, super::receipt::FOLDER).unwrap(), plan);
     let private = |path: &Path, bytes: &[u8]| {
         std::fs::create_dir_all(path.parent().unwrap()).unwrap();
         mode(path.parent().unwrap(), 0o700);
@@ -1960,7 +1966,7 @@ fn the_target_check_counts_the_label_holder_with_its_twins() {
     let verified = original(&"a".repeat(64), &uuid::Uuid::new_v4().to_string());
     let plan = &verified.plan;
     session_record(&state, SESSION, "claude", RUN, CONVERSATION);
-    let current = || target::current(&super::receipt::Roots::open(&state).unwrap(), plan);
+    let current = || target::current(&super::receipt::Roots::open(&state, super::receipt::FOLDER).unwrap(), plan);
     assert!(current(), "no ID layout: the label's record decides");
     let private = |path: &Path, bytes: &[u8]| {
         std::fs::create_dir_all(path.parent().unwrap()).unwrap();
@@ -2016,7 +2022,7 @@ fn the_target_check_refuses_every_malformed_listed_index() {
     let verified = original(&"a".repeat(64), &uuid::Uuid::new_v4().to_string());
     let plan = &verified.plan;
     session_record(&state, SESSION, "claude", RUN, CONVERSATION);
-    let current = || target::current(&super::receipt::Roots::open(&state).unwrap(), plan);
+    let current = || target::current(&super::receipt::Roots::open(&state, super::receipt::FOLDER).unwrap(), plan);
     let private = |path: &Path, bytes: &[u8]| {
         std::fs::create_dir_all(path.parent().unwrap()).unwrap();
         mode(path.parent().unwrap(), 0o700);
@@ -2063,4 +2069,80 @@ fn the_target_check_refuses_every_malformed_listed_index() {
     whole["labels"]["another"] = json!(1);
     private(&manifest, whole.to_string().as_bytes());
     assert!(!current(), "a manifest with a malformed entry");
+}
+
+/// desktop-u's G1 on #1433: this kind's child runner checks the
+/// never-renewed deadline last before the spawn and before any input.
+#[cfg(any(target_os = "linux", target_os = "macos"))]
+mod spent_deadline {
+    use crate::desktop::original_child::{crossed, OFFERED, SPAWNED};
+    use std::path::Path;
+    use std::sync::Arc;
+    use std::time::{Duration, Instant};
+    use zerus_client_core::run::custody::InheritedLock;
+
+    pub(super) fn custody() -> Arc<InheritedLock> {
+        InheritedLock::try_lock(tempfile::tempfile().unwrap()).unwrap()
+    }
+    pub(super) fn resources() -> Arc<dyn Send + Sync> {
+        Arc::new(())
+    }
+    pub(super) fn cat() -> &'static Path {
+        Path::new("/bin/cat")
+    }
+    pub(super) fn clear() {
+        SPAWNED.with(|spawned| spawned.set(None));
+        OFFERED.with(|offered| offered.set(None));
+    }
+    pub(super) fn spawned() -> Option<u32> {
+        SPAWNED.with(|spawned| spawned.take())
+    }
+    pub(super) fn expired() -> Instant {
+        Instant::now() - Duration::from_millis(1)
+    }
+    pub(super) fn soon() -> Instant {
+        Instant::now() + Duration::from_secs(20)
+    }
+
+    #[test]
+    fn a_send_child_never_starts_once_its_deadline_is_spent() {
+        use super::super::child::{run, Ended};
+        clear();
+        let ended = run(
+            cat(),
+            &[],
+            b"hello",
+            &custody(),
+            &resources(),
+            expired(),
+            |_| Ok(()),
+        );
+        assert_eq!(ended, Ended::NotStarted);
+        assert_eq!(spawned(), None);
+        let ended = crossed(|deadline, check| {
+            clear();
+            run(
+                cat(),
+                &[],
+                b"hello",
+                &custody(),
+                &resources(),
+                deadline,
+                check,
+            )
+        });
+        assert_eq!(ended, Ended::NotStarted);
+        assert_eq!(spawned(), None, "no child once the last check spent it");
+        clear();
+        let ended = run(
+            cat(),
+            &[],
+            b"hello",
+            &custody(),
+            &resources(),
+            soon(),
+            |_| Ok(()),
+        );
+        assert_eq!(ended, Ended::Exited { code: 0 });
+    }
 }

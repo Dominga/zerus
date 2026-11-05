@@ -28,5 +28,8 @@ pub use schema::{
 pub use store::{
     Admitted, Changes, Damaged, Keep, Position, ProjectStore, DEPENDS_ON_INCOMING_COPY, MARK_FORMAT,
 };
-pub use sync::{Document, DonePage, DoneRow, Imported, Inventory, Update, Version};
+pub use sync::{
+    canonical_version, version_includes, Document, DonePage, DoneRow, Imported, Inventory, Update,
+    Version,
+};
 pub use task::{NewTask, Settled, Settlement, TaskDoc};

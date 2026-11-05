@@ -54,9 +54,11 @@ function sharedPort(others: () => readonly (string | undefined)[]): ActivityPort
   };
 }
 
-export const activity = createActivity(sharedPort(() => [coordinatorActivity.target()?.id]));
+export const activity = createActivity(sharedPort(() => [coordinatorActivity.target()?.id, designerActivity.target()?.id]));
 /** The Team tab's coordinator conversation, when the coordinator is not the selected session. */
-export const coordinatorActivity = createActivity(sharedPort(() => [activity.target()?.id]));
+export const coordinatorActivity = createActivity(sharedPort(() => [activity.target()?.id, designerActivity.target()?.id]));
+/** Task #44: the Team designer's conversation on its page, when it is not the selected session. */
+export const designerActivity = createActivity(sharedPort(() => [activity.target()?.id, coordinatorActivity.target()?.id]));
 bindActivity(activity);
 bindModelNotice((message) => notify("error", message, true));
 bindSelection(() => ({ key: selectedKey(), subagent: subagentOpen() }));
@@ -96,7 +98,7 @@ export function receive(b: Batch) {
     archive.applyGroups(b.groups ?? []);
   });
   observeMarks(b);
-  if (b.activity.length) { activity.applyActivity(b.activity); coordinatorActivity.applyActivity(b.activity); }
+  if (b.activity.length) { activity.applyActivity(b.activity); coordinatorActivity.applyActivity(b.activity); designerActivity.applyActivity(b.activity); }
   if (b.teams?.length) teams.apply(b.teams);
   if (b.tasks?.length) tasks.apply(b.tasks);
   if (b.processes_view) processes.apply(b.processes_view);

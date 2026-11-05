@@ -481,6 +481,7 @@ fn replies(read: &TeamRead) -> Value {
         TeamRead::Spans { .. } => fixture("spans"),
         TeamRead::Profile { .. } => fixture("profile"),
         TeamRead::Catalog => fixture("catalog"),
+        TeamRead::CatalogRoute { .. } => serde_json::json!({"rule": null, "template": null}),
     }
 }
 

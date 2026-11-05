@@ -1050,7 +1050,47 @@ export type TeamAction =
   | { kind: "catalog_propose"; change: Record<string, unknown> }
   | { kind: "catalog_decide"; proposal: string; decision: "keep" | "reject" | "undo" }
   | { kind: "catalog_apply" }
-  | { kind: "catalog_discard" };
+  | { kind: "catalog_discard" }
+  | { kind: "catalog_set"; version: number; catalog: Record<string, unknown> }
+  | { kind: "catalog_designer"; folder: string; goal: string; agent?: string; model?: string; effort?: string; project?: string };
+
+/** Task #44: one kind of catalog item (core catalog_edit.rs `Kind`). */
+export type CatalogKind = "role" | "template" | "rule" | "pipeline";
+/** The catalog's list of each kind. */
+export type CatalogList = "roles" | "templates" | "routing" | "pipelines";
+/** One field Qt's catalog editor shows (core `FieldSpec`); the webview translates its label and hint. */
+export interface CatalogFieldSpec {
+  name: string;
+  label: string;
+  hint: string;
+  type: "text" | "multiline" | "number" | "bool" | "choice" | "words" | "list";
+  min?: number;
+  max?: number;
+  options?: [string, string][];
+  fields?: CatalogFieldSpec[];
+}
+export type CatalogSchema = Record<CatalogList, CatalogFieldSpec[]>;
+/** The working copy as the editors show it (core `CatalogEditorView`); core checks every edit. */
+export interface CatalogEditorView {
+  version: number;
+  builtin: boolean;
+  roles: Record<string, unknown>[];
+  templates: Record<string, unknown>[];
+  routing: Record<string, unknown>[];
+  pipelines: Record<string, unknown>[];
+  planning_rules: string;
+  unsaved: number;
+  edited: Partial<Record<CatalogList, string[]>>;
+}
+export type CatalogEdit =
+  | { op: "set"; kind: CatalogKind; id: string; field: string; value: unknown }
+  | { op: "add"; kind: CatalogKind }
+  | { op: "duplicate"; kind: CatalogKind; id: string }
+  | { op: "remove"; kind: CatalogKind; id: string }
+  | { op: "move"; kind: CatalogKind; id: string; by: number }
+  | { op: "planning_rules"; text: string };
+/** What deleting an item takes with it (core `RemoveImpact`). */
+export interface CatalogRemoveImpact { name: string; templates: string[]; pipelines: string[]; emptied: string[] }
 
 /**
  * One call (core `TeamCall`): the computer ("" is this one), the team (empty

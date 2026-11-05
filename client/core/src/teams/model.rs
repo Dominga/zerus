@@ -398,6 +398,7 @@ impl TeamsModel {
             TeamRead::Spans { team, .. } => team_key("spans", team),
             TeamRead::Profile { team } => team_key("profile", team),
             TeamRead::Catalog => "catalog".into(),
+            TeamRead::CatalogRoute { .. } => "route".into(),
         }
     }
 
@@ -513,6 +514,8 @@ impl TeamsModel {
                 TeamsUpdate::Catalog(Arc::new(view::catalog(&value))),
                 &mut out,
             ),
+            // Asked once by the editor's Try it, never polled.
+            TeamRead::CatalogRoute { .. } => {}
         }
         out
     }

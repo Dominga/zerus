@@ -1461,7 +1461,8 @@ leads and tasks are parsed strictly: an unknown field is refused with its name,
 the accepted fields and an example, and a wrong type with serde's reason. A
 task's text is `description`. A member without `account` starts on its
 computer's default account for its agent, which the preflight names.
-`max_members` counts the members besides the lead.
+`max_members` counts the members besides the lead; more members than that is a
+preflight error, so a plan, an approval and a draft's create are refused with it.
 
 `draft get` answers the draft's `fields` (name, goal, addendum, settings,
 members, tasks and plan mode). A draft update sets only the fields it names;

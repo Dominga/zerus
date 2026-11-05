@@ -987,3 +987,39 @@ fn a_draft_changes_one_member_and_sets_the_plan_mode() {
     update(&mut team, 4, json!({"plan_mode":"free"}), &Actor::Human).unwrap();
     assert_eq!((team.plan_mode, team.plan_mode_offer), (PlanMode::Free, None));
 }
+
+/// Task #18 (owner, 2026-11-05): the New team form's first save is accepted as
+/// it sends it (the form's four settings only, its members and template tasks);
+/// a draft over its member limit is a preflight error and its create is refused
+/// naming the limit, never "Preflight: ok" beside a create that does nothing.
+#[test]
+fn a_draft_over_its_member_limit_is_refused_at_create_and_by_the_preflight() {
+    let (mut team, _) = create("t", &json!({"name":"T","lead":{"id":"lead","agent":"claude"}})).unwrap();
+    team.status = TeamStatus::Draft;
+    team.draft = Some(Draft { revision: 1, ..Default::default() });
+    let none = BTreeSet::new();
+    let members: Vec<Value> = (1..=3)
+        .map(|n| {
+            json!({"id":format!("dev-{n}"),"role":"Backend","agent":"claude","account":"","model":"","effort":"","permissions":"",
+                   "computer":"","folder":"shared","prompt":"Build it."})
+        })
+        .collect();
+    let set = json!({"goal":"Ship","addendum":"","members":members,
+        "tasks":[{"id":1,"title":"Plan","assignee":"lead","deps":[]},{"id":2,"title":"Build","assignee":"dev-1","deps":[{"task":1,"kind":"hard"}]}],
+        "settings":{"folder_policy":"auto","approval":"review","phase_approval":"auto","max_members":2}});
+    apply(&mut team, "draft", &json!({"action":"update","revision":1,"set":set}), &Actor::Human, &none, &mut Vec::new()).unwrap();
+    let validation = plan::validate(&team, &none);
+    assert!(
+        validation.errors.iter().any(|finding| finding.kind == "members" && finding.text.contains("over the team limit of 2")),
+        "{:?}",
+        validation.errors
+    );
+    assert!(validation.warnings.iter().all(|finding| finding.kind != "members"), "{:?}", validation.warnings);
+    let error = apply(&mut team, "draft", &json!({"action":"create"}), &Actor::Human, &none, &mut Vec::new()).unwrap_err().to_string();
+    assert!(error.contains("over the team limit of 2"), "{error}");
+    assert_eq!(team.status, TeamStatus::Draft);
+    // One member fewer: the same draft creates.
+    apply(&mut team, "draft", &json!({"action":"update","revision":2,"set":{"members":{"dev-3":null}}}), &Actor::Human, &none, &mut Vec::new()).unwrap();
+    let value = apply(&mut team, "draft", &json!({"action":"create"}), &Actor::Human, &none, &mut Vec::new()).unwrap();
+    assert_eq!(value["status"], "planning", "{value}");
+}

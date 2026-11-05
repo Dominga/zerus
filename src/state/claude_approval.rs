@@ -189,6 +189,29 @@ fn matches(request:&Value,panel:&Panel)->bool {
     targets.iter().all(|target|text.contains(&compact(target)))
 }
 
+/// The native "Read outside the working directories" panel can appear without
+/// a PermissionRequest hook (auto mode), so no pending request names it. Its
+/// known title, question and four native options plus the Read(path) row are
+/// enough to form the request a tool-approval card answers; every answer is
+/// checked against this same panel again (`snapshot`).
+fn native_read_request(screen:&str)->Option<Value> {
+    let panel=parse(screen)?;
+    if panel.title.trim()!="Read outside the working directories"
+        ||panel.question.trim()!="Allow this read outside the working directories?" {return None;}
+    const EXPECTED:[&str;4]=["Yes, and keep allowing any reads outside the working directories",
+        "No, and block reads outside the working directories from now on",
+        "No, and ask again next time","Yes, but ask again next time"];
+    let labels:Vec<String>=panel.labels.iter().map(|text|label(text)).collect();
+    if labels.len()!=EXPECTED.len()||labels.iter().zip(EXPECTED).any(|(label,want)|label!=want) {return None;}
+    let body=panel.body.iter().filter(|row|!rule(row,'╌')).map(String::as_str).collect::<String>();
+    let start=body.find("Read(")?+5;
+    let end=body[start..].find(')')?+start;
+    let path=body[start..end].trim();
+    if path.is_empty() {return None;}
+    let request=json!({"tool_name":"Read","tool_input":{"file_path":path}});
+    matches(&request,&panel).then_some(request)
+}
+
 fn summary(request:&Value)->String {
     let input=&request["tool_input"];
     let target=["command","file_path","notebook_path","url","path","pattern"].iter()
@@ -265,8 +288,21 @@ fn build(record:&Value,screen:Option<&str>)->Option<(Value,Option<Panel>)> {
         card["answer_unavailable_reason"]=json!("This child tool request needs review in Terminal.");
         return Some((card,panel));
     }
-    if !eligible(record) {return None;}
-    build_request(record,screen,request(record)?,&record["pending_approval_at"],"")
+    if eligible(record) {
+        if let Some(request)=request(record) {
+            return build_request(record,screen,request,&record["pending_approval_at"],"");
+        }
+    }
+    // Auto mode can show a known native panel without the PermissionRequest
+    // hook; then no pending approval exists to name the request, and the panel
+    // itself does. A pending request of another kind is never read from the
+    // screen this way.
+    let screen=screen?;
+    if !["input","approval","working","tool"].contains(&string(record,"phase")) {return None;}
+    if record.get("pending_approval").is_some() {return None;}
+    let request=native_read_request(screen)?;
+    let at=record["attention_started"].as_f64().map_or(record["last_event_at"].clone(),|at|json!(at));
+    build_request_seen(record,Some(screen),&request,&at,"",false)
 }
 
 /// The exact shell command of a Bash or PowerShell request, for a team's safe
@@ -278,7 +314,11 @@ fn shell_input(card:&mut Value,request:&Value) {
 }
 
 fn build_request(record:&Value,screen:Option<&str>,request:&Value,at:&Value,child_request_id:&str)->Option<(Value,Option<Panel>)> {
-    if screen.is_some_and(|screen|!visible(screen)) {return None;}
+    build_request_seen(record,screen,request,at,child_request_id,true)
+}
+
+fn build_request_seen(record:&Value,screen:Option<&str>,request:&Value,at:&Value,child_request_id:&str,seen_required:bool)->Option<(Value,Option<Panel>)> {
+    if seen_required&&screen.is_some_and(|screen|!visible(screen)) {return None;}
     let tool=string(request,"tool_name");
     let panel=screen.and_then(parse);
     let problem=match &panel {
@@ -1624,6 +1664,32 @@ pub(super) fn reconcile(record:Value)->Value {
         assert_eq!(write["can_answer"],true);assert_eq!(options(&write)[1].1,"broader");
         assert_eq!(parse(OUTSIDE).unwrap().selected,0);
         assert_eq!(parse(&BASH.replace(" ❯ 1. Yes","   1. Yes").replace("   4. No"," ❯ 4. No")).unwrap().selected,3);
+    }
+
+    #[test] fn windows_read_outside_without_a_hook_is_an_answerable_tool_approval() {
+        // The real Windows card at 2026-11-05 17:49:21 (attachment
+        // message-40hhyN/01-Screenshot_2.png) showed this path and these four
+        // options with no PermissionRequest; the fixture keeps that text in
+        // the Windows normal-screen layout.
+        let screen=include_str!("../../tests/fixtures/claude-read-outside-windows.txt");
+        let r=json!({"agent":"claude","phase":"input","run_id":"run","conversation_id":"conversation",
+            "pane":"%1","pid":1,"process_start":"1","attention_started":20.0,"last_event_at":21.0,"active_tools":{}});
+        let q=card(&r,screen);
+        assert_eq!((q["source"].clone(),q["can_answer"].clone(),q["answer_transport"].clone(),q["approval_choices"].clone()),
+            (json!("claude_tool_approval"),json!(true),json!("claude_tui"),json!(true)));
+        assert_eq!(q["questions"][0]["question"],"Allow this read outside the working directories?");
+        assert_eq!(options(&q),[("Yes, and keep allowing any reads outside the working directories","broader"),
+            ("No, and block reads outside the working directories from now on","broader"),
+            ("No, and ask again next time","once"),("Yes, but ask again next time","once")].map(|(l,s)|(l.to_owned(),s.to_owned())));
+        assert!(string(&q["questions"][0],"body").contains("01-Screenshot_2.png"));
+        assert!(string(&q["questions"][0],"body").contains("Read outside the working directories"));
+        assert!(snapshot(&r,screen).is_some());
+        // The same panel with the waiting hook keeps the existing answerable card.
+        let hooked=record("Read",json!({"file_path":r"C:\Users\whitl\.local\state\hgs\sessions\attachments\message-40hhyN\01-Screenshot_2.png"}));
+        let hooked=card(&hooked,screen);
+        assert_eq!((hooked["source"].clone(),hooked["can_answer"].clone()),(json!("claude_tool_approval"),json!(true)));
+        // A different question is not this known panel.
+        assert!(native_read_request(&screen.replace("Allow this read outside the working directories?","Do you want to proceed?")).is_none());
     }
 
     #[test] fn mismatched_or_unreadable_panels_stay_visible_for_terminal() {

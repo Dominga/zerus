@@ -31,6 +31,8 @@ pub(super) const TIMED_OUT: &str = "compact_to_send_receipt_timed_out";
 pub(super) const UNHELD: &str = "compact_to_send_receipt_root_unheld";
 /// The compaction receipt folder's name under the CLI state root.
 pub(super) const COMPACTION_FOLDER: &str = "compact_receipts";
+/// The send receipt folder's name under the same root.
+pub(super) const INPUT_FOLDER: &str = "input_receipts";
 
 /// What a child's own receipt says.
 #[derive(Clone, Debug, PartialEq, Eq)]
@@ -38,7 +40,6 @@ pub(super) enum Observed {
     /// The exact compaction's receipt is `submitted`.
     Compacted(Compacted),
     /// The exact send's receipt is `submitted`.
-    #[allow(dead_code)] // The send's read lands with its child.
     Sent(deferred_send::Outcome),
     /// The original store this drain held was read and holds no receipt of
     /// the request. Only a read here constructs it, so no caller can claim
@@ -66,6 +67,28 @@ pub(super) fn compaction(roots: &Roots, plan: &Plan, between: &dyn Fn()) -> (Obs
         // record, or no outcome.
         Ok(bytes) => match Compacted::from_receipt(plan, &bytes) {
             Ok(outcome) => Observed::Compacted(outcome),
+            Err(code) => Observed::Unknown(code),
+        },
+        Err(Failure::Missing) => Observed::Missing(Absence(())),
+        Err(Failure::Unavailable) => Observed::Unknown(UNAVAILABLE),
+        Err(Failure::Changed) => Observed::Unknown(CHANGED),
+    };
+    (observed, evidence)
+}
+
+/// Reads the send's receipt from `roots` (the same held root, its
+/// `input_receipts` folder) after the physical drain, by the deferred send's
+/// own rule for its plan.
+pub(super) fn send(roots: &Roots, plan: &Plan, between: &dyn Fn()) -> (Observed, Evidence) {
+    let send = plan.send_plan();
+    let Ok(request) = uuid::Uuid::parse_str(&send.request_id) else {
+        return (Observed::Unknown(RECEIPT_MISMATCH), Evidence::default());
+    };
+    let (bytes, evidence) =
+        original_store::read(roots, &request, deferred_send::RECEIPT_BYTES, between);
+    let observed = match bytes {
+        Ok(bytes) => match deferred_send::Outcome::from_receipt(&send, &bytes) {
+            Ok(outcome) => Observed::Sent(outcome),
             Err(code) => Observed::Unknown(code),
         },
         Err(Failure::Missing) => Observed::Missing(Absence(())),

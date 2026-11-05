@@ -23,6 +23,8 @@ pub(crate) use child::adopt_custody;
 #[cfg(any(target_os = "linux", target_os = "macos"))]
 pub(super) use recovery::{Owned, Recovery};
 #[cfg(any(target_os = "linux", target_os = "macos"))]
+mod slot;
+#[cfg(any(target_os = "linux", target_os = "macos"))]
 mod target;
 #[cfg(any(target_os = "linux", target_os = "macos"))]
 pub(super) use runtime::Runtime;

@@ -233,8 +233,10 @@ fn toast(
 }
 
 // A private identity-less initialization toast, never a user notification.
-// It has no launch argument/delegates, cannot show a popup, and expires even
-// if Windows cannot confirm the one immediate exact-identity removal.
+// SuppressPopup prevents a banner, not an Action Center entry. Immediate exact
+// removal is the normal path; if removal fails, only the brand-only entry may
+// remain until its 15-second expiry. It has no launch argument or delegates:
+// empty activation is rejected by Slot, and the cold COM entry exits 78.
 const BOOTSTRAP_GROUP: &str = "hgs-bootstrap";
 const BOOTSTRAP_SECONDS: u128 = 15;
 fn bootstrap_toast(tag: &str) -> Result<ToastNotification, Refusal> {

@@ -5473,6 +5473,11 @@ removes that exact tag/group for this AUMID and rechecks `Setting`; only Enabled
 allows the original user notification. Failure, cancellation and worker restart
 never reset the attempt. Status and withdrawal do not initialize an identity,
 and initialization never repairs registry/COM registration or changes consent.
+SuppressPopup prevents a popup banner, not an Action Center entry. Immediate
+exact removal is the normal path. Only if that removal fails may the brand-only
+scratch entry remain until its 15-second expiry. It carries no launch argument
+or delegates: empty activation arguments are rejected, and the cold COM entry
+exits 78 without opening a session or GUI.
 This follows the upstream [identity-less notifier initialization](https://github.com/CommunityToolkit/WindowsCommunityToolkit/blob/c8f76d072df53d3622fb5440d63afb06cb9e7a10/Microsoft.Toolkit.Uwp.Notifications/Toasts/Compat/ToastNotificationManagerCompat.cs)
 used before its [Setting getter](https://github.com/CommunityToolkit/WindowsCommunityToolkit/blob/c8f76d072df53d3622fb5440d63afb06cb9e7a10/Microsoft.Toolkit.Uwp.Notifications/Toasts/Compat/ToastNotifierCompat.cs).
 

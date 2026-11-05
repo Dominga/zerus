@@ -1,6 +1,6 @@
 import { batch } from "solid-js";
 import { createStore } from "solid-js/store";
-import type { ComputerId, TeamList, TeamSessionView, TeamSummary, TeamView, TeamsOut } from "../types";
+import type { ComputerId, TeamList, TeamSessionView, TeamSummary, TeamView, TeamWaitingView, TeamsOut } from "../types";
 import type { Session } from "../ui/sessions/types";
 
 // The Teams views the core reads and projects (client/core/src/teams), as the
@@ -17,13 +17,38 @@ export interface TeamsEntry {
   failed?: string;
 }
 
-export interface TeamsFollow { list: boolean; waiting: boolean; team: string | null }
+/** What one computer reads (core `TeamsFollow`): the list, Waiting for you, at most one team and the catalog. */
+export interface TeamsFollow { list: boolean; waiting: boolean; team: string | null; catalog: boolean }
+
+/** One view's need on a computer (task 47): the Team tab, Waiting for you, New team or Plan view, the catalog page. */
+export interface TeamsNeed { computer: ComputerId; list?: boolean; waiting?: boolean; team?: string | null; catalog?: boolean }
 
 export interface TeamsPort {
   follow(computer: ComputerId, follow: TeamsFollow): Promise<void>;
 }
 
-export const NOTHING: TeamsFollow = { list: false, waiting: false, team: null };
+export const NOTHING: TeamsFollow = { list: false, waiting: false, team: null, catalog: false };
+
+/**
+ * Every view's needs as one follow per computer (task 47): the core keeps one
+ * follow per computer, so a second call would replace the first. The list,
+ * Waiting and the catalog are read when any view needs them; the one team is
+ * the last need that names one (an explicitly opened team comes after the
+ * selected session's).
+ */
+export function mergeFollows(needs: readonly TeamsNeed[]): Map<ComputerId, TeamsFollow> {
+  const merged = new Map<ComputerId, TeamsFollow>();
+  for (const need of needs) {
+    const now = merged.get(need.computer) ?? NOTHING;
+    merged.set(need.computer, {
+      list: now.list || !!need.list,
+      waiting: now.waiting || !!need.waiting,
+      team: need.team ? need.team : now.team,
+      catalog: now.catalog || !!need.catalog,
+    });
+  }
+  return merged;
+}
 const entryId = (computer: ComputerId, key: string) => `${computer}\n${key}`;
 
 /** Whether a member's session is this row: the same name on the team's computer, or on the computer it names. */
@@ -88,6 +113,10 @@ export function createTeams(port: TeamsPort) {
     list,
     teamOf,
     team: (computer: ComputerId, id: string) => view<TeamView>(computer, `team:${id}`, "team"),
+    /** The team catalog and the designer's draft, as the core projects it (`catalog`); parsed by ui/teams/catalog.ts. */
+    catalog: (computer: ComputerId) => view<Record<string, unknown>>(computer, "catalog", "catalog"),
+    /** Task 11: what waits for the owner across the computer's teams (`waiting`). */
+    waiting: (computer: ComputerId) => view<TeamWaitingView>(computer, "waiting", "waiting"),
     /** Why the last read of a view failed, while it still shows what it had. */
     failure: (computer: ComputerId, key: string) => views[entryId(computer, key)]?.failed,
     /** Why the last follow of a computer was refused. */

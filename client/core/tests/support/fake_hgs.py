@@ -204,6 +204,30 @@ def main():
             data.pop("process_work", None)
         sys.stdout.write(json.dumps(data))
         return 0
+    if len(args) == 4 and args[0] == "team" and args[1] == "catalog" and args[3] == "--json":
+        body = sys.stdin.read()
+        try:
+            request = json.loads(body)
+        except ValueError:
+            request = body
+        log({"host": host, "team": "catalog " + args[2], "request": request})
+        path = reply % ("team-catalog-" + args[2])
+        if not os.path.exists(path):
+            sys.stderr.write("hgs: no reply" + chr(10))
+            return 2
+        with open(path, encoding="utf-8") as handle:
+            answer = json.load(handle)
+        if answer.get("sleep"):
+            time.sleep(answer["sleep"])
+        out = answer.get("stdout")
+        if isinstance(out, dict) and answer.get("echo") and isinstance(request, dict):
+            out = dict(out, request_id=request.get("request_id"))
+        if out is not None:
+            sys.stdout.write(out if isinstance(out, str) else json.dumps(out))
+            sys.stdout.flush()
+        if answer.get("stderr"):
+            sys.stderr.write(answer["stderr"])
+        return answer.get("exit", 0)
     if len(args) == 3 and args[0] == "team" and args[2] == "--json":
         body = sys.stdin.read()
         try:

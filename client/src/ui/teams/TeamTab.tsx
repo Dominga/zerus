@@ -12,6 +12,9 @@ import { QuestionCard } from "../sessions/QuestionCard";
 import { QueuePanel } from "../sessions/QueuePanel";
 import { duration, memberProgress, memberStatus, progress, shownMembers, stateLabel, stateTone, teamState, type MemberLive, type MemberStatus } from "./team-model";
 import { roleStyle } from "./roles";
+import { TeamProposals } from "./ProposalCards";
+import { TeamReports } from "./TeamReports";
+import { WaitingBanner } from "./Waiting";
 import type { ComputerId, TeamMemberView, TeamView } from "../../types";
 import type { Session } from "../sessions/types";
 
@@ -55,6 +58,8 @@ function TeamWorkspace(props: { computer: ComputerId; team: TeamView; failure?: 
   return (
     <>
       <TeamBar team={props.team} state={state()} problemTasks={problemTasks()} />
+      <WaitingBanner />
+      <TeamReports computer={props.computer} team={props.team} />
       <Show when={props.failure}><div class="team-strip danger" role="status"><Icon name="circle-alert" size={14} /><span class="ell">{props.failure}</span></div></Show>
       <Show when={state() === "stuck"}>
         <div class="team-strip warn" role="status">
@@ -216,6 +221,7 @@ function Coordinator(props: { computer: ComputerId; team: TeamView; lead?: TeamM
       <Show when={row()} fallback={<p class="dim team-empty">{props.lead?.session ? tr("The coordinator's session is not on the session list.") : tr("The coordinator has no session yet.")}</p>}>
         <div class="activity-wrap team-conversation" style={{ "--col": "100%" } as JSX.CSSProperties}>
           <ActivityView source={source()} session={row} />
+          <TeamProposals computer={props.computer} team={props.team} />
           <Show when={own()}>
             <QueuePanel /><QuestionCard />
             <div class="cmp-col"><Composer /></div>

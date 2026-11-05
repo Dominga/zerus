@@ -1,9 +1,9 @@
-import { createEffect, createMemo, createRoot } from "solid-js";
+import { createEffect, createMemo, createRoot, createSignal } from "solid-js";
 import { teamsFollow } from "../bridge";
 import { catalog } from "./catalog";
 import { page, selected } from "./ui";
-import { NOTHING, createTeams, sessionIs } from "./teamsView";
-import type { ComputerId, TeamMemberView } from "../types";
+import { NOTHING, createTeams, mergeFollows, sessionIs, type TeamsNeed } from "./teamsView";
+import type { ComputerId, TeamMemberView, TeamWaitingItem, TeamWaitingView } from "../types";
 import type { Session } from "../ui/sessions/types";
 
 // The window's Teams views (store/teamsView.ts) and what it follows: the team
@@ -30,16 +30,61 @@ export function memberRow(teamComputer: ComputerId, member: Pick<TeamMemberView,
   return undefined;
 }
 
+/**
+ * Task 47: the one owner of what the Teams views read. Each open view says
+ * what it needs (Waiting for you, a team opened by New team or the Plan view,
+ * the catalog page) and takes it back when it closes; the selected session's
+ * team list and team are needed while the Sessions page shows it. The needs
+ * are merged into one follow per computer (`mergeFollows`).
+ */
+const [shownNeeds, setShownNeeds] = createSignal<readonly TeamsNeed[]>([]);
+function show(need: TeamsNeed): () => void {
+  setShownNeeds((needs) => [...needs, need]);
+  let shown = true;
+  return () => { if (shown) { shown = false; setShownNeeds((needs) => needs.filter((found) => found !== need)); } };
+}
+/** Shows Waiting for you (this computer's list); the returned function hides it again. */
+export const showWaiting = (): (() => void) => show({ computer: "", waiting: true });
+/** Shows a computer's catalog page; the returned function hides it again. */
+export const showCatalog = (computer: ComputerId = ""): (() => void) => show({ computer, catalog: true });
+/** Shows one team outside the selected session (New team, the Plan view); the returned function hides it again. */
+export const showTeam = (computer: ComputerId, team: string): (() => void) => show({ computer, team });
+
+/** Task 11: items answered here leave at once, before the next read drops them. */
+const [answeredIds, setAnsweredIds] = createSignal<ReadonlySet<string>>(new Set());
+export function answeredWaiting(item: Pick<TeamWaitingItem, "id">) { setAnsweredIds((ids) => new Set([...ids, item.id])); }
+
+/** What waits for the owner on this computer, without what was answered here. */
+export const waiting = createRoot(() => createMemo((): TeamWaitingView | undefined => {
+  const view = teams.waiting("");
+  if (!view) return undefined;
+  const answered = answeredIds();
+  const items = view.items.filter((item) => !answered.has(item.id));
+  return { ...view, items, total: Math.max(items.length, view.total - (view.items.length - items.length)) };
+}));
+
+// A read without an answered item forgets it: it is gone from the store too.
+createRoot(() => createEffect(() => {
+  const view = teams.waiting("");
+  if (!view) return;
+  const listed = new Set(view.items.map((item) => item.id));
+  const answered = answeredIds();
+  if ([...answered].some((id) => !listed.has(id))) setAnsweredIds(new Set([...answered].filter((id) => listed.has(id))));
+}));
+
 // The Sessions page reads the selected session's computer: its team list, and
-// the team the session belongs to. Another page, or no selection, reads nothing.
+// the team the session belongs to. Another page, or no selection, reads nothing
+// of it. The views shown elsewhere add their needs; every computer gets one
+// follow with all of them.
 createRoot(() => {
-  let current: ComputerId | undefined;
+  let current = new Set<ComputerId>();
   createEffect(() => {
     const row = page() === "sessions" ? selected() : undefined;
     const computer = row && row.state !== "archived" ? row.computer : undefined;
-    if (current !== undefined && current !== computer) teams.follow(current, NOTHING);
-    current = computer;
-    if (computer === undefined) return;
-    teams.follow(computer, { list: true, waiting: false, team: selectedTeam()?.id ?? null });
+    const needs: TeamsNeed[] = computer !== undefined ? [{ computer, list: true, team: selectedTeam()?.id ?? null }] : [];
+    const wanted = mergeFollows([...needs, ...shownNeeds()]);
+    for (const gone of current) if (!wanted.has(gone)) teams.follow(gone, NOTHING);
+    for (const [id, follow] of wanted) teams.follow(id, follow);
+    current = new Set(wanted.keys());
   });
 });

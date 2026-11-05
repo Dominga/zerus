@@ -111,6 +111,52 @@ pub enum TeamAction {
         #[serde(default)]
         attempt: String,
     },
+    /// Task 11: answers a member's pending permission request or question
+    /// (`hgs team answer`) with its question id and hash and the session
+    /// card's answers (`[{question_id, selected_option_ids, text}]`).
+    Answer {
+        member: String,
+        question_id: String,
+        expected_question_hash: String,
+        answers: Value,
+    },
+    /// Task 11: confirms (`confirmation`, the typed word if any) or declines
+    /// the addition `confirm` waiting for a running phase (`add-to-phase`).
+    AddToPhase {
+        phase: u64,
+        confirm: String,
+        #[serde(default)]
+        confirmation: String,
+        #[serde(default)]
+        decline: bool,
+    },
+    /// Task 11: accepts a phase that waits for the owner's acceptance.
+    AcceptPhase {
+        phase: u64,
+    },
+    /// Task 11: sends a phase back to the lead with the owner's comment.
+    SendBackPhase {
+        phase: u64,
+        comment: String,
+    },
+    /// Task 11: the owner's answer to a missing tool's offer: Allow installs
+    /// it with the command shown; Deny (with a reason) is remembered.
+    DecideTool {
+        offer: String,
+        allow: bool,
+        #[serde(default)]
+        reason: String,
+    },
+    /// Task 11: releases a task the owner held.
+    Release {
+        task: u64,
+    },
+    /// Task 11: retries a task's step Zerus could not take.
+    Retry {
+        task: u64,
+    },
+    /// Task 11: finishes a team whose tasks are all decided.
+    Finish,
     /// Starts a draft team (no team id yet): its folder, name, lead and
     /// template as New team's Start planning sends them.
     DraftStart {
@@ -148,6 +194,17 @@ pub enum TeamAction {
         #[serde(default)]
         reason: String,
     },
+    /// The owner's settings patch, merged by `hgs team settings`: only the
+    /// fields that differ from the team's current settings.
+    Settings { settings: Value },
+    /// The designer's change, left for the owner to keep or reject.
+    CatalogPropose { change: Value },
+    /// The owner's decision on one catalog proposal: keep, reject or undo.
+    CatalogDecide { proposal: String, decision: String },
+    /// Writes the kept proposals as the next catalog version.
+    CatalogApply,
+    /// Ends the catalog draft, undecided changes included.
+    CatalogDiscard,
 }
 
 /// What the owner is asked before a destructive action or an approval.
@@ -270,17 +327,50 @@ impl TeamAction {
             Self::Archive => "archive",
             Self::DecideProposal { .. } => "decide-proposal",
             Self::UseLastReply { .. } => "use-last-reply",
+            Self::Answer { .. } => "answer",
+            Self::AddToPhase { .. } => "add-to-phase",
+            Self::AcceptPhase { .. } => "accept-phase",
+            Self::SendBackPhase { .. } => "send-back-phase",
+            Self::DecideTool { .. } => "decide-tool",
+            Self::Release { .. } => "release",
+            Self::Retry { .. } => "retry",
+            Self::Finish => "finish",
             Self::DraftStart { .. }
             | Self::DraftUpdate { .. }
             | Self::DraftSeen { .. }
             | Self::DraftCreate { .. }
             | Self::DraftDiscard { .. } => "draft",
+            Self::Settings { .. } => "settings",
+            Self::CatalogPropose { .. }
+            | Self::CatalogDecide { .. }
+            | Self::CatalogApply
+            | Self::CatalogDiscard => "catalog",
         }
     }
 
-    /// Whether the call names an existing team (all but a draft start).
+    /// The `hgs team catalog <sub>` word of a catalog action.
+    pub fn catalog_op(&self) -> Option<&'static str> {
+        match self {
+            Self::CatalogPropose { .. } => Some("propose"),
+            Self::CatalogDecide { .. } => Some("decide"),
+            Self::CatalogApply => Some("apply"),
+            Self::CatalogDiscard => Some("discard"),
+            _ => None,
+        }
+    }
+
+    /// Whether the call names an existing team (all but a draft start and a
+    /// tool offer, which belongs to no team).
     pub fn names_team(&self) -> bool {
-        !matches!(self, Self::DraftStart { .. })
+        !matches!(
+            self,
+            Self::DraftStart { .. }
+                | Self::DecideTool { .. }
+                | Self::CatalogPropose { .. }
+                | Self::CatalogDecide { .. }
+                | Self::CatalogApply
+                | Self::CatalogDiscard
+        )
     }
 
     /// Checks what the action sends before anything runs.
@@ -337,7 +427,58 @@ impl TeamAction {
                     .as_deref()
                     .map_or(Ok(()), |choice| word(choice, "sub-team choice"))
             }
-            Self::Pause | Self::Resume | Self::Stop | Self::Archive => Ok(()),
+            Self::Pause | Self::Resume | Self::Stop | Self::Archive | Self::Finish => Ok(()),
+            Self::Answer {
+                member,
+                question_id,
+                expected_question_hash,
+                answers,
+            } => {
+                word(member, "member id")?;
+                word(question_id, "question id")?;
+                if !expected_question_hash.is_empty() {
+                    word(expected_question_hash, "question hash")?;
+                }
+                if !answers
+                    .as_array()
+                    .is_some_and(|answers| !answers.is_empty() && answers.len() <= 32)
+                {
+                    return Err("An answer names what was chosen.".into());
+                }
+                Ok(())
+            }
+            Self::AddToPhase {
+                phase,
+                confirm,
+                confirmation,
+                ..
+            } => {
+                if *phase == 0 {
+                    return Err("Not a phase number.".into());
+                }
+                word(confirm, "pending addition")?;
+                plain(confirmation, "A confirmation", 200)
+            }
+            Self::AcceptPhase { phase } => {
+                if *phase == 0 {
+                    return Err("Not a phase number.".into());
+                }
+                Ok(())
+            }
+            Self::SendBackPhase { phase, comment } => {
+                if *phase == 0 {
+                    return Err("Not a phase number.".into());
+                }
+                if comment.trim().is_empty() {
+                    return Err("Say what the lead should change.".into());
+                }
+                plain(comment, "A comment", TEXT_CHARS)
+            }
+            Self::DecideTool { offer, reason, .. } => {
+                word(offer, "tool offer")?;
+                plain(reason, "A reason", 2000)
+            }
+            Self::Release { task: id } | Self::Retry { task: id } => task(*id),
             Self::DecideProposal {
                 proposal,
                 expected_hash,
@@ -379,6 +520,29 @@ impl TeamAction {
             }
             Self::DraftCreate { .. } => Ok(()),
             Self::DraftDiscard { reason, .. } => plain(reason, "A reason", 2000),
+            Self::Settings { settings } => {
+                if !settings.as_object().is_some_and(|fields| !fields.is_empty()) {
+                    return Err("A settings change names the fields it sets.".into());
+                }
+                Ok(())
+            }
+            Self::CatalogPropose { change } => {
+                if !change.as_object().is_some_and(|fields| !fields.is_empty()) {
+                    return Err("A catalog proposal names its change.".into());
+                }
+                Ok(())
+            }
+            Self::CatalogDecide {
+                proposal,
+                decision,
+            } => {
+                word(proposal, "proposal id")?;
+                if !matches!(decision.as_str(), "keep" | "reject" | "undo") {
+                    return Err("A catalog decision is keep, reject or undo.".into());
+                }
+                Ok(())
+            }
+            Self::CatalogApply | Self::CatalogDiscard => Ok(()),
         }
     }
 
@@ -462,7 +626,51 @@ impl TeamAction {
                     put("subteam", json!(choice));
                 }
             }
-            Self::Pause | Self::Resume | Self::Stop | Self::Archive => {}
+            Self::Pause | Self::Resume | Self::Stop | Self::Archive | Self::Finish => {}
+            Self::Answer {
+                member,
+                question_id,
+                expected_question_hash,
+                answers,
+            } => {
+                put("member", json!(member));
+                put("question_id", json!(question_id));
+                if !expected_question_hash.is_empty() {
+                    put("expected_question_hash", json!(expected_question_hash));
+                }
+                put("answers", answers.clone());
+            }
+            Self::AddToPhase {
+                phase,
+                confirm,
+                confirmation,
+                decline,
+            } => {
+                put("phase", json!(phase));
+                put("confirm", json!(confirm));
+                if *decline {
+                    put("decline", json!(true));
+                } else if !confirmation.is_empty() {
+                    put("confirmation", json!(confirmation));
+                }
+            }
+            Self::AcceptPhase { phase } => put("phase", json!(phase)),
+            Self::SendBackPhase { phase, comment } => {
+                put("phase", json!(phase));
+                put("comment", json!(comment));
+            }
+            Self::DecideTool {
+                offer,
+                allow,
+                reason,
+            } => {
+                put("offer", json!(offer));
+                put("allow", json!(allow));
+                if !allow && !reason.is_empty() {
+                    put("reason", json!(reason));
+                }
+            }
+            Self::Release { task } | Self::Retry { task } => put("task", json!(task)),
             Self::DecideProposal {
                 proposal,
                 accept,
@@ -536,6 +744,20 @@ impl TeamAction {
                     put("reason", json!(reason));
                 }
             }
+            Self::Settings { settings } => {
+                put("settings", settings.clone());
+            }
+            Self::CatalogPropose { change } => {
+                put("change", change.clone());
+            }
+            Self::CatalogDecide {
+                proposal,
+                decision,
+            } => {
+                put("proposal", json!(proposal));
+                put("decision", json!(decision));
+            }
+            Self::CatalogApply | Self::CatalogDiscard => {}
         }
         input
     }
@@ -562,6 +784,12 @@ impl TeamAction {
                     "Stop {name}? Every open task is cancelled and no task is handed out again. Member sessions keep running; their current turns finish."
                 ),
                 "Stop team",
+            )),
+            Self::Finish => Some(ask(
+                "teamFinishConfirm",
+                "Finish team?",
+                format!("Finish {name}? Every task is decided; the team is done and hands out nothing more."),
+                "Finish team",
             )),
             Self::Archive => Some(ask(
                 "teamArchiveConfirm",
@@ -612,6 +840,20 @@ impl TeamAction {
                     "Approve and run",
                 )
             }),
+            Self::CatalogApply => Some(ask(
+                "teamCatalogApplyConfirm",
+                "Apply the catalog draft?",
+                "Write the kept changes as the next catalog version? Undecided changes are dropped with the draft."
+                    .to_owned(),
+                "Apply",
+            )),
+            Self::CatalogDiscard => Some(ask(
+                "teamCatalogDiscardConfirm",
+                "Discard draft",
+                "Drop every proposal in the designer's draft? The catalog stays as it is."
+                    .to_owned(),
+                "Discard draft",
+            )),
             _ => None,
         }
     }
@@ -666,11 +908,20 @@ pub fn prepare(call: &TeamCall) -> Result<(Invocation, String), TeamOutcome> {
         .then(|| format!("@{}", call.computer))
         .into_iter()
         .collect();
-    args.extend([
-        "team".to_owned(),
-        call.action.op().to_owned(),
-        "--json".to_owned(),
-    ]);
+    if let Some(sub) = call.action.catalog_op() {
+        args.extend([
+            "team".to_owned(),
+            "catalog".to_owned(),
+            sub.to_owned(),
+            "--json".to_owned(),
+        ]);
+    } else {
+        args.extend([
+            "team".to_owned(),
+            call.action.op().to_owned(),
+            "--json".to_owned(),
+        ]);
+    }
     let invocation = Invocation {
         args,
         stdin: Some(Value::Object(input).to_string().into_bytes()),

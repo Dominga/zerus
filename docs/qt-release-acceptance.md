@@ -32,10 +32,37 @@ Next pending markers across restart and the once-only notice. Native caller,
 platform and deletion gates remain independent; no platform box is checked.
 
 
+## 0.48.0 acceptance sessions — owner decision 2026-11-05
+
+Qt is removed in 0.48.0. Agents execute the unattended acceptance rows on each
+owner computer; the owner supplies one short session per computer (about
+20–30 minutes) for notification click, microphone/camera consent and the Qt
+rollback round trip. macOS additionally retains its `.66.3.40.4` owner row.
+The projects/accounts-only G3 scope above and the clean-install exception below
+apply. This decision supersedes the older scheduling restrictions in dated
+records; it does not promote source tests or readiness into installed acceptance.
+
+On Arch, linux-shell-u owns the unattended rows and the evidence/runbook task
+`zerus-5wmh.66.8.1.22`. Every unattended display operation requires a fresh
+60-second input-idle observation, the original shared Arch display flock held
+through the operation, an unlocked session and the same verified GUI/build.
+Abort on owner input, lock, stale observation or changed target. No native agent,
+tmux server or DeepSeek host may be restarted. Updates use the maintained
+installer/updater and are announced by the coordinator.
+
+Desktop-u exclusively executes `.66.3.42` **inside the Arch owner session**:
+one scoped Post after normal GUI Quit, followed by the owner's **one physical
+Open-session click**. Linux-shell-u hands over that slot and does not duplicate
+its Post, click or launch. No automated click worker runs in the owner slot.
+Owner input is expected in this explicit session; it does not waive idle
+admission for unattended operations.
+
+
 Owner: `zerus-5wmh.66.8.1` (G6). Basis: the
 [retirement inventory](superpowers/specs/2026-10-29-qt-retirement-inventory.md),
 especially its responsibility tables, migration contract and G1–G7 gates.
-Owner scheduling decision (2026-11-02): installed acceptance uses the owner's
+**Historical scheduling (2026-11-02; superseded by the 2026-11-05 execution
+decision above):** installed acceptance uses the owner's
 **main accounts and existing canonical install route**, with no separate test
 account. **macOS runs first once the source admission gates below are merged**;
 Mac GUI/native checks need no separate owner window. **Arch GUI acceptance is
@@ -113,10 +140,11 @@ reseed an import or start a legacy GUI alongside service-owned background duties
 
 ## Linux — arch
 
-**GUI/installed acceptance is deferred until the owner reschedules it**, even
-when the source gates have merged. Then use the owner's main account and the
-maintained canonical AUR/package or `tray/install.sh` route. Staging prefixes are
-file checks only, not installed acceptance. Do not install a test binary by hand.
+The 2026-11-05 owner assignment authorizes unattended installed checks under
+the idle/display guard above, with the owner-only rows in one scheduled session.
+Use the owner's main account and maintained canonical AUR/package or
+`tray/install.sh` route. Staging prefixes are file checks only, not installed
+acceptance. Do not install a test binary by hand.
 
 | Pending check | How to verify | Coverage / owner |
 |---|---|---|
@@ -137,6 +165,60 @@ Linux notification acceptance also requires the root service attachment
 complete these routes or the native checks with Next closed. Keep this row pending
 until the coordinator's maintained owner route verifies readiness, presentation,
 click routing, stale/withdrawn refusal and Wayland behavior.
+
+
+### Arch 0.48 preparation and nondisplay subchecks — 2026-11-05
+
+Installed source: `7a60dceeb61423853766cd7072357c0a8e5b03c7`, clean,
+`0.47.1-preview.design-polish.7a60dce`. The canonical GUI and CLI hashes match
+installation provenance and their actual running images. The GUI caches
+`ZERUS_CLIENT_DESKTOP_SERVICE=1` and maps the maintained repaired WebKit prefix;
+no Qt/KF/WebEngine mappings were observed. These are installed identity
+subchecks, not the clean-install exception's exact-candidate CI/package proof.
+
+| Subcheck | Actual observation / remaining work |
+|---|---|
+| Registration and selected/running mode | Maintained installed helper `--check` passes; read-only status reports selected and running `background`, IPC ready, no pending restart or transition. One user-manager backend has no drop-ins. |
+| Background readiness | Same backend PID/birth; lifecycle `serving`, background mode and actual attention host ready, delivery writer ready; automatic approvals remain OFF. No mode switch, Grant/Rearm or service restart was performed. Closed-GUI read delivery and host ACK still need their actual observations. |
+| Custom registration refusal | Maintained helper `--check` against one private custom unit refuses before any `systemctl` execution. Both that unit and the real owner unit remain byte-identical. This is a private refusal subcheck, not an installed custom-unit mutation. |
+| Display admission | A passive Wayland input observer and one retained display flock admitted bounded screenshot inspection. AT-SPI's advertised socket refused connection; no accessibility action occurred. Input resumed before a later Settings admission, so it refused before issuing a click. Terminal, interactive parity and lifecycle cases remain pending. |
+| Upgrade preparation | A private bounded manifest retains original native PID/births and draft hashes. The next coordinator-announced maintained rollout, after #1467 and #1470, is the live-agent upgrade row. The coordinator waits for a fresh **manifests ready** receipt before updating; this preparation is not upgrade survival evidence. |
+| Qt artifact | The retained previous GUI reports clean Qt source `3a28fb2219fa0c4e7a367933d35b4c1882f607d6`, Dev 1595. Build-info inspection opened no Qt window; rollback/drain/return remain owner-only and unqualified. |
+
+Private evidence is indexed by the Arch 0.48 acceptance task. Public records
+omit account/message content and use the exact source plus selected-field
+observations. None of these subchecks checks a complete platform row.
+
+### Arch owner session — 20–30 minute step list
+
+Prepare first: announce and pin the installed candidate; finish the unattended
+rows and capture fresh private session/run/conversation, native process births,
+jobs/terminal and an unsent draft. Keep the complete verified Qt rollback copy
+and maintained return-to-Next route. Settle prior unknown transitions, confirm
+initial mode/Grant and dangerous opt-ins, and have desktop-u and its exact idle
+synthetic target ready. Devices and the existing speech provider must be
+available; no privacy or notification preference is silently changed.
+
+1. **Notification / Open session (6–8 minutes; explicit handoff to desktop-u).**
+   Desktop-u rechecks source, GUI/backend and target, holds the display flock,
+   normally Quits the GUI and makes one fresh scoped Post. The owner physically
+   clicks **Open session once**. Desktop-u records the native notification and
+   callback identity, one relaunch and exact target selection, then restores
+   that same installed GUI. A failed/unknown attempt is recorded without retry.
+2. **Microphone/camera (6–8 minutes).** The owner answers the actual consent
+   prompts and records a short synthetic phrase/clip. Check preview, Escape/
+   cancel, transcription and draft retention, with the owner confirming sound
+   and image quality. Do not send an uncertain recording again.
+3. **Qt rollback and return (8–12 minutes).** Use the maintained service-aware
+   rollback only after the original revoke and actual drain settle. Verify the
+   original agents/jobs, draft and settings under Qt, then return through the
+   maintained Next route and actual authenticated handoff. Unknown drain or
+   missing return authority stops the round trip; no marker/store deletion or
+   native-agent restart substitutes for it.
+
+Record exact sources and evidence for each completed row. A blocked prerequisite
+is reported before the owner session; the time estimate assumes all preparation
+is complete.
 
 ### Recorded Arch passive cutover subchecks — 2026-11-02
 

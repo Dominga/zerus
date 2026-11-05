@@ -295,6 +295,46 @@ class ChildDeadline(unittest.TestCase):
         self.control(True)
 
 
+class EarlyCleanupAllowance(unittest.TestCase):
+    def control(self, command_code, now=0):
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            spec = root / "spec.json"
+            spec.write_text(json.dumps({"argv": ["controlled-test"], "cwd": directory, "env": {},
+                                        "log": str(root / "log"), "status": str(root / "status"),
+                                        "end": ["one", "two", "three", "four", "five"],
+                                        "deadline": 600, "custody_only": False}))
+            clock = [now]
+            limits = []
+            def utility(argv, **kwargs):
+                limits.append(kwargs["timeout"])
+                clock[0] += kwargs["timeout"]
+                return subprocess.CompletedProcess(argv, 0, stdout="")
+            process = mock.Mock()
+            process.wait.return_value = command_code
+            with mock.patch.object(outside_job, "in_job", return_value=False), \
+                    mock.patch.object(outside_job, "join_kill_on_close_job", return_value=42), \
+                    mock.patch.object(outside_job.time, "monotonic", side_effect=lambda: clock[0]), \
+                    mock.patch.object(outside_job.subprocess, "Popen", return_value=process), \
+                    mock.patch.object(outside_job, "bounded_run", side_effect=utility):
+                outside_job.child(str(spec))
+            expected = min(now + 120, 720)
+            self.assertEqual(clock[0], expected)
+            self.assertEqual(sum(limits), expected - now)
+            self.assertEqual((root / "status").read_text(), str(command_code or 1))
+            self.assertIn("cleanup allowance exhausted", (root / "log").read_text())
+            return limits
+
+    def test_early_success_does_not_lend_unused_command_time_to_cleanup(self):
+        self.assertEqual(self.control(0), [30, 30, 30, 30])
+
+    def test_early_failure_keeps_its_status_and_clips_the_last_cleanup(self):
+        self.assertEqual(self.control(17), [5, 30, 30, 30, 25])
+
+    def test_late_observation_never_renews_the_original_hard_deadline(self):
+        self.assertEqual(self.control(0, now=719), [1])
+
+
 class RealUtility(unittest.TestCase):
     """Real private children, including a grandchild retaining BOTH outputs.
 

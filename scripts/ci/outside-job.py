@@ -331,7 +331,8 @@ def child(spec_path):
             log.write(f"outside-job: cannot run {spec['argv']}: {error}\n".encode())
             code = 127
         cleanup = Cleanup(lambda message: log.write(message.encode()),
-                          None if spec.get("custody_only") else spec["deadline"] + CLEANUP_ALLOWANCE)
+                          None if spec.get("custody_only") else
+                          min(time.monotonic() + CLEANUP_ALLOWANCE, spec["deadline"] + CLEANUP_ALLOWANCE))
         if code != 0 and started is not None:
             report_survivors(started, log, cleanup)
         end_executables(spec["end"], cleanup)

@@ -352,7 +352,7 @@ pub(crate) fn probe(rows: &[&Value]) -> Result<Probe> {
             }
             continue;
         };
-        if !terminal_live(&snapshot, &record) {
+        if !terminal_live(&snapshot, &record).unwrap_or(true) {
             continue;
         }
         let quiet = string(&record, "conversation_id").is_empty()

@@ -430,7 +430,7 @@ pub(super) fn current(name: &str) -> Result<Option<Value>> {
         return Ok(None);
     }
     let panes = live()?;
-    if terminal_live(&panes, &record) && !matches(&record, panes_of(&panes, &record)) {
+    if terminal_live(&panes, &record)? && !matches(&record, panes_of(&panes, &record)) {
         return Ok(None);
     }
     Ok(Some(record))

@@ -364,7 +364,13 @@ kill LABEL`, pause, terminate and every other command act on the session's
 own terminal, after checking its pane and run as before; none of them touches
 the other tmux session. `hgs ls` lists the session under its label. A rename
 moves a live session's terminal to the new name and records it; when the move
-fails, nothing changes. A new launch, fork, rename or restore still refuses a
+fails, nothing changes. A rename of a stopped or paused session clears its
+terminal name, so its next launch names one anew. A session is live only in
+its own terminal, with its pane and run, or while a launch of its own label
+holds that terminal; a tmux session another launch started under its terminal
+name never makes it live and never hides it from `hgs ls`. When hgs cannot
+read a terminal's environment to tell whose launch it is, it refuses and
+starts nothing. A new launch, fork, rename or restore still refuses a
 label that any tmux session holds. A build older than this one finds no pane
 for a session whose terminal is named otherwise, shows it as not live and
 drops `terminal_name` when it rewrites the record.

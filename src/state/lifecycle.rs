@@ -582,7 +582,7 @@ pub(super) fn pause_scoped(names: &[String], dry: bool, scope: Option<&session_a
         // In label order, as the terminal names were.
         let mut names: Vec<String> = records()?
             .iter()
-            .filter(|record| terminal_live(&snapshot, record))
+            .filter(|record| terminal_live(&snapshot, record).unwrap_or(true))
             .map(|record| string(record, "name").to_owned())
             .collect();
         names.sort();
@@ -714,20 +714,33 @@ fn launch_label(
     Ok(terminal.to_owned())
 }
 
-/// Whether a terminal under `terminal` was started by some launch of hgs,
-/// such as this session's own resume still starting, rather than by hand:
-/// a launch always gives its terminal `HGS_SESSION`.
-fn launched_by_hgs(terminal: &str) -> bool {
-    backend::current().session_variable(terminal, "HGS_SESSION").is_some()
-}
 
 /// Whether `record` is already live: its own terminal runs it, or a launch
 /// of hgs holds that terminal (its own resume, still starting, included). A
 /// terminal under that name that hgs never started does not count (P3b): the
 /// session then resumes under another terminal name.
-fn already_live(record: &Value, snapshot: &Snapshot) -> bool {
-    matches(record, panes_of(snapshot, record))
-        || (terminal_live(snapshot, record) && launched_by_hgs(terminal_name(record)))
+/// Whether `record` is already live (#1445 review): its own terminal runs it,
+/// or a launch of its label holds its terminal or any name a launch of it
+/// could mint, such as its own resume still starting. A terminal another
+/// session's launch started, or that hgs never started, does not count. An
+/// environment that cannot be read refuses, and nothing is launched.
+fn already_live(record: &Value, snapshot: &Snapshot) -> Result<bool> {
+    if terminal_live(snapshot, record)? {
+        return Ok(true);
+    }
+    let label = string(record, "name");
+    let mut names = vec![label.to_owned()];
+    let id = string(record, "session_id");
+    if session_id::canonical(id) {
+        names.push(format!("{label}~{}", &id[..8]));
+        names.push(format!("{label}~{id}"));
+    }
+    for name in names {
+        if launched_as(snapshot, &name, label)? {
+            return Ok(true);
+        }
+    }
+    Ok(false)
 }
 
 /// The saved recipe relaunched in its own tmux slot. `replaces` starts a new
@@ -925,15 +938,16 @@ pub(super) fn resume_scoped(names: &[String], dry: bool, scope: Option<&session_
     let requested = if scope.is_none() {nonempty_env("HGS_REQUESTED_ID")} else {None};
     let archived = archive::records()?;
     let names = if names == ["--all"] {
-        records()?
-            .iter()
-            .filter(|record| {
-                !already_live(record, &snapshot)
-                    && !string(record, "conversation_id").is_empty()
-                    && !archive::equivalent(record, &archived)
-            })
-            .map(|record| string(record, "name").to_owned())
-            .collect::<Vec<_>>()
+        let mut stopped = Vec::new();
+        for record in records()? {
+            if !string(&record, "conversation_id").is_empty()
+                && !archive::equivalent(&record, &archived)
+                && !already_live(&record, &snapshot)?
+            {
+                stopped.push(string(&record, "name").to_owned());
+            }
+        }
+        stopped
     } else {
         names.to_vec()
     };
@@ -943,7 +957,7 @@ pub(super) fn resume_scoped(names: &[String], dry: bool, scope: Option<&session_
             verify_requested(&read(&name)?, &snapshot, id)?;
         }
         let record = read(&name)?;
-        if already_live(&record, &snapshot) {
+        if already_live(&record, &snapshot)? {
             if scope.is_some() {return Err("Session is already live; no resume was launched".into());}
             continue;
         }
@@ -969,7 +983,7 @@ pub(super) fn resume_scoped(names: &[String], dry: bool, scope: Option<&session_
         if let Some(id) = &requested {
             verify_requested(&current, &current_snapshot, id)?;
         }
-        if already_live(&current, &current_snapshot) {
+        if already_live(&current, &current_snapshot)? {
             if scope.is_some() {return Err("Session became live before resume; no replacement was launched".into());}
             continue;
         }
@@ -1018,7 +1032,7 @@ pub(super) fn fresh(args: &[String], dry: bool) -> Result<i32> {
     let current = read(name)?;
     refuse_unsettled_clear(&current)?;
     let snapshot = live()?;
-    if already_live(&current, &snapshot) {
+    if already_live(&current, &snapshot)? {
         return Err(format!("{name}: the session is running; clear its context instead"));
     }
     if snapshot.contains_key(&spec.name) {
@@ -1051,7 +1065,7 @@ fn verify_requested(record: &Value, snapshot: &Snapshot, requested: &str) -> Res
     if string(record, "conversation_id") != requested
         || name.split('/').next() != Some(agent)
         || !attempts::agent_home_matches(record, agent)?
-        || (terminal_live(snapshot, record)
+        || (terminal_live(snapshot, record)?
             && (!matches(record, panes_of(snapshot, record)) || !string(record, "error").is_empty()))
     {
         return Err(format!(

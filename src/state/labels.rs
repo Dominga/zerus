@@ -895,6 +895,15 @@ mod tests {
         control("cuts");
     }
 
+    /// #1445 review (desktop-u): the terminal route of a label keeps the
+    /// command's selection. A selected record that vanishes, or a dangling
+    /// link where a record should be, refuses; only a name with no record
+    /// and no selection names a terminal itself.
+    #[test]
+    fn a_terminal_route_keeps_the_selection() {
+        control("terminal-route");
+    }
+
     /// zerus-ucck P3b (D5): a rename moves the session's terminal by its `$N`
     /// under the writer lock; when that move fails, nothing changes and the
     /// record keeps its terminal name.
@@ -1132,6 +1141,26 @@ mod tests {
                 backend::with_fake(&Moves(true), || rename::dispatch(&args, false)).unwrap();
                 let moved = read("claude/example/moved").unwrap();
                 assert_eq!(moved["terminal_name"], "claude/example/moved");
+            }
+            "terminal-route" => {
+                let mut twin_record = storage::read_id(&id).unwrap();
+                twin_record["terminal_name"] = json!(format!("{label}~{}", &id[..8]));
+                storage::write(&mut twin_record).unwrap();
+                session_id::select(label, &id);
+                assert_eq!(terminal_of(label).unwrap(), format!("{label}~{}", &id[..8]));
+                let own = storage::id_record_path(&id).unwrap();
+                let kept = std::fs::read(&own).unwrap();
+                std::fs::remove_file(&own).unwrap();
+                assert!(terminal_of(label).is_err(), "a selected record that vanished");
+                std::os::unix::fs::symlink(root().join("missing"), &own).unwrap();
+                assert!(terminal_of(label).is_err(), "a dangling link where the record was");
+                std::fs::remove_file(&own).unwrap();
+                atomic(&own, std::str::from_utf8(&kept).unwrap()).unwrap();
+                session_id::clear();
+                assert_eq!(terminal_of("claude/example/untracked").unwrap(), "claude/example/untracked");
+                let legacy = storage::label_record_path("claude/example/linked");
+                std::os::unix::fs::symlink(root().join("missing"), &legacy).unwrap();
+                assert!(terminal_of("claude/example/linked").is_err(), "a dangling link at a label's path");
             }
             other => panic!("unknown control {other}"),
         }

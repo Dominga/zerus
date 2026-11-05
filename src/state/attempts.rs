@@ -109,7 +109,9 @@ pub(super) fn binding_exists(name: &str) -> Result<bool> {
     // A new session's terminal is its label (P3b): the record's own terminal
     // and the label's both count.
     let snapshot = live()?;
-    Ok(terminal_live(&snapshot, &record) || snapshot.contains_key(name) || !retryable(&record, None))
+    Ok(terminal_live(&snapshot, &record).unwrap_or(true)
+        || snapshot.contains_key(name)
+        || !retryable(&record, None))
 }
 
 fn save(record: &Value) -> Result<()> {
@@ -202,7 +204,7 @@ pub(super) fn startup_failure(name: &str) -> Result<Option<String>> {
         return Ok(None);
     }
     let record = read(name)?;
-    if terminal_live(&live()?, &record) {
+    if terminal_live(&live()?, &record).unwrap_or(true) {
         return Ok(None);
     }
     if !unconfirmed(&record) || !identities_gone(&record) {

@@ -625,9 +625,29 @@ pub(super) fn panes_of<'a>(snapshot: &'a Snapshot, record: &Value) -> Option<&'a
     snapshot.get(terminal_name(record))
 }
 
-/// Whether `record`'s own terminal is live, whatever runs in it.
-pub(super) fn terminal_live(snapshot: &Snapshot, record: &Value) -> bool {
-    snapshot.contains_key(terminal_name(record))
+/// Whether `record`'s own terminal holds this session (#1445 review): its
+/// pane and run match the record, or a launch of this same label (its
+/// `HGS_SESSION`) holds it, such as the session's own resume still starting.
+/// A terminal under that name that another session's launch started, or that
+/// hgs never started, never makes the session live. An environment that
+/// cannot be read is an error, never absence.
+pub(super) fn terminal_live(snapshot: &Snapshot, record: &Value) -> Result<bool> {
+    if matches(record, panes_of(snapshot, record)) {
+        return Ok(true);
+    }
+    launched_as(snapshot, terminal_name(record), string(record, "name"))
+}
+
+/// Whether the live terminal `terminal` was started by a launch of the label
+/// `label`; false when it is not live or another launch, or none, started it.
+pub(super) fn launched_as(snapshot: &Snapshot, terminal: &str, label: &str) -> Result<bool> {
+    if !snapshot.contains_key(terminal) {
+        return Ok(false);
+    }
+    let launched = backend::current().session_variable(terminal, "HGS_SESSION").map_err(|error| {
+        format!("{error}; it may be this session's own launch, so nothing was changed")
+    })?;
+    Ok(launched.as_deref() == Some(label))
 }
 
 pub(super) fn matches(record: &Value, panes: Option<&Vec<Pane>>) -> bool {

@@ -967,14 +967,15 @@ impl<C: Connector> TerminalBackend for HostBackend<C> {
         .and_then(|value| value.value)
         .unwrap_or_default()
     }
-    fn session_variable(&self, name: &str, key: &str) -> Option<String> {
-        self.call::<EnvValue>(Op::ShowEnvironment {
-            target: protocol::Target::Name(name.into()),
-            name: key.into(),
-        })
-        .ok()
-        .and_then(|value| value.value)
-        .filter(|value| !value.is_empty())
+    fn session_variable(&self, name: &str, key: &str) -> Result<Option<String>> {
+        Ok(self
+            .call::<EnvValue>(Op::ShowEnvironment {
+                target: protocol::Target::Name(name.into()),
+                name: key.into(),
+            })
+            .map_err(Failure::message)?
+            .value
+            .filter(|value| !value.is_empty()))
     }
     fn notify(&self, client: &str, text: &str) {
         let _ = self.act(Op::Notify {

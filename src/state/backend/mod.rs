@@ -434,9 +434,11 @@ pub(crate) trait TerminalBackend: Sync {
         String::new()
     }
     /// A variable of the named terminal session's own environment, as its
-    /// launch set it; None when it is unset or cannot be read.
-    fn session_variable(&self, _name: &str, _key: &str) -> Option<String> {
-        None
+    /// launch set it. `Ok(None)` only when that environment was read and lacks
+    /// it; an error when it could not be read, which is never absence (#1445
+    /// review).
+    fn session_variable(&self, _name: &str, _key: &str) -> Result<Option<String>> {
+        Err("this terminal cannot read a session's environment".into())
     }
     /// Show a short message on a client terminal.
     fn notify(&self, _client: &str, _text: &str) {}

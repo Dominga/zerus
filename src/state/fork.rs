@@ -204,7 +204,7 @@ pub(super) fn start_scoped(
         return Err("source session changed; refresh before forking".into());
     }
     let snapshot = live()?;
-    let live_pane = archive_id.is_none() && terminal_live(&snapshot, &record);
+    let live_pane = archive_id.is_none() && terminal_live(&snapshot, &record)?;
     if live_pane && (!matches(&record, panes_of(&snapshot, &record)) || !process_alive(&record)) {
         return Err("source process no longer matches its tracked session".into());
     }

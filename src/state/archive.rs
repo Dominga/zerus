@@ -170,7 +170,8 @@ pub(super) fn contains_selected(record: &Value) -> Result<bool> {
 }
 
 fn reconcile_candidate(record: &Value, snapshot: &Snapshot) -> bool {
-    !terminal_live(snapshot, record)
+    // An environment that cannot be read counts as live: never archived.
+    !terminal_live(snapshot, record).unwrap_or(true)
         && !process_alive(record)
         && record.get("pausing").is_none()
         && !record["paused"].as_bool().unwrap_or(false)
@@ -215,7 +216,7 @@ pub(super) fn reconcile_locked(snapshot: &Snapshot) -> Result<(Vec<Value>, Vec<V
     let bindings = super::storage::records()?;
     let mut saved = false;
     for record in &bindings {
-        if terminal_live(snapshot, record)
+        if terminal_live(snapshot, record).unwrap_or(true)
             || process_alive(record)
             || record.get("pausing").is_some()
             || record["paused"].as_bool().unwrap_or(false)
@@ -260,7 +261,7 @@ pub(super) fn reconcile_active_locked(snapshot: &Snapshot) -> Result<Vec<Value>>
         if matches(&record,panes_of(snapshot, &record)) || process_alive(&record) { result.push(record);continue; }
         if catalog.is_none(){catalog=Some(archive_catalog::catalog()?);}
         if archive_catalog::contains(catalog.as_ref().unwrap(), &record)? { save(&record)?; continue; }
-        if terminal_live(snapshot, &record) || process_alive(&record)
+        if terminal_live(snapshot, &record).unwrap_or(true) || process_alive(&record)
             || record.get("pausing").is_some() || record["paused"].as_bool().unwrap_or(false)
             || !string(&record, "expected_id").is_empty() {
             result.push(record); continue;
@@ -279,7 +280,7 @@ pub(super) fn manual_scoped(name: &str, dry: bool, scope: Option<&session_action
     let _guard = lock(None)?;
     let mut record = read(name)?;
     // The session's own terminal (P3b), not another under its label.
-    if terminal_live(&live()?, &record) {
+    if terminal_live(&live()?, &record)? {
         return Err(format!(
             "{name}: only stopped or paused sessions can be archived"
         ));

@@ -214,7 +214,7 @@ pub(crate) fn account_context(name: &str) -> Result<Value> {
     let _guard = lock(None)?;
     let record = read(name)?;
     let snapshot = live()?;
-    if terminal_live(&snapshot, &record) && !matches(&record, panes_of(&snapshot, &record)) {
+    if terminal_live(&snapshot, &record)? && !matches(&record, panes_of(&snapshot, &record)) {
         return Err("Session account binding is no longer current.".into());
     }
     Ok(account_binding(&record))
@@ -459,21 +459,23 @@ pub fn merge_listing_archives(mut box_value: Value, ids: &BTreeMap<String, Strin
         let name = string(&record, "name");
         // Live rows are the terminals' (P3b): a record finds its row by its
         // own terminal, and that row then lists under the record's label.
+        // A row under its terminal name that is another session's never
+        // hides this one (#1445 review): it lists as saved below.
         if let Some(index) = by_name.get(terminal_name(&record)) {
             if matches(&record, panes_of(&snapshot, &record)) {
                 label_row(&mut sessions[*index], &record);
                 workspace::relabel(&mut names, terminal_name(&record), name);
                 live_row(&mut sessions[*index], record, &shared, &mut process_work)?;
+                continue;
             }
-            continue;
         }
         if string(&record, "conversation_id").is_empty() {
             continue;
         }
-        // A record whose terminal name was reused by a different live pane is
-        // not a stopped session. Never offer its old identity as that pane's
-        // identity.
-        if terminal_live(&snapshot, &record) {
+        // Only the session's own launch still starting keeps its saved row
+        // out; a terminal another session holds under its terminal name never
+        // hides it (#1445 review), nor does one that cannot be read.
+        if terminal_live(&snapshot, &record).unwrap_or(false) {
             continue;
         }
         let parts: Vec<&str> = name.splitn(3, '/').collect();
@@ -618,14 +620,14 @@ pub fn find_requested_session(agent: &str, requested: &str) -> Result<Option<Str
             continue;
         }
         let name = string(&record, "name");
-        if terminal_live(&snapshot, &record) && !matches(&record, panes_of(&snapshot, &record)) {
+        if terminal_live(&snapshot, &record)? && !matches(&record, panes_of(&snapshot, &record)) {
             continue;
         }
         let confirmed = string(&record, "conversation_id") == requested;
         let pending = string(&record, "conversation_id").is_empty()
             && string(&record, "requested_id") == requested
             && string(&record, "expected_id") == requested
-            && if terminal_live(&snapshot, &record) {
+            && if terminal_live(&snapshot, &record)? {
                 string(&record, "error").is_empty()
             } else {
                 attempts::retryable(&record, Some(requested))
@@ -657,10 +659,21 @@ pub fn startup_failure(name: &str) -> Result<Option<String>> {
 /// `name` itself names a terminal, as an untracked shell's does. A record
 /// that cannot be read is an error, never the label's terminal.
 pub(crate) fn terminal_of(name: &str) -> Result<String> {
-    if local_sessions().is_err() || !record_path(name).exists() {
+    if local_sessions().is_err() {
         return Ok(name.to_owned());
     }
-    read(name).map(|record| terminal_name(&record).to_owned())
+    // Presence without following a link (#1445 review): a record that is
+    // there but cannot be read, a dangling link included, refuses; and a
+    // selected record that vanished keeps the command's selection, so it
+    // refuses too, never routing to the label's terminal.
+    match std::fs::symlink_metadata(record_path(name)) {
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => {
+            session_id::verify_absent(name)?;
+            Ok(name.to_owned())
+        }
+        Err(error) => Err(format!("{name}: {error}")),
+        Ok(_) => read(name).map(|record| terminal_name(&record).to_owned()),
+    }
 }
 
 pub fn check_requested_session(name: &str, agent: &str, requested: &str) -> Result<bool> {
@@ -677,7 +690,7 @@ pub fn check_requested_session(name: &str, agent: &str, requested: &str) -> Resu
         };
     }
     let record = read(name)?;
-    let is_live = terminal_live(&snapshot, &record);
+    let is_live = terminal_live(&snapshot, &record)?;
     if string(&record, "agent") != agent
         || !attempts::agent_home_matches(&record, agent)?
         || (is_live && !matches(&record, panes_of(&snapshot, &record)))

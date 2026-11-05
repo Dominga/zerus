@@ -176,10 +176,15 @@ pub(super) fn dispatch_scoped(args: &[String], dry: bool, scope: Option<&session
 }
 
 /// A rename that moved the session's terminal gives the record its new
-/// terminal name; one that did not keeps the terminal it had (P3b).
+/// terminal name (P3b). One that moved none, of a stopped or paused session,
+/// clears it, so the session's terminal is its new label until a launch names
+/// one: an old name another session may later take never stays (#1445
+/// review).
 fn moved_terminal(transaction: &Value, record: &mut Value) {
     if transaction["session_id"].is_string() {
         record["terminal_name"] = transaction["new"].clone();
+    } else if let Some(fields) = record.as_object_mut() {
+        fields.remove("terminal_name");
     }
 }
 

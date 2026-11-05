@@ -20,8 +20,10 @@ pub(super) fn dispatch_scoped(args: &[String], dry: bool, scope: Option<&session
             return Err("session changed before termination; refresh and try again".into());
         }
         let snapshot = live()?;
-        // The session's own terminal (P3b), never another under its label.
-        if let Some(panes) = panes_of(&snapshot, &record) {
+        // The session's own terminal (P3b), never another under its label;
+        // a terminal another session's launch holds is not this session's.
+        let own = terminal_live(&snapshot, &record)?;
+        if let Some(panes) = panes_of(&snapshot, &record).filter(|_| own) {
             if panes.len() != 1
                 || panes[0].0 != string(&record, "pane")
                 || panes[0].2 != string(&record, "run_id")
@@ -107,7 +109,7 @@ pub(super) fn dispatch_scoped(args: &[String], dry: bool, scope: Option<&session
             forget_archive_preflight(&archived,current.as_ref(),scope)?;
             let snapshot = live()?;
             let running = match current.as_ref() {
-                Some(record) => terminal_live(&snapshot, record) || process_alive(record),
+                Some(record) => terminal_live(&snapshot, record)? || process_alive(record),
                 None => snapshot.contains_key(name),
             };
             if running {
@@ -134,7 +136,7 @@ pub(super) fn dispatch_scoped(args: &[String], dry: bool, scope: Option<&session
         );
     }
     // No live instance of the session may be removed from the catalog.
-    if terminal_live(&live()?, &record) || process_alive(&record) {
+    if terminal_live(&live()?, &record)? || process_alive(&record) {
         return Err("session is still running; its saved binding was kept".into());
     }
     if let Some(scope)=scope {scope.changing();}

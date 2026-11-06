@@ -250,6 +250,9 @@ export function normalize(b: Partial<Batch>): Batch {
     desktop_service: b.desktop_service ?? undefined,
     processes_view: b.processes_view ?? undefined,
     composer: b.composer ?? undefined, draft_keys: b.draft_keys ?? undefined, composer_events: b.composer_events ?? undefined,
+    // Task 76: the Teams views (list, Waiting, a team) arrive in batch.teams;
+    // dropping them here left the Team tab and Waiting for you unread.
+    teams: b.teams ?? undefined,
   };
 }
 

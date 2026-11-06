@@ -36,7 +36,7 @@ export default function WorkspacePanel(props:{view?:View;refresh:(afterAction?:b
   <Show when={stopUnavailable()}><Status kind="warn">{tr(STOP_UNAVAILABLE)}</Status></Show>
   <Show when={autostart()}>{line=><Status kind={line().kind}>{line().text}</Status>}</Show>
   <Show when={autostartSaveWarning(props.view?.autostart_save_failed)}>{text=><Status kind="warn">{text()}</Status>}</Show>
-  <Show when={autostart()&&login()?.available?login():undefined}>{entry=><div class="row" style={{gap:"8px","flex-wrap":"wrap"}}><span class="muted">{loginEntryMobileLine(entry().state)}</span> <button type="button" class="btn ghost small" onClick={openLoginSetting}>{tr("Open the setting")}</button></div>}</Show>
+  <Show when={autostart()&&login()?.available?login():undefined}>{entry=><div class="row" style={{gap:"8px","flex-wrap":"wrap"}}><span class="muted">{loginEntryMobileLine(entry().state,props.view?.autostart)}</span> <button type="button" class="btn ghost small" onClick={openLoginSetting}>{tr("Open the setting")}</button></div>}</Show>
   <Actions><Show when={read()?.controls.change&&!actions.open()}><button class="btn" disabled={!writable()} onClick={()=>actions.begin()}>{tr("Change workspace…")}</button></Show>
    <button class="btn" disabled={busy()||!canStartConnector(read())} onClick={e=>void connector.request("start",e.currentTarget)}><Icon name="play" size={13}/>{tr("Start connector")}</button><button class="btn" disabled={busy()||!canStopConnector(read())} onClick={e=>void connector.request("stop",e.currentTarget)}><Icon name="square" size={12}/>{tr("Stop connector")}</button>
    <button class="btn" disabled={busy()||!props.view} onClick={()=>props.refresh()}><Icon name="refresh-cw" size={13}/>{tr("Refresh status")}</button>

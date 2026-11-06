@@ -2,6 +2,7 @@
 // Run value and is the only source of its state; the page sends only on or off.
 import { createSignal } from "solid-js";
 import { tr } from "../../../i18n";
+import type { AutostartLine } from "./connector-autostart";
 
 export type LoginState = "on" | "off" | "other" | "unknown";
 export interface LoginEntry { available: boolean; state: LoginState }
@@ -57,10 +58,15 @@ export function loginEntryHint(state?: LoginState): string {
   return base;
 }
 
-export function loginEntryMobileLine(state: LoginState): string {
+// Only a connector the native side will start may be promised. Otherwise the line
+// describes Zerus alone, so it can't contradict "Stopped by you" just above it.
+const STARTS: ReadonlySet<AutostartLine["kind"]> = new Set<AutostartLine["kind"]>(["running", "starting", "will_start", "failed"]);
+
+export function loginEntryMobileLine(state: LoginState, line?: AutostartLine | null): string {
+  const starts = !!line && STARTS.has(line.kind);
   switch (state) {
-    case "on": return tr("Zerus starts at login on this computer, and the connector starts with it.");
-    case "off": return tr("Start Zerus at login is off, so the connector starts when you open Zerus, unless a Startup shortcut opens it.");
-    default: return tr("Zerus can't confirm that it starts at login on this computer, so the connector may wait until you open Zerus.");
+    case "on": return starts ? tr("Zerus starts at login on this computer, and the connector starts with it.") : tr("Zerus starts at login on this computer.");
+    case "off": return starts ? tr("Start Zerus at login is off, so the connector starts when you open Zerus, unless a Startup shortcut opens it.") : tr("Start Zerus at login is off, so Zerus starts when you open it, unless a Startup shortcut opens it.");
+    default: return starts ? tr("Zerus can't confirm that it starts at login on this computer, so the connector may wait until you open Zerus.") : tr("Zerus can't confirm that it starts at login on this computer.");
   }
 }

@@ -28,16 +28,21 @@ pub fn registration(read: Result<Option<&str>, Unreadable>, executable: &Path) -
         Ok(None) => return Registration::Off,
         Ok(Some(command)) => command,
     };
-    // The program as `login_item` writes it; Windows paths ignore case, options
-    // do not. `windows_program_line` puts two spaces before the options.
+    // The program as `login_item` writes it; Windows paths ignore case. The rest
+    // must be what this app's own command line runs as a background start, so
+    // help, version, login commands, conflicts and unknown options aren't one.
     let program = format!("\"{}\"", executable.to_string_lossy()).replace('/', "\\");
     let confirmed = command
         .get(..program.len())
         .is_some_and(|head| head.eq_ignore_ascii_case(&program))
-        && command[program.len()..]
-            .strip_prefix(' ')
-            .and_then(|rest| rest.trim_start_matches(' ').strip_prefix("--background"))
-            .is_some_and(|rest| rest.is_empty() || rest.starts_with(' '));
+        && command[program.len()..].starts_with([' ', '\t'])
+        && zerus_client_core::shell::windows_split_arguments(&command[program.len()..])
+            .is_some_and(|arguments| {
+                matches!(
+                    crate::cli::parse(&arguments),
+                    Ok(crate::cli::Command::Run(options)) if options.background
+                )
+            });
     if confirmed {
         Registration::On
     } else {
@@ -262,6 +267,19 @@ mod tests {
         // Windows paths ignore case.
         let shouted = r#""C:\PROGRAM FILES\ZERUS\HGS-TRAY.EXE" --background"#;
         assert_eq!(registration(Ok(Some(shouted)), exe), Registration::On);
+        // Every option the current command line accepts, in the order the person wrote.
+        for command in [
+            r#""C:\Program Files\Zerus\hgs-tray.exe" --background --hgs "C:\Program Files\z\hgs.exe""#,
+            r#""C:\Program Files\Zerus\hgs-tray.exe" --background --open-mode tabs --local-poll 5"#,
+            r#""C:\Program Files\Zerus\hgs-tray.exe" --hgs C:\z\hgs.exe --background"#,
+            r#""C:\Program Files\Zerus\hgs-tray.exe"	--background"#,
+        ] {
+            assert_eq!(
+                registration(Ok(Some(command)), exe),
+                Registration::On,
+                "{command}"
+            );
+        }
     }
 
     #[test]
@@ -283,6 +301,20 @@ mod tests {
             r#""C:\Zerus\hgs-tray.exe" --sessions"#,
             r#""C:\Zerus\hgs-tray.exe" --backgroundx"#,
             r#""C:\Zerus\hgs-tray.exe" --BACKGROUND"#,
+            // This image, but the rest of the command doesn't start Zerus in the background.
+            r#""C:\Zerus\hgs-tray.exe" --background --help"#,
+            r#""C:\Zerus\hgs-tray.exe" --background -h"#,
+            r#""C:\Zerus\hgs-tray.exe" --background --version"#,
+            r#""C:\Zerus\hgs-tray.exe" --background --build-info"#,
+            r#""C:\Zerus\hgs-tray.exe" --background --sessions"#,
+            r#""C:\Zerus\hgs-tray.exe" --background --install-login-item"#,
+            r#""C:\Zerus\hgs-tray.exe" --background --remove-login-item"#,
+            r#""C:\Zerus\hgs-tray.exe" --background --selftest"#,
+            r#""C:\Zerus\hgs-tray.exe" --background --frobnicate"#,
+            r#""C:\Zerus\hgs-tray.exe" --background --hgs"#,
+            r#""C:\Zerus\hgs-tray.exe" --background --hgs "C:\no end"#,
+            r#""C:\Zerus\hgs-tray.exe" --hgs --background"#,
+            r#""C:\Zerus\hgs-tray.exe" --hgs C:\z\hgs.exe"#,
             r#""C:\Zerus\hgs-tray.exe"--background"#,
             r#"cmd /c "C:\Zerus\hgs-tray.exe" --background"#,
             "é",

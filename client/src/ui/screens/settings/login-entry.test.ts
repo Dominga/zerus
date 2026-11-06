@@ -1,5 +1,6 @@
 import { describe, expect, it, vi } from "vitest";
 import { createLoginEntry, loginEntryHint, loginEntryMobileLine, type LoginEntry, type LoginState } from "./login-entry";
+import type { AutostartLine } from "./connector-autostart";
 
 const entry = (state: LoginState, available = true): LoginEntry => ({ available, state });
 const settle = () => new Promise((resolve) => setTimeout(resolve));
@@ -86,9 +87,31 @@ describe("Start Zerus at login", () => {
     expect(loginEntryHint("unknown")).toMatch(/can't read/);
   });
   it("the Mobile line allows for a shortcut it cannot see and never claims a confirmed off", () => {
-    expect(loginEntryMobileLine("on")).toMatch(/starts at login/);
-    expect(loginEntryMobileLine("off")).toMatch(/unless a Startup shortcut/);
-    expect(loginEntryMobileLine("other")).toMatch(/can't confirm/);
-    expect(loginEntryMobileLine("unknown")).toMatch(/can't confirm/);
+    const armed: AutostartLine = { kind: "will_start" };
+    expect(loginEntryMobileLine("on", armed)).toMatch(/starts at login/);
+    expect(loginEntryMobileLine("off", armed)).toMatch(/unless a Startup shortcut/);
+    expect(loginEntryMobileLine("other", armed)).toMatch(/can't confirm/);
+    expect(loginEntryMobileLine("unknown", armed)).toMatch(/can't confirm/);
+  });
+});
+
+describe("The Mobile line's promise follows the connector's own state", () => {
+  const armed: AutostartLine[] = [{ kind: "running" }, { kind: "starting" }, { kind: "will_start" }, { kind: "failed", reason: "x" }];
+  const unarmed: AutostartLine[] = [{ kind: "not_armed" }, { kind: "stopped_by_you" }, { kind: "unavailable" }, { kind: "running_not_armed" }];
+  const states: LoginState[] = ["on", "off", "other", "unknown"];
+  it.each(unarmed.flatMap((line) => states.map((state) => [line, state] as const)))("%j with login %s says nothing about the connector", (line, state) => {
+    expect(loginEntryMobileLine(state, line)).not.toMatch(/connector/i);
+  });
+  it.each(armed)("%j says when the connector starts", (line) => {
+    expect(loginEntryMobileLine("on", line)).toMatch(/connector starts with it/);
+    expect(loginEntryMobileLine("off", line)).toMatch(/connector starts when you open Zerus/);
+    expect(loginEntryMobileLine("unknown", line)).toMatch(/connector may wait/);
+  });
+  it("describes Zerus accurately in every unarmed state", () => {
+    const line: AutostartLine = { kind: "stopped_by_you" };
+    expect(loginEntryMobileLine("on", line)).toMatch(/Zerus starts at login/);
+    expect(loginEntryMobileLine("off", line)).toMatch(/unless a Startup shortcut opens it/);
+    expect(loginEntryMobileLine("other", line)).toMatch(/can't confirm/);
+    expect(loginEntryMobileLine("unknown", line)).toMatch(/can't confirm/);
   });
 });

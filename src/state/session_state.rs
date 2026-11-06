@@ -283,6 +283,35 @@ pub(crate) fn compute(session: &Value, team: Option<(bool, Option<&Value>)>, at:
     }
 }
 
+/// Task 115: a team member's session state from this contract, for
+/// `hgs team status` and its member card. A native question or permission the
+/// member waits on is Waiting for you even while the last tick still saw it
+/// busy; Kimi answers its Edit and Write approvals only in its Terminal panel,
+/// and its other permissions reach the lead. Otherwise the stored phase and
+/// activity decide, so an idle member reads Cooling/Cold rather than busy.
+pub(crate) fn member_state(member: &teams::model::Member) -> (&'static str, Option<Value>) {
+    let live = member.seen.is_some_and(|seen| seen.live);
+    let last = member.seen_event_at.or(member.seen.map(|seen| seen.at)).unwrap_or(0.0);
+    let mut session = json!({
+        "state": if live { "running" } else { "stopped" },
+        "process_state": if live { "running" } else { "exited" },
+        "activity": if member.seen_activity.is_empty() { "unknown" } else { member.seen_activity.as_str() },
+        "phase": member.seen_phase,
+        "current_tool": "",
+        "last_active": last,
+    });
+    if let Some(asked) = member.pending.as_ref().or(member.terminal_question.as_ref()) {
+        session["activity"] = json!("busy");
+        session["phase"] = json!(if asked.approval { "approval" } else { "input" });
+        return compute(&session, None, now());
+    }
+    // A native question phase is Waiting for you; the contract names it input.
+    if member.seen_phase == "question" {
+        session["phase"] = json!("input");
+    }
+    compute(&session, None, now())
+}
+
 fn subagents(session: &Value, active: u64) -> Value {
     let names: Vec<String> = session["subagent_previews"]
         .as_array()
@@ -692,5 +721,62 @@ mod tests {
             assert_eq!(asked["mobile_attention"].as_array().unwrap().len(), 2);
             assert_ne!(asked["attention_signature"], json!("a".repeat(64)));
         });
+    }
+
+    /// Task 115: the recorded Adventure team case. The Integrator (Kimi) showed
+    /// "Needs approval" in the session list while the team tick still stored it
+    /// busy/working, so `hgs team status` told the lead it was active. Its state
+    /// now comes from this contract: an open native approval is Waiting for you.
+    #[test]
+    fn a_kimi_member_waiting_on_an_approval_is_waiting_for_you_not_busy() {
+        use teams::model::{Member, MemberSeen, MemberState, PendingQuestion};
+        let stored = || Member {
+            id: "integrator".into(),
+            role: "Integrator".into(),
+            agent: "kimi".into(),
+            state: MemberState::Active,
+            seen: Some(MemberSeen { at: now() - 120.0, live: true }),
+            seen_phase: "working".into(),
+            seen_activity: "busy".into(),
+            seen_event_at: Some(now() - 120.0),
+            ..Default::default()
+        };
+        // Kimi answers its tool approvals in its Terminal panel; the stored
+        // pending approval outranks the phase the last tick saw.
+        let mut approval = stored();
+        approval.pending = Some(PendingQuestion {
+            question_id: "q".into(),
+            question_hash: "h".into(),
+            approval: true,
+            at: now(),
+            ..Default::default()
+        });
+        assert_eq!(
+            member_state(&approval),
+            ("user", Some(json!({"kind":"approval","text":"Needs approval"})))
+        );
+        // A Kimi question the lead cannot answer in the panel is the same wait.
+        let mut question = stored();
+        question.terminal_question = Some(PendingQuestion {
+            question_id: "q".into(),
+            question_hash: "h".into(),
+            at: now(),
+            ..Default::default()
+        });
+        assert_eq!(member_state(&question).0, "user");
+        assert_eq!(member_state(&question).1.unwrap()["kind"], "input");
+        // The contract's question phase is Waiting for you without a card.
+        let mut phase = stored();
+        phase.seen_phase = "question".into();
+        phase.seen_activity = "attention".into();
+        assert_eq!(member_state(&phase).0, "user");
+        // Without a question the stored phase decides: a busy tool works, and a
+        // stopped session is stopped, never waiting.
+        let mut working = stored();
+        working.seen_phase = "tool".into();
+        assert_eq!(member_state(&working), ("working", None));
+        let mut stopped = stored();
+        stopped.seen = Some(MemberSeen { at: now(), live: false });
+        assert_eq!(member_state(&stopped), ("stopped", None));
     }
 }

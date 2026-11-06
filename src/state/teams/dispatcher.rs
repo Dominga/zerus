@@ -869,7 +869,16 @@ pub(crate) fn steps_with(team: &Team, seen: &[Seen], now: f64, listed: Option<&B
             };
             let quiet = last.map(|at| now - at).unwrap_or(0.0);
             let limit = if in_tool { tool_stuck_minutes(team) * 60.0 } else { super::ops::stuck_minutes(team) * 60.0 };
-            let stuck = busy && !found.asking && !found.background && !found.building && quiet >= limit;
+            // Task 115: a member with an open native question or permission is
+            // Waiting for you, never stuck in a silent turn: the stored card
+            // outlives a tick whose phase has moved on.
+            let stuck = busy
+                && !found.asking
+                && !found.background
+                && !found.building
+                && member.pending.is_none()
+                && member.terminal_question.is_none()
+                && quiet >= limit;
             if stuck && member.stuck.is_none() {
                 let reason = if found.phase == "compacting" { "compaction_timeout" } else { "no_progress" };
                 let checked = open.as_ref().is_some_and(|(_, attempt)| attempt.told_lead.iter().any(|kind| kind == "silent"));
@@ -3650,6 +3659,10 @@ pub(crate) fn host_still_starting(error: &str) -> bool {
 
 fn launch(team: &Team, member: &Member) -> anyhow::Result<()> {
     super::super::iron_rules::for_team(team, member)?;
+    // Task 115: a Kimi member's read-only rules are the owner's explicit
+    // opt-in (`hgs account kimi-read-only`), never written by a launch: Kimi
+    // has no per-launch rule override, and editing the config a launch reads
+    // would silently change every Kimi session on this computer.
     let folder = member_folder(team, member)?;
     let args = launch_args(team, member, &folder);
     let args: Vec<&str> = args.iter().map(String::as_str).collect();

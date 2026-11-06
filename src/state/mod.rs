@@ -46,6 +46,7 @@ mod kimi_goal;
 mod kimi_plan;
 mod kimi_trust;
 mod kimi_tui_choice;
+pub(crate) mod kimi_permissions;
 mod lifecycle;
 mod kimi_launch;
 mod provider_errors;

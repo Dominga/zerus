@@ -2106,5 +2106,11 @@
   "your sessions not read: %1": "ваши сессии не прочитаны: %1",
   "~%1 GB estimated": "~%1 ГБ по оценке",
   "“%1” is no longer offered for %2.": "«%1» больше не предлагается для %2.",
-  "✓ %1": "✓ %1"
+  "✓ %1": "✓ %1",
+  "Why reject? The member receives this": "Почему отклонить? Участник получит этот текст",
+  "Finish": "Завершить",
+  "A summary for the lead": "Итог для лидера",
+  "That report was decided meanwhile; nothing was sent.": "По этому отчёту уже принято решение; ничего не отправлено.",
+  "That task is no longer held; nothing was sent.": "Задача больше не удерживается; ничего не отправлено.",
+  "That task no longer waits; nothing was sent.": "Задача больше не ждёт; ничего не отправлено."
 }

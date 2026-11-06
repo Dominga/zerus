@@ -83,6 +83,12 @@ private:
     void declineAddition();
     // U63: accept-phase, or send-back-phase with the comment.
     void sendAcceptance(bool accept);
+    // Task 116: a report accepted or rejected with the member's reason, a
+    // held task released, a step Zerus could not take retried, the team
+    // finished with the lead's summary: the same operations as the team's card.
+    void sendReport(bool accept);
+    void sendRelease(bool retry);
+    void sendFinish();
     QString m_comment;
     // #740: the member the item names: by id, else (an older hgs) by role.
     const Teams::Member *memberOf(const Teams::Team &team) const;

@@ -3,7 +3,8 @@ import { invoke } from "@tauri-apps/api/core";
 import { listen } from "@tauri-apps/api/event";
 import { inTauri } from "../../../bridge";
 import { Icon } from "../../lib/icons";
-import { Actions, Group, Lines, SectionHead, Select, Status } from "./ui";
+import { Actions, Group, Lines, SectionHead, Select, Status, ToggleRow } from "./ui";
+import { flag, setSetting } from "../../../store/settings";
 import {createPhoneActions,targetOf,phoneKey,targetKey,type PhoneActions} from "./phone-actions";
 import { createMobile, type MobileState, type View } from "./mobile-page";
 import WorkspacePanel from "./WorkspacePanel";
@@ -72,6 +73,44 @@ function DeliveryPanel(props: { view?: View; set: (value: string) => void }) {
   );
 }
 
+/** Task 102: the fork's Windows mobile services (client/src-tauri mobile.rs `LocalServices`). */
+interface LocalServices { available: boolean; relay_bundled: boolean; relay: boolean; running: boolean; port: number; database: string; connector: boolean }
+
+/**
+ * Task 102 (Qt's WindowsMobileServices::optionsPanel): the bundled connector
+ * started with Zerus, and a relay for this computer on 127.0.0.1 beside it.
+ * Shown on Windows with the bundled connector only.
+ */
+function LocalServicesPanel() {
+  const [view, setView] = createSignal<LocalServices>();
+  const [busy, setBusy] = createSignal(false);
+  const [error, setError] = createSignal("");
+  onMount(() => {
+    if (!inTauri()) return;
+    invoke<LocalServices>("mobile_local_services").then(setView, () => {});
+  });
+  const relay = async (on: boolean) => {
+    setBusy(true); setError("");
+    try { setView(await invoke<LocalServices>("mobile_local_relay", { on })); }
+    catch (reason) { setError(String(reason)); }
+    finally { setBusy(false); }
+  };
+  return (
+    <Show when={view()?.available ? view() : undefined}>{(v) => (
+      <Group title={trNoop("Connector on this computer")}>
+        <ToggleRow label={trNoop("Start the connector when Zerus starts")} checked={flag("mobile/runConnector")}
+          onChange={(on) => void setSetting("mobile/runConnector", on)} />
+        <Show when={v().relay_bundled}>
+          <ToggleRow label={tr("Run a relay on this computer (127.0.0.1:%1)", v().port)} checked={v().relay} disabled={busy()}
+            hint={tr("A phone reaches it only over HTTPS, for example with Tailscale: tailscale serve --bg --https=443 http://127.0.0.1:%1. Its database is %2.", v().port, v().database)}
+            onChange={(on) => void relay(on)} />
+        </Show>
+        <Show when={error()}>{(text) => <Status kind="error">{text()}</Status>}</Show>
+      </Group>
+    )}</Show>
+  );
+}
+
 export function MobileSection() {
   const [legacyOpen,setLegacyOpen]=createSignal(false);
   const [state, setState] = createSignal<MobileState>({});
@@ -111,6 +150,7 @@ export function MobileSection() {
       <WorkspacePanel view={view()} refresh={(afterAction) => page.refreshWorkspace(afterAction)} />
       <button class="btn ghost set-disclosure" disabled={!!view()?.workspace?.encrypted} aria-expanded={legacyOpen()&&!view()?.workspace?.encrypted} title={view()?.workspace?.encrypted?tr("Unavailable while this computer uses an encrypted workspace"):undefined} onClick={()=>setLegacyOpen(!legacyOpen())}><Icon name={legacyOpen()&&!view()?.workspace?.encrypted?"chevron-down":"chevron-right"} size={14}/>{tr("Advanced: legacy connector configuration")}</button>
       <Show when={legacyOpen()&&!view()?.workspace?.encrypted}><Suspense><LegacyRelay/></Suspense></Show>
+      <LocalServicesPanel />
       <PhonesPanel view={view()} refresh={() => page.refreshPhones()} actions={phoneActions}/>
       <Show when={phoneActions.prompt()}>{prompt=><Suspense><PhoneDialogs prompt={prompt()} actions={phoneActions}/></Suspense>}</Show>
       <DeliveryPanel view={view()} set={(value) => page.setDelivery(value)} />

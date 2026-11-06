@@ -223,6 +223,8 @@ private:
         return team.status == QLatin1String("planning") || team.status == QLatin1String("running") || team.status == QLatin1String("paused");
     }
     QWidget *errorStrip();
+    // Task 101: the team shown is the last good read; the latest one failed.
+    QWidget *staleStrip();
     // The team as the controller currently has it, by id (a poll may have
     // replaced the copy a widget was built with).
     const Teams::Team *currentTeam(const QString &id) const;

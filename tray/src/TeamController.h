@@ -1,4 +1,5 @@
 #pragma once
+#include <QDateTime>
 #include <QJsonArray>
 #include <QJsonObject>
 #include <QHash>
@@ -85,8 +86,21 @@ public:
     bool showCancelled() const { return m_showCancelled; }
     void setShowCancelled(bool on);
     bool available() const { return m_available; }
+    // Task 101 (owner, 2026-11-06: opening the Team tab made the lead's team
+    // vanish for minutes): a failed or late read keeps the last good teams
+    // and the watched team. The team store refused readers while it was
+    // busy ("hgs: database is locked" after its 10 s wait, or past the read's
+    // own deadline), and a failed `team list` used to clear every team, so
+    // teamOfSession() found none until a read succeeded again. What is shown
+    // then is stale: the failed read's words and the last good read's time.
+    bool stale() const { return !m_listError.isEmpty() || !m_statusError.isEmpty(); }
+    QString staleError() const { return m_listError.isEmpty() ? m_statusError : m_listError; }
+    QDateTime lastGoodRead() const { return m_listError.isEmpty() ? m_statusReadAt : m_listReadAt; }
     HgsClient *client() const { return m_client; }
     static void setPollInterval(int milliseconds);
+    // The deadline of the polled reads (list, status, events, inbox); 0 keeps
+    // HgsClient's own (15 s here). Tests shorten it.
+    static void setReadTimeout(int milliseconds);
 signals:
     void teamsChanged();
     void watchedChanged();
@@ -94,7 +108,11 @@ signals:
     void catalogChanged();
     void inboxChanged();
     void showCancelledChanged();
+    // Task 101: stale() or staleError() changed.
+    void staleChanged();
 private:
+    void markStale(QString &slot, const QString &error);
+    void markFresh(QString &slot, QDateTime &readAt);
     void received(quint64 request, const QString &operation, const QJsonObject &result);
     void failed(quint64 request, const QString &operation, const QString &error);
     void readWatched();
@@ -106,6 +124,10 @@ private:
     // A status read was asked for while one was in flight.
     bool m_statusAgain = false;
     QList<Teams::Team> m_teams;
+    // Task 101: the failure of the last list and status read (empty after a
+    // good one) and when each last answered well.
+    QString m_listError, m_statusError;
+    QDateTime m_listReadAt, m_statusReadAt;
     // The last answers, so an unchanged poll changes nothing on screen.
     QJsonObject m_lastList, m_lastStatus;
     QByteArray m_watchedShape, m_inboxShape;

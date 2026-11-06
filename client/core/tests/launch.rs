@@ -1689,3 +1689,27 @@ fn an_account_catalog_failure_reads_as_qts_failure_detail() {
         "a refusal on success keeps its text"
     );
 }
+
+/// Task 102: a folder mode the person chose rides in the plan as Qt's
+/// `worktree_choice` ("auto" or "none"); an unchosen one is not sent.
+#[test]
+fn a_chosen_folder_mode_rides_in_the_plan() {
+    let plan = launch::plan(&choices());
+    assert!(plan.worktree_choice.is_none());
+    assert!(serde_json::to_value(&plan)
+        .unwrap()
+        .get("worktree_choice")
+        .is_none());
+    let chosen = launch::plan(&Choices {
+        worktree_chosen: true,
+        ..choices()
+    });
+    assert_eq!(chosen.worktree_choice.as_deref(), Some("auto"));
+    let folder = launch::plan(&Choices {
+        worktree_chosen: true,
+        auto_preferred: false,
+        ..choices()
+    });
+    assert_eq!(folder.worktree_choice.as_deref(), Some("none"));
+    assert!(!folder.auto);
+}

@@ -1,5 +1,5 @@
 import { describe, expect, it } from "vitest";
-import { PrivateStoreNotices } from "./privateStoreNotices";
+import { KNOWN_LIMIT, PrivateStoreNotices, type NoticesPort } from "./privateStoreNotices";
 
 const store = (path: string, reason = "not private", fix = "restore the ACL") => ({ path, reason, fix });
 
@@ -23,5 +23,39 @@ describe("private-store notices", () => {
     expect(notices.knownKeys()).toHaveLength(1);
     notices.forget("mac");
     expect(notices.knownKeys()).toEqual([]);
+  });
+
+  it("keeps the raised set across restarts: a kept notice is not raised again (task 102)", async () => {
+    let release!: (keys: string[]) => void;
+    const saved: string[][] = [];
+    const port: NoticesPort = { load: () => new Promise((resolve) => { release = resolve; }), save: async (known) => { saved.push(known); } };
+    const seen: string[] = [];
+    const notices = new PrivateStoreNotices((notice) => seen.push(notice.key), port);
+    // Before the kept set arrives an observation waits: nothing is raised yet.
+    expect(notices.ready()).toBe(false);
+    expect(notices.observe("", "this computer", true, [store("C:\\state"), store("C:\\new")])).toEqual([]);
+    release(["\nC:\\state\nnot private"]);
+    await Promise.resolve(); await Promise.resolve();
+    expect(notices.ready()).toBe(true);
+    expect(seen).toEqual(["\nC:\\new\nnot private"]);
+    expect(saved.at(-1)).toEqual(["\nC:\\new\nnot private", "\nC:\\state\nnot private"]);
+    // An unchanged set is not saved again.
+    const writes = saved.length;
+    notices.observe("", "this computer", true, [store("C:\\state"), store("C:\\new")]);
+    expect(saved.length).toBe(writes);
+    // A resolved store leaves the kept set.
+    notices.observe("", "this computer", true, [store("C:\\new")]);
+    expect(saved.at(-1)).toEqual(["\nC:\\new\nnot private"]);
+  });
+
+  it("keeps at most the core's 512 keys and starts empty when the kept set cannot be read", async () => {
+    const many = Array.from({ length: KNOWN_LIMIT + 30 }, (_, n) => `\n/p/${String(n).padStart(4, "0")}\nreason`);
+    const notices = new PrivateStoreNotices(() => undefined, { load: async () => many, save: async () => undefined });
+    await Promise.resolve(); await Promise.resolve();
+    expect(notices.knownKeys()).toHaveLength(KNOWN_LIMIT);
+    const broken = new PrivateStoreNotices(() => undefined, { load: () => Promise.reject(new Error("unreadable")), save: async () => undefined });
+    await Promise.resolve(); await Promise.resolve();
+    expect(broken.ready()).toBe(true);
+    expect(broken.observe("", "", true, [store("/x")])).toHaveLength(1);
   });
 });

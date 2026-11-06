@@ -572,6 +572,8 @@ export interface LaunchChoices {
   implicit_inbox: boolean; swarm: string; path: string; auto_preferred: boolean; automatic_available: boolean;
   branch: string; catalog: unknown; automatic_path: string; listed_folder: boolean; project_worktree: boolean;
   model: string; effort: string; open_terminal: boolean; repository: LaunchRepositoryChoice | null; predecessor: string;
+  /** Task 102: Auto or the folder itself was chosen in this dialog; the plan then remembers it. */
+  worktree_chosen?: boolean;
 }
 /** Background creation's plan (core `launch::Plan`, Qt's `creationRequested` object). */
 export interface LaunchPlan {
@@ -587,7 +589,9 @@ export interface NewSessionContext {
   own_windows_session: number | null;
   /** The platform this client was built for: this computer's folder style before it reports a platform. */
   build_style: PathStyle;
-  remembered: { agent: string; accounts: Record<string, Record<string, string>>; open_terminal: boolean };
+  remembered: { agent: string; accounts: Record<string, Record<string, string>>; open_terminal: boolean;
+    /** Task 102: "auto" (a generated worktree) or "none" (the folder itself); missing or "" is Auto. */
+    folder_mode?: string };
   /** The catalog's swarm, "" before one arrives: a folder's project inference counts only from it. */
   swarm: string;
 }

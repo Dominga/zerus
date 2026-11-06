@@ -160,6 +160,14 @@ pub const KEYS: &[Key] = &[
     key("workspace/launchAgent", Kind::Text("")),
     key("workspace/launchOpenTerminal", Kind::Flag(false)),
     key("workspace/launchAccounts", Kind::Text("")),
+    // Task 102: the folder mode New session starts with, a generated worktree
+    // ("auto") or the folder itself ("none"), as Qt's workspace/launchWorktree
+    // (NewSessionDialog.cpp:259, :949); imported once by its family.
+    Key {
+        name: NEW_SESSION_FOLDER_MODE,
+        kind: Kind::Choice(&["auto", "none"]),
+        seeded: false,
+    },
     // Task 74: Qt's SessionLeads JSON object, by session identity.
     key("workspace/sessionLeads", Kind::Text("")),
     // A first-G3 family import handles this separately from the old seed.
@@ -223,6 +231,35 @@ pub const KEYS: &[Key] = &[
     Key {
         name: "speech/microphone",
         kind: Kind::Text(""),
+        seeded: false,
+    },
+    // Task 102: Qt's microphone as its name, never its id: the Voice page
+    // picks the device with this name when it lists them, then drops it.
+    Key {
+        name: MICROPHONE_HINT,
+        kind: Kind::Text(""),
+        seeded: false,
+    },
+    // Task 102: the fork's Windows mobile services (WindowsMobileServices.h):
+    // a relay for this computer on 127.0.0.1 and the connector started with
+    // Zerus. Qt keeps them only in its store; imported once by their family.
+    Key {
+        name: "mobile/localRelay",
+        kind: Kind::Flag(false),
+        seeded: false,
+    },
+    Key {
+        name: "mobile/localRelayPort",
+        kind: Kind::Whole {
+            default: 8787,
+            min: 1,
+            max: 65535,
+        },
+        seeded: false,
+    },
+    Key {
+        name: "mobile/runConnector",
+        kind: Kind::Flag(true),
         seeded: false,
     },
     // Automatic recovery: the newest shared policy known (recovery_settings).
@@ -307,6 +344,11 @@ pub const KEYS: &[Key] = &[
         },
     ),
 ];
+
+/// Task 102: New session's remembered folder mode.
+pub const NEW_SESSION_FOLDER_MODE: &str = "newSession/folderMode";
+/// Task 102: the name of Qt's chosen microphone, a hint for the Voice page.
+pub const MICROPHONE_HINT: &str = "speech/microphoneName";
 
 /// The setting called `name`: a listed key, a shortcut override, or one of
 /// UpdateController's per-channel and per-notification records.

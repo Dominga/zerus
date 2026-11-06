@@ -26,6 +26,7 @@ pub mod computer_codes;
 pub mod connector_actions;
 pub mod enrollment;
 pub mod legacy;
+pub mod local_services;
 pub mod page;
 pub mod phone_actions;
 

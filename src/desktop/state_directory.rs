@@ -14,9 +14,24 @@ pub(super) fn prepare(config: &Config, location: &Location) -> Result<()> {
     }
     #[cfg(not(unix))]
     {
+        use anyhow::Context;
         let _ = config;
         // Windows ACLs are never repaired by this Unix compatibility migration.
-        location.check_existing()?;
+        // WhiteWh fork, task 99: but the state folder may inherit a sandbox
+        // group's read ACE (Codex adds one to ~/.local), and the service
+        // would then refuse to start before `Location::prepare` could repair
+        // it. A folder this user owns that only Windows left too open is made
+        // private in place, as there; a missing one is not created here, and
+        // one that stays open is still refused.
+        for path in [location.root.parent().context("missing state folder")?, &location.root] {
+            match crate::platform::verify_private(path, crate::platform::Private::Directory) {
+                Err(error) if error.kind() == std::io::ErrorKind::NotFound => {}
+                _ => anyhow::ensure!(
+                    crate::private_stores::ensure(path, crate::platform::Private::Directory)?,
+                    "desktop folders must be private directories"
+                ),
+            }
+        }
     }
     Ok(())
 }

@@ -526,6 +526,8 @@ pub struct TeamView {
     pub updated: f64,
     pub waiting_for_lead: bool,
     pub pending_phase: Option<u64>,
+    /// Task 112: a paused team's pause ({at, by, reason}), or null.
+    pub paused: Value,
     /// The team's settings object as hgs stores it (a few dozen fields).
     pub settings: Value,
     pub members: Vec<MemberView>,
@@ -766,6 +768,7 @@ pub fn team(value: &Value) -> TeamView {
         updated: number(value, "updated"),
         waiting_for_lead: flag(value, "waiting_for_lead"),
         pending_phase: value.get("pending_phase").and_then(Value::as_u64),
+        paused: value.get("paused").filter(|paused| paused.is_object()).map_or(Value::Null, |paused| bounded(Some(paused))),
         settings: match value.get("settings") {
             Some(Value::Object(settings)) => Value::Object(settings.clone()),
             _ => Value::Object(Map::new()),

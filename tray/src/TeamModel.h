@@ -457,6 +457,12 @@ struct BuildState {
 
 struct Team {
     QString id, name, status, project, folder, lead;
+    // Task 112: a paused team's pause (status's "paused"): when, by whom and
+    // why; pausedText() is what the team bar, the session's strip and
+    // Waiting for you say.
+    double pausedAt = 0;
+    QString pausedBy, pausedReason;
+    QString pausedText() const;
     QString projectId;
     // D1: settings.evidence_folders, where report evidence may be previewed.
     QStringList evidenceFolders;

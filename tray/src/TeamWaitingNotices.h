@@ -88,6 +88,9 @@ public:
             }
             m_known.append(item.id);
             if (covered(teams, item)) continue;
+            // Task 112: a paused team is a state the owner (or the lead) set,
+            // not a question: shown in Waiting, never notified.
+            if (item.kind == QLatin1String("team_paused")) continue;
             fresh.append({token(item), item.team, title(item), item.title});
         }
         if (complete) m_known.erase(std::remove_if(m_known.begin(), m_known.end(), [&present](const QString &id) { return !present.contains(id); }), m_known.end());

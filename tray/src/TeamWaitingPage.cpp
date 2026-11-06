@@ -96,6 +96,7 @@ QString TeamWaitingPage::kindLabel(const QString &kind)
     if (kind == "lead_stalled") return tr("Lead stalled");   // task 95
     if (kind == "deferred") return tr("Deferred");   // task 97
     if (kind == "disk_low") return tr("Disk space");   // task 108
+    if (kind == "team_paused") return tr("Team paused");   // task 112
     return kind;
 }
 
@@ -115,6 +116,7 @@ QString TeamWaitingPage::kindIcon(const QString &kind)
     if (kind == "lead_stalled") return QStringLiteral("attention");
     if (kind == "deferred") return QStringLiteral("clock");
     if (kind == "disk_low") return QStringLiteral("attention");
+    if (kind == "team_paused") return QStringLiteral("pause");
     return QStringLiteral("warning");
 }
 
@@ -332,6 +334,15 @@ QWidget *TeamWaitingPage::rowFor(const Item &item)
     }
     const auto go = [this, item] { if (openTeam && !item.team.isEmpty()) openTeam(item); };
     // Task 108: a drive low on space opens Settings > Build folders.
+    // Task 112: a paused team resumes from here; resuming its sessions does not.
+    if (item.action == QLatin1String("resume_team") && m_teams) {
+        auto *resume = button(tr("Resume team"), "teamWaitingResumeTeam");
+        resume->setProperty("primary", true);
+        QObject::connect(resume, &QPushButton::clicked, frame, [this, item] {
+            m_teams->act(QStringLiteral("resume"), QJsonObject{{"team", item.team}});
+        });
+        h->addWidget(resume);
+    }
     if (item.action == QLatin1String("open_disk")) {
         auto *disk = button(tr("Open Build folders"), "teamWaitingOpenDisk");
         QObject::connect(disk, &QPushButton::clicked, frame, [this] { if (openDisk) openDisk(); });

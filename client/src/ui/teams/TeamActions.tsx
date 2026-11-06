@@ -90,8 +90,8 @@ export function TeamBarChips(props: { team: ActTeam; onPhase: (phase: number) =>
     else if (chip.id === "leadStalled") props.onLead?.();
   };
   return (
-    <For each={chips()}>{(chip) => chip.id === "waitingForLead"
-      ? <span class="team-chip accent" data-chip={chip.id}>{chip.text}</span>
+    <For each={chips()}>{(chip) => chip.id === "waitingForLead" || chip.id === "teamPaused"
+      ? <span class="team-chip" classList={{ accent: chip.id === "waitingForLead", warn: chip.id === "teamPaused" }} data-chip={chip.id} title={chip.tip}>{chip.text}</span>
       : <button type="button" class="team-chip link" classList={{ warn: chip.id === "leadStalled" }} data-chip={chip.id} title={chip.tip} onClick={() => click(chip)}>{chip.text}</button>}
     </For>
   );

@@ -442,6 +442,20 @@ impl Store {
 
     /// A page of one team's feed, newest first; `before` is the previous page's
     /// cursor. Entries appended meanwhile never shift an older page.
+    /// Task 112: the newest event of these kinds, its time and detail.
+    pub(crate) fn last_event(&self, team: &str, kinds: &[&str]) -> anyhow::Result<Option<(f64, Value)>> {
+        let list = kinds.iter().map(|kind| format!("'{}'", kind.replace('\'', ""))).collect::<Vec<_>>().join(",");
+        let found = self
+            .db
+            .query_row(
+                &format!("SELECT at,payload FROM events WHERE team=?1 AND kind IN ({list}) ORDER BY seq DESC LIMIT 1"),
+                params![team],
+                |row| Ok((row.get::<_, f64>(0)?, row.get::<_, String>(1)?)),
+            )
+            .optional()?;
+        Ok(found.map(|(at, payload)| (at, serde_json::from_str(&payload).unwrap_or_default())))
+    }
+
     pub(crate) fn events(&self, team: &str, before: Option<i64>, limit: i64) -> anyhow::Result<Value> {
         let limit = limit.clamp(1, PAGE);
         let mut statement = self.db.prepare(
@@ -580,6 +594,10 @@ impl Store {
         // Task 111: every change re-checks the open proposals; one that can no
         // longer apply is withdrawn in the same write.
         super::ops::withdraw_inapplicable(&mut team, &mut events);
+        // Task 112: only a paused team keeps its pause record.
+        if team.status != super::model::TeamStatus::Paused {
+            team.paused = None;
+        }
         let at = now();
         // Task 81: a task of the approved plan gets its baseline schedule in the
         // change that approves it or adds it.

@@ -328,6 +328,8 @@ fn all_items(team: &Team) -> Vec<Item> {
                 wait.reason.clone(),
             )
         };
+        // Task 112: a paused team hands nothing out; the lead learns that is why.
+        let paused = if team.status == TeamStatus::Paused { " The team is paused, so nothing is handed out until the owner resumes it." } else { "" };
         items.push(Item {
             subagents: Value::Null,
             kind: "task_waits",
@@ -335,7 +337,7 @@ fn all_items(team: &Team) -> Vec<Item> {
             task: Some(task.id),
             member,
             since: wait.at,
-            summary: summary(&format!("#{} {} waits: {}", task.id, task.title, wait.reason)),
+            summary: summary(&format!("#{} {} waits: {}{paused}", task.id, task.title, wait.reason)),
             command,
             detail,
         });
@@ -638,6 +640,34 @@ fn all_items(team: &Team) -> Vec<Item> {
     if !active {
         // N5: the decision above is all a finished team still has to say.
         return items;
+    }
+    // Task 112 (owner, 2026-11-06: #21 waited 529 minutes on a paused team and
+    // the lead did not know why): a paused team hands out nothing; the lead is
+    // told once per pause, with what waits for it.
+    if team.status == TeamStatus::Paused {
+        let at = team.paused.as_ref().map_or(team.updated, |pause| pause.at);
+        let waiting: Vec<String> = team
+            .tasks
+            .iter()
+            .filter(|task| task.status == TaskStatus::Pending)
+            .take(10)
+            .map(|task| format!("#{}", task.id))
+            .collect();
+        let waits = if waiting.is_empty() { String::new() } else { format!("; {} wait to be handed out", waiting.join(", ")) };
+        items.push(Item {
+            subagents: Value::Null,
+            kind: "team_paused",
+            key: format!("team_paused:{}", at as u64),
+            task: None,
+            member: "owner".into(),
+            since: at,
+            summary: summary(&format!(
+                "The team is paused {}: Zerus hands out no task until the owner resumes it{waits}",
+                paused_words(team)
+            )),
+            command: format!("{} | hgs team status --json", json!({"team":team.id})),
+            detail: "Ask the owner to resume the team (Resume team on the team bar or in Waiting for you); resume it yourself only on the owner's word.".into(),
+        });
     }
     // U25: a phase the owner sent back is a review item: the comment and the
     // command that returns the reworked phase to the owner as a draft.
@@ -1070,9 +1100,18 @@ fn age(now: f64, since: f64) -> String {
     }
 }
 
+/// Task 112: "since 2026-11-06 09:12 by You" for a paused team.
+pub(crate) fn paused_words(team: &Team) -> String {
+    match &team.paused {
+        Some(pause) if pause.by.is_empty() => format!("since {}", local_time(pause.at)),
+        Some(pause) => format!("since {} by {}", local_time(pause.at), pause.by),
+        None => String::new(),
+    }
+}
+
 /// A reset time as a person reads it, in this computer's zone; status keeps
 /// the numeric `resets_at`.
-fn local_time(at: f64) -> String {
+pub(crate) fn local_time(at: f64) -> String {
     chrono::DateTime::<chrono::Utc>::from_timestamp(at.round() as i64, 0)
         .map(|time| time.with_timezone(&chrono::Local).format("%Y-%m-%d %H:%M").to_string())
         .unwrap_or_else(|| format!("{at:.0}"))

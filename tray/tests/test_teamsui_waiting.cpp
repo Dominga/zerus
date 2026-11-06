@@ -146,6 +146,7 @@ private slots:
     void aLeadsQuestionIsAnsweredFromWaitingForYou();
     void aConfirmedDecisionLeavesWaitingAtOnceAndARefusedOneStays();
     void aLowDriveOpensBuildFoldersAndItsNoticeNamesTheDrive();
+    void aPausedTeamWaitsWithResumeTeamAndIsNeverNotified();
     void initTestCase()
     {
         setUpCase();
@@ -2632,6 +2633,34 @@ void TestTeamsUiWaiting::aLowDriveOpensBuildFoldersAndItsNoticeNamesTheDrive()
     QCOMPARE(fresh.size(), 1);
     QCOMPARE(fresh[0].title, QStringLiteral("Low disk space on D:"));
     QCOMPARE(fresh[0].body, low["title"].toString());
+}
+
+// Task 112: a paused team waits for the owner's Resume team in Waiting for
+// you, saying since when and by whom; it is a state the owner set, so it is
+// listed but never notified, and Resume team resumes the team.
+void TestTeamsUiWaiting::aPausedTeamWaitsWithResumeTeamAndIsNeverNotified()
+{
+    const double now = double(QDateTime::currentSecsSinceEpoch());
+    const QJsonObject paused{{"id", "team-1/team_paused/1800000000"}, {"team", "team-1"}, {"team_name", "Checkout"}, {"kind", "team_paused"},
+                             {"since", now - 600}, {"title", "Team paused since 09:12 by You: members get no tasks"}, {"action", "resume_team"},
+                             {"paused_by", "You"}, {"paused_at", now - 600}};
+    QVERIFY(writeWaiting(script() + ".waiting", QJsonArray{paused}));
+    HgsClient client(FakeCli::program(script()));
+    TeamController controller(&client);
+    TeamWaitingPage page(&controller);
+    page.resize(980, 520); page.show();
+    WAIT_VERIFY(page.findChild<QPushButton *>("teamWaitingResumeTeam"));
+    QCOMPARE(TeamWaitingPage::kindLabel("team_paused"), QStringLiteral("Team paused"));
+    page.findChild<QPushButton *>("teamWaitingResumeTeam")->click();
+    QTRY_COMPARE(calls(script(), "resume").size(), 1);
+    QCOMPARE(calls(script(), "resume").first()["team"].toString(), QStringLiteral("team-1"));
+    TeamWaitingNotices notices;
+    QVERIFY(notices.observe({{paused["id"].toString(), "team-1", "Checkout", "team_paused", paused["title"].toString()}}, {}, true).isEmpty());
+    QVERIFY(notices.known(paused["id"].toString()));
+    // Resume team decides it: the item leaves at once.
+    QList<TeamWaitingPage::Item> all{TeamWaitingPage::parse(paused)};
+    QCOMPARE(TeamWaitingFeed::decidedIds(all, "team-1", "resume", {}), QStringList{paused["id"].toString()});
+    QVERIFY(TeamWaitingFeed::decidedIds(all, "team-2", "resume", {}).isEmpty());
 }
 
 #include "test_teamsui_waiting.moc"

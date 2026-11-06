@@ -454,6 +454,7 @@ export function decidedWaiting(items: readonly TeamWaitingItem[], call: Pick<Tea
       case "approve": return item.kind === "phase_draft" && (phase > 0 ? fields.phase === phase : true);
       case "accept_phase": case "send_back_phase": return item.kind === "phase_acceptance" && phase > 0 && fields.phase === phase;
       case "release": return item.kind === "task_waits_owner" && task > 0 && fields.task === task;
+      case "resume": return item.kind === "team_paused";   // task 112
       case "accept": case "reject": case "send_back": return item.action === "decide_report" && task > 0 && fields.task === task;
       default: return false;
     }
@@ -462,6 +463,9 @@ export function decidedWaiting(items: readonly TeamWaitingItem[], call: Pick<Tea
 
 /** Task 108/109: a drive low on space; its row opens Settings > Build folders. */
 export const opensDisk = (item: Pick<TeamWaitingItem, "action">) => item.action === "open_disk";
+
+/** Task 112: a paused team's item resumes the team from Waiting for you. */
+export const resumesTeam = (item: Pick<TeamWaitingItem, "action">) => item.action === "resume_team";
 
 /** The item's kind in words. */
 export function waitingKindLabel(item: Pick<TeamWaitingItem, "kind" | "action">): string {
@@ -481,6 +485,7 @@ export function waitingKindLabel(item: Pick<TeamWaitingItem, "kind" | "action">)
     case "lead_stalled": return tr("Lead stalled");
     case "deferred": return tr("Deferred");
     case "disk_low": return tr("Disk space");
+    case "team_paused": return tr("Team paused");
     default: return item.kind;
   }
 }
@@ -500,6 +505,7 @@ export function waitingKindIcon(kind: string): string {
     case "lead_stalled": return "triangle-alert";
     case "deferred": return "clock";
     case "disk_low": return "hard-drive";
+    case "team_paused": return "pause";
     default: return "triangle-alert";
   }
 }

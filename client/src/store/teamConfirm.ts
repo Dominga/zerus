@@ -23,7 +23,9 @@ export function confirmButtons(confirmation: TeamConfirmation): ConfirmButton[] 
 
 /** A choice's buttons: its answers in order, Cancel last and focused. */
 export function choiceButtons(choice: TeamChoice): ConfirmButton[] {
-  return [...choice.choices.map((answer) => ({ id: answer.id, text: answer.text, danger: !!answer.danger, initial: false })), cancelButton()];
+  const focused = choice.choices.some((answer) => answer.id === choice.initial);
+  return [...choice.choices.map((answer) => ({ id: answer.id, text: answer.text, danger: !!answer.danger, initial: answer.id === choice.initial })),
+    { ...cancelButton(), initial: !focused }];
 }
 
 export function createConfirmer() {

@@ -750,3 +750,55 @@ fn a_proposal_into_a_done_phase_is_refused() {
     assert!(error.contains("Phase 1 is closed (done)") && error.contains("extend"), "{error}");
     assert!(team.proposals.is_empty());
 }
+
+/// Task 112 (owner, 2026-11-06: "I paused it in the morning, unpaused it in
+/// the afternoon, but Zerus still thinks it is paused"): a pause says since
+/// when and by whom wherever it shows (status, Waiting for you, the sessions'
+/// state, the lead's inbox) and leaves with the team's Resume; a team paused
+/// before this record reads it from its pause event.
+#[test]
+fn a_paused_team_says_since_when_and_by_whom_and_resume_team_ends_it() {
+    let dir = tempfile::tempdir().unwrap();
+    crate::state::with_test_state_root(dir.path(), || {
+        let mut store = Store::open(true).unwrap();
+        let mut team = running_team();
+        team.tasks.push(Task { id: 2, title: "Integrate".into(), assignee: "dev".into(), status: TaskStatus::Pending, ..Default::default() });
+        store.create("11111111-1111-4111-8111-111111111111", &json!({}), team, vec![]).unwrap();
+        store.mutate(None, "t", None, |team, events| ops::apply(team, "pause", &json!({}), &Actor::Human, &BTreeSet::new(), events)).unwrap();
+        let saved = store.load("t").unwrap().unwrap();
+        let pause = saved.paused.clone().expect("the pause is recorded");
+        assert_eq!((pause.by.as_str(), pause.reason.as_str()), ("You", "paused"));
+        // Status carries it; Waiting for you lists it with Resume team, unnotified by kind.
+        let status = run("status", &json!({"team":"t"}), false).unwrap();
+        assert_eq!(status["paused"]["by"], "You", "{}", status["paused"]);
+        let waiting = run("waiting", &json!({}), false).unwrap();
+        let item = waiting["items"].as_array().unwrap().iter().find(|item| item["kind"] == "team_paused").cloned().expect("listed");
+        assert_eq!(item["action"], "resume_team");
+        let title = item["title"].as_str().unwrap();
+        assert!(title.starts_with("Team paused since ") && title.contains(" by You: members get no tasks"), "{title}");
+        // The sessions' state reason says so too.
+        let reasons: Vec<String> = super::super::waiting::reasons(std::slice::from_ref(&saved), 0.0)
+            .into_iter()
+            .filter_map(|waiting| waiting.reason.map(|reason| reason.to_string()))
+            .collect();
+        assert!(!reasons.is_empty() && reasons.iter().all(|reason| reason.contains("paused since") && reason.contains("members get no tasks")), "{reasons:?}");
+        // The lead is told once that hand-outs wait for the team's Resume.
+        let inbox = run("inbox", &json!({"team":"t","by":"human"}), false).unwrap();
+        let told: Vec<&Value> = inbox["items"].as_array().unwrap().iter().filter(|item| item["kind"] == "team_paused").collect();
+        assert_eq!(told.len(), 1, "{inbox}");
+        let line = told[0]["summary"].as_str().unwrap();
+        assert!(line.contains("The team is paused since") && line.contains("by You") && line.contains("#2"), "{line}");
+        // Resume team ends it everywhere.
+        store.mutate(None, "t", None, |team, events| ops::apply(team, "resume", &json!({}), &Actor::Human, &BTreeSet::new(), events)).unwrap();
+        assert!(store.load("t").unwrap().unwrap().paused.is_none());
+        let waiting = run("waiting", &json!({}), false).unwrap();
+        assert!(!waiting.to_string().contains("team_paused"), "{waiting}");
+        // A team paused before the record reads it from its pause event.
+        store.mutate(None, "t", None, |team, events| ops::apply(team, "pause", &json!({}), &Actor::Member("lead".into()), &BTreeSet::new(), events)).unwrap();
+        store.mutate(None, "t", None, |team, _| { team.paused = None; Ok(Value::Null) }).unwrap();
+        assert!(store.load("t").unwrap().unwrap().paused.is_none(), "kept only while paused, and dropped here by hand");
+        let status = run("status", &json!({"team":"t"}), false).unwrap();
+        assert_eq!(status["paused"]["by"], "Lead", "{}", status["paused"]);
+        assert!(status["paused"]["at"].as_f64().unwrap() > 0.0);
+    });
+}

@@ -685,7 +685,10 @@ fn plan(team: &mut Team, input: &Value, actor: &Actor, events: &mut Vec<Event>) 
 
 fn set_status(team: &mut Team, status: TeamStatus, kind: &'static str, actor: &Actor, events: &mut Vec<Event>) -> Value {
     team.status = status;
-    events.push(Event::new(kind, json!({"by":actor.label(team)})));
+    let by = actor.label(team);
+    // Task 112: a pause says since when and by whom; any other status ends it.
+    team.paused = (status == TeamStatus::Paused).then(|| TeamPause { at: now(), by: by.clone(), reason: kind.into() });
+    events.push(Event::new(kind, json!({"by":by})));
     json!({"status":kind})
 }
 
@@ -4485,6 +4488,7 @@ fn finding(team: &mut Team, input: &Value, actor: &Actor, offline: &BTreeSet<Str
             proposal = clean(text(input, "proposal").trim(), 4000, "A proposal")?;
             ensure!(!proposal.is_empty(), "A replan carries the owner's proposal");
             team.status = TeamStatus::Paused;
+            team.paused = Some(TeamPause { at: now(), by: actor.label(team), reason: "replan".into() });
             events.push(Event::new("replan_proposed", json!({"by":actor.label(team),"finding":id,"proposal":proposal})));
             "replan"
         }

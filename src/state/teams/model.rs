@@ -2380,6 +2380,24 @@ pub(crate) struct Team {
     /// hourly, until the lead moves.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub lead_stall: Option<LeadStall>,
+    /// Task 112 (owner, 2026-11-06: "I paused it in the morning, unpaused it
+    /// in the afternoon, but Zerus still thinks it is paused"): when the team
+    /// was paused, by whom and why; only while it is paused.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub paused: Option<TeamPause>,
+}
+
+/// Task 112: the pause of a team, as the team bar, Waiting for you and the
+/// lead's inbox name it.
+#[derive(Clone, Debug, Default, Deserialize, Serialize, PartialEq)]
+pub(crate) struct TeamPause {
+    pub at: f64,
+    /// "You", "Lead" or another actor's label.
+    #[serde(default)]
+    pub by: String,
+    /// "paused", or "replan" when a replan paused it.
+    #[serde(default)]
+    pub reason: String,
 }
 
 /// Task 95 (owner, 2026-11-06): the lead stopped working while decisions wait

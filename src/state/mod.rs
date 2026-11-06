@@ -33,6 +33,7 @@ mod external_agents;
 mod fork;
 mod goals;
 mod hooks;
+mod heartbeat;
 mod command_guard;
 pub(crate) mod hook_health;
 mod input;

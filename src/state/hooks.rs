@@ -1322,6 +1322,13 @@ fn track(name: String, token: String, mut event: Value, output: &mut impl std::i
     let sid = session.as_str();
     let kind_value = string(&event, "hook_event_name").to_owned();
     let kind = kind_value.as_str();
+    if kind == "SessionHeartbeat" {
+        // Task 121: the heartbeat's whole effect is the session's last activity;
+        // it is a fast append that never waits on the state lock (Kimi stops a
+        // hook after 5 s, and a slow store under a delivery's lock outlived it).
+        super::heartbeat::observed(&token);
+        return Ok(0);
+    }
     if let Some(refusal) = command_refusal(&event, &home().to_string_lossy()) {
         eprintln!("{} [{}]", refusal.message, refusal.rule);
         return Ok(2);
@@ -2902,5 +2909,46 @@ mod tests {
         fs::remove_file(&claude).unwrap();
         assert_eq!(launch().registered_version(&program), None);
         assert_eq!(asked(), 4);
+    }
+
+    /// Task 121: the heartbeat hook is a fast append. While another delivery
+    /// holds the state lock (a slow store), the heartbeat still finishes at
+    /// once and its time reaches the record on the next read.
+    #[test]
+    fn a_heartbeat_never_waits_on_the_state_lock() {
+        let _env = super::super::ENV_LOCK.lock().unwrap();
+        let dir = std::env::temp_dir().join(format!("hgs-heartbeat-hook-{}", std::process::id()));
+        let _ = fs::remove_dir_all(&dir);
+        fs::create_dir_all(&dir).unwrap();
+        std::env::set_var("HGS_STATE_DIR", &dir);
+        std::env::set_var("HGS_SESSION", "kimi/p/lead");
+        std::env::set_var("HGS_RUN_ID", "run-heartbeat");
+        super::super::storage::set_test_root(None);
+        let held = lock(None).unwrap();
+        let started = std::time::Instant::now();
+        let (sender, receiver) = std::sync::mpsc::channel();
+        std::thread::spawn(move || {
+            let mut output = Vec::new();
+            let event = json!({"hook_event_name":"SessionHeartbeat","session_id":"s","agent_id":"main"});
+            let result = track("kimi/p/lead".into(), "run-heartbeat".into(), event, &mut output);
+            let _ = sender.send(result);
+        });
+        let result = receiver
+            .recv_timeout(std::time::Duration::from_secs(1))
+            .expect("the heartbeat hook waited on the state lock");
+        assert_eq!(result, Ok(0));
+        assert!(started.elapsed() < std::time::Duration::from_secs(1));
+        drop(held);
+        let beat = super::super::storage::root().join("heartbeats").join("run-heartbeat.json");
+        let beat: Value = serde_json::from_slice(&fs::read(&beat).unwrap()).unwrap();
+        assert_eq!(beat["run_id"], "run-heartbeat");
+        // The next read folds it into the run's record, as the old write did.
+        let mut record = json!({"run_id":"run-heartbeat","last_event_at":1.0});
+        super::super::heartbeat::apply(&mut record);
+        assert!(record["last_event_at"].as_f64().unwrap() > 1.0);
+        std::env::remove_var("HGS_STATE_DIR");
+        std::env::remove_var("HGS_SESSION");
+        std::env::remove_var("HGS_RUN_ID");
+        let _ = fs::remove_dir_all(&dir);
     }
 }

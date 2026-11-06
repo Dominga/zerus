@@ -112,12 +112,19 @@ fn db(config: &Config, write: bool) -> anyhow::Result<Option<Connection>> {
         return Ok(None);
     }
     if write {
-        platform::private_dir(&directory)?;
+        // Owner-only at creation; an existing owned folder that only inherits
+        // a sandbox group's read ACE is made private in place (#569).
+        platform::owner_only_dir(&directory)?;
+        ensure!(
+            crate::private_stores::ensure(&directory, platform::Private::Directory)?,
+            "External directory must be private, owned and not redirected"
+        );
+    } else {
+        ensure!(
+            platform::verify_private(&directory, platform::Private::Directory)?,
+            "External directory must be private, owned and not redirected"
+        );
     }
-    ensure!(
-        platform::verify_private(&directory, platform::Private::Directory)?,
-        "External directory must be private, owned and not redirected"
-    );
     // macOS /var and /tmp are system ancestor aliases. Resolve only the
     // already verified private directory, never the database leaf. SQLite's
     // NOFOLLOW then still protects the exact regular private database file.

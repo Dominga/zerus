@@ -564,3 +564,75 @@ fn copied_loose_modes_links_and_other_configuration_are_refused() {
     fs::copy(&db, other_dir.join("index.sqlite3")).unwrap();
     assert!(Store::open(&other_dir).is_err());
 }
+
+/// The Codex sandbox setup leaves an inherited read ACE for its group on the
+/// profile, so a folder under ~/.local made by inheritance is not private:
+/// the index used to be refused before its database was ever created. The
+/// store now creates it owner-only or repairs an existing Zerus-owned one in
+/// place, and both leave the parent's ACL (which still carries the group ACE)
+/// alone.
+#[test]
+fn the_index_builds_under_a_parent_that_grants_a_sandbox_group_read() {
+    let temp = tempfile::tempdir().unwrap();
+    let root = temp.path().join("state");
+    fs::create_dir(&root).unwrap();
+    #[cfg(windows)]
+    {
+        use std::process::{Command, Stdio};
+        // As the Codex sandbox installer leaves it: Authenticated Users and an
+        // extra group may read and traverse every entry below.
+        for grant in ["*S-1-5-11:(OI)(CI)RX", "*S-1-5-32-545:(OI)(CI)RX"] {
+            let granted = Command::new("icacls")
+                .arg(&root)
+                .args(["/grant", grant, "/Q"])
+                .stdout(Stdio::null())
+                .status()
+                .unwrap();
+            assert!(granted.success(), "icacls {grant}");
+        }
+    }
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::PermissionsExt;
+        fs::set_permissions(&root, fs::Permissions::from_mode(0o755)).unwrap();
+    }
+    crate::state::with_test_state_root(&root, || {
+        // The folder an earlier failed attempt left: made by inheritance alone,
+        // so the strict check refuses it.
+        let inherited = root.join("content-search-v1");
+        fs::create_dir(&inherited).unwrap();
+        #[cfg(windows)]
+        assert!(
+            !crate::platform::verify_private(&inherited, crate::platform::Private::Directory)
+                .unwrap(),
+            "the inherited sandbox ACE is refused by the check"
+        );
+        let store = Store::open(&inherited).unwrap();
+        assert!(
+            crate::platform::verify_private(&inherited, crate::platform::Private::Directory)
+                .unwrap(),
+            "the owned folder is repaired in place"
+        );
+        let db = inherited.join("index.sqlite3");
+        assert!(db.is_file(), "the index is created");
+        assert!(
+            crate::platform::verify_private(&db, crate::platform::Private::File).unwrap(),
+            "the index file inherits only this user"
+        );
+        drop(store);
+        // The parent keeps the sandbox group's ACE: only the store's own folder
+        // was repaired.
+        assert!(
+            !crate::platform::verify_private(&root, crate::platform::Private::Directory).unwrap(),
+            "the parent's ACL is never touched"
+        );
+        // A fresh folder is created owner-only under the same open parent.
+        let fresh = root.join("content-search-v2");
+        let store = Store::open(&fresh).unwrap();
+        assert!(
+            crate::platform::verify_private(&fresh, crate::platform::Private::Directory).unwrap()
+        );
+        assert!(fresh.join("index.sqlite3").is_file());
+        drop(store);
+    });
+}

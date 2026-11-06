@@ -203,6 +203,7 @@ impl Store {
                     kind TEXT NOT NULL,payload TEXT NOT NULL);
                 CREATE INDEX IF NOT EXISTS events_team ON events(team,seq);
                 CREATE INDEX IF NOT EXISTS events_team_kind_at ON events(team,kind,at);
+                CREATE INDEX IF NOT EXISTS events_team_phase_kind_at ON events(team,json_extract(payload,'$.phase'),kind,at);
                 CREATE TABLE IF NOT EXISTS team_task_archive(team TEXT NOT NULL,task INTEGER NOT NULL,
                     phase INTEGER NOT NULL,status TEXT NOT NULL,stub TEXT NOT NULL,payload TEXT NOT NULL,PRIMARY KEY(team,task));
                 CREATE INDEX IF NOT EXISTS team_task_archive_phase ON team_task_archive(team,phase,task);
@@ -527,9 +528,9 @@ impl Store {
         let at = now();
         team.revision += 1;
         team.updated = at;
+        append(&transaction, team_id, at, &events).map_err(write_error)?;
         archive_closed(&transaction, &mut team).map_err(write_error)?;
         write(&transaction, &team).map_err(write_error)?;
-        append(&transaction, team_id, at, &events).map_err(write_error)?;
         if receipt.is_object() {
             receipt["team"] = json!(team_id);
             receipt["revision"] = json!(team.revision);
@@ -681,7 +682,12 @@ fn archive_closed(transaction: &rusqlite::Transaction, team: &mut Team) -> anyho
                 accepted: tasks.iter().filter(|task| task.status == super::model::TaskStatus::Accepted).count(),
                 rejected: tasks.iter().filter(|task| task.status == super::model::TaskStatus::Rejected).count(),
                 cancelled: tasks.iter().filter(|task| task.status == super::model::TaskStatus::Cancelled).count(),
-                closed_at: phase.decided_at.or_else(|| tasks.iter().filter_map(|task| task.archived.as_ref()?.accepted_at).max_by(f64::total_cmp)),
+                closed_at: if phase.acceptance.is_lead() {
+                    tasks.iter().filter_map(|task| task.archived.as_ref()?.accepted_at).max_by(f64::total_cmp)
+                } else {
+                    transaction.query_row("SELECT at FROM events WHERE team=?1 AND json_extract(payload,'$.phase')=?2 AND kind='phase_owner_accepted' ORDER BY at DESC LIMIT 1",
+                        params![team.id,n], |row| row.get(0)).optional()?
+                },
             });
             team.archive_totals.add(phase.archived.as_ref().unwrap());
             transaction.execute("INSERT INTO team_phase_archive(team,phase,header,payload) VALUES(?1,?2,?3,?4) ON CONFLICT(team,phase) DO UPDATE SET header=excluded.header,payload=excluded.payload",

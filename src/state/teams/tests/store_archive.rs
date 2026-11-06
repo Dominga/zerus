@@ -108,6 +108,7 @@ fn archive_rolls_back_and_waits_for_owner_acceptance() {
     let mut store = Store::open_at(&dir.path().join("teams.sqlite3"), true).unwrap();
     let mut team = legacy(50);
     team.phases[0].acceptance = PhaseAcceptance::Owner;
+    team.phases[0].decided_at = Some(0.5);
     insert(&store, &team);
     store.mutate(None, &team.id, None, |_, _| Ok(json!({}))).unwrap();
     assert!(store.load(&team.id).unwrap().unwrap().tasks[0].archived.is_none());
@@ -117,11 +118,14 @@ fn archive_rolls_back_and_waits_for_owner_acceptance() {
     });
     assert!(error.is_err());
     assert!(store.load(&team.id).unwrap().unwrap().tasks[0].archived.is_none());
-    store.mutate(None, &team.id, None, |team, _| {
+    store.mutate(None, &team.id, None, |team, events| {
         team.phases[0].state = PhaseState::Done;
+        events.push(Event::new("phase_owner_accepted", json!({"phase":1})));
         Ok(json!({}))
     }).unwrap();
-    assert!(store.load(&team.id).unwrap().unwrap().tasks[0].archived.is_some());
+    let archived = store.load(&team.id).unwrap().unwrap();
+    assert!(archived.tasks[0].archived.is_some());
+    assert!(archived.phases[0].archived.as_ref().unwrap().closed_at.unwrap() > 4.0);
     let request = json!({"task":1});
     store.mutate(Some(("11111111-1111-4111-8111-111111111111", &request)), &team.id, None, |team, _| {
         let task = team.task_mut(1).unwrap();
@@ -137,7 +141,8 @@ fn archive_rolls_back_and_waits_for_owner_acceptance() {
 fn archive_full_database_refuses_without_losing_the_live_record() {
     let dir = tempfile::tempdir().unwrap();
     let mut store = Store::open_at(&dir.path().join("teams.sqlite3"), true).unwrap();
-    let team = legacy(50);
+    let mut team = legacy(50);
+    team.phases[0].decided_at = Some(0.5);
     insert(&store, &team);
     let before: String = store.db.query_row("SELECT payload FROM teams WHERE id=?1", [&team.id], |row| row.get(0)).unwrap();
     let pages: i64 = store.db.pragma_query_value(None, "page_count", |row| row.get(0)).unwrap();
@@ -150,4 +155,7 @@ fn archive_full_database_refuses_without_losing_the_live_record() {
     let phases: i64 = store.db.query_row("SELECT count(*) FROM team_phase_archive", [], |row| row.get(0)).unwrap();
     assert_eq!((tasks, phases), (0, 0));
     assert_eq!(store.task(&team.id, 1).unwrap()["attempts"][0]["report"]["text"], "r".repeat(10_240));
+    store.db.pragma_update(None, "max_page_count", 262144).unwrap();
+    store.mutate(None, &team.id, None, |_, _| Ok(json!({}))).unwrap();
+    assert_eq!(store.load(&team.id).unwrap().unwrap().phases[0].archived.as_ref().unwrap().closed_at, Some(4.0));
 }

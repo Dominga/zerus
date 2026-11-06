@@ -8,6 +8,7 @@
 
 namespace {
 int pollInterval = 3000;
+int readTimeout = 0;
 // #706: reads change nothing, so their answers ask for no new poll (the
 // waiting list's every 30 s, the profile and heat reads).
 bool readOnly(const QString &operation)
@@ -19,6 +20,23 @@ bool readOnly(const QString &operation)
 }
 
 void TeamController::setPollInterval(int milliseconds) { pollInterval = milliseconds; }
+void TeamController::setReadTimeout(int milliseconds) { readTimeout = milliseconds; }
+
+void TeamController::markStale(QString &slot, const QString &error)
+{
+    const QString words = error.trimmed().isEmpty() ? tr("The read failed") : error.trimmed().left(300);
+    if (slot == words) return;
+    slot = words;
+    emit staleChanged();
+}
+
+void TeamController::markFresh(QString &slot, QDateTime &readAt)
+{
+    readAt = QDateTime::currentDateTime();
+    if (slot.isEmpty()) return;
+    slot.clear();
+    emit staleChanged();
+}
 
 TeamController::TeamController(HgsClient *client, QObject *parent) : QObject(parent), m_client(client)
 {
@@ -42,7 +60,7 @@ void TeamController::setActive(bool active)
 
 void TeamController::refresh()
 {
-    if (!m_listRequest) m_listRequest = m_client->requestTeam({}, QStringLiteral("list"), {{"include_cancelled", true}});
+    if (!m_listRequest) m_listRequest = m_client->requestTeam({}, QStringLiteral("list"), {{"include_cancelled", true}}, readTimeout);
     readWatched();
     if ((m_watchCatalog || m_watchCatalogPage) && !m_catalogInFlight) refreshCatalog();
 }
@@ -51,7 +69,7 @@ void TeamController::refresh()
 void TeamController::refreshInbox()
 {
     if (m_watch.isEmpty() || m_inboxRequest) return;
-    m_inboxRequest = m_client->requestTeam({}, QStringLiteral("inbox"), {{"team", m_watch}});
+    m_inboxRequest = m_client->requestTeam({}, QStringLiteral("inbox"), {{"team", m_watch}}, readTimeout);
 }
 
 void TeamController::readWatched()
@@ -60,8 +78,8 @@ void TeamController::readWatched()
     // A read asked for while one is in flight is made once that one answers:
     // the answer in flight may predate the change this read is for.
     if (m_statusRequest) m_statusAgain = true;
-    else m_statusRequest = m_client->requestTeam({}, QStringLiteral("status"), {{"team", m_watch}, {"include_cancelled", true}});
-    if (!m_feedRequest) m_feedRequest = m_client->requestTeam({}, QStringLiteral("events"), {{"team", m_watch}});
+    else m_statusRequest = m_client->requestTeam({}, QStringLiteral("status"), {{"team", m_watch}, {"include_cancelled", true}}, readTimeout);
+    if (!m_feedRequest) m_feedRequest = m_client->requestTeam({}, QStringLiteral("events"), {{"team", m_watch}}, readTimeout);
     if (!m_inboxRequest) refreshInbox();
 }
 
@@ -97,6 +115,8 @@ void TeamController::watch(const QString &team)
     m_watched = {}; m_lastStatus = {}; m_watchedShape.clear(); m_inboxShape.clear();
     m_feed.clear(); m_feedCursor = QJsonValue();
     m_statusRequest = m_feedRequest = m_olderRequest = 0; m_statusAgain = false;
+    // Another team's status has not failed yet.
+    if (!m_statusError.isEmpty()) { m_statusError.clear(); emit staleChanged(); }
     m_inbox.clear(); m_lastInbox = {}; m_inboxRequest = 0;
     emit watchedChanged(); emit feedChanged(); emit inboxChanged();
     readWatched();
@@ -256,6 +276,7 @@ void TeamController::received(quint64 request, const QString &operation, const Q
         m_listRequest = 0;
         const bool first = !m_available;
         m_available = true;
+        markFresh(m_listError, m_listReadAt);
         if (result == m_lastList) return;
         m_lastList = result;
         m_teams = Teams::parseList(result);
@@ -276,6 +297,7 @@ void TeamController::received(quint64 request, const QString &operation, const Q
     } else if (request == m_statusRequest) {
         m_statusRequest = 0;
         if (std::exchange(m_statusAgain, false)) QTimer::singleShot(0, this, &TeamController::readWatched);
+        if (result.value("id").toString() == m_watch) markFresh(m_statusError, m_statusReadAt);
         const auto team = Teams::parse(result);
         if (team.id != m_watch || (result == m_lastStatus && m_watched.id == m_watch)) return;
         m_lastStatus = result;
@@ -322,10 +344,15 @@ void TeamController::failed(quint64 request, const QString &operation, const QSt
     }
     if (request == m_listRequest) {
         m_listRequest = 0;
-        // No teams yet (or an hgs without them): nothing to show.
-        if (m_available || !m_teams.isEmpty()) { m_teams.clear(); m_lastList = {}; m_listShapes.clear(); m_listOrder.clear(); emit teamsChanged(); }
-        m_available = false;
-    } else if (request == m_statusRequest) { m_statusRequest = 0; m_statusAgain = false; }
+        // Task 101: a failed or late read is no answer. The last good list
+        // stays, so every session keeps its team; it is marked stale until a
+        // read answers again. Without a good list yet (no teams, or an hgs
+        // without them) there is nothing to show.
+        if (m_available) markStale(m_listError, error);
+    } else if (request == m_statusRequest) {
+        m_statusRequest = 0; m_statusAgain = false;
+        if (m_watched.id == m_watch && !m_watch.isEmpty()) markStale(m_statusError, error);
+    }
     else if (request == m_inboxRequest) m_inboxRequest = 0;
     else if (request == m_feedRequest) m_feedRequest = 0;
     else if (request == m_olderRequest) m_olderRequest = 0;

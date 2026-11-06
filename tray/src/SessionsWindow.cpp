@@ -1809,6 +1809,8 @@ SessionsWindow::SessionsWindow(const QString &hgsPath, QWidget *parent)
     // once each; the known ones are kept across restarts.
     m_teamNotices=std::make_shared<TeamAttentionNotices>(Settings::value("teams/attentionNotified").toStringList());
     connect(m_teams,&TeamController::watchedChanged,this,[this]{updateProposalCards();});
+    // Task 101: a failed read keeps the team; its strip says it is stale.
+    connect(m_teams,&TeamController::staleChanged,this,[this]{updateTeamPanel();});
     connect(m_teams,&TeamController::teamsChanged,this,[this]{
         const SlowEventLog::Scope scope(this,"teams changed");
         // U25 (spec 2.3): members other than the lead are muted by default.
@@ -7583,7 +7585,14 @@ void SessionsWindow::updateTeamPanel()
                     Q_UNUSED(attempt);break;
                 }
             }
+            // Task 101: the last good read stays while hgs does not answer.
+            if(m_teams->stale()){
+                const auto at=m_teams->lastGoodRead();
+                text+=tr(" · <span style='color:%1;'>not refreshed since %2</span>").arg(m_dark?QStringLiteral("#d6b25e"):QStringLiteral("#8a6414"),
+                    at.isValid()?at.time().toString(QStringLiteral("HH:mm:ss")):tr("earlier"));
+            }
             m_teamStripText->setText(text);
+            m_teamStripText->setToolTip(m_teams->stale()?m_teams->staleError():QString());
             QColor fill(m_accent);fill.setAlphaF(m_dark?.10:.07);
             m_teamStrip->setStyleSheet(QStringLiteral("QFrame#teamStrip{background:%1;border:1px solid %2;border-radius:8px;} QPushButton#teamStripOpen{color:%3;border:none;background:transparent;}")
                 .arg(fill.name(QColor::HexArgb),[this]{QColor edge(m_accent);edge.setAlphaF(.45);return edge.name(QColor::HexArgb);}(),m_accent));

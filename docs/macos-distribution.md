@@ -251,10 +251,18 @@ this forwarding even for environment secrets; without it their values are empty.
 The values remain in the main-only `macos-signing` environment and are resolved
 only by the signing job. The callers never use `secrets: inherit`. See
 [GitHub's reusable workflow secret rules](https://docs.github.com/en/actions/how-tos/reuse-automations/reuse-workflows#using-inputs-and-secrets-in-a-reusable-workflow).
-The same three stages remain required. Stable/Nightly start them after full
-verification. Dev overlaps only the credential-free bundle with its core gate;
-`macos-cask.yml` reuses that exact run's checked artifact and waits for both before
-signing. An unsigned version from another Dev run is refused before key import.
+The same three stages remain required. Stable and Dev overlap only the
+credential-free unsigned bundle with their required qualification gates;
+Nightly starts its bundle after full verification. Stable signing still waits for
+the full platform matrix, and Dev signing for its package gate. `macos-cask.yml`
+reuses only that exact run's SHA-named checked artifact and verifies its channel,
+event and version before key import. Stable reuse requires the manual candidate's
+`VERSION`; Dev reuse requires that push's exact numbered version. Signing and
+notarization stay main-only in `macos-signing`, without build caches. The unsigned
+build occupies one of the shared macOS runner slots (typically five), so queued
+Mac verification jobs must be included when comparing end-to-end timings.
+Stable cask installation overlaps final binary assembly; the candidate is sealed
+only after both succeed.
 The unsigned job builds the Release Tauri switch app with voice and video, then
 packages that same output for all channels:
 

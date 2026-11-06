@@ -103,14 +103,26 @@ jobs:
       # Stable releases carry the tested portable zip, as nightlies do.
       run_windows: true
       run_ios: true
+  macos-unsigned:
+    # Only this credential-free build overlaps verification. Signing still
+    # waits for the complete matrix and this exact run's checked bundle.
+    if: inputs.macos_cask && vars.MACOS_CASKS_ENABLED == 'true'
+    needs: version
+    uses: ./.github/workflows/macos-bundle.yml
+    with:
+      channel: stable
   macos:
     # Homebrew casks start once the macos-signing environment is provisioned; see
     # docs/macos-distribution.md. macos_cask=false skips the cask for one release.
-    if: inputs.macos_cask && vars.MACOS_CASKS_ENABLED == 'true'
-    needs: verify
+    if: >-
+      !cancelled() && needs.verify.result == 'success' && needs.macos-unsigned.result == 'success' &&
+      inputs.macos_cask && vars.MACOS_CASKS_ENABLED == 'true'
+    needs: [verify, macos-unsigned]
     uses: ./.github/workflows/macos-cask.yml
     with:
       channel: stable
+      reuse_unsigned: true
+      unsigned_release: ${{ needs.macos-unsigned.outputs.release }}
       verify_installation: false
     secrets:
       MACOS_DEVELOPER_ID_P12: ${{ secrets.MACOS_DEVELOPER_ID_P12 }}

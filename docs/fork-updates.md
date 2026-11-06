@@ -245,14 +245,16 @@ Carried over: theme, language, scale and the other workspace settings,
 notifications, processes, downloads, update channel, keyboard shortcuts,
 recovery policy, speech settings (not the microphone), new-session choices,
 window geometry and splitters, machine and project colours, collapsed rows,
-the composer drafts, the account list, and the inspector width, visibility,
+the composer drafts, the account list, the inspector width, visibility,
 tab and folded cards (`workspace/inspectorWidth`, `workspace/inspectorOpen`,
-`workspace/inspectorTab`, `workspace/inspectorClosed`).
+`workspace/inspectorTab`, `workspace/inspectorClosed`), and the WhiteWh skin
+(`workspace/skin`: Tauri ports it as `whitewh-dark` and `whitewh-light`).
 
 Not carried over, and why:
 
 - task title, new-card and note drafts (`tasks/titleDraft/*`, `tasks/newCard/*`,
-  `tasks/noteDraft/*`): the drafts import reads only composer drafts;
+  `tasks/noteDraft/*`): the Tauri task board keeps no draft fields, so there is
+  nowhere to put them; the owner loses only unsent board text;
 - the microphone choice (`speech/microphone`) and the new-session worktree
   choice (`launchWorktree`): the Tauri New session screen does not read either
   key yet;
@@ -260,12 +262,11 @@ Not carried over, and why:
   `ui/expanded/*`): Tauri keeps its own collapsed-row store, not Qt's keys;
 - automatic approvals: off after the move by design; turn them on again in
   Settings;
-- the WhiteWh skin (`workspace/skin`): Tauri skins exist, but the `whitewh`
-  skin asset itself was not ported;
 - the mobile relay switches (`mobile/localRelay`, `mobile/localRelayPort`,
   `mobile/runConnector`): the Tauri mobile connector has no settings screen;
 - the Teams UI preferences (`teams/*`, `team/*`, `ui/catalogHideUnusedRoles`):
-  the Tauri Teams screen has its own layout settings and no matching keys;
+  the Tauri Teams screen has no matching keys for heat mode, hide finished,
+  per-team plan mode or the catalog role filter, so those visible choices reset;
 - `machines/residentHost`, `machines/otherTransport`: the resident host and
   transport choice are not implemented in Tauri;
 - `socraticode/nativeQdrant`: SocratiCode/native Qdrant is not in Tauri;

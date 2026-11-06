@@ -238,6 +238,8 @@ pub const KEYS: &[Key] = &[
     // and the Overview column (design round 7).
     client("client/darkSkin", Kind::Text("zerus-dark")),
     client("client/lightSkin", Kind::Text("zerus-light")),
+    // WhiteWh fork's skin choice; Tauri ports it as whitewh-dark/whitewh-light.
+    key("workspace/skin", Kind::Text("zerus")),
     client(
         "client/overviewWidth",
         Kind::Whole {

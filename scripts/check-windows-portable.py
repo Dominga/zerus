@@ -115,6 +115,14 @@ def main():
                             and report.get("CFBundleIdentifier") == "com.hgdev.hgs-tray",
                             "Portable desktop is not the exact clean Tauri switch build.")
                     print("Tauri desktop build/source/switch identity matches the portable package.")
+                    # WhiteWh fork, task #65: hgs-tray.exe embeds the fork build
+                    # and feed build-info.json names.
+                    fork = manifest.get("fork")
+                    if fork is not None:
+                        require(report.get("forkBuild") == fork.get("build") and
+                                report.get("forkFeed", "") == fork.get("feed"),
+                                "Portable desktop does not embed the fork build and feed of build-info.json.")
+                        print(f"Fork build {fork.get('build')} and feed {fork.get('feed') or 'none'} are embedded.")
                 else:
                     report = run(tray, ["--selftest"], environment, base)
                     require(report.startswith("hgs ok: "), f"Unexpected hgs-tray --selftest output: {report}")

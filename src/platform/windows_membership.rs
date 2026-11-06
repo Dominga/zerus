@@ -133,7 +133,18 @@ const ACCESS_DENIED: i32 = 0xc0000022u32 as i32;
 
 /// One original budget across all growth attempts. A short/error response is
 /// never parsed as a partial table, including a census-wide access denial.
-fn table(until: Instant, mut query: impl FnMut(&mut [u64]) -> (i32, usize)) -> Result<Vec<u8>> {
+fn table(until: Instant, query: impl FnMut(&mut [u64]) -> (i32, usize)) -> Result<Vec<u8>> {
+    bounded_table(until, TableKind::Census, query)
+}
+enum TableKind {
+    Census,
+    ProcessHandles,
+}
+fn bounded_table(
+    until: Instant,
+    kind: TableKind,
+    mut query: impl FnMut(&mut [u64]) -> (i32, usize),
+) -> Result<Vec<u8>> {
     let mut capacity = 1 << 20;
     for _ in 0..MAX_QUERIES {
         live(until)?;
@@ -148,6 +159,11 @@ fn table(until: Instant, mut query: impl FnMut(&mut [u64]) -> (i32, usize)) -> R
             let bytes =
                 unsafe { std::slice::from_raw_parts(buffer.as_ptr().cast::<u8>(), returned) };
             return Ok(bytes.to_vec());
+        }
+        // Only the retained process's own native read can report this denial.
+        // A census-wide failure never supplies a per-process waiver.
+        if status == ACCESS_DENIED && matches!(kind, TableKind::ProcessHandles) {
+            return Err(Error::Denied);
         }
         if !matches!(status, LENGTH_MISMATCH | BUFFER_TOO_SMALL) {
             return Err(Error::Incomplete);
@@ -292,6 +308,7 @@ fn current_directory(
     Ok(Directory { utf16, handle })
 }
 
+mod handles;
 #[cfg(windows)]
 mod native;
 #[cfg(test)]

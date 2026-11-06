@@ -52,7 +52,10 @@ class Provider(http.server.BaseHTTPRequestHandler):
                  for part in item.get('content') or [] if isinstance(part, dict)]
         tools = offered((body.get('tools') or []) + [tool for item in items if item.get('type') == 'additional_tools'
                                                      for tool in item.get('tools') or []])
-        if self.server.collaboration and (texts[-1:] == [COLLAB_PROMPT]
+        # A server built without the collaboration controls (the input and
+        # startup contracts in test_codex_input_native share this Provider) is
+        # a plain one: the attribute is optional (zerus-0a51e.6).
+        if getattr(self.server, 'collaboration', False) and (texts[-1:] == [COLLAB_PROMPT]
                 or body.get('model') == 'gpt-6.1-sol' and 'send_message' in tools):
             return self.collaborate(body, items, texts, tools)
         answering = any(item.get('type') == 'function_call_output' and item.get('call_id') == CALL for item in items)

@@ -29,6 +29,7 @@ pub mod end_action;
 pub mod external_file;
 pub mod file_download;
 pub mod fleet;
+pub mod fork_update;
 pub mod fsx;
 pub mod input_queue;
 pub mod launch;

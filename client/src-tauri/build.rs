@@ -119,6 +119,10 @@ fn embed_identity() {
 
 fn main() {
     embed_identity();
+    // WhiteWh fork, task #63: the fork build number and feed the updater
+    // reads with option_env! (crate::fork_updates), as the Qt build embeds them.
+    println!("cargo:rerun-if-env-changed=ZERUS_FORK_BUILD");
+    println!("cargo:rerun-if-env-changed=ZERUS_FORK_FEED_URL");
     if std::env::var("CARGO_CFG_TARGET_OS").as_deref() == Ok("macos") {
         println!("cargo:rerun-if-changed=src/macos_notification_log.c");
         cc::Build::new()

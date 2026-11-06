@@ -69,6 +69,7 @@ import uuid
 
 import model_api_fixture as api
 import test_windows_host as host
+from codex_resume_diagnostics import ResumeDiagnostics
 
 TESTS = Path(__file__).resolve().parent
 EXE = ".exe" if os.name == "nt" else ""
@@ -283,6 +284,9 @@ class NativeAgent:
     def describe(self):
         """The screens, the listing, the host's log and the fake model's requests, for failure messages."""
         parts = []
+        diagnostic = getattr(self, 'resume_diagnostic', None)
+        if diagnostic is not None:
+            parts.append('original Codex resume evidence:\n' + diagnostic.finish(self.agent_home))
         for name in self.names:
             try:
                 parts.append(f"screen of {name}:\n{self.capture(name)}")
@@ -402,10 +406,30 @@ class NativeAgent:
             return second if first == second and composer else None
         return self.until(f"{name}'s composer", same)
 
+    def sample_resume(self):
+        diagnostic = getattr(self, 'resume_diagnostic', None)
+        if diagnostic is None:
+            return
+        def query(request):
+            try:
+                result = subprocess.run([str(self.hgs_exe), '__host', 'call', json.dumps(request)],
+                    env=self.env, cwd=self.work, stdin=subprocess.DEVNULL, capture_output=True,
+                    timeout=2, creationflags=host.HIDDEN)
+                if result.returncode == 0 and len(result.stdout) <= 64 * 1024:
+                    return json.loads(result.stdout).get('ok')
+            except (OSError, ValueError, subprocess.TimeoutExpired):
+                pass
+            return None
+        try:
+            diagnostic.sample(self.record(diagnostic.name), query)
+        except (OSError, ValueError):
+            pass  # Diagnostics never replace the original test assertion.
+
     def ready(self, name):
         """The listing row once the session takes a message: what hgs itself reports for a
         conversation the agent has yet to confirm, else idle with a settled composer."""
         def check():
+            self.sample_resume()
             row, state = self.row(name), self.inspect(name)
             if row.get("runtime_state") != "live" or state.get("pending_questions"):
                 return None
@@ -583,7 +607,10 @@ class NativeAgent:
                          dict(runtime_state="stopped", process_state="exited", resumable=True,
                               conversation_id=row["conversation_id"]))
         self.until("the paused agent to exit", lambda: not self.alive(*process))
+        if self.AGENT == 'codex':
+            self.resume_diagnostic = ResumeDiagnostics(name, record)
         self.hgs("resume", name, "-d")
+        self.sample_resume()
         self.until("the resumed session", lambda: (lambda row: row.get("runtime_state") == "live"
                                                    and row.get("run_id") != record["run_id"])(self.row(name)))
         self.pin_session(name)
@@ -1088,8 +1115,14 @@ class NativeWindowsCodex(NativeAgent, host.HostCase):
         self.assertEqual(self.inspect(name)["session_clear"]["type"], "SessionCleared")
 
     def test_pause_resume_and_terminate(self):
+        self.env['RUST_LOG'] = 'warn,codex_core::rollout=debug,codex_state=debug,codex_tui::session_resume=debug'
         name = self.launch("lifecycle", self.NO_HOOK_REVIEW)
-        self.check_lifecycle(name)
+        try:
+            self.check_lifecycle(name)
+        finally:
+            diagnostic = getattr(self, 'resume_diagnostic', None)
+            if diagnostic is not None:
+                print('ZERUS_CODEX_RESUME_EVIDENCE=' + diagnostic.finish(self.agent_home), flush=True)
 
     def test_input_keys_reach_codex_through_the_host(self):
         self.check_keys(self.launch("keys", self.NO_HOOK_REVIEW))

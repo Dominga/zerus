@@ -43,6 +43,25 @@ env = dict(os.environ, HOME=str(home), HGS_SELF=host, HGS_PEERS='',
 sys.exit(subprocess.run(['/bin/sh', '-c', command], env=env).returncode)
 '''
 
+FAKE_PROTECTED_CONNECTOR = r'''
+import json, os, pathlib, sys
+root = pathlib.Path(os.environ['MOBILE_FIXTURE'])
+action = sys.argv[2]
+json.load(sys.stdin)
+with (root / 'protected-calls').open('a') as log:
+    log.write(MODE + ':' + action + '\n')
+if MODE == 'stale':
+    print(json.dumps({'ok': False, 'error': 'stale sibling fixture'}))
+    sys.exit(1)
+if action == 'status':
+    print(json.dumps({'state': 'active', 'encrypted': True, 'server_url': 'https://relay.example.test',
+                      'workspace_id': 'fixture', 'workspace_name': 'Fixture', 'config_revision': 'a' * 64}))
+elif action == 'list-devices':
+    print(json.dumps({'devices': []}))
+else:
+    raise AssertionError(action)
+'''
+
 
 class MobilePhones(unittest.TestCase):
     def setUp(self):
@@ -87,6 +106,51 @@ class MobilePhones(unittest.TestCase):
         self.assertEqual(result.returncode, 1)
         self.assertIn("mobile connection", result.stderr)
         self.assertEqual(self.calls(), [])
+
+    @unittest.skipIf(os.name == 'nt', 'Unix executable fixtures; Windows runs the exact packaged UI trial')
+    def test_exact_packaged_connector_beats_a_stale_sibling_of_the_real_staged_cli(self):
+        stage, package = self.root / 'stage', self.root / 'package'
+        stage.mkdir()
+        package.mkdir()
+        staged = stage / 'hgs'
+        try:
+            os.link(HGS, staged)
+        except OSError:
+            shutil.copy2(HGS, staged)
+        selected = package / 'zerus-mobile-connector'
+        for directory, mode in [(stage, 'stale'), (package, 'selected')]:
+            program = directory / 'zerus-mobile-connector'
+            program.write_text('#!/usr/bin/env python3\nMODE=' + repr(mode) + '\n' + FAKE_PROTECTED_CONNECTOR)
+            program.chmod(0o755)
+        folder = self.config / 'mobile'
+        folder.mkdir()
+        (folder / 'connector.json').write_text(json.dumps(
+            {'server_url': 'https://relay.example.test', 'encrypted_workspace': {}}))
+        environment = dict(self.env, PATH=str(package) + os.pathsep + self.env['PATH'])
+        environment.pop('HGS_MOBILE_CONNECTOR', None)
+
+        def run():
+            return subprocess.run([str(staged), 'mobile', 'phones', '--json'], env=environment,
+                                  capture_output=True, text=True, timeout=15)
+
+        # Reproduce the actual competing-sibling refusal even with the package first on PATH.
+        old = run()
+        self.assertEqual(old.returncode, 1, old.stderr)
+        self.assertIn('stale sibling fixture', old.stderr)
+        calls = self.root / 'protected-calls'
+        self.assertEqual(calls.read_text().splitlines(), ['stale:status'])
+        calls.write_text('')
+        environment['HGS_MOBILE_CONNECTOR'] = str(selected)
+        current = run()
+        self.assertEqual(current.returncode, 0, current.stderr)
+        self.assertTrue(json.loads(current.stdout)['configured'])
+        self.assertEqual(calls.read_text().splitlines(), ['selected:status', 'selected:list-devices'])
+        calls.write_text('')
+        for bad in ['', 'relative-connector', str(package / 'missing-connector')]:
+            environment['HGS_MOBILE_CONNECTOR'] = bad
+            refused = run()
+            self.assertNotEqual(refused.returncode, 0)
+            self.assertEqual(calls.read_text(), '', 'invalid explicit selection must never fall back')
 
     def test_phones_come_from_the_relay_with_the_token_kept_off_the_command_line(self):
         self.connect()

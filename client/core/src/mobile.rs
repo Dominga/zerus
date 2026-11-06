@@ -129,61 +129,53 @@ pub fn connector_program(hgs: &Path, client_dir: Option<&Path>) -> PathBuf {
     found.or(bundled).unwrap_or_else(|| PathBuf::from(name))
 }
 
-/// The staged Windows CLI has no connector beside it. Its existing PATH
-/// fallback must see the same connector selected by the Mobile page. This is
-/// local child environment only; it neither changes the CLI nor reaches SSH peers.
-#[cfg(any(windows, test))]
-fn connector_search_path(connector: &Path, inherited: Option<&std::ffi::OsStr>) -> Option<String> {
-    let folder = connector.parent().filter(|p| p.is_absolute())?;
-    let mut paths = vec![folder.to_owned()];
-    if let Some(inherited) = inherited {
-        paths.extend(std::env::split_paths(inherited));
-    }
-    std::env::join_paths(paths).ok()?.into_string().ok()
-}
+/// Exact selection for a local nested CLI: PATH alone cannot override an old
+/// connector beside the staged hgs. Never send this local path to a peer.
+const CONNECTOR_ENV: &str = "HGS_MOBILE_CONNECTOR";
 
 #[cfg(any(windows, test))]
-fn phone_search_path(
-    hgs: &Path,
-    call: &Invocation,
-    directory: Option<&Path>,
-    inherited: Option<&std::ffi::OsStr>,
-) -> Option<String> {
+fn phone_connector(hgs: &Path, call: &Invocation, directory: Option<&Path>) -> Option<String> {
     if call.args.first().is_some_and(|arg| arg.starts_with('@')) {
         return None;
     }
-    connector_search_path(&connector_program(hgs, directory), inherited)
+    let selected = connector_program(hgs, directory);
+    selected
+        .is_absolute()
+        .then(|| selected.to_str().map(str::to_owned))
+        .flatten()
 }
 
 fn run_phone_cli(hgs: &Path, call: &Invocation, cap: usize) -> Result<Exit, crate::run::TooLarge> {
     #[cfg(windows)]
-    let search = {
+    let connector = {
         let directory = std::env::current_exe()
             .ok()
             .and_then(|p| p.parent().map(Path::to_path_buf));
-        phone_search_path(
-            hgs,
-            call,
-            directory.as_deref(),
-            std::env::var_os("PATH").as_deref(),
-        )
+        phone_connector(hgs, call, directory.as_deref())
     };
     #[cfg(not(windows))]
-    let search: Option<String> = None;
-    run_phone_cli_in(hgs, call, cap, search.as_deref())
+    let connector: Option<String> = None;
+    run_phone_cli_in(hgs, call, cap, connector.as_deref())
 }
 
 fn run_phone_cli_in(
     hgs: &Path,
     call: &Invocation,
     cap: usize,
-    search: Option<&str>,
+    connector: Option<&str>,
 ) -> Result<Exit, crate::run::TooLarge> {
-    let environment = search.map(|path| [("PATH", path)]);
-    crate::run::run_limited(
+    let environment = connector.map(|path| [(CONNECTOR_ENV, path)]);
+    // Also remove an inherited selection on remote reads/actions. The remote
+    // computer retains its own existing connector discovery.
+    crate::run::run_without(
         hgs,
         call,
         environment.as_ref().map_or(&[], |v| v.as_slice()),
+        if connector.is_some() {
+            &[]
+        } else {
+            &[CONNECTOR_ENV]
+        },
         cap,
     )
 }
@@ -813,13 +805,12 @@ pub fn phones(hgs: &Path, host: &str) -> Result<Option<PhoneList>, String> {
             .unwrap_or(error)
     };
     let probe_time = Duration::from_secs(if host.is_empty() { 5 } else { 15 });
-    let help = crate::run::run_limited(
+    let help = run_phone_cli(
         hgs,
         &Invocation {
             args: routed(host, &["--help"]),
             ..invocation(&[], probe_time)
         },
-        &[],
         HELP_BYTES,
     )
     .ok();

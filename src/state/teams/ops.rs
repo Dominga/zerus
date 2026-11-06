@@ -189,6 +189,9 @@ fn validate_settings(settings: &Settings) -> anyhow::Result<()> {
         "The blocked warning waits 60 to 86400 seconds"
     );
     // Section 9.2: the tree bounds are set on the master.
+    // Task 95: 0 turns the stalled-lead notice off; a day is the longest wait.
+    ensure!(settings.lead_stall_minutes <= 1440, "lead_stall_minutes is 0 (off) to 1440");
+    ensure!(settings.defer_minutes <= 1440, "defer_minutes is 0 (off) to 1440");
     ensure!((1..=8).contains(&settings.tree_depth), "A tree goes 1 to 8 levels below its master");
     ensure!((1..=200).contains(&settings.tree_sessions), "A tree runs 1 to 200 sessions");
     // U48: the task branch's name template gives a valid branch for any task.
@@ -682,7 +685,10 @@ fn plan(team: &mut Team, input: &Value, actor: &Actor, events: &mut Vec<Event>) 
 
 fn set_status(team: &mut Team, status: TeamStatus, kind: &'static str, actor: &Actor, events: &mut Vec<Event>) -> Value {
     team.status = status;
-    events.push(Event::new(kind, json!({"by":actor.label(team)})));
+    let by = actor.label(team);
+    // Task 112: a pause says since when and by whom; any other status ends it.
+    team.paused = (status == TeamStatus::Paused).then(|| TeamPause { at: now(), by: by.clone(), reason: kind.into() });
+    events.push(Event::new(kind, json!({"by":by})));
     json!({"status":kind})
 }
 
@@ -1033,7 +1039,7 @@ fn settings(team: &mut Team, input: &Value, actor: &Actor, events: &mut Vec<Even
 /// C4: the settings that decide who approves, how far a team may grow and
 /// what runs without the owner stay the owner's; the lead changes the rest.
 /// Spec 6.1 lets the lead set resume_after_limits too.
-pub(crate) const OWNER_SETTINGS: [&str; 22] = [
+pub(crate) const OWNER_SETTINGS: [&str; 24] = [
     "approval",
     "phase_approval",
     "max_members",
@@ -1045,6 +1051,10 @@ pub(crate) const OWNER_SETTINGS: [&str; 22] = [
     // N6 (U18): the lead cannot switch off the owner's escalations.
     "remind_owner_minutes",
     "remind_owner_permission_minutes",
+    // Task 95: nor the owner's word that the lead stalled.
+    "lead_stall_minutes",
+    // Task 97: nor when Zerus answers a prompt safely for the absent owner.
+    "defer_minutes",
     "work_ahead",
     // U48: a land stage may push, and a branch per task moves members' folders.
     "land_allowed",
@@ -1546,8 +1556,15 @@ fn add_to_phase(team: &mut Team, input: &Value, actor: &Actor, offline: &BTreeSe
     if let Some(record) = team.phases.iter().find(|phase| phase.n == n) {
         ensure!(!record.state.is_draft(), "Phase {n} is a draft: change it with edit-draft");
     }
-    let running = plan::phase_summary(team).iter().any(|phase| phase["n"].as_u64() == Some(u64::from(n)) && phase["state"] == "running");
-    ensure!(running, "Phase {n} is not running; add the task to a draft phase or extend the plan");
+    let summary = plan::phase_summary(team);
+    let state = summary.iter().find(|phase| phase["n"].as_u64() == Some(u64::from(n))).and_then(|phase| phase["state"].as_str()).unwrap_or_default();
+    // Task 111: a closed phase takes no task: its tasks are decided.
+    ensure!(
+        !matches!(state, "done" | "awaiting_acceptance" | "cancelled"),
+        "Phase {n} is closed ({}); propose the work in a new phase with extend instead",
+        state.replace('_', " ")
+    );
+    ensure!(state == "running", "Phase {n} is not running; add the task to a draft phase or extend the plan");
     let word = verified_word(input)?;
     ensure!(!actor.is_lead(team) || word.is_some(), "The lead adds a task to a running phase only on your word: propose {{\"kind\":\"add-to-phase\"}} as a card (hgs guide team-propose); the owner allows it with a click");
     let at = now();
@@ -4471,6 +4488,7 @@ fn finding(team: &mut Team, input: &Value, actor: &Actor, offline: &BTreeSet<Str
             proposal = clean(text(input, "proposal").trim(), 4000, "A proposal")?;
             ensure!(!proposal.is_empty(), "A replan carries the owner's proposal");
             team.status = TeamStatus::Paused;
+            team.paused = Some(TeamPause { at: now(), by: actor.label(team), reason: "replan".into() });
             events.push(Event::new("replan_proposed", json!({"by":actor.label(team),"finding":id,"proposal":proposal})));
             "replan"
         }
@@ -4927,20 +4945,10 @@ fn propose(team: &mut Team, input: &Value, actor: &Actor, events: &mut Vec<Event
     // parse, an unknown member or phase) is refused here, not left as a card
     // the owner cannot allow. A next goal and a question apply nothing; a
     // swap is checked by the swap itself when it runs.
-    if matches!(kind.as_str(), "add-member" | "remove-member" | "add-to-phase" | "cancel-tasks" | "discard-phase" | "switch-plan-mode" | "switch-setting") {
-        let mut trial = team.clone();
-        let mut ignored = Vec::new();
-        run_proposal(&mut trial, &kind, &member, &change, &mode, "", "", &BTreeSet::new(), &mut ignored)
-            .map_err(|error| anyhow::anyhow!("Allow could not apply this proposal: {error:#}"))?;
-    }
     // Task #21: an owner operation is tried as the owner's own request.
-    if OWNER_OPS.contains(&kind.as_str()) {
-        let mut trial = team.clone();
-        let mut value = change["input"].clone();
-        value["team"] = json!(team.id);
-        apply(&mut trial, &kind, &value, &Actor::Human, &BTreeSet::new(), &mut Vec::new())
-            .map_err(|error| anyhow::anyhow!("Allow could not apply this proposal: {error:#}"))?;
-    }
+    // Task 111: the same trial re-checks every open proposal when the plan
+    // changes (Store::mutate) and when it is read.
+    trial(team, &kind, &member, &change, &mode).map_err(|error| anyhow::anyhow!("Allow could not apply this proposal: {error:#}"))?;
     let id = format!("p{}", team.proposals.len() + 1);
     // N3: accepting the proposal runs the change under this one request id, so
     // a retried or interrupted decision replays it instead of running twice.
@@ -5003,6 +5011,11 @@ fn decide_proposal(team: &mut Team, input: &Value, actor: &Actor, offline: &BTre
         events.push(Event::new("proposal_decided", json!({"id":id,"accept":true,"kind":kind,"answer":answer})));
         return Ok(json!({"status":"answered","proposal":id,"answer":answer}));
     }
+    // Task 111: a proposal that can no longer apply is never run; the change
+    // that withdraws it reaches the store with the next team change.
+    if let Some(why) = inapplicable(team, &team.proposals[at]) {
+        bail!("This proposal can no longer apply ({why}); it is withdrawn and the lead is told why");
+    }
     let mode = team.proposals[at]["mode"].as_str().unwrap_or_default().to_owned();
     let reason_of = team.proposals[at]["reason"].as_str().unwrap_or_default().to_owned();
     let result = run_proposal(team, &kind, &member, &change, &mode, &id, &reason_of, offline, events)?;
@@ -5011,6 +5024,83 @@ fn decide_proposal(team: &mut Team, input: &Value, actor: &Actor, offline: &BTre
     team.proposals[at]["note"] = json!(reason);
     events.push(Event::new("proposal_decided", json!({"id":id,"accept":true,"kind":kind})));
     Ok(json!({"status":"accepted","proposal":id,"result":result}))
+}
+
+/// #740 / task 111: runs a proposal's change on a copy of the team, by the
+/// code Allow runs. A next goal and a question apply nothing; a swap is checked
+/// by the swap itself when it runs, so here only its members must still be on
+/// the team.
+fn trial(team: &Team, kind: &str, member: &Value, change: &Value, mode: &str) -> anyhow::Result<()> {
+    if matches!(kind, "add-member" | "remove-member" | "add-to-phase" | "cancel-tasks" | "discard-phase" | "switch-plan-mode" | "switch-setting") {
+        let mut copy = team.clone();
+        run_proposal(&mut copy, kind, member, change, mode, "", "", &BTreeSet::new(), &mut Vec::new())?;
+    }
+    if OWNER_OPS.contains(&kind) {
+        let mut copy = team.clone();
+        let mut value = change["input"].clone();
+        value["team"] = json!(team.id);
+        apply(&mut copy, kind, &value, &Actor::Human, &BTreeSet::new(), &mut Vec::new())?;
+    }
+    if kind == "swap-member" {
+        for entry in change["members"].as_array().into_iter().flatten() {
+            let id = entry["id"].as_str().or(entry.as_str()).unwrap_or_default();
+            ensure!(team.member(id).is_some_and(|found| found.state != MemberState::Removed), "the team has no member {id} any more");
+        }
+    }
+    Ok(())
+}
+
+/// Task 111 (owner, 2026-11-06, rejecting p47, which added a task to phase 2
+/// after phase 2 had closed: "a notification must not reach me if it
+/// physically cannot be carried out or stopped being possible"): why this
+/// open proposal can no longer apply, or None.
+pub(crate) fn inapplicable(team: &Team, proposal: &Value) -> Option<String> {
+    if proposal["state"] != "open" {
+        return None;
+    }
+    // The owner's Allow runs it in several writes; its own change must not
+    // withdraw it, and an interrupted Allow replays (N3).
+    if proposal["deciding"].as_f64().is_some_and(|at| now() - at < DECIDING_SECONDS) {
+        return None;
+    }
+    let kind = proposal["kind"].as_str().unwrap_or_default();
+    // A next goal is what a finished team waits for; anything else it can no
+    // longer run.
+    if matches!(team.status, TeamStatus::Done | TeamStatus::Stopped | TeamStatus::Archived) && kind != "next-goal" {
+        return Some("the team has finished".into());
+    }
+    let mode = proposal["mode"].as_str().unwrap_or_default();
+    trial(team, kind, &proposal["member"], &proposal["change"], mode).err().map(|error| format!("{error:#}"))
+}
+
+/// Task 111: how long an Allow in progress keeps its proposal from the re-check.
+pub(crate) const DECIDING_SECONDS: f64 = 3600.0;
+
+/// Task 111: withdraws every open proposal that can no longer apply: state
+/// "withdrawn" with the reason, never shown as Allow/Deny; its Waiting item
+/// leaves (so the desktops withdraw its notification) and the lead's inbox
+/// says why once (keyed by the proposal). Runs on every team change and on the
+/// copies the reads show. Returns the withdrawn ids.
+pub(crate) fn withdraw_inapplicable(team: &mut Team, events: &mut Vec<Event>) -> Vec<String> {
+    if !team.proposals.iter().any(|proposal| proposal["state"] == "open") {
+        return Vec::new();
+    }
+    let gone: Vec<(usize, String)> =
+        team.proposals.iter().enumerate().filter_map(|(at, proposal)| inapplicable(team, proposal).map(|why| (at, why))).collect();
+    let at = now();
+    let mut ids = Vec::new();
+    for (index, why) in gone {
+        let proposal = &mut team.proposals[index];
+        let id = proposal["id"].as_str().unwrap_or_default().to_owned();
+        let kind = proposal["kind"].clone();
+        proposal["state"] = json!("withdrawn");
+        proposal["decided_at"] = json!(at);
+        proposal["note"] = json!(why);
+        proposal["withdrawn_reason"] = json!(why);
+        events.push(Event::new("proposal_withdrawn", json!({"id":id,"kind":kind,"reason":why})));
+        ids.push(id);
+    }
+    ids
 }
 
 /// #740: a question to the owner: its words, the options offered (at most

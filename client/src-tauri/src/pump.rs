@@ -6,7 +6,8 @@
 //! row's project and the headers (zerus-5wmh.31). A [`Tap`] sees every change
 //! as it arrives (the menu bar's desk).
 
-use std::collections::{BTreeMap, HashMap};
+use std::cmp::Reverse;
+use std::collections::{BTreeMap, BTreeSet, HashMap};
 use std::sync::mpsc::Receiver;
 use std::sync::{Arc, Condvar, Mutex, MutexGuard, PoisonError, Weak};
 use std::time::Duration;
@@ -200,13 +201,115 @@ impl Pump {
             return;
         }
         let mut inner = self.lock();
-        if let Some(tap) = &inner.tap {
-            tap(&change);
-        }
-        inner.mirror.observe(&change);
-        inner.grouping.observe(&change);
-        inner.coalescer.push(change);
+        inner.publish(change);
         self.wake(inner);
+    }
+
+    pub(crate) fn notification_scope(
+        &self,
+        computer: &str,
+        scope: crate::desktop_service::NotificationScope,
+    ) {
+        let mut inner = self.lock();
+        let rows = inner.mirror.computers.entry(computer.into()).or_default();
+        if rows.notification_scope.as_ref() != Some(&scope) {
+            rows.notification_rows.clear();
+            rows.notification_scope = Some(scope);
+        }
+    }
+
+    #[cfg(all(test, unix))]
+    pub(crate) fn notification_index_len(&self, computer: &str) -> usize {
+        self.lock()
+            .mirror
+            .computers
+            .get(computer)
+            .map_or(0, |rows| {
+                rows.notification_rows
+                    .values()
+                    .flat_map(|conversations| conversations.values())
+                    .map(BTreeSet::len)
+                    .sum()
+            })
+    }
+
+    #[cfg(test)]
+    pub(crate) fn question_index_len(&self, computer: &str) -> usize {
+        self.lock()
+            .mirror
+            .computers
+            .get(computer)
+            .map_or(0, |rows| {
+                rows.question_rows
+                    .values()
+                    .flat_map(HashMap::values)
+                    .flat_map(HashMap::values)
+                    .map(BTreeSet::len)
+                    .sum()
+            })
+    }
+
+    pub(crate) fn apply_notification_preferences(
+        &self,
+        receipt: &crate::desktop_service::NotificationReceipt,
+        target: &zerus_client_core::actions::Target,
+        preferences: &Value,
+    ) {
+        let mut inner = self.lock();
+        let Some(rows) = inner.mirror.computers.get_mut(&target.computer) else {
+            return;
+        };
+        if rows.status != Some(ComputerStatus::Live)
+            || rows.notification_scope.as_ref() != Some(&receipt.scope)
+        {
+            return;
+        }
+        let Some(row) = rows
+            .rows
+            .get(&receipt.key)
+            .filter(|row| row.notify.cmd == receipt.provider)
+        else {
+            return;
+        };
+        let mut row = row.clone();
+        if !zerus_client_core::notification_preferences::apply(&mut row, target, preferences) {
+            return;
+        }
+        let key = receipt.key.clone();
+        let change = Change::Upsert {
+            computer: ComputerId::from(target.computer.as_str()),
+            key,
+            row,
+        };
+        inner.publish(change);
+        self.wake(inner);
+    }
+
+    pub(crate) fn notification_receipt(
+        &self,
+        scope: crate::desktop_service::NotificationScope,
+        target: &zerus_client_core::actions::Target,
+    ) -> Option<crate::desktop_service::NotificationReceipt> {
+        let inner = self.lock();
+        let rows = inner.mirror.computers.get(&target.computer)?;
+        if rows.status != Some(ComputerStatus::Live)
+            || rows.notification_scope.as_ref() != Some(&scope)
+        {
+            return None;
+        }
+        let (key, row) = rows.rows.iter().find(|(_, row)| {
+            row.shared_notifications
+                && !row.notify.cmd.is_empty()
+                && row.state != "archived"
+                && row.name == target.name
+                && row.run_id.as_deref() == Some(&target.run_id)
+                && row.conversation_id.as_deref() == Some(&target.conversation_id)
+        })?;
+        Some(crate::desktop_service::NotificationReceipt {
+            scope,
+            key: key.clone(),
+            provider: row.notify.cmd.clone(),
+        })
     }
 
     /// Marks the pump dirty and wakes a parked `take`.
@@ -215,7 +318,43 @@ impl Pump {
         drop(inner);
         self.0 .1.notify_all();
     }
+}
 
+impl Inner {
+    /// Apply receipt retention and native's optional question keep before
+    /// either the tray tap or the webview sees an incoming row. The indexes
+    /// name only service-scoped rows in this mirror.
+    fn publish(&mut self, mut change: Change) {
+        match &mut change {
+            Change::Upsert { computer, row, .. } => {
+                if let Some(rows) = self.mirror.computers.get_mut(&computer.0) {
+                    rows.keep_notifications(row);
+                    rows.keep_questions(row);
+                }
+            }
+            Change::Replace {
+                computer,
+                rows: incoming,
+            } => {
+                if let Some(rows) = self.mirror.computers.get_mut(&computer.0) {
+                    for (_, row) in incoming {
+                        rows.keep_notifications(row);
+                        rows.keep_questions(row);
+                    }
+                }
+            }
+            _ => {}
+        }
+        if let Some(tap) = &self.tap {
+            tap(&change);
+        }
+        self.mirror.observe(&change);
+        self.grouping.observe(&change);
+        self.coalescer.push(change);
+    }
+}
+
+impl Pump {
     /// Wakes a parked `take` without a change: a hub's view changed.
     pub fn poke(&self) {
         self.lock().dirty = true;
@@ -302,16 +441,39 @@ impl Pump {
         }
     }
 
+    #[cfg(all(test, unix))]
     pub fn drain_service(
         &self,
         changes: Receiver<crate::desktop_service::Data>,
         observe: impl Fn(&Change) + Send + 'static,
+    ) -> std::thread::JoinHandle<()> {
+        self.drain_service_with_after(
+            changes,
+            move |change| {
+                observe(change);
+                false
+            },
+            || {},
+        )
+    }
+
+    /// Service deliveries validate their scope before observing a change.
+    /// Wake consumers only after admission and the mirror update have finished.
+    pub fn drain_service_with_after(
+        &self,
+        changes: Receiver<crate::desktop_service::Data>,
+        before: impl Fn(&Change) -> bool + Send + 'static,
+        after: impl Fn() + Send + 'static,
     ) -> std::thread::JoinHandle<()> {
         let pump = self.clone();
         std::thread::Builder::new()
             .name("zerus-service-view".into())
             .spawn(move || {
                 for data in changes {
+                    let interested = std::cell::Cell::new(false);
+                    let observe = |change: &Change| {
+                        interested.set(before(change) || interested.get());
+                    };
                     match data {
                         crate::desktop_service::Data::Change(change) => {
                             observe(&change);
@@ -323,6 +485,9 @@ impl Pump {
                         crate::desktop_service::Data::Detail(delivery) => {
                             delivery.apply(&pump, &observe)
                         }
+                    }
+                    if interested.get() {
+                        after();
                     }
                 }
             })
@@ -664,6 +829,24 @@ impl Pump {
             .cloned()
     }
 
+    /// The listed durable session ID of the computer's row for `run`, its
+    /// catalog key `run:<id>`, without copying the row (zerus-ucck P1c).
+    pub fn run_session_id(&self, computer: &str, run: &str) -> Option<String> {
+        if run.is_empty() {
+            return None;
+        }
+        let inner = self.lock();
+        let row = inner
+            .mirror
+            .computers
+            .get(computer)?
+            .rows
+            .get(&zerus_watch_protocol::key_for(Some(run), ""))?;
+        (row.run_id.as_deref() == Some(run))
+            .then(|| row.session_id.clone())
+            .flatten()
+    }
+
     /// The computer's live row of that name (a session that started a new
     /// run has a new catalog key). A scan of one computer's rows, only when
     /// the key is gone.
@@ -732,6 +915,16 @@ impl Pump {
                     ComputerStatus::Reconnecting { .. } | ComputerStatus::Ended
                 )
             })
+    }
+
+    /// Whether the view currently shows the computer Live, exactly.
+    pub fn live(&self, computer: &str) -> bool {
+        self.lock()
+            .mirror
+            .computers
+            .get(computer)
+            .and_then(|rows| rows.status)
+            == Some(ComputerStatus::Live)
     }
 
     /// Drains a change sink on its own thread until every sender is gone,
@@ -817,6 +1010,10 @@ struct Mirror {
     computers: BTreeMap<String, Rows>,
 }
 
+type NotificationRows = HashMap<String, HashMap<String, BTreeSet<(Reverse<i64>, String)>>>;
+/// Session name -> archive -> conversation -> keys, in native key order.
+type QuestionRows = HashMap<String, HashMap<String, HashMap<String, BTreeSet<String>>>>;
+
 #[derive(Default)]
 struct Rows {
     archive_generation: u64,
@@ -826,9 +1023,97 @@ struct Rows {
     order: Vec<String>,
     rows: HashMap<String, ViewRow>,
     launches: HashMap<String, String>,
+    notification_scope: Option<crate::desktop_service::NotificationScope>,
+    /// Provider/conversation -> highest revision, then native key order.
+    /// At most one key per current mirror row; no row or payload copies.
+    notification_rows: NotificationRows,
+    /// Service-scoped rows with a known optional question count, for the
+    /// keep native mode applies per frame (zerus-tsdc). It follows the rows,
+    /// not the scope: native keeps a count across a reconnect's snapshot.
+    /// At most one key per current mirror row; no row or payload copies.
+    question_rows: QuestionRows,
 }
 
 impl Rows {
+    fn keep_notifications(&self, row: &mut ViewRow) {
+        let Some((_, key)) = self
+            .notification_rows
+            .get(&row.notify.cmd)
+            .and_then(|conversations| {
+                conversations.get(row.conversation_id.as_deref().unwrap_or(""))
+            })
+            .and_then(|keys| keys.first())
+        else {
+            return;
+        };
+        if let Some(previous) = self.rows.get(key) {
+            zerus_client_core::notification_preferences::keep(previous, row);
+        }
+    }
+
+    /// Native `Before::keep_questions`: an incoming row whose question index
+    /// is incomplete keeps the count and IDs of the first current row (in key
+    /// order) of its session, archive and conversation with a known count.
+    fn keep_questions(&self, row: &mut ViewRow) {
+        use zerus_client_core::optional_questions::{archive, conversation, keep, unknown};
+        if self.notification_scope.is_none() || !unknown(row) {
+            return;
+        }
+        let Some(key) = self
+            .question_rows
+            .get(&row.name)
+            .and_then(|archives| archives.get(archive(row)))
+            .and_then(|conversations| conversations.get(conversation(row)))
+            .and_then(BTreeSet::first)
+        else {
+            return;
+        };
+        if let Some(previous) = self.rows.get(key) {
+            keep(previous, row);
+        }
+    }
+
+    fn forget_questions(&mut self, key: &str, row: &ViewRow) {
+        use zerus_client_core::optional_questions::{archive, conversation};
+        let Some(archives) = self.question_rows.get_mut(&row.name) else {
+            return;
+        };
+        if let Some(conversations) = archives.get_mut(archive(row)) {
+            if let Some(keys) = conversations.get_mut(conversation(row)) {
+                keys.remove(key);
+                if keys.is_empty() {
+                    conversations.remove(conversation(row));
+                }
+            }
+            if conversations.is_empty() {
+                archives.remove(archive(row));
+            }
+        }
+        if archives.is_empty() {
+            self.question_rows.remove(&row.name);
+        }
+    }
+
+    fn forget_notifications(&mut self, key: &str, row: &ViewRow) {
+        let Some(conversation) = row.conversation_id.as_deref() else {
+            return;
+        };
+        if let Some(conversations) = self.notification_rows.get_mut(&row.notify.cmd) {
+            if let Some(keys) = conversations.get_mut(conversation) {
+                keys.remove(&(
+                    Reverse(row.notification_revision.unwrap_or(-1)),
+                    key.to_owned(),
+                ));
+                if keys.is_empty() {
+                    conversations.remove(conversation);
+                }
+            }
+            if conversations.is_empty() {
+                self.notification_rows.remove(&row.notify.cmd);
+            }
+        }
+    }
+
     fn forget_launch(&mut self, key: &str, row: &ViewRow) {
         if let Some(launch) = &row.launch_id {
             if self
@@ -844,8 +1129,31 @@ impl Rows {
     fn upsert(&mut self, key: &str, row: &ViewRow) {
         if let Some(previous) = self.rows.insert(key.to_owned(), row.clone()) {
             self.forget_launch(key, &previous);
+            self.forget_notifications(key, &previous);
+            self.forget_questions(key, &previous);
         } else {
             self.order.push(key.to_owned());
+        }
+        if self.notification_scope.is_some() && zerus_client_core::optional_questions::known(row) {
+            use zerus_client_core::optional_questions::{archive, conversation};
+            self.question_rows
+                .entry(row.name.clone())
+                .or_default()
+                .entry(archive(row).to_owned())
+                .or_default()
+                .entry(conversation(row).to_owned())
+                .or_default()
+                .insert(key.to_owned());
+        }
+        if self.notification_scope.is_some() && row.notify.preferences.is_some() {
+            if let Some(conversation) = row.conversation_id.as_deref().filter(|c| !c.is_empty()) {
+                self.notification_rows
+                    .entry(row.notify.cmd.clone())
+                    .or_default()
+                    .entry(conversation.into())
+                    .or_default()
+                    .insert((Reverse(row.notification_revision.unwrap_or(-1)), key.into()));
+            }
         }
         if row.state != "archived" {
             if let Some(launch) = row.launch_id.as_ref().filter(|launch| !launch.is_empty()) {
@@ -857,6 +1165,8 @@ impl Rows {
     fn remove(&mut self, key: &str) {
         if let Some(row) = self.rows.remove(key) {
             self.forget_launch(key, &row);
+            self.forget_notifications(key, &row);
+            self.forget_questions(key, &row);
             self.order.retain(|known| known != key);
         }
     }
@@ -880,6 +1190,8 @@ impl Mirror {
                 entry.order.clear();
                 entry.rows.clear();
                 entry.launches.clear();
+                entry.notification_rows.clear();
+                entry.question_rows.clear();
                 for (key, row) in rows {
                     entry.upsert(key, row);
                 }
@@ -888,6 +1200,8 @@ impl Mirror {
                 let entry = self.computers.entry(computer.0.clone()).or_default();
                 entry.status = Some(*status);
                 if *status == ComputerStatus::Ended {
+                    entry.notification_scope = None;
+                    entry.notification_rows.clear();
                     entry.archive_generation = entry.archive_generation.saturating_add(1);
                     entry.machine = None;
                 }
@@ -1523,5 +1837,206 @@ mod tests {
             batch.groups.is_empty(),
             "no stale project for an ended computer's rows"
         );
+    }
+
+    /// A service-scoped row of `name` and `conversation` with a listed
+    /// optional question count, or with an incomplete index (`None`).
+    fn asked(name: &str, conversation: &str, count: Option<(i64, &[&str])>) -> ViewRow {
+        let mut row = ViewRow {
+            name: name.into(),
+            conversation_id: Some(conversation.into()),
+            ..ViewRow::default()
+        };
+        row.notify.optional_reported = true;
+        row.notify.optional_count = count.map_or(-1, |(count, _)| count);
+        row.notify.optional_ids = count.map_or_else(Vec::new, |(_, ids)| {
+            ids.iter().map(|id| (*id).to_owned()).collect()
+        });
+        row.optional_question_count = count.map(|(count, _)| count);
+        row
+    }
+
+    fn service_pump() -> (Pump, std::sync::mpsc::Receiver<Change>) {
+        let pump = Pump::default();
+        let (sender, receiver) = std::sync::mpsc::channel();
+        pump.tap(Box::new(move |change: &Change| {
+            let _ = sender.send(change.clone());
+        }));
+        pump.notification_scope("", crate::desktop_service::NotificationScope::for_test(""));
+        (pump, receiver)
+    }
+
+    fn put(pump: &Pump, key: &str, row: ViewRow) {
+        pump.push(Change::Upsert {
+            computer: ComputerId(String::new()),
+            key: key.into(),
+            row,
+        });
+    }
+
+    fn questions(row: &ViewRow) -> (Option<i64>, i64, Vec<String>) {
+        (
+            row.optional_question_count,
+            row.notify.optional_count,
+            row.notify.optional_ids.clone(),
+        )
+    }
+
+    #[test]
+    fn service_rows_keep_the_last_known_optional_questions_like_native_mode() {
+        // zerus-tsdc: a resume's successor run lists its question index as
+        // incomplete; native mode keeps the paused run's count and IDs.
+        let (pump, tap) = service_pump();
+        put(
+            &pump,
+            "run:a",
+            asked("codex/p/one", "c1", Some((2, &["q1", "q2"]))),
+        );
+        put(&pump, "run:b", asked("codex/p/one", "c1", None));
+        let kept = questions(&pump.row("", "run:b").unwrap());
+        assert_eq!(kept, (Some(2), 2, vec!["q1".to_owned(), "q2".to_owned()]));
+        // The tray tap sees the kept row too, not only the webview.
+        let tapped: Vec<_> = tap.try_iter().collect();
+        assert!(
+            matches!(tapped.last(), Some(Change::Upsert { key, row, .. })
+            if key == "run:b" && questions(row) == kept)
+        );
+        pump.push(Change::Remove {
+            computer: ComputerId(String::new()),
+            key: "run:a".into(),
+            reason: Some("replaced".into()),
+        });
+        // The zero count of a session without questions is kept as well,
+        // from the same run's previous version.
+        put(&pump, "run:z", asked("codex/p/zero", "c9", Some((0, &[]))));
+        put(&pump, "run:z", asked("codex/p/zero", "c9", None));
+        assert_eq!(
+            questions(&pump.row("", "run:z").unwrap()),
+            (Some(0), 0, vec![])
+        );
+        // Another conversation, session or archive starts unknown.
+        put(&pump, "run:c", asked("codex/p/one", "c2", None));
+        put(&pump, "run:d", asked("codex/p/two", "c1", None));
+        let mut archived = asked("codex/p/one", "c1", None);
+        archived.state = "archived".into();
+        archived.archive_id = Some("a1".into());
+        put(&pump, "archive:a1", archived);
+        for key in ["run:c", "run:d", "archive:a1"] {
+            assert_eq!(
+                questions(&pump.row("", key).unwrap()),
+                (None, -1, vec![]),
+                "{key}"
+            );
+        }
+        // A listed count is the host's answer, never replaced.
+        put(
+            &pump,
+            "run:b",
+            asked("codex/p/one", "c1", Some((1, &["q3"]))),
+        );
+        assert_eq!(
+            questions(&pump.row("", "run:b").unwrap()),
+            (Some(1), 1, vec!["q3".to_owned()])
+        );
+    }
+
+    #[test]
+    fn a_removed_predecessor_is_not_kept_and_native_mode_is_untouched() {
+        // A paged Start fresh removes the old run before its successor lands:
+        // native mode has no previous row then, and neither has the pump.
+        let (pump, _tap) = service_pump();
+        put(
+            &pump,
+            "run:a",
+            asked("codex/p/one", "c1", Some((2, &["q1", "q2"]))),
+        );
+        pump.push(Change::Remove {
+            computer: ComputerId(String::new()),
+            key: "run:a".into(),
+            reason: Some("replaced".into()),
+        });
+        put(&pump, "run:b", asked("codex/p/one", "c1", None));
+        assert_eq!(
+            questions(&pump.row("", "run:b").unwrap()),
+            (None, -1, vec![])
+        );
+        // Without a service scope (native mode) CatalogState already kept
+        // what native keeps; the pump changes nothing and indexes nothing.
+        let native = Pump::default();
+        put(
+            &native,
+            "run:a",
+            asked("codex/p/one", "c1", Some((2, &["q1"]))),
+        );
+        put(&native, "run:b", asked("codex/p/one", "c1", None));
+        assert_eq!(
+            questions(&native.row("", "run:b").unwrap()),
+            (None, -1, vec![])
+        );
+        assert_eq!(native.question_index_len(""), 0);
+    }
+
+    #[test]
+    fn a_complete_service_snapshot_keeps_from_the_rows_it_replaces() {
+        // A resnapshot (restart, resync) is native's replace_rows: its rows
+        // keep from the rows before it, in key order.
+        let (pump, _tap) = service_pump();
+        put(
+            &pump,
+            "run:b",
+            asked("codex/p/one", "c1", Some((3, &["q1", "q2", "q3"]))),
+        );
+        put(
+            &pump,
+            "run:c",
+            asked("codex/p/one", "c1", Some((1, &["q4"]))),
+        );
+        pump.push(Change::Replace {
+            computer: ComputerId(String::new()),
+            rows: vec![("run:d".into(), asked("codex/p/one", "c1", None))],
+        });
+        assert_eq!(
+            questions(&pump.row("", "run:d").unwrap()),
+            (
+                Some(3),
+                3,
+                vec!["q1".to_owned(), "q2".to_owned(), "q3".to_owned()]
+            )
+        );
+        // The replaced rows leave the index; the kept row is known again.
+        assert_eq!(pump.question_index_len(""), 1);
+    }
+
+    #[test]
+    fn the_question_index_names_at_most_one_key_per_current_row() {
+        let (pump, _tap) = service_pump();
+        for round in 0..3 {
+            for n in 0..20 {
+                put(
+                    &pump,
+                    &format!("run:{n}"),
+                    asked(&format!("codex/p/{n}"), "c1", Some((round, &[]))),
+                );
+            }
+        }
+        assert_eq!(pump.question_index_len(""), 20);
+        // A row that moves to an unknown conversation leaves its old place
+        // (an unknown row of the same conversation keeps its count and stays);
+        // a removal leaves too.
+        put(&pump, "run:0", asked("codex/p/0", "c2", None));
+        put(&pump, "run:2", asked("codex/p/2", "c1", None));
+        assert_eq!(questions(&pump.row("", "run:2").unwrap()).1, 2);
+        pump.push(Change::Remove {
+            computer: ComputerId(String::new()),
+            key: "run:1".into(),
+            reason: None,
+        });
+        assert_eq!(pump.question_index_len(""), 18);
+        // A new service scope (reconnect) keeps the rows and their index.
+        pump.notification_scope(
+            "",
+            crate::desktop_service::NotificationScope::for_test("other"),
+        );
+        assert_eq!(pump.question_index_len(""), 18);
     }
 }

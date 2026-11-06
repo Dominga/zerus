@@ -328,6 +328,8 @@ fn all_items(team: &Team) -> Vec<Item> {
                 wait.reason.clone(),
             )
         };
+        // Task 112: a paused team hands nothing out; the lead learns that is why.
+        let paused = if team.status == TeamStatus::Paused { " The team is paused, so nothing is handed out until the owner resumes it." } else { "" };
         items.push(Item {
             subagents: Value::Null,
             kind: "task_waits",
@@ -335,7 +337,7 @@ fn all_items(team: &Team) -> Vec<Item> {
             task: Some(task.id),
             member,
             since: wait.at,
-            summary: summary(&format!("#{} {} waits: {}", task.id, task.title, wait.reason)),
+            summary: summary(&format!("#{} {} waits: {}{paused}", task.id, task.title, wait.reason)),
             command,
             detail,
         });
@@ -552,6 +554,25 @@ fn all_items(team: &Team) -> Vec<Item> {
             detail: "The full run is the owner's call: ask the owner with this time, then record it with full-done once it ran.".into(),
         });
     }
+    // Task 98: a member whose composer holds a draft or dialog Zerus did not
+    // leave refuses every hand-out; after a few refusals the lead hears it once,
+    // with the screen's last lines and what to do.
+    for member in team.members.iter().filter(|member| member.input_block.as_ref().is_some_and(|block| block.raised)).filter(|_| active) {
+        let block = member.input_block.as_ref().unwrap();
+        let name = team.name_of(&member.id);
+        let terminal = member.session.as_ref().map(|session| session.name.clone()).unwrap_or_default();
+        items.push(Item {
+            subagents: Value::Null,
+            kind: "input_blocked",
+            key: format!("input_blocked:{}:{}", member.id, block.since),
+            task: None,
+            member: name.clone(),
+            since: block.since,
+            summary: summary(&format!("{name} refused {} hand-outs: {}", block.count, block.reason)),
+            command: String::new(),
+            detail: input_block_action(&terminal, &block.screen),
+        });
+    }
     // U52: a member whose session crashed too often this hour stays stopped
     // until the owner or the lead starts it again.
     for member in team.members.iter().filter(|member| member.id != team.lead && member.crash_told).filter(|_| active) {
@@ -582,7 +603,7 @@ fn all_items(team: &Team) -> Vec<Item> {
     let mut decided: Vec<&Value> = team
         .proposals
         .iter()
-        .filter(|proposal| matches!(proposal["state"].as_str(), Some("accepted") | Some("rejected") | Some("answered")))
+        .filter(|proposal| matches!(proposal["state"].as_str(), Some("accepted") | Some("rejected") | Some("answered") | Some("withdrawn")))
         .collect();
     let decided_at = |proposal: &Value| proposal["decided_at"].as_f64().or(proposal["at"].as_f64()).unwrap_or_default();
     // A stable order: proposals decided in one go keep their places.
@@ -597,6 +618,10 @@ fn all_items(team: &Team) -> Vec<Item> {
         let text = if state == "answered" {
             let question = proposal["change"]["question"].as_str().unwrap_or_default();
             format!("The owner answered your question {id} ({question}): {note}")
+        } else if state == "withdrawn" {
+            // Task 111: never shown to the owner; the lead learns why, once,
+            // and proposes again against the plan as it is now.
+            format!("Your {kind} proposal {id} was withdrawn before the owner saw it: it can no longer apply ({note}). Propose again against the plan as it is now")
         } else {
             format!("The owner {state} your {kind} proposal {id}{why}")
         };
@@ -615,6 +640,34 @@ fn all_items(team: &Team) -> Vec<Item> {
     if !active {
         // N5: the decision above is all a finished team still has to say.
         return items;
+    }
+    // Task 112 (owner, 2026-11-06: #21 waited 529 minutes on a paused team and
+    // the lead did not know why): a paused team hands out nothing; the lead is
+    // told once per pause, with what waits for it.
+    if team.status == TeamStatus::Paused {
+        let at = team.paused.as_ref().map_or(team.updated, |pause| pause.at);
+        let waiting: Vec<String> = team
+            .tasks
+            .iter()
+            .filter(|task| task.status == TaskStatus::Pending)
+            .take(10)
+            .map(|task| format!("#{}", task.id))
+            .collect();
+        let waits = if waiting.is_empty() { String::new() } else { format!("; {} wait to be handed out", waiting.join(", ")) };
+        items.push(Item {
+            subagents: Value::Null,
+            kind: "team_paused",
+            key: format!("team_paused:{}", at as u64),
+            task: None,
+            member: "owner".into(),
+            since: at,
+            summary: summary(&format!(
+                "The team is paused {}: Zerus hands out no task until the owner resumes it{waits}",
+                paused_words(team)
+            )),
+            command: format!("{} | hgs team status --json", json!({"team":team.id})),
+            detail: "Ask the owner to resume the team (Resume team on the team bar or in Waiting for you); resume it yourself only on the owner's word.".into(),
+        });
     }
     // U25: a phase the owner sent back is a review item: the comment and the
     // command that returns the reworked phase to the owner as a draft.
@@ -1047,9 +1100,18 @@ fn age(now: f64, since: f64) -> String {
     }
 }
 
+/// Task 112: "since 2026-11-06 09:12 by You" for a paused team.
+pub(crate) fn paused_words(team: &Team) -> String {
+    match &team.paused {
+        Some(pause) if pause.by.is_empty() => format!("since {}", local_time(pause.at)),
+        Some(pause) => format!("since {} by {}", local_time(pause.at), pause.by),
+        None => String::new(),
+    }
+}
+
 /// A reset time as a person reads it, in this computer's zone; status keeps
 /// the numeric `resets_at`.
-fn local_time(at: f64) -> String {
+pub(crate) fn local_time(at: f64) -> String {
     chrono::DateTime::<chrono::Utc>::from_timestamp(at.round() as i64, 0)
         .map(|time| time.with_timezone(&chrono::Local).format("%Y-%m-%d %H:%M").to_string())
         .unwrap_or_else(|| format!("{at:.0}"))
@@ -1283,6 +1345,26 @@ fn phase_name(phase: &Phase) -> String {
     }
 }
 
+/// Task 98: what the lead or the owner does about a blocked composer, with
+/// the screen's last lines.
+pub(crate) fn input_block_action(terminal: &str, screen: &[String]) -> String {
+    let mut text = format!(
+        "Open {terminal}'s Terminal. Zerus never submits a draft it did not paste: submit it if it is a message the member \
+         should get, or clear it (Esc, or Ctrl+U), close any dialog and return to an empty prompt. The next hand-out then goes."
+    );
+    if !screen.is_empty() {
+        text += "\nLast lines:\n";
+        text += &screen.join("\n");
+    }
+    text
+}
+
+/// Task 111: the member was removed or its session was seen to end: a question
+/// it asked can no longer be answered and waits for nobody.
+fn session_ended(member: &Member) -> bool {
+    member.state == MemberState::Removed || member.seen.as_ref().is_some_and(|seen| !seen.live)
+}
+
 pub(crate) fn attention(team: &Team, now: f64) -> Vec<Value> {
     if !matches!(team.status, TeamStatus::Running | TeamStatus::Paused) {
         return Vec::new();
@@ -1343,6 +1425,10 @@ pub(crate) fn attention(team: &Team, now: f64) -> Vec<Value> {
     if permission_minutes > 0 || team.members.iter().any(|member| member.id == team.lead && member.pending.is_some()) {
         for member in &team.members {
             let Some(pending) = &member.pending else { continue };
+            // Task 111: a question whose session ended can no longer be answered.
+            if session_ended(member) {
+                continue;
+            }
             let waited = (now - pending.at).max(0.0);
             // #740: the lead's own question waits for the owner from the start.
             let lead = member.id == team.lead;
@@ -1367,7 +1453,12 @@ pub(crate) fn attention(team: &Team, now: f64) -> Vec<Value> {
     // The owner, 2026-11-05: a running team whose lead's session stopped has
     // nobody to read its reports or hand out its tasks; only the owner can
     // resume it (or restart_crashed does, on by default).
-    if team.status == TeamStatus::Running {
+    // Task 95: the lead stalled while its decisions wait: the owner's item
+    // names what it waits on; it covers a stopped lead too.
+    let stalled = super::lead_stall::attention(team, now);
+    let stalled_now = stalled.is_some();
+    out.extend(stalled);
+    if team.status == TeamStatus::Running && !stalled_now {
         if let Some(lead) = team.member(&team.lead).filter(|lead| lead.state == MemberState::Active && lead.session.is_some()) {
             if let Some(seen) = lead.seen.filter(|seen| !seen.live) {
                 out.push(json!({"kind":"lead_stopped","member":team.role_of(&lead.id),"member_id":lead.id,"since":seen.at,
@@ -1378,10 +1469,27 @@ pub(crate) fn attention(team: &Team, now: f64) -> Vec<Value> {
             }
         }
     }
+    // Task 98: a composer that keeps refusing hand-outs waits for the owner
+    // too: only a person decides what to do with a draft Zerus did not paste.
+    if team.status == TeamStatus::Running {
+        for member in &team.members {
+            let Some(block) = member.input_block.as_ref().filter(|block| block.raised) else { continue };
+            let terminal = member.session.as_ref().map(|session| session.name.clone()).unwrap_or_default();
+            out.push(json!({"kind":"input_blocked","member":team.role_of(&member.id),"member_id":member.id,"since":block.since,
+                "minutes":((now - block.since).max(0.0) / 60.0).round() as u64,"count":block.count,"reason":block.reason,
+                "screen":block.screen,"session":terminal,
+                "summary":format!("{}'s Terminal refused {} hand-outs: a draft or dialog Zerus did not leave. Open it and clear or submit it",
+                    team.name_of(&member.id), block.count),
+                "command":input_block_action(&terminal, &block.screen)}));
+        }
+    }
     // A request only the member's Terminal takes waits for the owner at once:
     // nobody else can answer it.
     for member in &team.members {
         let Some(asked) = &member.terminal_question else { continue };
+        if session_ended(member) {
+            continue;
+        }
         let name = team.name_of(&member.id);
         out.push(json!({"kind":"permission_terminal","member":team.role_of(&member.id),"member_id":member.id,
             "since":asked.at,"minutes":((now - asked.at).max(0.0) / 60.0).round() as u64,
@@ -1792,6 +1900,35 @@ mod tests {
         // A live lead, or a paused team, is no item.
         team.members.iter_mut().find(|member| member.id == "lead").unwrap().seen = Some(MemberSeen { at: now, live: true });
         assert!(!super::attention(&team, now).iter().any(|item| item["kind"] == "lead_stopped"));
+    }
+
+    /// Task 111: a question whose session ended, or whose member was
+    /// removed, can no longer be answered and waits for nobody.
+    #[test]
+    fn a_question_whose_session_ended_waits_for_nobody() {
+        let mut team = team();
+        let now = 5_000.0;
+        team.settings.remind_owner_permission_minutes = 1;
+        let question = |at: f64| PendingQuestion {
+            question_id: "q1".into(),
+            question_hash: "h1".into(),
+            approval: true,
+            at,
+            card: json!({"questions":[{"id":"decision","header":"Bash","question":"Run the build?",
+                "options":[{"id":"allow","label":"Allow"},{"id":"deny","label":"Deny"}]}]}),
+        };
+        let asked = |team: &Team| super::attention(team, now).iter().filter(|item| item["kind"] == "permission").count();
+        team.members.iter_mut().find(|member| member.id == "dev").unwrap().pending = Some(question(now - 600.0));
+        assert_eq!(asked(&team), 1);
+        team.members.iter_mut().find(|member| member.id == "dev").unwrap().seen = Some(MemberSeen { at: now - 30.0, live: false });
+        assert_eq!(asked(&team), 0, "its session ended");
+        let dev = team.members.iter_mut().find(|member| member.id == "dev").unwrap();
+        dev.seen = Some(MemberSeen { at: now, live: true });
+        assert_eq!(asked(&team), 1);
+        team.members.iter_mut().find(|member| member.id == "dev").unwrap().state = MemberState::Removed;
+        assert_eq!(asked(&team), 0, "its member was removed");
+        let waiting = super::super::owner_waiting::items(std::slice::from_ref(&team), now);
+        assert!(!waiting.iter().any(|item| item["kind"] == "permission_escalated"), "{waiting:?}");
     }
 
     #[test]

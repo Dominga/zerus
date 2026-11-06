@@ -10,7 +10,7 @@ import tempfile
 import xml.etree.ElementTree as ET
 
 ROOT = Path(__file__).resolve().parents[2]
-SOURCE = ROOT / "tray/translations/zerus_ru.ts"
+SOURCE = ROOT / "client/i18n/shared/zerus_ru.ts"
 SUPPLEMENT = ROOT / "client/src/i18n.next-ru.json"
 DESTINATION = ROOT / "client/src/i18n.ru.json"
 PLACEHOLDERS = re.compile(r"%L?\d+|%n")
@@ -41,7 +41,7 @@ def supplement(catalog: dict, entries: dict) -> dict:
 
 
 def generate() -> str:
-    spec = importlib.util.spec_from_file_location("zerus_prepare_catalog", ROOT / "tray/translations/prepare_catalog.py")
+    spec = importlib.util.spec_from_file_location("zerus_prepare_catalog", ROOT / "client/i18n/shared/prepare_catalog.py")
     module = importlib.util.module_from_spec(spec)
     assert spec.loader is not None
     spec.loader.exec_module(module)

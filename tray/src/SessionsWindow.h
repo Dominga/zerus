@@ -20,6 +20,7 @@ class QPlainTextEdit;
 #include <QDeadlineTimer>
 #include <QElapsedTimer>
 #include <QWidget>
+#include <functional>
 #include <memory>
 #include <optional>
 #include "FleetState.h"
@@ -218,6 +219,11 @@ signals:
 public:
     // WhiteWh fork: apply the selected skin again, as after a change in Settings.
     void applySkin() { applyTheme(); }
+    // Task 112: resuming a paused team's session asks "Resume the team too?"
+    // (Resume team focused): 2 resumes the team and the session, 1 only the
+    // session, 0 neither. Tests answer it.
+    std::function<int(const QString &team)> resumeTeamChoice;
+    int askResumeTeam(const QString &team);
 protected:
     bool eventFilter(QObject *watched, QEvent *event) override;
     void showEvent(QShowEvent *event) override;
@@ -588,6 +594,8 @@ private:
     // A member session's team, task and a link to the Team tab, above Activity.
     class QFrame *m_teamStrip=nullptr;
     class QLabel *m_teamStripText=nullptr;
+    // Task 112: Resume team on a paused team's session.
+    class QPushButton *m_teamStripResume=nullptr;
     void openTeamTask(int task);
     // F7: a session named here is taken into the new team as its existing lead.
     void showNewTeam(const QString &host = {}, const QString &name = {});
@@ -622,6 +630,9 @@ private:
     class ModelServerSettings *m_modelServerSettings=nullptr;
     class QPushButton *m_modelServersNav=nullptr;
     int m_modelServersPageIndex=-1,m_modelServerSettingsSection=-1;
+    // Task 108: Settings > Build folders.
+    class DiskSettings *m_diskSettings=nullptr;
+    int m_diskSettingsSection=-1;
     class QPushButton *m_teamWaitingNav=nullptr;
     int m_teamWaitingPageIndex=-1;
     // U55: the same list as banners above the session's chat and Activity and

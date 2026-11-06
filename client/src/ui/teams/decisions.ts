@@ -1,4 +1,5 @@
 import { tr } from "../../i18n";
+import { withdrawnRefusal } from "../../teamRefusals";
 import type { ComputerId, TeamAction, TeamCall, TeamChoice, TeamConfirmation, TeamMemberQuestion, TeamMemberView, TeamOutcome, TeamProposalView, TeamView, TeamWaitingItem } from "../../types";
 
 // The owner's decisions on a team (task 11), ported from Qt's
@@ -287,6 +288,8 @@ export class ProposalCards {
   private notices = new Map<string, string>();
   private reasons = new Map<string, string>();
   private sending = new Set<string>();
+  /** Task 107: decided, confirmed by hgs: hidden at once, until the store no longer lists them. */
+  private decided = new Set<string>();
   private picked = new Map<string, string>();
   private ownWords = new Set<string>();
   private uncertain = new Map<string, string>();
@@ -306,9 +309,12 @@ export class ProposalCards {
     const id = team?.id ?? "";
     let views = proposalCards(team);
     if (this.only) views = views.filter((view) => view.id === this.only);
-    if (id !== this.teamId) { this.stale.clear(); this.notices.clear(); this.reasons.clear(); this.sending.clear(); this.uncertain.clear(); }
+    if (id !== this.teamId) { this.stale.clear(); this.notices.clear(); this.reasons.clear(); this.sending.clear(); this.uncertain.clear(); this.decided.clear(); }
     const open = new Set(views.map((view) => view.id));
     for (const sent of [...this.sending]) if (!open.has(sent)) this.sending.delete(sent);
+    for (const done of [...this.decided]) if (!open.has(done)) this.decided.delete(done);
+    // A decided card stays hidden while an older read still lists it.
+    views = views.filter((view) => !this.decided.has(view.id));
     for (const view of this.views) if (!open.has(view.id) && this.notices.has(view.id)) this.stale.set(view.id, view);
     for (const key of [...this.stale.keys()]) if (open.has(key)) this.stale.delete(key);
     for (const key of [...this.reasons.keys()]) if (!open.has(key)) this.reasons.delete(key);
@@ -319,6 +325,13 @@ export class ProposalCards {
   }
 
   get team() { return this.teamId; }
+
+  /** Task 107: hgs confirmed this card's decision: it leaves at once. */
+  private confirmed(id: string) {
+    this.sending.delete(id);
+    this.decided.add(id);
+    this.views = this.views.filter((view) => view.id !== id);
+  }
 
   cards(): CardState[] {
     const state = (card: ProposalCard, gone: boolean): CardState => ({
@@ -375,7 +388,9 @@ export class ProposalCards {
     const action: TeamAction = { kind: "decide_proposal", proposal: id, accept: allow, expected_hash: view.hash, ...(!allow && reason ? { reason } : {}) };
     const outcome = await this.send(id, action);
     if (outcome !== "cancelled") {
-      if (outcome.outcome === "failed") {
+      // Task 111: hgs withdrew it (it can no longer apply): it leaves at once.
+      if (outcome.outcome === "failed" && withdrawnRefusal(outcome.detail)) this.confirmed(id);
+      else if (outcome.outcome === "failed") {
         // #754: a refusal says why on the card, in the server's words; the card stays to answer again.
         this.notices.set(id, allow ? tr("Allow was refused, nothing was applied: %1", hgsWords(outcome.detail))
           : tr("Deny was refused, nothing was decided: %1", hgsWords(outcome.detail)));
@@ -387,6 +402,7 @@ export class ProposalCards {
         const wanted = allow ? "accepted" : "rejected";
         if ((status === "accepted" || status === "rejected") && status !== wanted)
           this.notices.set(id, status === "accepted" ? tr("It was already allowed; your Deny changed nothing.") : tr("It was already denied; your Allow changed nothing."));
+        else this.confirmed(id);
       }
     }
     this.changed();
@@ -409,8 +425,10 @@ export class ProposalCards {
       return "stale";
     }
     const outcome = await this.send(id, { kind: "decide_proposal", proposal: id, accept: true, expected_hash: view.hash, answer });
-    if (outcome !== "cancelled" && outcome.outcome === "failed")
+    if (outcome !== "cancelled" && outcome.outcome === "failed" && withdrawnRefusal(outcome.detail)) this.confirmed(id);
+    else if (outcome !== "cancelled" && outcome.outcome === "failed")
       this.notices.set(id, outcome.detail.includes("changed") ? tr("The question changed; nothing was sent. Read it again and answer.") : hgsWords(outcome.detail));
+    else if (outcome !== "cancelled" && outcome.outcome === "done") this.confirmed(id);
     this.changed();
     return outcome;
   }
@@ -418,6 +436,36 @@ export class ProposalCards {
 
 // ---------------------------------------------------------------------------
 // Waiting for you (Qt TeamWaitingPage, TeamWaitingBanner, TeamWaitingAnswer)
+
+/**
+ * Task 107: the items of Waiting for you a confirmed action decided, as Qt's
+ * TeamWaitingFeed::decidedIds matches them: a proposal by its id, a draft or
+ * a waiting phase by its number, a held or reported task by its id. Another
+ * team's items, and actions that name none of these, decide nothing.
+ */
+export function decidedWaiting(items: readonly TeamWaitingItem[], call: Pick<TeamCall, "team" | "action">): string[] {
+  const action = call.action as { kind: string; proposal?: string; phase?: number | null; task?: number };
+  const phase = action.phase ?? 0, task = action.task ?? 0;
+  return items.filter((item) => {
+    if (!call.team || item.team !== call.team) return false;
+    const fields = waitingFields(item);
+    switch (action.kind) {
+      case "decide_proposal": return !!action.proposal && (fields.proposal === action.proposal || item.id === `${call.team}/owner_word_asked/proposal-${action.proposal}`);
+      case "approve": return item.kind === "phase_draft" && (phase > 0 ? fields.phase === phase : true);
+      case "accept_phase": case "send_back_phase": return item.kind === "phase_acceptance" && phase > 0 && fields.phase === phase;
+      case "release": return item.kind === "task_waits_owner" && task > 0 && fields.task === task;
+      case "resume": return item.kind === "team_paused";   // task 112
+      case "accept": case "reject": case "send_back": return item.action === "decide_report" && task > 0 && fields.task === task;
+      default: return false;
+    }
+  }).map((item) => item.id);
+}
+
+/** Task 108/109: a drive low on space; its row opens Settings > Build folders. */
+export const opensDisk = (item: Pick<TeamWaitingItem, "action">) => item.action === "open_disk";
+
+/** Task 112: a paused team's item resumes the team from Waiting for you. */
+export const resumesTeam = (item: Pick<TeamWaitingItem, "action">) => item.action === "resume_team";
 
 /** The item's kind in words. */
 export function waitingKindLabel(item: Pick<TeamWaitingItem, "kind" | "action">): string {
@@ -434,6 +482,10 @@ export function waitingKindLabel(item: Pick<TeamWaitingItem, "kind" | "action">)
     case "test_full_run": return tr("Full test run");
     case "test_quarantine": return tr("Flaky tests");
     case "phase_acceptance": return tr("Phase acceptance");
+    case "lead_stalled": return tr("Lead stalled");
+    case "deferred": return tr("Deferred");
+    case "disk_low": return tr("Disk space");
+    case "team_paused": return tr("Team paused");
     default: return item.kind;
   }
 }
@@ -450,13 +502,17 @@ export function waitingKindIcon(kind: string): string {
     case "team_finished": case "phase_acceptance": return "check";
     case "tool_missing": return "terminal";
     case "test_full_run": return "refresh-cw";
+    case "lead_stalled": return "triangle-alert";
+    case "deferred": return "clock";
+    case "disk_low": return "hard-drive";
+    case "team_paused": return "pause";
     default: return "triangle-alert";
   }
 }
 
 /** Opens a card to answer in place. */
 export const opensCard = (action: string) =>
-  ["decide_proposal", "confirm_addition", "answer_permission", "decide_tool", "accept_phase"].includes(action);
+  ["decide_proposal", "confirm_addition", "answer_permission", "decide_tool", "accept_phase", "answer_deferred"].includes(action);
 /** Approves with the team view's question. */
 export const approves = (action: string) => action === "approve_phase" || action === "approve_plan";
 
@@ -622,7 +678,7 @@ export class WaitingAnswer {
 
   /** Opens the card: the team as it is now, and what the owner sees of it. */
   async open() {
-    if (this.item.action === "decide_tool" || !opensCard(this.item.action)) return;
+    if (this.item.action === "decide_tool" || this.item.action === "answer_deferred" || !opensCard(this.item.action)) return;
     const team = await this.read();
     if (!team) return;
     const stale = staleReason(this.item, team);
@@ -715,6 +771,17 @@ export class WaitingAnswer {
     return this.send({ kind: "decide_tool", offer: fields.offer, allow, ...(!allow && reason.trim() ? { reason: reason.trim() } : {}) }, false);
   }
 
+  /**
+   * Task 97: the owner's answer to a deferred request: Allow or Deny a
+   * permission, or the owner's words to a question. hgs sends the session one
+   * message; the tool is never replayed.
+   */
+  answerDeferred(decision: "allow" | "deny" | "answer", text = "") {
+    const id = deferredRequest(this.item).id;
+    if (!id || (decision === "answer" && !text.trim())) return Promise.resolve(undefined);
+    return this.send({ kind: "answer_deferred", id, decision, ...(text.trim() ? { text: text.trim() } : {}) }, false);
+  }
+
   /** A held task, a step Zerus could not take, a finished team. */
   release() { return this.send({ kind: "release", task: waitingFields(this.item).task }, false); }
   retry() { return this.send({ kind: "retry", task: waitingFields(this.item).task }, false); }
@@ -737,6 +804,32 @@ export class WaitingAnswer {
 }
 
 /** The tool offer's card texts. */
+/** Task 97: a deferred request as its card shows it. */
+export interface DeferredRequest {
+  id: string; permission: boolean; text: string; session: string; outcome: string;
+  questions: { id: string; question: string; options: { id: string; label: string }[] }[];
+}
+
+export function deferredRequest(item: TeamWaitingItem): DeferredRequest {
+  const detail = obj(item.detail);
+  const questions = Array.isArray(detail.questions) ? detail.questions : [];
+  return {
+    id: str(detail.deferred), permission: str(detail.request) === "permission", text: str(detail.text), session: str(detail.session),
+    outcome: str(detail.outcome),
+    questions: questions.map((raw) => {
+      const asked = obj(raw);
+      const options = Array.isArray(asked.options) ? asked.options : [];
+      return { id: str(asked.id), question: str(asked.question),
+        options: options.map((option) => ({ id: str(obj(option).id), label: str(obj(option).label) })) };
+    }),
+  };
+}
+
+/** Task 97: Waiting for you > Deferred: the requests Zerus answered safely for the absent owner. */
+export function splitDeferred(items: readonly TeamWaitingItem[]) {
+  return { waiting: items.filter((item) => item.kind !== "deferred"), deferred: items.filter((item) => item.kind === "deferred") };
+}
+
 export function toolOffer(item: TeamWaitingItem) {
   const fields = waitingFields(item);
   const failed = fields.state === "failed";

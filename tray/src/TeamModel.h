@@ -134,6 +134,11 @@ struct Member {
     QString contextBeforeTask;
     // U49: it finishes its open work, takes nothing new and then leaves.
     bool draining = false;
+    // Task 98: hand-outs its Terminal refused in a row (a draft, a dialog or an
+    // unknown prompt), hgs's reason, and whether the lead and you were told.
+    int inputRefusals = 0;
+    QString inputReason;
+    bool inputRaised = false;
     QJsonObject json() const;
 };
 
@@ -452,6 +457,12 @@ struct BuildState {
 
 struct Team {
     QString id, name, status, project, folder, lead;
+    // Task 112: a paused team's pause (status's "paused"): when, by whom and
+    // why; pausedText() is what the team bar, the session's strip and
+    // Waiting for you say.
+    double pausedAt = 0;
+    QString pausedBy, pausedReason;
+    QString pausedText() const;
     QString projectId;
     // D1: settings.evidence_folders, where report evidence may be previewed.
     QStringList evidenceFolders;
@@ -534,7 +545,11 @@ struct Team {
     // C4: the undecided reports on the owner's attention list.
     // U18/N7: `summary` is the server's sentence (member and what waits),
     // `command` the hgs command that answers it.
-    struct Attention { QString kind, member, summary, command; int task = 0, minutes = 0, phase = 0, count = 0; double since = 0; };
+    // Task 95: a stalled lead ("lead_stalled") also names its reason (idle,
+    // question, rejected_tool, exited), the decisions and members it blocks
+    // and the notification round, which changes at most hourly.
+    struct Attention { QString kind, member, summary, command, reason; int task = 0, minutes = 0, phase = 0, count = 0, items = 0, members = 0, round = 0; double since = 0; };
+    const Attention *leadStall() const;
     QList<Attention> attention;
     // D2: findings_* from status (open items and the deferred list).
     QList<TeamFinding> findings;

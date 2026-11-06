@@ -42,7 +42,12 @@ class StablePolicy(unittest.TestCase):
             return re.search(r'(?m)^  ' + key + r':\n    name: (.+)$', text)[1]
         expected = {name(ci, 'gate'), name(ci, 'automatic') + ' / ' + name(checks, 'gate')}
         self.assertTrue(expected <= {job['name'] for job in self.jobs})
-        self.assertEqual(len(self.jobs), 16)
+        self.assertEqual(len(self.jobs), 14)
+        checked_names = set(re.findall(r'(?m)^    name: (.+)$', checks))
+        fixture_names = {j['name'].split(' / ', 1)[-1] for j in self.jobs if ' / ' in j['name']}
+        self.assertLessEqual(fixture_names, checked_names)
+        self.assertNotIn('Arch desktop', fixture_names)
+        self.assertNotIn('macOS desktop', fixture_names)
         self.assertEqual(C.validate_ci(self.run, self.workflow, self.jobs, self.request)['run_id'], 123)
         wrong_nested = [{**job, 'name': name(ci, 'automatic') + ' / ' + name(ci, 'gate')}
                         if job['name'] != name(ci, 'gate') else job for job in self.jobs]

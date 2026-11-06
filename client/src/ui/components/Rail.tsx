@@ -12,6 +12,8 @@ import { openAbout } from "../../store/desk";
 import { trNoop, tr } from "../../i18n";
 import { waiting } from "../../store/teams";
 import { modelServers } from "../../store/modelServers";
+import { appBuildInfo, refreshAppBuildInfo } from "../../store/buildInfo";
+import { installedAppName, railVersion } from "../screens/settings/about-version";
 
 // The side screen switcher stays on the side (owner decision 2026-10-27).
 // Order follows SessionsWindow: brand -> Overview, New session, Sessions,
@@ -32,10 +34,8 @@ const ITEMS: { id: Page; icon: string; label: string; tip: string; command: stri
   { id: "modelservers", icon: "hard-drive", label: "Model servers", tip: trNoop("Model servers"), command: "go.modelservers" },
 ];
 
-/** "0.1.0" -> "0.1 Dev": the rail shows major.minor and the channel. */
-const short = __APP_VERSION__.split(".").slice(0, 2).join(".");
-
 export function Rail() {
+  onMount(() => { void refreshAppBuildInfo(); });
   const labeled = () => skin().layout.rail === "labeled";
   // The list is read once at start; the tab shows only while a server exists.
   onMount(() => { void modelServers.refreshList(); });
@@ -43,7 +43,7 @@ export function Rail() {
   const shown = () => ITEMS.filter((item) => item.id !== "modelservers" || modelServers.available());
   return (
     <nav class="rail" classList={{ labeled: labeled() }} aria-label={tr("Screens")}>
-      <button class="rail-brand" classList={{ on: page() === "dashboard" }} data-tip={shortcutTooltip(`Home — Zerus Next ${__APP_VERSION__}`, "go.overview")} data-tip-pos="right" onClick={() => setPage("dashboard")}>
+      <button class="rail-brand" classList={{ on: page() === "dashboard" }} data-tip={shortcutTooltip(tr("Home — %1", installedAppName(appBuildInfo())), "go.overview")} data-tip-pos="right" onClick={() => setPage("dashboard")}>
         <ZerusLogo attention={counts().attention > 0} motion={logoMotion()} size={28} />
         <Show when={labeled()}><span>{tr("Overview")}</span></Show>
       </button>
@@ -78,7 +78,7 @@ export function Rail() {
         <Icon name="settings" size={24} />
         <Show when={labeled()}><span>{tr("Settings")}</span></Show>
       </button>
-      <button class="rail-version" data-tip={tr("Zerus Next %1 (development build). Open About", __APP_VERSION__)} data-tip-pos="right" onClick={openAbout}>{short} Dev</button>
+      <button class="rail-version" data-tip={tr("%1\nOpen About", installedAppName(appBuildInfo()))} data-tip-pos="right" onClick={openAbout}>{railVersion(appBuildInfo()) || tr("About")}</button>
     </nav>
   );
 }

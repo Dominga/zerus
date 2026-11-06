@@ -1,0 +1,280 @@
+{
+  "schema": 1,
+  "scope": "Production build_feed output and Next parse_feed conformance only. Payloads and signing identifiers are synthetic; URLs are inert pinned-origin strings. No archive, signature, download, installed upgrade or native lifecycle qualification.",
+  "cases": [
+    {
+      "name": "stable-v1",
+      "channel": "stable",
+      "producer": {
+        "release": {
+          "id": 1234,
+          "draft": false,
+          "prerelease": false,
+          "tag_name": "v0.47.0",
+          "published_at": "2026-10-29T12:00:00Z",
+          "html_url": "https://github.com/ufna/zerus/releases/tag/v0.47.0"
+        },
+        "info": {
+          "schema": 1,
+          "version": "0.47.0",
+          "channel": "stable",
+          "source_commit": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+          "architecture": "x86_64",
+          "distribution": "Arch Linux",
+          "native_agents_bundled": false,
+          "aur_packages": [
+            "zerus",
+            "zerus-ade-bin",
+            "zerus-git"
+          ]
+        },
+        "package_versions": {
+          "zerus": "0.47.0-1",
+          "zerus-ade-bin": "0.47.0-1",
+          "zerus-git": "0.47.0.r91.gaaaaaaa-2"
+        },
+        "commit": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+        "payloads": {
+          "zerus-0.47.0-aur.tar.gz": "Synthetic AUR metadata archive\n",
+          "zerus-0.47.0-arch-x86_64.tar.gz": "Synthetic Linux archive\n",
+          "zerus-0.47.0-source.tar.gz": "Synthetic source archive\n",
+          "zerus-0.47.0-1-x86_64.pkg.tar.zst": "Synthetic source package\n",
+          "zerus-ade-bin-0.47.0-1-x86_64.pkg.tar.zst": "Synthetic binary package\n"
+        }
+      },
+      "catalog": {
+        "schemaVersion": 1,
+        "product": "zerus",
+        "platform": "desktop",
+        "channel": "stable",
+        "versionName": "0.47.0",
+        "releaseId": 1234,
+        "publishedAt": "2026-10-29T12:00:00Z",
+        "releaseUrl": "https://github.com/ufna/zerus/releases/tag/v0.47.0",
+        "sourceCommit": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+        "artifacts": [
+          {
+            "kind": "arch-package",
+            "name": "zerus-0.47.0-1-x86_64.pkg.tar.zst",
+            "url": "https://zerus.dev/downloads/v0.47.0/zerus-0.47.0-1-x86_64.pkg.tar.zst",
+            "sha256": "2a81e30050952a6681324d8ffd79559824062b5a17c775d8d4a38d9cda6f0802",
+            "size": 25,
+            "os": "linux",
+            "arch": "x86_64"
+          },
+          {
+            "kind": "linux-archive",
+            "name": "zerus-0.47.0-arch-x86_64.tar.gz",
+            "url": "https://zerus.dev/downloads/v0.47.0/zerus-0.47.0-arch-x86_64.tar.gz",
+            "sha256": "992ca3cfb150d13ae8282f8972f6eaec7e1198cffffa9fc7559a905c24dc00fb",
+            "size": 24,
+            "os": "linux",
+            "arch": "x86_64"
+          },
+          {
+            "kind": "source",
+            "name": "zerus-0.47.0-source.tar.gz",
+            "url": "https://zerus.dev/downloads/v0.47.0/zerus-0.47.0-source.tar.gz",
+            "sha256": "a91b606bafced5c2002e1beab7125f019d72ccb3684ff952ef2d27c8e023ecc4",
+            "size": 25,
+            "os": "any",
+            "arch": "source"
+          },
+          {
+            "kind": "arch-package",
+            "name": "zerus-ade-bin-0.47.0-1-x86_64.pkg.tar.zst",
+            "url": "https://zerus.dev/downloads/v0.47.0/zerus-ade-bin-0.47.0-1-x86_64.pkg.tar.zst",
+            "sha256": "29fb59ae395ba8e575405316595144ac531646967ca65ce3b82f18afb0577ec7",
+            "size": 25,
+            "os": "linux",
+            "arch": "x86_64"
+          }
+        ],
+        "packages": {
+          "zerus": "0.47.0-1",
+          "zerus-ade-bin": "0.47.0-1",
+          "zerus-git": "0.47.0.r91.gaaaaaaa-2"
+        }
+      },
+      "expected_feed": {
+        "valid": true,
+        "version": "0.47.0",
+        "release_url": "https://github.com/ufna/zerus/releases/tag/v0.47.0",
+        "packages": {
+          "zerus": "0.47.0-1",
+          "zerus-ade-bin": "0.47.0-1",
+          "zerus-git": "0.47.0.r91.gaaaaaaa-2"
+        },
+        "release_id": 1234,
+        "build_number": 0,
+        "source_commit": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+        "source_url": "",
+        "package_url": "",
+        "macos_zip_url": "",
+        "macos_dmg_url": ""
+      },
+      "expected_update_token": "zerus-update:v1:stable:1234"
+    },
+    {
+      "name": "stable-v1-additive-macos-windows",
+      "channel": "stable",
+      "producer": {
+        "release": {
+          "id": 1234,
+          "draft": false,
+          "prerelease": false,
+          "tag_name": "v0.47.0",
+          "published_at": "2026-10-29T12:00:00Z",
+          "html_url": "https://github.com/ufna/zerus/releases/tag/v0.47.0"
+        },
+        "info": {
+          "schema": 2,
+          "version": "0.47.0",
+          "channel": "stable",
+          "source_commit": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+          "architecture": "x86_64",
+          "distribution": "Arch Linux",
+          "native_agents_bundled": false,
+          "aur_packages": [
+            "zerus",
+            "zerus-ade-bin",
+            "zerus-git"
+          ],
+          "homebrew_casks": [
+            "zerus"
+          ],
+          "macos": {
+            "asset": "zerus-0.47.0-macos-arm64.zip",
+            "qt_version": "6.11.2",
+            "team_id": "ABCDE12345",
+            "notarization_id": "0123abcd-4567-89ef-0123-456789abcdef",
+            "minimum_system_version": "14.0",
+            "dmg": {
+              "asset": "zerus-0.47.0-macos-arm64.dmg",
+              "notarization_id": "1123abcd-4567-89ef-0123-456789abcdef"
+            }
+          },
+          "windows_portable": "zerus-0.47.0-windows-x86_64.zip",
+          "windows_installer": {
+            "asset": "zerus-0.47.0-windows-x86_64-setup.exe",
+            "portable_sha256": "7f3feee03cb1e3f835480800ecfb99b87b13a95e5578283dd69a35af4f4eea19"
+          }
+        },
+        "package_versions": {
+          "zerus": "0.47.0-1",
+          "zerus-ade-bin": "0.47.0-1",
+          "zerus-git": "0.47.0.r91.gaaaaaaa-2"
+        },
+        "commit": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+        "payloads": {
+          "zerus-0.47.0-aur.tar.gz": "Synthetic AUR metadata archive\n",
+          "zerus-0.47.0-arch-x86_64.tar.gz": "Synthetic Linux archive\n",
+          "zerus-0.47.0-source.tar.gz": "Synthetic source archive\n",
+          "zerus-0.47.0-1-x86_64.pkg.tar.zst": "Synthetic source package\n",
+          "zerus-ade-bin-0.47.0-1-x86_64.pkg.tar.zst": "Synthetic binary package\n",
+          "zerus-0.47.0-windows-x86_64.zip": "Synthetic Windows portable archive\n",
+          "zerus-0.47.0-windows-x86_64-setup.exe": "Synthetic Windows installer\n",
+          "zerus-0.47.0-macos-arm64.zip": "Synthetic macOS application archive\n",
+          "zerus-0.47.0-macos-arm64.dmg": "Synthetic macOS disk image\n"
+        }
+      },
+      "catalog": {
+        "schemaVersion": 1,
+        "product": "zerus",
+        "platform": "desktop",
+        "channel": "stable",
+        "versionName": "0.47.0",
+        "releaseId": 1234,
+        "publishedAt": "2026-10-29T12:00:00Z",
+        "releaseUrl": "https://github.com/ufna/zerus/releases/tag/v0.47.0",
+        "sourceCommit": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+        "artifacts": [
+          {
+            "kind": "arch-package",
+            "name": "zerus-0.47.0-1-x86_64.pkg.tar.zst",
+            "url": "https://zerus.dev/downloads/v0.47.0/zerus-0.47.0-1-x86_64.pkg.tar.zst",
+            "sha256": "2a81e30050952a6681324d8ffd79559824062b5a17c775d8d4a38d9cda6f0802",
+            "size": 25,
+            "os": "linux",
+            "arch": "x86_64"
+          },
+          {
+            "kind": "linux-archive",
+            "name": "zerus-0.47.0-arch-x86_64.tar.gz",
+            "url": "https://zerus.dev/downloads/v0.47.0/zerus-0.47.0-arch-x86_64.tar.gz",
+            "sha256": "992ca3cfb150d13ae8282f8972f6eaec7e1198cffffa9fc7559a905c24dc00fb",
+            "size": 24,
+            "os": "linux",
+            "arch": "x86_64"
+          },
+          {
+            "kind": "source",
+            "name": "zerus-0.47.0-source.tar.gz",
+            "url": "https://zerus.dev/downloads/v0.47.0/zerus-0.47.0-source.tar.gz",
+            "sha256": "a91b606bafced5c2002e1beab7125f019d72ccb3684ff952ef2d27c8e023ecc4",
+            "size": 25,
+            "os": "any",
+            "arch": "source"
+          },
+          {
+            "kind": "arch-package",
+            "name": "zerus-ade-bin-0.47.0-1-x86_64.pkg.tar.zst",
+            "url": "https://zerus.dev/downloads/v0.47.0/zerus-ade-bin-0.47.0-1-x86_64.pkg.tar.zst",
+            "sha256": "29fb59ae395ba8e575405316595144ac531646967ca65ce3b82f18afb0577ec7",
+            "size": 25,
+            "os": "linux",
+            "arch": "x86_64"
+          }
+        ],
+        "packages": {
+          "zerus": "0.47.0-1",
+          "zerus-ade-bin": "0.47.0-1",
+          "zerus-git": "0.47.0.r91.gaaaaaaa-2"
+        },
+        "macos": {
+          "asset": "zerus-0.47.0-macos-arm64.zip",
+          "qt_version": "6.11.2",
+          "team_id": "ABCDE12345",
+          "notarization_id": "0123abcd-4567-89ef-0123-456789abcdef",
+          "minimum_system_version": "14.0",
+          "dmg": {
+            "asset": "zerus-0.47.0-macos-arm64.dmg",
+            "notarization_id": "1123abcd-4567-89ef-0123-456789abcdef"
+          },
+          "downloads": [
+            {
+              "name": "zerus-0.47.0-macos-arm64.zip",
+              "url": "https://github.com/ufna/zerus/releases/download/v0.47.0/zerus-0.47.0-macos-arm64.zip",
+              "size": 36,
+              "sha256": "fb22ccecda5240e22b0e794aae072b19ab88b229fcd1456d3a9025bdd5869624"
+            },
+            {
+              "name": "zerus-0.47.0-macos-arm64.dmg",
+              "url": "https://github.com/ufna/zerus/releases/download/v0.47.0/zerus-0.47.0-macos-arm64.dmg",
+              "size": 27,
+              "sha256": "61a42f7ccbd6a72d50691e1b1116e0e3debd68c797e59898158de223c2ee0393"
+            }
+          ]
+        }
+      },
+      "expected_feed": {
+        "valid": true,
+        "version": "0.47.0",
+        "release_url": "https://github.com/ufna/zerus/releases/tag/v0.47.0",
+        "packages": {
+          "zerus": "0.47.0-1",
+          "zerus-ade-bin": "0.47.0-1",
+          "zerus-git": "0.47.0.r91.gaaaaaaa-2"
+        },
+        "release_id": 1234,
+        "build_number": 0,
+        "source_commit": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+        "source_url": "",
+        "package_url": "",
+        "macos_zip_url": "https://github.com/ufna/zerus/releases/download/v0.47.0/zerus-0.47.0-macos-arm64.zip",
+        "macos_dmg_url": "https://github.com/ufna/zerus/releases/download/v0.47.0/zerus-0.47.0-macos-arm64.dmg"
+      },
+      "expected_update_token": "zerus-update:v1:stable:1234"
+    }
+  ]
+}

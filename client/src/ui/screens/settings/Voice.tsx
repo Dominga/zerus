@@ -6,6 +6,7 @@ import { flag, setSetting, text } from "../../../store/settings";
 import { Icon } from "../../lib/icons";
 import { Check, Group, Lines, SectionHead, Select, Status, type Option } from "./ui";
 import { formValid, retype, type AdapterView, type EditorForm } from "./voice-form";
+import { MICROPHONE_HINT, hintedMicrophone } from "./voice-hint";
 import { tr, trNoop } from "../../../i18n";
 import { trText, type Text } from "../../../text";
 
@@ -57,7 +58,13 @@ async function input(kind: string, fields: Record<string, unknown> = {}): Promis
 
 function loadMicrophones() {
   if (!inTauri() || !media()) return;
-  invoke<Microphone[]>("voice_microphones").then(setMicrophones, () => setMicrophones([]));
+  invoke<Microphone[]>("voice_microphones").then((listed) => {
+    setMicrophones(listed);
+    // Task 102: Qt's microphone, imported by its name, is chosen once it is listed.
+    const hint = hintedMicrophone(listed, text("speech/microphone"), text(MICROPHONE_HINT));
+    if (hint.choose) void setSetting("speech/microphone", hint.choose);
+    if (hint.drop) void setSetting(MICROPHONE_HINT, "");
+  }, () => setMicrophones([]));
 }
 
 /** SpeechSettings::refresh: the providers, the statistics and the microphones, when the section opens. */

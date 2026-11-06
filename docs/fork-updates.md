@@ -250,30 +250,42 @@ tab and folded cards (`workspace/inspectorWidth`, `workspace/inspectorOpen`,
 `workspace/inspectorTab`, `workspace/inspectorClosed`), and the WhiteWh skin
 (`workspace/skin`: Tauri ports it as `whitewh-dark` and `whitewh-light`).
 
+Also carried over once, on a Tauri client that switched before them too
+(task 102; Qt's store is only read, never written):
+
+- the mobile services (`mobile/localRelay`, `mobile/localRelayPort`,
+  `mobile/runConnector`): Qt keeps them only in its store, not in
+  `connector.json` or `tray.conf`, so Tauri has its own copies and the same
+  switches under Settings -> Mobile connection (see below);
+- the new-session worktree choice (`workspace/launchWorktree`) as Tauri's
+  `newSession/folderMode`, the New session dialog's default;
+- the microphone (`speech/microphone`) as its name only
+  (`speech/microphoneName`, read from Windows' device registry for Qt's
+  endpoint id): the Voice page chooses the listed microphone with that name.
+  Qt's device id itself is never stored, and a device this computer no longer
+  knows imports nothing;
+- `pathMappings/*`: the WSL path presets (at most 64) into
+  `<data_dir>/wsl-path-mappings.json` at the first start, when that file does
+  not exist yet;
+- `privateStores/notified`: the private-store notices already raised (at most
+  512) into `<data_dir>/private-store-notices.json` at the first start, when
+  that file does not exist yet; Tauri keeps that set there from then on.
+
 Not carried over, and why:
 
 - task title, new-card and note drafts (`tasks/titleDraft/*`, `tasks/newCard/*`,
   `tasks/noteDraft/*`): the Tauri task board keeps no draft fields, so there is
   nowhere to put them; the owner loses only unsent board text;
-- the microphone choice (`speech/microphone`) and the new-session worktree
-  choice (`launchWorktree`): the Tauri New session screen does not read either
-  key yet;
 - the expanded and collapsed sessions and teams (`ui/collapsed/*`,
   `ui/expanded/*`): Tauri keeps its own collapsed-row store, not Qt's keys;
 - automatic approvals: off after the move by design; turn them on again in
   Settings;
-- the mobile relay switches (`mobile/localRelay`, `mobile/localRelayPort`,
-  `mobile/runConnector`): the Tauri mobile connector has no settings screen;
 - the Teams UI preferences (`teams/*`, `team/*`, `ui/catalogHideUnusedRoles`):
   the Tauri Teams screen has no matching keys for heat mode, hide finished,
   per-team plan mode or the catalog role filter, so those visible choices reset;
 - `machines/residentHost`, `machines/otherTransport`: the resident host and
   transport choice are not implemented in Tauri;
 - `socraticode/nativeQdrant`: SocratiCode/native Qdrant is not in Tauri;
-- `pathMappings`: WSL path presets wait for the WSL mapping screen (task 73's
-  `<data_dir>/wsl-path-mappings.json`); Tauri has no WSL mapping feature yet;
-- `privateStores/notified`: Tauri raises private-store notices in memory and
-  has no persisted notified set yet;
 - `workspace/cacheKeepWarm`: cache keep-warm is not implemented in Tauri;
 - the extensions' switches (`extensions/*`): Tauri has no extensions surface;
 - `dataPlane/eventStream`: the event-stream data plane is not in Tauri;
@@ -336,7 +348,9 @@ usual problems, is in [fork-mobile-tailscale.md](fork-mobile-tailscale.md).
 
 Upstream's Windows gateway (`docs/superpowers/specs/2026-10-20-windows-mobile-gateway-design.md`)
 manages the bundled connector through `zerus-mobile-connector --manage`. The fork
-adds, under Settings -> Mobile connection (`tray/src/WindowsMobileServices.h`):
+adds, under Settings -> Mobile connection (`tray/src/WindowsMobileServices.h`;
+in Zerus Next the same two switches and startup, task 102,
+`client/src-tauri/src/mobile.rs`, `client/core/src/mobile/local_services.rs`):
 
 - **Start the connector when Zerus starts** (`mobile/runConnector`, on by
   default): at startup Zerus asks `--manage status` and, for a configured

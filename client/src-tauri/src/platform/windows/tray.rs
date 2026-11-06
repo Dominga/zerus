@@ -17,8 +17,7 @@ use windows_sys::Win32::{
 };
 use zerus_client_core::{
     attention::Notice,
-    menubar::{Apply, Entry, Face, OpenMode},
-    text::Text,
+    menubar::{Apply, Entry, Face},
 };
 
 const CALLBACK: u32 = WM_APP + 41;
@@ -183,26 +182,6 @@ fn dispatch(app: &AppHandle, action: MenuAction) {
         }
         MenuAction::Updates => crate::updates::open_page(app),
         MenuAction::Restart => crate::updates::open_page(app),
-        MenuAction::Session {
-            computer,
-            key,
-            running: false,
-            ..
-        } => {
-            crate::desk::open_session(app, &computer, &key);
-        }
-        MenuAction::Session {
-            computer,
-            name,
-            tty,
-            ..
-        } => {
-            let app = app.clone();
-            tauri::async_runtime::spawn_blocking(move || {
-                crate::desk::open_running(&app, &computer, &name, &tty)
-            });
-        }
-        MenuAction::Mode(mode) => crate::desk::set_mode(app, mode),
         MenuAction::Refresh => {
             let fleet = app.state::<crate::commands::AppState>();
             fleet.refresh();
@@ -217,7 +196,7 @@ fn menu(inner: &mut Inner, entries: &[Entry]) {
     }
     let mut bindings = HashMap::new();
     let mut next = 1u32;
-    for item in inner.bar.layout_modes(entries, &OpenMode::WINDOWS) {
+    for item in inner.bar.layout(entries) {
         match item {
             Item::Action { id, text } => {
                 unsafe {
@@ -242,36 +221,6 @@ fn menu(inner: &mut Inner, entries: &[Entry]) {
             Item::Separator => unsafe {
                 AppendMenuW(native, MF_SEPARATOR, 0, std::ptr::null());
             },
-            Item::OpenIn { modes, .. } => {
-                let submenu = unsafe { CreatePopupMenu() };
-                for (id, mode, checked) in modes {
-                    let text = match mode {
-                        OpenMode::Tab => zerus_client_core::source!("Windows Terminal tab"),
-                        OpenMode::Window => zerus_client_core::source!("Windows Terminal window"),
-                        _ => mode.label(),
-                    };
-                    let text = crate::native_text::render(&Text::new(text));
-                    unsafe {
-                        AppendMenuW(
-                            submenu,
-                            MF_STRING | if checked { MF_CHECKED } else { MF_UNCHECKED },
-                            next as usize,
-                            wide(&text.replace('&', "&&")).as_ptr(),
-                        );
-                    }
-                    bindings.insert(next, id);
-                    next += 1;
-                }
-                let label = crate::native_text::render(&Text::new("Open in"));
-                unsafe {
-                    AppendMenuW(
-                        native,
-                        MF_POPUP,
-                        submenu as usize,
-                        wide(&label.replace('&', "&&")).as_ptr(),
-                    );
-                }
-            }
         }
     }
     let old = std::mem::replace(&mut inner.menu, native);
@@ -508,50 +457,5 @@ pub fn stop(app: &AppHandle) {
         if !raw.is_null() {
             drop(unsafe { Box::from_raw(raw) });
         }
-    }
-}
-pub fn open_running(
-    app: &AppHandle,
-    computer: &zerus_client_core::ComputerId,
-    name: &str,
-    tty: &str,
-) {
-    use zerus_client_core::terminal_launch::{Launcher, Opened};
-    let settings = crate::desk::terminal_settings(&crate::data_dir(app));
-    let mode = crate::desk::current_mode(app);
-    let hgs = zerus_client_core::default_hgs();
-    let command = zerus_client_core::shell::open_command(
-        &hgs.to_string_lossy(),
-        &computer.0,
-        name,
-        None,
-        zerus_client_core::shell::current_shell(),
-    );
-    if mode == OpenMode::Clipboard {
-        match crate::clipboard::copy_text(app.clone(), command.clone()) {
-            Ok(()) => crate::desk::window_notice(
-                app,
-                "Zerus: copied to the clipboard",
-                &zerus_client_core::shell::notification_text(&command),
-            ),
-            Err(e) => crate::desk::window_notice(app, "Zerus: the terminal did not open", &e),
-        }
-        return;
-    }
-    let mut launcher = Launcher::new(settings);
-    match launcher.open_session(&hgs.to_string_lossy(), &computer.0, name, tty) {
-        Ok(Opened::Opened {
-            advisory: Some(text),
-        }) => crate::desk::window_notice(
-            app,
-            zerus_client_core::terminal_launch::ADVISORY_TITLE,
-            &text,
-        ),
-        Err(e) => crate::desk::window_notice(
-            app,
-            zerus_client_core::terminal_launch::NOT_OPENED_TITLE,
-            &zerus_client_core::terminal_launch::not_opened(&e, &command),
-        ),
-        _ => {}
     }
 }

@@ -18,8 +18,9 @@ args = sys.argv[1:]
 data = sys.stdin.read()
 with open(os.path.join(here, "log.ndjson"), "a") as log:
     log.write(json.dumps({"argv": args, "stdin": data}) + "\n")
-if args in (["swarm", "initialize", "--g3-status", "--json"], ["swarm", "initialize", "--g3", "--json"]):
-    action = "g3-status" if args[2] == "--g3-status" else "g3-import"
+if args in (["swarm", "initialize", "--g3-status", "--json"], ["swarm", "initialize", "--g3", "--json"],
+            ["swarm", "initialize", "--g3-bootstrap", "--json"]):
+    action = {"--g3-status": "g3-status", "--g3": "g3-import", "--g3-bootstrap": "g3-bootstrap"}[args[2]]
 elif args == ["machine", "ls"]:
     action = "machines"
 elif len(args) == 3 and args[0] == "swarm" and args[1] in ("preview", "join"):

@@ -125,7 +125,8 @@ mod tests {
     #[cfg(unix)]
     #[test]
     fn the_fix_runs_only_the_bundled_setup_with_autostart() {
-        use std::os::unix::fs::PermissionsExt;
+        let _process = crate::PROCESS_TREE.read().unwrap();
+        let environment = zerus_client_core::run::FrozenEnvironment::capture().unwrap();
         use std::sync::atomic::{AtomicUsize, Ordering};
         static NEXT: AtomicUsize = AtomicUsize::new(0);
         let root = std::env::temp_dir().join(format!(
@@ -138,27 +139,31 @@ mod tests {
         std::fs::create_dir_all(setup.parent().unwrap()).unwrap();
         std::fs::create_dir_all(executable.parent().unwrap()).unwrap();
         std::fs::write(&executable, "").unwrap();
-        std::fs::write(
-            &setup,
-            "#!/bin/sh\nprintf '%s' \"$1\" > \"${ZERUS_TEST_LOG:?}\"\nprintf 'fixture problem\\n' >&2\nexit \"${ZERUS_TEST_EXIT:-0}\"\n",
+        // Configure only this fake setup file. Mutating the parent environment
+        // invalidates unrelated termination controllers running in parallel.
+        let script = |exit| {
+            format!(
+            "#!/bin/sh\nprintf '%s' \"$1\" > \"${{0%/*}}/args\"\nprintf 'fixture problem\\n' >&2\nexit {exit}\n"
         )
-        .unwrap();
-        std::fs::set_permissions(&setup, std::fs::Permissions::from_mode(0o700)).unwrap();
-        let log = root.join("args");
-        unsafe {
-            std::env::set_var("ZERUS_TEST_LOG", &log);
-            std::env::set_var("ZERUS_TEST_EXIT", "0");
-        }
+        };
+        crate::write_executable(&setup, script(0));
+        let log = setup.with_file_name("args");
+        assert!(
+            environment.current(),
+            "fixture preparation invalidated an unrelated native context"
+        );
         fix(&executable).unwrap();
+        assert!(
+            environment.current(),
+            "setup changed the parent environment"
+        );
         assert_eq!(std::fs::read_to_string(&log).unwrap(), "--autostart");
-        unsafe {
-            std::env::set_var("ZERUS_TEST_EXIT", "7");
-        }
+        crate::write_executable(&setup, script(7));
         assert_eq!(fix(&executable).unwrap_err(), "fixture problem");
-        unsafe {
-            std::env::remove_var("ZERUS_TEST_LOG");
-            std::env::remove_var("ZERUS_TEST_EXIT");
-        }
+        assert!(
+            environment.current(),
+            "failed setup changed the parent environment"
+        );
         std::fs::remove_dir_all(root).unwrap();
     }
 }

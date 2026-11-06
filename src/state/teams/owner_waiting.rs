@@ -78,6 +78,17 @@ fn team_items(team: &Team, now: f64, out: &mut Vec<Value>) {
         TeamStatus::Running | TeamStatus::Paused => {}
         _ => return,
     }
+    // Task 112: a paused team waits for the owner's Resume team, whatever its
+    // sessions do; the item says since when and by whom.
+    if team.status == TeamStatus::Paused {
+        let at = team.paused.as_ref().map_or(team.updated, |pause| pause.at);
+        let words = super::inbox::paused_words(team);
+        let title = if words.is_empty() { "Team paused: members get no tasks".to_owned() } else { format!("Team paused {words}: members get no tasks") };
+        let mut found = item(team, "team_paused", &(at as u64).to_string(), title, at, "resume_team");
+        found["paused_at"] = json!(at);
+        found["paused_by"] = json!(team.paused.as_ref().map(|pause| pause.by.clone()).unwrap_or_default());
+        out.push(found);
+    }
     // The attention list already decides when a report or a permission is
     // escalated to the owner, and which draft phase is next.
     for attention in super::inbox::attention(team, now) {
@@ -131,6 +142,31 @@ fn team_items(team: &Team, now: f64, out: &mut Vec<Value>) {
                 let mut found = item(team, "lead_stopped", &member, summary, at, "resume_lead");
                 found["member"] = json!(member);
                 found["member_id"] = attention["member_id"].clone();
+                out.push(found);
+            }
+            // Task 98: a member's composer refuses every hand-out; only its
+            // Terminal clears it.
+            "input_blocked" => {
+                let member = attention["member"].as_str().unwrap_or_default().to_owned();
+                let mut found = item(team, "input_blocked", &format!("{member}-{}", at as u64), summary, at, "open_terminal");
+                for key in ["member_id", "count", "reason", "screen", "session", "command"] {
+                    found[key] = attention[key].clone();
+                }
+                found["member"] = json!(member);
+                out.push(found);
+            }
+            // Task 95: the lead stalled while its decisions wait. The round is
+            // part of the id, so each round (at most hourly) is notified once
+            // by the desktops, which notify a waiting id once.
+            "lead_stalled" => {
+                let member = attention["member"].as_str().unwrap_or_default().to_owned();
+                let round = attention["round"].as_u64().unwrap_or(1);
+                let action = if attention["reason"] == "exited" { "resume_lead" } else { "open_lead" };
+                let mut found = item(team, "lead_stalled", &format!("{member}-{round}"), summary, at, action);
+                for key in ["member_id", "reason", "detail", "items", "members", "round", "minutes", "session"] {
+                    found[key] = attention[key].clone();
+                }
+                found["member"] = json!(member);
                 out.push(found);
             }
             // Only the member's Terminal takes this answer: the button opens the
@@ -328,7 +364,12 @@ mod tests {
         stopped.tasks[0].hold = Some(Hold { by: "You".into(), at: 9000.0, ..Default::default() });
 
         let teams = vec![planning, phased, reported, asking, proposing, held, finished, quiet, stopped];
-        let list = items(&teams, now);
+        let all = items(&teams, now);
+        // Task 112: the paused team also waits for Resume team.
+        let paused: Vec<&Value> = all.iter().filter(|item| item["kind"] == "team_paused").collect();
+        assert_eq!(paused.len(), 1, "{all:#?}");
+        assert_eq!((paused[0]["team"].as_str(), paused[0]["action"].as_str()), (Some("t-word"), Some("resume_team")));
+        let list: Vec<Value> = all.into_iter().filter(|item| item["kind"] != "team_paused").collect();
         assert_eq!(
             kinds(&list),
             ["team_finished", "task_waits_owner", "owner_word_asked", "owner_word_asked", "permission_escalated", "report_escalated", "phase_draft", "plan_draft"],

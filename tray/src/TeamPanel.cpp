@@ -702,7 +702,9 @@ QWidget *TeamPanel::header(const Team &team, const QString &status, bool narrow)
         });
         actions->addWidget(pause);
     } else if (team.status == "paused") {
-        auto *resume = button(tr("Resume"), "teamResume", true);
+        auto *paused = new QLabel(team.pausedText()); paused->setObjectName("teamPausedText"); paused->setWordWrap(true);
+        actions->addWidget(paused, 1);
+        auto *resume = button(tr("Resume team"), "teamResume", true);
         QObject::connect(resume, &QPushButton::clicked, this, [this] { act("resume", {}); });
         actions->addWidget(resume);
     }

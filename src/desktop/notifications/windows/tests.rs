@@ -418,3 +418,77 @@ fn original_actor_dispatch_settles_only_its_durable_attempt() {
     actor.poll(&mut store, Instant::now());
     assert!(actor.operation_drained());
 }
+#[test]
+fn one_click_reported_by_both_native_paths_reaches_the_actor_once() {
+    use std::time::Duration;
+    let mut model = ready();
+    let mut native = Fake::default();
+    let first = post(&model.session, 1);
+    let second = post(&model.session, 2);
+    for command in [&first, &second] {
+        assert!(matches!(
+            model.execute(command, &mut native, || None),
+            Outcome::Delivered { .. }
+        ));
+    }
+    let now = Instant::now();
+    let id = &first.binding.request_id;
+    assert_eq!(model.click(id, now), Some(activation(&first)));
+    // The Activated delegate and the COM activator report the same click.
+    assert!(model.click(id, now + Duration::from_millis(300)).is_none());
+    assert_eq!(model.coalesced, 1);
+    // Another delivered toast is a distinct click inside the same window.
+    assert_eq!(
+        model.click(&second.binding.request_id, now + Duration::from_millis(400)),
+        Some(activation(&second))
+    );
+    // An unknown request is refused and leaves no state behind.
+    let unknown = uuid();
+    assert!(model.click(&unknown, now).is_none());
+    assert!(!model.delivered.contains_key(&unknown));
+    // A later click on a still-delivered mapping is a new native event.
+    assert_eq!(
+        model.click(id, now + CLICK_COALESCE + Duration::from_millis(1)),
+        Some(activation(&first))
+    );
+    // Stopping still refuses clicks before cleanup.
+    model.request_stop();
+    assert!(model
+        .click(&second.binding.request_id, now + CLICK_COALESCE * 2)
+        .is_none());
+}
+
+#[test]
+fn a_burst_of_distinct_clicks_never_evicts_a_live_suppression_marker() {
+    use std::time::Duration;
+    let mut model = ready();
+    let mut native = Fake::default();
+    // More distinct clicks than the native callback queue holds, all at T.
+    let commands: Vec<_> = (1..=super::super::EVENTS as i64 * 2 + 1)
+        .map(|seq| post(&model.session, seq))
+        .collect();
+    let now = Instant::now();
+    for command in &commands {
+        assert!(matches!(
+            model.execute(command, &mut native, || None),
+            Outcome::Delivered { .. }
+        ));
+        assert_eq!(
+            model.click(&command.binding.request_id, now),
+            Some(activation(command))
+        );
+    }
+    // The second native report of the FIRST click is still suppressed.
+    let later = now + Duration::from_millis(300);
+    for command in [commands.first().unwrap(), commands.last().unwrap()] {
+        assert!(model.click(&command.binding.request_id, later).is_none());
+    }
+    assert_eq!(model.coalesced, 2);
+    // A marker leaves with its mapping: a closed toast cannot be clicked, and
+    // no marker outlives the bounded delivered mappings.
+    let closed = &commands[0].binding.request_id;
+    assert!(model.closed(closed).is_some());
+    assert!(model.click(closed, later).is_none());
+    assert_eq!(model.coalesced, 2);
+    assert_eq!(model.delivered.len(), commands.len() - 1);
+}

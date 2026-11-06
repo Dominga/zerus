@@ -345,6 +345,7 @@ pub fn valid_operation(id: &str, value: &Value) -> bool {
     if array_len(value, "history") > HISTORY
         || array_len(value, "previous_launches") > PREVIOUS
         || array_len(value, "worktree_previous") > PREVIOUS
+        || array_len(value, "clone_previous") > PREVIOUS
     {
         return false;
     }
@@ -1002,6 +1003,8 @@ pub struct Remember {
     pub agent: String,
     pub account: String,
     pub terminal: bool,
+    /// Task 102: "auto" or "none" when chosen in the dialog, else empty.
+    pub folder_mode: String,
 }
 
 /// What the caller does for a step.
@@ -1209,6 +1212,7 @@ impl Creations {
                 agent: text(&choices, "cmd").to_owned(),
                 account: text(&choices, "account").to_owned(),
                 terminal: flag(&choices, "terminal"),
+                folder_mode: text(&choices, "worktree_choice").to_owned(),
             }
         });
         self.next_write += 1;
@@ -1902,6 +1906,10 @@ impl Creations {
         if text(&value, "worktree_id").is_empty() {
             value["worktree_id"] = Value::from(self.uuid());
         }
+        // The request's source folder. Preparation later moves `target` to the
+        // checkout; a service lookup of this original still needs its exact
+        // admitted plan.
+        value["worktree_source"] = value["target"].clone();
         value["worktree_receipts"] = Value::Bool(flag(&result, "creation_receipts_v1"));
         value["worktree_common"] = result["common_dir"].clone();
         self.put(id, value);
@@ -1985,6 +1993,23 @@ impl Creations {
                 .and_then(Value::as_str)
                 .unwrap_or("The original clone result is unknown. Check again before continuing.")
                 .to_owned();
+            // Only a definitely effect-free failure (a clone this client never
+            // sent) frees its request for a later Continue setup.
+            if status == "failed" && result.get("effects_started") == Some(&Value::Bool(false)) {
+                let mut previous = value["clone_previous"]
+                    .as_array()
+                    .cloned()
+                    .unwrap_or_default();
+                previous.push(value["clone_id"].clone());
+                while previous.len() > PREVIOUS {
+                    previous.remove(0);
+                }
+                value["clone_previous"] = Value::Array(previous);
+                if let Some(object) = value.as_object_mut() {
+                    object.remove("clone_id");
+                }
+                self.put(id, value);
+            }
             return self.failed(id, &detail, status != "failed");
         }
         value["clone_done"] = Value::Bool(true);
@@ -2199,6 +2224,22 @@ impl Creations {
             Err(error) => self.failed(&id, &error, true),
         }
         self.finish()
+    }
+
+    /// The launch never left this client: it had no fresh consent, or it
+    /// stopped before its admission request was written. The unused launch ID
+    /// is retired into the history and a new one reserved; the operation
+    /// fails and stays resumable, so an explicit Continue setup starts the
+    /// agent. Nothing is launched with the replacement ID automatically.
+    pub fn launch_unsent(&mut self, launch: &str, error: &str) -> Vec<Effect> {
+        let Some(id) = self.for_launch(launch) else {
+            return Vec::new();
+        };
+        let value = self.get(&id);
+        if !flag(&value, "launch_dispatched") || text(&value, "state") != "launching" {
+            return Vec::new();
+        }
+        self.ended(&id, launch, error)
     }
 
     /// The launched session ended without binding: the launch ID is retired

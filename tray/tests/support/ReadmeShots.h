@@ -363,6 +363,13 @@ elif c=='account' and a[1:2]==['inspect']:
   out(usage(found[0]) if found else {'status':'unavailable','id':a[2]})
 elif c=='team':
  op=a[1] if len(a)>1 else ''
+ import os
+ # Task 101: `.teamsbusy` (seconds) makes the polled reads wait, then
+ # refuse as the team store does while a writer holds it.
+ if op in ('list','status','events','inbox') and os.path.exists(__file__+'.teamsbusy'):
+  import time
+  time.sleep(float(open(__file__+'.teamsbusy').read().strip() or 0))
+  print('hgs: database is locked',file=sys.stderr);sys.exit(1)
  if op=='list':
   t=dict(d['team'])
   for k in ('layers','cycle','ready','validation'):t.pop(k,None)

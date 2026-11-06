@@ -6,6 +6,12 @@ import { tr } from "../../i18n";
 // Activity attachment cards (ActivityView.cpp:759-782) and their Open
 // (SessionsWindow.cpp:1093-1102), apart from the view so they can be tested.
 
+/** The scope a row's files are read in: none for a fork's inherited row, whose
+ * files belong to the session it began from, never this one (zerus-b4qk). */
+export function rowScope(item: { inherited?: boolean }, scope: AttachmentScope | undefined): AttachmentScope | undefined {
+  return item.inherited ? undefined : scope;
+}
+
 /** What a card reads its file by: none for a file its message saved no reference to, or while no conversation shows. */
 export function cardTarget(file: Pick<ItemAttachment, "request_id" | "index">, scope: AttachmentScope | undefined): { computer: string; ref: AttachmentRef } | undefined {
   if (!scope || !file.request_id) return undefined;

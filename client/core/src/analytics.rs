@@ -30,6 +30,10 @@ pub const PAGE_SIZE: usize = 50;
 const HELP_BYTES: usize = 128 * 1024;
 /// How long a probe or a call may run.
 const TIMEOUT: Duration = Duration::from_secs(30);
+/// hgs's refusal of a voice read where no local speech service runs (src/speech.rs).
+const SPEECH_REMOTE_ONLY: &str = "Use a configured remote computer for speech recognition";
+/// What the voice section says for that computer (task 72, F4).
+pub const NO_LOCAL_SPEECH: &str = "No speech service runs here: voice is recognised on a configured remote computer, which keeps its own counters.";
 /// Exact JSON integers.
 const MAX_EXACT: u64 = 9_007_199_254_740_991;
 const MAX_INTEGER: f64 = MAX_EXACT as f64;
@@ -1079,11 +1083,20 @@ impl Request {
 
     /// The call's answer, checked; None for output past the limit.
     pub fn answer(&self, exit: Option<Exit>) -> Result<Reply, String> {
-        let Some(Exit::Code {
-            code: 0, stdout, ..
-        }) = exit
-        else {
-            return Err(self.failed());
+        let stdout = match exit {
+            Some(Exit::Code {
+                code: 0, stdout, ..
+            }) => stdout,
+            // Task 72 (F4): a computer without a local speech service (hgs on
+            // Windows) refuses every voice read; say so instead of a failure.
+            // Only this known refusal is recognised: stderr is never shown.
+            Some(Exit::Code { stderr, .. })
+                if matches!(self, Request::Speech { .. })
+                    && stderr.contains(SPEECH_REMOTE_ONLY) =>
+            {
+                return Err(NO_LOCAL_SPEECH.into())
+            }
+            _ => return Err(self.failed()),
         };
         if self.mutation() {
             // Mutations answer with metadata for the default range: only a

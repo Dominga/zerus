@@ -3,7 +3,10 @@
 //! test reads the same file and renders every Text in Russian.
 use serde_json::{json, Value};
 use std::path::Path;
-use zerus_client_core::questions::{card, AnswerDraft, CardContext, CardView, Question};
+use zerus_client_core::questions::{
+    card, AnswerDraft, CardContext, CardView, Question, ANSWER_NOT_STARTED, ANSWER_REFUSED,
+    ANSWER_STILL_SENDING, UNCONFIRMED_BY_SERVICE,
+};
 
 fn ask(extra: Value) -> Value {
     let mut raw = json!({"question_id": "q1", "question_hash": "h", "run_id": "run-1",
@@ -85,7 +88,90 @@ fn samples() -> Vec<CardView> {
         ),
         // Multi-select bounds and a free-text item.
         card(&multi, &draft, &ready),
+        // Each answer state's notice is the card's or the app's prose, which
+        // the webview translates: sent and waiting, still sent by the desktop
+        // service (locked like one under way), never started or refused by
+        // it, unconfirmed by it, and uncertain with a detail as written.
+        card(&required, &noticed(|d| d.set_answered(false)), &ready),
+        card(
+            &required,
+            &noticed(|d| d.set_pending(ANSWER_STILL_SENDING)),
+            &CardContext {
+                in_flight: true,
+                ..ready.clone()
+            },
+        ),
+        card(
+            &required,
+            &noticed(|d| d.set_error(ANSWER_NOT_STARTED, false)),
+            &ready,
+        ),
+        card(
+            &required,
+            &noticed(|d| d.set_error(ANSWER_REFUSED, false)),
+            &ready,
+        ),
+        card(
+            &required,
+            &noticed(|d| d.set_unconfirmed(UNCONFIRMED_BY_SERVICE)),
+            &ready,
+        ),
+        card(
+            &required,
+            &noticed(|d| d.set_error("Answer transfer failed (exit 1).", true)),
+            &ready,
+        ),
     ]
+}
+
+/// A draft after `change`.
+fn noticed(change: impl FnOnce(&mut AnswerDraft)) -> AnswerDraft {
+    let mut draft = AnswerDraft::default();
+    change(&mut draft);
+    draft
+}
+
+/// The card shows the answer states' notices as catalog prose: the source
+/// itself, or the uncertain prefix around a detail kept as written. A
+/// message the card does not know stays verbatim.
+#[test]
+fn the_answer_notices_are_prose_and_other_messages_stay_as_written() {
+    let cards = samples();
+    let status = |english: &str| {
+        cards
+            .iter()
+            .find(|c| c.status.english() == english)
+            .unwrap_or_else(|| panic!("{english}"))
+            .status
+            .clone()
+    };
+    for known in [
+        "Answer sent. Waiting for the agent…",
+        ANSWER_STILL_SENDING,
+        ANSWER_NOT_STARTED,
+        ANSWER_REFUSED,
+        UNCONFIRMED_BY_SERVICE,
+    ] {
+        let text = status(known);
+        assert_eq!(
+            (text.source.as_ref(), text.args.len()),
+            (known, 0),
+            "{known}"
+        );
+    }
+    let uncertain = status(
+        "Delivery is not confirmed. Check Terminal before retrying. Answer transfer failed (exit 1).",
+    );
+    assert_eq!(
+        uncertain.source,
+        "Delivery is not confirmed. Check Terminal before retrying. %1"
+    );
+    assert_eq!(
+        serde_json::to_value(&uncertain.args).unwrap(),
+        json!([{"kind": "text", "value": {"source": "%1", "args": [{"kind": "verbatim",
+            "value": "Answer transfer failed (exit 1)."}]}}])
+    );
+    assert_eq!(status("Answer transfer failed (exit 1).").source, "%1");
 }
 
 #[test]

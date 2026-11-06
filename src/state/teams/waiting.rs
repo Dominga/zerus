@@ -24,6 +24,11 @@ pub(crate) struct Waiting {
     /// U30: the member's `hgs team run` still running in its folder: the
     /// session is Building.
     pub build: Option<Value>,
+    /// Task 95: the lead stalled: the phone's alert item for the lead's row
+    /// (`mobile_attention`), one per notification round.
+    pub alert: Option<Value>,
+    /// Task 97: the team, so the owner queue finds its lead's row.
+    pub team: String,
 }
 
 /// The reasons of every session of these teams, the lead's first.
@@ -44,6 +49,11 @@ pub(crate) fn reasons(teams: &[Team], now: f64) -> Vec<Waiting> {
                     "job":budget.job.as_ref().map(|job| json!({"command":job.command,"since":job.since}))})
             });
             let build = if lead { None } else { team_build(team, member, now) };
+            let alert = team
+                .lead_stall
+                .as_ref()
+                .filter(|_| lead && team.status == TeamStatus::Running)
+                .map(|stall| super::lead_stall::mobile_item(team, stall));
             out.push(Waiting {
                 name: session.name.clone(),
                 conversation_id: session.conversation_id.clone(),
@@ -51,6 +61,8 @@ pub(crate) fn reasons(teams: &[Team], now: f64) -> Vec<Waiting> {
                 reason,
                 budget,
                 build,
+                alert,
+                team: team.id.clone(),
             });
         }
     }
@@ -80,6 +92,19 @@ fn team_build(team: &Team, member: &Member, now: f64) -> Option<Value> {
         })
 }
 
+/// Task 112: a paused team's sessions wait for the team, not for their own
+/// Resume: the reason says since when, by whom, and that members get no tasks.
+fn paused_reason(team: &Team) -> Option<Value> {
+    let words = super::inbox::paused_words(team);
+    let text = if words.is_empty() {
+        "Waiting for you to resume the team: members get no tasks".to_owned()
+    } else {
+        format!("Waiting for you to resume the team, paused {words}: members get no tasks")
+    };
+    let pause = team.paused.clone().unwrap_or_default();
+    reason(team, "team_paused", text, json!({"paused_at":pause.at,"paused_by":pause.by}))
+}
+
 fn reason(team: &Team, kind: &str, text: String, extra: Value) -> Option<Value> {
     let mut value = json!({"kind":kind,"text":text,"team":team.id,"team_name":team.name});
     if let (Some(value), Value::Object(extra)) = (value.as_object_mut(), extra) {
@@ -99,10 +124,15 @@ fn role_of(team: &Team, member: &str) -> String {
 }
 
 fn lead_reason(team: &Team) -> Option<Value> {
+    // Task 95: decisions wait for a lead that does not work on them: only the
+    // owner moves it now.
+    if let Some(stall) = team.lead_stall.as_ref().filter(|_| team.status == TeamStatus::Running) {
+        let items = if stall.items == 1 { "1 decision waits".to_owned() } else { format!("{} decisions wait", stall.items) };
+        return reason(team, "team_lead_stalled", format!("Waiting for you: the lead stalled, {items} for it"),
+            json!({"items":stall.items,"members":stall.members,"stall":stall.reason,"round":stall.round}));
+    }
     match team.status {
-        TeamStatus::Paused => {
-            return reason(team, "team_paused", "Waiting for you to resume the team".into(), json!({}));
-        }
+        TeamStatus::Paused => return paused_reason(team),
         TeamStatus::Planning if !team.tasks.is_empty() => {
             return reason(team, "team_plan", "Waiting for you to approve the plan".into(), json!({}));
         }
@@ -148,7 +178,7 @@ fn lead_reason(team: &Team) -> Option<Value> {
 
 fn member_reason(team: &Team, member: &Member) -> Option<Value> {
     if team.status == TeamStatus::Paused {
-        return reason(team, "team_paused", "Waiting for you to resume the team".into(), json!({}));
+        return paused_reason(team);
     }
     if team.status != TeamStatus::Running {
         return None;
@@ -318,8 +348,15 @@ mod tests {
         let mut paused = team(vec![task(1, "dev", TaskStatus::Pending)]);
         paused.status = TeamStatus::Paused;
         let found = reasons(&[paused], 0.0);
-        assert_eq!(text(&found, "lead"), "Waiting for you to resume the team");
-        assert_eq!(text(&found, "dev"), "Waiting for you to resume the team");
+        // Task 112: members get no tasks; with a recorded pause, since when and by whom.
+        assert_eq!(text(&found, "lead"), "Waiting for you to resume the team: members get no tasks");
+        assert_eq!(text(&found, "dev"), "Waiting for you to resume the team: members get no tasks");
+        let mut recorded = team(vec![task(1, "dev", TaskStatus::Pending)]);
+        recorded.status = TeamStatus::Paused;
+        recorded.paused = Some(crate::state::teams::model::TeamPause { at: 1_800_000_000.0, by: "You".into(), reason: "paused".into() });
+        let found = reasons(&[recorded], 0.0);
+        let said = text(&found, "lead");
+        assert!(said.starts_with("Waiting for you to resume the team, paused since ") && said.ends_with(" by You: members get no tasks"), "{said}");
         let mut planning = team(vec![task(1, "dev", TaskStatus::Pending)]);
         planning.status = TeamStatus::Planning;
         let found = reasons(&[planning], 0.0);

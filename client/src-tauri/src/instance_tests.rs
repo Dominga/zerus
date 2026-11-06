@@ -33,6 +33,9 @@ fn wait_for(path: &Path, child: &mut Child) {
 }
 
 fn launch(root: &Path, scope: &str) -> Child {
+    launch_with_quit_hold(root, scope, false)
+}
+fn launch_with_quit_hold(root: &Path, scope: &str, hold_after_quit: bool) -> Child {
     let home = root.join(scope);
     fs::create_dir_all(home.join("tmp")).unwrap();
     fs::create_dir_all(home.join("runtime")).unwrap();
@@ -40,7 +43,7 @@ fn launch(root: &Path, scope: &str) -> Child {
     fs::write(
         &control,
         serde_json::to_vec(&serde_json::json!({
-            "root": root, "scope": scope
+            "root": root, "scope": scope, "hold_after_quit":hold_after_quit
         }))
         .unwrap(),
     )
@@ -54,6 +57,7 @@ fn launch(root: &Path, scope: &str) -> Child {
             .env("TMPDIR", home.join("tmp"))
             .env("XDG_RUNTIME_DIR", home.join("runtime"))
             .env("XDG_CONFIG_HOME", home.join("xdg"))
+            .env("XDG_STATE_HOME", home.join("log-state"))
             .env("HGS_CONFIG_DIR", home.join("config"))
             .env("HGS_STATE_DIR", home.join("state"))
             // The incident used this GUI mode; it must not bypass exclusion.
@@ -91,6 +95,10 @@ fn launch_fixture() {
             fs::write(root.join(format!("{scope}.forwarded")), b"clean exit").unwrap();
             return;
         }
+        Claim::Duplicate(reason) => {
+            fs::write(root.join(format!("{scope}.duplicate")), reason).unwrap();
+            return;
+        }
         Claim::Failed(error) => panic!("fixture GUI owner: {error}"),
     };
     // This is the boundary before UI/desktop effects in the actual caller.
@@ -110,10 +118,19 @@ fn launch_fixture() {
             .is_none(),
         "final teardown must not release GUI exclusion before actual process exit"
     );
+    if control["hold_after_quit"] == true {
+        fs::write(root.join(format!("{scope}.released")), b"").unwrap();
+        let deadline = Instant::now() + Duration::from_secs(8);
+        while !root.join(format!("{scope}.exit")).exists() {
+            assert!(Instant::now() < deadline, "quit fixture exit deadline");
+            std::thread::sleep(Duration::from_millis(10));
+        }
+    }
 }
 
 #[test]
 fn two_tmpdirs_homes_and_configs_handoff_before_second_gui_effects() {
+    let _process = crate::PROCESS_TREE.read().unwrap();
     let root = private_root();
     let mut owner = launch(&root, "first");
     wait_for(&root.join("first.ready"), &mut owner);
@@ -131,10 +148,14 @@ fn two_tmpdirs_homes_and_configs_handoff_before_second_gui_effects() {
     fs::write(root.join("first.stop"), b"").unwrap();
     assert!(owner.0.wait().unwrap().success());
     assert!(second.0.wait().unwrap().success());
+    let text = fs::read_to_string(log_path(&root, "second")).unwrap();
+    assert_eq!(text.lines().count(), 1);
+    assert!(text.contains("outcome=forwarded reason=activation_written"));
 }
 
 #[test]
 fn a_crash_releases_kernel_exclusion_and_replaces_only_the_stale_socket() {
+    let _process = crate::PROCESS_TREE.read().unwrap();
     let root = private_root();
     let mut owner = launch(&root, "crashed");
     wait_for(&root.join("crashed.ready"), &mut owner);
@@ -188,9 +209,10 @@ fn an_owner_not_yet_listening_still_excludes_a_second_gui() {
     let root = private_root();
     let directory = root.join("canonical");
     let _guard = canonical::acquire(&directory).unwrap().unwrap();
-    assert!(canonical_claim(&directory, Activation::Sessions)
-        .unwrap()
-        .is_none());
+    assert!(matches!(
+        canonical_claim(&directory, Activation::Sessions).unwrap(),
+        CanonicalClaim::Busy
+    ));
     assert!(!directory.join("gui.sock").exists());
 }
 
@@ -212,4 +234,136 @@ fn unsafe_canonical_files_refuse_instead_of_starting_without_exclusion() {
     symlink(&target, directory.join("gui.sock")).unwrap();
     assert!(guard.bind().is_err());
     assert_eq!(fs::read(&target).unwrap(), b"original");
+}
+
+fn log_path(root: &Path, scope: &str) -> PathBuf {
+    #[cfg(target_os = "macos")]
+    {
+        root.join(scope).join("Library/Logs/hgs-tray.log")
+    }
+    #[cfg(not(target_os = "macos"))]
+    {
+        root.join(scope).join("log-state/hgs/hgs-tray.log")
+    }
+}
+
+#[test]
+fn normal_process_quit_relaunches_immediately_and_after_twenty_seconds() {
+    let _process = crate::PROCESS_TREE.read().unwrap();
+    let root = private_root();
+    for (index, delay) in [Duration::ZERO, Duration::from_secs(20)]
+        .into_iter()
+        .enumerate()
+    {
+        let first = format!("quit-{index}");
+        let second = format!("relaunch-{index}");
+        let mut owner = launch(&root, &first);
+        wait_for(&root.join(format!("{first}.ready")), &mut owner);
+        fs::write(root.join(format!("{first}.stop")), b"").unwrap();
+        assert!(owner.0.wait().unwrap().success());
+        let text = fs::read_to_string(log_path(&root, &first)).unwrap();
+        assert!(text.contains("outcome=claimed reason=instance_acquired"));
+        assert!(text.contains("outcome=quitting reason=listeners_closed_owner_retained"));
+        std::thread::sleep(delay);
+        let mut next = launch(&root, &second);
+        wait_for(&root.join(format!("{second}.ready")), &mut next);
+        assert!(!root.join(format!("{second}.forwarded")).exists());
+        assert!(!root.join(format!("{second}.duplicate")).exists());
+        assert!(fs::read_to_string(log_path(&root, &second))
+            .unwrap()
+            .contains("outcome=claimed reason=instance_acquired"));
+        fs::write(root.join(format!("{second}.stop")), b"").unwrap();
+        assert!(next.0.wait().unwrap().success());
+    }
+}
+
+#[test]
+fn a_normal_quit_finishing_during_the_handoff_wait_is_reacquired() {
+    let _process = crate::PROCESS_TREE.read().unwrap();
+    let root = private_root();
+    let mut owner = launch_with_quit_hold(&root, "exiting", true);
+    wait_for(&root.join("exiting.ready"), &mut owner);
+    fs::write(root.join("exiting.stop"), b"").unwrap();
+    wait_for(&root.join("exiting.released"), &mut owner);
+    let mut observed = false;
+    let result = canonical_claim_observed(&root.join("canonical"), Activation::Sessions, || {
+        if !observed {
+            observed = true;
+            fs::write(root.join("exiting.exit"), b"").unwrap();
+        }
+    })
+    .unwrap();
+    assert!(
+        observed,
+        "the old process must still hold the kernel lock on the first attempt"
+    );
+    assert!(
+        matches!(result, CanonicalClaim::Owner(_)),
+        "handoff failure after actual exit must allow a new owner"
+    );
+    assert!(owner.0.wait().unwrap().success());
+}
+
+#[test]
+fn every_guard_disposition_is_written_to_the_private_gui_log() {
+    let _process = crate::PROCESS_TREE.read().unwrap();
+    let root = private_root();
+    let directory = root.join("canonical");
+    let guard = canonical::acquire(&directory).unwrap().unwrap();
+    let mut duplicate = launch(&root, "busy");
+    wait_for(&root.join("busy.duplicate"), &mut duplicate);
+    assert!(duplicate.0.wait().unwrap().success());
+    let text = fs::read_to_string(log_path(&root, "busy")).unwrap();
+    assert_eq!(text.lines().count(), 1);
+    assert!(text.contains("outcome=duplicate reason=canonical_owner_unresponsive"));
+    assert!(!text.contains("outcome=forwarded"));
+    drop(guard);
+    fs::set_permissions(&directory, Permissions::from_mode(0o755)).unwrap();
+    let mut failed = launch(&root, "failed");
+    assert!(!failed.0.wait().unwrap().success());
+    let text = fs::read_to_string(log_path(&root, "failed")).unwrap();
+    assert_eq!(text.lines().count(), 1);
+    assert!(text.contains("outcome=failed reason=instance_claim_failed"));
+    assert!(text.contains("unsafe canonical GUI directory"));
+}
+
+#[cfg(target_os = "linux")]
+#[test]
+fn a_full_activation_backlog_cannot_pin_startup_before_its_guard_log() {
+    use socket2::{Domain, SockAddr, Socket, Type};
+    let root = private_root();
+    let path = root.join("full.sock");
+    let address = SockAddr::unix(&path).unwrap();
+    let listener = Socket::new(Domain::UNIX, Type::STREAM, None).unwrap();
+    listener.bind(&address).unwrap();
+    listener.listen(1).unwrap();
+    let mut clients = Vec::new();
+    let mut full = false;
+    for _ in 0..16 {
+        let client = Socket::new(Domain::UNIX, Type::STREAM, None).unwrap();
+        client.set_nonblocking(true).unwrap();
+        match client.connect(&address) {
+            Ok(()) => clients.push(client),
+            Err(error) if error.kind() == io::ErrorKind::WouldBlock => {
+                full = true;
+                break;
+            }
+            Err(error) => panic!("backlog fixture: {error}"),
+        }
+    }
+    assert!(full, "the isolated listen backlog must be saturated");
+    let (sent, received) = mpsc::channel();
+    let probe = std::thread::spawn(move || {
+        sent.send(forward(&path, Activation::Sessions)).unwrap();
+    });
+    let result = received.recv_timeout(Duration::from_secs(1));
+    // Close only fixture sockets before asserting, even if connect regresses.
+    drop(listener);
+    drop(clients);
+    probe.join().unwrap();
+    assert_eq!(
+        result,
+        Ok(false),
+        "the activation connect must have a deadline"
+    );
 }

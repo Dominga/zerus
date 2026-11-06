@@ -49,6 +49,12 @@ impl Identity {
         self.is_switch() && !replay
     }
 
+    /// Whether this run's shared-folder changes record G3 evidence first: the
+    /// maintained production build only, never a development build or replay.
+    pub fn records_evidence(&self, replay: bool) -> bool {
+        self.is_switch() && !replay
+    }
+
     /// The single-instance name: Qt's `hgs-tray` for the switch bundle; any
     /// other build only on request (`ZERUS_CLIENT_SINGLE_INSTANCE=1`), under
     /// its own name, so parallel dev runs and Qt's socket stay apart.

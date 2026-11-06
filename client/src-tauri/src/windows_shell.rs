@@ -1,25 +1,34 @@
 //! Windows parity decisions shared by the native adapter and its unit tests.
 //! Qt: AppConfig::chooseHgs/restartArguments and SwarmWorkerSupervisor.
+#[cfg(any(feature = "live", test))]
 use serde_json::Value;
+#[cfg(any(feature = "live", test))]
 use std::path::{Path, PathBuf};
 
+#[cfg(any(feature = "live", test))]
 pub struct HgsChoice {
     pub path: PathBuf,
     pub refresh: bool,
     pub fallback: PathBuf,
 }
 
+#[cfg(any(feature = "live", test))]
 fn version(value: &str) -> Option<semver::Version> {
     semver::Version::parse(value).ok()
 }
 
 /// The session-host enabled marker is authoritative, not leftover staged files.
 /// An explicit CLI selector never stages or switches to another executable.
+/// `app`, this app's own canonical image, stages again when the staged binding
+/// does not name it (docs/desktop-windows-mode.md): same or newer version only,
+/// and staging copies nothing when the CLI is unchanged.
+#[cfg(any(feature = "live", test))]
 pub fn choose_hgs(
     status: &Value,
     bundled: &Path,
     digest: &str,
     configured: Option<&Path>,
+    app: Option<&Path>,
 ) -> HgsChoice {
     let choice = |path: PathBuf, refresh, fallback: PathBuf| HgsChoice {
         path,
@@ -46,10 +55,30 @@ pub fn choose_hgs(
         version(cli["version"].as_str().unwrap_or_default())
             .is_none_or(|prior| current.cmp_precedence(&prior).is_ge())
     });
-    choice(stable.clone(), differs && newer, stable)
+    let unbound = app.is_some_and(|app| !bound(&status["frontend"], app));
+    choice(stable.clone(), (differs || unbound) && newer, stable)
+}
+
+/// Whether the status binding names `app`, still names the staged CLI and
+/// still holds for the file at the app's path (a same-path replacement does
+/// not). Informational: the CLI proves the pair itself before admitting it.
+#[cfg(any(feature = "live", test))]
+fn bound(frontend: &Value, app: &Path) -> bool {
+    let plain = |path: &str| {
+        path.strip_prefix(r"\\?\")
+            .unwrap_or(path)
+            .replace('/', "\\")
+            .to_ascii_lowercase()
+    };
+    frontend["cli_current"] == true
+        && frontend["frontend_current"] == true
+        && frontend["path"]
+            .as_str()
+            .is_some_and(|path| plain(path) == plain(&app.to_string_lossy()))
 }
 
 /// Value options are walked as pairs, so a value spelling --sessions survives.
+#[cfg(any(feature = "live", test))]
 pub fn restart_arguments(args: &[String]) -> Vec<String> {
     let valued = [
         "--hgs",
@@ -82,8 +111,10 @@ pub fn restart_arguments(args: &[String]) -> Vec<String> {
 }
 
 /// Windows tray clicks do not identify a message; Qt also routes only the latest.
+#[cfg(any(feature = "live", test))]
 #[derive(Default)]
 pub struct NoticeClicks(Option<String>);
+#[cfg(any(feature = "live", test))]
 impl NoticeClicks {
     pub fn raised(&mut self, token: String) {
         self.0 = Some(token);
@@ -98,6 +129,7 @@ impl NoticeClicks {
     }
 }
 
+#[cfg(any(feature = "live", test))]
 pub fn restart_delay(previous: u64, uptime: std::time::Duration) -> u64 {
     if previous == 0 || uptime.as_secs() >= 60 {
         1000
@@ -106,7 +138,43 @@ pub fn restart_delay(previous: u64, uptime: std::time::Duration) -> u64 {
     }
 }
 
+/// The only calls a Windows presentation may make to come to the front. The
+/// seam deliberately has no input injection (SendInput/keybd_event), no
+/// AttachThreadInput and no foreground-lock change: Tao's set_focus falls back
+/// to a synthetic Alt press, which must never reach the app in front.
+pub trait Foreground {
+    fn minimized(&self) -> bool;
+    /// ShowWindow(SW_RESTORE).
+    fn restore(&self);
+    fn in_front(&self) -> bool;
+    /// One SetForegroundWindow call.
+    fn take_front(&self) -> bool;
+    /// A bounded FlashWindowEx on the taskbar button.
+    fn flash(&self);
+}
+#[derive(Debug, PartialEq, Eq)]
+pub enum Front {
+    Already,
+    Taken,
+    Flashed,
+}
+/// One direct attempt; on refusal only the taskbar button flashes.
+pub fn bring_to_front(window: &impl Foreground) -> Front {
+    if window.minimized() {
+        window.restore();
+    }
+    if window.in_front() {
+        return Front::Already;
+    }
+    if window.take_front() && window.in_front() {
+        return Front::Taken;
+    }
+    window.flash();
+    Front::Flashed
+}
+
 /// Windows native strings are bounded in UTF-16 without splitting a surrogate.
+#[cfg(any(feature = "live", test))]
 pub fn wide_text<const N: usize>(text: &str) -> [u16; N] {
     let mut out = [0; N];
     let mut at = 0;
@@ -154,24 +222,65 @@ mod tests {
     fn only_an_enabled_host_stages_and_explicit_selectors_are_preserved() {
         let bin = Path::new("C:/Zerus/hgs.exe");
         let status = json!({"enabled":true,"version":"1.56.0","cli":{"path":"C:/State/hgs.exe","installed":true,"sha256":"old","version":"1.55.0"}});
-        let choice = choose_hgs(&status, bin, "new", None);
+        let choice = choose_hgs(&status, bin, "new", None, None);
         assert!(choice.refresh);
         assert_eq!(choice.path, Path::new("C:/State/hgs.exe"));
         let mut older = status.clone();
         older["version"] = json!("1.54.0");
-        assert!(!choose_hgs(&older, bin, "new", None).refresh);
+        assert!(!choose_hgs(&older, bin, "new", None, None).refresh);
         older["version"] = json!("1.56.0-dev.9");
         older["cli"]["version"] = json!("1.56.0-dev.10");
-        assert!(!choose_hgs(&older, bin, "new", None).refresh);
+        assert!(!choose_hgs(&older, bin, "new", None, None).refresh);
         older["enabled"] = json!(false);
-        assert_eq!(choose_hgs(&older, bin, "new", None).path, bin);
+        assert_eq!(choose_hgs(&older, bin, "new", None, None).path, bin);
         let explicit = Path::new("D:/Pinned/hgs.exe");
-        let choice = choose_hgs(&status, bin, "new", Some(explicit));
+        let choice = choose_hgs(&status, bin, "new", Some(explicit), None);
         assert!(!choice.refresh);
         assert_eq!(choice.path, explicit);
         let mut absent = status;
         absent["cli"]["installed"] = json!(false);
-        assert_eq!(choose_hgs(&absent, bin, "", None).fallback, bin);
+        assert_eq!(choose_hgs(&absent, bin, "", None, None).fallback, bin);
+    }
+    #[test]
+    fn the_portable_app_stages_again_only_to_bind_itself_and_never_downgrades() {
+        let bin = Path::new("C:/Zip/hgs.exe");
+        let app = Path::new(r"C:\Zip\hgs-tray.exe");
+        let status = json!({"enabled":true,"version":"1.56.0","cli":{"path":"C:/State/hgs.exe","installed":true,"sha256":"same","version":"1.56.0"},
+            "frontend":{"path":r"C:\zip\HGS-TRAY.EXE","cli_current":true,"frontend_current":true}});
+        // Bound to this app and an unchanged CLI: nothing to do.
+        assert!(!choose_hgs(&status, bin, "same", None, Some(app)).refresh);
+        assert!(
+            !choose_hgs(
+                &status,
+                bin,
+                "same",
+                None,
+                Some(Path::new(r"\\?\C:\Zip\hgs-tray.exe"))
+            )
+            .refresh
+        );
+        // No binding, another app's, or one for a CLI since replaced: rebind.
+        for frontend in [
+            json!(null),
+            json!({"path":r"C:\Other\hgs-tray.exe","cli_current":true,"frontend_current":true}),
+            json!({"path":r"C:\Zip\hgs-tray.exe","cli_current":false,"frontend_current":true}),
+            // The same path now holds another app (replaced after a quit).
+            json!({"path":r"C:\Zip\hgs-tray.exe","cli_current":true,"frontend_current":false}),
+            json!({"path":r"C:\Zip\hgs-tray.exe"}),
+        ] {
+            let mut unbound = status.clone();
+            unbound["frontend"] = frontend;
+            let choice = choose_hgs(&unbound, bin, "same", None, Some(app));
+            assert!(choice.refresh);
+            assert_eq!(choice.path, Path::new("C:/State/hgs.exe"));
+            // Never from an older zip, and never without an app of our own.
+            let mut older = unbound.clone();
+            older["version"] = json!("1.55.0");
+            assert!(!choose_hgs(&older, bin, "other", None, Some(app)).refresh);
+            assert!(!choose_hgs(&unbound, bin, "same", None, None).refresh);
+            // An explicit selector still never stages.
+            assert!(!choose_hgs(&unbound, bin, "same", Some(bin), Some(app)).refresh);
+        }
     }
     #[test]
     fn restart_keeps_selector_and_values_but_never_opens_the_window() {
@@ -212,6 +321,86 @@ mod tests {
         assert_eq!(clicks.clicked().as_deref(), Some("current"));
         clicks.cleared(&["current".into()]);
         assert_eq!(clicks.clicked(), None);
+    }
+    #[derive(Default)]
+    struct Recorded {
+        minimized: bool,
+        front: std::cell::Cell<bool>,
+        grant: bool,
+        calls: std::cell::RefCell<Vec<&'static str>>,
+    }
+    impl Foreground for Recorded {
+        fn minimized(&self) -> bool {
+            self.calls.borrow_mut().push("minimized");
+            self.minimized
+        }
+        fn restore(&self) {
+            self.calls.borrow_mut().push("restore");
+        }
+        fn in_front(&self) -> bool {
+            self.calls.borrow_mut().push("in_front");
+            self.front.get()
+        }
+        fn take_front(&self) -> bool {
+            self.calls.borrow_mut().push("take_front");
+            self.front.set(self.grant);
+            self.grant
+        }
+        fn flash(&self) {
+            self.calls.borrow_mut().push("flash");
+        }
+    }
+    #[test]
+    fn a_refused_foreground_makes_one_attempt_and_only_flashes() {
+        let refused = Recorded {
+            minimized: true,
+            ..Default::default()
+        };
+        assert_eq!(bring_to_front(&refused), Front::Flashed);
+        assert_eq!(
+            *refused.calls.borrow(),
+            ["minimized", "restore", "in_front", "take_front", "flash"]
+        );
+        let granted = Recorded {
+            grant: true,
+            ..Default::default()
+        };
+        assert_eq!(bring_to_front(&granted), Front::Taken);
+        assert_eq!(
+            *granted.calls.borrow(),
+            ["minimized", "in_front", "take_front", "in_front"]
+        );
+        let already = Recorded::default();
+        already.front.set(true);
+        assert_eq!(bring_to_front(&already), Front::Already);
+        assert_eq!(*already.calls.borrow(), ["minimized", "in_front"]);
+    }
+    #[test]
+    fn windows_presentation_never_injects_input_or_uses_tao_focus() {
+        // The adapter and the Windows presentation path are the only callers.
+        let adapter = include_str!("platform/windows/foreground.rs");
+        for forbidden in [
+            "SendInput",
+            "keybd_event",
+            "AttachThreadInput",
+            "LockSetForegroundWindow",
+            "SystemParametersInfo",
+            "ASFW_ANY",
+            "set_focus",
+        ] {
+            assert!(!adapter.contains(forbidden), "{forbidden}");
+        }
+        // Tauri's window focus is a disallowed method: Windows all-target
+        // Clippy fails on any call Windows can reach, however it is written
+        // (through a macro too); the Unix calls and the perf-only hooks allow
+        // it inside their gates.
+        let config = include_str!("../clippy.toml");
+        for path in [
+            "\"tauri::WebviewWindow::set_focus\"",
+            "\"tauri::Window::set_focus\"",
+        ] {
+            assert!(config.contains(path), "{path}");
+        }
     }
     #[test]
     fn windows_text_limits_preserve_unicode_and_termination() {

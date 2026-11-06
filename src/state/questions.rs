@@ -367,6 +367,125 @@ fn collect(record: &Value, deadline: Option<std::time::Instant>) -> Result<Optio
     Ok(Some(cards))
 }
 
+/// The current cards of the deferred answer kind's sources
+/// (`deferred_answer::SOURCES`), rebuilt with pure reads only, in
+/// `collect`'s order: no fit, no `claude_approval` listing, no Codex question
+/// index or startup lock, nothing written. The three Kimi wire sources get
+/// `can_answer`, `answer_transport` and `answer_unavailable_reason` exactly
+/// as `inspection` sets them, from their pure availability checks; a panel
+/// that `inspection` would have fitted but is clipped now therefore yields no
+/// card or no transport, and the comparison fails closed.
+pub(super) fn observe_current(record: &Value) -> Result<Vec<Value>> {
+    let events = wire_events(record)?;
+    let mut cards: Vec<Value> = recover_wire(record, &events).into_values().collect();
+    cards.extend(kimi_plan::recover(record, &events));
+    cards.extend(kimi_approval::recover(record, &events));
+    cards.extend(
+        [
+            claude_permission::current(record),
+            claude_resume::current(record),
+            claude_usage_limit::current(record),
+            claude_trust::current(record),
+            codex_trust::current(record),
+            codex_hooks_trust::current(record),
+            codex_update::current(record),
+            codex_rate_limit::current(record),
+            kimi_trust::current(record),
+            kimi_cache_hint::current(record),
+        ]
+        .into_iter()
+        .flatten(),
+    );
+    let sources = zerus_client_core::desktop::deferred_answer::SOURCES;
+    cards.retain(|card| sources.contains(&string(card, "source")));
+    for card in &mut cards {
+        let source = string(card, "source").to_owned();
+        if string(record, "agent") != "kimi"
+            || ![kimi_plan::SOURCE, kimi_approval::SOURCE, "kimi_wire"].contains(&source.as_str())
+        {
+            continue;
+        }
+        let available = if source == kimi_plan::SOURCE {
+            kimi_plan::available(record, card)
+        } else if source == kimi_approval::SOURCE {
+            kimi_approval::available(record, card)
+        } else {
+            super::question_terminal::available(record, card)
+        };
+        match available {
+            Ok(()) => {
+                card["can_answer"] = json!(true);
+                card["answer_transport"] = json!("kimi_tui");
+                card["answer_unavailable_reason"] = json!("");
+            }
+            Err(error) => card["answer_unavailable_reason"] = json!(error),
+        }
+    }
+    cards.sort_by(|a, b| {
+        a["created_at"]
+            .as_f64()
+            .unwrap_or(0.0)
+            .total_cmp(&b["created_at"].as_f64().unwrap_or(0.0))
+    });
+    Ok(cards)
+}
+
+/// The observation's stdin: one question of one exact run and conversation.
+#[derive(Deserialize)]
+#[serde(deny_unknown_fields)]
+struct ObserveRequest {
+    question_id: String,
+    expected_run_id: String,
+    expected_conversation_id: String,
+}
+/// The largest observation reply.
+const MAX_OBSERVATION_BYTES: usize = 64 << 10;
+
+/// `hgs answer <session> --observe --json`: the consent identity of one
+/// pending question of the deferred answer kind's sources, read without any
+/// effect ([`observe_current`]). It never answers, locks, fits a panel,
+/// writes a receipt or writes anything else.
+fn observe_dispatch(name: &str) -> Result<i32> {
+    let mut input = Vec::new();
+    io::stdin()
+        .take(MAX_PAYLOAD_BYTES + 1)
+        .read_to_end(&mut input)
+        .map_err(|error| error.to_string())?;
+    if input.len() as u64 > MAX_PAYLOAD_BYTES {
+        return Err("observation payload exceeds 128 KiB".into());
+    }
+    let request: ObserveRequest = serde_json::from_slice(crate::state::without_bom(&input))
+        .map_err(|error| format!("invalid observation payload: {error}"))?;
+    if request.expected_run_id.is_empty() || request.question_id.is_empty() {
+        return Err("question identities are required".into());
+    }
+    expect(name, &request.expected_run_id, &request.expected_conversation_id)?;
+    let record = read(name)?;
+    // The answer path's own identity and availability rule, read only.
+    let current = string(&record, "run_id") == request.expected_run_id
+        && string(&record, "conversation_id") == request.expected_conversation_id
+        && matches(&record, panes_of(&live()?, &record))
+        && process_alive(&record)
+        && !pause_active(&record)
+        && string(&record, "error").is_empty()
+        && (string(&record, "expected_id").is_empty() || startup_question_id(&request.question_id));
+    let card = if current {
+        observe_current(&record)?
+            .into_iter()
+            .find(|card| string(card, "question_id") == request.question_id)
+    } else {
+        None
+    };
+    let reply = json!({"found": card.is_some(),
+        "consent_identity": card.map(|card| zerus_client_core::questions::consent_identity(&card))});
+    let text = reply.to_string();
+    if text.len() > MAX_OBSERVATION_BYTES {
+        return Err("observation exceeds 64 KiB".into());
+    }
+    println!("{text}");
+    Ok(0)
+}
+
 pub(super) fn wire_response(record: &Value, question_id: &str) -> Result<Option<Value>> {
     // A closure belongs only to the latest request with this ID, never a reused one.
     for event in wire_events(record)?.into_iter().rev() {
@@ -559,13 +678,16 @@ fn startup_question_id(id: &str) -> bool {
 }
 
 fn matching_record(name: &str, request: &AnswerRequest) -> Result<Value> {
+    // zerus-ucck P3c: the request's identities select among sessions that
+    // share the label.
+    expect(name, &request.expected_run_id, &request.expected_conversation_id)?;
     let record = read(name)?;
     if string(&record, "run_id") != request.expected_run_id
         || string(&record, "conversation_id") != request.expected_conversation_id
     {
         return Err("session identity changed; refresh before answering".into());
     }
-    if !matches(&record, live()?.get(name))
+    if !matches(&record, panes_of(&live()?, &record))
         || !process_alive(&record)
         || pause_active(&record)
         || !string(&record, "error").is_empty()
@@ -668,6 +790,9 @@ fn own_question(name: &str, record: Option<&Value>, session: Option<&str>) -> bo
 }
 
 pub(super) fn dispatch(args: &[String]) -> Result<i32> {
+    if args.len() == 3 && args[1] == "--observe" && args[2] == "--json" {
+        return observe_dispatch(&args[0]);
+    }
     if args.len() != 2 || args[1] != "--json" {
         return Err("usage: hgs answer <session> --json (JSON from stdin)".into());
     }

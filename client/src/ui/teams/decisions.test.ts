@@ -1,10 +1,11 @@
+import { withdrawnRefusal } from "../../teamRefusals";
 import { describe, expect, it } from "vitest";
-import {
+import { decidedWaiting,
   ProposalCards, WaitingAnswer, WaitingNotices, acceptanceSummary, act, noticeToken, proposalCards, proposalKindLabel, toolOffer,
-  waitingActionLabel, waitingAge, waitingCount, waitingKindLabel, approves, opensCard, type DecisionPort, type QuestionChoice,
+  waitingActionLabel, waitingAge, waitingCount, waitingKindIcon, waitingKindLabel, deferredRequest, splitDeferred, approves, opensCard, type DecisionPort, type QuestionChoice,
 } from "./decisions";
 import { choiceButtons, confirmButtons, createConfirmer } from "../../store/teamConfirm";
-import type { TeamCall, TeamConfirmation, TeamMemberView, TeamProposalView, TeamTaskView, TeamView, TeamWaitingItem } from "../../types";
+import type { TeamAction, TeamCall, TeamConfirmation, TeamMemberView, TeamProposalView, TeamTaskView, TeamView, TeamWaitingItem } from "../../types";
 
 // Every owner decision path of Qt's tray/tests/test_teamsui_waiting.cpp, on
 // the pure model the Team tab and Waiting for you draw (task 11). Each test
@@ -158,8 +159,8 @@ describe("proposal cards", () => {
     await cards.answer("p2", true);
     expect(f.sent).toHaveLength(2);
     expect(f.sent[1].action).toEqual({ kind: "decide_proposal", proposal: "p2", accept: true, expected_hash: "h2" });
-    // Until the store has taken it, the card stays off and a second click sends nothing.
-    expect(card(cards, "p2")!.sending).toBe(true);
+    // Task 107: confirmed by hgs, the card leaves at once; it cannot be sent twice.
+    expect(card(cards, "p2")).toBeUndefined();
     expect(await cards.answer("p2", true)).toBeUndefined();
     expect(f.sent).toHaveLength(2);
     // A remove asks too.
@@ -270,7 +271,8 @@ describe("proposal cards", () => {
       expect(f.sent).toHaveLength(before + 1);
       expect(f.sent.at(-1)!.action).toEqual({ kind: "decide_proposal", proposal: id, accept: true, expected_hash: `h${n + 1}` });
       expect(f.sent.at(-1)!.team).toBe("team-1");
-      expect(card(cards, id)!.sending).toBe(true);
+      // Task 107: confirmed by hgs, the card leaves at once.
+      expect(card(cards, id)).toBeUndefined();
     }
     expect(f.asked.map((asked) => asked.title)).toEqual(["Drain member?", "Drain member?"]);
     cards.setReason("p99", "keep six");
@@ -402,6 +404,43 @@ describe("Waiting for you", () => {
     expect(f.sent).toHaveLength(1);
     expect(f.sent[0].action).toEqual({ kind: "add_to_phase", phase: 1, confirm: "add-1", decline: true });
     expect(answered).toEqual(["team-1/owner_word_asked/addition-add-1"]);
+  });
+
+  it("answers a deferred request with one message from its own card (task 97)", async () => {
+    const permission = item("ab12cd34ef56ab78", "deferred", "answer_deferred", "Deferred permission of Backend: Bash: cargo test --locked", NOW - 60,
+      { deferred: "ab12cd34ef56ab78", request: "permission", text: "Bash: cargo test --locked", session: "codex/x/dev",
+        outcome: "Zerus denied it for now", questions: [] }, "team-1", "Live");
+    expect(waitingKindLabel(permission)).toBe("Deferred");
+    expect(waitingKindIcon("deferred")).toBe("clock");
+    expect(opensCard(permission.action)).toBe(true);
+    expect(deferredRequest(permission)).toMatchObject({ id: "ab12cd34ef56ab78", permission: true, text: "Bash: cargo test --locked", outcome: "Zerus denied it for now" });
+    const f = fake(answerTeam({}));
+    const row = new WaitingAnswer(permission, f.port, "", () => {}, () => {});
+    await row.open();
+    expect(f.sent).toEqual([]);
+    await row.answerDeferred("allow");
+    expect(f.sent[0].action).toEqual({ kind: "answer_deferred", id: "ab12cd34ef56ab78", decision: "allow" });
+    // A question takes words; an empty answer sends nothing.
+    const question = item("cd34", "deferred", "answer_deferred", "Deferred question of solo", NOW - 30,
+      { deferred: "cd34", request: "question", text: "Which storage?", questions: [{ id: "q", question: "Which storage?", options: [{ id: "a", label: "SQLite" }] }] }, "", "claude/p/solo");
+    expect(deferredRequest(question).questions[0].options[0].label).toBe("SQLite");
+    const g = fake(answerTeam({}));
+    const asked = new WaitingAnswer(question, g.port, "", () => {}, () => {});
+    expect(await asked.answerDeferred("answer", "  ")).toBeUndefined();
+    await asked.answerDeferred("answer", "SQLite");
+    expect(g.sent.map((sent) => sent.action)).toEqual([{ kind: "answer_deferred", id: "cd34", decision: "answer", text: "SQLite" }]);
+    // Waiting for you lists them under Deferred.
+    const split = splitDeferred([question, item("1", "phase_draft", "approve_phase", "Phase 1", NOW)]);
+    expect([split.waiting.length, split.deferred.map((found) => found.id)]).toEqual([1, [question.id]]);
+  });
+
+  it("names a stalled lead and only opens its team (task 95)", () => {
+    const stalled = item("Lead", "lead_stalled", "open_lead", "The lead stalled (it is idle): 3 decisions wait for it", NOW - 60, { round: 2 });
+    expect(waitingKindLabel(stalled)).toBe("Lead stalled");
+    expect(waitingKindIcon("lead_stalled")).toBe("triangle-alert");
+    expect(opensCard(stalled.action)).toBe(false);
+    expect(waitingActionLabel(stalled.action)).toBe("Open team");
+    expect(waitingActionLabel("resume_lead")).toBe("Open team");
   });
 
   it("aPhaseIsAcceptedOrSentBackFromWaitingForYou: Send back wants a comment, Accept phase, and a phase accepted meanwhile sends nothing", async () => {
@@ -622,5 +661,63 @@ describe("reports", () => {
     f.refuse.set("accept", "hgs: Task #1 was decided meanwhile");
     await decision.accept(rows[0]);
     expect(decision.notice).toBe("Task #1 was decided meanwhile");
+  });
+});
+
+describe("a confirmed decision leaves at once (task 107)", () => {
+  it("Allow takes the card out before any read; a refused one keeps it with why", async () => {
+    const f = fake(answerTeam({
+      proposals: [
+        proposal({ id: "p1", kind: "add-member", member: { role: "Designer", agent: "claude", model: "sonnet" } }),
+        proposal({ id: "p2", kind: "add-member", member: { role: "Writer", agent: "claude", model: "haiku" } }),
+      ],
+    }));
+    const cards = cardsOf(f);
+    expect(cards.cards().map((state) => state.card.id)).toEqual(["p1", "p2"]);
+    await cards.answer("p1", true);
+    expect(card(cards, "p1")).toBeUndefined();
+    // An older read still listing p1 does not bring the card back.
+    cards.setTeam(f.team);
+    expect(card(cards, "p1")).toBeUndefined();
+    f.refuse.set("decide_proposal", "hgs: The plan changed since the warning");
+    await cards.answer("p2", true);
+    expect(card(cards, "p2")?.sending).toBe(false);
+    expect(card(cards, "p2")?.notice).toContain("The plan changed since the warning");
+  });
+
+  it("a card hgs withdrew (task 111) leaves at once when its Allow is refused for it", async () => {
+    const f = fake(answerTeam({
+      proposals: [proposal({ id: "p3", kind: "add-member", member: { role: "Designer", agent: "claude", model: "sonnet" } })],
+    }));
+    const cards = cardsOf(f);
+    f.refuse.set("decide_proposal", "hgs: This proposal can no longer apply (Phase 2 is closed (done); propose the work in a new phase with extend instead); it was withdrawn and the lead is told why");
+    await cards.answer("p3", true);
+    expect(card(cards, "p3")).toBeUndefined();
+    cards.setTeam(f.team);
+    expect(card(cards, "p3")).toBeUndefined();
+    expect(withdrawnRefusal("hgs: The plan changed since the warning")).toBe(false);
+  });
+
+  it("matches what a confirmed action decided in Waiting for you, as Qt does", () => {
+    const item = (id: string, kind: string, action: string, detail: Record<string, unknown> = {}, proposal: unknown = null, team = "t1") =>
+      ({ id: `${team}/${kind}/${id}`, kind, team, team_name: "Live", title: id, action, since: 1, proposal, detail });
+    const items = [
+      item("proposal-p1", "owner_word_asked", "decide_proposal", {}, "p1"),
+      item("proposal-p2", "owner_word_asked", "decide_proposal", {}, "p2"),
+      item("2", "phase_draft", "approve_phase", { phase: 2 }),
+      item("3", "phase_acceptance", "accept_phase", { phase: 3 }),
+      item("1", "report_escalated", "decide_report", { task: 1 }),
+      item("2", "task_waits_owner", "release_task", { task: 2 }),
+      item("proposal-p1", "owner_word_asked", "decide_proposal", {}, "p1", "t2"),
+    ];
+    const decided = (action: TeamAction, team = "t1") => decidedWaiting(items, { team, action });
+    expect(decided({ kind: "decide_proposal", proposal: "p1", accept: true, expected_hash: "h1" })).toEqual(["t1/owner_word_asked/proposal-p1"]);
+    expect(decided({ kind: "approve", phase: 2 })).toEqual(["t1/phase_draft/2"]);
+    expect(decided({ kind: "accept_phase", phase: 3 })).toEqual(["t1/phase_acceptance/3"]);
+    expect(decided({ kind: "accept", task: 1 })).toEqual(["t1/report_escalated/1"]);
+    expect(decided({ kind: "release", task: 2 })).toEqual(["t1/task_waits_owner/2"]);
+    expect(decided({ kind: "hold", task: 2, reason: "later" } as TeamAction)).toEqual([]);
+    expect(decided({ kind: "accept_phase", phase: 9 })).toEqual([]);
+    expect(decided({ kind: "decide_proposal", proposal: "p1", accept: true, expected_hash: "h1" }, "t3")).toEqual([]);
   });
 });

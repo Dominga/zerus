@@ -14,6 +14,7 @@ import argparse
 import json
 import os
 from pathlib import Path
+import re
 import subprocess
 import tempfile
 import tomllib
@@ -27,6 +28,34 @@ ROOT = Path(__file__).resolve().parents[1]
 # Variables Windows programs need to start; everything else is dropped.
 SYSTEM_VARIABLES = {"SYSTEMROOT", "SYSTEMDRIVE", "WINDIR", "COMSPEC", "PATHEXT", "COMPUTERNAME", "OS",
                     "NUMBER_OF_PROCESSORS", "PROCESSOR_ARCHITECTURE", "USERNAME", "USERDOMAIN"}
+
+
+# Debug-only hosted-fixture seams (zerus-yfbd.1) compile only under
+# cfg(debug_assertions). A published image must not carry their markers.
+DEBUG_SEAM = ROOT / "src" / "desktop" / "windows_registration" / "native" / "mode" / "held_pause.rs"
+
+
+def debug_seam_markers():
+    """The seam's exact environment name and handshake prefixes, read from its
+    source so that a rename cannot leave this check vacuous."""
+    text = DEBUG_SEAM.read_text(encoding="utf-8")
+    name = re.search(r'pub\(super\) const ENV: &str = "([A-Z_]+)";', text)
+    require(name is not None, "The debug-only held pause seam no longer names its environment marker.")
+    prefixes = [prefix for prefix in ("held-pause-", "held-release-") if f'format!("{prefix}{{request}}' in text]
+    require(len(prefixes) == 2, "The debug-only held pause seam no longer names its handshake files.")
+    return [name[1].encode(), *(prefix.encode() for prefix in prefixes)]
+
+
+def require_no_debug_seams(path):
+    markers = debug_seam_markers()
+    with zipfile.ZipFile(path) as archive:
+        images = [entry for entry in archive.infolist() if entry.filename.lower().endswith((".exe", ".dll"))]
+        require(any(entry.filename.endswith("/hgs.exe") for entry in images), "Bundle has no hgs.exe to check.")
+        for entry in images:
+            data = archive.read(entry)
+            for marker in markers:
+                require(marker not in data, f"{entry.filename} carries the debug-only seam marker {marker.decode()}.")
+    print(f"No debug-only seam markers in {len(images)} executables and libraries.")
 
 
 def isolated_environment(base):
@@ -74,6 +103,7 @@ def main():
     require(manifest["source_commit"] == commit, f"Bundle commit {manifest['source_commit']} is not {commit}.")
     require(manifest["version"] == version and manifest["cli_version"] == cli_version,
             "Bundle versions differ from VERSION/Cargo.toml.")
+    require_no_debug_seams(args.zip)
     with zipfile.ZipFile(args.zip) as archive:
         entries = archive.infolist()
     unpacked = sum(entry.file_size for entry in entries)
@@ -102,6 +132,14 @@ def main():
                                        str(base / "config/mobile/connector.json")], environment, base))
                 require(status.get("configured") is False and status.get("running") is False,
                         "Fresh portable connector status is not isolated/unconfigured.")
+                workspace = json.loads(run(bundle / "zerus-mobile-connector.exe", ["--workspace", "status", "--config",
+                                          str(base / "config/mobile/connector.json")], environment, base))
+                require(workspace.get("state") == "unconfigured" and workspace.get("encrypted") is False
+                        and workspace.get("config_revision") == "",
+                        "Bundled connector does not support the desktop workspace status protocol.")
+                phones = json.loads(run(hgs, ["mobile", "phones", "--json"], environment, base))
+                require(phones.get("configured") is False,
+                        "Fresh portable phone discovery is not isolated/unconfigured.")
             print(f"hgs.exe {cli_version} and hgs-tray.exe {version} start from the extracted bundle.")
             if args.selftest:
                 box = json.loads(run(hgs, ["ls", "--json", "--local"], environment, base))

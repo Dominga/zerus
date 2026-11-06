@@ -41,6 +41,17 @@ one final outcome per exact revision/key:
 {"op":"remove","revision":"2","key":"run:example","row":null}
 ```
 
+A removal may also carry the native watch removal `reason` (`replaced`,
+`archived`, `forgotten` or `ended`), for example
+`{"op":"remove","revision":"3","key":"run:old","row":null,"reason":"replaced"}`.
+It is additive within `desktop-catalog-changes-v1`: upserts never carry it, and
+a reasonless removal, an unknown native reason or history journaled before
+root schema 21 omits it. The native watch pages a large delta with removals
+before upserts, so a replacement and its successor may be in different
+revisions; the journaled reason still says `replaced`. A client that receives
+no reason infers `replaced` only when the same revision upserts that session
+name, and otherwise treats the removal as reasonless.
+
 Payloads are immutable history through that fixed high-water, including rows
 which are later updated or deleted. `revision` reports the currently observed
 head; `stale` means it exceeds this walk's high-water. `complete` on a change
@@ -77,7 +88,8 @@ allocate a per-session task/cache. Journal writes and catalog mutations commit
 in the same SQLite transaction, with indexed revision/key reads and bounded GC.
 
 Schema 13 follows the actual maintenance schema 12. Migration preserves retained
-rows without inventing a watermark. Shared-read-setting attention counts retain
+rows without inventing a watermark. Schema 21 adds the removal reason column;
+retained removals keep no reason rather than an invented one. Shared-read-setting attention counts retain
 their existing scope and provenance and remain separate from device-local
 review-later/ack overlays and final UI badges.
 

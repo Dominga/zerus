@@ -46,6 +46,14 @@ describe("member states", () => {
     expect(memberStatus(draft, of(draft, "qa")).text).toBe("Created with the team");
   });
 
+  it("a Terminal that refuses hand-outs names the count and hgs's reason (task 98)", () => {
+    const t = team();
+    const dev = { ...of(t, "dev"), input_refusals: 4, input_reason: "terminal has a draft, dialog, or unrecognized prompt", input_raised: true };
+    expect(memberStatus(t, dev)).toMatchObject({ kind: "input_blocked", short: "Blocked", tone: "warn", problem: true, icon: "terminal",
+      text: "Terminal refused 4 hand-outs: terminal has a draft, dialog, or unrecognized prompt" });
+    expect(memberStatus(t, { ...dev, input_refusals: 0 }).kind).toBe("idle");
+  });
+
   it("Running: working names its task, sending, submitted, idle and a member that starts later", () => {
     const t = team({ tasks: [task({ id: 3, title: "Saved cards API", status: "in_progress", attempt_state: "delivered", attempts: 1 })] });
     const dev = { ...of(t, "dev"), queue: [3] };

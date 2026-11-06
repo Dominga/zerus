@@ -197,7 +197,8 @@ fn a_folder_launch_crosses_a_durable_barrier_before_every_step() {
             host: String::new(),
             agent: "codex".into(),
             account: "a".into(),
-            terminal: true
+            terminal: true,
+            folder_mode: String::new(),
         }
     );
     driver.flush();
@@ -620,6 +621,44 @@ fn a_lost_clone_is_only_read_again() {
         "Checkout recovered. Continue setup to start the session."
     );
     assert!(can_resume(&driver.op(&id)));
+}
+
+#[test]
+fn only_an_effect_free_clone_failure_frees_its_request_for_continue() {
+    for (effect_free, resumable) in [(true, true), (false, false)] {
+        let mut driver = Driver::loaded();
+        let id = driver.submit(plan(&clone_choices(false)));
+        driver.flush();
+        let (flight, _) = driver.call();
+        driver.answer(flight, identity("/srv"));
+        driver.flush();
+        let (flight, _) = driver.call();
+        driver.answer(
+            flight,
+            ok(json!({"status": "ready", "path": "/srv/r", "parent": "/srv", "name": "r"})),
+        );
+        driver.flush();
+        let (flight, _) = driver.call();
+        let clone = driver.op(&id)["clone_id"].as_str().unwrap().to_owned();
+        let mut failed = json!({"status": "failed", "request_id": clone, "path": "/srv/r",
+            "detail": "The clone was not sent."});
+        if effect_free {
+            failed["effects_started"] = json!(false);
+        }
+        driver.answer(flight, ok(failed));
+        assert_eq!(driver.state(&id), "failed");
+        let op = driver.op(&id);
+        assert_eq!(op["error"], "The clone was not sent.");
+        // A never-sent clone retires its request; any other failure keeps it.
+        assert_eq!(op.get("clone_id").is_none(), effect_free, "{op}");
+        assert_eq!(
+            op["clone_previous"]
+                .as_array()
+                .is_some_and(|ids| ids == &[json!(clone)]),
+            effect_free
+        );
+        assert_eq!(can_resume(&op), resumable);
+    }
 }
 
 #[test]

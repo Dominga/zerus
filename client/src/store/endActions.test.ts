@@ -124,6 +124,22 @@ describe("confirmed end action grace", () => {
     await f.app.schedule([capture("refused")], vi.fn());
     expect(pendingEnd("test", "refused")).toBe(false); expect(f.bus.notices()[0].text).toBe("Too much session data selected at once. Select fewer sessions.");
   });
+  it("keeps execution visible after Undo ends without replaying or clearing its result", async () => {
+    const f = fixture(); let settle!: (value: string) => void;
+    const effect = vi.fn(() => new Promise<string>((resolve) => { settle = resolve; }));
+    const job = f.app.schedule([capture("slow-terminate", "terminate")], effect, { remove: true }); await tick();
+    const undo = f.bus.notices()[0].actions![0];
+    f.ready(); await tick();
+    expect(effect).toHaveBeenCalledTimes(1);
+    const progress = f.bus.notices()[0];
+    expect(progress).toMatchObject({ title: "Terminating session", sticky: true, busy: true, dismissible: false });
+    expect(progress.actions ?? []).toEqual([]); expect(progress.text).toContain("slow-terminate");
+    vi.advanceTimersByTime(NOTICE_MS * 3); await undo.run(); await tick();
+    expect(f.bus.notices()).toContain(progress); expect(effect).toHaveBeenCalledTimes(1);
+    const result = f.bus.notify("warn", "Working folder kept for review.", false, progress.key, "Session archived");
+    settle("unconfirmed"); expect(await job).toBe("unconfirmed");
+    expect(f.bus.notices().map((n) => n.id)).toEqual([result]);
+  });
   it("closing before admission acknowledgement cancels a late registration without dispatch", async () => {
     const f = fixture(); let admit!: () => void; f.port.begin = () => new Promise((r) => { admit = r; });
     const effect = vi.fn(), job = f.app.schedule([capture("slow-admission")], effect); f.app.close(); admit(); await job;

@@ -37,6 +37,16 @@ const QUEUE_LINES: usize = 1024;
 /// The most help text a probe reads.
 const PROBE_BYTES: u64 = 1 << 20;
 const SOURCE_JOIN: Duration = Duration::from_secs(1);
+/// At most one restart a minute skips the delay for a replaced executable
+/// (zerus-5wmh.66.2.46): a new executable that reports itself replaced again
+/// (a broken install) restarts after the failure delays.
+const REPLACED_GAP: Duration = Duration::from_secs(60);
+
+/// A fatal `hgs_replaced` error: an update replaced the server's executable.
+fn replaced(frame: &Frame) -> bool {
+    matches!(&frame.body, Body::Error(error)
+        if error.fatal && error.code == zerus_watch_protocol::code::HGS_REPLACED)
+}
 
 mod helper;
 #[path = "stream_legacy_source.rs"]
@@ -180,6 +190,7 @@ pub(crate) fn hgs_command(hgs: &Path, computer: &ComputerId, args: &[&str]) -> C
     command
         .args(args)
         .env_remove("HGS_SESSION")
+        .env_remove("HGS_SESSION_ID")
         .env_remove("HGS_RUN_ID");
     command
 }
@@ -1000,6 +1011,7 @@ fn spawn_with(
         last_frame: Instant::now(),
         launched: Instant::now(),
         source_seq: None,
+        replaced_restart: None,
         reader_stop: None,
     };
     let name = match computer.alias() {
@@ -1032,6 +1044,8 @@ enum Outcome {
     Ended,
     Stopped,
     Resnapshot,
+    /// The server's executable was replaced: start the new one now.
+    Replaced,
 }
 
 struct Supervisor {
@@ -1069,6 +1083,8 @@ struct Supervisor {
     last_frame: Instant,
     launched: Instant,
     source_seq: Option<u64>,
+    /// The last restart for a replaced executable, which skipped the delay.
+    replaced_restart: Option<Instant>,
     reader_stop: Option<Arc<AtomicBool>>,
     resources: Option<resources::Scope>,
     child_charge: Option<crate::run::ChildCharge>,
@@ -1151,7 +1167,7 @@ impl Supervisor {
             }
             let outcome = self.pump();
             self.close();
-            if outcome == Outcome::Resnapshot {
+            if matches!(outcome, Outcome::Resnapshot | Outcome::Replaced) {
                 self.status(ComputerStatus::Probing);
                 continue;
             }
@@ -1608,6 +1624,18 @@ impl Supervisor {
                         Instant::now()
                     };
                     match classify(&line) {
+                        // An update replaced the server's executable: the
+                        // new one starts at once, with the rows kept, but
+                        // only once a minute; a repeat waits like a failure.
+                        Line::Frame(frame)
+                            if replaced(&frame)
+                                && self
+                                    .replaced_restart
+                                    .is_none_or(|at| at.elapsed() >= REPLACED_GAP) =>
+                        {
+                            self.replaced_restart = Some(Instant::now());
+                            return Outcome::Replaced;
+                        }
                         Line::Frame(frame) => {
                             if self.source.is_some() {
                                 self.handle_source(frame, received_at, permit);
@@ -2052,9 +2080,12 @@ impl Supervisor {
             }
             return;
         }
+        // A window of each stage; an older server ignores it and sends the
+        // whole list.
         self.write(&Control::Subscribe(Subscription {
             topic: topic::TASKS.into(),
             project: Some(key.to_owned()),
+            window: Some(crate::tasks::WINDOW),
             ..Subscription::default()
         }));
     }
@@ -2395,7 +2426,7 @@ mod tests {
             .filter(|(_, value)| value.is_none())
             .map(|(name, _)| name.to_string_lossy().into_owned())
             .collect();
-        assert_eq!(removed, vec!["HGS_RUN_ID", "HGS_SESSION"]);
+        assert_eq!(removed, vec!["HGS_RUN_ID", "HGS_SESSION", "HGS_SESSION_ID"]);
         let local = hgs_command(Path::new("hgs"), &ComputerId::local(), &["-h"]);
         assert_eq!(local.get_args().count(), 1);
     }

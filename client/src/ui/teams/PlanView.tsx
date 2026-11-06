@@ -1,11 +1,14 @@
-import { For, Show, createEffect, createMemo, createSignal, type JSX } from "solid-js";
+import { For, Show, createEffect, createMemo, createSignal, onMount, type JSX } from "solid-js";
 import { createVirtualizer } from "@tanstack/solid-virtual";
 import { Icon } from "../lib/icons";
 import { tr } from "../../i18n";
 import type { PlanGraph, TeamView } from "./types";
-import type { TeamProfileView, TeamTestsView } from "../../types";
-import { BoardView, LayersView, PlanModeBar, ProfilePanel, TestsPanel, stageLabel } from "./plan-panels";
-import { spawnedFrom, stageChips, heatShare, type PlanMode } from "./planModes";
+import type { TeamProfileView, TeamTestsView, TeamTimelineView } from "../../types";
+import { BoardView, HeatLegend, HeatLine, LayersView, PlanModeBar, ProfilePanel, TestsPanel, runStatusLabel, stageLabel } from "./plan-panels";
+import { ProfileTime } from "./TimeView";
+import { spawnedFrom, heatSeed, stageChips, type PlanMode } from "./planModes";
+import { settings, settingsReady } from "../../store/settings";
+import { taskHeat } from "./heat";
 import {
   CARD_H,
   ROW_H,
@@ -41,6 +44,8 @@ export interface PlanViewProps {
   onLoadTests?: (before: number | null) => void;
   /** The Profile mode asks for the team's profile when opened. */
   onLoadProfile?: () => void;
+  /** Task 92: the Profile mode's Time view reads one scope (a phase, or the plan with null) through the core. */
+  loadTimeline?: (phase: number | null) => Promise<TeamTimelineView>;
   /** Task 40: the task card's actions (ui/teams/TeamActions.tsx TaskActions), drawn under the task's detail. */
   taskActions?: (id: number) => JSX.Element;
   /** Task #58: a phase header's mode chip and switch (ui/teams/TeamActions.tsx PhaseModeControl). */
@@ -89,12 +94,38 @@ function statusLabel(kind: string): string {
   return tr("Open");
 }
 
+function readFlag(key: string): boolean {
+  try { return localStorage.getItem(key) === "1"; } catch { return false; }
+}
+
 export function PlanView(props: PlanViewProps): JSX.Element {
   const [mode, setMode] = createSignal<PlanMode>("graph");
   const [includeCancelled, setIncludeCancelled] = createSignal(false);
+  // Task 82: the lateness heat, off by default and remembered per team in
+  // this browser only (a convenience; nothing depends on it).
+  const heatKey = () => `zerus.teams.heat.${props.team.id}`;
+  const [heatOn, setHeatOn] = createSignal(readFlag(heatKey()));
+  const switchHeat = (on: boolean) => {
+    setHeatOn(on);
+    try { if (on) localStorage.setItem(heatKey(), "1"); else localStorage.removeItem(heatKey()); } catch { /* storage unavailable */ }
+  };
+  // Task 103: Qt's imported per-team heat starts this switch on once; this
+  // browser's own choice, once made, always wins.
+  onMount(() => {
+    void settingsReady.then(() => {
+      try {
+        if (localStorage.getItem(heatKey()) === null && heatSeed(props.team.id, null, String(settings["teams/heatModes"] ?? "{}"))) {
+          setHeatOn(true);
+          localStorage.setItem(heatKey(), "1");
+        }
+      } catch { /* storage unavailable */ }
+    });
+  });
+  const heatView = () => heatOn() && (mode() === "graph" || mode() === "board" || mode() === "layers");
+  const heatProfile = () => (heatView() ? props.profile : null);
   createEffect(() => {
     if (mode() === "tests") props.onLoadTests?.(null);
-    if (mode() === "profile") props.onLoadProfile?.();
+    if (mode() === "profile" || heatView()) props.onLoadProfile?.();
   });
   const [collapsed, setCollapsed] = createSignal<Set<number>>(
     new Set(props.team.phases.filter((phase) => phase.status === "done").map((phase) => phase.n)),
@@ -222,7 +253,7 @@ export function PlanView(props: PlanViewProps): JSX.Element {
     const stateText = task?.attempt_state?.trim() || "";
     const classes = ["pt-card", `pt-card-${state}`];
     const stages = stageChips(task?.pipeline_run);
-    const heat = heatShare(props.profile, placed.node.id);
+    const heat = taskHeat(heatProfile(), placed.node.id);
     const litNow = lit();
     if (litNow) classes.push(litNow.has(placed.node.id) ? (hover() === placed.node.id ? "pt-card-on" : "pt-card-lit") : "pt-card-dim");
     if (task?.pinned) classes.push("pt-card-pinned");
@@ -230,7 +261,8 @@ export function PlanView(props: PlanViewProps): JSX.Element {
       <button
         type="button"
         class={classes.join(" ")}
-        style={{ left: `${placed.x}px`, top: "0px", "--heat": String(heat ?? 0) }}
+        style={{ left: `${placed.x}px`, top: "0px", "--heat": String(heat?.tint ?? 0) }}
+        title={heat?.tip || undefined}
         data-task={placed.node.id}
         data-lit={litNow ? (litNow.has(placed.node.id) ? "lit" : "dim") : "none"}
         aria-label={tr("Task %1: %2", placed.node.id, placed.node.title || task?.title || "")}
@@ -265,6 +297,7 @@ export function PlanView(props: PlanViewProps): JSX.Element {
             <span class="pt-meta">{stateText || attempt}</span>
           </Show>
           <span class="pt-grow" />
+          <HeatLine heat={heat} compact />
           <Show when={spawnedFrom(placed.node, task)}>{(origin) => (
             <span class="pt-origin" data-origin={origin()} title={tr("Spawned from #%1; it does not wait for it", origin())}>
               {tr("Spawned from #%1", origin())}
@@ -357,6 +390,15 @@ export function PlanView(props: PlanViewProps): JSX.Element {
             <span class="pt-chip">{tr("%1 min", task.estimate_minutes)}</span>
           </Show>
         </div>
+        <Show when={taskHeat(heatProfile(), task.id)}>
+          {(heat) => (
+            <div class="pt-detail-section pt-detail-heat">
+              <span class="pt-detail-label">{tr("Lateness")}</span>
+              <HeatLine heat={heat()} />
+              <For each={heat().tip.split("\n")}>{(line) => <p class="pt-detail-p">{line}</p>}</For>
+            </div>
+          )}
+        </Show>
         <Show when={task.waits}>
           <p class="pt-detail-note">{task.waits}</p>
         </Show>
@@ -415,6 +457,8 @@ export function PlanView(props: PlanViewProps): JSX.Element {
           includeCancelled={includeCancelled()}
           onMode={setMode}
           onCancelled={setIncludeCancelled}
+          heat={heatOn()}
+          onHeat={switchHeat}
         />
         <span class="pt-grow" />
         <span class="pt-legend" aria-label={tr("Link legend")}>
@@ -430,6 +474,9 @@ export function PlanView(props: PlanViewProps): JSX.Element {
           <button type="button" class="btn ghost small" onClick={expandAll}>{tr("Expand all")}</button>
         </Show>
       </header>
+      <Show when={heatView()}>
+        <HeatLegend profile={props.profile} />
+      </Show>
       <Show when={mode() === "graph"}>
         <div class="pt-plan-body">
           <div class="pt-plan-scroll" ref={scroller} onPointerLeave={() => setHover(null)}>
@@ -455,13 +502,18 @@ export function PlanView(props: PlanViewProps): JSX.Element {
         </div>
       </Show>
       <Show when={mode() === "board"}>
-        <BoardView phases={phases()} includeCancelled={includeCancelled()} profile={props.profile} onOpen={open} />
+        <BoardView phases={phases()} includeCancelled={includeCancelled()} profile={heatProfile()} onOpen={open} />
       </Show>
       <Show when={mode() === "layers"}>
-        <LayersView phases={phases()} includeCancelled={includeCancelled()} profile={props.profile} onOpen={open} />
+        <LayersView phases={phases()} includeCancelled={includeCancelled()} profile={heatProfile()} onOpen={open} />
       </Show>
       <Show when={mode() === "profile"}>
-        <ProfilePanel profile={props.profile} />
+        <div class="pm-profile-scroll">
+          <Show when={props.loadTimeline}>{(load) => (
+            <ProfileTime team={props.team} load={load()} profile={props.profile} statusName={runStatusLabel} onOpen={open} />
+          )}</Show>
+          <ProfilePanel profile={props.profile} />
+        </div>
       </Show>
       <Show when={mode() === "tests"}>
         <TestsPanel tests={props.tests} onMore={() => props.onLoadTests?.(props.tests?.next ?? null)} />

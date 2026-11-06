@@ -101,7 +101,7 @@ fn cancel_requires_the_confirmed_receipt_and_suppresses_raw_errors() {
     s.mode("unknown");
     assert_eq!(
         computer_codes::cancel(&s.connector(), &s.config(), &t, "invitation-example").unwrap_err(),
-        computer_codes::UNCONFIRMED
+        "Workspace operation was not confirmed: the computer connector returned an invalid workspace reply; verify the matching connector version. Refresh status before continuing."
     );
     assert_eq!(s.effects().len(), 1);
     s.mode("bad-receipt");

@@ -9,8 +9,11 @@
 
 mod capture;
 pub mod geometry;
+mod upgrade;
 pub use capture::{CapturedQt, CapturedSettings};
 mod imports;
+mod legacy_projects;
+pub use legacy_projects::Record as LegacyProjectImport;
 pub mod qt;
 mod qt_layout;
 pub mod repository;
@@ -160,6 +163,14 @@ pub const KEYS: &[Key] = &[
     key("workspace/launchAgent", Kind::Text("")),
     key("workspace/launchOpenTerminal", Kind::Flag(false)),
     key("workspace/launchAccounts", Kind::Text("")),
+    // Task 102: the folder mode New session starts with, a generated worktree
+    // ("auto") or the folder itself ("none"), as Qt's workspace/launchWorktree
+    // (NewSessionDialog.cpp:259, :949); imported once by its family.
+    Key {
+        name: NEW_SESSION_FOLDER_MODE,
+        kind: Kind::Choice(&["auto", "none"]),
+        seeded: false,
+    },
     // Task 74: Qt's SessionLeads JSON object, by session identity.
     key("workspace/sessionLeads", Kind::Text("")),
     // A first-G3 family import handles this separately from the old seed.
@@ -225,6 +236,35 @@ pub const KEYS: &[Key] = &[
         kind: Kind::Text(""),
         seeded: false,
     },
+    // Task 102: Qt's microphone as its name, never its id: the Voice page
+    // picks the device with this name when it lists them, then drops it.
+    Key {
+        name: MICROPHONE_HINT,
+        kind: Kind::Text(""),
+        seeded: false,
+    },
+    // Task 102: the fork's Windows mobile services (WindowsMobileServices.h):
+    // a relay for this computer on 127.0.0.1 and the connector started with
+    // Zerus. Qt keeps them only in its store; imported once by their family.
+    Key {
+        name: "mobile/localRelay",
+        kind: Kind::Flag(false),
+        seeded: false,
+    },
+    Key {
+        name: "mobile/localRelayPort",
+        kind: Kind::Whole {
+            default: 8787,
+            min: 1,
+            max: 65535,
+        },
+        seeded: false,
+    },
+    Key {
+        name: "mobile/runConnector",
+        kind: Kind::Flag(true),
+        seeded: false,
+    },
     // Automatic recovery: the newest shared policy known (recovery_settings).
     key(crate::recovery_settings::SHARED_POLICY_KEY, Kind::Text("")),
     // Files (DownloadCache), Updates (UpdateController.cpp).
@@ -283,6 +323,11 @@ pub const KEYS: &[Key] = &[
             max: 4096,
         },
     ),
+    // WhiteWh fork: optional extensions (tray/src/Extensions.h). A fork build
+    // turns them on by default; the client is the fork's. Both names are Qt's,
+    // so the switch seeds the owner's choice.
+    key("extensions/socraticode", Kind::Flag(true)),
+    key("socraticode/nativeQdrant", Kind::Flag(false)),
     // The Team tab's dividers (task 9): the side column's width beside the
     // canvas, and the members' share of it above the coordinator, in percent.
     client(
@@ -301,12 +346,27 @@ pub const KEYS: &[Key] = &[
             max: 85,
         },
     ),
-    // WhiteWh fork: optional extensions (tray/src/Extensions.h). A fork build
-    // turns them on by default; the client is the fork's. Both names are Qt's,
-    // so the switch seeds the owner's choice.
-    key("extensions/socraticode", Kind::Flag(true)),
-    key("socraticode/nativeQdrant", Kind::Flag(false)),
+    // Task 103: the Teams view preferences the move keeps. Qt keeps "hide
+    // finished" and the catalog's unused-role switch as plain flags; its heat
+    // mode is per team, so the imported map holds team -> "time" | "tokens".
+    key("teams/hideFinished", Kind::Flag(false)),
+    key("ui/catalogHideUnusedRoles", Kind::Flag(false)),
+    Key {
+        name: "teams/heatModes",
+        kind: Kind::Text("{}"),
+        seeded: false,
+    },
+    Key {
+        name: "teams/planModes",
+        kind: Kind::Text("{}"),
+        seeded: false,
+    },
 ];
+
+/// Task 102: New session's remembered folder mode.
+pub const NEW_SESSION_FOLDER_MODE: &str = "newSession/folderMode";
+/// Task 102: the name of Qt's chosen microphone, a hint for the Voice page.
+pub const MICROPHONE_HINT: &str = "speech/microphoneName";
 
 /// The setting called `name`: a listed key, a shortcut override, or one of
 /// UpdateController's per-channel and per-notification records.
@@ -1047,6 +1107,57 @@ impl Settings {
     /// The seed record (`source`, `path`, `at`, `keys`), once seeded.
     pub fn seed_record(&self) -> Option<Value> {
         self.loaded().contents.seed.clone()
+    }
+
+    /// The Qt preference import by key name only (no values): handled
+    /// families, families waiting to retry, and Qt keys with no Next use.
+    pub fn preference_report(&self) -> Value {
+        imports::report(&self.loaded().contents)
+    }
+
+    /// A distinct one-time family, never part of Qt organization recovery.
+    /// Pending records are observation-only even after a process restart.
+    pub fn legacy_project_import(
+        &self,
+        machine: &str,
+    ) -> Result<Option<LegacyProjectImport>, String> {
+        let state = self.loaded();
+        if state.unreadable.is_some() {
+            return Err(crate::swarm::legacy_projects::Code::Invalid.as_str().into());
+        }
+        legacy_projects::read(&state.contents.extra, machine).map_err(|e| e.as_str().into())
+    }
+
+    /// True only for the first durable reservation. A repeat never admits an
+    /// apply, whether the previous attempt is pending, incomplete or complete.
+    pub fn prepare_legacy_project_import(
+        &self,
+        plan: &crate::swarm::legacy_projects::Plan,
+    ) -> Result<bool, String> {
+        self.update_organization_record(|contents| {
+            legacy_projects::prepare(&mut contents.extra, plan).map_err(|e| e.as_str())
+        })
+    }
+
+    /// Finish only from newly verified original-scope observation. This
+    /// records evidence and never recreates or returns an apply request.
+    pub fn observe_legacy_project_import(
+        &self,
+        binding: &crate::swarm::legacy_projects::Binding,
+        snapshot: &Value,
+    ) -> Result<bool, String> {
+        self.update_organization_record(|contents| {
+            legacy_projects::observe(&mut contents.extra, binding, snapshot).map_err(|e| e.as_str())
+        })
+    }
+
+    /// Fixed codes and key names only; no machine, project or folder values.
+    pub fn legacy_project_report(&self) -> Value {
+        let state = self.loaded();
+        if state.unreadable.is_some() {
+            return legacy_projects::unavailable(crate::swarm::legacy_projects::Code::Invalid);
+        }
+        legacy_projects::report(&state.contents.extra)
     }
 
     /// Background organization recovery shares this writer and its existing

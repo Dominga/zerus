@@ -32,6 +32,7 @@ import { Composer } from "./Composer";
 import { ComposerDialogs } from "./ComposerDialogs";
 import { QuestionCard } from "./QuestionCard";
 import { QueuePanel } from "./QueuePanel";
+import { HeldMessage } from "./HeldMessage";
 import { onCommand } from "../../store/shortcuts";
 import { composer } from "../../store/composer";
 import { createSubagentIdentity } from "../../store/subagentIdentity";
@@ -40,6 +41,7 @@ import { Inspector } from "./Inspector";
 import { followProjectTasks } from "../../store/taskContext";
 import { inspectorOpen, setInspectorOpen, openInspector, inspectorHint } from "../../store/inspector";
 import { sessionGoal } from "./inspector-data";
+import { PausedServiceDetail, servicePausedEmpty } from "../components/DesktopServiceStatus";
 
 import { folderEntries, folderRequest } from "../../store/sessionFolders";
 
@@ -57,10 +59,12 @@ function headerCaption(): string {
 
 function EmptyDetail() {
   return (
-    <div class="detail-empty">
-      <h2>{tr("A little more focus.")}</h2>
-      <p>{tr("Select a session to see what your agent is doing.")}<br />{tr("New sessions appear here automatically.")}</p>
-    </div>
+    <Show when={!servicePausedEmpty()} fallback={<PausedServiceDetail />}>
+      <div class="detail-empty">
+        <h2>{tr("A little more focus.")}</h2>
+        <p>{tr("Select a session to see what your agent is doing.")}<br />{tr("New sessions appear here automatically.")}</p>
+      </div>
+    </Show>
   );
 }
 
@@ -264,7 +268,7 @@ export function SessionDetail() {
               <Switch>
                 <Match when={detailTab() === "activity"}>
                   <div class="activity-wrap" classList={{ "has-goal": !!goal().objective }} style={columnStyle()}>
-                    <Show when={goal().objective}><button class="goal-pill" onClick={() => openInspector("plan")}><Icon name="circle-dot" size={13} /><b>{tr("Pursuing goal")}</b><span class="ell">{goal().objective}</span><span class="grow" /><span>{tr("Details")}</span><Icon name="chevron-right" size={12} /></button></Show>
+                    <Show when={goal().objective}><button class="goal-pill" onClick={() => openInspector("plan")}><Icon name="circle-dot" size={13} /><b>{goal().caption}</b><span class="ell">{goal().objective}</span><span class="grow" /><span>{tr("Details")}</span><Icon name="chevron-right" size={12} /></button></Show>
                     <ActivityView source={activitySourceFor(selected()!.key)} />
                     {/* Child Activity stays read-only; its own composer opens only when the inspection supports send. */}
                     <Show when={!subagentOpen()}>
@@ -272,7 +276,7 @@ export function SessionDetail() {
                         <p class="qcard-body">{tr("Sign in to DeepSeek to start using this session. Complete sign-in in the official DeepSeek UI, then return here.")}</p>
                         <div class="qcard-actions"><button class="btn small" onClick={() => nativeRoute(selected())()}>{tr("Sign in to DeepSeek…")}</button></div>
                       </div></div></Show>
-                      <QueuePanel /><QuestionCard />
+                      <HeldMessage /><QueuePanel /><QuestionCard />
                     </Show>
                     <div class="cmp-col"><Composer /></div>
                   </div>

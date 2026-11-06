@@ -1083,13 +1083,26 @@ impl Providers {
         let request = (self.ids)();
         payload["request_id"] = json!(request);
         payload["expected_machine_id"] = json!(machine);
-        let pending = json!({
+        let mut pending = json!({
             "host": host,
             "computer": self.label(host),
             "machine_id": machine,
             "request_id": request,
             "action": payload["action"],
         });
+        // Retain only original binding fields, never the profile body or its
+        // credential. Status recovery must not derive revisions from a later list.
+        for field in ["expected_revision", "expected_profile_revision"] {
+            if let Some(value) = payload.get(field) {
+                pending[field] = value.clone();
+            }
+        }
+        if let Some(profile) = payload
+            .get("profile_id")
+            .or_else(|| payload.get("profile").and_then(|p| p.get("id")))
+        {
+            pending["profile_id"] = profile.clone();
+        }
         self.pending = Some(object(&pending));
         self.storing = Some(Storing {
             host: host.to_owned(),

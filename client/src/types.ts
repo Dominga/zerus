@@ -14,11 +14,19 @@ export type ComputerId = string;
  * are null; times are seconds since the Unix epoch.
  */
 export interface ViewRow {
+  conversation_state?: string;
   /** This device's retained pre-cutover queue, not host acknowledgement. */
   local_read_reply?: boolean;
   local_read_attention?: boolean;
   name: string;
   launch_id?: string | null;
+  /**
+   * The listing's durable session ID, when canonical. The Rust dispatcher
+   * reads it from its own copy of the row for explicit actions; the webview
+   * never passes it for one. It passes it only in a composer's SessionRef,
+   * where it keys the drafts.
+   */
+  session_id?: string;
   title?: string;
   agent?: string;
   status?: string;
@@ -159,7 +167,25 @@ export type EditOutcome = (
   | { outcome: "refused"; detail: string }) & { project?: string; folder?: string };
 
 /** Native ownership presentation only; this can never authorize a writer. */
+export interface ModeReview {
+  request_id: string;
+  configuration: string;
+  selection: string;
+  disposition: "required" | "reboot_required" | "reviewed_unknown";
+  passive_available: boolean;
+}
+/** A first explicit background choice offer (Windows). Routing only, never consent. */
+export interface FirstChoiceOffer {
+  configuration: string;
+  selection: string;
+}
 export interface NotificationOwnership {
+  /** Local startup recovery presentation; never a service grant. */
+  native_recovery?: boolean;
+  /** Native helper observation only; never permission to start a writer. */
+  activation?: { pending: boolean; running: boolean; needs_resume: boolean; code: string;
+    review?: ModeReview | null; automatic_blocked?: boolean; request_id?: string | null; active?: boolean; business_ready?: boolean;
+    first?: FirstChoiceOffer | null };
   status: null | { abi: string; configuration: string; journal: string | null; revision: number;
     state: "passive" | "preparing" | "service" | "draining" | "revoked" | "native" | "identity_changed" | "unavailable";
     rearm_required: boolean; request_id: string | null; owner_epoch: string | null; identity_current: boolean };
@@ -168,8 +194,19 @@ export interface NotificationOwnership {
   running: boolean;
   code: string;
 }
+/** Native refresh selection and result display; never consent or authority. */
+export interface ServiceRefreshView {
+  configuration?: string | null;
+  offer?: null | { configuration: string; epoch: string; selection: string };
+  request_id?: string | null;
+  running: boolean;
+  settled: boolean;
+  code: string;
+}
 /** Desktop service presentation has separate provenance from device-local marks. */
 export interface DesktopService {
+  /** Bounded display reason from the checked original service scope; no authority. */
+  executable_upgrade?: null | { state: "draining" | "manual_refresh_required" };
   /** Native intent/current-scope presentation, never a permission. */
   notification_preferences?: null | {
     status: null | { abi: string; scope: { configuration: string; service_epoch: string };
@@ -181,6 +218,7 @@ export interface DesktopService {
     code: string;
   };
   connected: boolean;
+  reconnecting?: boolean;
   epoch: string | null;
   generation: number | null;
   background: Record<string, { ready: boolean; code: string }>;
@@ -190,11 +228,13 @@ export interface DesktopService {
     computers: { computer: string; complete: boolean; online: boolean; total: number | null; attention: number | null }[];
   };
   automatic_approvals: boolean | null;
+  /** Held task message copies a person may review; display only, never a release. */
+  task_message_inputs?: null | { review: number; full: boolean };
   details_available: boolean;
   /** Native frozen-read transfer; completion is durable queueing, not host ACK. */
   pending_read_import?: null | { required: boolean; complete: boolean; running: boolean; code: string; through: number; superseded: number; delivered: false };
   /** Best-effort Staged report only; its outcome never grants or gates service work. */
-  retained_source_import?: null | { required: boolean; complete: boolean; running: boolean; code: string; phase: string | null; creations_capture?: { code: string; paused: boolean; capture_id: string | null } };
+  retained_source_import?: null | { required: boolean; complete: boolean; running: boolean; code: string; phase: string | null; creations_capture?: { code: string; paused: boolean; capture_id: string | null }; local_read_capture?: { code: string; paused: boolean; capture_id: string | null; view_ready?: boolean; view_revision?: string }; drafts_capture?: { code: string; writes: boolean; paused: boolean; capture_id: string | null; manifests: number }; downloads_capture?: null | { code: string; capture_id: string | null }; downloads_report?: { required: boolean; complete: boolean; running: boolean; code: string; phase: string | null }; drafts_report?: { required: boolean; complete: boolean; partial?: boolean; running: boolean; code: string; phase: string | null }; worktree_cache_capture?: { code: string; paused: boolean; capture_id: string | null }; worktree_cache_report?: { required: boolean; complete: boolean; running: boolean; code: string; phase: string | null }; local_reads_report?: { required: boolean; complete: boolean; running: boolean; code: string; phase: string | null }; creations_report?: { required: boolean; complete: boolean; running: boolean; code: string; phase: string | null } };
   notification_ownership?: NotificationOwnership;
   code: string;
 }
@@ -298,6 +338,9 @@ export interface ActivityEvent {
   voice?: Record<string, unknown>;
   /** Codex's question replies of a user event, parsed in Rust (R7's annotate_replies). */
   question_replies?: Reply[];
+  /** A fork's row from the session it began from (that session's journal name):
+   * read-only history before the fork (zerus-b4qk). */
+  inherited_from?: string;
   [field: string]: unknown;
 }
 
@@ -347,6 +390,8 @@ export interface Details {
   resume_message_can_send: boolean;
   fork_supported?: boolean;
   fork_reason?: string;
+  /** The conversation a fork came from; `null` when this is no fork, absent from an older hgs. */
+  fork_parent_id?: string | null;
   allowed_actions: string[] | null;
   action_reasons: Record<string, string>;
   /** The host can interrupt this turn (Stop). */
@@ -374,6 +419,8 @@ export interface ReadMark {
   conversation_id: string;
   reply_id: string | null;
   attention_signature: string | null;
+  /** The durable session ID the Rust queue keys the mark by, when its row lists one (zerus-ucck P2c-2b). */
+  session_id?: string | null;
 }
 
 /** A computer's machine card from its `catalog.meta` (client/core `machine.rs`); an older host leaves fields null. */
@@ -572,6 +619,8 @@ export interface LaunchChoices {
   implicit_inbox: boolean; swarm: string; path: string; auto_preferred: boolean; automatic_available: boolean;
   branch: string; catalog: unknown; automatic_path: string; listed_folder: boolean; project_worktree: boolean;
   model: string; effort: string; open_terminal: boolean; repository: LaunchRepositoryChoice | null; predecessor: string;
+  /** Task 102: Auto or the folder itself was chosen in this dialog; the plan then remembers it. */
+  worktree_chosen?: boolean;
 }
 /** Background creation's plan (core `launch::Plan`, Qt's `creationRequested` object). */
 export interface LaunchPlan {
@@ -587,7 +636,9 @@ export interface NewSessionContext {
   own_windows_session: number | null;
   /** The platform this client was built for: this computer's folder style before it reports a platform. */
   build_style: PathStyle;
-  remembered: { agent: string; accounts: Record<string, Record<string, string>>; open_terminal: boolean };
+  remembered: { agent: string; accounts: Record<string, Record<string, string>>; open_terminal: boolean;
+    /** Task 102: "auto" (a generated worktree) or "none" (the folder itself); missing or "" is Auto. */
+    folder_mode?: string };
   /** The catalog's swarm, "" before one arrives: a folder's project inference counts only from it. */
   swarm: string;
 }
@@ -632,6 +683,8 @@ export type CreationAdmission = { admitted: string } | { refused: string };
  * `can_resume` and `can_edit` from the core (`creation::caption`, `can_resume`, `Creations::can_edit`).
  */
 export interface CreationCard {
+  /** Current launch attempt, rotated on retry; absent on older hosts. */
+  launch_id?: string;
   id: string; tag: string;
   /** The operation's state (`saving` ... `failed`, `bound`). */
   state: string;
@@ -737,15 +790,21 @@ export interface LocalMessage {
 }
 /** The native queue (core input_queue::QueueView), kept separate from local messages. */
 export interface QueueView { id: string; text: string; hint: string; can_send_now: boolean; enabled: boolean; label: string; run_id?: string; conversation_id?: string }
+/** A held message: the request of its local row, its exact text and its file names. */
+export interface HeldMessageView { request_id: string; text: string; attachments: string[] }
 export interface ComposerView {
   handle: number; key: string; subagent?: { agent_id: string; send_supported: boolean; hint: string } | null; loaded: boolean; rev: number; text_epoch: number; text: string; position: number; anchor: number;
   attachments: AttachmentView[]; removed: string | null; attaching: boolean; sending: boolean; recording?: boolean; waiting: string | null; uncertain: boolean;
+  /** The desktop service still sends this draft's message: no Allow retry, and its status is not an error. */
+  delivery_pending?: boolean;
   status: string; status_error: boolean; can_send: boolean; send_label: Text; available: boolean; unavailable_reason: string; block_reason: string | null;
   attachments_available: boolean; attachments_reason: string; session_status: string; session_status_error: boolean; session_blocks_input: boolean;
   /** The open session's last read failed (Qt's m_inspectError). */
   inspect_error: boolean;
   cache: Chip; cache_warning: string; cache_details: string; context: ContextChip; local: LocalMessage[];
-  cancel_send: boolean; compacting: boolean; clear: ClearControl;
+  cancel_send: boolean; cancel_locked?: boolean; compacting: boolean; clear: ClearControl;
+  /** The message a "Compact and continue" holds while the desktop service compacts first: it left the composer but is not sent yet (zerus-pabah). */
+  held?: HeldMessageView | null;
   /** The agent's question card shown in the composer (A2). */
   question: QuestionView | null;
   /** False while a required card stands in for the editor and the action row (Qt's setInputVisible). */
@@ -794,7 +853,8 @@ export type Inspect = { kind: "native_ui" } | { kind: "terminal" } | { kind: "re
 /** One exact native child; sends still name the parent run and conversation. */
 export interface SubagentRef { agent_id: string; parent_conversation_id: string }
 /** The session or child a composer belongs to (src-tauri `SessionRef`): `key` is the parent catalog key. */
-export interface SessionRef { computer: ComputerId; key: string; name: string; archive_id: string | null; subagent?: SubagentRef }
+/** `session_id`: the row's durable ID, which keys its drafts (src-tauri `session_draft_key`). */
+export interface SessionRef { computer: ComputerId; key: string; name: string; archive_id: string | null; subagent?: SubagentRef; session_id?: string | null }
 /** The detail tab that shows, for the composer's inspect retry (Qt's poll interval). */
 export type ComposerTab = "activity" | "terminal" | "native" | "processes";
 /** A file of an Activity message, as the journal lists it. */
@@ -831,6 +891,13 @@ export interface Fetched {
   /** An image whose header gives its size, at most Qt's 64M pixels: a card may show its thumbnail. */
   thumbnail: boolean;
   image_size?: ImageSize | null;
+  /** A task's file: where `task_attachment_read` reads it. Its `path` is empty until it is read. */
+  source?: TaskFileSource;
+}
+/** A file a task page names: the entry (null for the task's own files), its number from 1 and its metadata. */
+export interface TaskFileSource {
+  entry: string | null; file: number;
+  meta: { name: string; mime: string; reference: string; size: number; sha256: string };
 }
 
 // Saved drafts (src-tauri `composer/saved.rs`).
@@ -842,6 +909,8 @@ export interface SavedDraftItem {
   key: string; kind: DraftOwnerKind;
   /** The key's machine: a host alias, "" for this computer; a subagent key names the machine. */
   computer: string; session: string;
+  /** The durable ID of a draft keyed by it; "" for a key that names its session. */
+  session_id: string;
   /** The owner's parts joined by " / " (the row's accessible text). */
   title: string;
   /** What the row shows as its title. */
@@ -851,6 +920,8 @@ export interface SavedDraftItem {
 }
 /** `next` is an opaque token for the following page. */
 export interface SavedDraftsPage { items: SavedDraftItem[]; next: string | null }
+/** The G3 drafts capture's status (draft_preload::Status), shown in Saved drafts in every mode. */
+export interface DraftCaptureStatus { code: string; capture_id: string | null; manifests: number; writes: boolean; paused: boolean }
 /** The import's conflicts; `next` is the following page's offset. */
 export interface ConflictsPage { items: SavedDraftItem[]; next: number | null }
 export interface SavedDraftDetail { text: string; attachments: number; detail: string; restorable: boolean }
@@ -952,6 +1023,8 @@ export interface TeamMemberView {
   live: boolean | null; stuck: boolean; question: boolean;
   /** Its open task first, then the tasks returned to it. */
   queue: number[]; minutes_without_progress: number; host_shared: boolean;
+  /** Task 98: hand-outs its Terminal refused in a row, hgs's reason, and whether the lead and the owner were told. */
+  input_refusals?: number; input_reason?: string; input_raised?: boolean;
   /** The owner's mandatory additions to the member's rules. */
   iron_rules?: string[];
   /** Task 11: the pending question or permission request as hgs sends it (`members[].question`), null without one. */
@@ -1002,6 +1075,21 @@ export interface TeamProfileView {
   team: string; elapsed_s: number | null; worked_s: number | null; tasks: number; accepted: number;
   tokens: number | null; tokens_partial: boolean;
   losses: TeamProfileLoss[]; roles: TeamProfileRole[];
+  /** Task 82: each task's lateness against the plan and overrun against its estimate (the first page). */
+  task_rows: TeamProfileTask[]; task_rows_more: boolean;
+}
+
+export interface TeamProfileLateness {
+  known: boolean; unknown: string; planned_start: number | null; planned_end: number | null;
+  actual_start: number | null; actual_end: number | null; start_late_s: number; inherited_s: number; own_s: number; from: number | null;
+}
+
+export interface TeamProfileOverrun {
+  started: boolean; known: boolean; estimate_s: number; work_s: number; overrun_s: number; ratio: number; running: boolean;
+}
+
+export interface TeamProfileTask {
+  task: number; lateness: TeamProfileLateness | null; overrun: TeamProfileOverrun | null;
 }
 
 export interface TeamTestPending {
@@ -1013,6 +1101,27 @@ export interface TeamTestRun {
   id: string; suite: string; status: string; asked_by: string; task: number; at: number;
   duration_ms: number; recorded_ms: number; runner: string; excerpt: string;
   flags: string[]; reused_from: string; due: boolean; over_budget: boolean;
+}
+
+/** Task 92: one span of the Time view (core teams/timeline.rs `TimelineSpan`); a test run is kind `tests`, its suite in `member`, its status in `stage_kind`. */
+export interface TimelineSpan {
+  task: number; attempt: number; kind: string; stage_kind: string; member: string; record?: string;
+  from: number; to: number; running: boolean;
+}
+/** Task 92: a member's lane: its own spans (build and merge among them), the waits of its tasks and its idle time. */
+export interface TimelineLane {
+  member: string; role: string; model: string; utilization: number; busy_s: number; idle_s: number;
+  spans: TimelineSpan[]; waits: TimelineSpan[]; idle: [number, number][];
+}
+export interface TimelineEstimate { task: number; estimate_min: number | null; worked_s: number; running: boolean }
+/** Task 92: the profile's Time view of one scope (`team_timeline`). */
+export interface TeamTimelineView {
+  team: string; phase: number | null; from: number; to: number; elapsed_s: number | null; worked_s: number | null;
+  lanes: TimelineLane[]; real: TimelineSpan[]; planned: TimelineSpan[]; real_s: number; planned_s: number;
+  tests: TimelineSpan[]; tests_more: boolean; estimates: TimelineEstimate[];
+  /** Task id to title, for the tasks drawn (JSON object keys are strings). */
+  titles: Record<string, string>;
+  tasks: number; truncated: boolean;
 }
 
 export interface TeamTestsView {
@@ -1033,6 +1142,8 @@ export interface TeamView {
   revision: number; created: number; updated: number; waiting_for_lead: boolean; pending_phase: number | null;
   /** Task #58: the phase that takes tasks as they come, and whether hgs sends each phase's mode. */
   free_phase?: number | null; phase_modes_known?: boolean;
+  /** Task 112: a paused team's pause: since when, by whom and why (null otherwise). */
+  paused?: { at: number; by: string; reason: string } | null;
   settings: Record<string, unknown>; members: TeamMemberView[]; tasks: TeamTaskView[]; phases: TeamPhaseView[];
   proposals: TeamProposalView[];
   attention: unknown[];
@@ -1066,7 +1177,9 @@ export interface TeamWaitingView { items: TeamWaitingItem[]; total: number; more
 /** The owner's confirmation of a team action, worded by the core. */
 export interface TeamConfirmation { name: string; title: string; text: string; action: string }
 /** Task 52: a question with several answers (Qt's subteamChoice); Cancel is always added last and focused. */
-export interface TeamChoice { name: string; title: string; text: string; choices: { id: string; text: string; danger?: boolean }[] }
+export interface TeamChoice { name: string; title: string; text: string; choices: { id: string; text: string; danger?: boolean }[];
+  /** Task 112: the answer focused instead of Cancel (Resume team). */
+  initial?: string }
 
 /**
  * A team action (client/core/src/teams/action.rs `TeamAction`), by its kind:
@@ -1085,6 +1198,11 @@ export type TeamAction =
   | { kind: "phase_mode"; phase: number; mode: "free" | "standard"; reason?: string }
   | { kind: "send_back_phase"; phase: number; comment: string }
   | { kind: "decide_tool"; offer: string; allow: boolean; reason?: string }
+  /** Task 97: the owner's answer to a deferred request; one message reaches the session. */
+  | { kind: "answer_deferred"; id: string; decision: "allow" | "deny" | "answer"; text?: string }
+  /** Task 108: the build folders Zerus holds: the Disk view, a dry run or Clean now, the policy, forget a reviewed folder. */
+  | { kind: "disk"; action: "list" | "clean" | "policy" | "forget"; scope?: "policy" | "all"; dry_run?: boolean;
+      policy?: { enabled: boolean; unused_days: number; free_gb: number; free_percent: number }; paths?: string[]; path?: string; refresh?: boolean; measure?: boolean }
   | { kind: "release"; task: number }
   | { kind: "retry"; task: number }
   | { kind: "finish"; summary: string }

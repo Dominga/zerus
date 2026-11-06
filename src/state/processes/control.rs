@@ -264,7 +264,7 @@ pub(super) fn stop(record: &Value, id: &str) -> Result<Value> {
     if current["run_id"] != record["run_id"]
         || current["conversation_id"] != record["conversation_id"]
         || current["pid"] != record["pid"]
-        || !matches(&current, live()?.get(string(record, "name")))
+        || !matches(&current, panes_of(&live()?, record))
         || !process_alive(&current)
     {
         return Err("Session changed before stopping the process".into());

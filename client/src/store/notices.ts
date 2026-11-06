@@ -12,6 +12,8 @@ export interface Notice {
   title?: string;
   text: string;
   sticky: boolean;
+  /** An actual in-flight operation, not a timer-based progress estimate. */
+  busy?: boolean;
   /** Notices with one key replace each other, as one status line does. */
   key?: string;
   actions?: NoticeAction[];
@@ -27,7 +29,7 @@ export interface NoticeAction {
   disabled?: () => boolean;
   run(): void | Promise<void>;
 }
-export type NoticeOptions = Pick<Notice, "actions" | "dismissible" | "note">;
+export type NoticeOptions = Pick<Notice, "actions" | "dismissible" | "note" | "busy">;
 export const sessionNoticeKey = (computer: string, name: string) => `session-end:${computer}\n${name}`;
 
 /** At most this many show; the oldest non-sticky one goes first. */

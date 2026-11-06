@@ -40,7 +40,9 @@ data class Event(val id: String, val role: String, val text: String, val time: S
     val delivery: String = "", val outgoingId: String = "", val nativeType: String = "", val submittedText: String = "",
     val originalId: String = "", val historyId: String = "", val historyCursor: String = "",
     val historyEpoch: String = "", val incomingSeq: Long? = null, val originalIds: List<String> = emptyList(), val detailTruncated: Boolean = false,
-    val voice: VoiceMessage? = null, val origin: String = "", val sender: String = "", val report: String = "") {
+    val voice: VoiceMessage? = null, val origin: String = "", val sender: String = "", val report: String = "",
+    /** A fork's read-only row from the session it began from (that session's name); never incoming. */
+    val inheritedFrom: String = "") {
     /** The request this row stands for as a receipt or a local send. An OpenCode prompt only
      * names the request that sent it, which ConversationMerge alone matches. */
     val receiptRequestId: String get() = if (role != "You" || source == "opencode_native") "" else requestId

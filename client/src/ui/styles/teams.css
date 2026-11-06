@@ -22,6 +22,9 @@
   .team-badge { display: inline-flex; align-items: center; height: 18px; padding: 0 8px; border-radius: 9px; font-size: 10.5px; font-weight: 600;
     color: var(--tone); border: 1px solid var(--tone); white-space: nowrap; }
   .team-badge.tone-warn { background: var(--z-color-warn-bg); }
+  /* Task 95: the stalled lead on the team bar. */
+  .team-chip.warn { color: var(--z-color-warn); background: var(--z-color-warn-bg); border: 1px solid color-mix(in srgb, var(--z-color-warn) 45%, transparent);
+    border-radius: 9px; padding: 0 8px; font-size: 11px; font-weight: 600; white-space: nowrap; }
   .team-badge.tone-active { background: var(--z-color-accent-bg); }
   .team-progress { display: flex; gap: 2px; width: 200px; height: 6px; border-radius: 3px; background: var(--z-color-tile, var(--z-color-field)); overflow: hidden; flex: none; }
   .team-progress .seg { display: block; height: 100%; }
@@ -127,6 +130,10 @@
   .team-waiting-tile { display: grid; place-items: center; width: 28px; height: 28px; border-radius: 7px; background: var(--z-color-warn-bg); color: var(--z-color-warn); }
   .team-waiting-error { margin: 10px 20px 0; color: var(--z-color-danger); }
   .team-waiting-list { flex: 1; min-height: 0; overflow-y: auto; display: flex; flex-direction: column; gap: 8px; padding: 14px 20px 20px; }
+  /* Task 97: Waiting for you > Deferred. */
+  .team-waiting-deferred { display: flex; flex-direction: column; gap: 8px; margin-top: 10px; }
+  .team-waiting-group { margin: 0; font-size: var(--fs-sm); font-weight: 600; }
+  .team-waiting-group-note { margin: 0; }
   .team-waiting-row { display: flex; flex-direction: column; gap: 6px; padding: 8px 10px; border-radius: 8px; background: var(--z-color-card); border: 1px solid var(--z-color-card-border); cursor: pointer; }
   .team-waiting-row.open { cursor: default; }
   .team-waiting-row.compact { padding: 4px 8px; background: transparent; border: 0; border-radius: 0; }

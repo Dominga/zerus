@@ -19,6 +19,54 @@ fn active() -> Value {
 }
 
 #[test]
+fn workspace_failures_distinguish_startup_protocol_and_refusal_without_child_text() {
+    let private = "private-child-text-and-credential";
+    let cases = [
+        (Some(Exit::StartFailed(private.into())), "could not start"),
+        (Some(Exit::TimedOut), "timed out"),
+        (Some(Exit::WriteFailed), "input could not be delivered"),
+        (
+            Some(Exit::Abnormal {
+                stderr: private.into(),
+            }),
+            "ended abnormally",
+        ),
+        (None, "exceeded its limit"),
+        (code(-1073741515, private, private), "0xc0000135"),
+        (code(0, "[]", private), "invalid workspace reply"),
+        (code(0, "{}", private), "status is incompatible"),
+        (
+            code(1, r#"{"ok":false}"#, private),
+            "refused the workspace request",
+        ),
+    ];
+    for (exit, reason) in cases {
+        let error = status(exit).unwrap_err();
+        assert!(error.contains(reason), "{error}");
+        assert!(!error.contains(private));
+        assert!(error.len() < 512);
+    }
+    let error = workspace_reply(
+        code(1, &json!({"error":private}).to_string(), private),
+        false,
+    )
+    .unwrap_err();
+    assert!(
+        !error.contains(private),
+        "effect refusals never echo child text"
+    );
+    assert!(error.contains("refused the workspace request"));
+}
+
+#[test]
+fn a_missing_selected_connector_is_reported_before_the_status_probe() {
+    let missing = std::env::temp_dir().join(format!("missing-connector-{}", uuid::Uuid::new_v4()));
+    let error = read_status(&missing, &missing.with_extension("json")).unwrap_err();
+    assert!(error.contains("connector is missing"));
+    assert!(!error.contains(&missing.to_string_lossy().to_string()));
+}
+
+#[test]
 fn the_workspace_status_reads_as_qt_checks_it() {
     let workspace = status(code(0, &active().to_string(), "")).unwrap();
     assert_eq!(
@@ -27,7 +75,7 @@ fn the_workspace_status_reads_as_qt_checks_it() {
     );
     assert_eq!(workspace.connection, "Connector: running");
     assert!(workspace.encrypted && workspace.running && workspace.pending.is_none());
-    let unconfirmed = "Workspace operation was not confirmed. Refresh status before continuing. Verify that the matching computer connector is installed.";
+    let unconfirmed = workspace_failure("the computer connector workspace status is incompatible; update the matching Zerus package");
     let refused = |change: &dyn Fn(&mut Value)| {
         let mut value = active();
         change(&mut value);
@@ -42,7 +90,10 @@ fn the_workspace_status_reads_as_qt_checks_it() {
         refused(&|v| v["config_revision"] = json!("A".repeat(64))),
         unconfirmed
     );
-    assert_eq!(refused(&|v| v["ok"] = json!(false)), unconfirmed);
+    assert_eq!(
+        refused(&|v| v["ok"] = json!(false)),
+        workspace_failure("the computer connector refused the workspace request (exit 0)")
+    );
     // As in Qt, a well-formed status is read even with an error field.
     let mut noted = active();
     noted["error"] = json!("note");
@@ -59,10 +110,16 @@ fn the_workspace_status_reads_as_qt_checks_it() {
     );
     assert_eq!(
         status(code(1, &json!({"error": "x".repeat(1025)}).to_string(), "")).unwrap_err(),
-        unconfirmed
+        workspace_failure("the computer connector refused the workspace request (exit 1)")
     );
-    assert_eq!(status(Some(Exit::TimedOut)).unwrap_err(), unconfirmed);
-    assert_eq!(status(None).unwrap_err(), unconfirmed);
+    assert_eq!(
+        status(Some(Exit::TimedOut)).unwrap_err(),
+        workspace_failure("the computer connector timed out")
+    );
+    assert_eq!(
+        status(None).unwrap_err(),
+        workspace_failure("the computer connector reply exceeded its limit")
+    );
     // Stopped, legacy, retired, unconfigured and pending states.
     let mut stopped = active();
     stopped["connector_state"] = json!("stopped");
@@ -302,8 +359,11 @@ impl Scratch {
 
     /// A fake program logging its arguments (and whether TMUX or the agent's
     /// attribution reached it) and answering per the first matching case.
-    fn program(&self, name: &str, cases: &[(&str, &str)]) -> std::path::PathBuf {
-        use std::os::unix::fs::PermissionsExt;
+    fn program(
+        &self,
+        name: &str,
+        cases: &[(&str, &str)],
+    ) -> (std::path::PathBuf, std::path::PathBuf) {
         let mut script = format!(
             "#!/bin/sh\nhere=$(dirname \"$0\")\necho \"$* tmux=${{TMUX:-unset}} pane=${{TMUX_PANE:-unset}} session=${{HGS_SESSION:-unset}} run=${{HGS_RUN_ID:-unset}}\" >> \"$here/{name}.calls\"\ncat >/dev/null\ncase \"$*\" in\n"
         );
@@ -312,9 +372,18 @@ impl Scratch {
         }
         script.push_str("  *) echo unexpected >&2; exit 9;;\nesac\n");
         let path = self.0.join(name);
-        std::fs::write(&path, script).unwrap();
-        std::fs::set_permissions(&path, std::fs::Permissions::from_mode(0o755)).unwrap();
-        path
+        let payload = self.0.join(format!("{name}.fixture"));
+        // A parallel fork can retain a new executable's write fd until exec,
+        // making this test's exec fail with ETXTBSY after our writer closed.
+        // Execute only the checked-in launcher; the completed payload is read
+        // as shell input and is never executable.
+        std::fs::write(&payload, script).unwrap();
+        std::os::unix::fs::symlink(
+            Path::new(env!("CARGO_MANIFEST_DIR")).join("tests/support/fake_mobile.sh"),
+            &path,
+        )
+        .unwrap();
+        (path, payload)
     }
 
     fn calls(&self, name: &str) -> String {
@@ -331,10 +400,81 @@ impl Drop for Scratch {
 
 #[cfg(unix)]
 #[test]
+fn a_staged_phone_cli_receives_the_exact_connector_without_global_environment_changes() {
+    let bundle = Scratch::new("phone-bundle");
+    let stage = Scratch::new("phone-stage");
+    let (connector, _) = bundle.program(
+        "zerus-mobile-connector",
+        &[("*", "echo '{\"nested\":true}'")],
+    );
+    let (stale, _) = stage.program("zerus-mobile-connector", &[("*", "echo stale; exit 9")]);
+    let (hgs, _) = stage.program("hgs", &[("*", "if [ -n \"${ZERUS_CLIENT_MOBILE_CONNECTOR_PATH+x}\" ]; then \"$ZERUS_CLIENT_MOBILE_CONNECTOR_PATH\" --workspace status; else \"$here/zerus-mobile-connector\" --workspace status; fi")]);
+    let call = invocation(&["mobile", "phones", "--json"], Duration::from_secs(5));
+    // Existing fallback really reaches the competing sibling.
+    assert!(matches!(
+        run_phone_cli_in(&hgs, &call, 4096, None).unwrap(),
+        Exit::Code { code: 9, .. }
+    ));
+    let old_calls = stage.calls("zerus-mobile-connector");
+    let result = run_phone_cli_in(&hgs, &call, 4096, connector.to_str()).unwrap();
+    assert!(
+        matches!(result, Exit::Code { code: 0, ref stdout, .. } if stdout == b"{\"nested\":true}\n")
+    );
+    assert_eq!(
+        stage.calls("zerus-mobile-connector"),
+        old_calls,
+        "exact selection must bypass the stale sibling"
+    );
+    assert!(bundle
+        .calls("zerus-mobile-connector")
+        .starts_with("--workspace status "));
+    assert!(stale.exists());
+    let remote = invocation(
+        &["@lab", "mobile", "phones", "--json"],
+        Duration::from_secs(5),
+    );
+    assert!(phone_connector(&hgs, &remote, Some(&bundle.0)).is_none());
+}
+
+#[cfg(windows)]
+#[test]
+fn the_packaged_windows_connector_wins_over_a_legacy_cli_sibling() {
+    struct Owned(std::path::PathBuf);
+    impl Drop for Owned {
+        fn drop(&mut self) {
+            std::fs::remove_dir_all(&self.0).unwrap();
+        }
+    }
+    let root =
+        std::env::temp_dir().join(format!("zerus-mobile-selection-{}", uuid::Uuid::new_v4()));
+    std::fs::create_dir(&root).unwrap();
+    let root = Owned(root);
+    let app = root.0.join("app");
+    let stage = root.0.join("stage");
+    std::fs::create_dir(&app).unwrap();
+    std::fs::create_dir(&stage).unwrap();
+    let name = "zerus-mobile-connector.exe";
+    let current = app.join(name);
+    std::fs::write(&current, b"current package fixture").unwrap();
+    std::fs::write(stage.join(name), b"legacy fixture").unwrap();
+    let hgs = stage.join("hgs.exe");
+    assert_eq!(connector_program(&hgs, Some(&app)), current);
+    let call = invocation(&["mobile", "phones", "--json"], Duration::from_secs(5));
+    let selected = phone_connector(&hgs, &call, Some(&app)).unwrap();
+    assert_eq!(Path::new(&selected), current);
+    let remote = invocation(
+        &["@lab", "mobile", "phones", "--json"],
+        Duration::from_secs(5),
+    );
+    assert!(phone_connector(&hgs, &remote, Some(&app)).is_none());
+}
+
+#[cfg(unix)]
+#[test]
 fn the_connector_is_only_asked_for_read_only_status_and_capability() {
     let scratch = Scratch::new("connector");
     let reply = active().to_string().replace('"', "\\\"");
-    let connector = scratch.program(
+    let (connector, _) = scratch.program(
         "zerus-mobile-connector",
         &[
             ("*--workspace\\ status*", &format!("echo \"{reply}\"")),
@@ -377,13 +517,40 @@ fn the_connector_is_only_asked_for_read_only_status_and_capability() {
 
 #[cfg(unix)]
 #[test]
+fn a_held_fixture_writer_does_not_block_the_status_read() {
+    use std::os::unix::fs::PermissionsExt;
+
+    let scratch = Scratch::new("held-writer");
+    let reply = active().to_string().replace('"', "\\\"");
+    let (connector, payload) = scratch.program(
+        "zerus-mobile-connector",
+        &[
+            ("*--workspace\\ status*", &format!("echo \"{reply}\"")),
+            ("--help", &format!("echo '{STOP_MARKER}'")),
+        ],
+    );
+    // Model the writable descriptor a concurrent child inherited during
+    // fixture publication. Holding it must not prevent either read-only call.
+    let held = std::fs::OpenOptions::new()
+        .write(true)
+        .open(&payload)
+        .unwrap();
+    let workspace = read_status(&connector, &scratch.0.join("connector.json")).unwrap();
+    assert_eq!(workspace.connection, "Connector: running");
+    assert!(workspace.stop_supported);
+    assert_eq!(scratch.calls("zerus-mobile-connector").lines().count(), 2);
+    assert_eq!(held.metadata().unwrap().permissions().mode() & 0o111, 0);
+}
+
+#[cfg(unix)]
+#[test]
 fn phones_are_read_after_the_help_says_the_command_exists() {
     let scratch = Scratch::new("phones");
     let machines = r#"{"machines":[{"alias":"mac","enabled":true},{"alias":"off","enabled":false},{"alias":"","enabled":true}]}"#;
     let listed = json!({"configured": true, "encrypted": true, "server_url": "https://relay.example.com", "workspace_id": "ws-1",
         "workspace_name": "Example team", "devices": [{"id": "p1", "name": "Pixel", "platform": "android", "paired_at": 1_800_000_000,
         "last_seen_at": null, "added_by": {"name": "workstation"}}]}).to_string().replace('"', "\\\"");
-    let hgs = scratch.program(
+    let (hgs, _) = scratch.program(
         "hgs",
         &[
             ("machine\\ ls", &format!("echo '{machines}'")),
@@ -440,7 +607,7 @@ fn phones_are_read_after_the_help_says_the_command_exists() {
         "{calls}"
     );
     // A help past its own limit says so.
-    let long = scratch.program(
+    let (long, _) = scratch.program(
         "long",
         &[("--help", "head -c 300000 /dev/zero | tr '\\0' x")],
     );

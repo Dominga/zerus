@@ -51,7 +51,7 @@ fn candidate(path: &Path) -> bool {
             .all(|b| b.is_ascii_digit() || (b'a'..=b'f').contains(&b))
 }
 
-fn inventory(root: &Path) -> GraphResult<(Vec<InventorySource>, bool)> {
+pub(super) fn inventory(root: &Path) -> GraphResult<(Vec<InventorySource>, bool)> {
     let mut paths = Vec::new();
     let mut complete = true;
     for directory in [
@@ -59,6 +59,8 @@ fn inventory(root: &Path) -> GraphResult<(Vec<InventorySource>, bool)> {
         "bindings",
         "dsh/bindings",
         "opencode/bindings",
+        // The ID layout (zerus-ucck P3a).
+        "sessions",
         "sends",
         "archives",
     ] {
@@ -91,7 +93,10 @@ fn inventory(root: &Path) -> GraphResult<(Vec<InventorySource>, bool)> {
                 && path.file_stem().and_then(|s| s.to_str()).is_some_and(|s| {
                     uuid::Uuid::parse_str(s).is_ok_and(|id| !id.is_nil() && id.to_string() == s)
                 });
-            if !candidate(&path) && !archive {
+            let by_id = directory == "sessions"
+                && path.extension().and_then(|s| s.to_str()) == Some("json")
+                && path.file_stem().and_then(|s| s.to_str()).is_some_and(super::session_id::canonical);
+            if (directory == "sessions" && !by_id) || (!candidate(&path) && !archive && !by_id) {
                 continue;
             }
             if paths.len() == MAX_SOURCES {
@@ -212,6 +217,9 @@ fn collect(index: &mut Index, machine: &str, root: &Path) -> GraphResult<()> {
             let archived = source.starts_with("archives/");
             let expected = if archived {
                 format!("{}.json", string(&record, "archive_id"))
+            } else if source.starts_with("sessions/") {
+                ensure!(record["layout"] == "id", "binding_identity_mismatch");
+                format!("{}.json", string(&record, "session_id"))
             } else {
                 format!(
                     "{:x}.json",

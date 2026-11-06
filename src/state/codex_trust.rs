@@ -141,7 +141,7 @@ pub(super) fn current(record: &Value) -> Option<Value> {
         return None;
     }
     let panel = parse(&kimi_tui_choice::capture(record).ok()?)?;
-    if !process_alive(record) || !matches(record, live().ok()?.get(string(record, "name"))) {
+    if !process_alive(record) || !matches(record, panes_of(&live().ok()?, record)) {
         return None;
     }
     input::checked_terminal(record, false).ok()?;
@@ -187,7 +187,7 @@ mod tests {
         assert_eq!(parse(SCREEN).unwrap().selected,0);
         let bare=SCREEN.lines().filter(|row|!row.starts_with("  Trust this")&&!row.starts_with("  settings.")&&!row.starts_with("  Continue only")).collect::<Vec<_>>().join("\n");
         for invalid in [SCREEN.replace(HINT,"enter continue"),SCREEN.replace("  2. Quit","› 2. Quit"),
-            SCREEN.replace("Your trust decision will be saved.","…"),format!("Agent said:\n{SCREEN}"),format!("{SCREEN}\n› composer"),
+            SCREEN.replace("Your trust decision will be saved.","…"),format!("Agent said:\n{SCREEN}"),format!("{SCREEN}\n› composer"),format!("{SCREEN}\n›"),format!("{SCREEN}\n› Ask Codex to do anything"),
             SCREEN.replace("  2. Quit","  2. Quit\n  3. Trust parent"),bare] {
             assert!(parse(&invalid).is_none());
         }

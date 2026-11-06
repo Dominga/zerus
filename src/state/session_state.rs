@@ -45,6 +45,11 @@ pub(super) fn decorate(sessions: &mut [Value]) {
     let builds = super::builds::running(at);
     let observed = observed_ttls();
     let mut accounts = HashMap::new();
+    // Task 97: the owner queue's alerts for the phone, a team's on its lead's
+    // row; read once per listing.
+    let leads: Vec<(String, String, String)> =
+        waiting.iter().filter(|w| w.lead).map(|w| (w.team.clone(), String::new(), w.name.clone())).collect();
+    let deferred = teams::owner_queue::mobile_items(&leads);
     for session in sessions.iter_mut() {
         let team = waiting.iter().find(|w| {
             w.name == text(session, "name")
@@ -55,6 +60,32 @@ pub(super) fn decorate(sessions: &mut [Value]) {
         let key = format!("{}\n{}", text(session, "agent"), text(session, "account_home"));
         let ttl = accounts.entry(key).or_insert_with(|| cache_ttl(session, &observed)).clone();
         apply(session, ttl, team, at);
+        if let Some(alert) = team.and_then(|team| team.alert.as_ref()) {
+            add_alert(session, alert);
+        }
+        let name = text(session, "name").to_owned();
+        for (_, _, alert) in deferred.iter().filter(|(host, row, _)| host.is_empty() && *row == name) {
+            add_alert(session, alert);
+        }
+    }
+}
+
+/// Task 95: the stalled lead's phone alert joins the row's `mobile_attention`
+/// (the relay pushes a new item once). A row whose own question already has an
+/// attention signature mixes the alert into it, so a read mark of that
+/// question never hides the alert; a null signature is never suppressed and
+/// stays null.
+pub(crate) fn add_alert(session: &mut Value, alert: &Value) {
+    use sha2::{Digest, Sha256};
+    let mut items = session["mobile_attention"].as_array().cloned().unwrap_or_default();
+    if items.iter().any(|item| item["question_id"] == alert["question_id"]) {
+        return;
+    }
+    items.push(alert.clone());
+    session["mobile_attention"] = json!(items);
+    if let Some(signature) = session["attention_signature"].as_str() {
+        let mixed = json!([signature, alert["question_id"], alert["question_hash"]]).to_string();
+        session["attention_signature"] = json!(format!("{:x}", Sha256::digest(mixed.as_bytes())));
     }
 }
 
@@ -561,5 +592,63 @@ mod tests {
             (json!("cooling"), json!(true), json!(100.0)));
         apply(&mut row, ttl, None, 400.0);
         assert_eq!((row["session_state"].clone(), row["state_reason"].clone()), (json!("cold"), Value::Null));
+    }
+
+    /// Task 95: a stalled lead's row carries the phone's alert item and the
+    /// owner's reason; a member's row does not, and a row whose own question
+    /// has a signature mixes the alert into it.
+    #[test]
+    fn a_stalled_lead_row_carries_the_phone_alert_and_the_owner_reason() {
+        use teams::model::{LeadStall, Member, MemberState, SessionRef, Team, TeamStatus};
+        let member = |id: &str| Member {
+            id: id.into(),
+            role: id.into(),
+            agent: "claude".into(),
+            state: MemberState::Active,
+            session: Some(SessionRef { host: "h".into(), name: format!("claude/p/{id}"), run_id: "r".into(), conversation_id: format!("c-{id}") }),
+            ..Default::default()
+        };
+        let stall = LeadStall { since: 100.0, reason: "rejected_tool".into(), items: 3, members: 2, oldest: 50.0, round: 2, notified_at: 3700.0, ..Default::default() };
+        let team = Team {
+            id: "t".into(),
+            name: "T".into(),
+            status: TeamStatus::Running,
+            lead: "lead".into(),
+            members: vec![member("lead"), member("web")],
+            lead_stall: Some(stall),
+            ..Default::default()
+        };
+        let root = tempfile::tempdir().unwrap();
+        crate::state::with_test_state_root(root.path(), || {
+            teams::store::Store::open(true).unwrap()
+                .create("11111111-1111-4111-8111-111111111111", &json!({}), team, vec![]).unwrap();
+            let at = now();
+            let row = |id: &str| json!({"name":format!("claude/p/{id}"),"conversation_id":format!("c-{id}"),
+                "agent":"claude","activity":"idle","phase":"interrupted","last_event_at":at - 30.0,"attention_signature":null});
+            let mut rows = vec![row("lead"), row("web")];
+            decorate(&mut rows);
+            let alert = &rows[0]["mobile_attention"][0];
+            assert_eq!(alert["kind"], "team_lead_stall");
+            assert_eq!(alert["question_id"], "team-lead-stall:t:2");
+            assert_eq!((alert["items"].clone(), alert["members"].clone()), (json!(3), json!(2)));
+            assert!(alert["question_hash"].as_str().is_some_and(|hash| hash.len() == 64));
+            // No question text leaves the computer, and a null signature stays null.
+            assert!(alert.get("title").is_none() && alert.get("detail").is_none());
+            assert!(rows[0]["attention_signature"].is_null());
+            assert_eq!(rows[0]["session_state"], "user");
+            assert_eq!(rows[0]["state_reason"]["kind"], "team_lead_stalled");
+            assert!(rows[1].get("mobile_attention").is_none());
+            // Decorating again adds nothing twice.
+            let mut again = rows[0].clone();
+            add_alert(&mut again, &rows[0]["mobile_attention"][0].clone());
+            assert_eq!(again["mobile_attention"].as_array().unwrap().len(), 1);
+            // The lead's own question keeps its card and its signature changes.
+            let mut asked = row("lead");
+            asked["attention_signature"] = json!("a".repeat(64));
+            asked["mobile_attention"] = json!([{"question_id":"q1","question_hash":"h1"}]);
+            add_alert(&mut asked, alert);
+            assert_eq!(asked["mobile_attention"].as_array().unwrap().len(), 2);
+            assert_ne!(asked["attention_signature"], json!("a".repeat(64)));
+        });
     }
 }

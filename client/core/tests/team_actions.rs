@@ -415,6 +415,60 @@ fn every_action_sends_its_request_once_and_gives_the_receipt() {
         expected.insert("request_id".into(), json!(request_id));
         assert_eq!(request, Value::Object(expected));
     }
+    // Task 97: a deferred request belongs to no team; the owner's answer is
+    // sent as it is, and an answer without words never runs.
+    reply(&fake, "answer-deferred", "", json!({"stdout": {"status": "sent"}}));
+    let outcome = run(
+        &fake.path(),
+        &TeamCall {
+            team: String::new(),
+            ..call(TeamAction::AnswerDeferred { id: "0a1b2c3d4e5f6a7b".into(), decision: "allow".into(), text: String::new() })
+        },
+    );
+    let TeamOutcome::Done { request_id, .. } = &outcome else { panic!("{outcome:?}") };
+    let (op, request) = requests(&fake).pop().unwrap();
+    assert_eq!(op, "answer-deferred");
+    assert_eq!(request, json!({"id":"0a1b2c3d4e5f6a7b","decision":"allow","by":"human","request_id":request_id}));
+    let before_deferred = requests(&fake).len();
+    let empty = run(
+        &fake.path(),
+        &TeamCall {
+            team: String::new(),
+            ..call(TeamAction::AnswerDeferred { id: "0a1b2c3d4e5f6a7b".into(), decision: "answer".into(), text: " ".into() })
+        },
+    );
+    assert!(matches!(empty, TeamOutcome::Failed { .. }), "{empty:?}");
+    assert_eq!(requests(&fake).len(), before_deferred);
+    // Task 108: the Disk view belongs to no team. A list and a dry run go at
+    // once; Clean now asks first, then sends exactly what was confirmed.
+    let disk = |action: &str, dry_run: bool| TeamAction::Disk {
+        action: action.into(), scope: "policy".into(), dry_run, policy: Value::Null, paths: vec![], path: String::new(), refresh: false, measure: false,
+    };
+    reply(&fake, "disk", "", json!({"stdout": {"decisions": []}}));
+    let listed = run(&fake.path(), &TeamCall { team: String::new(), ..call(disk("list", false)) });
+    assert!(matches!(listed, TeamOutcome::Done { .. }), "{listed:?}");
+    assert_eq!(requests(&fake).pop().unwrap().1["action"], "list");
+    // Task 109: the open Disk view's live read asks hgs to measure.
+    let live = run(&fake.path(), &TeamCall { team: String::new(), ..call(TeamAction::Disk {
+        action: "list".into(), scope: String::new(), dry_run: false, policy: Value::Null, paths: vec![], path: String::new(), refresh: false, measure: true,
+    }) });
+    assert!(matches!(live, TeamOutcome::Done { .. }), "{live:?}");
+    assert_eq!(requests(&fake).pop().unwrap().1["measure"], true);
+    let dry = run(&fake.path(), &TeamCall { team: String::new(), ..call(disk("clean", true)) });
+    assert!(matches!(dry, TeamOutcome::Done { .. }), "{dry:?}");
+    assert_eq!(requests(&fake).pop().unwrap().1["dry_run"], true);
+    let before_clean = requests(&fake).len();
+    let asked = run(&fake.path(), &TeamCall { team: String::new(), confirmed: false, ..call(disk("clean", false)) });
+    let TeamOutcome::Confirm { confirmation } = &asked else { panic!("{asked:?}") };
+    assert_eq!((confirmation.name.as_str(), confirmation.action.as_str()), ("diskCleanConfirm", "Remove"));
+    assert_eq!(requests(&fake).len(), before_clean, "nothing runs before the owner confirms");
+    let cleaned = run(&fake.path(), &TeamCall { team: String::new(), confirmed: true, ..call(disk("clean", false)) });
+    assert!(matches!(cleaned, TeamOutcome::Done { .. }), "{cleaned:?}");
+    let (op, request) = requests(&fake).pop().unwrap();
+    assert_eq!((op.as_str(), request["dry_run"].clone(), request["scope"].clone(), request["by"].clone()), ("disk", json!(false), json!("policy"), json!("human")));
+    let wrong = run(&fake.path(), &TeamCall { team: String::new(), ..call(TeamAction::Disk { action: "wipe".into(), scope: String::new(), dry_run: true,
+        policy: Value::Null, paths: vec![], path: String::new(), refresh: false, measure: false }) });
+    assert!(matches!(wrong, TeamOutcome::Failed { .. }), "{wrong:?}");
     // A send back without a comment and an answer without a choice never run.
     let before = requests(&fake).len();
     for action in [

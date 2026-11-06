@@ -1,10 +1,28 @@
 # Proposed native CLI and configuration origin
 
-Status: design only for `zerus-5wmh.66.2.34.3.5`. No admission exception,
+Status: input-capture prerequisite for `zerus-5wmh.66.2.34.3.5`; native binding
+remains design only. No admission exception,
 production anchor, helper launch, pairing build or installer change is implemented
 or authorized here. The [quit-store design](desktop-quit-store-design.md) keeps
 its initial explicit-selector refusal until a replacement is independently
 qualified. R3's unresolved legacy-mutator exclusion remains a separate blocker.
+
+The GUI and CLI executable entries now preserve their original OS environment
+and arguments in `quit_origin`, before their fixed helper dispatch or loader
+mutations. The first capture, including a failed capture, cannot be replaced.
+It is opaque process-local data with no raw-value API, serialization or success
+result. Explicit CLI and prefixed environment inputs explain refusal only;
+even an implicit scope returns `NativeOriginUnavailable`. Library-only callers
+without the executable entry return `NotCaptured`. No current Quit caller uses
+this data and drop-on-Quit behavior is unchanged.
+
+Retention is bounded to 1024 environment entries, 256 arguments, 64 KiB per OS
+string and 1 MiB of encoded input in total. Overflow or duplicate environment
+names discards the entire capture and keeps a refusal. These are retention
+bounds: the standard library may allocate its OS snapshot before iteration.
+This is not the proposed bounded native read-set acquisition or a complete
+configuration manifest. It derives no OS profile, native image or configuration,
+and performs no filesystem, connection, helper or anchor operation.
 
 ## One shared pairing contract per platform
 

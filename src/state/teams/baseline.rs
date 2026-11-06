@@ -180,8 +180,14 @@ pub(crate) fn lateness(team: &Team, task: &Task, now: f64) -> Value {
         None => 0.0,
     };
     // The most any predecessor the task was planned to follow is behind: that
-    // much of its lateness is inherited, the rest is its own.
-    let behind = baseline.after.iter().filter_map(|id| team.task(*id)).map(|before| delay(before, now)).fold(0.0, f64::max);
+    // much of its lateness is inherited, the rest is its own. Task 82: `from`
+    // names that predecessor (the lower id on a tie), for "late 20m from #3".
+    let (from, behind) = baseline
+        .after
+        .iter()
+        .filter_map(|id| team.task(*id))
+        .map(|before| (before.id, delay(before, now)))
+        .fold((None, 0.0), |(id, most), (next, by)| if by > most { (Some(next), by) } else { (id, most) });
     let inherited = late.min(behind);
     let end_late = baseline.end.and_then(|end| {
         let reported = task.attempts.iter().rev().find_map(|attempt| attempt.report.as_ref().map(|report| report.at));
@@ -191,8 +197,13 @@ pub(crate) fn lateness(team: &Team, task: &Task, now: f64) -> Value {
             _ => None,
         }
     });
+    // Task 82: the actual start and end for the heat's tooltip (the end: the
+    // last report of a task that is no longer working).
+    let actual_end = task.attempts.iter().rev().find_map(|attempt| attempt.report.as_ref().map(|report| report.at))
+        .filter(|_| task.status != TaskStatus::InProgress && task.status != TaskStatus::Assigned);
     json!({"planned_start":planned_start,"planned_end":baseline.end,"start_late_s":seconds(late),"inherited_s":seconds(inherited),
-        "own_s":seconds(late) - seconds(inherited),"end_late_s":end_late.map(seconds)})
+        "own_s":seconds(late) - seconds(inherited),"end_late_s":end_late.map(seconds),
+        "from":if inherited > 0.0 { from } else { None },"actual_start":actual_start(task),"actual_end":actual_end})
 }
 
 /// The estimate a task's overrun is measured against: the baseline's, else the

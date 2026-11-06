@@ -90,7 +90,11 @@ class SessionReferences(unittest.TestCase):
         path = self.state / (hashlib.sha256(other['name'].encode()).hexdigest() + '.json')
         path.write_text(json.dumps(other))
         self.assertIn('Ambiguous', self.cli('inspect', uri, success=False))
-        self.assertIn('read-only', self.cli('send', uri, '--json', success=False))
+        # zerus-ucck P1c: session commands accept a reference through the same
+        # resolution, so an ambiguous one still fails closed before any effect;
+        # other commands keep refusing references as read-only.
+        self.assertIn('Ambiguous', self.cli('send', uri, '--json', success=False))
+        self.assertIn('read-only', self.cli('dirs', uri, success=False))
         self.cli('inspect', uri + '&name=other', success=False)
 
     def test_remote_copy_and_inspection_use_one_verified_hop(self):

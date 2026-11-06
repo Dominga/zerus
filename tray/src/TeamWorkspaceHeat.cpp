@@ -26,10 +26,35 @@ qint64 heatAgeMs = 60 * 1000;
 
 void TeamWorkspace::setHeatAge(int milliseconds) { heatAgeMs = milliseconds; }
 
+bool TeamWorkspace::heatView(const QString &view)
+{
+    return view == QLatin1String("graph") || view == QLatin1String("board") || view == QLatin1String("layers");
+}
+
+QWidget *TeamWorkspace::heatCardLine(const Team &team, int taskId)
+{
+    // Task 82: the drawer's task card shows the same two measures.
+    const Heat *shown = heat(team);
+    const Task *task = team.task(taskId);
+    if (!shown || !task) return nullptr;
+    const Colors c = colorsFor(m_dark);
+    auto *late = heatBoardLabel(*shown, *task, c);
+    auto *badge = heatOverrunBadge(*shown, *task, c);
+    if (!late && !badge) return nullptr;
+    auto *line = new QWidget; line->setObjectName("teamCardHeat");
+    auto *h = new QHBoxLayout(line); h->setContentsMargins(0, 0, 0, 0); h->setSpacing(6);
+    auto *icon = new QLabel; icon->setPixmap(workspaceIcon(QStringLiteral("flame"), c.text2).pixmap(12, 12)); h->addWidget(icon);
+    if (late) h->addWidget(late);
+    if (badge) h->addWidget(badge);
+    h->addStretch(1);
+    line->setToolTip(heatTip(*shown, *task));
+    return line;
+}
+
 QString TeamWorkspace::heatShown(const Team &team) const
 {
-    // A plan has no timeline yet; Layers has no tint (the mock-up's two views).
-    if (team.status == QLatin1String("planning") || (m_view != QLatin1String("graph") && m_view != QLatin1String("board"))) return {};
+    // A plan has no timeline yet. Task 82: Graph, Board and Layers take the tint.
+    if (team.status == QLatin1String("planning") || !heatView(m_view)) return {};
     const QString mode = heatMode(team.id);
     return mode == QLatin1String("off") ? QString() : mode;
 }
@@ -44,7 +69,7 @@ const Heat *TeamWorkspace::heat(const Team &team)
     return read.error.isEmpty() ? read.heat.get() : nullptr;
 }
 
-void TeamWorkspace::readHeat(const QString &team, const QString &metric, const QJsonValue &cursor, const std::shared_ptr<Heat> &into)
+void TeamWorkspace::readHeat(const QString &team, const QString &metric, const QJsonValue &cursor, const std::shared_ptr<Heat> &into, const QJsonValue &tasks)
 {
     auto &read = m_heat[metric];
     read.reading = true;
@@ -53,6 +78,8 @@ void TeamWorkspace::readHeat(const QString &team, const QString &metric, const Q
     // Time reads no session; Tokens pages the losses by tokens.
     QJsonObject input{{"team", team}, {"tokens", metric == QLatin1String("tokens")}, {"limit", 100}};
     if (!cursor.isNull() && !cursor.isUndefined()) input.insert(metric == QLatin1String("tokens") ? "after_tokens" : "after_time", cursor);
+    // Task 82: the task rows (lateness and overrun) page on their own cursor.
+    if (!tasks.isNull() && !tasks.isUndefined()) input.insert("after_task", tasks);
     QPointer<TeamWorkspace> self(this);
     m_teams->call(QStringLiteral("profile"), input, [self, team, metric, into, generation](bool ok, const QJsonObject &result, const QString &error) {
         if (!self) return;
@@ -60,8 +87,8 @@ void TeamWorkspace::readHeat(const QString &team, const QString &metric, const Q
         // Another team or a newer read since: this answer is stale.
         if (read.team != team || read.generation != generation) return;
         if (ok) {
-            const QJsonValue next = addHeatPage(*into, result);
-            if (!next.isNull() && into->pages < HeatPages) { self->readHeat(team, metric, next, into); return; }
+            const HeatCursors next = addHeatPage(*into, result);
+            if (!next.done() && into->pages < HeatPages) { self->readHeat(team, metric, next.losses, into, next.tasks); return; }
         }
         read.reading = false; read.at.start();
         read.error = ok ? QString() : (error.isEmpty() ? QObject::tr("no answer") : error.trimmed());
@@ -77,11 +104,11 @@ void TeamWorkspace::readHeat(const QString &team, const QString &metric, const Q
 
 QWidget *TeamWorkspace::heatSwitch(const Team &team)
 {
-    if (team.status == QLatin1String("planning") || (m_view != QLatin1String("graph") && m_view != QLatin1String("board"))) return nullptr;
+    if (team.status == QLatin1String("planning") || !heatView(m_view)) return nullptr;
     const Colors c = colorsFor(m_dark);
     auto *box = new QWidget; box->setObjectName("teamWorkspaceHeatBox"); box->setProperty("toolbarLevels", "01");
     auto *h = new QHBoxLayout(box); h->setContentsMargins(0, 0, 0, 0); h->setSpacing(0);
-    // The mock-up's "Heat  Off | Time lost | Tokens" while the toolbar has
+    // The mock-up's "Heat  Off | Lateness | Tokens" while the toolbar has
     // room (ToolbarRow's first step), one flame button with the same three
     // choices at its second; the icon-only step leaves it out (the legend of
     // a shown tint stays).
@@ -90,14 +117,14 @@ QWidget *TeamWorkspace::heatSwitch(const Team &team)
     wh->addWidget(label(tr("Heat"), c.text3, 11));
     const QString mode = heatMode(team.id);
     const auto pick = [this, id = team.id](const QString &value) { setHeatMode(id, value); scheduleRender(); };
-    const QList<std::pair<QString, QString>> choices{{"off", tr("Off")}, {"time", tr("Time lost")}, {"tokens", tr("Tokens")}};
+    const QList<std::pair<QString, QString>> choices{{"off", tr("Off")}, {"time", tr("Lateness")}, {"tokens", tr("Tokens")}};
     auto *seg = segmented(choices, mode, "teamWorkspaceHeat", pick);
     auto *menuButton = button(QString(), "teamWorkspaceHeatMenu"); menuButton->setProperty("toolbarLevels", "1"); menuButton->hide();
     menuButton->setIcon(workspaceIcon(QStringLiteral("flame"), mode == QLatin1String("off") ? c.text2 : c.accent)); menuButton->setIconSize(QSize(13, 13));
     // As narrow as the other icon buttons: no menu arrow.
     menuButton->setStyleSheet(QStringLiteral("QPushButton#teamWorkspaceHeatMenu::menu-indicator{image:none;width:0px;}"));
     menuButton->setFixedWidth(menuButton->iconSize().width() + 16);
-    const QString current = mode == QLatin1String("time") ? tr("Time lost") : mode == QLatin1String("tokens") ? tr("Tokens") : tr("Off");
+    const QString current = mode == QLatin1String("time") ? tr("Lateness") : mode == QLatin1String("tokens") ? tr("Tokens") : tr("Off");
     menuButton->setToolTip(tr("Heat: %1").arg(current)); menuButton->setAccessibleName(menuButton->toolTip());
     auto *menu = new QMenu(menuButton); menu->setObjectName("teamWorkspaceHeatChoices");
     for (const auto &[value, text] : choices) {
@@ -105,7 +132,7 @@ QWidget *TeamWorkspace::heatSwitch(const Team &team)
         QObject::connect(action, &QAction::triggered, this, [pick, value = value] { pick(value); });
     }
     menuButton->setMenu(menu);
-    // #755: Off, Time lost and Tokens as icons alone (a crossed-out flame, a
+    // #755: Off, Lateness and Tokens as icons alone (a crossed-out flame, a
     // flame, two coins), each named with its purpose in its tooltip.
     for (auto *b : seg->findChildren<QPushButton *>()) {
         const QString value = b->property("segment").toString();
@@ -114,7 +141,7 @@ QWidget *TeamWorkspace::heatSwitch(const Team &team)
                                  b->isChecked() ? c.accent : c.text2));
         b->setIconSize(QSize(16, 16));
         const QString purpose = value == QLatin1String("off") ? tr("No tint")
-                              : value == QLatin1String("time") ? tr("Tint each task by the time it lost to waits and rework")
+                              : value == QLatin1String("time") ? tr("Tint each task by how late it is against the plan; its overrun shows beside it")
                                                                : tr("Tint each task by the tokens it lost to rework and long tests");
         b->setAccessibleName(tr("Heat: %1").arg(b->text())); b->setAccessibleDescription(purpose);
         b->setToolTip(b->text() + QLatin1Char('\n') + purpose);

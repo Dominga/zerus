@@ -13,6 +13,23 @@ const row = (key: string, name: string, extra: Partial<ViewRow> = {}, computer =
 const batchOf = (part: Partial<Batch>): Batch => ({ ...emptyBatch(), ...part });
 
 describe("applyBatch", () => {
+  it("retains row identity and order while a service source reconnects", () => {
+    createRoot((dispose) => {
+      const { catalog, applyBatch } = createCatalog();
+      applyBatch(batchOf({
+        upserts: [row("run:a", "codex/p/a"), row("run:b", "codex/p/b")],
+        computers: [{ computer: "", status: "live", attempt: 0 }],
+      }));
+      const a = catalog.rows[rowId("", "run:a")], b = catalog.rows[rowId("", "run:b")];
+      const order = [...catalog.order];
+      applyBatch(batchOf({ computers: [{ computer: "", status: "reconnecting", attempt: 1 }] }));
+      expect(catalog.order).toEqual(order);
+      expect(catalog.rows[rowId("", "run:a")]).toBe(a);
+      expect(catalog.rows[rowId("", "run:b")]).toBe(b);
+      expect(catalog.computers[""].status).toBe("reconnecting");
+      dispose();
+    });
+  });
   it("keeps sh as Qt's Shell presentation rather than a Claude provider", () => {
     expect(agentKind("sh")).toBe("sh"); expect(agentKind("SH")).toBe("sh");
     const shell = toSession("", "run:shell", view("sh/example/probe", { agent: "sh", model: "", effort: null }));
@@ -150,6 +167,68 @@ describe("applyBatch", () => {
     expect(moves).toContainEqual(["\nrun:new", "\nrun:last"]);
   });
 
+  // The background service journal keeps only each key's final row, so its
+  // deltas and reconnect baselines remove keys without a reason (zerus-uutz).
+  const paused = () => row("run:old", "claude/p/review", { run_id: "old", conversation_id: "conversation", state: "paused" });
+  const resumed = (extra: Partial<ViewRow> = {}) => row("run:new", "claude/p/review", { run_id: "new", conversation_id: "conversation", state: "running", ...extra });
+  it.each([
+    ["restored replaced reason after its successor, in one batch", [{ upserts: [resumed()], removes: [{ computer: "", key: "run:old", reason: "replaced" }] }]],
+    ["no reason, successor first in one batch", [{ upserts: [resumed()], removes: [{ computer: "", key: "run:old", reason: null }] }]],
+    ["no reason, removal first, successor in a later batch", [{ removes: [{ computer: "", key: "run:old", reason: null }] }, { upserts: [resumed()] }]],
+    ["no reason, successor in an earlier batch, removal later", [{ upserts: [resumed()] }, { removes: [{ computer: "", key: "run:old" }] }]],
+  ] as [string, Partial<Batch>[]][])("carries selection across a service resume: %s", (_, batches) => {
+    const c = createCatalog(), moves: [string, string][] = [];
+    c.applyBatch(batchOf({ upserts: [paused()] }));
+    c.onReplaced((from, to) => moves.push([from, to]));
+    for (const part of batches) c.applyBatch(batchOf(part));
+    expect(moves).toEqual([["\nrun:old", "\nrun:new"]]);
+    expect(c.catalog.order).toEqual(["\nrun:new"]);
+  });
+
+  it.each([
+    ["a different conversation", { conversation_id: "different" }],
+    ["an unknown conversation", { conversation_id: "" }],
+    ["an archived row", { state: "archived" }],
+    ["an unknown run", { run_id: "" }],
+    ["the same run", { run_id: "old" }],
+  ] as [string, Partial<ViewRow>][])("does not infer a reasonless successor from %s in either order", (_, changed) => {
+    for (const order of [0, 1]) {
+      const c = createCatalog(), moves: unknown[] = [];
+      c.applyBatch(batchOf({ upserts: [paused()] }));
+      c.onReplaced((...move) => moves.push(move));
+      const removal = batchOf({ removes: [{ computer: "", key: "run:old", reason: null }] }), successor = batchOf({ upserts: [resumed(changed)] });
+      for (const part of order ? [removal, successor] : [successor, removal]) c.applyBatch(part);
+      expect(moves).toEqual([]);
+    }
+  });
+
+  it("keeps explicit removal reasons, ambiguous successors and expired removals from a reasonless handoff", () => {
+    for (const reason of ["ended", "archived", "forgotten"]) {
+      const c = createCatalog(), moves: unknown[] = [];
+      c.applyBatch(batchOf({ upserts: [paused()] }));
+      c.onReplaced((...move) => moves.push(move));
+      c.applyBatch(batchOf({ removes: [{ computer: "", key: "run:old", reason }] }));
+      c.applyBatch(batchOf({ upserts: [resumed()] }));
+      expect(moves).toEqual([]);
+    }
+    const ambiguous = createCatalog(), moves: unknown[] = [];
+    ambiguous.applyBatch(batchOf({ upserts: [paused()] }));
+    ambiguous.onReplaced((...move) => moves.push(move));
+    ambiguous.applyBatch(batchOf({ upserts: [resumed(), row("run:other", "claude/p/review", { run_id: "other", conversation_id: "conversation", state: "running" })] }));
+    ambiguous.applyBatch(batchOf({ removes: [{ computer: "", key: "run:old", reason: null }] }));
+    expect(moves).toEqual([]);
+    vi.useFakeTimers();
+    try {
+      const late = createCatalog();
+      late.applyBatch(batchOf({ upserts: [paused()] }));
+      late.onReplaced((...move) => moves.push(move));
+      late.applyBatch(batchOf({ removes: [{ computer: "", key: "run:old", reason: null }] }));
+      vi.advanceTimersByTime(10_001);
+      late.applyBatch(batchOf({ upserts: [resumed()] }));
+      expect(moves).toEqual([]);
+    } finally { vi.useRealTimers(); }
+  });
+
   it("records computer status", () => {
     createRoot((dispose) => {
       const { catalog, applyBatch } = createCatalog();
@@ -226,6 +305,27 @@ describe("setDraftKeys", () => {
       setDraftKeys([]);
       expect(catalog.rows[rowId("mac", "run:a")].draft).toBe(false);
       expect(catalog.rows[rowId("mac", "run:c")].draft).toBe(false);
+      dispose();
+    });
+  });
+
+  // zerus-ucck P2c-2: a row with a durable ID is marked by its ID key, and by a
+  // draft still under its name key until its composer moves it.
+  it("marks a row with a session ID by either of its keys", () => {
+    createRoot((dispose) => {
+      const id = "3f2a9c1d-6b7e-4c2a-9d1f-0a1b2c3d4e5f";
+      const { catalog, applyBatch, setDraftKeys } = createCatalog();
+      applyBatch(batchOf({ replaces: [{ computer: "mac", rows: [row("run:a", "claude/p/a", { session_id: id }, "mac"), row("run:b", "claude/p/b", {}, "mac")] }] }));
+      expect(catalog.rows[rowId("mac", "run:a")].sessionId).toBe(id);
+      expect(catalog.rows[rowId("mac", "run:b")].sessionId).toBeUndefined();
+      setDraftKeys([`mac\nid:${id}`]);
+      expect(catalog.rows[rowId("mac", "run:a")].draft).toBe(true);
+      setDraftKeys(["mac\nclaude/p/a"]);
+      expect(catalog.rows[rowId("mac", "run:a")].draft).toBe(true);
+      setDraftKeys([`mac\nid:${id}\nconv-1\nagent-2`]);
+      expect(catalog.rows[rowId("mac", "run:a")].draft, "a child's draft").toBe(true);
+      setDraftKeys([`mac\nid:${id.replace("3f", "4f")}`]);
+      expect(catalog.rows[rowId("mac", "run:a")].draft, "another session's ID").toBe(false);
       dispose();
     });
   });

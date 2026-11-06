@@ -1,4 +1,5 @@
 #pragma once
+#include <QJsonArray>
 #include <QElapsedTimer>
 #include <QHash>
 #include <QJsonObject>
@@ -31,6 +32,11 @@ public:
         QString memberId;   // #740: the member answered ("member" names its role)
         // #742: a missing tool's offer (no team: teamName is the project).
         QString offer, tool, why, saves, command, output, toolState;
+        // Task 97: a request the owner queue deferred (kind "deferred"): its
+        // id, permission or question, exact text, session, what Zerus did,
+        // and a question's options.
+        QString deferred, request, text, session, outcome;
+        QJsonArray questions;
         double since = 0;
         int phase = 0, task = 0;
         // U63 (owner, 2026-10-31): a phase that waits for the owner's
@@ -51,6 +57,8 @@ public:
     void loadOlder();
     // A row's team: the window opens its Team tab (a draft phase unfolded).
     std::function<void(const Item &item)> openTeam;
+    // Task 108: a drive low on space opens Settings > Build folders.
+    std::function<void()> openDisk;
     // How many items wait, for the rail button's caption; -1 before the first read.
     std::function<void(int total)> countChanged;
     // #724: an item answered here; the window drops it from the banner and

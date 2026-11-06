@@ -6,6 +6,7 @@ use rusqlite::{params, Connection, OptionalExtension, Transaction};
 use serde_json::Value;
 use zerus_watch_protocol::{self as watch, topic, Body, Frame};
 
+pub mod approvals;
 pub mod changes;
 /// Typed older-peer replacements, without manufacturing watch frames.
 pub mod legacy;
@@ -99,7 +100,9 @@ pub fn totals(db: &Connection) -> Result<Totals> {
 
 pub fn migrate(db: &Connection) -> Result<()> {
     migrate_base(db)?;
-    changes::migrate(db)
+    changes::migrate(db)?;
+    changes::migrate_reasons(db)?;
+    approvals::migrate(db)
 }
 
 /// Original catalog schema, for the service's ordered historical migrations.
@@ -401,8 +404,8 @@ fn apply_inner(db: &mut Connection, source: &Source, frame: &Frame) -> Result<Ap
             for item in snapshot.items.as_ref().context("snapshot has no items")? {
                 let item: watch::CatalogItem = serde_json::from_value(item.clone())?;
                 let json = row_json(&item)?;
-                tx.execute("INSERT INTO desktop_catalog_rows(generation,key,json,bytes) VALUES(?1,?2,?3,?4)",
-                    params![stage, item.key, json, charge(&item.key, &json)])?;
+                tx.execute("INSERT INTO desktop_catalog_rows(generation,key,json,bytes,approval) VALUES(?1,?2,?3,?4,?5)",
+                    params![stage, item.key, json, charge(&item.key, &json), approvals::approval_phase(&item.row) as i64])?;
             }
             tx.execute("UPDATE desktop_catalog_sources SET staged=?2,next_page=?3,cursor=?4,complete=0 WHERE computer=?1",
                 params![source.computer, stage, old.next_page + 1, snapshot.cursor])?;
@@ -424,9 +427,9 @@ fn apply_inner(db: &mut Connection, source: &Source, frame: &Frame) -> Result<Ap
             let visible = old.visible.context("delta without visible generation")?;
             for item in &delta.upsert {
                 let json = row_json(item)?;
-                tx.execute("INSERT INTO desktop_catalog_rows(generation,key,json,bytes) VALUES(?1,?2,?3,?4)
-                    ON CONFLICT(generation,key) DO UPDATE SET json=excluded.json,bytes=excluded.bytes",
-                    params![visible, item.key, json, charge(&item.key, &json)])?;
+                tx.execute("INSERT INTO desktop_catalog_rows(generation,key,json,bytes,approval) VALUES(?1,?2,?3,?4,?5)
+                    ON CONFLICT(generation,key) DO UPDATE SET json=excluded.json,bytes=excluded.bytes,approval=excluded.approval",
+                    params![visible, item.key, json, charge(&item.key, &json), approvals::approval_phase(&item.row) as i64])?;
             }
             for removal in &delta.remove {
                 text(&removal.key, 2048)?;

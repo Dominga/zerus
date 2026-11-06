@@ -281,11 +281,11 @@ fn fingerprint(path: &Path) -> Result<[u8; 32]> {
     );
     Ok(hash.finalize().into())
 }
+/// Removal is admitted offline only: the held owner.lock, then handoff lock and
+/// any current rollback proof live in `offline` through the registry effect.
 struct RemovalGuard {
-    _owner: Option<platform::FileLock>,
-    _handoff: crate::desktop::store::HandoffLock,
-    _request_id: String,
-    _runtime_epoch: Option<String>,
+    offline: super::removal::Offline,
+    request_id: String,
 }
 impl RemovalGuard {
     fn verified(location: &Location, id: &str) -> Result<Self> {
@@ -333,30 +333,38 @@ impl RemovalGuard {
             // supply its actual matching witness before this path is enabled.
             bail!("active Windows notification removal awaits integrated Runtime drain; registration kept");
         }
-        // No missing endpoint is treated as a stopped owner. The actual OS lock
-        // must be acquired; existing state cannot be replaced with a baseline.
-        location.prepare()?;
-        let owner = location.lock()?;
-        let held = location.handoff_lock()?;
-        for name in [
-            "state.sqlite3",
-            "state.sqlite3-wal",
-            "state.sqlite3-shm",
-            "state.sqlite3-journal",
-            zerus_desktop_migration::HANDOFF_FILE,
-        ] {
-            match std::fs::symlink_metadata(location.root.join(name)) {
-                Err(error) if error.kind()==std::io::ErrorKind::NotFound=>(),
-                _=>bail!("retained desktop state requires its original settled service receipt; registration kept"),
-            }
-        }
-        // Verified absent-service/no-state is not a live Runtime drain receipt.
+        // Offline: the actual owner.lock, then the handoff lock, and for
+        // existing state the current settled rollback of this exact request.
+        // Neither the no-state route nor that proof is a live Runtime drain
+        // receipt; the online path above stays refused.
         Ok(Self {
-            _owner: Some(owner),
-            _handoff: held,
-            _request_id: id.into(),
-            _runtime_epoch: None,
+            offline: super::removal::Offline::acquire(location, id)?,
+            request_id: id.into(),
         })
+    }
+    /// Effect admission, right before the registry removal.
+    fn admit(&self, location: &Location) -> Result<()> {
+        self.offline.admit(location, &self.request_id)
+    }
+    /// After the registry effect: the same exclusion objects were held
+    /// throughout, or the outcome is unknown. Nothing is replayed.
+    fn confirm(&self, location: &Location) -> Result<()> {
+        self.offline
+            .confirm(location)
+            .context("desktop exclusion changed during removal; outcome unknown, inspect status before retrying")
+    }
+}
+/// The removal guard bound to its location, as the shared execution's Gate.
+struct Held<'a> {
+    guard: RemovalGuard,
+    location: &'a Location,
+}
+impl super::Gate for Held<'_> {
+    fn admit(&self) -> Result<()> {
+        self.guard.admit(self.location)
+    }
+    fn confirm(&self) -> Result<()> {
+        self.guard.confirm(self.location)
     }
 }
 pub(super) fn command(
@@ -376,51 +384,46 @@ pub(super) fn command(
         .context("desktop registration arguments unavailable")?;
     ensure!(args.len() == 7, "desktop registration arguments changed");
     let cli = args[0].as_str().context("selected CLI unavailable")?;
-    let mut command = format!("\"{cli}\"");
-    for arg in [
-        super::super::ACTIVATION_ENTRY,
-        "--config-dir",
-        args[4].as_str().context("configuration unavailable")?,
-        "--state-dir",
-        args[6].as_str().context("state unavailable")?,
-    ] {
-        command.push(' ');
-        command.push_str(&host::spawn::quote_argument(arg));
-    }
+    let config_dir = args[4].as_str().context("configuration unavailable")?;
+    let state_dir = args[6].as_str().context("state unavailable")?;
+    // The same formatter the service compares with (zerus-mgw2v).
+    let command = super::expected_command(cli, config_dir, state_dir)
+        .map_err(|reason| anyhow::anyhow!(reason))?;
     let plan =
         Plan::new(&location.configuration, &sid, &command).map_err(|v| anyhow::anyhow!(v))?;
     let _lock = Lock::acquire(&plan.sid)?;
     let mut registry = Local;
-    plan.inspect(&mut registry)
-        .map_err(|v| anyhow::anyhow!(v))?;
-    if operation == "install" {
-        // The service installer stages the stable CLI first. Comparing held bounded
-        // files ensures a stale selected CLI cannot receive an unknown cold flag.
-        let cli = platform::canonical(Path::new(cli))
-            .context("install the maintained desktop registration before Toast registration")?;
-        ensure!(fingerprint(&cli)?==fingerprint(&std::env::current_exe()?)?,"selected CLI differs; install the maintained desktop registration before Toast registration");
-    }
-    let _removal = if operation == "remove" {
-        Some(RemovalGuard::verified(
-            &location,
-            request_id.context("remove requires the retained original revoke request UUID")?,
-        )?)
-    } else {
-        ensure!(request_id.is_none(), "unexpected revoke request UUID");
-        None
-    };
-    let reply = plan.apply(&mut registry, operation).map_err(|failure| {
-        anyhow::anyhow!(
-            "{}{}",
-            failure.reason,
-            if failure.uncertain {
-                "; outcome unknown, inspect status before retrying"
-            } else {
-                "; registration kept"
+    let (reply, previous) = super::run(
+        &plan,
+        &mut registry,
+        operation,
+        (cli, config_dir, state_dir),
+        || {
+            if operation == "install" {
+                // The service installer stages the stable CLI first. Comparing held bounded
+                // files ensures a stale selected CLI cannot receive an unknown cold flag.
+                let cli = platform::canonical(Path::new(cli)).context(
+                    "install the maintained desktop registration before Toast registration",
+                )?;
+                ensure!(fingerprint(&cli)?==fingerprint(&std::env::current_exe()?)?,"selected CLI differs; install the maintained desktop registration before Toast registration");
             }
-        )
-    })?;
-    Ok(
-        serde_json::json!({"schema":1,"abi":MARKER,"operation":operation,"configuration":plan.configuration,"registered":reply.registered,"changed":reply.changed,"started":false,"stopped":false}),
-    )
+            if operation == "remove" {
+                let id = request_id
+                    .context("remove requires the retained original revoke request UUID")?;
+                Ok(Some(Held {
+                    guard: RemovalGuard::verified(&location, id)?,
+                    location: &location,
+                }))
+            } else {
+                ensure!(request_id.is_none(), "unexpected revoke request UUID");
+                Ok(None)
+            }
+        },
+    )?;
+    let mut value = serde_json::json!({"schema":1,"abi":MARKER,"operation":operation,"configuration":plan.configuration,"registered":reply.registered,"changed":reply.changed,"started":false,"stopped":false});
+    if previous {
+        // An exact earlier image's registration of these folders was removed.
+        value["previous_image"] = true.into();
+    }
+    Ok(value)
 }

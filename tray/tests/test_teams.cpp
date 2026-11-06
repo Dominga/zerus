@@ -1,6 +1,7 @@
 // WhiteWh fork: agent teams in the desktop (design/agent-teams S1, S2, S8):
 // the model read from `hgs team`, the controller's polls and changes, and the
 // inspector's Team tab.
+#include <QScopeGuard>
 #include <QtTest>
 #include <QApplication>
 #include <QComboBox>
@@ -171,11 +172,13 @@ private slots:
     void proposalsSwapsLimitsAndHostsRead();
     void feedLinesSpeakOfStartsQuestionsAndHolds();
     void aFollowUpReadsItsOriginAndSitsInItsLayer();
+    void aMemberCardNamesItsRefusedHandOuts();
     void feedLinesSpeakOfRosterChanges();
     void aRunningTeamIsStuckWhenNothingCanMove();
     void feedLinesAndChains();
     void feedLinesSpeakOfPhasesAndTheEndOfThePlan();
     void controllerReadsOnceAndSendsChangesAsYou();
+    void controllerKeepsTheTeamsWhenAReadFailsOrIsLate();
     void controllerSendsPhaseDecisionsAndFinish();
     void controllerSendsHoldReleaseRejectAndReply();
     void lanesReadGroupAndRoundTrip();
@@ -1514,6 +1517,83 @@ void TestTeams::controllerReadsOnceAndSendsChangesAsYou()
     QVERIFY(!QUuid(pause["request_id"].toString()).isNull());
 }
 
+// Task 101 (owner, 2026-11-06): opening the Team tab made the lead's team,
+// its Team tab and its messages vanish for minutes. The team store refused
+// readers while a writer held it (`hgs team list` exits 1 with "hgs: database
+// is locked" after its 10 s wait, or passes the read's deadline), and a failed
+// list cleared every team. A failed or late read now keeps the last good teams
+// and the watched team, marked stale until a read answers again.
+void TestTeams::controllerKeepsTheTeamsWhenAReadFailsOrIsLate()
+{
+    const QString busy = m_dir.filePath("hgs-busy");
+    QVERIFY(FakeCli::install(busy, R"PY(#!/usr/bin/env python3
+import json,os,sys,time
+a=sys.argv[1:]
+if a and a[0].startswith('@'):a=a[1:]
+sys.stdin.read()
+base=os.path.join(os.path.dirname(os.path.abspath(__file__)),'hgs')
+mode=open(__file__+'.mode').read().strip() if os.path.exists(__file__+'.mode') else 'ok'
+if a[:1]==['team'] and a[1:2] in (['list'],['status'],['events'],['inbox']):
+ if mode=='locked':print('hgs: database is locked',file=sys.stderr);sys.exit(1)
+ if mode=='slow':time.sleep(5)
+if a[:2]==['team','list']:
+ t=json.load(open(base+'.status'))
+ for key in ('layers','cycle','ready','validation'):t.pop(key,None)
+ print(json.dumps({'items':[t]}))
+elif a[:2]==['team','status']:sys.stdout.write(open(base+'.status').read())
+elif a[:2]==['team','events']:sys.stdout.write(open(base+'.feed').read())
+else:print(json.dumps({'items':[]}))
+)PY"));
+    const auto mode = [&](const char *value) { QVERIFY(FakeCli::replace(busy + ".mode", value)); };
+    mode("ok");
+    TeamController::setReadTimeout(1500);
+    const auto restore = qScopeGuard([] { TeamController::setReadTimeout(0); });
+    HgsClient client(FakeCli::program(busy));
+    TeamController controller(&client);
+    QSignalSpy teams(&controller, &TeamController::teamsChanged), stale(&controller, &TeamController::staleChanged);
+    controller.refresh();
+    QTRY_COMPARE(teams.count(), 1);
+    controller.watch("team-1");
+    QTRY_VERIFY(controller.watched());
+    QVERIFY(!controller.stale());
+    const QDateTime goodAt = controller.lastGoodRead();
+    QVERIFY(goodAt.isValid());
+    const auto keeps = [&] {
+        QCOMPARE(controller.teams().size(), 1);
+        QVERIFY(controller.teamOfSession("msi-old", "kimi/checkout/tester"));
+        QVERIFY(controller.available());
+        QVERIFY(controller.watched());
+        QCOMPARE(teams.count(), 1);   // nothing told the views the teams changed
+    };
+    // The store refuses readers: the list and the watched status fail.
+    mode("locked");
+    controller.refresh();
+    QTRY_VERIFY(controller.stale());
+    QTRY_VERIFY(controller.staleError().contains("database is locked"));
+    keeps();
+    // The time shown is the last good read, and failing reads never move it.
+    const QDateTime staleAt = controller.lastGoodRead();
+    QVERIFY(staleAt.isValid() && staleAt <= goodAt);
+    controller.refresh(); controller.refresh();
+    QTest::qWait(500);
+    keeps();
+    QCOMPARE(controller.lastGoodRead(), staleAt);
+    // A good read answers again: fresh, nothing to rebuild.
+    mode("ok");
+    controller.refresh();
+    QTRY_VERIFY(!controller.stale());
+    keeps();
+    QVERIFY(stale.count() >= 2);
+    // A read past its deadline (a writer holding the store longer) is no answer either.
+    mode("slow");
+    controller.refresh();
+    QTRY_VERIFY_WITH_TIMEOUT(controller.stale(), 8000);
+    keeps();
+    mode("ok");
+    QTRY_VERIFY_WITH_TIMEOUT((controller.refresh(), !controller.stale()), 10000);
+    keeps();
+}
+
 void TestTeams::controllerSendsPhaseDecisionsAndFinish()
 {
     QFile::remove(script() + ".calls");
@@ -2301,6 +2381,31 @@ void TestTeams::visibleShapeIgnoresWhatOnlyTicks()
     QCOMPARE(agedMinutes(warning, 1000, 1000 + 125), QStringLiteral("starved: QA idle 7 min without a ready task; Open: #4 (also 14 min)"));
     QCOMPARE(agedMinutes(QStringLiteral("timeout 30 s, 2 minutes"), 1000, 1600), QStringLiteral("timeout 30 s, 2 minutes"));
     QCOMPARE(agedMinutes(warning, 0, 1600), warning);
+}
+
+// Task 98: a member whose Terminal refuses hand-outs says how many and why.
+void TestTeams::aMemberCardNamesItsRefusedHandOuts()
+{
+    auto value = checkout();
+    auto members = value["members"].toArray();
+    for (int i = 0; i < members.size(); ++i) {
+        auto member = members[i].toObject();
+        if (member["id"] == QStringLiteral("reviewer"))
+            member["input_block"] = QJsonObject{{"since", 100.0}, {"at", 160.0}, {"count", 4}, {"raised", true},
+                                                {"reason", "terminal has a draft, dialog, or unrecognized prompt"}};
+        members[i] = member;
+    }
+    value["members"] = members;
+    const auto team = parse(value);
+    const auto *reviewer = team.member("reviewer");
+    QCOMPARE(reviewer->inputRefusals, 4);
+    QVERIFY(reviewer->inputRaised);
+    const auto status = memberStatus(team, *reviewer, live(*reviewer));
+    QCOMPARE(status.kind, QStringLiteral("input_blocked"));
+    QCOMPARE(status.text, QStringLiteral("Terminal refused 4 hand-outs: terminal has a draft, dialog, or unrecognized prompt"));
+    QVERIFY(status.problem);
+    // Without refusals the card is as before.
+    QCOMPARE(memberStatus(parse(checkout()), *parse(checkout()).member("reviewer"), live(*reviewer)).kind, QStringLiteral("idle"));
 }
 
 QTEST_MAIN(TestTeams)

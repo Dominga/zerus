@@ -29,7 +29,7 @@ protected:
 
 QColor kindColor(const Colors &c, const QString &kind)
 {
-    if (kind == "report_escalated" || kind == "permission_escalated") return c.warn;
+    if (kind == "report_escalated" || kind == "permission_escalated" || kind == "lead_stalled") return c.warn;
     if (kind == "phase_draft" || kind == "plan_draft") return c.folder;
     if (kind == "owner_word_asked") return c.violet;
     if (kind == "team_finished" || kind == "phase_acceptance") return c.accent;
@@ -55,6 +55,8 @@ TeamWaitingPage::Item TeamWaitingPage::parse(const QJsonObject &item)
     out.offer = item["offer"].toString(); out.tool = item["tool"].toString(); out.why = item["why"].toString();
     out.saves = item["saves"].toString(); out.command = item["command"].toString(); out.output = item["output"].toString();
     out.toolState = item["state"].toString();
+    out.deferred = item["deferred"].toString(); out.request = item["request"].toString(); out.text = item["text"].toString();
+    out.session = item["session"].toString(); out.outcome = item["outcome"].toString(); out.questions = item["questions"].toArray();
     if (item["summary"].isObject()) {
         const auto summary = item["summary"].toObject();
         out.summary.known = true;
@@ -91,6 +93,10 @@ QString TeamWaitingPage::kindLabel(const QString &kind)
     if (kind == "test_full_run") return tr("Full test run");
     if (kind == "test_quarantine") return tr("Flaky tests");
     if (kind == "phase_acceptance") return tr("Phase acceptance");   // U63
+    if (kind == "lead_stalled") return tr("Lead stalled");   // task 95
+    if (kind == "deferred") return tr("Deferred");   // task 97
+    if (kind == "disk_low") return tr("Disk space");   // task 108
+    if (kind == "team_paused") return tr("Team paused");   // task 112
     return kind;
 }
 
@@ -107,6 +113,10 @@ QString TeamWaitingPage::kindIcon(const QString &kind)
     if (kind == "test_full_run") return QStringLiteral("refresh");
     if (kind == "test_quarantine") return QStringLiteral("attention");
     if (kind == "phase_acceptance") return QStringLiteral("check-circle");
+    if (kind == "lead_stalled") return QStringLiteral("attention");
+    if (kind == "deferred") return QStringLiteral("clock");
+    if (kind == "disk_low") return QStringLiteral("attention");
+    if (kind == "team_paused") return QStringLiteral("pause");
     return QStringLiteral("warning");
 }
 
@@ -323,6 +333,21 @@ QWidget *TeamWaitingPage::rowFor(const Item &item)
         h->addWidget(toggle);
     }
     const auto go = [this, item] { if (openTeam && !item.team.isEmpty()) openTeam(item); };
+    // Task 108: a drive low on space opens Settings > Build folders.
+    // Task 112: a paused team resumes from here; resuming its sessions does not.
+    if (item.action == QLatin1String("resume_team") && m_teams) {
+        auto *resume = button(tr("Resume team"), "teamWaitingResumeTeam");
+        resume->setProperty("primary", true);
+        QObject::connect(resume, &QPushButton::clicked, frame, [this, item] {
+            m_teams->act(QStringLiteral("resume"), QJsonObject{{"team", item.team}});
+        });
+        h->addWidget(resume);
+    }
+    if (item.action == QLatin1String("open_disk")) {
+        auto *disk = button(tr("Open Build folders"), "teamWaitingOpenDisk");
+        QObject::connect(disk, &QPushButton::clicked, frame, [this] { if (openDisk) openDisk(); });
+        h->addWidget(disk);
+    }
     if (!teamless) {
         auto *open = button(tr("Open team"), "teamWaitingOpen");
         if (inPlace) open->setProperty("ghost", true);
@@ -379,7 +404,23 @@ void TeamWaitingPage::render()
         v->addWidget(icon); v->addWidget(title); v->addWidget(text);
         m_rows->addWidget(empty);
     }
-    for (const auto &item : std::as_const(m_items)) m_rows->addWidget(rowFor(item));
+    // Task 97: Waiting for you > Deferred: what Zerus answered safely while
+    // the owner was away comes after everything else, under its own heading.
+    for (const auto &item : std::as_const(m_items)) if (item.kind != QLatin1String("deferred")) m_rows->addWidget(rowFor(item));
+    bool deferredHead = false;
+    for (const auto &item : std::as_const(m_items)) {
+        if (item.kind != QLatin1String("deferred")) continue;
+        if (!deferredHead) {
+            deferredHead = true;
+            auto *head = label(tr("Deferred"), c.fg, 13, true, "teamWaitingDeferredHead");
+            head->setContentsMargins(0, 8, 0, 0);
+            m_rows->addWidget(head);
+            auto *note = label(tr("Zerus answered these safely while you were away; each session went on with other work."), c.muted, 11, false, "teamWaitingDeferredNote");
+            note->setWordWrap(true);
+            m_rows->addWidget(note);
+        }
+        m_rows->addWidget(rowFor(item));
+    }
     const QJsonValue next = m_older.isEmpty() ? m_headNext : m_olderNext;
     if (next.isObject()) {
         auto *older = button(m_loadingOlder ? tr("Loading") : tr("Show older"), "teamWaitingOlder");

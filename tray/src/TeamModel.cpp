@@ -53,6 +53,12 @@ QMap<int, int> computeLayers(const Team &team)
 }
 }
 
+const Team::Attention *Team::leadStall() const
+{
+    for (const auto &item : attention) if (item.kind == QLatin1String("lead_stalled")) return &item;
+    return nullptr;
+}
+
 const Member *Team::member(const QString &id) const
 {
     for (const auto &m : members) if (m.id == id) return &m;
@@ -404,10 +410,29 @@ QString BuildState::text(double now) const
     return {};
 }
 
+QString Team::pausedText() const
+{
+    if (status != QLatin1String("paused")) return {};
+    QString since;
+    if (pausedAt > 0) {
+        const auto at = QDateTime::fromSecsSinceEpoch(qint64(pausedAt));
+        since = at.date() == QDate::currentDate() ? at.toString(QStringLiteral("HH:mm")) : at.toString(QStringLiteral("yyyy-MM-dd HH:mm"));
+    }
+    if (since.isEmpty()) return QObject::tr("Team paused: members get no tasks");
+    if (pausedBy.isEmpty()) return QObject::tr("Team paused since %1: members get no tasks").arg(since);
+    return QObject::tr("Team paused since %1 by %2: members get no tasks").arg(since, pausedBy);
+}
+
 Team parse(const QJsonObject &v)
 {
     Team team;
     team.id = str(v, "id"); team.name = str(v, "name"); team.status = str(v, "status");
+    {
+        const auto paused = v.value("paused").toObject();
+        team.pausedAt = paused.value("at").toDouble();
+        team.pausedBy = paused.value("by").toString();
+        team.pausedReason = paused.value("reason").toString();
+    }
     team.project = str(v, "project"); team.projectId = str(v, "project_id"); team.folder = str(v, "folder"); team.lead = str(v, "lead");
     // G1: the parent task this team came from and its sub-teams.
     if (v.value("parent").isObject()) {
@@ -533,6 +558,12 @@ Team parse(const QJsonObject &v)
         member.models = parseModelChoices(m.value("models"));
         member.contextBeforeTask = str(m, "context_before_task");
         member.draining = m.value("draining").toBool();
+        if (m.value("input_block").isObject()) {
+            const auto block = m.value("input_block").toObject();
+            member.inputRefusals = block.value("count").toInt();
+            member.inputReason = str(block, "reason");
+            member.inputRaised = block.value("raised").toBool();
+        }
         member.lead = member.id == team.lead;
         if (member.lead && member.role.isEmpty()) member.role = tr("Lead");
         team.members.append(member);
@@ -972,6 +1003,8 @@ Team parse(const QJsonObject &v)
         attention.minutes = entry.value("minutes").toInt();
         attention.summary = str(entry, "summary"); attention.command = str(entry, "command");
         attention.phase = entry.value("phase").toInt(); attention.count = entry.value("count").toInt();
+        attention.reason = str(entry, "reason"); attention.items = entry.value("items").toInt();
+        attention.members = entry.value("members").toInt(); attention.round = entry.value("round").toInt();
         team.attention.append(attention);
     }
     // F13: the plan's approval records the owner's sentence.
@@ -1190,6 +1223,11 @@ Status memberStatus(const Team &team, const Member &member, const Live &live)
     if (attempt && attempt->state == "unconfirmed")
         return make("unconfirmed", tr("Delivery unconfirmed"), tr("Unconfirmed"), Tone::Danger, current->id, true);
     if (attempt && attempt->noReport) return make("no_report", tr("No report"), tr("No report"), Tone::Warn, current->id, true);
+    // Task 98: its Terminal refuses hand-outs (a draft, a dialog or an unknown prompt).
+    if (member.inputRefusals > 0)
+        return make("input_blocked", tr("Terminal refused %1 hand-outs: %2").arg(member.inputRefusals)
+                                         .arg(member.inputReason.isEmpty() ? tr("a draft or dialog") : member.inputReason),
+                    tr("Blocked"), Tone::Warn, current ? current->id : 0, true);
     // A3: a question to the lead leaves the attempt open and pauses the work.
     if (attempt && attempt->openQuestion())
         return make("asking", tr("Waiting for your answer"), tr("Answer"), Tone::Warn, current->id, true);

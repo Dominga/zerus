@@ -15,6 +15,7 @@ export default function ForkDialog(props: { row: ActionRow; details: Details; cl
   onMount(() => queueMicrotask(() => { input.focus(); input.select(); }));
   onCleanup(() => { controller.abort(); confirm.cancel(); });
   const problem = () => sessionForks.problem(props.row, tag());
+  const resolved = () => problem() ? tag() : sessionForks.resolved(props.row, tag());
   const submit = (event: Event) => {
     event.preventDefault();
     if (problem()) return;
@@ -29,6 +30,7 @@ export default function ForkDialog(props: { row: ActionRow; details: Details; cl
         <div class="form-row"><label for="fork-tag">{tr("New session name")}</label>
           <input ref={input} id="fork-tag" class="field" data-initial autofocus value={tag()} disabled={sessionForks.working()} onInput={(event) => setTag(event.currentTarget.value)} /></div>
         <Show when={problem()}><div class="hint dlg-error">{problem()}</div></Show>
+        <Show when={!problem() && resolved() !== tag()}><div class="hint">{tr("That name is in use. The fork will be named %1.", resolved())}</div></Show>
       </div>
       <div class="dlg-foot"><span class="spacer" /><button type="button" class="btn" onClick={props.close}>{tr("Cancel")}</button>
         <button type="submit" class="btn primary" disabled={!!problem() || sessionForks.busy()}>{tr("Fork")}</button></div>

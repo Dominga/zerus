@@ -276,6 +276,12 @@ pub struct MemberView {
     pub iron_rules: Vec<String>,
     pub minutes_without_progress: u64,
     pub host_shared: bool,
+    /// Task 98: hand-outs its Terminal refused in a row (a draft, a dialog or
+    /// an unknown prompt), hgs's reason, and whether the lead and the owner
+    /// were told.
+    pub input_refusals: u64,
+    pub input_reason: String,
+    pub input_raised: bool,
     /// Task 11: the member's pending question or permission request as hgs
     /// sends it (`members[].question`, at most [`DETAIL_BYTES`]): its id,
     /// hash, tool, command, reason and the card's own allow and deny ids.
@@ -520,6 +526,8 @@ pub struct TeamView {
     pub updated: f64,
     pub waiting_for_lead: bool,
     pub pending_phase: Option<u64>,
+    /// Task 112: a paused team's pause ({at, by, reason}), or null.
+    pub paused: Value,
     /// The team's settings object as hgs stores it (a few dozen fields).
     pub settings: Value,
     pub members: Vec<MemberView>,
@@ -584,6 +592,9 @@ fn member(value: &Value, lead: &str) -> MemberView {
         iron_rules: lines(value, "iron_rules", TEXT_CHARS),
         minutes_without_progress: count(value, "minutes_without_progress"),
         host_shared: flag(value, "host_shared"),
+        input_refusals: value.get("input_block").map_or(0, |block| count(block, "count")),
+        input_reason: value.get("input_block").map_or_else(String::new, |block| text(block, "reason", LINE_CHARS)),
+        input_raised: value.get("input_block").is_some_and(|block| flag(block, "raised")),
         permission: bounded(
             value
                 .get("question")
@@ -757,6 +768,7 @@ pub fn team(value: &Value) -> TeamView {
         updated: number(value, "updated"),
         waiting_for_lead: flag(value, "waiting_for_lead"),
         pending_phase: value.get("pending_phase").and_then(Value::as_u64),
+        paused: value.get("paused").filter(|paused| paused.is_object()).map_or(Value::Null, |paused| bounded(Some(paused))),
         settings: match value.get("settings") {
             Some(Value::Object(settings)) => Value::Object(settings.clone()),
             _ => Value::Object(Map::new()),
@@ -1196,6 +1208,97 @@ pub struct ProfileView {
     pub tokens_partial: bool,
     pub losses: Vec<ProfileLossView>,
     pub roles: Vec<ProfileRoleView>,
+    /// Task 82: each task's lateness against the plan and overrun against
+    /// its estimate, from the profile's first page of task rows.
+    pub task_rows: Vec<ProfileTaskView>,
+    /// More task rows follow the first page; their tasks show no heat.
+    pub task_rows_more: bool,
+}
+
+/// Task 82: a task's lateness against the plan baseline. `known` is false
+/// when the plan lacks a moment it needs (an estimate is missing); `from` is
+/// the predecessor the inherited part comes from.
+#[derive(Clone, Debug, Default, PartialEq, Serialize)]
+pub struct ProfileLatenessView {
+    pub known: bool,
+    pub unknown: String,
+    pub planned_start: Option<f64>,
+    pub planned_end: Option<f64>,
+    pub actual_start: Option<f64>,
+    pub actual_end: Option<f64>,
+    pub start_late_s: i64,
+    pub inherited_s: i64,
+    pub own_s: i64,
+    pub from: Option<u64>,
+}
+
+/// Task 82: a task's own work against its estimate; `known` is false
+/// without an estimate, `started` false before its first attempt.
+#[derive(Clone, Debug, Default, PartialEq, Serialize)]
+pub struct ProfileOverrunView {
+    pub started: bool,
+    pub known: bool,
+    pub estimate_s: i64,
+    pub work_s: i64,
+    pub overrun_s: i64,
+    pub ratio: f64,
+    pub running: bool,
+}
+
+#[derive(Clone, Debug, Default, PartialEq, Serialize)]
+pub struct ProfileTaskView {
+    pub task: u64,
+    /// Null when the task has no plan baseline (planned before it existed).
+    pub lateness: Option<ProfileLatenessView>,
+    pub overrun: Option<ProfileOverrunView>,
+}
+
+fn profile_task(row: &Value) -> Option<ProfileTaskView> {
+    let task = row
+        .get("task")
+        .and_then(Value::as_u64)
+        .filter(|task| *task > 0)?;
+    let int = |value: &Value, key: &str| value.get(key).and_then(Value::as_i64);
+    let moment = |value: &Value, key: &str| value.get(key).and_then(Value::as_f64);
+    let lateness = row
+        .get("lateness")
+        .filter(|late| late.is_object())
+        .map(|late| {
+            let unknown = late
+                .get("unknown")
+                .and_then(Value::as_str)
+                .unwrap_or("")
+                .to_owned();
+            ProfileLatenessView {
+                known: unknown.is_empty() && int(late, "start_late_s").is_some(),
+                unknown,
+                planned_start: moment(late, "planned_start"),
+                planned_end: moment(late, "planned_end"),
+                actual_start: moment(late, "actual_start"),
+                actual_end: moment(late, "actual_end"),
+                start_late_s: int(late, "start_late_s").unwrap_or(0),
+                inherited_s: int(late, "inherited_s").unwrap_or(0),
+                own_s: int(late, "own_s").unwrap_or(0),
+                from: late.get("from").and_then(Value::as_u64),
+            }
+        });
+    let overrun = row
+        .get("overrun")
+        .filter(|over| over.is_object())
+        .map(|over| ProfileOverrunView {
+            started: !flag(over, "not_started"),
+            known: int(over, "overrun_s").is_some() && int(over, "estimate_s").is_some(),
+            estimate_s: int(over, "estimate_s").unwrap_or(0),
+            work_s: int(over, "work_s").unwrap_or(0),
+            overrun_s: int(over, "overrun_s").unwrap_or(0),
+            ratio: over.get("ratio").and_then(Value::as_f64).unwrap_or(0.0),
+            running: flag(over, "running"),
+        });
+    Some(ProfileTaskView {
+        task,
+        lateness,
+        overrun,
+    })
 }
 
 pub fn profile(team: &str, value: &Value) -> ProfileView {
@@ -1256,6 +1359,15 @@ pub fn profile(team: &str, value: &Value) -> ProfileView {
         })
         .collect(),
         roles,
+        task_rows: array(value.get("tasks").unwrap_or(&Value::Null), "items")
+            .iter()
+            .take(ITEMS_KEPT)
+            .filter_map(profile_task)
+            .collect(),
+        task_rows_more: value
+            .get("tasks")
+            .and_then(|tasks| tasks.get("next_cursor"))
+            .is_some_and(|next| !next.is_null()),
     }
 }
 

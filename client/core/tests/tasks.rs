@@ -64,8 +64,13 @@ fn texts(update: &TasksUpdate) -> Vec<String> {
 
 /// The tasks subscriptions the fake read, as `(op, project)`.
 fn controls(fake: &FakeHgs) -> Vec<(String, String)> {
-    fake.stdin("")
-        .into_iter()
+    let sent = fake.stdin("");
+    // Every tasks subscription asks for the board's window of each stage.
+    assert!(sent
+        .iter()
+        .filter(|control| control["topic"] == "tasks" && control["op"] == "subscribe")
+        .all(|control| control["window"] == json!(zerus_client_core::tasks::WINDOW)));
+    sent.into_iter()
         .filter(|control| control["topic"] == "tasks")
         .map(|control| {
             (

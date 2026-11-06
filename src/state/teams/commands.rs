@@ -10,7 +10,7 @@ use super::store::{self, canonical_uuid, Event, Store, PAGE};
 use anyhow::{bail, ensure, Context};
 use std::collections::BTreeSet;
 
-pub(crate) const USAGE: &str = "usage: hgs [@host] team create|plan|extend|edit-draft|move-phase|move-task|add-to-phase|approve-phase|discard-phase|return-to-draft|pause-phase|unpause-phase|phase-acceptance|accept-phase|send-back-phase|reject-phase|undo-reject-phase|rework-phase|finish|approve|answer|commit|discard|pause|resume|stop|archive|status|inbox|list|events|spans|profile|current|report|ask|reply|hold|release|accept|reject|skip-stage|send-back|reassign|take-over|cancel|retry|check|expect|swap-member|escalate|use-last-reply|relaunch|add-member|scale|drain|pause-member|resume-member|remove-member|settings|finding|draft|propose|decide-proposal|next-goal|leftovers|intake-key|intake|waiting|close-phase|phase-mode|integrate-build|start-ahead|full-tests|test|run|templates|safe-action|reports-to|sub-lead --json (JSON stdin) | hgs [@host] team catalog get|set|propose|decide|apply|discard|route|designer --json | hgs team worker [--stop]";
+pub(crate) const USAGE: &str = "usage: hgs [@host] team create|plan|extend|edit-draft|move-phase|move-task|add-to-phase|approve-phase|discard-phase|return-to-draft|pause-phase|unpause-phase|phase-acceptance|accept-phase|send-back-phase|reject-phase|undo-reject-phase|rework-phase|finish|approve|answer|commit|discard|pause|resume|stop|archive|status|inbox|list|events|spans|profile|current|report|ask|reply|hold|release|accept|reject|skip-stage|send-back|reassign|take-over|cancel|retry|check|expect|swap-member|escalate|use-last-reply|relaunch|add-member|scale|drain|pause-member|resume-member|remove-member|settings|finding|draft|propose|decide-proposal|next-goal|leftovers|intake-key|intake|waiting|close-phase|phase-mode|integrate-build|start-ahead|full-tests|test|run|templates|safe-action|reports-to|sub-lead|deferred|answer-deferred|defer-session|disk --json (JSON stdin) | hgs [@host] team catalog get|set|propose|decide|apply|discard|route|designer --json | hgs team worker [--stop]";
 
 const MUTATIONS: &[&str] = &[
     "plan", "extend", "edit-draft", "move-phase", "move-task", "add-to-phase", "approve-phase", "discard-phase", "return-to-draft", "reject-phase", "undo-reject-phase",
@@ -1724,6 +1724,22 @@ fn decide_proposal_in(store: &mut Store, input: &Value, caller: &Actor) -> anyho
         })?;
         return Ok(json!({"status":"answered","proposal":id,"answer":answer}));
     }
+    // Task 111: a proposal that can no longer apply is withdrawn, not run; the
+    // write stores the withdrawal and the lead's line.
+    if let Some(why) = ops::inapplicable(&team, &team.proposals[at]) {
+        store.mutate(None, &team_id, None, |_, _| Ok(Value::Null))?;
+        bail!("This proposal can no longer apply ({why}); it was withdrawn and the lead is told why");
+    }
+    // The Allow runs in several writes: marked first, so the change it makes
+    // never withdraws it before it is recorded as accepted.
+    store.mutate(None, &team_id, None, |team, _| {
+        if let Some(proposal) = team.proposals.iter_mut().find(|proposal| proposal["id"] == id && proposal["state"] == "open") {
+            if proposal["deciding"].is_null() {
+                proposal["deciding"] = json!(super::super::now());
+            }
+        }
+        Ok(Value::Null)
+    })?;
     let member = team.proposals[at]["member"].clone();
     let change = team.proposals[at]["change"].clone();
     let goal = team.proposals[at]["goal"].as_str().unwrap_or_default().to_owned();
@@ -3272,7 +3288,7 @@ fn active_team_records(store: &Store) -> anyhow::Result<Vec<Team>> {
 }
 
 /// The stored team list the desktop polls: no live session listing (C1).
-fn list_items(teams: &[Team], include_cancelled: bool) -> Value {
+pub(crate) fn list_items(teams: &[Team], include_cancelled: bool) -> Value {
     json!({"items":teams.iter().map(|team| summary(team, include_cancelled)).collect::<Vec<_>>()})
 }
 
@@ -3322,6 +3338,23 @@ fn reopen_rejected_subteam(store: &mut Store, parent_id: &str, input: &Value) ->
         Ok(Value::Null)
     })
     .map(|_| ())
+}
+
+/// Task 112: a team paused before its pause was recorded reads it from its
+/// newest pause event, so it still says since when and by whom.
+pub(crate) fn fill_pause(store: &Store, team: &mut Team) {
+    if team.status != TeamStatus::Paused || team.paused.is_some() {
+        return;
+    }
+    let found = store.last_event(&team.id, &["paused", "replan_proposed"]).ok().flatten();
+    team.paused = Some(match found {
+        Some((at, detail)) => super::model::TeamPause {
+            at,
+            by: detail["by"].as_str().unwrap_or_default().to_owned(),
+            reason: if detail.get("finding").is_some() { "replan".into() } else { "paused".into() },
+        },
+        None => super::model::TeamPause { at: team.updated, ..Default::default() },
+    });
 }
 
 /// 9.7: pause, resume or stop of a team reaches its sub-teams, level by level.
@@ -4182,6 +4215,20 @@ fn run(op: &str, input: &Value, wait: bool) -> anyhow::Result<Value> {
     if op == "decide-tool" {
         return crate::test_discipline::tools::decide(input);
     }
+    // Task 97: the owner's question queue spans teams and ordinary sessions.
+    if op == "answer-deferred" {
+        return super::owner_queue::answer(input);
+    }
+    if op == "defer-session" {
+        return super::owner_queue::watch(input);
+    }
+    if op == "deferred" {
+        return Ok(super::owner_queue::listing(input["limit"].as_u64()));
+    }
+    // Task 108: the build folders Zerus holds and their cleanup; no team's.
+    if op == "disk" {
+        return crate::state::build_dirs::command(input);
+    }
     match op {
         "create" => create(input),
         "answer" => answer(input),
@@ -4201,13 +4248,29 @@ fn run(op: &str, input: &Value, wait: bool) -> anyhow::Result<Value> {
         // U50: what waits for the owner across every team, read only.
         "waiting" => {
             // #742: a missing tool's offer waits for the owner with or without a team.
-            let tools = crate::test_discipline::tools::waiting_items();
+            let mut tools = crate::test_discipline::tools::waiting_items();
+            // Task 97: Waiting for you > Deferred, with or without a team; a
+            // watched ordinary session keeps the worker that defers it alive.
+            tools.extend(super::owner_queue::waiting_items());
+            // Task 108: a drive under its free-space threshold.
+            tools.extend(crate::state::build_dirs::waiting_items());
+            if !super::owner_queue::watched().is_empty() {
+                if let Err(error) = super::dispatcher::ensure_worker() {
+                    eprintln!("hgs: the team dispatcher did not start: {error}");
+                }
+            }
             if !store::path().exists() {
                 let items = super::owner_waiting::sorted(tools);
                 let before = Some(&input["before"]).filter(|cursor| !cursor.is_null());
                 return Ok(super::owner_waiting::page(&items, before, input["limit"].as_u64()));
             }
-            let teams = active_team_records(&Store::open(false)?)?;
+            let store = Store::open(false)?;
+            let mut teams = active_team_records(&store)?;
+            // Task 111: a proposal that can no longer apply never waits for you.
+            for team in &mut teams {
+                ops::withdraw_inapplicable(team, &mut Vec::new());
+                fill_pause(&store, team);
+            }
             let mut items = super::owner_waiting::items(&teams, super::super::now());
             items.extend(tools);
             let items = super::owner_waiting::sorted(items);
@@ -4235,7 +4298,11 @@ fn run(op: &str, input: &Value, wait: bool) -> anyhow::Result<Value> {
         }
         "status" => {
             let store = Store::open(false)?;
-            let team = store.load(text(input, "team"))?.context("Unknown team")?;
+            let mut team = store.load(text(input, "team"))?.context("Unknown team")?;
+            // Task 111: a proposal that can no longer apply reads withdrawn at
+            // once; the next change stores it so.
+            ops::withdraw_inapplicable(&mut team, &mut Vec::new());
+            fill_pause(&store, &mut team);
             let finished = matches!(team.status, TeamStatus::Done | TeamStatus::Stopped);
             // Only a finished team reads the live listing, for its members left
             // running (F7); a watched running team is polled often and must not
@@ -4275,7 +4342,8 @@ fn run(op: &str, input: &Value, wait: bool) -> anyhow::Result<Value> {
             Ok(value)
         }
         "inbox" => {
-            let team = Store::open(false)?.load(text(input, "team"))?.context("Unknown team")?;
+            let mut team = Store::open(false)?.load(text(input, "team"))?.context("Unknown team")?;
+            ops::withdraw_inapplicable(&mut team, &mut Vec::new());
             // Spec 5.6: a sub-lead reads its own inbox; you may name one.
             let named = text(input, "member").to_owned();
             let reviewer = if !named.is_empty() {

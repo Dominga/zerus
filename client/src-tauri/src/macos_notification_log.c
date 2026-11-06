@@ -14,3 +14,14 @@ void zerus_macos_notification_callback(uint32_t role, uint32_t kind) {
     case 5: os_log(OS_LOG_DEFAULT, "zerus-client: notification callback role=host kind=other"); break;
     }
 }
+
+// Fixed startup reasons only, used when the per-user GUI log is unwritable.
+void zerus_macos_startup_log_failure(uint32_t kind, int32_t error) {
+    switch (kind) {
+    case 0: os_log(OS_LOG_DEFAULT, "zerus-client: startup claimed; GUI log unavailable errno=%{public}d", error); break;
+    case 1: os_log(OS_LOG_DEFAULT, "zerus-client: startup forwarded; GUI log unavailable errno=%{public}d", error); break;
+    case 2: os_log(OS_LOG_DEFAULT, "zerus-client: startup duplicate without handoff; GUI log unavailable errno=%{public}d", error); break;
+    case 3: os_log(OS_LOG_DEFAULT, "zerus-client: startup failed; GUI log unavailable errno=%{public}d", error); break;
+    default: os_log(OS_LOG_DEFAULT, "zerus-client: startup diagnostic; GUI log unavailable errno=%{public}d", error); break;
+    }
+}

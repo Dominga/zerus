@@ -15,6 +15,7 @@
 }
 
 @layer base {
+  html { background: var(--z-color-page); }
   :root {
     /* Derived scale: Qt sizes are relative to the application font. */
     --fs-base: calc(var(--z-font-base) * var(--content-scale, 1));
@@ -236,6 +237,7 @@
   .toasts { position: fixed; right: 16px; bottom: 40px; z-index: 70; display: flex; flex-direction: column; gap: 8px; pointer-events: none; }
   .toast { min-width: 260px; max-width: 380px; padding: 10px 12px; border-radius: var(--z-radius-lg); background: var(--z-color-raised); border: 1px solid var(--z-color-border); box-shadow: var(--z-shadow-popover); font-size: var(--fs-sm); animation: slideL var(--z-motion-base) var(--ease) both; }
   .toast b { display: block; margin-bottom: 2px; }
+  .toast .busy-arc { display: inline-block; vertical-align: middle; margin: 0 7px 0 0; border-color: var(--z-color-accent); border-right-color: transparent; }
   .toast.error { border-color: color-mix(in srgb, var(--z-color-danger) 45%, transparent); }
   .toast.warn { border-color: var(--z-color-border); }
   .toast .dismiss { float: right; margin: -4px -6px 0 8px; pointer-events: auto; }
@@ -318,10 +320,10 @@
       .shortcut-help-list, .mach-page, .mach-log, .acct-scroll, .acct-main-scroll, .acct-more-list, .atm-list, .atm-results,
       .ns-accounts, .wt-tree, .ocm-list, .wtp-tree, .su-page, .proj-list, .su-tablewrap, .ip-summary, .ip-body, .ip-diff,
       .bc-details, .sp-scroll, .strip-scroll, .set-nav, .set-table-wrap, .voice-list, .an-detail, .an-json, .sw-clist,
-      .sw-review, .tasks-list, .tasks-detail, .tk-scroll, .tv-scroll, .tk-assign-list, .wto-tree, .team-canvas, .team-members-list, .team-proposals, .team-waiting-list,
+      .sw-review, .tasks-list, .tasks-detail, .tk-scroll, .tv-scroll, .tk-assign-list, .wtl-panel, .wto-tree, .team-canvas, .team-members-list, .team-proposals, .team-waiting-list,
       .team-waiting-output, .team-questions, .ms-list, .ms-raw, .ms-logs, .cat-list, .cat-proposals, .nt-body, .pt-plan-scroll, .pt-detail,
       .cat-form, .cat-routing, .cat-rules, .designer-draft, .newteam-page, .catalog-page,
-      .pm-board, .pm-column-body, .pm-layers, .pm-layer-body, .pm-profile, .pm-tests,
+      .pm-board, .pm-column-body, .pm-layers, .pm-layer-body, .pm-profile, .pm-tests, .pm-profile-scroll, .tl-host, .cl-list,
       .xterm-viewport):not(
       :is(.menu, .att-pop, .archive-pop, .acct-more, .acct-switch-pop, .ns-choice-list, .tk-tip, .goto-scrim, .cat-confirm, .nt-confirm, dialog.ns-model-pop[open], :popover-open) *) {
     scrollbar-width: none;

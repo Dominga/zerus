@@ -15,6 +15,12 @@ pub(crate) struct Stamp {
     size: u64,
     modified: [i64; 2],
 }
+impl Stamp {
+    /// The leaf's recorded length in bytes.
+    pub(crate) fn size(&self) -> u64 {
+        self.size
+    }
+}
 fn refused() -> io::Error {
     io::Error::new(
         io::ErrorKind::InvalidData,
@@ -23,12 +29,17 @@ fn refused() -> io::Error {
 }
 #[cfg(unix)]
 fn stamp(file: &File) -> io::Result<Stamp> {
+    stamp_with_access(file, false)
+}
+#[cfg(unix)]
+fn stamp_with_access(file: &File, legacy_cache: bool) -> io::Result<Stamp> {
     use std::os::unix::fs::MetadataExt;
     let m = file.metadata()?;
+    let forbidden = if legacy_cache { 0o022 } else { 0o077 };
     if !m.is_file()
         || m.uid() != unsafe { libc::geteuid() }
         || m.nlink() != 1
-        || m.mode() & 0o077 != 0
+        || m.mode() & forbidden != 0
     {
         return Err(refused());
     }
@@ -68,6 +79,11 @@ pub(crate) struct Parents {
 impl Parents {
     pub fn open(path: &Path, create: bool) -> io::Result<Self> {
         Self::open_with(path, create, true)
+    }
+    /// The existing canonical application data directory is owner-checked;
+    /// unlike new archive slots it need not have a 0700 umask.
+    pub(crate) fn managed_data(path: &Path) -> io::Result<Self> {
+        Self::open_with(path, false, false)
     }
     fn open_with(path: &Path, create: bool, private: bool) -> io::Result<Self> {
         #[cfg(windows)]
@@ -177,19 +193,51 @@ fn parent(path: &Path) -> io::Result<Parents> {
     Parents::open(path.parent().ok_or_else(refused)?, false)
 }
 pub(crate) fn read(path: &Path, limit: usize) -> io::Result<Option<(Vec<u8>, Stamp)>> {
-    read_with(path, limit, false, true)
+    read_with(path, limit, false, true, false)
+}
+/// The stamp of a private leaf without reading its bytes: opened without
+/// following links and checked like a read (one link, owner only). `None`:
+/// no such leaf.
+pub(crate) fn stat(path: &Path) -> io::Result<Option<Stamp>> {
+    let parents = parent(path)?;
+    #[cfg(unix)]
+    let opened = {
+        use std::{fs::OpenOptions, os::unix::fs::OpenOptionsExt};
+        OpenOptions::new()
+            .read(true)
+            .custom_flags(libc::O_NOFOLLOW | libc::O_NONBLOCK)
+            .open(path)
+    };
+    #[cfg(windows)]
+    let opened = super::windows::preload_stat_file(path);
+    #[cfg(not(any(unix, windows)))]
+    let opened: io::Result<File> = Err(io::ErrorKind::Unsupported.into());
+    let file = match opened {
+        Ok(file) => file,
+        Err(error) if error.kind() == io::ErrorKind::NotFound => return Ok(None),
+        Err(error) => return Err(error),
+    };
+    let actual = stamp(&file)?;
+    parents.recheck()?;
+    Ok(Some(actual))
 }
 pub(crate) fn durable(path: &Path, limit: usize) -> io::Result<Option<(Vec<u8>, Stamp)>> {
-    read_with(path, limit, true, true)
+    read_with(path, limit, true, true, false)
 }
 pub(crate) fn read_source(path: &Path, limit: usize) -> io::Result<Option<(Vec<u8>, Stamp)>> {
-    read_with(path, limit, false, false)
+    read_with(path, limit, false, false, false)
+}
+/// ONLY the legacy worktree-snapshots read accepts owned 0644. Archives,
+/// checkpoints and every other Next source retain their private leaf policy.
+pub(crate) fn read_legacy_cache(path: &Path, limit: usize) -> io::Result<Option<(Vec<u8>, Stamp)>> {
+    read_with(path, limit, false, false, true)
 }
 fn read_with(
     path: &Path,
     limit: usize,
     sync: bool,
     private: bool,
+    legacy_cache: bool,
 ) -> io::Result<Option<(Vec<u8>, Stamp)>> {
     let parents = Parents::open_with(path.parent().ok_or_else(refused)?, false, private)?;
     if std::fs::symlink_metadata(path).is_ok_and(|m| m.is_file() && m.len() > limit as u64) {
@@ -209,7 +257,18 @@ fn read_with(
     #[cfg(windows)]
     let file = &mut opened.file;
     #[cfg(unix)]
-    let opened = super::checkpoint::current(path, limit)?;
+    let opened = if legacy_cache {
+        super::checkpoint::read_only_source(path, limit)?
+    } else {
+        super::checkpoint::current(path, limit)?
+    };
+    #[cfg(unix)]
+    let read_stamp = |file: &File| stamp_with_access(file, legacy_cache);
+    #[cfg(not(unix))]
+    let read_stamp = |file: &File| {
+        let _ = legacy_cache;
+        stamp(file)
+    };
     #[cfg(unix)]
     let Some(mut opened) = opened
     else {
@@ -219,7 +278,7 @@ fn read_with(
     let file = &mut opened.file;
     #[cfg(not(any(unix, windows)))]
     let file = &mut File::open(path)?;
-    let before = stamp(file)?;
+    let before = read_stamp(file)?;
     if before.size > limit as u64 {
         return Err(refused());
     }
@@ -228,7 +287,7 @@ fn read_with(
     (&mut *file)
         .take(limit as u64 + 1)
         .read_to_end(&mut bytes)?;
-    if bytes.len() > limit || bytes.len() as u64 != before.size || stamp(file)? != before {
+    if bytes.len() > limit || bytes.len() as u64 != before.size || read_stamp(file)? != before {
         return Err(refused());
     }
     #[cfg(unix)]
@@ -295,7 +354,13 @@ pub(crate) struct Lock {
 }
 impl Lock {
     pub fn take(path: &Path) -> io::Result<Self> {
-        let parents = parent(path)?;
+        Self::take_with(path, true)
+    }
+    pub fn take_managed(path: &Path) -> io::Result<Self> {
+        Self::take_with(path, false)
+    }
+    fn take_with(path: &Path, private: bool) -> io::Result<Self> {
+        let parents = Parents::open_with(path.parent().ok_or_else(refused)?, false, private)?;
         #[cfg(unix)]
         let file = {
             use std::{
@@ -328,13 +393,58 @@ impl Lock {
         };
         #[cfg(not(any(unix, windows)))]
         let file = return Err(io::Error::from(io::ErrorKind::Unsupported));
-        if stamp(&file)?.size != 0 {
-            return Err(refused());
-        }
-        parents.recheck()?;
-        Ok(Self {
+        let held = Self {
             _file: file,
             _parents: parents,
-        })
+        };
+        if stamp(&held._file)?.size != 0 {
+            return Err(refused());
+        }
+        held._parents.recheck()?;
+        Ok(held)
+    }
+}
+
+#[cfg(unix)]
+impl Drop for Lock {
+    fn drop(&mut self) {
+        use std::os::fd::AsRawFd;
+        // Another thread may have forked while this description was locked.
+        // Close alone leaves its flock held by that child until exec/exit.
+        let _ = unsafe { libc::flock(self._file.as_raw_fd(), libc::LOCK_UN) };
+    }
+}
+
+#[cfg(all(test, unix))]
+mod lock_tests {
+    use super::*;
+    #[test]
+    fn dropping_the_lock_releases_it_even_while_an_inherited_description_remains_open() {
+        let root = std::env::temp_dir()
+            .canonicalize()
+            .unwrap()
+            .join(format!("zerus-preload-lock-{}", uuid::Uuid::new_v4()));
+        drop(Parents::open(&root, true).unwrap());
+        let path = root.join("capture.lock");
+        for managed in [false, true] {
+            let take = || {
+                if managed {
+                    Lock::take_managed(&path)
+                } else {
+                    Lock::take(&path)
+                }
+            };
+            let held = take().unwrap();
+            // fork inherits this SAME open file description, just as dup does.
+            // Keep it alive without creating a process in the parallel suite.
+            let inherited = held._file.try_clone().unwrap();
+            assert!(matches!(take(), Err(e) if e.kind()==io::ErrorKind::WouldBlock));
+            drop(held);
+            let next = take().expect("the original owner explicitly released its flock");
+            assert_eq!(inherited.metadata().unwrap().len(), 0);
+            drop(next);
+            drop(inherited);
+        }
+        std::fs::remove_dir_all(root).unwrap();
     }
 }

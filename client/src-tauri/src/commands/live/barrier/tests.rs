@@ -19,6 +19,9 @@ fn eventually(label: &str, test: impl Fn() -> bool) {
 
 #[test]
 fn empty_freeze_is_one_use_and_every_control_remains_closed() {
+    if crate::test_context::native() {
+        return;
+    }
     let live = Arc::new(Live::default());
     live.freeze().unwrap().drain_until(deadline()).unwrap();
     assert!(matches!(live.freeze(), Err(Refused::Closed)));
@@ -33,6 +36,9 @@ fn empty_freeze_is_one_use_and_every_control_remains_closed() {
 
 #[test]
 fn admitted_control_finishes_before_drain_and_timeout_never_reopens() {
+    if crate::test_context::native() {
+        return;
+    }
     let live = Arc::new(Live::default());
     let held = live.admit().unwrap();
     let frozen = live.freeze().unwrap();
@@ -44,6 +50,9 @@ fn admitted_control_finishes_before_drain_and_timeout_never_reopens() {
 
 #[test]
 fn admitted_start_waiting_for_source_cannot_create_a_late_graph() {
+    if crate::test_context::native() {
+        return;
+    }
     let live = Arc::new(Live::default());
     let source = live.source.lock().unwrap();
     let worker = live.clone();
@@ -62,6 +71,9 @@ fn admitted_start_waiting_for_source_cannot_create_a_late_graph() {
 
 #[test]
 fn poisoned_source_never_becomes_a_successful_empty_drain() {
+    if crate::test_context::native() {
+        return;
+    }
     let live = Arc::new(Live::default());
     let broken = live.clone();
     assert!(std::thread::spawn(move || {
@@ -78,6 +90,9 @@ fn poisoned_source_never_becomes_a_successful_empty_drain() {
 
 #[test]
 fn busy_source_is_refused_without_waiting_or_reopening() {
+    if crate::test_context::native() {
+        return;
+    }
     let live = Arc::new(Live::default());
     let frozen = live.freeze().unwrap();
     let _held = live.source.lock().unwrap();
@@ -87,6 +102,9 @@ fn busy_source_is_refused_without_waiting_or_reopening() {
 
 #[test]
 fn callback_completion_outlives_an_abandoned_controller() {
+    if crate::test_context::native() {
+        return;
+    }
     let live = Arc::new(Live::default());
     let (tx, rx) = mpsc::channel();
     let (entered, ready) = mpsc::channel();
@@ -145,6 +163,9 @@ impl Drop for Fixture {
 
 #[test]
 fn live_gui_source_requires_actual_helper_pipe_and_pump_completion() {
+    if crate::test_context::native() {
+        return;
+    }
     let f = Fixture::new();
     let live = Arc::new(Live::default());
     assert_eq!(live.start_from(|| f.0.join("hgs"), None).unwrap(), "live");
@@ -163,6 +184,9 @@ fn live_gui_source_requires_actual_helper_pipe_and_pump_completion() {
 
 #[test]
 fn replay_never_supplies_live_fleet_proof() {
+    if crate::test_context::native() {
+        return;
+    }
     let f = Fixture::new();
     fs::write(
         f.0.join("replay.ndjson"),

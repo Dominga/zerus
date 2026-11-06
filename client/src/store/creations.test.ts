@@ -1,10 +1,12 @@
 import { describe, expect, it, vi } from "vitest";
 import { createRoot, createSignal } from "solid-js";
+import { createStore } from "solid-js/store";
 import { createCreations, type CreationsDeps } from "./creations";
 import { toSession } from "./catalog";
-import { RESOLVED, creationRowId, type CardScope } from "../ui/sessions/creations-ui";
+import { RESOLVED, creationRowId, type CardScope, type ListScope } from "../ui/sessions/creations-ui";
 import type { CreationCard, CreationEvent, GroupingOut, ViewRow } from "../types";
 import type { Session } from "../ui/sessions/types";
+import type { Row } from "../ui/sessions/model";
 
 // The creation cards' store over a recorded bridge: selection, reveal and
 // adoption (SessionsWindow.cpp 3020-3075, 3253-3255, 3434-3442, 3717-3728),
@@ -54,7 +56,7 @@ function setup(view: CreationCard[] = [], options: { grouping?: GroupingOut; pla
     const [scope, setScope] = createSignal<Omit<CardScope, "grouping">>({ filter: "all", hosts: [], query: "", projects: [] });
     const [order, setOrder] = createSignal<string[]>([]);
     const [online, setOnline] = createSignal(true);
-    const rows: Record<string, Session> = {};
+    const [rows, setRows] = createStore<Record<string, Session>>({});
     const notices: { tone: string; text: string; sticky?: boolean }[] = [];
     const opened: unknown[] = [];
     const revealed: string[] = [];
@@ -79,8 +81,8 @@ function setup(view: CreationCard[] = [], options: { grouping?: GroupingOut; pla
     });
     const list = (n: number, extra: Partial<ViewRow> = {}, computer = "") => {
       const s = toSession(computer, `run:${n}`, { name: `claude/sample-project/s${n}`, agent: "claude", status: "ready", ...extra });
-      rows[s.key] = s;
-      setOrder((o) => [...o, s.key]);
+      setRows(s.key, s);
+      setOrder((o) => o.includes(s.key) ? o : [...o, s.key]);
       return s;
     };
     return {
@@ -93,6 +95,102 @@ function setup(view: CreationCard[] = [], options: { grouping?: GroupingOut; pla
 }
 
 describe("the cards", () => {
+  const scope = (): ListScope => ({ grouping: grouping([header("alpha")]), members: new Map(), filter: "all", hosts: [], query: "", projects: [], accounts: [], folder: undefined,
+    visible: () => true, online: () => true, expanded: () => false, compact: () => false });
+  const sessionRow = (s: Session): Row => ({ type: "card", id: s.key, session: s, expandable: false, expanded: false, compactRow: false });
+
+  it.each(["", "workstation", "studio"])("replaces the pending row atomically before the bound event (machine %s)", async (machine) => {
+    const host = machine === "studio" ? "studio" : "";
+    const c = card("a", { host, machine, launch_id: "current-attempt", launch_dispatched: true, state: "confirming" });
+    const t = setup([c]);
+    await t.started;
+    t.store.selectCreation(c.id);
+    expect(t.store.withCreations([], scope()).map((r) => r.type)).toEqual(["creation"]);
+    const s = t.list(1, { name: "claude/sample/tag-a", launch_id: c.launch_id, machine, state: "running" }, host);
+    // No bound event and no async wait: the catalog publication replaces the
+    // placeholder and its count in the same render, including the local "" key.
+    expect(t.store.withCreations([sessionRow(s)], scope()).map((r) => r.id)).toEqual([s.key]);
+    expect(t.store.creationCount()).toBe(0);
+    await flush();
+    expect(t.selectedKey()).toBe(s.key);
+    expect(t.store.creations()).toHaveLength(1); // The host still owns completion.
+    t.emit({ ...c, state: "bound", bound_session: s.name });
+    expect(t.store.withCreations([sessionRow(s)], scope()).map((r) => r.id)).toEqual([s.key]);
+    expect(t.selectedKey()).toBe(s.key);
+    t.dispose();
+  });
+
+  it.each([
+    { row: { launch_id: "retired-attempt" } },
+    { computer: "studio" },
+    { row: { agent: "codex" } },
+    { row: { name: "claude/sample/another-tag" } },
+    { row: { state: "archived" } },
+    { offline: true },
+    { dispatched: false },
+    { missing: true },
+  ])("keeps a placeholder without an exact current online launch: %j", async ({ row, computer, offline, dispatched, missing }) => {
+    const c = card("a", { launch_id: missing ? undefined : "current-attempt", launch_dispatched: dispatched !== false, state: "confirming" });
+    const t = setup([c]);
+    await t.started;
+    t.setOnline(!offline);
+    const s = t.list(1, { name: "claude/sample/tag-a", launch_id: "current-attempt", state: "running", ...row }, computer);
+    expect(t.store.withCreations([sessionRow(s)], scope()).map((r) => r.type)).toEqual(["card", "creation"]);
+    expect(t.store.creationCount()).toBe(1);
+    t.dispose();
+  });
+
+  it("uses the original provider for a dsh launch despite the DeepSeek display name", async () => {
+    const t = setup([card("a", { cmd: "dsh", launch_id: "current", launch_dispatched: true })]);
+    await t.started;
+    const s = t.list(1, { name: "dsh/sample/tag-a", agent: "deepseek", account_provider: "dsh", launch_id: "current", state: "running" });
+    expect(t.store.withCreations([sessionRow(s)], scope()).map((r) => r.id)).toEqual([s.key]);
+    t.dispose();
+  });
+
+  it("reconciles an existing catalog row updated to the current launch attempt", async () => {
+    const t = setup([card("a", { launch_id: "current", launch_dispatched: true })]);
+    await t.started;
+    t.list(1, { name: "claude/sample/tag-a", launch_id: "retired", state: "running" });
+    expect(t.store.creationCount()).toBe(1);
+    t.list(1, { name: "claude/sample/tag-a", launch_id: "current", state: "running" });
+    expect(t.store.creationCount()).toBe(0);
+    t.dispose();
+  });
+
+  it("keeps the current placeholder until its row arrives when the bound event wins the race", async () => {
+    const c = card("a", { launch_id: "current", launch_dispatched: true, state: "confirming" });
+    const t = setup([c]);
+    await t.started;
+    t.store.selectCreation(c.id);
+    t.emit({ ...c, state: "bound", show_pending: false, bound_session: "claude/sample/tag-a" });
+    expect(t.store.withCreations([], scope()).map((r) => r.type)).toEqual(["creation"]);
+    expect(t.selectedKey()).toBe(creationRowId(c.id));
+    const s = t.list(1, { name: "claude/sample/tag-a", launch_id: "current", state: "running" });
+    expect(t.store.withCreations([sessionRow(s)], scope()).map((r) => r.id)).toEqual([s.key]);
+    expect(t.selectedKey()).toBe(s.key);
+    expect(t.store.creations()).toEqual([]);
+    t.dispose();
+  });
+
+  it.each(["", "studio"])("never adopts another launch with the bound session's name (computer %s)", async (host) => {
+    const c = card("a", { host, launch_id: "current", launch_dispatched: true, state: "confirming" });
+    const t = setup([c]);
+    await t.started;
+    t.store.selectCreation(c.id);
+    const other = t.list(1, { name: "claude/sample/tag-a", launch_id: "retired", state: "running" }, host);
+    t.emit({ ...c, state: "bound", show_pending: false, bound_session: other.name });
+    expect(t.selectedKey()).toBe(creationRowId(c.id));
+    expect(t.store.creationCount()).toBe(1);
+    expect(t.revealed).not.toContain(other.key);
+    const current = t.list(2, { name: other.name, launch_id: "current", state: "running" }, host);
+    await flush();
+    expect(t.selectedKey()).toBe(current.key);
+    expect(t.store.creations()).toEqual([]);
+    expect(t.revealed).not.toContain(other.key);
+    t.dispose();
+  });
+
   it("come from the first read and the events, the events winning", async () => {
     const t = setup([card("a", { caption: "Queued" }), card("b"), card("gone"), card("old", { state: "bound" })]);
     // Before the read answers: a change of a, the removal of gone.

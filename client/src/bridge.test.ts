@@ -2,6 +2,7 @@ import { describe, expect, it } from "vitest";
 import { attentionMarks, pendingReadMarks, pump, queueReadMarks, updateAttentionMarks, type PumpHost, type Source } from "./bridge";
 import { emptyBatch, type Batch } from "./types";
 import { createTasks } from "./store/tasks";
+import { createTeams } from "./store/teamsView";
 
 /** A source whose `next` answers are resolved by the test. */
 function source() {
@@ -65,6 +66,29 @@ describe("pump", () => {
     }
     expect(got).toHaveLength(4);
     expect(got[0].tasks).toEqual([]);
+  });
+
+  it("keeps the Teams views and counts a batch of only Teams views as content (task 76)", async () => {
+    // As this computer's core sends them: the team list naming the lead's
+    // session, then Waiting for you, each in a batch of its own.
+    const src = source(), h = host(), store = createTeams({ follow: async () => {} });
+    pump(src.s, (b) => { if (b.teams?.length) store.apply(b.teams); }, h.h);
+    const lead = { id: "lead", role: "Lead", agent: "claude", state: "active", lead: true,
+      session: { name: "claude/Zerus/work-6926cceb", host: "", run_id: "r", conversation_id: "c" } };
+    src.answer({ teams: [{ computer: "", key: "list", kind: "list", payload: { truncated: false, teams: [{
+      id: "33fbafeb-8291-4eda-a00c-6e1448ec6f20", name: "Zerus Next for the fork", status: "running", project: "ZERUS",
+      folder: "D:\Tools\Zerus", plan_mode: "standard", lead: "lead", members: [lead], tasks: 80, accepted: 74, submitted: 0,
+      in_review: 0, in_test: 0, attention: 2, open_proposals: 1, waiting_for_lead: false, pending_phase: 3, updated: 1, revision: 9,
+    }] } }] } as unknown as Batch);
+    await settle(); h.runFrames();
+    expect(store.list("")?.teams.map((team) => team.id)).toEqual(["33fbafeb-8291-4eda-a00c-6e1448ec6f20"]);
+    expect(store.teamOf({ computer: "", name: "claude/Zerus/work-6926cceb" })?.name).toBe("Zerus Next for the fork");
+    src.answer({ teams: [{ computer: "", key: "waiting", kind: "waiting", payload: { items: [{
+      id: "33fbafeb-8291-4eda-a00c-6e1448ec6f20/owner_word_asked/proposal-p31", kind: "owner_word_asked",
+      team: "33fbafeb-8291-4eda-a00c-6e1448ec6f20", action: "decide_proposal", title: "Allow the switch", since: 1 }],
+      total: 1, more: false, cursor: null } }] } as unknown as Batch);
+    await settle(); h.runFrames();
+    expect(store.waiting("")?.items.map((item) => item.kind)).toEqual(["owner_word_asked"]);
   });
 
   it("keeps machine cards and counts a batch of only cards as content", async () => {

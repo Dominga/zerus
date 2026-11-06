@@ -18,6 +18,16 @@ pub struct Settings {
     pub agent_limit: i64,
 }
 
+/// A project's cutover hold, as the last person to change it left it.
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+pub struct CutoverHold {
+    pub on: bool,
+    /// Who set it; none when the stored value could not be read.
+    pub by: Option<Actor>,
+    /// When, in milliseconds; none when the stored value could not be read.
+    pub at: Option<i64>,
+}
+
 impl Default for Settings {
     fn default() -> Self {
         Self {
@@ -118,6 +128,42 @@ impl ProjectDoc {
         settings
     }
 
+    /// The project's cutover hold (zerus-cg5h.4 S2b.2 C2): while on, no task
+    /// here takes a new floor or a first attempt; it never lowers anything.
+    /// None when nobody set it (off). A value that cannot be read is on, so a
+    /// damaged or unknown hold never reopens cutover.
+    pub fn cutover_hold(&self) -> Option<CutoverHold> {
+        let raw = self.doc.get_map("settings").get("cutover_hold")?;
+        let held = match raw.into_value().ok() {
+            Some(LoroValue::String(s)) => serde_json::from_str::<CutoverHold>(&s).ok(),
+            _ => None,
+        };
+        Some(held.unwrap_or(CutoverHold {
+            on: true,
+            by: None,
+            at: None,
+        }))
+    }
+
+    /// Sets or clears the cutover hold, as one last-writer-wins value that
+    /// names who set it and when. Only a person sets it; an agent or an
+    /// automatic process never does.
+    pub fn set_cutover_hold(&mut self, on: bool, by: &Actor, at: i64) -> Result<()> {
+        if !matches!(by, Actor::Person) {
+            return Err(Error::new("only a person sets or clears the cutover hold"));
+        }
+        let hold = CutoverHold {
+            on,
+            by: Some(by.clone()),
+            at: Some(at),
+        };
+        self.doc
+            .get_map("settings")
+            .insert("cutover_hold", serde_json::to_string(&hold)?)?;
+        self.doc.commit();
+        Ok(())
+    }
+
     pub fn set_settings(&mut self, settings: &Settings) -> Result<()> {
         for (name, template) in [
             ("task prompt", &settings.task_template),
@@ -208,5 +254,45 @@ mod tests {
         assert!(settings.check_agent(&agent, &own, true, 1).is_ok());
         assert!(settings.check_agent(&agent, &own, true, 2).is_err());
         assert!(settings.check_agent(&agent, &own, false, 2).is_ok());
+    }
+
+    #[test]
+    fn the_cutover_hold_is_a_person_s_and_a_damaged_one_holds() {
+        let mut project = ProjectDoc::new();
+        assert_eq!(project.cutover_hold(), None);
+        let agent = Actor::Agent(SessionKey {
+            machine: "m1".into(),
+            session: "codex/api".into(),
+            session_id: "launch_id:api".into(),
+        });
+        assert!(project.set_cutover_hold(true, &agent, 5).is_err());
+        assert_eq!(project.cutover_hold(), None);
+        project.set_cutover_hold(true, &Actor::Person, 10).unwrap();
+        let hold = project.cutover_hold().unwrap();
+        assert_eq!(
+            (hold.on, hold.by, hold.at),
+            (true, Some(Actor::Person), Some(10))
+        );
+        // The settings an older build writes leave the hold as it was.
+        let settings = project.settings();
+        project.set_settings(&settings).unwrap();
+        assert!(project.cutover_hold().unwrap().on);
+        // Concurrent changes merge as last writer wins.
+        let mut other = ProjectDoc::from_bytes(&project.snapshot().unwrap()).unwrap();
+        project.set_cutover_hold(false, &Actor::Person, 20).unwrap();
+        other.set_cutover_hold(true, &Actor::Person, 21).unwrap();
+        let mut merged = ProjectDoc::from_bytes(&project.snapshot().unwrap()).unwrap();
+        merged.import(&other.snapshot().unwrap()).unwrap();
+        let mut reverse = ProjectDoc::from_bytes(&other.snapshot().unwrap()).unwrap();
+        reverse.import(&project.snapshot().unwrap()).unwrap();
+        assert_eq!(merged.cutover_hold(), reverse.cutover_hold());
+        // A value that cannot be read holds.
+        project
+            .doc
+            .get_map("settings")
+            .insert("cutover_hold", "not a hold")
+            .unwrap();
+        let damaged = project.cutover_hold().unwrap();
+        assert!(damaged.on && damaged.by.is_none() && damaged.at.is_none());
     }
 }

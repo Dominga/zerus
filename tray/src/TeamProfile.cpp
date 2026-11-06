@@ -84,23 +84,26 @@ QString tokens(qint64 count)
 const QList<KindStyle> &kindStyles()
 {
     // Chosen by search over CIELAB (scratch script in task #79's report): the
-    // solid kinds also stay apart under deuteranopia and protanopia.
+    // solid kinds also stay apart under deuteranopia and protanopia. Task 93
+    // (owner: "the green is too toxic"): calm colours, LCh chroma at most 45
+    // in dark and 55 in light (ChromaCapDark/Light), in the skin's own
+    // lightness bands, with work the skin's mint.
     static const QList<KindStyle> styles{
-        {"work", "work", "", QColor("#07ab2d"), QColor("#0f7d41"), Qt::SolidPattern},
-        {"rework", "rework", "", QColor("#f3a065"), QColor("#803e03"), Qt::SolidPattern},
-        {"build", "build", "", QColor("#e5c043"), QColor("#8a7216"), Qt::SolidPattern},
-        {"review", "stage", "review", QColor("#8075e6"), QColor("#3c3886"), Qt::SolidPattern},
-        {"test", "stage", "test", QColor("#278cbc"), QColor("#137aa6"), Qt::SolidPattern},
-        {"stage", "stage", "", QColor("#98b3f2"), QColor("#2b6dc0"), Qt::SolidPattern},
-        {"blocked", "question", "", QColor("#d1625b"), QColor("#81191e"), Qt::SolidPattern},
-        {"background", "background", "", QColor("#0ba4a7"), QColor("#0d8072"), Qt::SolidPattern},
-        {"delivery", "delivery", "", QColor("#848484"), QColor("#666666"), Qt::Dense5Pattern},
-        {"member", "member", "", QColor("#c362a2"), QColor("#78185d"), Qt::BDiagPattern},
-        {"deps", "deps", "", QColor("#708e34"), QColor("#416000"), Qt::FDiagPattern},
-        {"lead", "lead", "", QColor("#be57de"), QColor("#6a1a84"), Qt::DiagCrossPattern},
-        {"folder_held", "folder_held", "", QColor("#bc7305"), QColor("#bc7305"), Qt::HorPattern},
-        {"hold", "hold", "", QColor("#c4c4c4"), QColor("#5f3643"), Qt::VerPattern},
-        {"stage_wait", "stage_wait", "", QColor("#6ad0fb"), QColor("#224560"), Qt::CrossPattern}};
+        {"work", "work", "", QColor("#7dd3b0"), QColor("#3f9f7b"), Qt::SolidPattern},
+        {"rework", "rework", "", QColor("#df9c77"), QColor("#83441d"), Qt::SolidPattern},
+        {"build", "build", "", QColor("#9f8347"), QColor("#8b6e28"), Qt::SolidPattern},
+        {"review", "stage", "review", QColor("#afa3e4"), QColor("#453e80"), Qt::SolidPattern},
+        {"test", "stage", "test", QColor("#0e90be"), QColor("#0e90be"), Qt::SolidPattern},
+        {"stage", "stage", "", QColor("#bcd2fe"), QColor("#2b6aae"), Qt::SolidPattern},
+        {"blocked", "question", "", QColor("#c26f6d"), QColor("#7f282d"), Qt::SolidPattern},
+        {"background", "background", "", QColor("#14acb0"), QColor("#078487"), Qt::SolidPattern},
+        {"delivery", "delivery", "", QColor("#868686"), QColor("#686868"), Qt::Dense5Pattern},
+        {"member", "member", "", QColor("#b96f97"), QColor("#792758"), Qt::BDiagPattern},
+        {"deps", "deps", "", QColor("#899d5d"), QColor("#354e03"), Qt::FDiagPattern},
+        {"lead", "lead", "", QColor("#fdc5ff"), QColor("#925fa0"), Qt::DiagCrossPattern},
+        {"folder_held", "folder_held", "", QColor("#fcd6b2"), QColor("#58432d"), Qt::HorPattern},
+        {"hold", "hold", "", QColor("#c1c1c1"), QColor("#314d38"), Qt::VerPattern},
+        {"stage_wait", "stage_wait", "", QColor("#59d6f5"), QColor("#174d5a"), Qt::CrossPattern}};
     return styles;
 }
 

@@ -55,6 +55,9 @@ fn validate(request: &Request) -> Result<()> {
         "snapshot" | "draft" if bare && request.draft_hash.is_none() => Ok(()),
         // Enter in the native composer, only while it still holds exactly the
         // draft the owner was shown (owner, 2026-10-28).
+        // Task 98: Enter for a paste Zerus itself delivered and never
+        // submitted, only while the composer holds exactly that paste.
+        "submit_own_paste" if bare && request.draft_hash.is_none() => Ok(()),
         "submit_draft"
             if bare
                 && request.draft_hash.as_deref().is_some_and(|hash| {
@@ -108,7 +111,52 @@ fn validate(request: &Request) -> Result<()> {
         _ => Err("Unsupported terminal action".into()),
     }
 }
+
+#[cfg(test)]
+mod own_paste_tests {
+    use super::*;
+
+    fn record() -> Value {
+        json!({"name":"claude/p/merger","run_id":"r1","conversation_id":"c1",
+            "unsent_paste":{"request_id":"00000000-0000-4000-8000-000000000017","draft_hash":"a".repeat(64),"run_id":"r1","conversation_id":"c1","at":10.0}})
+    }
+
+    /// The composer as a fake terminal shows it: the draft and its hash.
+    #[test]
+    fn only_the_exact_paste_zerus_left_is_its_own() {
+        let pasted = "[Pasted text #17 +62 lines]";
+        assert_eq!(own_paste(&record(), Some(pasted), &"a".repeat(64)).unwrap(), "00000000-0000-4000-8000-000000000017");
+        // Anything the person typed changes the draft and its hash.
+        assert_eq!(own_paste(&record(), Some("[Pasted text #17 +62 lines] and more"), &"b".repeat(64)).unwrap_err(), NOT_OWN_PASTE);
+        // An empty composer, or no draft Zerus can read (a dialog), is not one.
+        assert!(own_paste(&record(), None, &"a".repeat(64)).is_err());
+        assert!(own_paste(&record(), Some("  "), &"a".repeat(64)).is_err());
+        // Another conversation or run, or no recorded paste, never matches.
+        let mut other = record();
+        other["conversation_id"] = json!("c2");
+        assert!(own_paste(&other, Some(pasted), &"a".repeat(64)).is_err());
+        let mut gone = record();
+        gone.as_object_mut().unwrap().remove("unsent_paste");
+        assert!(own_paste(&gone, Some(pasted), &"a".repeat(64)).is_err());
+    }
+
+    #[test]
+    fn the_action_takes_no_text_key_or_hash() {
+        let request = |extra: Value| -> Request {
+            let mut value = json!({"request_id":"6e337ab4-7843-4ee1-ab22-8d664827421a","action":"submit_own_paste",
+                "expected_run_id":"r1","expected_conversation_id":"c1"});
+            value.as_object_mut().unwrap().extend(extra.as_object().unwrap().clone());
+            serde_json::from_value(value).unwrap()
+        };
+        assert!(validate(&request(json!({}))).is_ok());
+        assert!(validate(&request(json!({"draft_hash":"a".repeat(64)}))).is_err());
+        assert!(validate(&request(json!({"text":"x","enter":true}))).is_err());
+    }
+}
 fn checked(name: &str, request: &Request) -> Result<Value> {
+    // zerus-ucck P3c: the request's identities select among sessions that
+    // share the label.
+    expect(name, &request.expected_run_id, &request.expected_conversation_id)?;
     if opencode::exists(name) {return Err(backend::OPENCODE_TERMINAL.text().into());}
     if dsh::exists(name) {
         return Err(backend::DEEPSEEK_TERMINAL.text().into());
@@ -118,7 +166,7 @@ fn checked(name: &str, request: &Request) -> Result<Value> {
         || string(&record, "conversation_id") != request.expected_conversation_id
         || !string(&record, "archive_id").is_empty()
         || !process_alive(&record)
-        || !matches(&record, live()?.get(name))
+        || !matches(&record, panes_of(&live()?, &record))
     {
         return Err("Terminal no longer belongs to this exact live session".into());
     }
@@ -157,7 +205,7 @@ fn frame(record: &Value) -> Result<Value> {
         || fields[1] != pane
         || fields[9] != "0"
         || fields[10] != string(record, "run_id")
-        || fields[11] != string(record, "name")
+        || fields[11] != terminal_name(record)
         || !fields[0]
             .strip_prefix('$')
             .is_some_and(|id| !id.is_empty() && id.bytes().all(|c| c.is_ascii_digit()))
@@ -319,7 +367,7 @@ fn input(name: &str, request: &Request, path: &Path, hash: &str) -> Result<Value
     Ok(answer)
 }
 /// The native composer's draft and its hash, bound to this exact run.
-fn read_draft(record: &Value) -> Result<(Option<String>, String)> {
+pub(super) fn read_draft(record: &Value) -> Result<(Option<String>, String)> {
     let pane = string(record, "pane");
     let cursor_y = frame(record)?["cursor"]["y"].as_u64().ok_or("invalid terminal cursor")? as usize;
     let terminal = backend::current();
@@ -347,6 +395,66 @@ fn submit_draft(name: &str, request: &Request, path: &Path, hash: &str) -> Resul
     atomic(path, &answer.to_string())?;
     Ok(answer)
 }
+/// Task 98: refused when the composer holds anything but a paste Zerus left.
+pub(super) const NOT_OWN_PASTE: &str = "The Terminal draft is not a paste Zerus delivered; nothing was sent";
+
+/// Task 98: the delivery whose paste the composer still holds, unsubmitted:
+/// `hgs send` recorded the draft's hash right after its paste
+/// (`unsent_paste`) when its Enter did not go. The hash binds the run, the
+/// conversation, the pane, the process and the exact draft, so anything the
+/// person typed, or a paste of another run or conversation, never matches.
+pub(super) fn own_paste(record: &Value, draft: Option<&str>, draft_hash: &str) -> Result<String> {
+    let paste = &record["unsent_paste"];
+    let request = paste["request_id"].as_str().filter(|id| !id.is_empty());
+    if draft.is_some_and(|draft| !draft.trim().is_empty())
+        && paste["draft_hash"].as_str() == Some(draft_hash)
+        && paste["run_id"] == record["run_id"]
+        && paste["conversation_id"] == record["conversation_id"]
+        && request.is_some()
+    {
+        return Ok(request.unwrap_or_default().to_owned());
+    }
+    Err(NOT_OWN_PASTE.into())
+}
+
+/// Task 98: finishes a delivery's own leftover paste with Enter, once. The
+/// session record forgets the paste before the Enter goes, so a second
+/// request, or one after the person changed the draft, sends nothing.
+fn submit_own_paste(name: &str, request: &Request, path: &Path, hash: &str) -> Result<Value> {
+    let _guard = lock(None)?;
+    let mut record = checked(name, request)?;
+    let (draft, current) = read_draft(&record)?;
+    let delivery = own_paste(&record, draft.as_deref(), &current)?;
+    if let Some(fields) = record.as_object_mut() {
+        fields.remove("unsent_paste");
+    }
+    write(&mut record)?;
+    let mut answer = identity(request, name, "claimed");
+    answer["request_hash"] = json!(hash);
+    answer["delivery"] = json!(delivery);
+    atomic(path, &answer.to_string())?;
+    let result = backend::current().send(string(&record, "pane"), &[backend::Key::Named("Enter")]);
+    answer["status"] = json!(if result.is_ok() { "submitted" } else { "uncertain" });
+    if let Err(error) = result {
+        answer["error"] = json!(error);
+    }
+    atomic(path, &answer.to_string())?;
+    // The delivery itself now reads as submitted (or still uncertain).
+    if answer["status"] == "submitted" {
+        let receipt = absolute_root()?.join("input_receipts").join(format!("{delivery}.json"));
+        if let Ok(bytes) = std::fs::read(&receipt) {
+            if let Ok(mut original) = serde_json::from_slice::<Value>(&bytes) {
+                if original["status"] != "submitted" {
+                    original["status"] = json!("submitted");
+                    original["finished_by"] = json!(request.request_id);
+                    atomic(&receipt, &original.to_string())?;
+                }
+            }
+        }
+    }
+    Ok(answer)
+}
+
 pub(super) fn dispatch(args: &[String]) -> Result<i32> {
     if args.len() != 2 || args[1] != "--json" {
         return Err("usage: hgs terminal <session> --json".into());
@@ -430,6 +538,8 @@ pub(super) fn dispatch(args: &[String]) -> Result<i32> {
         } else {
             let delivered = if request.action == "submit_draft" {
                 submit_draft(name, &request, &path, &hash)
+            } else if request.action == "submit_own_paste" {
+                submit_own_paste(name, &request, &path, &hash)
             } else {
                 input(name, &request, &path, &hash)
             };

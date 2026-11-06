@@ -5,11 +5,12 @@ use crate::{
     config::Config,
     platform,
 };
-use rusqlite::{params, Connection, OptionalExtension, TransactionBehavior};
+use rusqlite::{params, Connection, OpenFlags, OptionalExtension, TransactionBehavior};
 use serde_json::{json, Value};
 use sha2::{Digest, Sha256};
+#[cfg(all(test, unix))]
+use std::fs;
 use std::{
-    fs,
     io::{self, Read},
     path::Path,
     time::Duration,
@@ -116,19 +117,42 @@ pub(crate) fn open(root: &Path) -> Result<Connection> {
     if !crate::private_stores::ensure(root, platform::Private::Directory)? {
         return Err(bad("The approval journal folder must be private"));
     }
+    // NOFOLLOW checks every component; resolve the verified directory only,
+    // preserving ancestor aliases while still refusing a linked journal.
+    let root = platform::canonical(root)?;
+    // The canonical folder is the one used from here: check it as well, so an
+    // ancestor changed after the first check never selects another folder.
+    if !platform::verify_private(&root, platform::Private::Directory)? {
+        return Err(bad("The approval journal folder must be private"));
+    }
     let path = root.join("journal.sqlite3");
-    let file = platform::refuse_link(platform::private_open(
-        fs::OpenOptions::new()
-            .create(true)
-            .truncate(false)
-            .read(true)
-            .write(true),
-    ))
-    .open(&path)?;
-    if !crate::private_stores::ensure_file(&path, &file)? {
+    // Never close a raw fd on an existing SQLite inode: another connection
+    // (including the actor's audit reader) may already hold POSIX locks.
+    if !path.try_exists()? {
+        let file = tempfile::NamedTempFile::new_in(&root)?;
+        platform::make_private(file.as_file())?;
+        if !platform::verify_private_file(file.as_file())? {
+            return Err(bad("The approval journal must be a private regular file"));
+        }
+        // Close before publishing, so even a concurrent first opener cannot
+        // acquire SQLite locks before our unrelated descriptor is gone.
+        match file.into_temp_path().persist_noclobber(&path) {
+            Ok(()) => (),
+            Err(error) if error.error.kind() == io::ErrorKind::AlreadyExists => (),
+            Err(error) => return Err(error.error.into()),
+        }
+    }
+    // WhiteWh fork: a store this user owns and Windows left too open is repaired, as every private store.
+    if !crate::private_stores::ensure(&path, platform::Private::File)? {
         return Err(bad("The approval journal must be a private regular file"));
     }
-    let db = Connection::open(path).map_err(bad)?;
+    let db = Connection::open_with_flags(
+        path,
+        OpenFlags::SQLITE_OPEN_READ_WRITE
+            | OpenFlags::SQLITE_OPEN_NO_MUTEX
+            | OpenFlags::SQLITE_OPEN_NOFOLLOW,
+    )
+    .map_err(bad)?;
     db.busy_timeout(Duration::from_secs(5)).map_err(bad)?;
     let version: i64 = db
         .query_row("PRAGMA user_version", [], |row| row.get(0))
@@ -148,7 +172,7 @@ pub(crate) fn open(root: &Path) -> Result<Connection> {
     if version == 0 {
         db.execute_batch("PRAGMA user_version=1").map_err(bad)?;
     }
-    platform::sync_dir(root)?;
+    platform::sync_dir(&root)?;
     if let Some(parent) = root.parent() {
         platform::sync_dir(parent)?;
     }
@@ -357,6 +381,9 @@ pub fn dispatch(config: &Config, target: &str, args: &[String], dry: bool) -> Re
     println!("{result}");
     Ok(0)
 }
+
+#[cfg(all(test, unix))]
+pub(crate) mod lock_tests;
 
 #[cfg(test)]
 mod tests {
@@ -569,6 +596,44 @@ mod tests {
         assert_eq!(begin(&mut db, &next).unwrap()["fresh"], true);
     }
 
+    #[cfg(unix)]
+    #[test]
+    fn writer_lock_survives_fresh_open_and_restart() {
+        let directory = tempfile::tempdir().unwrap();
+        let root = directory.path().join("audit");
+        let path = root.join("journal.sqlite3");
+        for restart in 0..2 {
+            println!("approval writer restart={restart}");
+            let mut db = open(&root).unwrap();
+            db.query_row("SELECT count(*) FROM attempts", [], |r| r.get::<_, i64>(0))
+                .unwrap();
+            lock_tests::assert_lock(&path, true);
+            let mut request = payload();
+            request["question"]["question_id"] = json!(format!("restart-{restart}"));
+            let reserved = begin(&mut db, &request).unwrap();
+            assert_eq!(reserved["fresh"], true);
+            finish(
+                &db,
+                &json!({"id":reserved["id"],"request_id":reserved["request_id"],
+                "status":"unknown","detail":"no native input in this control"}),
+            )
+            .unwrap();
+            lock_tests::assert_lock(&path, true);
+            drop(db);
+            lock_tests::assert_lock(&path, false);
+            let db = Connection::open(&path).unwrap();
+            assert_eq!(
+                db.query_row(
+                    "SELECT count(*) FROM attempts WHERE status='unknown'",
+                    [],
+                    |r| r.get::<_, i64>(0)
+                )
+                .unwrap(),
+                restart + 1
+            );
+        }
+    }
+
     #[test]
     fn kimi_tool_approvals_are_never_answered_automatically() {
         let mut q = question();
@@ -671,6 +736,39 @@ mod tests {
         }
         assert!(list(&db, &json!({"before":0})).is_err());
         assert!(list(&db, &json!({"before":20,"after":10})).is_err());
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn writer_allows_symlinked_ancestors_but_not_the_journal_leaf() {
+        use std::os::unix::fs::symlink;
+        let directory = tempfile::tempdir().unwrap();
+        let real = directory.path().join("real");
+        platform::private_dir(&real).unwrap();
+        let link = directory.path().join("link");
+        symlink(&real, &link).unwrap();
+        let root = link.join("audit");
+        let path = root.join("journal.sqlite3");
+        for _ in 0..2 {
+            let db = open(&root).unwrap();
+            assert_eq!(
+                db.query_row("PRAGMA user_version", [], |r| r.get::<_, i64>(0))
+                    .unwrap(),
+                1
+            );
+            lock_tests::assert_lock(&path, true);
+            drop(db);
+            lock_tests::assert_lock(&path, false);
+        }
+        let target = real.join("retained.sqlite3");
+        fs::rename(&path, &target).unwrap();
+        let original = fs::read(&target).unwrap();
+        symlink(&target, &path).unwrap();
+        assert!(
+            open(&root).is_err(),
+            "a valid journal reached through a leaf link is refused"
+        );
+        assert_eq!(fs::read(&target).unwrap(), original);
     }
 
     #[cfg(unix)]

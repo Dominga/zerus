@@ -6,6 +6,8 @@ import { object, taskItem, text, type Task } from "../ui/screens/tasks-ui";
 export interface TaskEntry {
   kind: string; text: string; at: number; actor: string; session: string; requestId: string; files: Fetched[];
   delivery: { mode: string; state: string; error: string };
+  /** Why a report was recorded without moving its task (hgs `execution::Stale`). */
+  stale?: string;
 }
 export interface TaskDetail extends Task { files: Fetched[]; log: TaskEntry[]; total: number; next?: string; started: boolean; dispatch: string }
 const actor = (v: unknown) => { const a = object(v); return a.kind === "agent" ? text(a.session) + (a.host ? ` @${text(a.host)}` : "") : "You"; };
@@ -20,8 +22,22 @@ export function taskDetail(raw: unknown, project: string, uuid: string): TaskDet
       const e = object(value), delivery = object(e.delivery);
       return { kind: text(e.kind), text: text(e.text), at: typeof e.at === "number" ? e.at : 0,
         actor: actor(e.actor), session: text(object(e.session).session), requestId: text(e.request_id), files: files(e.attachments),
-        delivery: { mode: text(delivery.mode), state: text(delivery.state), error: text(delivery.error) } };
+        delivery: { mode: text(delivery.mode), state: text(delivery.state), error: text(delivery.error) },
+        ...(text(e.stale) ? { stale: text(e.stale) } : {}) };
     }) };
+}
+
+/** The previous objects of `next`'s unchanged items, each used once, in `next`'s order. */
+function reuse<T>(previous: readonly T[], next: T[]): T[] {
+  const known = new Map<string, T[]>();
+  for (const item of previous) { const key = JSON.stringify(item); known.set(key, [...known.get(key) ?? [], item]); }
+  const kept = next.map((item) => known.get(JSON.stringify(item))?.shift() ?? item);
+  return kept.length === previous.length && kept.every((item, i) => item === previous[i]) ? previous as T[] : kept;
+}
+/** A refreshed page keeps the objects of its unchanged entries and files, so
+ * keyed lists keep their nodes: a refresh replaces only what changed (zerus-agv9). */
+function retained(previous: TaskDetail | undefined, next: TaskDetail): TaskDetail {
+  return previous ? { ...next, files: reuse(previous.files, next.files), log: reuse(previous.log, next.log) } : next;
 }
 
 /** One page and one running read. Board updates coalesce into one follow-up;
@@ -37,7 +53,7 @@ export function createTaskDetails(read: (project: string, uuid: string, before: 
     const target = selection, mine = generation, cursor = before();
     try {
       const reply = await read(target.project, target.uuid, cursor ?? null);
-      if (mine === generation) { setData(taskDetail(reply, target.project, target.uuid)); setError(""); }
+      if (mine === generation) { const next = taskDetail(reply, target.project, target.uuid); setData((previous) => retained(previous, next)); setError(""); }
     } catch (e) { if (mine === generation) setError(String(e)); }
     finally { running = false; if (mine === generation) setLoading(false); void drain(); }
   };

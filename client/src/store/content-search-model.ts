@@ -12,7 +12,8 @@ export interface SearchHit {
   at: number; role: string; snippet: string; event: ActivityEvent; content_truncated: boolean;
   session: ViewRow | null; group: string;
 }
-export interface SearchReply { query: string; results: SearchHit[]; truncated: boolean; unavailable_sessions: number; contents_unavailable?: boolean }
+/** `index_state` is the content index's coverage (core content_search.rs; empty without an index). */
+export interface SearchReply { query: string; results: SearchHit[]; truncated: boolean; unavailable_sessions: number; contents_unavailable?: boolean; index_state?: string }
 export interface SearchHost { computer: string; machine: string; online: boolean }
 export interface FoundHit { computer: string; machine: string; hit: SearchHit }
 export interface SearchPort {
@@ -20,6 +21,21 @@ export interface SearchPort {
   cancel(through: number): void;
   later?(run: () => void, ms: number): () => void;
   firstGeneration?: number;
+}
+
+/**
+ * Why a host's contents are partial (task 77): the index is unavailable or
+ * still building, so hgs searched recent history; some sessions have no
+ * readable history (no transcript, or one that was removed). A bare
+ * "contents unavailable" stays for a reply that names no reason.
+ */
+export function coverageNotes(machine: string, reply: Pick<SearchReply, "unavailable_sessions" | "contents_unavailable" | "index_state">): string[] {
+  const notes: string[] = [];
+  if (reply.index_state === "unavailable") notes.push(tr("%1: content index unavailable, recent history searched instead", machine));
+  else if (reply.index_state && reply.index_state !== "ready") notes.push(tr("%1: content index still building, recent history searched too", machine));
+  if (reply.unavailable_sessions > 0) notes.push(tr("%1: history unavailable in %2 of the searched sessions", machine, reply.unavailable_sessions));
+  if (!notes.length && reply.contents_unavailable) notes.push(`${machine}: contents unavailable`);
+  return notes;
 }
 
 /** One query, one bounded result window. Old jobs still consume their lane
@@ -47,7 +63,8 @@ export function createContentSearch(port: SearchPort) {
         batch(() => {
           setLimited((old) => old || reply.truncated || reply.results.length > room);
           setUnavailable((old) => Math.min(1_000_000, old + reply.unavailable_sessions));
-          if (reply.contents_unavailable || reply.unavailable_sessions) setErrors((old) => [...old, `${host.machine}: contents unavailable`].slice(0, SEARCH_HOSTS));
+          const notes = coverageNotes(host.machine, reply);
+          if (notes.length) setErrors((old) => [...old, ...notes].slice(0, SEARCH_HOSTS));
           setHits((old) => [...old, ...reply.results.slice(0, room).map((hit) => ({ computer: host.computer, machine: host.machine, hit }))]);
         });
       }).catch((error) => {

@@ -702,7 +702,18 @@ pub(crate) fn read_tokens(team: &Team, asks: &[Ask]) -> (TokenMap, bool) {
         }
         let session = team.member(&ask.member).and_then(|member| member.session.as_ref()).filter(|session| session.host.is_empty());
         let record = session.and_then(|session| {
-            records.entry(session.name.clone()).or_insert_with(|| super::super::storage::read(&session.name).ok()).clone()
+            records
+                .entry(session.name.clone())
+                .or_insert_with(|| {
+                    // A DeepSeek session has no storage record; its binding names the
+                    // conversation its recorded counter samples belong to.
+                    if super::super::dsh::exists(&session.name) {
+                        super::super::dsh::binding(&session.name).ok()
+                    } else {
+                        super::super::storage::read(&session.name).ok()
+                    }
+                })
+                .clone()
         });
         out.insert(key, record.and_then(|record| known(&super::super::usage::span_many(&record, &ask.windows))));
     }

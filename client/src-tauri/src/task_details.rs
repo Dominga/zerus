@@ -55,28 +55,147 @@ pub async fn task_details(
         let reply = tasks_write::run(&zerus_client_core::default_hgs(), &call)?;
         let raw = task_details::checked(&reply, &project, &task)?;
         let cache = composers.cache();
-        let presented = task_details::present(raw, |value| {
-            let decoded = tasks_write::decode_files(value);
-            if value
-                .as_array()
-                .is_some_and(|files| files.len() != decoded.len())
-            {
-                return Err("Task attachments could not be read.".into());
-            }
-            attachments::prepare(cache.root(), &decoded)?
+        let presented = task_details::present(raw, |value, entry| {
+            task_details::file_metadata(value)?
                 .into_iter()
-                .map(|file| {
-                    let (view, _) = fetcher.described(CachedAttachment {
-                        local_path: file.local_path,
-                        metadata: json!({"name":file.name,"mime":file.mime}),
-                    })?;
-                    serde_json::to_value(view).map_err(|e| e.to_string())
+                .enumerate()
+                .map(|(at, meta)| {
+                    // A copy already in the cache is shown at once; any other
+                    // file is read when the card asks for it.
+                    let mut view = match cached(cache.root(), &fetcher, &meta)? {
+                        Some(view) => view,
+                        None => json!({"path":"","name":meta.name,"mime":meta.mime,
+                            "bytes":meta.size,"thumbnail":false,"image_size":null}),
+                    };
+                    view["source"] = json!({"entry": entry, "file": at + 1, "meta": meta});
+                    Ok(view)
                 })
-                .collect::<Result<Vec<_>, _>>()
+                .collect::<Result<Vec<_>, String>>()
                 .map(Value::Array)
         })?;
         cache.prune_later(&composers.0.deps.spawn, Arc::new(HashSet::new));
         Ok(presented)
+    })
+    .await
+    .map_err(|e| e.to_string())?
+}
+
+/// The UUID of the task a deep link's short reference names: one bounded
+/// `hgs task get` on a blocking thread, within `task_details::REFERENCE_TIMEOUT`.
+/// Any failure or mismatch opens nothing.
+#[tauri::command]
+pub async fn task_reference(project: String, reference: String) -> Result<String, String> {
+    if crate::actions::blocked() {
+        return Err(crate::screens::REPLAY_NEEDS_HGS.into());
+    }
+    tauri::async_runtime::spawn_blocking(move || {
+        task_details::resolve(&zerus_client_core::default_hgs(), &project, &reference)
+    })
+    .await
+    .map_err(|e| e.to_string())?
+}
+
+/// The cached copy of a file a page named, by its digest folder and name, as
+/// `attachments::store_at` keeps it, when its size is the page's.
+///
+/// The size check is enough; the copy is not hashed again. The private cache
+/// is content-addressed: `store_at` names the folder after the SHA-256 of the
+/// bytes it writes, writes them through a temporary file and an atomic rename,
+/// and keeps folders owner-only and the file `0600`. `cached_at` canonicalizes
+/// the path, following a link, and accepts only a regular file inside the
+/// canonical root. While `store_at` is the only writer there, a copy in the
+/// page's digest folder holds the bytes `store_at` wrote for that digest. The
+/// size comparison is a cheap check against a copy truncated or replaced
+/// outside Zerus; hashing it again would read up to 10 MiB per listed file on
+/// every page.
+fn cached(
+    root: &std::path::Path,
+    fetcher: &Fetcher,
+    meta: &task_details::FileMeta,
+) -> Result<Option<Value>, String> {
+    let path = root
+        .join(&meta.sha256)
+        .join(attachments::cache_name(&meta.name));
+    let Some(path) = attachments::cached_at(root, &path)
+        .filter(|path| std::fs::metadata(path).is_ok_and(|m| m.len() == meta.size))
+    else {
+        return Ok(None);
+    };
+    let (view, _) = fetcher.described(CachedAttachment {
+        local_path: path,
+        metadata: json!({"name":meta.name,"mime":meta.mime}),
+    })?;
+    serde_json::to_value(view)
+        .map(Some)
+        .map_err(|e| e.to_string())
+}
+
+/// Files read on their own take turns: one `hgs task attachment` at a time.
+static FILE_READS: std::sync::Mutex<()> = std::sync::Mutex::new(());
+
+/// One file of the selected task or of one of its history entries, read
+/// when its card needs it and kept in the private cache. It must be the file
+/// its page named: the same task, entry, number, name, type, size and digest.
+#[tauri::command]
+pub async fn task_attachment_read(
+    composers: State<'_, Composers>,
+    fetcher: State<'_, Arc<Fetcher>>,
+    project: String,
+    task: String,
+    entry: Option<String>,
+    file: usize,
+    meta: task_details::FileMeta,
+) -> Result<Value, String> {
+    if crate::actions::blocked() {
+        return Err(crate::screens::REPLAY_NEEDS_HGS.into());
+    }
+    let call = task_details::attachment_call(&project, &task, entry.as_deref(), file)?;
+    if task_details::file_metadata(&json!([meta])).is_err() {
+        return Err("Invalid task attachment request.".into());
+    }
+    let (composers, fetcher) = (composers.inner().clone(), Arc::clone(fetcher.inner()));
+    tauri::async_runtime::spawn_blocking(move || {
+        let _turn = FILE_READS
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner());
+        let cache = composers.cache();
+        if let Some(view) = cached(cache.root(), &fetcher, &meta)? {
+            return Ok(view);
+        }
+        let reply = tasks_write::run(&zerus_client_core::default_hgs(), &call)?;
+        let read = task_details::checked_attachment(
+            &reply,
+            &project,
+            &task,
+            entry.as_deref(),
+            file,
+            &meta,
+        )?;
+        attachments::prepare(cache.root(), std::slice::from_ref(&read))
+            .map_err(|_| "Could not save the attachment.".to_owned())?;
+        cached(cache.root(), &fetcher, &meta)?
+            .ok_or_else(|| "Could not save the attachment.".into())
+    })
+    .await
+    .map_err(|e| e.to_string())?
+}
+
+/// One further page of a stage on the board, after the cursor of its window
+/// or of the previous page: `task list --stage --limit --after`, checked.
+#[tauri::command]
+pub async fn task_page(
+    project: String,
+    stage: String,
+    limit: usize,
+    after: Option<String>,
+) -> Result<Value, String> {
+    if crate::actions::blocked() {
+        return Err(crate::screens::REPLAY_NEEDS_HGS.into());
+    }
+    let call = zerus_client_core::tasks::page_call(&project, &stage, limit, after.as_deref())?;
+    tauri::async_runtime::spawn_blocking(move || {
+        let reply = tasks_write::run(&zerus_client_core::default_hgs(), &call)?;
+        zerus_client_core::tasks::checked_page(&reply, &project, &stage, limit)
     })
     .await
     .map_err(|e| e.to_string())?
@@ -108,6 +227,52 @@ pub async fn task_attachment_open(
 #[cfg(test)]
 mod tests {
     use super::*;
+    #[test]
+    fn a_named_file_shows_from_the_cache_only_when_its_copy_is_that_file() {
+        use sha2::Digest;
+        let root = crate::composer::tests::dir("task-file-cache");
+        let cache = root.join("cache");
+        let fetch: crate::composer::fetch::FetchFn = Arc::new(|_, _, _| Err("no fetch".into()));
+        let fetcher = Fetcher::new(
+            crate::composer::files::Cache::new(cache.clone()),
+            fetch,
+            Arc::new(|job| {
+                std::thread::spawn(job);
+            }),
+        );
+        let sha256 = format!("{:x}", sha2::Sha256::digest(b"hello"));
+        let meta = task_details::FileMeta {
+            name: "notes.txt".into(),
+            mime: "text/plain".into(),
+            reference: String::new(),
+            size: 5,
+            sha256: sha256.clone(),
+        };
+        assert_eq!(cached(&cache, &fetcher, &meta), Ok(None));
+        attachments::store_at(&cache, "notes.txt", b"hello").unwrap();
+        let view = cached(&cache, &fetcher, &meta).unwrap().unwrap();
+        assert_eq!(view["path"], format!("cache/{sha256}/notes.txt"));
+        assert_eq!(
+            (view["name"].as_str(), view["bytes"].as_u64()),
+            (Some("notes.txt"), Some(5))
+        );
+        for other in [
+            task_details::FileMeta {
+                size: 6,
+                ..meta.clone()
+            },
+            task_details::FileMeta {
+                name: "other.txt".into(),
+                ..meta.clone()
+            },
+            task_details::FileMeta {
+                sha256: "0".repeat(64),
+                ..meta.clone()
+            },
+        ] {
+            assert_eq!(cached(&cache, &fetcher, &other), Ok(None), "{other:?}");
+        }
+    }
     #[test]
     fn one_read_holds_its_lane_until_it_finishes() {
         let reads = TaskReads::default();

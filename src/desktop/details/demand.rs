@@ -25,6 +25,9 @@ pub(super) struct Spec {
     tail: Option<u32>,
     interval_ms: Option<u64>,
     refresh: Option<bool>,
+    /// Tasks: the first `window` rows of each stage, as the GUI asks
+    /// (zerus-1fb4q); carried to the native subscription, never dropped.
+    window: Option<u32>,
 }
 fn text(value: &str, max: usize) -> bool {
     !value.is_empty() && value.len() <= max && !value.chars().any(char::is_control)
@@ -37,6 +40,7 @@ impl Spec {
             after: self.after,
             tail: self.tail,
             interval_ms: self.interval_ms,
+            window: self.window,
             ..Subscription::default()
         };
         if let Some(session) = self.session {
@@ -61,6 +65,7 @@ impl Spec {
                     native.session.is_some()
                         && native.project.is_none()
                         && native.interval_ms.is_none()
+                        && native.window.is_none()
                         && self.refresh.is_none()
                         && native.after.is_none_or(|n| n >= 0)
                         && native.tail.is_none_or(|n| n <= 100),
@@ -78,6 +83,7 @@ impl Spec {
                         && native.project.is_none()
                         && native.after.is_none()
                         && native.tail.is_none()
+                        && native.window.is_none()
                         && native
                             .interval_ms
                             .is_none_or(|n| (1000..=600_000).contains(&n)),
@@ -91,6 +97,9 @@ impl Spec {
                     && native.after.is_none()
                     && native.tail.is_none()
                     && native.interval_ms.is_none()
+                    && native.window.is_none_or(|rows| {
+                        rows >= 1 && rows as usize <= zerus_watch_protocol::TASKS_WINDOW
+                    })
                     && self.refresh.is_none(),
                 "invalid tasks demand"
             ),
@@ -100,6 +109,7 @@ impl Spec {
                     && native.after.is_none()
                     && native.tail.is_none()
                     && native.interval_ms.is_none()
+                    && native.window.is_none()
                     && self.refresh.is_none(),
                 "invalid organization demand"
             ),

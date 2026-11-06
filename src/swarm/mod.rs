@@ -34,6 +34,61 @@ pub(crate) use replica::PROTOCOL as REPLICA_PROTOCOL;
 pub(crate) use replica_members::Incomplete;
 pub(crate) use replica_members::Member as ReplicaMember;
 
+/// Why a bounded read found nothing to use.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) enum Unread {
+    Missing,
+    /// A link, FIFO, device, socket or folder: refused, never opened to wait.
+    NotRegular,
+    Oversized,
+    Unreadable,
+}
+
+/// At most `cap` bytes of the regular file at `path`, without waiting
+/// (#1471 review): these reads run under the catalog and project locks
+/// against the caller's own deadline. Anything but a regular file at the
+/// path is refused before it is opened. A swap after that check still cannot
+/// follow, block or overrun: the open never follows a final link and never
+/// waits for a FIFO's writer (`O_NOFOLLOW | O_NONBLOCK`; Windows opens a
+/// reparse point itself), and the opened handle must be a regular file
+/// within the cap.
+pub(crate) fn read_regular(
+    path: &std::path::Path,
+    cap: u64,
+) -> std::result::Result<Vec<u8>, Unread> {
+    match std::fs::symlink_metadata(path) {
+        Ok(metadata) if !metadata.is_file() => return Err(Unread::NotRegular),
+        Ok(_) => {}
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => return Err(Unread::Missing),
+        Err(_) => return Err(Unread::Unreadable),
+    }
+    read_opened(path, cap)
+}
+
+/// `read_regular` past its check: the open and the handle's own checks.
+fn read_opened(path: &std::path::Path, cap: u64) -> std::result::Result<Vec<u8>, Unread> {
+    let mut options = std::fs::OpenOptions::new();
+    options.read(true);
+    let file = match crate::platform::no_follow(&mut options).open(path) {
+        Ok(file) => file,
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => return Err(Unread::Missing),
+        Err(_) => return Err(Unread::Unreadable),
+    };
+    let metadata = file.metadata().map_err(|_| Unread::Unreadable)?;
+    if !metadata.is_file() {
+        return Err(Unread::NotRegular);
+    }
+    // One byte past the cap tells an oversized file, even one still growing.
+    let mut bytes = Vec::new();
+    file.take(cap + 1)
+        .read_to_end(&mut bytes)
+        .map_err(|_| Unread::Unreadable)?;
+    if bytes.len() as u64 > cap {
+        return Err(Unread::Oversized);
+    }
+    Ok(bytes)
+}
+
 /// A verified member that receives the projects' tasks (its hgs speaks the
 /// replica protocol), with what this computer last learned of its replica.
 pub(crate) struct TaskMember {

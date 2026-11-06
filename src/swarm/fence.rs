@@ -645,6 +645,8 @@ pub fn task(config: &Config, request: TaskRequest) -> Result<Value> {
 pub struct Proof {
     pub project: String,
     pub task: String,
+    #[serde(skip)]
+    pub swarm: String,
     pub version: Version,
     pub incarnation: String,
     #[serde(skip)]
@@ -823,6 +825,7 @@ fn prove_over(
         return Ok(Ok(Proof {
             project: project.to_owned(),
             task: uuid.to_owned(),
+            swarm: first.swarm.clone(),
             version,
             incarnation: first.incarnation(),
             view: first.view.clone(),
@@ -897,6 +900,275 @@ impl Proof {
         drop(catalog);
         Ok(Ok(result))
     }
+}
+
+/// The certificate's format; a record in another one is not reused.
+const CERTIFICATE_FORMAT: u64 = 1;
+
+/// The once-per-task certificate (C3e): the durable record of a proof that
+/// passed its final admission, reused with NO network while nothing it binds
+/// has changed. Under the owner's cutover boundary (every writer at least the
+/// first floor-aware release), a task once proved at version V stays proved
+/// while its local copy holds V and the membership this computer sees is the
+/// one certified. It is a schema-barrier record only: never consent, never
+/// send authority, never cached task state.
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+pub struct Certificate {
+    pub format: u64,
+    pub task: String,
+    pub project: String,
+    pub swarm: String,
+    pub version: Version,
+    /// This computer's membership view (`view`): its node, peers, catalog
+    /// machines and membership generation.
+    pub view: String,
+    pub node: String,
+    pub store: String,
+    pub root: String,
+    /// Every node that confirmed the proof, with the store it answered from.
+    pub nodes: BTreeMap<String, String>,
+    /// This computer's configuration identity (`configuration`).
+    pub configuration: String,
+    /// When it was written, in milliseconds (information only).
+    pub at: u64,
+    /// SHA-256 of the record with this field empty: a record changed since
+    /// `certify` wrote it is not reused.
+    pub digest: String,
+}
+
+fn certificate_path(dir: &std::path::Path, uuid: &str) -> std::path::PathBuf {
+    dir.join("fence").join(format!("{uuid}.json"))
+}
+
+/// The largest certificate written or read (#1471 review). A real record
+/// holds at most the discovery bound's nodes and the task's version, far
+/// below this.
+const CERTIFICATE_BYTES: u64 = 1 << 20;
+
+/// The task's certificate, or why it cannot be reused. The read never waits
+/// and never reads past its bound (#1471 review): it runs under the catalog
+/// and project locks, and `--check` runs it while writers are off. Only a
+/// record exactly as `certify` wrote it, and well-formed, is used.
+fn read_certificate(path: &std::path::Path) -> std::result::Result<Certificate, &'static str> {
+    use super::Unread;
+    let bytes = super::read_regular(path, CERTIFICATE_BYTES).map_err(|unread| match unread {
+        Unread::Missing => "no_certificate",
+        Unread::NotRegular => "certificate_not_regular",
+        Unread::Oversized => "certificate_oversized",
+        Unread::Unreadable => "certificate_unreadable",
+    })?;
+    serde_json::from_slice::<Certificate>(&bytes)
+        .ok()
+        .filter(Certificate::intact)
+        .ok_or("certificate_unreadable")
+}
+
+/// This computer's configuration identity: the desktop's Location identity
+/// of its canonical state and configuration folders (desktop-u on #1471).
+/// Another configuration sharing this state never inherits a certificate.
+fn configuration(config: &Config) -> Option<String> {
+    zerus_desktop_migration::configuration(&config.state, &config.dir).ok()
+}
+
+impl Certificate {
+    /// The digest of everything else in the record.
+    fn digest_of(&self) -> String {
+        let mut body = self.clone();
+        body.digest.clear();
+        format!(
+            "{:x}",
+            Sha256::digest(serde_json::to_vec(&body).unwrap_or_default())
+        )
+    }
+
+    /// Exactly as `certify` wrote it, and well-formed (desktop-u and P2
+    /// zerus-9d901 on #1471): its digest, its format, a non-empty canonical
+    /// version, and every certified node a canonical UUID other than this
+    /// one, with a canonical store. The task, project, swarm, view, node,
+    /// store, root and configuration are each compared with this computer's
+    /// current ones by the reuse itself.
+    fn intact(&self) -> bool {
+        self.digest == self.digest_of()
+            && self.format == CERTIFICATE_FORMAT
+            && !self.version.is_empty()
+            && canonical_version(&self.version).as_ref() == Some(&self.version)
+            && self.nodes.iter().all(|(node, store)| {
+                node != &self.node && ids::is_uuid(node) && ids::is_uuid(store)
+            })
+    }
+}
+
+impl Proof {
+    /// Writes this proof's certificate inside its final admission: in the
+    /// same critical section that reads every binding again, so a record is
+    /// written only for a proof that still holds. The record replaces any
+    /// earlier one for the task, by an atomic rename.
+    /// Its caller is the attempt writer (activation); nothing writes a
+    /// certificate before then, and `--check` only reads one.
+    #[allow(dead_code)]
+    pub(crate) fn certify(
+        &self,
+        config: &Config,
+        deadline: Instant,
+    ) -> Result<std::result::Result<Certificate, Closed>> {
+        let store = self.me.store.clone().unwrap_or_default();
+        let Some(configuration) = configuration(config) else {
+            return closed(Some(&self.me.node), "changed_identity");
+        };
+        let mut certificate = Certificate {
+            format: CERTIFICATE_FORMAT,
+            task: self.task.clone(),
+            project: self.project.clone(),
+            swarm: self.swarm.clone(),
+            version: self.version.clone(),
+            view: self.view.clone(),
+            node: self.me.node.clone(),
+            store,
+            root: self.me.root.clone(),
+            nodes: self.nodes.clone(),
+            configuration,
+            at: super::replica_members::now(),
+            digest: String::new(),
+        };
+        certificate.digest = certificate.digest_of();
+        // Never a record that its reuse would refuse.
+        if !certificate.intact() {
+            return closed(None, "malformed");
+        }
+        let bytes = serde_json::to_vec(&certificate)?;
+        if bytes.len() as u64 > CERTIFICATE_BYTES {
+            return closed(None, "certificate_oversized");
+        }
+        self.admit(config, deadline, |admitted, _| {
+            use std::io::Write;
+            let path = certificate_path(admitted.dir(), &self.task);
+            std::fs::create_dir_all(path.parent().expect("a fence folder"))?;
+            // A fresh file only: whatever was left at the partial path goes,
+            // and creating it never follows a link or waits on a FIFO.
+            let partial = path.with_extension("json.partial");
+            match std::fs::remove_file(&partial) {
+                Err(error) if error.kind() != std::io::ErrorKind::NotFound => {
+                    return Err(error.into())
+                }
+                _ => {}
+            }
+            let mut file = std::fs::OpenOptions::new()
+                .write(true)
+                .create_new(true)
+                .open(&partial)?;
+            file.write_all(&bytes)?;
+            drop(file);
+            std::fs::rename(&partial, &path)?;
+            Ok(certificate.clone())
+        })
+    }
+}
+
+/// Reuses the task's certificate with no network: the same final admission
+/// as a fresh proof (the catalog lock, the project lock, then the store's
+/// admission, each within `deadline`), which reads again everything the
+/// certificate binds before `then` runs:
+/// - the record, readable, of this format, for this task, project and swarm;
+/// - this computer's membership view, which an enrolment, a disconnection or
+///   a new catalog machine changes;
+/// - this computer's store and replica root;
+/// - every certified member's last observed store (C2's records, used only
+///   to invalidate: a different or unknown store refuses);
+/// - the hold, for a task that records no attempt yet;
+/// - the task: holding the certified version, with `fence_ready`.
+///
+/// Anything else is refused with the first reason; the caller then proves
+/// the fence afresh, never falling back to a legacy route.
+pub(crate) fn admit_certified<R>(
+    config: &Config,
+    project: &str,
+    uuid: &str,
+    deadline: Instant,
+    then: impl FnOnce(&mut Admitted<'_>, &mut TaskDoc) -> Result<R>,
+) -> Result<std::result::Result<R, Closed>> {
+    let Some(catalog) = LockedStore::load_until(config, deadline)? else {
+        return closed(None, "busy");
+    };
+    let now = view(&catalog);
+    let swarm = catalog.data.catalog.swarm_id.clone();
+    let node = catalog.data.node_id.clone();
+    let root = config.state.join("replica");
+    let own = match ProjectStore::store_id_until(&root, deadline) {
+        Ok(Some(own)) => own,
+        Ok(None) => return closed(None, "busy"),
+        Err(_) => return closed(Some(&node), "changed_identity"),
+    };
+    let Some(store) = ProjectStore::open_within(&root, project, left(deadline))? else {
+        return closed(None, "busy");
+    };
+    let certificate = match read_certificate(&certificate_path(store.dir(), uuid)) {
+        Ok(certificate) => certificate,
+        Err(reason) => return closed(None, reason),
+    };
+    if certificate.format != CERTIFICATE_FORMAT
+        || certificate.task != uuid
+        || certificate.project != project
+        || certificate.swarm != swarm
+    {
+        return closed(None, "certificate_unreadable");
+    }
+    if certificate.view != now {
+        return closed(None, "membership_changed");
+    }
+    if certificate.node != node
+        || certificate.store != own
+        || certificate.root != root.display().to_string()
+        || configuration(config).as_ref() != Some(&certificate.configuration)
+    {
+        return closed(Some(&node), "changed_identity");
+    }
+    // The swarm's member records only refuse, and their absence is no
+    // evidence (desktop-u on #1471): a damaged record file refuses, and so
+    // does every direct member without a record of its current enrolment.
+    // Each one's record must agree with the certificate both ways: a
+    // certified member with the store it answered from, or one recorded with
+    // no replica and not certified. An indirect member's store is not
+    // observable offline (the documented boundary).
+    let Ok(records) = super::replica_members::read_strict(config) else {
+        return closed(None, "members_unreadable");
+    };
+    for (alias, peer) in &catalog.data.peers {
+        let record = records.get(alias).filter(|record| record.node == peer.node);
+        let agrees = match (record, certificate.nodes.get(&peer.node)) {
+            (Some(record), Some(store)) => {
+                !record.no_replica && record.store.as_deref() == Some(store.as_str())
+            }
+            (Some(record), None) => record.no_replica,
+            (None, _) => false,
+        };
+        if !agrees {
+            return closed(Some(&peer.node), "member_store_changed");
+        }
+    }
+    let held = store.project()?.cutover_hold().is_some_and(|hold| hold.on);
+    let Some(mut admitted) = store.admit_until(deadline) else {
+        return closed(None, "busy");
+    };
+    let Ok(mut task) = admitted.load(uuid) else {
+        return closed(None, "damaged");
+    };
+    if held && !task.executes_attempts() {
+        return closed(None, "held");
+    }
+    if let Some(reason) = task.fence_ready() {
+        return closed(None, reason);
+    }
+    if !task
+        .applied_version()
+        .is_some_and(|version| version_includes(&version, &certificate.version))
+    {
+        return closed(None, "changed_version");
+    }
+    let result = then(&mut admitted, &mut task)?;
+    drop(admitted);
+    drop(store);
+    drop(catalog);
+    Ok(Ok(result))
 }
 
 #[cfg(test)]
@@ -1456,6 +1728,559 @@ mod tests {
         assert!(waited >= Duration::from_millis(100) && waited < Duration::from_secs(2), "{waited:?}");
     }
 
+    /// A floored task over A-B-C, proved and certified at a.
+    fn certified(members: &Members) -> (String, Certificate) {
+        let task = floored(members, "a");
+        let config = &members.configs["a"];
+        let net = InProcess::new(members, Faults::default());
+        let proof = prove(config, &net, "p", task.uuid(), soon())
+            .unwrap()
+            .1
+            .unwrap();
+        let certificate = proof.certify(config, soon()).unwrap().unwrap();
+        // A swarm sync's verified hello records each direct member's store.
+        for alias in &config.peers {
+            let hello = transport::hello(&members.configs[alias], false).unwrap();
+            let observed = super::super::replica_members::Observed::of(&members.ids[alias], &hello);
+            super::super::replica_members::seen(config, alias, &observed, 1).unwrap();
+        }
+        (task.uuid().to_owned(), certificate)
+    }
+
+    fn record_path(members: &Members, uuid: &str) -> std::path::PathBuf {
+        let store = ProjectStore::open(&members.configs["a"].state.join("replica"), "p").unwrap();
+        certificate_path(store.dir(), uuid)
+    }
+
+    /// Rewrites the record through `change`, with its digest made whole
+    /// again: what remains to refuse it is the record's meaning.
+    fn rewrite(members: &Members, uuid: &str, change: impl FnOnce(&mut Certificate)) {
+        let path = record_path(members, uuid);
+        let mut certificate: Certificate =
+            serde_json::from_slice(&std::fs::read(&path).unwrap()).unwrap();
+        change(&mut certificate);
+        certificate.digest = certificate.digest_of();
+        std::fs::write(&path, serde_json::to_vec(&certificate).unwrap()).unwrap();
+    }
+
+    #[cfg(unix)]
+    fn fifo(path: &std::path::Path) {
+        let _ = std::fs::remove_file(path);
+        let path = std::ffi::CString::new(path.as_os_str().as_encoded_bytes()).unwrap();
+        assert_eq!(unsafe { libc::mkfifo(path.as_ptr(), 0o600) }, 0);
+    }
+
+    /// `read` on its own thread. A read still waiting after `limit` is
+    /// released by opening `fifo` for writing, and the test fails: a
+    /// regression fails here rather than hanging the suite.
+    #[cfg(unix)]
+    fn returns_within<T: Send + 'static>(
+        limit: Duration,
+        fifo: &std::path::Path,
+        read: impl FnOnce() -> T + Send + 'static,
+    ) -> T {
+        let (sent, received) = std::sync::mpsc::channel();
+        let reader = std::thread::spawn(move || {
+            let _ = sent.send(read());
+        });
+        match received.recv_timeout(limit) {
+            Ok(value) => {
+                reader.join().unwrap();
+                value
+            }
+            Err(_) => {
+                let _ = std::fs::OpenOptions::new().write(true).open(fifo);
+                let _ = reader.join();
+                panic!("the read waited on a FIFO for more than {limit:?}");
+            }
+        }
+    }
+
+    /// `admit_certified` at a, within `budget`, off the test's thread.
+    #[cfg(unix)]
+    fn reuse_within(
+        members: &Members,
+        uuid: &str,
+        budget: Duration,
+        fifo: &std::path::Path,
+    ) -> (std::result::Result<(), Closed>, usize, Duration) {
+        let config = members.configs["a"].clone();
+        let uuid = uuid.to_owned();
+        returns_within(budget * 5, fifo, move || {
+            let started = Instant::now();
+            let mut runs = 0;
+            let reused = admit_certified(&config, "p", &uuid, started + budget, |_, _| {
+                runs += 1;
+                Ok(())
+            })
+            .unwrap();
+            (reused, runs, started.elapsed())
+        })
+    }
+
+    fn reuse(members: &Members, uuid: &str) -> (std::result::Result<(), Closed>, usize) {
+        let mut runs = 0;
+        let reused = admit_certified(&members.configs["a"], "p", uuid, soon(), |_, task| {
+            runs += 1;
+            assert_eq!(task.fence_ready(), None);
+            Ok(())
+        })
+        .unwrap();
+        (reused, runs)
+    }
+
+    /// C3e: a proved task's certificate is reused through the same final
+    /// admission with no network at all (`admit_certified` takes no
+    /// transport), binding the proof's version, this computer's membership
+    /// view, store and root, and every node with its store.
+    #[test]
+    fn a_certificate_is_reused_offline_while_everything_it_binds_holds() {
+        let members = chain_abc();
+        let (uuid, certificate) = certified(&members);
+        assert_eq!(certificate.format, CERTIFICATE_FORMAT);
+        assert_eq!(
+            certificate.nodes.keys().cloned().collect::<BTreeSet<_>>(),
+            BTreeSet::from([members.ids["b"].clone(), members.ids["c"].clone()])
+        );
+        assert_eq!(reuse(&members, &uuid), (Ok(()), 1));
+        // A later change of the task by this build keeps it: the copy still
+        // holds the certified version.
+        let a = ProjectStore::open(&members.configs["a"].state.join("replica"), "p").unwrap();
+        let mut task = a.load(&uuid).unwrap();
+        task.comment("after the certificate", &zerus_replica::Actor::Person, 9)
+            .unwrap();
+        a.save(&mut task).unwrap();
+        drop(a);
+        assert_eq!(reuse(&members, &uuid), (Ok(()), 1));
+    }
+
+    /// C3e: anything the certificate binds that changed refuses its reuse,
+    /// and nothing runs: a new peer, this computer's membership ABA, its
+    /// replaced store, a member observed since with another store, a lost or
+    /// corrupt record, a copy that does not hold the certified version, and
+    /// the hold for a first attempt.
+    #[test]
+    fn a_certificate_is_refused_when_anything_it_binds_changed() {
+        let refused = |change: &dyn Fn(&Members, &str)| -> &'static str {
+            let members = chain_abc();
+            let (uuid, _) = certified(&members);
+            change(&members, &uuid);
+            let (reused, runs) = reuse(&members, &uuid);
+            assert_eq!(runs, 0, "nothing ran on a refusal");
+            reused.unwrap_err().reason
+        };
+        let a = |members: &Members| members.configs["a"].clone();
+        assert_eq!(
+            refused(&|members, _| {
+                let mut store = LockedStore::load(&a(members)).unwrap();
+                store.data.peers.insert(
+                    "d".into(),
+                    Peer {
+                        node: "dddddddd-dddd-4ddd-8ddd-dddddddddddd".into(),
+                        ..Peer::default()
+                    },
+                );
+                store.save().unwrap();
+            }),
+            "membership_changed"
+        );
+        assert_eq!(
+            refused(&|members, _| {
+                let mut store = LockedStore::load(&a(members)).unwrap();
+                let peer = store.data.peers.remove("b").unwrap();
+                store.save().unwrap();
+                store.data.peers.insert("b".into(), peer);
+                store.save().unwrap();
+            }),
+            "membership_changed"
+        );
+        assert_eq!(
+            refused(&|members, _| {
+                std::fs::remove_file(a(members).state.join("replica").join("store-id")).unwrap();
+            }),
+            "changed_identity"
+        );
+        assert_eq!(
+            refused(&|members, _| {
+                let hello = json!({"replica": {"protocol": PROTOCOL, "task_schema": TASK_SCHEMA,
+                                           "store": "77777777-7777-4777-8777-777777777777"}});
+                let observed =
+                    super::super::replica_members::Observed::of(&members.ids["b"], &hello);
+                super::super::replica_members::seen(&a(members), "b", &observed, 99).unwrap();
+            }),
+            "member_store_changed"
+        );
+        let record = |members: &Members, uuid: &str| {
+            let store = ProjectStore::open(&a(members).state.join("replica"), "p").unwrap();
+            certificate_path(store.dir(), uuid)
+        };
+        assert_eq!(
+            refused(&|members, uuid| std::fs::remove_file(record(members, uuid)).unwrap()),
+            "no_certificate"
+        );
+        assert_eq!(
+            refused(&|members, uuid| std::fs::write(record(members, uuid), b"{not json").unwrap()),
+            "certificate_unreadable"
+        );
+        // A whole record naming another task is not this task's certificate.
+        assert_eq!(
+            refused(&|members, uuid| rewrite(members, uuid, |certificate| {
+                certificate.task = "eeeeeeee-eeee-4eee-8eee-eeeeeeeeeeee".into();
+            })),
+            "certificate_unreadable"
+        );
+        assert_eq!(
+            refused(&|members, uuid| rewrite(members, uuid, |certificate| {
+                for count in certificate.version.values_mut() {
+                    *count += 1000;
+                }
+            })),
+            "changed_version"
+        );
+        assert_eq!(
+            refused(&|members, _| {
+                let store = ProjectStore::open(&a(members).state.join("replica"), "p").unwrap();
+                let mut doc = store.project().unwrap();
+                doc.set_cutover_hold(true, &zerus_replica::Actor::Person, 2)
+                    .unwrap();
+                store.save_project(&doc).unwrap();
+            }),
+            "held"
+        );
+    }
+
+    /// desktop-u on #1471: losing the member records never reopens a
+    /// certificate. A damaged record file refuses rather than reading as no
+    /// change, and a direct member with no record of its current enrolment
+    /// refuses: the records' absence is no evidence.
+    #[test]
+    fn missing_or_damaged_member_records_refuse_the_certificate() {
+        let members = chain_abc();
+        let (uuid, _) = certified(&members);
+        let a = &members.configs["a"];
+        let file = a
+            .dir
+            .join("swarm")
+            .join(super::super::replica_members::FILE);
+        let changed = json!({"replica": {"protocol": PROTOCOL, "task_schema": TASK_SCHEMA,
+                                         "store": "77777777-7777-4777-8777-777777777777"}});
+        let observed = super::super::replica_members::Observed::of(&members.ids["b"], &changed);
+        super::super::replica_members::seen(a, "b", &observed, 99).unwrap();
+        let refused = |members: &Members| {
+            let (reused, runs) = reuse(members, &uuid);
+            assert_eq!(runs, 0, "nothing ran on a refusal");
+            reused.unwrap_err()
+        };
+        assert_eq!(refused(&members).reason, "member_store_changed");
+        std::fs::write(&file, b"{damaged").unwrap();
+        assert_eq!(refused(&members).reason, "members_unreadable");
+        let oversized = vec![b' '; 4 * 1024 * 1024 + 1];
+        std::fs::write(&file, oversized).unwrap();
+        assert_eq!(refused(&members).reason, "members_unreadable");
+        std::fs::remove_file(&file).unwrap();
+        let missing = refused(&members);
+        assert_eq!(
+            (missing.node.as_deref(), missing.reason),
+            (Some(members.ids["b"].as_str()), "member_store_changed")
+        );
+        // A record of b written before b's enrolment changed is not b's.
+        let observed = super::super::replica_members::Observed::of(
+            &members.ids["b"],
+            &transport::hello(&members.configs["b"], false).unwrap(),
+        );
+        super::super::replica_members::seen(a, "b", &observed, 100).unwrap();
+        assert_eq!(
+            reuse(&members, &uuid),
+            (Ok(()), 1),
+            "b's record again admits"
+        );
+        let mut records: Value = serde_json::from_slice(&std::fs::read(&file).unwrap()).unwrap();
+        records["b"]["node"] = json!("eeeeeeee-eeee-4eee-8eee-eeeeeeeeeeee");
+        std::fs::write(&file, serde_json::to_vec(&records).unwrap()).unwrap();
+        assert_eq!(refused(&members).reason, "member_store_changed");
+        // A member recorded with no replica must not be certified.
+        records["b"]["node"] = json!(members.ids["b"]);
+        records["b"]["no_replica"] = json!(true);
+        std::fs::write(&file, serde_json::to_vec(&records).unwrap()).unwrap();
+        assert_eq!(refused(&members).reason, "member_store_changed");
+    }
+
+    /// desktop-u on #1471: another configuration sharing this state, its
+    /// replica root, node and membership view, never inherits a certificate.
+    #[test]
+    fn another_configuration_never_inherits_a_certificate() {
+        fn copy(from: &std::path::Path, to: &std::path::Path) {
+            std::fs::create_dir_all(to).unwrap();
+            for entry in std::fs::read_dir(from).unwrap() {
+                let entry = entry.unwrap();
+                let target = to.join(entry.file_name());
+                if entry.file_type().unwrap().is_dir() {
+                    copy(&entry.path(), &target);
+                } else {
+                    std::fs::copy(entry.path(), target).unwrap();
+                }
+            }
+        }
+        let members = chain_abc();
+        let (uuid, certificate) = certified(&members);
+        let config = &members.configs["a"];
+        assert_eq!(
+            configuration(config).as_ref(),
+            Some(&certificate.configuration)
+        );
+        assert_eq!(
+            reuse(&members, &uuid),
+            (Ok(()), 1),
+            "its own configuration admits"
+        );
+        let mut other = config.clone();
+        other.dir = config.dir.with_file_name("other-config");
+        copy(&config.dir, &other.dir);
+        assert_ne!(configuration(&other), configuration(config));
+        // a itself now refuses: a new writer joined its membership. The copy
+        // still holds the view, store, root and node the record names.
+        let mut catalog = LockedStore::load(config).unwrap();
+        catalog.data.peers.insert(
+            "new-writer".into(),
+            Peer {
+                node: "dddddddd-dddd-4ddd-8ddd-dddddddddddd".into(),
+                ..Peer::default()
+            },
+        );
+        catalog.save().unwrap();
+        drop(catalog);
+        assert_eq!(
+            reuse(&members, &uuid).0.unwrap_err().reason,
+            "membership_changed"
+        );
+        let mut runs = 0;
+        let reused = admit_certified(&other, "p", &uuid, soon(), |_, _| {
+            runs += 1;
+            Ok(())
+        })
+        .unwrap();
+        assert_eq!(runs, 0, "another configuration never inherits it");
+        assert_eq!(reused.unwrap_err().reason, "changed_identity");
+    }
+
+    /// review-win-c and desktop-u on #1471: no FIFO at the certificate's
+    /// path or the member records' makes the reuse wait, under the locks,
+    /// past its own deadline; a link or folder is refused unopened.
+    #[cfg(unix)]
+    #[test]
+    fn an_irregular_record_is_refused_within_the_deadline() {
+        let budget = Duration::from_secs(2);
+        let members = chain_abc();
+        let (uuid, _) = certified(&members);
+        let path = record_path(&members, &uuid);
+        let kept = std::fs::read(&path).unwrap();
+        fifo(&path);
+        let (reused, runs, took) = reuse_within(&members, &uuid, budget, &path);
+        assert_eq!(
+            (reused.unwrap_err().reason, runs),
+            ("certificate_not_regular", 0)
+        );
+        assert!(took < budget, "{took:?}");
+        // A link to a whole record, or a folder, is not the record.
+        std::fs::remove_file(&path).unwrap();
+        let elsewhere = path.with_extension("elsewhere");
+        std::fs::write(&elsewhere, &kept).unwrap();
+        std::os::unix::fs::symlink(&elsewhere, &path).unwrap();
+        assert_eq!(
+            reuse(&members, &uuid).0.unwrap_err().reason,
+            "certificate_not_regular"
+        );
+        std::fs::remove_file(&path).unwrap();
+        std::fs::create_dir(&path).unwrap();
+        assert_eq!(
+            reuse(&members, &uuid).0.unwrap_err().reason,
+            "certificate_not_regular"
+        );
+        std::fs::remove_dir(&path).unwrap();
+        std::fs::write(&path, &kept).unwrap();
+        assert_eq!(reuse(&members, &uuid), (Ok(()), 1));
+        // The member records are read the same way.
+        let file = members.configs["a"]
+            .dir
+            .join("swarm")
+            .join(super::super::replica_members::FILE);
+        fifo(&file);
+        let (reused, runs, took) = reuse_within(&members, &uuid, budget, &file);
+        assert_eq!(
+            (reused.unwrap_err().reason, runs),
+            ("members_unreadable", 0)
+        );
+        assert!(took < budget, "{took:?}");
+    }
+
+    /// Past the check on the path, the open itself never waits on a FIFO
+    /// and never follows a final link: a swap after the check is refused.
+    #[cfg(unix)]
+    #[test]
+    fn the_bounded_open_never_waits_or_follows_after_its_check() {
+        use super::super::{read_opened, Unread};
+        let dir = tempfile::tempdir().unwrap();
+        let target = dir.path().join("target");
+        std::fs::write(&target, b"{}").unwrap();
+        assert_eq!(read_opened(&target, 2), Ok(b"{}".to_vec()));
+        assert_eq!(read_opened(&target, 1), Err(Unread::Oversized));
+        let link = dir.path().join("link");
+        std::os::unix::fs::symlink(&target, &link).unwrap();
+        assert_eq!(read_opened(&link, 2), Err(Unread::Unreadable));
+        let pipe = dir.path().join("pipe");
+        fifo(&pipe);
+        let opened = pipe.clone();
+        let read = returns_within(Duration::from_secs(5), &pipe, move || {
+            read_opened(&opened, 2)
+        });
+        assert_eq!(read, Err(Unread::NotRegular));
+    }
+
+    /// The record is bounded: one at the cap is read, one byte more refused.
+    #[test]
+    fn the_certificate_read_stops_at_its_cap() {
+        let members = chain_abc();
+        let (uuid, _) = certified(&members);
+        let path = record_path(&members, &uuid);
+        let mut bytes = std::fs::read(&path).unwrap();
+        bytes.resize(CERTIFICATE_BYTES as usize, b' ');
+        std::fs::write(&path, &bytes).unwrap();
+        assert_eq!(reuse(&members, &uuid), (Ok(()), 1));
+        bytes.push(b' ');
+        std::fs::write(&path, &bytes).unwrap();
+        let (reused, runs) = reuse(&members, &uuid);
+        assert_eq!(
+            (reused.unwrap_err().reason, runs),
+            ("certificate_oversized", 0)
+        );
+    }
+
+    /// desktop-u and review-win-c (P2 zerus-9d901) on #1471: a record is
+    /// used only exactly as written and well-formed. One flipped bit that
+    /// leaves valid JSON and a canonical UUID refuses through the digest;
+    /// with the digest made whole again, an empty or negative version, a
+    /// certified node another than a UUID or this computer, and an erased
+    /// direct member each refuse before anything runs.
+    #[test]
+    fn a_changed_or_malformed_certificate_is_never_used() {
+        let refused = |change: &dyn Fn(&Members, &str)| -> &'static str {
+            let members = chain_abc();
+            let (uuid, _) = certified(&members);
+            change(&members, &uuid);
+            let (reused, runs) = reuse(&members, &uuid);
+            assert_eq!(runs, 0, "nothing ran on a refusal");
+            reused.unwrap_err().reason
+        };
+        // desktop-u's probe: after b's store drift refuses, ONE flipped bit
+        // in b's certified node, still valid JSON and a canonical UUID.
+        assert_eq!(
+            refused(&|members, uuid| {
+                let a = &members.configs["a"];
+                let drift = json!({"replica": {"protocol": PROTOCOL, "task_schema": TASK_SCHEMA,
+                                               "store": "77777777-7777-4777-8777-777777777777"}});
+                let observed =
+                    super::super::replica_members::Observed::of(&members.ids["b"], &drift);
+                super::super::replica_members::seen(a, "b", &observed, 99).unwrap();
+                assert_eq!(
+                    reuse(members, uuid).0.unwrap_err().reason,
+                    "member_store_changed"
+                );
+                let path = record_path(members, uuid);
+                let before = std::fs::read(&path).unwrap();
+                let mut certificate: Certificate = serde_json::from_slice(&before).unwrap();
+                let key = &members.ids["b"];
+                let store = certificate.nodes.remove(key).unwrap();
+                let mut flipped = key.as_bytes().to_vec();
+                let last = flipped.len() - 1;
+                for mask in [1u8, 2, 4, 8] {
+                    let next = flipped[last] ^ mask;
+                    if next.is_ascii_hexdigit() && !next.is_ascii_uppercase() {
+                        flipped[last] = next;
+                        break;
+                    }
+                }
+                let flipped = String::from_utf8(flipped).unwrap();
+                assert!(ids::is_uuid(&flipped) && &flipped != key);
+                certificate.nodes.insert(flipped, store);
+                let after = serde_json::to_vec(&certificate).unwrap();
+                let bits: u32 = before
+                    .iter()
+                    .zip(&after)
+                    .map(|(x, y)| (x ^ y).count_ones())
+                    .sum();
+                assert_eq!((before.len(), bits), (after.len(), 1), "exactly one bit");
+                std::fs::write(&path, after).unwrap();
+            }),
+            "certificate_unreadable"
+        );
+        assert_eq!(
+            refused(&|members, uuid| rewrite(members, uuid, |c| c.version.clear())),
+            "certificate_unreadable"
+        );
+        assert_eq!(
+            refused(&|members, uuid| rewrite(members, uuid, |c| {
+                for count in c.version.values_mut() {
+                    *count = -1;
+                }
+            })),
+            "certificate_unreadable"
+        );
+        assert_eq!(
+            refused(&|members, uuid| rewrite(members, uuid, |c| {
+                c.nodes.insert("not-a-node".into(), c.store.clone());
+            })),
+            "certificate_unreadable"
+        );
+        assert_eq!(
+            refused(&|members, uuid| rewrite(members, uuid, |c| {
+                c.nodes.insert(c.node.clone(), c.store.clone());
+            })),
+            "certificate_unreadable"
+        );
+        // c is reached only through b: its store is checked here or nowhere.
+        assert_eq!(
+            refused(&|members, uuid| rewrite(members, uuid, |c| {
+                c.nodes
+                    .insert(members.ids["c"].clone(), "not-a-store".into());
+            })),
+            "certificate_unreadable"
+        );
+        assert_eq!(
+            refused(&|members, uuid| rewrite(members, uuid, |c| c.configuration.clear())),
+            "changed_identity"
+        );
+        assert_eq!(
+            refused(&|members, uuid| rewrite(members, uuid, |c| {
+                c.nodes.remove(&members.ids["b"]);
+            })),
+            "member_store_changed"
+        );
+        // A whole digest over an unchanged record is still the record.
+        let members = chain_abc();
+        let (uuid, _) = certified(&members);
+        rewrite(&members, &uuid, |_| {});
+        assert_eq!(reuse(&members, &uuid), (Ok(()), 1));
+    }
+
+    /// `certify` never writes a record its reuse would refuse.
+    #[test]
+    fn a_malformed_proof_is_never_certified() {
+        let members = chain_abc();
+        let task = floored(&members, "a");
+        let config = &members.configs["a"];
+        let net = InProcess::new(&members, Faults::default());
+        let mut proof = prove(config, &net, "p", task.uuid(), soon())
+            .unwrap()
+            .1
+            .unwrap();
+        proof.version.clear();
+        assert_eq!(
+            proof.certify(config, soon()).unwrap().unwrap_err().reason,
+            "malformed"
+        );
+        assert!(!record_path(&members, task.uuid()).exists());
+    }
+
     /// A reply from another store than the hello showed closes the proof.
     #[test]
     fn a_reply_from_another_store_closes_the_proof() {
@@ -1558,7 +2383,10 @@ mod tests {
         assert_eq!(admit(soon()).unwrap_err().reason, "membership_changed");
         assert_eq!(runs, 0, "nothing ran on any refusal");
         // A fresh proof admits; then a replaced store identity refuses.
-        let proof = prove(config, &net, "p", task.uuid(), soon()).unwrap().1.unwrap();
+        let proof = prove(config, &net, "p", task.uuid(), soon())
+            .unwrap()
+            .1
+            .unwrap();
         std::fs::remove_file(config.state.join("replica").join("store-id")).unwrap();
         let closed = proof.admit(config, soon(), |_, _| -> Result<()> { panic!("ran after a store change") }).unwrap();
         assert_eq!(closed.unwrap_err().reason, "changed_identity");

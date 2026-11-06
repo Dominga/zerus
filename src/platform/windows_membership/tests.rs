@@ -53,6 +53,36 @@ fn census_checks_every_record_and_never_turns_a_truncated_tail_into_clear() {
     assert!(census(&bytes, Instant::now()).is_err());
 }
 #[test]
+fn only_a_next_header_needs_alignment_not_the_final_names_tail() {
+    for extra in [2, 4, 6] {
+        let mut bytes = row(40, 100, false);
+        bytes.extend(vec![b'x'; extra]);
+        assert_eq!(
+            checked_census(&bytes, until()).unwrap()[&40],
+            Process {
+                pid: 40,
+                created: 100
+            }
+        );
+        // The identical offset cannot introduce a following header unaligned.
+        let next = bytes.len() as u64;
+        set(&mut bytes, 0, 4, next);
+        bytes.extend(row(80, 200, false));
+        assert_eq!(
+            checked_census(&bytes, until()),
+            Err(CensusFault::NextAlignment)
+        );
+    }
+    for extra in [1, 3, 5, 7] {
+        let mut bytes = row(40, 100, false);
+        bytes.extend(vec![b'x'; extra]);
+        assert_eq!(
+            checked_census(&bytes, until()),
+            Err(CensusFault::RecordSize)
+        );
+    }
+}
+#[test]
 fn a_census_over_the_process_limit_is_not_a_complete_prefix() {
     let mut bytes = Vec::new();
     for pid in 1..=MAX_PROCESSES as u32 {

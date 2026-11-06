@@ -48,54 +48,83 @@ struct Process {
 /// layout. Neither a name nor a pointer supplied by the kernel is dereferenced.
 /// Native32/ARM layouts are not guessed; the native entry checks x64 first.
 fn census(bytes: &[u8], until: Instant) -> Result<BTreeMap<u32, Process>> {
+    checked_census(bytes, until).map_err(|_| Error::Incomplete)
+}
+/// Closed failure-site labels for the native unit control. No process names,
+/// identities, pointers or table bytes are written to a diagnostic.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum CensusFault {
+    Deadline,
+    Bounds,
+    ProcessLimit,
+    RecordSize,
+    NextAlignment,
+    ProcessId,
+    Duplicate,
+    Creation,
+}
+impl From<Error> for CensusFault {
+    fn from(_: Error) -> Self {
+        Self::Bounds
+    }
+}
+fn checked_census(
+    bytes: &[u8],
+    until: Instant,
+) -> std::result::Result<BTreeMap<u32, Process>, CensusFault> {
     if bytes.len() < 256 || bytes.len() > MAX_TABLE {
-        return Err(Error::Incomplete);
+        return Err(CensusFault::Bounds);
     }
     let mut result = BTreeMap::new();
     let mut seen = BTreeSet::new();
     let mut offset = 0;
     let mut count = 0usize;
     loop {
-        live(until)?;
-        count = count.checked_add(1).ok_or(Error::Incomplete)?;
+        live(until).map_err(|_| CensusFault::Deadline)?;
+        count = count.checked_add(1).ok_or(CensusFault::ProcessLimit)?;
         if count > MAX_PROCESSES {
-            return Err(Error::Incomplete);
+            return Err(CensusFault::ProcessLimit);
         }
-        let row = bytes.get(offset..).ok_or(Error::Incomplete)?;
-        let next = usize::try_from(word(row, 0, 4)?).map_err(|_| Error::Incomplete)?;
-        let threads = usize::try_from(word(row, 4, 4)?).map_err(|_| Error::Incomplete)?;
+        let row = bytes.get(offset..).ok_or(CensusFault::Bounds)?;
+        let next = usize::try_from(word(row, 0, 4)?).map_err(|_| CensusFault::RecordSize)?;
+        let threads = usize::try_from(word(row, 4, 4)?).map_err(|_| CensusFault::RecordSize)?;
         let required = threads
             .checked_mul(80)
             .and_then(|n| n.checked_add(256))
-            .ok_or(Error::Incomplete)?;
+            .ok_or(CensusFault::RecordSize)?;
         let length = if next == 0 { row.len() } else { next };
-        if length < required || length > row.len() || length % 8 != 0 {
-            return Err(Error::Incomplete);
+        if length < required || length > row.len() || !length.is_multiple_of(2) {
+            return Err(CensusFault::RecordSize);
         }
-        let pid = u32::try_from(word(row, 80, 8)?).map_err(|_| Error::Incomplete)?;
+        // The next header needs native alignment. The LAST record can end in
+        // an unpadded variable-length image name; no next header follows it.
+        if next != 0 && !next.is_multiple_of(8) {
+            return Err(CensusFault::NextAlignment);
+        }
+        let pid = u32::try_from(word(row, 80, 8)?).map_err(|_| CensusFault::ProcessId)?;
         let created = word(row, 32, 8)?;
         if !seen.insert(pid) {
-            return Err(Error::Incomplete);
+            return Err(CensusFault::Duplicate);
         }
         // PID 0 is the kernel's idle pseudo-process, not an openable process.
         // It must have the kernel's zero birth. No named process is excluded.
         if pid == 0 {
             if created != 0 {
-                return Err(Error::Incomplete);
+                return Err(CensusFault::Creation);
             }
         } else if created == 0
             || created > i64::MAX as u64
             || result.insert(pid, Process { pid, created }).is_some()
         {
-            return Err(Error::Incomplete);
+            return Err(CensusFault::Creation);
         }
         if next == 0 {
             break;
         }
-        offset = offset.checked_add(next).ok_or(Error::Incomplete)?;
+        offset = offset.checked_add(next).ok_or(CensusFault::Bounds)?;
     }
     if result.is_empty() {
-        return Err(Error::Incomplete);
+        return Err(CensusFault::Bounds);
     }
     Ok(result)
 }

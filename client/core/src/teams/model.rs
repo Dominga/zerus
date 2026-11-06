@@ -413,6 +413,9 @@ impl TeamsModel {
             TeamRead::CatalogRoute { .. } => "route".into(),
             TeamRead::TestQueue { team } => team_key("tests-queue", team),
             TeamRead::TestResults { team, .. } => team_key("tests", team),
+            TeamRead::ScopedProfile { team, .. } => team_key("timeline-profile", team),
+            TeamRead::ScopedSpans { team, .. } => team_key("timeline-spans", team),
+            TeamRead::TestWindow { team, .. } => team_key("timeline-tests", team),
         }
     }
 
@@ -547,6 +550,10 @@ impl TeamsModel {
             TeamRead::CatalogRoute { .. } => {}
             // Test pages are read on request by the Tests mode, not polled.
             TeamRead::TestQueue { .. } | TeamRead::TestResults { .. } => {}
+            // Task 92: the Time view reads these on request, never polled.
+            TeamRead::ScopedProfile { .. }
+            | TeamRead::ScopedSpans { .. }
+            | TeamRead::TestWindow { .. } => {}
         }
         out
     }

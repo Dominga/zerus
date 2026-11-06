@@ -3,8 +3,9 @@ import { createVirtualizer } from "@tanstack/solid-virtual";
 import { Icon } from "../lib/icons";
 import { tr } from "../../i18n";
 import type { PlanGraph, TeamView } from "./types";
-import type { TeamProfileView, TeamTestsView } from "../../types";
-import { BoardView, HeatLegend, HeatLine, LayersView, PlanModeBar, ProfilePanel, TestsPanel, stageLabel } from "./plan-panels";
+import type { TeamProfileView, TeamTestsView, TeamTimelineView } from "../../types";
+import { BoardView, HeatLegend, HeatLine, LayersView, PlanModeBar, ProfilePanel, TestsPanel, runStatusLabel, stageLabel } from "./plan-panels";
+import { ProfileTime } from "./TimeView";
 import { spawnedFrom, stageChips, type PlanMode } from "./planModes";
 import { taskHeat } from "./heat";
 import {
@@ -41,6 +42,8 @@ export interface PlanViewProps {
   onLoadTests?: (before: number | null) => void;
   /** The Profile mode asks for the team's profile when opened. */
   onLoadProfile?: () => void;
+  /** Task 92: the Profile mode's Time view reads one scope (a phase, or the plan with null) through the core. */
+  loadTimeline?: (phase: number | null) => Promise<TeamTimelineView>;
   /** Task 40: the task card's actions (ui/teams/TeamActions.tsx TaskActions), drawn under the task's detail. */
   taskActions?: (id: number) => JSX.Element;
   /** Task #58: a phase header's mode chip and switch (ui/teams/TeamActions.tsx PhaseModeControl). */
@@ -470,7 +473,12 @@ export function PlanView(props: PlanViewProps): JSX.Element {
         <LayersView phases={phases()} includeCancelled={includeCancelled()} profile={heatProfile()} onOpen={open} />
       </Show>
       <Show when={mode() === "profile"}>
-        <ProfilePanel profile={props.profile} />
+        <div class="pm-profile-scroll">
+          <Show when={props.loadTimeline}>{(load) => (
+            <ProfileTime team={props.team} load={load()} profile={props.profile} statusName={runStatusLabel} onOpen={open} />
+          )}</Show>
+          <ProfilePanel profile={props.profile} />
+        </div>
       </Show>
       <Show when={mode() === "tests"}>
         <TestsPanel tests={props.tests} onMore={() => props.onLoadTests?.(props.tests?.next ?? null)} />

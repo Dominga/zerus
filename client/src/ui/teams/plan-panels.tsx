@@ -98,7 +98,7 @@ function lossLabel(kind: string): string {
   return kind;
 }
 
-function runStatusLabel(status: string): string {
+export function runStatusLabel(status: string): string {
   const kind = testStatus(status);
   if (kind === "passed") return tr("Passed");
   if (kind === "timed-out") return tr("Timed out");

@@ -1020,6 +1020,27 @@ export interface TeamTestRun {
   flags: string[]; reused_from: string; due: boolean; over_budget: boolean;
 }
 
+/** Task 92: one span of the Time view (core teams/timeline.rs `TimelineSpan`); a test run is kind `tests`, its suite in `member`, its status in `stage_kind`. */
+export interface TimelineSpan {
+  task: number; attempt: number; kind: string; stage_kind: string; member: string; record?: string;
+  from: number; to: number; running: boolean;
+}
+/** Task 92: a member's lane: its own spans (build and merge among them), the waits of its tasks and its idle time. */
+export interface TimelineLane {
+  member: string; role: string; model: string; utilization: number; busy_s: number; idle_s: number;
+  spans: TimelineSpan[]; waits: TimelineSpan[]; idle: [number, number][];
+}
+export interface TimelineEstimate { task: number; estimate_min: number | null; worked_s: number; running: boolean }
+/** Task 92: the profile's Time view of one scope (`team_timeline`). */
+export interface TeamTimelineView {
+  team: string; phase: number | null; from: number; to: number; elapsed_s: number | null; worked_s: number | null;
+  lanes: TimelineLane[]; real: TimelineSpan[]; planned: TimelineSpan[]; real_s: number; planned_s: number;
+  tests: TimelineSpan[]; tests_more: boolean; estimates: TimelineEstimate[];
+  /** Task id to title, for the tasks drawn (JSON object keys are strings). */
+  titles: Record<string, string>;
+  tasks: number; truncated: boolean;
+}
+
 export interface TeamTestsView {
   team: string; queue: TeamTestPending[]; runs: TeamTestRun[]; next: number | null;
 }

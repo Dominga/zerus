@@ -229,3 +229,28 @@
 .pm-legend { display: flex; flex-wrap: wrap; align-items: center; gap: 6px 12px; margin: 10px 0; font-size: var(--fs-xs); color: var(--z-color-text-2); }
 .pm-legend-title { color: var(--z-color-muted); font-weight: 600; }
 .pm-legend-item { display: inline-flex; align-items: center; gap: 5px; white-space: nowrap; }
+
+/* Task 92: the profile's Time view (Qt's TeamProfileTimeline), one canvas. */
+.pm-profile-scroll { flex: 1; min-height: 0; overflow: auto; display: flex; flex-direction: column; }
+.pm-profile-scroll > .pm-profile { flex: none; overflow: visible; }
+.tl-section { padding: 12px 14px 0; }
+.tl-head { display: flex; align-items: center; gap: 10px; flex-wrap: wrap; }
+.tl-head h3 { font-size: var(--fs-sm); color: var(--z-color-text-2); margin: 0; }
+.tl-scope { max-width: 100%; font-size: var(--fs-xs); }
+.tl { margin-top: 8px; border: 1px solid var(--z-color-card-border); border-radius: var(--z-radius-md); background: var(--z-color-card); }
+.tl-zoom { display: flex; align-items: center; gap: 6px; padding: 6px 8px 0; }
+.tl-host { position: relative; overflow: hidden; max-height: 70vh; overflow-y: auto; }
+.tl-host canvas { display: block; cursor: default; }
+.tl-host.panning canvas { cursor: grab; }
+.tl-host.panning canvas:active { cursor: grabbing; }
+.tl-tip { position: absolute; z-index: 2; max-width: 260px; padding: 6px 8px; border-radius: 6px; pointer-events: none;
+  background: var(--z-color-surface); border: 1px solid var(--z-color-card-border); color: var(--z-color-text); font-size: var(--fs-xs);
+  box-shadow: 0 4px 14px rgb(0 0 0 / 0.25); white-space: pre-wrap; }
+.tl-tip-head { font-weight: 600; }
+.tl-estimates { margin: 10px 0 0; padding: 8px 10px; border: 1px solid var(--z-color-card-border); border-radius: var(--z-radius-md); font-size: var(--fs-xs); }
+.tl-estimates-head { display: flex; align-items: center; gap: 8px; color: var(--z-color-muted); }
+.tl-estimates-table { width: 100%; border-collapse: collapse; margin-top: 6px; }
+.tl-estimates-table th { text-align: left; font-size: var(--fs-2xs); color: var(--z-color-muted); font-weight: 600; padding: 2px 6px; }
+.tl-estimates-table td { padding: 2px 6px; color: var(--z-color-text-2); }
+.tl-estimates-table .link { background: none; border: 0; padding: 0; color: var(--z-color-accent); cursor: pointer; text-align: left; }
+.tl-section .warn, .tl-estimates .warn { color: var(--z-color-warn); }

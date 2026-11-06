@@ -247,6 +247,34 @@ pub async fn team_tests(computer: String, team: String, before: Option<f64>) -> 
     .map_err(|error| error.to_string())?
 }
 
+/// Task 92: the profile's Time view of one scope (a phase, or the plan
+/// without one), read on request off the UI thread: the status, the scope's
+/// profile, its timelines in bounded pages and the window's test runs,
+/// projected by client/core (`teams::timeline`).
+#[tauri::command]
+pub async fn team_timeline(
+    teams: State<'_, Teams>,
+    computer: String,
+    team: String,
+    phase: Option<u64>,
+) -> Result<zerus_client_core::teams::timeline::TimelineView, String> {
+    if teams.replay {
+        return Err("Teams need hgs; a replay has none.".into());
+    }
+    if !valid_team(&team) {
+        return Err("Not a team id.".into());
+    }
+    let target = self::computer(&computer)?;
+    tauri::async_runtime::spawn_blocking(move || {
+        let now = std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .map_or(0.0, |elapsed| elapsed.as_secs_f64());
+        zerus_client_core::teams::timeline::read(&default_hgs(), &target, &team, phase, now)
+    })
+    .await
+    .map_err(|error| error.to_string())?
+}
+
 /// Runs one team action (task #7) as a guarded `hgs team` call with a
 /// request identity, off the main thread. A destructive action or an
 /// approval comes back as `confirm` until the call says `confirmed`; an

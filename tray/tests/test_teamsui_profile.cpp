@@ -4,6 +4,7 @@
 // support/TeamsUiFixture.h.
 #include "TeamsUiFixture.h"
 #include "Settings.h"
+#include <QFile>
 #include <QWheelEvent>
 #include "ActivityView.h"
 #include "HgsClient.h"
@@ -255,6 +256,7 @@ private slots:
     void heatTintsGraphAndBoardByTimeOrTokens();
     void aHeatReadThatDrawsTheSameRebuildsNothing();
     void timelineKindsAreDistinctAndBuildsNeverHideTitles();
+    void timelineLanesMatchTheTauriCoreOnTheTeamsReplies();
 };
 
 // U38 (#665): Profile beside Graph, Board and Layers, from hgs team profile
@@ -1071,4 +1073,40 @@ void TestTeamsUiProfile::timelineKindsAreDistinctAndBuildsNeverHideTitles()
     view.setDark(false); view.showModel(model); view.setTab("time");
     shot(&view, "t79-profile-time-light");
     view.setDark(true);
+}
+
+// Task 92: the Tauri Time view projects its lanes in client/core
+// (teams/timeline.rs). On the same real replies of this team (client/core's
+// fixtures) Model::build gives the table the core's test asserts too:
+// each lane's own span kinds and its waits, in the profile's member order.
+void TestTeamsUiProfile::timelineLanesMatchTheTauriCoreOnTheTeamsReplies()
+{
+    const auto read = [](const QString &name) {
+        QFile file(QFINDTESTDATA(QStringLiteral("../../client/core/tests/fixtures/teams/team-%1.json").arg(name)));
+        if (!file.open(QIODevice::ReadOnly)) return QJsonObject();
+        return QJsonDocument::fromJson(file.readAll()).object();
+    };
+    const auto status = read("status"), profile = read("profile"), spans = read("spans");
+    QVERIFY2(!status.isEmpty() && !profile.isEmpty() && !spans.isEmpty(), "the core's team fixtures");
+    const double now = profile.value("summary").toObject().value("to").toDouble() + 600;
+    const auto model = TeamProfile::Model::build(Teams::parse(status), profile, spans.value("tasks").toArray(), now);
+    const auto counts = [](const QList<TeamProfile::Span> &list) {
+        QMap<QString, int> kinds;
+        for (const auto &span : list) ++kinds[span.kind];
+        QStringList out;
+        for (auto it = kinds.cbegin(); it != kinds.cend(); ++it) out << QStringLiteral("%1:%2").arg(it.key()).arg(it.value());
+        return out.join(QLatin1Char(','));
+    };
+    QStringList table;
+    for (const auto &lane : model.lanes) table << QStringLiteral("%1|%2|%3").arg(lane.member, counts(lane.spans), counts(lane.waits));
+    const QStringList expected{
+        QStringLiteral("core|build:6,question:1,work:5|delivery:3,deps:2,lead:2,member:3,start_delay:3"),
+        QStringLiteral("hgs||deps:1"),
+        QStringLiteral("ui1|build:13,work:5|delivery:5,deps:2,lead:5,member:5,start_delay:5"),
+        QStringLiteral("ui2|permission:2,question:8,work:11|delivery:3,deps:3,lead:1,member:6,start_delay:3"),
+        QStringLiteral("merger||deps:4"),
+        QStringLiteral("qa|work:1|delivery:1,deps:2,member:1,start_delay:1"),
+    };
+    QCOMPARE(table, expected);
+    QCOMPARE(model.realSeconds, qint64(profile.value("critical_path").toObject().value("real").toObject().value("s").toDouble()));
 }

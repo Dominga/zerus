@@ -42,6 +42,8 @@ export interface PlanViewProps {
   onLoadProfile?: () => void;
   /** Task 40: the task card's actions (ui/teams/TeamActions.tsx TaskActions), drawn under the task's detail. */
   taskActions?: (id: number) => JSX.Element;
+  /** Task #58: a phase header's mode chip and switch (ui/teams/TeamActions.tsx PhaseModeControl). */
+  phaseActions?: (n: number) => JSX.Element;
   class?: string;
 }
 
@@ -164,6 +166,7 @@ export function PlanView(props: PlanViewProps): JSX.Element {
         <Show when={phase.phase.barrier}>
           <span class="pt-chip pt-chip-barrier">{tr("Barrier")}</span>
         </Show>
+        {props.phaseActions?.(phase.phase.n)}
         <span class="pt-grow" />
         <Show when={phase.phase.health}>
           <span class="pt-health">{short(phase.phase.health, 60)}</span>

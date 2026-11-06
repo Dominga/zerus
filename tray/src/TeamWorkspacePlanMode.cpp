@@ -352,6 +352,81 @@ void TeamWorkspace::closePhaseDialog(const Team &team)
     dialog->show();
 }
 
+void TeamWorkspace::phaseModeDialog(const Team &team, int phase, bool toFree)
+{
+    if (auto *open = findChild<QDialog *>("teamPhaseModeDialog")) { open->raise(); open->activateWindow(); return; }
+    if (phase <= 0) return;
+    const Colors c = colorsFor(m_dark);
+    auto *dialog = new QDialog(this);
+    dialog->setObjectName("teamPhaseModeDialog");
+    dialog->setProperty("team", team.id); dialog->setProperty("phase", phase); dialog->setProperty("mode", toFree ? "free" : "standard");
+    dialog->setAttribute(Qt::WA_DeleteOnClose);
+    dialog->setWindowTitle(toFree ? tr("Switch to free planning") : tr("Switch to standard planning"));
+    dialog->setModal(true);
+    dialog->resize(560, 380);
+    dialog->setStyleSheet(dialogSheet(c));
+    auto *v = new QVBoxLayout(dialog); v->setContentsMargins(18, 18, 18, 14); v->setSpacing(10);
+    auto *head = row(12);
+    auto *tile = new QLabel; tile->setFixedSize(38, 38); tile->setAlignment(Qt::AlignCenter);
+    tile->setStyleSheet(QStringLiteral("QLabel{background:%1;border-radius:9px;}").arg(alpha(c.violet, .16).name(QColor::HexArgb)));
+    tile->setPixmap(glyphPixmap(c.violet, toFree ? "plan_free" : "plan_standard", 16));
+    head->addWidget(tile, 0, Qt::AlignTop);
+    auto *titles = new QVBoxLayout; titles->setSpacing(2);
+    const QString name = phaseName(team, phase);
+    titles->addWidget(label(toFree ? tr("Switch %1 to free planning?").arg(name) : tr("Switch %1 to standard planning?").arg(name),
+                            c.fg, 15, true, "teamPhaseModeTitle"));
+    titles->addWidget(label(team.name, c.muted, 12));
+    head->addLayout(titles, 1);
+    v->addLayout(head);
+    v->addWidget(label(tr("WHAT CHANGES"), c.text3, 10, true));
+    const QString bold = QStringLiteral("<b>%1</b>").arg(name.toHtmlEscaped());
+    if (toFree) {
+        v->addWidget(changeLine(c, "plan_free", tr("%1 stays open when its tasks are accepted: idle, not done.").arg(bold)));
+        v->addWidget(changeLine(c, "add", tr("New tasks join it and run as they are added, with the same pipelines, reports and acceptance."), true));
+        v->addWidget(changeLine(c, "terminal", tr("Integration and a build run only when you or the lead ask, never as a phase barrier."), true));
+    } else {
+        v->addWidget(changeLine(c, "plan_standard", tr("%1 is locked: its tasks keep their state and run on.").arg(bold)));
+        v->addWidget(changeLine(c, "add", tr("New work is planned in a new phase, approved by you; nothing joins this one without a plan edit."), true));
+        int build = 0;
+        for (const auto &task : team.tasks) if (task.phaseBuild && task.phase == phase && !task.finished()) build = task.id;
+        if (build) v->addWidget(changeLine(c, "terminal", tr("Build #%1 stays a task of the phase; the phase is done when it is decided.").arg(build), true));
+        if (team.freePhase.known && team.freePhase.phase == phase && team.freePhase.closePending > 0)
+            v->addWidget(changeLine(c, "stop", tr("The pending close ends with this switch."), true));
+    }
+    auto *same = label(tr("Unchanged: the other phases and their modes, members, pipelines."), c.muted, 11, false, "teamPhaseModeUnchanged");
+    same->setWordWrap(true);
+    v->addWidget(same);
+    auto *reason = new QLineEdit; reason->setObjectName("teamPhaseModeReason"); reason->setMaxLength(2000);
+    reason->setPlaceholderText(tr("Why? The lead receives this (optional)"));
+    v->addWidget(reason);
+    auto *error = label(QString(), c.danger, 12, false, "teamPhaseModeError"); error->setWordWrap(true); error->hide();
+    v->addWidget(error);
+    v->addStretch();
+    auto *buttons = row(8);
+    buttons->addStretch();
+    auto *cancel = button(tr("Cancel"), "teamPhaseModeCancel");
+    auto *confirm = button(toFree ? tr("Switch to free") : tr("Switch to standard"), "teamPhaseModeConfirm", true);
+    confirm->setIcon(glyphIcon(c.accentText, toFree ? "plan_free" : "plan_standard", 12));
+    // A destructive-looking default is never Enter's: Cancel has the focus.
+    confirm->setAutoDefault(false); confirm->setDefault(false);
+    cancel->setAutoDefault(true); cancel->setDefault(true);
+    QObject::connect(cancel, &QPushButton::clicked, dialog, &QDialog::reject);
+    QObject::connect(confirm, &QPushButton::clicked, dialog, [this, dialog, reason, error, confirm, id = team.id, phase, toFree] {
+        confirm->setEnabled(false);
+        QJsonObject input{{"team", id}, {"phase", phase}, {"mode", toFree ? "free" : "standard"}};
+        if (const QString why = reason->text().trimmed(); !why.isEmpty()) input.insert("reason", why);
+        m_panel->act("phase-mode", input, [guard = QPointer<QDialog>(dialog), error, confirm](bool ok, const QString &message) {
+            if (!guard) return;
+            if (!ok) { error->setText(message); error->show(); confirm->setEnabled(true); return; }
+            guard->accept();
+        });
+    });
+    buttons->addWidget(cancel); buttons->addWidget(confirm);
+    v->addLayout(buttons);
+    dialog->show();
+    cancel->setFocus();
+}
+
 void TeamWorkspace::popSwitchRequest(const Team &team)
 {
     // A request decided elsewhere (the lead withdrew it, another window
@@ -384,9 +459,11 @@ void TeamWorkspace::switchModeDialog(const Team &team, const QString &proposalId
     if (!proposal) return;
     const Colors c = colorsFor(m_dark);
     const bool toFree = proposal->mode != "standard";
-    // The phase that stays open: the running one, else the last accepted.
-    int n = 0;
-    for (const auto &group : phaseGroups(team)) {
+    // Task #58: a card that names a phase switches that phase only.
+    const int named = proposal->change.toObject().value("phase").toInt();
+    // The phase that stays open: the named one, the running one, else the last accepted.
+    int n = named;
+    for (const auto &group : named > 0 ? QList<PhaseGroup>{} : phaseGroups(team)) {
         const QString state = ownerPhaseState(team, group);
         if (state == "running") { n = group.n; break; }
         if (state == "done" || state == "queued" || state == "awaiting_acceptance") n = n ? n : group.n;
@@ -396,6 +473,7 @@ void TeamWorkspace::switchModeDialog(const Team &team, const QString &proposalId
     auto *dialog = new QDialog(this);
     dialog->setObjectName("teamSwitchModeDialog");
     dialog->setProperty("team", team.id); dialog->setProperty("proposal", proposal->id); dialog->setProperty("hash", proposal->hash);
+    dialog->setProperty("phase", named);
     dialog->setAttribute(Qt::WA_DeleteOnClose);
     dialog->setWindowTitle(toFree ? tr("Switch to free planning") : tr("Switch to standard planning"));
     dialog->setModal(true);
@@ -426,10 +504,14 @@ void TeamWorkspace::switchModeDialog(const Team &team, const QString &proposalId
         v->addWidget(changeLine(c, "add", tr("New tasks join it and run as they are added, with the same pipelines, reports and acceptance."), true));
         v->addWidget(changeLine(c, "terminal", tr("Integration and a build run only when you or the lead ask, never as a phase barrier."), true));
         v->addWidget(changeLine(c, "stop", tr("You close the phase to return to standard."), true));
+    } else if (named > 0) {
+        v->addWidget(changeLine(c, "plan_standard", tr("%1 is locked: its tasks keep their state and run on.").arg(open)));
+        v->addWidget(changeLine(c, "add", tr("New work is planned in a new phase, approved by you; nothing joins this one without a plan edit."), true));
     } else {
         v->addWidget(changeLine(c, "plan_standard", tr("New work is planned in phases again, each approved by you and closed with its integration and build.")));
     }
-    QString unchanged = tr("Unchanged: running tasks and their attempts, members, pipelines");
+    QString unchanged = named > 0 ? tr("Unchanged: the other phases and their modes, running tasks and their attempts, members, pipelines")
+                                  : tr("Unchanged: running tasks and their attempts, members, pipelines");
     if (!queued.isEmpty()) {
         QStringList names; for (int q : queued) names << tr("phase %1").arg(q);
         unchanged += tr("; the queued %1 stays as it is").arg(names.join(QStringLiteral(", ")));

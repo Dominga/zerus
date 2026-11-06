@@ -967,3 +967,24 @@ fn catalog_set_import_export_and_designer_send_their_requests() {
     let none = TeamAction::CatalogDesigner { folder: String::new(), goal: "x".into(), agent: String::new(), model: String::new(), effort: String::new(), project: String::new() };
     assert!(matches!(run(&fake.path(), &TeamCall { team: String::new(), ..call(none) }), TeamOutcome::Failed { .. }));
 }
+
+/// Task #58: the owner switches one phase's mode: the confirmation first
+/// (Qt's dialog words), then exactly `hgs team phase-mode --json` with the
+/// phase, the mode and the owner's identity.
+#[test]
+fn a_phase_mode_switch_asks_first_then_sends_the_phase_and_its_mode() {
+    let switch = |mode: &str| TeamAction::PhaseMode { phase: 2, mode: mode.into(), reason: " release ".into() };
+    let Err(TeamOutcome::Confirm { confirmation }) = prepare(&TeamCall { confirmed: false, ..call(switch("free")) }) else { panic!("asks first") };
+    assert_eq!((confirmation.name.as_str(), confirmation.action.as_str()), ("teamPhaseModeConfirm", "Switch to free"));
+    assert!(confirmation.text.contains("phase 2") && confirmation.text.contains("other phases keep their modes"), "{}", confirmation.text);
+    let Err(TeamOutcome::Confirm { confirmation }) = prepare(&TeamCall { confirmed: false, ..call(switch("standard")) }) else { panic!("asks first") };
+    assert_eq!(confirmation.action, "Switch to standard");
+    let (invocation, request_id) = prepare(&call(switch("standard"))).unwrap();
+    assert_eq!(invocation.args, ["team", "phase-mode", "--json"]);
+    let sent: Value = serde_json::from_slice(invocation.stdin.as_deref().unwrap()).unwrap();
+    assert_eq!(sent, json!({"phase":2,"mode":"standard","reason":"release","team":TEAM,"by":"human","request_id":request_id}));
+    for bad in [TeamAction::PhaseMode { phase: 0, mode: "free".into(), reason: String::new() },
+                TeamAction::PhaseMode { phase: 2, mode: "open".into(), reason: String::new() }] {
+        assert!(matches!(prepare(&call(bad)), Err(TeamOutcome::Failed { .. })));
+    }
+}

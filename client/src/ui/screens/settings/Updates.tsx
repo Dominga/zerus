@@ -10,6 +10,8 @@ import { trText } from "../../../text";
 import { desktopService } from "../../../store/desktopService";
 import { maintenanceIntent } from "../../../store/maintenance";
 import { MaintenanceStatus } from "./MaintenanceStatus";
+import { forkActions, forkInstalled } from "./forkUpdates";
+import { forkUpdatesCheck, forkUpdatesConfirm } from "../../../bridge";
 
 function failed(error: unknown) {
   toast("Updates", String(error), "error", true);
@@ -69,6 +71,65 @@ function LoginItemDialog() {
   );
 }
 
+/**
+ * WhiteWh fork, task #63: the fork's own channel, as Qt's Settings > About
+ * offers it. Replacing an unnumbered build asks first (Cancel focused).
+ */
+function ForkUpdates() {
+  const [asking, setAsking] = createSignal(false);
+  let dialog!: HTMLDialogElement;
+  createEffect(() => {
+    if (asking()) {
+      if (!dialog.open) dialog.showModal();
+      queueMicrotask(() => dialog.querySelector<HTMLElement>("[data-initial]")?.focus());
+    } else if (dialog.open) dialog.close();
+  });
+  const fork = () => updates().fork;
+  const actions = () => forkActions(fork());
+  return (
+    <Show when={fork()}>{(view) => (
+      <Group title={tr("Fork updates from %1", view().repository)}>
+        <div class="updates-card" data-fork-ready={actions().restart > 0 ? "1" : "0"}>
+          <Row label={trNoop("Installed")}>
+            <span class="selectable">{forkInstalled(view()).build > 0
+              ? tr("Fork build %1", forkInstalled(view()).build)
+              : tr("No fork build number (commit %1)", forkInstalled(view()).commit || tr("unknown"))}</span>
+          </Row>
+          <p class="set-group-hint selectable">{trText(view().status)}</p>
+          <Show when={!view().supported}>
+            <p class="set-group-hint">{tr("This installation is not a portable fork installation; it does not update itself.")}</p>
+          </Show>
+          <Actions>
+            <Show when={view().supported}>
+              <button type="button" class="btn" disabled={!actions().check} onClick={() => { void forkUpdatesCheck().catch(failed); }}>
+                {tr("Check for updates from %1", view().repository)}</button>
+            </Show>
+            <Show when={actions().replace > 0}>
+              <button type="button" class="btn" onClick={() => setAsking(true)}>{tr("Replace this build with fork build %1…", actions().replace)}</button>
+            </Show>
+            <Show when={actions().restart > 0}>
+              <button type="button" class="btn primary" onClick={() => { void updateCommands.restart().catch(failed); }}>
+                {tr("Restart to install fork build %1", actions().restart)}</button>
+            </Show>
+          </Actions>
+        </div>
+        <dialog class="dlg" ref={dialog} style={{ width: "520px" }} role="alertdialog" aria-labelledby="fork-replace-title"
+          onCancel={(event) => { event.preventDefault(); setAsking(false); }} onClose={() => setAsking(false)}>
+          <div class="dlg-head"><Icon name="triangle-alert" size={18} class="warn" /><h2 id="fork-replace-title">{tr("Replace this build?")}</h2></div>
+          <div class="dlg-body confirm-body">
+            <p>{tr("This build has no fork build number, so fork build %1 is not known to be newer. It downloads now and replaces this build when you restart Zerus; this build stays as the rollback copy.", actions().replace)}</p>
+          </div>
+          <div class="dlg-foot">
+            <span class="spacer" />
+            <button type="button" class="btn primary" data-initial autofocus onClick={() => setAsking(false)}>{tr("Cancel")}</button>
+            <button type="button" class="btn" onClick={() => { setAsking(false); void forkUpdatesConfirm().catch(failed); }}>{tr("Replace")}</button>
+          </div>
+        </dialog>
+      </Group>
+    )}</Show>
+  );
+}
+
 export function UpdatesSection() {
   const [details, setDetails] = createSignal(false);
   onMount(() => { void refreshUpdates(); });
@@ -100,6 +161,8 @@ export function UpdatesSection() {
       </Group>
 
       <LoginItemDialog />
+
+      <ForkUpdates />
 
       <Group title={trNoop("Update checks")}>
         <ToggleRow label={trNoop("Check for updates automatically")} checked={updates().automatic}

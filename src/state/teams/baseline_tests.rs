@@ -289,3 +289,19 @@ fn a_historical_chain_plans_after_a_finished_predecessor() {
     assert_eq!(late["inherited_s"], 0);
     assert_eq!(late["own_s"], 0);
 }
+
+#[test]
+fn a_historical_member_chain_plans_after_the_members_finished_task() {
+    let mut team = team(vec![task(1, "dev", &[], Some(10.0)), task(2, "dev", &[], Some(10.0))]);
+    accept(&mut team, 1, T0 + 100.0, T0 + 200.0, T0 + 300.0);
+    start(&mut team, 2, T0 + 600.0);
+    let temp = tempfile::tempdir().unwrap();
+    crate::state::with_test_state_root(temp.path(), || backfill(&mut team, T0 + 3600.0));
+    let first = team.task(1).unwrap().baseline.as_ref().unwrap();
+    let second = team.task(2).unwrap().baseline.as_ref().unwrap();
+    assert_eq!((first.start, first.end), (Some(T0), Some(T0 + 600.0)));
+    assert_eq!((second.start, second.end), (Some(T0 + 600.0), Some(T0 + 1200.0)));
+    let late = lateness(&team, team.task(2).unwrap(), T0 + 3600.0);
+    assert_eq!(late["start_late_s"], 0);
+    assert_eq!(late["inherited_s"], 0);
+}

@@ -80,7 +80,7 @@ fn ahead(team: &Team, task: &Task, historical: bool) -> Vec<u32> {
         if let Some(previous) = team
             .tasks
             .iter()
-            .filter(|other| other.id < task.id && other.assignee == task.assignee && !other.status.finished() && other.status != TaskStatus::Draft)
+            .filter(|other| other.id < task.id && other.assignee == task.assignee && (historical || !other.status.finished()) && other.status != TaskStatus::Draft)
             .map(|other| other.id)
             .max()
         {
@@ -224,6 +224,7 @@ pub(crate) fn overrun(team: &Team, task: &Task, work_s: i64, history: &mut Optio
 #[cfg(test)]
 #[path = "baseline_tests.rs"]
 mod tests;
+
 
 
 

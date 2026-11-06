@@ -1017,7 +1017,8 @@ void TestTeamsUiProfile::timelineKindsAreDistinctAndBuildsNeverHideTitles()
     }
     // No two kinds share a colour in any shipped skin, light or dark: CIE76
     // distance of 20 or more, 3:1 or more against the skin's lane background,
-    // a bar's title 4.5:1 on its fill, and every wait its own hatch.
+    // a bar's title 4.5:1 on its fill, every wait its own hatch and (task 93)
+    // no colour above the chroma cap.
     const auto lab = [](const QColor &c) {
         const auto lin = [](double v) { return v <= 0.04045 ? v / 12.92 : std::pow((v + 0.055) / 1.055, 2.4); };
         const double r = lin(c.redF()), g = lin(c.greenF()), b = lin(c.blueF());
@@ -1039,6 +1040,10 @@ void TestTeamsUiProfile::timelineKindsAreDistinctAndBuildsNeverHideTitles()
                 const QColor a = dark ? styles[i].dark : styles[i].light;
                 QVERIFY2(TeamProfile::contrast(a, lane) >= 3.0, qPrintable(QStringLiteral("%1 %2 %3 on its lane").arg(skin.id, dark ? "dark" : "light", styles[i].key)));
                 QVERIFY2(TeamProfile::contrast(TeamProfile::labelOn(a), a) >= 4.5, qPrintable(styles[i].key));
+                // Task 93: calm colours, no kind above the chroma cap.
+                const auto ab = lab(a);
+                QVERIFY2(std::hypot(ab[1], ab[2]) <= (dark ? TeamProfile::ChromaCapDark : TeamProfile::ChromaCapLight),
+                         qPrintable(QStringLiteral("%1 %2 %3 %4 chroma %5").arg(skin.id, dark ? "dark" : "light", styles[i].key, a.name()).arg(std::hypot(ab[1], ab[2]))));
                 for (int j = i + 1; j < styles.size(); ++j) {
                     const QColor b = dark ? styles[j].dark : styles[j].light;
                     QVERIFY2(distance(a, b) >= 20, qPrintable(QStringLiteral("%1 %2: %3 and %4").arg(skin.id, dark ? "dark" : "light", styles[i].key, styles[j].key)));

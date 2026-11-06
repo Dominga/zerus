@@ -76,6 +76,8 @@ struct KindStyle {
 };
 // Every kind the timeline draws, in legend order.
 const QList<KindStyle> &kindStyles();
+// Task 93: no kind more saturated than this (CIE LCh chroma), dark and light.
+constexpr double ChromaCapDark = 45, ChromaCapLight = 55;
 // The palette key of a span: question, permission, stop and no_report are one
 // "blocked" kind, delivery and start_delay one "delivery" kind, and a stage
 // other than review or test one "stage" kind.

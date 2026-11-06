@@ -3294,7 +3294,11 @@ class Recipes(Harness):
         self.assertEqual(path.read_bytes(), before, "dry-run changed the saved binding")
         tmux_command = shlex.split(output.strip())
         self.assertEqual(tmux_command[:3], ["tmux", "new-session", "-d"])
-        runner = shlex.split(tmux_command[-1])
+        command_start = tmux_command.index("--")
+        self.assertEqual(tmux_command[command_start:command_start + 3], ["--", "/usr/bin/env", "--"])
+        # The launcher executes this argv directly; its last item is a native
+        # argument, not another shell-encoded copy of the whole runner.
+        runner = tmux_command[command_start + 3:]
         expected = ('exec env HGS_AGENT_HINT=1 HGS_AGENT_HINT_OFF= "$0" --run "$@"'
                     if agent in ('claude', 'codex') else 'exec "$0" --run "$@"')
         self.assertEqual(runner[2], expected)

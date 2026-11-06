@@ -1,9 +1,36 @@
 """Bounded, read-only evidence for a native Codex resume in a private fixture."""
+from contextlib import closing
 import json
 from pathlib import Path
+import sqlite3
 
 
 LIMIT = 64 * 1024
+METADATA_LIMIT = 1024 * 1024
+
+
+def sqlite_log_tail(home):
+    """Recent native SQLite logs, without creating a missing database or retaining its handle."""
+    try:
+        with closing(sqlite3.connect((home / 'logs_2.sqlite').resolve().as_uri() + '?mode=ro',
+                                     uri=True, timeout=0.2)) as database:
+            rows = database.execute("""
+                SELECT level, target, body, process FROM (
+                    SELECT id, substr(level, 1, 16) AS level, substr(target, 1, 256) AS target,
+                           substr(feedback_log_body, 1, 2048) AS body,
+                           substr(process_uuid, 1, 128) AS process
+                    FROM logs ORDER BY id DESC LIMIT 64
+                ) WHERE level IN ('WARN', 'ERROR') OR target LIKE '%rollout%'
+                  OR target LIKE '%session_resume%' ORDER BY id DESC
+            """).fetchall()
+        kept = []
+        for row in rows:
+            if len(json.dumps([*kept, row], ensure_ascii=False).encode()) > LIMIT:
+                break
+            kept.append(row)
+        return dict(rows=kept, truncated=len(kept) < len(rows), window=64)
+    except sqlite3.Error as error:
+        return dict(unavailable=type(error).__name__)
 
 
 def tail(path, limit=LIMIT):
@@ -62,6 +89,7 @@ class ResumeDiagnostics:
         # ConPTY merges stdout/stderr. launch_status.output is the original
         # drained terminal tail, never a replay or another child's output.
         self.evidence['native_log_tail'] = tail(home / 'log/codex-tui.log')
+        self.evidence['native_sqlite_log_tail'] = sqlite_log_tail(home)
         self.evidence['recorded_argv_basis'] = 'HGS saved native base argv, not an OS argv observation'
         self.evidence['session_files_basis'] = 'retained source metadata, not a process file-read audit'
         source = self.original.get('transcript')
@@ -71,8 +99,8 @@ class ResumeDiagnostics:
                 if not path.resolve().is_relative_to(home.resolve()):
                     raise ValueError('source outside fixture home')
                 with path.open('rb') as stream:
-                    first = stream.readline(8193)
-                if len(first) > 8192:
+                    first = stream.readline(METADATA_LIMIT + 1)
+                if len(first) > METADATA_LIMIT:
                     raise ValueError('metadata over limit')
                 row = json.loads(first)
                 data = row.get('payload', {})

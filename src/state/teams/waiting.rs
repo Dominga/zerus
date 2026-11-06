@@ -24,6 +24,9 @@ pub(crate) struct Waiting {
     /// U30: the member's `hgs team run` still running in its folder: the
     /// session is Building.
     pub build: Option<Value>,
+    /// Task 95: the lead stalled: the phone's alert item for the lead's row
+    /// (`mobile_attention`), one per notification round.
+    pub alert: Option<Value>,
 }
 
 /// The reasons of every session of these teams, the lead's first.
@@ -44,6 +47,11 @@ pub(crate) fn reasons(teams: &[Team], now: f64) -> Vec<Waiting> {
                     "job":budget.job.as_ref().map(|job| json!({"command":job.command,"since":job.since}))})
             });
             let build = if lead { None } else { team_build(team, member, now) };
+            let alert = team
+                .lead_stall
+                .as_ref()
+                .filter(|_| lead && team.status == TeamStatus::Running)
+                .map(|stall| super::lead_stall::mobile_item(team, stall));
             out.push(Waiting {
                 name: session.name.clone(),
                 conversation_id: session.conversation_id.clone(),
@@ -51,6 +59,7 @@ pub(crate) fn reasons(teams: &[Team], now: f64) -> Vec<Waiting> {
                 reason,
                 budget,
                 build,
+                alert,
             });
         }
     }
@@ -99,6 +108,13 @@ fn role_of(team: &Team, member: &str) -> String {
 }
 
 fn lead_reason(team: &Team) -> Option<Value> {
+    // Task 95: decisions wait for a lead that does not work on them: only the
+    // owner moves it now.
+    if let Some(stall) = team.lead_stall.as_ref().filter(|_| team.status == TeamStatus::Running) {
+        let items = if stall.items == 1 { "1 decision waits".to_owned() } else { format!("{} decisions wait", stall.items) };
+        return reason(team, "team_lead_stalled", format!("Waiting for you: the lead stalled, {items} for it"),
+            json!({"items":stall.items,"members":stall.members,"stall":stall.reason,"round":stall.round}));
+    }
     match team.status {
         TeamStatus::Paused => {
             return reason(team, "team_paused", "Waiting for you to resume the team".into(), json!({}));

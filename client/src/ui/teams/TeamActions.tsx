@@ -82,16 +82,17 @@ export function TeamModeControl(props: { computer: ComputerId; team: ActTeam }) 
 }
 
 /** The bar's chips: the pending phase (opens it), Finish waiting, waiting for the lead. */
-export function TeamBarChips(props: { team: ActTeam; onPhase: (phase: number) => void; onFinish: () => void }) {
+export function TeamBarChips(props: { team: ActTeam; onPhase: (phase: number) => void; onFinish: () => void; onLead?: () => void }) {
   const chips = createMemo(() => barChips(props.team));
   const click = (chip: BarChip) => {
     if (chip.id === "pendingPhase" && chip.phase) props.onPhase(chip.phase);
     else if (chip.id === "finishWaits") props.onFinish();
+    else if (chip.id === "leadStalled") props.onLead?.();
   };
   return (
     <For each={chips()}>{(chip) => chip.id === "waitingForLead"
       ? <span class="team-chip accent" data-chip={chip.id}>{chip.text}</span>
-      : <button type="button" class="team-chip link" data-chip={chip.id} title={chip.tip} onClick={() => click(chip)}>{chip.text}</button>}
+      : <button type="button" class="team-chip link" classList={{ warn: chip.id === "leadStalled" }} data-chip={chip.id} title={chip.tip} onClick={() => click(chip)}>{chip.text}</button>}
     </For>
   );
 }

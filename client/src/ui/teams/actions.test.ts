@@ -1,6 +1,6 @@
 import { describe, expect, it } from "vitest";
 import {
-  TeamActions, allDecided, barActions, barChips, discardConfirmation, finishSummary, formAction, formText, moreItems, moveTargets,
+  TeamActions, allDecided, barActions, barChips, discardConfirmation, leadStall, finishSummary, formAction, formText, moreItems, moveTargets,
   openQuestions, pauseConfirmation, planApproval, questionClosed, retryConfirmation, sendBackMessage, stageName, stopConfirmation, subtreeImpact, subteamQuestion, taskButtons,
   type ActTask, type ActTeam,
 } from "./actions";
@@ -85,6 +85,19 @@ describe("team bar", () => {
     expect(barChips(team({ status: "planning", pending_phase: 2 }))).toEqual([]);
     const decided = team({ waiting_for_lead: true, tasks: [task({ id: 1, status: "accepted" })] });
     expect(barChips(decided).map((chip) => chip.text)).toEqual(["Waiting for you to finish", "waiting for the lead"]);
+  });
+
+  it("puts a stalled lead first on the bar, by its reason and count (task 95)", () => {
+    const stall = (over: Record<string, unknown>) => ({ kind: "lead_stalled", member: "Lead", member_id: "lead", since: 100, minutes: 42,
+      reason: "idle", items: 3, members: 2, round: 1, summary: "The lead stalled (it is idle): 3 decisions wait for it", ...over });
+    const stalled = team({ pending_phase: 2, attention: [{ kind: "report", task: 1 }, stall({})] });
+    expect(barChips(stalled).map((chip) => chip.id)).toEqual(["leadStalled", "pendingPhase"]);
+    expect(barChips(stalled)[0]).toEqual({ id: "leadStalled", text: "Lead stalled: 3 decisions wait", tip: "The lead stalled (it is idle): 3 decisions wait for it" });
+    expect(barChips(team({ attention: [stall({ reason: "exited", items: 1 })] }))[0].text).toBe("Lead stopped: 1 decision waits");
+    expect(leadStall(team({ attention: [stall({ round: 2 })] }))).toMatchObject({ reason: "idle", items: 3, members: 2, round: 2 });
+    // The lead moved: no item, no chip.
+    expect(leadStall(team({ attention: [{ kind: "report", task: 1 }] }))).toBeNull();
+    expect(barChips(team())).toEqual([]);
   });
 
   it("Approve & Run asks Qt's question, then sends approve once; Cancel sends nothing", async () => {

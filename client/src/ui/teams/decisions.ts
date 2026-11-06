@@ -434,6 +434,7 @@ export function waitingKindLabel(item: Pick<TeamWaitingItem, "kind" | "action">)
     case "test_full_run": return tr("Full test run");
     case "test_quarantine": return tr("Flaky tests");
     case "phase_acceptance": return tr("Phase acceptance");
+    case "lead_stalled": return tr("Lead stalled");
     default: return item.kind;
   }
 }
@@ -450,6 +451,7 @@ export function waitingKindIcon(kind: string): string {
     case "team_finished": case "phase_acceptance": return "check";
     case "tool_missing": return "terminal";
     case "test_full_run": return "refresh-cw";
+    case "lead_stalled": return "triangle-alert";
     default: return "triangle-alert";
   }
 }

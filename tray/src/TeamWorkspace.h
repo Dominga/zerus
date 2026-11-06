@@ -212,6 +212,7 @@ private:
     // N7: Answer on a permission item: the member's Allow / Deny box, or its
     // command on the clipboard when this hgs sends no box.
     // attempts: a member's box not shown yet is looked for again (fork CI).
+    void openLead(const QString &teamId);
     void answerAttention(const QString &teamId, const QString &member, const QString &command, int attempts = 10,
                          const QString &question = {}, const QString &hash = {}, quint64 generation = 0);
     // A planning, running or paused team takes a settings change (ops.rs settings).

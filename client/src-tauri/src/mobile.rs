@@ -84,6 +84,8 @@ struct Inner {
     /// Automatic connector start, where this computer has it (Windows).
     autostart: Option<autostart::Io>,
     autostart_attempted: std::sync::atomic::AtomicBool,
+    /// Orders the choice's file writes; never taken while the page is locked.
+    autostart_saves: Mutex<()>,
     effects: std::sync::atomic::AtomicBool,
     /// The page's clock: monotonic, so a changed system time neither names
     /// nor hides the sync service early.
@@ -147,6 +149,7 @@ impl Inner {
             legacy_plan: Mutex::new(None),
             autostart: None,
             autostart_attempted: std::sync::atomic::AtomicBool::new(false),
+            autostart_saves: Mutex::new(()),
             effects: std::sync::atomic::AtomicBool::new(false),
             started: Instant::now(),
             blocked,

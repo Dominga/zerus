@@ -74,11 +74,18 @@ impl Inner {
         changed
     }
 
-    /// A record that could not be saved is surfaced and offered again by the next answer.
+    /// A record that could not be saved is surfaced and offered again by the next
+    /// answer. Held from before the snapshot until the write ends, so an older
+    /// record still on its way to the disk can never land after a newer one, and
+    /// a Stop returns from here only once its disarm is the last write.
     pub(super) fn save_autostart(&self) {
         let Some(io) = &self.autostart else {
             return;
         };
+        let _order = self
+            .autostart_saves
+            .lock()
+            .unwrap_or_else(PoisonError::into_inner);
         let Some(bytes) = self.page().autostart_unsaved() else {
             return;
         };

@@ -56,6 +56,8 @@ struct Log {
     /// Each status read's answer, oldest first; the last one repeats.
     answers: Mutex<VecDeque<Result<Workspace, String>>>,
     during_automatic_read: Mutex<Option<Hook>>,
+    /// Holds the next file write: says it began, then waits to be released.
+    save_gate: Mutex<Option<(std::sync::mpsc::Sender<()>, std::sync::mpsc::Receiver<()>)>>,
     start_fails: AtomicBool,
     save_fails: AtomicBool,
     unconfigured: AtomicBool,
@@ -136,6 +138,11 @@ fn fixture_with(
                 status.answer()
             }),
             save: Box::new(move |bytes| {
+                let gate = save.save_gate.lock().unwrap().take();
+                if let Some((began, release)) = gate {
+                    began.send(()).unwrap();
+                    release.recv().unwrap();
+                }
                 if save.save_fails.swap(false, Ordering::SeqCst) {
                     return Err("store refused".into());
                 }
@@ -475,6 +482,48 @@ fn a_disarm_that_could_not_be_saved_is_surfaced_stops_anyway_and_is_saved_again(
     // The answer that ended the Stop saved it, and the warning goes.
     assert_eq!(log.saved().len(), 1);
     assert_eq!(log.saved()[0]["armed"], false);
+    assert!(!inner.view(None).autostart_save_failed);
+}
+
+#[test]
+fn an_arm_write_still_in_progress_cannot_land_after_a_stop() {
+    use std::sync::mpsc::channel;
+    let (inner, log) = fixture(None, vec![Ok(running())]);
+    let (began, write_began) = channel();
+    let (release, released) = channel();
+    *log.save_gate.lock().unwrap() = Some((began, released));
+
+    // A status read arms the connector, and its file write stalls.
+    let arming = {
+        let inner = Arc::clone(&inner);
+        std::thread::spawn(move || inner.answer_for_test(running()))
+    };
+    write_began.recv().unwrap();
+
+    // The person chooses Stop while that write is still on its way to the disk.
+    let stopping = {
+        let inner = Arc::clone(&inner);
+        std::thread::spawn(move || {
+            let answer = stop_answer(stopped(), "Connector stopped.");
+            inner.button(core::Kind::Stop, &running(), answer).unwrap();
+        })
+    };
+    std::thread::sleep(std::time::Duration::from_millis(50));
+    assert!(
+        log.saved().is_empty(),
+        "the Stop's write overtook the older one"
+    );
+
+    release.send(()).unwrap();
+    arming.join().unwrap();
+    stopping.join().unwrap();
+    let saved = log.saved();
+    assert_eq!(
+        saved.last().unwrap()["armed"],
+        false,
+        "the older arm landed last: {saved:?}"
+    );
+    assert_eq!(inner.view(None).autostart, Some(Line::StoppedByYou));
     assert!(!inner.view(None).autostart_save_failed);
 }
 

@@ -287,6 +287,18 @@ pub struct AttachmentView {
     pub image_size: Option<attachments::image::Size>,
 }
 
+/// The message a "Compact and continue" holds while the desktop service
+/// compacts first (zerus-pabah): it left the composer but is not sent yet.
+/// Shown as pending until it is sent; if it is not, the draft comes back.
+#[derive(Clone, Debug, Default, PartialEq, Serialize)]
+pub struct HeldView {
+    /// The send's request: its local row, which this entry stands for.
+    pub request_id: String,
+    pub text: String,
+    /// The names of its files.
+    pub attachments: Vec<String>,
+}
+
 #[derive(Clone, Debug, Default, PartialEq, Serialize)]
 pub struct SubagentView {
     pub agent_id: String,
@@ -359,6 +371,8 @@ pub struct ComposerView {
     pub cancel_locked: bool,
     /// A compaction waits to send this draft (compact-to-send).
     pub compacting: bool,
+    /// The message the desktop service holds until its compaction ends.
+    pub held: Option<HeldView>,
     /// Clear session and the cache popover's Clear context (`clearContext`).
     pub clear: send::ClearControl,
     /// The agent's question card shown in the composer (A2-1).
@@ -1784,6 +1798,22 @@ impl Composers {
                 || compact_handed,
             cancel_locked: compact_handed,
             compacting: hub.compacts.contains_key(key),
+            // Only while the composer shows nothing of it: a held message
+            // that comes back (unconfirmed, failed, reloaded) is the draft.
+            held: composer
+                .handed
+                .as_ref()
+                .filter(|handed| composer.sending && handed.compacts())
+                .map(|handed| HeldView {
+                    request_id: handed.plan.row().to_owned(),
+                    text: composer.draft.text.clone(),
+                    attachments: composer
+                        .draft
+                        .attachments
+                        .iter()
+                        .map(|a| a.name.clone())
+                        .collect(),
+                }),
             clear: session.clear,
             question,
             queue: self.queue_part(hub),

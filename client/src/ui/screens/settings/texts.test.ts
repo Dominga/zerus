@@ -448,9 +448,9 @@ describe("Settings texts", () => {
     const qtOrder = [...nav.matchAll(/tr\("([^"]+)"\)/g)].map((m) => m[1]);
     // Worktrees goes in before Automatic approvals (SettingsPage.h:140).
     qtOrder.splice(qtOrder.indexOf("Automatic approvals"), 0, "Worktrees");
-    // WhiteWh fork: Extensions (SettingsPage.h) is in the Qt desktop only.
-    const fork = qtOrder.indexOf("Extensions");
-    if (fork >= 0) qtOrder.splice(fork, 1);
+    // The fork's Extensions page (SettingsPage.h:146, 300) is in the nav list
+    // already, so the surviving fork carve-out (it used to be removed because
+    // Next had no such page) is gone: the client shows it too.
     expect(labels).toEqual(qtOrder);
   });
 });

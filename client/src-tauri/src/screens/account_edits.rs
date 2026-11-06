@@ -4,7 +4,13 @@ use super::*;
 use serde::Deserialize;
 use std::collections::VecDeque;
 use zerus_client_core::account_actions::{
-    self, models::Catalog as ModelCatalog, Binding, Kind, Values,
+    self,
+    models::Catalog as ModelCatalog,
+    permissions::{
+        Catalog as PermissionCatalog, Check as PermissionCheck, Editor as PermissionEditor,
+        Selection,
+    },
+    Binding, Kind, Values,
 };
 pub mod distribution;
 pub mod setup;
@@ -22,6 +28,8 @@ struct Plan {
     kind: Kind,
     targets: Vec<Target>,
     models: Option<ModelCatalog>,
+    /// Task 68: the profile's native permission catalog, captured at open.
+    permissions: Option<PermissionCatalog>,
 }
 struct Target {
     machine: String,
@@ -37,6 +45,9 @@ pub struct EditView {
     permission_mode: String,
     permission_detail: String,
     models: Option<ModelCatalog>,
+    /// Task 68: the permission selector and native editor (Qt's
+    /// accountChoices and PermissionCatalogDialog), for Permissions only.
+    permissions: Option<PermissionEditor>,
 }
 #[derive(Serialize)]
 pub struct EditResult {
@@ -141,12 +152,22 @@ impl Screens {
             .and_then(|v| v["profiles"].as_array())
             .and_then(|rows| rows.iter().find(|r| r["id"] == selected.id))
             .ok_or(account_actions::CHANGED)?;
-        let permission_mode = if raw["permission_mode"] == "bypass" {
-            "bypass"
-        } else {
-            "provider"
-        }
-        .to_owned();
+        let permissions = (kind == Kind::Permissions).then(|| PermissionCatalog::parse(raw));
+        let editor = permissions
+            .as_ref()
+            .map(|catalog| catalog.editor(&selected.machine));
+        // The saved selector the dialog opens on; saving it again changes nothing.
+        let permission_mode = editor
+            .as_ref()
+            .map(|e| e.initial.clone())
+            .unwrap_or_else(|| {
+                if raw["permission_mode"] == "bypass" {
+                    "bypass"
+                } else {
+                    "provider"
+                }
+                .to_owned()
+            });
         let permission_detail = raw["permission_detail"]
             .as_str()
             .unwrap_or("")
@@ -204,6 +225,7 @@ impl Screens {
             permission_mode,
             permission_detail,
             models: models.clone(),
+            permissions: editor,
         };
         let mut edits = self
             .0
@@ -220,9 +242,34 @@ impl Screens {
                 kind,
                 targets,
                 models,
+                permissions,
             },
         ));
         Ok(shown)
+    }
+    /// Task 68: the native editor's answer about one selection, from the
+    /// catalog captured when the dialog opened. Reads nothing; sends nothing.
+    fn edit_permission_check(
+        &self,
+        handle: &str,
+        selection: Selection,
+    ) -> Result<PermissionCheck, String> {
+        if selection.len() > 64 {
+            return Err(account_actions::CHANGED.into());
+        }
+        let edits = self
+            .0
+            .edits
+            .0
+            .lock()
+            .unwrap_or_else(PoisonError::into_inner);
+        let (_, plan) = edits
+            .plans
+            .iter()
+            .find(|(key, _)| key == handle)
+            .ok_or(account_actions::CHANGED)?;
+        let catalog = plan.permissions.as_ref().ok_or(account_actions::CHANGED)?;
+        Ok(catalog.check(&selection))
     }
     fn edit_begin(&self, binding: &Binding) -> Result<(), String> {
         self.catalog_begin(&binding.computer, |catalog| binding.verify(catalog))
@@ -295,12 +342,20 @@ impl Screens {
         // The handle is consumed before any effect. No exit, retry or reopened
         // webview can dispatch this captured plan for a second time.
         let _busy = Busy(&self.0.edits);
-        let values = Values {
+        let mut values = Values {
             label: request.label,
             mode: request.mode,
             model: request.model,
             effort: request.effort,
         };
+        if plan.kind == Kind::Permissions {
+            // Only a selector or native map the captured catalog offers.
+            values.mode = plan
+                .permissions
+                .as_ref()
+                .ok_or(account_actions::CHANGED)?
+                .mode_to_save(&values.mode)?;
+        }
         if plan.kind == Kind::Model {
             plan.models
                 .as_ref()
@@ -418,6 +473,15 @@ pub fn account_edit_apply(
     request: EditRequest,
 ) -> Result<EditResult, String> {
     state.edit_apply(&source.pump(), request)
+}
+/// Task 68: checks one native permission selection of an open dialog.
+#[tauri::command]
+pub fn account_permission_check(
+    state: State<'_, Screens>,
+    handle: String,
+    selection: Selection,
+) -> Result<PermissionCheck, String> {
+    state.edit_permission_check(&handle, selection)
 }
 #[tauri::command]
 pub fn account_edit_close(state: State<'_, Screens>, handle: String) {
@@ -627,6 +691,10 @@ mod tests {
             .unwrap();
         assert_eq!(opened.permission_mode, "bypass");
         assert!(opened.models.is_none());
+        assert_eq!(
+            opened.permissions.as_ref().unwrap().choices[1].value,
+            "bypass"
+        );
         screens.0.edits.0.lock().unwrap().plans.push_back((
             "model".into(),
             Plan {
@@ -641,6 +709,7 @@ mod tests {
                     provider_defaults: Default::default(),
                     effort_supported: true,
                 }),
+                permissions: None,
             },
         ));
         let request = EditRequest {
@@ -659,6 +728,67 @@ mod tests {
             .plans
             .iter()
             .any(|(id, _)| id == "model"));
+    }
+    #[test]
+    fn native_permissions_are_checked_against_the_captured_catalog() {
+        let (screens, pump, binding) = fixture();
+        screens
+            .lock()
+            .accounts
+            .catalogs
+            .get_mut(&binding.computer)
+            .unwrap()
+            .data
+            .as_mut()
+            .unwrap()["profiles"][0]["permission_catalog"] = json!({"status":"available","source":"codex","controls":[
+                {"id":"approval","label":"Approval","options":[{"value":"never","label":"Never"}],"conflicts_with":["sandbox"]},
+                {"id":"sandbox","label":"Sandbox","options":[{"value":"read-only"}]}]});
+        let view = screens.accounts(false);
+        let account = &view.accounts[0];
+        let opened = screens
+            .edit_open(
+                &pump,
+                &account.key,
+                &account.members[0].key,
+                Kind::Permissions,
+            )
+            .unwrap();
+        assert_eq!(opened.permission_mode, "provider");
+        assert!(opened
+            .permissions
+            .as_ref()
+            .unwrap()
+            .choices
+            .iter()
+            .any(|c| c.editor));
+        let check = screens
+            .edit_permission_check(
+                &opened.handle,
+                Selection::from([("approval".into(), "never".into())]),
+            )
+            .unwrap();
+        assert!(check.problem.is_empty());
+        assert_eq!(check.mode, r#"native:{"approval":"never"}"#);
+        let both = Selection::from([
+            ("approval".into(), "never".into()),
+            ("sandbox".into(), "read-only".into()),
+        ]);
+        assert!(!screens
+            .edit_permission_check(&opened.handle, both)
+            .unwrap()
+            .problem
+            .is_empty());
+        assert!(screens
+            .edit_permission_check("unknown", Selection::new())
+            .is_err());
+        // A conflicting or withdrawn map is refused before anything runs.
+        let request = EditRequest {
+            handle: opened.handle.clone(),
+            mode: r#"native:{"approval":"never","sandbox":"read-only"}"#.into(),
+            ..Default::default()
+        };
+        assert!(screens.edit_apply(&pump, request).is_err());
+        assert!(!screens.0.edits.0.lock().unwrap().busy);
     }
     #[test]
     fn a_new_session_opened_during_a_write_receives_its_catalog_reply() {
@@ -682,6 +812,7 @@ mod tests {
             "captured".into(),
             Plan {
                 models: None,
+                permissions: None,
                 kind: Kind::Rename,
                 targets: vec![
                     Target {
@@ -763,6 +894,7 @@ mod tests {
             "same-machine".into(),
             Plan {
                 models: None,
+                permissions: None,
                 kind: Kind::Rename,
                 targets: vec![
                     Target {

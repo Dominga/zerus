@@ -31,6 +31,7 @@ pub mod file_download;
 pub mod fleet;
 pub mod fsx;
 pub mod input_queue;
+pub mod iron_rules;
 pub mod launch;
 pub mod legacy;
 pub mod linux_notify;

@@ -5,6 +5,7 @@ import { emptyAccounts, emptyBatch, emptyMachines, emptyProjects, isEmptyBatch, 
 import type { CreatedWorktree, CreationAction, CreationAdmission, CreationCard, CreationEvent, FolderOut, LaunchAccounts, LaunchChoices, LaunchPlan, LaunchStart, MachineMeta, NewSessionContext, NewSessionFormInput, NewSessionFormView, PathStyle, RepositoryFields } from "./types";
 import type { ActivityPort, FollowRequest } from "./store/activity";
 import { documentVisibility, type PageVisibility } from "./store/visibility";
+import type { Text } from "./text";
 import { emptyUpdatesView, type UpdateChannel, type UpdatesView } from "./types";
 
 // The one path from the Rust side to the stores. The frontend asks for the next
@@ -520,7 +521,31 @@ export interface AccountModelCatalog {
   defaults: {model:string;effort:string}; provider_defaults: {model:string;effort:string}; effort_supported:boolean;
 }
 export interface AccountEditValues {label?:string;mode?:string;model?:string;effort?:string}
-export interface AccountEditView { handle: string; kind: AccountEditKind; label: string; machine: string; provider: string; permission_mode?:string; permission_detail?:string; models?:AccountModelCatalog|null }
+export interface AccountEditView { handle: string; kind: AccountEditKind; label: string; machine: string; provider: string; permission_mode?:string; permission_detail?:string; models?:AccountModelCatalog|null; permissions?:PermissionEditor|null }
+/** Task 68: the native permission catalog as client/core projects it (Qt's PermissionCatalog). */
+export interface PermissionOption { value: string; label: string; description: string }
+export interface PermissionChoice { label: Text; value: string; tooltip: Text; explanation: Text; bypass: boolean; unavailable: boolean; editor: boolean }
+export interface PermissionEditorRow { id: string; label: Text; description: Text; selected: string; unknown: boolean; unavailable: boolean; options: PermissionOption[] }
+export interface PermissionEditor { harness: string; choices: PermissionChoice[]; initial: string; saved_mode: string; selected: Record<string, string>; malformed: boolean; reset_label: Text; source_note: Text }
+export interface PermissionCheck { mode: string; summary: Text; choice_label: Text; problem: Text; rows: PermissionEditorRow[] }
+/** The core's answer about one native selection of an open permissions dialog. */
+export async function accountPermissionCheck(handle: string, selection: Record<string, string>): Promise<PermissionCheck> {
+  if (!inTauri()) throw new Error(DESKTOP_ONLY);
+  return invoke("account_permission_check", { handle, selection });
+}
+/** Task 68: one project's or one exact session's iron rules (client/core iron_rules). */
+export type RulesTarget = { scope: "project"; project: string } | { scope: "session"; name: string; run_id: string; conversation_id: string };
+export type RulesOp = { op: "read" } | { op: "save"; rules: string[]; expected_revision: number; request_id?: string };
+export interface RulesCall { computer: ComputerId; target: RulesTarget; op: RulesOp }
+export type RulesOutcome =
+  | { outcome: "done"; view: { rules: string[]; revision: number }; request_id?: string }
+  | { outcome: "unsupported"; detail: Text }
+  | { outcome: "failed"; detail: Text; request_id?: string }
+  | { outcome: "uncertain"; detail: Text; request_id: string };
+export async function ironRules(call: RulesCall): Promise<RulesOutcome> {
+  if (!inTauri()) throw new Error(DESKTOP_ONLY);
+  return invoke("iron_rules", { call });
+}
 export interface AccountEditResult { notices: string[]; errors: string[] }
 export async function accountEditOpen(account: string, profile: string, kind: AccountEditKind): Promise<AccountEditView> {
   if (!inTauri()) throw new Error(DESKTOP_ONLY);

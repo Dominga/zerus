@@ -10,6 +10,7 @@ pub const CHANGED: &str = "Accounts changed on this machine. Refresh before savi
 pub const UPDATING: &str = "Accounts are updating. Wait for the update to finish.";
 pub const MAX_MEMBERS: usize = 256;
 pub mod models;
+pub mod permissions;
 pub mod setup;
 pub mod transfer;
 
@@ -153,8 +154,11 @@ impl Binding {
             call.args.extend(["--label".into(), label.into()]);
         }
         if kind == Kind::Permissions {
+            // Task 68: a native selection too, as its compact `native:` map;
+            // the captured catalog checks its controls before this is built.
             if self.provider == "opencode"
-                || !["provider", "bypass"].contains(&values.mode.as_str())
+                || !(["provider", "bypass"].contains(&values.mode.as_str())
+                    || permissions::decode_native(&values.mode).is_some_and(|map| !map.is_empty()))
             {
                 return Err("Choose provider or bypass permission mode.".into());
             }
@@ -273,5 +277,30 @@ mod tests {
         assert!(binding().verify(&v).is_err());
         assert!(Binding::capture(ComputerId::local(), String::new(), &catalog(), "work").is_err());
         assert!(binding().edit(Kind::Rename, "\n").is_err());
+    }
+    #[test]
+    fn permissions_take_provider_bypass_or_a_native_map_as_one_argument() {
+        let values = |mode: &str| Values {
+            mode: mode.into(),
+            ..Default::default()
+        };
+        let native = r#"native:{"approval":"never"}"#;
+        let call = binding()
+            .edit_values(Kind::Permissions, &values(native))
+            .unwrap();
+        assert!(call.args.windows(2).any(|a| a == ["--mode", native]));
+        for mode in ["bypass", "provider"] {
+            assert!(binding()
+                .edit_values(Kind::Permissions, &values(mode))
+                .is_ok());
+        }
+        for mode in ["auto", "native:{}", "native:{oops", "__editor__", ""] {
+            assert!(
+                binding()
+                    .edit_values(Kind::Permissions, &values(mode))
+                    .is_err(),
+                "{mode}"
+            );
+        }
     }
 }

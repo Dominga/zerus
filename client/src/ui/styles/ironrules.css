@@ -1,0 +1,20 @@
+/* Task 68: iron rules (session Details and Projects) and the native permission editor. Skin tokens only. */
+@layer components {
+  .iron-rules { display: flex; flex-direction: column; gap: 6px; min-width: 0; }
+  .iron-head { align-items: center; gap: 6px; }
+  .iron-scope { min-width: 0; max-width: 220px; }
+  .iron-error { margin: 0; color: var(--z-color-danger); font-size: var(--fs-sm); white-space: pre-wrap; }
+  .iron-list { margin: 0; padding-left: 22px; display: flex; flex-direction: column; gap: 3px; }
+  .iron-rule { line-height: 1.45; color: var(--z-color-text); }
+  .iron-rule > .iron-text { display: inline; overflow-wrap: anywhere; }
+  .iron-rule > .icon-btn { float: right; margin-left: 6px; }
+  .iron-add { gap: 6px; align-items: center; }
+  .iron-add .field { min-width: 0; }
+  .proj-rules { margin-bottom: 12px; }
+  .proj-rules .iron-rules { width: min(520px, 100%); }
+  .nperm .dlg-body { display: flex; flex-direction: column; gap: 12px; }
+  .nperm-row { display: flex; flex-direction: column; gap: 4px; }
+  .nperm-row .field { width: 100%; }
+  .nperm-label { font-weight: 600; }
+  .nperm-warning { margin: 0; color: var(--z-color-warn); }
+}

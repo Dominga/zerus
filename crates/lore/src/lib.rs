@@ -5,7 +5,9 @@ use serde_json::{Map, Value};
 use std::collections::BTreeSet;
 use std::path::Path;
 
+pub mod embed;
 pub mod schema;
+pub mod search;
 pub mod store;
 pub mod writer;
 
@@ -63,3 +65,4 @@ pub fn object(record: &Value) -> &Map<String, Value> {
         EMPTY.get_or_init(Map::new)
     })
 }
+

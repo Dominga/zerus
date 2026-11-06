@@ -81,3 +81,12 @@ fn schema_refusals_match_python() {
     assert!(validate(&item, &areas, None).iter().any(|e| e.contains("`decided_by` is required when `dropped`")));
 }
 
+
+#[test]
+fn fixed_embeddings_keep_the_ollama_shape_offline() {
+    use zerus_lore::embed::{Embeddings, Fixed};
+    let fixed = Fixed(vec![vec![0.1, 0.2], vec![0.3, 0.4]]);
+    let vectors = fixed.embed(&["one".into(), "two".into()]).unwrap();
+    assert_eq!(vectors, vec![vec![0.1, 0.2], vec![0.3, 0.4]]);
+    assert!(fixed.embed(&["one".into(), "two".into(), "three".into()]).is_err());
+}

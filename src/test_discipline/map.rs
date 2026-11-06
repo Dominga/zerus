@@ -351,7 +351,7 @@ fn references(root: &Path, provider: &Provider, area: &[String]) -> ProviderMap 
 fn language(file: &str) -> Option<&'static str> {
     let ext = Path::new(file).extension()?.to_str()?;
     Some(match ext {
-        "py" => "python",
+        "py" | "pyx" | "pxd" | "pxi" => "python",
         "kt" | "kts" | "java" => "jvm",
         "ts" | "tsx" | "js" | "jsx" | "mjs" | "cjs" => "js",
         "rs" => "rust",
@@ -671,5 +671,13 @@ mentions = "target/debug/demo"
         let mut lacking = fresh.clone();
         lacking.providers.get_mut("py").unwrap().test_files.remove("tests/test_new.py");
         assert_eq!(check(&config, &files, &committed, &lacking).missing_tests, vec!["py: tests/test_new.py"]);
+    }
+
+    #[test]
+    fn cython_sources_share_the_python_import_language() {
+        assert_eq!(language("src/ext.pyx"), Some("python"));
+        assert_eq!(language("src/ext.pxd"), Some("python"));
+        assert_eq!(language("src/ext.pxi"), Some("python"));
+        assert_eq!(language("src/ext.py"), Some("python"));
     }
 }

@@ -400,36 +400,40 @@ impl Drop for Scratch {
 
 #[cfg(unix)]
 #[test]
-fn a_staged_phone_cli_can_find_the_pages_bundled_connector_without_global_path_changes() {
+fn a_staged_phone_cli_receives_the_exact_connector_without_global_environment_changes() {
     let bundle = Scratch::new("phone-bundle");
     let stage = Scratch::new("phone-stage");
     let (connector, _) = bundle.program(
         "zerus-mobile-connector",
         &[("*", "echo '{\"nested\":true}'")],
     );
-    let (hgs, _) = stage.program("hgs", &[("*", "zerus-mobile-connector --workspace status")]);
-    let inherited = std::env::join_paths([Path::new("/usr/bin"), Path::new("/bin")]).unwrap();
+    let (stale, _) = stage.program("zerus-mobile-connector", &[("*", "echo stale; exit 9")]);
+    let (hgs, _) = stage.program("hgs", &[("*", "if [ -n \"${HGS_MOBILE_CONNECTOR+x}\" ]; then \"$HGS_MOBILE_CONNECTOR\" --workspace status; else \"$here/zerus-mobile-connector\" --workspace status; fi")]);
     let call = invocation(&["mobile", "phones", "--json"], Duration::from_secs(5));
-    let path = phone_search_path(&hgs, &call, Some(&bundle.0), Some(&inherited)).unwrap();
-    let result = run_phone_cli_in(&hgs, &call, 4096, Some(&path)).unwrap();
+    // Existing fallback really reaches the competing sibling.
+    assert!(matches!(
+        run_phone_cli_in(&hgs, &call, 4096, None).unwrap(),
+        Exit::Code { code: 9, .. }
+    ));
+    let old_calls = stage.calls("zerus-mobile-connector");
+    let result = run_phone_cli_in(&hgs, &call, 4096, connector.to_str()).unwrap();
     assert!(
         matches!(result, Exit::Code { code: 0, ref stdout, .. } if stdout == b"{\"nested\":true}\n")
+    );
+    assert_eq!(
+        stage.calls("zerus-mobile-connector"),
+        old_calls,
+        "exact selection must bypass the stale sibling"
     );
     assert!(bundle
         .calls("zerus-mobile-connector")
         .starts_with("--workspace status "));
-    assert_eq!(
-        Path::new(&std::env::split_paths(&path).next().unwrap()).join("zerus-mobile-connector"),
-        connector
-    );
-    let missing = run_phone_cli_in(&hgs, &call, 4096, inherited.to_str()).unwrap();
-    assert!(matches!(missing, Exit::Code { code: 127, .. }));
+    assert!(stale.exists());
     let remote = invocation(
         &["@lab", "mobile", "phones", "--json"],
         Duration::from_secs(5),
     );
-    assert!(phone_search_path(&hgs, &remote, Some(&bundle.0), Some(&inherited)).is_none());
-    assert!(connector_search_path(Path::new("zerus-mobile-connector"), Some(&inherited)).is_none());
+    assert!(phone_connector(&hgs, &remote, Some(&bundle.0)).is_none());
 }
 
 #[cfg(windows)]
@@ -456,13 +460,13 @@ fn the_packaged_windows_connector_wins_over_a_legacy_cli_sibling() {
     let hgs = stage.join("hgs.exe");
     assert_eq!(connector_program(&hgs, Some(&app)), current);
     let call = invocation(&["mobile", "phones", "--json"], Duration::from_secs(5));
-    let path = phone_search_path(&hgs, &call, Some(&app), None).unwrap();
-    assert_eq!(std::env::split_paths(&path).next().unwrap(), app);
+    let selected = phone_connector(&hgs, &call, Some(&app)).unwrap();
+    assert_eq!(Path::new(&selected), current);
     let remote = invocation(
         &["@lab", "mobile", "phones", "--json"],
         Duration::from_secs(5),
     );
-    assert!(phone_search_path(&hgs, &remote, Some(&app), None).is_none());
+    assert!(phone_connector(&hgs, &remote, Some(&app)).is_none());
 }
 
 #[cfg(unix)]

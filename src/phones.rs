@@ -231,7 +231,13 @@ fn protected_call(connection:&Connection,action:&str,input:&Value)->Result<Value
     let executable=std::env::current_exe()?;
     let name=if cfg!(windows){"zerus-mobile-connector.exe"}else{"zerus-mobile-connector"};
     let sibling=executable.parent().map(|p|p.join(name));
-    let program=sibling.filter(|p|p.is_file()).unwrap_or_else(||name.into());
+    // The desktop carries its exact packaged connector to this local child.
+    // A supplied selection never falls back to a stale sibling or PATH.
+    let program=if let Some(selected)=std::env::var_os("HGS_MOBILE_CONNECTOR") {
+        let path=std::path::PathBuf::from(selected);
+        if !path.is_absolute(){return Err(Error::new(1,"The selected mobile connector path must be absolute"))}
+        path
+    }else{sibling.filter(|p|p.is_file()).unwrap_or_else(||name.into())};
     let mut command=Command::new(program);
     command.args(["--workspace",action,"--config"]).arg(&connection.config_path)
         .stdin(Stdio::piped()).stdout(Stdio::piped()).stderr(Stdio::null());

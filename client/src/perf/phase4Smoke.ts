@@ -7,7 +7,7 @@ import { composer, draftKey } from "../store/composer";
 import { terminal } from "../store/terminal";
 import { processes } from "../store/processes";
 import { questions } from "../store/questions";
-import { detailTab, selectedKey, setDetailTab, setSelectedKey, subagentOpen } from "../store/ui";
+import { detailTab, selectedKey, setDetailTab, setSelectedKey, setSubagentOpen, subagentOpen } from "../store/ui";
 import { flag, setSetting } from "../store/settings";
 import type { Session } from "../ui/sessions/types";
 import type { ActivityEvent } from "../types";
@@ -1227,6 +1227,13 @@ async function openChild(agentId: string, label: string) {
   await until(() => subagentOpen() === agentId && subagentActivity.target()?.agentId === agentId && subagentActivity.loaded()
     && composer.view()?.subagent?.agent_id === agentId && composer.view()?.loaded === true,
     15_000, `${label} did not open its own Activity and composer`);
+  // What the person sees: the child's own page, no longer "Reading activity…" (zerus-l7n54).
+  // Rendered Markdown differs from its source further in, so compare the newest event's opening words.
+  const opening = () => String(subagentActivity.events().at(-1)?.detail ?? "").slice(0, 24);
+  const page = () => document.querySelector(".act-virtual")?.textContent ?? "";
+  await until(() => !document.querySelector(".activity > [role=status]") && document.querySelectorAll(".act-virtual-row").length > 0 && page().includes(opening()),
+    5000, `${label} did not show its own page: wanted ${JSON.stringify(opening())} in ${JSON.stringify(page().slice(-300))}`);
+  log(`phase4-smoke subagent ${agentId}: ${document.querySelectorAll(".act-virtual-row").length} rows mounted for ${subagentActivity.events().length} events, ${getComputedStyle(document.querySelector(".act-scroll > .act-col")!).visibility}`);
 }
 
 async function subagentStep() {
@@ -1237,6 +1244,9 @@ async function subagentStep() {
   await until(() => composer.text() === "child smoke", 1000, "the child editor did not take the text");
   button("Main activity").click();
   await until(() => !subagentOpen() && composer.view()?.key === draftKey({ computer: parent.computer, key: parent.catalogKey, name: parent.name, archive_id: null, session_id: parent.sessionId ?? null }), 5000, "the parent composer did not return");
+  // A selection left in the parent's Activity must not hold the child's page back.
+  await until(() => document.querySelectorAll(".act-virtual-row").length > 0, 5000, "the parent's Activity did not return");
+  getSelection()!.selectAllChildren(document.querySelector(".act-virtual")!);
   await openChild("agent-writable", "Writable child");
   if (composer.text() !== "child smoke") throw new Error("the child draft did not survive navigation");
   await until(() => composer.sendEnabled(), 10_000, "the reopened child did not restore Send");
@@ -1250,6 +1260,8 @@ async function subagentStep() {
     throw new Error(`the child send has the wrong identity: ${sent[before].stdin}`);
   }
   await openChild("agent-readonly", "Read-only child");
+  // What was sent to one child is not part of another's Activity.
+  if (document.querySelector(".act-virtual")?.textContent?.includes("child smoke")) throw new Error("the message sent to the writable child shows in the read-only child");
   await until(() => document.querySelector(".subagent-bar")?.textContent?.includes("Read only. This agent is managed by the parent conversation.") === true,
     10_000, "the read-only child hint did not arrive");
   if (composer.view()?.input_visible !== false || document.querySelector<HTMLElement>(".cmp-actions")?.hidden !== true) {
@@ -1258,6 +1270,10 @@ async function subagentStep() {
   await composer.send();
   await sleep(50);
   if ((await calls("send")).length !== before + 1) throw new Error("the read-only child sent a message");
+  // A read the CLI refuses ends in its reason, never in "Reading activity…".
+  setSubagentOpen("agent-not-on-the-roster");
+  await until(() => !document.querySelector(".activity > [role=status]") && document.querySelector(".activity .notice.danger")?.textContent?.includes("the subagent changed or is unavailable") === true,
+    5000, `the refused read showed no reason: ${document.querySelector(".activity")?.textContent?.slice(0, 200)}`);
   button("Main activity").click();
   await until(() => !subagentOpen(), 5000, "the child view did not close");
 }

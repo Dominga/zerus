@@ -17,7 +17,7 @@ import { applyGrouping } from "./organization";
 import { activityReadOnly } from "./activitySource";
 import { compactRows, detailTab, page, selected, selectedKey, setCompactRows, setDetailTab, setReadSelectionKey, setSelectedKey, subagentOpen } from "./ui";
 import { startScreens } from "./screens";
-import { documentVisibility } from "./visibility";
+import { documentVisibility, pageHidden } from "./visibility";
 import { processes, trackFollow, trackShown } from "./processes";
 import type { Batch, ComposerEvent } from "../types";
 
@@ -47,13 +47,14 @@ export const subagentActivity = createRoot(() => {
       target.archiveId,
       target.agentId,
     ),
-    showing: () => page() === "sessions" && !documentVisibility.hidden(),
+    showing: () => page() === "sessions" && !pageHidden(),
     online: (computer) => !computerOffline(computer),
   });
   createEffect(() => {
     const row = selected(), agentId = subagentOpen();
-    const target = row && agentId && row.runId && row.conversationId ? {
-      id: row.key, computer: row.computer, name: row.name, runId: row.runId, conversationId: row.conversationId,
+    // Without an identity the core refuses the read, so the child says it is unavailable.
+    const target = row && agentId ? {
+      id: row.key, computer: row.computer, name: row.name, runId: row.runId ?? "", conversationId: row.conversationId ?? "",
       archiveId: row.archiveId ?? null, agentId,
     } : undefined;
     untrack(() => store.follow(target));

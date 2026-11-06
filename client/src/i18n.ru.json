@@ -846,6 +846,8 @@
   "Could not read local sessions": "Не удалось прочитать локальные сессии",
   "Could not read the pasted image.": "Не удалось прочитать вставленное изображение.",
   "Could not refresh activity: %1": "Не удалось обновить активность: %1",
+  "Could not refresh activity: the computer is offline": "Не удалось обновить активность: компьютер не в сети",
+  "Could not refresh activity: the read did not finish": "Не удалось обновить активность: чтение не завершилось",
   "Could not refresh activity: the subagent changed or is unavailable": "Не удалось обновить активность: субагент изменился или недоступен",
   "Could not release the executor launch record.": "Не удалось освободить запись о запуске исполнителя.",
   "Could not release the start record.": "Не удалось освободить запись о запуске.",

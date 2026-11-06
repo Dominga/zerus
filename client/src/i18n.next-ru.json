@@ -219,6 +219,8 @@
   "Could not load user skins: %1": "Не удалось загрузить пользовательские оформления: %1",
   "Could not open system settings automatically.": "Не удалось автоматически открыть системные настройки.",
   "Could not read held message copies.": "Не удалось прочитать удержанные копии сообщений.",
+  "Could not refresh activity: the computer is offline": "Не удалось обновить активность: компьютер не в сети",
+  "Could not refresh activity: the read did not finish": "Не удалось обновить активность: чтение не завершилось",
   "Could not refresh activity: the subagent changed or is unavailable": "Не удалось обновить активность: субагент изменился или недоступен",
   "Could not release the start record.": "Не удалось освободить запись о запуске.",
   "Could not save update preferences.": "Не удалось сохранить настройки обновлений.",

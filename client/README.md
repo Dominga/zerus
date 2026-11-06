@@ -1092,8 +1092,11 @@ the selected child and nongroup children with drafts. A child Activity is one
 bounded replacement page of at most 200 events from `inspect NAME --agent ID`
 (the CLI's child option; `--subagent` is refused), read only while that exact
 child is visible and online; it never inherits the
-parent's live state or grows a history. Child attachments carry the same exact
-agent identity.
+parent's live state or grows a history. "Reading activity…" lasts only until
+the first answer: an offline computer, a parent with no run or conversation
+identity, a refused read and a read with no answer after 20 seconds each end in
+their reason, and the reads resume once they can. Child attachments carry the
+same exact agent identity.
 
 A child with a matching inspection and `send_supported` gets the ordinary
 composer layout and durable draft under

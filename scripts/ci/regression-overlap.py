@@ -27,17 +27,21 @@ def candidate_cover(fetch, commit):
             examined += 1
             if examined > 4:
                 raise ValueError('Candidate job reads exceed their bound')
-            jobs = fetch(f"actions/runs/{int(run['id'])}/jobs?per_page=100")
+            run_id = int(run['id'])
+            if run_id <= 0:
+                raise ValueError('Invalid candidate run identity')
+            jobs = fetch(f"actions/runs/{run_id}/jobs?per_page=100")
             if jobs['total_count'] > 100:
                 raise ValueError('Candidate job listing exceeds its bound')
-            verify = [j for j in jobs['jobs'] if j['name'].startswith('verify / ')]
-            gates = [j for j in verify if j['name'] == 'verify / Suite results']
+            prefix = 'review / ' if workflow == 'nightly.yml' and run['event'] == 'workflow_dispatch' else 'verify / '
+            verify = [j for j in jobs['jobs'] if j['name'].startswith(prefix)]
+            gates = [j for j in verify if j['name'] == prefix + 'Suite results']
             if len(gates) == 1 and gates[0]['status'] == 'completed':
                 if gates[0]['conclusion'] == 'success':
-                    return int(run['id'])
+                    return run_id
                 continue  # A failed candidate does not suppress independent regression.
             if any(j['status'] in {'queued', 'in_progress'} for j in verify):
-                return int(run['id'])
+                return run_id
     return None
 
 
@@ -60,12 +64,13 @@ def main():
     try:
         covered = candidate_cover(fetch, os.environ['SOURCE_COMMIT'])
         reason = 'candidate-verification' if covered else 'no-active-candidate'
-    except (OSError, ValueError, KeyError, TypeError):
+    except Exception:  # Includes HTTPException/IncompleteRead and decoder failures.
         covered, reason = None, 'candidate-observation-unavailable'
     # Incomplete API evidence runs regression; it never fabricates coverage.
-    record = dict(run_checks=covered is None, reason=reason, candidate_run=covered)
+    record = dict(covered=covered is not None, run_checks=covered is None, reason=reason, candidate_run=covered)
     print(json.dumps(record))
     with Path(os.environ['GITHUB_OUTPUT']).open('a') as output:
+        output.write('covered=' + str(record['covered']).lower() + '\n')
         output.write('run_checks=' + str(record['run_checks']).lower() + '\n')
         output.write('candidate_run=' + (str(covered) if covered else '') + '\n')
 

@@ -35,7 +35,7 @@ jobs:
       contents: read
       actions: read
     outputs:
-      run_checks: ${{ steps.candidate.outputs.run_checks }}
+      covered: ${{ steps.candidate.outputs.covered }}
     steps:
       # workflow_run uses the trusted main workflow, never the triggering
       # run's code or an external PR's scripts with a token.
@@ -52,7 +52,8 @@ jobs:
     name: Main regression tests
     needs: overlap
     if: >-
-      needs.overlap.outputs.run_checks == 'true' && github.event_name == 'workflow_run' && github.repository == 'ufna/zerus' && github.event.repository.private == false && vars.DEV_UPDATES_ENABLED == 'true' &&
+      !cancelled() && !(needs.overlap.result == 'success' && needs.overlap.outputs.covered == 'true') &&
+      github.event_name == 'workflow_run' && github.repository == 'ufna/zerus' && github.event.repository.private == false && vars.DEV_UPDATES_ENABLED == 'true' &&
       github.event.workflow_run.event == 'push' && github.event.workflow_run.head_branch == 'main' &&
       github.event.workflow_run.head_repository.full_name == 'ufna/zerus' &&
       github.event.workflow_run.conclusion != 'cancelled'

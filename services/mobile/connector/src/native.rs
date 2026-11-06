@@ -322,6 +322,8 @@ impl Drop for Owned {
 impl Native for Process {
     fn command(&self) -> Option<Command> {
         let mut command = Command::new(&self.hgs);
+        #[cfg(windows)]
+        command.creation_flags(0x08000000); // CREATE_NO_WINDOW, including the watch child.
         for key in CONTEXT_KEYS {
             command.env_remove(key);
         }

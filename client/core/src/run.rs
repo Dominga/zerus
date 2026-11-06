@@ -720,7 +720,7 @@ fn run_inner(
         )
         .stdout(Stdio::piped())
         .stderr(Stdio::piped());
-    let mut child = match pipes.spawn.unwrap_or_else(|| Box::new(Command::spawn))(&mut command) {
+    let mut child = match pipes.spawn.unwrap_or_else(|| Box::new(spawn_helper))(&mut command) {
         Ok(child) => child,
         Err(error) => return Ok(Exit::StartFailed(error.to_string())),
     };
@@ -960,6 +960,18 @@ fn run_inner(
         },
         None => Exit::Abnormal { stderr },
     })
+}
+
+/// Helpers have private pipes, never an interactive console. Keep custom
+/// spawn/observation hooks in charge of their own original child.
+fn spawn_helper(command: &mut Command) -> std::io::Result<Child> {
+    #[cfg(windows)]
+    {
+        use std::os::windows::process::CommandExt;
+        use windows_sys::Win32::System::Threading::CREATE_NO_WINDOW;
+        command.creation_flags(CREATE_NO_WINDOW);
+    }
+    command.spawn()
 }
 
 /// Waits for both pipe readers to finish. One budget for both pipes: a
@@ -1431,6 +1443,47 @@ mod hidden_tests {
         std::io::stdin().take(1025).read_to_end(&mut input).unwrap();
         assert_eq!(input, b"exact helper input");
         println!("\n0:exact helper input");
+    }
+
+    #[test]
+    fn ordinary_mobile_probe_and_action_helpers_have_no_console() {
+        let call = Invocation {
+            args: vec![
+                "--exact".into(),
+                CASE.into(),
+                "--ignored".into(),
+                "--nocapture".into(),
+                "--test-threads=1".into(),
+            ],
+            stdin: Some(b"exact helper input".to_vec()),
+            timeout: Duration::from_secs(15),
+            request_id: None,
+        };
+        for remove in [false, true] {
+            let env = [(MARKER, CASE)];
+            let result = if remove {
+                run_without(
+                    &std::env::current_exe().unwrap(),
+                    &call,
+                    &env,
+                    &crate::mobile::CONNECTOR_UNSET,
+                    4096,
+                )
+            } else {
+                run_limited(&std::env::current_exe().unwrap(), &call, &env, 4096)
+            }
+            .unwrap();
+            match result {
+                Exit::Code {
+                    code: 0, stdout, ..
+                } => {
+                    let output = String::from_utf8(stdout).unwrap();
+                    assert!(output.lines().any(|line| line == "0:exact helper input"));
+                    assert!(output.contains("test result: ok. 1 passed; 0 failed; 0 ignored;"));
+                }
+                other => panic!("default helper: {other:?}"),
+            }
+        }
     }
 
     #[test]

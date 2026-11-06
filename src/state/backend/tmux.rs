@@ -67,6 +67,19 @@ fn owned(args: &[&str]) -> Vec<String> {
     args.iter().map(|arg| (*arg).to_owned()).collect()
 }
 
+/// Multiple arguments use tmux's direct exec path, even for one program. Its
+/// command parser still consumes a final semicolon unless escaped once here.
+fn direct_command(mut arguments: Vec<String>, command: &[String]) -> Vec<String> {
+    arguments.extend(owned(&["--", "/usr/bin/env", "--"]));
+    arguments.extend(command.iter().cloned());
+    for argument in &mut arguments {
+        if argument.ends_with(';') {
+            argument.insert(argument.len() - 1, '\\');
+        }
+    }
+    arguments
+}
+
 /// The `-t` operand of a session command.
 fn session_target(target: Target) -> String {
     match target {
@@ -178,8 +191,7 @@ fn start_args(spec: &LaunchSpec) -> Vec<String> {
     for value in &spec.env {
         arguments.extend(["-e".into(), value.clone()]);
     }
-    arguments.push(crate::state::join_command(&spec.command));
-    arguments
+    direct_command(arguments, &spec.command)
 }
 
 /// A CLI launch: `-u new-session [-d] (-e KEY=VALUE)* -s NAME -c DIR COMMAND`.
@@ -196,9 +208,8 @@ fn launch_args(spec: &LaunchSpec) -> Vec<String> {
         spec.name.clone(),
         "-c".into(),
         spec.cwd.clone(),
-        platform::join(&spec.command),
     ]);
-    arguments
+    direct_command(arguments, &spec.command)
 }
 
 /// Foreground programs that mean a shell, not the agent, reads the pane's input.
@@ -366,6 +377,9 @@ impl TerminalBackend for Tmux {
         platform::capture("tmux", &arguments).map(PaneInfo::new)
     }
     fn start(&self, spec: &LaunchSpec) -> Result<()> {
+        if spec.command.is_empty() {
+            return Err("Session launch needs a program".into());
+        }
         // Fork and relaunch submit a runner recipe naming this image; a unit
         // test image must not hand itself to tmux with production arguments.
         crate::self_exec::ensure().map_err(|e| e.to_string())?;
@@ -544,6 +558,9 @@ impl TerminalBackend for Tmux {
     }
 
     fn launch(&self, spec: &LaunchSpec) -> CliResult<ClientExit> {
+        if spec.command.is_empty() {
+            return Err(Error::new(1, "Session launch needs a program"));
+        }
         crate::self_exec::ensure().map_err(|e| Error::new(1, e.to_string()))?;
         let arguments = launch_args(spec);
         if spec.detached {
@@ -854,12 +871,12 @@ mod tests {
                 "A=1",
                 "-e",
                 "B=two words",
-                "/bin/bash -lic 'exec \"$0\" --run \"$@\"' /x/hgs 0 claude",
+                "--", "/usr/bin/env", "--", "/bin/bash", "-lic", "exec \"$0\" --run \"$@\"", "/x/hgs", "0", "claude",
             ]
         );
         assert_eq!(
             Tmux.describe(&DryRun::Start(&spec)),
-            "tmux new-session -d -s claude/p/t -c '/tmp/a b' -e 'A=1' -e 'B=two words' '/bin/bash -lic '\\''exec \"$0\" --run \"$@\"'\\'' /x/hgs 0 claude'"
+            "tmux new-session -d -s claude/p/t -c '/tmp/a b' -e 'A=1' -e 'B=two words' -- /usr/bin/env -- /bin/bash -lic 'exec \"$0\" --run \"$@\"' /x/hgs 0 claude"
         );
         assert_eq!(
             launch_args(&spec),
@@ -874,7 +891,7 @@ mod tests {
                 "claude/p/t",
                 "-c",
                 "/tmp/a b",
-                "/bin/bash -lic 'exec \"$0\" --run \"$@\"' /x/hgs 0 claude",
+                "--", "/usr/bin/env", "--", "/bin/bash", "-lic", "exec \"$0\" --run \"$@\"", "/x/hgs", "0", "claude",
             ]
         );
         assert_eq!(
@@ -887,5 +904,13 @@ mod tests {
         assert!(Tmux
             .describe(&DryRun::Launch(&spec))
             .starts_with("tmux -u new-session -d  -s claude/p/t -c /tmp/a b -- "));
+    }
+
+    #[test]
+    fn direct_argv_has_no_default_shell_and_keeps_literal_final_semicolons() {
+        let arguments = direct_command(owned(&["new-session", "-c", "/private/dir;", "-e", "A=x;"]),
+            &owned(&["/private/program", ";", "\\;", "words with space", "quote'", "$(not-a-command)", ""]));
+        assert_eq!(arguments, owned(&["new-session", "-c", "/private/dir\\;", "-e", "A=x\\;",
+            "--", "/usr/bin/env", "--", "/private/program", "\\;", "\\\\;", "words with space", "quote'", "$(not-a-command)", ""]));
     }
 }

@@ -3523,6 +3523,7 @@
   "Text fields use this key for editing.": "Текстовые поля используют эту клавишу для редактирования.",
   "That name is in use. The fork will be named %1.": "Это имя уже используется. Новая сессия будет называться %1.",
   "That report was decided meanwhile; nothing was sent.": "По этому отчёту уже принято решение; ничего не отправлено.",
+  "That session is not on the session list.": "Этой сессии нет в списке сессий.",
   "That task is no longer held; nothing was sent.": "Задача больше не удерживается; ничего не отправлено.",
   "That task no longer waits; nothing was sent.": "Задача больше не ждёт; ничего не отправлено.",
   "The %1 stops; %2 gets a new attempt with your reason. It does not count as a round.": "Этап «%1» останавливается; %2 получает новую попытку с вашей причиной. Это не считается раундом.",

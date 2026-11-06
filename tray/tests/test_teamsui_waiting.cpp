@@ -1702,7 +1702,8 @@ void TestTeamsUiWaiting::waitingPageListsEveryKindAcrossTeams()
     }
     QCOMPARE(kinds, (QStringList{"Plan", "Phase draft", "Permission", "Proposal", "Report", "Held task", "All decided"}));
     // #724: every row opens its team; a one-click decision is answered in it
-    // too (Approve… for the drafts, Answer for the proposal and the permission).
+    // too (Approve… for the drafts, Answer for the proposal and the permission;
+    // task 116: and Answer for a report, a held task and the end of the team).
     QStringList answers;
     for (auto *row : page.findChildren<QFrame *>("teamWaitingRow")) {
         QCOMPARE(row->findChild<QPushButton *>("teamWaitingOpen")->text(), QStringLiteral("Open team"));
@@ -1710,7 +1711,7 @@ void TestTeamsUiWaiting::waitingPageListsEveryKindAcrossTeams()
         const auto *answer = row->findChild<QPushButton *>("teamWaitingAnswerToggle");
         answers << (approve ? approve->text() : answer ? answer->text() : QString());
     }
-    QCOMPARE(answers, (QStringList{"Approve…", "Approve…", "Answer", "Answer", "", "", ""}));
+    QCOMPARE(answers, (QStringList{"Approve…", "Approve…", "Answer", "Answer", "Answer", "Answer", "Answer"}));
     QCOMPARE(teams.size(), 6);
     const QString count = page.findChild<QLabel *>("teamWaitingCount")->text();
     QVERIFY2(count.contains("7 items") && count.contains("6 teams"), qPrintable(count));
@@ -1816,7 +1817,7 @@ void TestTeamsUiWaiting::waitingBannerFoldsOpensAndHides()
     }
     QCOMPARE(ids, (QStringList{"team-plan/plan_draft/plan", "team-1/phase_draft/2", "team-3/permission_escalated/Tester",
                                "team-2/owner_word_asked/proposal-p3", "team-2/report_escalated/4"}));
-    QCOMPARE(actions, (QStringList{"Approve…", "Approve…", "Answer", "Answer", "Accept…"}));
+    QCOMPARE(actions, (QStringList{"Approve…", "Approve…", "Answer", "Answer", "Answer"}));
     // No dots as separators: the rows keep their parts apart with space.
     for (auto *label : banner->findChildren<QLabel *>()) QVERIFY2(label->text() != QStringLiteral("·"), "a dot separator");
     auto *more = banner->findChild<QPushButton *>("teamWaitingBannerAll");

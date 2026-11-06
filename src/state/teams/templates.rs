@@ -766,14 +766,29 @@ trait EngineRegistry {
 struct SystemRegistry;
 impl EngineRegistry for SystemRegistry {
     fn value(&self, root: &str, key: &str, name: &str) -> Option<String> {
-        let output = Command::new("reg").args(["query", &format!("{root}\\{key}"), "/v", name]).output().ok()?;
+        // reg.exe from System32, never one found on the PATH.
+        let system = std::env::var_os("SystemRoot").map_or_else(|| PathBuf::from("C:\\Windows"), PathBuf::from);
+        let output = Command::new(system.join("System32").join("reg.exe")).args(["query", &format!("{root}\\{key}"), "/v", name]).output().ok()?;
         if !output.status.success() { return None; }
-        let text = String::from_utf8_lossy(&output.stdout);
-        text.lines().find_map(|line| {
-            let mut parts = line.split_whitespace();
-            (parts.next()? == name).then(|| parts.collect::<Vec<_>>().join(" "))
-        })
+        parse_reg_value(&String::from_utf8_lossy(&output.stdout), name)
     }
+}
+
+/// The data of the value `name` in what `reg query KEY /v NAME` prints:
+/// `    InstalledDirectory    REG_SZ    D:\EGS\UE_5.3`. The type token is not
+/// part of it and the data is kept verbatim (a path with spaces stays whole).
+fn parse_reg_value(text: &str, name: &str) -> Option<String> {
+    text.lines().find_map(|line| {
+        let rest = line.trim_start().strip_prefix(name)?;
+        // The whole name, not a longer one that starts with it.
+        if !rest.starts_with(char::is_whitespace) {
+            return None;
+        }
+        let rest = rest.trim_start();
+        let (kind, data) = rest.split_once(char::is_whitespace).unwrap_or((rest, ""));
+        let data = data.trim();
+        (matches!(kind, "REG_SZ" | "REG_EXPAND_SZ") && !data.is_empty()).then(|| data.to_owned())
+    })
 }
 
 /// The engine from the project's EngineAssociation: a launcher version reads
@@ -792,16 +807,19 @@ fn unreal_engine(project: &Path, override_path: Option<&str>, registry: &dyn Eng
     if association.is_empty() {
         bail!("{} names no EngineAssociation", project.display());
     }
-    let version = association.parse::<f64>().is_ok();
-    let (root, key) = if version {
-        ("HKLM", format!("SOFTWARE\\EpicGames\\Unreal Engine\\{association}"))
+    // A launcher engine ("5.3", "4.27"): HKLM\SOFTWARE\EpicGames\Unreal Engine\<version>,
+    // value InstalledDirectory. A source build (a GUID): HKCU\Software\Epic Games\
+    // Unreal Engine\Builds, a value named like the GUID. Both as reg.exe prints them.
+    let version = association.chars().all(|c| c.is_ascii_digit() || c == '.');
+    let (root, key, name) = if version {
+        ("HKLM", format!("SOFTWARE\\EpicGames\\Unreal Engine\\{association}"), "InstalledDirectory")
     } else {
-        ("HKCU", "Epic Games\\Unreal Engine\\Builds".to_owned())
+        ("HKCU", "Software\\Epic Games\\Unreal Engine\\Builds".to_owned(), association)
     };
-    if let Some(path) = registry.value(root, &key, association) {
+    if let Some(path) = registry.value(root, &key, name) {
         return Ok(path);
     }
-    bail!("No Unreal engine for EngineAssociation {association}: looked in {root}\\{key}, ZERUS_UE_ENGINE, and the engine override")
+    bail!("No Unreal engine for EngineAssociation {association}: looked in {root}\\{key} (value {name}), ZERUS_UE_ENGINE, and the engine override")
 }
 /// Validates a run request and builds the exact program and argv (U21). Nothing
 /// here reads a shell: every value is one argv element, or spliced as whole
@@ -828,10 +846,22 @@ pub(crate) fn plan(id: &str, args: &Value, folder: &Path) -> anyhow::Result<Plan
     let Some(template) = builtin(id) else { bail!("Unknown template {id}") };
     ensure!(enabled(), "The built-in command templates are turned off in Settings > Teams");
     let mut args = args.clone();
+    let mut editor: Option<String> = None;
     if matches!(template.id, "ue-build" | "ue-test") {
         let project = args["project"].as_str().unwrap_or_default();
         if project.is_empty() { bail!("The template {id} needs a project"); }
         let engine = unreal_engine(&folder.join(project), args["engine"].as_str(), &SystemRegistry)?;
+        if template.id == "ue-test" {
+            // Task 90: -ExecCmds takes `;`-separated console commands, so the filter
+            // is one filter: no `;` and no line break. The engine, wherever it is
+            // named from, must hold the editor Zerus runs (4.x names it UE4Editor-Cmd).
+            let filters = args["filters"].as_str().unwrap_or_default();
+            ensure!(!filters.contains(';') && !filters.contains(['\n', '\r']), "The template's \"filters\" is one automation filter: no ';' and no line break");
+            let bin = Path::new(&engine).join("Engine").join("Binaries").join("Win64");
+            let name = ["UnrealEditor-Cmd.exe", "UE4Editor-Cmd.exe"].into_iter().find(|name| bin.join(name).is_file());
+            let Some(name) = name else { bail!("The Unreal engine {engine} holds no Engine/Binaries/Win64/UnrealEditor-Cmd.exe (or UE4Editor-Cmd.exe)") };
+            editor = Some(format!("{}/Engine/Binaries/Win64/{name}", engine.trim_end_matches(['/', '\\'])));
+        }
         args["engine"] = json!(engine);
     }
     let args = &args;
@@ -904,6 +934,9 @@ pub(crate) fn plan(id: &str, args: &Value, folder: &Path) -> anyhow::Result<Plan
             bail!("The template {id} needs a single \"{placeholder}\" for its program");
         };
         program = program.replace(&format!("{{{placeholder}}}"), &word);
+    }
+    if let Some(editor) = editor {
+        program = editor;
     }
     let mut more = Vec::new();
     if template.id == "cargo-test" {
@@ -2891,13 +2924,77 @@ kind = "path"
         assert!(build.program.ends_with("Engine/Build/BatchFiles/Build.bat"));
         assert!(build.argv.contains(&"-Project=Game.uproject".to_owned()));
         assert_eq!(&build.argv[..4], ["Game.uproject", "Game", "Win64", "Development"]);
-        let test = plan("ue-test", &json!({"engine":"UE_5.5","project":"Game.uproject","filters":"Project.Game"}), dir.path()).unwrap();
-        assert!(test.program.ends_with("UnrealEditor-Cmd.exe"));
+        let engine = fake_engine("UnrealEditor-Cmd.exe");
+        let root = engine.path().to_string_lossy().into_owned();
+        let test = plan("ue-test", &json!({"engine":root,"project":"Game.uproject","filters":"Project.Game"}), dir.path()).unwrap();
+        assert!(test.program.ends_with("Engine/Binaries/Win64/UnrealEditor-Cmd.exe"), "{}", test.program);
         assert!(test.argv.contains(&"-ExecCmds=Automation RunTests Project.Game;Quit".to_owned()));
         assert!(test.argv.contains(&"-nullrhi".to_owned()) && test.argv.contains(&"-unattended".to_owned()));
         assert!(test.argv.contains(&"-saveddir=.zerus-team/ue/Saved".to_owned()));
         assert!(test.argv.contains(&"-abslog=.zerus-team/ue/Unreal.log".to_owned()));
         assert!(plan("ue-build", &json!({"engine":"UE_5.5","project":"Game.uproject","target":"Game"}), dir.path()).is_ok());
+    }
+
+    /// An engine folder holding the named editor.
+    fn fake_engine(editor: &str) -> tempfile::TempDir {
+        let engine = tempfile::tempdir().unwrap();
+        let bin = engine.path().join("Engine").join("Binaries").join("Win64");
+        std::fs::create_dir_all(&bin).unwrap();
+        std::fs::write(bin.join(editor), "").unwrap();
+        engine
+    }
+
+    /// Task 90: -ExecCmds takes one automation filter, and the engine holds the
+    /// editor (UE4Editor-Cmd.exe for a 4.x engine).
+    #[test]
+    fn ue_test_refuses_a_filter_that_adds_commands_and_an_engine_without_its_editor() {
+        let dir = temp();
+        std::fs::write(dir.path().join("Game.uproject"), "{}").unwrap();
+        let engine = fake_engine("UnrealEditor-Cmd.exe");
+        let root = engine.path().to_string_lossy().into_owned();
+        for filters in ["Project.Game;Quit", "Project.Game\nquit", "A\rB"] {
+            let error = plan("ue-test", &json!({"engine":root,"project":"Game.uproject","filters":filters}), dir.path()).unwrap_err().to_string();
+            assert!(error.contains("one automation filter"), "{filters:?}: {error}");
+        }
+        assert!(plan("ue-test", &json!({"engine":root,"project":"Game.uproject","filters":"Project.Game"}), dir.path()).is_ok());
+        let empty = tempfile::tempdir().unwrap();
+        let error = plan("ue-test", &json!({"engine":empty.path().to_string_lossy(),"project":"Game.uproject"}), dir.path()).unwrap_err().to_string();
+        assert!(error.contains("UnrealEditor-Cmd.exe") && error.contains("UE4Editor-Cmd.exe"), "{error}");
+        let four = fake_engine("UE4Editor-Cmd.exe");
+        let plan = plan("ue-test", &json!({"engine":four.path().to_string_lossy(),"project":"Game.uproject"}), dir.path()).unwrap();
+        assert!(plan.program.ends_with("Engine/Binaries/Win64/UE4Editor-Cmd.exe"), "{}", plan.program);
+    }
+
+    /// reg.exe's own output, as printed on a machine with Unreal 5.3 installed
+    /// by the launcher and a source build registered by its GUID.
+    #[test]
+    fn reg_exe_output_is_read_without_its_type_token_and_with_the_path_whole() {
+        let launcher = "\r\nHKEY_LOCAL_MACHINE\\SOFTWARE\\EpicGames\\Unreal Engine\\5.3\r\n    InstalledDirectory    REG_SZ    D:\\EGS\\UE_5.3\r\n\r\n";
+        assert_eq!(parse_reg_value(launcher, "InstalledDirectory").as_deref(), Some("D:\\EGS\\UE_5.3"));
+        let spaced = "HKEY_LOCAL_MACHINE\\SOFTWARE\\EpicGames\\Unreal Engine\\5.3\r\n    InstalledDirectory    REG_SZ    C:\\Program Files\\Epic Games\\UE_5.3\r\n";
+        assert_eq!(parse_reg_value(spaced, "InstalledDirectory").as_deref(), Some("C:\\Program Files\\Epic Games\\UE_5.3"));
+        let source = "HKEY_CURRENT_USER\\Software\\Epic Games\\Unreal Engine\\Builds\r\n    {A1B2-C3}    REG_SZ    D:\\Source\\UE\r\n    {OTHER}    REG_SZ    E:\\Other\r\n";
+        assert_eq!(parse_reg_value(source, "{A1B2-C3}").as_deref(), Some("D:\\Source\\UE"));
+        assert_eq!(parse_reg_value("    InstalledDirectoryX    REG_SZ    D:\\X\r\n", "InstalledDirectory"), None);
+        assert_eq!(parse_reg_value("    InstalledDirectory    REG_DWORD    0x1\r\n", "InstalledDirectory"), None);
+        assert_eq!(parse_reg_value("ERROR: The system was unable to find the specified registry key or value.\r\n", "InstalledDirectory"), None);
+    }
+
+    /// Against the real registry with reg.exe: every launcher engine this computer
+    /// lists resolves to a folder that exists. Nothing to check where none is installed.
+    #[cfg(windows)]
+    #[test]
+    fn the_registry_of_this_computer_gives_its_launcher_engines() {
+        let system = std::env::var("SystemRoot").unwrap_or_else(|_| "C:\\Windows".to_owned());
+        let output = Command::new(Path::new(&system).join("System32").join("reg.exe")).args(["query", "HKLM\\SOFTWARE\\EpicGames\\Unreal Engine"]).output().unwrap();
+        let text = String::from_utf8_lossy(&output.stdout).into_owned();
+        let versions: Vec<&str> = text.lines().filter_map(|line| line.trim().rsplit('\\').next()).filter(|v| !v.is_empty() && v.chars().all(|c| c.is_ascii_digit() || c == '.')).collect();
+        for version in versions {
+            let key = format!("SOFTWARE\\EpicGames\\Unreal Engine\\{version}");
+            if let Some(dir) = SystemRegistry.value("HKLM", &key, "InstalledDirectory") {
+                assert!(!dir.starts_with("REG_") && Path::new(&dir).is_dir(), "{version}: {dir}");
+            }
+        }
     }
 
     struct FakeRegistry(std::collections::BTreeMap<(String,String,String),String>);
@@ -2912,11 +3009,11 @@ kind = "path"
         let dir = temp();
         let project = dir.path().join("Game.uproject");
         std::fs::write(&project, r#"{"EngineAssociation":"5.5"}"#).unwrap();
-        let launcher = FakeRegistry([(("HKLM".into(), "SOFTWARE\\EpicGames\\Unreal Engine\\5.5".into(), "5.5".into()), "C:/Epic/UE_5.5".into())].into());
+        let launcher = FakeRegistry([(("HKLM".into(), "SOFTWARE\\EpicGames\\Unreal Engine\\5.5".into(), "InstalledDirectory".into()), "C:/Epic/UE_5.5".into())].into());
         assert_eq!(unreal_engine(&project, None, &launcher).unwrap(), "C:/Epic/UE_5.5");
         assert_eq!(unreal_engine(&project, Some("D:/UE"), &launcher).unwrap(), "D:/UE");
         std::fs::write(&project, r#"{"EngineAssociation":"{abc}"}"#).unwrap();
-        let source = FakeRegistry([(("HKCU".into(), "Epic Games\\Unreal Engine\\Builds".into(), "{abc}".into()), "D:/Source/UE".into())].into());
+        let source = FakeRegistry([(("HKCU".into(), "Software\\Epic Games\\Unreal Engine\\Builds".into(), "{abc}".into()), "D:/Source/UE".into())].into());
         assert_eq!(unreal_engine(&project, None, &source).unwrap(), "D:/Source/UE");
         let error = unreal_engine(&project, None, &launcher).unwrap_err().to_string();
         assert!(error.contains("HKCU") && error.contains("ZERUS_UE_ENGINE"), "{error}");

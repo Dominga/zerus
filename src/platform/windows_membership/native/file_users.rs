@@ -442,9 +442,9 @@ pub(super) fn private_probe(input: &str) {
             }
         }
     };
-    println!(
-        "file-users-report-v1={}",
-        serde_json::to_string(&report).unwrap()
+    print!(
+        "{}",
+        super::super::file_users::private_report_frame(&serde_json::to_string(&report).unwrap())
     );
 }
 
@@ -509,12 +509,9 @@ mod tests {
         assert!(!out.overflow && !err.overflow);
         assert!(err.bytes.is_empty());
         let out = String::from_utf8(out.bytes).unwrap();
-        let rows: Vec<_> = out
-            .lines()
-            .filter_map(|s| s.strip_prefix("file-users-report-v1="))
-            .collect();
-        assert_eq!(rows.len(), 1, "one original matching report only");
-        let report: Report = serde_json::from_str(rows[0]).unwrap();
+        let row = super::super::super::file_users::private_report_line(&out)
+            .expect("one original matching report only");
+        let report: Report = serde_json::from_str(row).unwrap();
         assert_eq!(report.request, request);
         report
     }

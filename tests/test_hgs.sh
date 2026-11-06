@@ -955,7 +955,7 @@ while True:
         break
     time.sleep(0.1)
 assert ended.get(sys.argv[2]) == {'launch_id': sys.argv[2], 'name': 'sh/sample-project/gone', 'code': None,
-                                  'output': ''}, box
+                                  'output': '', 'diagnostic_code': 'launch_supervisor_report_missing'}, box
 assert sys.argv[3] not in ended, box
 assert all(session['name'] != 'sh/sample-project/gone' for session in box['sessions']), box
 PY

@@ -66,7 +66,7 @@ class WorkflowBodies(unittest.TestCase):
         self.assertNotIn("body", rows[2])
 
 
-@unittest.skipUnless(shutil.which("bwrap") and shutil.which("dbus-run-session")
+@unittest.skipUnless(sys.platform == "linux" and shutil.which("bwrap") and shutil.which("dbus-run-session")
                      and hasattr(os, "sched_getaffinity"), "requires unprivileged Linux namespaces")
 class RealIsolation(unittest.TestCase):
     def setUp(self):
@@ -112,9 +112,10 @@ assert os.environ['DBUS_SESSION_BUS_ADDRESS'].startswith('unix:')
 s=pathlib.Path('/proc/self/status').read_text()
 assert 'NoNewPrivs:\\t1' in s
 assert 'CapEff:\\t0000000000000000' in s
+assert os.getuid()==EXPECTED_UID
 print(json.dumps({k:os.readlink('/proc/self/ns/'+k) for k in ('pid','net')}))
 PY
-""".replace("CANARY", repr(str(canary)))
+""".replace("CANARY", repr(str(canary))).replace("EXPECTED_UID", str(os.getuid()))
         row = dict(name="isolation", index=0, body=body, directory=".", env={}, timeout=10)
         with patch.dict(os.environ, HGS_STATE_DIR="/must-not-inherit", ZERUS_CLIENT_DESKTOP_SERVICE="1"):
             self.runner.run({"id": "quick"}, row)
@@ -163,6 +164,48 @@ PY
         self.assertEqual((self.runner.workspace / "source").read_text(), "original")
         self.assertEqual((self.runner.pristine / "source").read_text(), "original")
         self.assertNotEqual(first.stat().st_ino, (self.runner.workspace / "source").stat().st_ino)
+
+    def network_fixture(self, refuse_first):
+        self.args.online = True
+        helper = self.base / "setup-helper"
+        helper.write_text("""#!/usr/bin/python3
+import os,pathlib,sys
+p=pathlib.Path(__file__).with_suffix('.count')
+n=int(p.read_text())+1 if p.exists() else 1
+p.write_text(str(n))
+if REFUSE and n==1:sys.exit(7)
+def fd(name):return int(next(a.split('=',1)[1] for a in sys.argv if a.startswith(name+'=')))
+os.write(fd('--ready-fd'),b'1')
+os.read(fd('--exit-fd'),1)
+""".replace("REFUSE", repr(refuse_first)))
+        helper.chmod(0o700)
+        self.args.slirp = helper
+        (self.runner.output / "resolv.conf").write_text("nameserver 10.0.2.3\n")
+        return helper.with_suffix(".count")
+
+    def test_pre_entry_setup_refusal_never_runs_the_body_twice(self):
+        count = self.network_fixture(True)
+        row = dict(name="pre-entry refusal", index=0, body="echo entry >> entered", directory=".", env={}, timeout=10)
+        self.runner.run({"id": "quick"}, row)
+        self.assertEqual(row["status"], "pass", (self.runner.output / row["log"]).read_text())
+        self.assertEqual(count.read_text(), "2")
+        self.assertEqual((self.runner.workspace / "entered").read_text(), "entry\n")
+        self.assertEqual(len(row["preparation_refusals"]), 1)
+        self.assertTrue(row["preparation_refusals"][0]["before_release"])
+
+    def test_failure_after_release_is_uncertain_and_never_retried(self):
+        count = self.network_fixture(False)
+        original = CI.Network.connect
+        def fail_after_release(network):
+            original(network)
+            raise RuntimeError("injected after the real release write")
+        row = dict(name="post-release failure", index=0, body="echo entry >> entered", directory=".", env={}, timeout=10)
+        with patch.object(CI.Network, "connect", fail_after_release):
+            self.runner.run({"id": "quick"}, row)
+        self.assertEqual(row["status"], "fail")
+        self.assertTrue(row["execution_started"])
+        self.assertEqual(count.read_text(), "1")
+        self.assertFalse(row["preparation_refusals"][0]["before_release"])
 
 
 if __name__ == "__main__":

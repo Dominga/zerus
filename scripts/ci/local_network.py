@@ -17,6 +17,7 @@ class Network:
     def __init__(self, binary, log):
         self.binary, self.log = binary, log
         self.fds, self.helper = [], None
+        self.release_entered = False
 
     def pipe(self):
         pair = os.pipe()
@@ -65,13 +66,14 @@ class Network:
         self.helper = subprocess.Popen([
             str(self.binary), "--configure", "--disable-host-loopback", "--enable-sandbox", "--enable-seccomp",
             f"--ready-fd={ready_write}", f"--exit-fd={exit_read}", str(child), "tap0"],
-            pass_fds=(ready_write, exit_read), stdout=self.log, stderr=subprocess.STDOUT,
+            pass_fds=(ready_write, exit_read), stdin=subprocess.DEVNULL, stdout=self.log, stderr=subprocess.STDOUT,
             start_new_session=True, env={"PATH": "/usr/bin:/bin"})
         self.close(ready_write)
         self.close(exit_read)
         read_ready(ready, 10)
         if self.helper.poll() is not None:
             raise RuntimeError("original network helper exited before release")
+        self.release_entered = True
         os.write(self.release, b"1")
         self.close(self.release)
 

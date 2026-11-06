@@ -149,6 +149,10 @@ def plan(workflow, cli, selected=None, online=False):
         if job.get("container"):
             item["container_image"] = job["container"]["image"]
         for index, step in enumerate(job.get("steps", [])):
+            supplied_dbus = "sudo apt-get update && sudo apt-get install --no-install-recommends -y dbus-daemon\n"
+            if key == "quick" and step.get("run", "").startswith(supplied_dbus) and shutil.which("dbus-daemon"):
+                step = dict(step, run=step["run"][len(supplied_dbus):],
+                            local_provisioning="preinstalled dbus-daemon replaces only the apt installation line")
             if step.get("uses", "").startswith("actions/setup-node@") and online:
                 major = str(step.get("with", {}).get("node-version", ""))
                 if re.fullmatch(r"[1-9][0-9]", major):
@@ -193,6 +197,8 @@ def plan(workflow, cli, selected=None, online=False):
                 item["steps"].pop()
             for part, (title, script) in enumerate(units):
                 target = row if len(units) == 1 else dict(row, name=title, part=part)
+                if step.get("local_provisioning"):
+                    target["local_provisioning"] = step["local_provisioning"]
                 target.update(body=script, body_sha256=digest(script.encode()),
                               condition=condition,
                               directory=step.get("working-directory", "."),
@@ -238,6 +244,10 @@ class Runner:
         self.output.mkdir(parents=True, mode=0o700)
         self.created_output = True
         self.output.chmod(0o700)
+        harness = self.output / "harness"
+        harness.mkdir()
+        for path in Path(__file__).parent.glob("local*.py"):
+            shutil.copy2(path, harness / path.name)
         self.cache.mkdir(parents=True, exist_ok=True, mode=0o700)
         self.lock = (self.cache / "lock").open("w")
         fcntl.flock(self.lock, fcntl.LOCK_EX | fcntl.LOCK_NB)
@@ -341,6 +351,39 @@ class Runner:
         cpus = sorted(os.sched_getaffinity(0))[:self.args.workers]
         return ["nice", "-n", "10", "taskset", "--cpu-list", ",".join(map(str, cpus)), *command]
 
+    def spawn(self, command, output, step, home):
+        for attempt in range(3):
+            child = None
+            network = Network(self.args.slirp, output) if self.args.online and not self.container else None
+            try:
+                passed = network.before_spawn(command) if network else ()
+                child = subprocess.Popen(command, stdout=output, pass_fds=passed, stdin=subprocess.DEVNULL,
+                                         stderr=subprocess.STDOUT, start_new_session=True,
+                                         env={"PATH": "/usr/bin:/bin", "HOME": str(home)})
+                if network:
+                    network.connect()
+                step["execution_started"] = True
+                return child, network
+            except BaseException as error:
+                entered = bool(network and network.release_entered)
+                step["execution_started"] = entered
+                step.setdefault("preparation_refusals", []).append(dict(attempt=attempt + 1,
+                    before_release=not entered, reason=str(error)))
+                if child:
+                    if child.poll() is None:
+                        os.killpg(child.pid, signal.SIGKILL)
+                    child.wait(timeout=10)
+                if network:
+                    network.finish()
+                if isinstance(error, RuntimeError) and network and not entered and attempt < 2:
+                    # The original setup namespace and helper have physically
+                    # settled, and the command gate was never entered.
+                    command = [part for part in command]
+                    start = command.index("--info-fd")
+                    del command[start:start + 4]
+                    continue
+                raise
+
     def run(self, job, step):
         deadline = time.monotonic() + 600
         while os.getloadavg()[0] > self.args.max_load:
@@ -414,16 +457,10 @@ class Runner:
         with log.open("wb") as output:
             command = (self.container.command(script, directory, env) if self.container
                        else self.command(script, directory, home, env))
-            network = Network(self.args.slirp, output) if self.args.online and not self.container else None
-            passed = network.before_spawn(command) if network else ()
-            child = None
+            child = network = None
             try:
-                child = subprocess.Popen(command, stdout=output, pass_fds=passed,
-                                         stderr=subprocess.STDOUT, start_new_session=True,
-                                         env={"PATH": "/usr/bin:/bin", "HOME": str(home)})
-                if network:
-                    network.connect()
                 deadline = time.monotonic() + step["timeout"]
+                child, network = self.spawn(command, output, step, home)
                 while True:
                     remaining = deadline - time.monotonic()
                     if remaining <= 0:
@@ -454,7 +491,7 @@ class Runner:
             finally:
                 if network:
                     network.finish()
-        step.update(status="pass" if code == 0 else "fail", exit_code=code,
+        step.update(status=("pass" if code == 0 else "fail") if step.get("execution_started") else "not run", exit_code=code,
                     seconds=round(time.time() - step["started_at"], 2), log_sha256=file_digest(log))
         print(f"{step['status'].upper()} {job['id']}: {step['name']} ({step['seconds']}s)", flush=True)
         for key, filename in (("env", "github-env"), ("path", "github-path")):
@@ -542,6 +579,7 @@ def main(argv=None):
               "platform": "Arch/Linux local preflight", "network": "private outbound" if args.online else "offline",
               "rust": RUST, "workers": args.workers,
               "jobs": plan(workflow, cli, selected, args.online), "completed": False}
+    report["harness_files"] = {path.name: file_digest(path) for path in Path(__file__).parent.glob("local*.py")}
     if args.plan:
         args.output.mkdir(parents=True, exist_ok=False)
         save(args.output / "report.json", report)

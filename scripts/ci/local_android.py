@@ -16,7 +16,8 @@ import zipfile
 def fetch(url):
     if not url.startswith("https://"):
         raise ValueError("tool downloads require HTTPS")
-    return urllib.request.urlopen(url, timeout=90)
+    request = urllib.request.Request(url, headers={"User-Agent": "Zerus-local-ci/1.0"})
+    return urllib.request.urlopen(request, timeout=90)
 
 
 def download(url, path, expected, algorithm="sha256"):

@@ -32,6 +32,10 @@ namespaces, short temporary socket directory and D-Bus session. It inherits no
 the namespace outbound access with host loopback disabled. No host credentials,
 agent homes, tmux socket or Docker daemon socket are mounted into the checks.
 Headless Xvfb uses software Mesa; the owner's display and GPU are not used.
+Network setup may be recreated at most twice after a verified refusal before
+the test-entry write. The old namespace/helper must settle first. The entry is
+latched before writing; any uncertainty after it, or any test failure, is never
+retried. These preparation refusals stay visible in the report.
 
 Only public tool/cache data are seeded. The cache and Cargo target are
 locked for the run. `--target /path/to/exclusively-used-target` can reuse a build
@@ -43,6 +47,7 @@ script layout refuses rather than guessing how to split it.
 
 `report.json` is saved after checks, with the commit, workflow/runner hashes,
 step bodies and hashes, tool versions, exit codes and raw-log SHA256 values.
+The exact runner/helper source is retained in `harness/` alongside its hashes.
 Every job in `checks.yml` has a pass, fail or not-run status. A partially executed
 job is not run unless a check actually failed, in which case it is fail. Logs
 and the checkout remain in the private output directory for diagnosis. Namespace

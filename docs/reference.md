@@ -2904,8 +2904,11 @@ retain their existing scope.
 
 The original Terminate UUID and exact successful archive receipt precede a
 separate, durably reserved program-stop UUID. Normal stop sends TERM with a
-15-second phase bound and never escalates automatically. If verified original
-programs survive, **Force stop…** opens a new native confirmation listing the
+15-second phase bound and never escalates automatically. If process metadata
+is temporarily unavailable after signalling, read-only exit observation stays
+within that original phase; only a later exact native pin observation establishes
+exit. Uncertainty at the bound remains Unknown. If verified original programs
+survive, **Force stop…** opens a new native confirmation listing the
 currently surviving originals, with a new UUID. It becomes available only after
 the previous mutating helper, descendants, pipes and loans physically settle.
 Missing or uncertain outcomes cannot create a Force offer. The original selected

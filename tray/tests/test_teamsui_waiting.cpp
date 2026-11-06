@@ -2096,9 +2096,10 @@ void TestTeamsUiWaiting::waitingReportHeldRetryAndFinishAnswerInPlace()
         auto tasks = team["tasks"].toArray();
         auto first = tasks[0].toObject(); first["status"] = "submitted"; tasks[0] = first;
         auto second = tasks[1].toObject(); second["hold"] = QJsonObject{{"by", "You"}, {"reason", "After the release"}, {"at", 1}}; tasks[1] = second;
-        auto fifth = tasks[4].toObject();
-        fifth["waits"] = QJsonObject{{"for", "model"}, {"on", QJsonArray{"model"}}, {"unblock", "choose a model"}};
-        tasks[4] = fifth;
+        // The team has two tasks: #5 is added whole (indexing past the end of the
+        // array was undefined and crashed).
+        tasks.append(QJsonObject{{"id", 5}, {"phase", 1}, {"title", "Code review"}, {"assignee", "backend"}, {"status", "pending"},
+                                 {"waits", QJsonObject{{"for", "model"}, {"on", QJsonArray{"model"}}, {"unblock", "choose a model"}}}});
         team["tasks"] = tasks;
     }
     setTeam(team);
@@ -2322,8 +2323,9 @@ void TestTeamsUiWaiting::waitingBannerAnswersInPlaceAndWithdrawsTheNotice()
         return nullptr;
     };
     QTRY_VERIFY(bannerRow(permission) && bannerRow(held));
-    QCOMPARE(bannerRow(held)->findChild<QPushButton *>("teamWaitingBannerAction")->text(), QStringLiteral("Open team"));
-    QVERIFY(!bannerRow(held)->findChild<QToolButton *>("teamWaitingBannerOpen"));
+    // Task 116: a held task answers in its row too (Release), like the permission.
+    QCOMPARE(bannerRow(held)->findChild<QPushButton *>("teamWaitingBannerAction")->text(), QStringLiteral("Answer"));
+    QVERIFY(bannerRow(held)->findChild<QToolButton *>("teamWaitingBannerOpen"));
     auto *answer = bannerRow(permission)->findChild<QPushButton *>("teamWaitingBannerAction");
     QCOMPARE(answer->text(), QStringLiteral("Answer"));
     QVERIFY(bannerRow(permission)->findChild<QToolButton *>("teamWaitingBannerOpen"));

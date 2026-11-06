@@ -1,0 +1,50 @@
+<!doctype html><html lang="en"><meta charset="utf-8"><title>Private Terminate offer fixture</title>
+<body><div id="host"></div><pre id="result">PENDING</pre>
+<script type="module">
+const calls = []; let error = "";
+window.__TAURI_INTERNALS__ = {
+  transformCallback: () => 1,
+  invoke: async (command, args) => {
+    calls.push({command, args});
+    if (command === "termination_cleanup_offer") throw error;
+    if (command === "worktree_cleanup_open") return {id:"original-review", revision:1, computer:"", machine:"example", repository:"/srv/example/work", focus:"/srv/example/work", rows:[], busy:false, summary:"Review required", unknown:false};
+    if (command === "worktree_cleanup_close" || command === "plugin:event|unlisten") return;
+    if (command === "plugin:event|listen") return 1;
+    throw Error("Unexpected native command: " + command);
+  },
+};
+const require = (ok, message) => {if (!ok) throw Error(message)};
+const until = async (read, message) => {const end=Date.now()+3000;while(!read()){require(Date.now()<end,message);await new Promise(r=>setTimeout(r,10));}};
+try {
+  const {render, createComponent} = await import("solid-js/web");
+  const {TerminateDialog} = await import("/src/ui/sessions/ActionDialogs.tsx");
+  const {terminateCopy} = await import("/src/ui/sessions/actions-ui.ts");
+  const {toSession} = await import("/src/store/catalog.ts");
+  const {closeWorktreeReview, worktreeReviewDialog, worktreeReview} = await import("/src/store/worktreeCleanup.ts");
+  const row = toSession("", "run:original", {name:"codex/example/original",cmd:"codex",agent:"codex",state:"running",tracked:true,run_id:"original-run",conversation_id:"original-conversation",cwd:"/srv/example/work",machine:"example",activity:"idle",process_state:"running",resumable:true});
+  for (const [platform, code] of [["Linux","termination_native_relay_unavailable"],["macOS","termination_native_image_unavailable"]]) {
+    error=code;calls.length=0;let closed=0;
+    const host=document.querySelector("#host");
+    let dispose=()=>{};
+    dispose=render(()=>createComponent(TerminateDialog,{row,close:()=>{closed++;dispose();}}),host);
+    await until(()=>host.querySelector('[role="status"]'), platform+" explanation absent");
+    const notice=host.querySelector('[role="status"]');
+    require(notice.getBoundingClientRect().height>0, platform+" explanation hidden");
+    require(notice.textContent.includes("Automatic folder removal after Terminate is unavailable for this agent in background mode. Review the folder manually."),platform+" wrong explanation");
+    require(!host.querySelector('input[type="checkbox"]'),platform+" offered removal without a permit");
+    require([...host.querySelectorAll("button")].some(b=>b.textContent===terminateCopy(row).confirm && !b.disabled),platform+" ordinary Terminate unavailable");
+    require(calls.length===1 && calls[0].command==="termination_cleanup_offer",platform+" automatic fallback dispatch: "+JSON.stringify(calls));
+    const review=[...host.querySelectorAll("button")].find(b=>b.textContent==="Review working folder…");
+    require(review,platform+" manual review absent"); review.click();
+    await until(()=>calls.some(c=>c.command==="worktree_cleanup_open"),platform+" manual review did not open");
+    await until(()=>worktreeReview()?.id==="original-review",platform+" review reply absent");
+    require(closed===1 && !!worktreeReviewDialog(),platform+" wrong review lifecycle");
+    require(calls.every(c=>["termination_cleanup_offer","worktree_cleanup_open"].includes(c.command)),platform+" manual review dispatched Terminate or cleanup");
+    const original=calls.find(c=>c.command==="worktree_cleanup_open").args;
+    require(original.path==="/srv/example/work" && original.focus==="/srv/example/work",platform+" changed review target");
+    closeWorktreeReview();
+    await until(()=>calls.some(c=>c.command==="worktree_cleanup_close"),platform+" original review did not close");
+  }
+  document.querySelector("#result").textContent="PASS Linux/macOS actual dialog visibility, ordinary Terminate and manual review, zero fallback dispatch";
+} catch (e) {document.querySelector("#result").textContent="FAIL "+String(e)+"\n"+(e?.stack??"");}
+</script></body></html>

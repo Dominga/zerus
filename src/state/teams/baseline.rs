@@ -22,29 +22,44 @@ use std::collections::{BTreeMap, BTreeSet};
 /// Whether a task waits for its baseline: in a running plan, in an approved
 /// phase, not a draft, not started or finished (a task already running when
 /// the field arrived has no planned start to be late against).
-fn wants(team: &Team, task: &Task) -> bool {
+fn wants(team: &Team, task: &Task, historical: bool) -> bool {
     task.baseline.is_none()
-        && task.attempts.is_empty()
         && task.status != TaskStatus::Draft
-        && !task.status.finished()
+        && (historical || (task.attempts.is_empty() && !task.status.finished()))
         && team.phases.iter().find(|phase| phase.n == task.phase).is_none_or(|phase| phase.state == PhaseState::Approved)
+}
+
+/// Task 94: when this task's plan was fixed: its phase's decision, the task's
+/// late addition, else the team's approval. Old records have no phase moment.
+fn moment(team: &Team, task: &Task) -> f64 {
+    team.phases
+        .iter()
+        .find(|phase| phase.n == task.phase)
+        .and_then(|phase| phase.decided_at)
+        .or_else(|| task.added_late.as_ref().map(|late| late.at).filter(|at| *at > 0.0))
+        .or(team.approved_at)
+        .unwrap_or(0.0)
 }
 
 /// Fixes the baseline of every task of an approved, running plan that has none:
 /// the moment its phase is approved, or the task is added later. A baseline
 /// once fixed is kept through later plan edits.
-pub(crate) fn stamp(team: &mut Team, now: f64) {
+pub(crate) fn backfill(team: &mut Team, now: f64) { stamp_with(team, now, true); }
+
+pub(crate) fn stamp(team: &mut Team, now: f64) { stamp_with(team, now, false); }
+
+fn stamp_with(team: &mut Team, now: f64, historical: bool) {
     if team.approved_at.is_none() || !matches!(team.status, TeamStatus::Running | TeamStatus::Paused) {
         return;
     }
-    let wanted: Vec<u32> = team.tasks.iter().filter(|task| wants(team, task)).map(|task| task.id).collect();
+    let wanted: Vec<u32> = team.tasks.iter().filter(|task| wants(team, task, historical)).map(|task| task.id).collect();
     if wanted.is_empty() {
         return;
     }
     let history = estimates::load();
     let mut planned: BTreeMap<u32, Baseline> = BTreeMap::new();
     for id in &wanted {
-        plan_of(team, &history, &wanted, *id, now, &mut planned, &mut BTreeSet::new());
+        plan_of(team, &history, &wanted, *id, now, historical, &mut planned, &mut BTreeSet::new());
     }
     for (id, baseline) in planned {
         if let Some(task) = team.task_mut(id) {
@@ -56,7 +71,7 @@ pub(crate) fn stamp(team: &mut Team, now: f64) {
 /// The tasks `task` is planned to follow and are still ahead: its hard
 /// dependencies, its member's previous task, and (in a barrier phase) every
 /// task of the lower phases. A finished one is no longer ahead.
-fn ahead(team: &Team, task: &Task) -> Vec<u32> {
+fn ahead(team: &Team, task: &Task, historical: bool) -> Vec<u32> {
     let mut out: BTreeSet<u32> = BTreeSet::new();
     for dep in task.deps.iter().filter(|dep| dep.kind == DependencyKind::Hard) {
         out.insert(dep.task);
@@ -65,7 +80,7 @@ fn ahead(team: &Team, task: &Task) -> Vec<u32> {
         if let Some(previous) = team
             .tasks
             .iter()
-            .filter(|other| other.id < task.id && other.assignee == task.assignee && !other.status.finished() && other.status != TaskStatus::Draft)
+            .filter(|other| other.id < task.id && other.assignee == task.assignee && (historical || !other.status.finished()) && other.status != TaskStatus::Draft)
             .map(|other| other.id)
             .max()
         {
@@ -75,7 +90,7 @@ fn ahead(team: &Team, task: &Task) -> Vec<u32> {
     if team.phases.iter().any(|phase| phase.n == task.phase && phase.barrier) {
         out.extend(team.tasks.iter().filter(|other| other.phase < task.phase && other.status != TaskStatus::Draft).map(|other| other.id));
     }
-    out.retain(|id| *id != task.id && team.task(*id).is_some_and(|other| !other.status.finished()));
+    out.retain(|id| *id != task.id && team.task(*id).is_some_and(|other| historical || !other.status.finished()));
     out.into_iter().collect()
 }
 
@@ -86,6 +101,7 @@ fn plan_of(
     wanted: &[u32],
     id: u32,
     now: f64,
+    historical: bool,
     planned: &mut BTreeMap<u32, Baseline>,
     visiting: &mut BTreeSet<u32>,
 ) -> Option<Baseline> {
@@ -96,13 +112,14 @@ fn plan_of(
     if !wanted.contains(&id) {
         return task.baseline.clone();
     }
-    let after = ahead(team, task);
+    let after = ahead(team, task, historical);
     let estimate_s = estimates::estimate_from(history, team, task).minutes.map(|minutes| minutes * 60.0);
     // A cycle in the dependencies has no schedule: its tasks start unknown.
-    let mut start = if visiting.insert(id) { Some(now) } else { None };
+    let at = if historical { moment(team, task) } else { now };
+    let mut start = if visiting.insert(id) { Some(at) } else { None };
     if start.is_some() {
         for before in &after {
-            let end = plan_of(team, history, wanted, *before, now, planned, visiting).and_then(|found| found.end);
+            let end = plan_of(team, history, wanted, *before, now, historical, planned, visiting).and_then(|found| found.end);
             start = match (start, end) {
                 (Some(start), Some(end)) => Some(start.max(end)),
                 _ => None,
@@ -110,7 +127,7 @@ fn plan_of(
         }
         visiting.remove(&id);
     }
-    let baseline = Baseline { at: now, estimate_s, start, end: start.zip(estimate_s).map(|(start, estimate)| start + estimate), after };
+    let baseline = Baseline { at, estimate_s, start, end: start.zip(estimate_s).map(|(start, estimate)| start + estimate), after, backfilled: historical && !task.attempts.is_empty() };
     planned.insert(id, baseline.clone());
     Some(baseline)
 }
@@ -218,3 +235,9 @@ pub(crate) fn overrun(team: &Team, task: &Task, work_s: i64, history: &mut Optio
 #[cfg(test)]
 #[path = "baseline_tests.rs"]
 mod tests;
+
+
+
+
+
+

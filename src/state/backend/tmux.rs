@@ -366,6 +366,9 @@ impl TerminalBackend for Tmux {
         platform::capture("tmux", &arguments).map(PaneInfo::new)
     }
     fn start(&self, spec: &LaunchSpec) -> Result<()> {
+        // Fork and relaunch submit a runner recipe naming this image; a unit
+        // test image must not hand itself to tmux with production arguments.
+        crate::self_exec::ensure().map_err(|e| e.to_string())?;
         let output = starting(&start_args(spec), Command::output, |_| true);
         checked(output, true).map(drop)
     }
@@ -541,6 +544,7 @@ impl TerminalBackend for Tmux {
     }
 
     fn launch(&self, spec: &LaunchSpec) -> CliResult<ClientExit> {
+        crate::self_exec::ensure().map_err(|e| Error::new(1, e.to_string()))?;
         let arguments = launch_args(spec);
         if spec.detached {
             let code = platform::code(starting(&arguments, Command::status, |_| true)?);
@@ -647,6 +651,19 @@ impl TerminalBackend for Tmux {
         let line = environment.trim_end_matches('\n');
         line.strip_prefix("HGS_CLIENT=").unwrap_or(line).to_owned()
     }
+    fn session_variable(&self, name: &str, key: &str) -> Result<Option<String>> {
+        // The session's whole environment: a listing that succeeds and lacks
+        // the key proves it unset, which a failed lookup of the key alone
+        // could not tell from an unreadable terminal.
+        let listing = platform::capture("tmux", &["show-environment", "-t", &format!("={name}")])
+            .ok_or_else(|| format!("{name}: the terminal's environment cannot be read"))?;
+        let prefix = format!("{key}=");
+        Ok(listing
+            .lines()
+            .find_map(|line| line.strip_prefix(&prefix))
+            .filter(|value| !value.is_empty())
+            .map(str::to_owned))
+    }
     fn notify(&self, client: &str, text: &str) {
         platform::silent(
             "tmux",
@@ -698,6 +715,47 @@ impl TerminalBackend for Tmux {
 mod tests {
     use super::super::PaneField::*;
     use super::*;
+
+    #[cfg(target_os = "linux")]
+    #[test]
+    fn a_test_image_never_hands_its_runner_recipe_to_tmux() {
+        crate::self_exec::private_probe("state::backend::tmux::tests::runner_submission_probe");
+    }
+    #[cfg(target_os = "linux")]
+    #[test]
+    #[ignore = "run by a_test_image_never_hands_its_runner_recipe_to_tmux"]
+    fn runner_submission_probe() {
+        crate::self_exec::probe_child("state::backend::tmux::tests::runner_submission_probe");
+        // The real recipe still renders; only its submission is refused.
+        let runner = crate::state::storage::runner_executable().unwrap();
+        let spec = |detached| LaunchSpec {
+            name: "probe".into(),
+            cwd: "/".into(),
+            env: vec![],
+            command: [
+                "/bin/sh",
+                "-lic",
+                "exec \"$0\" --run \"$@\"",
+                &runner,
+                "0",
+                "/bin/true",
+            ]
+            .map(str::to_owned)
+            .to_vec(),
+            detached,
+        };
+        // No fake is installed: this is the real tmux backend fork,
+        // relaunch and launch use.
+        let backend = super::super::current();
+        assert_eq!(
+            backend.start(&spec(true)).unwrap_err(),
+            crate::self_exec::TEST_IMAGE
+        );
+        for detached in [true, false] {
+            let error = backend.launch(&spec(detached)).err().unwrap();
+            assert_eq!(error.message, crate::self_exec::TEST_IMAGE);
+        }
+    }
 
     #[test]
     fn pane_queries_keep_their_formats_and_targets() {

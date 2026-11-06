@@ -1,4 +1,4 @@
-//! Dormant G2 policy/ledger bridge. Frozen originals and proposals are data,
+//! G2 policy/ledger bridge. Frozen originals and proposals are data,
 //! never current admission, a reservation, dispatch or resource-drain proof.
 use rusqlite::Connection;
 use serde::Serialize;
@@ -35,13 +35,13 @@ fn encoded(value: &impl Serialize) -> Result<Vec<u8>, Refused> {
     serde_json::to_writer(&mut out, value).map_err(|_| Refused::Metadata)?;
     Ok(out.0)
 }
-fn hash(bytes: &[u8]) -> String {
+pub(super) fn hash(bytes: &[u8]) -> String {
     format!("{:x}", Sha256::digest(bytes))
 }
 
 // Exhaustive field/variant matches make changes to either closed schema a
 // compile-time integration decision, rather than a permissive JSON projection.
-fn to_ledger(binding: &policy::Binding) -> ledger::Binding {
+pub(super) fn to_ledger(binding: &policy::Binding) -> ledger::Binding {
     let policy::Binding {
         key,
         marker_id,
@@ -162,8 +162,8 @@ impl VerifiedOriginal {
         })
     }
 
-    /// Constructs only the existing storage request DATA. This module never
-    /// calls admit/reserve or supplies a current guard for those actor calls.
+    /// Constructs only storage request DATA. The per-kind actor independently
+    /// rechecks current native admission under its transaction before using it.
     pub(super) fn admission<'a>(
         &'a self,
         admission_id: &'a str,
@@ -191,6 +191,21 @@ impl VerifiedOriginal {
     }
     pub(super) fn consent_sha256(&self) -> String {
         ledger::consent_sha256(&self.input)
+    }
+    pub(super) fn check_stored(
+        &self,
+        db: &Connection,
+        expected: &ledger::Admitted,
+    ) -> Result<(), Refused> {
+        let loaded = Loaded::load(db, expected)?;
+        if self.binding != loaded.verified.binding
+            || self.raw != loaded.verified.raw
+            || self.input != loaded.verified.input
+            || self.provenance != loaded.verified.provenance
+        {
+            return Err(Refused::Identity);
+        }
+        Ok(())
     }
 }
 

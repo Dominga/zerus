@@ -1,4 +1,4 @@
-import { For, Show, createEffect, createMemo, createSignal, type JSX } from "solid-js";
+import { For, Show, createEffect, createMemo, createSignal, onMount, type JSX } from "solid-js";
 import { createVirtualizer } from "@tanstack/solid-virtual";
 import { Icon } from "../lib/icons";
 import { tr } from "../../i18n";
@@ -6,7 +6,8 @@ import type { PlanGraph, TeamView } from "./types";
 import type { TeamProfileView, TeamTestsView, TeamTimelineView } from "../../types";
 import { BoardView, HeatLegend, HeatLine, LayersView, PlanModeBar, ProfilePanel, TestsPanel, runStatusLabel, stageLabel } from "./plan-panels";
 import { ProfileTime } from "./TimeView";
-import { spawnedFrom, stageChips, type PlanMode } from "./planModes";
+import { spawnedFrom, heatSeed, stageChips, type PlanMode } from "./planModes";
+import { settings, settingsReady } from "../../store/settings";
 import { taskHeat } from "./heat";
 import {
   CARD_H,
@@ -108,6 +109,18 @@ export function PlanView(props: PlanViewProps): JSX.Element {
     setHeatOn(on);
     try { if (on) localStorage.setItem(heatKey(), "1"); else localStorage.removeItem(heatKey()); } catch { /* storage unavailable */ }
   };
+  // Task 103: Qt's imported per-team heat starts this switch on once; this
+  // browser's own choice, once made, always wins.
+  onMount(() => {
+    void settingsReady.then(() => {
+      try {
+        if (localStorage.getItem(heatKey()) === null && heatSeed(props.team.id, null, String(settings["teams/heatModes"] ?? "{}"))) {
+          setHeatOn(true);
+          localStorage.setItem(heatKey(), "1");
+        }
+      } catch { /* storage unavailable */ }
+    });
+  });
   const heatView = () => heatOn() && (mode() === "graph" || mode() === "board" || mode() === "layers");
   const heatProfile = () => (heatView() ? props.profile : null);
   createEffect(() => {

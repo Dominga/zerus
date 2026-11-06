@@ -975,6 +975,37 @@ mod tests {
         );
     }
 
+    /// zerus-ucck P2c-1 (#1413 review, finding 3): a local move of a session
+    /// with a durable ID writes its ID membership beside the catalog, so the
+    /// apply's `written` names only catalog tokens that `versions` shows. The
+    /// next state that shows the write, a peer's change included, is adopted
+    /// at once with the snapshot's ID fields, not after the guard.
+    #[test]
+    fn a_local_move_of_a_session_with_an_id_is_adopted_at_once() {
+        let with_ids = |mut value: Value, project: &str| {
+            value["membership_by_id"] = json!({"ready": true, "missing": []});
+            for p in value["organization"]["projects"].as_array_mut().unwrap() {
+                if p["id"] == project {
+                    p["session_ids"] = json!(["studio\n3f2a9c1d-0b4e-4d6a-9c1d-2e3f4a5b6c7d"]);
+                }
+            }
+            value
+        };
+        let mut sync = ready();
+        sync.edit(&to("beta"), 0).unwrap();
+        let _ = input(sync.due(120));
+        sync.finish(
+            reply(with_ids(state("d3", "beta", &["op-2"]), "beta"), &["op-2"]),
+            300,
+        );
+        assert_eq!(place(&sync), "beta");
+        assert!(sync.observe(
+            observation(with_ids(state("d4", "beta", &["op-2"]), "beta")),
+            301
+        ));
+        assert_eq!(sync.digest(), "d4");
+    }
+
     #[test]
     fn the_guard_ends_after_ten_seconds() {
         let mut sync = ready();

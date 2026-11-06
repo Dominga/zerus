@@ -388,6 +388,28 @@ Read refreshes can issue new request IDs. Retrying an acknowledged result upload
 does not execute the native command again. The connector never restarts native
 agents, tmux servers or DeepSeek hosts.
 
+The Rust connector also selects the session of an explicit mutation by its
+durable ID (zerus-ucck P1c-2b). Phones never send the ID, and the relay, API v1,
+request identities and the journal are unchanged.
+- The ID is the listed `session_id` for the request's `expected_run_id`, and
+  the connector adds `--session-id ID` right after the name.
+- It applies to send, send now, answer, interrupt, model settings, clear and
+  compact, and the scoped actions pause, resume, rename, fork, archive, forget,
+  terminate and queued-message removal.
+- Restore, archived conversations, process stops, recovery, the delivery
+  setting and every read keep the name.
+- Each CLI on the call's path must list `session-id-selector-v1`. A call
+  through `swarm mobile-peer` or `__mobile-peer-local` also needs
+  `mobile-peer-session-id-v1` on each CLI it passes; those entry points accept
+  `[SESSION, --session-id, ID, --json]` only for those commands and live
+  actions. Without the markers the call keeps the name form.
+- Only the CLI's refusal of that exact ID while it resolves the ID, before the
+  command runs, is a definite failed receipt ("native session changed; refresh
+  before action"). That means another name, no session or several sessions for
+  the ID. Any other failure after the write began stays uncertain (step 6),
+  including a later read's "no longer names", which can follow an effect.
+- The legacy Python connector keeps the name form.
+
 The Android composer and outgoing messages have separate durable state. Sending
 atomically moves the current composition into an outgoing envelope before any
 network request. The conversation immediately shows its delivery status while a
@@ -1185,6 +1207,10 @@ most 100 public rows. A bounded connector read can advance initial indexing
 locally for up to two seconds and 32 native reads, avoiding a network roundtrip
 per index chunk. Cursored reads execute once. A partial resident adapter is
 reported as partial rather than a completed conversation.
+A fork's pages also carry its sources' history up to the fork point as
+additive `Inherited` rows (`inherited_type`, `inherited_from`), never counted as
+incoming; older apps drop the unknown type. See the public history section of
+`services/mobile/README.md`.
 
 `last_seen_at` and event `created_at` use Unix epoch seconds. `last_seen_at`
 is the selected route's last accepted heartbeat (the gateway's own heartbeat for

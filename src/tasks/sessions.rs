@@ -62,6 +62,7 @@ impl Machines {
         if key.session_id.is_empty() {
             let mut aliases = self.bindings.iter().filter(|row| {
                 row["journal_name"].as_str() == Some(&key.session)
+                    || row["launch_label"].as_str() == Some(&key.session)
                     || row["legacy_shadow"]["name"].as_str() == Some(&key.session)
             });
             if let Some(row) = aliases.next() {

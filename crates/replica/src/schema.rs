@@ -111,6 +111,20 @@ pub struct LogEntry {
     pub attachments: Vec<crate::TaskAttachment>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub delivery: Option<TaskDelivery>,
+    /// Why a report was recorded without moving its task.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub stale: Option<crate::execution::Stale>,
+    /// The requirement revision a report says it considered.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub considered: Option<u64>,
+    /// The history entry a person's review of an unexplained execution entry
+    /// names (`Execution::unexplained`).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub reviews: Option<String>,
+    /// For an execution entry an attempt's settlement wrote: the fingerprint
+    /// of that exact attempt record (`Attempt::fingerprint`).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub of: Option<String>,
 }
 
 /// A task message's durable outbox reservation. Submission is not consumption.
@@ -175,12 +189,31 @@ pub struct TaskView {
     #[serde(skip_serializing_if = "Vec::is_empty")]
     pub attachments: Vec<crate::TaskAttachment>,
     pub log: Vec<LogEntry>,
+    /// The task's execution: its current attempt and requirement revision
+    /// (`execution` module). None for a task that is not In progress and
+    /// recorded no attempt.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub execution: Option<crate::execution::Execution>,
 }
 
 impl TaskView {
     /// Dispatch receipt, or an explicit direct-work acknowledgement. Names do
     /// not identify an execution. This anchor is not a distributed claim.
     pub fn execution_id(&self) -> Option<String> {
+        // A recorded attempt is its own anchor: its native request, or the
+        // attempt itself for a direct start.
+        if let Some(current) = self
+            .execution
+            .as_ref()
+            .and_then(|execution| execution.current.as_ref())
+            .filter(|current| !current.legacy)
+        {
+            return Some(if current.request_id.is_empty() {
+                format!("attempt:{}", current.id)
+            } else {
+                current.request_id.clone()
+            });
+        }
         self.log
             .iter()
             .rev()

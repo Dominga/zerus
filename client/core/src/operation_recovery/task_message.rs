@@ -48,6 +48,9 @@ pub enum Review {
     InvalidRecord,
     IdentityChanged,
     MarkerChanged,
+    /// The record was handed to the desktop service: only the service's
+    /// scoped lookup may check it.
+    HandedOff,
     InputChanged,
     Unsupported,
     Historical,
@@ -204,12 +207,19 @@ fn version(value: &Value) -> bool {
 }
 
 impl Original {
+    /// `handoff` is the record's desktop-service handoff marker: `None` only
+    /// when the caller observed that there is none. A present marker, even an
+    /// unreadable or foreign one, is `Some` and refuses this direct check.
     pub fn verify(
         binding: Binding,
         raw: &[u8],
         input: &[u8],
         marker: &[u8],
+        handoff: Option<&[u8]>,
     ) -> Result<Self, Review> {
+        if handoff.is_some() {
+            return Err(Review::HandedOff);
+        }
         if raw.len() > PRIVATE_BYTES || input.len() > PRIVATE_BYTES || marker.len() > 128 {
             return Err(Review::TooLarge);
         }
@@ -233,8 +243,27 @@ impl Original {
         if sha256(input) != binding.input_sha256 {
             return Err(Review::InputChanged);
         }
-        let fields = raw_fields(raw, &["id", "intent", "schema", "version"])
-            .map_err(|_| Review::InvalidRecord)?;
+        let fields = raw_fields(
+            raw,
+            &["id", "intent", "input", "input_sha256", "schema", "version"],
+        )
+        .map_err(|_| Review::InvalidRecord)?;
+        // A record that froze its stdin before its checkpoint must name
+        // exactly the retained input: its bytes, or their digest.
+        if let Some(frozen) = fields.get("input") {
+            let frozen: String =
+                serde_json::from_str(frozen.get()).map_err(|_| Review::InvalidRecord)?;
+            if frozen.as_bytes() != input {
+                return Err(Review::InputChanged);
+            }
+        }
+        if let Some(frozen) = fields.get("input_sha256") {
+            let frozen: String =
+                serde_json::from_str(frozen.get()).map_err(|_| Review::InvalidRecord)?;
+            if frozen != binding.input_sha256 {
+                return Err(Review::InputChanged);
+            }
+        }
         let intent = raw_fields(
             required(&fields, "intent")
                 .map_err(|_| Review::InvalidRecord)?
@@ -267,7 +296,8 @@ impl Original {
         // Only the existing builder selects arguments. Its generated content
         // is replaced BEFORE invocation with the exact retained stdin, never
         // used as a reconstructed original. Missing retained input refused above.
-        let mut call = tasks_write::message_call(&binding.project, &binding.task_id, &record, true);
+        let mut call = tasks_write::message_call(&binding.project, &binding.task_id, &record, true)
+            .map_err(|_| Review::InputChanged)?;
         call.input = std::str::from_utf8(input)
             .map_err(|_| Review::InvalidRecord)?
             .to_owned();
@@ -344,118 +374,137 @@ impl Original {
         else {
             return Err(Review::UnknownOutcome);
         };
-        if stdout.len() > REPLY_BYTES {
-            return Err(Review::TooLarge);
-        }
-        let root = raw_fields(stdout, &["schema", "version", "task", "message"])
-            .map_err(|_| Review::InvalidReply)?;
-        raw_fields(
-            required(&root, "task")
-                .map_err(|_| Review::InvalidReply)?
-                .get()
-                .as_bytes(),
-            &["uuid", "project"],
-        )
-        .map_err(|_| Review::InvalidReply)?;
-        let message = raw_fields(
-            required(&root, "message")
-                .map_err(|_| Review::InvalidReply)?
-                .get()
-                .as_bytes(),
-            &["kind", "request_id", "session", "delivery"],
-        )
-        .map_err(|_| Review::InvalidReply)?;
-        raw_fields(
-            required(&message, "delivery")
-                .map_err(|_| Review::InvalidReply)?
-                .get()
-                .as_bytes(),
-            &[
-                "mode",
-                "state",
-                "dispatch_id",
-                "run_id",
-                "conversation_id",
-                "submitted_id",
-                "prompt",
-                "error",
-                "stage",
-                "stage_at",
-            ],
-        )
-        .map_err(|_| Review::InvalidReply)?;
-        let data: Value = serde_json::from_slice(stdout).map_err(|_| Review::InvalidReply)?;
-        if !version(&data) {
-            return Err(Review::InvalidReply);
-        }
-        let map = data.as_object().ok_or(Review::InvalidReply)?;
-        tasks_write::message_delivered(map, &self.binding.task_id, &self.binding.request_id)
-            .map_err(|_| Review::IdentityChanged)?;
-        if data["task"]["project"].as_str() != Some(&self.binding.project) {
-            return Err(Review::IdentityChanged);
-        }
-        let message = &data["message"];
-        if message["kind"].as_str() != Some("message")
-            || message
-                .get("session")
-                .is_some_and(|session| !session.is_null())
-        {
-            return Err(Review::InvalidReply);
-        }
-        let delivery = &message["delivery"];
-        let expected_state = if self.binding.mode == "queue" {
-            "queued"
-        } else {
-            "note"
-        };
-        if delivery["mode"].as_str() != Some(&self.binding.mode)
-            || delivery["state"].as_str() != Some(expected_state)
-        {
-            return Err(Review::UnknownOutcome);
-        }
-        // TaskDelivery omits dispatch_id when its canonical value is empty.
-        // No other missing or malformed identity is synthesized here.
-        let dispatch = match delivery.get("dispatch_id") {
-            None => "",
-            Some(value) => value.as_str().ok_or(Review::InvalidReply)?,
-        };
-        if dispatch != self.binding.dispatch_id {
-            return Err(Review::IdentityChanged);
-        }
-        for key in [
-            "run_id",
-            "conversation_id",
-            "submitted_id",
-            "prompt",
-            "error",
-        ] {
-            if delivery
-                .get(key)
-                .is_some_and(|value| value.as_str() != Some(""))
-            {
-                return Err(Review::InvalidReply);
-            }
-        }
-        if delivery.get("stage").is_some_and(|v| !v.is_string())
-            || delivery
-                .get("stage_at")
-                .is_some_and(|v| v.as_i64().is_none())
-        {
-            return Err(Review::InvalidReply);
-        }
+        let state = reply_state(
+            &self.binding.project,
+            &self.binding.task_id,
+            &self.binding.request_id,
+            &self.binding.mode,
+            &self.binding.dispatch_id,
+            stdout,
+        )?;
         let receipt = Receipt {
             schema: 1,
             kind: Kind::TaskMessageRecovery,
             task_id: self.binding.task_id.clone(),
             request_id: self.binding.request_id.clone(),
             mode: self.binding.mode.clone(),
-            dispatch_id: dispatch.into(),
-            state: expected_state.into(),
+            dispatch_id: self.binding.dispatch_id.clone(),
+            state: state.into(),
             executor: (),
         };
         receipt_size(&receipt)?;
         Ok(receipt)
     }
+}
+/// The exact metadata outcome that an `hgs task message` reply (its whole
+/// stdout, exit 0) proves for one original: its project, task, request, mode
+/// and dispatch, and the state that mode records (`queued` or `note`). Known
+/// fields are bounded and unambiguous; a session, executor, prompt or error
+/// never passes. This never proves native delivery or consumption. Shared by
+/// this policy and the service-owned task message leaf.
+pub fn reply_state(
+    project: &str,
+    task_id: &str,
+    request_id: &str,
+    mode: &str,
+    dispatch_id: &str,
+    stdout: &[u8],
+) -> Result<&'static str, Review> {
+    if stdout.len() > REPLY_BYTES {
+        return Err(Review::TooLarge);
+    }
+    let root = raw_fields(stdout, &["schema", "version", "task", "message"])
+        .map_err(|_| Review::InvalidReply)?;
+    raw_fields(
+        required(&root, "task")
+            .map_err(|_| Review::InvalidReply)?
+            .get()
+            .as_bytes(),
+        &["uuid", "project"],
+    )
+    .map_err(|_| Review::InvalidReply)?;
+    let message = raw_fields(
+        required(&root, "message")
+            .map_err(|_| Review::InvalidReply)?
+            .get()
+            .as_bytes(),
+        &["kind", "request_id", "session", "delivery"],
+    )
+    .map_err(|_| Review::InvalidReply)?;
+    raw_fields(
+        required(&message, "delivery")
+            .map_err(|_| Review::InvalidReply)?
+            .get()
+            .as_bytes(),
+        &[
+            "mode",
+            "state",
+            "dispatch_id",
+            "run_id",
+            "conversation_id",
+            "submitted_id",
+            "prompt",
+            "error",
+            "stage",
+            "stage_at",
+        ],
+    )
+    .map_err(|_| Review::InvalidReply)?;
+    let data: Value = serde_json::from_slice(stdout).map_err(|_| Review::InvalidReply)?;
+    if !version(&data) {
+        return Err(Review::InvalidReply);
+    }
+    let map = data.as_object().ok_or(Review::InvalidReply)?;
+    tasks_write::message_delivered(map, task_id, request_id)
+        .map_err(|_| Review::IdentityChanged)?;
+    if data["task"]["project"].as_str() != Some(project) {
+        return Err(Review::IdentityChanged);
+    }
+    let message = &data["message"];
+    if message["kind"].as_str() != Some("message")
+        || message
+            .get("session")
+            .is_some_and(|session| !session.is_null())
+    {
+        return Err(Review::InvalidReply);
+    }
+    let delivery = &message["delivery"];
+    let expected_state = if mode == "queue" { "queued" } else { "note" };
+    if delivery["mode"].as_str() != Some(mode) || delivery["state"].as_str() != Some(expected_state)
+    {
+        return Err(Review::UnknownOutcome);
+    }
+    // TaskDelivery omits dispatch_id when its canonical value is empty.
+    // No other missing or malformed identity is synthesized here.
+    let dispatch = match delivery.get("dispatch_id") {
+        None => "",
+        Some(value) => value.as_str().ok_or(Review::InvalidReply)?,
+    };
+    if dispatch != dispatch_id {
+        return Err(Review::IdentityChanged);
+    }
+    for key in [
+        "run_id",
+        "conversation_id",
+        "submitted_id",
+        "prompt",
+        "error",
+    ] {
+        if delivery
+            .get(key)
+            .is_some_and(|value| value.as_str() != Some(""))
+        {
+            return Err(Review::InvalidReply);
+        }
+    }
+    if delivery.get("stage").is_some_and(|v| !v.is_string())
+        || delivery
+            .get("stage_at")
+            .is_some_and(|v| v.as_i64().is_none())
+    {
+        return Err(Review::InvalidReply);
+    }
+    Ok(expected_state)
 }
 fn receipt_size(receipt: &Receipt) -> Result<(), Review> {
     struct Limit(usize);
@@ -508,7 +557,20 @@ mod tests {
     }
     fn original(b: Binding, raw: &[u8], input: &[u8]) -> Original {
         let marker = b.marker_id.as_bytes().to_vec();
-        Original::verify(b, raw, input, &marker).unwrap_or_else(|e| panic!("{e:?}"))
+        Original::verify(b, raw, input, &marker, None).unwrap_or_else(|e| panic!("{e:?}"))
+    }
+    #[test]
+    fn a_record_handed_to_the_desktop_service_is_never_checked_directly() {
+        let (b, raw, input) = fixture(record("queue", ""));
+        let marker = b.marker_id.as_bytes().to_vec();
+        // Any handoff marker, its content readable or not, refuses.
+        for handoff in [&b"{}"[..], b"", b"unreadable"] {
+            assert!(matches!(
+                Original::verify(b.clone(), &raw, &input, &marker, Some(handoff)),
+                Err(Review::HandedOff)
+            ));
+        }
+        assert!(Original::verify(b, &raw, &input, &marker, None).is_ok());
     }
     fn proposal(o: &mut Original) -> Proposal {
         match o.step(Input::LookupRequested, false, false) {
@@ -552,6 +614,46 @@ mod tests {
         assert!(matches!(
             o.step(Input::LookupRequested, false, false),
             Decision::NeedsReview(Review::Spent)
+        ));
+    }
+    #[test]
+    fn a_record_with_frozen_input_must_carry_exactly_the_retained_input() {
+        let (_, _, input) = fixture(record("queue", ""));
+        let frozen = std::str::from_utf8(&input).unwrap();
+        let mut value = record("queue", "");
+        value["input"] = json!(frozen);
+        let (b, raw, retained) = fixture(value.clone());
+        // The fixture's retained input is the same exact bytes.
+        assert_eq!(retained, input);
+        let o = original(b.clone(), &raw, &retained);
+        assert_eq!(o._input, input);
+        // Any other retained input is refused against the frozen one.
+        let mut changed = input.clone();
+        changed.pop();
+        let mut other = b.clone();
+        other.input_sha256 = sha256(&changed);
+        assert!(matches!(
+            Original::verify(other, &raw, &changed, b.marker_id.as_bytes(), None),
+            Err(Review::InputChanged)
+        ));
+    }
+    #[test]
+    fn a_record_with_a_frozen_digest_must_name_exactly_the_retained_input() {
+        // A digest freezes the canonical serialization of the content.
+        let mut value = record("queue", "");
+        let canonical = value["intent"]["content"].to_string().into_bytes();
+        value["input_sha256"] = json!(sha256(&canonical));
+        let (mut b, raw, _) = fixture(value.clone());
+        b.input_sha256 = sha256(&canonical);
+        assert_eq!(original(b, &raw, &canonical)._input, canonical);
+        // A record freezing the canonical bytes, retained as another
+        // serialization of the same content, is refused: those are not the
+        // bytes it froze.
+        let (b, raw, pretty) = fixture(value);
+        assert_ne!(pretty, canonical);
+        assert!(matches!(
+            Original::verify(b.clone(), &raw, &pretty, b.marker_id.as_bytes(), None),
+            Err(Review::InputChanged)
         ));
     }
     #[test]
@@ -650,24 +752,24 @@ mod tests {
             format!("{}\n", id(2)).into_bytes(),
         ] {
             assert!(matches!(
-                Original::verify(b.clone(), &raw, &input, &marker),
+                Original::verify(b.clone(), &raw, &input, &marker, None),
                 Err(Review::MarkerChanged)
             ));
         }
         let mut bound = b.clone();
         bound.marker_id = id(9);
         assert!(matches!(
-            Original::verify(bound, &raw, &input, id(9).as_bytes()),
+            Original::verify(bound, &raw, &input, id(9).as_bytes(), None),
             Err(Review::MarkerChanged)
         ));
         assert!(matches!(
-            Original::verify(b.clone(), &raw, b"", id(2).as_bytes()),
+            Original::verify(b.clone(), &raw, b"", id(2).as_bytes(), None),
             Err(Review::MissingInput)
         ));
         let mut changed = input.clone();
         changed.push(b' ');
         assert!(matches!(
-            Original::verify(b.clone(), &raw, &changed, id(2).as_bytes()),
+            Original::verify(b.clone(), &raw, &changed, id(2).as_bytes(), None),
             Err(Review::InputChanged)
         ));
         let mut content: Value = serde_json::from_slice(&input).unwrap();
@@ -676,13 +778,13 @@ mod tests {
         let mut bound = b.clone();
         bound.input_sha256 = sha256(&changed);
         assert!(matches!(
-            Original::verify(bound, &raw, &changed, id(2).as_bytes()),
+            Original::verify(bound, &raw, &changed, id(2).as_bytes(), None),
             Err(Review::InputChanged)
         ));
         let mut changed = raw;
         changed.push(b' ');
         assert!(matches!(
-            Original::verify(b, &changed, &input, id(2).as_bytes()),
+            Original::verify(b, &changed, &input, id(2).as_bytes(), None),
             Err(Review::IdentityChanged)
         ));
     }
@@ -700,7 +802,7 @@ mod tests {
                 _ => bound.dispatch_id = "not-canonical".into(),
             }
             assert!(
-                Original::verify(bound, &raw, &input, id(2).as_bytes()).is_err(),
+                Original::verify(bound, &raw, &input, id(2).as_bytes(), None).is_err(),
                 "{key}"
             );
         }
@@ -711,13 +813,13 @@ mod tests {
             let mut value = record("queue", "");
             value["id"] = json!(original);
             let (b, raw, input) = fixture(value);
-            assert!(Original::verify(b, &raw, &input, id(2).as_bytes()).is_err());
+            assert!(Original::verify(b, &raw, &input, id(2).as_bytes(), None).is_err());
         }
         for version in [json!(2), json!(1.0), Value::Null] {
             let mut value = record("queue", "");
             value["version"] = version;
             let (b, raw, input) = fixture(value);
-            assert!(Original::verify(b, &raw, &input, id(2).as_bytes()).is_err());
+            assert!(Original::verify(b, &raw, &input, id(2).as_bytes(), None).is_err());
         }
     }
     #[test]
@@ -730,7 +832,7 @@ mod tests {
             let mut record = record("queue", "");
             record["intent"][path] = value;
             let (b, raw, input) = fixture(record);
-            assert!(Original::verify(b, &raw, &input, id(2).as_bytes()).is_err());
+            assert!(Original::verify(b, &raw, &input, id(2).as_bytes(), None).is_err());
         }
         for value in [
             json!({"text":null}),
@@ -741,7 +843,7 @@ mod tests {
             let mut record = record("queue", "");
             record["intent"]["content"] = value;
             let (b, raw, input) = fixture(record);
-            assert!(Original::verify(b, &raw, &input, id(2).as_bytes()).is_err());
+            assert!(Original::verify(b, &raw, &input, id(2).as_bytes(), None).is_err());
         }
     }
     #[test]
@@ -775,7 +877,7 @@ mod tests {
             bound.source_sha256 = sha256(&bytes);
             assert!(
                 matches!(
-                    Original::verify(bound, &bytes, &input, id(2).as_bytes()),
+                    Original::verify(bound, &bytes, &input, id(2).as_bytes(), None),
                     Err(Review::InvalidRecord)
                 ),
                 "{needle}"
@@ -788,7 +890,7 @@ mod tests {
         let mut bound = b;
         bound.input_sha256 = sha256(&frozen);
         assert!(matches!(
-            Original::verify(bound, &raw, &frozen, id(2).as_bytes()),
+            Original::verify(bound, &raw, &frozen, id(2).as_bytes(), None),
             Err(Review::InvalidRecord)
         ));
         let mut value = record("note", "");
@@ -801,7 +903,7 @@ mod tests {
             .into_bytes();
         b.source_sha256 = sha256(&bytes);
         assert!(matches!(
-            Original::verify(b, &bytes, &input, id(2).as_bytes()),
+            Original::verify(b, &bytes, &input, id(2).as_bytes(), None),
             Err(Review::InvalidRecord)
         ));
     }
@@ -976,7 +1078,8 @@ mod tests {
                 b.clone(),
                 &vec![0; PRIVATE_BYTES + 1],
                 &input,
-                id(2).as_bytes()
+                id(2).as_bytes(),
+                None
             ),
             Err(Review::TooLarge)
         ));
@@ -985,12 +1088,13 @@ mod tests {
                 b.clone(),
                 &raw,
                 &vec![0; PRIVATE_BYTES + 1],
-                id(2).as_bytes()
+                id(2).as_bytes(),
+                None
             ),
             Err(Review::TooLarge)
         ));
         assert!(matches!(
-            Original::verify(b.clone(), &raw, &input, &[0; 129]),
+            Original::verify(b.clone(), &raw, &input, &[0; 129], None),
             Err(Review::TooLarge)
         ));
         for value in [

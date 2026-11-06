@@ -135,7 +135,7 @@ class Switch(Fixture):
         self.assertEqual(updater.snapshot(saved, roots), 3)
         self.assertEqual(saved.stat().st_mode & 0o777, 0o700)
         self.assertEqual((saved / f'client-{TEST_ID}/client-draft/draft.json').stat().st_mode & 0o777, 0o600)
-        self.assertEqual(updater.changed_drafts(saved, roots), (2, []))
+        self.assertEqual(updater.changed_drafts(saved, roots), (updater.KeptDrafts(total=2, unsent=2), []))
         blob = next((client_root / 'client-draft').glob('*.bin'))
         blob.write_bytes(b'changed')
         shutil.rmtree(qt_root / 'qt-draft')
@@ -146,6 +146,54 @@ class Switch(Fixture):
         with self.assertRaisesRegex(updater.UpdateError, 'symbolic links'):
             updater.snapshot(self.root / 'again', roots)
 
+    def test_the_report_tells_unsent_input_from_form_state_and_held_identities(self):
+        # zerus-8iwj: an answered or submitted question form is saved form
+        # state, not unsent input. A held delivery identity (`deferred_input`,
+        # zerus-5wmh.66.4.4) is compared and counted on its own.
+        client = {'CFBundleIdentifier': TEST_ID, 'ZerusGUI': 'tauri'}
+        roots = updater.draft_roots({}, client)
+        qt_root, client_root = roots[0][1], roots[1][1]
+        held = {'version': 1, 'kind': 'send', 'request_id': '00000000-0000-4000-8000-000000000001'}
+
+        def manifest(name, **fields):
+            folder = client_root / name
+            folder.mkdir(parents=True)
+            body = {'version': 1, 'key': name, 'text': '', 'attachments': [], **fields}
+            (folder / 'draft.json').write_text(json.dumps(body))
+
+        def rewrite(name, change):
+            path = client_root / name / 'draft.json'
+            body = json.loads(path.read_text())
+            change(body)
+            path.write_text(json.dumps(body))
+
+        self.draft(qt_root, 'typed', 'unsent text')
+        self.draft(client_root, 'with-file', '', blob=b'attachment')
+        manifest('answered', form_state={'answers': {'q': 'yes'}, 'answered': True})
+        manifest('submitted', form_state={'answers': {'q': 'no'}, 'submitted': True})
+        manifest('empty-form', form_state={})
+        manifest('held-only', deferred_input=held)
+        manifest('held-text', text='maybe sent', deferred_input=held)
+        # Text with a form's fields is unsent input, counted once.
+        manifest('text-and-form', text='typed', form_state={'title': 'a form'})
+        # A present but null identity is compared, yet holds no identity.
+        manifest('null-identity', deferred_input=None)
+        saved = self.root / 'saved'
+        updater.snapshot(saved, roots)
+        self.assertEqual(updater.changed_drafts(saved, roots),
+                         (updater.KeptDrafts(total=8, unsent=4, forms=2, held=2), []))
+        # A changed answered form, a changed held identity and a lost
+        # identity-only draft each block, as any changed draft does.
+        rewrite('answered', lambda body: body['form_state'].update(answered=False))
+        rewrite('held-text', lambda body: body['deferred_input'].update(
+            request_id='00000000-0000-4000-8000-000000000002'))
+        shutil.rmtree(client_root / 'held-only')
+        kept, problems = updater.changed_drafts(saved, roots)
+        self.assertEqual(problems, [f'client-{TEST_ID} answered: changed',
+                                    f'client-{TEST_ID} held-only: missing',
+                                    f'client-{TEST_ID} held-text: changed'])
+        self.assertEqual(kept, updater.KeptDrafts(total=5, unsent=3, forms=1, held=0))
+
     def test_a_half_deleted_bundle_has_no_kind(self):
         half = self.bundle('half', 'qt')
         (half / 'Contents/Info.plist').unlink()
@@ -155,14 +203,6 @@ class Switch(Fixture):
         self.assertEqual((result.returncode, result.stdout.strip()), (0, 'none'), result.stderr)
         self.assertIsNone(updater.bundle_kind(self.root / 'missing.app'))
         self.assertEqual(updater.bundle_kind(self.bundle('client', 'tauri')), 'tauri')
-
-    def test_the_slot_keeps_qt_only_after_the_switch(self):
-        # Qt stays while the client replaces anything but Qt: a client, an incomplete bundle or nothing.
-        for kinds in (('tauri', 'qt', 'tauri'), (None, 'qt', 'tauri')):
-            self.assertTrue(updater.keeps_slot(*kinds), kinds)
-        for kinds in (('qt', 'qt', 'tauri'), ('tauri', 'tauri', 'tauri'), ('tauri', None, 'tauri'),
-                      ('tauri', 'qt', 'qt'), ('qt', None, 'qt')):
-            self.assertFalse(updater.keeps_slot(*kinds), kinds)
 
     def test_a_numbered_dev_install_is_never_replaced_by_an_unnumbered_build(self):
         numbered = {'version': '0.47.0', 'devBuildNumber': 1413}
@@ -307,6 +347,7 @@ class SlotAndRestore(Fixture):
         for point in range(1, 4):
             with self.subTest(point=point):
                 shutil.rmtree(updater.ROLLBACK, ignore_errors=True)
+                shutil.rmtree(updater.ROLLBACK.parent / 'desktop-qt-legacy', ignore_errors=True)
                 shutil.copytree(self.bundle('qt-old', 'qt'), self.slot)
                 previous = self.root / 'Applications/.update/previous/hgs-tray.app'
                 shutil.rmtree(previous.parent, ignore_errors=True)
@@ -396,6 +437,27 @@ class Flow(Fixture):
 
 
 class UpdateFlow(Flow):
+    def test_stopped_pair_refresh_is_complete_before_opt_in_update_returns(self):
+        self.install('client-1', 'tauri', self.installed)
+        self.running = False
+        def refresh(installed):
+            self.events.append(('desktop-ready', self.variant(installed)))
+            self.assertFalse(self.running)
+        with mock.patch.object(updater, 'REFRESH_MAC_DESKTOP', self.root / 'runner-hgs'), \
+                mock.patch.object(updater, 'refresh_mac_desktop', side_effect=refresh):
+            self.assertEqual(updater.update(self.bundle('client-2', 'tauri'), self.installed), 0)
+        self.assertEqual(self.events, [('desktop-ready', 'client-2')])
+        self.assertFalse(self.running, 'the source installer owns the later first GUI load')
+
+    def test_stopped_pair_refresh_failure_cannot_report_success_or_start_gui(self):
+        self.running = False
+        with mock.patch.object(updater, 'REFRESH_MAC_DESKTOP', self.root / 'runner-hgs'), \
+                mock.patch.object(updater, 'refresh_mac_desktop', side_effect=updater.UpdateError('private desktop unavailable')):
+            with self.assertRaisesRegex(updater.UpdateError, 'private desktop unavailable'):
+                updater.update(self.bundle('client-1', 'tauri'), self.installed)
+        self.assertEqual(self.events, [])
+        self.assertFalse(self.running)
+
     def test_a_client_that_does_not_start_brings_back_the_client_it_replaced(self):
         self.install('client-1', 'tauri', self.installed)
         self.install('qt', 'qt', self.slot)
@@ -450,6 +512,7 @@ class UpdateFlow(Flow):
             with self.subTest(how=how, running=self.running):
                 shutil.rmtree(self.installed, ignore_errors=True)
                 shutil.rmtree(self.slot, ignore_errors=True)
+                shutil.rmtree(updater.ROLLBACK.parent / 'desktop-qt-legacy', ignore_errors=True)
                 self.install('client', 'tauri', self.installed)
                 self.install('qt', 'qt', self.slot)
                 # The client changed a Qt key; Qt rewrites it as soon as it starts.
@@ -537,6 +600,7 @@ class UpdateFlow(Flow):
             with self.subTest(running=self.running):
                 shutil.rmtree(self.installed.parent, ignore_errors=True)
                 shutil.rmtree(updater.ROLLBACK, ignore_errors=True)
+                shutil.rmtree(updater.ROLLBACK.parent / 'desktop-qt-legacy', ignore_errors=True)
                 self.install('qt-partial', 'qt', self.installed)
                 (self.installed / 'Contents/MacOS/hgs-tray').unlink()
                 self.install('qt-old', 'qt', self.slot)
@@ -546,22 +610,84 @@ class UpdateFlow(Flow):
                 self.assertIn('the replaced bundle could not be verified as complete', self.lines[-2])
                 self.assertTrue(list(self.installed.parent.glob('.hgs-tray-kept-*/previous/hgs-tray.app')))
 
+    def test_two_next_updates_keep_the_last_next_rollback_and_the_first_qt_image(self):
+        self.install('qt', 'qt', self.installed)
+        self.domain({'attention.observed': b'{}'})
+        self.assertEqual(updater.update(self.bundle('client-1', 'tauri'), self.installed), 0)
+        self.assertEqual(updater.update(self.bundle('client-2', 'tauri'), self.installed), 0)
+        [legacy] = (updater.ROLLBACK.parent / 'desktop-qt-legacy').glob('qt-*/hgs-tray.app')
+        retained = (legacy / 'Contents/MacOS/hgs-tray').read_bytes()
+        self.assertEqual((self.variant(self.slot), self.variant(legacy)), ('client-1', 'qt'))
+        self.assertEqual(updater.update(self.bundle('client-3', 'tauri'), self.installed), 0)
+        self.assertEqual(self.variant(self.slot), 'client-2')
+        self.assertEqual(updater.roll_back_installed(self.installed), 0)
+        self.assertEqual((self.variant(self.installed), self.variant(self.slot)), ('client-2', 'client-3'))
+        self.assertEqual((legacy / 'Contents/MacOS/hgs-tray').read_bytes(), retained)
+        self.assertTrue(updater.SETTINGS_SNAPSHOT.is_file())
+
+    def test_each_older_qt_gets_a_unique_archive_without_losing_post_update_checks(self):
+        self.install('qt', 'qt', self.installed)
+        self.install('qt-old', 'qt', self.slot)
+        self.domain({'attention.observed': b'{}'})
+        with mock.patch.object(updater, 'provenance') as provenance, \
+                mock.patch.object(updater, 'changed_drafts', wraps=updater.changed_drafts) as drafts:
+            self.assertEqual(updater.update(self.bundle('client-1', 'tauri'), self.installed), 0)
+            self.assertEqual(updater.update(self.bundle('client-2', 'tauri'), self.installed), 0)
+            self.assertEqual(provenance.call_count, 2)
+            self.assertEqual(drafts.call_count, 2)
+        images = list((updater.ROLLBACK.parent / 'desktop-qt-legacy').glob('qt-*/hgs-tray.app'))
+        self.assertEqual({self.variant(p) for p in images}, {'qt', 'qt-old'})
+        self.assertEqual(len(images), 2)
+        self.assertEqual(self.variant(self.slot), 'client-1')
+
+    def test_legacy_move_errors_are_nonfatal_named_retention_and_main_has_no_traceback(self):
+        for code, after in ((errno.EXDEV, False), (errno.EACCES, False), (errno.EIO, True)):
+            with self.subTest(code=code, after=after):
+                for path in (self.installed.parent, updater.ROLLBACK, updater.ROLLBACK.parent / 'desktop-qt-legacy'):
+                    shutil.rmtree(path, ignore_errors=True)
+                self.install('client-1', 'tauri', self.installed)
+                self.install('qt', 'qt', self.slot)
+                rename = updater.os.rename
+                def fail_legacy(source, target):
+                    if Path(target).parent.parent.name == 'desktop-qt-legacy':
+                        if after:
+                            rename(source, target)
+                        raise OSError(code, 'fixture legacy move')
+                    return rename(source, target)
+                errors = io.StringIO()
+                argv = ['update-installed.py', str(self.bundle('client-2', 'tauri')), str(self.installed)]
+                with mock.patch.object(updater.os, 'rename', fail_legacy), \
+                        mock.patch.object(updater, 'provenance') as provenance, \
+                        mock.patch.object(updater, 'changed_drafts', wraps=updater.changed_drafts) as drafts, \
+                        mock.patch.object(sys, 'argv', argv), mock.patch('sys.stderr', errors):
+                    self.assertEqual(updater.main(), 0)
+                provenance.assert_called_once()
+                drafts.assert_called_once()
+                self.assertEqual((self.variant(self.installed), self.variant(self.slot)), ('client-2', 'client-1'))
+                candidates = list(updater.ROLLBACK.glob('.replaced-*/hgs-tray.app')) + \
+                    list((updater.ROLLBACK.parent / 'desktop-qt-legacy').glob('qt-*/hgs-tray.app'))
+                [kept] = candidates
+                self.assertEqual(self.variant(kept), 'qt')
+                self.assertIn(str(kept), '\n'.join(self.lines))
+                self.assertNotIn('Traceback', errors.getvalue())
+                self.assertTrue(any('the verified Next update continues' in line for line in self.lines))
+
     def test_a_partial_qt_in_the_slot_keeps_the_replaced_client(self):
         # main's replace() put any installed bundle into the slot, so a partial Qt can sit there.
         for self.running in (True, False):
             with self.subTest(running=self.running):
                 shutil.rmtree(self.installed.parent, ignore_errors=True)
                 shutil.rmtree(updater.ROLLBACK, ignore_errors=True)
+                shutil.rmtree(updater.ROLLBACK.parent / 'desktop-qt-legacy', ignore_errors=True)
                 self.install('client-1', 'tauri', self.installed)
                 self.install('qt-partial', 'qt', self.slot)
                 (self.slot / 'Contents/MacOS/hgs-tray').unlink()
                 self.assertEqual(updater.update(self.bundle('client-2', 'tauri'), self.installed), 0)
                 self.assertEqual(self.variant(self.installed), 'client-2')
-                self.assertEqual(updater.bundle_info(self.slot)['CFBundleIdentifier'], TEST_ID, 'the slot is untouched')
-                self.assertFalse((self.slot / 'Contents/MacOS/hgs-tray').exists())
-                [kept] = self.installed.parent.glob('.hgs-tray-kept-*/previous/hgs-tray.app')
-                self.assertEqual(self.variant(kept), 'client-1')
-                self.assertIn('could not be verified as complete, so the replaced GUI was kept rather than removed', self.lines[-2])
+                self.assertEqual(self.variant(self.slot), 'client-1')
+                [kept] = (updater.ROLLBACK.parent / 'desktop-qt-legacy').glob('qt-*/hgs-tray.app')
+                self.assertEqual(updater.bundle_info(kept)['CFBundleIdentifier'], TEST_ID)
+                self.assertFalse((kept / 'Contents/MacOS/hgs-tray').exists())
                 self.assertNotIn('the Qt GUI stays the rollback copy', ' '.join(self.lines))
 
     def test_every_codesign_is_bounded_and_a_timeout_means_unverified(self):
@@ -622,6 +748,7 @@ class UpdateFlow(Flow):
                     with self.subTest(running=running, target=target, fault=fault.__name__):
                         shutil.rmtree(self.installed.parent, ignore_errors=True)
                         shutil.rmtree(updater.ROLLBACK, ignore_errors=True)
+                        shutil.rmtree(updater.ROLLBACK.parent / 'desktop-qt-legacy', ignore_errors=True)
                         self.lines.clear()
                         self.running = running
                         self.install('client-1', 'tauri', self.installed)
@@ -637,6 +764,11 @@ class UpdateFlow(Flow):
 
                         with mock.patch.object(updater, 'run', codesign):
                             self.assertEqual(updater.update(self.bundle('client-2', 'tauri'), self.installed), 0)
+                        if target == 'slot':
+                            self.assertEqual(self.variant(self.slot), 'client-1')
+                            [kept_qt] = (updater.ROLLBACK.parent / 'desktop-qt-legacy').glob('qt-*/hgs-tray.app')
+                            self.assertEqual(self.variant(kept_qt), 'qt')
+                            continue
                         [kept] = self.installed.parent.glob('.hgs-tray-kept-*/previous/hgs-tray.app')
                         self.assertEqual((self.variant(kept), self.variant(self.slot)), ('client-1', 'qt'))
                         output = '\n'.join(self.lines)
@@ -649,6 +781,7 @@ class UpdateFlow(Flow):
                 with self.subTest(point=point, fault=fault.__name__):
                     shutil.rmtree(self.installed.parent, ignore_errors=True)
                     shutil.rmtree(updater.ROLLBACK, ignore_errors=True)
+                    shutil.rmtree(updater.ROLLBACK.parent / 'desktop-qt-legacy', ignore_errors=True)
                     self.lines.clear()
                     self.running = False
                     self.install('client-1', 'tauri', self.installed)
@@ -738,6 +871,7 @@ class UpdateFlow(Flow):
             with self.subTest(case=case):
                 shutil.rmtree(self.installed.parent, ignore_errors=True)
                 shutil.rmtree(updater.ROLLBACK, ignore_errors=True)
+                shutil.rmtree(updater.ROLLBACK.parent / 'desktop-qt-legacy', ignore_errors=True)
                 self.install('client-1', 'tauri', self.installed)
                 self.install('qt', 'qt', self.slot)
                 self.running, self.pid = True, 100
@@ -759,7 +893,13 @@ class UpdateFlow(Flow):
         def interrupted(path):
             (path / 'Contents/MacOS/hgs-tray').unlink()
             raise KeyboardInterrupt
-        with mock.patch.object(updater, 'remove', interrupted), self.assertRaises(KeyboardInterrupt):
+        original_rename = updater.os.rename
+        def cross_device(source, destination):
+            if Path(source).parent.name == 'previous' and Path(destination).parent.name.startswith('.incoming-'):
+                raise OSError(errno.EXDEV, 'fixture cross-device move')
+            return original_rename(source, destination)
+        with mock.patch.object(updater.os, 'rename', cross_device), \
+                mock.patch.object(updater, 'remove', interrupted), self.assertRaises(KeyboardInterrupt):
             updater.update(self.bundle('client-2', 'tauri'), self.installed)
         self.assertIn('may be partial; the new GUI was verified, so delete it rather than putting it back', self.lines[-1])
         self.assertNotIn('to put it back, quit Zerus and move it', self.lines[-1])
@@ -898,6 +1038,7 @@ class UpdateFlow(Flow):
                         path.unlink()
                 shutil.rmtree(self.installed, ignore_errors=True)
                 shutil.rmtree(updater.ROLLBACK, ignore_errors=True)
+                shutil.rmtree(updater.ROLLBACK.parent / 'desktop-qt-legacy', ignore_errors=True)
                 self.installed.parent.mkdir(parents=True, exist_ok=True)
                 updater.ROLLBACK.parent.mkdir(parents=True, exist_ok=True)
                 if name != 'installed':
@@ -928,9 +1069,9 @@ class Invariants(Flow):
 
     # installed, slot, build (None: --rollback), what policy supersedes once the new GUI runs
     DIRECTIONS = {
-        'client to client': (('client-1', 'tauri'), ('qt', 'qt'), ('client-2', 'tauri'), {'client-1'}),
-        'Qt to client': (('qt', 'qt'), ('qt-old', 'qt'), ('client', 'tauri'), {'qt-old'}),
-        'client to Qt': (('client', 'tauri'), ('qt-last', 'qt'), ('qt-new', 'qt'), {'qt-last'}),
+        'client to client': (('client-1', 'tauri'), ('qt', 'qt'), ('client-2', 'tauri'), set()),
+        'Qt to client': (('qt', 'qt'), ('qt-old', 'qt'), ('client', 'tauri'), set()),
+        'client to Qt': (('client', 'tauri'), ('qt-last', 'qt'), ('qt-new', 'qt'), set()),
         '--rollback': (('client', 'tauri'), ('qt', 'qt'), None, set()),
         'second --rollback': (('qt', 'qt'), ('client', 'tauri'), None, set()),
         'install over nothing': (None, ('qt', 'qt'), ('client', 'tauri'), set()),
@@ -1015,7 +1156,7 @@ class Invariants(Flow):
 
     def case(self, direction, mode, fault, point):
         installed, slot, built, superseded = self.DIRECTIONS[direction]
-        for path in (self.installed.parent, updater.ROLLBACK):
+        for path in (self.installed.parent, updater.ROLLBACK, updater.ROLLBACK.parent / 'desktop-qt-legacy'):
             shutil.rmtree(path, ignore_errors=True)
         if installed:
             self.install(*installed, self.installed)
@@ -1067,7 +1208,11 @@ class Invariants(Flow):
                         f'no client: {context}')
         # I2: the slot changes only after a verified start; a partial one is never set aside.
         if direction in self.PARTIAL_SLOT:
-            self.assertTrue((self.slot / 'Contents/partial').exists(), context)
+            partials = [path for path in bundles if (path / 'Contents/partial').is_file()]
+            self.assertTrue(any((path / 'Contents/partial').read_text() == 'the original partial bundle'
+                                and named(path) for path in partials), context)
+            if not self.verified:
+                self.assertTrue((self.slot / 'Contents/partial').exists(), context)
         elif not self.verified:
             self.assertEqual(complete.get(self.slot, (None,))[0], slot[0], context)
         # A line names the installed path whenever it does not hold the requested GUI.

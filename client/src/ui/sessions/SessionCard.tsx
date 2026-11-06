@@ -8,6 +8,7 @@ import { now } from "../../store/ui";
 import { settings } from "../../store/settings";
 import { machineAppearance } from "../../store/machineAppearance";
 import type { AgentKind, Session, Status, Subagent } from "./types";
+import { currentChildren, workingChildren } from "./subagents";
 
 // Card anatomy follows tray/src/SessionCardDelegate.h paintCard() at the
 // compact density (94 px rows, the only density in the web client):
@@ -231,12 +232,22 @@ function detailText(s: Session): string {
 
 export const agentsLabel = (s: Session) => {
   const kids = s.subagents ?? [];
-  return `${kids.filter((k) => k.state === "working").length}/${kids.length}`;
+  return `${workingChildren(s, !computerOffline(s.computer))}/${kids.length}`;
 };
 
 /** The checkout's folder name, as the card's second line shows it. */
 export function folderOf(s: Session) {
   return s.cwd.split(/[\\/]/).filter(Boolean).pop() ?? "";
+}
+
+/** Optional questions remain separate from blocking input and session status. */
+function OptionalQuestionsChip(props: { session: Session }) {
+  const optionalCount = () => optionalQuestionCount(props.session, computerFresh(props.session.computer));
+  return <Show when={optionalCount()}>
+    <span class="qchip" classList={{ muted: !!props.session.muted }} title={tr(optionalCount() === 1 ? "%1 optional question waiting\nThe agent can continue without an answer. Answer or skip it in Activity.\nClick to open." : "%1 optional questions waiting\nThe agent can continue without an answer. Answer or skip it in Activity.\nClick to open.", optionalCount())}>
+      <Icon name="question" size={16} />{optionalQuestionCountText(optionalCount())}
+    </span>
+  </Show>;
 }
 
 export function SessionCard(props: {
@@ -248,7 +259,6 @@ export function SessionCard(props: {
 }) {
   const s = () => props.session;
   const kind = () => badgeKind(s());
-  const optionalCount = () => optionalQuestionCount(s(), computerFresh(s().computer));
   return (
     <div class="scard" classList={{ selected: props.selected, offline: statusOf(s()) === "offline", muted: !!s().muted }} data-emphasis={emphasis(s())}>
       <div class="sc-l1">
@@ -258,11 +268,7 @@ export function SessionCard(props: {
         <Show when={visibleUnreadReply(s(), computerFresh(s().computer)) && (s().status === "working" || s().status === "attention" || s().draft)}>
           <span class="sc-extra"><StatusBadge kind={s().muted ? "muted-unread" : "unread"} caption="" iconOnly /></span>
         </Show>
-        <Show when={optionalCount()}>
-          <span class="qchip" classList={{ muted: !!s().muted }} title={tr(optionalCount() === 1 ? "%1 optional question waiting\nThe agent can continue without an answer. Answer or skip it in Activity.\nClick to open." : "%1 optional questions waiting\nThe agent can continue without an answer. Answer or skip it in Activity.\nClick to open.", optionalCount())}>
-            <Icon name="question" size={16} />{optionalQuestionCountText(optionalCount())}
-          </span>
-        </Show>
+        <OptionalQuestionsChip session={s()} />
         <span class="grow" />
         <AgentBadge agent={s().agent} />
       </div>
@@ -295,18 +301,23 @@ const CHILD_STATUS: Record<Subagent["state"], { kind: BadgeKind; caption: string
   attention: { kind: "attention", caption: trNoop("Needs input") },
   error: { kind: "error", caption: trNoop("Error") },
   paused: { kind: "paused", caption: trNoop("Paused") },
+  unknown: { kind: "neutral", caption: trNoop("Unknown") },
+  ended: { kind: "neutral", caption: trNoop("Ended") },
 };
-export const childStatus = (c: Subagent) => ({ ...CHILD_STATUS[c.state], caption: tr(CHILD_STATUS[c.state].caption) });
+export const childStatus = (c: Subagent, current = true): { kind: BadgeKind; caption: string } => current
+  ? { ...CHILD_STATUS[c.state], caption: tr(CHILD_STATUS[c.state].caption) }
+  : { kind: "neutral", caption: tr("Recorded") };
 
 /** Native subagent row (64 px): card indented 24 px, one muted detail line. */
 export function ChildCard(props: { parent: Session; child: Subagent; last: boolean; first: boolean; selected: boolean }) {
+  const status = () => childStatus(props.child, currentChildren(props.parent, !computerOffline(props.parent.computer)));
   return (
     <div class="child-row" classList={{ last: props.last, first: props.first }}>
       <i class="tree" aria-hidden="true" />
       <div class="scard child" classList={{ selected: props.selected }}>
         <div class="sc-l1">
           <span class="sc-title ell" style={titleReserve(props.child.name, 72)}>{props.child.name}</span>
-          <StatusBadge kind={childStatus(props.child).kind} caption={childStatus(props.child).caption} />
+          <StatusBadge kind={status().kind} caption={status().caption} />
           <span class="grow" />
           <AgentBadge agent={props.parent.agent} max={85} />
         </div>
@@ -317,8 +328,8 @@ export function ChildCard(props: { parent: Session; child: Subagent; last: boole
 }
 
 /**
- * Compact (collapsed) row, 40 px: title, then status, provider and mute at the
- * right, then the expand button (SessionCardDelegate::compactLayout).
+ * Compact (collapsed) row, 40 px: title, then status, optional questions,
+ * provider and mute at the right, then the expand button.
  */
 export function CompactCard(props: { session: Session; selected: boolean; onExpand: () => void }) {
   const s = () => props.session;
@@ -327,6 +338,7 @@ export function CompactCard(props: { session: Session; selected: boolean; onExpa
       aria-description={tr("Collapsed session row. Press Right to expand.")}>
       <span class="sc-title ell" style={titleReserve(s().title, 60)} title={s().name}>{s().title}</span>
       <StatusBadge kind={badgeKind(s())} caption={statusCaption(s())} />
+      <OptionalQuestionsChip session={s()} />
       <AgentBadge agent={s().agent} />
       <Show when={s().muted}><Icon name="mute" size={14} class="sc-mute" /></Show>
       <button class="cc-expand" title={tr("Expand session row")} onClick={(e) => { e.stopPropagation(); props.onExpand(); }} onDblClick={(e) => e.stopPropagation()}>

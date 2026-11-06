@@ -10,8 +10,6 @@ mod state;
 mod tests;
 
 use super::Store;
-#[cfg(unix)]
-use crate::platform;
 use crate::{
     config::Config,
     desktop::{feed, fleet},
@@ -150,25 +148,29 @@ impl Runtime {
                         .iter()
                         .map(|(k, v)| (k.as_str(), v.as_str()))
                         .collect();
-                    let result = zerus_client_core::run::run_owned(
-                        &hgs,
-                        &invocation,
-                        &environment,
-                        cancel,
-                        spawn,
-                        lease,
-                    )
-                    .map_err(|_| {
-                        "Recovery request did not complete. Reload its state before saving."
-                            .to_owned()
-                    })
-                    .and_then(|stdout| {
-                        recovery::answer(zerus_client_core::Exit::Code {
-                            code: 0,
-                            stdout,
-                            stderr: String::new(),
+                    let result = crate::self_exec::ensure()
+                        .map_err(|error| error.to_string())
+                        .and_then(|()| {
+                            zerus_client_core::run::run_owned(
+                                &hgs,
+                                &invocation,
+                                &environment,
+                                cancel,
+                                spawn,
+                                lease,
+                            )
+                            .map_err(|_| {
+                                "Recovery request did not complete. Reload its state before saving."
+                                    .to_owned()
+                            })
                         })
-                    });
+                        .and_then(|stdout| {
+                            recovery::answer(zerus_client_core::Exit::Code {
+                                code: 0,
+                                stdout,
+                                stderr: String::new(),
+                            })
+                        });
                     Answer::Recovery(result)
                 }
             }),
@@ -769,12 +771,5 @@ fn unix_now() -> i64 {
     chrono::Utc::now().timestamp()
 }
 fn spawn(command: &mut std::process::Command) -> std::io::Result<std::process::Child> {
-    #[cfg(unix)]
-    {
-        platform::spawn_in_turn(command)
-    }
-    #[cfg(not(unix))]
-    {
-        command.spawn()
-    }
+    crate::platform::spawn_service_child(command)
 }

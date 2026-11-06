@@ -1,7 +1,11 @@
-//! Historical original Next creation bytes, captured by its sole native queue
-//! owner BEFORE load/normalization. This is not a live journal checkpoint, a
-//! drain receipt, consent or a source of effects. Qt/Settings keep their leases.
-use super::{sources, SourceError, SourceResult, SourceStream};
+//! Original Next bytes captured by their sole native owner BEFORE first
+//! service-mode load/normalization. Each source has a separate fixed historical
+//! boundary and private slot. These are not live checkpoints or effect authority;
+//! Qt/Settings keep their existing current-source leases.
+use super::{
+    lineage::{create_json, read_json, unreadable, Seed, META},
+    sources, SourceError, SourceResult, SourceStream,
+};
 use crate::fsx::preload::{self as disk, Stamp};
 use serde::{Deserialize, Serialize};
 use std::{
@@ -12,22 +16,111 @@ use std::{
     },
 };
 use zerus_desktop_migration::{canonical_uuid, sha256};
-const META: usize = 64 << 10;
 const RAW: usize = crate::creation::JOURNAL_LIMIT;
 const BOUNDARY: &str = "next-creations-before-first-load-v1";
 
-#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
-#[serde(deny_unknown_fields)]
-struct Seed {
-    version: u32,
-    boundary: String,
-    capture_id: String,
+pub mod local_reads;
+pub mod worktree_cache;
+#[derive(Clone, Copy, PartialEq, Eq)]
+enum Kind {
+    Creations,
+    LocalReads,
+    WorktreeCache,
 }
-impl Seed {
-    fn valid(&self) -> bool {
-        self.version == 1 && self.boundary == BOUNDARY && canonical_uuid(&self.capture_id)
+impl Kind {
+    fn boundary(self) -> &'static str {
+        match self {
+            Self::Creations => BOUNDARY,
+            Self::LocalReads => "next-local-read-marks-before-first-load-v1",
+            Self::WorktreeCache => "next-worktree-cache-before-first-load-v1",
+        }
+    }
+    fn from_boundary(boundary: &str) -> Option<Self> {
+        [Self::Creations, Self::LocalReads, Self::WorktreeCache]
+            .into_iter()
+            .find(|kind| kind.boundary() == boundary)
+    }
+    fn slot(self) -> &'static str {
+        match self {
+            Self::Creations => "creation-preload-v1",
+            Self::LocalReads => "local-read-preload-v1",
+            Self::WorktreeCache => "worktree-cache-preload-v1",
+        }
+    }
+    fn leaf(self) -> &'static str {
+        match self {
+            Self::Creations => "creations.json",
+            Self::LocalReads => "attention-marks.json",
+            Self::WorktreeCache => "worktree-snapshots.json",
+        }
+    }
+    fn limit(self) -> usize {
+        match self {
+            Self::Creations => RAW,
+            Self::LocalReads | Self::WorktreeCache => 16 << 20,
+        }
+    }
+    fn source(self, bytes: &[u8]) -> SourceResult<SourceStream> {
+        match self {
+            Self::Creations => sources::creations(sources::Origin::Next, bytes),
+            Self::LocalReads => sources::next_local_read_marks(bytes),
+            Self::WorktreeCache => sources::next_worktree_snapshots(bytes),
+        }
+    }
+    fn read_source(self, path: &Path) -> std::io::Result<Option<(Vec<u8>, Stamp)>> {
+        match self {
+            Self::WorktreeCache => disk::read_legacy_cache(path, self.limit()),
+            _ => disk::read_source(path, self.limit()),
+        }
+    }
+    fn code(self, index: usize) -> &'static str {
+        const CREATION: [&str; 11] = [
+            "creation_source_waiting",
+            "creation_source_not_applicable",
+            "creation_source_captured",
+            "creation_source_changed",
+            "creation_source_too_large",
+            "creation_source_unsupported",
+            "creation_source_data_directory",
+            "creation_source_private_slot",
+            "creation_source_unavailable",
+            "creation_source_writer_unavailable",
+            "creation_source_owner_unavailable",
+        ];
+        const READS: [&str; 11] = [
+            "local_read_source_waiting",
+            "local_read_source_not_applicable",
+            "local_read_source_captured",
+            "local_read_source_changed",
+            "local_read_source_too_large",
+            "local_read_source_unsupported",
+            "local_read_source_data_directory",
+            "local_read_source_private_slot",
+            "local_read_source_unavailable",
+            "local_read_source_writer_unavailable",
+            "local_read_source_owner_unavailable",
+        ];
+        const CACHE: [&str; 11] = [
+            "worktree_cache_source_waiting",
+            "worktree_cache_source_not_applicable",
+            "worktree_cache_source_captured",
+            "worktree_cache_source_changed",
+            "worktree_cache_source_too_large",
+            "worktree_cache_source_unsupported",
+            "worktree_cache_source_data_directory",
+            "worktree_cache_source_private_slot",
+            "worktree_cache_source_unavailable",
+            "worktree_cache_source_writer_unavailable",
+            "worktree_cache_source_owner_unavailable",
+        ];
+        match self {
+            Self::WorktreeCache => CACHE[index],
+            Self::Creations => CREATION[index],
+            Self::LocalReads => READS[index],
+        }
     }
 }
+
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
 struct Plan {
@@ -65,6 +158,7 @@ impl CaptureFailure {
 /// Managed native setup supplies only the original application data directory.
 /// No IPC/JS caller selects a path, capture identity or raw bytes.
 pub struct Capture {
+    kind: Kind,
     data: PathBuf,
     #[cfg(unix)]
     resolved: std::sync::OnceLock<Arc<disk::ManagedData>>,
@@ -72,12 +166,17 @@ pub struct Capture {
     retry: AtomicBool,
     preparing: Mutex<()>,
     notify: Mutex<Option<Arc<dyn Fn() + Send + Sync>>>,
+    retry_notify: Mutex<Option<Arc<dyn Fn() + Send + Sync>>>,
 }
 #[derive(Clone, Debug, Serialize)]
 pub struct Status {
     pub code: &'static str,
     pub paused: bool,
     pub capture_id: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub view_ready: Option<bool>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub view_revision: Option<String>,
 }
 impl Default for Status {
     fn default() -> Self {
@@ -85,19 +184,39 @@ impl Default for Status {
             code: "creation_source_waiting",
             paused: true,
             capture_id: None,
+            view_ready: None,
+            view_revision: None,
         }
     }
 }
 impl Capture {
     pub fn new(data: PathBuf) -> Arc<Self> {
+        Self::for_kind(data, Kind::Creations)
+    }
+    /// Only native service-mode setup selects this fixed managed family.
+    pub fn local_reads(data: PathBuf) -> Arc<Self> {
+        Self::for_kind(data, Kind::LocalReads)
+    }
+    /// Only the native NewSession owner selects this fixed legacy cache source.
+    pub fn worktree_cache(data: PathBuf) -> Arc<Self> {
+        Self::for_kind(data, Kind::WorktreeCache)
+    }
+    fn for_kind(data: PathBuf, kind: Kind) -> Arc<Self> {
         Arc::new(Self {
+            kind,
             data,
             #[cfg(unix)]
             resolved: std::sync::OnceLock::new(),
-            state: Mutex::new(Status::default()),
+            state: Mutex::new(Status {
+                code: kind.code(0),
+                view_ready: (kind == Kind::LocalReads).then_some(false),
+                view_revision: (kind == Kind::LocalReads).then(|| "0".into()),
+                ..Status::default()
+            }),
             retry: AtomicBool::new(true),
             preparing: Mutex::new(()),
             notify: Mutex::new(None),
+            retry_notify: Mutex::new(None),
         })
     }
     pub fn status(&self) -> Status {
@@ -106,17 +225,89 @@ impl Capture {
             .unwrap_or_else(PoisonError::into_inner)
             .clone()
     }
+    /// Original native setup's canonical data object, never a caller path.
+    /// This accessor does not capture or initialize anything on the reporter.
+    pub fn data_path(&self) -> SourceResult<PathBuf> {
+        #[cfg(unix)]
+        {
+            let resolved = self.resolved.get().ok_or(SourceError::SourceUnreadable)?;
+            resolved.recheck().map_err(|_| SourceError::SourceChanged)?;
+            Ok(resolved.path().to_path_buf())
+        }
+        #[cfg(not(unix))]
+        {
+            if !self.data.is_absolute() {
+                return Err(SourceError::InvalidMetadata);
+            }
+            Ok(self.data.clone())
+        }
+    }
+    /// Use the same canonical directory for original legacy load AND writes.
+    pub fn live_path(&self) -> SourceResult<PathBuf> {
+        self.data_path()
+            .map(|path| path.join(self.kind.leaf()))
+            .inspect_err(|_| {
+                let mut state = self.state.lock().unwrap_or_else(PoisonError::into_inner);
+                state.paused = true;
+                state.code = self.kind.code(3);
+                drop(state);
+                let notify = self
+                    .notify
+                    .lock()
+                    .unwrap_or_else(PoisonError::into_inner)
+                    .clone();
+                if let Some(notify) = notify {
+                    notify();
+                }
+            })
+    }
+    /// Read ONLY the already committed historical slot. No mutable source read,
+    /// capture, recovery, normalization or decoder/effect admission occurs here.
+    pub fn retained(&self) -> SourceResult<Prepared> {
+        let expected = self
+            .status()
+            .capture_id
+            .ok_or(SourceError::SourceUnreadable)?;
+        let root = self.data_path()?.join(self.kind.slot());
+        let (seed, _) =
+            read_json::<Seed>(&root.join("identity.json"))?.ok_or(SourceError::SourceUnreadable)?;
+        if !seed.valid(self.kind.boundary()) || seed.capture_id != expected {
+            return Err(SourceError::SourceChanged);
+        }
+        let (receipt, _) = read_json::<Receipt>(&root.join("receipt.json"))?
+            .ok_or(SourceError::SourceUnreadable)?;
+        Snapshot::open(root, receipt, &seed, false)
+    }
     pub fn hook(&self, notify: Arc<dyn Fn() + Send + Sync>) {
         *self.notify.lock().unwrap_or_else(PoisonError::into_inner) = Some(notify);
     }
     pub fn request_retry(&self) {
         self.retry.store(true, Ordering::Release);
+        let notify = self
+            .retry_notify
+            .lock()
+            .unwrap_or_else(PoisonError::into_inner)
+            .clone();
+        if let Some(notify) = notify {
+            notify();
+        }
+    }
+    /// Wake the existing native source owner; this creates no worker or queue.
+    pub fn retry_hook(&self, notify: Arc<dyn Fn() + Send + Sync>) {
+        *self
+            .retry_notify
+            .lock()
+            .unwrap_or_else(PoisonError::into_inner) = Some(notify);
     }
     pub fn take_retry(&self) -> bool {
         self.retry.swap(false, Ordering::AcqRel)
     }
-    /// Called only on the ORIGINAL queue worker, before any legacy mutation.
-    /// I/O is finite (8 MiB raw, fixed metadata leaves, no listing or helper).
+    pub fn retry_pending(&self) -> bool {
+        self.retry.load(Ordering::Acquire)
+    }
+    /// Called only on the ORIGINAL native source owner, before legacy mutation.
+    /// I/O is finite (source-specific 8/16 MiB raw cap and fixed metadata leaves;
+    /// no directory listing or helper).
     pub fn prepare(&self) -> SourceResult<Prepared> {
         let _operation = self
             .preparing
@@ -125,18 +316,19 @@ impl Capture {
         let result = self.prepare_inner();
         let mut status = self.state.lock().unwrap_or_else(PoisonError::into_inner);
         status.paused = result.is_err();
+        if self.kind == Kind::LocalReads {
+            status.view_ready = Some(false);
+        }
         status.code = match &result {
-            Ok(Prepared::Missing { .. }) => "creation_source_not_applicable",
-            Ok(Prepared::Snapshot(_)) => "creation_source_captured",
-            Err(CaptureFailure::Source(SourceError::SourceChanged)) => "creation_source_changed",
-            Err(CaptureFailure::Source(SourceError::TooLarge)) => "creation_source_too_large",
-            Err(CaptureFailure::Source(SourceError::UnsupportedSource)) => {
-                "creation_source_unsupported"
-            }
+            Ok(Prepared::Missing { .. }) => self.kind.code(1),
+            Ok(Prepared::Snapshot(_)) => self.kind.code(2),
+            Err(CaptureFailure::Source(SourceError::SourceChanged)) => self.kind.code(3),
+            Err(CaptureFailure::Source(SourceError::TooLarge)) => self.kind.code(4),
+            Err(CaptureFailure::Source(SourceError::UnsupportedSource)) => self.kind.code(5),
             #[cfg(unix)]
-            Err(CaptureFailure::DataDirectory) => "creation_source_data_directory",
-            Err(CaptureFailure::PrivateSlot) => "creation_source_private_slot",
-            Err(_) => "creation_source_unavailable",
+            Err(CaptureFailure::DataDirectory) => self.kind.code(6),
+            Err(CaptureFailure::PrivateSlot) => self.kind.code(7),
+            Err(_) => self.kind.code(8),
         };
         drop(status);
         let notify = self
@@ -168,22 +360,18 @@ impl Capture {
         let data = resolved.path();
         #[cfg(not(unix))]
         let data = self.data.as_path();
-        let root = data.join("creation-preload-v1");
+        let root = data.join(self.kind.slot());
         let _parents = disk::Parents::open(&root, true).map_err(|_| CaptureFailure::PrivateSlot)?;
         let _lock = disk::Lock::take(&root.join("capture.lock")).map_err(unreadable)?;
         let seed: Seed = match read_json(&root.join("identity.json"))? {
             Some((value, _)) => value,
             None => {
-                let value = Seed {
-                    version: 1,
-                    boundary: BOUNDARY.into(),
-                    capture_id: uuid::Uuid::new_v4().to_string(),
-                };
+                let value = Seed::new(self.kind.boundary());
                 create_json(&root.join("identity.json"), &value)?;
                 value
             }
         };
-        if !seed.valid() {
+        if !seed.valid(self.kind.boundary()) {
             return Err(SourceError::InvalidMetadata.into());
         }
         self.state
@@ -192,15 +380,15 @@ impl Capture {
             .capture_id = Some(seed.capture_id.clone());
         let ready = root.join("receipt.json");
         if let Some((receipt, _)) = read_json::<Receipt>(&ready)? {
-            let prepared = Snapshot::open(root, receipt, &seed)?;
+            let prepared = Snapshot::open(root, receipt, &seed, true)?;
             #[cfg(unix)]
             resolved.recheck().map_err(|_| SourceError::SourceChanged)?;
             return Ok(prepared);
         }
         let plan_path = root.join("source.json");
         let previous = read_json::<Plan>(&plan_path)?.map(|(p, _)| p);
-        let source_path = data.join("creations.json");
-        let source = disk::read_source(&source_path, RAW).map_err(unreadable)?;
+        let source_path = data.join(self.kind.leaf());
+        let source = self.kind.read_source(&source_path).map_err(unreadable)?;
         let (bytes, stamp) = match source {
             Some((b, s)) => (b, Some(s)),
             None => (Vec::new(), None),
@@ -222,7 +410,7 @@ impl Capture {
         // leaf. A fully written original leaf can be recognized by exact bytes.
         let snapshot = if plan.source.is_some() {
             let path = root.join("original.bin");
-            let actual = match disk::read(&path, RAW).map_err(unreadable)? {
+            let actual = match disk::read(&path, self.kind.limit()).map_err(unreadable)? {
                 Some((saved, identity)) => {
                     if saved != bytes {
                         return Err(SourceError::SourceChanged.into());
@@ -237,7 +425,7 @@ impl Capture {
         };
         // Reopen the source before releasing its original worker fence. This
         // verifies the source object/stamp/hash, not a normalized projection.
-        let check = disk::read_source(&source_path, RAW).map_err(unreadable)?;
+        let check = self.kind.read_source(&source_path).map_err(unreadable)?;
         if check.as_ref().map(|(_, s)| s) != plan.source.as_ref()
             || check
                 .as_ref()
@@ -252,7 +440,7 @@ impl Capture {
         for (leaf, limit) in [
             ("identity.json", META),
             ("source.json", META),
-            ("original.bin", RAW),
+            ("original.bin", self.kind.limit()),
         ] {
             let current = disk::read(&root.join(leaf), limit).map_err(unreadable)?;
             let synced = disk::durable(&root.join(leaf), limit).map_err(unreadable)?;
@@ -264,49 +452,50 @@ impl Capture {
         create_json(&ready, &receipt)?;
         #[cfg(unix)]
         resolved.recheck().map_err(|_| SourceError::SourceChanged)?;
-        Snapshot::open(root, receipt, &seed).map_err(Into::into)
+        Snapshot::open(root, receipt, &seed, true).map_err(Into::into)
     }
-}
-fn unreadable(error: std::io::Error) -> SourceError {
-    if error.kind() == std::io::ErrorKind::FileTooLarge {
-        SourceError::TooLarge
-    } else {
-        SourceError::SourceUnreadable
-    }
-}
-fn read_json<T: serde::de::DeserializeOwned>(path: &Path) -> SourceResult<Option<(T, Stamp)>> {
-    disk::read(path, META)
-        .map_err(unreadable)?
-        .map(|(b, s)| {
-            serde_json::from_slice(&b)
-                .map(|v| (v, s))
-                .map_err(|_| SourceError::InvalidMetadata)
-        })
-        .transpose()
-}
-fn create_json(path: &Path, value: &impl Serialize) -> SourceResult<()> {
-    let bytes = serde_json::to_vec(value).map_err(|_| SourceError::InvalidMetadata)?;
-    if bytes.len() > META {
-        return Err(SourceError::TooLarge);
-    }
-    disk::create(path, &bytes).map_err(unreadable)?;
-    Ok(())
 }
 pub enum Prepared {
     Missing { capture_id: String },
     Snapshot(Arc<Snapshot>),
 }
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct Reference {
+    capture_id: String,
+    source_sha256: String,
+    receipt_sha256: String,
+    receipt_identity: Stamp,
+}
+impl Reference {
+    pub fn capture_id(&self) -> &str {
+        &self.capture_id
+    }
+    pub fn valid(&self) -> bool {
+        canonical_uuid(&self.capture_id)
+            && [&self.source_sha256, &self.receipt_sha256].iter().all(|s| {
+                s.len() == 64
+                    && s.bytes()
+                        .all(|b| b.is_ascii_digit() || (b'a'..=b'f').contains(&b))
+            })
+    }
+}
 /// An immutable historical version. The actual original source may now change.
 /// Every later reader validates THIS retained object and hash afresh; it never
 /// treats the live creation writer or an old status digest as a recheck.
 pub struct Snapshot {
+    kind: Kind,
     root: PathBuf,
     receipt: Receipt,
     receipt_stamp: Stamp,
 }
 impl Snapshot {
-    fn open(root: PathBuf, receipt: Receipt, seed: &Seed) -> SourceResult<Prepared> {
-        if receipt.plan.seed != *seed || receipt.plan.bytes > RAW {
+    fn open(root: PathBuf, receipt: Receipt, seed: &Seed, decode: bool) -> SourceResult<Prepared> {
+        let kind = Kind::from_boundary(&seed.boundary).ok_or(SourceError::InvalidMetadata)?;
+        if !seed.valid(kind.boundary())
+            || receipt.plan.seed != *seed
+            || receipt.plan.bytes > kind.limit()
+        {
             return Err(SourceError::InvalidMetadata);
         }
         let (actual, receipt_stamp) = read_json::<Receipt>(&root.join("receipt.json"))?
@@ -320,7 +509,7 @@ impl Snapshot {
         for (leaf, limit) in [
             ("identity.json", META),
             ("source.json", META),
-            ("original.bin", RAW),
+            ("original.bin", kind.limit()),
             ("receipt.json", META),
         ] {
             let before = disk::read(&root.join(leaf), limit).map_err(unreadable)?;
@@ -332,6 +521,7 @@ impl Snapshot {
         #[cfg(unix)]
         crate::fsx::checkpoint::sync_parent(&root.join("receipt.json")).map_err(unreadable)?;
         let snapshot = Self {
+            kind,
             root,
             receipt,
             receipt_stamp,
@@ -346,8 +536,10 @@ impl Snapshot {
             });
         }
         // Decode for classification only. No Creations::load or effects.
-        for item in sources::creations(sources::Origin::Next, &bytes)?.into_chunks() {
-            item?;
+        if decode {
+            for item in kind.source(&bytes)?.into_chunks() {
+                item?;
+            }
         }
         Ok(Prepared::Snapshot(Arc::new(snapshot)))
     }
@@ -367,7 +559,8 @@ impl Snapshot {
         if seed != self.receipt.plan.seed || plan != self.receipt.plan {
             return Err(SourceError::SourceChanged);
         }
-        let source = disk::read(&self.root.join("original.bin"), RAW).map_err(unreadable)?;
+        let source =
+            disk::read(&self.root.join("original.bin"), self.kind.limit()).map_err(unreadable)?;
         let bytes = match (source, &self.receipt.snapshot) {
             (Some((bytes, stamp)), Some(expected)) if stamp == *expected => bytes,
             (None, None) if self.receipt.plan.source.is_none() => Vec::new(),
@@ -378,8 +571,59 @@ impl Snapshot {
         }
         Ok(bytes)
     }
+    pub fn reference(&self) -> SourceResult<Reference> {
+        self.bytes()?;
+        Ok(Reference {
+            capture_id: self.capture_id().into(),
+            source_sha256: self.receipt.plan.sha256.clone(),
+            receipt_sha256: sha256(
+                &serde_json::to_vec(&self.receipt).map_err(|_| SourceError::InvalidMetadata)?,
+            ),
+            receipt_identity: self.receipt_stamp.clone(),
+        })
+    }
+    fn provenance(&self) -> SourceResult<serde_json::Value> {
+        let reference = self.reference()?;
+        Ok(
+            serde_json::json!({"version":1,"boundary":self.kind.boundary(),"historical":true,
+            "current_source_complete":false,"drained":false,"reference":reference,
+            "original_source":self.receipt.plan.source,"original_bytes":self.receipt.plan.bytes,
+            "snapshot_identity":self.receipt.snapshot}),
+        )
+    }
+    pub fn report_sources(self: Arc<Self>) -> SourceResult<Vec<SourceStream>> {
+        let original = self.clone().source()?;
+        let value = self.provenance()?;
+        let hash = sha256(&serde_json::to_vec(&value).map_err(|_| SourceError::InvalidMetadata)?);
+        let source = SourceStream::new(
+            zerus_desktop_migration::SourceRecord {
+                family: match self.kind {
+                    Kind::Creations => "next-creations-preload-provenance",
+                    Kind::LocalReads => "next-local-read-marks-preload-provenance",
+                    Kind::WorktreeCache => "next-worktree-cache-preload-provenance",
+                }
+                .into(),
+                schema: 1,
+                format: match self.kind {
+                    Kind::Creations => "creation-preload-provenance-v1",
+                    Kind::LocalReads => "local-read-preload-provenance-v1",
+                    Kind::WorktreeCache => "worktree-cache-preload-provenance-v1",
+                }
+                .into(),
+                sha256: hash,
+                build: None,
+            },
+            std::iter::once(Ok(value)),
+        )
+        .recheck(move || {
+            serde_json::to_vec(&self.provenance()?)
+                .map(|b| sha256(&b))
+                .map_err(|_| SourceError::InvalidMetadata)
+        });
+        Ok(vec![original, source])
+    }
     pub fn source(self: Arc<Self>) -> SourceResult<SourceStream> {
-        let source = sources::creations(sources::Origin::Next, &self.bytes()?)?;
+        let source = self.kind.source(&self.bytes()?)?;
         Ok(source.recheck(move || self.bytes().map(|b| sha256(&b))))
     }
 }
@@ -418,6 +662,15 @@ mod tests {
     }
     fn raw() -> Vec<u8> {
         br#"{ "schema":1, "operations":{}, "opaque":"kept byte for byte" }"#.to_vec()
+    }
+    /// The shared seed keeps the exact bytes of a plan written before it was
+    /// shared, nested inside the plan (zerus-0ht0).
+    #[test]
+    fn a_plan_keeps_its_exact_nested_seed_bytes() {
+        let earlier = r#"{"seed":{"version":1,"boundary":"next-creations-before-first-load-v1","capture_id":"8b0c0bd4-6b1f-4bb1-9d8e-0d3a3f2b9a51"},"source":null,"bytes":0,"sha256":"e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855"}"#;
+        let plan: Plan = serde_json::from_str(earlier).unwrap();
+        assert!(plan.seed.valid(Kind::Creations.boundary()));
+        assert_eq!(serde_json::to_string(&plan).unwrap(), earlier);
     }
     #[test]
     fn original_bytes_and_stable_identity_survive_later_live_recovery_and_restart() {
@@ -641,6 +894,12 @@ mod tests {
         fs::rename(&data, s.0.join("old-data")).unwrap();
         fs::create_dir(&data).unwrap();
         crate::fsx::write_private_durable(&data.join("creations.json"), &raw()).unwrap();
+        assert!(matches!(
+            capture.live_path(),
+            Err(SourceError::SourceChanged)
+        ));
+        assert!(capture.status().paused);
+        assert_eq!(capture.status().code, "creation_source_changed");
         assert!(matches!(capture.prepare(), Err(SourceError::SourceChanged)));
         assert!(!data.join("creation-preload-v1").exists());
     }

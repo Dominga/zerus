@@ -612,10 +612,20 @@ pub fn forward(socket: &Path, activation: Activation) -> bool {
     if line.is_empty() {
         return false;
     }
-    let Ok(mut stream) = UnixStream::connect(socket) else {
+    let stream = (|| -> io::Result<UnixStream> {
+        let connection = socket2::Socket::new(socket2::Domain::UNIX, socket2::Type::STREAM, None)?;
+        connection.connect_timeout(
+            &socket2::SockAddr::unix(socket)?,
+            Duration::from_millis(200),
+        )?;
+        let fd: std::os::fd::OwnedFd = connection.into();
+        let stream = UnixStream::from(fd);
+        stream.set_write_timeout(Some(Duration::from_millis(200)))?;
+        Ok(stream)
+    })();
+    let Ok(mut stream) = stream else {
         return false;
     };
-    let _ = stream.set_write_timeout(Some(Duration::from_millis(200)));
     stream.write_all(&line).is_ok()
 }
 
@@ -728,6 +738,7 @@ pub struct Claimed {
 pub enum Claim {
     Claimed(Claimed),
     Forwarded,
+    Duplicate(&'static str),
     Failed(String),
 }
 
@@ -740,10 +751,14 @@ impl InstanceState {
     /// place the file is removed.
     pub fn release(&self) {
         if let Some(mut listening) = self.0.lock().unwrap_or_else(PoisonError::into_inner).take() {
+            let canonical = listening._canonical.is_some();
             if let Some(guard) = listening._canonical.take() {
                 guard.retain_until_exit();
             }
             drop(listening);
+            if canonical {
+                crate::startup_log::record("quitting", "listeners_closed_owner_retained", None);
+            }
         }
     }
 }
@@ -777,10 +792,24 @@ fn claim_in(
     directory: &Path,
     admitted: impl FnOnce(),
 ) -> Claim {
+    let result = claim_inner(name, label, activation, reply, directory, admitted);
+    crate::startup_log::guard(&result);
+    result
+}
+
+fn claim_inner(
+    name: &str,
+    label: Option<&str>,
+    activation: Activation,
+    reply: Option<Reply>,
+    directory: &Path,
+    admitted: impl FnOnce(),
+) -> Claim {
     let guard = if name == "hgs-tray" {
         match canonical_claim(directory, activation.clone()) {
-            Ok(Some(guard)) => Some(guard),
-            Ok(None) => return Claim::Forwarded,
+            Ok(CanonicalClaim::Owner(guard)) => Some(guard),
+            Ok(CanonicalClaim::Forwarded) => return Claim::Forwarded,
+            Ok(CanonicalClaim::Busy) => return Claim::Duplicate("canonical_owner_unresponsive"),
             Err(error) => return Claim::Failed(error.to_string()),
         }
     } else {
@@ -803,20 +832,35 @@ fn claim_in(
     )
 }
 
-fn canonical_claim(
+enum CanonicalClaim {
+    Owner(canonical::Guard),
+    Forwarded,
+    Busy,
+}
+fn canonical_claim(directory: &Path, activation: Activation) -> io::Result<CanonicalClaim> {
+    canonical_claim_observed(directory, activation, || {})
+}
+fn canonical_claim_observed(
     directory: &Path,
     activation: Activation,
-) -> io::Result<Option<canonical::Guard>> {
-    if let Some(guard) = canonical::acquire(directory)? {
-        return Ok(Some(guard));
-    }
+    mut busy: impl FnMut(),
+) -> io::Result<CanonicalClaim> {
     // A concurrent start may still be opening its listeners. Failure to focus
     // is a clean duplicate exit, never permission to create another GUI.
     let deadline = Instant::now() + Duration::from_secs(2);
-    while !forward(&directory.join("gui.sock"), activation.clone()) && Instant::now() < deadline {
+    loop {
+        if let Some(guard) = canonical::acquire(directory)? {
+            return Ok(CanonicalClaim::Owner(guard));
+        }
+        busy();
+        if forward(&directory.join("gui.sock"), activation.clone()) {
+            return Ok(CanonicalClaim::Forwarded);
+        }
+        if Instant::now() >= deadline {
+            return Ok(CanonicalClaim::Busy);
+        }
         std::thread::sleep(Duration::from_millis(20));
     }
-    Ok(None)
 }
 
 #[cfg(test)]

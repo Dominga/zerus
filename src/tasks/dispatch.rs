@@ -146,7 +146,7 @@ fn prepared(
             &Actor::Person,
             to,
             true,
-            store.agent_starts_since(now() - 3_600_000).map_err(fail)?,
+            super::agent_starts_since(store, now() - 3_600_000)?,
         )
         .map_err(fail)?;
     let (prompt, files) = dispatch_content(

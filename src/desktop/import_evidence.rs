@@ -131,9 +131,11 @@ fn body(input: &mut impl Read, size: u64, limit: u64, budget: &mut u64) -> Resul
     Ok(bytes)
 }
 fn directory(path: &Path) -> Result<()> {
-    platform::private_dir(path)?;
+    // Owner-only at creation, and an existing owned folder that only inherits
+    // a sandbox group's read ACE is made private in place (#569).
+    platform::owner_only_dir(path)?;
     ensure!(
-        platform::verify_private(path, platform::Private::Directory)?,
+        crate::private_stores::ensure(path, platform::Private::Directory)?,
         "unsafe import directory"
     );
     Ok(())

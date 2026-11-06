@@ -10,6 +10,8 @@ scripts/ci/kimi-native-manifests/*.json -text
 # They and the recorded screen data are embedded with include_str!, so checkouts
 # keep their bytes exactly (no CRLF conversion on Windows).
 tests/fixtures/*.txt -text -whitespace
+# SessionStart serialization has a byte-exact UTF-8/LF contract on every host.
+tests/fixtures/session-start-context.json -text
 src/state/data/*.txt -text -whitespace
 
 # Keep vendored libvterm byte-for-byte identical to the documented upstream.

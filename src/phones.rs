@@ -232,9 +232,18 @@ fn protected_call(connection:&Connection,action:&str,input:&Value)->Result<Value
     let executable=std::env::current_exe()?;
     let name=if cfg!(windows){"zerus-mobile-connector.exe"}else{"zerus-mobile-connector"};
     let sibling=executable.parent().map(|p|p.join(name));
-    let program=sibling.filter(|p|p.is_file()).unwrap_or_else(||name.into());
-    let mut child=Command::new(program).args(["--workspace",action,"--config"]).arg(&connection.config_path)
-        .stdin(Stdio::piped()).stdout(Stdio::piped()).stderr(Stdio::null()).spawn()
+    // Private runtime hint from the desktop, distinct from the installer's
+    // HGS_MOBILE_CONNECTOR=0/1. It is executable selection, not authority.
+    // A supplied selection never falls back to a stale sibling or PATH.
+    let program=if let Some(selected)=std::env::var_os("ZERUS_CLIENT_MOBILE_CONNECTOR_PATH") {
+        let path=std::path::PathBuf::from(selected);
+        if !path.is_absolute(){return Err(Error::new(1,"The selected mobile connector path must be absolute"))}
+        path
+    }else{sibling.filter(|p|p.is_file()).unwrap_or_else(||name.into())};
+    let mut command=Command::new(program);
+    command.args(["--workspace",action,"--config"]).arg(&connection.config_path)
+        .stdin(Stdio::piped()).stdout(Stdio::piped()).stderr(Stdio::null());
+    let mut child=crate::platform::spawn_service_child(&mut command)
         .map_err(|_|Error::new(1,"Update the mobile connector to manage this encrypted workspace"))?;
     if let Some(mut stdin)=child.stdin.take(){stdin.write_all(input.to_string().as_bytes())?;}
     let mut bytes=Vec::new();child.stdout.take().ok_or_else(||Error::new(1,"Workspace response is unavailable"))?.take(MAX_RESPONSE_BYTES+1).read_to_end(&mut bytes)?;
@@ -328,8 +337,7 @@ impl Connection {
             .stdin(Stdio::piped())
             .stdout(Stdio::piped())
             .stderr(Stdio::piped());
-        let mut child = command
-            .spawn()
+        let mut child = crate::platform::spawn_service_child(&mut command)
             .map_err(|_| Error::new(1, "Could not reach the relay: curl is not installed"))?;
         let header = self.token.replace('\\', "\\\\").replace('"', "\\\"");
         let written = child

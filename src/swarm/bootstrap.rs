@@ -156,6 +156,54 @@ impl G3Import {
     }
 }
 
+/// A desktop whose saved Qt organization cannot be read still needs a usable
+/// catalog: the same first-use bootstrap as an absent Qt store, bound to the
+/// expected node. Its pending GUI import stays, so a later readable organization
+/// fills only missing fields. An initialized catalog is left as it is.
+#[derive(Deserialize)]
+#[serde(deny_unknown_fields)]
+pub(super) struct G3Bootstrap {
+    version: u32,
+    expected_node_id: String,
+}
+
+impl G3Bootstrap {
+    pub(super) fn parse(value: Value) -> Result<Self> {
+        let request: Self =
+            serde_json::from_value(value).context("invalid G3 project bootstrap")?;
+        ensure!(
+            request.version == 1
+                && super::catalog::uuid(&request.expected_node_id)
+                && uuid::Uuid::parse_str(&request.expected_node_id)?.to_string()
+                    == request.expected_node_id,
+            "unsupported G3 project bootstrap identity"
+        );
+        Ok(request)
+    }
+
+    pub(super) fn bootstrap(&self, store: &mut LockedStore) -> Result<()> {
+        ensure!(
+            store.data.node_id == self.expected_node_id,
+            "project catalog node changed; nothing initialized"
+        );
+        if store.data.imported {
+            return Ok(());
+        }
+        // Unknown or foreign import metadata blocks a bootstrap, as for get.
+        if let Some(pending) = marker(store.path.parent().expect("catalog directory"))? {
+            ensure!(
+                pending.node_id == self.expected_node_id,
+                "pending GUI import belongs to another node"
+            );
+        }
+        bootstrap_at(store, || Ok(()))
+    }
+
+    pub(super) fn receipt(&self) -> Value {
+        serde_json::json!({"version":1})
+    }
+}
+
 /// Read-only reconciliation: imported=true alone is insufficient while an
 /// earlier CLI bootstrap still has a pending GUI import. Never saves a store
 /// or supervises the swarm worker.
@@ -357,6 +405,78 @@ mod tests {
             let mut store = LockedStore::load(&config).unwrap();
             G3Import::parse(json!({"version":1,"expected_node_id":node,"source_sha256":"a".repeat(64),"organization":gui()}))
                 .unwrap().initialize(&mut store).unwrap();
+        }
+        assert_eq!(
+            g3_status(&config, request).unwrap()["gui_import_pending"],
+            false
+        );
+    }
+
+    #[test]
+    fn g3_bootstrap_sets_up_a_desktop_whose_qt_organization_is_unreadable() {
+        use super::super::catalog::Key;
+        let root = tempfile::tempdir().unwrap();
+        let config = test_config(root.path());
+        let node = {
+            let mut store = LockedStore::load(&config).unwrap();
+            store.save().unwrap();
+            store.data.node_id.clone()
+        };
+        let request = json!({"version":1,"expected_node_id":node});
+        for bad in [
+            json!({"version":2,"expected_node_id":node}),
+            json!({"version":1,"expected_node_id":node.to_uppercase()}),
+            json!({"version":1,"expected_node_id":node,"organization":gui()}),
+        ] {
+            assert!(G3Bootstrap::parse(bad).is_err());
+        }
+        // Another node's request initializes nothing.
+        {
+            let other =
+                json!({"version":1,"expected_node_id":"11111111-1111-4111-8111-111111111111"});
+            let mut store = LockedStore::load(&config).unwrap();
+            assert!(G3Bootstrap::parse(other)
+                .unwrap()
+                .bootstrap(&mut store)
+                .is_err());
+            assert!(!store.data.imported);
+        }
+        assert_eq!(
+            g3_status(&config, request.clone()).unwrap()["initialized"],
+            false
+        );
+        {
+            let mut store = LockedStore::load(&config).unwrap();
+            G3Bootstrap::parse(request.clone())
+                .unwrap()
+                .bootstrap(&mut store)
+                .unwrap();
+        }
+        let status = g3_status(&config, request.clone()).unwrap();
+        assert_eq!(status["initialized"], true);
+        assert_eq!(status["gui_import_pending"], true);
+        // Again: an initialized catalog is left exactly as it is.
+        let path = config.dir.join("swarm/catalog.json");
+        let before = std::fs::read(&path).unwrap();
+        {
+            let mut store = LockedStore::load(&config).unwrap();
+            G3Bootstrap::parse(request.clone())
+                .unwrap()
+                .bootstrap(&mut store)
+                .unwrap();
+        }
+        assert_eq!(std::fs::read(&path).unwrap(), before);
+        // A later readable Qt organization fills the missing fields and finishes.
+        {
+            let mut store = LockedStore::load(&config).unwrap();
+            G3Import::parse(json!({"version":1,"expected_node_id":node,"source_sha256":"a".repeat(64),"organization":gui()}))
+                .unwrap()
+                .initialize(&mut store)
+                .unwrap();
+            assert_eq!(
+                store.data.catalog.values()[&Key::project("imported-project", "name")],
+                "Later GUI import"
+            );
         }
         assert_eq!(
             g3_status(&config, request).unwrap()["gui_import_pending"],

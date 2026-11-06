@@ -11,8 +11,11 @@ use std::{
     sync::atomic::{AtomicBool, Ordering},
     time::{Duration, Instant},
 };
-use zerus_content_search::{Index, Message, Role, Target, DEFAULT_FILE_BYTES, DOCUMENT_BYTES};
+use zerus_content_search::{
+    Index, Message, Part, Role, Target, DEFAULT_FILE_BYTES, DOCUMENT_BYTES,
+};
 mod catalog;
+mod metadata;
 mod query;
 mod wire;
 pub(crate) use catalog::{DiscoveryBudget, DiscoveryProgress};
@@ -22,6 +25,8 @@ const ABI: &str = "content-search-index-v1";
 const INPUT_BYTES: usize = 64 << 10;
 const RECORD_BYTES: usize = 1 << 20;
 const READ_BYTES: usize = 2 << 20;
+const PART_BYTES: usize = 16 << 10;
+const PART_OVERLAP: usize = 255;
 
 #[derive(Clone, Deserialize, Serialize)]
 #[serde(deny_unknown_fields)]
@@ -70,6 +75,11 @@ impl Budget {
         }
     }
 }
+#[derive(Clone, Copy, PartialEq)]
+enum Flow {
+    Next,
+    Stop,
+}
 #[derive(Default, Serialize)]
 pub(crate) struct Progress {
     files: usize,
@@ -102,6 +112,7 @@ struct Cursor {
     seq: i64,
     skipping: bool,
     incomplete: bool,
+    chunk_version: u8,
 }
 #[derive(Clone, Deserialize, Serialize)]
 #[serde(deny_unknown_fields)]
@@ -121,11 +132,18 @@ pub(crate) struct Store {
     directory: PathBuf,
     index: Index,
     wire_roots: std::collections::BTreeMap<PathBuf, std::sync::Arc<wire::Snapshot>>,
+    /// An owned source-step transaction is open (see `begin_step`).
+    step: bool,
 }
 impl Store {
     pub fn open(directory: &Path) -> Result<Self> {
-        private_dir(directory)?;
-        if !crate::platform::verify_private(directory, crate::platform::Private::Directory)
+        // A sandbox installer can leave an inherited read ACE on the profile
+        // (Codex adds its group to ~/.local), so a folder made by inheritance
+        // is not private. Create it owner-only, and make an existing owned one
+        // private in place, as the other private stores do (#569); the check
+        // below stays the stricter verify_private, never a looser one.
+        crate::platform::owner_only_dir(directory).map_err(|e| e.to_string())?;
+        if !crate::private_stores::ensure(directory, crate::platform::Private::Directory)
             .map_err(|e| e.to_string())?
         {
             return Err("Search index directory must be private and owned by this user".into());
@@ -133,9 +151,15 @@ impl Store {
         // SQLite NOFOLLOW rejects symlinks in every path component, including
         // macOS's ordinary /var -> /private/var parent. Resolve the verified
         // directory only; keep refusing a symlink at the database itself.
-        let path = crate::platform::canonical(directory)
+        let canonical = crate::platform::canonical(directory).map_err(|e| e.to_string())?;
+        // The canonical folder is the one used from here: check it as well, so
+        // an ancestor changed after the first check never selects another one.
+        if !crate::platform::verify_private(&canonical, crate::platform::Private::Directory)
             .map_err(|e| e.to_string())?
-            .join("index.sqlite3");
+        {
+            return Err("Search index directory must be private and owned by this user".into());
+        }
+        let path = canonical.join("index.sqlite3");
         // A copied/restored database or auxiliary file must not become a new
         // public copy of message text, even if its parent is currently private.
         for name in [
@@ -157,22 +181,37 @@ impl Store {
                 }
             }
         }
-        let file = crate::platform::no_follow(crate::platform::private_open(
-            fs::OpenOptions::new()
-                .create(true)
-                .truncate(false)
-                .read(true)
-                .write(true),
-        ))
-        .open(&path)
-        .map_err(|e| e.to_string())?;
-        if !crate::platform::verify_private_file(&file).map_err(|e| e.to_string())? {
-            return Err("Search index file is not private".into());
+        // Never close a raw descriptor of the live index on Unix: it would drop
+        // the SQLite locks of every connection this process has open on it
+        // (zerus-iiee). Create it owner-only if missing, check it by path, and
+        // bind the connection to the checked file.
+        #[cfg(unix)]
+        let identity = {
+            crate::sqlite_file::create(&path).map_err(|e| e.to_string())?;
+            crate::sqlite_file::private(&path)
+                .map_err(|_| "Search index file is not private".to_string())?
+        };
+        #[cfg(not(unix))]
+        {
+            let file = crate::platform::no_follow(crate::platform::private_open(
+                fs::OpenOptions::new()
+                    .create(true)
+                    .truncate(false)
+                    .read(true)
+                    .write(true),
+            ))
+            .open(&path)
+            .map_err(|e| e.to_string())?;
+            if !crate::platform::verify_private_file(&file).map_err(|e| e.to_string())? {
+                return Err("Search index file is not private".into());
+            }
         }
         let flags = OpenFlags::SQLITE_OPEN_READ_WRITE
             | OpenFlags::SQLITE_OPEN_NO_MUTEX
             | OpenFlags::SQLITE_OPEN_NOFOLLOW;
         let db = Connection::open_with_flags(&path, flags).map_err(|e| e.to_string())?;
+        #[cfg(unix)]
+        crate::sqlite_file::bind_private(&db, &path, identity).map_err(|e| e.to_string())?;
         let index = Index::new(db, DEFAULT_FILE_BYTES).map_err(|e| e.to_string())?;
         let parent = crate::platform::canonical(directory.parent().ok_or("Invalid index path")?)
             .map_err(|e| e.to_string())?;
@@ -203,6 +242,7 @@ impl Store {
             directory: directory.to_owned(),
             index,
             wire_roots: Default::default(),
+            step: false,
         })
     }
 
@@ -214,6 +254,23 @@ impl Store {
         targets: &[Identity],
         budget: &Budget,
         cancel: &AtomicBool,
+    ) -> Result<Progress> {
+        self.step_with_reader(
+            state,
+            targets,
+            budget,
+            cancel,
+            &mut metadata::Reader::default(),
+        )
+    }
+
+    fn step_with_reader(
+        &mut self,
+        state: &Path,
+        targets: &[Identity],
+        budget: &Budget,
+        cancel: &AtomicBool,
+        reader: &mut metadata::Reader,
     ) -> Result<Progress> {
         if targets.len() > 16
             || budget.files > 256
@@ -237,150 +294,234 @@ impl Store {
             return Ok(progress);
         }
         self.cleanup()?;
-        self.sweep(state, budget, &mut progress, cancel)?;
+        self.sweep(state, budget, &mut progress, cancel, reader)?;
         for identity in targets {
             let target = identity.target();
             let key = target.key().map_err(|e| e.to_string())?;
-            if !progress.available(budget, cancel)
-                || budget.bytes - progress.bytes < RECORD_BYTES + 1
-            {
+            if !progress.available(budget, cancel) {
                 progress.stopped = true;
                 break;
             }
-            let record = match binding(state, identity, &mut progress, budget) {
-                Ok(record) => record,
-                Err(_) => {
-                    self.retire(&key)?;
-                    progress
-                        .errors
-                        .push("Source missing, replaced or unreadable; index entry retired".into());
-                    continue;
-                }
-            };
-            let target = record_target(&record);
-            if let Err(error) = self.index.register(&target) {
-                progress.errors.push(error.to_string());
-                continue;
+            let owned = self.begin_step()?;
+            let flow =
+                self.step_identity(state, identity, &key, budget, cancel, reader, &mut progress);
+            let ended = self.end_step(owned);
+            let flow = flow?;
+            ended?;
+            if flow == Flow::Stop {
+                break;
             }
-            let encoded: Option<String> = self
-                .index
-                .connection()
-                .query_row(
-                    "SELECT cursor FROM input_cursors WHERE source=?",
-                    [&key],
-                    |r| r.get(0),
-                )
-                .optional()
-                .map_err(|e| e.to_string())?;
-            let mut cursor: Cursor = match encoded {
-                Some(encoded) => serde_json::from_str(&encoded)
-                    .map_err(|_| "Invalid source cursor; dispose and rebuild the search index")?,
-                None => Cursor::default(),
-            };
-            let before = cursor.clone();
-            let mut unavailable = false;
-            let result = self.transcript(&record, &key, &mut cursor, budget, &mut progress, cancel);
-            let complete = match result {
-                Ok(complete) => complete,
-                Err(error) => {
-                    cursor = before;
-                    unavailable = true;
-                    progress.errors.push(error.chars().take(160).collect());
-                    false
-                }
-            };
-            let active: bool = self
-                .index
-                .connection()
-                .query_row("SELECT active FROM sources WHERE id=?", [&key], |r| {
-                    r.get(0)
-                })
-                .map_err(|e| e.to_string())?;
-            if !active {
-                progress.targets += 1;
-                continue;
-            }
-            // A missing or unsupported provider never hides its recorded journal.
-            let journal_complete =
-                match self.journal(&record, &key, &mut cursor, budget, &mut progress, cancel) {
-                    Ok(complete) => complete,
-                    Err(_) => {
-                        unavailable = true;
-                        false
-                    }
-                };
-            let mut snapshots_complete = true;
-            for (field, kind, role, time) in [
-                ("prompt", "UserPromptSubmit", "user", "turn_started"),
-                ("last_message", "AgentMessage", "assistant", "last_event_at"),
-            ] {
-                if !progress.can_read(budget, cancel) {
-                    snapshots_complete = false;
-                    break;
-                }
-                let text = if field == "prompt" {
-                    journal::user_prompt(&record).as_str().unwrap_or("")
-                } else {
-                    string(&record, field)
-                };
-                if !text.is_empty() {
-                    let event =
-                        json!({"type":kind,"source":"snapshot","at":record[time],"detail":text});
-                    if self
-                        .put(&key, event, role, &mut cursor, &mut progress)
-                        .is_err()
-                    {
-                        unavailable = true;
-                        snapshots_complete = false;
-                    }
-                }
-            }
-            self.index
-                .connection()
-                .execute(
-                    "INSERT OR REPLACE INTO input_cursors VALUES(?,?)",
-                    params![
-                        key,
-                        serde_json::to_string(&cursor).map_err(|e| e.to_string())?
-                    ],
-                )
-                .map_err(|e| e.to_string())?;
-            let _ = self.index.source_progress(
-                &key,
-                complete && journal_complete && snapshots_complete && !cursor.incomplete,
-                unavailable || cursor.incomplete,
-            );
-            progress.targets += 1;
         }
         progress.stopped |= !progress.available(budget, cancel);
         Ok(progress)
     }
 
+    /// One identity's source step; `Stop` ends this bounded call.
+    #[allow(clippy::too_many_arguments)]
+    fn step_identity(
+        &mut self,
+        state: &Path,
+        identity: &Identity,
+        key: &str,
+        budget: &Budget,
+        cancel: &AtomicBool,
+        reader: &mut metadata::Reader,
+        progress: &mut Progress,
+    ) -> Result<Flow> {
+        let key = key.to_owned();
+        let record = match binding(state, identity, progress, budget, reader, 0) {
+            Ok(metadata::Record::Ready(record)) => record,
+            Ok(metadata::Record::Deferred | metadata::Record::OverBudget) => {
+                progress.stopped = true;
+                return Ok(Flow::Stop);
+            }
+            Err(_) => {
+                self.retire(&key)?;
+                progress
+                    .errors
+                    .push("Source missing, replaced or unreadable; index entry retired".into());
+                return Ok(Flow::Next);
+            }
+        };
+        let target = record_target(&record);
+        if let Err(error) = self.index.register(&target) {
+            progress.errors.push(error.to_string());
+            return Ok(Flow::Next);
+        }
+        let encoded: Option<String> = self
+            .index
+            .connection()
+            .query_row(
+                "SELECT cursor FROM input_cursors WHERE source=?",
+                [&key],
+                |r| r.get(0),
+            )
+            .optional()
+            .map_err(|e| e.to_string())?;
+        let mut cursor: Cursor = match encoded {
+            Some(encoded) => serde_json::from_str(&encoded)
+                .map_err(|_| "Invalid source cursor; dispose and rebuild the search index")?,
+            None => Cursor::default(),
+        };
+        // Old capped writers advanced past oversized public messages. Rewind
+        // only after transcript identity verification (or when none was saved).
+        if cursor.chunk_version == 0 && !cursor.incomplete {
+            cursor.chunk_version = 1;
+        }
+        let before = cursor.clone();
+        let mut unavailable = false;
+        let result = self.transcript(&record, &key, &mut cursor, budget, progress, cancel);
+        let complete = match result {
+            Ok(complete) => complete,
+            Err(error) => {
+                cursor = before;
+                unavailable = true;
+                progress.errors.push(error.chars().take(160).collect());
+                false
+            }
+        };
+        let active: bool = self
+            .index
+            .connection()
+            .query_row("SELECT active FROM sources WHERE id=?", [&key], |r| {
+                r.get(0)
+            })
+            .map_err(|e| e.to_string())?;
+        if !active {
+            progress.targets += 1;
+            return Ok(Flow::Next);
+        }
+        if cursor.chunk_version == 0 && cursor.stamp.is_none() {
+            cursor.seq = 0;
+            cursor.incomplete = false;
+            cursor.chunk_version = 1;
+        }
+        // A missing or unsupported provider never hides its recorded journal.
+        let journal_complete =
+            match self.journal(&record, &key, &mut cursor, budget, progress, cancel) {
+                Ok(complete) => complete,
+                Err(_) => {
+                    unavailable = true;
+                    false
+                }
+            };
+        let mut snapshots_complete = true;
+        for (field, kind, role, time) in [
+            ("prompt", "UserPromptSubmit", "user", "turn_started"),
+            ("last_message", "AgentMessage", "assistant", "last_event_at"),
+        ] {
+            if !progress.can_read(budget, cancel) {
+                snapshots_complete = false;
+                break;
+            }
+            let text = if field == "prompt" {
+                journal::user_prompt(&record).as_str().unwrap_or("")
+            } else {
+                string(&record, field)
+            };
+            if !text.is_empty() {
+                let event =
+                    json!({"type":kind,"source":"snapshot","at":record[time],"detail":text});
+                match self.put(&key, event, role, budget, progress, cancel) {
+                    Ok(Flow::Next) => (),
+                    Ok(Flow::Stop) => snapshots_complete = false,
+                    Err(_) => {
+                        unavailable = true;
+                        snapshots_complete = false;
+                    }
+                }
+            }
+        }
+        // Never record a cursor past rows that SQLite rolled back.
+        self.step_open()?;
+        self.index
+            .connection()
+            .execute(
+                "INSERT OR REPLACE INTO input_cursors VALUES(?,?)",
+                params![
+                    key,
+                    serde_json::to_string(&cursor).map_err(|e| e.to_string())?
+                ],
+            )
+            .map_err(|e| e.to_string())?;
+        let _ = self.index.source_progress(
+            &key,
+            complete && journal_complete && snapshots_complete && !cursor.incomplete,
+            unavailable || cursor.incomplete,
+        );
+        progress.targets += 1;
+        Ok(Flow::Next)
+    }
+
+    /// A source step commits once: its index rows, input cursor, progress and
+    /// queue completion become durable together. Each journaled commit flushes
+    /// the disk several times, and a small session used to take about fourteen,
+    /// more than a slow Windows disk fits into an interactive budget. A step
+    /// begun inside an open one joins it. IMMEDIATE takes the write lock first,
+    /// so a concurrent writer waits for the busy timeout instead of deadlocking.
+    fn begin_step(&mut self) -> Result<bool> {
+        if self.step {
+            self.step_open()?;
+            return Ok(false);
+        }
+        self.index
+            .connection()
+            .execute_batch("BEGIN IMMEDIATE")
+            .map_err(|e| e.to_string())?;
+        self.step = true;
+        Ok(true)
+    }
+
+    /// SQLite can cancel a whole transaction after SQLITE_FULL, IOERR or NOMEM;
+    /// later statements would then commit one by one. A step must not record
+    /// its cursor or completion after that: the next step redoes it instead.
+    fn step_open(&self) -> Result<()> {
+        if self.step && self.index.connection().is_autocommit() {
+            return Err("Search-index step was rolled back; a later step retries it".into());
+        }
+        Ok(())
+    }
+
+    /// Commit the step even when it returned an error, as the former
+    /// per-statement commits kept everything written before the error. A
+    /// failed commit rolls the whole step back.
+    fn end_step(&mut self, owned: bool) -> Result<()> {
+        if !owned {
+            return Ok(());
+        }
+        let cancelled = self.step_open();
+        self.step = false;
+        cancelled?;
+        let connection = self.index.connection();
+        if let Err(error) = connection.execute_batch("COMMIT") {
+            let _ = connection.execute_batch("ROLLBACK");
+            return Err(error.to_string());
+        }
+        Ok(())
+    }
+
     fn put(
         &mut self,
         key: &str,
-        mut event: Value,
+        event: Value,
         role: &str,
-        cursor: &mut Cursor,
+        budget: &Budget,
         progress: &mut Progress,
-    ) -> Result<()> {
-        progress.records += 1;
+        cancel: &AtomicBool,
+    ) -> Result<Flow> {
         let text = string(&event, "detail");
         if text.is_empty() {
-            return Ok(());
-        }
-        if text.len() > DOCUMENT_BYTES {
-            cursor.incomplete = true;
-            return Ok(());
+            progress.records += 1;
+            return Ok(Flow::Next);
         }
         let id = if string(&event, "message_id").is_empty() {
             format!("indexed-{:x}", Sha256::digest(format!("{key}:{event}")))
         } else {
             string(&event, "message_id").to_owned()
         };
-        // Only these typed public fields reach the persistent copy.
-        event["message_id"] = json!(id);
-        let message = Message {
+        // Only these typed public fields reach the persistent copy. IDs and
+        // fingerprints describe the original, never an individual window.
+        let mut message = Message {
             id,
             at: event["at"]
                 .as_f64()
@@ -395,18 +536,71 @@ impl Store {
             kind: string(&event, "type").to_owned(),
             source: string(&event, "source").to_owned(),
             seq: event["seq"].as_u64().unwrap_or(0),
-            text: string(&event, "detail").to_owned(),
+            text: text.to_owned(),
         };
-        if let Err(error) = self.index.ingest(key, &[message]) {
-            // SQLITE_FULL must not advance this source's input cursor. Eviction
-            // is separately bounded and visible; a later step retries the input.
-            if matches!(error.downcast_ref::<rusqlite::Error>(),Some(rusqlite::Error::SqliteFailure(code,_)) if code.code==rusqlite::ErrorCode::DiskFull)
-            {
-                let _ = self.index.evict();
+        let result = if text.len() <= DOCUMENT_BYTES {
+            self.index.ingest(key, &[message]).map(|inserted| {
+                // Snapshots are revisited every slice. An unchanged prompt
+                // must not starve the following reply under a one-record cap.
+                if inserted > 0 || event["source"] != "snapshot" {
+                    progress.records += 1;
+                }
+                Flow::Next
+            })
+        } else {
+            let fingerprint = format!(
+                "{:x}",
+                Sha256::digest(serde_json::to_vec(&(1, key, &message)).map_err(|e| e.to_string())?)
+            );
+            let mut offset = self
+                .index
+                .part_offset(key, &message.id, &fingerprint, text.len())
+                .map_err(|e| e.to_string())?
+                .unwrap_or(0);
+            if offset == text.len() && event["source"] != "snapshot" {
+                progress.records += 1;
             }
-            return Err(error.to_string());
+            let mut result = Ok(Flow::Next);
+            while offset < text.len() {
+                if cancel.load(Ordering::Relaxed)
+                    || Instant::now() >= budget.deadline
+                    || progress.records >= budget.records
+                {
+                    result = Ok(Flow::Stop);
+                    break;
+                }
+                let (end, next) = part_window(text, offset)?;
+                message.text = text[offset..end].to_owned();
+                if let Err(error) = self.index.ingest_part(
+                    key,
+                    &message,
+                    Part {
+                        fingerprint: &fingerprint,
+                        start: offset,
+                        next,
+                        total: text.len(),
+                    },
+                ) {
+                    result = Err(error);
+                    break;
+                }
+                progress.records += 1;
+                offset = next;
+            }
+            result
+        };
+        match result {
+            Ok(flow) => Ok(flow),
+            Err(error) => {
+                // A failed part keeps its source/input cursor. Eviction is
+                // separately bounded and invalidates affected part receipts.
+                if matches!(error.downcast_ref::<rusqlite::Error>(),Some(rusqlite::Error::SqliteFailure(code,_)) if code.code==rusqlite::ErrorCode::DiskFull)
+                {
+                    let _ = self.index.evict();
+                }
+                Err(error.to_string())
+            }
         }
-        Ok(())
     }
 
     fn transcript(
@@ -481,6 +675,15 @@ impl Store {
                 "Transcript changed identity; index source retired, use legacy search".into(),
             );
         }
+        if cursor.chunk_version == 0 {
+            // The old cursor's file/head/tail were checked above before any
+            // rewind. Replaced input never acquires a fresh identity here.
+            cursor.offset = 0;
+            cursor.seq = 0;
+            cursor.skipping = false;
+            cursor.incomplete = false;
+            cursor.chunk_version = 1;
+        }
         file.seek(SeekFrom::Start(cursor.offset))
             .map_err(|e| e.to_string())?;
         // Reserve the final fingerprint read before committing an input cursor.
@@ -534,7 +737,9 @@ impl Store {
                     if let Some((event, role)) =
                         search::provider_event(string(record, "agent"), &value)
                     {
-                        self.put(key, event, role, cursor, progress)?;
+                        if self.put(key, event, role, budget, progress, cancel)? == Flow::Stop {
+                            break;
+                        }
                     } else {
                         progress.records += 1;
                     }
@@ -649,7 +854,9 @@ impl Store {
                 let role = search::journal_role(&event);
                 event["seq"] = json!(seq);
                 event["source"] = json!("journal");
-                self.put(key, event, role, cursor, progress)?;
+                if self.put(key, event, role, budget, progress, cancel)? == Flow::Stop {
+                    return Ok(false);
+                }
             } else {
                 cursor.incomplete = true;
                 progress.records += 1;
@@ -714,6 +921,26 @@ impl Store {
                     |r| r.get(0),
                 )
                 .map_err(|e| e.to_string())?;
+            let parts: bool = self
+                .index
+                .connection()
+                .query_row(
+                    "SELECT EXISTS(SELECT 1 FROM sqlite_schema WHERE name='message_parts')",
+                    [],
+                    |row| row.get(0),
+                )
+                .map_err(|e| e.to_string())?;
+            let remains = remains
+                || (parts
+                    && self
+                        .index
+                        .connection()
+                        .query_row(
+                            "SELECT EXISTS(SELECT 1 FROM message_parts WHERE source=?1 LIMIT 1) OR EXISTS(SELECT 1 FROM message_groups WHERE source=?1 LIMIT 1)",
+                            [&key],
+                            |row| row.get::<_, bool>(0),
+                        )
+                        .map_err(|e| e.to_string())?);
             if !remains {
                 self.index
                     .connection()
@@ -730,6 +957,7 @@ impl Store {
         budget: &Budget,
         progress: &mut Progress,
         cancel: &AtomicBool,
+        reader: &mut metadata::Reader,
     ) -> Result<()> {
         let last: String = self
             .index
@@ -755,9 +983,7 @@ impl Store {
             last
         };
         for (key, target) in entries {
-            if !progress.available(budget, cancel)
-                || budget.bytes - progress.bytes < RECORD_BYTES + 1
-            {
+            if !progress.available(budget, cancel) {
                 break;
             }
             let target: Target = serde_json::from_str(&target)
@@ -768,8 +994,12 @@ impl Store {
                 conversation_id: target.conversation_id,
                 archive_id: target.archive_id,
             };
-            if binding(state, &identity, progress, budget).is_err() {
-                self.retire(&key)?;
+            match binding(state, &identity, progress, budget, reader, 0) {
+                Ok(metadata::Record::Ready(_)) => (),
+                // Keep this source active and revisit it on a later sweep;
+                // an expensive record must not fence every following source.
+                Ok(metadata::Record::Deferred | metadata::Record::OverBudget) => (),
+                Err(_) => self.retire(&key)?,
             }
             next = key;
         }
@@ -782,6 +1012,27 @@ impl Store {
             .map_err(|e| e.to_string())?;
         Ok(())
     }
+}
+
+fn part_window(text: &str, start: usize) -> Result<(usize, usize)> {
+    if start >= text.len() || !text.is_char_boundary(start) {
+        return Err("Invalid public-message continuation".into());
+    }
+    let mut end = (start + PART_BYTES).min(text.len());
+    while !text.is_char_boundary(end) {
+        end -= 1;
+    }
+    let next = if end == text.len() {
+        end
+    } else {
+        text[start..end]
+            .char_indices()
+            .rev()
+            .nth(PART_OVERLAP - 1)
+            .map(|(offset, _)| start + offset)
+            .ok_or("Public-message window is too small")?
+    };
+    Ok((end, next))
 }
 
 fn record_target(record: &Value) -> Target {
@@ -798,43 +1049,74 @@ fn record_target(record: &Value) -> Target {
             .unwrap_or(0.0),
     }
 }
+/// The record of an ID-layout session (zerus-ucck P3a) whose label has no
+/// first holder: the file in `sessions/` with this identity's label and run.
+/// The scan reads at most 2,000 files.
+pub(super) fn id_layout_path(state: &Path, identity: &Identity, label: &Path) -> Option<PathBuf> {
+    // The label index names the candidates when its manifest proves it; a
+    // label it proves has no session in the ID layout is never scanned, and
+    // only a label path with no record falls back to a bounded scan.
+    let sessions = state.join("sessions");
+    let candidates: Vec<PathBuf> = match super::labels::listed_in(state, &identity.name) {
+        Some(ids) => ids.iter().map(|id| sessions.join(format!("{id}.json"))).collect(),
+        None if !label.exists() => std::fs::read_dir(&sessions)
+            .ok()?
+            .take(2_000)
+            .flatten()
+            .map(|entry| entry.path())
+            .filter(|path| {
+                path.file_stem()
+                    .and_then(|stem| stem.to_str())
+                    .is_some_and(super::session_id::canonical)
+            })
+            .collect(),
+        None => Vec::new(),
+    };
+    // Each read is bounded, never follows a final link and never blocks on a
+    // FIFO (#1437 review); the whole search stops at its deadline.
+    let deadline = std::time::Instant::now() + std::time::Duration::from_secs(2);
+    candidates.into_iter().find(|path| {
+        std::time::Instant::now() < deadline
+            && super::labels::read_file(path, super::storage::ID_RECORD_BYTES)
+                .ok()
+                .flatten()
+                .and_then(|bytes| serde_json::from_slice::<Value>(&bytes).ok())
+                .is_some_and(|record| {
+                    string(&record, "name") == identity.name
+                        && string(&record, "run_id") == identity.run_id
+                        && record["layout"] == "id"
+                })
+    })
+}
+
 fn binding(
     state: &Path,
     identity: &Identity,
     progress: &mut Progress,
     budget: &Budget,
-) -> Result<Value> {
+    reader: &mut metadata::Reader,
+    reserve: usize,
+) -> Result<metadata::Record> {
     let path = if identity.archive_id.is_empty() {
         let basename = format!("{:x}.json", Sha256::digest(identity.name.as_bytes()));
-        if state.join("name_routes").join(&basename).exists() {
+        let label = if state.join("name_routes").join(&basename).exists() {
             state.join("bindings").join(basename)
         } else {
             state.join(basename)
-        }
+        };
+        // A session in the ID layout (zerus-ucck P3a): found by its run, also
+        // when the label's own path holds its first holder.
+        id_layout_path(state, identity, &label).unwrap_or(label)
     } else {
         uuid::Uuid::parse_str(&identity.archive_id).map_err(|_| "Invalid archive identity")?;
         state
             .join("archives")
             .join(format!("{}.json", identity.archive_id))
     };
-    progress.files += 1;
-    let file = crate::platform::no_follow(fs::OpenOptions::new().read(true))
-        .open(path)
-        .map_err(|_| "Binding unavailable")?;
-    if !file.metadata().map_err(|e| e.to_string())?.is_file() {
-        return Err("Binding is not a regular file".into());
-    }
-    let cap = (RECORD_BYTES + 1).min(budget.bytes - progress.bytes);
-    let mut bytes = Vec::new();
-    file.take(cap as u64)
-        .read_to_end(&mut bytes)
-        .map_err(|e| e.to_string())?;
-    progress.bytes += bytes.len();
-    if bytes.len() > RECORD_BYTES {
-        return Err("Binding exceeds the index metadata budget".into());
-    }
-    let mut record: Value =
-        serde_json::from_slice(&bytes).map_err(|_| "Binding is incomplete or invalid")?;
+    let mut record = match reader.read(&path, progress, budget, reserve)? {
+        metadata::Record::Ready(record) => record,
+        other => return Ok(other),
+    };
     if !identity.archive_id.is_empty() {
         rename::normalize_archive(&mut record)?;
     }
@@ -847,7 +1129,7 @@ fn binding(
     {
         return Err("Binding identity changed".into());
     }
-    Ok(record)
+    Ok(metadata::Record::Ready(record))
 }
 fn sample(
     file: &mut fs::File,
@@ -985,5 +1267,35 @@ mod windows_tests {
         assert!(progress.complete);
         assert_eq!(progress.staged, 1);
         assert_eq!(store.status().unwrap()["catalog"]["queued_paths"], 1);
+    }
+}
+
+#[cfg(all(test, unix))]
+mod lock_regressions {
+    use super::*;
+    use crate::sqlite_file::foreign_lock_refused;
+
+    /// zerus-iiee: opening the search index again keeps the SQLite locks of a
+    /// connection already open, also after a restart.
+    #[test]
+    fn opening_the_index_again_keeps_a_live_connection_s_locks() {
+        let temp = tempfile::tempdir().unwrap();
+        let directory = temp.path().join("state").join("content-search-v1");
+        let path = directory.join("index.sqlite3");
+        // The second round is a restart: every earlier connection is gone.
+        for round in 0..2 {
+            let live = Store::open(&directory).unwrap();
+            // A writer's transaction: opening again during it is refused as
+            // busy and must never drop the writer's lock. (A reader's shared
+            // lock is not used here: the refused writer's own downgrade takes
+            // a shared lock again and would hide its loss.)
+            live.index.connection().execute_batch("BEGIN IMMEDIATE").unwrap();
+            assert!(foreign_lock_refused(&path), "round {round}: the writer holds its lock");
+            drop(Store::open(&directory));
+            assert!(foreign_lock_refused(&path), "round {round}: another open kept the lock");
+            live.index.connection().execute_batch("COMMIT").unwrap();
+            drop(live);
+            assert!(!foreign_lock_refused(&path), "round {round}: the lock went with its connection");
+        }
     }
 }

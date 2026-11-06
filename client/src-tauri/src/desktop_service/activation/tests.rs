@@ -190,6 +190,8 @@ fn start(
         drain,
         Some(responder),
         Observers {
+            #[cfg(target_os = "linux")]
+            mode_helpers: None,
             projections: vec![],
             notification_controls: None,
             retained_sources: None,
@@ -236,13 +238,8 @@ fn consume(delivery: Delivery, available: bool) -> crate::desk::Outcome {
         ..ViewRow::default()
     };
     let computer = ComputerId(target.computer);
-    let mut desk = DeskLoop::new(
-        zerus_client_core::menubar::OpenMode::Automatic,
-        None,
-        Instant::now(),
-    );
-    let mut publish =
-        |_: &zerus_client_core::menubar::Desk, _: zerus_client_core::menubar::OpenMode| {};
+    let mut desk = DeskLoop::new(None, Instant::now());
+    let mut publish = |_: &zerus_client_core::menubar::Desk| {};
     let mut optional = || false;
     let mut marks = || None;
     let mut notice = || "fixture".to_owned();
@@ -367,7 +364,7 @@ fn retained_delivery_refuses_a_new_epoch_and_shutdown_does_not_wait_for_a_stalle
         let (service, rx) = start(&fixture, responder);
         let delivery = receive(&rx).await;
         assert!(delivery.current());
-        service.shared.snapshot.lock().unwrap().epoch = Some(uuid::Uuid::new_v4().to_string());
+        service.shared.snapshot.lock().epoch = Some(uuid::Uuid::new_v4().to_string());
         assert!(!delivery.current());
         let completion = delivery.completion();
         let outcome = consume(delivery, true);
@@ -541,6 +538,188 @@ fn original_incomplete_pipes_block_rearm_and_remain_visible_through_join() {
                 assert!(!delivery.current());
             }
         }
+    });
+}
+
+#[test]
+fn a_passive_service_refusal_waits_quietly_and_reads_again_once_background_is_ready() {
+    if !private_case("desktop_service::activation::tests::a_passive_service_refusal_waits_quietly_and_reads_again_once_background_is_ready") { return; }
+    let _process = crate::PROCESS_TREE.read().unwrap();
+    tauri::async_runtime::block_on(async {
+        let fixture = Fixture::new(json!({
+            "ready": false, "ready_later": true, "activation_abi": true, "activation_passive": 1
+        }));
+        let responder = responder();
+        let _cache = CacheServer::start(&fixture.0, responder.clone());
+        let (service, rx) = start(&fixture, responder);
+        until("the passive refusal is waited out quietly", || {
+            service
+                .shared
+                .activation_passive_waits
+                .load(Ordering::Acquire)
+                == 1
+        })
+        .await;
+        // While the service stays passive, no further read and no error backoff.
+        tokio::time::sleep(Duration::from_millis(300)).await;
+        assert_eq!(waits(&fixture).len(), 1);
+        assert_eq!(
+            service.shared.activation_backoffs.load(Ordering::Acquire),
+            0
+        );
+        assert!(!service.snapshot().background_ready());
+        // A status with background work ready re-arms the reader at once.
+        std::fs::write(fixture.0.join("background-ready"), b"").unwrap();
+        let delivery = receive(&rx).await;
+        assert!(delivery.current());
+        let calls = waits(&fixture);
+        assert_eq!(calls.len(), 2);
+        assert_ne!(
+            calls[0]["value"]["request"]["request_id"],
+            calls[1]["value"]["request"]["request_id"]
+        );
+        assert_eq!(
+            service
+                .shared
+                .activation_passive_waits
+                .load(Ordering::Acquire),
+            1
+        );
+        assert_eq!(
+            service.shared.activation_backoffs.load(Ordering::Acquire),
+            0
+        );
+        service.join().await.unwrap();
+    });
+}
+
+#[test]
+fn the_passive_wait_is_bounded_and_sends_only_fresh_activation_reads() {
+    if !private_case("desktop_service::activation::tests::the_passive_wait_is_bounded_and_sends_only_fresh_activation_reads") { return; }
+    let _process = crate::PROCESS_TREE.read().unwrap();
+    tauri::async_runtime::block_on(async {
+        let fixture = Fixture::new(json!({
+            "ready": false, "activation_abi": true, "activation_passive": 3,
+            "activation_passive_hold": true
+        }));
+        let responder = responder();
+        let _cache = CacheServer::start(&fixture.0, responder.clone());
+        let (service, rx) = start(&fixture, responder);
+        // The fixture holds the first refusal until the seam is installed, so
+        // the first passive wait cannot capture the production delay.
+        until("first passive read", || waits(&fixture).len() == 1).await;
+        *service.shared.activation_retry.lock().unwrap() = Some(Duration::from_millis(150));
+        std::fs::write(fixture.0.join("release-first-passive"), b"").unwrap();
+        // Still passive: each wait lasts its bounded interval, then one fresh read.
+        let delivery = receive(&rx).await;
+        assert!(delivery.current());
+        let calls = waits(&fixture);
+        assert_eq!(calls.len(), 4);
+        let ids: std::collections::BTreeSet<_> = calls
+            .iter()
+            .map(|call| call["value"]["request"]["request_id"].to_string())
+            .collect();
+        assert_eq!(ids.len(), 4, "every read is new, never a replay");
+        assert_eq!(
+            service
+                .shared
+                .activation_passive_waits
+                .load(Ordering::Acquire),
+            3
+        );
+        assert_eq!(
+            service.shared.activation_backoffs.load(Ordering::Acquire),
+            0
+        );
+        // The reader sent activation reads only: no other frontend request.
+        assert!(fixture
+            .calls()
+            .iter()
+            .filter_map(|call| call["value"]["request"]["op"].as_str())
+            .all(|op| op == "activation_wait"));
+        service.join().await.unwrap();
+    });
+}
+
+/// A connected, passive service and its epoch, with the activation reader
+/// idle: the passive wait is then exercised directly.
+async fn passive_service(fixture: &Fixture) -> (Arc<Service>, String) {
+    let responder = responder();
+    let (service, _) = start(fixture, responder);
+    until("connected passive status", || {
+        let snapshot = service.snapshot();
+        snapshot.connected && snapshot.epoch.is_some() && !snapshot.background_ready()
+    })
+    .await;
+    let epoch = service.snapshot().epoch.unwrap();
+    (service, epoch)
+}
+
+/// Holds the admission lock as a stalled catalog view callback does.
+fn hold_admission(service: &Arc<Service>, hold: Duration) -> std::thread::JoinHandle<()> {
+    let shared = service.shared.clone();
+    let (held, holding) = mpsc::channel();
+    let holder = std::thread::spawn(move || {
+        let guard = shared.snapshot.lock();
+        held.send(()).unwrap();
+        std::thread::sleep(hold);
+        drop(guard);
+    });
+    holding.recv().unwrap();
+    holder
+}
+
+#[test]
+fn the_passive_wait_keeps_its_deadline_while_a_view_callback_holds_admission() {
+    if !private_case("desktop_service::activation::tests::the_passive_wait_keeps_its_deadline_while_a_view_callback_holds_admission") { return; }
+    let _process = crate::PROCESS_TREE.read().unwrap();
+    tauri::async_runtime::block_on(async {
+        let fixture = Fixture::new(json!({"ready": false}));
+        let (service, epoch) = passive_service(&fixture).await;
+        *service.shared.activation_retry.lock().unwrap() = Some(Duration::from_millis(25));
+        let holder = hold_admission(&service, Duration::from_secs(3));
+        let started = Instant::now();
+        let reread = passive(&service.shared, &AtomicBool::new(false), &epoch).await;
+        let elapsed = started.elapsed();
+        holder.join().unwrap();
+        assert!(reread, "the deadline schedules a fresh read");
+        assert!(
+            elapsed < Duration::from_millis(1500),
+            "waited {elapsed:?} for the admission lock"
+        );
+        service.join().await.unwrap();
+    });
+}
+
+#[test]
+fn stopping_the_passive_wait_does_not_wait_for_a_held_admission_lock() {
+    if !private_case("desktop_service::activation::tests::stopping_the_passive_wait_does_not_wait_for_a_held_admission_lock") { return; }
+    let _process = crate::PROCESS_TREE.read().unwrap();
+    tauri::async_runtime::block_on(async {
+        let fixture = Fixture::new(json!({"ready": false}));
+        let (service, epoch) = passive_service(&fixture).await;
+        // The production minute: only the stop can end this wait early.
+        assert!(service.shared.activation_retry.lock().unwrap().is_none());
+        let holder = hold_admission(&service, Duration::from_secs(3));
+        let stop = Arc::new(AtomicBool::new(false));
+        let stopper = {
+            let stop = stop.clone();
+            std::thread::spawn(move || {
+                std::thread::sleep(Duration::from_millis(20));
+                stop.store(true, Ordering::Release);
+            })
+        };
+        let started = Instant::now();
+        let reread = passive(&service.shared, &stop, &epoch).await;
+        let elapsed = started.elapsed();
+        stopper.join().unwrap();
+        holder.join().unwrap();
+        assert!(!reread, "a stopped wait never reads again");
+        assert!(
+            elapsed < Duration::from_millis(1500),
+            "stop waited {elapsed:?} for the admission lock"
+        );
+        service.join().await.unwrap();
     });
 }
 

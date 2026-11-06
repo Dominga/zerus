@@ -143,7 +143,7 @@ pub(super) fn current(record: &Value) -> Option<Value> {
         return None;
     }
     let panel = parse(&kimi_tui_choice::capture(record).ok()?)?;
-    if !process_alive(record) || !matches(record, live().ok()?.get(string(record, "name"))) {
+    if !process_alive(record) || !matches(record, panes_of(&live().ok()?, record)) {
         return None;
     }
     input::checked_terminal(record, false).ok()?;

@@ -22,6 +22,7 @@ pub(super) fn read_archive(name: &str, id: &str) -> Result<Value> {
     {
         return Err(format!("{name}: invalid archive record {id}"));
     }
+    session_id::verify(&record)?;
     Ok(record)
 }
 
@@ -94,6 +95,7 @@ pub(super) fn visit_bounded(deadline: std::time::Instant, mut visit: impl FnMut(
 }
 
 pub(super) fn remove_synced(path: &Path) -> Result<()> {
+    storage::cut_write()?;
     match fs::remove_file(path) {
         Ok(()) => crate::platform::sync_dir(path.parent().ok_or("invalid record path")?)
             .map_err(|error| error.to_string()),
@@ -119,18 +121,26 @@ pub(super) fn save(record: &Value) -> Result<String> {
         archived["archived_at"] = json!(now());
         archived["state"] = json!("archived");
         archived.as_object_mut().unwrap().remove("pausing");
-        atomic(&path(&id)?, &format!("{archived}\n"))?;
+        // An archive holds no label, lives in no layout and has no terminal:
+        // a restore writes wherever its label then allows (P3a: the label's
+        // own path), and its launch names a terminal anew (P3b).
+        archived.as_object_mut().unwrap().remove("layout");
+        archived.as_object_mut().unwrap().remove("terminal_name");
+        atomic_record(&path(&id)?, &mut archived)?;
         id
     };
-    if record_path(string(record, "name")).exists() {
-        let current = read(string(record, "name"))?;
+    // The archived session's own record goes, never its label's holder: a
+    // session in the ID layout removes `sessions/<id>.json` (P3a).
+    if let Some(current) = storage::current_of(record)? {
         if current["run_id"] == record["run_id"]
             && current["conversation_id"] == record["conversation_id"]
         {
-            remove_synced(&record_path(string(record, "name")))?;
-            rename::remove_legacy(&current)?;
+            storage::remove_record(&current)?;
         }
     }
+    // Its own Git worktree lock goes with it, or stays and is reported; the
+    // archive stands either way (P3c).
+    worktree_lock::left(record);
     Ok(id)
 }
 
@@ -163,7 +173,8 @@ pub(super) fn contains_selected(record: &Value) -> Result<bool> {
 }
 
 fn reconcile_candidate(record: &Value, snapshot: &Snapshot) -> bool {
-    !snapshot.contains_key(string(record, "name"))
+    // An environment that cannot be read counts as live: never archived.
+    !terminal_live(snapshot, record).unwrap_or(true)
         && !process_alive(record)
         && record.get("pausing").is_none()
         && !record["paused"].as_bool().unwrap_or(false)
@@ -208,7 +219,7 @@ pub(super) fn reconcile_locked(snapshot: &Snapshot) -> Result<(Vec<Value>, Vec<V
     let bindings = super::storage::records()?;
     let mut saved = false;
     for record in &bindings {
-        if snapshot.contains_key(string(record, "name"))
+        if terminal_live(snapshot, record).unwrap_or(true)
             || process_alive(record)
             || record.get("pausing").is_some()
             || record["paused"].as_bool().unwrap_or(false)
@@ -250,10 +261,10 @@ pub(super) fn reconcile_active_locked(snapshot: &Snapshot) -> Result<Vec<Value>>
     let mut catalog=None;
     for record in bindings {
         // A live exact binding cannot be the crash-left copy of a completed run.
-        if matches(&record,snapshot.get(string(&record,"name"))) || process_alive(&record) { result.push(record);continue; }
+        if matches(&record,panes_of(snapshot, &record)) || process_alive(&record) { result.push(record);continue; }
         if catalog.is_none(){catalog=Some(archive_catalog::catalog()?);}
         if archive_catalog::contains(catalog.as_ref().unwrap(), &record)? { save(&record)?; continue; }
-        if snapshot.contains_key(string(&record, "name")) || process_alive(&record)
+        if terminal_live(snapshot, &record).unwrap_or(true) || process_alive(&record)
             || record.get("pausing").is_some() || record["paused"].as_bool().unwrap_or(false)
             || !string(&record, "expected_id").is_empty() {
             result.push(record); continue;
@@ -270,12 +281,13 @@ pub(super) fn manual(name: &str, dry: bool) -> Result<i32> { manual_scoped(name,
 
 pub(super) fn manual_scoped(name: &str, dry: bool, scope: Option<&session_action::Scope>) -> Result<i32> {
     let _guard = lock(None)?;
-    if live()?.contains_key(name) {
+    let mut record = read(name)?;
+    // The session's own terminal (P3b), not another under its label.
+    if terminal_live(&live()?, &record)? {
         return Err(format!(
             "{name}: only stopped or paused sessions can be archived"
         ));
     }
-    let mut record = read(name)?;
     if let Some(scope)=scope {scope.check(&record)?;}
     if process_alive(&record) {
         return Err(format!("{name}: tracked agent process is still running"));
@@ -321,7 +333,10 @@ pub(super) fn forget_scoped(name: &str, id: &str, dry: bool, scope: Option<&sess
         return Ok(());
     }
     if let Some(scope)=scope {scope.changing();}
-    remove_synced(&path(id)?)
+    remove_synced(&path(id)?)?;
+    // A lock its archive kept, once nothing else uses the checkout (P3c).
+    worktree_lock::left(&record);
+    Ok(())
 }
 
 /// The immutable source of a still-pending restore, before its binding changes.
@@ -363,7 +378,7 @@ pub(super) fn reserve_clear_source(record: &Value) -> Result<()> {
             .map_err(|error| error.to_string());
     }
     archived["restore_archive_clear_source"] = anchor.clone();
-    atomic(&path(id)?, &format!("{archived}\n"))
+    atomic_record(&path(id)?, &mut archived)
 }
 
 /// Commit the restore after its exact ID, or its explicitly cleared successor.
@@ -428,8 +443,8 @@ pub(super) fn failed_restore(record: &mut Value) -> Result<bool> {
     } else {
         string(record, "error")
     });
-    atomic(&path(id)?, &format!("{archived}\n"))?;
-    remove_synced(&record_path(string(record, "name")))?;
+    atomic_record(&path(id)?, &mut archived)?;
+    remove_synced(&storage::own_path(record)?)?;
     Ok(true)
 }
 

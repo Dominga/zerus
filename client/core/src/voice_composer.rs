@@ -119,6 +119,10 @@ pub enum NoticeKind {
 pub struct Target {
     /// The composer's session key.
     pub key: String,
+    /// The session's name key when `key` names it by session ID: a voice
+    /// draft found there moves once to `key` (zerus-ucck P2c-2).
+    #[serde(default)]
+    pub legacy_key: String,
     pub host: String,
     pub session: String,
     pub run: String,
@@ -130,6 +134,10 @@ pub struct Target {
     pub reason: String,
     /// A draft composer: dictation into the draft.
     pub draft_only: bool,
+    /// The caller's current draft insertion revision. It is separate from
+    /// conversation identity and never grants insertion authority after restart.
+    #[serde(default)]
+    pub draft_revision: Option<u64>,
 }
 
 impl Target {
@@ -215,10 +223,15 @@ pub enum Effect {
     /// Pause other messages' players before recording.
     PauseMessages,
     StopPlayback,
-    /// Load the draft and answer [`VoiceComposer::loaded`].
+    /// Load the draft and answer [`VoiceComposer::loaded`]. A draft under
+    /// `legacy`, the session's name key, first moves once to `key`
+    /// ([`DraftStore::adopt`](crate::drafts::DraftStore::adopt)), labelled
+    /// `session`.
     Load {
         token: u64,
         key: String,
+        legacy: String,
+        session: String,
     },
     /// Save the draft durably (an empty draft clears it) and answer
     /// [`VoiceComposer::saved`]; token 0 needs no answer.
@@ -240,12 +253,14 @@ pub enum Effect {
         key: String,
         message: Value,
     },
-    /// Insert the transcript into the draft at the place recorded when Send
-    /// or Check was pressed, then answer [`VoiceComposer::inserted`].
+    /// Insert only into the explicitly requested draft revision, then answer
+    /// [`VoiceComposer::inserted`]. The caller rechecks revision and insertion
+    /// UUID at the durable write; this effect never submits a message.
     Insert {
         token: u64,
         text: String,
         id: String,
+        revision: u64,
     },
     /// Answer [`VoiceComposer::poll`] in one second.
     PollLater {
@@ -308,7 +323,7 @@ enum Then {
     Send {
         call: Box<Call>,
         previous_attempt: i64,
-        target: Target,
+        target: Box<Target>,
         key: String,
     },
     Refusal,
@@ -350,6 +365,8 @@ pub struct VoiceComposer {
     preferences: Preferences,
     pcm: Vec<u8>,
     transcript: String,
+    // An explicit action in this process, never restored from voice metadata.
+    insertion_armed: bool,
     video: Vec<u8>,
     video_meta: Map<String, Value>,
     capture_video: bool,
@@ -466,6 +483,7 @@ impl VoiceComposer {
             preferences: Preferences::default(),
             pcm: Vec::new(),
             transcript: String::new(),
+            insertion_armed: false,
             video: Vec::new(),
             video_meta: Map::new(),
             capture_video: false,
@@ -553,6 +571,7 @@ impl VoiceComposer {
     fn clear_recording(&mut self) {
         self.pcm.clear();
         self.transcript.clear();
+        self.insertion_armed = false;
         self.video.clear();
         self.video_meta.clear();
         self.id.clear();
@@ -601,9 +620,15 @@ impl VoiceComposer {
         let token = self.token(Pending::Load {
             generation: self.generation,
         });
+        let legacy = Some(&self.current.legacy_key)
+            .filter(|legacy| !legacy.is_empty() && **legacy != key)
+            .map(|legacy| format!("voice-message-draft\n{legacy}"))
+            .unwrap_or_default();
         self.effects.push(Effect::Load {
             token,
             key: self.storage_key(),
+            legacy,
+            session: self.current.session.clone(),
         });
     }
 
@@ -638,9 +663,11 @@ impl VoiceComposer {
                 .get("draft_only")
                 .and_then(Value::as_bool)
                 .unwrap_or(false),
+            draft_revision: meta.get("draft_revision").and_then(Value::as_u64),
             ..Target::default()
         };
         text(&meta, "transcript").clone_into(&mut self.transcript);
+        self.insertion_armed = false;
         let audio = &draft.draft.attachments[0].bytes;
         if !audio.starts_with(b"RIFF")
             || audio.get(8..16) != Some(b"WAVEfmt ".as_slice())
@@ -918,6 +945,9 @@ impl VoiceComposer {
             Value::Object(self.selected_profile.clone()),
         );
         form.insert("draft_only".into(), json!(self.target.draft_only));
+        if let Some(revision) = self.target.draft_revision {
+            form.insert("draft_revision".into(), json!(revision));
+        }
         form.insert("transcript".into(), json!(self.transcript));
         form.insert(
             "submitted".into(),
@@ -947,6 +977,11 @@ impl VoiceComposer {
             },
             label: format!("Voice message ({})", self.target.session),
             form_state: form,
+            session_label: if self.target.legacy_key.is_empty() {
+                String::new()
+            } else {
+                self.target.session.clone()
+            },
             ..StoredDraft::default()
         }
     }
@@ -1013,6 +1048,7 @@ impl VoiceComposer {
         self.preview_before_send = target.draft_only || self.preferences.preview_before_send;
         self.target = target;
         self.transcript.clear();
+        self.insertion_armed = false;
         self.notice.clear();
         self.notice_kind = NoticeKind::General;
         self.state = State::Starting;
@@ -1175,16 +1211,24 @@ impl VoiceComposer {
             if self.state != State::Preview {
                 return;
             }
+            if !self.current.same_conversation(&self.target) || !self.current.available {
+                return;
+            }
             if !self.transcript.is_empty() {
-                self.apply_transcript();
+                // Add to draft is a fresh explicit insertion, not an audio
+                // retry. Checkpoint its exact revision before emitting it.
+                self.target.draft_revision = self.current.draft_revision;
+                self.insertion_armed = true;
+                self.state = State::Saving;
+                self.save(Then::Transcript, false);
                 return;
             }
-            if self.selected_profile().is_empty()
-                || !self.current.same_conversation(&self.target)
-                || !self.current.available
-            {
+            if self.selected_profile().is_empty() {
                 return;
             }
+            self.target.draft_revision = self.current.draft_revision;
+            self.insertion_armed = true;
+            self.operation_id = self.id.clone();
             self.draft_polls = 0;
             self.state = State::Submitting;
             self.notice.clear();
@@ -1280,7 +1324,7 @@ impl VoiceComposer {
             Then::Send {
                 call: Box::new(call),
                 previous_attempt,
-                target,
+                target: Box::new(target),
                 key,
             },
             true,
@@ -1465,7 +1509,7 @@ impl VoiceComposer {
                 let token = self.token(Pending::Voice {
                     generation,
                     request,
-                    target,
+                    target: *target,
                     key,
                 });
                 self.effects.push(Effect::Call { token, call: *call });
@@ -1851,6 +1895,16 @@ impl VoiceComposer {
         if self.transcript.is_empty() || !self.current.same_conversation(&self.target) {
             return;
         }
+        let Some(revision) = self.target.draft_revision.filter(|revision| {
+            self.insertion_armed
+                && self.current.draft_revision == Some(*revision)
+                && self.current.available
+                && self.input_visible
+        }) else {
+            self.notice = DRAFT_CHANGED.into();
+            return;
+        };
+        self.insertion_armed = false;
         let token = self.token(Pending::Insert {
             generation: self.generation,
             id: self.id.clone(),
@@ -1859,6 +1913,7 @@ impl VoiceComposer {
             token,
             text: self.transcript.clone(),
             id: self.id.clone(),
+            revision,
         });
     }
 

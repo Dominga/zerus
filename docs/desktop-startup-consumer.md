@@ -1,5 +1,14 @@
 # Canonical frontend startup exclusion
 
+**Status note, 2026-11-04.** This startup consumer stays in production. The
+production producer prepare/controller it anticipates below is PARKED: none is
+planned since the owner direction of 2026-11-01 recorded in `zerus-5wmh.66.3.23`
+(`hgs desktop` owns background duties and Zerus Next is UI only; no
+universal-old-binary proof gate). Its checks of writer policy, the handoff
+marker and the handoff lock stay active. Only its prepared-row branch sees no
+production-created row, and it still refuses one. See the [universal replacement
+policy](desktop-universal-prepared-policy.md).
+
 The Linux/macOS live switch bundle claims the existing canonical instance
 before starting its GUI writers. Forwarded Show/Sessions launches return
 through the existing instance path and start no helper. Replay and other bundle

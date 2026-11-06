@@ -392,15 +392,13 @@ fn a_unix_error_number_is_never_retried_as_windows_sharing_contention() {
 #[test]
 fn direct_native_output_holders_pin_the_barrier_until_actual_eof() {
     let _process_tree = crate::PROCESS_TREE.read().unwrap();
-    use std::os::unix::fs::PermissionsExt;
     for pipe in ["stdout", "stderr"] {
         let f = Fixture::new();
         let fake = f.root.join("hgs");
         let release = f.root.join("release");
         let body = format!("import os,time\nend=time.monotonic()+15\nwhile not os.path.exists({}) and time.monotonic()<end: time.sleep(.01)\n", serde_json::to_string(release.to_str().unwrap()).unwrap());
         let program = format!("#!/usr/bin/env python3\nimport subprocess,sys\nsubprocess.Popen([sys.executable,'-c',{}],stdin=subprocess.DEVNULL,stdout={},stderr={})\nprint('{{\"ok\":true,\"applied\":{{\"reply_id\":true,\"attention_signature\":false}}}}')\n", serde_json::to_string(&body).unwrap(), if pipe=="stdout" {"sys.stdout"} else {"subprocess.DEVNULL"}, if pipe=="stderr" {"sys.stderr"} else {"subprocess.DEVNULL"});
-        std::fs::write(&fake, program).unwrap();
-        std::fs::set_permissions(&fake, std::fs::Permissions::from_mode(0o700)).unwrap();
+        crate::write_executable(&fake, program);
         let out = tauri::async_runtime::block_on(dispatch_with_plan(
             &f.actions,
             target(),

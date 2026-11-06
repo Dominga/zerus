@@ -42,7 +42,6 @@ class PackagedUnits(unittest.TestCase):
         self.assertEqual(service(blocks[0]).get("KillMode"), ["process"])
         drop_in = "~/.config/systemd/user/zerus-mobile-connector.service.d/50-zerus-killmode.conf"
         self.assertIn(f"printf '[Service]\\nKillMode=process\\n' \\\n  > {drop_in}", guide)
-        self.assertIn(drop_in, (ROOT / "tray/src/RelaySettings.h").read_text(encoding="utf-8"))
 
 
 @unittest.skipUnless(sys.platform.startswith("linux"), "systemd user units are written on Linux")

@@ -16,6 +16,9 @@ use serde_json::{json, Value};
 use std::{
     fs::{self, File},
     path::{Path, PathBuf},
+};
+#[cfg(not(windows))]
+use std::{
     process::{Command, Stdio},
     thread,
     time::{Duration, Instant},
@@ -112,12 +115,16 @@ pub fn status(config: &Config) -> Status {
 }
 
 /// Reports the worker and restarts a stale one. Best effort: it never fails
-/// the calling command.
+/// the calling command. A unit-test image only reports: it never activates the
+/// service manager or records an attempt.
 pub fn supervise(config: &Config) -> Status {
     let status = status(config);
-    if status.running && !status.current {
+    if status.running && !status.current && crate::self_exec::ensure().is_ok() {
         let default = std::env::var_os("HGS_CONFIG_DIR").is_none();
         restart(&config.dir.join("swarm"), default, now(), || {
+            #[cfg(windows)]
+            let _ = crate::desktop::restart_swarm(config);
+            #[cfg(not(windows))]
             if let Some((program, args)) = command() {
                 run(program, &args);
             }
@@ -177,13 +184,23 @@ fn command() -> Option<(&'static str, Vec<String>)> {
         ],
     ))
 }
-/// No service manager runs the worker here: the Windows desktop app supervises it.
-#[cfg(not(any(target_os = "linux", target_os = "macos")))]
+/// The command addresses the existing background owner, never a marker PID or
+/// the whole desktop registration. Automatic stale-worker recovery uses the
+/// same bounded IPC directly, without another helper process or GUI launch.
+#[cfg(windows)]
+fn command() -> Option<(PathBuf, Vec<String>)> {
+    Some((
+        std::env::current_exe().ok()?,
+        vec!["desktop".into(), "swarm-restart".into(), "--json".into()],
+    ))
+}
+#[cfg(not(any(target_os = "linux", target_os = "macos", windows)))]
 fn command() -> Option<(&'static str, Vec<String>)> {
     None
 }
 
 /// Waits briefly; a hung service manager never holds up the command.
+#[cfg(not(windows))]
 fn run(program: &str, args: &[String]) {
     let Ok(mut child) = crate::platform::spawn(
         Command::new(program)
@@ -213,6 +230,15 @@ fn identity(path: &Path) -> Option<Identity> {
 pub struct Executable {
     path: PathBuf,
     started: Identity,
+    /// The size of the running image, where it can be read.
+    size: Option<u64>,
+}
+
+/// A ready file at an executable's path that is not the one it started from.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub struct Replacement {
+    identity: Identity,
+    size: u64,
 }
 
 impl Executable {
@@ -228,12 +254,47 @@ impl Executable {
             .to_str()
             .and_then(|path| path.strip_suffix(" (deleted)"))
             .map_or(path.clone(), PathBuf::from);
-        Some(Self { path, started })
+        #[cfg(target_os = "linux")]
+        let size = fs::metadata("/proc/self/exe").ok().map(|image| image.len());
+        // Elsewhere the file at the path, while it is still the running one.
+        #[cfg(not(target_os = "linux"))]
+        let size = (identity(&path) == Some(started))
+            .then(|| fs::metadata(&path).ok().map(|file| file.len()))
+            .flatten();
+        Some(Self {
+            path,
+            started,
+            size,
+        })
     }
     /// A different file at the same path. A missing file may be mid-upgrade.
     pub fn replaced(&self) -> bool {
         identity(&self.path).is_some_and(|now| now != self.started)
     }
+    /// The file now at the path, when it is a regular executable file that
+    /// differs from the running one in device, inode, modification time or
+    /// size. None while the path is missing or not yet executable, which an
+    /// upgrade may pass through.
+    pub fn replacement(&self) -> Option<Replacement> {
+        let (identity, metadata) = Identity::at(&self.path).ok()?;
+        if !metadata.is_file() || !runnable(&metadata) {
+            return None;
+        }
+        let size = metadata.len();
+        (identity != self.started || self.size.is_some_and(|started| started != size))
+            .then_some(Replacement { identity, size })
+    }
+}
+
+#[cfg(unix)]
+fn runnable(metadata: &fs::Metadata) -> bool {
+    use std::os::unix::fs::PermissionsExt;
+    metadata.permissions().mode() & 0o111 != 0
+}
+
+#[cfg(not(unix))]
+fn runnable(_: &fs::Metadata) -> bool {
+    true
 }
 
 #[cfg(test)]
@@ -319,6 +380,7 @@ mod tests {
     }
 
     #[test]
+    #[cfg(not(windows))]
     fn only_the_swarm_worker_unit_is_restarted() {
         match command() {
             Some(("systemctl", args)) => assert_eq!(
@@ -331,6 +393,13 @@ mod tests {
             }
             other => assert!(other.is_none()),
         }
+    }
+    #[test]
+    #[cfg(windows)]
+    fn windows_restart_addresses_only_the_existing_service_worker() {
+        let (program, args) = command().unwrap();
+        assert_eq!(program, std::env::current_exe().unwrap());
+        assert_eq!(args, ["desktop", "swarm-restart", "--json"]);
     }
 
     #[test]
@@ -381,6 +450,46 @@ mod tests {
         fs2::FileExt::try_lock_exclusive(&lock).unwrap();
     }
 
+    #[cfg(target_os = "linux")]
+    #[test]
+    fn test_image_reports_a_stale_worker_without_restarting_it() {
+        crate::self_exec::private_probe("swarm::service::tests::stale_worker_restart_probe");
+    }
+    #[cfg(target_os = "linux")]
+    #[test]
+    #[ignore = "run by test_image_reports_a_stale_worker_without_restarting_it"]
+    fn stale_worker_restart_probe() {
+        crate::self_exec::probe_child("swarm::service::tests::stale_worker_restart_probe");
+        // The private default directory: restarts are reachable but for the guard.
+        assert!(std::env::var_os("HGS_CONFIG_DIR").is_none());
+        let home = std::env::var("HOME").unwrap();
+        let config = Config {
+            home: home.clone(),
+            dir: crate::config::config_dir(&home),
+            state: PathBuf::from(&home).join("state"),
+            selves: vec![],
+            peers: vec![],
+            base_peers: vec![],
+            peers_from_environment: false,
+            machines: BTreeMap::new(),
+            tab: false,
+            tab_colors: String::new(),
+        };
+        let swarm = config.dir.join("swarm");
+        fs::create_dir_all(&swarm).unwrap();
+        let lock = File::create(swarm.join(LOCK)).unwrap();
+        fs2::FileExt::try_lock_exclusive(&lock).unwrap();
+        let stale = Status {
+            running: true,
+            current: false,
+        };
+        assert_eq!(supervise(&config), stale);
+        assert!(
+            !swarm.join(RESTART).exists(),
+            "no restart attempt is recorded"
+        );
+    }
+
     #[test]
     fn a_replaced_executable_is_detected() {
         let dir = tempfile::tempdir().unwrap();
@@ -389,6 +498,7 @@ mod tests {
         let executable = Executable {
             path: path.clone(),
             started: identity(&path).unwrap(),
+            size: None,
         };
         assert!(!executable.replaced());
         // Package managers install the new file under a temporary name and rename it.
@@ -405,9 +515,67 @@ mod tests {
                 modified: 0,
                 ..identity(&path).unwrap()
             },
+            size: None,
         };
         assert!(executable.replaced());
         assert!(Executable::current().is_some_and(|current| !current.replaced()));
+    }
+
+    /// zerus-5wmh.66.2.46: a long-lived reader restarts only for a ready
+    /// replacement: another identity, modification time or size, and a
+    /// regular executable file; never for a path an upgrade left missing.
+    #[test]
+    fn only_a_ready_replacement_is_reported() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("hgs");
+        let write = |at: &Path, bytes: &[u8], mode: u32| {
+            fs::write(at, bytes).unwrap();
+            #[cfg(unix)]
+            {
+                use std::os::unix::fs::PermissionsExt;
+                fs::set_permissions(at, fs::Permissions::from_mode(mode)).unwrap();
+            }
+            #[cfg(not(unix))]
+            let _ = mode;
+        };
+        write(&path, b"old", 0o755);
+        let executable = Executable {
+            path: path.clone(),
+            started: identity(&path).unwrap(),
+            size: Some(3),
+        };
+        assert_eq!(executable.replacement(), None);
+        fs::remove_file(&path).unwrap();
+        assert_eq!(executable.replacement(), None, "mid-upgrade");
+        fs::create_dir(&path).unwrap();
+        assert_eq!(executable.replacement(), None, "not a file");
+        fs::remove_dir(&path).unwrap();
+        let next = dir.path().join(".hgs.new");
+        #[cfg(unix)]
+        {
+            write(&next, b"newer", 0o644);
+            fs::rename(&next, &path).unwrap();
+            assert_eq!(executable.replacement(), None, "not executable yet");
+            fs::remove_file(&path).unwrap();
+        }
+        write(&next, b"newer", 0o755);
+        fs::rename(&next, &path).unwrap();
+        let ready = executable.replacement().expect("a ready replacement");
+        // The same replacement reads the same until it changes again.
+        assert_eq!(executable.replacement(), Some(ready));
+        // The same file with another size (an in-place rewrite) is one too.
+        let same = Executable {
+            path: path.clone(),
+            started: identity(&path).unwrap(),
+            size: Some(3),
+        };
+        assert!(same.replacement().is_some());
+        let unchanged = Executable {
+            size: Some(5),
+            ..same
+        };
+        assert_eq!(unchanged.replacement(), None);
+        assert!(Executable::current().is_some_and(|current| current.replacement().is_none()));
     }
 
     /// Set, to the folder they share, for the process

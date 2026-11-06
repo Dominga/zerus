@@ -186,6 +186,27 @@ class TaskCommands(Fixture):
         planned = self.hgs("target", task["ref"], "subagent", "--parent", "codex/api")["task"]
         self.assertEqual(planned["target"]["parent"]["session_id"], "launch_id:" + launch)
 
+    def test_task_views_carry_the_projected_execution_of_work_in_progress(self):
+        queued = self.add("For later", session="codex/api")
+        self.assertNotIn("execution", self.hgs("get", queued["ref"])["task"])
+        started = self.hgs("start", queued["ref"], "--json", session="codex/api")["task"]
+        # History before attempts: the session holding the task began it, no attempt is invented.
+        execution = started["execution"]
+        self.assertEqual((execution["requirement"], execution["attempts"]), (1, 0))
+        current = execution["current"]
+        self.assertEqual((current["legacy"], current["generation"], current["origin"], current["phase"]),
+                         (True, 0, "start", "running"))
+        self.assertEqual(current["executor"]["session_id"], started["session"]["session_id"])
+        self.assertIn("host", current["executor"])
+        # Every view of the task agrees: the full document, a history page and list rows.
+        page = self.hgs("get", queued["ref"], "--history-limit", "1")["task"]
+        self.assertEqual(page["execution"], execution)
+        self.assertEqual(self.hgs("list", "--project", "orchard", "--stage", "active")["tasks"][0]["execution"], execution)
+        self.assertEqual(self.hgs("list", "--project", "orchard")["tasks"][0]["execution"], execution)
+        # A result moves it to review, where history alone shows no current execution.
+        self.hgs("report", queued["ref"], "--json", text="Done", session="codex/api")
+        self.assertNotIn("execution", self.hgs("get", queued["ref"])["task"])
+
     def test_an_agent_explicitly_starts_work_without_sending_it(self):
         queued = self.add("For later", session="codex/api")
         self.assertEqual(queued["stage"], "todo")
@@ -435,6 +456,64 @@ class TaskCommands(Fixture):
         listing = self.hgs("list", "--project", "orchard")
         self.assertEqual(len(listing["tasks"]), 1)
         self.assertEqual(len(listing["damaged"]), 1)
+        self.assertNotIn("kept", listing["damaged"][0])
+        self.assertEqual(listing["damaged"][0]["recovery"], "depends_on_incoming_copy")
+
+    def test_a_damaged_task_cut_over_here_is_listed_as_kept_for_review(self):
+        # zerus-cg5h.4.2: a copy this computer cut over to execution attempts
+        # (its mark beside the files) is told apart from damage whose
+        # recovery depends on the copy that arrives; torn local updates are
+        # kept too. What is shown is only what is known here.
+        project = None
+        uuids = {}
+        for name in ("Kept", "Ordinary", "Torn"):
+            task = self.add(name)
+            project = project or next(p for p in (self.state / "replica").iterdir() if p.is_dir())
+            (project / "tasks" / (task["uuid"] + ".loro")).write_bytes(b"broken")
+            uuids[name] = task["uuid"]
+        (project / "tasks" / (uuids["Kept"] + ".managed")).write_text('{"snapshot":{}}')
+        (project / "tasks" / (uuids["Torn"] + ".updates")).write_bytes(b"\x07")
+        expected = {
+            uuids["Kept"]: {"kept": True, "kept_reason": "marked"},
+            uuids["Ordinary"]: {"recovery": "depends_on_incoming_copy"},
+            uuids["Torn"]: {"kept": True, "kept_reason": "unreadable_local_data"},
+        }
+        for listing in (self.hgs("list", "--project", "orchard"),
+                        self.hgs("list", "--project", "orchard", "--stage", "todo", "--limit", "5")):
+            rows = {d["uuid"]: {k: v for k, v in d.items() if k not in ("uuid", "error")}
+                    for d in listing["damaged"]}
+            self.assertEqual(rows, expected)
+        # Removing the mark is read at once.
+        (project / "tasks" / (uuids["Kept"] + ".managed")).unlink()
+        page = self.hgs("list", "--project", "orchard", "--stage", "todo", "--limit", "5")
+        row = next(d for d in page["damaged"] if d["uuid"] == uuids["Kept"])
+        self.assertEqual(row.get("recovery"), "depends_on_incoming_copy")
+        self.assertNotIn("kept", row)
+
+
+    def test_the_cutover_status_and_a_person_s_hold(self):
+        # zerus-cg5h.4 S2b.2 C2: information only; the hold is a person's.
+        task = self.add("Add rate limiting")
+        status = self.hgs("cutover", "--project", "orchard")
+        self.assertEqual((status["phase"], status["cut_over_tasks"], status["members"], status["closed"]),
+                         ("not_cut_over", 0, [], None))
+        self.assertEqual(status["hold"], {"on": False, "by": None, "at": None})
+        self.assertIn("only a person", self.hgs("cutover", "--project", "orchard", "--hold", "on",
+                                               ok=False, session="codex/api"))
+        held = self.hgs("cutover", "--project", "orchard", "--hold", "on")["hold"]
+        self.assertEqual((held["on"], held["by"]["kind"]), (True, "person"))
+        self.assertIsInstance(held["at"], int)
+        # Clearing it needs an explicit confirmation.
+        self.assertIn("--confirm", self.hgs("cutover", "--project", "orchard", "--hold", "off", ok=False))
+        self.assertTrue(self.hgs("cutover", "--project", "orchard")["hold"]["on"])
+        self.assertFalse(self.hgs("cutover", "--project", "orchard", "--hold", "off", "--confirm")["hold"]["on"])
+        self.assertIn("on or off", self.hgs("cutover", "--project", "orchard", "--hold", "maybe", ok=False))
+        # A task cut over here, with no other member, is active.
+        project = next(p for p in (self.state / "replica").iterdir() if p.is_dir())
+        (project / "tasks" / (task["uuid"] + ".managed")).write_text('{"saved":{}}')
+        status = self.hgs("cutover", "--project", "orchard")
+        self.assertEqual((status["phase"], status["cut_over_tasks"], status["closed"]), ("active", 1, None))
+        self.assertIsInstance(status["last_cutover_write"], int)
 
 
 class AgentIdentity(Fixture):
@@ -744,6 +823,42 @@ class TaskDelivery(DeliveryFixture):
         report = json.loads(self.as_agent("report", task["ref"], "--json", text="Ownership checked."))
         self.assertTrue(report["moved_to_review"])
         self.assertEqual(report["task"]["stage"], "review")
+
+    def test_only_the_current_executor_moves_a_task_with_its_result(self):
+        task = self.add("Check the new owner", "--start", session="codex/source")
+        self.hgs("handoff", task["ref"], "--session", self.name, "--json", session="codex/source")
+        self.wait_received("Check the new owner")
+        # The previous executor's late result is history: it does not move the task.
+        late = self.hgs("report", task["ref"], "--json", text="Finished earlier.", session="codex/source")
+        self.assertEqual((late["moved_to_review"], late["report"], late["stale"]), (False, "ready", "other_executor"))
+        self.assertEqual((late["task"]["stage"], late["task"]["summary"]), ("active", ""))
+        entry = late["task"]["log"][-1]
+        self.assertEqual((entry["kind"], entry["text"], entry["stale"]), ("report", "Finished earlier.", "other_executor"))
+        self.assertEqual(self.says("report", task["ref"], text="Same again.", session="codex/source"),
+                         task["ref"] + " is In progress; your report was added to its history but cannot move it: "
+                         + self.name + " executes it now.")
+        self.assertEqual(self.says("report", task["ref"], "--progress", text="Still here.", session="codex/source"),
+                         task["ref"] + " is In progress; your progress was added to its history, outside its current"
+                         " execution: " + self.name + " executes it now.")
+        # The executor's progress keeps it In progress and records the revision it considered.
+        progress = json.loads(self.as_agent("report", task["ref"], "--progress", "--considered", "1", "--json",
+                                            text="Half way."))
+        self.assertEqual((progress["moved_to_review"], progress["report"]), (False, "progress"))
+        self.assertNotIn("stale", progress)
+        entry = progress["task"]["log"][-1]
+        self.assertEqual((entry["kind"], entry["text"], entry["considered"]), ("progress", "Half way.", 1))
+        self.assertNotIn("stale", entry)
+        self.assertEqual(progress["task"]["execution"]["current"]["executor"]["session"], self.name)
+        self.assertIn("choose --progress or --ready",
+                      self.as_agent("report", task["ref"], "--progress", "--ready", text="Both.", ok=False))
+        self.assertIn("--considered is a requirement revision from 1",
+                      self.as_agent("report", task["ref"], "--considered", "0", text="None.", ok=False))
+        self.assertEqual(self.hgs("get", task["ref"])["task"]["stage"], "active")
+        # Its result moves it, with that summary.
+        done = json.loads(self.as_agent("report", task["ref"], "--ready", "--json", text="Ownership checked."))
+        self.assertEqual((done["moved_to_review"], done["report"]), (True, "ready"))
+        self.assertEqual((done["task"]["stage"], done["task"]["summary"]), ("review", "Ownership checked."))
+        self.assertNotIn("stale", done["task"]["log"][-1])
 
     def test_task_images_reach_native_attachment_storage(self):
         data = b"\x89PNG\r\n\x1a\nsynthetic fixture"

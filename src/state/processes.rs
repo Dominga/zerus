@@ -7,6 +7,9 @@ use std::fs::File;
 use std::io::{BufRead, BufReader, Seek, SeekFrom};
 
 mod control;
+mod commands;
+use commands::{compact_job, set_command};
+pub(super) use commands::compact;
 mod history;
 mod native;
 #[cfg(any(target_os = "linux", target_os = "macos"))]
@@ -75,12 +78,14 @@ fn new_job(record: &Value, owner: &str, call: &str, command: &str, at: f64) -> V
             } else {
                 &record["agent"]
             });
-    json!({"id":id(record,owner,call),"call_id":call,"owner":owner,"provider":provider,
+    let mut job = json!({"id":id(record,owner,call),"call_id":call,"owner":owner,"provider":provider,
         "run_id":record["run_id"],"conversation_id":record["conversation_id"],
-        "command":journal::clipped(&json!(command),16000),"cwd":record["cwd"],
+        "cwd":record["cwd"],
         "started_at":at,"updated_at":at,"status":"starting","source":"hooks",
         "background":false,"observed":true,"output":"","output_truncated":false,
-        "capabilities":{"output":true,"stop":false,"stdin":false}})
+        "capabilities":{"output":true,"stop":false,"stdin":false}});
+    set_command(&mut job, command);
+    job
 }
 fn call_id(event: &Value) -> &str {
     ["tool_use_id", "tool_call_id", "call_id"]
@@ -95,7 +100,8 @@ fn shell_tool(event: &Value) -> bool {
         "Bash" | "bash" | "Shell" | "shell" | "exec_command" | "shell_command"
     )
 }
-fn put(jobs: &mut Jobs, job: Value) {
+fn put(jobs: &mut Jobs, mut job: Value) {
+    compact_job(&mut job);
     let key = string(&job, "id").to_owned();
     if jobs.get(&key).is_none_or(|old| {
         old["updated_at"].as_f64().unwrap_or(0.) <= job["updated_at"].as_f64().unwrap_or(0.)
@@ -292,7 +298,7 @@ pub(super) fn observe(record: &mut Value, event: &Value) {
             .remove(&key)
             .unwrap_or_else(|| new_job(record, owner, call, &command, at));
         if !command.is_empty() {
-            job["command"] = json!(journal::clipped(&json!(command), 16000));
+            set_command(&mut job, &command);
         }
         if !string(input, "description").is_empty() {
             job["description"] = json!(journal::clipped(&input["description"], 400));
@@ -360,6 +366,7 @@ pub(super) fn observe(record: &mut Value, event: &Value) {
     }
     // Manifests carry short tails only; explicit output reads can recover native logs.
     for job in jobs.values_mut() {
+        compact_job(job);
         let s = string(job, "output").to_owned();
         if s.len() > 4096 {
             job["output_truncated"] = json!(true);
@@ -400,7 +407,9 @@ fn collect(record: &Value, live: bool) -> (Jobs, Vec<String>) {
             let stale = !live
                 || job["run_id"] != record["run_id"]
                 || job["observed"] != true
-                || lost_foreground;
+                || lost_foreground
+                || (subagent_lifecycle::owner_unknown(record, string(job,"owner")) && !subagent_lifecycle::own_process_live(job))
+                || subagent_lifecycle::recorded_process_unknown(job);
             job["stale"] = json!(stale);
             if stale {
                 job["last_status"] = job["status"].clone();
@@ -451,7 +460,7 @@ pub(super) fn claude_background(record: &Value, jobs: &mut Jobs, at: f64) {
     }
 }
 
-fn projection(jobs: &Jobs, notes: Vec<String>, complete: bool) -> Value {
+fn projection(jobs: &Jobs, mut notes: Vec<String>, complete: bool) -> Value {
     let mut items: Vec<_> = jobs.values().cloned().collect();
     items.sort_by(|a, b| {
         active(b).cmp(&active(a)).then_with(|| {
@@ -462,8 +471,12 @@ fn projection(jobs: &Jobs, notes: Vec<String>, complete: bool) -> Value {
         })
     });
     for job in &mut items {
+        compact_job(job);
         job.as_object_mut().unwrap().remove("output");
         job.as_object_mut().unwrap().remove("output_path");
+    }
+    if items.iter().any(|job| job["command_truncated"] == true) {
+        notes.push(commands::PREVIEW_NOTE.into());
     }
     let running = items
         .iter()
@@ -630,7 +643,7 @@ pub(super) fn dispatch(args: &[String]) -> Result<i32> {
         println!("{}", control::stop(&record, id)?);
         return Ok(0);
     }
-    let live = archive.is_none() && matches(&record, live()?.get(name)) && process_alive(&record);
+    let live = archive.is_none() && matches(&record, panes_of(&live()?, &record)) && process_alive(&record);
     let (jobs, notes) = collect(&record, live);
     let value = if let Some(id) = output {
         let job = jobs

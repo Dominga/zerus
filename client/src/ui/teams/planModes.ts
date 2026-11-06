@@ -141,3 +141,16 @@ export function runTime(ms: number): string {
   if (seconds < 3600) return `${Math.floor(seconds / 60)}m ${(seconds % 60).toString().padStart(2, "0")}s`;
   return `${Math.floor(seconds / 3600)}h ${Math.floor((seconds % 3600) / 60).toString().padStart(2, "0")}m`;
 }
+
+/** Task 103: what a team's Lateness switch starts with: this browser's own
+ * stored choice first, else Qt's imported heat mode (`teams/heatModes`, a
+ * bounded team -> "time" | "tokens" map from the settings store). */
+export function heatSeed(team: string, stored: string | null, modes: string): boolean {
+  if (stored !== null) return stored === "1";
+  try {
+    const map = JSON.parse(modes) as Record<string, unknown>;
+    return map[team] === "time" || map[team] === "tokens";
+  } catch {
+    return false;
+  }
+}

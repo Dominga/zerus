@@ -208,6 +208,15 @@ mod native {
         anyhow::ensure!(peer.pid != 0, "invalid desktop peer process");
         Ok(peer.pid)
     }
+    /// Verify the serving process of a client-end connection. Incoming client
+    /// authentication above is server-only and cannot be used on this end.
+    pub fn server_pid(stream: &Stream) -> Result<u32> {
+        let pid = stream
+            .verify_server()
+            .map_err(|error| anyhow::anyhow!("cannot verify desktop server process: {error}"))?;
+        anyhow::ensure!(pid != 0, "invalid desktop server process");
+        Ok(pid)
+    }
     impl Listener {
         pub fn bind(location: &Location) -> Result<Self> {
             Ok(Self(pipe::PipeListener::bind(
@@ -234,3 +243,7 @@ mod native {
     }
 }
 pub use native::*;
+
+#[cfg(all(windows, test))]
+#[path = "transport/windows_tests.rs"]
+mod windows_tests;

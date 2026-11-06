@@ -21,6 +21,21 @@ PY
 if [ "$phase" != remaining ]; then
 cargo test --locked 2>&1 | tee artifacts/test-results/rust.log
 cargo build --locked
+# These exact, one-shot tests use the separately built CLI for metadata
+# reconciliation. Never run the libtest image as an hgs helper or run the
+# private crash leaf on its own.
+for native_case in \
+    real_cli_recover_only_reconciles_the_original_receipt_and_never_falls_back_to_terminal_input \
+    real_cli_original_child_kill_and_revoke_never_release_input_or_replay_after_reopen; do
+    HGS_TEST_BIN="$PWD/target/debug/hgs" cargo test --locked --bin hgs \
+        "desktop::task_start_reconcile::tests::$native_case" \
+        -- --ignored --exact --test-threads=1
+done
+if [ "$(uname -s)" = Linux ]; then
+    HGS_TEST_BIN="$PWD/target/debug/hgs" cargo test --locked --bin hgs \
+        desktop::task_start_reconcile::tests::real_cli_actor_sigkill_keeps_original_custody_and_restart_never_reconstructs_consent \
+        -- --ignored --exact --test-threads=1
+fi
 # The native stand-in agent of tests/test_fake_agent.py, tests/test_backend_contract.py
 # and later terminal suites.
 cargo build --locked --example fake_agent
@@ -28,6 +43,14 @@ fi
 if [ "$phase" != debug ]; then
 export HGS_TEST_BIN="$PWD/target/debug/hgs"
 bash tests/test_hgs.sh 2>&1 | tee artifacts/test-results/cli-smoke.log
+# Cold fixture compilation belongs to preparation, not a parallel test worker's
+# 240 s setup budget. Its own target directory keeps the verified debug CLI intact.
+cargo +1.99.1 test --locked --test voice_recovery_fixture --no-run \
+    --target-dir target/speech-recovery --message-format=json \
+    > artifacts/test-results/speech-recovery-build.jsonl
+HGS_TEST_SPEECH_RECOVERY_BIN=$(python3 scripts/ci/speech-recovery-executable.py \
+    artifacts/test-results/speech-recovery-build.jsonl)
+export HGS_TEST_SPEECH_RECOVERY_BIN
 python3 scripts/ci/python-tests.py 2>&1 | tee artifacts/test-results/python.log
 cargo build --release --locked
 printf 'CLI checks and release build passed.\n'

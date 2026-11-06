@@ -107,9 +107,11 @@ pub(super) fn prepare(
     ticket: &Ticket,
 ) -> Result<(Prepared, Arc<InheritedLock>)> {
     let dir = directory(location)?;
-    platform::private_dir(&dir)?;
+    // Owner-only at creation, and an existing owned folder that only inherits
+    // a wider ACL is made private in place (#569).
+    platform::owner_only_dir(&dir)?;
     ensure!(
-        platform::verify_private(&dir, platform::Private::Directory)?,
+        crate::private_stores::ensure(&dir, platform::Private::Directory)?,
         "custody folder is not private"
     );
     local(&fs::File::open(&dir)?)?;

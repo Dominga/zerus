@@ -16,7 +16,7 @@ const state = (change: Partial<DropState> = {}): DropState => ({
 });
 const terminalOn = { tab: "terminal" as const, terminal: { connected: true, generation: 4 } };
 
-describe("where a drop goes (SessionsWindow.cpp:1595-1601, 2618-2622)", () => {
+describe("where a drop goes", () => {
   it("never attaches Task View files to the session agent's draft", () => {
     expect(routeDrop(state({ tab: "taskview" }))).toEqual({ kind: "none" });
   });
@@ -68,7 +68,7 @@ function harness(change: Partial<DropDeps> = {}) {
   };
 }
 
-describe("a drop on the session's panel (SessionFileDrop.h)", () => {
+describe("a drop on the session's panel", () => {
   it("shows what a drop does while over the panel, and attaches to the composer on Activity", async () => {
     const h = harness();
     h.drops.enter(["/srv/home/example/notes.txt"], 10, 10);
@@ -79,7 +79,7 @@ describe("a drop on the session's panel (SessionFileDrop.h)", () => {
     expect(h.calls).toEqual(["files /srv/home/example/notes.txt", "reveal", "attach /srv/home/example/notes.txt"]);
   });
 
-  it("refuses a drop with a folder in it, as Qt takes only files", async () => {
+  it("refuses a drop containing a folder", async () => {
     const h = harness();
     h.folder();
     h.drops.enter(["/srv/home/example"], 10, 10);
@@ -149,19 +149,5 @@ describe("a drop on the session's panel (SessionFileDrop.h)", () => {
     h.set({ tab: "terminal", terminal: { connected: true, generation: 5 } });
     await h.drops.drop(["/srv/a.txt"], 10, 10);
     expect(h.calls).toEqual(["files /srv/a.txt"]);
-  });
-});
-
-// The drop texts are Qt's (SessionFileDrop.h, SessionsWindow.cpp).
-const fs = (await import(/* @vite-ignore */ ["node", "fs"].join(":"))) as { readFileSync(path: URL, encoding: "utf8"): string };
-const read = (file: string) => fs.readFileSync(new URL(file, new URL("../../../", import.meta.url)), "utf8");
-
-describe("the drop texts are Qt's", () => {
-  it.each([COMPOSER_HINT, TERMINAL_HINT])("SessionFileDrop says %s", (text) => {
-    expect(read("tray/src/SessionFileDrop.h")).toContain(`tr("${text}")`);
-  });
-  it("fills in Qt's transfer notice", () => {
-    expect(read("tray/src/SessionsWindow.cpp")).toContain('tr("Transferring files to %1…")');
-    expect(read("client/src/store/drops.ts")).toContain('tr("Transferring files to %1…", peer)');
   });
 });

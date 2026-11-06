@@ -1,0 +1,85 @@
+{
+  "fork": {
+    "action_reasons": {},
+    "allowed_actions": [
+      "terminate"
+    ],
+    "auth_required": false,
+    "conversation_id": "fork-conversation",
+    "cwd": "/srv/example",
+    "cwd_canonical": null,
+    "expected_id": "",
+    "fork_parent_id": "source-conversation",
+    "fork_reason": "Wait for a completed reply before forking",
+    "fork_supported": false,
+    "interrupt_supported": false,
+    "phase": "idle",
+    "resume_message_can_send": false,
+    "run_id": "fork-run",
+    "terminal_attach_supported": null,
+    "terminal_supported": null,
+    "turn_started": 0.0
+  },
+  "fork_before_first_message": {
+    "action_reasons": {},
+    "allowed_actions": [
+      "terminate"
+    ],
+    "auth_required": false,
+    "conversation_id": "",
+    "cwd": "/srv/example",
+    "cwd_canonical": null,
+    "expected_id": "",
+    "fork_parent_id": "source-conversation",
+    "fork_reason": "Wait for a completed reply before forking",
+    "fork_supported": false,
+    "interrupt_supported": false,
+    "phase": "idle",
+    "resume_message_can_send": false,
+    "run_id": "fork-run",
+    "terminal_attach_supported": null,
+    "terminal_supported": null,
+    "turn_started": 0.0
+  },
+  "not_a_fork": {
+    "action_reasons": {},
+    "allowed_actions": [
+      "terminate"
+    ],
+    "auth_required": false,
+    "conversation_id": "fork-conversation",
+    "cwd": "/srv/example",
+    "cwd_canonical": null,
+    "expected_id": "",
+    "fork_parent_id": null,
+    "fork_reason": "Wait for a completed reply before forking",
+    "fork_supported": false,
+    "interrupt_supported": false,
+    "phase": "idle",
+    "resume_message_can_send": false,
+    "run_id": "fork-run",
+    "terminal_attach_supported": null,
+    "terminal_supported": null,
+    "turn_started": 0.0
+  },
+  "older_hgs": {
+    "action_reasons": {},
+    "allowed_actions": [
+      "terminate"
+    ],
+    "auth_required": false,
+    "conversation_id": "fork-conversation",
+    "cwd": "/srv/example",
+    "cwd_canonical": null,
+    "expected_id": "",
+    "fork_reason": "Wait for a completed reply before forking",
+    "fork_supported": false,
+    "interrupt_supported": false,
+    "phase": "idle",
+    "resume_message_can_send": false,
+    "run_id": "fork-run",
+    "terminal_attach_supported": null,
+    "terminal_supported": null,
+    "turn_started": 0.0
+  }
+}

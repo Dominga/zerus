@@ -103,6 +103,45 @@ class PairedControls(unittest.TestCase):
             sign.sign(self.app, self.installed)
         self.run.assert_not_called()
 
+    def test_service_helpers_are_exact_copies_before_any_signing(self):
+        def signing(*args):
+            for name, relative in zip(prepare.service_payload.SERVICE_SCRIPTS,
+                                      prepare.service_payload.SERVICE_RESOURCES):
+                target = self.output / relative
+                self.assertEqual(target.read_bytes(), (ROOT / "scripts" / name).read_bytes())
+                self.assertEqual(target.stat().st_mode & 0o777, 0o644)
+                self.assertEqual(target.stat().st_nlink, 1)
+            return self.command(*args)
+        with mock.patch.object(sign, "run", side_effect=signing):
+            self.prepare()
+        self.assertFalse((self.app / "Contents/Resources/setup").exists())
+
+    def test_each_missing_helper_refuses_before_signing_and_preserves_inputs(self):
+        stage = prepare.service_payload.stage
+        for relative in prepare.service_payload.SERVICE_RESOURCES:
+            def incomplete(*args):
+                stage(*args)
+                (self.output / relative).unlink()
+            with self.subTest(relative=relative), mock.patch.object(
+                    prepare.service_payload, "stage", side_effect=incomplete):
+                with self.assertRaisesRegex(ValueError, "missing " + relative):
+                    self.prepare()
+            self.run.assert_not_called()
+            self.assertFalse(self.output.exists())
+            self.assertFalse(self.installed.exists())
+            self.assertEqual(self.hgs.read_bytes(), MAGIC + b"synthetic CLI")
+
+    def test_post_sign_payload_loss_is_not_returned_as_a_prepared_pair(self):
+        real_sign = sign.sign
+        def missing(*args, **kwargs):
+            result = real_sign(*args, **kwargs)
+            (self.output / prepare.service_payload.SERVICE_RESOURCES[0]).unlink()
+            return result
+        with mock.patch.object(sign, "sign", side_effect=missing):
+            with self.assertRaisesRegex(ValueError, "missing Contents/Resources/setup"):
+                self.prepare()
+        self.assertFalse(self.output.exists())
+
     def test_cli_drift_during_signing_refuses_and_removes_only_the_private_copy(self):
         runner = self.root / "stable-hgs"
         original = self.hgs.read_bytes()

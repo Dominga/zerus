@@ -11,7 +11,11 @@ export function sessionPlan(value: unknown) {
 }
 export function sessionGoal(value: unknown) {
   const goal = object(object(value).goal);
-  return { objective: text(goal.objective), completion: text(goal.completion_criterion), status: text(goal.status) };
+  const status = text(goal.status);
+  const caption = status === "active" ? tr("Pursuing goal") : status === "complete" ? tr("Goal complete")
+    : status === "paused" ? tr("Goal paused") : status === "blocked" ? tr("Goal blocked")
+    : status === "usage_limited" ? tr("Usage limit reached") : status === "budget_limited" ? tr("Goal budget limit reached") : tr("Goal");
+  return { objective: text(goal.objective), completion: text(goal.completion_criterion), status, caption };
 }
 export function usageRows(value: unknown): [string, string][] {
   const view = sessionUsageView(object(value).session_usage);

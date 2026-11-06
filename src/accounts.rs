@@ -876,7 +876,7 @@ pub fn dispatch(config: &Config, args: &[String], dry: bool) -> Result<i32> {
             println!("{}",import(config,id,arg(args,"--label").unwrap_or(id),crate::state::without_bom(&payload),args)?);
         },
         "login"=>{
-            if id=="native-dsh" {return crate::native_ui::open(config,"","@account",dry);}
+            if id=="native-dsh" {return crate::native_ui::open(config,"","@account",None,dry);}
             if id=="native-opencode" {
                 const GUIDANCE: &str = "Connect OpenCode providers with `opencode auth login` in a terminal on this computer";
                 if dry {println!("{GUIDANCE}");return Ok(0);}
@@ -1136,7 +1136,7 @@ fn transport(
     use std::process::Stdio;
     let mut command;
     if host.is_empty() || host == "@local" || config.is_self(host) {
-        command = Command::new(env::current_exe()?);
+        command = Command::new(crate::self_exec::current()?);
         command.args(args);
     } else {
         if !config.peers.iter().any(|s| s == host) {

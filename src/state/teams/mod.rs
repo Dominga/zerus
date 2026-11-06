@@ -19,6 +19,7 @@ pub(crate) mod owner_waiting;
 pub(crate) mod owner_word;
 pub(crate) mod pipeline;
 pub(crate) mod plan;
+pub(crate) mod run_results;
 pub(crate) mod profile;
 pub(crate) mod safe_actions;
 pub(crate) mod spans;
@@ -31,6 +32,7 @@ pub(crate) mod test_results;
 pub(crate) mod test_runners;
 pub(crate) mod merge_queue;
 pub(crate) mod timing;
+pub(crate) mod usage_sampler;
 pub(crate) mod waiting;
 
 use std::collections::BTreeSet;

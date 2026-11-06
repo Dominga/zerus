@@ -119,7 +119,7 @@ pub struct GroupView {
 #[derive(Clone, Debug, Default, PartialEq, Serialize)]
 pub struct DetailView {
     pub id: String,
-    /// The whole command, for Copy command.
+    /// The recorded command or bounded preview, for Copy command.
     pub command: String,
     pub details: String,
     /// None until an output was read for this selection.

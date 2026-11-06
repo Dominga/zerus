@@ -11,6 +11,19 @@ export interface ComputerCodeIo{
  copy(text:string):Promise<unknown>;refresh():void;
 }
 export const COMPUTER_UNCONFIRMED=trNoop("Workspace operation was not confirmed. Refresh status before continuing. Verify that the matching computer connector is installed.");
+// Only closed native diagnostics may cross the credential error boundary.
+// A rejection can include arbitrary child text; never display that text.
+const CONNECTOR_FAILURES=[
+ trNoop("Workspace operation was not confirmed: the computer connector is missing; reinstall the matching Zerus package. Refresh status before continuing."),
+ trNoop("Workspace operation was not confirmed: the computer connector could not start; verify its executable and runtime dependencies. Refresh status before continuing."),
+ trNoop("Workspace operation was not confirmed: the computer connector timed out. Refresh status before continuing."),
+ trNoop("Workspace operation was not confirmed: the workspace request input could not be delivered. Refresh status before continuing."),
+ trNoop("Workspace operation was not confirmed: the computer connector ended abnormally. Refresh status before continuing."),
+ trNoop("Workspace operation was not confirmed: the computer connector reply exceeded its limit. Refresh status before continuing."),
+ trNoop("Workspace operation was not confirmed: the computer connector returned an invalid workspace reply; verify the matching connector version. Refresh status before continuing."),
+ trNoop("Workspace operation was not confirmed: the computer connector refused the workspace request. Refresh status before continuing."),
+];
+const failure=(error:unknown)=>typeof error==="string"&&CONNECTOR_FAILURES.some(message=>message===error)?error:COMPUTER_UNCONFIRMED;
 const key=(t?:ComputerTarget)=>t?JSON.stringify([t.config_revision,t.server_url]):"";
 const ready=(expires:number)=>{const date=new Date(expires*1000),time=`${String(date.getHours()).padStart(2,"0")}:${String(date.getMinutes()).padStart(2,"0")}`;return tr("Computer code ready until %1. Keep this computer online while the other computer joins.", time);};
 export function createComputerCodes(io:ComputerCodeIo,now:()=>number=()=>Date.now()/1000,memory=createMobileInvitationMemory()){
@@ -20,12 +33,12 @@ export function createComputerCodes(io:ComputerCodeIo,now:()=>number=()=>Date.no
  const code=()=>{const value=credential();return value&&pending()?.handle===value.handle?value:undefined;};
  const release=(handle:string)=>void io.close(handle).catch(()=>{});
  const forget=(handle?:string)=>{const value=memory.clear(handle);if(!handle||credential()?.handle===handle)setCredential(undefined);if(value)release(value.handle);};
- const unknown=(handle?:string)=>{forget(handle);if(!disposed){setStatus(tr(COMPUTER_UNCONFIRMED));io.refresh();}};
+ const unknown=(handle?:string,error?:unknown)=>{forget(handle);if(!disposed){setStatus(tr(failure(error)));io.refresh();}};
  const tick=()=>{const value=pending();if(value&&value.expires_at<=now()){forget(value.handle);if(!disposed)setStatus(tr("Computer code expired."));}};
  return {code,pending,busy:memory.busy,status:()=>status()||(pending()?ready(pending()!.expires_at):""),
   observe(workspace?:Workspace|null){if(disposed)return;const next=workspace?.state==="active"&&workspace.encrypted&&!workspace.pending?{config_revision:workspace.config_revision,server_url:workspace.server_url}:undefined;if(key(memory.target())!==key(next)){forget();memory.observe(next);}if(key(target())===key(next))return;generation++;setTarget(next);setCredential(undefined);if(status()!==COMPUTER_UNCONFIRMED)setStatus("");tick();},
   tick,
-  async issue(){if(disposed||memory.busy()||!target()||pending())return;const current=generation,captured=target()!;let handle:string|undefined;memory.setBusy(true);setStatus("");try{handle=await io.open(captured);if(disposed||current!==generation)return;const value=await io.issue(handle);if(key(value.target)!==key(captured)||key(memory.target())!==key(captured)){release(value.handle);return;}memory.retain(value);if(!disposed&&current===generation){setCredential(value);setStatus(ready(value.expires_at));tick();}}catch{unknown();}finally{if(handle)release(handle);memory.setBusy(false);}},
+  async issue(){if(disposed||memory.busy()||!target()||pending())return;const current=generation,captured=target()!;let handle:string|undefined;memory.setBusy(true);setStatus("");try{handle=await io.open(captured);if(disposed||current!==generation)return;const value=await io.issue(handle);if(key(value.target)!==key(captured)||key(memory.target())!==key(captured)){release(value.handle);return;}memory.retain(value);if(!disposed&&current===generation){setCredential(value);setStatus(ready(value.expires_at));tick();}}catch(error){unknown(undefined,error);}finally{if(handle)release(handle);memory.setBusy(false);}},
   async copy(){const value=code();if(!value||value.expires_at<=now()||memory.busy()||disposed)return false;try{await io.copy(value.code);return !disposed&&code()===value;}catch{if(!disposed)setStatus(tr("Could not copy the computer code."));return false;}},
   async cancel(){const value=pending();if(!value||memory.busy()||disposed)return;const current=generation;memory.setBusy(true);memory.clear(value.handle);setCredential(undefined);try{await io.cancel(value.handle);if(!disposed&&current===generation)setStatus(tr("Code canceled. Computers already joined keep their access."));}catch{unknown(value.handle);}finally{release(value.handle);memory.setBusy(false);}},
   async check(){const value=pending();if(!value||memory.busy()||disposed)return;memory.setBusy(true);try{await io.check(value.handle);}catch{unknown(value.handle);}finally{memory.setBusy(false);}},

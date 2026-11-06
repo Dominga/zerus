@@ -33,6 +33,7 @@
 
 pub mod clones;
 pub mod folders;
+mod legacy_projects;
 pub mod overview;
 pub mod swarm_dialog;
 
@@ -139,6 +140,10 @@ struct Hub {
     recovery_due: Option<String>,
     presentation_due: bool,
     catalog: Option<swarm_dialog::Context>,
+    legacy: Option<legacy_projects::Context>,
+    legacy_report: Option<legacy_projects::Report>,
+    legacy_epochs: HashMap<String, u64>,
+    legacy_read_blocked: bool,
     source_generation: u64,
     /// Only an adopted current source observation can qualify local metadata.
     /// Kept out of Controller: it is never shared state or apply input.
@@ -535,6 +540,7 @@ impl Organization {
 
     /// This computer's organization changes, from the drain thread.
     pub fn observe(&self, change: &Change) {
+        self.legacy_observe(change);
         // This callback precedes Pump::push. Drop the proof before a new hello
         // or a disconnect can leave the previous card cached in the pump.
         let identity_changed = match change {
@@ -652,6 +658,11 @@ impl Organization {
     fn view(&self, hub: &Hub) -> SyncView {
         let mut view = hub.sync.view();
         view.notice = hub.notice.clone();
+        if hub.legacy_read_blocked {
+            view.reason = Some(legacy_projects::READ_BLOCKED.into());
+            view.status = legacy_projects::READ_BLOCKED.into();
+            view.status_error = true;
+        }
         view.layout_save_paused = !self.0.layout_writable;
         if !self.0.allowed {
             view.ready = false;
@@ -1050,6 +1061,9 @@ impl Organization {
         if self.catalog_pass() {
             return;
         }
+        if self.legacy_projects_pass() {
+            return;
+        }
         if let Err(detail) = self.recover_windows_folders() {
             let mut hub = self.lock();
             hub.notice = Some(detail);
@@ -1119,6 +1133,13 @@ impl Organization {
         let wait = hub
             .sync
             .next_due()
+            .into_iter()
+            .chain(
+                hub.legacy
+                    .as_ref()
+                    .and_then(legacy_projects::Context::next_due),
+            )
+            .min()
             .map_or(IDLE_MS, |at| at.saturating_sub(now))
             .clamp(1, IDLE_MS);
         drop(
@@ -1766,6 +1787,7 @@ pub fn set_project_collapsed(state: State<'_, Organization>, project: String, co
 
 #[cfg(all(test, unix))]
 mod tests {
+    mod legacy_projects;
     mod swarm_conflicts;
     mod swarm_dialog_cases;
     mod windows_folders;
@@ -2058,6 +2080,126 @@ mod tests {
         assert!(organization.recover_presentation(&recovery).is_ok());
         organization.flush();
         assert_eq!(std::fs::read(fake.layout()).unwrap(), original);
+        fake.finish(organization);
+    }
+
+    #[test]
+    fn a_qt_profile_without_an_organization_still_sets_up_projects() {
+        // win-accept-cl importonce: Qt saves workspace/organization only once
+        // its organization first changes. A real store without it left the
+        // catalog uninitialized, so Projects could never add a project.
+        let fake = Fake::landing();
+        let node = "11111111-1111-4111-8111-111111111111";
+        let qt = fake.dir.join("synthetic-qt.conf");
+        let ini = "[General]\nlanguage=ru\n\n[window]\ngeometry=@ByteArray(AAAA)\n\n[accounts]\ndefault=claude\n";
+        std::fs::write(&qt, ini).unwrap();
+        let hash = zerus_client_core::settings::QtStore::Ini(qt.clone())
+            .snapshot()
+            .unwrap()
+            .unwrap()
+            .sha256;
+        let inbox = swarm::qt_import::shared(None, node).unwrap();
+        std::fs::write(fake.dir.join("config.json"),json!({"g3-status":[{"stdout":{"version":1,"node_id":node,"initialized":false,"gui_import_pending":false}}],
+            "g3-import":[{"stdout":{"schema":1,"node_id":node,"initialized":true,"organization":inbox,"g3_import":{"version":1,"source_sha256":hash}}}]}).to_string()).unwrap();
+        let settings =
+            zerus_client_core::settings::Settings::open(fake.dir.join("settings.json"), None);
+        let organization = fake.organization(&Pump::default(), true);
+        organization.recover_qt(
+            Some(zerus_client_core::settings::QtStore::Ini(qt.clone())),
+            settings.clone(),
+        );
+        let mut observed = full("d1");
+        observed["node_id"] = json!(node);
+        observed["initialized"] = json!(false);
+        organization.set_source(snapshot_of(&observed));
+        organization.observe(&state_of(&observed));
+        wait_until("the first-use import", || {
+            settings.organization_import().unwrap()
+                == zerus_client_core::settings::OrganizationImport::Handled
+        });
+        let log = std::fs::read_to_string(fake.dir.join("log.ndjson")).unwrap();
+        let imports: Vec<_> = log
+            .lines()
+            .filter(|line| line.contains("\"--g3\""))
+            .collect();
+        assert_eq!(imports.len(), 1);
+        let request = input(imports[0]);
+        assert_eq!(request["organization"], inbox);
+        assert_eq!(request["source_sha256"], hash);
+        assert!(organization.lock().notice.is_none());
+        assert_eq!(std::fs::read_to_string(qt).unwrap(), ini);
+        drop(settings);
+        fake.finish(organization);
+    }
+
+    #[test]
+    fn an_unreadable_qt_organization_still_sets_up_projects() {
+        // P1 (b): a malformed saved organization kept the catalog uninitialized
+        // for good. The CLI first-use bootstrap sets it up once, the refusal
+        // stays visible, and Projects can add projects.
+        let fake = Fake::landing();
+        let node = "11111111-1111-4111-8111-111111111111";
+        let qt = fake.dir.join("synthetic-qt.conf");
+        let ini = "[workspace]\norganization=\"{\\\"version\\\":99}\"\n";
+        std::fs::write(&qt, ini).unwrap();
+        std::fs::write(fake.dir.join("config.json"),json!({"g3-status":[
+                {"stdout":{"version":1,"node_id":node,"initialized":false,"gui_import_pending":false}},
+                {"stdout":{"version":1,"node_id":node,"initialized":true,"gui_import_pending":true}}],
+            "g3-bootstrap":[{"stdout":{"schema":1,"node_id":node,"initialized":true,"g3_bootstrap":{"version":1}}}]}).to_string()).unwrap();
+        let settings =
+            zerus_client_core::settings::Settings::open(fake.dir.join("settings.json"), None);
+        let organization = fake.organization(&Pump::default(), true);
+        organization.recover_qt(
+            Some(zerus_client_core::settings::QtStore::Ini(qt.clone())),
+            settings.clone(),
+        );
+        let mut observed = full("d1");
+        observed["node_id"] = json!(node);
+        observed["initialized"] = json!(false);
+        organization.set_source(snapshot_of(&observed));
+        organization.observe(&state_of(&observed));
+        wait_until("the first-use bootstrap", || {
+            std::fs::read_to_string(fake.dir.join("log.ndjson"))
+                .is_ok_and(|log| log.contains("--g3-bootstrap"))
+        });
+        let refused = swarm::sync::unavailable(swarm::qt_import::SOURCE_FAILED);
+        wait_until("the visible refusal", || {
+            organization.lock().sync.view().status == refused
+        });
+        // The CLI publishes the bootstrapped catalog. Its next recovery pass
+        // reads Qt again and refuses visibly, while project edits stay ready.
+        observed["initialized"] = json!(true);
+        organization.set_source(snapshot_of(&observed));
+        organization.observe(&state_of(&observed));
+        wait_until("the second recovery pass", || {
+            std::fs::read_to_string(fake.dir.join("log.ndjson"))
+                .is_ok_and(|log| log.matches("--g3-status").count() == 2)
+        });
+        wait_until("ready projects with the visible refusal", || {
+            let hub = organization.lock();
+            hub.sync.ready() && hub.sync.view().status == refused
+        });
+        organization.flush();
+        let log = std::fs::read_to_string(fake.dir.join("log.ndjson")).unwrap();
+        let bootstraps: Vec<_> = log
+            .lines()
+            .filter(|line| line.contains("--g3-bootstrap"))
+            .collect();
+        assert_eq!(bootstraps.len(), 1);
+        assert_eq!(
+            input(bootstraps[0]),
+            json!({"version":1,"expected_node_id":node})
+        );
+        assert_eq!(
+            log.lines().filter(|line| line.contains("\"--g3\"")).count(),
+            0
+        );
+        assert_eq!(
+            settings.organization_import().unwrap(),
+            zerus_client_core::settings::OrganizationImport::Unhandled
+        );
+        assert_eq!(std::fs::read_to_string(qt).unwrap(), ini);
+        drop(settings);
         fake.finish(organization);
     }
 

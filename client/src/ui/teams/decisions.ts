@@ -142,7 +142,12 @@ export function proposalText(team: TeamView | undefined, proposal: TeamProposalV
       return how.length ? tr("Swap %1 to %2", role, how.join(", ")) : tr("Swap %1 to a new session with the same settings", role);
     }
     case "next-goal": return tr("Next goal: %1", (proposal.goal ?? "").split("\n")[0].slice(0, 120));
-    case "switch-plan-mode": return proposal.mode === "standard" ? tr("Switch to standard planning") : tr("Switch to free planning");
+    case "switch-plan-mode": {
+      // Task #58: a card that names a phase switches that phase only.
+      const phase = num(change.phase);
+      if (phase > 0) return proposal.mode === "standard" ? tr("Switch phase %1 to standard planning", phase) : tr("Switch phase %1 to free planning", phase);
+      return proposal.mode === "standard" ? tr("Switch to standard planning") : tr("Switch to free planning");
+    }
     case "add-to-phase": {
       const count = arr(change.tasks).length;
       const phase = phaseName(team, num(change.phase));

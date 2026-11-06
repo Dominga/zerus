@@ -1580,6 +1580,38 @@ changes nothing and succeeds, also when the phase no longer runs. An Allow on
 the lead's add-to-phase proposal warns and confirms at once; when its
 confirmation fails, its warning is declined, so no addition is left waiting.
 
+### Follow-ups: a task's origin
+
+A task added because of something missed or a bug carries `origin`, the task
+that produced it, in the same team (task #60, owner 2026-11-06):
+
+```json
+{"request_id":"<uuid>","team":"<id>","tasks":[{"id":14,"title":"Fix the empty cart crash",
+ "assignee":"dev","origin":9}]}
+```
+
+`origin` is accepted wherever a request carries tasks: `plan`, `extend`,
+`add-to-phase` and its proposal card, `intake`, and `edit-draft`'s
+`tasks_update` (`"origin":null` removes it). It is distinct from `deps`: it
+never blocks or gates hand-out, it only places the task at least in its
+origin's layer, as if the task had the origin's dependencies without depending
+on the origin itself; dependencies that reach further place it further. A task
+without deps and with an origin therefore sits beside its origin, not in the
+first layer. An origin that names no task of the team, or the task itself, is
+refused (`"Task #14 names #99 as its origin, which is neither in the plan nor
+among the new tasks"`; validation reports `kind` `origin`). It follows
+renumbering: new tasks numbered otherwise (#754) and drafts renumbered after a
+discard (F285) keep their link, and a task whose origin was discarded loses it.
+An urgent fix filed from a finding takes the finding's task as its origin
+unless it names one.
+
+Status and the list carry each task's `origin`; `layers` place it; the feed's
+`phase_added`, `phase_edited` and `phase_tasks_added` carry `origins`
+(`{"14":9}`) for the added tasks that have one, and an `edit-draft` change of
+it is recorded with `field` `origin`. A record stored before the field has no
+origin and reads as before. The desktop shows "Spawned from #9" on the task and
+"from #9" on its card; the follow-ups of a task are listed on its card.
+
 ### Task pipelines and stage verdicts
 
 A task may pass its team's pipeline before it reaches the lead: an ordered list
@@ -1675,7 +1707,70 @@ build. Switching mid-plan is the owner's decision, bound to the request:
 The proposal answer carries `hash`, the SHA-256 of the kind, mode and reason. A
 missing or different `expected_hash` is refused ("reload the dialog and answer
 again"). Allow sets `plan_mode` and emits `plan_mode_switched`; Deny keeps
-standard, keeps the reason and emits `plan_mode_denied` for the lead.
+standard, keeps the reason and emits `plan_mode_denied` for the lead. A card
+without a phase switches the team's mode: the open phase and every phase
+without a mode of its own follow it, and a switch to standard leaves no phase
+free.
+
+#### The mode of one phase
+
+The mode is a property of each phase (task #58, owner 2026-11-06). A phase
+plans in its own mode when it has one, else in the team's `plan_mode`, which
+stays the default: a team stored before phase modes reads its mode on every
+phase, and a new phase starts in it. Status and the polled team list carry
+`phase_modes`, every phase's mode by number (phase 1 included), and each
+`phases` item its `mode`; the watch's team rows carry `plan_mode` and
+`phase_modes`, the phases that have a mode of their own:
+
+```json
+{"plan_mode":"standard","phase_modes":{"1":"standard","2":"free"},
+ "phases":[{"n":2,"state":"approved","mode":"free"}],
+ "free_phase":{"phase":2,"state":"open","running":[7],"accepted":3,
+  "accepted_since":1,"last_build_at":null,"close_pending":null}}
+```
+
+The owner switches one phase directly, with one guarded operation; the lead
+only proposes it, with a `switch-plan-mode` card that names the phase:
+
+```sh
+{"request_id":"<uuid>","team":"<id>","phase":2,"mode":"free","reason":"..."} |
+  hgs team phase-mode --json
+{"request_id":"<uuid>","team":"<id>","kind":"switch-plan-mode","mode":"standard",
+ "phase":2,"reason":"ready for the release"} | hgs team propose --json
+```
+
+A lead's `phase-mode` is refused ("Only you switch a phase's mode; the lead
+proposes it"). The card's `change` is `{"phase":2}`, covered by its hash, and
+it is checked when it is made: a phase that cannot switch is refused at once.
+Allow applies exactly that switch. Both answer
+`{"status":"switched","phase":2,"mode":"free","build":null,"close_pending":null,
+"phase_modes":{...}}` and emit `phase_mode_switched` (`by`, `phase`, `mode`,
+`proposal`, `reason`, `build`, `close_pending`). Every other phase keeps its
+mode.
+
+- Standard to free opens a running phase (approved, or phase 1) for tasks as
+  they come: `extend` without a phase adds to it with no new phase and no
+  approval, its empty queue is idle and never done, and no queued phase starts
+  behind it. One phase is free at a time: opening another while one is free is
+  refused ("Phase 2 already takes tasks as they come; switch it to standard
+  first"). The free phase is the open (latest running) phase when it plans in
+  free mode, else the running phase whose own mode is free; `integrate-build`
+  and `close-phase` act on it.
+- Free to standard locks an accepted phase. Its tasks keep their state and run
+  on; no new task joins it without a plan edit (`extend` with its `phase`,
+  which asks the owner for an accepted phase); a new `extend` plans a new
+  phase. The lock resolves the free phase's own work explicitly: an open build
+  task stays an ordinary task of the phase, handed out and decided like any
+  other, and the phase is done only when it is decided; accepting it still sets
+  `last_build_at` but closes nothing. A pending close of the phase ends with
+  the lock, which is that close: `free_close_pending` clears and the receipt
+  and the event name it as `close_pending`, with the build as `build`.
+- A draft has no mode to switch; a switch to the mode the phase already has is
+  refused.
+
+`close-phase` keeps U59's close: the free phase drops a mode of its own and the
+team continues in standard mode; a request that names `phase` must name the
+free one.
 
 Every proposal is checked when the lead makes it, on a copy of the team, by the
 code Allow runs: one Allow could not apply (a task the plan cannot parse, work

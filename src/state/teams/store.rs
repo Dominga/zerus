@@ -398,10 +398,18 @@ impl Store {
     /// indexed query: the payload is read only for the name and the lead.
     pub(crate) fn heads(&self, limit: usize) -> anyhow::Result<(Vec<Value>, bool)> {
         let mut statement = self.db.prepare(
-            "SELECT id,revision,status,updated,json_extract(payload,'$.name'),json_extract(payload,'$.lead')
+            "SELECT id,revision,status,updated,json_extract(payload,'$.name'),json_extract(payload,'$.lead'),
+                    json_extract(payload,'$.plan_mode'),json_extract(payload,'$.phase_modes')
              FROM teams ORDER BY updated DESC, id LIMIT ?1",
         )?;
         let rows = statement.query_map(params![limit.saturating_add(1) as i64], |row| {
+            // Task #58: the team's plan mode and each phase's own one (a phase
+            // not named plans in the team's), so a watcher sees a switch.
+            let phase_modes = row
+                .get::<_, Option<String>>(7)?
+                .and_then(|text| serde_json::from_str::<Value>(&text).ok())
+                .filter(Value::is_object)
+                .unwrap_or_else(|| json!({}));
             Ok(json!({
                 "id": row.get::<_, String>(0)?,
                 "revision": row.get::<_, i64>(1)?,
@@ -409,6 +417,8 @@ impl Store {
                 "updated": row.get::<_, f64>(3)?,
                 "name": row.get::<_, Option<String>>(4)?.unwrap_or_default(),
                 "lead": row.get::<_, Option<String>>(5)?.unwrap_or_default(),
+                "plan_mode": row.get::<_, Option<String>>(6)?.unwrap_or_else(|| "standard".into()),
+                "phase_modes": phase_modes,
             }))
         })?;
         let mut heads = rows.collect::<std::result::Result<Vec<_>, _>>()?;

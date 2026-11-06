@@ -462,6 +462,12 @@ void TeamTaskCard::rebuild()
     for (const auto &t : m_team.tasks) for (const auto &d : t.deps) if (d.task == task->id) blocks << t.id;
     linkRow(tr("Depends on"), deps, soft);
     linkRow(tr("Blocks"), blocks, {});
+    // Task #60: the task this follow-up was spawned from, and the follow-ups
+    // spawned from this one; neither waits for the other.
+    QList<int> spawned;
+    for (const auto &t : m_team.tasks) if (t.origin == task->id) spawned << t.id;
+    if (task->origin > 0) linkRow(tr("Spawned from"), {task->origin}, {});
+    linkRow(tr("Follow-ups"), spawned, {});
     // Owner 2026-10-31 (#746): the estimate and, once it works, the time
     // spent against it; over it in the warning color.
     if (task->estimateKnown()) {

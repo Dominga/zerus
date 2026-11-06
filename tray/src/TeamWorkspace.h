@@ -161,6 +161,9 @@ private:
     void popSwitchRequest(const Teams::Team &team);
     void switchModeDialog(const Teams::Team &team, const QString &proposal);
     void closePhaseDialog(const Teams::Team &team);
+    // Task #58: the owner switches one phase between free and standard
+    // planning, confirmed in this dialog (never a typed word).
+    void phaseModeDialog(const Teams::Team &team, int phase, bool toFree);
     void integrateBuild(const Teams::Team &team);
     // Why Close phase is off now (tasks still run, a close waits), or "".
     static QString closeBlocked(const Teams::Team &team);

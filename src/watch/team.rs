@@ -393,6 +393,9 @@ mod tests {
         store
             .mutate(None, "older", None, |team, _| {
                 team.name = "Renamed".into();
+                // Task #58: a free team whose phase 2 was locked to standard.
+                team.plan_mode = crate::state::teams::model::PlanMode::Free;
+                team.phase_modes.insert(2, crate::state::teams::model::PlanMode::Standard);
                 Ok(Value::Null)
             })
             .unwrap();
@@ -401,6 +404,10 @@ mod tests {
         assert_eq!(heads.iter().map(|head| head["id"].as_str().unwrap()).collect::<Vec<_>>(), ["older", "newest"]);
         assert_eq!((heads[0]["name"].as_str(), heads[0]["revision"].as_i64(), heads[0]["lead"].as_str()), (Some("Renamed"), Some(2), Some("lead")));
         assert_eq!(heads[0]["status"], "planning");
+        // Task #58: the watch carries the team's mode and each phase's own; a
+        // team stored without them reads standard with no phase of its own.
+        assert_eq!((&heads[0]["plan_mode"], &heads[0]["phase_modes"]), (&json!("free"), &json!({"2":"standard"})));
+        assert_eq!((&heads[1]["plan_mode"], &heads[1]["phase_modes"]), (&json!("standard"), &json!({})));
         let files = crate::state::teams::store::files(&path);
         assert!(files[1].to_string_lossy().ends_with("teams.sqlite3-journal"));
     }

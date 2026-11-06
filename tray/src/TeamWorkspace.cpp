@@ -1117,6 +1117,16 @@ QWidget *TeamWorkspace::headerActionsContent(const Team &team)
         close->setEnabled(blocked.isEmpty());
         close->setToolTip(blocked.isEmpty() ? tr("Close the free phase; the team returns to standard planning") : blocked);
         iconFor(close, "stop");
+        // Task #58: lock the free phase to standard now; its tasks run on.
+        if (team.phaseModesKnown) {
+            auto *lock = add(tr("Switch to standard…"), "teamWorkspaceLockPhase", false, [this, id = team.id] {
+                QTimer::singleShot(0, this, [this, id] {
+                    if (const auto *current = currentTeam(id)) phaseModeDialog(*current, current->freePhase.phase, false);
+                });
+            });
+            lock->setToolTip(tr("Switch phase %1 to standard planning: its tasks stay, new work is planned in a new phase").arg(team.freePhase.phase));
+            lock->setIcon(glyphIcon(c.text2, "plan_standard", 12)); lock->setIconSize(QSize(12, 12));
+        }
     }
     if (team.status == "running" || team.status == "paused") {
         auto *stop = add(tr("Stop…"), "teamWorkspaceStop", false, [this, name = team.name, team] {
@@ -2199,6 +2209,12 @@ void TeamWorkspace::graphNodes(TaskView *view, const Team &team, const QList<int
         QStringList external;
         for (const auto &d : task->deps) if (grouped && !phase.contains(d.task)) external << QStringLiteral("#%1").arg(d.task);
         if (!external.isEmpty()) node.ext = QStringLiteral("↤") + external.join(' ');
+        // Task #60: a follow-up names the task it was spawned from; it is not
+        // an edge, since it never waits for it.
+        if (task->origin > 0 && team.task(task->origin)) {
+            const QString from = tr("from #%1").arg(task->origin);
+            node.ext = node.ext.isEmpty() ? from : node.ext + QLatin1Char(' ') + from;
+        }
         // A plan or draft task without an assignee is an error on its node.
         const bool unassigned = (team.status == "planning" || node.draft) && !assignee;
         if (unassigned) { node.error = true; node.problemText = tr("No assignee"); node.tone = c.danger; }
@@ -2908,6 +2924,20 @@ QWidget *TeamWorkspace::phaseScroll(const Team &team, const PhaseGroup &group)
                 QObject::connect(pauseAction, &QAction::triggered, this, [this, id, phase] { if (const auto *t = currentTeam(id)) pausePhaseDialog(*t, phase); });
             }
             addPhaseAcceptance(menu, id, phase);
+            // Task #58: a running phase opens for tasks as they come; one
+            // phase is free at a time.
+            if (current && current->phaseModesKnown) {
+                menu->addSeparator();
+                auto *free = menu->addAction(tr("Switch to free planning…")); free->setObjectName("teamPhaseModeFree");
+                bool running = false;
+                for (const auto &group : phaseGroups(*current))
+                    if (group.n == phase) running = ownerPhaseState(*current, group) == QLatin1String("running");
+                free->setEnabled(running && !current->freeMode());
+                if (current->freeMode()) free->setToolTip(tr("Phase %1 is free; switch it to standard first").arg(current->freePhase.phase));
+                QObject::connect(free, &QAction::triggered, this, [this, id, phase] {
+                    QTimer::singleShot(0, this, [this, id, phase] { if (const auto *t = currentTeam(id)) phaseModeDialog(*t, phase, true); });
+                });
+            }
             menu->addSeparator();
             // U42: back to a draft that waits for your approval again.
             auto *redraft = menu->addAction(tr("Return to draft…")); redraft->setObjectName("teamPhaseReturnToDraft");

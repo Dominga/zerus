@@ -966,3 +966,43 @@ fn a_failure_keeps_a_pending_view_in_the_batch() {
     );
     assert!(coalescer.take().is_empty());
 }
+
+/// Task #58: status carries each phase's mode and the free phase; the list
+/// names the free phases; an older hgs sends neither.
+#[test]
+fn task_58_each_phase_carries_its_mode() {
+    let status = json!({"id":"t1","name":"Checkout","status":"running","lead":"lead","members":[{"id":"lead"}],
+        "plan_mode":"standard","phase_modes":{"1":"standard","2":"free"},
+        "free_phase":{"phase":2,"state":"idle","running":[]},
+        "phase_summary":[{"n":1,"title":"Build","state":"running"},{"n":2,"title":"Support","state":"running"},{"n":3,"state":"draft"}]});
+    let view = view::team(&status);
+    assert!(view.phase_modes_known);
+    assert_eq!(view.free_phase, Some(2));
+    let modes: Vec<(u64, &str)> = view.phases.iter().map(|phase| (phase.n, phase.mode.as_str())).collect();
+    assert_eq!(modes, [(1, "standard"), (2, "free"), (3, "standard")], "a phase not named reads the team's mode");
+    let older = view::team(&json!({"id":"t1","name":"Checkout","status":"running","lead":"lead","plan_mode":"free",
+        "phase_summary":[{"n":1,"state":"running"}]}));
+    assert!(!older.phase_modes_known);
+    assert_eq!((older.phases[0].mode.as_str(), older.free_phase), ("", None));
+    let list = view::list(&json!({"items":[
+        {"id":"a","name":"A","status":"running","lead":"lead","members":[],"phase_modes":{"1":"standard","3":"free"}},
+        {"id":"b","name":"B","status":"running","lead":"lead","members":[]}]}));
+    assert_eq!((list.teams[0].free_phases.clone(), list.teams[1].free_phases.clone()), (vec![3], vec![]));
+}
+
+/// Task #60: a follow-up's origin reaches the task view and the graph node,
+/// never as a dependency edge; an older record has none.
+#[test]
+fn task_60_a_follow_up_carries_its_origin() {
+    let status = json!({"id":"t1","name":"Checkout","status":"running","lead":"lead","members":[{"id":"lead"}],
+        "tasks":[{"id":1,"title":"API","status":"accepted","assignee":"lead"},
+                 {"id":2,"title":"Fix","status":"pending","assignee":"lead","origin":1},
+                 {"id":3,"title":"Gone origin","status":"pending","assignee":"lead","origin":9}],
+        "layers":{"1":0,"2":0,"3":0}});
+    let view = view::team(&status);
+    let origins: Vec<Option<u64>> = view.tasks.iter().map(|task| task.origin).collect();
+    assert_eq!(origins, [None, Some(1), Some(9)]);
+    let graph = view::graph(&status, &view);
+    assert_eq!(graph.nodes.iter().map(|node| node.origin).collect::<Vec<_>>(), [None, Some(1), None], "a task the graph lacks is no link");
+    assert!(graph.edges.is_empty(), "an origin is not a dependency edge");
+}

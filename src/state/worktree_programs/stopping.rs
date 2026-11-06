@@ -272,6 +272,43 @@ fn final_state(row: &mut Original, scope: &Scope, until: Instant) -> Result<()> 
         };
     Ok(())
 }
+/// Observation only, after the one signal per original. Darwin can briefly
+/// withhold BSD metadata for an exiting process before its parent reaps it.
+/// Keep that uncertainty pending inside the ORIGINAL wait budget; only a later
+/// successful pin observation can establish exit. No signal or proof is retried.
+fn observe_exits(
+    rows: &mut [Original],
+    until: Instant,
+    stop_until: Instant,
+    observe: &mut impl FnMut(&PinnedProcess) -> Result<ProcessState>,
+) -> Result<()> {
+    loop {
+        live(until)?;
+        let mut surviving = false;
+        let mut unavailable = None;
+        for row in rows.iter_mut() {
+            if row.observation == Observation::Surviving {
+                match observe(row.pin.as_ref().ok_or(INVALID)?) {
+                    Ok(ProcessState::Exited) => row.observation = Observation::Exited,
+                    Ok(_) => surviving = true,
+                    Err(error) => {
+                        surviving = true;
+                        unavailable = Some(error);
+                    }
+                }
+            }
+        }
+        if !surviving {
+            return Ok(());
+        }
+        if Instant::now() >= stop_until {
+            return unavailable.map_or(Ok(()), Err);
+        }
+        std::thread::sleep(
+            Duration::from_millis(5).min(stop_until.saturating_duration_since(Instant::now())),
+        );
+    }
+}
 /// Private worker mechanism. Only execute() can reach it in production after
 /// consuming the typed native proof and holding the actual original loan.
 fn drive<G>(
@@ -331,25 +368,7 @@ fn drive<G>(
             Kind::Force { .. } => pin.kill()?,
         }
     }
-    loop {
-        let mut surviving = false;
-        for row in &mut rows {
-            if row.observation == Observation::Surviving {
-                if row.pin.as_ref().ok_or(INVALID)?.state()? == ProcessState::Exited {
-                    row.observation = Observation::Exited;
-                } else {
-                    surviving = true;
-                }
-            }
-        }
-        if !surviving || Instant::now() >= stop_until {
-            break;
-        }
-        live(until)?;
-        std::thread::sleep(
-            Duration::from_millis(5).min(stop_until.saturating_duration_since(Instant::now())),
-        );
-    }
+    observe_exits(&mut rows, until, stop_until, &mut PinnedProcess::state)?;
     // Read-only final observations distinguish known survivors from Unknown.
     // A normal deadline never automatically escalates to SIGKILL.
     for row in &mut rows {
@@ -576,8 +595,8 @@ for line in sys.stdin:
         assert!(force.follows(&input, &normal));
         let (forced, status) = std::thread::scope(|threads| {
             // Act as the original fixture's parent while the worker observes
-            // exit. Darwin cannot read BSD metadata for an unreaped zombie;
-            // that uncertainty must still refuse in production.
+            // exit. Darwin may withhold BSD metadata until its parent reaps;
+            // only a later successful pin observation can establish exit.
             let child = &mut process.child;
             let input_pipe = child.stdin.take();
             let reaped = threads.spawn(move || child.wait());
@@ -599,6 +618,126 @@ for line in sys.stdin:
         assert_eq!(forced.members[0].observation, Observation::Exited);
         use std::os::unix::process::ExitStatusExt;
         assert_eq!(status.signal(), Some(libc::SIGKILL));
+    }
+    fn observation_row(process: &Process, input: &Input) -> Original {
+        let program = input.manifest.programs[0].clone();
+        Original {
+            pin: Some(PinnedProcess::pin(process.child.id(), &program.birth).unwrap()),
+            program,
+            observation: Observation::Surviving,
+        }
+    }
+    #[test]
+    fn a_transient_post_signal_read_requires_later_exact_exit_evidence() {
+        if isolated_signal_case("a_transient_post_signal_read_requires_later_exact_exit_evidence") {
+            return;
+        }
+        let mut process = Process::new();
+        let (_scope, input) = process.data();
+        let mut rows = [observation_row(&process, &input)];
+        let mut reads = 0;
+        let until = Instant::now() + Duration::from_secs(1);
+        observe_exits(
+            &mut rows,
+            until,
+            until - Duration::from_millis(200),
+            &mut |pin| {
+                reads += 1;
+                if reads == 1 {
+                    return Err("original native observation unavailable".into());
+                }
+                if reads == 2 {
+                    let state = pin.state()?;
+                    assert_eq!(state, ProcessState::Running);
+                    return Ok(state);
+                }
+                // Settle only our owned fixture, then require its real native
+                // exit read. The injected error itself never means Exited.
+                process.child.kill().unwrap();
+                process.child.wait().unwrap();
+                let state = pin.state()?;
+                assert_eq!(state, ProcessState::Exited);
+                Ok(state)
+            },
+        )
+        .unwrap();
+        assert_eq!(reads, 3);
+        assert_eq!(rows[0].observation, Observation::Exited);
+    }
+    #[test]
+    fn persistent_post_signal_uncertainty_stays_unknown_at_the_original_bound() {
+        if isolated_signal_case(
+            "persistent_post_signal_uncertainty_stays_unknown_at_the_original_bound",
+        ) {
+            return;
+        }
+        let mut process = Process::new();
+        let (_scope, input) = process.data();
+        let mut rows = [observation_row(&process, &input)];
+        let mut reads = 0;
+        let stop_until = Instant::now() + Duration::from_millis(20);
+        let result = observe_exits(
+            &mut rows,
+            stop_until + Duration::from_millis(200),
+            stop_until,
+            &mut |_| {
+                reads += 1;
+                Err("original native observation unavailable".into())
+            },
+        );
+        assert!(reads > 0);
+        assert_eq!(
+            result.as_ref().unwrap_err(),
+            "original native observation unavailable"
+        );
+        assert!(Instant::now() >= stop_until);
+        assert_eq!(rows[0].observation, Observation::Surviving);
+        assert!(process.child.try_wait().unwrap().is_none());
+        assert!(!process.marker.exists(), "observation sends no signal");
+        let result = terminal(
+            &input,
+            result.map(|()| report(&input, State::Complete, vec![])),
+            true,
+        );
+        assert_eq!(result.state, State::Unknown);
+        let (_state, claim) = journal::Claim::fixture(input.clone());
+        assert_eq!(claim.finish(result).unwrap().state, State::Unknown);
+        // An expired original phase cannot acquire a new observation window.
+        assert!(observe_exits(
+            &mut rows,
+            Instant::now(),
+            Instant::now() + Duration::from_secs(1),
+            &mut |_| panic!("expired phase must not observe again"),
+        )
+        .is_err());
+    }
+    #[test]
+    fn a_later_readable_survivor_never_becomes_an_exit_after_an_unavailable_read() {
+        if isolated_signal_case(
+            "a_later_readable_survivor_never_becomes_an_exit_after_an_unavailable_read",
+        ) {
+            return;
+        }
+        let mut process = Process::new();
+        let (scope, input) = process.data();
+        let mut rows = [observation_row(&process, &input)];
+        let stop_until = Instant::now() + Duration::from_millis(200);
+        let until = stop_until + Duration::from_millis(200);
+        let mut reads = 0;
+        observe_exits(&mut rows, until, stop_until, &mut |pin| {
+            reads += 1;
+            if reads == 1 {
+                Err("original native observation unavailable".into())
+            } else {
+                pin.state()
+            }
+        })
+        .unwrap();
+        assert!(reads >= 2);
+        final_state(&mut rows[0], &scope, until).unwrap();
+        assert_eq!(rows[0].observation, Observation::Surviving);
+        assert!(process.child.try_wait().unwrap().is_none());
+        assert!(!process.marker.exists(), "observation sends no signal");
     }
     #[test]
     fn outside_replaced_cancelled_or_changed_originals_never_receive_a_signal() {

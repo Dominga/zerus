@@ -1422,6 +1422,7 @@ jobs:
           HGS_TEST_BIN=$(cygpath -w "$PWD/target/release/hgs.exe")
           HGS_TEST_FAKE_SSH=$(cygpath -w "$PWD/target/debug/examples/fake_ssh.exe")
           export HGS_TEST_BIN HGS_TEST_FAKE_SSH
+          python -m unittest discover -s tests -p test_outside_job.py -v </dev/null 2>&1 | tee artifacts/test-results/outside-job.log
           python -m unittest discover -s tests -p test_windows_client.py -v </dev/null 2>&1 | tee artifacts/test-results/windows-client.log
           python -m unittest discover -s tests -p test_repositories.py -v </dev/null 2>&1 | tee artifacts/test-results/windows-repositories.log
       # Microsoft's ConPTY pair (spec D6) from the NuGet package pinned in
@@ -1513,6 +1514,20 @@ jobs:
             --version "${WINDOWS_INSTALLER_VERSION:-$(cat VERSION)}" \
             --info artifacts/installer/windows-installer-info.json \
             --output artifacts/installer/zerus-windows-x86_64-setup.exe </dev/null 2>&1 | tee artifacts/test-results/installer-package.log
+      # Retain release inputs BEFORE the survival test: even a runner-level
+      # timeout must not lose the zip/installer. Job success still gates release
+      # assembly; the test result is never converted to continue-on-error.
+      # Installer diagnostics are retained separately afterwards.
+      - name: Retain Windows portable zip and test logs
+        if: always()
+        timeout-minutes: 5
+        uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
+        with:
+          name: windows-x86_64-${{ needs.source.outputs.commit }}
+          path: artifacts
+          retention-days: ${{ github.event_name == 'schedule' && 3 || 7 }}
+          compression-level: 0
+
       # Install, upgrade over it and uninstall while a session host of the
       # installed build runs from its staged image, outside the step's job as the
       # host suites run.
@@ -1523,20 +1538,20 @@ jobs:
           HGS_TEST_INSTALLER=$(cygpath -w "$PWD/artifacts/installer/zerus-windows-x86_64-setup.exe")
           HGS_TEST_PORTABLE_ZIP=$(cygpath -w "$PWD/artifacts/zerus-windows-x86_64.zip")
           HGS_TEST_INSTALLER_VERSION="${WINDOWS_INSTALLER_VERSION:-$(cat VERSION)}"
-          export HGS_TEST_BIN HGS_TEST_INSTALLER HGS_TEST_PORTABLE_ZIP HGS_TEST_INSTALLER_VERSION
+          HGS_TEST_INSTALLER_LOG_DIR=$(cygpath -w "$PWD/artifacts/test-results/installer-setup")
+          export HGS_TEST_BIN HGS_TEST_INSTALLER HGS_TEST_PORTABLE_ZIP HGS_TEST_INSTALLER_VERSION HGS_TEST_INSTALLER_LOG_DIR
           cd tests
           python ../scripts/ci/outside-job.py --timeout 600 --end "$HGS_TEST_BIN" --end '*\hgs-host-*\hgs.exe' \
             --log ../artifacts/test-results/installer.log -- \
-            python -m unittest -v test_windows_installer_survival </dev/null
-      # Stable and nightly assembly download this artifact from the same run.
-      - name: Retain Windows portable zip and test logs
+            python -u -m unittest -v test_windows_installer_survival </dev/null
+      - name: Retain installer survival diagnostics
         if: always()
+        timeout-minutes: 5
         uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
         with:
-          name: windows-x86_64-${{ needs.source.outputs.commit }}
-          path: artifacts
+          name: windows-installer-logs-${{ needs.source.outputs.commit }}
+          path: artifacts/test-results/installer*
           retention-days: ${{ github.event_name == 'schedule' && 3 || 7 }}
-          compression-level: 0
 
   # The latest win32-x64 Claude Code and Codex packages selected by
   # scripts/ci/agent-compatibility.py through isolated session hosts of the

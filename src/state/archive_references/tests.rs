@@ -64,7 +64,39 @@ fn run(case: &str) {
     if let Some(system) = std::env::var_os("SystemRoot") {
         command.env("SystemRoot", system);
     }
-    let output = command.output().unwrap();
+    let output = if case.starts_with("native-") {
+        use std::process::Stdio;
+        let marker = directory.path().join("entered");
+        command
+            .env("HGS_TEST_ARCHIVE_READY", &marker)
+            .stdout(Stdio::piped())
+            .stderr(Stdio::piped());
+        let mut child = command.spawn().unwrap();
+        let setup = Instant::now() + Duration::from_secs(30);
+        let mut entered = None;
+        loop {
+            if child.try_wait().unwrap().is_some() {
+                break;
+            }
+            if entered.is_none() && marker.exists() {
+                entered = Some(Instant::now());
+            }
+            if entered.is_some_and(|at: Instant| at.elapsed() > Duration::from_secs(3))
+                || Instant::now() > setup
+            {
+                child.kill().unwrap();
+                let output = child.wait_with_output().unwrap();
+                panic!(
+                    "{case}: private reader did not settle: {}",
+                    String::from_utf8_lossy(&output.stderr)
+                );
+            }
+            std::thread::sleep(Duration::from_millis(10));
+        }
+        child.wait_with_output().unwrap()
+    } else {
+        command.output().unwrap()
+    };
     assert!(
         output.status.success(),
         "{case}: {}\n{}",
@@ -92,6 +124,10 @@ fn ordinary_writes_rewrites_and_removal_keep_reference_coverage_current() {
 fn a_changed_relevant_body_is_never_overwritten_by_a_preloaded_record() {
     run("changed");
 }
+#[test]
+fn the_regular_reader_releases_original_files_and_its_private_vfs() {
+    run("resources");
+}
 #[cfg(unix)]
 #[test]
 fn an_in_place_rewrite_with_restored_mtime_invalidates_reference_coverage() {
@@ -101,6 +137,24 @@ fn an_in_place_rewrite_with_restored_mtime_invalidates_reference_coverage() {
 #[test]
 fn a_dangling_or_directory_symlink_is_not_an_empty_archive() {
     run("symlink");
+}
+
+#[cfg(unix)]
+#[test]
+fn irregular_catalog_and_sidecars_refuse_before_a_blocking_open() {
+    for case in [
+        "native-catalog",
+        "native-journal",
+        "native-wal",
+        "native-shm",
+        "native-writer",
+        "native-swap-catalog",
+        "native-swap-journal",
+        "native-swap-wal",
+        "native-swap-shm",
+    ] {
+        run(case);
+    }
 }
 
 #[test]
@@ -137,7 +191,48 @@ fn isolated_reference_probe() {
     }
     reconcile();
     assert_eq!(related(&target).unwrap(), vec![original.clone()]);
+    #[cfg(unix)]
+    if let Some(which) = case.strip_prefix("native-") {
+        use std::os::unix::ffi::OsStrExt;
+        let swap = which.starts_with("swap-");
+        let which = which.strip_prefix("swap-").unwrap_or(which);
+        let suffix = if which == "catalog" || which == "writer" {
+            "".to_owned()
+        } else {
+            format!("-{which}")
+        };
+        let input = root().join(format!("archive-catalog-v1.sqlite3{suffix}"));
+        if swap {
+            native_reader::AFTER_PIN.with(|hook| hook.set(Some(replace_after_reader_pin)));
+        } else {
+            if input.exists() {
+                fs::remove_file(&input).unwrap();
+            }
+            let raw = std::ffi::CString::new(input.as_os_str().as_bytes()).unwrap();
+            assert_eq!(
+                unsafe {
+                    libc::mkfifo(raw.as_ptr(), if which == "writer" { 0o400 } else { 0o600 })
+                },
+                0
+            );
+        }
+        fs::write(
+            std::env::var_os("HGS_TEST_ARCHIVE_READY").unwrap(),
+            b"ready",
+        )
+        .unwrap();
+        let begin = Instant::now();
+        if which == "writer" {
+            atomic_record(&path, &mut original).unwrap();
+            assert!(begin.elapsed() < Duration::from_secs(1));
+            return;
+        }
+        assert!(visit_metadata(begin + Duration::from_millis(100), |_| Ok(())).is_err());
+        assert!(begin.elapsed() < Duration::from_secs(1));
+        return;
+    }
     match case.as_str() {
+        "resources" => native_reader::fixture_settles(),
         "corrupt" | "paths" => {
             if case == "corrupt" {
                 database()
@@ -223,6 +318,26 @@ fn isolated_reference_probe() {
             original["launch_dir"] = original["cwd"].clone();
             atomic_record(&path, &mut original).unwrap();
             assert_eq!(metadata().unwrap()[0]["name"], original["name"]);
+            let files = fs::read_dir(root().join("archive-reference-writes-v1"))
+                .unwrap()
+                .map(|entry| entry.unwrap().path())
+                .collect::<Vec<_>>();
+            assert_eq!(files.len(), 1);
+            let update = &files[0];
+            let bytes = fs::read(update).unwrap();
+            fs::write(update, b"{invalid writer receipt").unwrap();
+            assert!(
+                metadata().is_err(),
+                "a bad writer receipt cannot adopt a stale base row"
+            );
+            fs::write(update, &bytes).unwrap();
+            assert_eq!(metadata().unwrap()[0]["name"], original["name"]);
+            fs::remove_file(update).unwrap();
+            assert!(
+                metadata().is_err(),
+                "a missing writer receipt cannot adopt a stale base row"
+            );
+            fs::write(update, &bytes).unwrap();
             assert!(related(&target).unwrap().is_empty());
             assert_eq!(
                 related(Path::new(string(&original, "cwd"))).unwrap(),
@@ -230,6 +345,9 @@ fn isolated_reference_probe() {
             );
             super::super::archive::remove_synced(&path).unwrap();
             assert!(metadata().unwrap().is_empty());
+            // Orphan base rows are harmless; ordinary reconciliation retires
+            // them without a fresh SQLite open in the removal write hook.
+            reconcile();
             assert_eq!(
                 database()
                     .query_row("SELECT count(*) FROM archive_references", [], |r| r
@@ -283,4 +401,22 @@ fn isolated_reference_probe() {
         }
         _ => panic!("unknown reference fixture"),
     }
+}
+
+#[cfg(unix)]
+fn replace_after_reader_pin() {
+    use std::os::unix::ffi::OsStrExt;
+    let case = std::env::var("HGS_TEST_ARCHIVE_REFERENCES").unwrap();
+    let which = case.strip_prefix("native-swap-").unwrap();
+    let suffix = if which == "catalog" {
+        String::new()
+    } else {
+        format!("-{which}")
+    };
+    let path = root().join(format!("archive-catalog-v1.sqlite3{suffix}"));
+    if path.exists() {
+        fs::rename(&path, root().join("retained-original-catalog")).unwrap();
+    }
+    let name = std::ffi::CString::new(path.as_os_str().as_bytes()).unwrap();
+    assert_eq!(unsafe { libc::mkfifo(name.as_ptr(), 0o600) }, 0);
 }

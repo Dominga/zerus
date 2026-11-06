@@ -11,6 +11,8 @@ use std::{
     io::Read,
     time::{Duration, Instant},
 };
+mod native_reader;
+mod updates;
 
 const FILES: usize = 5000;
 const BYTES: usize = 32 * 1024 * 1024;
@@ -83,8 +85,19 @@ fn open(path: &Path) -> Result<fs::File> {
     ))
     .open(path)
     .map_err(fail)?;
-    if !file.metadata().map_err(fail)?.is_file() {
+    let metadata = file.metadata().map_err(fail)?;
+    if !metadata.is_file() {
         return Err(INVALID.into());
+    }
+    #[cfg(windows)]
+    {
+        use std::os::windows::fs::MetadataExt;
+        if metadata.file_attributes()
+            & windows_sys::Win32::Storage::FileSystem::FILE_ATTRIBUTE_REPARSE_POINT
+            != 0
+        {
+            return Err(INVALID.into());
+        }
     }
     Ok(file)
 }
@@ -202,17 +215,6 @@ pub(super) fn current(db: &Connection, path: &Path, id: &str) -> bool {
         .flatten()
         .is_some_and(|(prior, _, _)| file_version(path).ok() == Some(prior))
 }
-pub(super) fn index(db: &Connection, path: &Path, record: &Value) -> Result<()> {
-    let id = path.file_stem().and_then(|v| v.to_str()).ok_or(INVALID)?;
-    let mut normalized = record.clone();
-    super::rename::normalize_archive(&mut normalized)?;
-    let metadata = Metadata::from_record(id, &normalized)?;
-    let (actual, expected) = capture(path)?;
-    if actual != metadata {
-        return Err(INVALID.into());
-    }
-    store(db, &metadata, &expected)
-}
 fn capture(path: &Path) -> Result<(Metadata, Version)> {
     let id = path.file_stem().and_then(|v| v.to_str()).ok_or(INVALID)?;
     // Bind the compact row to bytes from the SAME opened native file, not a
@@ -229,7 +231,9 @@ fn capture(path: &Path) -> Result<(Metadata, Version)> {
 /// remain restore references even when the scoped archive reader omits them.
 pub(super) fn reconcile(db: &Connection, path: &Path) -> Result<()> {
     let (metadata, expected) = capture(path)?;
-    store(db, &metadata, &expected)
+    store(db, &metadata, &expected)?;
+    let _ = updates::forget(&metadata.id);
+    Ok(())
 }
 fn store(db: &Connection, metadata: &Metadata, expected: &Version) -> Result<()> {
     let id = &metadata.id;
@@ -261,15 +265,15 @@ pub(super) fn note(path: &Path, record: &Value) {
         return;
     }
     let run = || -> Result<()> {
-        let mut db = Connection::open_with_flags(
-            root().join("archive-catalog-v1.sqlite3"),
-            OpenFlags::SQLITE_OPEN_READ_WRITE,
-        )
-        .map_err(fail)?;
-        db.busy_timeout(Duration::ZERO).map_err(fail)?;
-        let tx = db.transaction().map_err(fail)?;
-        index(&tx, path, record)?;
-        tx.commit().map_err(fail)
+        let id = path.file_stem().and_then(|v| v.to_str()).ok_or(INVALID)?;
+        let mut normalized = record.clone();
+        super::rename::normalize_archive(&mut normalized)?;
+        let supplied = Metadata::from_record(id, &normalized)?;
+        let (metadata, stamp) = capture(path)?;
+        if supplied != metadata {
+            return Err(INVALID.into());
+        }
+        updates::write(&metadata, &stamp)
     };
     let _ = run();
 }
@@ -277,22 +281,9 @@ pub(super) fn forget(path: &Path) {
     if path.parent() != Some(root().join("archives").as_path()) {
         return;
     }
-    let run = || -> Result<()> {
-        let id = path.file_stem().and_then(|v| v.to_str()).ok_or(INVALID)?;
-        let mut db = Connection::open_with_flags(
-            root().join("archive-catalog-v1.sqlite3"),
-            OpenFlags::SQLITE_OPEN_READ_WRITE,
-        )
-        .map_err(fail)?;
-        db.busy_timeout(Duration::ZERO).map_err(fail)?;
-        let tx = db.transaction().map_err(fail)?;
-        tx.execute("DELETE FROM archive_reference_paths WHERE id=?", [id])
-            .map_err(fail)?;
-        tx.execute("DELETE FROM archive_references WHERE id=?", [id])
-            .map_err(fail)?;
-        tx.commit().map_err(fail)
-    };
-    let _ = run();
+    if let Some(id) = path.file_stem().and_then(|v| v.to_str()) {
+        let _ = updates::forget(id);
+    }
 }
 
 struct Snapshot {
@@ -365,22 +356,29 @@ fn snapshot(until: Instant, target: Option<&Path>) -> Result<Snapshot> {
             namespace: Some(prior),
         });
     }
-    let db = Connection::open_with_flags(
-        root().join("archive-catalog-v1.sqlite3"),
-        OpenFlags::SQLITE_OPEN_READ_ONLY,
-    )
-    .map_err(fail)?;
-    db.busy_timeout(Duration::ZERO).map_err(fail)?;
-    db.progress_handler(1000, Some(move || Instant::now() >= until));
+    let db = native_reader::Reader::open(until)?;
     db.execute_batch("BEGIN DEFERRED").map_err(fail)?;
     let mut rows = BTreeMap::new();
+    let mut changed = std::collections::BTreeSet::new();
     let mut bytes = 0;
     for (id, actual) in roster {
         live(until)?;
-        let (indexed, metadata, size) = entry(&db, &id)?.ok_or(INVALID)?;
-        if actual != indexed {
-            return Err(INVALID.into());
-        }
+        let base = entry(&db, &id)?;
+        let (indexed, metadata, size) = match base {
+            Some((version, metadata, size)) if version == actual => (version, metadata, size),
+            prior => {
+                let (version, metadata, size) = updates::read(&id)?.ok_or(INVALID)?;
+                if version != actual {
+                    return Err(INVALID.into());
+                }
+                changed.insert(id.clone());
+                (
+                    version,
+                    metadata,
+                    size + prior.map_or(0, |(_, _, size)| size),
+                )
+            }
+        };
         bytes += size;
         if bytes > BYTES {
             return Err(INVALID.into());
@@ -402,10 +400,29 @@ fn snapshot(until: Instant, target: Option<&Path>) -> Result<Snapshot> {
         if selected.len() > FILES {
             return Err(INVALID.into());
         }
-        selected
+        let selected = selected
             .into_iter()
-            .filter(|id| rows.contains_key(id))
-            .collect()
+            .filter(|id| rows.contains_key(id) && !changed.contains(id))
+            .collect::<std::collections::BTreeSet<_>>();
+        let matches = rows
+            .iter()
+            .filter(|(_, (_, metadata))| {
+                metadata
+                    .paths()
+                    .iter()
+                    .any(|folder| Path::new(folder).starts_with(Path::new(target)))
+            })
+            .map(|(id, _)| id.clone())
+            .collect::<Vec<_>>();
+        let unchanged = matches
+            .iter()
+            .filter(|id| !changed.contains(*id))
+            .cloned()
+            .collect::<std::collections::BTreeSet<_>>();
+        if unchanged != selected {
+            return Err(INVALID.into());
+        }
+        matches
     } else {
         vec![]
     };
@@ -416,6 +433,11 @@ fn snapshot(until: Instant, target: Option<&Path>) -> Result<Snapshot> {
         }
     }
     if directory_stamp(&directory)? != prior {
+        return Err(INVALID.into());
+    }
+    db.check()?;
+    bytes = bytes.checked_add(db.bytes()).ok_or(INVALID)?;
+    if bytes > BYTES {
         return Err(INVALID.into());
     }
     live(until)?;

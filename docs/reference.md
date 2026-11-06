@@ -3137,6 +3137,14 @@ interrupted initial migration cannot publish complete coverage. Branch, head and
 ownership checks remain independent. Old removed receipts do not repopulate the
 queue once their Git metadata is gone.
 
+Reference reads bind a regular native catalog object before SQLite runs; its
+private read-only reader never reopens mutable paths or accesses SQLite sidecars.
+Unexpected sidecars or replacement refuse coverage within the original budget.
+Archive write hooks publish bounded per-ID native metadata updates without
+opening SQLite. Reads verify those updates against the current archive objects;
+ordinary catalog reconciliation absorbs them. Missing or corrupt updates never
+substitute for a stale base row.
+
 All automatic rules use fresh native checks under the repository/session locks.
 They preserve branches, changed/untracked files and **all ignored local data**,
 including build caches. Running executables inside the checkout protect it even

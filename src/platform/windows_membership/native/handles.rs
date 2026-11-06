@@ -1,6 +1,8 @@
 //! Read only the source process's handle table and metadata-only duplicates.
 //! No global kernel-pointer table, source-handle close, write or stop operation.
-use super::super::handles::{with_details, Details, Handle, Metadata, Object, Snapshot};
+use super::super::handles::{
+    after_metadata_retry, with_details, Details, Handle, Metadata, Object, Snapshot,
+};
 use super::*;
 use windows_sys::Wdk::System::Threading::ProcessHandleInformation;
 use windows_sys::Win32::{
@@ -126,12 +128,7 @@ impl<'a> Files<'a> {
         }
         let second = metadata(attributes.as_raw_handle(), until);
         self.pin.current(until)?;
-        match (&first, &second) {
-            (_, Err(Error::Denied)) => first,
-            (Ok(Some(a)), Ok(Some(b))) if a.object != b.object => Err(Error::Incomplete),
-            (Ok(Some(_)), Ok(None)) => Err(Error::Incomplete),
-            _ => second,
-        }
+        after_metadata_retry(first, second)
     }
 }
 fn metadata(handle: HANDLE, until: Instant) -> Result<Option<Metadata>> {

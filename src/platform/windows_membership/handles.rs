@@ -78,6 +78,21 @@ pub(super) fn with_details(object: Object, details: Result<Details>) -> Result<M
     Ok(Metadata { object, details })
 }
 
+/// The stronger retry can add evidence, but cannot replace a known object or
+/// turn a non-permission failure into a permission waiver.
+pub(super) fn after_metadata_retry(
+    first: Result<Option<Metadata>>,
+    second: Result<Option<Metadata>>,
+) -> Result<Option<Metadata>> {
+    match (&first, &second) {
+        (Err(Error::Incomplete) | Ok(None), _) => Err(Error::Incomplete),
+        (_, Err(Error::Denied)) => first,
+        (Ok(Some(a)), Ok(Some(b))) if a.object != b.object => Err(Error::Incomplete),
+        (Ok(Some(_)), Ok(None)) => Err(Error::Incomplete),
+        _ => second,
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -170,6 +185,47 @@ mod tests {
             Err(Error::Incomplete),
             "a late native denial cannot waive an expired query"
         );
+    }
+    #[test]
+    fn metadata_retry_cannot_erase_known_use_or_adopt_a_replacement_object() {
+        let original = Metadata {
+            object: Object {
+                volume: 7,
+                file: [9; 16],
+            },
+            details: Details::Denied,
+        };
+        let mut complete = original;
+        complete.details = Details::Known {
+            links: 2,
+            directory: false,
+        };
+        let mut replacement = complete;
+        replacement.object.file = [8; 16];
+        assert_eq!(
+            after_metadata_retry(Ok(Some(original)), Err(Error::Denied)),
+            Ok(Some(original))
+        );
+        assert_eq!(
+            after_metadata_retry(Ok(Some(original)), Ok(Some(complete))),
+            Ok(Some(complete))
+        );
+        assert_eq!(
+            after_metadata_retry(Err(Error::Denied), Ok(Some(complete))),
+            Ok(Some(complete))
+        );
+        for first in [Err(Error::Incomplete), Ok(None)] {
+            assert_eq!(
+                after_metadata_retry(first, Ok(Some(complete))),
+                Err(Error::Incomplete)
+            );
+        }
+        for second in [Err(Error::Incomplete), Ok(None), Ok(Some(replacement))] {
+            assert_eq!(
+                after_metadata_retry(Ok(Some(original)), second),
+                Err(Error::Incomplete)
+            );
+        }
     }
     #[test]
     fn readable_object_identity_survives_denied_attributes() {

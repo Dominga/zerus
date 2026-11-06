@@ -2692,6 +2692,20 @@ QWidget *TeamWorkspace::phaseScroll(const Team &team, const PhaseGroup &group)
     badge->setObjectName("teamPhaseBadge"); badge->setProperty("state", state); badge->setProperty("auto", autoDraft);
     if (autoDraft) badge->setToolTip(autoDraftTip(record->startAhead));
     h->addWidget(badge);
+    // Task #59: the phase's own mode, live from hgs, for a phase a switch
+    // reaches: the free one, or a running one (Standard).
+    if (team.phaseModesKnown && (freeOpen || state == QLatin1String("running") || team.phaseMode(group.n) == QLatin1String("free"))) {
+        const bool phaseFree = freeOpen || (team.freeMode() && team.freePhase.phase == group.n) || team.phaseMode(group.n) == QLatin1String("free");
+        if (phaseFree || state == QLatin1String("running")) {
+            auto *mode = new PhaseBadge(phaseFree ? tr("Free") : tr("Standard"), phaseFree ? c.violet : c.text3,
+                                        phaseFree ? QStringLiteral("plan_free") : QStringLiteral("plan_standard"), false);
+            mode->setObjectName("teamPhaseMode"); mode->setProperty("phase", group.n); mode->setProperty("mode", phaseFree ? "free" : "standard");
+            mode->setToolTip(phaseFree ? tr("Free planning: the phase stays open and takes tasks as they come until you close it")
+                                       : tr("Standard planning: the phase is planned, approved and closed with its build"));
+            mode->setAttribute(Qt::WA_TransparentForMouseEvents);
+            h->addWidget(mode);
+        }
+    }
     // U63 (owner, 2026-10-31): a paused accepted phase does not start until
     // the pause is removed; who paused it and why.
     const PhasePause pause = freeOpen ? PhasePause{} : phasePauseOf(team, group.n);
@@ -2899,6 +2913,16 @@ QWidget *TeamWorkspace::phaseScroll(const Team &team, const PhaseGroup &group)
         auto *waits = label(text, c.dim, 11, false, "teamPhaseQueued"); waits->setAttribute(Qt::WA_TransparentForMouseEvents);
         h->addWidget(waits);
     }
+    // Task #59: the open free phase locks back to standard from its own
+    // header (it has no phase menu), through the same dialog.
+    if (freeOpen && team.phaseModesKnown && (team.status == "running" || team.status == "paused")) {
+        auto *lock = button(tr("Switch to standard…"), "teamPhaseLock"); lock->setProperty("ghost", true); lock->setProperty("phase", group.n);
+        lock->setToolTip(tr("Switch phase %1 to standard planning: its tasks stay, new work is planned in a new phase").arg(group.n));
+        QObject::connect(lock, &QPushButton::clicked, this, [this, id = team.id, phase = group.n] {
+            QTimer::singleShot(0, this, [this, id, phase] { if (const auto *t = currentTeam(id)) phaseModeDialog(*t, phase, false); });
+        });
+        h->addWidget(lock);
+    }
     // U39 (owner, 2026-10-28): an accepted phase can be discarded, or (U42)
     // returned to a draft, while its work has not started; hgs refuses it
     // otherwise and names the tasks.
@@ -2926,7 +2950,14 @@ QWidget *TeamWorkspace::phaseScroll(const Team &team, const PhaseGroup &group)
             addPhaseAcceptance(menu, id, phase);
             // Task #58: a running phase opens for tasks as they come; one
             // phase is free at a time.
-            if (current && current->phaseModesKnown) {
+            if (current && current->phaseModesKnown && current->freeMode() && current->freePhase.phase == phase) {
+                // Task #59: the free phase locks back from its own header too.
+                menu->addSeparator();
+                auto *lock = menu->addAction(tr("Switch to standard…")); lock->setObjectName("teamPhaseModeStandard");
+                QObject::connect(lock, &QAction::triggered, this, [this, id, phase] {
+                    QTimer::singleShot(0, this, [this, id, phase] { if (const auto *t = currentTeam(id)) phaseModeDialog(*t, phase, false); });
+                });
+            } else if (current && current->phaseModesKnown) {
                 menu->addSeparator();
                 auto *free = menu->addAction(tr("Switch to free planning…")); free->setObjectName("teamPhaseModeFree");
                 bool running = false;

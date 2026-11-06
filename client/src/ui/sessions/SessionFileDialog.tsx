@@ -1,6 +1,10 @@
 import { createSignal, onMount, onCleanup, Show } from "solid-js";
 import { copyVerbatim } from "../../bridge";
-import { actOnSessionFile, closeSessionFile, downloadSessionFile, saveSessionFile, sessionFile } from "./sessionFiles";
+import { actOnSessionFile, closeSessionFile, downloadSessionFile, fileOrigin, saveSessionFile, sessionFile } from "./sessionFiles";
+import { platform } from "../../store/shortcuts";
+import { toast } from "../../store/ui";
+import { fileScope } from "../components/wsl-mapping";
+import { WslFileOpenDialog } from "../components/WslDialogs";
 import { Icon } from "../lib/icons";
 import { tr } from "../../i18n";
 
@@ -14,6 +18,9 @@ export function SessionFileDialog() {
         const [copying, setCopying] = createSignal(false);
         const [copied, setCopied] = createSignal(false);
         const [copyError, setCopyError] = createSignal(false);
+        // Task 73: Open mapped Windows original… (Qt, Windows only): a WSL file of a known conversation.
+        const [mapped, setMapped] = createSignal(false);
+        const scope = () => { const origin = fileOrigin(); return platform === "windows" && file().remote ? fileScope(origin?.session, file().path, origin?.agentId) : undefined; };
         let live = true, reset: ReturnType<typeof setTimeout> | undefined;
         const copyPath = async () => {
           if (copying() || !file().path) return;
@@ -64,9 +71,16 @@ export function SessionFileDialog() {
                   <button class="btn" disabled={file().picking} onClick={() => actOnSessionFile("show_file")}>{tr("Show file")}</button>
                 </Show>
               </Show>
+              <Show when={platform === "windows" && file().remote}>
+                <button class="btn" disabled={!file().can_download || !scope() || mapped()} title={tr("Open the Windows file this WSL path maps to, after checking that both have the same contents")}
+                  onClick={() => setMapped(true)}>{tr("Open mapped Windows original…")}</button>
+              </Show>
               <Show when={file().remote}><button class="btn" onClick={() => actOnSessionFile("open_ssh")}><Icon name="square-terminal" size={13} />{tr("Open SSH terminal")}</button></Show>
             <button class="btn" onClick={closeSessionFile}>{tr("Close")}</button>
           </div>
+          <Show when={mapped() && scope()}>{(fixed) => (
+            <WslFileOpenDialog alias={file().computer} scope={fixed()} onClose={() => setMapped(false)} onDone={(notice) => toast(tr("File reference"), notice, "info", false)} />
+          )}</Show>
         </dialog>
       ); }}
     </Show>

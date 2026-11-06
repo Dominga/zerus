@@ -5,6 +5,7 @@ import { emptyAccounts, emptyBatch, emptyMachines, emptyProjects, isEmptyBatch, 
 import type { CreatedWorktree, CreationAction, CreationAdmission, CreationCard, CreationEvent, FolderOut, LaunchAccounts, LaunchChoices, LaunchPlan, LaunchStart, MachineMeta, NewSessionContext, NewSessionFormInput, NewSessionFormView, PathStyle, RepositoryFields } from "./types";
 import type { ActivityPort, FollowRequest } from "./store/activity";
 import { documentVisibility, type PageVisibility } from "./store/visibility";
+import type { Text } from "./text";
 import { emptyUpdatesView, type UpdateChannel, type UpdatesView } from "./types";
 
 // The one path from the Rust side to the stores. The frontend asks for the next
@@ -520,7 +521,97 @@ export interface AccountModelCatalog {
   defaults: {model:string;effort:string}; provider_defaults: {model:string;effort:string}; effort_supported:boolean;
 }
 export interface AccountEditValues {label?:string;mode?:string;model?:string;effort?:string}
-export interface AccountEditView { handle: string; kind: AccountEditKind; label: string; machine: string; provider: string; permission_mode?:string; permission_detail?:string; models?:AccountModelCatalog|null }
+export interface AccountEditView { handle: string; kind: AccountEditKind; label: string; machine: string; provider: string; permission_mode?:string; permission_detail?:string; models?:AccountModelCatalog|null; permissions?:PermissionEditor|null }
+/** Task 68: the native permission catalog as client/core projects it (Qt's PermissionCatalog). */
+export interface PermissionOption { value: string; label: string; description: string }
+export interface PermissionChoice { label: Text; value: string; tooltip: Text; explanation: Text; bypass: boolean; unavailable: boolean; editor: boolean }
+export interface PermissionEditorRow { id: string; label: Text; description: Text; selected: string; unknown: boolean; unavailable: boolean; options: PermissionOption[] }
+export interface PermissionEditor { harness: string; choices: PermissionChoice[]; initial: string; saved_mode: string; selected: Record<string, string>; malformed: boolean; reset_label: Text; source_note: Text }
+export interface PermissionCheck { mode: string; summary: Text; choice_label: Text; problem: Text; rows: PermissionEditorRow[] }
+/** The core's answer about one native selection of an open permissions dialog. */
+export async function accountPermissionCheck(handle: string, selection: Record<string, string>): Promise<PermissionCheck> {
+  if (!inTauri()) throw new Error(DESKTOP_ONLY);
+  return invoke("account_permission_check", { handle, selection });
+}
+/** Task 68: one project's or one exact session's iron rules (client/core iron_rules). */
+export type RulesTarget = { scope: "project"; project: string } | { scope: "session"; name: string; run_id: string; conversation_id: string };
+export type RulesOp = { op: "read" } | { op: "save"; rules: string[]; expected_revision: number; request_id?: string };
+export interface RulesCall { computer: ComputerId; target: RulesTarget; op: RulesOp }
+export type RulesOutcome =
+  | { outcome: "done"; view: { rules: string[]; revision: number }; request_id?: string }
+  | { outcome: "unsupported"; detail: Text }
+  | { outcome: "failed"; detail: Text; request_id?: string }
+  | { outcome: "uncertain"; detail: Text; request_id: string };
+/** Task 67: this computer's model servers (client/core model_servers over `hgs model-server`). */
+export interface ModelServer {
+  name: string; base_url: string; kind: string; ssh: string; has_key: boolean; up_minutes: number; contexts: unknown;
+  status: string[]; up: string[]; down: string[]; logs: string[]; read_only: boolean; agent_url: string; models_url: string;
+  status_text: string; up_text: string; down_text: string; logs_text: string;
+}
+export interface ModelServerModel { name: string; state: string; label: Text; since: number; usable: boolean; can_down: boolean; can_up: boolean }
+export interface ModelServerStatus {
+  error: string; detail: string; error_label: Text; problem: Text; source: string; models: ModelServerModel[];
+  free: number; total: number; memory: Text; low: boolean; used: number; raw: string[]; running: number; active: string[];
+}
+export interface ModelServerOutcome { text: Text; error: boolean }
+export interface ModelServerUpStart { started: boolean; id: string; limit_ms: number; outcome: ModelServerOutcome | null }
+export interface ModelServerUpPoll { running: boolean; outcome: ModelServerOutcome | null }
+export interface ModelServerLogs { lines: string[]; truncated: boolean }
+export interface ModelServerForm { was: string; name: string; base_url: string; kind: string; ssh: string; key_change: "" | "replace" | "remove"; key: string; status: string; up: string; down: string; logs: string }
+export interface ModelServerTest { tone: "ok" | "warn" | "error"; text: Text; raw: string[] }
+const desktopOnly = <T>(run: () => Promise<T>): Promise<T> => (inTauri() ? run() : Promise.reject(new Error(DESKTOP_ONLY)));
+export const modelServersList = () => desktopOnly(() => invoke<ModelServer[]>("model_servers_list"));
+export const modelServerStatus = (server: string) => desktopOnly(() => invoke<ModelServerStatus>("model_server_status", { server }));
+export const modelServerUp = (server: string, model: string) => desktopOnly(() => invoke<ModelServerUpStart>("model_server_up", { server, model }));
+export const modelServerUpResult = (server: string, model: string, id: string, expired: boolean) =>
+  desktopOnly(() => invoke<ModelServerUpPoll>("model_server_up_result", { server, model, id, expired }));
+export const modelServerSessions = (server: string) => desktopOnly(() => invoke<Record<string, string[]>>("model_server_sessions", { server }));
+export const modelServerDown = (server: string, model: string) => desktopOnly(() => invoke<Text | null>("model_server_down", { server, model }));
+export const modelServerLogs = (server: string, model: string) => desktopOnly(() => invoke<ModelServerLogs>("model_server_logs", { server, model }));
+export const modelServerSave = (form: ModelServerForm) => desktopOnly(() => invoke<ModelServer[]>("model_server_save", { form }));
+export const modelServerDelete = (name: string) => desktopOnly(() => invoke<ModelServer[]>("model_server_delete", { name }));
+export const modelServerTest = (form: ModelServerForm, what: "api" | "status") => desktopOnly(() => invoke<ModelServerTest>("model_server_test", { form, what }));
+export const modelServerTestLogs = (form: ModelServerForm, model: string) => desktopOnly(() => invoke<ModelServerTest>("model_server_test_logs", { form, model }));
+export const modelServerSession = (agent: string, folder: string, tag: string, server: string, model: string) =>
+  desktopOnly(() => invoke<void>("model_server_session", { agent, folder, tag, server, model }));
+/** Task 73: WSL path mapping and WSL file open (client/core wsl_mapping). Errors are core Text. */
+export interface WslFields { windows_root: string; mount_root: string; workspace_id: string }
+export interface WslTarget { alias: string; machine_id: string; distribution: string; user: string; environment: string; saved: WslFields }
+export interface WslOpened { handle: string; target: WslTarget }
+export interface WslMapped { windows: string; wsl: string; canonical: string }
+export interface WslFilePreview { wsl: string; windows: string; sha256: string }
+export interface WslScope { session: string; run_id: string; conversation_id: string; path: string; archive_id?: string; agent_id?: string }
+export async function wslMappingOpen(alias: string): Promise<WslOpened> {
+  if (!inTauri()) throw new Error(DESKTOP_ONLY);
+  return invoke("wsl_mapping_open", { alias });
+}
+export async function wslMappingPreview(handle: string, source: string, fields: WslFields): Promise<WslMapped> {
+  if (!inTauri()) throw new Error(DESKTOP_ONLY);
+  return invoke("wsl_mapping_preview", { handle, source, fields });
+}
+export async function wslMappingUse(handle: string, source: string, fields: WslFields, remember: boolean): Promise<string> {
+  if (!inTauri()) throw new Error(DESKTOP_ONLY);
+  return invoke("wsl_mapping_use", { handle, source, fields, remember });
+}
+export async function wslFileOpen(alias: string, scope: WslScope): Promise<WslOpened> {
+  if (!inTauri()) throw new Error(DESKTOP_ONLY);
+  return invoke("wsl_file_open", { alias, scope });
+}
+export async function wslFilePreview(handle: string, fields: WslFields): Promise<WslFilePreview> {
+  if (!inTauri()) throw new Error(DESKTOP_ONLY);
+  return invoke("wsl_file_preview", { handle, fields });
+}
+export async function wslFileOpenOriginal(handle: string, fields: WslFields, remember: boolean): Promise<Text> {
+  if (!inTauri()) throw new Error(DESKTOP_ONLY);
+  return invoke("wsl_file_open_original", { handle, fields, remember });
+}
+export async function wslDialogClose(handle: string): Promise<void> {
+  if (inTauri()) await invoke("wsl_dialog_close", { handle });
+}
+export async function ironRules(call: RulesCall): Promise<RulesOutcome> {
+  if (!inTauri()) throw new Error(DESKTOP_ONLY);
+  return invoke("iron_rules", { call });
+}
 export interface AccountEditResult { notices: string[]; errors: string[] }
 export async function accountEditOpen(account: string, profile: string, kind: AccountEditKind): Promise<AccountEditView> {
   if (!inTauri()) throw new Error(DESKTOP_ONLY);

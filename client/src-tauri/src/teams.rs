@@ -292,6 +292,23 @@ pub async fn team_role_models(
     .map_err(|error| error.to_string())?
 }
 
+/// Task 68: reads or writes one project's or session's iron rules (Qt's
+/// IronRulesPanel): the guarded `hgs rules` call client/core builds.
+#[tauri::command]
+pub async fn iron_rules(
+    teams: State<'_, Teams>,
+    call: zerus_client_core::iron_rules::RulesCall,
+) -> Result<zerus_client_core::iron_rules::RulesOutcome, String> {
+    if teams.replay {
+        return Err("Iron rules need hgs; a replay has none.".into());
+    }
+    tauri::async_runtime::spawn_blocking(move || {
+        zerus_client_core::iron_rules::run(&default_hgs(), &call)
+    })
+    .await
+    .map_err(|error| error.to_string())
+}
+
 /// Task 11: reads one team once, as a Waiting for you answer does before it
 /// sends (Qt's TeamWaitingAnswer::read): the projected `team status`.
 #[tauri::command]

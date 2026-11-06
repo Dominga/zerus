@@ -3,6 +3,7 @@ import { setPage } from "../../../store/ui";
 import { AppearanceSection } from "./Appearance";
 import { SessionsSection } from "./Sessions";
 import { TeamsSection } from "./TeamsSection";
+import { ModelServersSection } from "./ModelServersSection";
 import { KeyboardSection } from "./Keyboard";
 import { VoiceSection, refreshVoice } from "./Voice";
 import { RecoverySection, refreshRecovery } from "./Recovery";
@@ -24,7 +25,7 @@ import { trNoop } from "../../../i18n";
 
 export type SectionId =
   | "appearance" | "sessions" | "teams" | "recovery" | "processes" | "updates" | "mobile" | "files"
-  | "worktrees" | "approvals" | "voice" | "keyboard" | "analytics" | "about";
+  | "worktrees" | "approvals" | "voice" | "keyboard" | "analytics" | "about" | "modelservers";
 
 export interface Section {
   id: SectionId;
@@ -49,8 +50,9 @@ export const SECTIONS: readonly Section[] = [
   { id: "analytics", label: trNoop("Private analytics"), icon: "gauge", component: AnalyticsSection },
   { id: "about", label: "About", icon: "info", component: AboutSection, refresh: refreshAbout },
   // SessionsWindow.cpp:2235 appends the fork's Teams section after Settings'
-  // own nav; Model servers follows but is not ported to the client yet.
+  // own nav, and Model servers after it (2241, task 67).
   { id: "teams", label: "Teams", icon: "users", component: TeamsSection },
+  { id: "modelservers", label: trNoop("Model servers"), icon: "hard-drive", component: ModelServersSection },
 ];
 
 /** The sections the client has so far, in Qt's order. */

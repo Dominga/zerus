@@ -21,7 +21,7 @@ import { roleStyle } from "./roles";
 import { TeamProposals } from "./ProposalCards";
 import { TeamReports } from "./TeamReports";
 import { WaitingBanner } from "./Waiting";
-import { Blockers, PhaseModeControl, TaskActions, TeamBarActions, TeamBarChips, TeamQuestions } from "./TeamActions";
+import { Blockers, PhaseModeControl, TaskActions, TeamBarActions, TeamBarChips, TeamModeControl, TeamQuestions } from "./TeamActions";
 import { composer } from "../../store/composer";
 import type { ComputerId, TeamMemberView, TeamView } from "../../types";
 import type { Session } from "../sessions/types";
@@ -194,6 +194,7 @@ function TeamBar(props: {
       <Icon name="users" size={16} />
       <b class="team-name ell" title={props.team.goal || props.team.name}>{props.team.name}</b>
       <span class={`team-badge tone-${stateTone(props.state)}`} data-state={props.state}>{stateLabel(props.state)}</span>
+      <TeamModeControl computer={props.computer} team={props.team} />
       <div class="team-progress" role="img" aria-label={tr("%1 of %2 tasks accepted", counts().accepted, counts().total)}
         title={tr("%1 of %2 tasks accepted", counts().accepted, counts().total)}>
         <i class="seg accepted" style={{ width: share(counts().accepted) }} />

@@ -70,6 +70,30 @@ export function phaseModeSwitch(team: ActTeam, n: number): PhaseModeSwitch | und
     enabled: free === 0, why: free > 0 ? tr("Phase %1 is free; switch it to standard first", free) : "" };
 }
 
+/** Task #59: the mode chip a phase header shows, for a phase a switch reaches (running, or the free one). */
+export interface ModeChip { mode: "free" | "standard"; text: string; tip: string }
+export function phaseModeChip(team: ActTeam, n: number): ModeChip | undefined {
+  const phase = team.phases.find((found) => found.n === n);
+  if (!phase) return undefined;
+  const free = (team.free_phase ?? 0) === n || phase.mode === "free";
+  if (free) return { mode: "free", text: tr("Free mode"), tip: tr("Free planning: the phase stays open and takes tasks as they come until you close it") };
+  if (!team.phase_modes_known || phase.state !== "running") return undefined;
+  return { mode: "standard", text: tr("Standard mode"), tip: tr("Standard planning: the phase is planned, approved and closed with its build") };
+}
+
+/** Task #59: the team bar's mode badge (Qt teamHeaderPlanMode), with the free phase it names. */
+export interface TeamModeBadge { mode: "free" | "standard"; text: string; tip: string; phase: number }
+export function teamModeBadge(team: ActTeam): TeamModeBadge | undefined {
+  if (["planning", "draft"].includes(team.status) || (!team.phase_modes_known && !team.plan_mode)) return undefined;
+  const phase = team.free_phase ?? 0;
+  if (freeMode(team)) {
+    return { mode: "free", phase, text: phase > 0 ? tr("Free mode: phase %1", phase) : tr("Free mode"),
+      tip: phase > 0 ? tr("Free planning: phase %1 stays open and takes tasks as they come until you close it", phase)
+        : tr("Free planning: the phase stays open and takes tasks as they come until you close it") };
+  }
+  return { mode: "standard", phase: 0, text: tr("Standard mode"), tip: tr("Standard planning: each phase is planned, approved and closed with its build") };
+}
+
 /** Task #58: the switch's question, Qt's teamPhaseModeDialog words; Cancel is focused. */
 export function phaseModeConfirmation(team: ActTeam, n: number, mode: "free" | "standard"): TeamConfirmation {
   const title = team.phases.find((phase) => phase.n === n)?.title ?? "";

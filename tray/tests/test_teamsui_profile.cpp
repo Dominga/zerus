@@ -79,6 +79,37 @@ QJsonArray spansOfPhase2()
                                          span("stage", 21000, 21600, {{"member", "tester"}, {"attempt", 1}, {"stage", 1}, {"round", 1}, {"stage_kind", "test"}})}}}};
 }
 
+// Task #79: the owner's case (Profile > Time, phase 2): long builds and a merge
+// run while #3's work bar shows its title, with every kind of span and wait.
+QJsonArray spansOfOwnersCase()
+{
+    const double t0 = profileStart();
+    const auto span = [t0](const QString &kind, double from, double to, const QJsonObject &extra = {}) {
+        QJsonObject value{{"kind", kind}, {"from", t0 + from}, {"to", t0 + to}, {"s", to - from}};
+        for (auto it = extra.begin(); it != extra.end(); ++it) value.insert(it.key(), it.value());
+        return value;
+    };
+    const QJsonObject backend{{"member", "backend"}, {"attempt", 2}};
+    return {
+        QJsonObject{{"task", 3}, {"status", "accepted"},
+                    {"overlay", QJsonArray{span("build", 4200, 7400, {{"member", "backend"}, {"template", "cargo-build"}, {"exit", 0}}),
+                                           span("build", 9000, 12600, {{"member", "backend"}, {"template", "qt-build"}, {"exit", 0}})}},
+                    {"spans", QJsonArray{span("delivery", 0, 60, {{"member", "backend"}, {"attempt", 1}}),
+                                         span("rework", 60, 3060, {{"member", "backend"}, {"attempt", 1}}),
+                                         span("start_delay", 3060, 3300, backend),
+                                         span("work", 3300, 13000, backend),
+                                         span("question", 13000, 13600, backend),
+                                         span("background", 13600, 14200, backend),
+                                         span("stage", 14200, 15000, {{"member", "backend"}, {"attempt", 2}, {"stage", 1}, {"round", 1}, {"stage_kind", "review"}}),
+                                         span("lead", 15000, 15600)}}},
+        QJsonObject{{"task", 4}, {"status", "in_progress"},
+                    {"overlay", QJsonArray{span("build", 20800, 21400, {{"member", "tester"}, {"template", "qt-build"}, {"exit", 0}})}},
+                    {"spans", QJsonArray{span("deps", 0, 9000), span("folder_held", 9000, 12000), span("hold", 12000, 15600), span("member", 15600, 18600),
+                                         span("stage_wait", 18600, 19600),
+                                         span("work", 19600, 21000, {{"member", "tester"}, {"attempt", 1}}),
+                                         span("stage", 21000, 21600, {{"member", "tester"}, {"attempt", 1}, {"stage", 1}, {"round", 1}, {"stage_kind", "test"}})}}}};
+}
+
 QJsonObject compareOf1And2()
 {
     const QJsonObject first{{"tasks", 2}, {"accepted", 2}, {"elapsed_s", 9000}, {"worked_s", 8000}, {"totals", QJsonObject{{"work", 8000}, {"member", 600}}},
@@ -204,6 +235,7 @@ private slots:
     void profileOfALargeTeamStaysResponsive();
     void heatTintsGraphAndBoardByTimeOrTokens();
     void aHeatReadThatDrawsTheSameRebuildsNothing();
+    void timelineKindsAreDistinctAndBuildsNeverHideTitles();
 };
 
 // U38 (#665): Profile beside Graph, Board and Layers, from hgs team profile
@@ -854,3 +886,104 @@ void TestTeamsUiProfile::profileTimelineZoomsAndTheSidesFold()
 
 QTEST_MAIN(TestTeamsUiProfile)
 #include "test_teamsui_profile.moc"
+
+// Task #79 (owner, 2026-11-06: "All colours must be clearly readable"): the
+// owner's case in both themes, before and after; every kind of span and wait.
+void TestTeamsUiProfile::timelineKindsAreDistinctAndBuildsNeverHideTitles()
+{
+    setTeam(phasedTeam());
+    const auto team = Teams::parse(phasedTeam());
+    const auto model = TeamProfile::Model::build(team, profileOfPhase2(), spansOfOwnersCase(), profileStart() + 21600);
+    HgsClient client(FakeCli::program(script()));
+    TeamController controller(&client);
+    TeamProfile::Cache cache(&controller);
+    TeamProfileView view(&controller, &cache);
+    view.setDark(true);
+    view.resize(1180, 820); view.show();
+    view.showModel(model);
+    view.setTab("time");
+    QTRY_VERIFY(view.findChild<QWidget *>("teamProfileTimeline"));
+    shot(&view, "t79-profile-time-dark");
+    // Task titles on work bars are never covered: build and merge are a strip
+    // along the bottom of the lane, below the work bar and the waits.
+    using Bands = TeamProfile::LaneBands;
+    QVERIFY(Bands::BuildTop >= Bands::WorkTop + Bands::WorkHeight && Bands::BuildTop >= Bands::WaitTop + Bands::WaitHeight);
+    QVERIFY(Bands::BuildTop + Bands::BuildHeight <= Bands::Row && Bands::WaitTop >= Bands::WorkTop + Bands::WorkHeight);
+    {
+        // Drawn so: no pixel row of the timeline holds both a work bar and a build.
+        const QImage image = view.findChild<QWidget *>("teamProfileTimeline")->grab().toImage().convertToFormat(QImage::Format_RGB32);
+        const QRgb work = TeamProfile::kindColor("work", {}, true).rgb(), build = TeamProfile::kindColor("build", {}, true).rgb();
+        int workRows = 0, buildRows = 0;
+        for (int y = 0; y < image.height(); ++y) {
+            bool hasWork = false, hasBuild = false;
+            const auto *line = reinterpret_cast<const QRgb *>(image.constScanLine(y));
+            for (int x = 0; x < image.width(); ++x) { hasWork = hasWork || line[x] == work; hasBuild = hasBuild || line[x] == build; }
+            workRows += hasWork; buildRows += hasBuild;
+            QVERIFY2(!(hasWork && hasBuild), qPrintable(QStringLiteral("row %1 has a build over a work bar").arg(y)));
+        }
+        QVERIFY(workRows > 0 && buildRows > 0);
+    }
+    // The legend shows every kind, its name in full (the items wrap).
+    const auto labels = view.findChildren<QLabel *>("teamProfileLegendLabel");
+    QCOMPARE(labels.size(), TeamProfile::kindStyles().size());
+    for (auto *label : labels) {
+        QVERIFY2(label->isVisible() && label->width() >= label->fontMetrics().horizontalAdvance(label->text()), qPrintable(label->text()));
+        QVERIFY(!label->text().endsWith(QChar(0x2026)));
+    }
+    for (const auto &key : {QStringLiteral("member"), QStringLiteral("deps"), QStringLiteral("folder_held"), QStringLiteral("hold"), QStringLiteral("stage_wait")}) {
+        bool found = false;
+        for (auto *label : labels) found = found || label->text() == TeamProfile::keyName(key);
+        QVERIFY2(found, qPrintable(key));
+    }
+    // No two kinds share a colour in any shipped skin, light or dark: CIE76
+    // distance of 20 or more, 3:1 or more against the skin's lane background,
+    // a bar's title 4.5:1 on its fill, and every wait its own hatch.
+    const auto lab = [](const QColor &c) {
+        const auto lin = [](double v) { return v <= 0.04045 ? v / 12.92 : std::pow((v + 0.055) / 1.055, 2.4); };
+        const double r = lin(c.redF()), g = lin(c.greenF()), b = lin(c.blueF());
+        const double x = (0.4124 * r + 0.3576 * g + 0.1805 * b) / 0.95047, yy = 0.2126 * r + 0.7152 * g + 0.0722 * b,
+                     z = (0.0193 * r + 0.1192 * g + 0.9505 * b) / 1.08883;
+        const auto f = [](double t) { return t > 0.008856 ? std::cbrt(t) : 7.787 * t + 16.0 / 116; };
+        return std::array<double, 3>{116 * f(yy) - 16, 500 * (f(x) - f(yy)), 200 * (f(yy) - f(z))};
+    };
+    const auto distance = [&](const QColor &a, const QColor &b) {
+        const auto p = lab(a), q = lab(b);
+        return std::sqrt((p[0] - q[0]) * (p[0] - q[0]) + (p[1] - q[1]) * (p[1] - q[1]) + (p[2] - q[2]) * (p[2] - q[2]));
+    };
+    const auto &styles = TeamProfile::kindStyles();
+    QVERIFY(!WorkspaceSkin::builtins().isEmpty());
+    for (const auto &skin : WorkspaceSkin::builtins()) {
+        for (const bool dark : {true, false}) {
+            const QColor lane = WorkspaceSkin::color(skin, dark, QStringLiteral("card"));
+            for (int i = 0; i < styles.size(); ++i) {
+                const QColor a = dark ? styles[i].dark : styles[i].light;
+                QVERIFY2(TeamProfile::contrast(a, lane) >= 3.0, qPrintable(QStringLiteral("%1 %2 %3 on its lane").arg(skin.id, dark ? "dark" : "light", styles[i].key)));
+                QVERIFY2(TeamProfile::contrast(TeamProfile::labelOn(a), a) >= 4.5, qPrintable(styles[i].key));
+                for (int j = i + 1; j < styles.size(); ++j) {
+                    const QColor b = dark ? styles[j].dark : styles[j].light;
+                    QVERIFY2(distance(a, b) >= 20, qPrintable(QStringLiteral("%1 %2: %3 and %4").arg(skin.id, dark ? "dark" : "light", styles[i].key, styles[j].key)));
+                    if (styles[i].pattern != Qt::SolidPattern && styles[j].pattern != Qt::SolidPattern) QVERIFY(styles[i].pattern != styles[j].pattern);
+                }
+            }
+        }
+    }
+    // Every kind the timeline draws has its own key; the old look-alikes are apart.
+    QVERIFY(TeamProfile::kindColor("build", {}, true) != TeamProfile::kindColor("stage", "test", true));
+    QVERIFY(TeamProfile::kindColor("member", {}, true) != TeamProfile::kindColor("stage", "test", true));
+    QCOMPARE(TeamProfile::kindKey("permission", {}), QStringLiteral("blocked"));
+    QCOMPARE(TeamProfile::kindKey("start_delay", {}), QStringLiteral("delivery"));
+    QCOMPARE(TeamProfile::kindKey("stage", "lint"), QStringLiteral("stage"));
+    // The light shot with the light skin's window colours, as the app sets them.
+    const QPalette before = QApplication::palette();
+    {
+        QPalette light = before;
+        const auto token = [](const char *name) { return WorkspaceSkin::color(WorkspaceSkin::active(), false, QString::fromLatin1(name)); };
+        for (const auto role : {QPalette::Window, QPalette::Base, QPalette::Button}) light.setColor(role, token("bg"));
+        for (const auto role : {QPalette::WindowText, QPalette::Text, QPalette::ButtonText}) light.setColor(role, token("fg"));
+        QApplication::setPalette(light);
+    }
+    const auto restore = qScopeGuard([before] { QApplication::setPalette(before); });
+    view.setDark(false); view.showModel(model); view.setTab("time");
+    shot(&view, "t79-profile-time-light");
+    view.setDark(true);
+}

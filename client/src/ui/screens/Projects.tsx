@@ -12,6 +12,7 @@ import { flag, num, setSetting, settingsLoaded } from "../../store/settings";
 import { setMenu, type MenuEntry } from "../../store/ui";
 import { PROJECT_EDITING } from "./reasons";
 import { machineCards } from "../../store/machines";
+import { IronRulesPanel } from "../sessions/IronRulesPanel";
 import { folderButton, folderExists, folderLaunch, folderMenuEntry, newSessionInFolder } from "../sessions/newsession-view";
 import { copy } from "../../store/actions";
 import { nextSort, showAskedProject, shownProjects, sortFolders, type Sort, type SortColumn } from "./projects-ui";
@@ -273,6 +274,10 @@ export function ProjectsScreen() {
                 <input type="checkbox" checked={p().is_default} disabled={defaultBusy() || !edits.canEdit(p().id)}
                   onChange={(event) => { const checked = event.currentTarget.checked; event.currentTarget.checked = p().is_default; if (checked && !p().is_default) void chooseDefault(p().id); }} />{tr("Default for sessions started outside Zerus")}
               </label>
+              <div class="form-row proj-rules">
+                <label>{tr("Iron rules")}</label>
+                <IronRulesPanel context={{ computer: "", project: p().id }} />
+              </div>
 
               <div class="proj-folders" style={{height: `${split()}px`}}>
                 <div class="row proj-fhead">

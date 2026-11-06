@@ -47,6 +47,29 @@ class ShellBootstrap(test_pause.Harness):
         self.env['SHELL'] = str(Path(FISH).resolve())
         self.test_the_agent_gets_literal_arguments_including_empty_and_final_semicolons()
 
+    @unittest.skipUnless(FISH, 'Set HGS_TEST_FISH for the actual Fish interpreter')
+    def test_real_fish_selected_account_paths_keep_backslashes_quotes_and_login_overrides(self):
+        self.env['SHELL'] = str(Path(FISH).resolve())
+        config = self.root / '.config/fish'
+        config.mkdir(parents=True)
+        self.env['XDG_CONFIG_HOME'] = str(config.parent)
+        # The selected account must win AFTER the real login startup runs.
+        (config / 'config.fish').write_text('set -gx CODEX_HOME /tmp/not-the-selected-profile\n')
+        for tag, leaf in [('trailing-bs', 'profile with space\\'),
+                          ('double-bs', "profile\\\\quoted' $value;")]:
+            with self.subTest(profile=leaf):
+                profile = self.root / leaf
+                profile.mkdir()
+                self.env['CODEX_HOME'] = str(profile)
+                name = self.start('codex', tag, '--new', '--account', 'native-codex')
+                conversation = self.binding(name)['conversation_id']
+                self.assertEqual(self.binding(name)['agent_home'], str(profile))
+                self.hgs('pause', name)
+                self.resume(name)
+                self.assertEqual(self.binding(name)['conversation_id'], conversation)
+                calls = [json.loads(line) for line in (self.root / 'argv.jsonl').read_text().splitlines()]
+                self.assertEqual(calls[-1]['codex_home'], str(profile))
+
     def test_pre_supervisor_failure_keeps_an_honest_diagnostic_on_the_original_launch(self):
         # A real shell-startup failure before hgs --run can record an exit.
         self.script('bash', '#!/bin/sh\necho synthetic-login-startup-failure >&2\nexit 47\n')

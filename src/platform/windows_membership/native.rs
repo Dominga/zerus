@@ -1,4 +1,4 @@
-//! Native read-only primitives; no child launch, configuration or effect route.
+//! Native inspection/custody primitives; no production caller or effect route.
 use super::*;
 use std::{
     ffi::c_void,
@@ -19,6 +19,7 @@ use windows_sys::Win32::{
 };
 
 mod child;
+mod file_users;
 mod handles;
 
 type QuerySystem = unsafe extern "system" fn(i32, *mut c_void, u32, *mut u32) -> i32;

@@ -372,6 +372,10 @@ impl Attempt {
     pub(super) fn refusal(&self) -> Option<Refusal> {
         self.refusal
     }
+    #[cfg(test)]
+    pub(super) fn id(&self) -> u32 {
+        self.child.pid
+    }
     pub(super) fn exit(&self) -> io::Result<Option<u32>> {
         self.child.wait(Duration::ZERO)
     }
@@ -427,7 +431,15 @@ mod tests {
         // A probe contains no spawning path. It neither reads owner config nor
         // performs native operations on another process.
         let mut input = String::new();
-        std::io::stdin().read_to_string(&mut input).unwrap();
+        std::io::stdin()
+            .take(65537)
+            .read_to_string(&mut input)
+            .unwrap();
+        assert!(input.len() <= 65536, "private input bound");
+        if let Some(input) = input.strip_prefix("file-users-probe-v1\n") {
+            super::super::file_users::private_probe(input);
+            return;
+        }
         assert_eq!(input, "original-pipe-frame\n");
         println!("original-pipe-ack");
     }

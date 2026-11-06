@@ -41,9 +41,14 @@ export function createSubagentActivity(deps: SubagentActivityDeps) {
   const [target, setTarget] = createSignal<SubagentActivityTarget | undefined>();
   const [events, setEvents] = createSignal<readonly ActivityEvent[]>([]);
   const [summary, setSummary] = createSignal<Record<string, unknown> | undefined>();
-  const [loaded, setLoaded] = createSignal(false);
-  const [error, setError] = createSignal<string | undefined>();
+  const [answered, setAnswered] = createSignal(false);
+  const [failure, setFailure] = createSignal<string | undefined>();
   const reachable = createMemo(() => { const t = target(); return !!t && (deps.online?.(t.computer) ?? true); });
+  // Offline follows the computer, not the reads: one still out can neither delay
+  // this reason nor clear it, and nothing else is read until the computer returns.
+  const offline = () => !!target() && !reachable();
+  const error = () => (offline() ? tr("Could not refresh activity: the computer is offline") : failure());
+  const loaded = () => answered() || offline();
   let generation = 0, reading = false, showing = false;
   let cancel: (() => void) | undefined;
 
@@ -56,16 +61,11 @@ export function createSubagentActivity(deps: SubagentActivityDeps) {
     generation++;
     reading = false;
     stopTimer();
-    batch(() => { setEvents([]); setSummary(undefined); setLoaded(false); setError(undefined); });
+    batch(() => { setEvents([]); setSummary(undefined); setAnswered(false); setFailure(undefined); });
   }
   function read() {
     const t = untrack(target);
-    if (!t || !showing || reading) return;
-    if (!untrack(reachable)) {
-      // Nothing is read until it returns, and what was read stays.
-      batch(() => { setError(tr("Could not refresh activity: the computer is offline")); setLoaded(true); });
-      return;
-    }
+    if (!t || !showing || reading || !untrack(reachable)) return;
     const mine = generation;
     reading = true;
     stopTimer();
@@ -73,23 +73,22 @@ export function createSubagentActivity(deps: SubagentActivityDeps) {
       cancel = undefined;
       generation++; // Its answer, should one still come, is no longer wanted.
       reading = false;
-      batch(() => { setError(tr("Could not refresh activity: the read did not finish")); setLoaded(true); });
+      batch(() => { setFailure(tr("Could not refresh activity: the read did not finish")); setAnswered(true); });
       schedule();
     }, SUBAGENT_READ_DEADLINE_MS);
     void deps.read(t).then((answer) => {
       if (mine !== generation) return;
       reading = false;
       if (!answer || answer.agent_id !== t.agentId || answer.parent_conversation_id !== t.conversationId || answer.run_id !== t.runId) {
-        setError(tr("Could not refresh activity: the subagent changed or is unavailable"));
-        setLoaded(true);
+        batch(() => { setFailure(tr("Could not refresh activity: the subagent changed or is unavailable")); setAnswered(true); });
       } else {
-        batch(() => { setEvents(answer.events); setSummary(answer); setError(undefined); setLoaded(true); });
+        batch(() => { setEvents(answer.events); setSummary(answer); setFailure(undefined); setAnswered(true); });
       }
       schedule();
     }).catch((reason: unknown) => {
       if (mine !== generation) return;
       reading = false;
-      batch(() => { setError(tr("Could not refresh activity: %1", String(reason))); setLoaded(true); });
+      batch(() => { setFailure(tr("Could not refresh activity: %1", String(reason))); setAnswered(true); });
       schedule();
     });
   }
@@ -104,7 +103,7 @@ export function createSubagentActivity(deps: SubagentActivityDeps) {
     if (!show) drop();
     else read();
   }));
-  createEffect(on(reachable, read, { defer: true }));
+  createEffect(on(reachable, (up) => { if (up) read(); }, { defer: true }));
   onCleanup(() => { generation++; stopTimer(); });
 
   return {

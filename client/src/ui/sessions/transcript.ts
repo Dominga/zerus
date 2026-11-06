@@ -550,7 +550,7 @@ function transcriptItems(events: readonly ActivityEvent[], summary?: Record<stri
   return items;
 }
 
-/** One open Activity only. Remember at most 50 local receipts and 1000 small
+/** One display target only. Remember at most 50 local receipts and 1000 small
  * journal/display-key bindings; never retain another session's transcript.
  * Rust may drop its local row before the corresponding activity batch arrives. */
 export function createTranscriptProjection() {
@@ -583,5 +583,21 @@ export function createTranscriptProjection() {
       trim(bindings, 1000);
       return transcriptItems(mergeAttachmentMessages(events, summary), summary, !provider.length);
     },
+  };
+}
+
+/**
+ * The projections of one open Activity: the session's and its open child's.
+ * Each starts over when its own display target changes, so a child shows no
+ * other row's receipts and a brief visit to a child leaves its parent's handoff
+ * in place. Showing another session drops both; the bound is each projection's.
+ */
+export function createActivityProjections() {
+  const session = createTranscriptProjection(), child = createTranscriptProjection();
+  let sessionTarget: string | undefined, childTarget: string | undefined;
+  return (isChild: boolean, target: string | undefined, ...view: Parameters<typeof session.build>) => {
+    if (isChild && target !== childTarget) { child.reset(); childTarget = target; }
+    if (!isChild && target !== sessionTarget) { session.reset(); child.reset(); sessionTarget = target; }
+    return (isChild ? child : session).build(...view);
   };
 }

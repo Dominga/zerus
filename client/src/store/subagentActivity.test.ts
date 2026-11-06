@@ -139,6 +139,98 @@ describe("a child Activity that cannot be read says so", () => {
     });
   });
 
+  it("says the computer went offline at once with a read out, and starts no second read", async () => {
+    await createRoot(async (dispose) => {
+      const [showing] = createSignal(true), [online, setOnline] = createSignal(true), time = clock();
+      let answer!: (value: SubagentInspection) => void;
+      const read = vi.fn().mockImplementationOnce(() => new Promise<SubagentInspection>((resolve) => { answer = resolve; })).mockResolvedValue(page("child", 2));
+      const store = createSubagentActivity({ read, showing, online, later: time.later });
+      store.follow(target()); await tick();
+      expect(store.loaded()).toBe(false);
+      setOnline(false); await tick();
+      expect(store.error()).toContain("offline");
+      expect(store.loaded()).toBe(true);
+      expect(read).toHaveBeenCalledTimes(1);
+      // Its answer is still this child's page, and it doesn't end the reason.
+      answer(page("child", 1)); await tick();
+      expect(store.events().map((event) => event.seq)).toEqual([1]);
+      expect(store.error()).toContain("offline");
+      time.fire(SUBAGENT_POLL_MS); await tick();
+      expect(read).toHaveBeenCalledTimes(1);
+      setOnline(true); await tick();
+      expect(read).toHaveBeenCalledTimes(2);
+      expect(store.error()).toBeUndefined();
+      expect(store.events().map((event) => event.seq)).toEqual([2]);
+      dispose();
+    });
+  });
+
+  it("keeps one read when the computer returns with that read still out", async () => {
+    await createRoot(async (dispose) => {
+      const [showing] = createSignal(true), [online, setOnline] = createSignal(true);
+      let answer!: (value: SubagentInspection) => void;
+      const read = vi.fn(() => new Promise<SubagentInspection>((resolve) => { answer = resolve; }));
+      const store = createSubagentActivity({ read, showing, online, later: () => () => {} });
+      store.follow(target()); await tick();
+      setOnline(false); await tick();
+      setOnline(true); await tick();
+      expect(read).toHaveBeenCalledTimes(1);
+      expect(store.error()).toBeUndefined();
+      // Nothing has answered yet, so it is reading again, not loaded.
+      expect(store.loaded()).toBe(false);
+      answer(page()); await tick();
+      expect(store.loaded()).toBe(true);
+      expect(store.events().map((event) => event.seq)).toEqual([1]);
+      dispose();
+    });
+  });
+
+  it("keeps the deadline of a read that outlasts going offline", async () => {
+    await createRoot(async (dispose) => {
+      const [showing] = createSignal(true), [online, setOnline] = createSignal(true), time = clock();
+      let late!: (value: SubagentInspection) => void;
+      const read = vi.fn().mockImplementationOnce(() => new Promise<SubagentInspection>((resolve) => { late = resolve; })).mockResolvedValue(page("child", 2));
+      const store = createSubagentActivity({ read, showing, online, later: time.later });
+      store.follow(target()); await tick();
+      setOnline(false); await tick();
+      time.fire(SUBAGENT_READ_DEADLINE_MS); await tick();
+      expect(store.error()).toContain("offline");
+      setOnline(true); await tick();
+      expect(read).toHaveBeenCalledTimes(2);
+      expect(store.events().map((event) => event.seq)).toEqual([2]);
+      late(page("child", 1)); await tick();
+      expect(store.events().map((event) => event.seq)).toEqual([2]);
+      dispose();
+    });
+  });
+
+  it("starts the next child without the last one's failure", async () => {
+    await createRoot(async (dispose) => {
+      const [showing] = createSignal(true);
+      const read = vi.fn().mockResolvedValueOnce(null).mockImplementationOnce(() => new Promise<SubagentInspection>(() => {}));
+      const store = createSubagentActivity({ read, showing, later: () => () => {} });
+      store.follow(target("one")); await tick();
+      expect(store.error()).toContain("unavailable");
+      store.follow(target("two")); await tick();
+      expect(store.error()).toBeUndefined();
+      expect(store.loaded()).toBe(false);
+      dispose();
+    });
+  });
+
+  it("drops the offline reason with the child", async () => {
+    await createRoot(async (dispose) => {
+      const [showing] = createSignal(true), [online] = createSignal(false);
+      const store = createSubagentActivity({ read: vi.fn(), showing, online, later: () => () => {} });
+      store.follow(target()); await tick();
+      expect(store.error()).toContain("offline");
+      store.follow(undefined); await tick();
+      expect(store.error()).toBeUndefined();
+      expect(store.loaded()).toBe(false);
+      dispose();
+    });
+  });
+
   it("turns a read that never settles into an error, then reads again", async () => {
     await createRoot(async (dispose) => {
       const [showing] = createSignal(true), time = clock();

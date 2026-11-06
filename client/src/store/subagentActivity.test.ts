@@ -2,6 +2,9 @@ import { createRoot, createSignal } from "solid-js";
 import { describe, expect, it, vi } from "vitest";
 import { createSubagentActivity, type SubagentActivityTarget } from "./subagentActivity";
 import type { SubagentInspection } from "../bridge";
+// The real CLI's answer to the core's own call, pinned by
+// tests/subagent_activity_contract.rs (zerus-mnck6).
+import contract from "../../core/tests/fixtures/subagent-activity.json";
 
 const target = (agentId = "child"): SubagentActivityTarget => ({ id: "\nrun:parent", computer: "", name: "dsh/example/review", runId: "run-parent", conversationId: "conv-parent", archiveId: null, agentId });
 const page = (agentId = "child", seq = 1): SubagentInspection => ({
@@ -11,6 +14,24 @@ const page = (agentId = "child", seq = 1): SubagentInspection => ({
 const tick = async () => { for (let i = 0; i < 8; i++) await Promise.resolve(); };
 
 describe("bounded child Activity", () => {
+  it("adopts the real CLI answer for the exact target it was asked for", async () => {
+    await createRoot(async (dispose) => {
+      const [showing] = createSignal(true);
+      const answer = contract.answer as unknown as SubagentInspection;
+      const read = vi.fn().mockResolvedValue(answer);
+      const store = createSubagentActivity({ read, showing, later: () => () => {} });
+      store.follow(contract.target); await tick();
+      expect(read).toHaveBeenCalledExactlyOnceWith(contract.target);
+      expect(store.error()).toBeUndefined();
+      expect(store.loaded()).toBe(true);
+      expect(store.summary()).toEqual(answer);
+      // The same answer for another run of the parent is still refused.
+      store.follow({ ...contract.target, runId: "another-run" }); await tick();
+      expect(store.error()).toContain("unavailable");
+      dispose();
+    });
+  });
+
   it("replaces the page and scopes attachments to the exact child", async () => {
     await createRoot(async (dispose) => {
       const [showing] = createSignal(true), pending: Array<() => void> = [];

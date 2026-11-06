@@ -23,3 +23,16 @@ impl Embeddings for Fixed {
 }
 
 pub type Shared = Arc<dyn Embeddings>;
+
+/// The configured provider. Task 146 supplies the builtin candle model; until
+/// then builtin and none both mean text-only search.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum Provider { Builtin, None }
+
+impl Provider {
+    pub fn from_config(provider: &str) -> Self {
+        if provider == "builtin" { Self::Builtin } else { Self::None }
+    }
+    /// The embedder a caller plugs into search, or None for text-only.
+    pub fn embedder(self) -> Option<Shared> { None }
+}

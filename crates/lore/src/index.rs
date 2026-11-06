@@ -7,6 +7,11 @@ use rusqlite::{params, Connection};
 use serde_json::Value;
 use std::path::Path;
 
+pub const FORMAT: &str = "1";
+
+#[derive(Clone, Copy, Debug, Default, PartialEq)]
+pub struct Sync { pub changed: usize, pub removed: usize, pub rebuilt: bool }
+
 pub struct Index {
     connection: Connection,
 }
@@ -47,6 +52,61 @@ impl Index {
         tx.commit().map_err(|error| LoreError(format!("index: {error}")))
     }
 
+    /// Incremental sync: only a record whose canonical bytes changed is
+    /// re-indexed; a schema/version change rebuilds all. Returns what moved.
+    pub fn sync(&mut self, records: &[Value]) -> Result<Sync, LoreError> {
+        let tx = self.connection.transaction().map_err(|error| LoreError(format!("index: {error}")))?;
+        tx.execute_batch("CREATE TABLE IF NOT EXISTS fingerprints(id TEXT PRIMARY KEY, hash TEXT);") 
+            .map_err(|error| LoreError(format!("index: {error}")))?;
+        let version: String = tx.query_row("SELECT value FROM meta WHERE key='version'", [], |row| row.get(0))
+            .unwrap_or_default();
+        let rebuild = version != FORMAT;
+        if rebuild {
+            tx.execute("DELETE FROM records", []).ok();
+            tx.execute("DELETE FROM words", []).ok();
+            tx.execute("DELETE FROM fingerprints", []).ok();
+        }
+        let mut known = std::collections::BTreeMap::new();
+        if !rebuild {
+            let mut statement = tx.prepare("SELECT id,hash FROM fingerprints").map_err(|error| LoreError(format!("index: {error}")))?;
+            let rows = statement.query_map([], |row| Ok((row.get::<_, String>(0)?, row.get::<_, String>(1)?)))
+                .map_err(|error| LoreError(format!("index: {error}")))?;
+            for row in rows.flatten() { known.insert(row.0, row.1); }
+        }
+        let mut current = std::collections::BTreeSet::new();
+        let mut sync = Sync::default();
+        for record in records {
+            let id = record.get("id").and_then(Value::as_str).unwrap_or_default().to_owned();
+            if id.is_empty() { continue; }
+            current.insert(id.clone());
+            let hash = fingerprint(record);
+            if known.get(&id) == Some(&hash) { continue; }
+            let kind = record.get("kind").and_then(Value::as_str).unwrap_or_default();
+            let area = record.get("area").and_then(Value::as_str).unwrap_or_default();
+            let title = record.get("title").and_then(Value::as_str).unwrap_or_default();
+            let body = body(record);
+            let refs = refs(record);
+            tx.execute("INSERT OR REPLACE INTO records VALUES (?1,?2,?3,?4,?5,?6)",
+                params![id, kind, area, title, body, refs]).map_err(|error| LoreError(format!("index: {error}")))?;
+            tx.execute("DELETE FROM words WHERE id=?1", params![id]).map_err(|error| LoreError(format!("index: {error}")))?;
+            tx.execute("INSERT INTO words(id,title,body,refs) VALUES (?1,?2,?3,?4)",
+                params![id, title, body, refs]).map_err(|error| LoreError(format!("index: {error}")))?;
+            tx.execute("INSERT OR REPLACE INTO fingerprints(id,hash) VALUES (?1,?2)", params![id, hash])
+                .map_err(|error| LoreError(format!("index: {error}")))?;
+            sync.changed += 1;
+        }
+        for id in known.keys().filter(|id| !current.contains(*id)) {
+            tx.execute("DELETE FROM records WHERE id=?1", params![id]).ok();
+            tx.execute("DELETE FROM words WHERE id=?1", params![id]).ok();
+            tx.execute("DELETE FROM fingerprints WHERE id=?1", params![id]).ok();
+            sync.removed += 1;
+        }
+        if rebuild { sync.rebuilt = true; }
+        tx.execute("CREATE TABLE IF NOT EXISTS meta(key TEXT PRIMARY KEY, value TEXT)", []).ok();
+        tx.execute("INSERT OR REPLACE INTO meta(key,value) VALUES ('version',?1)", params![FORMAT]).ok();
+        tx.commit().map_err(|error| LoreError(format!("index: {error}")))?;
+        Ok(sync)
+    }
     /// A quick check whether the index already holds exactly `ids`.
     pub fn matches_ids(&self, ids: &[String]) -> bool {
         let count: i64 = self.connection.query_row("SELECT count(*) FROM records", [], |row| row.get(0)).unwrap_or(-1);
@@ -99,6 +159,13 @@ fn fts_query(query: &str) -> String {
     query.split_whitespace().filter(|word| !word.is_empty())
         .map(|word| format!("\"{}\"", word.replace('"', "\"\"")))
         .collect::<Vec<_>>().join(" ")
+}
+
+fn fingerprint(record: &Value) -> String {
+    use std::hash::{Hash, Hasher};
+    let mut hasher = std::collections::hash_map::DefaultHasher::new();
+    crate::store::canonical(record).hash(&mut hasher);
+    format!("{:016x}", hasher.finish())
 }
 
 fn body(record: &Value) -> String {
@@ -158,4 +225,24 @@ mod tests {
         assert_eq!(fused[0].id, "b");
         assert_eq!(fused.len(), 3);
     }
+
+    #[test]
+    fn sync_reindexes_only_changed_records() {
+        let (_dir, mut index) = temp();
+        let one = json!({"id":"a","kind":"fault","area":"git","title":"A","symptom":"x"});
+        let two = json!({"id":"b","kind":"fault","area":"git","title":"B","symptom":"y"});
+        let first = index.sync(&[one.clone(), two.clone()]).unwrap();
+        assert_eq!((first.changed, first.removed), (2, 0));
+        assert!(first.rebuilt, "the first sync builds the index");
+        let same = index.sync(&[one.clone(), two.clone()]).unwrap();
+        assert_eq!((same.changed, same.removed), (0, 0));
+        let mut changed = one.clone();
+        changed["symptom"] = json!("changed");
+        let changed = index.sync(&[changed, two]).unwrap();
+        assert_eq!((changed.changed, changed.removed), (1, 0));
+        let removed = index.sync(&[one]).unwrap();
+        assert_eq!((removed.changed, removed.removed), (1, 1)); // restore one, remove b
+    }
 }
+
+

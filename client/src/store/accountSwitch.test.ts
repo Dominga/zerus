@@ -1,6 +1,6 @@
 import { describe, expect, it } from "vitest";
 import type { AccountsView, Profile } from "../types";
-import { accountOf, accountOptions, switchOutcome, switchable } from "./accountSwitch";
+import { accountOf, accountOptions, accountSwitchRequested, consumeAccountSwitch, requestAccountSwitch, switchOutcome, switchable } from "./accountSwitch";
 
 const profile = (id: string, provider: string, host: string, signed = true, state = "ready"): Profile => ({
   key: `${host}/${provider}/${id}`, host, machine: host, id, label: id.toUpperCase(), provider,
@@ -32,3 +32,15 @@ describe("session account switch", () => {
     expect(switchOutcome({}, "hgs: no such account", "work")).toBe("Not moved: no such account");
   });
 });
+
+describe("account switch entry points", () => {
+  it("asks the composer chip for one session and is consumed once", () => {
+    requestAccountSwitch("pc\nrun:one");
+    expect(accountSwitchRequested()).toBe("pc\nrun:one");
+    expect(consumeAccountSwitch("pc\nrun:two")).toBe(false);
+    expect(consumeAccountSwitch("pc\nrun:one")).toBe(true);
+    expect(accountSwitchRequested()).toBe("");
+  });
+});
+
+

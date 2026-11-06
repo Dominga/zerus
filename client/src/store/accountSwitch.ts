@@ -1,3 +1,4 @@
+import { createSignal } from "solid-js";
 import type { AccountsView, Profile } from "../types";
 import { tr } from "../i18n";
 
@@ -56,3 +57,16 @@ function fallbackRequest(): string {
   const hex = fallback.toString(16).padStart(12, "0").slice(-12);
   return `00000000-0000-4000-8000-${hex}`;
 }
+
+// Owner #83: the status-bar usage chip's "Switch this session's account…"
+// entry asks the composer chip to open its list for the same session.
+const [requested, setRequested] = createSignal("");
+export const accountSwitchRequested = requested;
+export function requestAccountSwitch(sessionKey: string) { setRequested(sessionKey); }
+export function consumeAccountSwitch(sessionKey: string): boolean {
+  if (requested() !== sessionKey) return false;
+  setRequested("");
+  return true;
+}
+
+

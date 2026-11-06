@@ -60,6 +60,7 @@ pub(crate) mod startup_diagnostic;
 #[allow(dead_code)]
 mod startup_exclusion;
 mod startup_stdio;
+mod state_directory;
 mod store;
 #[cfg(windows)]
 mod swarm_windows;
@@ -395,6 +396,11 @@ pub fn dispatch(config: &Config, target: &str, args: &[String], dry: bool) -> cl
                 Ok(())
             }
             ["startup", "--json"] => startup_stdio::run(&location),
+            ["prepare-state", "--json"] => {
+                state_directory::prepare(config, &location)?;
+                println!("{}", json!({"prepared":true}));
+                Ok(())
+            }
             ["owner-status", "--json"] => {
                 println!("{}", owner::status(&location));
                 Ok(())
@@ -608,6 +614,7 @@ impl Drop for Permit {
 }
 
 fn serve(config: &Config, location: Location, background_mode: bool) -> Result<()> {
+    state_directory::prepare(config, &location).context(StartupRefused)?;
     // A logon-task start on Windows before 24H2 gets a console window of its own.
     #[cfg(windows)]
     lifecycle::CONSOLE_RELEASED.store(

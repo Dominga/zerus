@@ -1,0 +1,127 @@
+//! Repair only the selected state directory's legacy Unix mode. No ownership,
+//! service, journal, child entry or missing directory is created or adopted.
+use super::store::Location;
+use crate::config::Config;
+use anyhow::Result;
+
+pub(super) fn prepare(config: &Config, location: &Location) -> Result<()> {
+    #[cfg(unix)]
+    {
+        tighten(
+            &config.state,
+            location.root.parent().expect("state directory"),
+        )?;
+    }
+    #[cfg(not(unix))]
+    {
+        let _ = config;
+        // Windows ACLs are never repaired by this Unix compatibility migration.
+        location.check_existing()?;
+    }
+    Ok(())
+}
+
+#[cfg(unix)]
+fn tighten(selected: &std::path::Path, canonical: &std::path::Path) -> Result<()> {
+    use anyhow::ensure;
+    use std::{
+        fs,
+        os::unix::fs::{MetadataExt, OpenOptionsExt, PermissionsExt},
+    };
+    let named = match fs::symlink_metadata(selected) {
+        Ok(metadata) => metadata,
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => return Ok(()),
+        Err(error) => return Err(error.into()),
+    };
+    ensure!(
+        named.is_dir() && named.uid() == unsafe { libc::geteuid() },
+        "desktop state directory must belong to this user and not be a symlink"
+    );
+    let file = fs::OpenOptions::new()
+        .read(true)
+        .custom_flags(libc::O_DIRECTORY | libc::O_NOFOLLOW | libc::O_NONBLOCK)
+        .open(selected)?;
+    let original = file.metadata()?;
+    ensure!(
+        original.is_dir() && original.uid() == unsafe { libc::geteuid() },
+        "desktop state directory must belong to this user"
+    );
+    ensure!(
+        (named.dev(), named.ino()) == (original.dev(), original.ino()),
+        "desktop state directory changed"
+    );
+    let unchanged = || -> std::io::Result<bool> {
+        let same = |path| -> std::io::Result<bool> {
+            let now = fs::symlink_metadata(path)?;
+            Ok(now.is_dir() && now.dev() == original.dev() && now.ino() == original.ino())
+        };
+        Ok(same(selected)? && same(canonical)?)
+    };
+    ensure!(unchanged()?, "desktop state directory changed");
+    if original.mode() & 0o077 != 0 {
+        // File::set_permissions uses fchmod: never chmod a newly substituted
+        // pathname. Only REMOVE access, only on this already-owned directory.
+        file.set_permissions(fs::Permissions::from_mode(original.mode() & 0o700))?;
+    }
+    ensure!(
+        unchanged()? && crate::platform::verify_private_directory(&file)?,
+        "desktop state directory changed"
+    );
+    Ok(())
+}
+
+#[cfg(all(test, unix))]
+mod tests {
+    use super::*;
+    use std::{
+        fs,
+        os::unix::fs::{symlink, MetadataExt, PermissionsExt},
+    };
+
+    #[test]
+    fn repair_is_owned_directory_only_nonrecursive_and_does_not_create() {
+        let temp = tempfile::tempdir().unwrap();
+        let state = temp.path().join("sessions");
+        tighten(&state, &state).unwrap();
+        assert!(!state.exists());
+        fs::create_dir(&state).unwrap();
+        fs::set_permissions(&state, fs::Permissions::from_mode(0o755)).unwrap();
+        let child = state.join("keep");
+        fs::write(&child, b"original").unwrap();
+        fs::set_permissions(&child, fs::Permissions::from_mode(0o644)).unwrap();
+        let before = fs::metadata(&state).unwrap();
+        tighten(&state, &state).unwrap();
+        tighten(&state, &state).unwrap();
+        let after = fs::metadata(&state).unwrap();
+        assert_eq!((after.dev(), after.ino()), (before.dev(), before.ino()));
+        assert_eq!(after.mode() & 0o777, 0o700);
+        assert_eq!(fs::read(&child).unwrap(), b"original");
+        assert_eq!(fs::metadata(&child).unwrap().mode() & 0o777, 0o644);
+        assert_eq!(fs::read_dir(&state).unwrap().count(), 1);
+    }
+
+    #[test]
+    fn repair_refuses_symlink_file_foreign_owner_and_mismatched_identity() {
+        let temp = tempfile::tempdir().unwrap();
+        let state = temp.path().join("sessions");
+        fs::create_dir(&state).unwrap();
+        fs::set_permissions(&state, fs::Permissions::from_mode(0o755)).unwrap();
+        let link = temp.path().join("link");
+        symlink(&state, &link).unwrap();
+        assert!(tighten(&link, &state).is_err());
+        fs::remove_file(&link).unwrap();
+        symlink(temp.path().join("missing"), &link).unwrap();
+        assert!(tighten(&link, &state).is_err());
+        let file = temp.path().join("file");
+        fs::write(&file, b"keep").unwrap();
+        assert!(tighten(&file, &file).is_err());
+        assert!(tighten(&state, temp.path()).is_err());
+        assert_eq!(fs::metadata(&state).unwrap().mode() & 0o777, 0o755);
+        // A real root-owned directory, never chmodded by this non-root control.
+        if unsafe { libc::geteuid() } != fs::metadata("/").unwrap().uid() {
+            let before = fs::metadata("/").unwrap().mode();
+            assert!(tighten(std::path::Path::new("/"), std::path::Path::new("/")).is_err());
+            assert_eq!(fs::metadata("/").unwrap().mode(), before);
+        }
+    }
+}

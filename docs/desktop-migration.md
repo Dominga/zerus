@@ -100,6 +100,25 @@ since the original switch is recorded and remains eligible for a new family.
 Failed/partial families remain unhandled. Already handled settings/layout/drafts
 never re-seed after rollback.
 
+## Unix first-run state directory
+
+Host telemetry, presence and worktree-cache writers create missing state folders
+privately, regardless of the user's umask. Older versions could create
+`~/.local/state/hgs/sessions` as 0755 during an ordinary listing, preventing the
+next GUI startup from reading desktop ownership. Before a new native startup
+intent, the selected helper's explicit `desktop prepare-state --json` operation
+removes group/other access from that existing, owned directory through a pinned
+no-follow handle. Service startup does the same. It refuses a symbolic link,
+wrong owner, non-directory or changed object; it never repairs descendants or
+creates a service/ownership grant. Missing state stays missing. Ordinary status
+and lookup commands remain read-only.
+
+For an affected older installation, after verifying that the sessions directory
+is a real directory owned by the current user, `chmod 700` on that directory
+alone followed by a full GUI relaunch recovers startup. Do not recursively change
+permissions, follow a symlink, change ownership or remove session files. A custom
+`HGS_STATE_DIR` selects the directory instead of the default path above.
+
 ## Locks and live proof
 
 G1 retains `desktop/owner.lock` for its process lifetime. G3 never takes it.

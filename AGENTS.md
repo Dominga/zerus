@@ -209,6 +209,9 @@ PRs need no additional manual trust approval for ordinary Dev integration.
 Main regressions cover shared Rust/protocol contracts, Linux CLI, Arch, macOS and
 Android. PRs add Windows/iOS for affected desktop, native or shared paths;
 unknown change inventories retain both. Nightly and Stable retain the full matrix.
+Shared candidate tests may run once in a same-SHA qualification job when final
+sealing requires its successful result. Do not launch a manual full CI matrix
+while PR CI already tests that SHA; reuse the run or select missing platforms.
 iOS TestFlight Dev uploads follow successful Nightly verification, using the exact
 source's main CI sequence. Manual checks remain available. Public
 standard GitHub runners are free; do not introduce paid larger runners or raise

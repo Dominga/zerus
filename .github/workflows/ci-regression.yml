@@ -21,10 +21,38 @@ concurrency:
   cancel-in-progress: true
 
 jobs:
-  checks:
-    name: Main regression tests
+  overlap:
+    name: Check for same-SHA candidate verification
     if: >-
       github.event_name == 'workflow_run' && github.repository == 'ufna/zerus' && github.event.repository.private == false && vars.DEV_UPDATES_ENABLED == 'true' &&
+      github.event.workflow_run.event == 'push' && github.event.workflow_run.head_branch == 'main' &&
+      github.event.workflow_run.head_repository.full_name == 'ufna/zerus' &&
+      github.event.workflow_run.conclusion != 'cancelled'
+    runs-on: ubuntu-24.04
+    timeout-minutes: 3
+    cache-mode: none
+    permissions:
+      contents: read
+      actions: read
+    outputs:
+      run_checks: ${{ steps.candidate.outputs.run_checks }}
+    steps:
+      # workflow_run uses the trusted main workflow, never the triggering
+      # run's code or an external PR's scripts with a token.
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+      - name: Observe only exact main candidate verification
+        id: candidate
+        env:
+          GH_TOKEN: ${{ github.token }}
+          SOURCE_COMMIT: ${{ github.event.workflow_run.head_sha }}
+        run: python3 scripts/ci/regression-overlap.py
+  checks:
+    name: Main regression tests
+    needs: overlap
+    if: >-
+      needs.overlap.outputs.run_checks == 'true' && github.event_name == 'workflow_run' && github.repository == 'ufna/zerus' && github.event.repository.private == false && vars.DEV_UPDATES_ENABLED == 'true' &&
       github.event.workflow_run.event == 'push' && github.event.workflow_run.head_branch == 'main' &&
       github.event.workflow_run.head_repository.full_name == 'ufna/zerus' &&
       github.event.workflow_run.conclusion != 'cancelled'

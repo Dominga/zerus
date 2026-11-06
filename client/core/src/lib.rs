@@ -100,6 +100,7 @@ pub mod worktree_overview;
 pub mod worktree_policy;
 pub mod worktree_review;
 pub mod worktrees;
+pub mod wsl_mapping;
 
 use serde::{Deserialize, Serialize};
 use serde_json::Value;

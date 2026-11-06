@@ -127,6 +127,7 @@ mod window_geometry;
 #[cfg(feature = "live")]
 mod window_layer;
 mod window_visibility;
+mod wsl_mapping;
 #[cfg(any(windows, test))]
 mod windows_shell;
 #[cfg(feature = "live")]
@@ -619,6 +620,8 @@ fn launch(context: tauri::Context<tauri::Wry>, startup: Startup) {
                 app.manage(speech_settings::SpeechPage::default());
                 // Task #6: the Teams views' reads; a replay runs no hgs.
                 app.manage(teams::Teams::new(replay));
+                // Task 73: Map Windows path… and Open mapped Windows original….
+                app.manage(wsl_mapping::WslDialogs::new(dir.join("wsl-path-mappings.json"), replay));
                 // Task 8: a stream's team heads reach the computer's poller.
                 let heads_app = app.handle().clone();
                 app.state::<commands::AppState>().pump().on_team_heads(std::sync::Arc::new(move |computer, heads| {
@@ -1452,6 +1455,13 @@ fn handler() -> impl Fn(tauri::ipc::Invoke) -> bool + Send + Sync + 'static {
         teams::team_read,
         teams::team_role_models,
         teams::iron_rules,
+        wsl_mapping::wsl_mapping_open,
+        wsl_mapping::wsl_mapping_preview,
+        wsl_mapping::wsl_mapping_use,
+        wsl_mapping::wsl_file_open,
+        wsl_mapping::wsl_file_preview,
+        wsl_mapping::wsl_file_open_original,
+        wsl_mapping::wsl_dialog_close,
         teams::catalog_editor_schema,
         teams::catalog_editor_load,
         teams::catalog_editor_edit,

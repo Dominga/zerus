@@ -542,6 +542,40 @@ export type RulesOutcome =
   | { outcome: "unsupported"; detail: Text }
   | { outcome: "failed"; detail: Text; request_id?: string }
   | { outcome: "uncertain"; detail: Text; request_id: string };
+/** Task 73: WSL path mapping and WSL file open (client/core wsl_mapping). Errors are core Text. */
+export interface WslFields { windows_root: string; mount_root: string; workspace_id: string }
+export interface WslTarget { alias: string; machine_id: string; distribution: string; user: string; environment: string; saved: WslFields }
+export interface WslOpened { handle: string; target: WslTarget }
+export interface WslMapped { windows: string; wsl: string; canonical: string }
+export interface WslFilePreview { wsl: string; windows: string; sha256: string }
+export interface WslScope { session: string; run_id: string; conversation_id: string; path: string; archive_id?: string; agent_id?: string }
+export async function wslMappingOpen(alias: string): Promise<WslOpened> {
+  if (!inTauri()) throw new Error(DESKTOP_ONLY);
+  return invoke("wsl_mapping_open", { alias });
+}
+export async function wslMappingPreview(handle: string, source: string, fields: WslFields): Promise<WslMapped> {
+  if (!inTauri()) throw new Error(DESKTOP_ONLY);
+  return invoke("wsl_mapping_preview", { handle, source, fields });
+}
+export async function wslMappingUse(handle: string, source: string, fields: WslFields, remember: boolean): Promise<string> {
+  if (!inTauri()) throw new Error(DESKTOP_ONLY);
+  return invoke("wsl_mapping_use", { handle, source, fields, remember });
+}
+export async function wslFileOpen(alias: string, scope: WslScope): Promise<WslOpened> {
+  if (!inTauri()) throw new Error(DESKTOP_ONLY);
+  return invoke("wsl_file_open", { alias, scope });
+}
+export async function wslFilePreview(handle: string, fields: WslFields): Promise<WslFilePreview> {
+  if (!inTauri()) throw new Error(DESKTOP_ONLY);
+  return invoke("wsl_file_preview", { handle, fields });
+}
+export async function wslFileOpenOriginal(handle: string, fields: WslFields, remember: boolean): Promise<Text> {
+  if (!inTauri()) throw new Error(DESKTOP_ONLY);
+  return invoke("wsl_file_open_original", { handle, fields, remember });
+}
+export async function wslDialogClose(handle: string): Promise<void> {
+  if (inTauri()) await invoke("wsl_dialog_close", { handle });
+}
 export async function ironRules(call: RulesCall): Promise<RulesOutcome> {
   if (!inTauri()) throw new Error(DESKTOP_ONLY);
   return invoke("iron_rules", { call });

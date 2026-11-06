@@ -220,6 +220,13 @@ export class FolderBrowser {
   /** The browser closed: later answers change nothing. */
   dispose() { this.closed = true; }
 
+  /** Task 73: a word from the WSL mapping (a refusal) in the status line. */
+  notice(text: string) {
+    if (this.closed) return;
+    this.statusText = text;
+    this.changed();
+  }
+
   // Navigation (186-193 and the buttons, 87-89, 119).
 
   navigate(path: string) {

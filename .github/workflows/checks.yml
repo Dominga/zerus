@@ -16,6 +16,10 @@ on:
       run_macos:
         type: boolean
         default: false
+      arch_check_in_source:
+        description: Release source job runs check() for this exact same SHA before sealing
+        type: boolean
+        default: false
       run_windows:
         type: boolean
         default: false
@@ -128,6 +132,9 @@ jobs:
           "$RUNNER_TEMP/speech-http-venv/bin/python" -m unittest discover -s services/speech/tests -v
       - name: Release publication contract checks
         run: python3 -m unittest discover -s tests -p 'test_*publication.py'
+      - name: Credential-free release scheduling and archive controls
+        working-directory: tests
+        run: python3 -m unittest test_release_source test_regression_overlap test_release_test_scheduling
       - name: Windows installer and runtime prerequisite contracts
         working-directory: tests
         run: python3 -m unittest test_windows_installer test_webview2_ci
@@ -1300,7 +1307,15 @@ jobs:
           echo "started=$(date +%s)" >> "$GITHUB_OUTPUT"
       - name: Build and check package
         id: build
-        run: runuser -u user -- bash scripts/build-arch-package.sh
+        env:
+          SOURCE_CHECK_COMMIT: ${{ inputs.arch_check_in_source && github.sha || '' }}
+        shell: bash
+        run: |
+          if [ -n "$SOURCE_CHECK_COMMIT" ]; then
+            runuser -u user -- bash scripts/build-arch-package.sh --checked-source "$SOURCE_CHECK_COMMIT"
+          else
+            runuser -u user -- bash scripts/build-arch-package.sh
+          fi
       - name: ccache statistics
         id: ccache
         if: ${{ !cancelled() }}
@@ -1342,6 +1357,74 @@ jobs:
           name: arch-x86_64-${{ needs.source.outputs.commit }}
           path: artifacts
           retention-days: ${{ github.event_name == 'schedule' && 3 || 7 }}
+
+  windows-tests:
+    name: Windows unit and connector contracts
+    needs: source
+    if: needs.source.outputs.run_windows == 'true'
+    runs-on: windows-2025
+    timeout-minutes: 60
+    defaults:
+      run:
+        shell: bash
+    env:
+      CARGO_TERM_COLOR: always
+      # Line tables keep test backtraces readable and bound the cached target size.
+      CARGO_PROFILE_DEV_DEBUG: line-tables-only
+      CARGO_INCREMENTAL: 0
+      CARGO_BUILD_JOBS: 4
+      ZERUS_BUILD_JOBS: 4
+    steps:
+      # Before checkout: the runner's Git converts text files to CRLF by default,
+      # which changes fixtures, scripts and embedded text.
+      - name: Check out text files unchanged
+        run: git config --global core.autocrlf false
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          ref: ${{ needs.source.outputs.commit }}
+          persist-credentials: false
+      # One exact interpreter for every Python step; the runner image's default
+      # changes with the image.
+      - uses: actions/setup-python@5fda3b95a4ea91299a34e894583c3862153e4b97 # v7.0.0
+        with:
+          python-version: '3.13.15'
+      - run: rustup toolchain install stable --profile minimal && rustup default stable && rustup toolchain install 1.99.1 --profile minimal --component clippy
+      - name: Rust cache identity
+        id: rust
+        run: |
+          echo "rustc=$(rustc -Vv | git hash-object --stdin | cut -c1-16)" >> "$GITHUB_OUTPUT"
+          echo "epoch=$(date -u +%Y-%m)" >> "$GITHUB_OUTPUT"
+      - name: Restore Rust cache
+        id: rust-cache
+        uses: actions/cache/restore@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6.1.0
+        with:
+          path: |
+            ~/.cargo/registry
+            ~/.cargo/git
+            target
+          key: windows-cli-${{ runner.arch }}-${{ steps.rust.outputs.rustc }}-${{ steps.rust.outputs.epoch }}-${{ hashFiles('Cargo.lock', 'client/core/Cargo.lock', 'client/media/Cargo.lock', 'client/src-tauri/Cargo.lock') }}
+          restore-keys: windows-cli-${{ runner.arch }}-${{ steps.rust.outputs.rustc }}-${{ steps.rust.outputs.epoch }}-
+      - name: Root unit tests and pinned lints
+        run: |
+          mkdir -p artifacts/test-results
+          cargo test --locked </dev/null 2>&1 | tee artifacts/test-results/rust.log
+          cargo +1.99.1 clippy --locked --all-targets -- -D warnings 2>&1 | tee artifacts/test-results/clippy.log
+      - name: Windows connector filesystem contracts
+        run: |
+          cargo +1.99.1 clippy --locked --manifest-path services/mobile/connector/Cargo.toml --target-dir target --all-targets -- -D warnings
+          cargo +1.99.1 test --locked --manifest-path services/mobile/connector/Cargo.toml --target-dir target --lib windows_management::tests </dev/null \
+            2>&1 | tee artifacts/test-results/windows-gateway-locks.log
+          cargo +1.99.1 test --locked --manifest-path services/mobile/connector/Cargo.toml --target-dir target --test windows_gateway </dev/null \
+            2>&1 | tee artifacts/test-results/windows-gateway-config.log
+          cargo +1.99.1 test --locked --offline -j2 --manifest-path services/mobile/connector/Cargo.toml --target-dir target -p zerus-windows-private --lib -- --test-threads=2 </dev/null \
+            2>&1 | tee artifacts/test-results/windows-gateway-launch-builder.log
+      - name: Retain Windows unit and connector logs
+        if: always()
+        uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
+        with:
+          name: windows-unit-results-${{ needs.source.outputs.commit }}
+          path: artifacts/test-results
+          retention-days: 7
 
   windows-desktop:
     name: Windows client, desktop and portable zip
@@ -1393,26 +1476,12 @@ jobs:
       # The runner gives every step a synchronous pipe as stdin. Windows OpenSSH
       # (and the fake client, which refuses it) must never inherit it, so steps
       # that start hgs, ssh or the desktop app read from /dev/null.
-      - name: Rust client tests, Rust 1.99 lints and release build
+      - name: Release CLI and connector for host and package checks
         run: |
           mkdir -p artifacts/test-results
-          cargo test --locked </dev/null 2>&1 | tee artifacts/test-results/rust.log
-          # Pinned like the relay lints, so a new stable release cannot fail an
-          # unchanged commit. Windows-only code is compiled nowhere else, so this
-          # also checks it against Rust 1.99.
-          cargo +1.99.1 clippy --locked --all-targets -- -D warnings 2>&1 | tee artifacts/test-results/clippy.log
           cargo build --release --locked
           cargo build --locked --example fake_ssh
           cargo build --locked --example fake_agent
-      - name: Windows mobile connector build and native filesystem contracts
-        run: |
-          cargo +1.99.1 clippy --locked --manifest-path services/mobile/connector/Cargo.toml --target-dir target --all-targets -- -D warnings
-          cargo +1.99.1 test --locked --manifest-path services/mobile/connector/Cargo.toml --target-dir target --lib windows_management::tests </dev/null \
-            2>&1 | tee artifacts/test-results/windows-gateway-locks.log
-          cargo +1.99.1 test --locked --manifest-path services/mobile/connector/Cargo.toml --target-dir target --test windows_gateway </dev/null \
-            2>&1 | tee artifacts/test-results/windows-gateway-config.log
-          cargo +1.99.1 test --locked --offline -j2 --manifest-path services/mobile/connector/Cargo.toml --target-dir target -p zerus-windows-private --lib -- --test-threads=2 </dev/null \
-            2>&1 | tee artifacts/test-results/windows-gateway-launch-builder.log
           cargo +1.99.1 build --locked --release --manifest-path services/mobile/connector/Cargo.toml --target-dir target
       - name: Windows client integration tests
         run: |
@@ -1628,7 +1697,7 @@ jobs:
   gate:
     name: Suite results
     if: always() && (github.event.repository.private == false || github.event_name == 'workflow_dispatch')
-    needs: [source, quick, client-frontend, relay, connector, connector-macos, ios, android, client-native-linux, client-native-macos-core, client-native-macos-tauri, client-native-windows, cli, cli-macos-debug, cli-macos-core, cli-macos-native, cli-macos, arch-package, windows-desktop, windows-host]
+    needs: [source, quick, client-frontend, relay, connector, connector-macos, ios, android, client-native-linux, client-native-macos-core, client-native-macos-tauri, client-native-windows, cli, cli-macos-debug, cli-macos-core, cli-macos-native, cli-macos, arch-package, windows-tests, windows-desktop, windows-host]
     runs-on: ubuntu-24.04
     timeout-minutes: 5
     env:
@@ -1662,6 +1731,7 @@ jobs:
               'arch-package': json.loads(os.environ['RUN_ARCH']),
               'connector-macos': json.loads(os.environ['RUN_MACOS']),
               'ios': json.loads(os.environ['RUN_IOS']),
+              'windows-tests': json.loads(os.environ['RUN_WINDOWS']),
               'windows-desktop': json.loads(os.environ['RUN_WINDOWS']),
               'windows-host': json.loads(os.environ['RUN_WINDOWS']),
           }

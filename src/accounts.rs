@@ -200,6 +200,23 @@ pub(crate) fn hook_profile(config: &Config, id: &str) -> Result<(String, PathBuf
     Ok((profile.provider, path))
 }
 
+/// Task 115: the home a launch of `provider` reads for `account` (empty: the
+/// default managed profile, else the native one). A caller that must prepare a
+/// file there before the launch (Kimi's read-only team rules) uses the same
+/// resolution the launch itself does.
+pub(crate) fn launch_home(config: &Config, provider: &str, account: &str) -> PathBuf {
+    let id = if account.is_empty() {
+        default_account(config, provider).ok().flatten().unwrap_or_default()
+    } else {
+        account.to_owned()
+    };
+    if id.is_empty() || native_id(&id) {
+        native_home(config, provider)
+    } else {
+        profile_home(config, &id)
+    }
+}
+
 /// The Claude account config a new launch without `--account` reads (U16,
 /// N18): the default managed profile's `.claude.json` (the launch sets
 /// `CLAUDE_CONFIG_DIR` to that profile), else the native one.
@@ -1486,6 +1503,54 @@ mod permission_tests {
         }).to_string()).unwrap();
         assert_eq!(claude_launch_config(&config).unwrap(), claude::account_config().unwrap(), "a native default: the native config");
     }
+    #[test]
+    fn a_launch_home_is_the_profiles_or_the_native_one() {
+        // Task 115: the Kimi read-only rules are written where the launch reads
+        // its config: a managed profile's own home, else the native one.
+        let dir = tempfile::tempdir().unwrap();
+        let config = Config {
+            home: dir.path().to_str().unwrap().into(),
+            dir: dir.path().join("config"),
+            state: dir.path().join("state"),
+            selves: vec![],
+            peers: vec![],
+            base_peers: vec![],
+            peers_from_environment: false,
+            machines: BTreeMap::new(),
+            tab: false,
+            tab_colors: String::new(),
+        };
+        let native = std::env::var("KIMI_CODE_HOME")
+            .ok()
+            .filter(|value| !value.is_empty())
+            .map(PathBuf::from)
+            .unwrap_or_else(|| Path::new(&config.home).join(".kimi-code"));
+        assert_eq!(launch_home(&config, "kimi", ""), native, "no catalog: the native home");
+        assert_eq!(launch_home(&config, "kimi", "native-kimi"), native);
+        fs::create_dir_all(&config.dir).unwrap();
+        fs::write(
+            config.dir.join("accounts.json"),
+            json!({
+                "profiles": {"work": {"provider": "kimi", "label": "Work"}},
+                "defaults": {"kimi": "work"}
+            })
+            .to_string(),
+        )
+        .unwrap();
+        assert_eq!(launch_home(&config, "kimi", "work"), config.dir.join("accounts").join("work"));
+        assert_eq!(launch_home(&config, "kimi", ""), config.dir.join("accounts").join("work"), "the default profile");
+        fs::write(
+            config.dir.join("accounts.json"),
+            json!({
+                "profiles": {"work": {"provider": "kimi", "label": "Work"}},
+                "defaults": {"kimi": "native-kimi"}
+            })
+            .to_string(),
+        )
+        .unwrap();
+        assert_eq!(launch_home(&config, "kimi", ""), native, "a native default");
+    }
+
     #[test]
     fn claude_project_keys_use_forward_slashes_on_windows() {
         // N19: as Claude writes them; the mixed form was another project.

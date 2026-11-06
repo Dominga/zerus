@@ -198,13 +198,17 @@ def inventory_findings(directory):
 def tauri_plist_findings(plist, version, release=None):
     expected = {"CFBundleExecutable": "hgs-tray", "CFBundleName": "Zerus",
                 "CFBundleDisplayName": "Zerus" if release is not None else "hgs-tray",
-                "LSHasLocalizedDisplayName": True, "LSUIElement": True, "CFBundleShortVersionString": version,
+                "LSHasLocalizedDisplayName": True, "CFBundleShortVersionString": version,
                 "LSMinimumSystemVersion": MINIMUM_SYSTEM, "CFBundleIconName": "hgs-zerus-swarm", "ZerusGUI": "tauri",
                 "ZerusReleaseVersion": release or version}
     if release is not None:
         expected.update(CFBundleIdentifier=BUNDLE_ID, CFBundleVersion=version)
     findings = [f"Info.plist {key} is {plist.get(key)!r}, expected {value!r}"
                 for key, value in expected.items() if plist.get(key) != value]
+    # A regular app at launch: Mission Control moves only a regular app's window
+    # between Spaces. The client keeps its menu-bar mode at run time (zerus-v5ft5).
+    if plist.get("LSUIElement"):
+        findings.append("Info.plist sets LSUIElement; the switch bundle launches as a regular app")
     # The raw build keeps the local identifier; tray/sign-local-macos.py promotes its signed copy.
     if plist.get("CFBundleIdentifier") not in (BUNDLE_ID, BUNDLE_ID + ".local"):
         findings.append(f"Info.plist CFBundleIdentifier is {plist.get('CFBundleIdentifier')!r}, "

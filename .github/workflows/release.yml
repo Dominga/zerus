@@ -81,7 +81,9 @@ jobs:
       !cancelled() && needs.verify.result == 'success' &&
       (needs.macos.result == 'success' || (needs.macos.result == 'skipped' && !(inputs.macos_cask && vars.MACOS_CASKS_ENABLED == 'true')))
     runs-on: ubuntu-24.04
-    timeout-minutes: 45
+    # The source recipe now builds Zerus Next (Tauri) as well as hgs; the
+    # matching Arch package job takes about 40 minutes.
+    timeout-minutes: 120
     container:
       image: archlinux@sha256:996c3a1d6b0d87b01242f6fcd8cfa3ad3eece1a67ab5c8f108e20af1d7b97bdd
     steps:

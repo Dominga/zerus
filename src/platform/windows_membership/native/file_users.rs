@@ -367,6 +367,10 @@ fn identity(file: &File, until: Instant) -> Result<Object> {
         file: id.FileId.Identifier,
     })
 }
+#[cfg(test)]
+pub(super) fn private_identity(file: &File, until: Instant) -> Result<Object> {
+    identity(file, until)
+}
 
 /// Private native experiment only, reached by the exact original-image probe
 /// in child.rs. There is no production CLI/data entry or clear capability.

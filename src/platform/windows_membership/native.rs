@@ -21,6 +21,8 @@ use windows_sys::Win32::{
 mod child;
 mod file_users;
 mod handles;
+#[cfg(test)]
+mod qualification;
 mod resident;
 
 type QuerySystem = unsafe extern "system" fn(i32, *mut c_void, u32, *mut u32) -> i32;

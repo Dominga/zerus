@@ -95,7 +95,7 @@ fn linux_and_windows_switches_seed_once_and_keep_the_clients_choices() {
         )
         .unwrap();
         fs::create_dir_all(qt.path().parent().unwrap()).unwrap();
-        let source = b"[workspace]\ntheme=dark\nlanguage=ru\n[automaticApprovals]\nenabled=true\n";
+        let source = b"[workspace]\ntheme=dark\nlanguage=ru\ninspectorWidth=512\ninspectorOpen=true\ninspectorTab=details\n[automaticApprovals]\nenabled=true\n";
         fs::write(qt.path(), source).unwrap();
         let before = fs::metadata(qt.path()).unwrap().modified().unwrap();
         let path = base.join("com.hgdev.hgs-tray/settings.json");
@@ -107,6 +107,9 @@ fn linux_and_windows_switches_seed_once_and_keep_the_clients_choices() {
         let migrated = Settings::open(path.clone(), Some(qt.clone()));
         assert_eq!(migrated.get("workspace/theme"), "light");
         assert_eq!(migrated.get("workspace/language"), "ru");
+        assert_eq!(migrated.get("workspace/inspectorWidth"), 512);
+        assert_eq!(migrated.get("workspace/inspectorOpen"), true);
+        assert_eq!(migrated.get("workspace/inspectorTab"), "details");
         assert_eq!(migrated.get(QT_AUTOMATIC_APPROVALS), true);
         assert!(!migrated.flag("automaticApprovals/enabled"));
         assert_eq!(migrated.get("automaticApprovals/error"), "");

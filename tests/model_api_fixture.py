@@ -227,7 +227,7 @@ class Handler(BaseHTTPRequestHandler):
         self.end_headers()
         self.wfile.write(data)
 
-    def stream(self, events):
+    def stream(self, events, hold_question=False):
         self.send_response(200)
         self.send_header("Content-Type", "text/event-stream")
         self.send_header("Cache-Control", "no-cache")
@@ -235,6 +235,8 @@ class Handler(BaseHTTPRequestHandler):
         for kind, data in events:
             self.wfile.write(f"event: {kind}\ndata: {json.dumps(dict(type=kind, **data))}\n\n".encode())
             self.wfile.flush()
+            if hold_question and kind == 'response.created':
+                self.server.question_release.wait(120)
 
     def do_GET(self):
         route = urlsplit(self.path).path.rstrip("/")
@@ -260,6 +262,8 @@ class Handler(BaseHTTPRequestHandler):
             entry["fixture_sentinels"] = {text: json.dumps(body, ensure_ascii=False).count(text)
                                           for text in self.server.sentinels}
         self.server.record(entry)
+        if '<send_user_message_question_reply>' in (typed(body) or ''):
+            self.server.question_release.set()
         try:
             if route.endswith("/count_tokens"):
                 return self.reply(200, {"input_tokens": 100})
@@ -267,7 +271,10 @@ class Handler(BaseHTTPRequestHandler):
                 message = anthropic_message(body, answer, number)
                 return self.stream(anthropic_events(message)) if body.get("stream") else self.reply(200, message)
             if route.endswith("/responses"):
-                return self.stream(responses_events(body, answer, number))
+                # A live optional question belongs to the running turn. Tests
+                # can hold that turn until the actual native answer steers it.
+                hold = self.server.question_hold.is_file() and typed(body) == QUESTIONS and bool(results(body))
+                return self.stream(responses_events(body, answer, number), hold_question=hold)
             self.reply(404, {"error": {"type": "not_found_error", "message": "no such route"}})
         except (BrokenPipeError, ConnectionResetError, ConnectionAbortedError):
             pass  # The agent stopped reading, as an interrupted turn does.
@@ -282,6 +289,8 @@ class Server(ThreadingHTTPServer):
         self.numbers = itertools.count(1)
         self.lock = threading.Lock()
         self.log = Path(root) / "requests.jsonl"
+        self.question_hold = Path(root) / 'hold-codex-questions'
+        self.question_release = threading.Event()
         self.hint = hint
         self.sentinels = sentinels
         self.hint_threads = set()

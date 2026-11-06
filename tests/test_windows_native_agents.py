@@ -1030,9 +1030,15 @@ class NativeWindowsCodex(NativeAgent, host.HostCase):
         self.assertEqual(self.accepted(name, text), 1, self.describe())
 
     def test_hgs_answers_request_user_input_async(self):
+        (self.api_root / 'hold-codex-questions').touch()
         name = self.launch("question", self.NO_HOOK_REVIEW)
-        # The question does not block the turn: Codex accepts it and the turn ends.
-        self.deliver(name, api.QUESTIONS)
+        # Keep a genuine question alive. Once its turn ends, Codex clears it;
+        # answering a stale card from an idle composer is not question coverage.
+        row = self.ready(name)
+        self.send(name, self.message(row, api.QUESTIONS))
+        self.until('the native optional question', lambda: any(
+            card.get('source') == 'codex_async' for card in self.inspect(name).get('pending_questions', [])))
+        self.keys(name, {'named': 'S-Left'})
         card = self.card(name, "codex_async")
         item, = card["questions"]
         self.assertEqual((item["question"], [option["label"] for option in item["options"]]),
@@ -1054,6 +1060,14 @@ class NativeWindowsCodex(NativeAgent, host.HostCase):
                                              "question": item["question"], "answer": "Two"}])
         self.until("the answered card to go", lambda: not [
             card for card in self.inspect(name).get("pending_questions", []) if card.get("source") == "codex_async"])
+
+    def test_optional_questions_close_when_codex_finishes_the_turn(self):
+        name = self.launch('question-end', self.NO_HOOK_REVIEW)
+        self.deliver(name, api.QUESTIONS)
+        self.assertEqual(self.inspect(name)['pending_questions'], [], self.describe())
+        self.assertEqual(self.row(name)['optional_questions']['count'], 0, self.describe())
+        self.assertFalse(any('<send_user_message_question_reply>' in text
+                             for text in self.user_messages(self.record(name)['conversation_id'])))
 
     def test_hgs_trusts_the_hooks_it_installed(self):
         # Without the bypass Codex stops at its review of the new hooks before SessionStart.

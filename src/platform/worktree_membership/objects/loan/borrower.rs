@@ -173,6 +173,20 @@ impl Borrowed {
         result.current(intent)?;
         Ok(result)
     }
+    pub(crate) fn programs(
+        &self,
+        intent: &Intent,
+    ) -> io::Result<Vec<zerus_client_core::worktree_programs::Program>> {
+        self.current(intent)?;
+        let rows = crate::platform::worktree_membership::programs_borrowed(
+            &self.scope,
+            &self.holder,
+            &self.stream,
+            self.until,
+        )?;
+        self.current(intent)?;
+        Ok(rows)
+    }
     pub(crate) fn deadline(&self) -> Instant {
         self.until
     }

@@ -23,6 +23,53 @@ pub(crate) fn programs(
     Ok(rows)
 }
 
+/// Only an already kernel-bound original holder can supply this exclusion.
+/// The exemption is exactly ONE read-only close-on-exec root descriptor,
+/// never its cwd, other descriptors, PID, or process membership as a whole.
+struct Custody<'a> {
+    peer: &'a objects::loan::peer::Peer,
+    socket: &'a std::os::unix::net::UnixStream,
+    root: objects::Object,
+}
+impl Custody<'_> {
+    fn current(&self, until: Instant) -> io::Result<()> {
+        self.peer.current(self.socket, until)
+    }
+    fn root_for(&self, pid: u32) -> Option<objects::Object> {
+        (pid == self.peer.pid()).then_some(self.root)
+    }
+}
+fn programs_borrowed(
+    scope: &objects::Scope,
+    peer: &objects::loan::peer::Peer,
+    socket: &std::os::unix::net::UnixStream,
+    deadline: Instant,
+) -> io::Result<Vec<zerus_client_core::worktree_programs::Program>> {
+    let custody = Custody {
+        peer,
+        socket,
+        root: objects::Object {
+            device: scope.identity().device,
+            inode: scope.identity().inode,
+        },
+    };
+    custody.current(deadline)?;
+    let inventory = scope.inventory(deadline)?;
+    // This helper's actual borrowed pin is accounted separately. Never turn
+    // the holder exclusion into permission to ignore its borrower or children.
+    #[cfg(target_os = "linux")]
+    linux::own_clear(scope, &inventory, deadline)?;
+    #[cfg(target_os = "macos")]
+    macos::own_clear(scope, &inventory, deadline)?;
+    #[cfg(target_os = "linux")]
+    let rows = linux::programs_with_holder(&inventory, Some(&custody), deadline)?;
+    #[cfg(target_os = "macos")]
+    let rows = macos::programs_with_holder(&inventory, Some(&custody), deadline)?;
+    inventory.current(scope, deadline)?;
+    custody.current(deadline)?;
+    Ok(rows)
+}
+
 /// Fresh observation of ONE original process for the later per-signal gate.
 /// This does not signal, adopt a reused PID or turn a denied read into known
 /// use. The executing owner must also keep its original PinnedProcess.
@@ -247,6 +294,34 @@ mod tests {
             "readable membership still protects the checkout"
         );
     }
+    #[test]
+    fn a_borrowers_own_pin_is_not_a_bypass_for_its_other_open_files() {
+        let temporary = tempfile::tempdir().unwrap();
+        let root = temporary.path().canonicalize().unwrap();
+        std::fs::write(root.join("held"), b"original").unwrap();
+        let until = || Instant::now() + std::time::Duration::from_secs(3);
+        let scope = objects::Scope::open(&root, until()).unwrap();
+        let inventory = scope.inventory(until()).unwrap();
+        #[cfg(target_os = "linux")]
+        use linux::own_clear;
+        #[cfg(target_os = "macos")]
+        use macos::own_clear;
+        own_clear(&scope, &inventory, until()).unwrap();
+        let file = std::fs::File::open(root.join("held")).unwrap();
+        assert!(own_clear(&scope, &inventory, until()).is_err());
+        drop(file);
+        own_clear(&scope, &inventory, until()).unwrap();
+        use std::os::fd::AsRawFd;
+        let root_pin = scope.own_root_descriptor();
+        let duplicate = unsafe { libc::fcntl(root_pin.as_raw_fd(), libc::F_DUPFD_CLOEXEC, 3) };
+        assert!(duplicate >= 0);
+        use std::os::fd::FromRawFd;
+        let duplicate = unsafe { std::fs::File::from_raw_fd(duplicate) };
+        assert!(own_clear(&scope, &inventory, until()).is_err());
+        drop(duplicate);
+        own_clear(&scope, &inventory, until()).unwrap();
+    }
+
     #[test]
     fn original_kernel_cwd_or_open_file_is_required_and_a_replacement_name_is_not_enough() {
         use std::{

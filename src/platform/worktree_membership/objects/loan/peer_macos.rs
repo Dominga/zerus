@@ -113,6 +113,9 @@ pub(crate) struct Peer {
     pin: PinnedProcess,
 }
 impl Peer {
+    pub(in crate::platform::worktree_membership) fn pid(&self) -> u32 {
+        self.pid
+    }
     pub(crate) fn pin(
         pid: u32,
         birth: &str,

@@ -47,6 +47,8 @@ mod producer_io;
 mod producer_prepared;
 #[allow(dead_code)]
 mod producer_session;
+#[cfg(any(target_os = "linux", target_os = "macos"))]
+pub(crate) mod program_stop;
 mod protocol;
 mod registration;
 mod revoke;

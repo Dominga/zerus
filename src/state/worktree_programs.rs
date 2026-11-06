@@ -10,6 +10,8 @@ const INVALID: &str =
 
 #[cfg(any(target_os = "linux", target_os = "macos"))]
 mod holding;
+#[cfg(any(target_os = "linux", target_os = "macos"))]
+mod stopping;
 // Exact historical completion/ownership DATA, never execution or drain proof.
 #[allow(dead_code)]
 mod completed;
@@ -18,6 +20,14 @@ mod completed;
 #[allow(dead_code)]
 mod journal;
 pub(crate) use journal::Claim as ProgramStopClaim;
+
+pub(super) fn stop_status(args: &[String]) -> Result<Value> {
+    stopping::status(args)
+}
+
+pub(super) fn stop(args: &[String]) -> Result<i32> {
+    stopping::run(args)
+}
 
 pub(super) fn hold(args: &[String]) -> Result<i32> {
     holding::run(args)

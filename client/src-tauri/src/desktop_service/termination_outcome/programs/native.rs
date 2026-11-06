@@ -84,6 +84,14 @@ impl NativeContext {
     pub(super) fn executable(&self) -> &std::path::Path {
         self.image.executable()
     }
+    pub(super) fn prepare_stop(&self, request: Request) -> Result<Registration, String> {
+        if !self.current() {
+            return Err(UNCONFIRMED.into());
+        }
+        self.source
+            .prepare_program_stop(request)
+            .map_err(str::to_owned)
+    }
     fn same_context(&self) -> bool {
         !self.cancel.load(Ordering::Acquire)
             && !self.rejected.load(Ordering::Acquire)
@@ -118,7 +126,7 @@ impl NativeContext {
         }
         Ok((child, identity))
     }
-    fn read(self: &Arc<Self>, args: Vec<String>, cap: usize) -> Result<Vec<u8>, String> {
+    pub(super) fn read(self: &Arc<Self>, args: Vec<String>, cap: usize) -> Result<Vec<u8>, String> {
         if !self.current()
             || self
                 .busy

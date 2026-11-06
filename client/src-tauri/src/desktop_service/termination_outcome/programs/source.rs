@@ -16,6 +16,7 @@ pub(crate) struct Source {
     holder: NativeChild,
     socket: String,
     not_after: Instant,
+    normal_consumed: AtomicBool,
 }
 
 enum Origin {
@@ -54,6 +55,57 @@ impl Origin {
             Self::Service(c) => c.image.executable(),
             Self::Native(c) => c.executable(),
         }
+    }
+    fn prepare_stop(
+        &self,
+        intent: zerus_client_core::worktree_programs::invocation::Intent,
+    ) -> Result<Registration, String> {
+        if !self.current()
+            || intent.input.source != self.scope()
+            || intent.input.manifest.configuration != self.configuration()
+        {
+            return Err(UNCONFIRMED.into());
+        }
+        let request = Request::WorktreeProgramStop {
+            intent: Box::new(intent),
+        };
+        match self {
+            Self::Service(c) => c
+                .service
+                .shared
+                .responder
+                .as_ref()
+                .ok_or(UNCONFIRMED)?
+                .prepare_ui_request(uuid::Uuid::new_v4().to_string(), request)
+                .map_err(|_| UNCONFIRMED.into()),
+            Self::Native(c) => c.prepare_stop(request),
+        }
+    }
+    fn check_stop_capability(&self) -> Result<(), String> {
+        let args = vec!["--help".into()];
+        let bytes = match self {
+            Self::Service(c) => match c.read(&Invocation {
+                args,
+                stdin: Some(Vec::new()),
+                timeout: Duration::from_secs(5),
+                request_id: None,
+            }) {
+                Exit::Code {
+                    code: 0, stdout, ..
+                } if stdout.len() <= 256 << 10 => stdout,
+                _ => return Err(UNCONFIRMED.into()),
+            },
+            Self::Native(c) => c.read(args, 256 << 10)?,
+        };
+        let text = std::str::from_utf8(&bytes).map_err(|_| UNCONFIRMED)?;
+        if !text
+            .lines()
+            .any(|line| line.trim() == zerus_client_core::worktree_programs::stop::HELP_MARKER)
+            || !self.current()
+        {
+            return Err("termination_program_stop_unavailable".into());
+        }
+        Ok(())
     }
     fn spawn(
         &self,
@@ -98,6 +150,7 @@ impl Source {
         if !capture.target.computer.is_empty() {
             return Err("termination_programs_remote_custody_unavailable".into());
         }
+        context.check_stop_capability()?;
         let pipeline = uuid::Uuid::new_v4().to_string();
         let original_holder = Arc::new(Mutex::new(None));
         let observed = original_holder.clone();
@@ -154,6 +207,7 @@ impl Source {
             holder,
             socket,
             not_after,
+            normal_consumed: AtomicBool::new(false),
         }))
     }
 }
@@ -226,6 +280,169 @@ impl Source {
     }
 }
 
+impl Source {
+    /// Only the original consumed Remove confirmation can produce OriginalDone.
+    /// Bind that SAME held Source/Actions before minting the normal-stop IDs;
+    /// a report, a new selected CLI, or restored JSON cannot enter this method.
+    fn normal(
+        self: &Arc<Self>,
+        done: &OriginalDone,
+    ) -> Result<
+        (
+            Result<zerus_client_core::worktree_programs::stop::Report, String>,
+            Mutation,
+        ),
+        String,
+    > {
+        let Origin::Service(context) = self.context.as_ref() else {
+            return Err(UNCONFIRMED.into());
+        };
+        if !self.current()
+            || !done.current()
+            || !done.original_call_joined()
+            || self.manifest.capture != *done.capture()
+            || self.not_after != done.not_after
+            || !Arc::ptr_eq(&context.image, &done.context.image)
+            || !Arc::ptr_eq(&context.routing, &done.context.routing)
+            || !Arc::ptr_eq(&context.hold, &done.context.hold)
+        {
+            return Err(UNCONFIRMED.into());
+        }
+        self.normal_consumed
+            .compare_exchange(false, true, Ordering::AcqRel, Ordering::Acquire)
+            .map_err(|_| UNCONFIRMED)?;
+        let input = zerus_client_core::worktree_programs::stop::Input {
+            request_id: uuid::Uuid::new_v4().to_string(),
+            confirmation_id: done.intent.confirmation_id.clone(),
+            source: self.context.scope(),
+            manifest: self.manifest.clone(),
+            original: done.intent.original.clone(),
+            archive_id: done.archive().into(),
+            stop: zerus_client_core::worktree_programs::stop::Kind::Normal,
+        };
+        if !input.valid() {
+            return Err(UNCONFIRMED.into());
+        }
+        self.run_stop(input)
+    }
+    /// The caller is the native one-shot normal/Force controller, never IPC.
+    /// All resources, including the original cache slot and every output pipe,
+    /// stay charged independently of this bounded return or parsed result.
+    fn run_stop(
+        self: &Arc<Self>,
+        input: zerus_client_core::worktree_programs::stop::Input,
+    ) -> Result<
+        (
+            Result<zerus_client_core::worktree_programs::stop::Report, String>,
+            Mutation,
+        ),
+        String,
+    > {
+        use zerus_client_core::worktree_programs::{invocation::Intent, stop::Report};
+        if !self.current()
+            || input.source != self.context.scope()
+            || input.manifest.capture != self.manifest.capture
+            || input.manifest.configuration != self.manifest.configuration
+            || input.manifest.checkout != self.manifest.checkout
+            || input.manifest.boot != self.manifest.boot
+            || input.manifest.issued != self.manifest.issued
+            || input.manifest.expires != self.manifest.expires
+            || !self.manifest.contains_originals(&input.manifest.programs)
+        {
+            return Err(UNCONFIRMED.into());
+        }
+        let until =
+            (Instant::now() + Duration::from_millis(custody::PHASE_MILLIS)).min(self.not_after);
+        let intent = Intent {
+            input: Box::new(input.clone()),
+            pipeline: self.pipeline.clone(),
+            holder: self.holder.clone(),
+            socket: self.socket.clone(),
+        };
+        let registration = self.context.prepare_stop(intent)?;
+        let bytes = serde_json::to_vec(registration.envelope()).map_err(|_| UNCONFIRMED)?;
+        if bytes.len() > custody::FRAME_BYTES {
+            return Err(UNCONFIRMED.into());
+        }
+        let (mutation, charge) = Mutation::new(self.clone(), &input);
+        mutation.armed.store(false, Ordering::Release);
+        let armed = mutation.armed.clone();
+        let resource: Arc<dyn Send + Sync> = Arc::new((charge, registration.resources()));
+        let rejected = Arc::new(AtomicBool::new(false));
+        let refusal = rejected.clone();
+        let selected = self.clone();
+        let frozen = input.clone();
+        let stop = Arc::new(AtomicBool::new(false));
+        let finished = Arc::new(AtomicBool::new(false));
+        let observe_stop = stop.clone();
+        let observe_finished = finished.clone();
+        let observe_source = self.clone();
+        let observe_charge = resource.clone();
+        let watcher = std::thread::Builder::new()
+            .name("program-stop-source".into())
+            .spawn(move || {
+                let _charge = observe_charge;
+                while !observe_finished.load(Ordering::Acquire) {
+                    if Instant::now() >= until || !observe_source.current() {
+                        observe_stop.store(true, Ordering::Release);
+                        break;
+                    }
+                    std::thread::sleep(Duration::from_millis(5));
+                }
+            })
+            .map_err(|_| UNCONFIRMED)?;
+        let invocation = Invocation {
+            args: vec!["worktrees".into(), "program-stop".into(), "--json".into()],
+            stdin: Some(bytes),
+            timeout: until.saturating_duration_since(Instant::now()),
+            request_id: Some(input.request_id.clone()),
+        };
+        #[cfg(target_os = "macos")]
+        let invocation = run::rendezvous::prepare(&invocation);
+        // Linux must keep the exact closed argv; its handler already waits for
+        // input. Machine identity is checked by that own-helper before effects.
+        let exit = run::run_accounted_frozen(
+            self.context.executable(),
+            &invocation,
+            self.context.environment(),
+            zerus_client_core::worktree_programs::MAX_BYTES,
+            &stop,
+            resource,
+            move |command| {
+                let (mut child, native) = selected.context.spawn(command)?;
+                let mut refused = native.is_none() || !registration.bind_original(&child);
+                if !refused {
+                    armed.store(true, Ordering::Release); // missing ACK cannot reopen a phase
+                    refused = selected
+                        .owner
+                        .lock()
+                        .unwrap_or_else(PoisonError::into_inner)
+                        .arm(&frozen, native.expect("original observed child"), until)
+                        .is_err();
+                }
+                if refused || !selected.current() {
+                    refusal.store(true, Ordering::Release);
+                    drop(child.stdin.take());
+                }
+                Ok(child) // SAME child, even on image/registration/arm refusal
+            },
+        );
+        finished.store(true, Ordering::Release);
+        let observed = watcher.join().is_ok();
+        let result = if observed && !rejected.load(Ordering::Acquire) {
+            match exit {
+                Ok(Exit::Code {
+                    code: 0, stdout, ..
+                }) => Report::decode(&stdout, &input).map_err(|_| UNCONFIRMED.into()),
+                _ => Err(UNCONFIRMED.into()),
+            }
+        } else {
+            Err(UNCONFIRMED.into())
+        };
+        Ok((result, mutation))
+    }
+}
+
 // Each mutating call will own a fresh instance. The read-only Source/holder is
 // retained here but is NOT counted as that call's mutating reader/loan charge.
 struct MutatorResources {
@@ -236,6 +453,7 @@ pub(super) struct Mutation {
     binding: custody::Binding,
     resources: Weak<MutatorResources>,
     retired: bool,
+    armed: Arc<AtomicBool>,
 }
 impl Mutation {
     /// A private native call obtains this while arming its ORIGINAL helper;
@@ -257,6 +475,7 @@ impl Mutation {
             source,
             resources: Arc::downgrade(&charge),
             retired: false,
+            armed: Arc::new(AtomicBool::new(true)),
         };
         (mutation, charge)
     }
@@ -269,12 +488,14 @@ impl Mutation {
         if self.resources.upgrade().is_some() {
             return Ok(false);
         }
-        self.source
-            .owner
-            .lock()
-            .unwrap_or_else(PoisonError::into_inner)
-            .joined(&self.binding)
-            .map_err(|_| UNCONFIRMED)?;
+        if self.armed.load(Ordering::Acquire) {
+            self.source
+                .owner
+                .lock()
+                .unwrap_or_else(PoisonError::into_inner)
+                .joined(&self.binding)
+                .map_err(|_| UNCONFIRMED)?;
+        }
         self.retired = true;
         Ok(true)
     }

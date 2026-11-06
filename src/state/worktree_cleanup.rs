@@ -1470,6 +1470,92 @@ fn scan_leftover_limit(root: &Path, deadline: Instant, limit: usize) -> Leftover
     scan
 }
 
+/// Same repository -> state lock order as guarded removal. Hold these across
+/// the final membership/proof checks and one signal, so a new saved/live
+/// binding or managed worktree mutation cannot race that original decision.
+#[cfg(any(target_os = "linux", target_os = "macos"))]
+pub(super) struct ProgramStopGuards {
+    _repository: std::fs::File,
+    _state: storage::Guard,
+}
+#[cfg(any(target_os = "linux", target_os = "macos"))]
+pub(super) fn program_stop_guards(
+    capture: &zerus_client_core::termination_cleanup::Capture,
+    until: Instant,
+) -> Result<ProgramStopGuards> {
+    let repository = repository_lock(Path::new(&capture.common_dir))?;
+    loop {
+        match repository.try_lock_exclusive() {
+            Ok(()) => break,
+            Err(e) if !crate::platform::lock_contended(&e) => return Err(e.to_string()),
+            Err(_) if Instant::now() >= until || crate::platform::shutdown_signal() != 0 => {
+                return Err("The working folder is busy".into())
+            }
+            Err(_) => std::thread::sleep(Duration::from_millis(5)),
+        }
+    }
+    let state = storage::writer_until(until)?.ok_or("Session state is busy")?;
+    Ok(ProgramStopGuards {
+        _repository: repository,
+        _state: state,
+    })
+}
+
+/// Existing session/Git/launch protections for the explicit program-stop
+/// phase. This grants no deletion permission and does not relax assessment,
+/// process review, ignored-file preservation or branch/archive restoration.
+#[cfg(any(target_os = "linux", target_os = "macos"))]
+pub(super) fn program_stop_check(
+    capture: &zerus_client_core::termination_cleanup::Capture,
+    until: Instant,
+) -> Result<()> {
+    let fail =
+        || "The working folder is protected or changed; review the original action".to_owned();
+    if Instant::now() >= until || crate::platform::shutdown_signal() != 0 {
+        return Err(fail());
+    }
+    let path = Path::new(&capture.root);
+    let common = Path::new(&capture.common_dir);
+    let owned = super::worktree_lifecycle::owned(common, path).ok_or_else(fail)?;
+    if owned["id"] != capture.owner_id
+        || owned["path"] != capture.root
+        || owned["common_dir"] != capture.common_dir
+    {
+        return Err(fail());
+    }
+    let (trees, partial) = list(path, common, until).map_err(|_| fail())?;
+    let selected = trees
+        .iter()
+        .find(|row| row["path"] == capture.root)
+        .ok_or_else(fail)?;
+    if partial
+        || selected["kind"] != "linked"
+        || selected["available"] != true
+        || selected["locked"] == true
+        || selected["prunable"] == true
+        || selected["branch"] != owned["branch"]
+        || trees.iter().any(|row| {
+            row["path"]
+                .as_str()
+                .is_some_and(|other| Path::new(other) != path && Path::new(other).starts_with(path))
+        })
+    {
+        return Err(fail());
+    }
+    // An archived original is not a saved/live occupant. A new same-name
+    // session or any other retained binding still protects its actual folder.
+    if bindings()?
+        .iter()
+        .any(|record| record.folders.iter().any(|folder| folder.starts_with(path)))
+    {
+        return Err(fail());
+    }
+    if Instant::now() >= until || crate::platform::shutdown_signal() != 0 {
+        return Err(fail());
+    }
+    Ok(())
+}
+
 pub(super) fn review(path: &Path, only: Option<&Path>, total: Instant) -> Value {
     let machine = crate::config::Config::load()
         .map(|c| c.host().to_owned())

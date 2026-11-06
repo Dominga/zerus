@@ -169,6 +169,7 @@ fn a_parsed_result_and_holder_ack_cannot_retire_real_readers_or_a_mutator_loan()
             holder,
             socket,
             not_after,
+            normal_consumed: AtomicBool::new(false),
         });
         let (mut mutation, resources) = Mutation::new(source.clone(), &input);
         let loan = resources.clone();

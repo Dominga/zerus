@@ -92,6 +92,9 @@ pub(crate) fn receive_transfer(
 }
 
 impl Scope {
+    pub(in crate::platform::worktree_membership) fn own_root_descriptor(&self) -> BorrowedFd<'_> {
+        self.root.as_fd()
+    }
     /// Borrowed descriptors stay owned by the original holder through sendmsg.
     /// Sending rights duplicates them in the receiver, not in a pathname walk.
     pub(crate) fn native_descriptors(&self) -> Vec<BorrowedFd<'_>> {

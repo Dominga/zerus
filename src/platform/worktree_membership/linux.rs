@@ -219,31 +219,127 @@ pub(super) fn member(
     inventory: &objects::Inventory,
     deadline: Instant,
 ) -> io::Result<bool> {
+    member_with_holder(process, inventory, None, deadline)
+}
+fn member_with_holder(
+    process: &Path,
+    inventory: &objects::Inventory,
+    root: Option<objects::Object>,
+    deadline: Instant,
+) -> io::Result<bool> {
     let mut found = false;
+    let mut skipped = false;
     bounded(0, deadline)?;
     match native_object(&process.join("cwd")) {
         Ok(id) => found |= inventory.contains(id),
-        Err(e) if denied(&e) => {}
+        Err(e) if denied(&e) && root.is_none() => {}
         Err(e) => return Err(e),
     }
     let fds = match fs::read_dir(process.join("fd")) {
         Ok(fds) => fds,
-        Err(e) if denied(&e) => return Ok(found),
+        Err(e) if denied(&e) && root.is_none() => return Ok(found),
         Err(e) => return Err(e),
     };
     for (count, fd) in fds.enumerate() {
         bounded(count, deadline)?;
-        match native_object(&fd?.path()) {
+        let fd = fd?;
+        match native_object(&fd.path()) {
+            Ok(id) if Some(id) == root && !skipped => {
+                let info = read(&process.join("fdinfo").join(fd.file_name()))?;
+                let flags = u32::from_str_radix(
+                    info.lines()
+                        .find_map(|line| line.strip_prefix("flags:"))
+                        .ok_or_else(limit)?
+                        .trim(),
+                    8,
+                )
+                .map_err(io::Error::other)?;
+                if flags & libc::O_ACCMODE as u32 != libc::O_RDONLY as u32
+                    || flags & libc::O_CLOEXEC as u32 == 0
+                    || native_object(&fd.path())? != id
+                {
+                    return Err(limit());
+                }
+                skipped = true;
+            }
             Ok(id) => found |= inventory.contains(id),
-            Err(e) if denied(&e) || e.kind() == io::ErrorKind::NotFound => {}
+            Err(e) if (denied(&e) && root.is_none()) || e.kind() == io::ErrorKind::NotFound => {}
             Err(e) => return Err(e),
         }
+    }
+    if root.is_some() && !skipped {
+        return Err(limit());
     }
     Ok(found)
 }
 
+/// Account only for THIS Scope's actual native borrowed FD. Its descriptor
+/// number comes from the owned object, never the wire or an ignore-PID flag.
+pub(super) fn own_clear(
+    scope: &objects::Scope,
+    inventory: &objects::Inventory,
+    deadline: Instant,
+) -> io::Result<()> {
+    use std::os::fd::AsRawFd;
+    let fd = scope.own_root_descriptor();
+    let own = fd.as_raw_fd();
+    let root = objects::Object {
+        device: scope.identity().device,
+        inode: scope.identity().inode,
+    };
+    let process = Path::new("/proc/self");
+    if inventory.contains(native_object(&process.join("cwd"))?) {
+        return Err(limit());
+    }
+    let mut seen = false;
+    for (count, entry) in fs::read_dir(process.join("fd"))?.enumerate() {
+        bounded(count, deadline)?;
+        let entry = entry?;
+        let number = entry
+            .file_name()
+            .to_str()
+            .and_then(|s| s.parse::<i32>().ok())
+            .ok_or_else(limit)?;
+        match native_object(&entry.path()) {
+            Ok(object) if number == own => {
+                let descriptor = unsafe { libc::fcntl(own, libc::F_GETFD) };
+                let access = unsafe { libc::fcntl(own, libc::F_GETFL) };
+                if object != root
+                    || seen
+                    || descriptor < 0
+                    || access < 0
+                    || descriptor & libc::FD_CLOEXEC == 0
+                    || access & libc::O_ACCMODE != libc::O_RDONLY
+                {
+                    return Err(limit());
+                }
+                seen = true;
+            }
+            Ok(object) if inventory.contains(object) => {
+                return Err(io::Error::other(
+                    "this cleanup helper also uses the checkout",
+                ))
+            }
+            Ok(_) => {}
+            Err(e) if e.kind() == io::ErrorKind::NotFound => {}
+            Err(e) => return Err(e),
+        }
+    }
+    if !seen {
+        return Err(limit());
+    }
+    scope.current(deadline)
+}
+
 pub(super) fn programs(
     inventory: &objects::Inventory,
+    deadline: Instant,
+) -> io::Result<Vec<zerus_client_core::worktree_programs::Program>> {
+    programs_with_holder(inventory, None, deadline)
+}
+pub(super) fn programs_with_holder(
+    inventory: &objects::Inventory,
+    holder: Option<&Custody<'_>>,
     deadline: Instant,
 ) -> io::Result<Vec<zerus_client_core::worktree_programs::Program>> {
     let uid = unsafe { libc::getuid() };
@@ -287,7 +383,8 @@ pub(super) fn programs(
             if before.1 {
                 return Ok(None);
             }
-            let membership = member(&process, inventory, deadline);
+            let root = holder.and_then(|h| h.root_for(pid));
+            let membership = member_with_holder(&process, inventory, root, deadline);
             let after = identity(&process)?;
             if after.1 {
                 return Ok(None);
@@ -298,7 +395,7 @@ pub(super) fn programs(
             if !membership? {
                 return Ok(None);
             }
-            if invocation.get(&pid) == Some(&before.0) {
+            if root.is_some() || invocation.get(&pid) == Some(&before.0) {
                 return Err(io::Error::other(
                     "a program in the checkout is needed to settle this action",
                 ));
@@ -334,6 +431,93 @@ pub(super) fn programs(
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn the_holder_exclusion_is_one_native_read_only_root_fd_not_a_process_exemption() {
+        use std::{
+            io::{BufRead, Write},
+            process::{Command, Stdio},
+            time::Duration,
+        };
+        let temporary = tempfile::tempdir().unwrap();
+        let root = temporary.path().canonicalize().unwrap();
+        fs::write(root.join("held"), b"original").unwrap();
+        struct HeldChild(std::process::Child);
+        impl Drop for HeldChild {
+            fn drop(&mut self) {
+                let _ = self.0.kill();
+                let _ = self.0.wait();
+            }
+        }
+        let mut child = HeldChild(
+            Command::new("python3")
+                .args([
+                    "-I",
+                    "-c",
+                    r#"import os,sys
+root=sys.argv[1]
+fd=os.open(root,os.O_RDONLY|os.O_DIRECTORY|os.O_CLOEXEC)
+print('ready',flush=True)
+for op in sys.stdin:
+ op=op.strip()
+ if op=='duplicate': other=os.dup(fd)
+ elif op=='file': other=os.open(root+'/held',os.O_RDONLY|os.O_CLOEXEC)
+ elif op=='close': os.close(other)
+ elif op=='inherit': os.set_inheritable(fd,True)
+ elif op=='cloexec': os.set_inheritable(fd,False)
+ elif op=='cwd': os.chdir(root)
+ print('ready',flush=True)
+"#,
+                ])
+                .arg(&root)
+                .stdin(Stdio::piped())
+                .stdout(Stdio::piped())
+                .spawn()
+                .unwrap(),
+        );
+        let mut output = std::io::BufReader::new(child.0.stdout.take().unwrap());
+        let mut ready = || {
+            use std::os::fd::AsRawFd;
+            let mut poll = libc::pollfd {
+                fd: output.get_ref().as_raw_fd(),
+                events: libc::POLLIN,
+                revents: 0,
+            };
+            assert_eq!(unsafe { libc::poll(&mut poll, 1, 5000) }, 1);
+            let mut line = String::new();
+            output.read_line(&mut line).unwrap();
+            assert_eq!(line, "ready\n");
+        };
+        ready();
+        let until = || Instant::now() + Duration::from_secs(3);
+        let scope = objects::Scope::open(&root, until()).unwrap();
+        let inventory = scope.inventory(until()).unwrap();
+        let root = objects::Object {
+            device: scope.identity().device,
+            inode: scope.identity().inode,
+        };
+        let path = PathBuf::from(format!("/proc/{}", child.0.id()));
+        assert!(!member_with_holder(&path, &inventory, Some(root), until()).unwrap());
+        for op in ["duplicate", "file"] {
+            writeln!(child.0.stdin.as_mut().unwrap(), "{op}").unwrap();
+            ready();
+            assert!(
+                member_with_holder(&path, &inventory, Some(root), until()).unwrap(),
+                "{op}"
+            );
+            writeln!(child.0.stdin.as_mut().unwrap(), "close").unwrap();
+            ready();
+        }
+        writeln!(child.0.stdin.as_mut().unwrap(), "inherit").unwrap();
+        ready();
+        assert!(member_with_holder(&path, &inventory, Some(root), until()).is_err());
+        writeln!(child.0.stdin.as_mut().unwrap(), "cloexec").unwrap();
+        ready();
+        assert!(!member_with_holder(&path, &inventory, Some(root), until()).unwrap());
+        writeln!(child.0.stdin.as_mut().unwrap(), "cwd").unwrap();
+        ready();
+        assert!(member_with_holder(&path, &inventory, Some(root), until()).unwrap());
+    }
 
     #[test]
     fn native_fd_membership_finds_an_open_file_outside_the_current_directory() {

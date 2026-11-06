@@ -877,6 +877,7 @@ pub(crate) struct NativeReady {
     helper: Arc<relay::Connection>,
     // None only for a selected CLI's successful marker-absent legacy probe.
     _receipt: Option<Receipt>,
+    responder: Option<Arc<Responder>>,
 }
 impl NativeReady {
     pub(crate) fn helper(&self) -> Result<&Path, &'static str> {
@@ -903,6 +904,10 @@ impl NativeReady {
             helper: self.helper.clone(),
             original: original.clone(),
             environment,
+            responder: self
+                .responder
+                .clone()
+                .ok_or("worktree_programs_native_responder_unavailable")?,
         })
     }
 }
@@ -914,9 +919,34 @@ pub(crate) struct NativeSource {
     helper: Arc<relay::Connection>,
     original: Receipt,
     environment: zerus_client_core::run::FrozenEnvironment,
+    responder: Arc<Responder>,
 }
 #[allow(dead_code)]
 impl NativeSource {
+    pub(crate) fn prepare_program_stop(
+        &self,
+        request: zerus_client_core::desktop::ui_requests::Request,
+    ) -> Result<zerus_client_core::desktop::ui_requests::Registration, &'static str> {
+        let zerus_client_core::desktop::ui_requests::Request::WorktreeProgramStop { intent } =
+            &request
+        else {
+            return Err("worktree_programs_native_request_invalid");
+        };
+        if !self.route_current()
+            || intent.input.manifest.configuration != self.original.configuration
+            || intent.input.source
+                != (zerus_client_core::worktree_programs::stop::Source::Native {
+                    request_id: self.original.request_id.clone(),
+                    journal: self.original.journal.clone(),
+                    revision: self.original.revision,
+                })
+        {
+            return Err("worktree_programs_native_origin_changed");
+        }
+        self.responder
+            .prepare_ui_request(uuid::Uuid::new_v4().to_string(), request)
+            .map_err(|_| "worktree_programs_native_registration_refused")
+    }
     pub(crate) fn route_current(&self) -> bool {
         !crate::desktop_service::mode()
             && self.original.native_ready()
@@ -1082,6 +1112,7 @@ fn native_startup(owner: Arc<Controller>, deadline: Instant) -> Result<NativeRea
             return Ok(NativeReady {
                 helper,
                 _receipt: receipt,
+                responder: owner.responder.clone(),
             });
         }
         let refresh = {

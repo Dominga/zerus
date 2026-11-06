@@ -382,6 +382,22 @@ pub(super) fn catalog_until(path: &Path, refresh: bool, deadline: Instant) -> Va
 
 pub(super) fn dispatch(args: &[String]) -> Result<i32> {
     let action = args.first().map(String::as_str);
+    if action == Some("program-stop-status") {
+        #[cfg(any(target_os = "linux", target_os = "macos"))]
+        {
+            let value = super::worktree_programs::stop_status(&args[1..])?;
+            println!("{}", serde_json::to_string(&value).map_err(|e| e.to_string())?);
+            return Ok(0);
+        }
+        #[cfg(not(any(target_os = "linux", target_os = "macos")))]
+        return Err("Native program stop is unavailable on this computer".into());
+    }
+    if action == Some("program-stop") {
+        #[cfg(any(target_os = "linux", target_os = "macos"))]
+        return super::worktree_programs::stop(&args[1..]);
+        #[cfg(not(any(target_os = "linux", target_os = "macos")))]
+        return Err("Native program stop is unavailable on this computer".into());
+    }
     if action == Some("program-holder") {
         #[cfg(any(target_os = "linux", target_os = "macos"))]
         return super::worktree_programs::hold(&args[1..]);

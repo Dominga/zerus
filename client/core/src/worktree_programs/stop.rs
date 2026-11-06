@@ -8,6 +8,7 @@ use crate::{
 use serde::{Deserialize, Serialize};
 
 pub const INPUT_LIMIT: usize = 128 << 10;
+pub const HELP_MARKER: &str = "Worktree program stop ABI: worktree-program-stop-v1";
 
 /// Original routing/ownership DATA. Native caller evidence and current Root
 /// ownership are checked independently; serializing a mode grants nothing.

@@ -51,6 +51,10 @@ fn original_helper_fixture() {
             assert!(borrowed.deadline() <= bound);
             assert_eq!(borrowed.scope().identity(), &intent.input.manifest.checkout);
             borrowed.current(&intent).unwrap();
+            assert!(
+                borrowed.programs(&intent).unwrap().is_empty(),
+                "the verified holder root pin is not an occupant"
+            );
             let mut changed = intent.clone();
             changed.pipeline = uuid::Uuid::new_v4().to_string();
             assert!(borrowed.current(&changed).is_err());

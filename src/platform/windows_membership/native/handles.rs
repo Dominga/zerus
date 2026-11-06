@@ -1,6 +1,6 @@
 //! Read only the source process's handle table and metadata-only duplicates.
 //! No global kernel-pointer table, source-handle close, write or stop operation.
-use super::super::handles::{Handle, Metadata, Object, Snapshot};
+use super::super::handles::{with_details, Details, Handle, Metadata, Object, Snapshot};
 use super::*;
 use windows_sys::Wdk::System::Threading::ProcessHandleInformation;
 use windows_sys::Win32::{
@@ -46,6 +46,18 @@ struct Files<'a> {
     pin: &'a Pinned,
     source: OwnedHandle,
 }
+enum Access {
+    Identity,
+    Attributes,
+}
+impl Access {
+    fn bits(&self) -> u32 {
+        match self {
+            Self::Identity => 0,
+            Self::Attributes => FILE_READ_ATTRIBUTES,
+        }
+    }
+}
 impl<'a> Files<'a> {
     fn open(pin: &'a Pinned, until: Instant) -> Result<Self> {
         // DUP_HANDLE is requested independently, never bundled with VM_READ or
@@ -55,7 +67,7 @@ impl<'a> Files<'a> {
             source: pin.additional(PROCESS_DUP_HANDLE, until)?,
         })
     }
-    fn copy(&self, original: Handle, until: Instant) -> Result<OwnedHandle> {
+    fn copy(&self, original: Handle, access: Access, until: Instant) -> Result<OwnedHandle> {
         self.pin.current(until)?;
         let mut copy = std::ptr::null_mut();
         let source = usize::try_from(original.value).map_err(|_| Error::Incomplete)? as HANDLE;
@@ -67,7 +79,7 @@ impl<'a> Files<'a> {
                 source,
                 GetCurrentProcess(),
                 &mut copy,
-                FILE_READ_ATTRIBUTES,
+                access.bits(),
                 0,
                 0,
             )
@@ -87,10 +99,39 @@ impl<'a> Files<'a> {
         copy.ok_or(Error::Incomplete)
     }
     fn metadata(&self, original: Handle, until: Instant) -> Result<Option<Metadata>> {
-        let copy = self.copy(original, until)?;
-        let result = metadata(copy.as_raw_handle(), until);
+        let copy = self.copy(original, Access::Identity, until)?;
+        let first = metadata(copy.as_raw_handle(), until);
         self.pin.current(until)?;
-        result
+        let denied = matches!(
+            first,
+            Err(Error::Denied)
+                | Ok(Some(Metadata {
+                    details: Details::Denied,
+                    ..
+                }))
+        );
+        if !denied {
+            return first;
+        }
+        // Try stronger METADATA rights only after a genuine lower-rights read
+        // denial, retaining the first copy and every readable object identity.
+        let attributes = match self.copy(original, Access::Attributes, until) {
+            Err(Error::Denied) => return first,
+            other => other?,
+        };
+        // SAFETY: both owned file copies remain live. A reused source handle
+        // must not lend a replacement object to this original observation.
+        if unsafe { CompareObjectHandles(copy.as_raw_handle(), attributes.as_raw_handle()) } == 0 {
+            return Err(Error::Incomplete);
+        }
+        let second = metadata(attributes.as_raw_handle(), until);
+        self.pin.current(until)?;
+        match (&first, &second) {
+            (_, Err(Error::Denied)) => first,
+            (Ok(Some(a)), Ok(Some(b))) if a.object != b.object => Err(Error::Incomplete),
+            (Ok(Some(_)), Ok(None)) => Err(Error::Incomplete),
+            _ => second,
+        }
     }
 }
 fn metadata(handle: HANDLE, until: Instant) -> Result<Option<Metadata>> {
@@ -128,6 +169,13 @@ fn metadata(handle: HANDLE, until: Instant) -> Result<Option<Metadata>> {
         return Err(error);
     }
     live(until)?;
+    if id.FileId.Identifier == [0; 16] {
+        return Err(Error::Incomplete);
+    }
+    let object = Object {
+        volume: id.VolumeSerialNumber,
+        file: id.FileId.Identifier,
+    };
     let mut standard = FILE_STANDARD_INFO::default();
     // SAFETY: same retained metadata-only handle and correct typed output.
     if unsafe {
@@ -141,20 +189,20 @@ fn metadata(handle: HANDLE, until: Instant) -> Result<Option<Metadata>> {
     {
         let error = win32_error();
         live(until)?;
-        return Err(error);
+        return with_details(object, Err(error)).map(Some);
     }
     live(until)?;
-    if id.FileId.Identifier == [0; 16] || standard.NumberOfLinks == 0 || standard.DeletePending {
+    if standard.NumberOfLinks == 0 || standard.DeletePending {
         return Err(Error::Incomplete);
     }
-    Ok(Some(Metadata {
-        object: Object {
-            volume: id.VolumeSerialNumber,
-            file: id.FileId.Identifier,
-        },
-        links: standard.NumberOfLinks,
-        directory: standard.Directory,
-    }))
+    with_details(
+        object,
+        Ok(Details::Known {
+            links: standard.NumberOfLinks,
+            directory: standard.Directory,
+        }),
+    )
+    .map(Some)
 }
 
 #[cfg(test)]
@@ -200,8 +248,21 @@ mod tests {
         let files = Files::open(&pin, until).unwrap();
         let first = files.metadata(a, until).unwrap().unwrap();
         assert_eq!(first, files.metadata(b, until).unwrap().unwrap());
-        assert_eq!(first.links, 2);
-        let copy = files.copy(a, until).unwrap();
+        assert_eq!(
+            first.details,
+            Details::Known {
+                links: 2,
+                directory: false
+            }
+        );
+        let copy = files.copy(a, Access::Identity, until).unwrap();
+        assert_eq!(
+            metadata(copy.as_raw_handle(), until)
+                .unwrap()
+                .unwrap()
+                .object,
+            first.object
+        );
         let mut written = 0;
         // A broad read/write source must not lend its write access to the
         // metadata copy. This attempted write targets only the private fixture.

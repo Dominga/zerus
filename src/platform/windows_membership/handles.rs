@@ -60,8 +60,22 @@ pub(super) struct Object {
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub(super) struct Metadata {
     pub(super) object: Object,
-    pub(super) links: u32,
-    pub(super) directory: bool,
+    pub(super) details: Details,
+}
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub(super) enum Details {
+    Known { links: u32, directory: bool },
+    Denied,
+}
+/// An attribute denial never erases the already readable native object ID.
+/// Other errors stay incomplete and cannot be waived as permission denials.
+pub(super) fn with_details(object: Object, details: Result<Details>) -> Result<Metadata> {
+    let details = match details {
+        Ok(details) => details,
+        Err(Error::Denied) => Details::Denied,
+        Err(other) => return Err(other),
+    };
+    Ok(Metadata { object, details })
 }
 
 #[cfg(test)]
@@ -155,6 +169,35 @@ mod tests {
             }),
             Err(Error::Incomplete),
             "a late native denial cannot waive an expired query"
+        );
+    }
+    #[test]
+    fn readable_object_identity_survives_denied_attributes() {
+        let object = Object {
+            volume: 7,
+            file: [9; 16],
+        };
+        assert_eq!(
+            with_details(object, Err(Error::Denied)),
+            Ok(Metadata {
+                object,
+                details: Details::Denied
+            })
+        );
+        let known = Details::Known {
+            links: 2,
+            directory: false,
+        };
+        assert_eq!(
+            with_details(object, Ok(known)),
+            Ok(Metadata {
+                object,
+                details: known
+            })
+        );
+        assert_eq!(
+            with_details(object, Err(Error::Incomplete)),
+            Err(Error::Incomplete)
         );
     }
 }

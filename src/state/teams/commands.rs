@@ -10,7 +10,7 @@ use super::store::{self, canonical_uuid, Event, Store, PAGE};
 use anyhow::{bail, ensure, Context};
 use std::collections::BTreeSet;
 
-pub(crate) const USAGE: &str = "usage: hgs [@host] team create|plan|extend|edit-draft|move-phase|move-task|add-to-phase|approve-phase|discard-phase|return-to-draft|pause-phase|unpause-phase|phase-acceptance|accept-phase|send-back-phase|reject-phase|undo-reject-phase|rework-phase|finish|approve|answer|commit|discard|pause|resume|stop|archive|status|inbox|list|events|spans|profile|current|report|ask|reply|hold|release|accept|reject|skip-stage|send-back|reassign|take-over|cancel|retry|check|expect|swap-member|escalate|use-last-reply|relaunch|add-member|scale|drain|pause-member|resume-member|remove-member|settings|finding|draft|propose|decide-proposal|next-goal|leftovers|intake-key|intake|waiting|close-phase|phase-mode|integrate-build|start-ahead|full-tests|test|run|templates|safe-action|reports-to|sub-lead|deferred|answer-deferred|defer-session|disk --json (JSON stdin) | hgs [@host] team catalog get|set|propose|decide|apply|discard|route|designer --json | hgs team worker [--stop]";
+pub(crate) const USAGE: &str = "usage: hgs [@host] team create|plan|extend|edit-draft|move-phase|move-task|add-to-phase|approve-phase|discard-phase|return-to-draft|pause-phase|unpause-phase|phase-acceptance|accept-phase|send-back-phase|reject-phase|undo-reject-phase|rework-phase|finish|approve|answer|commit|discard|pause|resume|stop|archive|status|inbox|list|events|spans|profile|current|report|ask|reply|hold|release|accept|reject|skip-stage|send-back|reassign|take-over|cancel|retry|check|expect|swap-member|escalate|use-last-reply|relaunch|add-member|scale|drain|pause-member|resume-member|remove-member|settings|finding|draft|propose|decide-proposal|next-goal|leftovers|intake-key|intake|waiting|close-phase|phase-mode|integrate-build|start-ahead|full-tests|test|run|templates|safe-action|reports-to|sub-lead|deferred|answer-deferred|defer-session|disk|test-config --json (JSON stdin) | hgs [@host] team catalog get|set|propose|decide|apply|discard|route|designer --json | hgs team worker [--stop]";
 
 const MUTATIONS: &[&str] = &[
     "plan", "extend", "edit-draft", "move-phase", "move-task", "add-to-phase", "approve-phase", "discard-phase", "return-to-draft", "reject-phase", "undo-reject-phase",
@@ -3357,6 +3357,66 @@ pub(crate) fn fill_pause(store: &Store, team: &mut Team) {
     });
 }
 
+/// Task 88: the project's test configuration as the team uses it: the file
+/// (or the detected proposal) with the owner's override, every provider and
+/// its kind, the project templates with whether the owner accepted each, and
+/// the proposal `hgs test config --propose` would write. With `"action":
+/// "check"` and `"tests"`, a candidate override is checked as the owner's
+/// Save would apply it; nothing is written either way.
+fn test_config(input: &Value) -> anyhow::Result<Value> {
+    let team = Store::open(false)?.load(text(input, "team"))?.context("Unknown team")?;
+    let folder = std::path::Path::new(&team.folder);
+    let (override_value, checking) = match text(input, "action") {
+        "" | "get" => (team.settings.tests.clone(), false),
+        "check" => {
+            let candidate = input["tests"].clone();
+            ensure!(candidate.is_null() || candidate.is_object(), "The tests override is an object shaped like .zerus/tests.toml");
+            ((!candidate.is_null()).then_some(candidate), true)
+        }
+        other => bail!("test-config action is get or check (got {other})"),
+    };
+    let detected = crate::test_discipline::detect::detect(folder);
+    let proposal = crate::test_discipline::detect::proposal(&detected);
+    let file = folder.join(crate::test_discipline::config::FILE);
+    let loaded = match crate::test_discipline::config::load(folder, override_value.as_ref()) {
+        Ok(loaded) => loaded,
+        Err(error) => {
+            return Ok(json!({"ok":false,"error":format!("{error:#}"),"checked":checking,"override":override_value,
+                "file":file.is_file(),"proposal":proposal}));
+        }
+    };
+    let source = match loaded.source {
+        crate::test_discipline::config::Source::File => "file",
+        crate::test_discipline::config::Source::Detected => "detected",
+        crate::test_discipline::config::Source::None => "none",
+    };
+    let providers: Vec<Value> = loaded
+        .config
+        .providers
+        .iter()
+        .map(|provider| {
+            let mut item = serde_json::to_value(provider).unwrap_or_default();
+            item["kind"] = json!(provider.kind.name());
+            item
+        })
+        .collect();
+    let accepted = super::templates::project_listed(folder).unwrap_or_default();
+    let templates: Vec<Value> = loaded
+        .config
+        .templates
+        .iter()
+        .map(|template| {
+            let hash = template.content_hash();
+            let mut item = serde_json::to_value(template).unwrap_or_default();
+            item["hash"] = json!(hash);
+            item["accepted"] = json!(accepted.iter().any(|known| known["hash"] == hash.as_str() && known["accepted"] == true));
+            item
+        })
+        .collect();
+    Ok(json!({"ok":true,"checked":checking,"source":source,"active":loaded.active(),"overridden":loaded.overridden,
+        "file":file.is_file(),"override":override_value,"providers":providers,"templates":templates,"proposal":proposal}))
+}
+
 /// 9.7: pause, resume or stop of a team reaches its sub-teams, level by level.
 fn cascade_status(store: &mut Store, team_id: &str, op: &str, depth: usize) -> anyhow::Result<()> {
     if depth >= 8 {
@@ -4244,6 +4304,11 @@ fn run(op: &str, input: &Value, wait: bool) -> anyhow::Result<Value> {
     // Task 108: the build folders Zerus holds and their cleanup; no team's.
     if op == "disk" {
         return crate::state::build_dirs::command(input);
+    }
+    // Task 88: the team's test configuration for its Tests settings; it reads
+    // and checks, never writes (the owner's Save is `settings`).
+    if op == "test-config" {
+        return test_config(input);
     }
     match op {
         "create" => create(input),

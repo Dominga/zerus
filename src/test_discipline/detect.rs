@@ -81,6 +81,7 @@ fn provider(name: String, kind: Kind, root: &str, sources: Vec<String>, tests: V
         budget_lines: 0,
         reuse: Default::default(),
         disabled: false,
+        results: None,
     }
 }
 

@@ -1101,7 +1101,14 @@ export interface TeamTestRun {
   id: string; suite: string; status: string; asked_by: string; task: number; at: number;
   duration_ms: number; recorded_ms: number; runner: string; excerpt: string;
   flags: string[]; reused_from: string; due: boolean; over_budget: boolean;
+  /** Task 88: one result per test from the provider's report, failures first; null without one. */
+  report?: TeamTestReport | null;
 }
+
+/** Task 88: one test of a run's report. */
+export interface TeamTestCase { suite: string; name: string; status: "passed" | "failed" | "skipped" | "error" | string; ms: number; message: string }
+/** Task 88: a run's report: the counts of every test, and at most 200 of them. */
+export interface TeamTestReport { passed: number; failed: number; skipped: number; errors: number; note: string; results: TeamTestCase[] }
 
 /** Task 92: one span of the Time view (core teams/timeline.rs `TimelineSpan`); a test run is kind `tests`, its suite in `member`, its status in `stage_kind`. */
 export interface TimelineSpan {
@@ -1200,6 +1207,8 @@ export type TeamAction =
   | { kind: "decide_tool"; offer: string; allow: boolean; reason?: string }
   /** Task 97: the owner's answer to a deferred request; one message reaches the session. */
   | { kind: "answer_deferred"; id: string; decision: "allow" | "deny" | "answer"; text?: string }
+  /** Task 88: the team's test configuration for its Tests settings: read it, or check a candidate override; neither writes. */
+  | { kind: "test_config"; action: "get" | "check"; tests?: Record<string, unknown> | null }
   /** Task 108: the build folders Zerus holds: the Disk view, a dry run or Clean now, the policy, forget a reviewed folder. */
   | { kind: "disk"; action: "list" | "clean" | "policy" | "forget"; scope?: "policy" | "all"; dry_run?: boolean;
       policy?: { enabled: boolean; unused_days: number; free_gb: number; free_percent: number }; paths?: string[]; path?: string; refresh?: boolean; measure?: boolean }

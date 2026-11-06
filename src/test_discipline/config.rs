@@ -519,6 +519,10 @@ pub struct Provider {
     /// Turned off, here or by the owner's override.
     #[serde(default, skip_serializing_if = "std::ops::Not::not")]
     pub disabled: bool,
+    /// Task 88: the report a suite's run leaves (junit, trx or unreal), read
+    /// into one result per test.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub results: Option<TemplateResults>,
 }
 
 fn rule_build() -> Rule {
@@ -670,6 +674,21 @@ fn validate(config: &TestsConfig) -> anyhow::Result<()> {
             provider.name,
             provider.resources
         );
+        if let Some(results) = &provider.results {
+            anyhow::ensure!(
+                crate::state::teams::run_results::Format::parse(&results.format).is_some(),
+                "The provider {}'s results format is junit, trx or unreal (got {})",
+                provider.name,
+                results.format
+            );
+            let path = std::path::Path::new(&results.path);
+            anyhow::ensure!(
+                !results.path.trim().is_empty() && path.is_relative() && !results.path.contains(':') && !path.components().any(|part| part == std::path::Component::ParentDir),
+                "The provider {}'s results path is a path inside the project (got {})",
+                provider.name,
+                results.path
+            );
+        }
         for rule in &provider.paths {
             anyhow::ensure!(!rule.files.is_empty(), "A path rule of {} names its files", provider.name);
             anyhow::ensure!(

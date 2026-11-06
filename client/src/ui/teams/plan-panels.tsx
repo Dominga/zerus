@@ -1,4 +1,4 @@
-import { For, Show } from "solid-js";
+import { For, Show, createSignal } from "solid-js";
 import type { JSX } from "solid-js";
 import { tr } from "../../i18n";
 import type { TeamProfileView, TeamTestsView } from "../../types";
@@ -16,6 +16,9 @@ import {
   stageName,
   testStatus,
   testsRows,
+  reportCounts,
+  caseName,
+  caseFailed,
   type PlanMode,
 } from "./planModes";
 
@@ -340,6 +343,7 @@ export function TestsPanel(props: {
   onMore?: () => void;
 }): JSX.Element {
   const rows = () => testsRows(props.tests);
+  const [open, setOpen] = createSignal("");
   return (
     <div class="pm-tests">
       <Show when={props.tests} fallback={<p class="pm-empty">{tr("Reading the tests…")}</p>}>
@@ -355,13 +359,37 @@ export function TestsPanel(props: {
         <Show when={rows().runs.length > 0} fallback={<p class="pm-empty">{tr("No test runs recorded")}</p>}>
           <For each={rows().runs.slice(0, 50)}>
             {(run) => (
-              <div class={`pm-run pm-${testStatus(run.status)}`}>
-                <span class="pm-run-status">{runStatusLabel(run.status)}</span>
-                <b class="pm-run-suite">{run.suite}</b>
-                <span class="grow" />
-                <span>{runTime(run.duration_ms)}</span>
-                <Show when={run.runner}><span class="pm-note">{run.runner}</span></Show>
-              </div>
+              <>
+                <div class={`pm-run pm-${testStatus(run.status)}`} data-run={run.id}
+                  role={run.report ? "button" : undefined} tabIndex={run.report ? 0 : undefined}
+                  onClick={() => { if (run.report) setOpen(open() === run.id ? "" : run.id); }}>
+                  <span class="pm-run-status">{runStatusLabel(run.status)}</span>
+                  <b class="pm-run-suite">{run.suite}</b>
+                  {/* Task 88: how its tests went, from the provider's report. */}
+                  <Show when={run.report}>{(report) => (
+                    <span classList={{ "pm-note": true, "pm-run-bad": report().failed + report().errors > 0 }} data-run-counts>{reportCounts(report())}</span>
+                  )}</Show>
+                  <span class="grow" />
+                  <span>{runTime(run.duration_ms)}</span>
+                  <Show when={run.runner}><span class="pm-note">{run.runner}</span></Show>
+                </div>
+                <Show when={open() === run.id && run.report}>{(report) => (
+                  <div class="pm-cases" data-run-cases={run.id}>
+                    <Show when={report().note}><p class="pm-note">{report().note}</p></Show>
+                    <For each={report().results}>{(test) => (
+                      <div classList={{ "pm-case": true, "pm-case-bad": caseFailed(test) }} data-case-status={test.status}>
+                        <span class="pm-case-name">{caseName(test)}</span>
+                        <span class="grow" />
+                        <span class="pm-note">{runTime(test.ms)}</span>
+                        <Show when={test.message}><p class="pm-case-message">{test.message}</p></Show>
+                      </div>
+                    )}</For>
+                    <Show when={report().passed + report().failed + report().skipped + report().errors > report().results.length}>
+                      <p class="pm-note">{tr("%1 more tests in the record", report().passed + report().failed + report().skipped + report().errors - report().results.length)}</p>
+                    </Show>
+                  </div>
+                )}</Show>
+              </>
             )}
           </For>
         </Show>

@@ -1402,6 +1402,30 @@ pub struct TestRunView {
     pub reused_from: String,
     pub due: bool,
     pub over_budget: bool,
+    /// Task 88: one result per test from the provider's report (counts,
+    /// note and at most `REPORT_RESULTS` results, failures first), or null.
+    pub report: Value,
+}
+
+/// Task 88: the results of one run the Tests mode shows; the counts cover the rest.
+const REPORT_RESULTS: usize = 200;
+
+/// Task 88: a run's report as the view carries it, every text bounded.
+fn test_report(value: Option<&Value>) -> Value {
+    let Some(report) = value.filter(|report| report.is_object()) else { return Value::Null };
+    let results: Vec<Value> = report["results"]
+        .as_array()
+        .into_iter()
+        .flatten()
+        .take(REPORT_RESULTS)
+        .map(|result| {
+            json!({"suite":text(result, "suite", LINE_CHARS),"name":text(result, "name", LINE_CHARS),"status":name(result, "status"),
+                "ms":result.get("ms").and_then(Value::as_u64).unwrap_or(0),"message":text(result, "message", LINE_CHARS)})
+        })
+        .collect();
+    let count = |key: &str| report.get(key).and_then(Value::as_u64).unwrap_or(0);
+    json!({"passed":count("passed"),"failed":count("failed"),"skipped":count("skipped"),"errors":count("errors"),
+        "note":text(report, "note", LINE_CHARS),"results":results})
 }
 
 /// `team test` for the Tests mode: the queue and one page of results.
@@ -1449,6 +1473,7 @@ pub fn tests(team: &str, queue: &Value, results: &Value) -> TestsView {
                 reused_from: name(run, "reused_from"),
                 due: flag(run, "due"),
                 over_budget: flag(run, "over_budget"),
+                report: test_report(run.get("report")),
             })
             .collect(),
         next: results.get("next_cursor").and_then(Value::as_f64),

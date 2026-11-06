@@ -34,6 +34,24 @@ pub(super) fn decode(bytes: &[u8], until: Instant) -> Result<BTreeSet<u32>> {
     Ok(pids)
 }
 
+/// Private test framing only. Libtest can leave its progress prefix on the
+/// current stdout line before invoking an exact ignored probe with nocapture.
+#[cfg(test)]
+pub(super) fn private_report_frame(json: &str) -> String {
+    format!("\nfile-users-report-v1={json}\n")
+}
+#[cfg(test)]
+pub(super) fn private_report_line(stdout: &str) -> Result<&str> {
+    let mut rows = stdout
+        .lines()
+        .filter_map(|line| line.strip_prefix("file-users-report-v1="));
+    let row = rows.next().ok_or(Error::Incomplete)?;
+    if rows.next().is_some() {
+        return Err(Error::Incomplete);
+    }
+    Ok(row)
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -73,5 +91,20 @@ mod tests {
         assert_eq!(decode(&native, until()).unwrap(), [40].into());
         // This is an empty DATA set, with no Complete or Clear representation.
         assert!(decode(&bytes(&[]), until()).unwrap().is_empty());
+    }
+    #[test]
+    fn private_report_starts_a_new_line_and_keeps_the_exact_single_record_rule() {
+        // Captured from an actual --exact --ignored --nocapture --test-threads=1
+        // libtest subprocess: its progress prefix has NO terminating newline.
+        let progress = "\nrunning 1 test\ntest report_probe ... ";
+        let json = r#"{"request":"private-fixture","outcome":"data_only"}"#;
+        let old = format!("{progress}file-users-report-v1={json}\nok\n");
+        assert!(private_report_line(&old).is_err());
+        let frame = private_report_frame(json);
+        let stdout = format!("{progress}{frame}ok\n");
+        assert_eq!(private_report_line(&stdout).unwrap(), json);
+        assert!(private_report_line(&format!("{stdout}{frame}")).is_err());
+        assert!(private_report_line("test probe ... ok\n").is_err());
+        assert!(private_report_line(&format!("decoy file-users-report-v1={json}\n")).is_err());
     }
 }

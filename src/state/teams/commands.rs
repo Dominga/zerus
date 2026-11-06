@@ -3268,7 +3268,7 @@ fn active_team_records(store: &Store) -> anyhow::Result<Vec<Team>> {
 }
 
 /// The stored team list the desktop polls: no live session listing (C1).
-fn list_items(teams: &[Team], include_cancelled: bool) -> Value {
+pub(crate) fn list_items(teams: &[Team], include_cancelled: bool) -> Value {
     json!({"items":teams.iter().map(|team| summary(team, include_cancelled)).collect::<Vec<_>>()})
 }
 

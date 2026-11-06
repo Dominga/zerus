@@ -2128,6 +2128,28 @@ one inbox item and `member_crashed`; pausing the team stops restarts, a member
 the team paused is never restarted, and a launch that fails records
 `restart_failed`.
 
+### The team store never makes a reader wait
+
+The teams live in one SQLite file, `teams/teams.sqlite3` under the state root.
+Since task 105 it runs in WAL mode: a reader (`hgs team list`, status, the
+desktop's polls, the watch) reads the last committed state while a writer works,
+and a writer never waits for readers. Before, in the rollback-journal mode, a
+writer's commit waited for the readers and new readers waited behind it, so a
+list could fail with "database is locked" after its 10 s wait; measured on a
+copy of a live store, a write of a 3.7 MB team waited up to 17.5 s.
+
+The first write open of an older store switches it (it waits 2 s for the other
+connections; a busy store is switched by a later open). The `-wal` and `-shm`
+files stay beside the store when the last connection closes, so a read-only
+sandboxed reader can still open it; on Windows they inherit the folder's Low
+integrity label like every file there. The log is checkpointed every 4000
+pages and kept at 64 MB at most. Where SQLite refuses WAL (a store on a network
+folder) the store stays in the rollback-journal mode. An older hgs reads a WAL
+store; its write open switches it back to the rollback journal when no other
+connection has it open, and this hgs's next write open switches it again.
+`hgs team list` reads every record before it parses any, so a read never holds
+the store while megabytes of JSON parse.
+
 ### A stalled lead tells the owner
 
 When the lead's decisions (a member's report, question or permission) have
@@ -6604,7 +6626,8 @@ client reads a team again with `hgs team status`, `inbox` and `events` when its
 revision moved instead of polling them. At most 1000 heads go out, the most
 recently changed first; `truncated` says more exist. A worker thread reads them
 with one indexed query and never writes. It reads again when a stat of the
-store or its rollback journal changes and at least every 30 s, at most once a
+store, its rollback journal or its write-ahead log changes and at least every
+30 s, at most once a
 second. The first rows go out as a paged `snapshot`, a later change as one
 `delta` of the changed rows and removed keys. A delta the client is too far
 behind to take becomes `gap` (`overflow`) and a fresh snapshot once it caught

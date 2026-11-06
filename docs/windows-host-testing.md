@@ -436,6 +436,41 @@ drops the test variables and installs into its temporary profile.
   breakaway makes `__host call --start` fail instead of starting a host that would
   end with that job.
 
+## CI wrapper deadlines and retained installer artifacts
+
+`scripts/ci/outside-job.py` gives the outside test copy its own execution deadline,
+including WMI startup. It writes directly to a regular log file. On expiration it
+records a bounded process snapshot before the existing fixture-tree/image
+cleanup; cleanup shares 120 seconds, with up to 30 seconds per utility plus
+bounded native exit observation. The step follower allows 30 seconds for the
+copy to start cleanup, then uses that same cleanup deadline for its fallback.
+A growing log is read in 16 KiB chunks, so following it cannot postpone the next
+deadline check indefinitely.
+
+WMI launch, taskkill and PowerShell diagnostics use a private utility worker.
+Before its fixed one-byte release, the parent assigns it to a non-breakaway
+kill-on-close Job Object. Output uses regular files, not captured pipes or the
+step's inherited output handles. Timeout terminates the whole utility job and
+observes its active process count, without `communicate()` or an unbounded
+`Popen` context-manager wait. This avoids CPython's Windows post-timeout pipe
+read, which otherwise waits for descendants retaining stdout/stderr. Native
+Windows controls and Unix controls cover both a timed-out utility and a utility
+that exits successfully while its grandchild retains both outputs.
+
+The connector's `--custody-only` path retains its existing behavior: timeout
+leaves the original fixture/copy and its uncertain outcome in custody, with no
+PID/tree/image cleanup or new child deadline. No product job escape or process
+policy changes follow from this CI harness.
+
+The Windows job uploads `windows-x86_64-<sha>` immediately after packaging,
+before installer survival. Release assembly still requires successful checks;
+retention never makes a failed test pass. The following `always()` upload stores
+`windows-installer-logs-<sha>` separately, including the unbuffered test log,
+process diagnostics and Inno setup logs written directly into the artifact tree.
+Thus even a runner-level cancellation cannot lose the already retained zip and
+installer. Host kernel/filesystem stalls or runner loss can still prevent the
+later diagnostics upload; no in-process Python timeout can preempt those.
+
 ## Survival tests
 
 `tests/test_windows_host_survival.py` checks what a host outlives and what ends

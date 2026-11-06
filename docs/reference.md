@@ -2463,6 +2463,37 @@ Terminal, with its session, minutes and request. The escalation goes with its
 request (feed `terminal_prompt_raised`, `terminal_prompt_cleared`); Zerus never
 answers it.
 
+### A member's status is cross-checked from every source
+
+Task 139: `hgs team status` named members' states wrong (working while an
+approval waited, a prompt Zerus did not read, a delivery left in the composer).
+The dispatcher compares a member's sources: its session record (native hooks
+and events), a request Zerus read (`pending`, `terminal_question`), its
+Terminal's recognised panel (a question or approval, an unsent paste in the
+composer, an idle prompt, a working spinner), its process and jobs, and the time
+of its last event against the stuck bound. The screen is read only for a
+suspect member (busy without an event for 3 min, asking without a request Zerus
+read, idle with a hand-out unreported for 3 min, or a disagreement still open),
+at most every 3 min (1 min while it disagrees), two members at a time and on its
+own thread, never on the tick.
+
+Sources that disagree for 60 s make the member `uncertain`: status shows its
+`phase` and `activity` as `uncertain` and `check` with `state`, `since` and the
+disagreements in words; it never shows a confident `working`. The lead is told
+once per episode, with the disagreements, the screen's last lines and how to
+look again (feed `member_uncertain`, `member_uncertain_told`); agreement or a
+member no longer suspect ends it (`member_check_settled`). An idle lead with
+decisions waiting (task 95's stall, reason `idle`) is told itself once a round
+(`lead_idle_told`).
+
+`hgs team look MEMBER [--team ID]`, or `{"member":"dev","team":ID} | hgs team look
+--json`, reads the member's screen now and answers one compact snapshot: the
+reconciled `state` (`uncertain`, `settling` within the grace), `disagree`,
+`sources` (hooks, record, screen, process, activity), the last 12 `screen`
+lines, its open `task`, its `pulse` and `next`, what Zerus does next. It
+changes nothing. A member is named by id, role or session; with several teams
+the caller's own team is taken first.
+
 ### The profile of the work: losses, spans and unknown
 
 `hgs team profile` reads a scope after the work: where its time and tokens

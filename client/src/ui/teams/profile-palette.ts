@@ -5,27 +5,32 @@ import { tr } from "../../i18n";
 // (tray/src/TeamProfile.cpp; a test keeps them equal). One fixed palette in
 // every skin: any two kinds at least 24 apart (CIE76), every colour at least
 // 3:1 against every shipped lane background, and every wait its own hatch, so
-// a wait is told by its pattern too, not only by hue.
+// a wait is told by its pattern too, not only by hue. Task 93 (owner: "the
+// green is too toxic"): calm colours, CIE LCh chroma at most CHROMA_CAP, in
+// the skin's own lightness bands, with work the skin's mint.
 
 export type Pattern = "solid" | "dots" | "bdiag" | "fdiag" | "diagcross" | "hor" | "ver" | "cross";
 export interface KindStyle { key: string; dark: string; light: string; pattern: Pattern }
 
+/** Task 93: the most saturated a kind may be (CIE LCh chroma), per theme. */
+export const CHROMA_CAP = { dark: 45, light: 55 } as const;
+
 export const KIND_STYLES: readonly KindStyle[] = [
-  { key: "work", dark: "#07ab2d", light: "#0f7d41", pattern: "solid" },
-  { key: "rework", dark: "#f3a065", light: "#803e03", pattern: "solid" },
-  { key: "build", dark: "#e5c043", light: "#8a7216", pattern: "solid" },
-  { key: "review", dark: "#8075e6", light: "#3c3886", pattern: "solid" },
-  { key: "test", dark: "#278cbc", light: "#137aa6", pattern: "solid" },
-  { key: "stage", dark: "#98b3f2", light: "#2b6dc0", pattern: "solid" },
-  { key: "blocked", dark: "#d1625b", light: "#81191e", pattern: "solid" },
-  { key: "background", dark: "#0ba4a7", light: "#0d8072", pattern: "solid" },
-  { key: "delivery", dark: "#848484", light: "#666666", pattern: "dots" },
-  { key: "member", dark: "#c362a2", light: "#78185d", pattern: "bdiag" },
-  { key: "deps", dark: "#708e34", light: "#416000", pattern: "fdiag" },
-  { key: "lead", dark: "#be57de", light: "#6a1a84", pattern: "diagcross" },
-  { key: "folder_held", dark: "#bc7305", light: "#bc7305", pattern: "hor" },
-  { key: "hold", dark: "#c4c4c4", light: "#5f3643", pattern: "ver" },
-  { key: "stage_wait", dark: "#6ad0fb", light: "#224560", pattern: "cross" },
+  { key: "work", dark: "#7dd3b0", light: "#3f9f7b", pattern: "solid" },
+  { key: "rework", dark: "#df9c77", light: "#83441d", pattern: "solid" },
+  { key: "build", dark: "#9f8347", light: "#8b6e28", pattern: "solid" },
+  { key: "review", dark: "#afa3e4", light: "#453e80", pattern: "solid" },
+  { key: "test", dark: "#0e90be", light: "#0e90be", pattern: "solid" },
+  { key: "stage", dark: "#bcd2fe", light: "#2b6aae", pattern: "solid" },
+  { key: "blocked", dark: "#c26f6d", light: "#7f282d", pattern: "solid" },
+  { key: "background", dark: "#14acb0", light: "#078487", pattern: "solid" },
+  { key: "delivery", dark: "#868686", light: "#686868", pattern: "dots" },
+  { key: "member", dark: "#b96f97", light: "#792758", pattern: "bdiag" },
+  { key: "deps", dark: "#899d5d", light: "#354e03", pattern: "fdiag" },
+  { key: "lead", dark: "#fdc5ff", light: "#925fa0", pattern: "diagcross" },
+  { key: "folder_held", dark: "#fcd6b2", light: "#58432d", pattern: "hor" },
+  { key: "hold", dark: "#c1c1c1", light: "#314d38", pattern: "ver" },
+  { key: "stage_wait", dark: "#59d6f5", light: "#174d5a", pattern: "cross" },
 ];
 
 /** A span's palette key, as Qt's kindKey: question, permission, stop and no_report are "blocked"; delivery and start_delay one key; other stages "stage". */
@@ -97,14 +102,22 @@ export function contrast(a: string, b: string): number {
 /** A label's colour on a bar of `fill`: near black or white, whichever reads better. */
 export const labelOn = (fill: string) => (contrast(fill, "#101418") >= contrast(fill, "#ffffff") ? "#101418" : "#ffffff");
 
+/** CIELAB (D65) of a #rrggbb colour. */
+export function lab(hex: string): [number, number, number] {
+  const [r, g, bl] = [1, 3, 5].map((at) => linear(channel(hex, at)));
+  const f = (t: number) => (t > 0.008856 ? Math.cbrt(t) : 7.787 * t + 16 / 116);
+  const x = (0.4124 * r + 0.3576 * g + 0.1805 * bl) / 0.95047, y = 0.2126 * r + 0.7152 * g + 0.0722 * bl, z = (0.0193 * r + 0.1192 * g + 0.9505 * bl) / 1.08883;
+  return [116 * f(y) - 16, 500 * (f(x) - f(y)), 200 * (f(y) - f(z))];
+}
+
+/** Task 93: a colour's CIE LCh chroma, how saturated it looks. */
+export function chroma(hex: string): number {
+  const [, a, b] = lab(hex);
+  return Math.hypot(a, b);
+}
+
 /** CIE76 distance of two #rrggbb colours. */
 export function distance(a: string, b: string): number {
-  const lab = (hex: string) => {
-    const [r, g, bl] = [1, 3, 5].map((at) => linear(channel(hex, at)));
-    const f = (t: number) => (t > 0.008856 ? Math.cbrt(t) : 7.787 * t + 16 / 116);
-    const x = (0.4124 * r + 0.3576 * g + 0.1805 * bl) / 0.95047, y = 0.2126 * r + 0.7152 * g + 0.0722 * bl, z = (0.0193 * r + 0.1192 * g + 0.9505 * bl) / 1.08883;
-    return [116 * f(y) - 16, 500 * (f(x) - f(y)), 200 * (f(y) - f(z))];
-  };
   const [p, q] = [lab(a), lab(b)];
   return Math.hypot(p[0] - q[0], p[1] - q[1], p[2] - q[2]);
 }

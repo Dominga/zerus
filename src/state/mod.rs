@@ -100,6 +100,7 @@ mod startup_choice;
 mod terminal;
 mod conversation_history;
 mod usage;
+mod usage_samples;
 mod workspace;
 mod git_status;
 pub(crate) mod repositories;

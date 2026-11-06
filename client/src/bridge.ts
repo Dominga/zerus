@@ -111,6 +111,9 @@ export const teamsProfile = (computer: ComputerId) => inTauri() ? invoke<boolean
 /** Task 41: the Tests mode's queue and one bounded result page through the core. */
 export const teamTests = (computer: ComputerId, team: string, before: number | null) =>
   inTauri() ? invoke<import("./types").TeamTestsView>("team_tests", { computer, team, before }) : Promise.reject(new Error("Teams need the desktop app."));
+/** Task 92: the profile's Time view of one scope (a phase, or the plan with null), read on request through the core. */
+export const teamTimeline = (computer: ComputerId, team: string, phase: number | null) =>
+  inTauri() ? invoke<import("./types").TeamTimelineView>("team_timeline", { computer, team, phase }) : Promise.reject(new Error("Teams need the desktop app."));
 export const openTaskAttachment = (path: string) => desktop<string | null>("task_attachment_open", { path });
 
 /** `next_batch` answers with raw JSON bytes (`ipc::Response`), so large batches skip script evaluation. */
@@ -250,6 +253,9 @@ export function normalize(b: Partial<Batch>): Batch {
     desktop_service: b.desktop_service ?? undefined,
     processes_view: b.processes_view ?? undefined,
     composer: b.composer ?? undefined, draft_keys: b.draft_keys ?? undefined, composer_events: b.composer_events ?? undefined,
+    // Task 76: the Teams views (list, Waiting, a team) arrive in batch.teams;
+    // dropping them here left the Team tab and Waiting for you unread.
+    teams: b.teams ?? undefined,
   };
 }
 

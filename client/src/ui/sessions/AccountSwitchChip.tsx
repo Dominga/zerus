@@ -1,16 +1,16 @@
-import { For, Show, createSignal, onCleanup, onMount } from "solid-js";
+import { For, Show, createEffect, createSignal, onCleanup, onMount } from "solid-js";
 import type { JSX } from "solid-js";
 import { tr } from "../../i18n";
 import { Icon } from "../lib/icons";
 import { sessionSwitchAccount } from "../../bridge";
 import { accountsPage, loadAccounts } from "../../store/accounts";
-import { accountOf, accountOptions, switchOutcome, switchRequest, switchable } from "../../store/accountSwitch";
+import { accountOf, accountOptions, consumeAccountSwitch, switchOutcome, switchRequest, switchable } from "../../store/accountSwitch";
 import type { Session } from "./types";
 
 /** The composer's account chip (Qt AccountSwitchChip): the session's account,
  * the same agent's signed-in accounts, a confirmation with Cancel focused,
  * then `hgs switch-account`; the receipt is shown in the chip. */
-export function AccountSwitchChip(props: { session: Session; compact?: boolean }): JSX.Element {
+export function AccountSwitchChip(props: { session: Session; compact?: boolean; locked?: string }): JSX.Element {
   const [open, setOpen] = createSignal(false);
   const [target, setTarget] = createSignal<{ id: string; label: string }>();
   const [busy, setBusy] = createSignal(false);
@@ -22,6 +22,8 @@ export function AccountSwitchChip(props: { session: Session; compact?: boolean }
   const current = () => accountOf(provider(), props.session.accountId ?? "");
   const options = () => accountOptions(accountsPage(), props.session.computer, provider(), current());
   const label = () => options().find((option) => option.id === current())?.label || props.session.accountId || tr("Native account");
+  const locked = () => props.locked ?? "";
+  createEffect(() => { if (consumeAccountSwitch(props.session.key)) { setOpen(true); void loadAccounts(); } });
   const close = (focus = false) => {
     setOpen(false);
     setTarget(undefined);
@@ -61,11 +63,12 @@ export function AccountSwitchChip(props: { session: Session; compact?: boolean }
   return (
     <Show when={switchable(provider())}>
       <span class="acct-switch">
-        <button ref={chip} type="button" class="tchip" classList={{ icon: props.compact }} title={tr("Account: %1", label())}
-          aria-haspopup="menu" aria-expanded={open()} onClick={() => { setOpen(!open()); if (!open()) void loadAccounts(); }}>
-          <Icon name="accounts" size={13} /><Show when={!props.compact}><span class="ell">{label()}</span></Show>
+        <button ref={chip} type="button" class="tchip" classList={{ icon: props.compact, locked: !!locked() }}
+          title={locked() || tr("Account: %1", label())} aria-haspopup="menu" aria-expanded={open()} aria-disabled={!!locked()}
+          onClick={() => { if (locked()) return; setOpen(!open()); if (!open()) void loadAccounts(); }}>
+          <Icon name="accounts" size={13} /><Show when={!props.compact}><span class="ell">{locked() ? tr("%1 (locked)", label()) : label()}</span></Show>
         </button>
-        <Show when={open()}>
+        <Show when={open() && !locked()}>
           <div class="acct-switch-pop" role="menu" aria-label={tr("Accounts on this computer")}>
             <Show when={options().length > 0} fallback={<span class="dim acct-switch-empty">{tr("No other signed-in account.")}</span>}>
               <For each={options()}>
@@ -102,3 +105,5 @@ export function AccountSwitchChip(props: { session: Session; compact?: boolean }
     </Show>
   );
 }
+
+

@@ -136,6 +136,12 @@ pub(crate) struct Settings {
     /// reaches the owner's attention list; 0 turns only that off.
     #[serde(default = "default_remind_owner_permission")]
     pub remind_owner_permission_minutes: u64,
+    /// Task 95 (owner, 2026-11-06): minutes the lead's decisions (reports,
+    /// questions, permissions) may wait while its session does not work on
+    /// them before the owner is told the lead stalled; 0 turns it off. Only
+    /// the owner sets it.
+    #[serde(default = "default_lead_stall")]
+    pub lead_stall_minutes: u64,
     /// Minutes a Background job without a declared budget may run before the
     /// lead hears it is red (C12).
     #[serde(default = "default_background_red")]
@@ -282,6 +288,11 @@ fn default_remind_owner() -> u64 {
 fn default_remind_owner_permission() -> u64 {
     10
 }
+/// Task 95: the owner hears of a stalled lead after 20 minutes.
+pub(crate) const DEFAULT_LEAD_STALL_MINUTES: u64 = 20;
+fn default_lead_stall() -> u64 {
+    DEFAULT_LEAD_STALL_MINUTES
+}
 fn default_background_red() -> u64 {
     30
 }
@@ -305,6 +316,7 @@ impl Default for Settings {
             remind_lead_minutes: default_remind_lead(),
             remind_owner_minutes: default_remind_owner(),
             remind_owner_permission_minutes: default_remind_owner_permission(),
+            lead_stall_minutes: default_lead_stall(),
             background_red_minutes: default_background_red(),
             worktrees_forbidden: false,
             resume_after_limits: false,
@@ -1487,6 +1499,26 @@ impl Attempt {
     }
 }
 
+/// Task 81: where a task should start and end by the estimates when its plan
+/// was approved. A moment is None where an estimate on the way was missing:
+/// lateness against it is unknown, never a guess.
+#[derive(Clone, Debug, Default, Deserialize, Serialize, PartialEq)]
+pub(crate) struct Baseline {
+    /// When the baseline was fixed.
+    pub at: f64,
+    /// The task's estimate then, in seconds.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub estimate_s: Option<f64>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub start: Option<f64>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub end: Option<f64>,
+    /// The tasks it was planned to follow: its hard dependencies and the
+    /// member's previous task. Their delay is the task's inherited lateness.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub after: Vec<u32>,
+}
+
 #[derive(Clone, Debug, Default, Deserialize, Serialize, PartialEq)]
 pub(crate) struct Task {
     pub id: u32,
@@ -1539,6 +1571,11 @@ pub(crate) struct Task {
     /// `history`, `role`, `lead` or `none`: where the estimate came from.
     #[serde(default, skip_serializing_if = "no_estimate_source")]
     pub estimate_source: String,
+    /// Task 81: the schedule this task was planned on when it was approved (or
+    /// added to a running plan), fixed from then on: lateness is measured
+    /// against it. Absent on a task saved before, or one already running.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub baseline: Option<Baseline>,
     /// U27: the visual lane this task is drawn in, set by the lead or the owner;
     /// it changes nothing about hand-out.
     #[serde(default, skip_serializing_if = "Option::is_none")]
@@ -2286,6 +2323,64 @@ pub(crate) struct Team {
     /// revocation.
     #[serde(default, skip_serializing_if = "is_zero_u64")]
     pub intakes_seq: u64,
+    /// Task 95: the lead's decisions wait past `lead_stall_minutes` while its
+    /// session does not work on them; the owner is told, again at most
+    /// hourly, until the lead moves.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub lead_stall: Option<LeadStall>,
+}
+
+/// Task 95 (owner, 2026-11-06): the lead stopped working while decisions wait
+/// for it: one owner-level item, notified once per `round`.
+#[derive(Clone, Debug, Default, Deserialize, Serialize, PartialEq)]
+pub(crate) struct LeadStall {
+    /// When the dispatcher raised it.
+    pub since: f64,
+    /// What the lead waits on: `question` (its own question or permission),
+    /// `rejected_tool` (a refused tool call ended its turn), `exited` (its
+    /// agent stopped) or `idle`.
+    pub reason: String,
+    /// The lead's own question, when `reason` is `question`.
+    #[serde(default, skip_serializing_if = "String::is_empty")]
+    pub detail: String,
+    /// The decisions waiting past the threshold, and the members they block.
+    pub items: u32,
+    pub members: u32,
+    /// The oldest of those decisions.
+    pub oldest: f64,
+    /// The notification number: 1 when raised, one more each repeat.
+    pub round: u32,
+    /// When the owner was last notified (the round started).
+    pub notified_at: f64,
+}
+
+impl LeadStall {
+    /// At most one notification per this many seconds.
+    pub(crate) const REPEAT_SECONDS: f64 = 3600.0;
+
+    /// The sentence that names what the lead waits on.
+    pub(crate) fn waits_on(&self) -> String {
+        match self.reason.as_str() {
+            "question" if !self.detail.is_empty() => format!("its own question: {}", self.detail),
+            "question" => "its own question or permission".into(),
+            "rejected_tool" => "a refused tool call ended its turn".into(),
+            "exited" => "its agent exited".into(),
+            _ => "it is idle".into(),
+        }
+    }
+
+    /// The owner-facing title: what the lead waits on and what it blocks.
+    pub(crate) fn title(&self, now: f64) -> String {
+        let minutes = ((now - self.oldest).max(0.0) / 60.0).round() as u64;
+        let items = if self.items == 1 { "1 decision".to_owned() } else { format!("{} decisions", self.items) };
+        let members = match self.members {
+            0 => String::new(),
+            1 => ", 1 member blocked".to_owned(),
+            n => format!(", {n} members blocked"),
+        };
+        format!("The lead stalled ({}): {items} wait{} for it, the oldest {minutes} min{members}",
+            self.waits_on(), if self.items == 1 { "s" } else { "" })
+    }
 }
 
 /// #511 N3: a revoked worked-ahead attempt whose member must stop. The
@@ -2690,6 +2785,9 @@ mod tests {
             ),
             (120, 15, 60, 10)
         );
+        // Task 95: an old team hears of a stalled lead after the default.
+        assert_eq!(team.settings.lead_stall_minutes, 20);
+        assert!(team.lead_stall.is_none());
         assert_eq!(team.settings.background_red_minutes, 30);
         assert!(team.inbox.told.is_empty() && team.inbox.told_at == 0.0);
         assert!(team.members.iter().all(|member| member.pending.is_none()));

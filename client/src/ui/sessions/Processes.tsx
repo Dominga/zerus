@@ -2,7 +2,7 @@ import { For, Show, createEffect, on } from "solid-js";
 import { Spinner } from "../components/Status";
 import { copyVerbatim } from "../../bridge";
 import { notify } from "../../store/actions";
-import { createOutputFollow, groupItem, processes } from "../../store/processes";
+import { createOutputFollow, groupItem, processes, summaryText } from "../../store/processes";
 import { setMenu } from "../../store/ui";
 import type { ProcessesView } from "../../types";
 import { tr } from "../../i18n";
@@ -72,7 +72,7 @@ export function ProcessesTab() {
         {(v) => (
           <>
             <div class="proc-summary">
-              <span class="proc-summary-text" title={v().summary_tooltip}>{v().summary}</span>
+              <span class="proc-summary-text" title={v().summary_tooltip}>{summaryText(v().summary)}</span>
               <Show when={v().busy}><Spinner size={12} /></Show>
               <span class="grow" />
               <button class="btn small danger" disabled={!v().stop.enabled} title={v().stop.tooltip} onClick={() => processes.stop()}>{v().stop.label}</button>

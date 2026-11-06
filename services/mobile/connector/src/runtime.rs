@@ -634,7 +634,8 @@ impl<N: Native + 'static> Connector<N> {
                 continue;
             };
             if let (Some(cards), Some(row)) = (state.attention.get(&key), row.as_object_mut()) {
-                row.insert("mobile_attention".into(), cards.clone());
+                let merged = merge_attention(row.get("mobile_attention"), cards);
+                row.insert("mobile_attention".into(), merged);
             }
         }
     }
@@ -1229,6 +1230,38 @@ fn attention_cards(detail: &Value, key: &(String, String, String)) -> Option<Val
             })
             .collect(),
     ))
+}
+
+/// The connector's question cards, after the row's own team alerts (task 95:
+/// hgs puts a stalled lead's `team_lead_stall` item on the lead's row). Only
+/// those alerts are kept: every other row item is the cards' to replace.
+fn merge_attention(row: Option<&Value>, cards: &Value) -> Value {
+    let mut merged: Vec<Value> = row
+        .and_then(Value::as_array)
+        .into_iter()
+        .flatten()
+        .filter(|item| item.get("kind").and_then(Value::as_str) == Some("team_lead_stall"))
+        .cloned()
+        .collect();
+    merged.extend(cards.as_array().into_iter().flatten().cloned());
+    Value::Array(merged)
+}
+
+#[cfg(test)]
+mod attention_merge_tests {
+    use super::*;
+
+    #[test]
+    fn a_team_alert_on_the_row_survives_the_question_cards() {
+        let alert = json!({"question_id":"team-lead-stall:t:2","question_hash":"h","kind":"team_lead_stall"});
+        let stale = json!({"question_id":"old","question_hash":"o"});
+        let cards = json!([{"question_id":"q1","question_hash":"h1"}]);
+        let merged = merge_attention(Some(&json!([alert.clone(), stale])), &cards);
+        assert_eq!(merged, json!([alert, {"question_id":"q1","question_hash":"h1"}]));
+        // Without a team alert the cards replace the row's items, as before.
+        assert_eq!(merge_attention(Some(&json!([{"question_id":"old","question_hash":"o"}])), &cards), cards);
+        assert_eq!(merge_attention(None, &cards), cards);
+    }
 }
 
 #[cfg(test)]

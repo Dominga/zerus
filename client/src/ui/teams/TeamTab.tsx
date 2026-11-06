@@ -6,7 +6,7 @@ import { coordinatorActivity, activity } from "../../store/session";
 import { memberRow, showCatalog, showTeam, teams } from "../../store/teams";
 import { SHARE, SIDE, dragShare, dragSide, teamLayout, type TeamLayout } from "../../store/teamLayout";
 import { selected, setDetailTab, setSelectedKey } from "../../store/ui";
-import { teamTests, teamsProfile } from "../../bridge";
+import { teamTests, teamTimeline, teamsProfile } from "../../bridge";
 import { PlanView } from "./PlanView";
 import { TeamCatalogEditor } from "./TeamCatalogEditor";
 import { TeamSettingsDialog } from "./TeamSettingsDialog";
@@ -118,6 +118,7 @@ function TeamWorkspace(props: { computer: ComputerId; team: TeamView; failure?: 
                 profile={profile()}
                 tests={tests()}
                 onLoadProfile={() => { void teamsProfile(props.computer); }}
+                loadTimeline={(phase) => teamTimeline(props.computer, props.team.id, phase)}
                 onLoadTests={loadTests}
                 taskActions={(id) => {
                   const task = props.team.tasks.find((candidate) => candidate.id === id);
@@ -207,7 +208,11 @@ function TeamBar(props: {
       <button type="button" class="btn ghost small" onClick={props.onCatalog}>{tr("Catalog")}</button>
       <Show when={props.team.created > 0}><span class="dim team-age" title={tr("Since the team was created")}>{duration(now() - props.team.created)}</span></Show>
       <span class="grow" />
-      <TeamBarChips team={props.team} onPhase={props.onPhase} onFinish={() => setFinishOpen(true)} />
+      <TeamBarChips team={props.team} onPhase={props.onPhase} onFinish={() => setFinishOpen(true)} onLead={() => {
+        // Task 95: the lead's session shows what it waits on.
+        const lead = props.team.members.find((member) => member.lead);
+        if (lead) openRow(memberRow(props.computer, lead));
+      }} />
       <Show when={props.state === "planning"}><span class="team-note">{tr("The plan waits for your approval")}</span></Show>
       <Show when={props.state === "done"}><span class="team-note done"><Icon name="check" size={13} />{tr("All tasks are decided")}</span></Show>
       <Show when={props.team.status === "planning"}>

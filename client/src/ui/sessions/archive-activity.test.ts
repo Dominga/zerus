@@ -59,6 +59,9 @@ vi.mock("../../bridge", () => ({
   // The session side panel's Tasks tab reads task details through the bridge.
   onExitFlush: vi.fn(async () => () => {}), acknowledgeExitFlush: vi.fn(async () => {}),
   readTaskDetails: vi.fn(async () => null),
+  // The fork's Claude app dialog and SocratiCode panel (task 70) read through the bridge.
+  claudeAppSessions: vi.fn(() => new Promise(() => {})), claudeAppResume: vi.fn(() => new Promise(() => {})),
+  socraticodeStatus: vi.fn(() => new Promise(() => {})), socraticodeAct: vi.fn(() => new Promise(() => {})),
 }));
 
 import * as bridge from "../../bridge";

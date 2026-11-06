@@ -339,6 +339,9 @@ pub(crate) enum Step {
     /// The dispatcher saw a member's session live or stopped; status derives
     /// `stopped` from it without a listing of its own (L3).
     Liveness { member: String, live: bool },
+    /// Task 95: the lead's stall as this tick sees it: raised, repeated (a new
+    /// round), updated or cleared (None).
+    LeadStall { stall: Option<LeadStall> },
     /// U56: a pending task pinned to a stuck, stopped or offline member says so
     /// in its waits.
     WaitOnMember { task: u32, member: String, reason: String },
@@ -1051,6 +1054,13 @@ pub(crate) fn steps_with(team: &Team, seen: &[Seen], now: f64, listed: Option<&B
     // Background work or subagents keep it from being `free`, as long as its
     // turn has ended and it can take a message.
     let lead_ready = lead.is_some_and(can_take_a_message);
+    // Task 95: decisions wait for a lead that does not work on them: the
+    // owner hears it once a round, at most hourly, until the lead moves.
+    if let Some(stall) = super::lead_stall::desired(team, seen, now, listed) {
+        if stall != team.lead_stall {
+            steps.push(Step::LeadStall { stall });
+        }
+    }
     // N4: the sub-lead's reminder does not wait for the lead's turn to end -
     // only the lead's own reminder needs a lead that can take a message.
     if team.settings.remind_lead_minutes > 0 {
@@ -4270,6 +4280,7 @@ fn hand_out_now(
         &rules_team,
         rules_team.member(member_id).context("Unknown member")?,
     )?;
+    sample_member_usage(&rules_team, member_id);
     // Record the attempt before sending; a crash leaves it Unconfirmed.
     let attempt_id = uuid::Uuid::new_v4().to_string();
     let mut message = None;
@@ -4438,6 +4449,7 @@ fn stage_hand_out(store: &mut Store, team_id: &str, task_id: u32, member_id: &st
     anyhow::ensure!(team.status == TeamStatus::Running, "the team is not running");
     let member = team.member(member_id).cloned().with_context(|| format!("Unknown member {member_id}"))?;
     let session = member.session.clone().context("no session")?;
+    sample_member_usage(&team, member_id);
     let member_host = member.computer.clone();
     let (run_id, stage_role) = {
         let task = team.task(task_id).context("unknown task")?;
@@ -6891,6 +6903,13 @@ fn run_step(store: &mut Store, team: &Team, step: &Step, host: &str) -> anyhow::
             }
             Ok(())
         }),
+        Step::LeadStall { stall } => change(store, &team.id, |team, events| {
+            if let Some((kind, data)) = super::lead_stall::event(team.lead_stall.as_ref(), stall.as_ref(), now()) {
+                events.push(Event::new(kind, data));
+            }
+            team.lead_stall = stall.clone();
+            Ok(())
+        }),
         Step::Restart { member } => restart_crashed(store, team, member),
         Step::CrashStopped { member } => crash_stopped(store, team, member),
         Step::Services { member, services } => change(store, &team.id, |team, _| {
@@ -7077,6 +7096,7 @@ pub(crate) fn tick(store: &mut Store, host: &str) -> anyhow::Result<bool> {
     let listing: Value = serde_json::from_slice(&output.stdout).context("invalid hgs ls output")?;
     let sessions = seen(&listing);
     let listed = listed_hosts(&listing);
+    sample_usage(&teams, &sessions);
     for team in &teams {
         if let Err(error) = take_outbox(store, team, &sessions) {
             eprintln!("hgs team worker: {}: outbox: {error}", team.name);
@@ -7100,6 +7120,37 @@ pub(crate) fn tick(store: &mut Store, host: &str) -> anyhow::Result<bool> {
         }
     }
     Ok(true)
+}
+
+/// DeepSeek reports only the running total of its tokens and keeps no history,
+/// so the team profile takes an attempt's tokens from counter samples taken at
+/// its ends (`usage_samples`). Reading a counter is an rpc to the session host
+/// (35 s timeout), so the tick only tells the sampler thread which local
+/// DeepSeek members run and which of them work; it never waits for a reading.
+fn sample_usage(teams: &[Team], seen: &[Seen]) {
+    let mut sessions: Vec<(String, bool)> = Vec::new();
+    for team in teams {
+        for member in team.members.iter().filter(|member| member.state != MemberState::Removed) {
+            let Some(session) = member.session.as_ref().filter(|session| session.host.is_empty()) else { continue };
+            let Some(found) = session_of(member, seen).filter(|found| found.agent == "dsh" && found.live) else { continue };
+            if !sessions.iter().any(|(name, _)| *name == session.name) {
+                sessions.push((session.name.clone(), !found.idle));
+            }
+        }
+    }
+    super::usage_sampler::SAMPLER.tick(&sessions, now());
+}
+
+/// The reading an attempt's or stage's start is measured from: the session's
+/// counters at the hand-out. The sampler thread takes it and records it at this
+/// moment (an idle member's counters do not move); the hand-out never waits.
+fn sample_member_usage(team: &Team, member_id: &str) {
+    let Some(session) = team.member(member_id).and_then(|member| member.session.as_ref()).filter(|session| session.host.is_empty()) else {
+        return;
+    };
+    if super::super::dsh::exists(&session.name) {
+        super::usage_sampler::SAMPLER.hand_out(&session.name, now());
+    }
 }
 
 /// N13: the folder the worker reads a member's outbox from is the one the
@@ -7992,6 +8043,9 @@ mod dispatcher_drafts;
 #[cfg(test)]
 #[path = "tests/dispatcher_stall.rs"]
 mod dispatcher_stall;
+#[cfg(test)]
+#[path = "tests/dispatcher_lead_stall.rs"]
+mod dispatcher_lead_stall;
 
 #[cfg(test)]
 #[path = "tests/dispatcher_areas.rs"]

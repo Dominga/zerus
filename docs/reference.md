@@ -2128,6 +2128,39 @@ one inbox item and `member_crashed`; pausing the team stops restarts, a member
 the team paused is never restarted, and a launch that fails records
 `restart_failed`.
 
+### A stalled lead tells the owner
+
+When the lead's decisions (a member's report, question or permission) have
+waited longer than `Settings.lead_stall_minutes` (20 by default, 0 turns it
+off, at most 1440; only the owner changes it) and the lead's session does not
+work on them, the dispatcher records `team.lead_stall`. A lead that is in a
+turn, runs a Zerus build or waits for its own Background jobs works; one that
+is idle, has its own question or permission open, ended its turn on a refused
+tool call (the listing's `interrupted` phase) or whose agent exited does not.
+A computer that did not answer the listing decides nothing.
+
+The record names the reason (`idle`, `question` with the question's title,
+`rejected_tool`, `exited`), the decisions waiting past the threshold and the
+members they block, the oldest one's time and a notification `round`. The owner
+sees it as the attention item `lead_stalled` (in status and the team list; it
+covers `lead_stopped`), as the Waiting-for-you item
+`<team>/lead_stalled/<lead role>-<round>` (action `resume_lead` for an exited
+agent, otherwise `open_lead`), on the team bar of both desktops, and on the
+phone: the lead's `hgs ls --json` row carries one `mobile_attention` item
+`{"question_id":"team-lead-stall:<team>:<round>","question_hash",
+"kind":"team_lead_stall","team","team_name","items","members","reason","round",
+"since"}`, never the question's text, and the lead's `state_reason` is
+`team_lead_stalled` ("Waiting for you: the lead stalled, ..."). A row whose own
+question already has an `attention_signature` mixes the alert into it; a null
+signature stays null. The mobile connector keeps the row's `team_lead_stall`
+items when it adds its own question cards.
+
+Desktops notify a waiting id once, so each round is one notification; a new
+round starts at most once an hour while the lead stays stalled. The record
+clears as soon as the lead works again, the decisions are taken or fall back
+under the threshold, the team stops running, or the setting is 0. The feed
+records `lead_stalled` (raised or a new round) and `lead_stall_cleared`.
+
 ### The profile of the work: losses, spans and unknown
 
 `hgs team profile` reads a scope after the work: where its time and tokens
@@ -2184,8 +2217,10 @@ The output is one JSON object:
   `s`, and `tokens`/`cost_usd` when its part's session is known. The kinds are
   `rework` (per rejected or returned attempt, with `cause`, `share` of the
   task's tokens and `tokens_unknown`), `lead_wait` (`lead_s`, `question_s`),
-  `permission_wait` (`answered_by`), `blocked_chain` (`deps_s`,
-  `folder_held_s`, `on`, `held_by`), `member_wait`, `idle_member` (`open_s`,
+  `permission_wait` (`answered_by`), `blocked_chain` (a folder another task's
+  stage held: `folder_held_s`, `held_by`, with `deps_s` and `on` for context;
+  waiting for dependencies is no loss by itself, see lateness below),
+  `member_wait`, `idle_member` (`open_s`,
   `from`, `to`), `long_test` (a test stage or test build of at least 300 s),
   `merge` and `conflict` (a `git-merge-lead` run, or a land stage, that did
   not merge cleanly). `by_tokens` ranks only the losses whose tokens are
@@ -2200,9 +2235,43 @@ The output is one JSON object:
   open after it joined.
 - `tasks`: a page of rows (`task`, `title`, `status`, `phase`, `elapsed_s`,
   `worked_s`, `rework_s`, `tokens`, and `rework_tokens`/`rework_share` when
-  known), with `next_cursor`.
+  known, and the two measures below: `lateness` and `overrun`), with
+  `next_cursor`. `summary.lateness` counts the rows: `late`, `own_s`,
+  `inherited_s` and `unknown`.
 - `events` (`read`, `truncated`: the bounded journal window was cut) and
   `token_reads` (`asked`, `read`, `truncated`: at most 200 session reads).
+
+Lateness and overrun (task 81) are two values per task, apart from the causes
+above and from each other. Heat that adds up waits since the phase began tells
+nothing: a task that by the plan starts after its dependencies is not losing
+time while they work on schedule.
+
+- Lateness is measured against a baseline schedule fixed when the plan is
+  approved (the change that approves a phase, or adds a task to a running
+  plan) and kept through later plan edits: a task's planned start is the latest
+  planned end of its hard dependencies and of its member's previous task (a
+  barrier phase also of the lower phases), and never before the baseline's
+  moment; its planned end is that plus its estimate. `lateness` is `{planned_start,
+  planned_end, start_late_s, inherited_s, own_s, end_late_s, from, actual_start,
+  actual_end}` (task 82: `from` is the predecessor the inherited part comes
+  from, null without one; `actual_start` and `actual_end` are the moments
+  themselves, null until they happen): `start_late_s`
+  is the actual start (or now, while the task has not started and is past its
+  planned start) minus the planned start, never negative; `inherited_s` is the
+  part of it that the tasks it was planned to follow are behind (they ended, or
+  still run, past their planned end), and `own_s` the rest; `end_late_s` is the
+  actual end (the report, or now while it runs) minus the planned end, null
+  before the task starts. A moment that needs an estimate nobody has is null
+  with `unknown` naming why, and the whole `lateness` is null for a task saved
+  before baselines, one already running when they came, or a draft. The causes
+  (`lead_wait`, `member_wait`, `rework`, `long_test`, `merge`) explain
+  lateness; they are not added to it. `hgs team status` tasks carry
+  `planned_start` and `planned_end`.
+- `overrun` is `{estimate_s, work_s, overrun_s, ratio, running}`: the task's own
+  work (every attempt, rework included, without waits) minus its estimate (the
+  baseline's, else the current one), signed, and the ratio of the two. It is
+  `{"not_started":true}` before the first attempt and its estimate, `overrun_s`
+  and `ratio` are null with `unknown` when the task has no estimate.
 
 Unknown is never zero: a member on another computer, a missing session record,
 a provider without counters, or a read past the 200-read bound leaves those

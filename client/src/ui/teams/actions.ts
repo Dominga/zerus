@@ -12,6 +12,8 @@ import type { ComputerId, TeamAction, TeamChoice, TeamConfirmation, TeamOutcome,
 export interface ActTeam {
   id: string; name: string; status: string; plan_mode: string; revision: number; pending_phase: number | null;
   waiting_for_lead: boolean; settings: Record<string, unknown>;
+  /** The owner's attention items as hgs words them (task 95 reads `lead_stalled`). */
+  attention?: unknown[];
   members: { id: string; role: string; agent: string; computer: string; lead: boolean; session: { name: string } | null }[];
   tasks: ActTask[];
   phases: { n: number; title: string; state: string; status: string; mode?: string }[];
@@ -123,7 +125,22 @@ export function stageName(kind: string): string {
 // ---------------------------------------------------------------------------
 // The team bar
 
-export interface BarChip { id: "pendingPhase" | "finishWaits" | "waitingForLead"; text: string; tip: string; phase?: number }
+export interface BarChip { id: "pendingPhase" | "finishWaits" | "waitingForLead" | "leadStalled"; text: string; tip: string; phase?: number }
+
+/** Task 95: the stalled lead's attention item: its reason, what it blocks and the round. */
+export interface LeadStall { reason: string; items: number; members: number; round: number; summary: string }
+
+/** Task 95: the lead's decisions wait while its session does not work on them. */
+export function leadStall(team: Pick<ActTeam, "attention">): LeadStall | null {
+  for (const raw of team.attention ?? []) {
+    const item = (raw ?? {}) as Record<string, unknown>;
+    if (item.kind !== "lead_stalled") continue;
+    const count = (key: string) => (typeof item[key] === "number" ? (item[key] as number) : 0);
+    return { reason: typeof item.reason === "string" ? item.reason : "", items: count("items"), members: count("members"),
+      round: count("round"), summary: typeof item.summary === "string" ? item.summary : "" };
+  }
+  return null;
+}
 
 export interface BarAction {
   id: "resumeLimits" | "finish" | "discard" | "sendBack" | "approve" | "pause" | "resume" | "stop" | "archive";
@@ -138,6 +155,15 @@ const draftPhases = (team: ActTeam) => team.phases.filter((phase) => phase.state
 /** The bar's chips (Qt TeamWorkspace header row): the pending phase, Finish waiting, waiting for the lead. */
 export function barChips(team: ActTeam): BarChip[] {
   const chips: BarChip[] = [];
+  // Task 95: the stalled lead comes first: nothing moves until it does.
+  const stall = leadStall(team);
+  if (stall) {
+    const exited = stall.reason === "exited";
+    const text = stall.items === 1
+      ? (exited ? tr("Lead stopped: 1 decision waits") : tr("Lead stalled: 1 decision waits"))
+      : (exited ? tr("Lead stopped: %1 decisions wait", stall.items) : tr("Lead stalled: %1 decisions wait", stall.items));
+    chips.push({ id: "leadStalled", text, tip: stall.summary || tr("Open the lead's session to see what it waits on") });
+  }
   if ((team.pending_phase ?? 0) > 0 && team.status !== "planning") {
     const drafts = draftPhases(team);
     chips.push({ id: "pendingPhase", phase: team.pending_phase!, text: tr("Phase %1 waits for you", team.pending_phase!),

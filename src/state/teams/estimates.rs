@@ -308,6 +308,11 @@ pub(crate) fn fill_status(value: &mut Value, team: &Team, now: f64) {
         if let Some(spent) = spent_minutes(task, now) {
             entry["estimate_spent_minutes"] = json!(spent.round());
         }
+        // Task 81: where the plan puts it (fixed when the plan was approved).
+        if let Some(baseline) = &task.baseline {
+            entry["planned_start"] = json!(baseline.start);
+            entry["planned_end"] = json!(baseline.end);
+        }
     }
 }
 

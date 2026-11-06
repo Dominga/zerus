@@ -133,6 +133,20 @@ fn team_items(team: &Team, now: f64, out: &mut Vec<Value>) {
                 found["member_id"] = attention["member_id"].clone();
                 out.push(found);
             }
+            // Task 95: the lead stalled while its decisions wait. The round is
+            // part of the id, so each round (at most hourly) is notified once
+            // by the desktops, which notify a waiting id once.
+            "lead_stalled" => {
+                let member = attention["member"].as_str().unwrap_or_default().to_owned();
+                let round = attention["round"].as_u64().unwrap_or(1);
+                let action = if attention["reason"] == "exited" { "resume_lead" } else { "open_lead" };
+                let mut found = item(team, "lead_stalled", &format!("{member}-{round}"), summary, at, action);
+                for key in ["member_id", "reason", "detail", "items", "members", "round", "minutes", "session"] {
+                    found[key] = attention[key].clone();
+                }
+                found["member"] = json!(member);
+                out.push(found);
+            }
             // Only the member's Terminal takes this answer: the button opens the
             // team, and the title says where to answer.
             "permission_terminal" => {

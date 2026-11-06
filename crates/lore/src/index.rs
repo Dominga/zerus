@@ -26,7 +26,7 @@ impl Index {
             r#"PRAGMA journal_mode=WAL;
              CREATE TABLE IF NOT EXISTS records(
                id TEXT PRIMARY KEY, kind TEXT, area TEXT, title TEXT, body TEXT, refs TEXT);
-             CREATE VIRTUAL TABLE IF NOT EXISTS words USING fts5(id UNINDEXED, title, body, refs, tokenize='porter');
+             CREATE VIRTUAL TABLE IF NOT EXISTS words USING fts5(id UNINDEXED, signals, title, body, refs, tokenize='porter unicode61 tokenchars ''_''');
              CREATE VIRTUAL TABLE IF NOT EXISTS terms USING fts5(id UNINDEXED, toks, tokenize="unicode61 tokenchars '_./:-'");
              PRAGMA user_version=1;"#,
         ).map_err(|error| LoreError(format!("index: {error}")))?;
@@ -48,8 +48,8 @@ impl Index {
             let refs = refs(record);
             tx.execute("INSERT OR REPLACE INTO records VALUES (?1,?2,?3,?4,?5,?6)",
                 params![id, kind, area, title, body, refs]).map_err(|error| LoreError(format!("index: {error}")))?;
-            tx.execute("INSERT INTO words(id,title,body,refs) VALUES (?1,?2,?3,?4)",
-                params![id, title, body, refs]).map_err(|error| LoreError(format!("index: {error}")))?;
+            tx.execute("INSERT INTO words(id,signals,title,body,refs) VALUES (?1,?2,?3,?4,?5)",
+                params![id, signals(record), title, body, refs]).map_err(|error| LoreError(format!("index: {error}")))?;
             tx.execute("INSERT INTO terms(id,toks) VALUES (?1,?2)", params![id, terms_of(record)])
                 .map_err(|error| LoreError(format!("index: {error}")))?;
         }
@@ -94,8 +94,8 @@ impl Index {
             tx.execute("INSERT OR REPLACE INTO records VALUES (?1,?2,?3,?4,?5,?6)",
                 params![id, kind, area, title, body, refs]).map_err(|error| LoreError(format!("index: {error}")))?;
             tx.execute("DELETE FROM words WHERE id=?1", params![id]).map_err(|error| LoreError(format!("index: {error}")))?;
-            tx.execute("INSERT INTO words(id,title,body,refs) VALUES (?1,?2,?3,?4)",
-                params![id, title, body, refs]).map_err(|error| LoreError(format!("index: {error}")))?;
+            tx.execute("INSERT INTO words(id,signals,title,body,refs) VALUES (?1,?2,?3,?4,?5)",
+                params![id, signals(record), title, body, refs]).map_err(|error| LoreError(format!("index: {error}")))?;
             tx.execute("INSERT INTO terms(id,toks) VALUES (?1,?2)", params![id, terms_of(record)])
                 .map_err(|error| LoreError(format!("index: {error}")))?;
             tx.execute("INSERT OR REPLACE INTO fingerprints(id,hash) VALUES (?1,?2)", params![id, hash])
@@ -171,7 +171,8 @@ impl Index {
 
     fn fts(&self, table: &str, query: &str, limit: usize) -> Result<Vec<Hit>, LoreError> {
         if query.is_empty() { return Ok(Vec::new()); }
-        let sql = format!("SELECT records.id, records.title, bm25({table}) FROM {table} JOIN records ON records.id={table}.id WHERE {table} MATCH ?1 ORDER BY bm25({table}) LIMIT ?2");
+        let rank = if table == "words" { "bm25(words, 0.0, 100.0, 10.0, 1.0)" } else { "bm25(terms)" };
+        let sql = format!("SELECT records.id, records.title, {rank} FROM {table} JOIN records ON records.id={table}.id WHERE {table} MATCH ?1 ORDER BY {rank} LIMIT ?2");
         let mut statement = self.connection.prepare(&sql).map_err(|error| LoreError(format!("index: {error}")))?;
         let rows = statement.query_map(params![query, limit as i64], |row| {
             Ok(Hit { id: row.get(0)?, title: row.get(1)?, score: -(row.get::<_, f64>(2)? as f32) })
@@ -214,7 +215,7 @@ fn terms_query(query: &str) -> String {
         .collect::<Vec<_>>().join(" OR ")
 }
 fn fts_query(query: &str) -> String {
-    query.split(|c: char| !c.is_alphanumeric())
+    query.split(|c: char| !(c.is_alphanumeric() || c == '_'))
         .filter(|word| word.chars().count() >= 2)
         .map(|word| format!("\"{}\"", word.replace('"', "\"\"")))
         .collect::<Vec<_>>().join(" OR ")
@@ -253,7 +254,12 @@ fn strings(value: &Value) -> Vec<String> {
 fn flat(text: &str) -> String {
     text.to_lowercase().replace(['`', '*', '«', '»', '"', '\''], "").split_whitespace().collect::<Vec<_>>().join(" ")
 }
-fn body(record: &Value) -> String {
+
+fn signals(record: &Value) -> String {
+    record.get("signals").and_then(Value::as_array)
+        .map(|signals| signals.iter().filter_map(Value::as_str).collect::<Vec<_>>().join("\n"))
+        .unwrap_or_default()
+}fn body(record: &Value) -> String {
     let mut text = String::new();
     if let Some(map) = record.as_object() {
         for (key, value) in map {
@@ -263,6 +269,7 @@ fn body(record: &Value) -> String {
                 Value::Array(values) => for value in values {
                     if let Some(value) = value.as_str() { text.push_str(value); text.push('\n'); }
                 },
+                Value::Object(_) => { text.push_str(&value.to_string()); text.push(' '); }
                 _ => {}
             }
         }
@@ -271,9 +278,13 @@ fn body(record: &Value) -> String {
 }
 
 fn refs(record: &Value) -> String {
-    record.get("refs").and_then(|refs| refs.get("files")).and_then(Value::as_array)
+    let mut out = record.get("refs").and_then(|refs| refs.get("files")).and_then(Value::as_array)
         .map(|files| files.iter().filter_map(Value::as_str).collect::<Vec<_>>().join("\n"))
-        .unwrap_or_default()
+        .unwrap_or_default();
+    if let Some(signals) = record.get("signals").and_then(Value::as_array) {
+        for signal in signals.iter().filter_map(Value::as_str) { out.push(' '); out.push_str(signal); }
+    }
+    out
 }
 
 #[cfg(test)]
@@ -329,6 +340,16 @@ mod tests {
         assert_eq!((removed.changed, removed.removed), (1, 1)); // restore one, remove b
     }
 }
+
+
+
+
+
+
+
+
+
+
 
 
 

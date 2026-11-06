@@ -44,8 +44,9 @@ fn main() {
         for kind in ["exact", "para"] {
             let Some(query) = row.get(kind).and_then(Value::as_str) else { continue };
             let (hits, _) = index.search_all(query, 10).expect("search");
-            if std::env::var("PARITY_DEBUG").is_ok() && !hits.first().is_some_and(|hit| by_id.get(&hit.id).is_some_and(|text| keys.iter().any(|key| text.contains(key)))) {
-                eprintln!("MISS {kind}: {query}");
+            if std::env::var("PARITY_DEBUG").is_ok() {
+                let rank = hits.iter().position(|hit| by_id.get(&hit.id).is_some_and(|text| keys.iter().any(|key| text.contains(key)))).map_or(0, |index| index + 1);
+                eprintln!("RANK {kind} {rank} {query}");
             }
             let at1 = hits.first().is_some_and(|hit| by_id.get(&hit.id).is_some_and(|text| keys.iter().any(|key| text.contains(key))));
             let at5 = hits.iter().take(5).any(|hit| by_id.get(&hit.id).is_some_and(|text| keys.iter().any(|key| text.contains(key))));
@@ -61,6 +62,7 @@ fn main() {
     }
     let _ = Path::new(&root);
 }
+
 
 
 

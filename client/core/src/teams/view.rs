@@ -321,6 +321,9 @@ pub struct TaskView {
     pub subteam: bool,
     /// Task 52: that sub-team's id, for Cancel's and Reassign's question.
     pub subteam_team: String,
+    /// Task #60: the task this follow-up was added for ("spawned from"); it
+    /// never blocks, unlike `deps`.
+    pub origin: Option<u64>,
     /// Task 55: the newest attempt's open questions to the lead (A3): the
     /// owner answers them with `hgs team reply` too.
     pub questions: Vec<QuestionView>,
@@ -635,6 +638,7 @@ fn task(value: &Value) -> TaskView {
         pipeline_run: pipeline_run(value),
         subteam: value.get("subteam").is_some_and(Value::is_object),
         subteam_team: value.get("subteam").map(|subteam| name(subteam, "team")).unwrap_or_default(),
+        origin: value.get("origin").and_then(Value::as_u64).filter(|origin| *origin > 0),
         questions: open_questions(value),
     }
 }
@@ -841,6 +845,9 @@ pub struct GraphNode {
     pub layer: u64,
     pub ready: bool,
     pub in_cycle: bool,
+    /// Task #60: the task it was spawned from, when the graph has it; drawn
+    /// as a link, never as a dependency edge.
+    pub origin: Option<u64>,
 }
 
 /// One edge: `to` depends on `from`.
@@ -891,6 +898,7 @@ pub fn graph(value: &Value, view: &TeamView) -> PlanGraph {
                 .unwrap_or(0),
             ready: view.ready.contains(&task.id),
             in_cycle: view.cycle.contains(&task.id),
+            origin: task.origin.filter(|origin| known.contains(origin)),
         })
         .collect();
     let edges = view

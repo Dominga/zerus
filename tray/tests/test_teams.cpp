@@ -170,6 +170,7 @@ private slots:
     void aDraftTeamReadsItsRevisionUnseenFieldsAndGoal();
     void proposalsSwapsLimitsAndHostsRead();
     void feedLinesSpeakOfStartsQuestionsAndHolds();
+    void aFollowUpReadsItsOriginAndSitsInItsLayer();
     void feedLinesSpeakOfRosterChanges();
     void aRunningTeamIsStuckWhenNothingCanMove();
     void feedLinesAndChains();
@@ -1341,6 +1342,26 @@ void TestTeams::modelReadsEachTasksTiming()
     // The running attempt has no end yet.
     QCOMPARE(timing.attempts[1].to, 0.0);
     QVERIFY(!parse(t).task(2)->timing.known);
+}
+
+// Task #60: a follow-up carries the task it was spawned from; an older hgs
+// without layers places it in its origin's layer as hgs does, never after it,
+// and a task without one reads 0.
+void TestTeams::aFollowUpReadsItsOriginAndSitsInItsLayer()
+{
+    auto value = deliveryTeam();
+    auto tasks = value["tasks"].toArray();
+    tasks.append(QJsonObject{{"id", 7}, {"title", "Fix the card API"}, {"assignee", "backend"}, {"status", "pending"}, {"origin", 6}});
+    tasks.append(QJsonObject{{"id", 8}, {"title", "Missed field"}, {"assignee", "backend"}, {"status", "pending"}, {"origin", 99}});
+    value["tasks"] = tasks;
+    const auto team = parse(value);
+    QCOMPARE(team.task(7)->origin, 6);
+    QCOMPARE(team.task(6)->origin, 0);
+    QCOMPARE(team.layers.value(6), 1);
+    QCOMPARE(team.layers.value(7), 1);
+    QCOMPARE(team.layers.value(8), 0);
+    QVERIFY(!ready(team, *team.task(6)));
+    QVERIFY(ready(team, *team.task(7)));
 }
 
 void TestTeams::feedLinesSpeakOfStartsQuestionsAndHolds()

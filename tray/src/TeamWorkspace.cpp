@@ -2209,6 +2209,12 @@ void TeamWorkspace::graphNodes(TaskView *view, const Team &team, const QList<int
         QStringList external;
         for (const auto &d : task->deps) if (grouped && !phase.contains(d.task)) external << QStringLiteral("#%1").arg(d.task);
         if (!external.isEmpty()) node.ext = QStringLiteral("↤") + external.join(' ');
+        // Task #60: a follow-up names the task it was spawned from; it is not
+        // an edge, since it never waits for it.
+        if (task->origin > 0 && team.task(task->origin)) {
+            const QString from = tr("from #%1").arg(task->origin);
+            node.ext = node.ext.isEmpty() ? from : node.ext + QLatin1Char(' ') + from;
+        }
         // A plan or draft task without an assignee is an error on its node.
         const bool unassigned = (team.status == "planning" || node.draft) && !assignee;
         if (unassigned) { node.error = true; node.problemText = tr("No assignee"); node.tone = c.danger; }

@@ -38,9 +38,12 @@ QMap<int, int> computeLayers(const Team &team)
         if (active.contains(id)) return -1;
         active.insert(id);
         int level = 0;
-        if (const auto *task = team.task(id))
+        if (const auto *task = team.task(id)) {
             for (const auto &dep : task->deps)
                 if (ids.contains(dep.task)) { const int d = visit(dep.task); if (d >= 0) level = qMax(level, d + 1); }
+            // Task #60: a follow-up sits at least in its origin's layer, as hgs places it.
+            if (task->origin > 0 && task->origin != id && ids.contains(task->origin)) { const int d = visit(task->origin); if (d >= 0) level = qMax(level, d); }
+        }
         active.remove(id);
         depth[id] = level;
         return level;
@@ -574,6 +577,7 @@ Team parse(const QJsonObject &v)
         for (const auto &c : t.value("criteria").toArray()) task.criteria.append(c.toString());
         for (const auto &d : t.value("deps").toArray()) task.deps.append({d.toObject().value("task").toInt(), str(d.toObject(), "kind") == "soft"});
         task.phaseBuild = t.value("phase_build").toBool();
+        task.origin = qMax(0, t.value("origin").toInt());
         if (t.value("hold").isObject()) {
             // A5: parked by the lead or by you until `release`.
             const auto h = t.value("hold").toObject();

@@ -969,6 +969,8 @@ export interface TeamTaskView {
   subteam_team?: string;
   /** Task 55: the newest attempt's open questions to the lead; the owner answers them too. */
   questions?: { id: string; text: string; at: number }[];
+  /** Task #60: the task this follow-up was spawned from; never a dependency. */
+  origin?: number | null;
 }
 
 /** A task's pipeline run (core PipelineRunView). */

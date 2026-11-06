@@ -989,3 +989,20 @@ fn task_58_each_phase_carries_its_mode() {
         {"id":"b","name":"B","status":"running","lead":"lead","members":[]}]}));
     assert_eq!((list.teams[0].free_phases.clone(), list.teams[1].free_phases.clone()), (vec![3], vec![]));
 }
+
+/// Task #60: a follow-up's origin reaches the task view and the graph node,
+/// never as a dependency edge; an older record has none.
+#[test]
+fn task_60_a_follow_up_carries_its_origin() {
+    let status = json!({"id":"t1","name":"Checkout","status":"running","lead":"lead","members":[{"id":"lead"}],
+        "tasks":[{"id":1,"title":"API","status":"accepted","assignee":"lead"},
+                 {"id":2,"title":"Fix","status":"pending","assignee":"lead","origin":1},
+                 {"id":3,"title":"Gone origin","status":"pending","assignee":"lead","origin":9}],
+        "layers":{"1":0,"2":0,"3":0}});
+    let view = view::team(&status);
+    let origins: Vec<Option<u64>> = view.tasks.iter().map(|task| task.origin).collect();
+    assert_eq!(origins, [None, Some(1), Some(9)]);
+    let graph = view::graph(&status, &view);
+    assert_eq!(graph.nodes.iter().map(|node| node.origin).collect::<Vec<_>>(), [None, Some(1), None], "a task the graph lacks is no link");
+    assert!(graph.edges.is_empty(), "an origin is not a dependency edge");
+}

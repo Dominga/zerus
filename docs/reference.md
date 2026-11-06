@@ -1580,6 +1580,38 @@ changes nothing and succeeds, also when the phase no longer runs. An Allow on
 the lead's add-to-phase proposal warns and confirms at once; when its
 confirmation fails, its warning is declined, so no addition is left waiting.
 
+### Follow-ups: a task's origin
+
+A task added because of something missed or a bug carries `origin`, the task
+that produced it, in the same team (task #60, owner 2026-11-06):
+
+```json
+{"request_id":"<uuid>","team":"<id>","tasks":[{"id":14,"title":"Fix the empty cart crash",
+ "assignee":"dev","origin":9}]}
+```
+
+`origin` is accepted wherever a request carries tasks: `plan`, `extend`,
+`add-to-phase` and its proposal card, `intake`, and `edit-draft`'s
+`tasks_update` (`"origin":null` removes it). It is distinct from `deps`: it
+never blocks or gates hand-out, it only places the task at least in its
+origin's layer, as if the task had the origin's dependencies without depending
+on the origin itself; dependencies that reach further place it further. A task
+without deps and with an origin therefore sits beside its origin, not in the
+first layer. An origin that names no task of the team, or the task itself, is
+refused (`"Task #14 names #99 as its origin, which is neither in the plan nor
+among the new tasks"`; validation reports `kind` `origin`). It follows
+renumbering: new tasks numbered otherwise (#754) and drafts renumbered after a
+discard (F285) keep their link, and a task whose origin was discarded loses it.
+An urgent fix filed from a finding takes the finding's task as its origin
+unless it names one.
+
+Status and the list carry each task's `origin`; `layers` place it; the feed's
+`phase_added`, `phase_edited` and `phase_tasks_added` carry `origins`
+(`{"14":9}`) for the added tasks that have one, and an `edit-draft` change of
+it is recorded with `field` `origin`. A record stored before the field has no
+origin and reads as before. The desktop shows "Spawned from #9" on the task and
+"from #9" on its card; the follow-ups of a task are listed on its card.
+
 ### Task pipelines and stage verdicts
 
 A task may pass its team's pipeline before it reaches the lead: an ordered list

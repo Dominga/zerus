@@ -1,3 +1,4 @@
+import { withdrawnRefusal } from "./teamRefusals";
 import { desktopService } from "./store/desktopService";
 import { Channel, invoke } from "@tauri-apps/api/core";
 import { listen } from "@tauri-apps/api/event";
@@ -75,7 +76,9 @@ export const teamAction = (call: import("./types").TeamCall) =>
     ? invoke<import("./types").TeamOutcome>("team_action", { call }).then((outcome) => {
       // Task 107: a confirmed decision leaves Waiting for you at once; the core
       // has already asked for a fresh read. Failed, unknown or to confirm: nothing.
-      if (outcome.outcome === "done") for (const listener of decidedListeners) listener(call);
+      // Task 111: a proposal hgs withdrew leaves too.
+      const withdrawn = outcome.outcome === "failed" && call.action.kind === "decide_proposal" && withdrawnRefusal(outcome.detail);
+      if (outcome.outcome === "done" || withdrawn) for (const listener of decidedListeners) listener(call);
       return outcome;
     })
     : Promise.reject(new Error("Teams need the desktop app."));

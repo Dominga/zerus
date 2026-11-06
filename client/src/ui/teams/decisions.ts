@@ -1,4 +1,5 @@
 import { tr } from "../../i18n";
+import { withdrawnRefusal } from "../../teamRefusals";
 import type { ComputerId, TeamAction, TeamCall, TeamChoice, TeamConfirmation, TeamMemberQuestion, TeamMemberView, TeamOutcome, TeamProposalView, TeamView, TeamWaitingItem } from "../../types";
 
 // The owner's decisions on a team (task 11), ported from Qt's
@@ -387,7 +388,9 @@ export class ProposalCards {
     const action: TeamAction = { kind: "decide_proposal", proposal: id, accept: allow, expected_hash: view.hash, ...(!allow && reason ? { reason } : {}) };
     const outcome = await this.send(id, action);
     if (outcome !== "cancelled") {
-      if (outcome.outcome === "failed") {
+      // Task 111: hgs withdrew it (it can no longer apply): it leaves at once.
+      if (outcome.outcome === "failed" && withdrawnRefusal(outcome.detail)) this.confirmed(id);
+      else if (outcome.outcome === "failed") {
         // #754: a refusal says why on the card, in the server's words; the card stays to answer again.
         this.notices.set(id, allow ? tr("Allow was refused, nothing was applied: %1", hgsWords(outcome.detail))
           : tr("Deny was refused, nothing was decided: %1", hgsWords(outcome.detail)));
@@ -422,7 +425,8 @@ export class ProposalCards {
       return "stale";
     }
     const outcome = await this.send(id, { kind: "decide_proposal", proposal: id, accept: true, expected_hash: view.hash, answer });
-    if (outcome !== "cancelled" && outcome.outcome === "failed")
+    if (outcome !== "cancelled" && outcome.outcome === "failed" && withdrawnRefusal(outcome.detail)) this.confirmed(id);
+    else if (outcome !== "cancelled" && outcome.outcome === "failed")
       this.notices.set(id, outcome.detail.includes("changed") ? tr("The question changed; nothing was sent. Read it again and answer.") : hgsWords(outcome.detail));
     else if (outcome !== "cancelled" && outcome.outcome === "done") this.confirmed(id);
     this.changed();

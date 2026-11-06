@@ -601,7 +601,7 @@ fn all_items(team: &Team) -> Vec<Item> {
     let mut decided: Vec<&Value> = team
         .proposals
         .iter()
-        .filter(|proposal| matches!(proposal["state"].as_str(), Some("accepted") | Some("rejected") | Some("answered")))
+        .filter(|proposal| matches!(proposal["state"].as_str(), Some("accepted") | Some("rejected") | Some("answered") | Some("withdrawn")))
         .collect();
     let decided_at = |proposal: &Value| proposal["decided_at"].as_f64().or(proposal["at"].as_f64()).unwrap_or_default();
     // A stable order: proposals decided in one go keep their places.
@@ -616,6 +616,10 @@ fn all_items(team: &Team) -> Vec<Item> {
         let text = if state == "answered" {
             let question = proposal["change"]["question"].as_str().unwrap_or_default();
             format!("The owner answered your question {id} ({question}): {note}")
+        } else if state == "withdrawn" {
+            // Task 111: never shown to the owner; the lead learns why, once,
+            // and proposes again against the plan as it is now.
+            format!("Your {kind} proposal {id} was withdrawn before the owner saw it: it can no longer apply ({note}). Propose again against the plan as it is now")
         } else {
             format!("The owner {state} your {kind} proposal {id}{why}")
         };
@@ -1316,6 +1320,12 @@ pub(crate) fn input_block_action(terminal: &str, screen: &[String]) -> String {
     text
 }
 
+/// Task 111: the member was removed or its session was seen to end: a question
+/// it asked can no longer be answered and waits for nobody.
+fn session_ended(member: &Member) -> bool {
+    member.state == MemberState::Removed || member.seen.as_ref().is_some_and(|seen| !seen.live)
+}
+
 pub(crate) fn attention(team: &Team, now: f64) -> Vec<Value> {
     if !matches!(team.status, TeamStatus::Running | TeamStatus::Paused) {
         return Vec::new();
@@ -1376,6 +1386,10 @@ pub(crate) fn attention(team: &Team, now: f64) -> Vec<Value> {
     if permission_minutes > 0 || team.members.iter().any(|member| member.id == team.lead && member.pending.is_some()) {
         for member in &team.members {
             let Some(pending) = &member.pending else { continue };
+            // Task 111: a question whose session ended can no longer be answered.
+            if session_ended(member) {
+                continue;
+            }
             let waited = (now - pending.at).max(0.0);
             // #740: the lead's own question waits for the owner from the start.
             let lead = member.id == team.lead;
@@ -1434,6 +1448,9 @@ pub(crate) fn attention(team: &Team, now: f64) -> Vec<Value> {
     // nobody else can answer it.
     for member in &team.members {
         let Some(asked) = &member.terminal_question else { continue };
+        if session_ended(member) {
+            continue;
+        }
         let name = team.name_of(&member.id);
         out.push(json!({"kind":"permission_terminal","member":team.role_of(&member.id),"member_id":member.id,
             "since":asked.at,"minutes":((now - asked.at).max(0.0) / 60.0).round() as u64,
@@ -1844,6 +1861,35 @@ mod tests {
         // A live lead, or a paused team, is no item.
         team.members.iter_mut().find(|member| member.id == "lead").unwrap().seen = Some(MemberSeen { at: now, live: true });
         assert!(!super::attention(&team, now).iter().any(|item| item["kind"] == "lead_stopped"));
+    }
+
+    /// Task 111: a question whose session ended, or whose member was
+    /// removed, can no longer be answered and waits for nobody.
+    #[test]
+    fn a_question_whose_session_ended_waits_for_nobody() {
+        let mut team = team();
+        let now = 5_000.0;
+        team.settings.remind_owner_permission_minutes = 1;
+        let question = |at: f64| PendingQuestion {
+            question_id: "q1".into(),
+            question_hash: "h1".into(),
+            approval: true,
+            at,
+            card: json!({"questions":[{"id":"decision","header":"Bash","question":"Run the build?",
+                "options":[{"id":"allow","label":"Allow"},{"id":"deny","label":"Deny"}]}]}),
+        };
+        let asked = |team: &Team| super::attention(team, now).iter().filter(|item| item["kind"] == "permission").count();
+        team.members.iter_mut().find(|member| member.id == "dev").unwrap().pending = Some(question(now - 600.0));
+        assert_eq!(asked(&team), 1);
+        team.members.iter_mut().find(|member| member.id == "dev").unwrap().seen = Some(MemberSeen { at: now - 30.0, live: false });
+        assert_eq!(asked(&team), 0, "its session ended");
+        let dev = team.members.iter_mut().find(|member| member.id == "dev").unwrap();
+        dev.seen = Some(MemberSeen { at: now, live: true });
+        assert_eq!(asked(&team), 1);
+        team.members.iter_mut().find(|member| member.id == "dev").unwrap().state = MemberState::Removed;
+        assert_eq!(asked(&team), 0, "its member was removed");
+        let waiting = super::super::owner_waiting::items(std::slice::from_ref(&team), now);
+        assert!(!waiting.iter().any(|item| item["kind"] == "permission_escalated"), "{waiting:?}");
     }
 
     #[test]

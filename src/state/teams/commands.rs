@@ -1724,6 +1724,22 @@ fn decide_proposal_in(store: &mut Store, input: &Value, caller: &Actor) -> anyho
         })?;
         return Ok(json!({"status":"answered","proposal":id,"answer":answer}));
     }
+    // Task 111: a proposal that can no longer apply is withdrawn, not run; the
+    // write stores the withdrawal and the lead's line.
+    if let Some(why) = ops::inapplicable(&team, &team.proposals[at]) {
+        store.mutate(None, &team_id, None, |_, _| Ok(Value::Null))?;
+        bail!("This proposal can no longer apply ({why}); it was withdrawn and the lead is told why");
+    }
+    // The Allow runs in several writes: marked first, so the change it makes
+    // never withdraws it before it is recorded as accepted.
+    store.mutate(None, &team_id, None, |team, _| {
+        if let Some(proposal) = team.proposals.iter_mut().find(|proposal| proposal["id"] == id && proposal["state"] == "open") {
+            if proposal["deciding"].is_null() {
+                proposal["deciding"] = json!(super::super::now());
+            }
+        }
+        Ok(Value::Null)
+    })?;
     let member = team.proposals[at]["member"].clone();
     let change = team.proposals[at]["change"].clone();
     let goal = team.proposals[at]["goal"].as_str().unwrap_or_default().to_owned();
@@ -4227,7 +4243,11 @@ fn run(op: &str, input: &Value, wait: bool) -> anyhow::Result<Value> {
                 let before = Some(&input["before"]).filter(|cursor| !cursor.is_null());
                 return Ok(super::owner_waiting::page(&items, before, input["limit"].as_u64()));
             }
-            let teams = active_team_records(&Store::open(false)?)?;
+            let mut teams = active_team_records(&Store::open(false)?)?;
+            // Task 111: a proposal that can no longer apply never waits for you.
+            for team in &mut teams {
+                ops::withdraw_inapplicable(team, &mut Vec::new());
+            }
             let mut items = super::owner_waiting::items(&teams, super::super::now());
             items.extend(tools);
             let items = super::owner_waiting::sorted(items);
@@ -4255,7 +4275,10 @@ fn run(op: &str, input: &Value, wait: bool) -> anyhow::Result<Value> {
         }
         "status" => {
             let store = Store::open(false)?;
-            let team = store.load(text(input, "team"))?.context("Unknown team")?;
+            let mut team = store.load(text(input, "team"))?.context("Unknown team")?;
+            // Task 111: a proposal that can no longer apply reads withdrawn at
+            // once; the next change stores it so.
+            ops::withdraw_inapplicable(&mut team, &mut Vec::new());
             let finished = matches!(team.status, TeamStatus::Done | TeamStatus::Stopped);
             // Only a finished team reads the live listing, for its members left
             // running (F7); a watched running team is polled often and must not
@@ -4295,7 +4318,8 @@ fn run(op: &str, input: &Value, wait: bool) -> anyhow::Result<Value> {
             Ok(value)
         }
         "inbox" => {
-            let team = Store::open(false)?.load(text(input, "team"))?.context("Unknown team")?;
+            let mut team = Store::open(false)?.load(text(input, "team"))?.context("Unknown team")?;
+            ops::withdraw_inapplicable(&mut team, &mut Vec::new());
             // Spec 5.6: a sub-lead reads its own inbox; you may name one.
             let named = text(input, "member").to_owned();
             let reviewer = if !named.is_empty() {

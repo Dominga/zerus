@@ -577,6 +577,9 @@ impl Store {
         }
         let mut events = Vec::new();
         let mut receipt = change(&mut team, &mut events)?;
+        // Task 111: every change re-checks the open proposals; one that can no
+        // longer apply is withdrawn in the same write.
+        super::ops::withdraw_inapplicable(&mut team, &mut events);
         let at = now();
         // Task 81: a task of the approved plan gets its baseline schedule in the
         // change that approves it or adds it.

@@ -101,6 +101,12 @@ public:
     // The deadline of the polled reads (list, status, events, inbox); 0 keeps
     // HgsClient's own (15 s here). Tests shorten it.
     static void setReadTimeout(int milliseconds);
+    // Task 111: hgs refused a decision because the proposal can no longer
+    // apply and withdrew it: the card and its waiting item leave at once.
+    static bool withdrawn(const QString &error)
+    {
+        return error.contains(QLatin1String("can no longer apply")) && error.contains(QLatin1String("withdrawn"));
+    }
 signals:
     void teamsChanged();
     void watchedChanged();

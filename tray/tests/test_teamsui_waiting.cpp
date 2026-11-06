@@ -2721,6 +2721,20 @@ void TestTeamsUiWaiting::aConfirmedDecisionLeavesWaitingAtOnceAndARefusedOneStay
     QVERIFY(listed(p2));
     QCOMPARE(feed.items().size(), 6);
     QCOMPARE(dropped.count(), 1);
+    // Task 111: hgs withdrew p2 (it can no longer apply): Allow is refused
+    // with that reason and the card, the banner item and its notice leave at
+    // once, as a confirmed decision's do.
+    QVERIFY(FakeCli::replace(script() + ".proposalrefuse",
+        "hgs: This proposal can no longer apply (Phase 2 is closed (done); propose the work in a new phase with extend instead); it was withdrawn and the lead is told why"));
+    QTRY_VERIFY(card("p2") && card("p2")->findChild<QPushButton *>("teamProposalAllow")->isEnabled());
+    card("p2")->findChild<QPushButton *>("teamProposalAllow")->click();
+    QTRY_VERIFY(!card("p2"));
+    QTRY_COMPARE(dropped.count(), 2);
+    QCOMPARE(dropped.last().first().toString(), p2);
+    QVERIFY(!listed(p2));
+    QCOMPARE(feed.items().size(), 5);
+    QVERIFY(TeamController::withdrawn("hgs: This proposal can no longer apply (x); it was withdrawn and the lead is told why"));
+    QVERIFY(!TeamController::withdrawn("hgs: The plan changed since the warning"));
     // What else a confirmed change decides: a phase by its number, a report or
     // a held task by its id; another team's or a change that names none, nothing.
     QList<TeamWaitingPage::Item> all;

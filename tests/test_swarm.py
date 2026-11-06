@@ -707,6 +707,18 @@ class Swarm(unittest.TestCase):
         check = self.fence_check('a', task['id'])
         self.assertEqual(check['closed'], {'node': None, 'reason': 'no_floor'})
         self.assertEqual(check['certificate'], {'valid': False, 'reason': 'no_certificate'})
+        # review-win-c on #1471: a FIFO at the certificate's path or the
+        # member records' is refused, never waited on past the check's budget.
+        fence = self.root / 'a/state/replica' / hashlib.sha256(b'a').hexdigest() / 'fence'
+        fence.mkdir(exist_ok=True)
+        os.mkfifo(fence / f"{task['uuid']}.json")
+        members = self.root / 'a/swarm/replica-members.json'
+        members.unlink(missing_ok=True)
+        os.mkfifo(members)
+        started = time.monotonic()
+        check = self.fence_check('a', task['id'])
+        self.assertLess(time.monotonic() - started, 15)
+        self.assertEqual(check['certificate'], {'valid': False, 'reason': 'certificate_not_regular'})
 
     def test_a_relay_never_answers_after_its_budget(self):
         # review-n on #1452: an answer whose pipe a descendant keeps open past

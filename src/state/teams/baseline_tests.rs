@@ -218,7 +218,7 @@ fn a_baseline_is_fixed_once_kept_on_plan_edits_and_a_later_task_gets_its_own() {
         started.tasks = vec![task(1, "dev", &[], Some(10.0))];
         start(&mut started, 1, T0 - 50.0);
         stamp(&mut started, T0);
-        assert!(started.task(1).unwrap().baseline.is_none(), "a task already running has no planned start");
+        assert!(started.task(1).unwrap().baseline.is_none(), "fresh stamping skips a task already running");
     });
 }
 
@@ -264,4 +264,62 @@ fn the_store_fixes_a_baseline_in_the_change_that_approves_the_plan() {
         store.mutate(None, "t", None, |team, _| { team.name = "Again".into(); Ok(json!({})) }).unwrap();
         assert_eq!(store.load("t").unwrap().unwrap().task(1).unwrap().baseline, Some(one));
     });
+}
+
+#[test]
+fn a_phase_running_at_upgrade_is_backfilled_from_its_approval() {
+    let mut old = team(vec![task(1, "dev", &[], Some(10.0)), task(2, "qa", &[1], Some(20.0))]);
+    start(&mut old, 1, T0 + 100.0);
+    let temp = tempfile::tempdir().unwrap();
+    crate::state::with_test_state_root(temp.path(), || backfill(&mut old, T0 + 300.0));
+    let one = old.task(1).unwrap().baseline.as_ref().unwrap();
+    assert!(one.backfilled);
+    assert_eq!(one.start, Some(T0));
+    assert_eq!(one.end, Some(T0 + 600.0));
+    let late = lateness(&old, old.task(1).unwrap(), T0 + 300.0);
+    assert_eq!(late["start_late_s"], 100);
+    let mut fresh = team(vec![task(1, "dev", &[], Some(10.0)), task(2, "qa", &[1], Some(20.0))]);
+    crate::state::with_test_state_root(temp.path(), || stamp(&mut fresh, T0));
+    for id in [1, 2] {
+        let a = old.task(id).unwrap().baseline.as_ref().unwrap();
+        let b = fresh.task(id).unwrap().baseline.as_ref().unwrap();
+        assert_eq!((a.start, a.end, a.after.clone()), (b.start, b.end, b.after.clone()));
+    }
+}
+
+
+
+
+#[test]
+fn a_historical_chain_plans_after_a_finished_predecessor() {
+    let mut team = team(vec![task(1, "dev", &[], Some(10.0)), task(2, "qa", &[1], Some(10.0))]);
+    accept(&mut team, 1, T0 + 100.0, T0 + 200.0, T0 + 300.0);
+    start(&mut team, 2, T0 + 600.0);
+    let temp = tempfile::tempdir().unwrap();
+    crate::state::with_test_state_root(temp.path(), || backfill(&mut team, T0 + 3600.0));
+    let first = team.task(1).unwrap().baseline.as_ref().unwrap();
+    let second = team.task(2).unwrap().baseline.as_ref().unwrap();
+    assert!(first.backfilled && second.backfilled);
+    assert_eq!((first.start, first.end), (Some(T0), Some(T0 + 600.0)));
+    assert_eq!((second.start, second.end), (Some(T0 + 600.0), Some(T0 + 1200.0)));
+    let late = lateness(&team, team.task(2).unwrap(), T0 + 3600.0);
+    assert_eq!(late["start_late_s"], 0);
+    assert_eq!(late["inherited_s"], 0);
+    assert_eq!(late["own_s"], 0);
+}
+
+#[test]
+fn a_historical_member_chain_plans_after_the_members_finished_task() {
+    let mut team = team(vec![task(1, "dev", &[], Some(10.0)), task(2, "dev", &[], Some(10.0))]);
+    accept(&mut team, 1, T0 + 100.0, T0 + 200.0, T0 + 300.0);
+    start(&mut team, 2, T0 + 600.0);
+    let temp = tempfile::tempdir().unwrap();
+    crate::state::with_test_state_root(temp.path(), || backfill(&mut team, T0 + 3600.0));
+    let first = team.task(1).unwrap().baseline.as_ref().unwrap();
+    let second = team.task(2).unwrap().baseline.as_ref().unwrap();
+    assert_eq!((first.start, first.end), (Some(T0), Some(T0 + 600.0)));
+    assert_eq!((second.start, second.end), (Some(T0 + 600.0), Some(T0 + 1200.0)));
+    let late = lateness(&team, team.task(2).unwrap(), T0 + 3600.0);
+    assert_eq!(late["start_late_s"], 0);
+    assert_eq!(late["inherited_s"], 0);
 }

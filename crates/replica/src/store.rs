@@ -594,10 +594,6 @@ thread_local! {
         const { std::cell::RefCell::new(None) };
 }
 
-/// The most one task or project file may hold when it is read: a document
-/// is at most `MAX_DOCUMENT`, and its updates log grows until it is folded.
-const FILE_BYTES: u64 = 16 * crate::schema::MAX_DOCUMENT as u64;
-
 /// A store file opened for reading without waiting (#1519 review,
 /// zerus-r75ru): only a regular file, refused before it is opened otherwise;
 /// opened without following a final link or waiting for a FIFO's writer; the
@@ -627,19 +623,21 @@ fn open_regular(path: &Path) -> std::io::Result<File> {
     Ok(file)
 }
 
-/// One task or project file, read whole without waiting (`open_regular`),
-/// at most `FILE_BYTES`. Every read of a store's documents goes through it,
-/// so a FIFO, device or link in a task's place never holds a command that
-/// reads every task: that task does not load, and is listed as damaged.
+/// One task or project file, read whole without waiting (`open_regular`).
+/// Every read of a store's documents goes through it, so a FIFO, device or
+/// link in a task's place never holds a command that reads every task: that
+/// task does not load, and is listed as damaged.
+///
+/// No size is refused (zerus-ern6o): no writer bounds these files. A
+/// project's or a task's Loro history grows with every edit, and only a
+/// task's visible text is held to `MAX_DOCUMENT`, so any cap here would make
+/// a file this store wrote unreadable. A read takes the memory a load of
+/// that file always took; only regular files are read.
 pub(crate) fn read_regular(path: &Path) -> std::io::Result<Vec<u8>> {
     use std::io::Read;
+    let mut file = open_regular(path)?;
     let mut bytes = Vec::new();
-    open_regular(path)?
-        .take(FILE_BYTES + 1)
-        .read_to_end(&mut bytes)?;
-    if bytes.len() as u64 > FILE_BYTES {
-        return Err(std::io::Error::other("larger than a task file"));
-    }
+    file.read_to_end(&mut bytes)?;
     Ok(bytes)
 }
 
@@ -1527,16 +1525,54 @@ mod tests {
     /// fails closed and never waits. It counts what it reads whole; a task
     /// file it cannot read as a bounded regular file (a FIFO, a link, one
     /// it may not read) or the deadline is an error, never a count of zero.
-    /// A store file past the bound is refused, never read into memory.
+    /// zerus-ern6o (review-win-c on #1521): a project whose settings history
+    /// outgrew the earlier 64 MiB read cap, written by `save_project` as any
+    /// long-lived project's would be, is read again. No writer bounds a
+    /// document's history, so the reader refuses no size.
     #[test]
-    fn a_store_file_past_the_bound_is_refused_not_read() {
-        let dir = tempfile::tempdir().unwrap();
-        let path = dir.path().join("large.loro");
-        let file = File::create(&path).unwrap();
-        file.set_len(FILE_BYTES + 1).unwrap();
-        assert!(read_regular(&path).is_err());
-        file.set_len(FILE_BYTES).unwrap();
-        assert_eq!(read_regular(&path).unwrap().len() as u64, FILE_BYTES);
+    fn a_project_whose_history_outgrew_any_cap_is_read_again() {
+        use crate::project::Settings;
+        fn text(seed: &mut u64) -> String {
+            const LETTERS: &[u8] =
+                b"ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789-_";
+            let mut text = String::from("[Zerus task]\n");
+            while text.len() < 16 * 1024 {
+                *seed ^= *seed << 13;
+                *seed ^= *seed >> 7;
+                *seed ^= *seed << 17;
+                text.push(LETTERS[(*seed as usize) % LETTERS.len()] as char);
+            }
+            text
+        }
+        let earlier_cap = 16 * crate::schema::MAX_DOCUMENT;
+        let mut doc = ProjectDoc::new();
+        let mut seed = 0x67c2_1ab7_d393_u64;
+        for _ in 0..2250 {
+            let settings = Settings {
+                task_template: text(&mut seed),
+                cancel_template: text(&mut seed),
+                agents_other: true,
+                agent_limit: 0,
+            };
+            doc.set_settings(&settings).unwrap();
+        }
+        let root = tempfile::tempdir().unwrap();
+        let store = ProjectStore::open(root.path(), "growth").unwrap();
+        store.save_project(&doc).unwrap();
+        let size = fs::metadata(store.dir().join("project.loro"))
+            .unwrap()
+            .len();
+        assert!(size > earlier_cap as u64, "{size}");
+        let read = store.project().unwrap();
+        assert_eq!(read.settings(), doc.settings());
+        // A regular file of any size is read whole, by every reader.
+        let large = root.path().join("large.loro");
+        let file = File::create(&large).unwrap();
+        file.set_len(earlier_cap as u64 * 2 + 1).unwrap();
+        assert_eq!(
+            read_regular(&large).unwrap().len() as u64,
+            earlier_cap as u64 * 2 + 1
+        );
     }
 
     /// zerus-r75ru: a FIFO in place of any task file, or of the project

@@ -735,10 +735,12 @@ pub(super) fn supervisor_command(
         } else {
             string(record, "shell")
         };
+        let (shell, flags) = crate::accounts::supervisor_shell(shell);
         vec![
             shell.into(),
-            "-lic".into(),
+            flags.into(),
             crate::accounts::run_script(
+                shell,
                 string(record, "account_id"),
                 string(record, "agent"),
                 string(record, "agent_home"),
@@ -807,13 +809,13 @@ mod agent_hint_tests {
                 ],
             ),
         ] {
-            let record = json!({"agent":agent,"account_id":"work-account","agent_home":"/private/profile","shell":"/private/login-shell"});
+            let record = json!({"agent":agent,"account_id":"work-account","agent_home":"/private/profile","shell":"/bin/bash"});
             let native = argv.into_iter().map(str::to_owned).collect::<Vec<_>>();
             let command = supervisor_command(&record, "/stable/hgs", native.clone(), &hint);
             assert_eq!(&command[command.len() - native.len()..], native.as_slice());
             #[cfg(unix)]
             {
-                assert_eq!(&command[..2], &["/private/login-shell", "-lic"]);
+                assert_eq!(&command[..2], &["/bin/bash", "-lic"]);
                 let script = shell_words::split(&command[2]).unwrap();
                 assert!(script.contains(&"HGS_AGENT_HINT=1".into()));
                 assert!(script.contains(&"HGS_AGENT_HINT_OFF=".into()));

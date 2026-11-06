@@ -2350,6 +2350,14 @@ clients](#json-and-external-clients)), and stays when the launch command
 reports afterwards; a hidden launch status ends silently but still shows a
 later launch error.
 Existing names and unrelated sessions are never repurposed.
+
+On Unix, agent launch and resume use explicit POSIX or fish argument syntax for
+known login shells. Other configured shell types use `/bin/sh -lc`, with the
+inherited environment and POSIX login profile; their own rc files are not loaded
+or interpreted as another language. tmux executes the argument vector directly,
+including on computers whose default shell is not POSIX. Account selection and
+agent hints are reapplied after shell startup.
+
 **Open terminal window** is off by default and remembered separately from the tray
 open mode; DeepSeek uses its embedded native interface.
 
@@ -5236,6 +5244,12 @@ minutes without a confirmed conversation records how; a run that confirmed one
 leaves its record to carry the launch ID instead. These records live in
 `launches/` of the hgs state directory for a week, as long as the desktop keeps a
 launch placeholder. The key is omitted when no launch has ended.
+When there is no supervisor completion report, `diagnostic_code` is
+`launch_supervisor_report_missing`; the original started record also retains
+that diagnostic. This identifies missing evidence, often a failure before
+`hgs --run` during shell startup. It does not invent an agent exit code or
+terminal output: those fields remain null and empty when unknown. The desktop
+shows the missing-report explanation separately from captured output.
 
 A running Zerus desktop records input idle time and screen lock with
 `hgs presence set --json` (`{"idle_seconds": 12, "locked": false}` on stdin) every

@@ -2850,12 +2850,15 @@ fn launch(
         base
     } else {
         #[cfg(unix)]
-        let mut words = vec![
-            shell,
-            "-lic".into(),
-            crate::accounts::supervisor_script(&supervisor_environment),
-            executable.clone(),
-        ];
+        let mut words = {
+            let (program, flags) = crate::accounts::supervisor_shell(&shell);
+            vec![
+                program.into(),
+                flags.into(),
+                crate::accounts::supervisor_script(program, &supervisor_environment),
+                executable.clone(),
+            ]
+        };
         // The supervisor starts directly, with the session's variables, which
         // carry the account (spec D8).
         #[cfg(windows)]

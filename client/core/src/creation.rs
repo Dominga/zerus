@@ -731,7 +731,12 @@ pub struct EndedLaunch {
     pub name: String,
     pub code: Option<i64>,
     pub output: String,
+    #[serde(skip_serializing_if = "String::is_empty")]
+    pub diagnostic_code: String,
 }
+
+pub const SUPERVISOR_REPORT_MISSING: &str = "launch_supervisor_report_missing";
+pub const SUPERVISOR_REPORT_MISSING_DETAIL: &str = "No supervisor exit report was captured. The terminal may have failed during startup; the agent's exit status and output are unknown.";
 
 /// One bounded binding read; an absent row proves nothing about a launch.
 #[derive(Clone, Debug, Default, PartialEq, Eq)]
@@ -812,6 +817,10 @@ pub(crate) fn ended_launches(value: &Value) -> Vec<EndedLaunch> {
             name: text(row, "name").into(),
             code: row.get("code").and_then(Value::as_i64),
             output: text(row, "output").into(),
+            diagnostic_code: match text(row, "diagnostic_code") {
+                SUPERVISOR_REPORT_MISSING => SUPERVISOR_REPORT_MISSING.into(),
+                _ => String::new(),
+            },
         })
         .collect()
 }

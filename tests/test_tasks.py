@@ -1371,8 +1371,9 @@ class TaskDelivery(DeliveryFixture):
         fifo = tasks / (str(uuid.uuid4()) + ".loro")
         os.mkfifo(fifo)
         self.addCleanup(lambda: fifo.unlink(missing_ok=True))
-        # By its UUID: a short ID is found by reading every task, which the
-        # FIFO would hold (zerus-r75ru, not the quota count).
+        # By its UUID, so only the quota count reads the FIFO here; a
+        # short-ID lookup beside one is test_an_irregular_task_file_never_
+        # holds_project_reads (zerus-r75ru).
         ref = "orchard/" + late["uuid"]
         began = time.monotonic()
         refused = self.hgs("send", ref, session="codex/actor", ok=False)
@@ -1381,6 +1382,24 @@ class TaskDelivery(DeliveryFixture):
         self.assertNotIn("UNCOUNTED_LATE", self.received())
         self.assertEqual(self.hgs("send", ref)["task"]["stage"], "active")
         self.wait_received("UNCOUNTED_LATE")
+
+    def test_an_irregular_task_file_never_holds_project_reads(self):
+        # zerus-r75ru: a FIFO named as a task's file never holds a command
+        # that reads every task. It is listed as damaged; the other tasks
+        # are listed, found by short ID and added beside it as before.
+        kept = self.add("KEPT_BESIDE_A_FIFO", "--target", self.name)
+        tasks = self.state / "replica" / hashlib.sha256(b"project-1").hexdigest() / "tasks"
+        fifo = tasks / (str(uuid.uuid4()) + ".loro")
+        os.mkfifo(fifo)
+        self.addCleanup(lambda: fifo.unlink(missing_ok=True))
+        began = time.monotonic()
+        listing = self.hgs("list", "--project", "orchard")
+        self.assertIn(kept["uuid"], [task["uuid"] for task in listing["tasks"]])
+        self.assertIn(fifo.stem, json.dumps(listing["damaged"]))
+        self.assertEqual(self.hgs("get", kept["ref"])["task"]["uuid"], kept["uuid"])
+        added = self.add("ADDED_BESIDE_A_FIFO")
+        self.assertEqual(self.hgs("get", added["ref"])["task"]["uuid"], added["uuid"])
+        self.assertLess(time.monotonic() - began, 25)
 
     def test_the_legacy_route_counts_a_possible_agent_start_too(self):
         # desktop-u on #1519 R2: the legacy route's limit counts the tasks as

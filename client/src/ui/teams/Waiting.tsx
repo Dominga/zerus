@@ -181,6 +181,41 @@ function Answer(props: { item: TeamWaitingItem }) {
             </div>
           </div>
         </Match>
+        <Match when={props.item.action === "decide_report"}>
+          <div class="team-waiting-card">
+            <div class="team-waiting-line"><b>{props.item.title}</b></div>
+            <div class="team-proposal-answers">
+              <input class="field" maxlength={4000} placeholder={tr("Why reject? The member receives this")} value={reason()} disabled={off()} onInput={(event) => setReason(event.currentTarget.value)} />
+              <button class="btn small danger" disabled={off() || !reason().trim()} onClick={() => void read().rejectReport(reason())}>{tr("Reject")}</button>
+              <button class="btn small primary" disabled={off()} onClick={() => void read().acceptReport()}>{tr("Accept")}</button>
+            </div>
+          </div>
+        </Match>
+        <Match when={props.item.action === "release_task"}>
+          <div class="team-waiting-card">
+            <div class="team-waiting-line"><b>{props.item.title}</b></div>
+            <div class="team-proposal-answers"><span class="grow" />
+              <button class="btn small primary" disabled={off()} onClick={() => void read().release()}>{tr("Release")}</button>
+            </div>
+          </div>
+        </Match>
+        <Match when={props.item.action === "retry_task"}>
+          <div class="team-waiting-card">
+            <div class="team-waiting-line"><b>{props.item.title}</b></div>
+            <div class="team-proposal-answers"><span class="grow" />
+              <button class="btn small primary" disabled={off()} onClick={() => void read().retry()}>{tr("Retry")}</button>
+            </div>
+          </div>
+        </Match>
+        <Match when={props.item.action === "finish"}>
+          <div class="team-waiting-card">
+            <div class="team-waiting-line"><b>{props.item.title}</b></div>
+            <div class="team-proposal-answers">
+              <input class="field" maxlength={4000} placeholder={tr("A summary for the lead")} value={comment()} disabled={off()} onInput={(event) => setComment(event.currentTarget.value)} />
+              <button class="btn small primary" disabled={off() || !comment().trim()} onClick={() => void read().finishTeam(comment())}>{tr("Finish")}</button>
+            </div>
+          </div>
+        </Match>
       </Switch>
     </div>
   );

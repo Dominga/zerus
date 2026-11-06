@@ -15,6 +15,11 @@ use std::{
 };
 
 mod shim;
+// Read-only Windows inspection primitives. The guarded cleanup sampler is
+// still closed until its object matching and owned-worker integration land.
+#[cfg(any(windows, test))]
+#[allow(dead_code)]
+mod windows_membership;
 #[cfg(any(target_os = "linux", target_os = "macos"))]
 pub(crate) mod worktree_membership;
 #[cfg(unix)]

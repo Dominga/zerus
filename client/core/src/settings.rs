@@ -277,6 +277,11 @@ pub const KEYS: &[Key] = &[
             max: 4096,
         },
     ),
+    // WhiteWh fork: optional extensions (tray/src/Extensions.h). A fork build
+    // turns them on by default; the client is the fork's. Both names are Qt's,
+    // so the switch seeds the owner's choice.
+    key("extensions/socraticode", Kind::Flag(true)),
+    key("socraticode/nativeQdrant", Kind::Flag(false)),
 ];
 
 /// The setting called `name`: a listed key, a shortcut override, or one of

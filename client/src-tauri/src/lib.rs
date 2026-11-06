@@ -17,6 +17,8 @@ mod approvals;
 mod child_environment;
 mod cli;
 mod clipboard;
+#[cfg(feature = "live")]
+mod claude_app;
 mod commands;
 #[cfg(feature = "live")]
 mod composer;
@@ -94,6 +96,8 @@ mod session_folders;
 pub mod settings;
 #[cfg(any(target_os = "linux", target_os = "macos"))]
 mod signals;
+#[cfg(feature = "live")]
+mod socraticode;
 #[cfg(feature = "live")]
 mod speech_settings;
 #[cfg(feature = "live")]
@@ -1347,6 +1351,10 @@ fn handler() -> impl Fn(tauri::ipc::Invoke) -> bool + Send + Sync + 'static {
         renderer::renderer_frame,
         content_search::content_search,
         content_search::cancel_content_search,
+        claude_app::claude_app_sessions,
+        claude_app::claude_app_resume,
+        socraticode::socraticode_status,
+        socraticode::socraticode_act,
         native_ui::runtime::native_ui_open,
         native_ui::runtime::native_ui_browser,
         native_ui::runtime::native_ui_retire,

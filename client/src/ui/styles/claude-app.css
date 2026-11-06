@@ -1,0 +1,31 @@
+/* WhiteWh fork: Continue a Claude app session (ClaudeAppDialog.tsx), Qt's
+   760x460 dialog (tray/src/ClaudeAppSessionsDialog.h:32) with its four-column
+   session list. Skin tokens only. */
+@layer components {
+  dialog.cl-dlg { width: min(760px, calc(100vw - 48px)); }
+  dialog.cl-warn { width: min(520px, calc(100vw - 48px)); }
+  .cl-body { display: flex; flex-direction: column; gap: 8px; }
+  .cl-intro { margin: 0; font-size: var(--fs-sm); color: var(--z-color-muted); line-height: 1.45; }
+  .cl-tools { align-items: center; gap: 8px; }
+  .cl-list {
+    display: flex; flex-direction: column; min-height: 120px; max-height: 46vh; overflow: auto;
+    margin: 0; padding: 0; list-style: none; border: 1px solid var(--z-color-border);
+    border-radius: var(--z-radius-md); background: var(--z-color-field);
+  }
+  .cl-list:focus-visible { outline: none; border-color: var(--z-color-accent-muted); box-shadow: var(--z-shadow-focus-ring); }
+  .cl-row {
+    display: grid; grid-template-columns: minmax(0, 1fr) minmax(0, 240px) 104px 128px;
+    gap: 10px; align-items: center; padding: 5px 10px; border-bottom: 1px solid var(--z-color-divider);
+    font-size: var(--fs-sm); color: var(--z-color-text-2); cursor: default;
+  }
+  .cl-row:last-child { border-bottom: 0; }
+  .cl-row.cl-head {
+    position: sticky; top: 0; z-index: 1; padding-top: 7px; padding-bottom: 7px;
+    font-size: var(--fs-xs); font-weight: 600; color: var(--z-color-label); background: var(--z-color-raised);
+  }
+  .cl-row.on { background: var(--z-color-segment-on); color: var(--z-color-text); }
+  .cl-row .mono { font-size: var(--fs-xs); }
+  .cl-status { min-height: 1.4em; margin: 0; font-size: var(--fs-sm); color: var(--z-color-muted); white-space: pre-line; }
+  .cl-status.error { color: var(--z-color-danger); }
+  .cl-dlg .form-row { grid-template-columns: 130px minmax(0, 1fr); margin: 0; }
+}

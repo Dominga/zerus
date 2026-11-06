@@ -8,6 +8,7 @@ import { RecoverySection, refreshRecovery } from "./Recovery";
 import { FilesSection } from "./Files";
 import { AnalyticsSection } from "./Analytics";
 import { ApprovalsSection } from "./Approvals";
+import { ExtensionsSection } from "./Extensions";
 import { WorktreesSection, refreshWorktrees } from "./Worktrees";
 import { MobileSection } from "./Mobile";
 import { ProcessesSection } from "./Processes";
@@ -23,7 +24,7 @@ import { trNoop } from "../../../i18n";
 
 export type SectionId =
   | "appearance" | "sessions" | "recovery" | "processes" | "updates" | "mobile" | "files"
-  | "worktrees" | "approvals" | "voice" | "keyboard" | "analytics" | "about";
+  | "worktrees" | "approvals" | "voice" | "keyboard" | "analytics" | "extensions" | "about";
 
 export interface Section {
   id: SectionId;
@@ -46,6 +47,7 @@ export const SECTIONS: readonly Section[] = [
   { id: "voice", label: trNoop("Voice input"), icon: "mic", component: VoiceSection, refresh: refreshVoice },
   { id: "keyboard", label: "Keyboard", icon: "keyboard", component: KeyboardSection },
   { id: "analytics", label: trNoop("Private analytics"), icon: "gauge", component: AnalyticsSection },
+  { id: "extensions", label: trNoop("Extensions"), icon: "plug", component: ExtensionsSection },
   { id: "about", label: "About", icon: "info", component: AboutSection, refresh: refreshAbout },
 ];
 

@@ -15,6 +15,7 @@ sandbox, in the member's own folder, with a bounded time and output:
   git-merge-lead             git merge --no-edit the lead's branch, in your
                              own worktree or clone, never a shared team folder
   git-commit {message, paths?}  Zerus commits your work on your branch
+  cmake-*, ctest, msbuild-build, vstest: hgs guide team-cpp
 On Windows the Qt templates load Visual Studio and Qt; do not wrap them in
 your own vcvars batch. Shots stay in your folder: name their path in the report.
 Codex on Windows: .git is read-only; commit with git-commit, use powershell.exe.

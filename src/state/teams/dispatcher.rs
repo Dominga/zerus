@@ -7679,7 +7679,8 @@ fn run_outcome(team: &Team, member: &Member, folder: &Path, request: &Value) -> 
             zerus_folder,
         });
     }
-    let timeout = Duration::from_secs(super::templates::timeout_for(template));
+    // Task 85: a project template's own timeout comes from the folder's tests file.
+    let timeout = Duration::from_secs(super::templates::timeout_in(template, folder));
     // U36: a test stage builds in the task's folder (or its checkout), with
     // its own temporary folder, only while the stage is open.
     if let Some((stage_folder, temp)) = super::stages::run_folder(team, &member.id, request["attempt"].as_str().unwrap_or_default(), template)? {
@@ -7779,7 +7780,7 @@ fn record_run(store: &mut Store, team: &Team, member: &Member, request: &Value, 
     }
     json!({"status":"ran","template":template,"exit":outcome.exit,"tail":outcome.tail,
         "failures":outcome.failures,"excerpt":outcome.excerpt,"ms":outcome.ms,
-        "timed_out":outcome.timed_out,"error":outcome.error})
+        "timed_out":outcome.timed_out,"error":outcome.error,"report":outcome.report})
 }
 
 /// C1: claims a queued run and starts the detached runner. None means claimed

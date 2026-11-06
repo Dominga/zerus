@@ -121,10 +121,13 @@ void TeamProposalCards::setTeam(const Teams::Team *team)
     const QString id = team ? team->id : QString();
     auto views = team ? viewsOf(*team) : QList<View>();
     if (!m_only.isEmpty()) views.erase(std::remove_if(views.begin(), views.end(), [this](const View &view) { return view.id != m_only; }), views.end());
-    if (id != m_team) { m_staleViews.clear(); m_notices.clear(); m_reasons.clear(); m_sending.clear(); }
+    if (id != m_team) { m_staleViews.clear(); m_notices.clear(); m_reasons.clear(); m_sending.clear(); m_decided.clear(); }
     QSet<QString> open;
     for (const auto &view : views) open << view.id;
     m_sending.intersect(open);   // the ones the store has taken are gone
+    m_decided.intersect(open);
+    // Task 107: a decided card stays hidden while an older read still lists it.
+    views.erase(std::remove_if(views.begin(), views.end(), [this](const View &view) { return m_decided.contains(view.id); }), views.end());
     // A card that says something keeps saying it after its proposal is gone,
     // until the owner dismisses it; one shown again replaces it.
     for (const auto &view : std::as_const(m_views))
@@ -137,6 +140,13 @@ void TeamProposalCards::setTeam(const Teams::Team *team)
     m_team = id; m_views = views;
     if (same || m_asking) return;
     render();
+}
+
+void TeamProposalCards::confirmed(const QString &id)
+{
+    m_sending.remove(id);
+    m_decided.insert(id);
+    m_views.erase(std::remove_if(m_views.begin(), m_views.end(), [&id](const View &view) { return view.id == id; }), m_views.end());
 }
 
 void TeamProposalCards::setDark(bool dark)
@@ -333,7 +343,7 @@ void TeamProposalCards::answerQuestion(const View &view)
             self->m_sending.remove(id);
             self->m_notices.insert(id, message.contains(QLatin1String("changed"))
                                            ? tr("The question changed; nothing was sent. Read it again and answer.") : message);
-        }
+        } else self->confirmed(id);
         QTimer::singleShot(0, self, [self] { self->render(); });
     });
 }
@@ -415,7 +425,7 @@ void TeamProposalCards::answer(const View &view, bool allow)
             // A replay returns the stored decision: it was decided before.
             self->m_notices.insert(id, message == "accepted" ? tr("It was already allowed; your Deny changed nothing.")
                                                              : tr("It was already denied; your Allow changed nothing."));
-        }
+        } else self->confirmed(id);
         QTimer::singleShot(0, self, [self] { self->render(); });
     });
 }

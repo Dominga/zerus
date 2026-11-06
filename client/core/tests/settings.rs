@@ -1269,4 +1269,78 @@ fn malformed_splitter_is_unhandled_and_retry_is_family_atomic() {
     assert!(settings.flush_within(FLUSH));
 }
 
+/// Task 102: the fork's mobile services, New session's folder mode and the
+/// microphone come over once on a client that switched before them, from a
+/// fixture INI as the fork's Qt writes it. Next's own values win, a Qt
+/// device id is never stored (an id this computer does not know gives no
+/// name either), a malformed port keeps its whole family out, and the INI
+/// is never written.
+#[test]
+fn task_102_families_import_once_and_the_ini_is_never_written() {
+    use zerus_client_core::settings::{MICROPHONE_HINT, NEW_SESSION_FOLDER_MODE};
+    let scratch = Scratch::new("t102-families");
+    let qt = scratch.0.join("hgs-tray.ini");
+    let bytes: &[u8] = b"[mobile]\r\nlocalRelay=true\r\nlocalRelayPort=9443\r\nrunConnector=false\r\n\r\n[speech]\r\nmicrophone=\"{0.0.1.00000000}.{00000000-0000-0000-0000-000000000000}\"\r\n\r\n[workspace]\r\nlaunchWorktree=none\r\n";
+    fs::write(&qt, bytes).unwrap();
+    let modified = fs::metadata(&qt).unwrap().modified().unwrap();
+    let path = scratch.0.join("settings.json");
+    legacy_switch(&path, json!({"workspace/theme":"light"}));
+    let settings = Settings::open(path.clone(), Some(QtStore::Ini(qt.clone())));
+    assert!(settings.flag("mobile/localRelay"));
+    assert_eq!(settings.number("mobile/localRelayPort"), 9443.0);
+    assert!(!settings.flag("mobile/runConnector"));
+    assert_eq!(settings.text(NEW_SESSION_FOLDER_MODE), "none");
+    assert_eq!(
+        settings.text("speech/microphone"),
+        "",
+        "a Qt device id is never stored"
+    );
+    assert!(
+        !settings.contains(MICROPHONE_HINT),
+        "an unknown endpoint gives no name"
+    );
+    assert!(settings.flush_within(FLUSH));
+    drop(settings);
+    assert_eq!(fs::read(&qt).unwrap(), bytes);
+    assert_eq!(fs::metadata(&qt).unwrap().modified().unwrap(), modified);
+    let saved: Value = serde_json::from_slice(&fs::read(&path).unwrap()).unwrap();
+    for family in [
+        "mobile-local-services",
+        "new-session-folder-mode",
+        "voice-device-hint",
+    ] {
+        assert_eq!(saved["g3"]["families"][family]["family"], family);
+    }
+    // Handled: Qt's later change does not come over again.
+    fs::write(&qt, b"[workspace]\r\nlaunchWorktree=auto\r\n").unwrap();
+    let again = Settings::open(path.clone(), Some(QtStore::Ini(qt.clone())));
+    assert_eq!(again.text(NEW_SESSION_FOLDER_MODE), "none");
+    drop(again);
 
+    // Next's own choices win; anything but "none" is Auto; a bad port keeps
+    // the mobile family out (quarantined, its source untouched).
+    let path = scratch.0.join("settings-own.json");
+    legacy_switch(
+        &path,
+        json!({"mobile/runConnector": true, "newSession/folderMode": "none"}),
+    );
+    let qt = scratch.0.join("hgs-tray-other.ini");
+    let bytes: &[u8] = b"[mobile]\r\nlocalRelay=true\r\nlocalRelayPort=99999\r\n\r\n[workspace]\r\nlaunchWorktree=auto\r\n";
+    fs::write(&qt, bytes).unwrap();
+    let own = Settings::open(path.clone(), Some(QtStore::Ini(qt.clone())));
+    assert_eq!(own.text(NEW_SESSION_FOLDER_MODE), "none");
+    assert!(!own.flag("mobile/localRelay"));
+    assert_eq!(own.number("mobile/localRelayPort"), 8787.0);
+    assert!(own.flush_within(FLUSH));
+    drop(own);
+    let saved: Value = serde_json::from_slice(&fs::read(&path).unwrap()).unwrap();
+    assert_eq!(
+        saved["g3"]["quarantine"]["mobile-local-services"]["reason"],
+        "invalid relay port"
+    );
+    assert_eq!(fs::read(&qt).unwrap(), bytes);
+    let path = scratch.0.join("settings-auto.json");
+    legacy_switch(&path, json!({}));
+    let auto = Settings::open(path, Some(QtStore::Ini(qt)));
+    assert_eq!(auto.text(NEW_SESSION_FOLDER_MODE), "auto");
+}

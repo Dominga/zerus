@@ -1002,6 +1002,8 @@ pub struct Remember {
     pub agent: String,
     pub account: String,
     pub terminal: bool,
+    /// Task 102: "auto" or "none" when chosen in the dialog, else empty.
+    pub folder_mode: String,
 }
 
 /// What the caller does for a step.
@@ -1209,6 +1211,7 @@ impl Creations {
                 agent: text(&choices, "cmd").to_owned(),
                 account: text(&choices, "account").to_owned(),
                 terminal: flag(&choices, "terminal"),
+                folder_mode: text(&choices, "worktree_choice").to_owned(),
             }
         });
         self.next_write += 1;

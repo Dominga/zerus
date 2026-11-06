@@ -1149,6 +1149,13 @@ fn bind(
 fn remember(settings: &zerus_client_core::settings::Settings, choices: &Remember) {
     let _ = settings.set("workspace/launchAgent", json!(choices.agent));
     let _ = settings.set("workspace/launchOpenTerminal", json!(choices.terminal));
+    // Task 102: the folder mode chosen in the dialog is the next default.
+    if matches!(choices.folder_mode.as_str(), "auto" | "none") {
+        let _ = settings.set(
+            zerus_client_core::settings::NEW_SESSION_FOLDER_MODE,
+            json!(choices.folder_mode),
+        );
+    }
     if !choices.account.is_empty() {
         let mut accounts =
             serde_json::from_str::<Value>(&settings.text("workspace/launchAccounts"))
@@ -2397,11 +2404,25 @@ mod tests {
             agent: "codex".into(),
             account: String::new(),
             terminal: true,
+            folder_mode: String::new(),
         };
         remember(&settings, &choice);
         assert_eq!(settings.text("workspace/launchAccounts"), "invalid JSON");
         assert_eq!(settings.text("workspace/launchAgent"), "codex");
         assert!(settings.flag("workspace/launchOpenTerminal"));
+        // Task 102: an unchosen folder mode keeps the default; a chosen one is the next.
+        let mode = zerus_client_core::settings::NEW_SESSION_FOLDER_MODE;
+        assert_eq!(settings.text(mode), "auto");
+        choice.folder_mode = "none".into();
+        remember(&settings, &choice);
+        assert_eq!(settings.text(mode), "none");
+        choice.folder_mode = String::new();
+        remember(&settings, &choice);
+        assert_eq!(settings.text(mode), "none");
+        choice.folder_mode = "auto".into();
+        remember(&settings, &choice);
+        assert_eq!(settings.text(mode), "auto");
+        choice.folder_mode = String::new();
         choice.account = "remote".into();
         remember(&settings, &choice);
         choice.host.clear();

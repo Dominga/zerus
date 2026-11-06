@@ -231,6 +231,7 @@ TeamWorkspace::TeamWorkspace(TeamController *teams, TeamPanel *panel, QWidget *p
     // ages in place.
     QObject::connect(m_teams, &TeamController::teamsChanged, this, [this] { pollRender(); });
     QObject::connect(m_teams, &TeamController::showCancelledChanged, this, [this] { scheduleRender(); });
+    QObject::connect(m_teams, &TeamController::staleChanged, this, [this] { scheduleRender(); });
     QObject::connect(m_teams, &TeamController::watchedChanged, this, [this] {
         if (const auto *team = m_teams->watched()) Teams::AccountMove::observe(m_move, *team);
         renderAccountMove();
@@ -595,6 +596,7 @@ void TeamWorkspace::render()
         // C4: the owner's attention list is the first group of the side
         // column; the lead's inbox (C2) is a drawer under the canvas.
         if (!m_error.isEmpty()) tv->addWidget(errorStrip());
+        if (m_teams->stale()) tv->addWidget(staleStrip());
         // U25 (spec 5.7): Needs your answer, Team stuck and Plan problems are
         // collapsed lists at the top of the right column now.
         // The send-back form being typed in keeps the focus across the rebuild.
@@ -1695,6 +1697,24 @@ void TeamWorkspace::answerAttention(const QString &teamId, const QString &member
     QGuiApplication::clipboard()->setText(command);
     m_error = tr("The answer command is on the clipboard: fill in the option and run it.");
     render();
+}
+
+// Task 101: hgs did not answer the latest read (the team store was busy, or
+// the read passed its deadline); what shows is the last good read, kept
+// until a read answers again.
+QWidget *TeamWorkspace::staleStrip()
+{
+    const Colors c = colorsFor(m_dark);
+    auto *strip = new QFrame; strip->setObjectName("teamWorkspaceStale");
+    strip->setStyleSheet(QStringLiteral("QFrame#teamWorkspaceStale{background:%1;border-bottom:1px solid %2;}")
+                             .arg(alpha(c.warn, .08).name(QColor::HexArgb), alpha(c.warn, .4).name(QColor::HexArgb)));
+    auto *h = new QHBoxLayout(strip); h->setContentsMargins(12, 4, 12, 4); h->setSpacing(8);
+    const QDateTime at = m_teams->lastGoodRead();
+    const QString when = at.isValid() ? at.time().toString(QStringLiteral("HH:mm:ss")) : tr("earlier");
+    auto *text = label(tr("Showing the team as read at %1; reading again (%2)").arg(when, m_teams->staleError()), c.warn, 11);
+    text->setWordWrap(true); text->setObjectName("teamWorkspaceStaleText");
+    h->addWidget(text, 1);
+    return strip;
 }
 
 QWidget *TeamWorkspace::errorStrip()

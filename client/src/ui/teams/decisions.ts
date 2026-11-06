@@ -287,6 +287,8 @@ export class ProposalCards {
   private notices = new Map<string, string>();
   private reasons = new Map<string, string>();
   private sending = new Set<string>();
+  /** Task 107: decided, confirmed by hgs: hidden at once, until the store no longer lists them. */
+  private decided = new Set<string>();
   private picked = new Map<string, string>();
   private ownWords = new Set<string>();
   private uncertain = new Map<string, string>();
@@ -306,9 +308,12 @@ export class ProposalCards {
     const id = team?.id ?? "";
     let views = proposalCards(team);
     if (this.only) views = views.filter((view) => view.id === this.only);
-    if (id !== this.teamId) { this.stale.clear(); this.notices.clear(); this.reasons.clear(); this.sending.clear(); this.uncertain.clear(); }
+    if (id !== this.teamId) { this.stale.clear(); this.notices.clear(); this.reasons.clear(); this.sending.clear(); this.uncertain.clear(); this.decided.clear(); }
     const open = new Set(views.map((view) => view.id));
     for (const sent of [...this.sending]) if (!open.has(sent)) this.sending.delete(sent);
+    for (const done of [...this.decided]) if (!open.has(done)) this.decided.delete(done);
+    // A decided card stays hidden while an older read still lists it.
+    views = views.filter((view) => !this.decided.has(view.id));
     for (const view of this.views) if (!open.has(view.id) && this.notices.has(view.id)) this.stale.set(view.id, view);
     for (const key of [...this.stale.keys()]) if (open.has(key)) this.stale.delete(key);
     for (const key of [...this.reasons.keys()]) if (!open.has(key)) this.reasons.delete(key);
@@ -319,6 +324,13 @@ export class ProposalCards {
   }
 
   get team() { return this.teamId; }
+
+  /** Task 107: hgs confirmed this card's decision: it leaves at once. */
+  private confirmed(id: string) {
+    this.sending.delete(id);
+    this.decided.add(id);
+    this.views = this.views.filter((view) => view.id !== id);
+  }
 
   cards(): CardState[] {
     const state = (card: ProposalCard, gone: boolean): CardState => ({
@@ -387,6 +399,7 @@ export class ProposalCards {
         const wanted = allow ? "accepted" : "rejected";
         if ((status === "accepted" || status === "rejected") && status !== wanted)
           this.notices.set(id, status === "accepted" ? tr("It was already allowed; your Deny changed nothing.") : tr("It was already denied; your Allow changed nothing."));
+        else this.confirmed(id);
       }
     }
     this.changed();
@@ -411,6 +424,7 @@ export class ProposalCards {
     const outcome = await this.send(id, { kind: "decide_proposal", proposal: id, accept: true, expected_hash: view.hash, answer });
     if (outcome !== "cancelled" && outcome.outcome === "failed")
       this.notices.set(id, outcome.detail.includes("changed") ? tr("The question changed; nothing was sent. Read it again and answer.") : hgsWords(outcome.detail));
+    else if (outcome !== "cancelled" && outcome.outcome === "done") this.confirmed(id);
     this.changed();
     return outcome;
   }
@@ -418,6 +432,29 @@ export class ProposalCards {
 
 // ---------------------------------------------------------------------------
 // Waiting for you (Qt TeamWaitingPage, TeamWaitingBanner, TeamWaitingAnswer)
+
+/**
+ * Task 107: the items of Waiting for you a confirmed action decided, as Qt's
+ * TeamWaitingFeed::decidedIds matches them: a proposal by its id, a draft or
+ * a waiting phase by its number, a held or reported task by its id. Another
+ * team's items, and actions that name none of these, decide nothing.
+ */
+export function decidedWaiting(items: readonly TeamWaitingItem[], call: Pick<TeamCall, "team" | "action">): string[] {
+  const action = call.action as { kind: string; proposal?: string; phase?: number | null; task?: number };
+  const phase = action.phase ?? 0, task = action.task ?? 0;
+  return items.filter((item) => {
+    if (!call.team || item.team !== call.team) return false;
+    const fields = waitingFields(item);
+    switch (action.kind) {
+      case "decide_proposal": return !!action.proposal && (fields.proposal === action.proposal || item.id === `${call.team}/owner_word_asked/proposal-${action.proposal}`);
+      case "approve": return item.kind === "phase_draft" && (phase > 0 ? fields.phase === phase : true);
+      case "accept_phase": case "send_back_phase": return item.kind === "phase_acceptance" && phase > 0 && fields.phase === phase;
+      case "release": return item.kind === "task_waits_owner" && task > 0 && fields.task === task;
+      case "accept": case "reject": case "send_back": return item.action === "decide_report" && task > 0 && fields.task === task;
+      default: return false;
+    }
+  }).map((item) => item.id);
+}
 
 /** The item's kind in words. */
 export function waitingKindLabel(item: Pick<TeamWaitingItem, "kind" | "action">): string {

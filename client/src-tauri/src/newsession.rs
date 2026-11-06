@@ -452,6 +452,8 @@ pub struct Remembered {
     pub agent: String,
     pub accounts: Value,
     pub open_terminal: bool,
+    /// Task 102: "auto" (a generated worktree) or "none" (the folder itself).
+    pub folder_mode: String,
 }
 
 /// Reading invalid account JSON gives Qt's empty object without rewriting
@@ -464,6 +466,7 @@ pub fn remembered(settings: &zerus_client_core::settings::Settings) -> Remembere
             .filter(Value::is_object)
             .unwrap_or_else(|| json!({})),
         open_terminal: settings.flag("workspace/launchOpenTerminal"),
+        folder_mode: settings.text(zerus_client_core::settings::NEW_SESSION_FOLDER_MODE),
     }
 }
 
@@ -493,6 +496,7 @@ pub fn context() -> Context {
             agent: String::new(),
             accounts: json!({}),
             open_terminal: false,
+            folder_mode: String::new(),
         },
         swarm: String::new(),
     }
@@ -901,7 +905,8 @@ mod tests {
                 Remembered {
                     agent: "claude".into(),
                     accounts: json!({}),
-                    open_terminal: true
+                    open_terminal: true,
+                    folder_mode: "auto".into(),
                 }
             );
             assert_eq!(settings.text("workspace/launchAccounts"), accounts);
@@ -1219,7 +1224,8 @@ mod tests {
             Remembered {
                 agent: String::new(),
                 accounts: json!({}),
-                open_terminal: false
+                open_terminal: false,
+                folder_mode: String::new(),
             }
         );
         assert_eq!(first.own_windows_session, launch::own_windows_session());

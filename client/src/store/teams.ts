@@ -1,5 +1,6 @@
 import { createEffect, createMemo, createRoot, createSignal } from "solid-js";
-import { teamsFollow } from "../bridge";
+import { onTeamDecided, teamsFollow } from "../bridge";
+import { decidedWaiting } from "../ui/teams/decisions";
 import { catalog } from "./catalog";
 import { page, selected } from "./ui";
 import { NOTHING, createTeams, mergeFollows, sessionIs, type TeamsNeed } from "./teamsView";
@@ -57,6 +58,19 @@ export function answeredWaiting(item: Pick<TeamWaitingItem, "id">) {
   waitingNotices().withdraw(item.id);
   setAnsweredIds((ids) => new Set([...ids, item.id]));
 }
+
+/**
+ * Task 107: a decision hgs confirmed anywhere (a proposal card, the Plan
+ * view, a task card) takes what it decided out of Waiting for you at once,
+ * with its notification, before the next read; a refused or unknown outcome
+ * keeps it.
+ */
+export function decidedTeamAction(call: Parameters<typeof decidedWaiting>[1] & { computer?: ComputerId }) {
+  if (call.computer) return;   // Waiting for you lists this computer's teams
+  const view = teams.waiting("");
+  for (const id of decidedWaiting(view?.items ?? [], call)) answeredWaiting({ id });
+}
+onTeamDecided(decidedTeamAction);
 
 /** What waits for the owner on this computer, without what was answered here. */
 export const waiting = createRoot(() => createMemo((): TeamWaitingView | undefined => {

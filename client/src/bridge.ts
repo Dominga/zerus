@@ -71,7 +71,20 @@ export const teamsFollow = (computer: ComputerId, follow: import("./store/teamsV
   inTauri() ? invoke<void>("teams_follow", { computer, list: follow.list, waiting: follow.waiting, team: follow.team, catalog: follow.catalog }) : Promise.resolve();
 /** One guarded owner action on a team (core action.rs); the outcome says whether it was applied, refused, unknown or must be confirmed first. The core runs `hgs team`, the webview never does. */
 export const teamAction = (call: import("./types").TeamCall) =>
-  inTauri() ? invoke<import("./types").TeamOutcome>("team_action", { call }) : Promise.reject(new Error("Teams need the desktop app."));
+  inTauri()
+    ? invoke<import("./types").TeamOutcome>("team_action", { call }).then((outcome) => {
+      // Task 107: a confirmed decision leaves Waiting for you at once; the core
+      // has already asked for a fresh read. Failed, unknown or to confirm: nothing.
+      if (outcome.outcome === "done") for (const listener of decidedListeners) listener(call);
+      return outcome;
+    })
+    : Promise.reject(new Error("Teams need the desktop app."));
+const decidedListeners: ((call: import("./types").TeamCall) => void)[] = [];
+/** Task 107: called with every team action hgs confirmed (outcome "done"). */
+export function onTeamDecided(listener: (call: import("./types").TeamCall) => void): () => void {
+  decidedListeners.push(listener);
+  return () => { const at = decidedListeners.indexOf(listener); if (at >= 0) decidedListeners.splice(at, 1); };
+}
 /**
  * Task #44: Qt's catalog editor. Core keeps the working copy and checks every
  * edit against the schema; the webview never parses or builds a catalog.

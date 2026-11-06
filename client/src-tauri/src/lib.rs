@@ -142,6 +142,8 @@ mod window_geometry;
 mod window_layer;
 mod window_visibility;
 mod wsl_mapping;
+// Task 102: Qt's presets and raised notices, read once at the first start.
+mod qt_first_start;
 mod model_servers;
 #[cfg(any(windows, test))]
 mod windows_shell;
@@ -611,6 +613,8 @@ fn launch(context: tauri::Context<tauri::Wry>, startup: Startup) {
                 std::fs::create_dir_all(&dir)?;
                 let replay = std::env::var_os("ZERUS_CLIENT_REPLAY").is_some_and(|list| !list.is_empty());
                 app.manage(settings::open(app.handle(), &dir, replay));
+                // Task 102: Qt's WSL presets and raised notices, once, before their readers.
+                qt_first_start::import(&dir, settings::seed_source(&app.state::<identity::Identity>().bundle_id, replay));
                 if desktop_service::mode() {
                     let source=desktop_notification_controls::Source::default();
                     let handle=app.handle().clone();
@@ -1030,6 +1034,8 @@ fn launch(context: tauri::Context<tauri::Wry>, startup: Startup) {
                         })) as desk::LoadAttention
                     });
                     desk::start(app.handle(), &pump, dir.clone(), desk::load_windows_mode(&dir, conf.as_deref()), attention);
+                    // Task 102: the chosen local relay and the connector, as Qt starts them.
+                    if !replay && !desktop_service::mode() { mobile::ensure_local_services(app.handle().clone()); }
                     if switch && !replay && !desktop_service::mode() {
                         match platform::windows::worker::Worker::start(zerus_client_core::default_hgs()) {
                             Ok(worker) => { app.manage(worker); }
@@ -1445,6 +1451,10 @@ fn handler() -> impl Fn(tauri::ipc::Invoke) -> bool + Send + Sync + 'static {
         mobile::mobile_legacy_open,
         mobile::mobile_legacy_apply,
         mobile::mobile_legacy_close,
+        mobile::mobile_local_services,
+        mobile::mobile_local_relay,
+        qt_first_start::private_store_notices_known,
+        qt_first_start::private_store_notices_save,
         mobile::mobile_view,
         mobile::mobile_open,
         mobile::mobile_refresh_workspace,

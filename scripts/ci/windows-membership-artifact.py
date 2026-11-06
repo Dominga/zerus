@@ -41,16 +41,18 @@ def select(messages, root):
                 and message.get("target", {}).get("name") == "hgs"
                 and message.get("target", {}).get("kind") == ["bin"]
                 and message.get("profile", {}).get("test") is True
+                and message.get("profile", {}).get("opt_level") == "3"
+                and message.get("profile", {}).get("debug_assertions") is False
                 and Path(message["manifest_path"]).resolve() == root / "Cargo.toml"
                 and message.get("executable")):
             candidates.append(Path(message["executable"]))
     if len(candidates) != 1:
         raise ValueError("Expected one exact root test executable")
     path = candidates[0]
-    parent = root / "target/debug/deps"
+    parent = root / "target/release/deps"
     if (linked(path) or path.parent != parent
             or not re.fullmatch(r"hgs-[0-9a-f]+\.exe", path.name)
-            or any(linked(part) for part in [root / "target", root / "target/debug", parent])):
+            or any(linked(part) for part in [root / "target", root / "target/release", parent])):
         raise ValueError("Unexpected test executable location")
     info = path.stat()
     if not stat.S_ISREG(info.st_mode) or info.st_nlink != 1 or not 2 <= info.st_size <= 1 << 30:
@@ -76,6 +78,7 @@ def package(source, sha, output):
         "schema": 1,
         "kind": "read-only-membership-test-fixture",
         "sourceCommit": sha,
+        "buildProfile": "release",
         "executable": {"name": EXE, "sha256": before, "size": target.stat().st_size},
         "allowedExactCases": CASES,
         "ignoredExactCases": [CASES[-1]],
@@ -103,7 +106,7 @@ def main():
     # The workflow additionally keeps the whole owned build tree in outside-job.
     with tempfile.TemporaryFile() as output, tempfile.TemporaryFile() as errors:
         built = subprocess.run(
-            ["cargo", "+1.99.1", "test", "--locked", "--bin", "hgs", "--no-run", "--message-format=json"],
+            ["cargo", "+1.99.1", "test", "--release", "--locked", "--bin", "hgs", "--no-run", "--message-format=json"],
             cwd=ROOT, stdout=output, stderr=errors, timeout=1800, check=False,
         )
         if built.returncode:

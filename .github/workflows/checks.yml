@@ -1420,7 +1420,7 @@ jobs:
         if: inputs.retain_membership_probe
         uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
         with:
-          name: membership-qualification-windows-${{ needs.source.outputs.commit }}
+          name: membership-qualification-windows-release-${{ needs.source.outputs.commit }}
           path: artifacts/membership-qualification-windows
           if-no-files-found: error
           retention-days: 1

@@ -17,13 +17,14 @@ class QualificationArtifact(unittest.TestCase):
         self.addCleanup(self.directory.cleanup)
         self.root = Path(self.directory.name).resolve()
         (self.root / "Cargo.toml").write_text("private fixture")
-        self.exe = self.root / "target/debug/deps/hgs-1234.exe"
+        self.exe = self.root / "target/release/deps/hgs-1234.exe"
         self.exe.parent.mkdir(parents=True)
         self.exe.write_bytes(b"MZprivate test fixture")
 
     def record(self, **changes):
         record = {"reason": "compiler-artifact", "manifest_path": str(self.root / "Cargo.toml"),
-                  "target": {"name": "hgs", "kind": ["bin"]}, "profile": {"test": True},
+                  "target": {"name": "hgs", "kind": ["bin"]},
+                  "profile": {"test": True, "opt_level": "3", "debug_assertions": False},
                   "executable": str(self.exe)}
         record.update(changes)
         return json.dumps(record)
@@ -32,6 +33,9 @@ class QualificationArtifact(unittest.TestCase):
         self.assertEqual(MODULE.select(self.record(), self.root), self.exe)
         for records in ["", self.record() + "\n" + self.record(),
                         self.record(profile={"test": False}),
+                        self.record(profile={"test": True, "opt_level": "0", "debug_assertions": False}),
+                        self.record(profile={"test": True, "opt_level": "3", "debug_assertions": True}),
+                        self.record(profile={"test": True, "opt_level": "3"}),
                         self.record(target={"name": "other", "kind": ["bin"]}),
                         self.record(manifest_path=str(self.root / "other/Cargo.toml"))]:
             with self.subTest(records=records), self.assertRaises(ValueError):
@@ -47,6 +51,17 @@ class QualificationArtifact(unittest.TestCase):
             MODULE.select(self.record(), self.root)
         self.exe.unlink()
         self.exe.mkdir()
+        with self.assertRaises(ValueError):
+            MODULE.select(self.record(), self.root)
+
+    def test_linked_release_directory_refuses(self):
+        release = self.root / "target/release"
+        original = self.root / "target/actual-release"
+        release.rename(original)
+        try:
+            release.symlink_to(original, target_is_directory=True)
+        except OSError:
+            self.skipTest("native directory links unavailable")
         with self.assertRaises(ValueError):
             MODULE.select(self.record(), self.root)
 
@@ -74,6 +89,7 @@ class QualificationArtifact(unittest.TestCase):
         MODULE.package(self.exe, sha, output)
         manifest = json.loads((output / "manifest.json").read_text())
         self.assertEqual(manifest["sourceCommit"], sha)
+        self.assertEqual(manifest["buildProfile"], "release")
         self.assertEqual(manifest["executable"]["sha256"], MODULE.digest(self.exe))
         self.assertEqual(manifest["executable"]["size"], self.exe.stat().st_size)
         self.assertEqual(manifest["kind"], "read-only-membership-test-fixture")

@@ -939,7 +939,7 @@ pub(super) fn create_with(args: &[String], control: Option<&Control<'_>>) -> Res
         })?;
     }
     let cache = cache_file("repo", &common.to_string_lossy());
-    fs::create_dir_all(cache.parent().unwrap()).map_err(|e| e.to_string())?;
+    crate::platform::private_dir(cache.parent().unwrap()).map_err(|e| e.to_string())?;
     let guard = crate::platform::private_open(
         OpenOptions::new()
             .create(true)

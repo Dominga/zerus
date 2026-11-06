@@ -676,6 +676,15 @@ impl Job {
             }
             return Ok(());
         }
+        // This explicit mutation only tightens the owned legacy state directory;
+        // passive status/lookup never changes permissions. It precedes the first
+        // native intent and retains the same selected helper/resource bounds.
+        if self.owner.mode == Mode::Native
+            && self.action == Some(Action::NativeTakeover)
+            && has(wire::PREPARE_STATE_HELP_MARKER)
+        {
+            self.call(&route, &["desktop", "prepare-state", "--json"], vec![])?;
+        }
         let bytes = self.call(&route, &["desktop", "ownership-status", "--json"], vec![])?;
         let status: Status =
             serde_json::from_slice(&bytes).map_err(|_| "invalid_ownership_status")?;

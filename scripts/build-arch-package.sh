@@ -2,13 +2,14 @@
 # Build and validate this exact checkout; full recipe tests run by default.
 set -euo pipefail
 build_only=false
-if [ "$#" -gt 1 ]; then echo 'Usage: build-arch-package.sh [--build-only]' >&2; exit 2; fi
+if [ "$#" -gt 2 ]; then echo 'Usage: build-arch-package.sh [--build-only | --checked-source SHA]' >&2; exit 2; fi
 case "${1:-}" in
     '') ;;
     --build-only) build_only=true ;;
-    *) echo 'Usage: build-arch-package.sh [--build-only]' >&2; exit 2 ;;
+    --checked-source) build_only=true ;;
+    *) echo 'Usage: build-arch-package.sh [--build-only | --checked-source SHA]' >&2; exit 2 ;;
 esac
-if [ "$build_only" = true ]; then
+if [ "${1:-}" = --build-only ]; then
     if [[ "${ZERUS_RELEASE_CHANNEL:-}" != dev || ! "${ZERUS_DEV_BUILD_NUMBER:-}" =~ ^[1-9][0-9]*$ ]]; then
         echo '--build-only requires the Dev channel and a positive Dev build number.' >&2
         exit 2
@@ -17,6 +18,15 @@ fi
 cd "$(dirname "$0")/.."
 if [ "$(id -u)" = 0 ]; then echo 'makepkg must run as an unprivileged user.' >&2; exit 1; fi
 repo_root="$PWD"
+if [ "${1:-}" = --checked-source ]; then
+    # This is scheduling, not a qualification receipt: the release seal still
+    # consumes the successful source job's exact archive/recipe/package hashes.
+    if [[ ! "${2:-}" =~ ^[0-9a-f]{40}$ ]] || [ "$2" != "$(git rev-parse HEAD)" ]; then
+        echo 'Parallel source checks must name this exact checkout commit.' >&2; exit 2
+    fi
+elif [ "$#" -gt 1 ]; then
+    echo 'Unexpected package build arguments.' >&2; exit 2
+fi
 git rev-parse --verify HEAD > /dev/null
 package_build="$repo_root/.ci-build/arch-package"
 mkdir -p "$package_build" artifacts/test-results

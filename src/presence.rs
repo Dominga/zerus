@@ -109,7 +109,7 @@ fn read(path: &Path) -> Option<Record> {
 }
 
 fn write(root: &Path, input: &Input, at: f64) -> Result<Record> {
-    fs::create_dir_all(root).context("create the hgs state directory")?;
+    crate::platform::private_dir(root).context("create the hgs state directory")?;
     let path = root.join(FILE);
     let record = next(read(&path).as_ref(), input, at);
     let mut file = tempfile::NamedTempFile::new_in(root)?;
@@ -174,6 +174,25 @@ mod tests {
     use super::*;
     use std::time::Duration;
     use zerus_presence_sampler::{Idle, IdleSource, Sample};
+
+    #[cfg(unix)]
+    #[test]
+    fn first_presence_write_creates_the_missing_state_directory_privately() {
+        use std::os::unix::fs::MetadataExt;
+        let temp = tempfile::tempdir().unwrap();
+        let state = temp.path().join("hgs/sessions");
+        write(
+            &state,
+            &Input {
+                idle_seconds: 0.0,
+                locked: false,
+            },
+            100.0,
+        )
+        .unwrap();
+        assert_eq!(fs::metadata(&state).unwrap().mode() & 0o777, 0o700);
+        assert!(read(&state.join(FILE)).is_some());
+    }
 
     fn sample(seconds: u64, since_input: bool, locked: Option<bool>) -> Sample {
         Sample {

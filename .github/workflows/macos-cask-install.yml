@@ -1,0 +1,37 @@
+name: macOS cask installation
+
+# Credential-free check of the signed artifact from this same workflow run.
+on:
+  workflow_call:
+    inputs:
+      channel:
+        type: string
+        required: true
+
+permissions:
+  contents: read
+
+cache-mode: none
+
+jobs:
+  verify:
+    name: macOS cask installation
+    runs-on: macos-15
+    timeout-minutes: 30
+    env:
+      HOMEBREW_NO_AUTO_UPDATE: 1
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+      - uses: actions/download-artifact@9000827ccba6bdab643e8b6fd33ac0654aef8333 # v8.0.2
+        with:
+          name: macos-signed-${{ github.sha }}
+          path: artifacts/macos-signed
+      - run: brew install tmux
+      - name: Install the candidate cask from a local tap
+        env:
+          CHANNEL: ${{ inputs.channel }}
+          # Nightly prereleases are tagged with the calling workflow run.
+          TAG: ${{ inputs.channel == 'nightly' && format('nightly-{0}', github.run_id) || inputs.channel == 'dev' && format('dev-desktop-{0}', github.run_id) || '' }}
+        run: bash scripts/ci/macos-cask-install.sh artifacts/macos-signed "$CHANNEL" "$TAG"

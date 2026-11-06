@@ -72,7 +72,7 @@ def receipt(request):
     return answer
 
 
-if args in [['desktop', 'ownership-status', '--json'], ['desktop', 'ownership-result', '--json'],
+if args in [['desktop', 'prepare-state', '--json'], ['desktop', 'ownership-status', '--json'], ['desktop', 'ownership-result', '--json'],
             ['desktop', 'frontend-request', '--json']] or args == ['--help']:
     with (root / 'calls').open('a') as log:
         log.write(json.dumps(dict(args=args, value=value, pid=os.getpid())) + '\n')
@@ -90,6 +90,8 @@ if args == ['--help']:
         print('Desktop frontend request ABI: desktop-ui-request-v1')
     if config.get('ownership_abi', True):
         print('Desktop ownership ABI: ' + abi)
+    if config.get('prepare_state'):
+        print('Desktop state preparation: desktop-state-prepare-v1')
     if config.get('retained_import_abi'):
         print('Desktop import ABI: desktop-import-v1')
     if config.get('observation_abi'):
@@ -97,6 +99,10 @@ if args == ['--help']:
 elif config.get('retained_import_abi') and args[:2] in [
         ['desktop', 'import-evidence'], ['desktop', 'import-status']]:
     exec(compile((root / 'import-fixture.py').read_text(), 'import-fixture.py', 'exec'))
+elif args == ['desktop', 'prepare-state', '--json']:
+    if config.get('prepare_refused'):
+        sys.exit(1)
+    print(json.dumps(dict(prepared=True)))
 elif args == ['desktop', 'ownership-status', '--json']:
     if (root / 'mode-ownership-hold').exists():
         (root / 'mode-ownership-entered').touch()

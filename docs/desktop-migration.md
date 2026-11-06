@@ -108,9 +108,10 @@ privately, regardless of the user's umask. Older versions could create
 next GUI startup from reading desktop ownership. Before a new native startup
 intent, the selected helper's explicit `desktop prepare-state --json` operation
 removes group/other access from that existing, owned directory through a pinned
-no-follow handle. Service startup does the same. It refuses a symbolic link,
-wrong owner, non-directory or changed object; it never repairs descendants or
-creates a service/ownership grant. Missing state stays missing. Ordinary status
+no-follow handle. Service startup does the same. An alias to the same verified
+already-private directory remains valid without mutation; repair through a
+symbolic link, wrong owner, non-directory or changed object is refused. It never
+repairs descendants or creates a service/ownership grant. Missing state stays missing. Ordinary status
 and lookup commands remain read-only.
 
 For an affected older installation, after verifying that the sessions directory

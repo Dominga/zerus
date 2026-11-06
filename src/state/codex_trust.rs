@@ -18,6 +18,33 @@ const GIT_ROOT: &str = "Note: You’re in a subdirectory of a Git project. Trust
 const LABELS: [&str; 2] = ["Trust and continue", "Quit"];
 const DESCRIPTIONS: [&str; 2] = ["Trust this folder and remember the decision.", "Exit without trusting this folder."];
 
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum Cancel {
+    Quit,
+    Overview,
+}
+impl Cancel {
+    fn hint(self) -> &'static str {
+        match self {
+            Self::Quit => HINT,
+            Self::Overview => "enter continue · esc back",
+        }
+    }
+    fn labels(self) -> [&'static str; 2] {
+        match self {
+            Self::Quit => LABELS,
+            Self::Overview => ["Trust and continue", "Back to Agent Command Center"],
+        }
+    }
+    fn description(self, repository: bool) -> &'static str {
+        match (self, repository) {
+            (Self::Quit, false) => DESCRIPTIONS[1],
+            (Self::Quit, true) => "Exit without trusting this repository.",
+            (Self::Overview, _) => "Return to Agent Command Center without trusting or opening this folder.",
+        }
+    }
+}
+
 struct Panel {
     folder: String,
     disclosure: String,
@@ -26,6 +53,7 @@ struct Panel {
     // Every paragraph is reviewed native text, so our paraphrases are accurate.
     known: bool,
     selected: usize,
+    cancel: Cancel,
 }
 
 fn words(text: &str) -> String {
@@ -35,9 +63,13 @@ fn words(text: &str) -> String {
 fn parse(screen: &str) -> Option<Panel> {
     let rows: Vec<_> = screen.trim().lines().map(str::trim).collect();
     let filled: Vec<_> = (0..rows.len()).filter(|&i| !rows[i].is_empty()).collect();
-    if filled.len()<6 || rows[0]!=TITLE || !shown_path::absolute(rows[1]) || *rows.last()?!=HINT {
+    if filled.len()<6 || rows[0]!=TITLE || !shown_path::absolute(rows[1]) {
         return None;
     }
+    // Each reviewed cancel action has its own exact label/footer pair. In
+    // 0.167 Back leaves the process running; it is not the older Quit action.
+    let hint = *rows.last()?;
+    let cancel = [Cancel::Quit, Cancel::Overview].into_iter().find(|cancel| hint == cancel.hint())?;
     let options=filled.len()-3;
     let mut selected=None;
     for i in 0..2 {
@@ -45,7 +77,7 @@ fn parse(screen: &str) -> Option<Panel> {
         let label=if let Some(label)=row.strip_prefix("› ") {
             if selected.replace(i).is_some(){return None;} label
         } else {row};
-        if label!=format!("{}. {}",i+1,LABELS[i]) {return None;}
+        if label!=format!("{}. {}",i+1,cancel.labels()[i]) {return None;}
     }
     // Wrapped rows are rejoined per paragraph; a clipped disclosure is incomplete.
     let paragraphs: Vec<_> = rows[2..filled[options]].split(|r| r.is_empty()).filter(|p| !p.is_empty()).collect();
@@ -67,17 +99,17 @@ fn parse(screen: &str) -> Option<Panel> {
         else {known=false;}
     }
     let disclosure=paragraphs.iter().map(|p| p.join(" ")).collect::<Vec<_>>().join("\n\n");
-    Some(Panel{folder:rows[1].into(),disclosure,root,known:known&&explained,selected:selected?})
+    Some(Panel{folder:rows[1].into(),disclosure,root,known:known&&explained,selected:selected?,cancel})
 }
 
 // Unreviewed text keeps the native labels and verbatim disclosure only.
 fn wording(panel: &Panel) -> (&'static str, [String; 2]) {
     match (&panel.root, panel.known) {
         (_, false) => ("Allow Codex folder access?", [String::new(), String::new()]),
-        (None, true) => ("Trust this folder?", DESCRIPTIONS.map(str::to_owned)),
+        (None, true) => ("Trust this folder?", [DESCRIPTIONS[0].into(), panel.cancel.description(false).into()]),
         (Some(root), true) => ("Trust this Git repository?", [
             format!("Trust the repository root {root} and remember the decision."),
-            "Exit without trusting this repository.".into(),
+            panel.cancel.description(true).into(),
         ]),
     }
 }
@@ -111,7 +143,7 @@ fn card(record: &Value, panel: &Panel) -> Option<Value> {
                 record["expected_id"],
                 panel.folder,
                 panel.disclosure,
-                LABELS,
+                panel.cancel.labels(),
                 descriptions
             ])
             .to_string()
@@ -124,7 +156,7 @@ fn card(record: &Value, panel: &Panel) -> Option<Value> {
         "can_answer":true,"answer_transport":"codex_tui","answer_unavailable_reason":"",
         "questions":[{"id":"trust","header":"Folder trust","question":question,
             "body":format!("{}\n\n{}",panel.folder,panel.disclosure),"multi_select":false,"allow_other":false,
-            "options":LABELS.iter().enumerate().map(|(i,label)|json!({"id":format!("trust_{i}"),"label":label,"description":descriptions[i]})).collect::<Vec<_>>()}]}),
+            "options":panel.cancel.labels().iter().enumerate().map(|(i,label)|json!({"id":format!("trust_{i}"),"label":label,"description":descriptions[i]})).collect::<Vec<_>>()}]}),
     )
 }
 
@@ -169,8 +201,11 @@ pub(super) fn answer(record: &Value, question: &Value, answers: &Value) -> Resul
         chosen,
         LABELS.len(),
         snapshot,
-        |screen| !screen.trim().is_empty() && !screen.contains(TITLE) && !screen.contains(HINT),
-        chosen == 1,
+        |screen| !screen.trim().is_empty() && !screen.contains(TITLE)
+            && ![Cancel::Quit, Cancel::Overview].iter().any(|cancel| screen.contains(cancel.hint())),
+        // The navigator rechecks the hash, including these exact labels,
+        // before every key. Back must observe the SAME live process afterward.
+        chosen == 1 && question["questions"][0]["options"][1]["label"] == "Quit",
     )
 }
 
@@ -179,6 +214,8 @@ mod tests {
     use super::*;
     const SCREEN: &str = include_str!("../../tests/fixtures/codex-folder-trust.txt");
     const GIT_ROOT_SCREEN: &str = include_str!("../../tests/fixtures/codex-folder-trust-git-root.txt");
+    const OVERVIEW: &str = include_str!("../../tests/fixtures/codex-folder-trust-0167.txt");
+    const OVERVIEW_GIT: &str = include_str!("../../tests/fixtures/codex-folder-trust-git-root-0167.txt");
     fn record() -> Value {
         json!({"agent":"codex","run_id":"run","run_identity_version":1,"supervisor":{},"launch_dir":"/work/example"})
     }
@@ -190,6 +227,54 @@ mod tests {
             SCREEN.replace("Your trust decision will be saved.","…"),format!("Agent said:\n{SCREEN}"),format!("{SCREEN}\n› composer"),format!("{SCREEN}\n›"),format!("{SCREEN}\n› Ask Codex to do anything"),
             SCREEN.replace("  2. Quit","  2. Quit\n  3. Trust parent"),bare] {
             assert!(parse(&invalid).is_none());
+        }
+    }
+    #[test]
+    fn overview_cancel_is_a_distinct_complete_native_choice() {
+        let panel = parse(OVERVIEW).unwrap();
+        assert_eq!((panel.cancel, panel.selected, panel.known), (Cancel::Overview, 0, true));
+        let question = card(&record(), &panel).unwrap();
+        assert_eq!(question["questions"][0]["options"][1]["label"], "Back to Agent Command Center");
+        assert_eq!(question["questions"][0]["options"][1]["description"],
+            "Return to Agent Command Center without trusting or opening this folder.");
+        // Same disclosure/wrapping with the old action still has a distinct
+        // identity. Neither saved choice may be applied to the other panel.
+        let old = OVERVIEW.replace("Back to Agent Command Center", "Quit").replace("esc back", "esc quit");
+        assert_ne!(snapshot(&record(), OVERVIEW).unwrap().0, snapshot(&record(), &old).unwrap().0);
+        // Unknown disclosures have no Zerus descriptions. The labels must
+        // still bind which cancel action an explicit answer can take.
+        let unknown = |screen: &str| screen.replace("Your trust decision will be saved.", "New native disclosure.");
+        assert_ne!(snapshot(&record(), &unknown(OVERVIEW)).unwrap().0, snapshot(&record(), &unknown(&old)).unwrap().0);
+        let selected = OVERVIEW.replace("› 1.", "  1.").replace("  2. Back", "› 2. Back");
+        assert_eq!(snapshot(&record(), &selected), Some((question["question_hash"].clone(), 1)));
+        for bad in [OVERVIEW.replace("esc back", "esc quit"), OVERVIEW.replace("Back to Agent Command Center", "Quit"),
+            OVERVIEW.replace("Back to Agent Command Center", "Keep current directory"), OVERVIEW.replace("esc back", "esc cancel"),
+            OVERVIEW.replace("  2. Back", "› 2. Back"), OVERVIEW.replace("will be saved.", "…"),
+            format!("Quoted dialog:\n{OVERVIEW}"), format!("{OVERVIEW}\n› composer"),
+            OVERVIEW.replace("  enter continue", "  3. Trust parent\n  enter continue")] {
+            assert!(parse(&bad).is_none(), "{bad}");
+        }
+    }
+    #[test]
+    fn overview_git_and_windows_forms_keep_the_original_path_checks() {
+        let mut record = record();
+        record["launch_dir"] = json!("/work/repository/subdir");
+        let panel = parse(OVERVIEW_GIT).unwrap();
+        let question = card(&record, &panel).unwrap();
+        assert_eq!(panel.root.as_deref(), Some("/work/repository"));
+        assert_eq!(question["questions"][0]["question"], "Trust this Git repository?");
+        assert!(question["questions"][0]["options"][0]["description"].as_str().unwrap().contains("/work/repository"));
+        assert!(!question["questions"][0]["options"][1]["description"].as_str().unwrap().contains("Exit"));
+        // Synthetic 0.167 label/footer variants of the real ConPTY fixtures.
+        // This exercises drive/root/case guards, not a new Windows capture.
+        for screen in [WINDOWS, WINDOWS_GIT_ROOT] {
+            let screen = screen.replace("2. Quit", "2. Back to Agent Command Center").replace("esc quit", "esc back");
+            let panel = parse(&screen).unwrap();
+            assert_eq!(panel.cancel, Cancel::Overview);
+            assert!(panel.known);
+            assert!(card(&windows_record(&panel.folder.to_uppercase()), &panel).is_some());
+            assert!(card(&windows_record(r"D:\other"), &panel).is_none());
+            assert!(card(&record, &panel).is_none());
         }
     }
     #[test]

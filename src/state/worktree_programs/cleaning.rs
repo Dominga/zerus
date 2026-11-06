@@ -30,7 +30,7 @@ pub(super) fn run(args: &[String]) -> Result<i32> {
     let Request::WorktreeProgramCleanup { intent } = &envelope.request else {
         return Err(INVALID.into());
     };
-    let config = crate::config::Config::load().map_err(fail)?;
+    let config = selected_config()?;
     let report = execute(
         &config,
         intent,
@@ -57,7 +57,7 @@ pub(super) fn status(args: &[String]) -> Result<Value> {
     let _signals = crate::platform::ShutdownGuard::install().map_err(fail)?;
     let input =
         Input::decode(&stopping::read(Instant::now() + Duration::from_secs(5))?).map_err(fail)?;
-    let config = crate::config::Config::load().map_err(fail)?;
+    let config = selected_config()?;
     if super::super::session_action::status_machine(&config)? != input.stop.manifest.capture.machine
         || zerus_desktop_migration::configuration(&config.state, &config.dir).map_err(fail)?
             != input.stop.manifest.configuration

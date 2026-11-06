@@ -8,6 +8,37 @@ use zerus_client_core::{termination_cleanup::Capture, worktree_programs as wire}
 const INVALID: &str =
     "The working folder or its programs changed. Review the original session again.";
 
+/// Freeze only the native-configured state root for this command, before any
+/// completion, proof or journal work. Descendant names are still opened by the
+/// existing no-follow directory walk; this resolves no checkout or wire path.
+fn selected_config() -> Result<crate::config::Config> {
+    let mut config = crate::config::Config::load().map_err(|e| e.to_string())?;
+    let unavailable = |error: std::io::Error| {
+        format!(
+            "Cannot resolve configured session state root {}: {error}",
+            config.state.display()
+        )
+    };
+    let state = std::fs::canonicalize(&config.state).map_err(unavailable)?;
+    // The shared legacy readers use a UTF-8 HGS_STATE_DIR. Refuse an alias
+    // whose resolved name cannot be represented there, never select a default.
+    if state.to_str().is_none() {
+        return Err(unavailable(std::io::Error::other(
+            "resolved path is not valid UTF-8",
+        )));
+    }
+    // Validate access to the resolved existing directory through the SAME
+    // no-follow walk used by the phase owners. This creates nothing and names
+    // the configured root on refusal; it is not a retained execution permit.
+    super::repositories::directory::Directory::open(&state)
+        .map_err(|error| unavailable(std::io::Error::other(error)))?;
+    // Legacy state readers also select this environment variable. Keep them
+    // on the SAME resolved root instead of following the input alias again.
+    std::env::set_var("HGS_STATE_DIR", &state);
+    config.state = state;
+    Ok(config)
+}
+
 #[cfg(any(target_os = "linux", target_os = "macos"))]
 mod cleaning;
 #[cfg(any(target_os = "linux", target_os = "macos"))]
@@ -136,7 +167,7 @@ pub(super) fn discover(args: &[String]) -> Result<Value> {
         .take(wire::MAX_BYTES as u64 + 1)
         .read_to_end(&mut bytes)
         .map_err(|e| e.to_string())?;
-    let config = crate::config::Config::load().map_err(|e| e.to_string())?;
+    let config = selected_config()?;
     discover_bytes(&config, &bytes)
         .and_then(|value| serde_json::to_value(value).map_err(|e| e.to_string()))
 }
@@ -197,6 +228,9 @@ fn discover_held(config: &crate::config::Config, bytes: &[u8]) -> Result<(wire::
     scope.current(deadline).map_err(|e| e.to_string())?;
     Ok((manifest, scope))
 }
+
+#[cfg(test)]
+mod config_tests;
 
 #[cfg(test)]
 mod tests {

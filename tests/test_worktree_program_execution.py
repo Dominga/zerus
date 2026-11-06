@@ -225,6 +225,48 @@ class ProgramExecution(test_pause.Harness):
         out, err = self.holder.communicate(timeout=8)
         self.assertEqual(self.holder.returncode, 0, out + err)
 
+    def test_a_configured_state_alias_keeps_the_same_native_scope_and_receipts(self):
+        alias = self.root / 'selected-state'
+        alias.symlink_to(self.root / 'state', target_is_directory=True)
+        self.env['HGS_STATE_DIR'] = str(alias)
+        # Use the actual original helper/proof/loan path. Canonical state
+        # selection must neither split its configuration nor lose its receipts.
+        self.test_the_exact_original_stop_then_final_cleanup_preserves_branch_and_archive()
+        self.assertTrue(alias.is_symlink())
+        self.assertEqual(alias.resolve(), self.root / 'state')
+        originals = list((alias / 'worktree-program-stops').glob('*.original.json'))
+        self.assertEqual(len(originals), 2)
+        for record in originals:
+            removal = record.name.startswith('cleanup-')
+            command = 'program-cleanup-status' if removal else 'program-stop-status'
+            saved = json.loads(record.read_text())['input']
+            status = subprocess.run([str(self.image), 'worktrees', command, '--json'],
+                                    input=compact(saved), env=self.env, text=True, capture_output=True, timeout=8)
+            self.assertEqual(status.returncode, 0, status.stderr)
+            receipt = json.loads(status.stdout)
+            self.assertTrue(receipt['found'])
+            self.assertEqual(receipt['report']['state'], 'removed' if removal else 'complete')
+
+    def test_a_journal_symlink_below_the_selected_state_refuses_without_a_signal(self):
+        alias = self.root / 'selected-state'
+        alias.symlink_to(self.root / 'state', target_is_directory=True)
+        self.env['HGS_STATE_DIR'] = str(alias)
+        stop = self.original()
+        outside = self.root / 'foreign-journal'
+        outside.mkdir(mode=0o700)
+        sentinel = outside / 'retained'
+        sentinel.write_text('original foreign data')
+        journal = self.root / 'state/worktree-program-stops'
+        journal.symlink_to(outside, target_is_directory=True)
+        code, output, error = self.run_original('program-stop', stop)
+        self.assertNotEqual(code, 0, output + error)
+        self.assertIn('Cannot pin clone directory', error)
+        self.assertIsNone(self.program.poll())
+        self.assertTrue(self.project.exists())
+        self.assertTrue(journal.is_symlink())
+        self.assertEqual(list(outside.iterdir()), [sentinel])
+        self.assertEqual(sentinel.read_text(), 'original foreign data')
+
     def test_new_members_and_changed_files_after_complete_keep_the_checkout(self):
         for change in ('new-program', 'new-file'):
             with self.subTest(change=change):

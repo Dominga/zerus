@@ -33,6 +33,26 @@ fn tighten(selected: &std::path::Path, canonical: &std::path::Path) -> Result<()
         Err(error) if error.kind() == std::io::ErrorKind::NotFound => return Ok(()),
         Err(error) => return Err(error.into()),
     };
+    if named.file_type().is_symlink() {
+        // Location/configuration already resolve aliases. Preserve an existing
+        // PRIVATE target without chmod, but never repair through this alias.
+        let file = fs::OpenOptions::new()
+            .read(true)
+            .custom_flags(libc::O_DIRECTORY | libc::O_NOFOLLOW | libc::O_NONBLOCK)
+            .open(canonical)?;
+        let held = file.metadata()?;
+        let resolved = fs::metadata(selected)?;
+        let current = fs::symlink_metadata(canonical)?;
+        ensure!(
+            resolved.is_dir()
+                && current.is_dir()
+                && (resolved.dev(), resolved.ino()) == (held.dev(), held.ino())
+                && (current.dev(), current.ino()) == (held.dev(), held.ino())
+                && crate::platform::verify_private_directory(&file)?,
+            "desktop state alias must name the same already-private directory"
+        );
+        return Ok(());
+    }
     ensure!(
         named.is_dir() && named.uid() == unsafe { libc::geteuid() },
         "desktop state directory must belong to this user and not be a symlink"
@@ -123,5 +143,37 @@ mod tests {
             assert!(tighten(std::path::Path::new("/"), std::path::Path::new("/")).is_err());
             assert_eq!(fs::metadata("/").unwrap().mode(), before);
         }
+    }
+
+    #[test]
+    fn an_already_private_alias_is_nonmutating_but_never_authorizes_repair() {
+        let temp = tempfile::tempdir().unwrap();
+        let state = temp.path().join("sessions");
+        crate::platform::private_dir(&state).unwrap();
+        let link = temp.path().join("alias");
+        symlink(&state, &link).unwrap();
+        let before = fs::metadata(&state).unwrap();
+        tighten(&link, &state).unwrap();
+        let after = fs::metadata(&state).unwrap();
+        assert_eq!(
+            (
+                before.dev(),
+                before.ino(),
+                before.mode(),
+                before.ctime(),
+                before.ctime_nsec()
+            ),
+            (
+                after.dev(),
+                after.ino(),
+                after.mode(),
+                after.ctime(),
+                after.ctime_nsec()
+            )
+        );
+        assert!(tighten(&link, temp.path()).is_err());
+        fs::set_permissions(&state, fs::Permissions::from_mode(0o755)).unwrap();
+        assert!(tighten(&link, &state).is_err());
+        assert_eq!(fs::metadata(&state).unwrap().mode() & 0o777, 0o755);
     }
 }

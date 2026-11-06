@@ -90,6 +90,14 @@ class Desktop(unittest.TestCase):
         actual.chmod(0o755)
         self.cli('desktop', 'prepare-state', '--json', ok=False)
         self.assertEqual(actual.stat().st_mode & 0o777, 0o755)
+        actual.chmod(0o700)
+        before = actual.stat()
+        self.cli('desktop', 'prepare-state', '--json')
+        self.assertEqual(actual.stat().st_ctime_ns, before.st_ctime_ns)
+        self.cli('desktop', 'status', '--json')
+        process, _ = self.serve()
+        self.assertTrue(self.cli('desktop', 'status', '--json')['running'])
+        self.stop(process)
 
     @unittest.skipUnless(sys.platform.startswith(('linux', 'darwin')), 'Unix private foreground holder')
     def test_installer_retains_the_real_original_hold_through_private_passive_restart(self):

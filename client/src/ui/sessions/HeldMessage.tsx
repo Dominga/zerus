@@ -11,7 +11,7 @@ import { heldMessage } from "./held-message";
  * sight, until it is sent. If it is not sent, it goes back to the composer.
  */
 export function HeldMessage() {
-  const held = createMemo(() => heldMessage(composer.view() ?? undefined, selected(), !!subagentOpen()));
+  const held = createMemo(() => heldMessage(composer.held(), composer.view(), selected(), !!subagentOpen()));
   return (
     <Show when={held()}>{(h) => (
       <div class="act-queue act-held" role="status" aria-label={tr("Sends after compaction")}>

@@ -2882,17 +2882,56 @@ kind = "path"
             eprintln!("skipped: no cmake, Visual Studio or MSBuild on this machine");
             return;
         }
+        // The generator names the installed Visual Studio: a runner image may
+        // carry VS 2026 (18) and no 2022 (17).
+        let Some(generator) = visual_studio_generator() else {
+            eprintln!("skipped: vswhere names no Visual Studio version");
+            return;
+        };
         let dir = temp();
         std::fs::write(dir.path().join("CMakeLists.txt"), "cmake_minimum_required(VERSION 3.21)\nproject(fixture C)\nadd_executable(fixture main.c)\n").unwrap();
         std::fs::write(dir.path().join("main.c"), "int main(void) { return 0; }\n").unwrap();
         let timeout = Duration::from_secs(600);
-        let configure = plan("cmake-configure", &json!({"build_dir":"vs","generator":"Visual Studio 17 2022"}), dir.path()).unwrap();
+        let configure = plan("cmake-configure", &json!({"build_dir":"vs","generator":generator}), dir.path()).unwrap();
         let configured = execute(&configure, dir.path(), timeout, &[]);
         assert_eq!(configured.exit, Some(0), "{}", configured.tail);
         let build = plan("msbuild-build", &json!({"project":"vs/fixture.sln","config":"Debug","platform":"x64"}), dir.path()).unwrap();
         let built = execute(&build, dir.path(), timeout, &[]);
         assert_eq!(built.exit, Some(0), "{}", built.tail);
         assert!(dir.path().join("vs").join("Debug").join("fixture.exe").is_file());
+    }
+
+    /// CMake's generator for the newest installed Visual Studio that this
+    /// CMake knows: vswhere's major versions, named as CMake names them
+    /// ("Visual Studio 17 2022", "Visual Studio 18 2026"), and kept only when
+    /// `cmake --help` lists that generator.
+    #[cfg(windows)]
+    fn visual_studio_generator() -> Option<String> {
+        let program_files = std::env::var("ProgramFiles(x86)").unwrap_or_else(|_| r"C:\Program Files (x86)".into());
+        let vswhere = Path::new(&program_files).join(r"Microsoft Visual Studio\Installer\vswhere.exe");
+        let output = Command::new(&vswhere).args(["-products", "*", "-property", "installationVersion"]).output().ok()?;
+        let mut majors: Vec<u32> = String::from_utf8_lossy(&output.stdout)
+            .lines()
+            .filter_map(|line| line.trim().split('.').next()?.parse().ok())
+            .collect();
+        majors.sort_unstable_by(|a, b| b.cmp(a));
+        let help = Command::new("cmake").arg("--help").output().ok()?;
+        let known = String::from_utf8_lossy(&help.stdout).into_owned();
+        majors.into_iter().find_map(|major| {
+            let year = match major {
+                16 => 2019,
+                17 => 2022,
+                18 => 2026,
+                _ => return None,
+            };
+            let name = format!("Visual Studio {major} {year}");
+            known.contains(&name).then_some(name)
+        })
+    }
+
+    #[cfg(not(windows))]
+    fn visual_studio_generator() -> Option<String> {
+        None
     }
 
     #[test]

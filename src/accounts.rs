@@ -1067,23 +1067,45 @@ fn copy_account(config: &Config, args: &[String], dry: bool) -> Result<Value> {
 
 /// Account selection is reapplied after shell startup on resume/fork as on initial launch.
 #[cfg(unix)]
-pub fn run_script(account: &str, provider: &str, home: &str, extra: &[String]) -> String {
+pub fn run_script(
+    shell: &str,
+    account: &str,
+    provider: &str,
+    home: &str,
+    extra: &[String],
+) -> String {
     let mut environment = run_environment(account, provider, home);
     environment.extend_from_slice(extra);
-    supervisor_script(&environment)
+    supervisor_script(shell, &environment)
+}
+
+/// Known login-shell argument contracts only. Other shells still launch agents
+/// through POSIX sh using the inherited environment and its login profile;
+/// their own rc files are not interpreted as another language.
+#[cfg(unix)]
+pub fn supervisor_shell(shell: &str) -> (&str, &'static str) {
+    match Path::new(shell).file_name().and_then(|name| name.to_str()) {
+        Some("sh" | "bash" | "dash" | "ash" | "ksh" | "ksh93" | "zsh" | "fish") => (shell, "-lic"),
+        _ => ("/bin/sh", "-lc"),
+    }
 }
 
 /// Explicit assignments follow login-shell startup, ahead of the unchanged
 /// supervisor and native arguments. The empty hint exclusion list is explicit.
 #[cfg(unix)]
-pub fn supervisor_script(environment: &[String]) -> String {
+pub fn supervisor_script(shell: &str, environment: &[String]) -> String {
+    let arguments = if Path::new(shell)
+        .file_name()
+        .is_some_and(|name| name == "fish")
+    {
+        "\"$argv[1]\" --run $argv[2..-1]"
+    } else {
+        "\"$0\" --run \"$@\""
+    };
     if environment.is_empty() {
-        return "exec \"$0\" --run \"$@\"".into();
+        return format!("exec {arguments}");
     }
-    format!(
-        "exec env {} \"$0\" --run \"$@\"",
-        platform::join(environment)
-    )
+    format!("exec env {} {arguments}", platform::join(environment))
 }
 
 /// The account variables a resumed or forked session's supervisor starts with
@@ -1124,10 +1146,31 @@ mod permission_tests {
 
     #[cfg(unix)]
     #[test]
+    fn login_shell_syntax_is_explicit_and_unknown_shells_use_posix_instead() {
+        for shell in ["/bin/bash", "/bin/sh", "/bin/zsh", "/bin/fish"] {
+            assert_eq!(supervisor_shell(shell), (shell, "-lic"));
+        }
+        for shell in [
+            "/bin/nu",
+            "/bin/xonsh",
+            "/bin/tcsh",
+            "/private/custom-shell",
+        ] {
+            assert_eq!(supervisor_shell(shell), ("/bin/sh", "-lc"));
+        }
+        let fish = supervisor_script("/bin/fish", &["HGS_AGENT_HINT_OFF=quoted ' value;".into()]);
+        assert!(fish.contains("\"$argv[1]\" --run $argv[2..-1]"));
+        assert!(!fish.contains("$0") && !fish.contains("$@"));
+        let words = shell_words::split(&fish).unwrap();
+        assert_eq!(words[2], "HGS_AGENT_HINT_OFF=quoted ' value;");
+    }
+
+    #[cfg(unix)]
+    #[test]
     fn agent_hint_effective_values_follow_shell_startup_without_config_redirect_or_argv_change() {
         let hint = vec!["HGS_AGENT_HINT=1".into(), "HGS_AGENT_HINT_OFF=".into()];
         let script = run_script(
-            "work-account",
+            "/bin/bash", "work-account",
             "claude",
             "/private/profile with space",
             &hint,
@@ -1139,9 +1182,9 @@ mod permission_tests {
         assert!(words.contains(&"HGS_ACCOUNT_ID=work-account".into()));
         assert_eq!(&words[words.len() - 5..words.len() - 3], hint.as_slice());
         assert!(!words.iter().any(|word| word.starts_with("HGS_CONFIG_DIR=")));
-        assert_eq!(supervisor_script(&[]), "exec \"$0\" --run \"$@\"");
+        assert_eq!(supervisor_script("/bin/bash", &[]), "exec \"$0\" --run \"$@\"");
         assert_eq!(
-            shell_words::split(&run_script("", "codex", "", &hint)).unwrap(),
+            shell_words::split(&run_script("/bin/bash", "", "codex", "", &hint)).unwrap(),
             [
                 "exec",
                 "env",
@@ -1156,7 +1199,7 @@ mod permission_tests {
             "HGS_AGENT_HINT=1".into(),
             "HGS_AGENT_HINT_OFF=work 'quoted' $(not-executed)".into(),
         ];
-        let words = shell_words::split(&supervisor_script(&quoted)).unwrap();
+        let words = shell_words::split(&supervisor_script("/bin/bash", &quoted)).unwrap();
         assert_eq!(&words[2..4], quoted.as_slice());
     }
     #[test]

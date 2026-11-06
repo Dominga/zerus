@@ -6724,7 +6724,7 @@ folder. An incremental build therefore uses the merged sources instead of
 running old binaries. Probe, configuration, build, CTest and any retries share
 one existing suite deadline and bounded output capture. Configuration/build
 failures after a successful probe fail the suite and follow ordinary merge
-rollback. A probe failure, missing probe executable or unresolved placeholder
+rollback, with a `build` flag and no flaky-test retry. A probe failure, missing probe executable or unresolved placeholder
 records `not_run` with a bounded `not run here: SUITE runs on ...; reason` message.
 It remains an untested range, never a pass or a green result eligible for reuse.
 
@@ -6756,8 +6756,10 @@ QT_QUICK_BACKEND = "software"
 ```
 
 Use the local machine's actual SDK and compiler values. On Windows the local
-`toolchain` value can invoke `scripts/ci/msvc-env.py`; the local environment
-must also put the selected Qt kit's `bin` directory on `PATH` for CTest. Local
+`toolchain` value can invoke `scripts/ci/msvc-env.py`. Local `env` entries replace
+the entire variable; they perform no expansion. Have the toolchain wrapper
+prepend the selected Qt kit's `bin` directory to `PATH` before invoking tools,
+or supply the complete `PATH` through local `env` for CTest. Local
 values cannot replace command strings or the reserved `build_dir`/`targets`
 placeholders. The local file is limited to 64 KiB, with at most 64 vars and 64
 environment entries per provider, and is excluded from exported project

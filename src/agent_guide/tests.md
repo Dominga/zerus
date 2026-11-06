@@ -35,3 +35,12 @@ you). Propose it on the question card and work without it.
 (name, kind cargo|ctest|pytest|unittest|gradle|npm|command, root, sources,
 tests, manual, elsewhere, affected build|paths|all, [[provider.paths]],
 command, widen, build_dir); every field: docs/reference.md, Affected tests.
+
+Local merge-queue CTest preparation: optional provider configure/build/probe
+commands in .zerus/tests.toml; configure on a missing CMakeCache.txt, always
+build selected targets, then CTest, under one suite timeout. Build {targets}
+expands to --target plus CMake targets, or nothing for (all). Probe failure
+or missing local placeholders means not run here, never passed/reusable.
+Machine values and environment belong only in ignored .zerus/tests.local.toml,
+[provider.NAME.vars] and [provider.NAME.env]. A tracked or unknown local setting
+is refused. Remote runners and providers without stages keep their behavior.

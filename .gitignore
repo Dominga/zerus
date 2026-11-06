@@ -28,3 +28,6 @@ __pycache__/
 
 # Zerus team runtime files in a member's folder (outbox, run results)
 .zerus-team/
+
+# Machine-only test toolchain values
+/.zerus/tests.local.toml

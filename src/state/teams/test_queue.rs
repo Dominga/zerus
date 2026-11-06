@@ -5,13 +5,13 @@
 //! at night. Only `run_due` writes results, each with its commit, input hash,
 //! status, duration, a bounded excerpt and who asked.
 use crate::test_discipline::config::{self, Resources};
-use super::templates::{last_chars, run_tree};
+use super::templates::{last_chars, run_tree, Outcome};
 use rusqlite::{params, Connection, OptionalExtension};
 use serde::Serialize;
 use std::collections::BTreeMap;
 use std::path::{Path, PathBuf};
 use std::process::Command;
-use std::time::Duration;
+use std::time::{Duration, Instant};
 
 pub(crate) const RESULT_LIMIT: i64 = 5000;
 pub(crate) const EXCERPT_BYTES: usize = 4000;
@@ -560,6 +560,89 @@ pub(crate) fn shell(command: &str, cwd: &Path) -> Command {
     process
 }
 
+fn expand_stage(template: &str, build_dir: &str, targets: &str, local: &config::LocalProvider) -> Result<String, String> {
+    let mut out = String::new();
+    let mut rest = template;
+    while let Some(start) = rest.find('{') {
+        out.push_str(&rest[..start]);
+        let Some(end) = rest[start + 1..].find('}').map(|end| start + 1 + end) else {
+            out.push_str(&rest[start..]);
+            return Ok(out);
+        };
+        let name = &rest[start + 1..end];
+        if !name.is_empty() && name.bytes().all(|c| c.is_ascii_alphanumeric() || c == b'_') {
+            let value = match name {
+                "build_dir" => build_dir,
+                "targets" => targets,
+                _ => local.vars.get(name).map(String::as_str).ok_or_else(|| format!("unresolved local placeholder {{{name}}}"))?,
+            };
+            out.push_str(value);
+        } else {
+            out.push_str(&rest[start..=end]);
+        }
+        rest = &rest[end + 1..];
+    }
+    out.push_str(rest);
+    Ok(out)
+}
+
+fn preparation_not_run(suite: &str, reason: &str) -> (Outcome, bool) {
+    let prefix = format!("not run here: {suite} runs on this computer; ");
+    let tail = format!("{prefix}{}", last_chars(reason, EXCERPT_BYTES.saturating_sub(prefix.chars().count())));
+    (Outcome { tail, ..Default::default() }, true)
+}
+
+/// Only local merge requests prepare CTest. All stages and retries share the
+/// suite deadline; no new queue metadata or team-record read is needed.
+fn run_request(request: &Request, project: &Path, limit: Duration, deadline: Instant, loaded: Option<&Result<config::Loaded, String>>) -> (Outcome, bool) {
+    let loaded = match loaded {
+        None => return (run_tree(&mut shell(&request.command_for(project), project), limit, None), false),
+        Some(Ok(loaded)) => loaded,
+        Some(Err(error)) => return (Outcome { exit: Some(1), tail: format!("Test configuration refused: {error}"), ..Default::default() }, false),
+    };
+    let provider = loaded.config.providers.iter().find(|provider| provider.name == request.suite);
+    let Some(provider) = provider.filter(|provider| provider.kind == config::Kind::Ctest && !provider.build.is_empty()) else {
+        return (run_tree(&mut shell(&request.command_for(project), project), limit, None), false);
+    };
+    let local = loaded.local.get(&provider.name).cloned().unwrap_or_default();
+    let build_dir = crate::test_discipline::affected::relative_to(&provider.build_dir, &provider.root);
+    let targets = if request.targets.iter().any(|target| target == crate::test_discipline::map::ALL) || request.targets.is_empty() {
+        String::new()
+    } else {
+        format!("--target {}", request.targets.iter().map(|target| crate::test_discipline::affected::quote(target)).collect::<Vec<_>>().join(" "))
+    };
+    let cwd = project.join(&provider.root);
+    let configure = !project.join(&provider.build_dir).join("CMakeCache.txt").is_file();
+    let stages = [("probe", provider.probe.as_str(), cwd.as_path()),
+        ("configure", if configure { &provider.configure } else { "" }, cwd.as_path()),
+        ("build", provider.build.as_str(), cwd.as_path()), ("ctest", request.command.as_str(), project)];
+    let expanded = stages.iter().map(|(stage, command, cwd)| expand_stage(command, &build_dir, &targets, &local).map(|command| (*stage, command, *cwd)))
+        .collect::<Result<Vec<_>, _>>();
+    let expanded = match expanded {
+        Ok(expanded) => expanded,
+        Err(reason) => return preparation_not_run(&request.suite, &reason),
+    };
+    let mut combined = String::new();
+    let mut outcome = Outcome::default();
+    for (stage, command, cwd) in expanded.into_iter().filter(|(_, command, _)| !command.is_empty()) {
+        let remaining = deadline.saturating_duration_since(Instant::now());
+        if remaining.is_zero() { return (Outcome { timed_out: true, tail: last_chars(&combined, EXCERPT_BYTES), ..Default::default() }, false); }
+        let mut process = shell(&command, cwd);
+        process.envs(&local.env);
+        outcome = run_tree(&mut process, remaining, None);
+        combined = last_chars(&format!("{combined}\n[{stage}]\n{}{}", outcome.tail, outcome.error), EXCERPT_BYTES);
+        if outcome.exit != Some(0) || outcome.timed_out {
+            if stage == "probe" {
+                return preparation_not_run(&request.suite, &combined);
+            }
+            outcome.tail = combined;
+            return (outcome, false);
+        }
+    }
+    outcome.tail = combined;
+    (outcome, false)
+}
+
 /// Runs the scheduled requests in order and writes one result each. The command
 /// comes from the project's configuration, never from a report; a timeout or a
 /// nonzero exit is the result's status. #718: a failure is retried as the
@@ -574,10 +657,14 @@ pub(crate) fn run_due(store: &TestStore, project: &Path, requests: &[Request], n
         let at = now + began.elapsed().as_secs_f64();
         store.start(&request.id, at)?;
         let limit = Duration::from_secs((request.budget_minutes.max(1.0) * 60.0) as u64);
-        let mut outcome = run_tree(&mut shell(&request.command_for(project), project), limit, None);
+        let deadline = started + limit;
+        let loaded = (request.asked_by == "merge queue").then(|| config::load(project, None).map_err(|error| error.to_string()));
+        let (mut outcome, not_run) = run_request(request, project, limit, deadline, loaded.as_ref());
         let mut flags = Vec::new();
         let crash = super::test_results::crashed(outcome.exit, &outcome.tail);
-        let mut status = if crash {
+        let mut status = if not_run {
+            "not_run".to_owned()
+        } else if crash {
             flags.push("crash".to_owned());
             "crashed".to_owned()
         } else if outcome.timed_out {
@@ -592,7 +679,12 @@ pub(crate) fn run_due(store: &TestStore, project: &Path, requests: &[Request], n
         let mut retries = 0;
         while status == "failed" && retries < policy.retries {
             retries += 1;
-            let again = run_tree(&mut shell(&request.command_for(project), project), limit, None);
+            let (again, not_run) = run_request(request, project, limit, deadline, loaded.as_ref());
+            if not_run {
+                status = "not_run".into();
+                outcome = again;
+                break;
+            }
             if super::test_results::crashed(again.exit, &again.tail) {
                 flags.push("crash".to_owned());
                 status = "crashed".into();

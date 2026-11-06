@@ -400,7 +400,7 @@ fn command(provider: &Provider, targets: &str) -> String {
 }
 
 /// A project path as seen from the provider's folder.
-fn relative_to(path: &str, root: &str) -> String {
+pub(crate) fn relative_to(path: &str, root: &str) -> String {
     if root.is_empty() {
         return path.to_owned();
     }
@@ -413,7 +413,7 @@ fn relative_to(path: &str, root: &str) -> String {
     }
 }
 
-fn quote(text: &str) -> String {
+pub(crate) fn quote(text: &str) -> String {
     if text.chars().all(|ch| ch.is_ascii_alphanumeric() || "_-:./@=+".contains(ch)) {
         text.to_owned()
     } else {

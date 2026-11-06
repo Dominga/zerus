@@ -20,6 +20,8 @@ use windows_sys::Win32::{
 
 type QuerySystem = unsafe extern "system" fn(i32, *mut c_void, u32, *mut u32) -> i32;
 type QueryProcess = unsafe extern "system" fn(HANDLE, i32, *mut c_void, u32, *mut u32) -> i32;
+#[repr(align(8))]
+struct QueryBytes<const N: usize>([u8; N]);
 struct Api {
     system: QuerySystem,
     process: QueryProcess,
@@ -253,15 +255,15 @@ impl Pinned {
         };
         let peb = match layout {
             Layout::Wow32 => {
-                let mut buffer = [0u8; 8];
-                self.query(api, 26, &mut buffer, until)?;
-                word(&buffer, 0, 8)?
+                let mut buffer = QueryBytes([0u8; 8]);
+                self.query(api, 26, &mut buffer.0, until)?;
+                word(&buffer.0, 0, 8)?
             }
             Layout::Native64 => {
-                let mut buffer = [0u8; mem::size_of::<PROCESS_BASIC_INFORMATION>()];
-                self.query(api, 0, &mut buffer, until)?;
+                let mut buffer = QueryBytes([0u8; mem::size_of::<PROCESS_BASIC_INFORMATION>()]);
+                self.query(api, 0, &mut buffer.0, until)?;
                 if word(
-                    &buffer,
+                    &buffer.0,
                     mem::offset_of!(PROCESS_BASIC_INFORMATION, UniqueProcessId),
                     8,
                 )? != u64::from(self.process.pid)
@@ -269,7 +271,7 @@ impl Pinned {
                     return Err(Error::Incomplete);
                 }
                 word(
-                    &buffer,
+                    &buffer.0,
                     mem::offset_of!(PROCESS_BASIC_INFORMATION, PebBaseAddress),
                     8,
                 )?

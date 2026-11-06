@@ -29,7 +29,7 @@ use store::LockedStore;
 #[cfg(unix)]
 pub(crate) use catalog::MOBILE_DELIVERY;
 pub(crate) use replica::{exchange_project as exchange_tasks, replicate};
-pub(crate) use replica::PROTOCOL as REPLICA_PROTOCOL;
+pub(crate) use replica_members::open_reason as cutover_open;
 #[cfg(test)]
 pub(crate) use replica_members::Incomplete;
 pub(crate) use replica_members::Member as ReplicaMember;

@@ -159,6 +159,54 @@ fn read_at(path: &Path) -> BTreeMap<String, Member> {
         .unwrap_or_default()
 }
 
+/// The first reason `record` keeps `project`'s cutover open (C2), with when
+/// it was observed: never seen, another replica protocol, an older task
+/// schema, no valid store, no exchange of the project, one not complete
+/// (whatever reason it gives, or none), or none since `latest`, the latest
+/// cutover write here. It fails closed: anything not positively known as
+/// complete keeps it open. Shared by the cutover status and the first
+/// floor's bootstrap gate (C3 activation), so both read one definition.
+pub fn open_reason(
+    record: Option<&Member>,
+    project: &str,
+    latest: Option<i64>,
+) -> Option<(&'static str, Option<i64>)> {
+    let Some(replica) = record else {
+        return Some(("unseen", None));
+    };
+    let seen = Some(replica.seen_at as i64);
+    if replica.protocol != Some(super::replica::PROTOCOL) {
+        return Some(("protocol", seen));
+    }
+    if replica
+        .task_schema
+        .is_none_or(|schema| schema < zerus_replica::TASK_SCHEMA)
+    {
+        return Some(("task_schema", seen));
+    }
+    if replica
+        .store
+        .as_deref()
+        .is_none_or(|store| !zerus_replica::ids::is_uuid(store))
+    {
+        return Some(("store", seen));
+    }
+    let Some(exchanged) = replica.projects.get(project) else {
+        return Some(("no_inventory", None));
+    };
+    let at = Some(exchanged.at as i64);
+    if !exchanged.complete {
+        return Some((
+            exchanged.reason.map_or("incomplete", Incomplete::as_str),
+            at,
+        ));
+    }
+    if latest.is_some_and(|latest| (exchanged.at as i64) < latest) {
+        return Some(("inventory_before_cutover", at));
+    }
+    None
+}
+
 /// Every member's entry, read without the lock. A missing, oversized or
 /// damaged file reads as none; nothing at the path makes the read wait.
 pub fn read(config: &Config) -> BTreeMap<String, Member> {

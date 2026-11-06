@@ -132,7 +132,9 @@ fn computer(alias: &str) -> Result<ComputerId, String> {
 /// Follows the Teams views of one computer: the team list, Waiting and at
 /// most one team (its tab, plan and New team form). All false and no team
 /// stops reading that computer.
-#[tauri::command]
+/// Task 72 (F3): off the main thread, which a cold start keeps busy (the
+/// window, WebView2, the tray): the first Waiting read is asked at once.
+#[tauri::command(async)]
 pub fn teams_follow(
     state: State<'_, AppState>,
     teams: State<'_, Teams>,

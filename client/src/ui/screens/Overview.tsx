@@ -15,7 +15,7 @@ import { setMachineFilter, setPage, setProjectFilter, setAccountFilter, setFolde
 import { flag, num, setSetting } from "../../store/settings";
 import { accountTooltip, clock, summaryText, usageLoading, windowsAt } from "../lib/usage";
 import { machineKey } from "./machines-ui";
-import { accountIdentity, accountTone, accountsNote, cpuFigure, level, loadTip, memoryFigure, sampleNote, sampleTip, sessionsLabel } from "./overview-ui";
+import { accountIdentity, accountTone, accountsNote, cpuFigure, level, loadTip, memoryFigure, metricsLoading, sampleNote, sampleTip, sessionsLabel } from "./overview-ui";
 import { tr } from "../../i18n";
 
 // Overview (DashboardPage.cpp), ported from design/webui/src/screens/Dashboard.tsx:
@@ -38,8 +38,9 @@ function LoadBar(props: { percent?: number; fresh: boolean }) {
 
 function MachineCard(props: { m: MachineCardModel; stats: OverviewStats; now: number }) {
   const c = () => props.m.connection;
-  const cpu = () => cpuFigure(props.m.meta);
-  const memory = () => memoryFigure(props.m.meta);
+  const loading = () => metricsLoading(props.m.meta, c());
+  const cpu = () => cpuFigure(props.m.meta, loading());
+  const memory = () => memoryFigure(props.m.meta, loading());
   const counts = () => props.stats.per[props.m.computer] ?? { sessions: 0, attention: 0 };
   const note = () => sampleNote(props.m.meta, c(), props.now);
   const openSessions = () => { setMachineFilter([props.m.filter]); setProjectFilter([]); setAccountFilter([]); setFolderFilter(undefined); setStateFilter("all"); setPage("sessions"); };

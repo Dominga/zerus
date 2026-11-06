@@ -878,6 +878,49 @@ fn spans_and_profile_are_read_on_request_for_the_watched_team_only() {
     assert_eq!(keys, [team_key("spans", TEAM), team_key("profile", TEAM)]);
 }
 
+/// Task 72 (F3): Waiting for you is read as soon as it is followed, not after
+/// a poll interval, and an empty reply is an empty view ("Nothing waits for
+/// you"), never the reading state.
+#[test]
+fn waiting_is_read_at_once_and_an_empty_list_is_a_view() {
+    let (tx, rx) = mpsc::channel();
+    let poller = super::TeamsPoller::spawn_with(
+        ComputerId::local(),
+        Box::new(|read: &TeamRead| match read {
+            TeamRead::Waiting { .. } => Ok(json!({"items": [], "total": 0, "next": null})),
+            other => Ok(replies(other)),
+        }),
+        Box::new(move |change| {
+            let _ = tx.send(change);
+        }),
+    )
+    .unwrap();
+    let asked = Instant::now();
+    poller.follow(TeamsFollow {
+        waiting: true,
+        ..TeamsFollow::default()
+    });
+    let change = rx
+        .recv_timeout(Duration::from_secs(10))
+        .expect("the first Waiting view");
+    assert!(
+        asked.elapsed() < super::model::POLL,
+        "read after {:?}, not at once",
+        asked.elapsed()
+    );
+    let mut coalescer = Coalescer::new();
+    coalescer.push(change);
+    let batch = coalescer.take();
+    let waiting = batch
+        .teams
+        .iter()
+        .find(|out| out.key == "waiting")
+        .expect("a waiting entry");
+    assert_eq!(waiting.kind, "waiting");
+    assert_eq!(waiting.payload["items"], json!([]));
+    assert_eq!(waiting.payload["total"], 0);
+}
+
 /// The poller runs the reads off the calling thread and the coalescer folds
 /// its changes to one entry per key, each carrying a projected view.
 #[test]

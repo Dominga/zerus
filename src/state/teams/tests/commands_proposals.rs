@@ -802,3 +802,51 @@ fn a_paused_team_says_since_when_and_by_whom_and_resume_team_ends_it() {
         assert!(status["paused"]["at"].as_f64().unwrap() > 0.0);
     });
 }
+
+/// Task 88: the Tests settings read the project's providers and templates,
+/// check a candidate override without writing it, and the owner's Save
+/// (settings) refuses one hgs test could not load.
+#[test]
+fn the_tests_settings_read_check_and_save_through_hgs() {
+    let dir = tempfile::tempdir().unwrap();
+    let project = tempfile::tempdir().unwrap();
+    std::fs::create_dir_all(project.path().join(".zerus")).unwrap();
+    std::fs::write(project.path().join(".zerus").join("tests.toml"),
+        "version = 1\n[[provider]]\nname = \"engine\"\nkind = \"ctest\"\nbuild_dir = \"build\"\nresults = { format = \"junit\", path = \"build/ctest.xml\" }\n\
+         [[template]]\nid = \"make-all\"\nprogram = \"make\"\nargs = [\"all\"]\n").unwrap();
+    std::fs::write(project.path().join("pyproject.toml"), "[tool.pytest.ini_options]\n").unwrap();
+    crate::state::with_test_state_root(dir.path(), || {
+        let mut store = Store::open(true).unwrap();
+        let mut team = running_team();
+        team.folder = project.path().display().to_string();
+        store.create("11111111-1111-4111-8111-111111111111", &json!({}), team, vec![]).unwrap();
+        let read = run("test-config", &json!({"team":"t"}), false).unwrap();
+        assert_eq!((read["ok"].clone(), read["source"].clone()), (json!(true), json!("file")), "{read}");
+        assert_eq!(read["providers"][0]["kind"], "ctest");
+        assert_eq!(read["providers"][0]["results"]["format"], "junit");
+        assert_eq!((read["templates"][0]["id"].clone(), read["templates"][0]["accepted"].clone()), (json!("make-all"), json!(false)));
+        assert!(read["proposal"].as_str().unwrap().contains("pytest"), "{read}");
+        // A candidate is checked, never written.
+        let candidate = json!({"provider":[{"name":"python","kind":"pytest","command":"python -m pytest {targets}",
+            "results":{"format":"junit","path":"out/pytest.xml"}}]});
+        let checked = run("test-config", &json!({"team":"t","action":"check","tests":candidate}), false).unwrap();
+        assert_eq!(checked["ok"], true, "{checked}");
+        assert!(checked["providers"].as_array().unwrap().iter().any(|provider| provider["name"] == "python"));
+        assert!(store.load("t").unwrap().unwrap().settings.tests.is_none(), "a check writes nothing");
+        let bad = json!({"provider":[{"name":"x","kind":"pytest","results":{"format":"html","path":"r.html"}}]});
+        let refused = run("test-config", &json!({"team":"t","action":"check","tests":bad}), false).unwrap();
+        assert_eq!(refused["ok"], false);
+        assert!(refused["error"].as_str().unwrap().contains("junit, trx or unreal"), "{refused}");
+        // The owner's Save goes through settings, checked the same way.
+        store.mutate(None, "t", None, |team, events| ops::apply(team, "settings", &json!({"settings":{"tests":candidate}}), &Actor::Human, &BTreeSet::new(), events)).unwrap();
+        assert_eq!(store.load("t").unwrap().unwrap().settings.tests, Some(candidate.clone()));
+        let error = store
+            .mutate(None, "t", None, |team, events| ops::apply(team, "settings", &json!({"settings":{"tests":bad}}), &Actor::Human, &BTreeSet::new(), events))
+            .unwrap_err()
+            .to_string();
+        assert!(error.contains("does not load"), "{error}");
+        let saved = run("test-config", &json!({"team":"t"}), false).unwrap();
+        assert_eq!(saved["overridden"], true);
+        assert!(saved["providers"].as_array().unwrap().iter().any(|provider| provider["name"] == "python"));
+    });
+}

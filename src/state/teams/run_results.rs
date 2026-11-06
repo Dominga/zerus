@@ -25,6 +25,8 @@ const MESSAGE_CHARS: usize = 2000;
 pub(crate) enum Format {
     Junit,
     Trx,
+    /// Task 88: Unreal's automation report (`-ReportExportPath`'s index.json).
+    Unreal,
 }
 
 impl Format {
@@ -32,6 +34,7 @@ impl Format {
         match name {
             "junit" => Some(Self::Junit),
             "trx" => Some(Self::Trx),
+            "unreal" => Some(Self::Unreal),
             _ => None,
         }
     }
@@ -115,6 +118,7 @@ pub(crate) fn parse(text: &str, format: Format) -> Report {
     let mut all = match format {
         Format::Junit => junit(text),
         Format::Trx => trx(text),
+        Format::Unreal => unreal(text),
     };
     let mut report = Report::default();
     for result in &all {
@@ -214,6 +218,38 @@ fn trx(text: &str) -> Vec<TestResult> {
         }
     }
     out
+}
+
+/// Task 88: Unreal's automation report: `tests[]` with `fullTestPath` (or
+/// `testDisplayName`), `state` (Success, Fail, NotRun, Skipped, InProcess),
+/// `duration` in seconds and the first `Error` entry's message.
+fn unreal(text: &str) -> Vec<TestResult> {
+    let text = text.trim_start_matches('\u{feff}');
+    let Ok(report) = serde_json::from_str::<serde_json::Value>(text) else { return Vec::new() };
+    report["tests"]
+        .as_array()
+        .into_iter()
+        .flatten()
+        .take(MAX_RESULTS * 20)
+        .filter_map(|test| {
+            let name = test["fullTestPath"].as_str().filter(|name| !name.is_empty()).or_else(|| test["testDisplayName"].as_str())?;
+            let status = match test["state"].as_str().unwrap_or_default() {
+                "Success" => Status::Passed,
+                "Fail" => Status::Failed,
+                "NotRun" | "Skipped" => Status::Skipped,
+                _ => Status::Error,
+            };
+            let message = test["entries"]
+                .as_array()
+                .into_iter()
+                .flatten()
+                .find(|entry| entry["event"]["type"] == "Error")
+                .and_then(|entry| entry["event"]["message"].as_str())
+                .unwrap_or_default();
+            let ms = (test["duration"].as_f64().unwrap_or(0.0) * 1000.0).round().max(0.0) as u64;
+            Some(TestResult { suite: String::new(), name: cut(name, NAME_CHARS), status, ms, message: cut(message.trim(), MESSAGE_CHARS) })
+        })
+        .collect()
 }
 
 /// "00:00:01.2345678" as milliseconds.
@@ -395,6 +431,23 @@ mod tests {
         assert_eq!(report.results[0].name, "Math.Divides");
         assert_eq!(report.results[0].ms, 1500);
         assert_eq!(report.results[0].message, "Assert.AreEqual failed. Expected:<2>. Actual:<3>.");
+    }
+
+    /// Task 88: Unreal's automation report, as UnrealEditor-Cmd writes it.
+    #[test]
+    fn unreal_automation_json_maps_to_one_result_per_test() {
+        let json = r#"{"devices":[],"reportCreatedOn":"2026.11.06","succeeded":1,"failed":1,"notRun":1,"tests":[
+            {"testDisplayName":"Adds","fullTestPath":"Project.Math.Adds","state":"Success","entries":[],"duration":0.25},
+            {"testDisplayName":"Spawns","fullTestPath":"Project.World.Spawns","state":"Fail","duration":1.5,
+             "entries":[{"event":{"type":"Info","message":"starting"}},{"event":{"type":"Error","message":"Expected 2 actors, got 0"}}]},
+            {"testDisplayName":"Later","fullTestPath":"Project.World.Later","state":"NotRun","entries":[],"duration":0}]}"#;
+        let report = parse(&format!("\u{feff}{json}"), Format::Unreal);
+        assert_eq!((report.passed, report.failed, report.skipped), (1, 1, 1));
+        assert_eq!(report.results[0].name, "Project.World.Spawns");
+        assert_eq!(report.results[0].message, "Expected 2 actors, got 0");
+        assert_eq!(report.results[0].ms, 1500);
+        assert_eq!(Format::parse("unreal"), Some(Format::Unreal));
+        assert!(parse("not json", Format::Unreal).results.is_empty());
     }
 
     #[test]

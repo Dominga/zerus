@@ -1042,3 +1042,46 @@ fn a_phase_mode_switch_asks_first_then_sends_the_phase_and_its_mode() {
         assert!(matches!(prepare(&call(bad)), Err(TeamOutcome::Failed { .. })));
     }
 }
+
+/// Task 88: the Tests settings read and check the team's test configuration;
+/// neither is a change (no confirmation), a candidate override goes as it is,
+/// and anything but an object or null is refused before anything runs.
+#[test]
+fn the_test_config_action_reads_and_checks_without_asking() {
+    let get = TeamAction::TestConfig { action: "get".into(), tests: Value::Null };
+    let (invocation, _) = prepare(&call(get.clone())).unwrap();
+    assert_eq!(&invocation.args[..3], ["team", "test-config", "--json"]);
+    let sent: Value = serde_json::from_slice(invocation.stdin.as_deref().unwrap()).unwrap();
+    assert_eq!((sent["action"].clone(), sent["team"].clone(), sent.get("tests").is_none()), (json!("get"), json!(TEAM), true));
+    assert!(get.confirmation("T").is_none());
+    let candidate = json!({"provider":[{"name":"python","kind":"pytest","results":{"format":"junit","path":"out/pytest.xml"}}]});
+    let check = TeamAction::TestConfig { action: "check".into(), tests: candidate.clone() };
+    let (invocation, _) = prepare(&TeamCall { confirmed: false, ..call(check) }).unwrap();
+    let sent: Value = serde_json::from_slice(invocation.stdin.as_deref().unwrap()).unwrap();
+    assert_eq!(sent["tests"], candidate);
+    for wrong in [TeamAction::TestConfig { action: "write".into(), tests: Value::Null }, TeamAction::TestConfig { action: "check".into(), tests: json!([1]) }] {
+        assert!(matches!(prepare(&call(wrong)), Err(TeamOutcome::Failed { .. })));
+    }
+    // From the webview's JSON.
+    let parsed: TeamAction = serde_json::from_value(json!({"kind":"test_config","action":"check","tests":{"provider":[]}})).unwrap();
+    assert!(matches!(parsed, TeamAction::TestConfig { .. }));
+}
+
+/// Task 88: a run's report reaches the Tests mode bounded: every count, at
+/// most 200 results, each text cut.
+#[test]
+fn a_test_runs_report_reaches_the_tests_mode_bounded() {
+    let results: Vec<Value> = (0..250).map(|n| json!({"suite":"math","name":format!("t{n}"),"status":if n == 0 { "failed" } else { "passed" },"ms":n,"message":"x".repeat(5000)})).collect();
+    let view = zerus_client_core::teams::view::tests(
+        "t",
+        &json!({"items":[]}),
+        &json!({"items":[{"id":"r1","suite":"engine","status":"failed","report":{"passed":249,"failed":1,"skipped":0,"errors":0,"note":"","results":results}},
+                         {"id":"r2","suite":"plain","status":"passed"}]}),
+    );
+    let report = &view.runs[0].report;
+    assert_eq!((report["passed"].clone(), report["failed"].clone()), (json!(249), json!(1)));
+    assert_eq!(report["results"].as_array().unwrap().len(), 200);
+    assert_eq!(report["results"][0]["status"], "failed");
+    assert!(report["results"][0]["message"].as_str().unwrap().chars().count() < 5000);
+    assert!(view.runs[1].report.is_null());
+}

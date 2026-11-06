@@ -861,6 +861,18 @@ elif a[:2]==['team','spans']:
  tl=json.load(open(__file__+'.spans')) if os.path.exists(__file__+'.spans') else []
  rest=[t for t in tl if t['task']>body.get('after',0)];page=rest[:body.get('limit',50)]
  print(json.dumps({'team':body.get('team'),'tasks':page,'next_cursor':page[-1]['task'] if len(rest)>len(page) else None,'events':{'read':0,'truncated':False}}))
+elif a[:2]==['team','test-config']:
+ # Task 88: `.testconfig` is the read; a check echoes the candidate's
+ # providers, refusing a results format hgs does not read.
+ import os
+ base=json.load(open(__file__+'.testconfig')) if os.path.exists(__file__+'.testconfig') else {'ok':True,'source':'none','providers':[],'templates':[],'proposal':''}
+ if body.get('action')=='check':
+  tests=body.get('tests') or {}
+  providers=tests.get('provider',[])
+  bad=[p for p in providers if p.get('results') and p['results'].get('format') not in ('junit','trx','unreal')]
+  if bad:print(json.dumps({'ok':False,'checked':True,'error':"The provider %s's results format is junit, trx or unreal"%bad[0]['name']}))
+  else:print(json.dumps(dict(base,checked=True,overridden=bool(tests),providers=base.get('providers',[])+providers)))
+ else:print(json.dumps(base))
 elif a[:2]==['team','test']:
  # #719: `.testqueue` and `.testresults` hold the database's rows; a forced
  # submit joins the queue; `.testrefuse` refuses every call.

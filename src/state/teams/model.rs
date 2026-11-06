@@ -1487,6 +1487,26 @@ impl Attempt {
     }
 }
 
+/// Task 81: where a task should start and end by the estimates when its plan
+/// was approved. A moment is None where an estimate on the way was missing:
+/// lateness against it is unknown, never a guess.
+#[derive(Clone, Debug, Default, Deserialize, Serialize, PartialEq)]
+pub(crate) struct Baseline {
+    /// When the baseline was fixed.
+    pub at: f64,
+    /// The task's estimate then, in seconds.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub estimate_s: Option<f64>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub start: Option<f64>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub end: Option<f64>,
+    /// The tasks it was planned to follow: its hard dependencies and the
+    /// member's previous task. Their delay is the task's inherited lateness.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub after: Vec<u32>,
+}
+
 #[derive(Clone, Debug, Default, Deserialize, Serialize, PartialEq)]
 pub(crate) struct Task {
     pub id: u32,
@@ -1533,6 +1553,11 @@ pub(crate) struct Task {
     /// `history`, `role`, `lead` or `none`: where the estimate came from.
     #[serde(default, skip_serializing_if = "no_estimate_source")]
     pub estimate_source: String,
+    /// Task 81: the schedule this task was planned on when it was approved (or
+    /// added to a running plan), fixed from then on: lateness is measured
+    /// against it. Absent on a task saved before, or one already running.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub baseline: Option<Baseline>,
     /// U27: the visual lane this task is drawn in, set by the lead or the owner;
     /// it changes nothing about hand-out.
     #[serde(default, skip_serializing_if = "Option::is_none")]

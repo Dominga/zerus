@@ -132,6 +132,14 @@ def main():
                                        str(base / "config/mobile/connector.json")], environment, base))
                 require(status.get("configured") is False and status.get("running") is False,
                         "Fresh portable connector status is not isolated/unconfigured.")
+                workspace = json.loads(run(bundle / "zerus-mobile-connector.exe", ["--workspace", "status", "--config",
+                                          str(base / "config/mobile/connector.json")], environment, base))
+                require(workspace.get("state") == "unconfigured" and workspace.get("encrypted") is False
+                        and workspace.get("config_revision") == "",
+                        "Bundled connector does not support the desktop workspace status protocol.")
+                phones = json.loads(run(hgs, ["mobile", "phones", "--json"], environment, base))
+                require(phones.get("configured") is False,
+                        "Fresh portable phone discovery is not isolated/unconfigured.")
             print(f"hgs.exe {cli_version} and hgs-tray.exe {version} start from the extracted bundle.")
             if args.selftest:
                 box = json.loads(run(hgs, ["ls", "--json", "--local"], environment, base))

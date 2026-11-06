@@ -19,6 +19,54 @@ fn active() -> Value {
 }
 
 #[test]
+fn workspace_failures_distinguish_startup_protocol_and_refusal_without_child_text() {
+    let private = "private-child-text-and-credential";
+    let cases = [
+        (Some(Exit::StartFailed(private.into())), "could not start"),
+        (Some(Exit::TimedOut), "timed out"),
+        (Some(Exit::WriteFailed), "input could not be delivered"),
+        (
+            Some(Exit::Abnormal {
+                stderr: private.into(),
+            }),
+            "ended abnormally",
+        ),
+        (None, "exceeded its limit"),
+        (code(-1073741515, private, private), "0xc0000135"),
+        (code(0, "[]", private), "invalid workspace reply"),
+        (code(0, "{}", private), "status is incompatible"),
+        (
+            code(1, r#"{"ok":false}"#, private),
+            "refused the workspace request",
+        ),
+    ];
+    for (exit, reason) in cases {
+        let error = status(exit).unwrap_err();
+        assert!(error.contains(reason), "{error}");
+        assert!(!error.contains(private));
+        assert!(error.len() < 512);
+    }
+    let error = workspace_reply(
+        code(1, &json!({"error":private}).to_string(), private),
+        false,
+    )
+    .unwrap_err();
+    assert!(
+        !error.contains(private),
+        "effect refusals never echo child text"
+    );
+    assert!(error.contains("refused the workspace request"));
+}
+
+#[test]
+fn a_missing_selected_connector_is_reported_before_the_status_probe() {
+    let missing = std::env::temp_dir().join(format!("missing-connector-{}", uuid::Uuid::new_v4()));
+    let error = read_status(&missing, &missing.with_extension("json")).unwrap_err();
+    assert!(error.contains("connector is missing"));
+    assert!(!error.contains(&missing.to_string_lossy().to_string()));
+}
+
+#[test]
 fn the_workspace_status_reads_as_qt_checks_it() {
     let workspace = status(code(0, &active().to_string(), "")).unwrap();
     assert_eq!(
@@ -27,7 +75,7 @@ fn the_workspace_status_reads_as_qt_checks_it() {
     );
     assert_eq!(workspace.connection, "Connector: running");
     assert!(workspace.encrypted && workspace.running && workspace.pending.is_none());
-    let unconfirmed = "Workspace operation was not confirmed. Refresh status before continuing. Verify that the matching computer connector is installed.";
+    let unconfirmed = workspace_failure("the computer connector workspace status is incompatible; update the matching Zerus package");
     let refused = |change: &dyn Fn(&mut Value)| {
         let mut value = active();
         change(&mut value);
@@ -42,7 +90,10 @@ fn the_workspace_status_reads_as_qt_checks_it() {
         refused(&|v| v["config_revision"] = json!("A".repeat(64))),
         unconfirmed
     );
-    assert_eq!(refused(&|v| v["ok"] = json!(false)), unconfirmed);
+    assert_eq!(
+        refused(&|v| v["ok"] = json!(false)),
+        workspace_failure("the computer connector refused the workspace request (exit 0)")
+    );
     // As in Qt, a well-formed status is read even with an error field.
     let mut noted = active();
     noted["error"] = json!("note");
@@ -59,10 +110,16 @@ fn the_workspace_status_reads_as_qt_checks_it() {
     );
     assert_eq!(
         status(code(1, &json!({"error": "x".repeat(1025)}).to_string(), "")).unwrap_err(),
-        unconfirmed
+        workspace_failure("the computer connector refused the workspace request (exit 1)")
     );
-    assert_eq!(status(Some(Exit::TimedOut)).unwrap_err(), unconfirmed);
-    assert_eq!(status(None).unwrap_err(), unconfirmed);
+    assert_eq!(
+        status(Some(Exit::TimedOut)).unwrap_err(),
+        workspace_failure("the computer connector timed out")
+    );
+    assert_eq!(
+        status(None).unwrap_err(),
+        workspace_failure("the computer connector reply exceeded its limit")
+    );
     // Stopped, legacy, retired, unconfigured and pending states.
     let mut stopped = active();
     stopped["connector_state"] = json!("stopped");

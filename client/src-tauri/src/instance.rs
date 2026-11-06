@@ -1766,10 +1766,33 @@ mod tests {
         assert!(!stale, "its holder still runs");
         // SAFETY: geteuid cannot fail.
         if unsafe { libc::geteuid() } != 0 {
+            // PID 1 can be our own readable namespace init in local CI. Use
+            // an original live, non-dumpable child for the permission refusal.
+            let mut unreadable = Command::new("python3")
+                .args([
+                    "-I",
+                    "-c",
+                    "import ctypes,os,time; assert ctypes.CDLL(None).prctl(4,0,0,0,0)==0; os.write(1,b'ready'); time.sleep(30)",
+                ])
+                .stdin(Stdio::null())
+                .stdout(Stdio::piped())
+                .spawn()
+                .unwrap();
+            let mut ready = [0; 5];
+            let started = unreadable.stdout.take().unwrap().read_exact(&mut ready);
+            let before = unreadable.try_wait();
+            let link = fs::read_link(format!("/proc/{}/exe", unreadable.id()));
+            let observed = process_name(i64::from(unreadable.id()));
+            let after = unreadable.try_wait();
+            let _ = unreadable.kill();
+            unreadable.wait().unwrap();
+            started.unwrap();
+            assert_eq!(&ready, b"ready");
+            assert!(before.unwrap().is_none() && after.unwrap().is_none());
+            assert_eq!(link.unwrap_err().kind(), io::ErrorKind::PermissionDenied);
             assert_eq!(
-                process_name(1),
-                None,
-                "init's executable link is unreadable here"
+                observed, None,
+                "the original live child's executable link is unreadable"
             );
         }
     }

@@ -584,6 +584,7 @@ Team parse(const QJsonObject &v)
             const auto a = t.value("added_late").toObject();
             task.addedLate = {str(a, "by"), str(a, "request"), str(a, "confirm"), a.value("at").toDouble(), true};
         }
+        task.prerequisites = t.value("requires").toArray();
         // Owner 2026-10-31 (#746): the estimate, from #745's status fields.
         if (t.contains("estimate_source")) {
             task.estimateSource = str(t, "estimate_source");
@@ -792,6 +793,8 @@ Team parse(const QJsonObject &v)
     for (const auto &value : v.value("phases").toArray()) {
         const auto p = value.toObject();
         Phase phase;
+        phase.checks = p.value("checks").toObject();
+        phase.targetHours = p.value("target_hours").toDouble(-1);
         phase.n = p.value("n").toInt(); phase.title = str(p, "title"); phase.barrier = p.value("barrier").toBool();
         phase.approval = str(p, "approval"); phase.state = str(p, "state");
         phase.addedBy = str(p, "added_by"); phase.decidedBy = str(p, "decided_by");
@@ -1077,6 +1080,7 @@ QJsonObject Task::json() const
     for (const auto &dep : deps) d.append(QJsonObject{{"task", dep.task}, {"kind", dep.soft ? "soft" : "hard"}});
     for (const auto &criterion : criteria) c.append(criterion);
     QJsonObject value{{"id", id}, {"title", title}, {"description", description}, {"criteria", c}, {"assignee", assignee}, {"deps", d}};
+    if (!prerequisites.isEmpty()) value.insert("requires", prerequisites);
     // C3 (#548): the phase it is planned in; hgs puts a task without one in phase 1.
     value.insert("phase", qMax(1, phase));
     if (lane.known()) value.insert("lane", QJsonObject{{"n", lane.n}, {"label", lane.label}});
@@ -1101,7 +1105,11 @@ QJsonObject planInput(const Team &team)
     QList<const Phase *> later;
     for (const auto &p : team.phases) if (p.n >= 2) later.append(&p);
     std::stable_sort(later.begin(), later.end(), [](const Phase *a, const Phase *b) { return a->n < b->n; });
-    for (const auto *p : later) phases.append(QJsonObject{{"n", p->n}, {"title", p->title}, {"barrier", p->barrier}});
+    for (const auto *p : later) {
+        QJsonObject phase{{"n", p->n}, {"title", p->title}, {"barrier", p->barrier}};
+        if (p->targetHours > 0) phase.insert("target_hours", p->targetHours);
+        phases.append(phase);
+    }
     return {{"members", members}, {"tasks", tasks}, {"phases", phases}};
 }
 
@@ -1970,6 +1978,24 @@ Approval phaseApproval(const Team &team, int phase)
         approval.title = tr("Approve phase?");
         approval.text = tr("Hand phase %1's %2 tasks to the members?").arg(phase).arg(count);
         approval.action = tr("Approve phase");
+    }
+    if (const auto *record = team.phase(phase)) {
+        const auto checks = record->checks;
+        if (checks.value("known_hours").isDouble()) {
+            const int missing = checks.value("missing_estimates").toInt();
+            QString path = tr("Critical path: %1%2 h").arg(missing ? QStringLiteral(">= ") : QString(), QString::number(checks.value("known_hours").toDouble(), 'g', 4));
+            if (missing) path += missing == 1 ? tr(", 1 task without an estimate") : tr(", %1 tasks without an estimate").arg(missing);
+            if (record->targetHours > 0) path += tr("; target %1 h").arg(record->targetHours);
+            if (checks.value("target_exceeded").toBool()) path += tr(" (exceeds target; warning only)");
+            approval.text += QLatin1Char('\n') + path;
+        }
+        const auto unresolved = checks.value("unresolved").toArray();
+        if (!unresolved.isEmpty()) {
+            approval.text += QLatin1Char('\n') + tr("Unresolved prerequisites:");
+            for (const auto &reason : unresolved) approval.text += QLatin1Char('\n') + reason.toString();
+            approval.action = tr("Approve anyway");
+            approval.input.insert("approve_anyway", true);
+        }
     }
     return approval;
 }

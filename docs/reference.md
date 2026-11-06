@@ -1745,6 +1745,45 @@ continues in standard mode. The feed records `plan_mode_proposed`,
 `plan_mode_switched`, `plan_mode_denied`, `phase_build_added`,
 `free_phase_close_pending`, `free_phase_closed` and `free_phase_build_failed`.
 
+### Phase checks before start
+
+Team settings has a **Phase checks before start** group. Each check is independent
+and off by default (`settings.phase_checks.critical_path_target` and
+`settings.phase_checks.unresolved_prerequisites`). With both off, approval keeps
+its existing behavior and cards show no extra check result.
+
+A phase may name an optional positive `target_hours`, in `extend`, a `plan` phase,
+or `edit-draft` (`null` clears it). With the target check enabled, its approval
+card shows the longest dependency path weighted by task estimates in minutes.
+Missing estimates are shown as a lower bound and a count, for example
+`>= 6.5 h, 2 tasks without an estimate`. Only a known sum above the target warns;
+this check never refuses approval. The profile keeps its existing count-based
+critical path and output.
+
+Tasks may name at most 32 prerequisites in `requires`, including through
+`edit-draft.tasks_update`:
+
+```json
+{"requires":[{"task":12},{"commit":"0123456789abcdef0123456789abcdef01234567"},{"branch":"feature/api"}]}
+```
+
+A same-phase task requirement resolves when that distinct task exists in the
+phase; it adds no dependency or ordering. An earlier-phase requirement resolves
+when its task is accepted. A missing task, self-reference or later-phase task
+is unresolved. Commit and branch requirements resolve only when Git verifies
+that reference is an ancestor of the configured base branch (the team folder's
+`HEAD` when no base is set). Unknown references, Git failures and timeouts remain
+unresolved, with their reasons. File-existence requirements are not supported.
+
+Draft mutations save `phases[].checks` for approval cards; reads and GUI refreshes
+never invoke Git. Snapshot checks share a five-second deadline, and approval
+rechecks the current plan and Git ancestry. With the prerequisite check enabled,
+unresolved requirements refuse ordinary `approve-phase`. The card offers
+**Approve anyway**, sending `approve_anyway:true`; the override only bypasses
+prerequisites, preserving the other approval guards. An owner proposal card sends
+the owner's explicit override through `decide-proposal`; a lead cannot preselect
+it in the proposal. Existing approve requests and receipts remain compatible.
+
 ### Auto-accepted drafts: start-ahead
 
 With Auto-accept drafts on (`settings.auto_accept`), a drafted phase whose

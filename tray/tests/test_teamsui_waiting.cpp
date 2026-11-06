@@ -14,6 +14,7 @@
 #include "TeamWaitingBanner.h"
 #include "TeamWaitingPage.h"
 #include "TeamWorkspace.h"
+#include "TeamProposalCard.h"
 
 // G6: the team card, its header and the workspace bar carry two compact bars —
 // the phase in work (or the next draft waiting) and the phases — readable at
@@ -140,6 +141,7 @@ QJsonArray answerItems(double now)
 class TestTeamsUiWaiting : public QObject, public TeamsUiFixture {
     Q_OBJECT
 private slots:
+    void phaseCheckCardShowsWarningAndSendsExplicitOverride();
     void waitingToolOffersAreAnsweredInPlace();
     void aLeadsQuestionIsAnsweredFromWaitingForYou();
     void initTestCase()
@@ -2477,6 +2479,48 @@ void TestTeamsUiWaiting::waitingToolOffersAreAnsweredInPlace()
     QCOMPARE(sent["allow"].toBool(), true);
     QVERIFY(!sent.contains("reason"));
     QTRY_COMPARE(answered, (QStringList{"tools/a1", "tools/b2"}));
+}
+
+void TestTeamsUiWaiting::phaseCheckCardShowsWarningAndSendsExplicitOverride()
+{
+    auto source = phasedTeam();
+    auto phases = source.value("phases").toArray();
+    auto phase = phases.first().toObject();
+    const int n = phase.value("n").toInt();
+    phase["target_hours"] = 1.0;
+    phase["checks"] = QJsonObject{{"known_hours", 6.5}, {"missing_estimates", 2}, {"target_exceeded", true},
+                                 {"unresolved", QJsonArray{"Task #5: task #1 has not been accepted"}}};
+    phases[0] = phase; source["phases"] = phases;
+    auto tasks = source.value("tasks").toArray();
+    auto task = tasks.first().toObject();
+    task.remove("estimate_source");
+    const QJsonArray prerequisites{QJsonObject{{"task", 999}}};
+    task["requires"] = prerequisites;
+    tasks[0] = task; source["tasks"] = tasks;
+    source["proposals"] = QJsonArray{QJsonObject{{"id", "phase-check"}, {"hash", "h1"}, {"kind", "approve-phase"}, {"state", "open"},
+        {"change", QJsonObject{{"op", "approve-phase"}, {"input", QJsonObject{{"phase", n}}}, {"summary", "Approve phase"}}}}};
+    const auto model = parse(source);
+    const auto plan = planInput(model);
+    QCOMPARE(plan.value("tasks").toArray().first().toObject().value("requires").toArray(), prerequisites);
+    QCOMPARE(plan.value("phases").toArray().first().toObject().value("target_hours").toDouble(), 1.0);
+    const auto approval = phaseApproval(model, n);
+    QVERIFY(approval.text.contains(">= 6.5 h"));
+    QVERIFY(approval.text.contains("2 tasks without an estimate"));
+    QVERIFY(approval.text.contains("exceeds"));
+    QCOMPARE(approval.action, QStringLiteral("Approve anyway"));
+    QCOMPARE(approval.input.value("approve_anyway").toBool(), true);
+    TeamProposalCards cards;
+    QJsonObject sent;
+    cards.decide = [&](const QJsonObject &input, const TeamProposalCards::Done &) { sent = input; };
+    cards.setTeam(&model); cards.show();
+    auto *allow = cards.findChild<QPushButton *>("teamProposalAllow");
+    QVERIFY(allow); QCOMPARE(allow->text(), QStringLiteral("Approve anyway"));
+    bool shown = false;
+    for (auto *line : cards.findChildren<QLabel *>()) shown |= line->text().contains("has not been accepted");
+    QVERIFY(shown);
+    allow->click();
+    QCOMPARE(sent.value("approve_anyway").toBool(), true);
+    QCOMPARE(sent.value("expected_hash").toString(), QStringLiteral("h1"));
 }
 
 QTEST_MAIN(TestTeamsUiWaiting)

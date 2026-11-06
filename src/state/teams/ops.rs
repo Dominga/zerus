@@ -1,6 +1,6 @@
 //! WhiteWh fork: the team state machine. Every change is a pure function of
-//! the team, the request and who asks, so the CLI and the dispatcher share it
-//! and tests need no processes.
+//! the team, the request and who asks, so the CLI and the dispatcher share it.
+//! Optional phase prerequisite checks also verify Git ancestry with a deadline.
 use super::super::now;
 use super::model::*;
 use super::plan;
@@ -338,8 +338,31 @@ fn clean_output(paths: &mut Vec<String>) -> anyhow::Result<()> {
     Ok(())
 }
 
+fn validate_requires(requires: &[Prerequisite]) -> anyhow::Result<()> {
+    ensure!(requires.len() <= 32, "A task has at most 32 prerequisites");
+    for requirement in requires {
+        match requirement {
+            Prerequisite::Task { task } => ensure!(*task > 0, "A prerequisite task number is positive"),
+            Prerequisite::Commit { commit } => ensure!((4..=64).contains(&commit.len()) && commit.bytes().all(|b| b.is_ascii_hexdigit()), "A prerequisite commit is a hexadecimal object id"),
+            Prerequisite::Branch { branch } => super::templates::check_branch(branch)?,
+        }
+    }
+    Ok(())
+}
+
+fn target_hours(input: &Value) -> anyhow::Result<Option<f64>> {
+    match input.get("target_hours") {
+        None | Some(Value::Null) => Ok(None),
+        Some(value) => {
+            let hours = value.as_f64().filter(|h| h.is_finite() && *h > 0.0).context("target_hours is a positive number or null")?;
+            Ok(Some(hours))
+        }
+    }
+}
+
 fn parse_task(value: &Value) -> anyhow::Result<Task> {
     let mut task: Task = super::strict::parse(value, &[], "A task", super::strict::TASK_EXAMPLE)?;
+    validate_requires(&task.requires)?;
     // Task #26: every refusal names the task and the field.
     let who = format!("Task #{}", task.id);
     let field = |name: &str| {
@@ -610,6 +633,7 @@ fn plan(team: &mut Team, input: &Value, actor: &Actor, events: &mut Vec<Event>) 
         phases.push(Phase {
             n,
             title,
+            target_hours: target_hours(value)?,
             barrier: value["barrier"].as_bool() == Some(true),
             approval,
             state: PhaseState::Draft,
@@ -807,6 +831,7 @@ fn draft_phases(team: &mut Team, listed: Option<&Value>, by: &str) -> anyhow::Re
                 phases.push(Phase {
                     n,
                     title: clean(value["title"].as_str().unwrap_or_default().trim(), 120, "A phase title")?,
+                    target_hours: target_hours(value)?,
                     barrier: value["barrier"].as_bool() == Some(true),
                     // A phase the draft had keeps its place and its proposer.
                     order: old.map_or(0, |old| old.order()),
@@ -993,7 +1018,12 @@ fn settings(team: &mut Team, input: &Value, actor: &Actor, events: &mut Vec<Even
         let given = value.as_object().context("Settings are an object")?;
         let mut merged = serde_json::to_value(&team.settings)?;
         for (field, value) in given {
-            merged[field] = value.clone();
+            if field == "phase_checks" {
+                let checks = value.as_object().context("phase_checks is an object")?;
+                for (check, enabled) in checks { merged[field][check] = enabled.clone(); }
+            } else {
+                merged[field] = value.clone();
+            }
         }
         let updated: Settings = serde_json::from_value(merged).context("Invalid settings")?;
         super::super::iron_rules::validate(&json!(updated.iron_rules))?;
@@ -1031,7 +1061,8 @@ fn settings(team: &mut Team, input: &Value, actor: &Actor, events: &mut Vec<Even
 /// C4: the settings that decide who approves, how far a team may grow and
 /// what runs without the owner stay the owner's; the lead changes the rest.
 /// Spec 6.1 lets the lead set resume_after_limits too.
-pub(crate) const OWNER_SETTINGS: [&str; 22] = [
+pub(crate) const OWNER_SETTINGS: [&str; 23] = [
+    "phase_checks",
     "approval",
     "phase_approval",
     "max_members",
@@ -1261,6 +1292,8 @@ fn extend(team: &mut Team, input: &Value, actor: &Actor, offline: &BTreeSet<Stri
         n,
         order,
         title: title.clone(),
+        target_hours: target_hours(input)?,
+        checks: None,
         barrier,
         approval,
         state,
@@ -1474,6 +1507,11 @@ fn renumber_new_tasks(team: &Team, tasks: &mut [Task]) -> anyhow::Result<BTreeMa
                     task.id,
                     dep.task
                 ),
+            }
+        }
+        for requirement in &mut task.requires {
+            if let Prerequisite::Task { task: id } = requirement {
+                if let Some(number) = numbers.get(id) { *id = *number; }
             }
         }
         task.id = numbers[&task.id];
@@ -1696,6 +1734,12 @@ fn decide_phase(team: &mut Team, input: &Value, actor: &Actor, approve: bool, of
     let wanted: BTreeSet<u32> = ids.iter().copied().collect();
     if approve {
         accept_blockers(team, at, offline)?;
+        let checks = plan::phase_checks(team, &team.phases[at], std::time::Instant::now() + std::time::Duration::from_secs(5));
+        ensure!(checks.unresolved.is_empty() || input["approve_anyway"].as_bool() == Some(true),
+            "Unresolved prerequisites: {}. Choose Approve anyway to override this check", checks.unresolved.join("; "));
+        if team.settings.phase_checks.critical_path_target || team.settings.phase_checks.unresolved_prerequisites {
+            team.phases[at].checks = Some(checks);
+        }
     }
     let label = actor.label(team);
     let count = ids.len();
@@ -1708,7 +1752,7 @@ fn decide_phase(team: &mut Team, input: &Value, actor: &Actor, approve: bool, of
         team.phases[at].owner_word = owner_word.clone();
         events.push(Event::new(
             "phase_approved",
-            json!({"by":label,"phase":n,"tasks":count,"owner_word":owner_word,"state":state,"alongside":alongside}),
+            json!({"by":label,"phase":n,"tasks":count,"owner_word":owner_word,"state":state,"alongside":alongside,"approve_anyway":input["approve_anyway"].as_bool() == Some(true)}),
         ));
         Ok(json!({"status":"phase_approved","phase":n,"tasks":ids,"owner_word":owner_word,"phase_state":state,"alongside":alongside}))
     } else {
@@ -2488,6 +2532,11 @@ fn renumber_drafts(team: &mut Team) -> Value {
     }
     let map: std::collections::BTreeMap<u32, u32> = task_map.iter().copied().collect();
     for task in &mut team.tasks {
+        for requirement in &mut task.requires {
+            if let Prerequisite::Task { task: id } = requirement {
+                if let Some(number) = map.get(id) { *id = *number; }
+            }
+        }
         for dep in &mut task.deps {
             if let Some(new) = map.get(&dep.task) {
                 dep.task = *new;
@@ -2585,6 +2634,13 @@ fn edit_draft(team: &mut Team, input: &Value, actor: &Actor, offline: &BTreeSet<
     let by = actor.label(team);
     let mut diff = json!({"updated":[],"removed":[]});
     let mut changes: Vec<Value> = Vec::new();
+    if input.get("target_hours").is_some() {
+        let target = target_hours(input)?;
+        if proposed.phases[at].target_hours != target {
+            changes.push(json!({"kind":"changed","field":"target_hours","from":proposed.phases[at].target_hours,"to":target}));
+            proposed.phases[at].target_hours = target;
+        }
+    }
     if let Some(value) = input.get("title") {
         let title = clean(value.as_str().unwrap_or_default().trim(), 120, "A phase title")?;
         if proposed.phases[at].title != title {
@@ -2684,6 +2740,15 @@ fn edit_draft(team: &mut Team, input: &Value, actor: &Actor, offline: &BTreeSet<
             }
             task.pinned = pinned;
             fields.push("pinned");
+        }
+        if let Some(requires) = value.get("requires") {
+            let requires: Vec<Prerequisite> = serde_json::from_value(requires.clone()).context("Invalid requires")?;
+            validate_requires(&requires)?;
+            if task.requires != requires {
+                changes.push(json!({"kind":"changed","task":id,"field":"requires","from":task.requires,"to":requires}));
+                task.requires = requires;
+            }
+            fields.push("requires");
         }
         // Owner 2026-10-31: the lead's estimate in minutes; null clears it and
         // Zerus computes it from the history again.
@@ -4707,6 +4772,9 @@ fn propose(team: &mut Team, input: &Value, actor: &Actor, events: &mut Vec<Event
         let mut trial = team.clone();
         let mut value = change["input"].clone();
         value["team"] = json!(team.id);
+        // A blocked phase must still be proposable: validate the override
+        // route on this copy, leaving the saved card unselected.
+        if kind == "approve-phase" { value["approve_anyway"] = json!(true); }
         apply(&mut trial, &kind, &value, &Actor::Human, &BTreeSet::new(), &mut Vec::new())
             .map_err(|error| anyhow::anyhow!("Allow could not apply this proposal: {error:#}"))?;
     }
@@ -4759,7 +4827,10 @@ fn decide_proposal(team: &mut Team, input: &Value, actor: &Actor, offline: &BTre
         return Ok(json!({"status":"rejected","proposal":id}));
     }
     let member = team.proposals[at]["member"].clone();
-    let change = team.proposals[at]["change"].clone();
+    let mut change = team.proposals[at]["change"].clone();
+    if kind == "approve-phase" {
+        change["input"]["approve_anyway"] = json!(input["approve_anyway"].as_bool() == Some(true));
+    }
     if kind == "question" {
         // #740: the owner's answer, an offered option or words of the owner's
         // own, reaches the lead's inbox with the question.
@@ -4988,6 +5059,7 @@ fn owner_op_change(team: &Team, op: &str, input: &Value) -> anyhow::Result<Value
             fields.remove("revision");
         }
     }
+    if op == "approve-phase" { given.as_object_mut().unwrap().remove("approve_anyway"); }
     if op == "settings" {
         ensure!(given.get("settings").is_some_and(Value::is_object) || given.get("members_update").is_some(),
             "A settings proposal names \"settings\" (or \"members_update\"), such as {{\"kind\":\"settings\",\"settings\":{{\"max_members\":8}},\"reason\":\"...\"}}");
@@ -6084,6 +6156,16 @@ pub(crate) fn apply(team: &mut Team, op: &str, input: &Value, actor: &Actor, off
             ));
         } else if !decided {
             team.idle = Notice::None;
+        }
+    }
+    if matches!(op, "plan" | "extend" | "edit-draft" | "rework-phase" | "return-to-draft" | "undo-reject-phase" | "move-phase" | "move-task" | "settings" | "approve" | "accept" | "cancel" | "discard-phase") {
+        let enabled = team.settings.phase_checks.critical_path_target || team.settings.phase_checks.unresolved_prerequisites;
+        let deadline = std::time::Instant::now() + std::time::Duration::from_secs(5);
+        let checks: Vec<_> = team.phases.iter().map(|phase| {
+            (enabled && phase.state == PhaseState::Draft).then(|| plan::phase_checks(team, phase, deadline))
+        }).collect();
+        for (phase, result) in team.phases.iter_mut().zip(checks) {
+            if phase.state == PhaseState::Draft { phase.checks = result; }
         }
     }
     Ok(result)

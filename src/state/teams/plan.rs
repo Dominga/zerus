@@ -1026,6 +1026,79 @@ pub(crate) fn validate(team: &Team, offline: &BTreeSet<String>) -> Validation {
     found
 }
 
+fn prerequisite_branch(folder: &std::path::Path, branch: &str, deadline: std::time::Instant) -> Result<String, String> {
+    // A tag with this name never satisfies a branch requirement.
+    for reference in [format!("refs/heads/{branch}"), format!("refs/remotes/{branch}")] {
+        match super::super::worktrees::git(folder, &["show-ref", "--verify", "--quiet", &reference], deadline) {
+            Ok(_) => return Ok(reference),
+            Err(error) if error.code == Some(1) => {},
+            Err(error) => return Err(format!("cannot verify branch {branch}: {}", error.detail.chars().take(200).collect::<String>())),
+        }
+    }
+    Err(format!("branch {branch} does not exist"))
+}
+
+/// Evaluate the bounded plan already in memory. Git shares one five-second
+/// deadline and a per-evaluation cache; no journal or team-list reads occur.
+pub(crate) fn phase_checks(team: &Team, phase: &Phase, deadline: std::time::Instant) -> super::model::PhaseCheckResult {
+    use super::model::{PhaseCheckResult, Prerequisite};
+    let mut result = PhaseCheckResult::default();
+    let tasks: Vec<&Task> = team.tasks.iter().filter(|task| task.phase == phase.n).collect();
+    if team.settings.phase_checks.critical_path_target {
+        let path = super::profile::planned_path(&tasks, |task| task.estimate_minutes.unwrap_or(0.0) as u64);
+        let selected: Vec<&Task> = tasks.iter().copied().filter(|task| path.contains(&task.id)).collect();
+        let hours = selected.iter().filter_map(|task| task.estimate_minutes).sum::<f64>() / 60.0;
+        result.known_hours = Some(hours);
+        result.missing_estimates = selected.iter().filter(|task| task.estimate_minutes.is_none()).count();
+        result.target_exceeded = phase.target_hours.is_some_and(|target| hours > target);
+    }
+    if !team.settings.phase_checks.unresolved_prerequisites {
+        return result;
+    }
+    let by_id: BTreeMap<u32, &Task> = team.tasks.iter().map(|task| (task.id, task)).collect();
+    let order = |n| team.phases.iter().find(|p| p.n == n).map_or(n, Phase::order);
+    let mut git_results: BTreeMap<String, Option<String>> = BTreeMap::new();
+    for task in tasks {
+        for requirement in &task.requires {
+            let reason = match requirement {
+                Prerequisite::Task { task: id } => match by_id.get(id) {
+                    None => Some(format!("task #{id} does not exist")),
+                    Some(_) if *id == task.id => Some(format!("task #{id} requires itself")),
+                    Some(required) if required.phase == phase.n => None,
+                    Some(required) if order(required.phase) >= order(phase.n) => Some(format!("task #{id} belongs to a later phase")),
+                    Some(required) if required.status == TaskStatus::Accepted => None,
+                    Some(_) => Some(format!("task #{id} has not been accepted")),
+                },
+                Prerequisite::Commit { commit } | Prerequisite::Branch { branch: commit } => {
+                    let branch = matches!(requirement, Prerequisite::Branch { .. });
+                    let key = format!("{}:{commit}", if branch { "branch" } else { "commit" });
+                    git_results.entry(key).or_insert_with(|| {
+                        let folder = std::path::Path::new(&team.folder);
+                        let reference = if branch {
+                            match prerequisite_branch(folder, commit, deadline) {
+                                Ok(reference) => reference,
+                                Err(reason) => return Some(reason),
+                            }
+                        } else { commit.clone() };
+                        let base = if team.settings.base_branch.is_empty() { "HEAD" } else { &team.settings.base_branch };
+                        super::super::worktrees::git(folder,
+                            &["merge-base", "--is-ancestor", &reference, base], deadline)
+                            .err().map(|error| if error.code == Some(1) {
+                                format!("{commit} is not an ancestor of {base}")
+                            } else {
+                                format!("cannot verify {commit}: {}", error.detail.chars().take(200).collect::<String>())
+                            })
+                    }).clone()
+                }
+            };
+            if let Some(reason) = reason {
+                result.unresolved.push(format!("Task #{}: {reason}", task.id));
+            }
+        }
+    }
+    result
+}
+
 #[cfg(test)]
 mod tests {
     use super::super::model::{Dependency, Member, MemberState, Phase, Settings};

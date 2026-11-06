@@ -94,8 +94,37 @@ pub(crate) struct FullTestsGrant {
     pub by: String,
 }
 
+/// Independent owner opt-ins. Older teams keep both checks off.
+#[derive(Clone, Debug, Default, Deserialize, Serialize, PartialEq)]
+#[serde(deny_unknown_fields)]
+pub(crate) struct PhaseChecks {
+    #[serde(default)]
+    pub critical_path_target: bool,
+    #[serde(default)]
+    pub unresolved_prerequisites: bool,
+}
+
+#[derive(Clone, Debug, Deserialize, Serialize, PartialEq)]
+#[serde(untagged, deny_unknown_fields)]
+pub(crate) enum Prerequisite {
+    Task { task: u32 },
+    Commit { commit: String },
+    Branch { branch: String },
+}
+
+/// Saved only on mutations, never computed by a GUI refresh.
+#[derive(Clone, Debug, Default, Deserialize, Serialize, PartialEq)]
+pub(crate) struct PhaseCheckResult {
+    pub known_hours: Option<f64>,
+    pub missing_estimates: usize,
+    pub target_exceeded: bool,
+    pub unresolved: Vec<String>,
+}
+
 #[derive(Clone, Debug, Deserialize, Serialize, PartialEq)]
 pub(crate) struct Settings {
+    #[serde(default)]
+    pub phase_checks: PhaseChecks,
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub iron_rules: Vec<String>,
     /// Every dependency is hard, whatever the lead chose.
@@ -292,6 +321,7 @@ fn default_phase() -> u32 {
 impl Default for Settings {
     fn default() -> Self {
         Self {
+            phase_checks: PhaseChecks::default(),
             iron_rules: Vec::new(),
             all_hard: false,
             folder_policy: FolderPolicy::default(),
@@ -1511,6 +1541,8 @@ pub(crate) struct Task {
     pub criteria: Vec<String>,
     #[serde(default)]
     pub deps: Vec<Dependency>,
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub requires: Vec<Prerequisite>,
     #[serde(default)]
     pub assignee: String,
     /// The lead or you chose this member: Zerus does not give the task to
@@ -2004,6 +2036,10 @@ pub(crate) struct PhaseRejection {
 /// and has no record.
 #[derive(Clone, Debug, Default, Deserialize, Serialize, PartialEq)]
 pub(crate) struct Phase {
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub target_hours: Option<f64>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub checks: Option<PhaseCheckResult>,
     pub n: u32,
     /// The display and approval order (F10): drafts may be moved before each
     /// other. 0 on a team stored before the field means n order.

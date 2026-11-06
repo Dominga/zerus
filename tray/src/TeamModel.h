@@ -303,6 +303,8 @@ struct Timing {
 };
 
 struct Task {
+    QJsonArray prerequisites;
+
     int id = 0;
     int phase = 1;             // the approved initial plan is phase 1
     bool pinned = false;       // stays with its assignee
@@ -385,6 +387,9 @@ struct PhasePause {
 PhasePause readPhasePause(const QJsonValue &value);
 
 struct Phase {
+    QJsonObject checks;
+    double targetHours = -1;
+
     int n = 0;
     QString title, approval, state, addedBy, decidedBy;
     bool barrier = false;      // no task starts before every lower phase is finished

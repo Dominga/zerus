@@ -1225,6 +1225,11 @@ bool TeamWorkspace::approvePhase(const QString &id, int phase)
     // The team may have been refreshed while the dialog was open: read it again.
     team = currentTeam(id);
     if (!team || m_phaseAct || phaseDecided(*team, phase)) return false;
+    const auto freshApproval = phaseApproval(*team, phase);
+    if (freshApproval.text != approval.text || freshApproval.input != approval.input) {
+        m_error = tr("The phase changed while you answered; approve again.");
+        return false;
+    }
     const QString key = markPhaseDecided(*team, phase);
     QJsonObject request = approval.input;
     request.insert("team", id);
@@ -2507,6 +2512,14 @@ QWidget *TeamWorkspace::board(const Team &team)
             h->addWidget(approve); h->addWidget(discard);
         }
         v->addWidget(head);
+        if (const auto *record = team.phase(group.n); group.draft && record && !record->checks.isEmpty()) {
+            const auto approval = phaseApproval(team, group.n);
+            auto *checks = label(approval.text, record->checks.value("target_exceeded").toBool()
+                                || !record->checks.value("unresolved").toArray().isEmpty() ? c.warn : c.text2,
+                                11, false, "teamBoardPhaseChecks");
+            checks->setWordWrap(true);
+            v->addWidget(checks);
+        }
         if (!open) continue;
         v->addWidget(makeRow(group.tasks, group.n));
     }

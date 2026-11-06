@@ -1715,7 +1715,10 @@ fn decide_proposal_in(store: &mut Store, input: &Value, caller: &Actor) -> anyho
         return Ok(json!({"status":"answered","proposal":id,"answer":answer}));
     }
     let member = team.proposals[at]["member"].clone();
-    let change = team.proposals[at]["change"].clone();
+    let mut change = team.proposals[at]["change"].clone();
+    if kind == "approve-phase" {
+        change["input"]["approve_anyway"] = json!(input["approve_anyway"].as_bool() == Some(true));
+    }
     let goal = team.proposals[at]["goal"].as_str().unwrap_or_default().to_owned();
     // N3: the change runs under one request id stored with the proposal, so an
     // interrupted or retried decision replays it instead of applying it twice.

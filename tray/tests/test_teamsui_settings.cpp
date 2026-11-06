@@ -80,6 +80,7 @@ QString cardStep(QWidget *root, const QString &id)
 class TestTeamsUiSettings : public QObject, public TeamsUiFixture {
     Q_OBJECT
 private slots:
+    void phaseChecksAreIndependentAndOffByDefault();
     void initTestCase()
     {
         setUpCase();
@@ -1037,6 +1038,27 @@ void TestTeamsUiSettings::teamDialogsDrawTheThemeNotTheSystem()
             dialog->close();
         }
     }
+}
+
+void TestTeamsUiSettings::phaseChecksAreIndependentAndOffByDefault()
+{
+    HgsClient client(FakeCli::program(script()));
+    TeamController controller(&client);
+    TeamSettingsDialog dialog(&controller, parse(team()), true);
+    dialog.show();
+    auto *target = dialog.findChild<QCheckBox *>("teamSettingsCriticalPathTarget");
+    auto *prerequisites = dialog.findChild<QCheckBox *>("teamSettingsPrerequisites");
+    QVERIFY(target); QVERIFY(prerequisites);
+    QVERIFY(!target->isChecked()); QVERIFY(!prerequisites->isChecked());
+    QVERIFY(dialog.changes().isEmpty());
+    target->setChecked(true);
+    QCOMPARE(dialog.changes().value("phase_checks").toObject(), (QJsonObject{{"critical_path_target", true}, {"unresolved_prerequisites", false}}));
+    prerequisites->setChecked(true);
+    target->setChecked(false);
+    dialog.findChild<QPushButton *>("teamSettingsSave")->click();
+    QTRY_COMPARE(calls(script(), "settings").size(), 1);
+    QCOMPARE(calls(script(), "settings").first().value("settings").toObject().value("phase_checks").toObject(),
+             (QJsonObject{{"critical_path_target", false}, {"unresolved_prerequisites", true}}));
 }
 
 QTEST_MAIN(TestTeamsUiSettings)

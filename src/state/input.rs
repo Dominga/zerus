@@ -565,6 +565,16 @@ fn codex_warning_footer(row: &str) -> bool {
         && matches!(tail, "warning · f2 to view" | "warnings · f2 to view")
 }
 
+/// Native 0.167 adds the agent-picker hint before the idle shortcuts hint.
+/// Accept only that fixed row and its optional existing warning indicator;
+/// arbitrary trailing content still cannot terminate a draft.
+fn codex_shortcuts_footer(plain: &str) -> bool {
+    let plain = plain.trim();
+    if plain.starts_with("? for shortcuts") { return true; }
+    let Some(tail) = plain.strip_prefix("← for agents · ? for shortcuts") else { return false; };
+    tail.is_empty() || (tail.starts_with(' ') && codex_warning_footer(tail))
+}
+
 fn codex_footer_model(record: &Value) -> Option<&str> {
     if let Some(model) = record["model"].as_str().filter(|model| !model.is_empty()) {
         return Some(model);
@@ -678,7 +688,7 @@ fn composer_empty_for_model(agent: &str, screen: &str, cursor_x: usize, cursor_y
                 return input_background || single_line_footer
                     || lines.last().is_some_and(|line| {
                         let plain: String = styled_row(line).iter().map(|(ch, _)| ch).collect();
-                        plain.trim_start().starts_with("? for shortcuts")
+                        codex_shortcuts_footer(&plain)
                     });
             }
         }
@@ -1643,6 +1653,22 @@ mod tests {
             2
         ));
     }
+    #[test]
+    fn codex_0167_agents_shortcuts_footer_preserves_the_empty_composer_boundary() {
+        let screen = "\n\x1b[1m›\x1b[0m \x1b[2mAsk Codex to do anything\x1b[0m\n\n  GPT-6.1-Sol default · /fixture\n  ← for agents · ? for shortcuts                  ⚠ 4 warnings · f2 to view";
+        assert!(composer_empty("codex", screen, 2, 1));
+        for footer in ["← for agents · ? for shortcuts", "← for agents · ? for shortcuts   ⚠ 1 warning · f2 to view", "? for shortcuts"] {
+            assert!(composer_empty("codex", &screen.replace("← for agents · ? for shortcuts                  ⚠ 4 warnings · f2 to view", footer), 2, 1));
+        }
+        for footer in ["← for agents · ? for shortcuts draft", "← for agents · ? for shortcuts ⚠ 4 warnings · f2 to view draft", "← for agents · ? for shortcuts ⚠ 0 warnings · f2 to view", "← for agents · ? for shortcuts ⚠ 4 warnings · enter to approve", "← for agents · ? for shortcuts\n  more input", "← for agents · Approve command?"] {
+            assert!(!composer_empty("codex", &screen.replace("← for agents · ? for shortcuts                  ⚠ 4 warnings · f2 to view", footer), 2, 1), "{footer}");
+        }
+        for draft in ["", "retained draft", "\n  draft continuation"] {
+            assert!(!composer_empty("codex", &screen.replace("\x1b[2mAsk Codex to do anything\x1b[0m", draft), 2, 1));
+        }
+        assert!(!composer_empty("codex", screen, 3, 1));
+    }
+
     #[test]
     fn codex_warning_footer_does_not_turn_an_empty_queue_composer_into_a_draft() {
         // Codex 0.166's separate warning row can occupy the shortcuts row.

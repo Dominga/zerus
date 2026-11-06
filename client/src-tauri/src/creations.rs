@@ -1295,7 +1295,8 @@ impl Worker {
                 Some(code) => format!("Session {tag} ended before it appeared (exit code {code})."),
                 None => format!("Session {tag} ended before it appeared."),
             };
-            if ended.code.is_none() && ended.diagnostic_code == creation::SUPERVISOR_REPORT_MISSING {
+            if ended.code.is_none() && ended.diagnostic_code == creation::SUPERVISOR_REPORT_MISSING
+            {
                 reason.push('\n');
                 reason.push_str(creation::SUPERVISOR_REPORT_MISSING_DETAIL);
             }

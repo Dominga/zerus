@@ -22,6 +22,7 @@ use serde_json::{Map, Value};
 
 use crate::actions::{Exit, Invocation};
 
+pub mod autostart;
 pub mod computer_codes;
 pub mod connector_actions;
 pub mod enrollment;
@@ -127,6 +128,18 @@ pub fn connector_program(hgs: &Path, client_dir: Option<&Path>) -> PathBuf {
             .find(|path| executable(path))
     });
     found.or(bundled).unwrap_or_else(|| PathBuf::from(name))
+}
+
+/// The connector packaged beside this app, with no staged-CLI or PATH fallback:
+/// what automatic start may run. Missing or unusable means unavailable.
+pub fn packaged_connector(client_dir: &Path) -> Option<PathBuf> {
+    let name = if cfg!(windows) {
+        "zerus-mobile-connector.exe"
+    } else {
+        "zerus-mobile-connector"
+    };
+    let path = client_dir.join(name);
+    executable(&path).then_some(path)
 }
 
 /// Exact selection for a local nested CLI: PATH alone cannot override an old

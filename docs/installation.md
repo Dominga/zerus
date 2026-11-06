@@ -534,8 +534,10 @@ stops an idle session host without disabling anything.
 - Voice messages cannot be sent to sessions on the Windows computer.
 - Mobile connection runs the bundled Rust connector on this PC. Configure its
   HTTPS relay and computer credential, choose Start connector, then refresh
-  Phones and pair by QR code. No other gateway is needed. Start the connector
-  again after login; closing the GUI keeps it and native agents running.
+  Phones and pair by QR code. No other gateway is needed. After that first
+  start, Zerus starts the connector each time Zerus starts; Stop connector turns
+  that off until the next Start connector. Closing the GUI keeps it and native
+  agents running. See [Windows gateway](mobile-deployment.md#windows-gateway).
   The first Windows gateway controls existing local Codex/Claude/Kimi sessions;
   mobile creation, folder/worktree/Git/file operations, peer routing and
   voice/speech are unavailable. Stop drains the current request and keeps
@@ -543,7 +545,7 @@ stops an idle session host without disabling anything.
 - Other machines cannot connect to the Windows computer as a peer: its local
   sessions appear only in Zerus on that computer, and its folders in Projects are
   not shared with other machines.
-- No installer, code signing, autostart or self-update. **Settings → Updates**
+- No installer, code signing or self-update. **Settings → Updates**
   starts on the Stable channel; choose Nightly to hear about nightly builds too.
   It reports a release with a newer product version than the running zip, with
   a link to its release page. Stable 0.42.2 and earlier have no
@@ -554,12 +556,14 @@ stops an idle session host without disabling anything.
   `hgs-tray.exe` in the Startup folder (`shell:startup`) and add a space and
   `--background` at the end of its **Target** field, so Zerus starts in the
   notification area without opening its window.
-  Zerus Next also supports an explicit per-user login registration:
-  `hgs-tray.exe --install-login-item` enables background startup and
-  `hgs-tray.exe --remove-login-item` removes it. Pass the same `--hgs` selector
-  when registering a custom CLI. It is never enabled automatically. Existing
-  Startup-folder shortcuts remain valid; duplicate background starts keep the
-  window hidden.
+  Zerus Next also has an explicit per-user login registration: turn on
+  **Settings → About → Start Zerus at login**, or use
+  `hgs-tray.exe --install-login-item` and `hgs-tray.exe --remove-login-item`
+  (pass the same `--hgs` selector when registering a custom CLI). It is never
+  enabled automatically. The setting reads and writes only its own value under
+  `HKCU\Software\Microsoft\Windows\CurrentVersion\Run`; it doesn't detect or
+  remove a Startup-folder shortcut. Existing shortcuts remain valid; duplicate
+  background starts keep the window hidden.
 - The separate `hgs desktop` service can be registered for the current user's
   next interactive sign-in with `hgs.exe desktop registration install --json`.
   Use `hgs.exe desktop registration status --json` to inspect it and

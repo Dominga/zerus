@@ -23,6 +23,7 @@ mod computers;
 pub use computers::*;
 mod enrollment;
 pub use enrollment::*;
+mod autostart;
 mod connector_actions;
 pub use connector_actions::*;
 mod legacy;
@@ -80,6 +81,11 @@ struct Inner {
     enrollment_plans: Mutex<enrollment::Plans>,
     connector_plans: Mutex<connector_actions::Plans>,
     legacy_plan: Mutex<Option<legacy::Plan>>,
+    /// Automatic connector start, where this computer has it (Windows).
+    autostart: Option<autostart::Io>,
+    autostart_attempted: std::sync::atomic::AtomicBool,
+    /// Orders the choice's file writes; never taken while the page is locked.
+    autostart_saves: Mutex<()>,
     effects: std::sync::atomic::AtomicBool,
     /// The page's clock: monotonic, so a changed system time neither names
     /// nor hides the sync service early.
@@ -89,15 +95,39 @@ struct Inner {
     notify: Box<dyn Fn() + Send + Sync>,
 }
 
-pub fn start(app: &AppHandle) -> Mobile {
+pub fn start(app: &AppHandle, dir: &std::path::Path) -> Mobile {
     let handle = app.clone();
-    Mobile(Arc::new(Inner::new(
-        crate::actions::blocked(),
+    let blocked = crate::actions::blocked();
+    let mut inner = Inner::new(
+        blocked,
         hgs_calls(),
         Box::new(move || {
             let _ = handle.emit("mobile-changed", ());
         }),
-    )))
+    );
+    let automatic = autostart::allowed(
+        cfg!(windows),
+        app.state::<crate::identity::Identity>().is_switch(),
+        blocked,
+        app.try_state::<crate::instance::InstanceState>()
+            .is_some_and(|state| {
+                state
+                    .0
+                    .lock()
+                    .unwrap_or_else(PoisonError::into_inner)
+                    .is_some()
+            }),
+    );
+    if automatic {
+        let record = autostart::record_path(dir);
+        let stored = autostart::read_record(&record);
+        inner.enable_autostart(stored.as_deref(), autostart::io(record));
+    }
+    let inner = Arc::new(inner);
+    if automatic {
+        inner.spawn_autostart();
+    }
+    Mobile(inner)
 }
 
 /// Runs `work` on a thread of its own; false when it could not start.
@@ -117,6 +147,9 @@ impl Inner {
             enrollment_plans: Mutex::new(enrollment::Plans::default()),
             connector_plans: Mutex::new(connector_actions::Plans::default()),
             legacy_plan: Mutex::new(None),
+            autostart: None,
+            autostart_attempted: std::sync::atomic::AtomicBool::new(false),
+            autostart_saves: Mutex::new(()),
             effects: std::sync::atomic::AtomicBool::new(false),
             started: Instant::now(),
             blocked,
@@ -168,7 +201,7 @@ impl Inner {
         let inner = Arc::clone(self);
         let started = spawn("mobile-status", move || {
             let answer = (inner.calls.status)();
-            let changed = inner.page().workspace_answered(answer);
+            let changed = inner.answered(answer);
             (inner.notify)();
             // A new connection lists other phones (Qt's connectionChanged).
             if changed {

@@ -173,7 +173,7 @@ pub fn mobile_computer_check(mobile: State<'_, Mobile>, handle: String) -> Resul
     let (connector, config) = workspace_runtime();
     let result = codes::check(&connector, &config, &issued.target);
     let error = result.as_ref().err().cloned();
-    if mobile.0.page().workspace_answered(result) {
+    if mobile.0.answered(result) {
         mobile.0.phones();
     }
     (mobile.0.notify)();

@@ -42,6 +42,9 @@ struct Transfer {
     binding: Binding,
     deadline_millis: u64,
     objects: Description,
+    // Actual original sender-owned Scope descriptor, not a caller-selected
+    // exemption. Native peer, transferred objects and flags remain independent.
+    holder_root_descriptor: i32,
 }
 
 pub(crate) fn transfer(
@@ -61,6 +64,7 @@ pub(crate) fn transfer(
         binding: binding.clone(),
         deadline_millis,
         objects,
+        holder_root_descriptor: scope.root.as_raw_fd(),
     })
     .map_err(io::Error::other)?;
     if bytes.len() > MAX_FRAME {
@@ -76,19 +80,20 @@ pub(crate) fn receive_transfer(
     binding: &Binding,
     original: &Manifest,
     until: Instant,
-) -> io::Result<(Scope, Instant)> {
+) -> io::Result<(Scope, Instant, i32)> {
     if bytes.len() > MAX_FRAME || !binding.valid() {
         return Err(invalid());
     }
     let transfer: Transfer = serde_json::from_slice(bytes).map_err(io::Error::other)?;
-    if transfer.version != 1 || transfer.binding != *binding {
+    if transfer.version != 1 || transfer.binding != *binding || transfer.holder_root_descriptor < 3
+    {
         return Err(invalid());
     }
     let deadline = until.min(clock::restore(transfer.deadline_millis)?);
     let objects = serde_json::to_vec(&transfer.objects).map_err(io::Error::other)?;
     let scope = receive(&objects, descriptors, original, deadline)?;
     check(deadline)?;
-    Ok((scope, deadline))
+    Ok((scope, deadline, transfer.holder_root_descriptor))
 }
 
 impl Scope {
@@ -269,11 +274,12 @@ mod tests {
         let bound = until();
         let stamp = clock::freeze(bound).unwrap();
         let bytes = transfer(&scope, &binding, stamp, bound).unwrap();
-        let (received, deadline) =
+        let (received, deadline, descriptor) =
             receive_transfer(&bytes, copies(&scope), &binding, &original, until()).unwrap();
         assert!(deadline <= bound);
+        assert_eq!(descriptor, scope.root.as_raw_fd());
         received.current(deadline).unwrap();
-        for change in 0..7 {
+        for change in 0..8 {
             let mut packet: serde_json::Value = serde_json::from_slice(&bytes).unwrap();
             match change {
                 0 => packet["binding"]["request"] = uuid::Uuid::new_v4().to_string().into(),
@@ -282,6 +288,7 @@ mod tests {
                 3 => packet["deadline_millis"] = clock::now().unwrap().saturating_sub(1).into(),
                 4 => packet["deadline_millis"] = u64::MAX.into(),
                 5 => packet["version"] = 2.into(),
+                6 => packet["holder_root_descriptor"] = 0.into(),
                 _ => packet["stop"] = true.into(),
             }
             assert!(

@@ -7,6 +7,7 @@ use zerus_client_core::worktree_programs::{
     custody::{self, Control, NativeChild, Owner, Reply},
     Discovery, Manifest,
 };
+use zerus_client_core::Target;
 
 pub(crate) struct Source {
     context: Arc<Origin>,
@@ -17,6 +18,7 @@ pub(crate) struct Source {
     socket: String,
     not_after: Instant,
     normal_consumed: AtomicBool,
+    closed: AtomicBool,
 }
 
 enum Origin {
@@ -131,6 +133,19 @@ impl Selected {
     }
 }
 impl Source {
+    pub(crate) fn inspect_native(
+        source: crate::desktop_ownership::NativeSource,
+        target: &Target,
+        machine: &str,
+        hold: Arc<dyn Send + Sync>,
+    ) -> Result<Option<(Capture, Arc<Self>)>, String> {
+        let context = super::native::NativeContext::selected(source, hold)?;
+        let Some(capture) = context.inspect(target, machine)? else {
+            return Ok(None);
+        };
+        let original = Self::open(Arc::new(Origin::Native(context)), &capture)?;
+        Ok(Some((capture, original)))
+    }
     /// Only the actual guarded Native startup/takeover result constructs this
     /// origin. Mode/status/receipt JSON cannot reconstruct it after restart.
     pub(crate) fn native(
@@ -208,6 +223,7 @@ impl Source {
             socket,
             not_after,
             normal_consumed: AtomicBool::new(false),
+            closed: AtomicBool::new(false),
         }))
     }
 }
@@ -237,14 +253,75 @@ impl Context {
 
 impl Source {
     pub(super) fn current(&self) -> bool {
-        let current = Instant::now() < self.not_after && self.context.current();
+        let current = !self.closed.load(Ordering::Acquire)
+            && Instant::now() < self.not_after
+            && self.context.current();
         if !current {
+            self.closed.store(true, Ordering::Release);
             self.owner
                 .lock()
                 .unwrap_or_else(PoisonError::into_inner)
                 .cancel();
         }
         current
+    }
+    pub(super) fn service_selected(&self) -> Option<Selected> {
+        match self.context.as_ref() {
+            Origin::Service(c) => Some(Selected(c.clone())),
+            Origin::Native(_) => None,
+        }
+    }
+    pub(super) fn executable(&self) -> &std::path::Path {
+        self.context.executable()
+    }
+    pub(super) fn check_native_scope(&self) -> Result<(), String> {
+        match self.context.as_ref() {
+            Origin::Native(c) => c.check_scope(),
+            Origin::Service(_) => Err(UNCONFIRMED.into()),
+        }
+    }
+    pub(super) fn read(&self, invocation: &Invocation) -> Exit {
+        if !self.current() {
+            return Exit::StartFailed(UNCONFIRMED.into());
+        }
+        match self.context.as_ref() {
+            Origin::Service(c) => c.read(invocation),
+            Origin::Native(c) => match c.read(
+                invocation.args.clone(),
+                zerus_client_core::worktree_review::REVIEW_LIMIT,
+            ) {
+                Ok(stdout) => Exit::Code {
+                    code: 0,
+                    stdout,
+                    stderr: String::new(),
+                },
+                Err(detail) => Exit::StartFailed(detail),
+            },
+        }
+    }
+    pub(super) fn run_native(
+        self: &Arc<Self>,
+        invocation: &Invocation,
+        resources: Arc<dyn Send + Sync>,
+    ) -> Exit {
+        let Origin::Native(context) = self.context.as_ref() else {
+            return Exit::StartFailed(UNCONFIRMED.into());
+        };
+        if !self.current() {
+            return Exit::StartFailed(UNCONFIRMED.into());
+        }
+        let selected = context.clone();
+        let command = helper_invocation(invocation);
+        run::run_accounted_frozen(
+            context.executable(),
+            &command,
+            context.environment(),
+            NATIVE_RECEIPT_LIMIT,
+            &context.cancel,
+            resources,
+            move |command| selected.spawn(command).map(|(child, _)| child),
+        )
+        .unwrap_or_else(|_| Exit::StartFailed(UNCONFIRMED.into()))
     }
     pub(super) fn manifest(&self) -> &Manifest {
         &self.manifest
@@ -272,6 +349,7 @@ impl Source {
     /// Close is available only after the prior mutator's separate actual-join
     /// witness. Owner also refuses to close an unretired phase independently.
     pub(super) fn close(&self) -> Result<(), String> {
+        self.closed.store(true, Ordering::Release);
         self.owner
             .lock()
             .unwrap_or_else(PoisonError::into_inner)
@@ -284,16 +362,7 @@ impl Source {
     /// Only the original consumed Remove confirmation can produce OriginalDone.
     /// Bind that SAME held Source/Actions before minting the normal-stop IDs;
     /// a report, a new selected CLI, or restored JSON cannot enter this method.
-    fn normal(
-        self: &Arc<Self>,
-        done: &OriginalDone,
-    ) -> Result<
-        (
-            Result<zerus_client_core::worktree_programs::stop::Report, String>,
-            Mutation,
-        ),
-        String,
-    > {
+    pub(super) fn normal(self: &Arc<Self>, done: &OriginalDone) -> Result<StopAttempt, String> {
         let Origin::Service(context) = self.context.as_ref() else {
             return Err(UNCONFIRMED.into());
         };
@@ -308,9 +377,7 @@ impl Source {
         {
             return Err(UNCONFIRMED.into());
         }
-        self.normal_consumed
-            .compare_exchange(false, true, Ordering::AcqRel, Ordering::Acquire)
-            .map_err(|_| UNCONFIRMED)?;
+        self.consume_normal()?;
         let input = zerus_client_core::worktree_programs::stop::Input {
             request_id: uuid::Uuid::new_v4().to_string(),
             confirmation_id: done.intent.confirmation_id.clone(),
@@ -328,16 +395,22 @@ impl Source {
     /// The caller is the native one-shot normal/Force controller, never IPC.
     /// All resources, including the original cache slot and every output pipe,
     /// stay charged independently of this bounded return or parsed result.
-    fn run_stop(
+    pub(super) fn consume_normal(&self) -> Result<(), String> {
+        if !self.current() {
+            return Err(UNCONFIRMED.into());
+        }
+        self.normal_consumed
+            .compare_exchange(false, true, Ordering::AcqRel, Ordering::Acquire)
+            .map(|_| ())
+            .map_err(|_| UNCONFIRMED.into())
+    }
+    pub(super) fn scope(&self) -> zerus_client_core::worktree_programs::stop::Source {
+        self.context.scope()
+    }
+    pub(super) fn run_stop(
         self: &Arc<Self>,
         input: zerus_client_core::worktree_programs::stop::Input,
-    ) -> Result<
-        (
-            Result<zerus_client_core::worktree_programs::stop::Report, String>,
-            Mutation,
-        ),
-        String,
-    > {
+    ) -> Result<StopAttempt, String> {
         use zerus_client_core::worktree_programs::{invocation::Intent, stop::Report};
         if !self.current()
             || input.source != self.context.scope()
@@ -439,8 +512,18 @@ impl Source {
         } else {
             Err(UNCONFIRMED.into())
         };
-        Ok((result, mutation))
+        Ok(StopAttempt {
+            input,
+            result,
+            mutation,
+        })
     }
+}
+
+pub(super) struct StopAttempt {
+    pub(super) input: zerus_client_core::worktree_programs::stop::Input,
+    pub(super) result: Result<zerus_client_core::worktree_programs::stop::Report, String>,
+    pub(super) mutation: Mutation,
 }
 
 // Each mutating call will own a fresh instance. The read-only Source/holder is

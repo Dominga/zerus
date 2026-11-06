@@ -224,7 +224,7 @@ pub(super) fn member(
 fn member_with_holder(
     process: &Path,
     inventory: &objects::Inventory,
-    root: Option<objects::Object>,
+    root: Option<HolderRoot>,
     deadline: Instant,
 ) -> io::Result<bool> {
     let mut found = false;
@@ -244,7 +244,16 @@ fn member_with_holder(
         bounded(count, deadline)?;
         let fd = fd?;
         match native_object(&fd.path()) {
-            Ok(id) if Some(id) == root && !skipped => {
+            Ok(id)
+                if root.is_some_and(|root| {
+                    root.object == id
+                        && fd
+                            .file_name()
+                            .to_str()
+                            .and_then(|name| name.parse::<i32>().ok())
+                            == Some(root.descriptor)
+                }) && !skipped =>
+            {
                 let info = read(&process.join("fdinfo").join(fd.file_name()))?;
                 let flags = u32::from_str_radix(
                     info.lines()
@@ -457,7 +466,8 @@ mod tests {
                     r#"import os,sys
 root=sys.argv[1]
 fd=os.open(root,os.O_RDONLY|os.O_DIRECTORY|os.O_CLOEXEC)
-print('ready',flush=True)
+original=fd
+print('ready',fd,flush=True)
 for op in sys.stdin:
  op=op.strip()
  if op=='duplicate': other=os.dup(fd)
@@ -466,7 +476,14 @@ for op in sys.stdin:
  elif op=='inherit': os.set_inheritable(fd,True)
  elif op=='cloexec': os.set_inheritable(fd,False)
  elif op=='cwd': os.chdir(root)
- print('ready',flush=True)
+ elif op=='relocate':
+  other=os.dup(fd);os.close(fd);fd=other
+ elif op=='restore':
+  os.dup2(fd,original,inheritable=False);os.close(fd);fd=original
+ elif op=='replace':
+  other=os.open(os.path.dirname(root),os.O_RDONLY|os.O_DIRECTORY|os.O_CLOEXEC)
+  os.dup2(other,fd,inheritable=False);os.close(other)
+ print('ready',fd,flush=True)
 "#,
                 ])
                 .arg(&root)
@@ -486,15 +503,22 @@ for op in sys.stdin:
             assert_eq!(unsafe { libc::poll(&mut poll, 1, 5000) }, 1);
             let mut line = String::new();
             output.read_line(&mut line).unwrap();
-            assert_eq!(line, "ready\n");
+            line.strip_prefix("ready ")
+                .unwrap()
+                .trim()
+                .parse::<i32>()
+                .unwrap()
         };
-        ready();
+        let original_descriptor = ready();
         let until = || Instant::now() + Duration::from_secs(3);
         let scope = objects::Scope::open(&root, until()).unwrap();
         let inventory = scope.inventory(until()).unwrap();
-        let root = objects::Object {
-            device: scope.identity().device,
-            inode: scope.identity().inode,
+        let root = HolderRoot {
+            object: objects::Object {
+                device: scope.identity().device,
+                inode: scope.identity().inode,
+            },
+            descriptor: original_descriptor,
         };
         let path = PathBuf::from(format!("/proc/{}", child.0.id()));
         assert!(!member_with_holder(&path, &inventory, Some(root), until()).unwrap());
@@ -514,9 +538,24 @@ for op in sys.stdin:
         writeln!(child.0.stdin.as_mut().unwrap(), "cloexec").unwrap();
         ready();
         assert!(!member_with_holder(&path, &inventory, Some(root), until()).unwrap());
+        writeln!(child.0.stdin.as_mut().unwrap(), "relocate").unwrap();
+        assert_ne!(ready(), original_descriptor);
+        assert!(
+            member_with_holder(&path, &inventory, Some(root), until()).is_err(),
+            "the same root at another FD cannot replace the original held descriptor"
+        );
+        writeln!(child.0.stdin.as_mut().unwrap(), "restore").unwrap();
+        assert_eq!(ready(), original_descriptor);
+        assert!(!member_with_holder(&path, &inventory, Some(root), until()).unwrap());
         writeln!(child.0.stdin.as_mut().unwrap(), "cwd").unwrap();
         ready();
         assert!(member_with_holder(&path, &inventory, Some(root), until()).unwrap());
+        writeln!(child.0.stdin.as_mut().unwrap(), "replace").unwrap();
+        assert_eq!(ready(), original_descriptor);
+        assert!(
+            member_with_holder(&path, &inventory, Some(root), until()).is_err(),
+            "reusing the original FD for a different directory cannot clear custody"
+        );
     }
 
     #[test]

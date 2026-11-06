@@ -79,7 +79,7 @@ fn original_helper_fixture() {
         std::io::stdin().read_exact(&mut bytes).unwrap();
         let (manifest, binding) = serde_json::from_slice(&bytes).unwrap();
         let (description, fds) = super::super::transport::receive(&socket, until()).unwrap();
-        let (original, deadline) =
+        let (original, deadline, _) =
             super::super::receive_transfer(&description, fds, &binding, &manifest, until())
                 .unwrap();
         original.current(deadline).unwrap();

@@ -4,7 +4,7 @@ use super::*;
 mod diagnostic;
 mod image;
 #[allow(dead_code)] // Consumed only by the new, separately confirmed program pipeline.
-mod programs;
+pub(crate) mod programs;
 use diagnostic::{Phase, Reason, Trace};
 use image::Image;
 use serde::Deserialize;

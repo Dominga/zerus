@@ -247,7 +247,7 @@ pub(super) fn member(
 fn member_with_holder(
     pid: u32,
     inventory: &objects::Inventory,
-    root: Option<objects::Object>,
+    root: Option<HolderRoot>,
     deadline: Instant,
 ) -> io::Result<bool> {
     let mut found = false;
@@ -258,9 +258,9 @@ fn member_with_holder(
         Err(e) => return Err(e),
     }
     // Known native membership wins even when the cwd or another FD was denied.
-    let denied = vnode_files(pid, deadline, |_, file| {
+    let denied = vnode_files(pid, deadline, |number, file| {
         let id = vnode_object(&file.vnode);
-        if Some(id) == root && !skipped {
+        if root.is_some_and(|root| root.object == id && root.descriptor == number) && !skipped {
             // XNU proc_info.h: fi_openflags FREAD=1/FWRITE=2,
             // fi_status PROC_FP_CLEXEC=2. No pathname or PID exemption.
             if file.info.flags & 3 != 1 || file.info.status & 2 == 0 {
@@ -549,7 +549,19 @@ mod tests {
         };
         let file = std::fs::File::open(&root).unwrap();
         drop(scope);
+        let id = HolderRoot {
+            object: id,
+            descriptor: file.as_raw_fd(),
+        };
         assert!(!member_with_holder(std::process::id(), &inventory, Some(id), until()).unwrap());
+        let wrong = HolderRoot {
+            descriptor: file.as_raw_fd() + 1024,
+            ..id
+        };
+        assert!(
+            member_with_holder(std::process::id(), &inventory, Some(wrong), until()).is_err(),
+            "a different descriptor cannot identify the original read-only holder pin"
+        );
         // Duplicating the deliberate pin does not exempt the process or both
         // FDs. Actual BSD fi_openflags/PROC_FP_CLEXEC are read from the kernel.
         let copy = unsafe { libc::fcntl(file.as_raw_fd(), libc::F_DUPFD_CLOEXEC, 3) };

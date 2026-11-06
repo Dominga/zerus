@@ -131,6 +131,7 @@ pub(crate) struct Borrowed {
     holder: Peer,
     stream: UnixStream,
     original: Intent,
+    holder_root_descriptor: i32,
     until: Instant,
 }
 impl Borrowed {
@@ -161,13 +162,14 @@ impl Borrowed {
         )?;
         let (bytes, fds) = transport::receive(&stream, until)?;
         peer.current(&stream, until)?;
-        let (scope, until) =
+        let (scope, until, holder_root_descriptor) =
             receive_transfer(&bytes, fds, &binding, &intent.input.manifest, until)?;
         let result = Self {
             scope,
             holder: peer,
             stream,
             original: intent.clone(),
+            holder_root_descriptor,
             until,
         };
         result.current(intent)?;
@@ -182,6 +184,7 @@ impl Borrowed {
             &self.scope,
             &self.holder,
             &self.stream,
+            self.holder_root_descriptor,
             self.until,
         )?;
         self.current(intent)?;

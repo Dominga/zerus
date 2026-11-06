@@ -32,6 +32,14 @@ pub struct Binding {
     pub input: String,
 }
 impl Binding {
+    pub fn for_cleanup(pipeline: &str, input: &super::cleanup::Input) -> Self {
+        Self {
+            pipeline: pipeline.into(),
+            manifest: input.stop.manifest.binding(),
+            request: input.request_id.clone(),
+            input: input.binding(),
+        }
+    }
     pub fn for_input(pipeline: &str, input: &Input) -> Self {
         Self {
             pipeline: pipeline.into(),

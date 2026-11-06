@@ -170,6 +170,7 @@ fn a_parsed_result_and_holder_ack_cannot_retire_real_readers_or_a_mutator_loan()
             socket,
             not_after,
             normal_consumed: AtomicBool::new(false),
+            closed: AtomicBool::new(false),
         });
         let (mut mutation, resources) = Mutation::new(source.clone(), &input);
         let loan = resources.clone();
@@ -223,6 +224,10 @@ fn a_parsed_result_and_holder_ack_cannot_retire_real_readers_or_a_mutator_loan()
             "the identified read-only source remains charged"
         );
         source.close().unwrap();
+        assert!(
+            !source.current(),
+            "closed original custody cannot become current again"
+        );
         drop(mutation);
         drop(source);
         assert!(actions.begin(key, &Action::Terminate).is_some());

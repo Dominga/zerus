@@ -8,10 +8,14 @@ use zerus_client_core::{termination_cleanup::Status, Outcome};
 #[cfg(any(target_os = "linux", target_os = "macos"))]
 mod native;
 #[cfg(any(target_os = "linux", target_os = "macos"))]
+pub(crate) mod pipeline;
+#[cfg(any(target_os = "linux", target_os = "macos"))]
 mod source;
 
 struct OriginalCall {
     _context: Arc<Context>,
+    #[cfg(any(target_os = "linux", target_os = "macos"))]
+    _source: Option<Arc<source::Source>>,
 }
 pub(crate) struct OriginalDone {
     pub(super) context: Arc<Context>,
@@ -58,6 +62,23 @@ impl Controller {
         invocation: &Invocation,
         not_after: std::time::Instant,
     ) -> (Outcome, Option<OriginalDone>) {
+        self.run_retaining_inner(invocation, not_after, None)
+    }
+    #[cfg(any(target_os = "linux", target_os = "macos"))]
+    fn run_retaining_pipeline(
+        self,
+        invocation: &Invocation,
+        source: Arc<source::Source>,
+    ) -> (Outcome, Option<OriginalDone>) {
+        self.run_retaining_inner(invocation, source.not_after(), Some(source))
+    }
+    fn run_retaining_inner(
+        self,
+        invocation: &Invocation,
+        not_after: std::time::Instant,
+        #[cfg(any(target_os = "linux", target_os = "macos"))] source: Option<Arc<source::Source>>,
+        #[cfg(not(any(target_os = "linux", target_os = "macos")))] _source: Option<()>,
+    ) -> (Outcome, Option<OriginalDone>) {
         let now = std::time::Instant::now();
         if self.stage != Stage::DispatchBegun
             || !same_invocation(invocation, &self.invocation)
@@ -76,6 +97,8 @@ impl Controller {
         }
         let call = Arc::new(OriginalCall {
             _context: self.context.clone(),
+            #[cfg(any(target_os = "linux", target_os = "macos"))]
+            _source: source,
         });
         let original_call = Arc::downgrade(&call);
         let current = self.context.clone();

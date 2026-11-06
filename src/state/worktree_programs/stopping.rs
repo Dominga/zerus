@@ -211,6 +211,13 @@ fn execute(config: &crate::config::Config, intent: &Intent, envelope: &Value) ->
         },
         &mut || permit.current().map_err(fail),
     );
+    let result = result.and_then(|report| {
+        // Also recheck the retained source/objects for a zero-target or fully
+        // exited list. Complete remains historical DATA, never cleanup consent.
+        permit.current().map_err(fail)?;
+        loan.current(intent).map_err(fail)?;
+        Ok(report)
+    });
     drop(permit);
     claim.finish(terminal(&intent.input, result, attempted))
 }

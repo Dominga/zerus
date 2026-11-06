@@ -6,6 +6,7 @@ use std::{
     process::{Child, Command},
     time::Instant,
 };
+use zerus_client_core::Target;
 use zerus_client_core::{desktop::ownership, worktree_programs::custody::NativeChild};
 
 pub(super) struct NativeContext {
@@ -15,7 +16,7 @@ pub(super) struct NativeContext {
     helper: PathBuf,
     environment: FrozenEnvironment,
     _hold: Arc<dyn Send + Sync>,
-    cancel: AtomicBool,
+    pub(super) cancel: AtomicBool,
     rejected: AtomicBool,
     busy: Arc<AtomicBool>,
 }
@@ -41,7 +42,12 @@ impl NativeContext {
         ready: &crate::desktop_ownership::NativeReady,
         hold: Arc<dyn Send + Sync>,
     ) -> Result<Arc<Self>, String> {
-        let source = ready.program_source()?;
+        Self::selected(ready.program_source()?, hold)
+    }
+    pub(super) fn selected(
+        source: crate::desktop_ownership::NativeSource,
+        hold: Arc<dyn Send + Sync>,
+    ) -> Result<Arc<Self>, String> {
         let connection = source.connection()?;
         let helper = connection.executable()?.to_owned();
         let image = Arc::new(Image::selected(connection.clone()).map_err(|_| UNCONFIRMED)?);
@@ -75,6 +81,34 @@ impl NativeContext {
         context.check_scope()?;
         Ok(context)
     }
+    pub(super) fn inspect(
+        self: &Arc<Self>,
+        target: &Target,
+        machine: &str,
+    ) -> Result<Option<Capture>, String> {
+        if !target.computer.is_empty() {
+            return Err("termination_programs_remote_custody_unavailable".into());
+        }
+        let runner = |_: &std::path::Path, invocation: &Invocation| match self.read(
+            invocation.args.clone(),
+            zerus_client_core::worktree_review::REVIEW_LIMIT,
+        ) {
+            Ok(stdout) => Exit::Code {
+                code: 0,
+                stdout,
+                stderr: String::new(),
+            },
+            Err(detail) => Exit::StartFailed(detail),
+        };
+        crate::termination_cleanup::probe(&self.helper, target, &runner)?;
+        let value = crate::termination_cleanup::inspection(&self.helper, target, machine, &runner)?;
+        let capture = Capture::from_inspection(target, machine, &value)?;
+        if !self.current() {
+            return Err(UNCONFIRMED.into());
+        }
+        Ok(capture)
+    }
+
     pub(super) fn configuration(&self) -> &str {
         self.source.configuration()
     }

@@ -26,16 +26,21 @@ pub(crate) fn programs(
 /// Only an already kernel-bound original holder can supply this exclusion.
 /// The exemption is exactly ONE read-only close-on-exec root descriptor,
 /// never its cwd, other descriptors, PID, or process membership as a whole.
+#[derive(Clone, Copy)]
+struct HolderRoot {
+    object: objects::Object,
+    descriptor: i32,
+}
 struct Custody<'a> {
     peer: &'a objects::loan::peer::Peer,
     socket: &'a std::os::unix::net::UnixStream,
-    root: objects::Object,
+    root: HolderRoot,
 }
 impl Custody<'_> {
     fn current(&self, until: Instant) -> io::Result<()> {
         self.peer.current(self.socket, until)
     }
-    fn root_for(&self, pid: u32) -> Option<objects::Object> {
+    fn root_for(&self, pid: u32) -> Option<HolderRoot> {
         (pid == self.peer.pid()).then_some(self.root)
     }
 }
@@ -43,14 +48,18 @@ fn programs_borrowed(
     scope: &objects::Scope,
     peer: &objects::loan::peer::Peer,
     socket: &std::os::unix::net::UnixStream,
+    original_descriptor: i32,
     deadline: Instant,
 ) -> io::Result<Vec<zerus_client_core::worktree_programs::Program>> {
     let custody = Custody {
         peer,
         socket,
-        root: objects::Object {
-            device: scope.identity().device,
-            inode: scope.identity().inode,
+        root: HolderRoot {
+            object: objects::Object {
+                device: scope.identity().device,
+                inode: scope.identity().inode,
+            },
+            descriptor: original_descriptor,
         },
     };
     custody.current(deadline)?;

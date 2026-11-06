@@ -6,7 +6,7 @@ import { tr } from "../i18n";
 export interface Consents { local_files: boolean; discard_changes: boolean; unchecked_processes: boolean; merged_branches: false }
 export interface RestoreSource { target: Target; machine: string; archive_id: string; status: "kept" | "unconfirmed"; overflow: boolean }
 export interface RetainedCapture { id: string | null; restore: RestoreSource | null; notice: string }
-export interface CleanupRow { id: string; label: string; path: string; machine: string; computer: string; branch: string; size: string; status: "removed" | "kept" | "review" | "unknown" | "ready" | "checking" | "removing"; reason: string; details: string; can_check: boolean; ready: boolean; busy?: boolean; source?: Target | null; notice?: string | null; restore?: RestoreSource | null }
+export interface CleanupRow { id: string; label: string; path: string; machine: string; computer: string; branch: string; size: string; status: "removed" | "kept" | "review" | "unknown" | "ready" | "checking" | "removing" | "stopping"; reason: string; details: string; can_check: boolean; can_force?: boolean; ready: boolean; busy?: boolean; source?: Target | null; notice?: string | null; restore?: RestoreSource | null }
 export interface CleanupView { revision: number; rows: CleanupRow[]; busy: boolean; cleaning?: boolean; removed: number; kept: number; unknown: number; required: Consents; text: string; title: string }
 export interface Inspection {
   path: string; common_dir: string; files?: { path: string; status: string }[]; files_partial?: boolean;

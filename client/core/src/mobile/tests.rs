@@ -400,6 +400,73 @@ impl Drop for Scratch {
 
 #[cfg(unix)]
 #[test]
+fn a_staged_phone_cli_can_find_the_pages_bundled_connector_without_global_path_changes() {
+    let bundle = Scratch::new("phone-bundle");
+    let stage = Scratch::new("phone-stage");
+    let (connector, _) = bundle.program(
+        "zerus-mobile-connector",
+        &[("*", "echo '{\"nested\":true}'")],
+    );
+    let (hgs, _) = stage.program("hgs", &[("*", "zerus-mobile-connector --workspace status")]);
+    let inherited = std::env::join_paths([Path::new("/usr/bin"), Path::new("/bin")]).unwrap();
+    let call = invocation(&["mobile", "phones", "--json"], Duration::from_secs(5));
+    let path = phone_search_path(&hgs, &call, Some(&bundle.0), Some(&inherited)).unwrap();
+    let result = run_phone_cli_in(&hgs, &call, 4096, Some(&path)).unwrap();
+    assert!(
+        matches!(result, Exit::Code { code: 0, ref stdout, .. } if stdout == b"{\"nested\":true}\n")
+    );
+    assert!(bundle
+        .calls("zerus-mobile-connector")
+        .starts_with("--workspace status "));
+    assert_eq!(
+        Path::new(&std::env::split_paths(&path).next().unwrap()).join("zerus-mobile-connector"),
+        connector
+    );
+    let missing = run_phone_cli_in(&hgs, &call, 4096, inherited.to_str()).unwrap();
+    assert!(matches!(missing, Exit::Code { code: 127, .. }));
+    let remote = invocation(
+        &["@lab", "mobile", "phones", "--json"],
+        Duration::from_secs(5),
+    );
+    assert!(phone_search_path(&hgs, &remote, Some(&bundle.0), Some(&inherited)).is_none());
+    assert!(connector_search_path(Path::new("zerus-mobile-connector"), Some(&inherited)).is_none());
+}
+
+#[cfg(windows)]
+#[test]
+fn the_packaged_windows_connector_wins_over_a_legacy_cli_sibling() {
+    struct Owned(std::path::PathBuf);
+    impl Drop for Owned {
+        fn drop(&mut self) {
+            std::fs::remove_dir_all(&self.0).unwrap();
+        }
+    }
+    let root =
+        std::env::temp_dir().join(format!("zerus-mobile-selection-{}", uuid::Uuid::new_v4()));
+    std::fs::create_dir(&root).unwrap();
+    let root = Owned(root);
+    let app = root.0.join("app");
+    let stage = root.0.join("stage");
+    std::fs::create_dir(&app).unwrap();
+    std::fs::create_dir(&stage).unwrap();
+    let name = "zerus-mobile-connector.exe";
+    let current = app.join(name);
+    std::fs::write(&current, b"current package fixture").unwrap();
+    std::fs::write(stage.join(name), b"legacy fixture").unwrap();
+    let hgs = stage.join("hgs.exe");
+    assert_eq!(connector_program(&hgs, Some(&app)), current);
+    let call = invocation(&["mobile", "phones", "--json"], Duration::from_secs(5));
+    let path = phone_search_path(&hgs, &call, Some(&app), None).unwrap();
+    assert_eq!(std::env::split_paths(&path).next().unwrap(), app);
+    let remote = invocation(
+        &["@lab", "mobile", "phones", "--json"],
+        Duration::from_secs(5),
+    );
+    assert!(phone_search_path(&hgs, &remote, Some(&app), None).is_none());
+}
+
+#[cfg(unix)]
+#[test]
 fn the_connector_is_only_asked_for_read_only_status_and_capability() {
     let scratch = Scratch::new("connector");
     let reply = active().to_string().replace('"', "\\\"");

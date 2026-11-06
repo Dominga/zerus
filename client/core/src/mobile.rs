@@ -96,14 +96,19 @@ fn executable(path: &Path) -> bool {
     }
 }
 
-/// WorkspaceSettings::connectorProgram: beside an absolute `hgs`, beside the
-/// client, or on the PATH (the client's own folder when none is found).
+/// Use the packaged Windows connector before a separately staged/older CLI's
+/// sibling. Other platforms retain the CLI, client, PATH search order.
 pub fn connector_program(hgs: &Path, client_dir: Option<&Path>) -> PathBuf {
     let name = if cfg!(windows) {
         "zerus-mobile-connector.exe"
     } else {
         "zerus-mobile-connector"
     };
+    let bundled = client_dir.map(|dir| dir.join(name));
+    #[cfg(windows)]
+    if let Some(path) = bundled.as_ref().filter(|path| executable(path)) {
+        return path.clone();
+    }
     if hgs.is_absolute() {
         if let Some(beside) = hgs
             .parent()
@@ -113,7 +118,6 @@ pub fn connector_program(hgs: &Path, client_dir: Option<&Path>) -> PathBuf {
             return beside;
         }
     }
-    let bundled = client_dir.map(|dir| dir.join(name));
     if let Some(bundled) = bundled.as_ref().filter(|path| executable(path)) {
         return bundled.clone();
     }
@@ -123,6 +127,65 @@ pub fn connector_program(hgs: &Path, client_dir: Option<&Path>) -> PathBuf {
             .find(|path| executable(path))
     });
     found.or(bundled).unwrap_or_else(|| PathBuf::from(name))
+}
+
+/// The staged Windows CLI has no connector beside it. Its existing PATH
+/// fallback must see the same connector selected by the Mobile page. This is
+/// local child environment only; it neither changes the CLI nor reaches SSH peers.
+#[cfg(any(windows, test))]
+fn connector_search_path(connector: &Path, inherited: Option<&std::ffi::OsStr>) -> Option<String> {
+    let folder = connector.parent().filter(|p| p.is_absolute())?;
+    let mut paths = vec![folder.to_owned()];
+    if let Some(inherited) = inherited {
+        paths.extend(std::env::split_paths(inherited));
+    }
+    std::env::join_paths(paths).ok()?.into_string().ok()
+}
+
+#[cfg(any(windows, test))]
+fn phone_search_path(
+    hgs: &Path,
+    call: &Invocation,
+    directory: Option<&Path>,
+    inherited: Option<&std::ffi::OsStr>,
+) -> Option<String> {
+    if call.args.first().is_some_and(|arg| arg.starts_with('@')) {
+        return None;
+    }
+    connector_search_path(&connector_program(hgs, directory), inherited)
+}
+
+fn run_phone_cli(hgs: &Path, call: &Invocation, cap: usize) -> Result<Exit, crate::run::TooLarge> {
+    #[cfg(windows)]
+    let search = {
+        let directory = std::env::current_exe()
+            .ok()
+            .and_then(|p| p.parent().map(Path::to_path_buf));
+        phone_search_path(
+            hgs,
+            call,
+            directory.as_deref(),
+            std::env::var_os("PATH").as_deref(),
+        )
+    };
+    #[cfg(not(windows))]
+    let search: Option<String> = None;
+    run_phone_cli_in(hgs, call, cap, search.as_deref())
+}
+
+fn run_phone_cli_in(
+    hgs: &Path,
+    call: &Invocation,
+    cap: usize,
+    search: Option<&str>,
+) -> Result<Exit, crate::run::TooLarge> {
+    let environment = search.map(|path| [("PATH", path)]);
+    crate::run::run_limited(
+        hgs,
+        call,
+        environment.as_ref().map_or(&[], |v| v.as_slice()),
+        cap,
+    )
 }
 
 /// `zerus-mobile-connector --workspace status --config PATH`, `{}` on stdin
@@ -780,7 +843,7 @@ pub fn phones(hgs: &Path, host: &str) -> Result<Option<PhoneList>, String> {
     };
     let reply = object(
         hgs,
-        crate::run::run_limited(hgs, &call, &[], REPLY_BYTES).ok(),
+        run_phone_cli(hgs, &call, REPLY_BYTES).ok(),
         "Invalid phone management response",
     )
     .map_err(strip)?;

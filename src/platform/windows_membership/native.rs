@@ -18,6 +18,8 @@ use windows_sys::Win32::{
     },
 };
 
+mod handles;
+
 type QuerySystem = unsafe extern "system" fn(i32, *mut c_void, u32, *mut u32) -> i32;
 type QueryProcess = unsafe extern "system" fn(HANDLE, i32, *mut c_void, u32, *mut u32) -> i32;
 #[repr(align(8))]

@@ -65,6 +65,12 @@ pub struct Target {
     /// ctest: the test binary, relative to the project, to run single functions.
     #[serde(default, skip_serializing_if = "String::is_empty")]
     pub binary: String,
+    /// msbuild: the configuration and platform its project builds first
+    /// (`Debug|x64`), so its assembly's folder is known.
+    #[serde(default, skip_serializing_if = "String::is_empty")]
+    pub config: String,
+    #[serde(default, skip_serializing_if = "String::is_empty")]
+    pub platform: String,
 }
 
 #[derive(Clone, Debug, Default, Deserialize, Serialize, PartialEq)]
@@ -128,6 +134,7 @@ pub fn generate_only(root: &Path, config: &TestsConfig, files: &[String], previo
                     ProviderMap { note, ..kept.unwrap_or_else(|| ProviderMap { rule: Rule::Build, ..whole(provider) }) }
                 }
             },
+            (Rule::Build, Kind::Msbuild) => super::msbuild::section(root, provider, &area),
             (Rule::Build, _) => references(root, provider, &area),
         };
         section.rules = resolve_rules(root, provider, &area, &section);
@@ -281,6 +288,7 @@ fn ctest(root: &Path, provider: &Provider) -> anyhow::Result<Option<ProviderMap>
                 tests: count,
                 functions,
                 binary: build.targets.values().find(|target| target.name == name).and_then(|target| target.artifacts.first()).map(|path| super::cargo_graph::relative(root, Path::new(path))).unwrap_or_default(),
+                ..Target::default()
             },
         );
         for file in files {
@@ -392,7 +400,7 @@ fn word_set(text: &str) -> BTreeSet<&str> {
 
 fn count_tests(kind: Kind, text: &str) -> usize {
     match kind {
-        Kind::Pytest | Kind::Unittest => text.lines().filter(|line| line.trim_start().starts_with("def test")).count(),
+        Kind::Pytest | Kind::Unittest | Kind::Cython => text.lines().filter(|line| line.trim_start().starts_with("def test")).count(),
         Kind::Gradle => text.matches("@Test").count(),
         Kind::Npm => text.matches("it(").count() + text.matches("test(").count(),
         _ => 1,

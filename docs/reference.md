@@ -7944,15 +7944,22 @@ A project names its test suites in `.zerus/tests.toml`; Zerus reads it, and the
 owner may override any field in the team settings (`settings.tests`, an object
 shaped like the file and merged over it, providers by name; only the owner sets
 it). Without the file `hgs test config` shows a proposal from the stacks it
-finds (Cargo, CMake/CTest, pytest or unittest, Gradle, npm) and nothing is
-enforced: a team without a configuration keeps today's flow.
+finds (Cargo, CMake/CTest, pytest or unittest, Cython with `setup.py`,
+MSBuild with a `.sln` or `.vcxproj`, Unreal with a `.uproject`, Gradle, npm)
+and nothing is enforced: a team without a configuration keeps today's flow.
 
 - `hgs test map --write` writes the committed map (`.zerus/test-map.json`) from
   the build: a Cargo package's module graph (each module's tests, widened to
   the modules that use it, `include_str!` files included); CMake's file API
   reply, the CTest files and the include graph for each test binary (its
   functions too); and for Python, Gradle and npm the files a test names or
-  imports. `[[provider.paths]]` adds path rules, with targets or with the tests
+  imports (Cython's `.pyx`, `.pxd` and `.pxi` too). For MSBuild (task 137) a
+  file belongs to the projects whose item lists name it (`ClCompile`,
+  `ClInclude` and the others; macros and wildcards are skipped); a test
+  project (a native unit test or Google Test project, or one the provider's
+  `tests` name) answers for itself and every project it references, and a
+  project no test project reaches is its own target, checked by its build.
+  `[[provider.paths]]` adds path rules, with targets or with the tests
   that mention a text (such as the CLI binary).
 - `hgs test map --check` fails on a tracked file outside every provider's area
   and `map.ignore` and on a tracked test file no provider maps; the CLI job runs
@@ -7975,7 +7982,22 @@ enforced: a team without a configuration keeps today's flow.
   `functions` as `suite:function` (a plain name, or `function:datatag`, with
   one suite). A Qt test runs with `QT_FORCE_STDERR_LOGGING=1`: without a
   console QtTest would log to the debugger, and the run's tail keeps each
-  suite's own lines (`FAIL!`, `Totals`).
+  suite's own lines (`FAIL!`, `Totals`). `qt-test` is only for the Qt GUI's
+  build (`build_dir = ".ci-build/gui"`). Every other kind names its own
+  templates (task 137), with the build its tests need as `team_build`, sent
+  first:
+  - ctest: `cmake-build` (`build_dir`, the configuration a multi-config
+    build's binary folder names, the chosen `targets`), then `ctest` with the
+    chosen tests (`tests`, or an anchored `regex` for other names);
+  - pytest: `py-test` with the chosen test files as `paths`;
+  - cython: `cython-build` when an extension source (`.pyx`, `.pxd`, `.pxi`,
+    C or C++, `setup.py`) changed or for the whole set, then `py-test`;
+  - msbuild: `msbuild-build` of the chosen test project (its configuration
+    and platform), or of `manifest` for the whole set, then `vstest` with its
+    assemblies; without a test project the build is the run;
+  - unreal: `ue-build` of `<project>Editor` (Win64, Development), then
+    `ue-test` with the chosen automation tests, or the module prefixes for
+    the whole set.
 - `hgs test durations --record LOG --provider NAME` keeps the slowest measured
   time per target from CTest, QtTest, Cargo (and libtest JSON), unittest or
   pytest output, or a JSON object of test ids to seconds.
@@ -8162,11 +8184,13 @@ a module compiles in); `[full]` `where` (`here`, `ci`, `runner`), `policy`
 `suite_lines`; `[reuse]` `full_after`, `max_age_days`; `[isolation]`
 `enabled` and the keys under "Test isolation"; `[build_cache]`; `[merge_queue]`
 `enabled`; `[resources.NAME]` `cpu`, `ram_mb`, `gpu`, `exclusive`; and each
-`[[provider]]`: `name`, `kind` (`cargo`, `ctest`, `pytest`, `unittest`,
-`gradle`, `npm`, `command`), `root`, `sources`, `tests`, `manual`, `elsewhere`,
+`[[provider]]`: `name`, `kind` (`cargo`, `ctest`, `pytest`, `cython`,
+`unittest`, `gradle`, `npm`, `msbuild`, `unreal`, `command`), `root`, `sources`, `tests`, `manual`, `elsewhere`,
 `affected` (`build`, `paths`, `all`), `[[provider.paths]]` (`files` with
 `targets` or `mentions`), `command` (`{targets}`, `{manifest}`, `{build_dir}`),
-`manifest`, `widen` (`none`, `dependants`, `transitive`), `build_dir`,
+`manifest` (cargo's `Cargo.toml`, required for msbuild's `.sln` or project
+file and unreal's `.uproject`), `widen` (`none`, `dependants`, `transitive`),
+`build_dir`,
 `resources`, `platforms`, `budget_minutes`, `budget_lines`, `reuse` (`auto`,
 `inputs`, `binary`, `never`), `disabled`.
 

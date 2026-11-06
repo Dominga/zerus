@@ -1,0 +1,11 @@
+version = 1
+
+[[provider]]
+name = "demo-cmake"
+kind = "ctest"
+root = "."
+sources = ["**"]
+tests = ["tests/**"]
+build_dir = "build"
+affected = "build"
+

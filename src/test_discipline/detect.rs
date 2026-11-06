@@ -51,13 +51,51 @@ pub fn detect(root: &Path) -> TestsConfig {
         let python_tests = std::fs::read_dir(dir.join("tests")).into_iter().flatten().flatten().any(|entry| {
             entry.file_name().to_str().is_some_and(|file| file.starts_with("test_") && file.ends_with(".py"))
         });
-        if pytest || python_tests {
-            let kind = if pytest { Kind::Pytest } else { Kind::Unittest };
-            providers.push(provider(name(kind.name()), kind, &place, area, vec![format!("{prefix}tests/**/test_*.py")], Rule::Build));
+        // Task 137: Cython extensions built by setup.py rebuild before the tests.
+        let cython = dir.join("setup.py").is_file() && has_extension(&dir, &["pyx"]);
+        if pytest || python_tests || cython {
+            let kind = if cython { Kind::Cython } else if pytest { Kind::Pytest } else { Kind::Unittest };
+            providers.push(provider(name(kind.name()), kind, &place, area.clone(), vec![format!("{prefix}tests/**/test_*.py")], Rule::Build));
+        }
+        // Task 137: a Visual Studio solution, or else a C++ project; one at the
+        // top covers the folders below it.
+        let solution = first_with(&dir, &["sln", "slnx"]).or_else(|| first_with(&dir, &["vcxproj"]));
+        if let Some(manifest) = solution.filter(|_| !providers.iter().any(|known| known.kind == Kind::Msbuild && known.root.is_empty())) {
+            providers.push(Provider { manifest, ..provider(name("msbuild"), Kind::Msbuild, &place, area.clone(), Vec::new(), Rule::Build) });
+        }
+        if let Some(manifest) = first_with(&dir, &["uproject"]) {
+            let sources = ["Source", "Content", "Config", "Plugins"].iter().map(|folder| format!("{prefix}{folder}/**")).collect();
+            providers.push(Provider { manifest, ..provider(name("unreal"), Kind::Unreal, &place, sources, Vec::new(), Rule::Build) });
         }
     }
     // A folder's provider owns its files before the project's own catch-all.
     TestsConfig { providers, ..TestsConfig::default() }
+}
+
+/// The first file of the folder (by name) with one of the extensions.
+fn first_with(dir: &Path, extensions: &[&str]) -> Option<String> {
+    let mut found: Vec<String> = std::fs::read_dir(dir)
+        .ok()?
+        .flatten()
+        .filter(|entry| entry.file_type().is_ok_and(|kind| kind.is_file()))
+        .filter_map(|entry| entry.file_name().into_string().ok())
+        .filter(|name| Path::new(name).extension().and_then(|ext| ext.to_str()).is_some_and(|ext| extensions.iter().any(|want| ext.eq_ignore_ascii_case(want))))
+        .collect();
+    found.sort();
+    found.into_iter().next()
+}
+
+/// A file with one of the extensions in the folder or one folder down.
+fn has_extension(dir: &Path, extensions: &[&str]) -> bool {
+    if first_with(dir, extensions).is_some() {
+        return true;
+    }
+    std::fs::read_dir(dir)
+        .into_iter()
+        .flatten()
+        .flatten()
+        .filter(|entry| entry.file_type().is_ok_and(|kind| kind.is_dir()) && !entry.file_name().to_string_lossy().starts_with('.'))
+        .any(|entry| first_with(&entry.path(), extensions).is_some())
 }
 
 fn provider(name: String, kind: Kind, root: &str, sources: Vec<String>, tests: Vec<String>, affected: Rule) -> Provider {
@@ -104,6 +142,9 @@ pub fn proposal(config: &TestsConfig) -> String {
             Rule::All => "all",
         };
         out.push_str(&format!("affected = {rule:?}\n"));
+        if !provider.manifest.is_empty() && provider.kind != Kind::Cargo {
+            out.push_str(&format!("manifest = {:?}\n", provider.manifest));
+        }
         if !provider.build_dir.is_empty() {
             out.push_str(&format!("build_dir = {:?}\n", provider.build_dir));
         }

@@ -1,0 +1,24 @@
+{
+  "providers": {
+    "demo-cmake": {
+      "files": {
+        "src/math.cpp": ["demo_test"],
+        "src/math.h": ["demo_test"],
+        "tests/test_math.cpp": ["demo_test"]
+      },
+      "kind": "ctest",
+      "rule": "build",
+      "targets": {
+        "demo_test": {
+          "binary": "build/Debug/demo_test.exe",
+          "run": ["math.add"],
+          "tests": 1
+        }
+      },
+      "test_files": {
+        "tests/test_math.cpp": ["demo_test"]
+      }
+    }
+  },
+  "schema": 1
+}

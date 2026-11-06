@@ -8,6 +8,7 @@ use super::glob;
 use super::map::{self, ProviderMap, TestMap, ALL};
 use serde::Serialize;
 use std::collections::{BTreeMap, BTreeSet};
+use std::path::Path;
 
 #[derive(Debug, Default, Serialize)]
 pub struct Selection {
@@ -49,9 +50,14 @@ pub struct Run {
     #[serde(skip_serializing_if = "String::is_empty")]
     pub functions_command: String,
     /// #741: the same run as an `hgs team run` request's template and args,
-    /// when a team template expresses it (cargo-test, qt-test).
+    /// when a team template expresses it; task 137: each kind its own
+    /// (cargo-test, qt-test, ctest, py-test, vstest, ue-test).
     #[serde(skip_serializing_if = "Option::is_none")]
     pub team_run: Option<serde_json::Value>,
+    /// Task 137: the build its tests need first, sent before `team_run`
+    /// (cmake-build, cython-build, msbuild-build, ue-build).
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub team_build: Option<serde_json::Value>,
 }
 
 #[derive(Debug, Serialize, PartialEq)]
@@ -146,14 +152,16 @@ pub fn select(root: &std::path::Path, config: &TestsConfig, map: &TestMap, durat
         }
     }
     for provider in &providers {
+        // Task 137: what changed in its area decides whether a build runs first.
+        let mine: Vec<&String> = changed.iter().filter(|file| map::in_area(provider, file)).collect();
         let Some(section) = map.providers.get(&provider.name) else {
             if whole.contains(provider.name.as_str()) {
-                selection.runs.push(whole_run(provider, &ProviderMap::empty(provider.kind), durations, map));
+                selection.runs.push(whole_run(provider, &ProviderMap::empty(provider.kind), durations, map, &mine));
             }
             continue;
         };
         if whole.contains(provider.name.as_str()) {
-            selection.runs.push(whole_run(provider, section, durations, map));
+            selection.runs.push(whole_run(provider, section, durations, map, &mine));
             continue;
         }
         let Some(ids) = chosen.get(provider.name.as_str()) else { continue };
@@ -164,7 +172,7 @@ pub fn select(root: &std::path::Path, config: &TestsConfig, map: &TestMap, durat
             }
         }
         for (group, ids) in groups {
-            let mut run = run(provider, section, &group, &ids, durations);
+            let mut run = run(provider, section, &group, &ids, durations, &mine);
             // Only test functions changed in a binary nothing else chose.
             if provider.kind == Kind::Ctest {
                 let functions: BTreeSet<String> = narrowed.values().flatten().cloned().collect();
@@ -177,7 +185,11 @@ pub fn select(root: &std::path::Path, config: &TestsConfig, map: &TestMap, durat
                         run.seconds = run.seconds.map(|seconds| seconds * run.functions.len() as f64 / target.tests as f64);
                     }
                     run.tests = run.functions.len();
-                    run.team_run = Some(serde_json::json!({"template": "qt-test", "args": {"suite": ids[0], "functions": run.functions}}));
+                    // Only the Qt build's test binaries take functions; ctest
+                    // runs a whole test.
+                    if qt_build(provider) {
+                        run.team_run = Some(serde_json::json!({"template": "qt-test", "args": {"suite": ids[0], "functions": run.functions}}));
+                    }
                 }
             }
             selection.runs.push(run);
@@ -246,19 +258,20 @@ fn function_bodies(text: &str) -> Vec<(String, usize, usize)> {
     out
 }
 
-fn whole_run(provider: &Provider, section: &ProviderMap, durations: &Durations, map: &TestMap) -> Run {
+fn whole_run(provider: &Provider, section: &ProviderMap, durations: &Durations, map: &TestMap, changed: &[&String]) -> Run {
     let (seconds, unknown) = durations::provider_seconds(durations, map, &provider.name);
-    let explicit = section.rule == Rule::Build && !provider.manual.is_empty() && matches!(provider.kind, Kind::Pytest | Kind::Unittest | Kind::Npm);
-    // A provider with tests run only by hand lists the others by name.
-    let ids: Vec<String> = if explicit { section.targets.keys().cloned().collect() } else { Vec::new() };
-    let command = if explicit { command(provider, &items(provider, section, &ids)) } else { command(provider, "") };
+    let explicit = section.rule == Rule::Build && !provider.manual.is_empty() && matches!(provider.kind, Kind::Pytest | Kind::Unittest | Kind::Npm | Kind::Cython);
+    // A provider with tests run only by hand lists the others by name; an
+    // MSBuild provider names its test assemblies.
+    let ids: Vec<String> = if explicit || provider.kind == Kind::Msbuild { section.targets.keys().cloned().collect() } else { Vec::new() };
+    let command = if explicit || provider.kind == Kind::Msbuild { command(provider, &items(provider, section, &ids)) } else { command(provider, "") };
     let tests = section.targets.values().map(|target| target.tests).sum();
     let unknown = unknown.max(usize::from(section.targets.is_empty()));
     let all: Vec<String> = section.targets.keys().filter(|id| *id != ALL).cloned().collect();
-    let team_run = match provider.kind {
-        Kind::Cargo => Some(cargo_team_run(provider, "", &[], &[])),
-        Kind::Ctest if !all.is_empty() => Some(serde_json::json!({"template": "qt-test", "args": {"suites": all}})),
-        _ => None,
+    let (team_build, team_run) = match provider.kind {
+        Kind::Cargo => (None, Some(cargo_team_run(provider, "", &[], &[]))),
+        Kind::Ctest if qt_build(provider) => (None, (!all.is_empty()).then(|| serde_json::json!({"template": "qt-test", "args": {"suites": all}}))),
+        _ => team_steps(provider, section, None, &all, changed),
     };
     Run {
         provider: provider.name.clone(),
@@ -273,10 +286,11 @@ fn whole_run(provider: &Provider, section: &ProviderMap, durations: &Durations, 
         functions: Vec::new(),
         functions_command: String::new(),
         team_run,
+        team_build,
     }
 }
 
-fn run(provider: &Provider, section: &ProviderMap, group: &str, ids: &[String], durations: &Durations) -> Run {
+fn run(provider: &Provider, section: &ProviderMap, group: &str, ids: &[String], durations: &Durations, changed: &[&String]) -> Run {
     let mut seconds = 0.0;
     let mut unknown = 0;
     let mut tests = 0;
@@ -292,13 +306,13 @@ fn run(provider: &Provider, section: &ProviderMap, group: &str, ids: &[String], 
     if provider.kind == Kind::Cargo {
         targets = format!("{group} -- {targets}");
     }
-    let team_run = match provider.kind {
+    let (team_build, team_run) = match provider.kind {
         Kind::Cargo => {
             let (filters, skips) = cargo_filters(section, ids);
-            Some(cargo_team_run(provider, group, &filters, &skips))
+            (None, Some(cargo_team_run(provider, group, &filters, &skips)))
         }
-        Kind::Ctest => Some(serde_json::json!({"template": "qt-test", "args": {"suites": ids}})),
-        _ => None,
+        Kind::Ctest if qt_build(provider) => (None, Some(serde_json::json!({"template": "qt-test", "args": {"suites": ids}}))),
+        _ => team_steps(provider, section, Some(group), ids, changed),
     };
     Run {
         provider: provider.name.clone(),
@@ -313,6 +327,172 @@ fn run(provider: &Provider, section: &ProviderMap, group: &str, ids: &[String], 
         functions: Vec::new(),
         functions_command: String::new(),
         team_run,
+        team_build,
+    }
+}
+
+/// This repository's Qt GUI build, whose suites the qt-test template runs;
+/// any other CTest provider uses cmake-build and ctest (task 137).
+pub const QT_BUILD_DIR: &str = ".ci-build/gui";
+
+fn qt_build(provider: &Provider) -> bool {
+    provider.kind == Kind::Ctest && provider.build_dir.trim_end_matches('/') == QT_BUILD_DIR
+}
+
+/// A name the templates take as an identifier: letters, digits, _ - . : + @.
+fn plain_name(name: &str) -> bool {
+    !name.is_empty()
+        && name.chars().count() <= 200
+        && name.chars().all(|ch| ch.is_ascii_alphanumeric() || "_-.:+@".contains(ch))
+        && !name.contains("..")
+        && !name.starts_with(['.', '-'])
+}
+
+/// A path inside the project, as the provider's folder names it.
+fn in_project(provider: &Provider, path: &str) -> String {
+    if provider.root.is_empty() || provider.root == "." {
+        path.to_owned()
+    } else {
+        format!("{}/{path}", provider.root.trim_end_matches('/'))
+    }
+}
+
+/// Task 137: a CMake build's configuration, from a multi-config generator's
+/// test binary folder (build/Debug/x.exe).
+fn cmake_config<'a>(section: &'a ProviderMap, ids: &[String]) -> Option<&'a str> {
+    ids.iter().filter_map(|id| section.targets.get(id)).find_map(|target| {
+        let folder = Path::new(&target.binary).parent()?.file_name()?.to_str()?;
+        ["Debug", "Release", "RelWithDebInfo", "MinSizeRel"].contains(&folder).then_some(folder)
+    })
+}
+
+/// Task 137: the `hgs team run` requests of a run of any kind but cargo and
+/// the Qt build: the build its tests need first, and the tests. `group` is
+/// None for the whole set; `changed` are the provider's changed files.
+fn team_steps(provider: &Provider, section: &ProviderMap, group: Option<&str>, ids: &[String], changed: &[&String]) -> (Option<serde_json::Value>, Option<serde_json::Value>) {
+    use serde_json::{json, Map, Value};
+    let whole = group.is_none();
+    let runs: Vec<String> = ids.iter().filter_map(|id| section.targets.get(id)).flat_map(|target| target.run.iter().cloned()).collect();
+    let request = |template: &str, args: Map<String, Value>| json!({"template": template, "args": args});
+    match provider.kind {
+        Kind::Ctest => {
+            let mut build = Map::new();
+            let mut test = Map::new();
+            if !provider.build_dir.is_empty() {
+                build.insert("build_dir".into(), provider.build_dir.clone().into());
+                test.insert("build_dir".into(), provider.build_dir.clone().into());
+            }
+            if let Some(config) = cmake_config(section, ids) {
+                build.insert("config".into(), config.into());
+                test.insert("config".into(), config.into());
+            }
+            let targets: Vec<&String> = ids.iter().filter(|id| *id != ALL).collect();
+            if !whole && !targets.is_empty() && targets.len() <= 64 && targets.iter().all(|id| plain_name(id)) {
+                build.insert("targets".into(), json!(targets));
+            }
+            if !whole && !runs.is_empty() {
+                if runs.len() <= 64 && runs.iter().all(|name| plain_name(name)) {
+                    test.insert("tests".into(), json!(runs));
+                } else {
+                    let names: Vec<String> = runs.iter().map(|name| regex_escape(name)).collect();
+                    let regex = format!("^({})$", names.join("|"));
+                    if regex.chars().count() <= 2000 {
+                        test.insert("regex".into(), regex.into());
+                    }
+                }
+            }
+            (Some(request("cmake-build", build)), Some(request("ctest", test)))
+        }
+        Kind::Pytest | Kind::Cython => {
+            let mut test = Map::new();
+            // The template takes at most 64 paths: more run the provider's folder.
+            let paths: Vec<String> = if whole || runs.len() > 64 {
+                if provider.root.is_empty() || provider.root == "." { Vec::new() } else { vec![provider.root.trim_end_matches('/').to_owned()] }
+            } else {
+                runs.iter().map(|path| in_project(provider, path)).collect()
+            };
+            if !paths.is_empty() {
+                test.insert("paths".into(), json!(paths));
+            }
+            // A Cython extension is rebuilt in place when one of its sources
+            // changed, and before a run of the whole set.
+            let extension = |file: &&String| {
+                let lower = file.to_ascii_lowercase();
+                [".pyx", ".pxd", ".pxi", ".c", ".cpp", ".h"].iter().any(|ext| lower.ends_with(ext)) || lower.ends_with("setup.py")
+            };
+            let build = (provider.kind == Kind::Cython && (changed.is_empty() || changed.iter().any(extension))).then(|| request("cython-build", Map::new()));
+            (build, Some(request("py-test", test)))
+        }
+        Kind::Msbuild => {
+            // One project per group: its own file builds; the whole set
+            // builds the provider's manifest.
+            let project = match group {
+                Some(group) if !group.is_empty() => group.to_owned(),
+                _ => in_project(provider, &provider.manifest),
+            };
+            let target = ids.iter().filter_map(|id| section.targets.get(id)).next();
+            let mut build = Map::new();
+            build.insert("project".into(), json!([project]));
+            if let Some(target) = target {
+                if !target.config.is_empty() {
+                    build.insert("config".into(), target.config.clone().into());
+                }
+                // A solution names Win32 x86; its projects' own platform holds.
+                let solution = project.to_ascii_lowercase().ends_with(".sln");
+                if !target.platform.is_empty() && !(solution && target.platform.eq_ignore_ascii_case("Win32")) {
+                    build.insert("platform".into(), target.platform.clone().into());
+                }
+            }
+            let build = request("msbuild-build", build);
+            // Built through a solution, an assembly lands under the
+            // solution's folder instead of its project's.
+            let solution_dir = project.to_ascii_lowercase().ends_with(".sln").then(|| project.rsplit_once('/').map(|(dir, _)| format!("{dir}/")).unwrap_or_default());
+            let runs: Vec<String> = match &solution_dir {
+                None => runs,
+                Some(dir) => ids
+                    .iter()
+                    .filter_map(|id| section.targets.get(id))
+                    .filter(|target| !target.run.is_empty())
+                    .map(|target| {
+                        let file = target.binary.rsplit('/').next().unwrap_or_default();
+                        let config = if target.config.is_empty() { "Debug" } else { target.config.as_str() };
+                        let platform = if target.platform.is_empty() || target.platform.eq_ignore_ascii_case("Win32") { String::new() } else { format!("{}/", target.platform) };
+                        format!("{dir}{platform}{config}/{file}")
+                    })
+                    .collect(),
+            };
+            if runs.is_empty() {
+                // No test project: the build is the check.
+                return (None, Some(build));
+            }
+            let mut test = Map::new();
+            test.insert("tests".into(), json!(runs));
+            (Some(build), Some(request("vstest", test)))
+        }
+        Kind::Unreal => {
+            let project = in_project(provider, &provider.manifest);
+            let stem = Path::new(&provider.manifest).file_stem().map(|stem| stem.to_string_lossy().into_owned()).unwrap_or_default();
+            let mut build = Map::new();
+            build.insert("project".into(), project.clone().into());
+            build.insert("target".into(), format!("{stem}Editor").into());
+            build.insert("platform".into(), "Win64".into());
+            build.insert("config".into(), "Development".into());
+            // The automation tests by name, or every prefix the project's
+            // modules use for the whole set.
+            let filters: Vec<String> = if whole || runs.is_empty() {
+                let mut prefixes: Vec<String> = provider.prefixes.values().cloned().collect();
+                prefixes.sort();
+                prefixes.dedup();
+                if prefixes.is_empty() { vec![stem] } else { prefixes }
+            } else {
+                runs
+            };
+            let mut test = Map::new();
+            test.insert("project".into(), project.into());
+            test.insert("filters".into(), filters.join("+").into());
+            (Some(request("ue-build", build)), Some(request("ue-test", test)))
+        }
+        _ => (None, None),
     }
 }
 
@@ -372,6 +552,7 @@ fn items(provider: &Provider, section: &ProviderMap, ids: &[String]) -> String {
             format!("-R \"^({})$\"", names.join("|"))
         }
         Kind::Gradle => runs.iter().map(|class| format!("--tests {}", quote(class))).collect::<Vec<_>>().join(" "),
+        Kind::Unreal => runs.iter().map(|name| name.as_str()).collect::<Vec<_>>().join("+"),
         _ => runs.iter().map(|item| quote(item)).collect::<Vec<_>>().join(" "),
     }
 }
@@ -388,6 +569,10 @@ fn command(provider: &Provider, targets: &str) -> String {
             Kind::Npm if targets.is_empty() => "npm test",
             Kind::Npm => "npm test -- {targets}",
             Kind::Command => "{targets}",
+            Kind::Cython => "python setup.py build_ext --inplace && python -m pytest {targets}",
+            Kind::Msbuild if targets.is_empty() => "msbuild {manifest}",
+            Kind::Msbuild => "msbuild {manifest} && vstest.console {targets}",
+            Kind::Unreal => "UnrealEditor-Cmd {manifest} -nullrhi -unattended -ExecCmds=\"Automation RunTests {targets};Quit\"",
         }
         .to_owned()
     } else {
@@ -401,7 +586,8 @@ fn command(provider: &Provider, targets: &str) -> String {
 
 /// A project path as seen from the provider's folder.
 fn relative_to(path: &str, root: &str) -> String {
-    if root.is_empty() {
+    // Task 137 (qa's matrix): `root = "."` is the project itself.
+    if root.is_empty() || root == "." {
         return path.to_owned();
     }
     match path.strip_prefix(&format!("{}/", root.trim_end_matches('/'))) {
@@ -465,8 +651,12 @@ pub fn text(selection: &Selection) -> String {
         if !run.functions.is_empty() {
             out.push_str(&format!("  only the changed functions: {}\n", run.functions_command));
         }
+        if let Some(request) = &run.team_build {
+            out.push_str(&format!("  hgs team run, the build first: {request}\n"));
+        }
         if let Some(request) = &run.team_run {
-            out.push_str(&format!("  hgs team run: {request}\n"));
+            let then = if run.team_build.is_some() { ", then" } else { "" };
+            out.push_str(&format!("  hgs team run{then}: {request}\n"));
         }
     }
     if !selection.widened.is_empty() {
@@ -538,7 +728,7 @@ sources = ["src/**", "Cargo.toml"]
 [[provider]]
 name = "gui"
 kind = "ctest"
-build_dir = "build/gui"
+build_dir = ".ci-build/gui"
 sources = ["gui/**"]
 tests = ["gui/tests/test_*.cpp"]
 [[provider]]
@@ -673,7 +863,7 @@ affected = "all"
         let inside = Hunks::from([("gui/tests/test_teams.cpp".to_owned(), vec![(10, 10)])]);
         let selection = select(root.path(), &config(), &map(), &durations(), &changed, &inside, false);
         let run = &selection.runs[0];
-        assert_eq!(run.command, "ctest --test-dir build/gui -R \"^(teams-0|teams-1)$\"");
+        assert_eq!(run.command, "ctest --test-dir .ci-build/gui -R \"^(teams-0|teams-1)$\"");
         assert_eq!(run.functions, vec!["opens"]);
         assert_eq!(run.functions_command, "build/gui/tests/test_teams opens");
         assert_eq!(run.team_run, Some(serde_json::json!({"template":"qt-test","args":{"suite":"test_teams","functions":["opens"]}})));
@@ -691,7 +881,7 @@ affected = "all"
         let root = tempfile::tempdir().unwrap();
         let selection = select(root.path(), &config(), &map(), &durations(), &[], &Hunks::new(), true);
         assert_eq!(selection.runs.len(), 4);
-        assert_eq!(selection.runs[1].command, "ctest --test-dir build/gui");
+        assert_eq!(selection.runs[1].command, "ctest --test-dir .ci-build/gui");
         assert_eq!(selection.runs[0].team_run, Some(serde_json::json!({"template":"cargo-test","args":{}})));
         assert_eq!(selection.runs[1].team_run, Some(serde_json::json!({"template":"qt-test","args":{"suites":["test_teams"]}})));
         // Python has no team template: hgs run runs its command.

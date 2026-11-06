@@ -422,6 +422,13 @@ pub enum Kind {
     Gradle,
     Npm,
     Command,
+    /// Task 137: pytest over Cython extensions, rebuilt in place first.
+    Cython,
+    /// Task 137: Visual Studio C++ projects (.sln, .vcxproj), vstest for
+    /// their test projects.
+    Msbuild,
+    /// Task 137: an Unreal project's automation tests (ue-build, ue-test).
+    Unreal,
 }
 
 impl Kind {
@@ -434,6 +441,9 @@ impl Kind {
             Kind::Gradle => "gradle",
             Kind::Npm => "npm",
             Kind::Command => "command",
+            Kind::Cython => "cython",
+            Kind::Msbuild => "msbuild",
+            Kind::Unreal => "unreal",
         }
     }
 }
@@ -493,7 +503,8 @@ pub struct Provider {
     /// whole set without it for a full run. Empty is the kind's own.
     #[serde(default, skip_serializing_if = "String::is_empty")]
     pub command: String,
-    /// cargo: the manifest, relative to `root`.
+    /// The manifest, relative to `root`: cargo's Cargo.toml, msbuild's .sln or
+    /// project file, unreal's .uproject.
     #[serde(default, skip_serializing_if = "String::is_empty")]
     pub manifest: String,
     /// cargo: how far a change in a shared module reaches.
@@ -666,6 +677,13 @@ fn validate(config: &TestsConfig) -> anyhow::Result<()> {
             provider.kind != Kind::Command || !provider.command.is_empty(),
             "The command provider {} names its command",
             provider.name
+        );
+        anyhow::ensure!(
+            !matches!(provider.kind, Kind::Msbuild | Kind::Unreal) || !provider.manifest.is_empty(),
+            "The {} provider {} names its manifest ({})",
+            provider.kind.name(),
+            provider.name,
+            if provider.kind == Kind::Msbuild { "the .sln or project file" } else { "the .uproject" }
         );
         anyhow::ensure!(
             provider.kind != Kind::Ctest || !provider.build_dir.is_empty() || provider.affected != Rule::Build,

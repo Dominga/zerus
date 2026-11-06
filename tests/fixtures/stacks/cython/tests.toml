@@ -1,0 +1,9 @@
+version = 1
+
+[[provider]]
+name = "demo-cython"
+kind = "pytest"
+root = "."
+sources = ["src/**"]
+tests = ["tests/**"]
+affected = "build"

@@ -1852,6 +1852,9 @@ descriptions only for reviewed text. In a Git subdirectory or worktree, Codex
 folder access names the repository root that Codex will trust. Claude wraps a
 long workspace path across rows; the joined rows must still equal the launch
 folder exactly.
+Codex 0.167 can offer **Back to Agent Command Center** instead of **Quit**.
+Back cancels opening the folder without saving trust and keeps Codex running;
+Quit exits the original Codex process. Both require an explicit user choice.
 Trust persistence belongs to the native agent.
 Already-running Claude and Kimi sessions can retain the exact Bitwarden launcher
 notices above the complete workspace-trust panel; Claude also accepts its

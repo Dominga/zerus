@@ -238,6 +238,8 @@ pub const KEYS: &[Key] = &[
     // and the Overview column (design round 7).
     client("client/darkSkin", Kind::Text("zerus-dark")),
     client("client/lightSkin", Kind::Text("zerus-light")),
+    // WhiteWh fork's skin choice; Tauri ports it as whitewh-dark/whitewh-light.
+    key("workspace/skin", Kind::Text("zerus")),
     client(
         "client/overviewWidth",
         Kind::Whole {
@@ -247,20 +249,22 @@ pub const KEYS: &[Key] = &[
         },
     ),
     client("client/overviewFullWidth", Kind::Flag(false)),
-    client("workspace/inspectorOpen", Kind::AutoFlag),
-    client(
-        "workspace/inspectorTab",
-        Kind::Choice(&["plan", "details", "worktrees", "tasks"]),
-    ),
-    client(
-        "workspace/inspectorWidth",
-        Kind::Whole {
+    Key { name: "workspace/inspectorOpen", kind: Kind::AutoFlag, seeded: true },
+    Key {
+        name: "workspace/inspectorTab",
+        kind: Kind::Choice(&["plan", "details", "worktrees", "tasks"]),
+        seeded: true,
+    },
+    Key {
+        name: "workspace/inspectorWidth",
+        kind: Kind::Whole {
             default: 400,
             min: 240,
             max: 900,
         },
-    ),
-    client("workspace/inspectorClosed", Kind::Text("[]")),
+        seeded: true,
+    },
+    Key { name: "workspace/inspectorClosed", kind: Kind::Text("[]"), seeded: true },
     // New G3 families use the family journal, not the original switch seed.
     client("client/windowGeometry", Kind::Text("")),
     client(

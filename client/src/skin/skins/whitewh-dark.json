@@ -1,0 +1,40 @@
+{
+  "schema": 1,
+  "id": "whitewh-dark",
+  "name": "Compact",
+  "appearance": "dark",
+  "extends": "zerus-dark",
+  "tokens": {
+    "color": {
+      "page": "#14181d",
+      "pane": "#1b1f26",
+      "surface": "#1b1f26",
+      "raised": "#222830",
+      "card": "#181c22",
+      "card-border": "#232932",
+      "card-hover": "#1e232b",
+      "card-selected": "#1b2621",
+      "card-selected-border": "#2f5a4a",
+      "field": "#11151a",
+      "border": "#2c323b",
+      "divider": "#232932",
+      "hover": "#222830",
+      "segment-on": "#26443a",
+      "selected-agent": "#1f3a31",
+      "text": "#e6e8eb",
+      "text-2": "#c4cad1",
+      "text-3": "#aab1ba",
+      "muted": "#9aa3ad",
+      "label": "#8f97a2",
+      "dim": "#7b8590",
+      "accent": "#7dd3b0",
+      "accent-text": "#0f1a16",
+      "accent-hover": "#a8e6cc",
+      "accent-muted": "#4f8f78",
+      "accent-bg": "rgba(125,211,176,.10)",
+      "warn": "#e8a75a",
+      "danger": "#ef7d6d",
+      "folder": "#7fb6e0"
+    }
+  }
+}

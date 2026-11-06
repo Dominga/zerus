@@ -1,0 +1,40 @@
+{
+  "schema": 1,
+  "id": "whitewh-light",
+  "name": "Compact",
+  "appearance": "light",
+  "extends": "zerus-light",
+  "tokens": {
+    "color": {
+      "page": "#f5f7f9",
+      "pane": "#ffffff",
+      "surface": "#ffffff",
+      "raised": "#edf2f5",
+      "card": "#ffffff",
+      "card-border": "#e1e6eb",
+      "card-hover": "#eef2f5",
+      "card-selected": "#e7f3ee",
+      "card-selected-border": "#9fd3bd",
+      "field": "#ffffff",
+      "border": "#d6dde4",
+      "divider": "#e1e6eb",
+      "hover": "#edf1f4",
+      "segment-on": "#e0f0e9",
+      "selected-agent": "#e0f0e9",
+      "text": "#1a2733",
+      "text-2": "#2c3a47",
+      "text-3": "#415060",
+      "muted": "#5d6b7c",
+      "label": "#647181",
+      "dim": "#6f7b88",
+      "accent": "#167357",
+      "accent-text": "#ffffff",
+      "accent-hover": "#115d46",
+      "accent-muted": "#5a9c88",
+      "accent-bg": "rgba(22,115,87,.08)",
+      "warn": "#9a5a0c",
+      "danger": "#c4402f",
+      "folder": "#2f6ea3"
+    }
+  }
+}

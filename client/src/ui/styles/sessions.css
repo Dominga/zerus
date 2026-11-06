@@ -319,3 +319,5 @@
 .acct-switch-row:disabled { cursor: default; }
 .acct-switch-empty { display: block; padding: 8px; }
 .acct-switch-notice { margin: 4px; padding: 6px 8px; color: var(--z-color-text-2); font-size: var(--fs-xs); }
+.tchip.locked { opacity: .6; cursor: not-allowed; }
+.acct-switch-row:disabled { cursor: default; }

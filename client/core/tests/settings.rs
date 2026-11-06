@@ -95,7 +95,7 @@ fn linux_and_windows_switches_seed_once_and_keep_the_clients_choices() {
         )
         .unwrap();
         fs::create_dir_all(qt.path().parent().unwrap()).unwrap();
-        let source = b"[workspace]\ntheme=dark\nlanguage=ru\n[automaticApprovals]\nenabled=true\n";
+        let source = b"[workspace]\ntheme=dark\nlanguage=ru\nskin=whitewh\ninspectorWidth=512\ninspectorOpen=true\ninspectorTab=details\n[automaticApprovals]\nenabled=true\n";
         fs::write(qt.path(), source).unwrap();
         let before = fs::metadata(qt.path()).unwrap().modified().unwrap();
         let path = base.join("com.hgdev.hgs-tray/settings.json");
@@ -107,6 +107,10 @@ fn linux_and_windows_switches_seed_once_and_keep_the_clients_choices() {
         let migrated = Settings::open(path.clone(), Some(qt.clone()));
         assert_eq!(migrated.get("workspace/theme"), "light");
         assert_eq!(migrated.get("workspace/language"), "ru");
+        assert_eq!(migrated.get("workspace/skin"), "whitewh");
+        assert_eq!(migrated.get("workspace/inspectorWidth"), 512);
+        assert_eq!(migrated.get("workspace/inspectorOpen"), true);
+        assert_eq!(migrated.get("workspace/inspectorTab"), "details");
         assert_eq!(migrated.get(QT_AUTOMATIC_APPROVALS), true);
         assert!(!migrated.flag("automaticApprovals/enabled"));
         assert_eq!(migrated.get("automaticApprovals/error"), "");
@@ -1048,15 +1052,17 @@ fn task_preferences_cover_existing_switches_but_never_reseed_an_old_handled_key(
 fn inspector_preferences_are_device_local_and_explicit_false_wins() {
     use zerus_client_core::settings::{default_value, effective, find};
     let open = find("workspace/inspectorOpen").unwrap();
-    assert!(!open.seeded);
+    assert!(open.seeded);
     assert_eq!(default_value(open.kind), json!("auto"));
     assert_eq!(effective(open.kind, Some(&json!(false))), json!(false));
     assert_eq!(effective(open.kind, Some(&json!(true))), json!(true));
     assert_eq!(effective(open.kind, Some(&json!("bad"))), json!("auto"));
     let width = find("workspace/inspectorWidth").unwrap();
-    assert!(!width.seeded);
+    assert!(width.seeded);
     assert_eq!(effective(width.kind, Some(&json!(100))), json!(240));
     assert_eq!(effective(width.kind, Some(&json!(2000))), json!(900));
+    assert!(find("workspace/inspectorTab").unwrap().seeded);
+    assert!(find("workspace/inspectorClosed").unwrap().seeded);
 }
 
 #[test]
@@ -1262,3 +1268,5 @@ fn malformed_splitter_is_unhandled_and_retry_is_family_atomic() {
     assert_eq!(settings.number("workspace/projectFolderSplit"), 320.0);
     assert!(settings.flush_within(FLUSH));
 }
+
+

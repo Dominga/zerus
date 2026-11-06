@@ -146,6 +146,7 @@ private slots:
     void aLeadsQuestionIsAnsweredFromWaitingForYou();
     void aConfirmedDecisionLeavesWaitingAtOnceAndARefusedOneStays();
     void aLowDriveOpensBuildFoldersAndItsNoticeNamesTheDrive();
+    void aPausedTeamWaitsWithResumeTeamAndIsNeverNotified();
     void initTestCase()
     {
         setUpCase();
@@ -2634,6 +2635,34 @@ void TestTeamsUiWaiting::aLowDriveOpensBuildFoldersAndItsNoticeNamesTheDrive()
     QCOMPARE(fresh[0].body, low["title"].toString());
 }
 
+// Task 112: a paused team waits for the owner's Resume team in Waiting for
+// you, saying since when and by whom; it is a state the owner set, so it is
+// listed but never notified, and Resume team resumes the team.
+void TestTeamsUiWaiting::aPausedTeamWaitsWithResumeTeamAndIsNeverNotified()
+{
+    const double now = double(QDateTime::currentSecsSinceEpoch());
+    const QJsonObject paused{{"id", "team-1/team_paused/1800000000"}, {"team", "team-1"}, {"team_name", "Checkout"}, {"kind", "team_paused"},
+                             {"since", now - 600}, {"title", "Team paused since 09:12 by You: members get no tasks"}, {"action", "resume_team"},
+                             {"paused_by", "You"}, {"paused_at", now - 600}};
+    QVERIFY(writeWaiting(script() + ".waiting", QJsonArray{paused}));
+    HgsClient client(FakeCli::program(script()));
+    TeamController controller(&client);
+    TeamWaitingPage page(&controller);
+    page.resize(980, 520); page.show();
+    WAIT_VERIFY(page.findChild<QPushButton *>("teamWaitingResumeTeam"));
+    QCOMPARE(TeamWaitingPage::kindLabel("team_paused"), QStringLiteral("Team paused"));
+    page.findChild<QPushButton *>("teamWaitingResumeTeam")->click();
+    QTRY_COMPARE(calls(script(), "resume").size(), 1);
+    QCOMPARE(calls(script(), "resume").first()["team"].toString(), QStringLiteral("team-1"));
+    TeamWaitingNotices notices;
+    QVERIFY(notices.observe({{paused["id"].toString(), "team-1", "Checkout", "team_paused", paused["title"].toString()}}, {}, true).isEmpty());
+    QVERIFY(notices.known(paused["id"].toString()));
+    // Resume team decides it: the item leaves at once.
+    QList<TeamWaitingPage::Item> all{TeamWaitingPage::parse(paused)};
+    QCOMPARE(TeamWaitingFeed::decidedIds(all, "team-1", "resume", {}), QStringList{paused["id"].toString()});
+    QVERIFY(TeamWaitingFeed::decidedIds(all, "team-2", "resume", {}).isEmpty());
+}
+
 #include "test_teamsui_waiting.moc"
 
 // Task 107 (owner, 2026-11-06: proposals already allowed stayed in "4 wait
@@ -2721,6 +2750,20 @@ void TestTeamsUiWaiting::aConfirmedDecisionLeavesWaitingAtOnceAndARefusedOneStay
     QVERIFY(listed(p2));
     QCOMPARE(feed.items().size(), 6);
     QCOMPARE(dropped.count(), 1);
+    // Task 111: hgs withdrew p2 (it can no longer apply): Allow is refused
+    // with that reason and the card, the banner item and its notice leave at
+    // once, as a confirmed decision's do.
+    QVERIFY(FakeCli::replace(script() + ".proposalrefuse",
+        "hgs: This proposal can no longer apply (Phase 2 is closed (done); propose the work in a new phase with extend instead); it was withdrawn and the lead is told why"));
+    QTRY_VERIFY(card("p2") && card("p2")->findChild<QPushButton *>("teamProposalAllow")->isEnabled());
+    card("p2")->findChild<QPushButton *>("teamProposalAllow")->click();
+    QTRY_VERIFY(!card("p2"));
+    QTRY_COMPARE(dropped.count(), 2);
+    QCOMPARE(dropped.last().first().toString(), p2);
+    QVERIFY(!listed(p2));
+    QCOMPARE(feed.items().size(), 5);
+    QVERIFY(TeamController::withdrawn("hgs: This proposal can no longer apply (x); it was withdrawn and the lead is told why"));
+    QVERIFY(!TeamController::withdrawn("hgs: The plan changed since the warning"));
     // What else a confirmed change decides: a phase by its number, a report or
     // a held task by its id; another team's or a change that names none, nothing.
     QList<TeamWaitingPage::Item> all;

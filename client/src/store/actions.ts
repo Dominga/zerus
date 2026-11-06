@@ -10,6 +10,7 @@ import { copyState, sessionIdentity, detailsFromInspection, MUTE_PENDING, STATE_
 import type { Action, Details, Outcome, Target } from "../types";
 import type { Session } from "../ui/sessions/types";
 import { tr, trNoop } from "../i18n";
+import { resumeTeamToo } from "./resumeTeam";
 
 // Guarded session actions. Every action is one call to the Rust side; a call
 // is never repeated. A rejected call is an unknown outcome and is shown as a
@@ -221,6 +222,8 @@ export function createActions(
       notify("error", tr(STATE_CHANGED), true);
       return failed(STATE_CHANGED);
     }
+    // Task 112: a paused team's session asks whether to resume the team too.
+    if (row.state !== "running" && !(await resumeTeamToo(row))) return failed(tr("Action cancelled."));
     return perform(row, { kind: row.state === "running" ? "pause" : "resume" });
   }
 

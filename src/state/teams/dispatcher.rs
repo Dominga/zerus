@@ -1120,7 +1120,12 @@ pub(crate) fn steps_with(team: &Team, seen: &[Seen], now: f64, listed: Option<&B
     // owner (2026-10-28): it reaches a lead in its own turn too, which takes
     // queued input between its tool calls (a permission waited 8 minutes
     // otherwise); a question or dialog on the lead's screen still holds it.
-    let lead_reachable = lead_ready || lead.is_some_and(|found| found.live && !found.asking && found.activity == "busy");
+    // Task 112: only an agent that takes queued input between its tool calls
+    // gets it in its turn; another (Kimi sends it after the turn) would read a
+    // list composed long before, with reports decided meanwhile, so it hears
+    // when it is free, from a fresh list.
+    let mid_turn = team.member(&team.lead).is_some_and(|found| takes_input_mid_turn(&found.agent));
+    let lead_reachable = lead_ready || (mid_turn && lead.is_some_and(|found| found.live && !found.asking && found.activity == "busy"));
     if lead_reachable {
         let items = inbox::items(team);
         let new = items.iter().filter(|item| !team.inbox.told.contains(&item.key)).count();
@@ -5813,14 +5818,28 @@ fn lead_hand_out_now(store: &mut Store, team_id: &str, task_id: u32, preparation
     })
 }
 
+/// Task 112: agents whose own input queue hands a pasted message to the agent
+/// between its tool calls (Claude, Codex); others send it after the turn.
+pub(crate) fn takes_input_mid_turn(agent: &str) -> bool {
+    matches!(agent, "claude" | "codex")
+}
+
 /// Sends the one coalesced inbox message and remembers which items it named
 /// (C2). A refusal leaves everything pending for the next interval.
 fn tell_lead_inbox(store: &mut Store, team: &Team) -> anyhow::Result<()> {
+    // Task 112: the list is composed from the team as it is now, never from
+    // this tick's earlier read: a report decided meanwhile is never told.
+    let fresh = store.load(&team.id)?.context("Unknown team")?;
+    let team = &fresh;
     let lead = team.member(&team.lead).and_then(|m| m.session.clone()).context("the lead has no session")?;
     let items = inbox::items(team);
     let new: Vec<inbox::Item> = items.iter().filter(|item| !team.inbox.told.contains(&item.key)).cloned().collect();
     let again = inbox::overdue(&items, &team.inbox.told, now());
-    anyhow::ensure!(!new.is_empty() || !again.is_empty(), "no new inbox items");
+    // Task 112: what the tick saw may have been decided since (a report
+    // accepted, a member back from its limit): nothing new now, nothing told.
+    if new.is_empty() && again.is_empty() {
+        return Ok(());
+    }
     let outcome = send(&lead, &uuid::Uuid::new_v4().to_string(), &inbox::text_with(team, &new, &again, now()));
     if matches!(outcome, Sent::Refused(_)) {
         return Ok(());

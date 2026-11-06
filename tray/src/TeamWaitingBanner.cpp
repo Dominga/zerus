@@ -110,6 +110,8 @@ QStringList TeamWaitingFeed::decidedIds(const QList<TeamWaitingPage::Item> &item
             done = item.kind == QLatin1String("phase_draft") && phase > 0 && item.phase == phase;
         else if (operation == QLatin1String("accept-phase") || operation == QLatin1String("send-back-phase"))
             done = item.kind == QLatin1String("phase_acceptance") && phase > 0 && item.phase == phase;
+        else if (operation == QLatin1String("resume"))   // task 112
+            done = item.kind == QLatin1String("team_paused");
         else if (operation == QLatin1String("release"))
             done = item.kind == QLatin1String("task_waits_owner") && task > 0 && item.task == task;
         else if (operation == QLatin1String("accept") || operation == QLatin1String("reject") || operation == QLatin1String("send-back"))

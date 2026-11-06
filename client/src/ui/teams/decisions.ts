@@ -1,4 +1,5 @@
 import { tr } from "../../i18n";
+import { withdrawnRefusal } from "../../teamRefusals";
 import type { ComputerId, TeamAction, TeamCall, TeamChoice, TeamConfirmation, TeamMemberQuestion, TeamMemberView, TeamOutcome, TeamProposalView, TeamView, TeamWaitingItem } from "../../types";
 
 // The owner's decisions on a team (task 11), ported from Qt's
@@ -387,7 +388,9 @@ export class ProposalCards {
     const action: TeamAction = { kind: "decide_proposal", proposal: id, accept: allow, expected_hash: view.hash, ...(!allow && reason ? { reason } : {}) };
     const outcome = await this.send(id, action);
     if (outcome !== "cancelled") {
-      if (outcome.outcome === "failed") {
+      // Task 111: hgs withdrew it (it can no longer apply): it leaves at once.
+      if (outcome.outcome === "failed" && withdrawnRefusal(outcome.detail)) this.confirmed(id);
+      else if (outcome.outcome === "failed") {
         // #754: a refusal says why on the card, in the server's words; the card stays to answer again.
         this.notices.set(id, allow ? tr("Allow was refused, nothing was applied: %1", hgsWords(outcome.detail))
           : tr("Deny was refused, nothing was decided: %1", hgsWords(outcome.detail)));
@@ -422,7 +425,8 @@ export class ProposalCards {
       return "stale";
     }
     const outcome = await this.send(id, { kind: "decide_proposal", proposal: id, accept: true, expected_hash: view.hash, answer });
-    if (outcome !== "cancelled" && outcome.outcome === "failed")
+    if (outcome !== "cancelled" && outcome.outcome === "failed" && withdrawnRefusal(outcome.detail)) this.confirmed(id);
+    else if (outcome !== "cancelled" && outcome.outcome === "failed")
       this.notices.set(id, outcome.detail.includes("changed") ? tr("The question changed; nothing was sent. Read it again and answer.") : hgsWords(outcome.detail));
     else if (outcome !== "cancelled" && outcome.outcome === "done") this.confirmed(id);
     this.changed();
@@ -450,6 +454,7 @@ export function decidedWaiting(items: readonly TeamWaitingItem[], call: Pick<Tea
       case "approve": return item.kind === "phase_draft" && (phase > 0 ? fields.phase === phase : true);
       case "accept_phase": case "send_back_phase": return item.kind === "phase_acceptance" && phase > 0 && fields.phase === phase;
       case "release": return item.kind === "task_waits_owner" && task > 0 && fields.task === task;
+      case "resume": return item.kind === "team_paused";   // task 112
       case "accept": case "reject": case "send_back": return item.action === "decide_report" && task > 0 && fields.task === task;
       default: return false;
     }
@@ -458,6 +463,9 @@ export function decidedWaiting(items: readonly TeamWaitingItem[], call: Pick<Tea
 
 /** Task 108/109: a drive low on space; its row opens Settings > Build folders. */
 export const opensDisk = (item: Pick<TeamWaitingItem, "action">) => item.action === "open_disk";
+
+/** Task 112: a paused team's item resumes the team from Waiting for you. */
+export const resumesTeam = (item: Pick<TeamWaitingItem, "action">) => item.action === "resume_team";
 
 /** The item's kind in words. */
 export function waitingKindLabel(item: Pick<TeamWaitingItem, "kind" | "action">): string {
@@ -477,6 +485,7 @@ export function waitingKindLabel(item: Pick<TeamWaitingItem, "kind" | "action">)
     case "lead_stalled": return tr("Lead stalled");
     case "deferred": return tr("Deferred");
     case "disk_low": return tr("Disk space");
+    case "team_paused": return tr("Team paused");
     default: return item.kind;
   }
 }
@@ -496,6 +505,7 @@ export function waitingKindIcon(kind: string): string {
     case "lead_stalled": return "triangle-alert";
     case "deferred": return "clock";
     case "disk_low": return "hard-drive";
+    case "team_paused": return "pause";
     default: return "triangle-alert";
   }
 }

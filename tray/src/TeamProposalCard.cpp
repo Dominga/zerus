@@ -1,4 +1,5 @@
 #include "TeamProposalCard.h"
+#include "TeamController.h"
 #include "TeamWidgets.h"
 #include <QApplication>
 #include <QDateTime>
@@ -339,7 +340,8 @@ void TeamProposalCards::answerQuestion(const View &view)
            [guard, id](bool ok, const QString &message) {
         if (!guard) return;
         auto *self = guard.data();
-        if (!ok) {
+        if (!ok && TeamController::withdrawn(message)) self->confirmed(id);   // task 111
+        else if (!ok) {
             self->m_sending.remove(id);
             self->m_notices.insert(id, message.contains(QLatin1String("changed"))
                                            ? tr("The question changed; nothing was sent. Read it again and answer.") : message);
@@ -408,7 +410,9 @@ void TeamProposalCards::answer(const View &view, bool allow)
     decide(input, [guard, id, allow](bool ok, const QString &message) {
         if (!guard) return;
         auto *self = guard.data();
-        if (!ok) {
+        // Task 111: hgs withdrew it (it can no longer apply): it leaves at once.
+        if (!ok && TeamController::withdrawn(message)) self->confirmed(id);
+        else if (!ok) {
             // #754: a refusal always says why on the card, in the server's
             // words (p11's "The plan changed since the warning" was shown as
             // "The proposal changed" and the owner's Allow looked like nothing);

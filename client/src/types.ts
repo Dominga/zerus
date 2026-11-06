@@ -1142,6 +1142,8 @@ export interface TeamView {
   revision: number; created: number; updated: number; waiting_for_lead: boolean; pending_phase: number | null;
   /** Task #58: the phase that takes tasks as they come, and whether hgs sends each phase's mode. */
   free_phase?: number | null; phase_modes_known?: boolean;
+  /** Task 112: a paused team's pause: since when, by whom and why (null otherwise). */
+  paused?: { at: number; by: string; reason: string } | null;
   settings: Record<string, unknown>; members: TeamMemberView[]; tasks: TeamTaskView[]; phases: TeamPhaseView[];
   proposals: TeamProposalView[];
   attention: unknown[];
@@ -1175,7 +1177,9 @@ export interface TeamWaitingView { items: TeamWaitingItem[]; total: number; more
 /** The owner's confirmation of a team action, worded by the core. */
 export interface TeamConfirmation { name: string; title: string; text: string; action: string }
 /** Task 52: a question with several answers (Qt's subteamChoice); Cancel is always added last and focused. */
-export interface TeamChoice { name: string; title: string; text: string; choices: { id: string; text: string; danger?: boolean }[] }
+export interface TeamChoice { name: string; title: string; text: string; choices: { id: string; text: string; danger?: boolean }[];
+  /** Task 112: the answer focused instead of Cancel (Resume team). */
+  initial?: string }
 
 /**
  * A team action (client/core/src/teams/action.rs `TeamAction`), by its kind:

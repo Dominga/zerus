@@ -410,10 +410,29 @@ QString BuildState::text(double now) const
     return {};
 }
 
+QString Team::pausedText() const
+{
+    if (status != QLatin1String("paused")) return {};
+    QString since;
+    if (pausedAt > 0) {
+        const auto at = QDateTime::fromSecsSinceEpoch(qint64(pausedAt));
+        since = at.date() == QDate::currentDate() ? at.toString(QStringLiteral("HH:mm")) : at.toString(QStringLiteral("yyyy-MM-dd HH:mm"));
+    }
+    if (since.isEmpty()) return QObject::tr("Team paused: members get no tasks");
+    if (pausedBy.isEmpty()) return QObject::tr("Team paused since %1: members get no tasks").arg(since);
+    return QObject::tr("Team paused since %1 by %2: members get no tasks").arg(since, pausedBy);
+}
+
 Team parse(const QJsonObject &v)
 {
     Team team;
     team.id = str(v, "id"); team.name = str(v, "name"); team.status = str(v, "status");
+    {
+        const auto paused = v.value("paused").toObject();
+        team.pausedAt = paused.value("at").toDouble();
+        team.pausedBy = paused.value("by").toString();
+        team.pausedReason = paused.value("reason").toString();
+    }
     team.project = str(v, "project"); team.projectId = str(v, "project_id"); team.folder = str(v, "folder"); team.lead = str(v, "lead");
     // G1: the parent task this team came from and its sub-teams.
     if (v.value("parent").isObject()) {

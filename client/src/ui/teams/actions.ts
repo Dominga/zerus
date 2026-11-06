@@ -12,6 +12,8 @@ import type { ComputerId, TeamAction, TeamChoice, TeamConfirmation, TeamOutcome,
 export interface ActTeam {
   id: string; name: string; status: string; plan_mode: string; revision: number; pending_phase: number | null;
   waiting_for_lead: boolean; settings: Record<string, unknown>;
+  /** Task 112: a paused team's pause: since when and by whom. */
+  paused?: { at?: number; by?: string; reason?: string } | null;
   /** The owner's attention items as hgs words them (task 95 reads `lead_stalled`). */
   attention?: unknown[];
   members: { id: string; role: string; agent: string; computer: string; lead: boolean; session: { name: string } | null }[];
@@ -125,7 +127,22 @@ export function stageName(kind: string): string {
 // ---------------------------------------------------------------------------
 // The team bar
 
-export interface BarChip { id: "pendingPhase" | "finishWaits" | "waitingForLead" | "leadStalled"; text: string; tip: string; phase?: number }
+export interface BarChip { id: "pendingPhase" | "finishWaits" | "waitingForLead" | "leadStalled" | "teamPaused"; text: string; tip: string; phase?: number }
+
+/**
+ * Task 112: "Team paused since 09:12 by You: members get no tasks" (the date
+ * when it was not today), as Qt's Team::pausedText says it.
+ */
+export function pausedText(team: Pick<ActTeam, "status" | "paused">, now: Date = new Date()): string {
+  if (team.status !== "paused") return "";
+  const at = team.paused?.at ? new Date(team.paused.at * 1000) : undefined;
+  const pad = (n: number) => String(n).padStart(2, "0");
+  const time = at ? `${pad(at.getHours())}:${pad(at.getMinutes())}` : "";
+  const since = !at ? "" : at.toDateString() === now.toDateString() ? time : `${at.getFullYear()}-${pad(at.getMonth() + 1)}-${pad(at.getDate())} ${time}`;
+  const by = team.paused?.by ?? "";
+  if (!since) return tr("Team paused: members get no tasks");
+  return by ? tr("Team paused since %1 by %2: members get no tasks", since, by) : tr("Team paused since %1: members get no tasks", since);
+}
 
 /** Task 95: the stalled lead's attention item: its reason, what it blocks and the round. */
 export interface LeadStall { reason: string; items: number; members: number; round: number; summary: string }
@@ -155,6 +172,9 @@ const draftPhases = (team: ActTeam) => team.phases.filter((phase) => phase.state
 /** The bar's chips (Qt TeamWorkspace header row): the pending phase, Finish waiting, waiting for the lead. */
 export function barChips(team: ActTeam): BarChip[] {
   const chips: BarChip[] = [];
+  // Task 112: a paused team says so first, with since when and by whom.
+  if (team.status === "paused")
+    chips.push({ id: "teamPaused", text: pausedText(team), tip: tr("Only Resume team hands out tasks again; resuming a member's session does not") });
   // Task 95: the stalled lead comes first: nothing moves until it does.
   const stall = leadStall(team);
   if (stall) {
@@ -201,7 +221,7 @@ export function barActions(team: ActTeam, planMode: string): BarAction[] {
   } else if (status === "running") {
     action({ id: "pause", text: tr("Pause"), tip: tr("Running turns finish; nothing new is handed out") });
   } else if (status === "paused") {
-    action({ id: "resume", text: tr("Resume"), tip: tr("Hand out tasks again"), primary: true });
+    action({ id: "resume", text: tr("Resume team"), tip: tr("Hand out tasks again; resuming a member's session does not"), primary: true });
   }
   if (status === "running" || status === "paused") action({ id: "stop", text: tr("Stop…"), tip: tr("Cancel every open task"), danger: true });
   if (status === "done" || status === "stopped") action({ id: "archive", text: tr("Archive"), tip: tr("Archive the team") });

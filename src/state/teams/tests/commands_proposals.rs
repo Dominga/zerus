@@ -661,3 +661,144 @@ fn a_plan_approval_card_runs_the_team() {
     super::live_sessions_override(None);
     super::set_test_caller_identities(None);
 }
+
+/// Task 111 (owner, 2026-11-06, rejecting p47: "a notification must not reach
+/// me if it physically cannot be carried out or stopped being possible"): an
+/// add-to-phase proposal waits for the owner while its phase runs; the change
+/// that closes the phase withdraws it with the reason, so it leaves Waiting for
+/// you (and its notification), and the lead's inbox says why, once.
+#[test]
+fn a_pending_addition_whose_phase_closes_is_withdrawn_and_the_lead_told_once() {
+    let dir = tempfile::tempdir().unwrap();
+    crate::state::with_test_state_root(dir.path(), || {
+        let mut store = Store::open(true).unwrap();
+        let mut team = running_team();
+        let input = json!({"kind":"add-to-phase","reason":"a crash to hunt","phase":1,
+            "tasks":[{"id":2,"title":"Find the crash","assignee":"dev","criteria":["Fixed"]}]});
+        ops::apply(&mut team, "propose", &input, &Actor::Member("lead".into()), &BTreeSet::new(), &mut Vec::new()).unwrap();
+        store.create("11111111-1111-4111-8111-111111111111", &json!({}), team, vec![]).unwrap();
+        let waiting = || run("waiting", &json!({}), false).unwrap()["items"].as_array().unwrap().iter()
+            .filter_map(|item| item["id"].as_str().map(str::to_owned)).collect::<Vec<_>>();
+        assert!(waiting().contains(&"t/owner_word_asked/proposal-p1".to_owned()), "{:?}", waiting());
+        // Phase 1 closes: its only task is accepted.
+        store.mutate(None, "t", None, |team, _| {
+            team.task_mut(1).unwrap().status = TaskStatus::Accepted;
+            Ok(Value::Null)
+        }).unwrap();
+        let saved = store.load("t").unwrap().unwrap();
+        assert_eq!(saved.proposals[0]["state"], "withdrawn", "{}", saved.proposals[0]);
+        let why = saved.proposals[0]["note"].as_str().unwrap().to_owned();
+        assert!(why.contains("Phase 1 is closed (done)"), "{why}");
+        assert!(store.events("t", None, 50).unwrap().to_string().contains("proposal_withdrawn"));
+        assert!(!waiting().iter().any(|id| id.contains("proposal-p1")), "{:?}", waiting());
+        // Never offered again: the status lists no open proposal.
+        let status = run("status", &json!({"team":"t"}), false).unwrap();
+        assert!(!status.to_string().contains("\"state\":\"open\""), "{status}");
+        // The lead is told why, in one line.
+        let inbox = run("inbox", &json!({"team":"t","by":"human"}), false).unwrap();
+        let told: Vec<&Value> = inbox["items"].as_array().unwrap().iter().filter(|item| item["key"] == "proposal:p1" || item["summary"].as_str().is_some_and(|text| text.contains("proposal p1"))).collect();
+        assert_eq!(told.len(), 1, "{inbox}");
+        let line = told[0]["summary"].as_str().unwrap();
+        assert!(line.contains("withdrawn before the owner saw it") && line.contains("Phase 1 is closed"), "{line}");
+        // Another change keeps it withdrawn and tells nothing new.
+        store.mutate(None, "t", None, |_, _| Ok(Value::Null)).unwrap();
+        assert_eq!(store.events("t", None, 50).unwrap().to_string().matches("proposal_withdrawn").count(), 1);
+    });
+}
+
+/// Task 111: a proposal that stopped being possible without a team change
+/// since is withdrawn when it is read: it never waits for the owner, and an
+/// Allow on a card shown before is refused with the reason and stores the
+/// withdrawal.
+#[test]
+fn an_inapplicable_proposal_is_withdrawn_at_read_time_and_its_allow_refused() {
+    let dir = tempfile::tempdir().unwrap();
+    crate::state::with_test_state_root(dir.path(), || {
+        let mut store = Store::open(true).unwrap();
+        let mut team = running_team();
+        let input = json!({"kind":"add-to-phase","reason":"a crash to hunt","phase":1,
+            "tasks":[{"id":2,"title":"Find the crash","assignee":"dev","criteria":["Fixed"]}]});
+        ops::apply(&mut team, "propose", &input, &Actor::Member("lead".into()), &BTreeSet::new(), &mut Vec::new()).unwrap();
+        let hash = team.proposals[0]["hash"].as_str().unwrap().to_owned();
+        // Stored as it was before this fix: open, its phase already closed.
+        team.task_mut(1).unwrap().status = TaskStatus::Accepted;
+        store.create("11111111-1111-4111-8111-111111111111", &json!({}), team, vec![]).unwrap();
+        assert_eq!(store.load("t").unwrap().unwrap().proposals[0]["state"], "open");
+        let items = run("waiting", &json!({}), false).unwrap();
+        assert!(!items.to_string().contains("proposal-p1"), "{items}");
+        let error = decide_proposal_in(&mut store, &json!({"team":"t","proposal":"p1","accept":true,"by":"human","expected_hash":hash}), &Actor::Human)
+            .unwrap_err()
+            .to_string();
+        assert!(error.contains("can no longer apply") && error.contains("withdrawn"), "{error}");
+        let saved = store.load("t").unwrap().unwrap();
+        assert_eq!(saved.proposals[0]["state"], "withdrawn");
+        assert!(saved.task(2).is_none(), "nothing was added");
+    });
+}
+
+/// Task 111: proposing into a closed phase is refused at once, as it is for
+/// a draft, with the reason.
+#[test]
+fn a_proposal_into_a_done_phase_is_refused() {
+    let mut team = running_team();
+    team.task_mut(1).unwrap().status = TaskStatus::Accepted;
+    let input = json!({"kind":"add-to-phase","reason":"late work","phase":1,
+        "tasks":[{"id":2,"title":"Late","assignee":"dev","criteria":["Done"]}]});
+    let error = ops::apply(&mut team, "propose", &input, &Actor::Member("lead".into()), &BTreeSet::new(), &mut Vec::new())
+        .unwrap_err()
+        .to_string();
+    assert!(error.contains("Phase 1 is closed (done)") && error.contains("extend"), "{error}");
+    assert!(team.proposals.is_empty());
+}
+
+/// Task 112 (owner, 2026-11-06: "I paused it in the morning, unpaused it in
+/// the afternoon, but Zerus still thinks it is paused"): a pause says since
+/// when and by whom wherever it shows (status, Waiting for you, the sessions'
+/// state, the lead's inbox) and leaves with the team's Resume; a team paused
+/// before this record reads it from its pause event.
+#[test]
+fn a_paused_team_says_since_when_and_by_whom_and_resume_team_ends_it() {
+    let dir = tempfile::tempdir().unwrap();
+    crate::state::with_test_state_root(dir.path(), || {
+        let mut store = Store::open(true).unwrap();
+        let mut team = running_team();
+        team.tasks.push(Task { id: 2, title: "Integrate".into(), assignee: "dev".into(), status: TaskStatus::Pending, ..Default::default() });
+        store.create("11111111-1111-4111-8111-111111111111", &json!({}), team, vec![]).unwrap();
+        store.mutate(None, "t", None, |team, events| ops::apply(team, "pause", &json!({}), &Actor::Human, &BTreeSet::new(), events)).unwrap();
+        let saved = store.load("t").unwrap().unwrap();
+        let pause = saved.paused.clone().expect("the pause is recorded");
+        assert_eq!((pause.by.as_str(), pause.reason.as_str()), ("You", "paused"));
+        // Status carries it; Waiting for you lists it with Resume team, unnotified by kind.
+        let status = run("status", &json!({"team":"t"}), false).unwrap();
+        assert_eq!(status["paused"]["by"], "You", "{}", status["paused"]);
+        let waiting = run("waiting", &json!({}), false).unwrap();
+        let item = waiting["items"].as_array().unwrap().iter().find(|item| item["kind"] == "team_paused").cloned().expect("listed");
+        assert_eq!(item["action"], "resume_team");
+        let title = item["title"].as_str().unwrap();
+        assert!(title.starts_with("Team paused since ") && title.contains(" by You: members get no tasks"), "{title}");
+        // The sessions' state reason says so too.
+        let reasons: Vec<String> = super::super::waiting::reasons(std::slice::from_ref(&saved), 0.0)
+            .into_iter()
+            .filter_map(|waiting| waiting.reason.map(|reason| reason.to_string()))
+            .collect();
+        assert!(!reasons.is_empty() && reasons.iter().all(|reason| reason.contains("paused since") && reason.contains("members get no tasks")), "{reasons:?}");
+        // The lead is told once that hand-outs wait for the team's Resume.
+        let inbox = run("inbox", &json!({"team":"t","by":"human"}), false).unwrap();
+        let told: Vec<&Value> = inbox["items"].as_array().unwrap().iter().filter(|item| item["kind"] == "team_paused").collect();
+        assert_eq!(told.len(), 1, "{inbox}");
+        let line = told[0]["summary"].as_str().unwrap();
+        assert!(line.contains("The team is paused since") && line.contains("by You") && line.contains("#2"), "{line}");
+        // Resume team ends it everywhere.
+        store.mutate(None, "t", None, |team, events| ops::apply(team, "resume", &json!({}), &Actor::Human, &BTreeSet::new(), events)).unwrap();
+        assert!(store.load("t").unwrap().unwrap().paused.is_none());
+        let waiting = run("waiting", &json!({}), false).unwrap();
+        assert!(!waiting.to_string().contains("team_paused"), "{waiting}");
+        // A team paused before the record reads it from its pause event.
+        store.mutate(None, "t", None, |team, events| ops::apply(team, "pause", &json!({}), &Actor::Member("lead".into()), &BTreeSet::new(), events)).unwrap();
+        store.mutate(None, "t", None, |team, _| { team.paused = None; Ok(Value::Null) }).unwrap();
+        assert!(store.load("t").unwrap().unwrap().paused.is_none(), "kept only while paused, and dropped here by hand");
+        let status = run("status", &json!({"team":"t"}), false).unwrap();
+        assert_eq!(status["paused"]["by"], "Lead", "{}", status["paused"]);
+        assert!(status["paused"]["at"].as_f64().unwrap() > 0.0);
+    });
+}

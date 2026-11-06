@@ -1,3 +1,4 @@
+import { withdrawnRefusal } from "../../teamRefusals";
 import { describe, expect, it } from "vitest";
 import { decidedWaiting,
   ProposalCards, WaitingAnswer, WaitingNotices, acceptanceSummary, act, noticeToken, proposalCards, proposalKindLabel, toolOffer,
@@ -682,6 +683,19 @@ describe("a confirmed decision leaves at once (task 107)", () => {
     await cards.answer("p2", true);
     expect(card(cards, "p2")?.sending).toBe(false);
     expect(card(cards, "p2")?.notice).toContain("The plan changed since the warning");
+  });
+
+  it("a card hgs withdrew (task 111) leaves at once when its Allow is refused for it", async () => {
+    const f = fake(answerTeam({
+      proposals: [proposal({ id: "p3", kind: "add-member", member: { role: "Designer", agent: "claude", model: "sonnet" } })],
+    }));
+    const cards = cardsOf(f);
+    f.refuse.set("decide_proposal", "hgs: This proposal can no longer apply (Phase 2 is closed (done); propose the work in a new phase with extend instead); it was withdrawn and the lead is told why");
+    await cards.answer("p3", true);
+    expect(card(cards, "p3")).toBeUndefined();
+    cards.setTeam(f.team);
+    expect(card(cards, "p3")).toBeUndefined();
+    expect(withdrawnRefusal("hgs: The plan changed since the warning")).toBe(false);
   });
 
   it("matches what a confirmed action decided in Waiting for you, as Qt does", () => {

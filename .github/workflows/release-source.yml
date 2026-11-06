@@ -1,0 +1,55 @@
+name: Release source recipe qualification
+
+on:
+  workflow_call:
+    inputs:
+      version:
+        type: string
+        default: ''
+
+permissions:
+  contents: read
+
+cache-mode: none
+
+jobs:
+  source:
+    runs-on: ubuntu-24.04
+    cache-mode: none
+    timeout-minutes: 75
+    container:
+      image: archlinux@sha256:996c3a1d6b0d87b01242f6fcd8cfa3ad3eece1a67ab5c8f108e20af1d7b97bdd
+    steps:
+      - name: Bootstrap Git before checkout
+        run: pacman -Syu --noconfirm --needed git
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+          fetch-depth: 0
+      - name: Source recipe dependencies
+        run: |
+          pacman -Syu --noconfirm --needed base-devel git rust nodejs npm webkit2gtk-4.1 gtk3 alsa-lib gstreamer gst-plugins-base-libs libappindicator dbus gst-plugins-base gst-plugins-good gst-plugins-bad gst-plugins-ugly gst-libav tmux openssh python namcap desktop-file-utils
+          useradd -m user
+          chown -R user:user "$GITHUB_WORKSPACE"
+      - name: Build and check the exact source recipe
+        env:
+          RELEASE_VERSION: ${{ inputs.version }}
+        shell: bash
+        run: |
+          set -euo pipefail
+          if [ -z "$RELEASE_VERSION" ]; then RELEASE_VERSION="$(cat VERSION)"; fi
+          runuser -u user -- python3 scripts/release_source.py prepare --version "$RELEASE_VERSION" --directory artifacts/release-source
+          runuser -u user -- bash scripts/check-release-packages.sh artifacts/release-source --source-only
+      - name: Retain source recipe logs
+        if: always()
+        uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
+        with:
+          name: release-source-results-${{ github.sha }}
+          path: artifacts/test-results
+          retention-days: 7
+      - uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
+        with:
+          name: release-source-${{ github.sha }}
+          path: artifacts/release-source
+          include-hidden-files: true
+          retention-days: 14

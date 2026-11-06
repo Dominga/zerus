@@ -270,8 +270,10 @@ packages that same output for all channels:
    product version, the nightly version computed exactly like
    `prepare-nightly.py`, or `DEV_VERSION-dev.<CI run_number>`), installs the locked
    npm toolchain and runs `scripts/ci/macos-bundle.sh`. It builds the CLI, connector
-   and Next with a macOS 14.0 target, runs frontend and Rust regression tests
-   (only numbered Dev may opt out), and assembles the production bundle,
+   and Next with a macOS 14.0 target and assembles the production bundle.
+   Numbered Dev uses its package gate; Stable delegates the frontend/core/Tauri
+   regression tests to the same-SHA full verification that gates signing. Other
+   callers run bundle regressions by default. Every channel still
    runs the bundle checks and self-tests and uploads `Zerus-unsigned.zip`.
    Dev passes the same CI sequence to the Tauri build. The unsigned, mounted and installed
    apps report their embedded build identity through `--build-info`; validation

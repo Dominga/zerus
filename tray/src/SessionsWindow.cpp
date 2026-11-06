@@ -2482,6 +2482,8 @@ SessionsWindow::SessionsWindow(const QString &hgsPath, QWidget *parent)
         emit refreshRequested();
     });
     connect(&m_client, &HgsClient::inspectionReady, this, &SessionsWindow::acceptInspection);
+    m_inspectRetry = new QTimer(this); m_inspectRetry->setSingleShot(true);
+    connect(m_inspectRetry, &QTimer::timeout, this, &SessionsWindow::retryInspection);
     if (auto *streams = EventStreams::instance()) {
         connect(streams, &EventStreams::activityReady, this, [this](const QString &host, const QString &name, const QJsonObject &inspection) {
             acceptInspection(host, name, inspection, {});
@@ -2533,7 +2535,14 @@ SessionsWindow::SessionsWindow(const QString &hgsPath, QWidget *parent)
         if (entry->session.cmd == "dsh" && entry->session.state != "running" && error.contains("DeepSeek host is unavailable")) {
             m_details.remove("allowed_actions"); m_inspectError.clear(); renderDetails(); return;
         }
-        m_inspectError = tr("Could not refresh activity: %1").arg(error); renderDetails();
+        // Task 117: the last good read stays on screen and is read again by
+        // itself; it said "timed out" and stayed so while the stream followed.
+        m_inspectError = !m_details.isEmpty() && m_lastInspected.isValid()
+            ? tr("Activity not refreshed since %1, retrying: %2").arg(m_lastInspected.toString(QStringLiteral("HH:mm:ss")), error)
+            : tr("Could not refresh activity: %1").arg(error);
+        m_inspectRetryKey = entry->key;
+        m_inspectRetry->start(std::min(60000, 2000 << std::min(m_inspectRetries++, 5)));
+        renderDetails();
     });
     connect(&m_client, &HgsClient::writeDone, this, [this](const QString &operation, bool ok, const QString &detail) {
         if (finishSelectionAction(operation, ok, detail)) {if(!m_selectionRunning)m_archiveBrowser->refresh();return;}
@@ -4245,6 +4254,16 @@ void SessionsWindow::selectSession()
     renderDetails();
 }
 
+// Task 117: the session the failed refresh was for, read directly: the poll
+// does not read a session a live event stream follows.
+void SessionsWindow::retryInspection()
+{
+    const auto *entry = selected();
+    if (!isVisible() || !entry || entry->key != m_inspectRetryKey || m_inspectError.isEmpty() || !entry->online) return;
+    if (m_client.requestInspection(entry->host, entry->session.name, m_cursor, entry->session.archiveId, false))
+        m_inspectionAge.start();
+}
+
 void SessionsWindow::inspect()
 {
     if (!m_pending && !m_renameKey.isEmpty()) return;
@@ -4433,6 +4452,7 @@ void SessionsWindow::acceptInspection(const QString &host, const QString &name, 
     const auto previousProcesses=m_details.value("processes");
     const bool sameRun=m_details.value("run_id")==data.value("run_id") && m_details.value("host_generation")==data.value("host_generation");
     m_details = data; m_inspectError.clear();
+    m_lastInspected = QTime::currentTime(); m_inspectRetries = 0; m_inspectRetry->stop();
     // U35: a message just queued shows until a read lists it or a second read does not.
     if (auto held = m_justHeld.find(entry->key); held != m_justHeld.end()) {
         QSet<QString> listed;

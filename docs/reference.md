@@ -6057,6 +6057,32 @@ another command. Codex completion beyond the normal 8 MiB transcript window can
 be read incrementally up to 16 MiB per poll and cached privately. Completion needs
 the exact call ID in the verified conversation; absence of an event is not success.
 
+## Activity never sticks on a timed-out refresh
+
+The desktops give a local `hgs inspect` 5 s (a peer's 15 s). Task 117 keeps
+the read inside that and lets a failure pass by itself:
+
+- `hgs inspect` answers its phase timings in `timings_ms` (`total` and each step:
+  `state_lock`, `record`, `live_sessions`, `questions`, `processes`,
+  `provider_messages`, `events_open`, `activity`, `waits`, `session_state`,
+  `team_store` and others). A call of 1 s or more leaves one JSON line in
+  `<state>/logs/slow-calls.log`, which rotates at 256 KiB to one older file.
+- The team reasons every listing and inspection reads wait at most 300 ms for a
+  team writer. A store that stays busy answers with the last good reasons, kept
+  in `teams/waiting-cache.json` for 2 minutes. Before, a rollback-journal store
+  (hgs before task 105's WAL) made this read wait up to 10 s behind a team
+  write: past the desktop's limit.
+- An inspection waits at most 3 s for the state lock, then answers "The session
+  state is busy" with its timings instead of being killed.
+- Qt and Zerus Next keep the last good Activity after a failed refresh. The
+  status says "Activity not refreshed since HH:mm:ss, retrying: <why>" (before
+  any good read, "Could not refresh activity: <why>"). The session is read
+  again by itself after 2 s (Activity's interval in Zerus Next, 2.5 s, or the
+  background interval behind Terminal), doubled for each failure in a row up to
+  a minute, also while a live event stream follows it, which before left the
+  notice standing. A read that succeeds, or a stream state, clears it; a
+  timed-out request never holds the next one.
+
 ## Build folder cleanup
 
 Zerus removes the build folders it creates, automatically and only its own

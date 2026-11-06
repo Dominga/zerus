@@ -207,6 +207,26 @@ pub(crate) fn cmd(row: &ViewRow) -> String {
     }
 }
 
+/// Task 117: a failed read is tried again after its base interval, doubled
+/// for each failure in a row, at most this long.
+const RETRY_MAX: f64 = 60.0;
+
+/// The wait before the next read after `failures` failed in a row.
+pub(crate) fn retry_after(base: f64, failures: u32) -> f64 {
+    (base * f64::from(1u32 << failures.saturating_sub(1).min(5))).min(RETRY_MAX.max(base))
+}
+
+/// Task 117: the clock time Activity was last refreshed (`HH:mm:ss`, as Qt's
+/// "Activity not refreshed since %1").
+pub(crate) fn clock(seconds: f64) -> String {
+    use chrono::TimeZone;
+    chrono::Local
+        .timestamp_opt(seconds as i64, 0)
+        .single()
+        .map(|time| time.format("%H:%M:%S").to_string())
+        .unwrap_or_default()
+}
+
 /// Local time as the cache details show it (Qt's `d MMM HH:mm:ss`, English
 /// month names); formatted in Rust, never in the webview.
 fn local_time(seconds: i64) -> String {
@@ -366,9 +386,12 @@ impl Composers {
 
     fn read_details(&self, waiting_send: bool) {
         let mut hub = self.lock();
+        // Task 117: a failed read is retried also while a stream follows: a
+        // stream that brings no state frame would leave its error standing.
+        let retrying = hub.followed.inspect_error.is_some();
         if hub.closed
             || hub.followed.inspecting.is_some()
-            || (hub.followed.streamed && !waiting_send)
+            || (hub.followed.streamed && !waiting_send && !retrying)
         {
             return;
         }
@@ -403,7 +426,11 @@ impl Composers {
         let archive = ctx.session.archive_id;
         let me = self.clone();
         (self.0.deps.spawn)(Box::new(move || {
-            let read = (me.0.deps.inspect)(&target, archive.as_deref(), agent.as_deref()).and_then(
+            let read = (me.0.deps.inspect)(&target, archive.as_deref(), agent.as_deref());
+            // Formatted before the hub lock is taken (local time may read the
+            // time zone files): when the details last arrived, for a failure.
+            let since = read.is_err().then(|| me.lock().followed.refreshed_at).flatten().map(clock);
+            let read = read.and_then(
                 |mut value| {
                     if agent.as_ref().is_some_and(|agent| {
                         text(&value, "run_id") != parent_run
@@ -438,21 +465,34 @@ impl Composers {
                 (None, None) => true,
                 _ => false,
             };
-            if !hub.followed.streamed || (waiting_send && unchanged) {
+            if !hub.followed.streamed || ((waiting_send || retrying) && unchanged) {
                 match read {
                     Ok((details, expiry, events)) => {
                         accepted_details = true;
                         hub.followed.inspect_error = None;
+                        hub.followed.failures = 0;
+                        hub.followed.refreshed_at = Some(me.now());
                         hub.followed.details = Some(details);
                         hub.followed.expiry = expiry;
                         let (replace, events) = events;
                         merge_events(&mut hub.followed.events, replace, events);
                     }
+                    // Task 117: the last good details stay; the notice says
+                    // since when, and the tick reads again with back-off.
                     Err(detail) => {
-                        hub.followed.inspect_error =
-                            Some(format!("Could not refresh activity: {detail}"))
+                        hub.followed.failures = hub.followed.failures.saturating_add(1);
+                        hub.followed.inspect_error = Some(match (&hub.followed.details, since) {
+                            (Some(_), Some(since)) => {
+                                format!("Activity not refreshed since {since}, retrying: {detail}")
+                            }
+                            _ => format!("Could not refresh activity: {detail}"),
+                        });
                     }
                 }
+            } else if retrying && read.is_ok() {
+                // A state frame came meanwhile and is newer: only the notice goes.
+                hub.followed.inspect_error = None;
+                hub.followed.failures = 0;
             }
             drop(hub);
             me.after_observe(accepted_details);
@@ -503,15 +543,15 @@ impl Composers {
         let followed = &hub.followed;
         if hub.open.as_ref().is_none_or(SessionRef::archived)
             || followed.inspecting.is_some()
-            || followed.streamed
+            || (followed.streamed && followed.inspect_error.is_none())
         {
             return false;
         }
+        let retry = retry_after(hub.poll.unwrap_or(RETRY_WAIT), followed.failures);
         match &followed.inspected {
             None => followed.details.is_some() || now - followed.opened_at >= DETAILS_WAIT,
             Some(basis) => {
-                (followed.inspect_error.is_some()
-                    && now - followed.inspected_at >= hub.poll.unwrap_or(RETRY_WAIT))
+                (followed.inspect_error.is_some() && now - followed.inspected_at >= retry)
                     || self
                         .context(hub)
                         .is_some_and(|ctx| Basis::of(&ctx.row) != *basis)
@@ -4148,6 +4188,10 @@ pub(crate) mod tests {
         wait(0.5);
         reads(2);
         *lock(&fake.inspected) = Some(ready());
+        // Task 117: a second failure in a row waits twice as long.
+        wait(2.5);
+        std::thread::sleep(Duration::from_millis(50));
+        assert_eq!(fake.inspects.load(Ordering::SeqCst), 2, "the back-off doubles");
         wait(2.5);
         reads(3);
         until(&c, |v| v.block_reason.is_none() && v.status.is_empty());
@@ -4207,8 +4251,69 @@ pub(crate) mod tests {
         wait(17.5);
         reads(2);
         c.set_poll(poll_seconds("activity", settings));
+        // Task 117: the second failure in a row doubles Activity's 2.5 s.
+        wait(5.0);
+        reads(3);
+    }
+
+    /// Task 117 (owner, 2026-11-06): Activity stuck on "Could not refresh
+    /// activity: timed out". A read that times out keeps the last details
+    /// the stream brought, says since when they were not refreshed, and the
+    /// tick reads again by itself with back-off, also while a stream follows
+    /// the session; a read that succeeds clears the notice.
+    #[test]
+    fn a_timed_out_read_keeps_the_details_and_recovers_by_itself() {
+        let root = dir("inspect-recovers");
+        let (c, fake) = send_hub(&root);
+        c.open(Some(session()));
+        until(&c, |v| v.loaded);
+        let reads = |n| {
+            eventually(|| {
+                fake.inspects.load(Ordering::SeqCst) == n && c.lock().followed.inspecting.is_none()
+            })
+        };
+        let wait = |seconds: f64| {
+            *lock(&fake.now) += seconds;
+            c.tick();
+        };
+        let mut known = ready();
+        known["last_message"] = json!("the last good read");
+        c.observe(&state(known));
+        let refreshed = c.lock().followed.refreshed_at.unwrap();
+        // The stream ends: the tick reads at once, and the read times out.
+        c.observe(&ended());
+        wait(0.1);
+        reads(1);
+        let view = until(&c, |v| v.session_status_error);
+        let since = clock(refreshed);
+        assert_eq!(view.session_status, format!("Activity not refreshed since {since}, retrying: timed out"));
+        assert_eq!(c.lock().followed.details.as_ref().unwrap()["last_message"], "the last good read");
+        // A stream follows again but brings nothing: the failed read is still retried.
+        c.lock().followed.streamed = true;
+        wait(2.6);
+        reads(2);
+        assert_eq!(c.lock().followed.failures, 2);
+        wait(2.6);
+        std::thread::sleep(Duration::from_millis(50));
+        assert_eq!(fake.inspects.load(Ordering::SeqCst), 2, "the second retry waits 5 s");
+        *lock(&fake.inspected) = Some(ready());
         wait(2.5);
         reads(3);
+        let view = until(&c, |v| !v.session_status_error);
+        assert!(view.session_status.is_empty(), "{}", view.session_status);
+        assert_eq!(c.lock().followed.failures, 0);
+        assert!(c.lock().followed.inspect_error.is_none());
+        // Nothing more is read while the stream keeps the details current.
+        wait(70.0);
+        std::thread::sleep(Duration::from_millis(50));
+        assert_eq!(fake.inspects.load(Ordering::SeqCst), 3);
+    }
+
+    #[test]
+    fn the_retry_back_off_doubles_to_a_minute() {
+        assert_eq!([1, 2, 3, 4, 5, 6, 9].map(|n| retry_after(2.5, n)), [2.5, 5.0, 10.0, 20.0, 40.0, 60.0, 60.0]);
+        assert_eq!(retry_after(30.0, 1), 30.0);
+        assert_eq!(retry_after(90.0, 3), 90.0, "a longer poll is never shortened");
     }
 
     #[test]

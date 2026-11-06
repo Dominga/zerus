@@ -211,6 +211,12 @@ impl Store {
         Self::open_at(&path(), write)
     }
 
+    /// Task 117: a read on a hot path (every listing and inspection) waits
+    /// at most `wait` for a writer instead of the usual 10 s.
+    pub(crate) fn busy_timeout(&self, wait: Duration) -> anyhow::Result<()> {
+        Ok(self.db.busy_timeout(wait)?)
+    }
+
     pub(crate) fn open_at(path: &Path, write: bool) -> anyhow::Result<Self> {
         Self::open_journal(path, write, Journal::Wal)
     }
@@ -722,6 +728,54 @@ mod tests {
             drop(reader);
             let after = Store::open_journal(&path, false, journal).unwrap();
             assert!(after.heads(10).unwrap().0.iter().any(|head| head["name"] == "Renamed"));
+        }
+    }
+
+    /// Task 117 (owner, 2026-11-06): Activity stuck on "Could not refresh
+    /// activity: timed out". Every inspection reads the team reasons; a
+    /// rollback-journal writer that holds the store kept that read waiting its
+    /// whole busy timeout (10 s, measured here with 2 s), past the desktop's
+    /// 5 s limit. The read now waits at most 300 ms and answers with the last
+    /// good reasons (at most 2 minutes old); in WAL it reads at once.
+    #[test]
+    fn the_listing_reads_team_reasons_within_its_bound_or_from_the_last_good_ones() {
+        use crate::state::session_state::team_reasons_at;
+        use crate::state::teams::model::{Member, MemberState, SessionRef};
+        for journal in [Journal::Delete, Journal::Wal] {
+            let dir = tempfile::tempdir().unwrap();
+            let path = dir.path().join("teams.sqlite3");
+            let cache = dir.path().join("waiting-cache.json");
+            let mut writer = Store::open_journal(&path, true, journal).unwrap();
+            let lead = Member { id: "lead".into(), role: "Lead".into(), agent: "claude".into(), state: MemberState::Active,
+                session: Some(SessionRef { name: "claude/x/lead".into(), run_id: "r0".into(), ..Default::default() }), ..Default::default() };
+            let team = Team { id: "t0".into(), name: "Team".into(), lead: "lead".into(), status: TeamStatus::Running,
+                members: vec![lead], ..Default::default() };
+            writer.create("11111111-1111-4111-8111-000000000117", &json!({}), team, vec![]).unwrap();
+            let fresh = team_reasons_at(&path, &cache, Duration::from_millis(300), 1000.0);
+            assert_eq!(fresh.len(), 1, "{journal:?}");
+            assert!(cache.is_file(), "the last good reasons are kept");
+            writer.db.execute_batch("BEGIN EXCLUSIVE; UPDATE teams SET payload=json_set(payload,'$.name','Renamed');").unwrap();
+            if journal == Journal::Delete {
+                // Before task 117: the reader waits out its whole busy timeout.
+                let old = Store::open_journal(&path, false, journal).unwrap();
+                old.db.busy_timeout(Duration::from_secs(2)).unwrap();
+                let started = Instant::now();
+                assert!(old.active_teams(32).is_err());
+                let waited = started.elapsed();
+                assert!(waited >= Duration::from_millis(1900), "{waited:?}");
+                eprintln!("task 117 {journal:?}: the unbounded reader waited {waited:?}");
+            }
+            let started = Instant::now();
+            let bounded = team_reasons_at(&path, &cache, Duration::from_millis(300), 1000.0);
+            let took = started.elapsed();
+            eprintln!("task 117 {journal:?}: the bounded reader answered in {took:?}");
+            assert!(took < Duration::from_millis(1500), "{journal:?} {took:?}");
+            assert_eq!(bounded, fresh, "{journal:?}: the read or the last good reasons");
+            if journal == Journal::Delete {
+                // Older than two minutes, the kept reasons are not used.
+                assert!(team_reasons_at(&path, &cache, Duration::from_millis(50), 1121.0).is_empty());
+            }
+            writer.db.execute_batch("COMMIT").unwrap();
         }
     }
 

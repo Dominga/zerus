@@ -111,6 +111,52 @@ fn windows_command_line(arguments: &[String]) -> String {
         .collect()
 }
 
+/// The arguments of a Windows command line, under the rules `windows_argument`
+/// writes for: backslashes count only before a quote, and quotes group. `None`
+/// for a quote that never closes, which is no argument list a person meant.
+pub fn windows_split_arguments(line: &str) -> Option<Vec<String>> {
+    let mut arguments = Vec::new();
+    let mut chars = line.chars().peekable();
+    loop {
+        while chars.next_if(|c| matches!(c, ' ' | '\t')).is_some() {}
+        if chars.peek().is_none() {
+            return Some(arguments);
+        }
+        let (mut argument, mut quoted) = (String::new(), false);
+        while let Some(&c) = chars.peek() {
+            if !quoted && matches!(c, ' ' | '\t') {
+                break;
+            }
+            chars.next();
+            match c {
+                '\\' => {
+                    let mut backslashes = 1;
+                    while chars.next_if_eq(&'\\').is_some() {
+                        backslashes += 1;
+                    }
+                    let before_quote = chars.peek() == Some(&'"');
+                    let kept = if before_quote {
+                        backslashes / 2
+                    } else {
+                        backslashes
+                    };
+                    argument.extend(std::iter::repeat_n('\\', kept));
+                    if before_quote && backslashes % 2 == 1 {
+                        chars.next();
+                        argument.push('"');
+                    }
+                }
+                '"' => quoted = !quoted,
+                other => argument.push(other),
+            }
+        }
+        if quoted {
+            return None;
+        }
+        arguments.push(argument);
+    }
+}
+
 /// The `CreateProcess` command line of `program` and `arguments` as `QProcess`
 /// builds it (`WindowsCommandLine::build`): the program with backslashes, in
 /// quotes when it has a space, then a space before each argument (so two
@@ -279,6 +325,34 @@ mod tests {
 
     fn open(hgs: &str, computer: &str, name: &str, archive: Option<&str>, shell: Shell) -> String {
         open_command(hgs, computer, name, archive, shell)
+    }
+
+    #[test]
+    fn windows_arguments_split_back_into_what_was_written() {
+        for arguments in [
+            vec![],
+            vec!["--background".to_owned()],
+            vec!["--hgs".to_owned(), r"C:\Program Files\z\hgs.exe".to_owned()],
+            vec![r"C:\trailing\".to_owned(), r"C:\with space\".to_owned()],
+            vec![String::new(), "a".to_owned(), String::new()],
+            vec![
+                r#"say "hi""#.to_owned(),
+                r#"back\"quote"#.to_owned(),
+                "tab\there".to_owned(),
+            ],
+        ] {
+            assert_eq!(
+                windows_split_arguments(&windows_command_line(&arguments)).as_ref(),
+                Some(&arguments),
+                "{arguments:?}"
+            );
+        }
+    }
+
+    #[test]
+    fn an_unterminated_windows_quote_is_no_argument_list() {
+        assert_eq!(windows_split_arguments(r#" --hgs "C:\no end"#), None);
+        assert_eq!(windows_split_arguments(r#" ""#), None);
     }
 
     #[test]

@@ -53,6 +53,8 @@ struct Log {
     page_reads: AtomicUsize,
     starts: AtomicUsize,
     saved: Mutex<Vec<String>>,
+    /// File writes that have begun.
+    save_entered: AtomicUsize,
     /// Each status read's answer, oldest first; the last one repeats.
     answers: Mutex<VecDeque<Result<Workspace, String>>>,
     during_automatic_read: Mutex<Option<Hook>>,
@@ -138,6 +140,7 @@ fn fixture_with(
                 status.answer()
             }),
             save: Box::new(move |bytes| {
+                save.save_entered.fetch_add(1, Ordering::SeqCst);
                 let gate = save.save_gate.lock().unwrap().take();
                 if let Some((began, release)) = gate {
                     began.send(()).unwrap();
@@ -508,15 +511,31 @@ fn an_arm_write_still_in_progress_cannot_land_after_a_stop() {
             inner.button(core::Kind::Stop, &running(), answer).unwrap();
         })
     };
-    std::thread::sleep(std::time::Duration::from_millis(50));
-    assert!(
-        log.saved().is_empty(),
-        "the Stop's write overtook the older one"
-    );
+    // Prove the Stop was admitted before judging anything: it has disarmed in
+    // memory, however slowly its thread was scheduled.
+    let admitted = (0..5000).any(|_| {
+        let disarmed = inner.view(None).autostart == Some(Line::RunningNotArmed);
+        if !disarmed {
+            std::thread::sleep(std::time::Duration::from_millis(1));
+        }
+        disarmed
+    });
+    // From here, without ordered saves the Stop's write would begin at once.
+    let overtaken = admitted
+        && (0..200).any(|_| {
+            std::thread::sleep(std::time::Duration::from_millis(1));
+            log.save_entered.load(Ordering::SeqCst) > 1
+        });
 
+    // Always drain both threads, so a failure below reports instead of hanging.
     release.send(()).unwrap();
     arming.join().unwrap();
     stopping.join().unwrap();
+    assert!(admitted, "the Stop was never admitted");
+    assert!(
+        !overtaken,
+        "the Stop's write began before the older one ended"
+    );
     let saved = log.saved();
     assert_eq!(
         saved.last().unwrap()["armed"],

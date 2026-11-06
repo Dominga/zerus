@@ -640,6 +640,46 @@ for line in sys.stdin:
         }
     }
     #[test]
+    fn leaving_between_the_two_membership_checks_receives_no_signal() {
+        if isolated_signal_case("leaving_between_the_two_membership_checks_receives_no_signal") {
+            return;
+        }
+        let mut process = Process::new();
+        let (scope, input) = process.data();
+        let until = Instant::now() + Duration::from_secs(3);
+        assert!(
+            worktree_membership::original_member(&scope, &input.manifest.programs[0], until)
+                .unwrap()
+        );
+        let mut checks = 0;
+        let mut attempted = false;
+        let result = drive(
+            &input,
+            &scope,
+            until,
+            &mut attempted,
+            &mut || Ok(()),
+            &mut || {
+                checks += 1;
+                if checks == 1 {
+                    // This existing consumed-proof check follows final_state's
+                    // real membership read and precedes the second read. Move
+                    // the actual original and wait for its native response.
+                    writeln!(process.child.stdin.as_mut().unwrap(), "outside").unwrap();
+                    process.ready();
+                }
+                Ok(())
+            },
+        )
+        .unwrap();
+        assert!(!attempted);
+        assert_eq!(result.state, State::Complete);
+        assert_eq!(result.members[0].observation, Observation::Outside);
+        assert!(!process.marker.exists());
+        assert!(process.child.try_wait().unwrap().is_none());
+        assert_eq!(checks, 1);
+    }
+    #[test]
     fn a_lost_result_after_the_first_signal_is_unknown_and_never_a_no_effect_refusal() {
         if isolated_signal_case(
             "a_lost_result_after_the_first_signal_is_unknown_and_never_a_no_effect_refusal",

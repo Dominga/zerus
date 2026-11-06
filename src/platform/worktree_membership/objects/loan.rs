@@ -198,6 +198,17 @@ pub(crate) fn receive(
     {
         return Err(invalid());
     }
+    let filesystem_root = directory(libc::AT_FDCWD, c"/")?;
+    if description.parents.first().map(|parent| parent.parent)
+        != Some(object(&stat(filesystem_root.as_raw_fd())?))
+        || description
+            .parents
+            .windows(2)
+            .any(|pair| pair[0].child != pair[1].parent)
+        || description.parents.last().map(|parent| parent.child) != Some(root_id)
+    {
+        return Err(invalid());
+    }
     let ancestors = files
         .into_iter()
         .zip(description.parents)
@@ -322,6 +333,57 @@ mod tests {
             .all(
                 |fd| unsafe { libc::fcntl(fd.as_raw_fd(), libc::F_GETFD) } & libc::FD_CLOEXEC != 0
             ));
+    }
+    #[test]
+    fn a_received_chain_must_start_at_the_native_filesystem_root() {
+        let temporary = tempfile::tempdir().unwrap();
+        let native_root = temporary.path().canonicalize().unwrap();
+        let checkout = native_root.join("first/second/checkout");
+        std::fs::create_dir_all(&checkout).unwrap();
+        let mut scope = Scope::open(&checkout, until()).unwrap();
+        // Every individual edge is genuine, but the claimed absolute spelling
+        // starts at a private directory instead of the native filesystem root.
+        scope.path = "/first/second/checkout".into();
+        let keep = scope.ancestors.len() - 3;
+        scope.ancestors.drain(..keep);
+        let original = manifest(&scope);
+        let bytes = scope.describe_loan(until()).unwrap();
+        assert!(receive(&bytes, copies(&scope), &original, until()).is_err());
+    }
+    #[test]
+    fn individually_real_ancestor_edges_cannot_replace_a_connected_chain() {
+        let temporary = tempfile::tempdir().unwrap();
+        let checkout = temporary.path().join("first/second/checkout");
+        std::fs::create_dir_all(&checkout).unwrap();
+        let mut scope = Scope::open(&checkout.canonicalize().unwrap(), until()).unwrap();
+        let other = tempfile::tempdir().unwrap();
+        let (parent, part, child) = &mut scope.ancestors[1];
+        let name = OsStr::from_bytes(part.to_bytes());
+        let detached = other.path().join(name);
+        std::fs::create_dir(&detached).unwrap();
+        *parent = File::open(other.path()).unwrap();
+        *child = object(&stat(File::open(&detached).unwrap().as_raw_fd()).unwrap());
+        let original = manifest(&scope);
+        // describe/current still verify every real child independently; the
+        // receiver must additionally link each child to the next parent.
+        let bytes = scope.describe_loan(until()).unwrap();
+        assert!(receive(&bytes, copies(&scope), &original, until()).is_err());
+    }
+    #[test]
+    fn the_last_ancestor_child_must_be_the_original_received_checkout() {
+        let temporary = tempfile::tempdir().unwrap();
+        let checkout = temporary.path().join("first/second/checkout");
+        std::fs::create_dir_all(&checkout).unwrap();
+        let mut scope = Scope::open(&checkout.canonicalize().unwrap(), until()).unwrap();
+        let other = tempfile::tempdir().unwrap();
+        let replacement = Scope::open(&other.path().canonicalize().unwrap(), until()).unwrap();
+        // The original checkout ID and received root agree, and the complete
+        // native ancestor chain agrees internally, but it leads elsewhere.
+        scope.root = replacement.root;
+        scope.identity = replacement.identity;
+        let original = manifest(&scope);
+        let bytes = scope.describe_loan(until()).unwrap();
+        assert!(receive(&bytes, copies(&scope), &original, until()).is_err());
     }
     #[test]
     fn received_names_objects_counts_and_close_on_exec_cannot_be_substituted() {

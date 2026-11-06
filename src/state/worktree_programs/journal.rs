@@ -604,4 +604,55 @@ pub(super) mod tests {
         next.confirmation_id = "aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaaa".into();
         assert!(store(state.path()).reserve(next, 1100).is_err());
     }
+    #[test]
+    fn force_refuses_a_recorded_force_predecessor_or_a_non_survivor() {
+        for force_predecessor in [false, true] {
+            let state = private();
+            let mut normal = input();
+            let mut exited = normal.manifest.programs[0].clone();
+            exited.pid += 1;
+            exited.birth = "exited-original".into();
+            normal.manifest.programs.push(exited.clone());
+            let mut result = report(&normal);
+            result.members[1].observation = wire::stop::Observation::Exited;
+            fresh(store(state.path()), normal.clone())
+                .finish(result.clone())
+                .unwrap();
+
+            let mut force = normal.clone();
+            force.request_id = uuid::Uuid::new_v4().to_string();
+            force.confirmation_id = uuid::Uuid::new_v4().to_string();
+            force.manifest.id = uuid::Uuid::new_v4().to_string();
+            force.manifest.programs.truncate(1);
+            force.stop = Kind::Force {
+                previous_request_id: normal.request_id.clone(),
+                previous_binding: normal.binding(),
+            };
+            assert!(force.follows(&normal, &result));
+            if force_predecessor {
+                // A real, settled Force is still not the Normal predecessor
+                // required by a later Force. No missing/corrupt-row shortcut.
+                fresh(store(state.path()), force.clone())
+                    .finish(report(&force))
+                    .unwrap();
+                let previous = force.clone();
+                force.request_id = uuid::Uuid::new_v4().to_string();
+                force.confirmation_id = uuid::Uuid::new_v4().to_string();
+                force.manifest.id = uuid::Uuid::new_v4().to_string();
+                force.stop = Kind::Force {
+                    previous_request_id: previous.request_id.clone(),
+                    previous_binding: previous.binding(),
+                };
+            } else {
+                force.manifest.programs = vec![exited];
+            }
+            assert!(force.valid());
+            let id = force.request_id.clone();
+            assert!(
+                store(state.path()).reserve(force, 1100).is_err(),
+                "recorded Force predecessor: {force_predecessor}"
+            );
+            assert!(store(state.path()).lookup(&id).unwrap().is_none());
+        }
+    }
 }

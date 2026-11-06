@@ -148,6 +148,70 @@ pub(crate) fn send(
     Ok(())
 }
 
+// Only recvmsg (or the private native-buffer test) supplies this initialized
+// control buffer. Adopt every complete installed right even if Darwin reports
+// a truncated header length; rejection must still close those descriptors.
+#[allow(clippy::unnecessary_cast)]
+fn rights(control: &mut [usize], length: usize) -> (Vec<OwnedFd>, bool) {
+    let capacity = size_of_val(control);
+    let mut message: libc::msghdr = unsafe { std::mem::zeroed() };
+    message.msg_control = control.as_mut_ptr().cast();
+    message.msg_controllen = length.min(capacity) as _;
+    let mut fds = Vec::new();
+    let mut malformed = length > capacity;
+    // SAFETY: headers and complete data ints are bounded by initialized native
+    // storage. All adopted rights become owned before any refusal is returned.
+    unsafe {
+        let mut header = libc::CMSG_FIRSTHDR(&message);
+        while !header.is_null() {
+            let minimum = libc::CMSG_LEN(0) as usize;
+            let declared = (*header).cmsg_len as usize;
+            let offset = header as usize - control.as_ptr() as usize;
+            let available = (message.msg_controllen as usize).saturating_sub(offset);
+            if declared < minimum || available < minimum {
+                malformed = true;
+                break;
+            }
+            let contained = declared.min(available);
+            malformed |= declared > available;
+            if (*header).cmsg_level == libc::SOL_SOCKET && (*header).cmsg_type == libc::SCM_RIGHTS {
+                let data = contained - minimum;
+                malformed |= !data.is_multiple_of(size_of::<libc::c_int>());
+                for at in 0..data / size_of::<libc::c_int>() {
+                    let raw = std::ptr::read_unaligned(
+                        libc::CMSG_DATA(header).cast::<libc::c_int>().add(at),
+                    );
+                    if raw < 0 {
+                        malformed = true;
+                        continue;
+                    }
+                    let fd = OwnedFd::from_raw_fd(raw);
+                    #[cfg(target_os = "macos")]
+                    if libc::fcntl(fd.as_raw_fd(), libc::F_SETFD, libc::FD_CLOEXEC) != 0 {
+                        malformed = true;
+                        drop(fd);
+                        continue;
+                    }
+                    let flags = libc::fcntl(fd.as_raw_fd(), libc::F_GETFD);
+                    if flags < 0 || flags & libc::FD_CLOEXEC == 0 {
+                        malformed = true;
+                        drop(fd);
+                        continue;
+                    }
+                    fds.push(fd);
+                }
+            } else {
+                malformed = true;
+            }
+            if declared > available {
+                break;
+            }
+            header = libc::CMSG_NXTHDR(&message, header);
+        }
+    }
+    (fds, malformed)
+}
+
 #[allow(clippy::unnecessary_cast)]
 fn part(
     stream: &UnixStream,
@@ -183,55 +247,7 @@ fn part(
             retry(stream, libc::POLLIN, until)?;
             continue;
         }
-        let mut fds = Vec::new();
-        let mut malformed = false;
-        // SAFETY: recvmsg supplied initialized native control headers within
-        // the aligned bounded buffer. Adopt every received FD immediately so
-        // all rejection/truncation paths close their complete received set.
-        unsafe {
-            let mut header = libc::CMSG_FIRSTHDR(&message);
-            while !header.is_null() {
-                let minimum = libc::CMSG_LEN(0) as usize;
-                let length = (*header).cmsg_len as usize;
-                let offset = header as usize - control.as_ptr() as usize;
-                if length < minimum
-                    || offset
-                        .checked_add(length)
-                        .is_none_or(|end| end > message.msg_controllen as usize)
-                {
-                    malformed = true;
-                    break;
-                }
-                if (*header).cmsg_level == libc::SOL_SOCKET
-                    && (*header).cmsg_type == libc::SCM_RIGHTS
-                {
-                    let data = length - minimum;
-                    malformed |= !data.is_multiple_of(size_of::<libc::c_int>());
-                    for at in 0..data / size_of::<libc::c_int>() {
-                        let raw = std::ptr::read_unaligned(
-                            libc::CMSG_DATA(header).cast::<libc::c_int>().add(at),
-                        );
-                        if raw < 0 {
-                            malformed = true;
-                            continue;
-                        }
-                        let fd = OwnedFd::from_raw_fd(raw);
-                        #[cfg(target_os = "macos")]
-                        if libc::fcntl(fd.as_raw_fd(), libc::F_SETFD, libc::FD_CLOEXEC) != 0 {
-                            malformed = true;
-                        }
-                        let flags = libc::fcntl(fd.as_raw_fd(), libc::F_GETFD);
-                        if flags < 0 || flags & libc::FD_CLOEXEC == 0 {
-                            malformed = true;
-                        }
-                        fds.push(fd);
-                    }
-                } else {
-                    malformed = true;
-                }
-                header = libc::CMSG_NXTHDR(&message, header);
-            }
-        }
+        let (fds, malformed) = rights(&mut control, message.msg_controllen as usize);
         #[cfg(target_os = "macos")]
         drop(turn);
         if malformed
@@ -393,5 +409,56 @@ mod tests {
         assert!(receive(&receiver, until()).is_err());
         #[cfg(target_os = "linux")]
         assert_eq!(copies(&file), before, "truncated rights leaked on refusal");
+    }
+    #[test]
+    #[allow(clippy::unnecessary_cast)]
+    fn a_clipped_rights_header_still_adopts_and_closes_its_complete_native_fds() {
+        let original = tempfile::tempfile().unwrap();
+        let raw = [0; 2].map(|_| {
+            let fd = unsafe { libc::fcntl(original.as_raw_fd(), libc::F_DUPFD_CLOEXEC, 3) };
+            assert!(fd >= 0);
+            fd
+        });
+        let space = unsafe { libc::CMSG_SPACE(size_of_val(&raw) as u32) } as usize;
+        let mut control = vec![0usize; space.div_ceil(size_of::<usize>())];
+        let mut message: libc::msghdr = unsafe { std::mem::zeroed() };
+        message.msg_control = control.as_mut_ptr().cast();
+        message.msg_controllen = space as _;
+        // Model Darwin's truncated SCM_RIGHTS header while using real private
+        // duplicated descriptors. There are two complete installed rights in
+        // the received bytes, even though the header declares three.
+        unsafe {
+            let header = libc::CMSG_FIRSTHDR(&message);
+            assert!(!header.is_null());
+            (*header).cmsg_level = libc::SOL_SOCKET;
+            (*header).cmsg_type = libc::SCM_RIGHTS;
+            (*header).cmsg_len = libc::CMSG_LEN((3 * size_of::<libc::c_int>()) as u32) as _;
+            std::ptr::copy_nonoverlapping(
+                raw.as_ptr().cast::<u8>(),
+                libc::CMSG_DATA(header),
+                size_of_val(&raw),
+            );
+        }
+        let bytes = unsafe { libc::CMSG_LEN(size_of_val(&raw) as u32) } as usize;
+        let (fds, malformed) = rights(&mut control, bytes);
+        assert!(malformed);
+        assert_eq!(fds.len(), raw.len());
+        for fd in &fds {
+            assert!(unsafe { libc::fcntl(fd.as_raw_fd(), libc::F_GETFD) } & libc::FD_CLOEXEC != 0);
+        }
+        drop(fds);
+        for fd in raw {
+            let mut stat: libc::stat = unsafe { std::mem::zeroed() };
+            if unsafe { libc::fstat(fd, &mut stat) } == 0 {
+                use std::os::unix::fs::MetadataExt;
+                let metadata = original.metadata().unwrap();
+                // Parallel fixtures may already reuse a closed number. It
+                // must no longer refer to this private original object.
+                assert_ne!(
+                    (stat.st_dev as u64, stat.st_ino as u64),
+                    (metadata.dev(), metadata.ino())
+                );
+            }
+        }
     }
 }

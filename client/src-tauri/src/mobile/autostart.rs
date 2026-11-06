@@ -10,13 +10,16 @@ use mobile::enrollment::Target;
 use std::path::{Path, PathBuf};
 use zerus_client_core::mobile::autostart::{FILE, MAX_RECORD};
 
+type Packaged = Box<dyn Fn() -> Option<PathBuf> + Send + Sync>;
+type Start = Box<dyn Fn(&Path, &Target) -> Result<core::Answer, String> + Send + Sync>;
+
 /// What the attempt needs from the computer; each call blocks.
 pub(super) struct Io {
     pub configured: Box<dyn Fn() -> bool + Send + Sync>,
-    pub packaged: Box<dyn Fn() -> Option<PathBuf> + Send + Sync>,
-    pub status: Box<dyn Fn(&Path) -> Result<Workspace, String> + Send + Sync>,
-    pub save: Box<dyn Fn(&[u8]) -> Result<(), String> + Send + Sync>,
-    pub start: Box<dyn Fn(&Path, &Target) -> Result<core::Answer, String> + Send + Sync>,
+    pub packaged: Packaged,
+    pub status: CallWith<Path, Workspace>,
+    pub save: CallWith<[u8], ()>,
+    pub start: Start,
 }
 
 /// The actual installed Windows app, outside a replay, owning its instance.

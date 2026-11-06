@@ -1502,6 +1502,42 @@ class TaskDelivery(DeliveryFixture):
         self.assertEqual(self.notes(task, identity), [])
         self.assertNotIn("OUTSIDER_TEXT", self.received())
 
+    def test_a_legacy_reopen_obeys_the_project_s_agent_rules(self):
+        # zerus-anemc: the legacy route (here, the person's hold over a task
+        # with no floor or attempt) applies the same rules: an outsider agent
+        # may not reopen another session's task when agents keep to their
+        # own, and an agent past the hourly limit may not reopen one. A
+        # refusal saves no note and sends nothing; the person still reopens.
+        self.hgs("cutover", "--project", "orchard", "--hold", "on")
+        self.settings(agents_other=False)
+        task = self.reviewed("LEGACY_OUTSIDER_TASK")
+        self.assertFalse(self.execution(task).get("attempts"))
+        self.agent("codex/outsider")
+        identity = str(uuid.uuid4())
+        refused = self.message(task, "LEGACY_OUTSIDER_TEXT", mode="reopen", identity=identity,
+                               session="codex/outsider", ok=False)
+        self.assertIn("only in their own session", refused)
+        self.assertEqual(self.hgs("get", task["ref"])["task"]["stage"], "review")
+        self.assertEqual(self.notes(task, identity), [])
+        self.assertNotIn("LEGACY_OUTSIDER_TEXT", self.received())
+        # Past the hourly limit: an agent the rules let reach any session,
+        # which just made the hour's one start, is refused too.
+        self.settings(agents_other=True, agent_limit=1)
+        warm = self.add("LEGACY_REOPEN_WARM", "--target", self.name)
+        self.hgs("send", warm["ref"], "--json", session="codex/actor")
+        self.wait_received("LEGACY_REOPEN_WARM"); self.confirm()
+        limited = str(uuid.uuid4())
+        refused = self.message(task, "LEGACY_LIMIT_TEXT", mode="reopen", identity=limited,
+                               session="codex/actor", ok=False)
+        self.assertIn("per hour", refused)
+        self.assertEqual(self.notes(task, limited), [])
+        self.assertNotIn("LEGACY_LIMIT_TEXT", self.received())
+        # The person's reopen goes on, on the legacy route.
+        reopened = self.message(task, "LEGACY_PERSON_TEXT", mode="reopen")
+        self.assertEqual(reopened["task"]["stage"], "active")
+        self.assertNotIn("attempt", reopened)
+        self.wait_received("LEGACY_PERSON_TEXT")
+
     def test_a_start_id_reused_for_another_body_is_refused(self):
         # desktop-u on #1519 (zerus-f5q49): an ID answers only for its own
         # request. After a managed Start, the same ID with a changed body is

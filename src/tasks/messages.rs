@@ -199,6 +199,18 @@ pub(super) fn execute(config: &Config, args: &[String]) -> Result<Value> {
         }
         None
     } else if let Some(to) = to.as_ref().filter(|_| !missing_recovery && routing_error.is_none()) {
+        // The project's agent rules, as a send and the managed reopen apply
+        // them (zerus-anemc): an agent reopens a task only where it may
+        // start one, within the hourly limit. A refusal saves nothing.
+        if mode == "reopen" {
+            let settings = store.project().map_err(fail)?.settings();
+            let starts = if matches!(who, Actor::Agent(_)) && settings.agent_limit > 0 {
+                super::agent_starts_since(&store, now() - 3_600_000, deadline)?
+            } else {
+                0
+            };
+            settings.check_agent(&who, to, true, starts).map_err(fail)?;
+        }
         delivery.prompt = prompt(&r.project.1, &before.id, id, mode, &content.text, before.worker.as_ref());
         let attachments = files
             .iter()

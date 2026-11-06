@@ -238,6 +238,8 @@
   .act-queue-text { max-height: 220px; overflow-y: auto; user-select: text; }
   .act-queue-message { margin-top: 8px; padding-left: 10px; border-left: 2px solid var(--z-color-accent-muted); }
   .act-queue-message + .act-queue-message { padding-top: 8px; border-top: 1px dashed var(--z-color-border); }
+  .act-held-files { display: flex; flex-wrap: wrap; gap: 6px; margin-top: 6px; }
+  .act-held-note { margin: 8px 0 0; color: var(--z-color-muted); font-size: 12px; }
 
   /* Composer: toolbar 34, editor 76, action row 34. */
   .cmp-col { width: min(var(--col), calc(100% - 32px)); margin: 0 auto 10px; }

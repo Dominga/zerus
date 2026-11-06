@@ -778,6 +778,8 @@ export interface LocalMessage {
 }
 /** The native queue (core input_queue::QueueView), kept separate from local messages. */
 export interface QueueView { id: string; text: string; hint: string; can_send_now: boolean; enabled: boolean; label: string; run_id?: string; conversation_id?: string }
+/** A held message: the request of its local row, its exact text and its file names. */
+export interface HeldMessageView { request_id: string; text: string; attachments: string[] }
 export interface ComposerView {
   handle: number; key: string; subagent?: { agent_id: string; send_supported: boolean; hint: string } | null; loaded: boolean; rev: number; text_epoch: number; text: string; position: number; anchor: number;
   attachments: AttachmentView[]; removed: string | null; attaching: boolean; sending: boolean; recording?: boolean; waiting: string | null; uncertain: boolean;
@@ -789,6 +791,8 @@ export interface ComposerView {
   inspect_error: boolean;
   cache: Chip; cache_warning: string; cache_details: string; context: ContextChip; local: LocalMessage[];
   cancel_send: boolean; cancel_locked?: boolean; compacting: boolean; clear: ClearControl;
+  /** The message a "Compact and continue" holds while the desktop service compacts first: it left the composer but is not sent yet (zerus-pabah). */
+  held?: HeldMessageView | null;
   /** The agent's question card shown in the composer (A2). */
   question: QuestionView | null;
   /** False while a required card stands in for the editor and the action row (Qt's setInputVisible). */

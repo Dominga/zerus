@@ -1,4 +1,5 @@
 import { nativeRoute } from "./native-entry";
+import { withoutHeld } from "./held-message";
 import { tr } from "../../i18n";
 import { createActivityScroll } from "./activity-scroll";
 import { activityReadingRows, createActivityAnchor } from "./activity-anchor";
@@ -734,7 +735,8 @@ export function localRows(source: ActivitySource, s: Session | undefined): reado
   if (source.readOnly) return [];
   const key = draftKey({ computer: s.computer, key: s.catalogKey, name: s.name, archive_id: s.state === "archived" ? s.archiveId ?? null : null,
     session_id: s.sessionId ?? null });
-  return v.key === key ? v.local : [];
+  // A held "Compact and continue" message shows as its pending entry instead (zerus-pabah).
+  return v.key === key ? withoutHeld(v.local, v.held) : [];
 }
 
 /** Scrolling near the top reads the previous page, unless one is loading or none is left. */

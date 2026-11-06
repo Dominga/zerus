@@ -73,7 +73,7 @@ impl HandedPlan {
         }
     }
     /// The request of its message's local row: the send.
-    fn row(&self) -> &str {
+    pub(crate) fn row(&self) -> &str {
         match self {
             Self::Send(plan) => &plan.request_id,
             Self::Compact(plan) => &plan.send_request_id,

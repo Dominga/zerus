@@ -55,6 +55,65 @@ pub struct TestsConfig {
     /// linter); Zerus offers a missing one to the owner.
     #[serde(default, rename = "tool", skip_serializing_if = "Vec::is_empty")]
     pub tools: Vec<ToolNeed>,
+    /// Task 85: the project's own `hgs team run` templates, typed like the
+    /// built-ins; each runs only once the owner accepted its exact content.
+    #[serde(default, rename = "template", skip_serializing_if = "Vec::is_empty")]
+    pub templates: Vec<ProjectTemplate>,
+    /// The build broker's table (`src/state/teams/broker.rs` reads it from the
+    /// same file). Task 84 found it refused here, which made a file with it
+    /// unreadable for `hgs test` and the merge queue; it is declared, not read.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub build_broker: Option<Value>,
+}
+
+/// Task 85: a `[[template]]` entry: a fixed program and argv with typed
+/// placeholders, as the built-in templates are.
+#[derive(Clone, Debug, Default, Deserialize, Serialize, PartialEq)]
+#[serde(deny_unknown_fields)]
+pub struct ProjectTemplate {
+    pub id: String,
+    #[serde(default, skip_serializing_if = "String::is_empty")]
+    pub summary: String,
+    pub program: String,
+    #[serde(default)]
+    pub args: Vec<String>,
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub params: Vec<TemplateParam>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub timeout_secs: Option<u64>,
+    /// The test report the run leaves, read into one result per test.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub results: Option<TemplateResults>,
+}
+
+impl ProjectTemplate {
+    /// The hash the owner's acceptance is bound to: any change waits again.
+    pub fn content_hash(&self) -> String {
+        use sha2::{Digest, Sha256};
+        let text = serde_json::to_string(self).unwrap_or_default();
+        format!("{:x}", Sha256::digest(text.as_bytes()))
+    }
+}
+
+/// One typed placeholder of a project template.
+#[derive(Clone, Debug, Default, Deserialize, Serialize, PartialEq)]
+#[serde(deny_unknown_fields)]
+pub struct TemplateParam {
+    pub name: String,
+    /// identifier, identifiers, text, path or paths.
+    pub kind: String,
+    #[serde(default)]
+    pub required: bool,
+}
+
+/// Where a project template's run writes its test report, and its format.
+#[derive(Clone, Debug, Default, Deserialize, Serialize, PartialEq)]
+#[serde(deny_unknown_fields)]
+pub struct TemplateResults {
+    /// junit or trx.
+    pub format: String,
+    /// A path relative to the folder.
+    pub path: String,
 }
 
 /// A `[[tool]]` entry: a tool, why the project needs it and what it saves;
@@ -580,6 +639,12 @@ fn merge_providers(base: &mut Value, over: &Value) {
 
 fn validate(config: &TestsConfig) -> anyhow::Result<()> {
     anyhow::ensure!(config.version == 1, "The test configuration's version is 1, not {}", config.version);
+    anyhow::ensure!(config.templates.len() <= 50, "A project declares at most 50 templates");
+    let mut ids = std::collections::BTreeSet::new();
+    for template in &config.templates {
+        anyhow::ensure!(ids.insert(template.id.as_str()), "Two templates are named {}", template.id);
+        crate::state::teams::templates::check_project_template(template)?;
+    }
     for tool in &config.tools {
         anyhow::ensure!(!tool.name.trim().is_empty(), "Every [[tool]] has a name");
     }

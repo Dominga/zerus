@@ -2205,9 +2205,15 @@ void TestTeamsUiPlan::spawnedFromHasItsOwnLinkAndLegend()
     tasks.append(QJsonObject{{"id", 6}, {"phase", 2}, {"title", "Fix the login crash"}, {"assignee", "tester"},
                              {"status", "pending"}, {"origin", 1}});
     t["tasks"] = tasks;
-    script()["team status --json"] = QJsonObject{{"stdout", QString::fromUtf8(QJsonDocument(t).toJson(QJsonDocument::Compact))}};
-    TeamWorkspace workspace;
+    setTeam(t);
+    TeamController controller(&client);
+    TeamPanel panel(&controller);
+    TeamWorkspace workspace(&controller, &panel);
+    workspace.setLive(live);
     workspace.resize(1200, 800);
+    workspace.show();
+    controller.refresh();
+    panel.showTeam("team-1");
     workspace.showTeam("team-1");
     QTRY_VERIFY(phaseGraphOf(&workspace, 2));
     auto *view = phaseGraphOf(&workspace, 2);

@@ -1208,7 +1208,6 @@
   "default model": "модель по умолчанию",
   "directory": "каталог",
   "folder": "папка",
-  "from #%1": "из #%1",
   "from %1": "от %1",
   "from provider settings": "из настроек провайдера",
   "gets the cancel message.": "получает сообщение об отмене.",

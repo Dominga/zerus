@@ -1618,6 +1618,40 @@ class WorkflowSecurityTests(unittest.TestCase):
                                              (requested, enabled, result))
                         self.assertFalse(self.assemble_runs(workflow, "failure", "skipped", enabled, requested))
 
+    def test_stable_unsigned_overlap_keeps_the_full_gate_and_exact_version(self):
+        release = (ROOT / '.github/workflows/release.yml').read_text()
+        bundle = job(release, 'macos-unsigned')
+        self.assertEqual(field(bundle, 'needs'), 'version')
+        self.assertEqual(field(bundle, 'uses'), './.github/workflows/macos-bundle.yml')
+        self.assertNotIn('secrets.', bundle)
+        macos = job(release, 'macos')
+        self.assertEqual(field(macos, 'needs'), '[verify, macos-unsigned]')
+        self.assertIn("needs.verify.result == 'success'", field(macos, 'if'))
+        self.assertIn("needs.macos-unsigned.result == 'success'", field(macos, 'if'))
+        self.assertIn('reuse_unsigned: true', macos)
+        self.assertIn('unsigned_release: ${{ needs.macos-unsigned.outputs.release }}', macos)
+        signing = job((ROOT / '.github/workflows/macos-cask.yml').read_text(), 'sign')
+        code = inline_python(signing)
+        self.assertLess(signing.index('Bind the parallel candidate'), signing.index('Prepare a temporary signing keychain'))
+        with tempfile.TemporaryDirectory(prefix='zerus-macos-reuse-') as tmp:
+            root = Path(tmp); (root / 'VERSION').write_text('0.99.0'); (root / 'DEV_VERSION').write_text('0.100.0')
+            for channel, event, version, admitted in [
+                    ('stable', 'workflow_dispatch', '0.99.0', True),
+                    ('dev', 'push', '0.100.0-dev.123', True),
+                    ('stable', 'push', '0.99.0', False),
+                    ('stable', 'pull_request', '0.99.0', False),
+                    ('stable', 'workflow_dispatch', '0.98.0', False),
+                    ('nightly', 'workflow_dispatch', '0.99.0', False),
+                    ('dev', 'workflow_dispatch', '0.100.0-dev.123', False),
+                    ('dev', 'push', '0.100.0-dev.122', False)]:
+                with self.subTest(channel=channel, event=event, version=version), \
+                        patch.dict(os.environ, CHANNEL=channel, EVENT_NAME=event, RELEASE=version, RUN_NUMBER='123'), \
+                        patch('pathlib.Path', side_effect=lambda p: root / p):
+                    if admitted:
+                        exec(code, {})
+                    else:
+                        with self.assertRaises(AssertionError): exec(code, {})
+
     def test_release_parallel_source_and_install_jobs_cannot_bypass_sealing(self):
         workflow = (ROOT / '.github/workflows/release.yml').read_text()
         source = job(workflow, 'source')

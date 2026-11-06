@@ -145,8 +145,10 @@ class OverlapTests(unittest.TestCase):
         class Outputs(SimpleNamespace):
             def __getattr__(self, _): return ''  # GitHub's absent-output value.
         for result, covered, cancelled in product(('success', 'failure', 'skipped', 'cancelled'),
-                                                  (None, '', 'false', 'true', 'True'), (False, True)):
-            outputs = Outputs(**({} if covered is None else dict(covered=covered)))
+                                                  (None, '', 'false', 'true', 'True', 'TrUe', 'true '), (False, True)):
+            # GitHub string equality ignores case; the trusted helper itself
+            # emits lowercase Booleans. Normalize this tested comparison only.
+            outputs = Outputs(**({} if covered is None else dict(covered=covered.casefold())))
             context = dict(cancelled=lambda: cancelled,
                            needs=SimpleNamespace(overlap=SimpleNamespace(result=result, outputs=outputs)),
                            github=SimpleNamespace(event_name='workflow_run', repository='ufna/zerus',
@@ -156,7 +158,9 @@ class OverlapTests(unittest.TestCase):
                            vars=SimpleNamespace(DEV_UPDATES_ENABLED='true'))
             with self.subTest(observer=result, covered=covered, cancelled=cancelled):
                 actual = bool(eval(expression, {'__builtins__': {}}, context))
-                self.assertEqual(actual, not cancelled and not (result == 'success' and covered == 'true'))
+                self.assertEqual(actual, not cancelled and not (result == 'success' and covered is not None and covered.casefold() == 'true'))
+                if result == 'success' and covered in ('True', 'TrUe') and not cancelled:
+                    self.assertFalse(actual, 'GitHub compares the positive marker without case sensitivity')
             context['github'].event.workflow_run.head_repository.full_name = 'example/zerus'
             self.assertFalse(bool(eval(expression, {'__builtins__': {}}, context)))
 

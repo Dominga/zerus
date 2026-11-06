@@ -1,0 +1,13 @@
+[package]
+name = "zerus-lore"
+version = "0.1.0"
+edition = "2021"
+rust-version = "1.99"
+license = "MIT"
+description = "RustCodeLore: records, validation and the canonical JSONL store"
+publish = false
+
+[dependencies]
+anyhow = "1"
+fs2 = "0.4"
+serde_json = "1"

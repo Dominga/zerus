@@ -2206,10 +2206,11 @@ void TestTeamsUiPlan::spawnedFromHasItsOwnLinkAndLegend()
                              {"status", "pending"}, {"origin", 1}});
     t["tasks"] = tasks;
     setTeam(t);
+    HgsClient client(FakeCli::program(script()));
     TeamController controller(&client);
     TeamPanel panel(&controller);
     TeamWorkspace workspace(&controller, &panel);
-    workspace.setLive(live);
+    workspace.setLive(prototypeLive);
     workspace.resize(1200, 800);
     workspace.show();
     controller.refresh();

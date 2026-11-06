@@ -404,7 +404,9 @@ async function variableScrollStep() {
   const markdown = (index: number) => `## Response ${index}\n\n` + Array.from({ length: 3 + index % 9 }, (_, block) =>
     `Paragraph ${block}: a variable-height Markdown reply with **emphasis**, a [fixture link](https://example.org/) and enough words to wrap across the reading column.\n\n`
     + `1. First list entry with another line that wraps in the reading column.\n2. Second entry\n   - Nested entry ${index}\n\n`
-    + "```rust\nfn fixture() {\n    let value = 42;\n    println!(\"{value}\");\n}\n```\n\n").join("");
+    + "```rust\nfn fixture() {\n    let value = 42;\n    println!(\"{value}\");\n}\n```\n\n").join("")
+    // An unbroken run must wrap inside its card and still be a measured row (zerus-x98jz).
+    + (index % 5 === 0 ? `${"a3c056a9d".repeat(40)}\n\n` : "");
   const staticWheel = new URLSearchParams(location.search).get("phase4-static-wheel") === "1";
   const rolling = new URLSearchParams(location.search).get("phase4-provider-window") === "1";
   const shape = new URLSearchParams(location.search).get("phase4-static-shape") ?? "messages";
@@ -434,6 +436,13 @@ async function variableScrollStep() {
   }
   await until(() => document.querySelector(".act-col")?.getAttribute("style")?.includes("visible") === true && scroller.scrollHeight > 20000, 10000, "variable Markdown did not settle").catch(error => { throw new Error(`${error.message}: ${JSON.stringify({ hidden: document.hidden, focused: document.hasFocus(), innerWidth, innerHeight, height: scroller.scrollHeight, viewport: scroller.clientHeight, top: scroller.scrollTop, column: document.querySelector(".act-col")?.getAttribute("style"), mounted: scroller.querySelectorAll(".act-virtual-row").length })}`); });
   await sleep(500);
+  const cards = [...scroller.querySelectorAll<HTMLElement>(".act-msg")];
+  const unbroken = cards.filter((card) => card.textContent!.includes("a3c056a9d".repeat(40))).length;
+  const clipped = cards.filter((card) => card.scrollWidth > card.clientWidth + 1).length;
+  if (clipped || scroller.scrollWidth > scroller.clientWidth + 1 || (!rolling && !staticWheel && !unbroken)) {
+    throw new Error(`a long unbroken run left its card: ${JSON.stringify({ cards: cards.length, unbroken, clipped, scrollWidth: scroller.scrollWidth, clientWidth: scroller.clientWidth })}`);
+  }
+  log(`phase4-long-lines ${JSON.stringify({ cards: cards.length, unbroken, clipped })}`);
   const original = scroller.scrollTo;
   const originalBy = scroller.scrollBy;
   const originalIntoView = Element.prototype.scrollIntoView;

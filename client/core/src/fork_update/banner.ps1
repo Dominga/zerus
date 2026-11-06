@@ -1,6 +1,10 @@
 
+# -Quiet is for tests only; the updaters never pass it. No banner shows, and
+# every build starts without a window.
+if ($Quiet) { $PSDefaultParameterValues['Start-Process:WindowStyle'] = 'Hidden' }
 $banner = $null
 try {
+    if ($Quiet) { throw 'quiet' }
     Add-Type -AssemblyName System.Windows.Forms, System.Drawing
     try { Add-Type -Namespace ZerusUpdate -Name Dpi -MemberDefinition '[DllImport("user32.dll")] public static extern bool SetProcessDPIAware();'; [void][ZerusUpdate.Dpi]::SetProcessDPIAware() } catch { }
     $graphics = [System.Drawing.Graphics]::FromHwnd([IntPtr]::Zero); $scale = $graphics.DpiX / 96; $graphics.Dispose()

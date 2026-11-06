@@ -6,9 +6,10 @@ import { answeredWaiting, memberRow, showWaiting, teams, waiting } from "../../s
 import { teamsWaitingOlder } from "../../bridge";
 import { waitingNotices } from "../../store/waitingNotices";
 import { setDetailTab, setPage, setSelectedKey } from "../../store/ui";
+import { openSettings } from "../screens/settings/sections";
 import { ProposalCardList, useModel, windowPort } from "./ProposalCards";
 import {
-  BANNER_ROWS, WaitingAnswer, acceptanceSummary, approves, opensCard, toolOffer, waitingActionLabel, waitingAge,
+  BANNER_ROWS, WaitingAnswer, acceptanceSummary, approves, deferredRequest, opensCard, splitDeferred, toolOffer, waitingActionLabel, waitingAge,
   waitingCount, waitingFields, waitingKindIcon, waitingKindLabel, type QuestionChoice,
 } from "./decisions";
 import type { TeamWaitingItem } from "../../types";
@@ -59,7 +60,7 @@ function Answer(props: { item: TeamWaitingItem }) {
   return (
     <div class="team-waiting-answer" onClick={(event) => event.stopPropagation()}>
       <Show when={read().notice}><div class="team-waiting-notice" role="status">{read().notice}</div></Show>
-      <Show when={read().reading && !read().team && props.item.action !== "decide_tool"}><div class="dim">{tr("Reading the team…")}</div></Show>
+      <Show when={read().reading && !read().team && props.item.action !== "decide_tool" && props.item.action !== "answer_deferred"}><div class="dim">{tr("Reading the team…")}</div></Show>
       <Switch>
         <Match when={props.item.action === "decide_proposal" && read().proposals}>
           <ProposalCardList cards={read().proposals!} tick={tick} />
@@ -131,6 +132,41 @@ function Answer(props: { item: TeamWaitingItem }) {
             </div>
           </div>
         </Match>
+        <Match when={props.item.action === "answer_deferred"}>{(() => {
+          const request = deferredRequest(props.item);
+          return (
+            <div class="team-waiting-card">
+              <div class="team-waiting-line dim">{request.session}</div>
+              <code class="team-waiting-command">{request.text}</code>
+              <Show when={request.outcome}><div class="team-waiting-line dim">{request.outcome}</div></Show>
+              <div class="team-waiting-line">{tr("Your answer reaches the session as one message; nothing runs again by itself.")}</div>
+              <Show when={request.permission} fallback={
+                <>
+                  <For each={request.questions}>{(asked) => (
+                    <div class="team-waiting-question" role="group" aria-label={asked.question}>
+                      <div class="team-waiting-line"><b>{asked.question}</b></div>
+                      <div class="team-proposal-answers">
+                        <For each={asked.options}>{(option) => (
+                          <button class="btn small" disabled={off()} onClick={() => void read().answerDeferred("answer", option.label)}>{option.label}</button>
+                        )}</For>
+                      </div>
+                    </div>
+                  )}</For>
+                  <div class="team-proposal-answers">
+                    <input class="field" maxlength={4000} placeholder={tr("Your answer")} value={reason()} disabled={off()} onInput={(event) => setReason(event.currentTarget.value)} />
+                    <button class="btn small primary" disabled={off() || !reason().trim()} onClick={() => void read().answerDeferred("answer", reason())}>{tr("Answer")}</button>
+                  </div>
+                </>
+              }>
+                <div class="team-proposal-answers">
+                  <input class="field" maxlength={4000} placeholder={tr("A note for the session (optional)")} value={reason()} disabled={off()} onInput={(event) => setReason(event.currentTarget.value)} />
+                  <button class="btn small danger" disabled={off()} onClick={() => void read().answerDeferred("deny", reason())}>{tr("Deny")}</button>
+                  <button class="btn small primary" disabled={off()} onClick={() => void read().answerDeferred("allow", reason())}>{tr("Allow")}</button>
+                </div>
+              </Show>
+            </div>
+          );
+        })()}</Match>
         <Match when={props.item.action === "decide_tool"}>
           <div class="team-waiting-card">
             <div class="team-waiting-line"><b>{offer.head}</b></div>
@@ -190,6 +226,9 @@ function Row(props: { item: TeamWaitingItem; compact?: boolean }) {
         <Show when={item().team}>
           <button class="btn small ghost" onClick={(event) => { event.stopPropagation(); openTeam(item()); }}>{tr("Open team")}</button>
         </Show>
+        <Show when={item().action === "open_disk"}>
+          <button class="btn small" onClick={(event) => { event.stopPropagation(); openSettings("disk"); }}>{tr("Open Build folders")}</button>
+        </Show>
       </div>
       <Show when={open()}><Answer item={item()} /></Show>
     </div>
@@ -221,7 +260,16 @@ export function WaitingPage() {
       <Show when={failure()}><p class="team-waiting-error" role="alert">{failure()}</p></Show>
       <div class="team-waiting-list">
         <Show when={view()} fallback={<p class="dim team-empty">{tr("Reading what waits for you…")}</p>}>
-          <For each={view()!.items} fallback={<p class="dim team-empty">{tr("Nothing waits for you")}</p>}>{(item) => <Row item={item} />}</For>
+          <For each={splitDeferred(view()!.items).waiting} fallback={
+            <Show when={splitDeferred(view()!.items).deferred.length === 0}><p class="dim team-empty">{tr("Nothing waits for you")}</p></Show>
+          }>{(item) => <Row item={item} />}</For>
+          <Show when={splitDeferred(view()!.items).deferred.length > 0}>
+            <section class="team-waiting-deferred" aria-label={tr("Deferred")}>
+              <h2 class="team-waiting-group">{tr("Deferred")}</h2>
+              <p class="dim team-waiting-group-note">{tr("Zerus answered these safely while you were away; each session went on with other work.")}</p>
+              <For each={splitDeferred(view()!.items).deferred}>{(item) => <Row item={item} />}</For>
+            </section>
+          </Show>
           <Show when={view()!.more}>
             <button type="button" class="btn ghost small" disabled={loading()} onClick={() => void older()}>
               {tr("Show older")}

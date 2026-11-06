@@ -191,6 +191,7 @@ fn validate_settings(settings: &Settings) -> anyhow::Result<()> {
     // Section 9.2: the tree bounds are set on the master.
     // Task 95: 0 turns the stalled-lead notice off; a day is the longest wait.
     ensure!(settings.lead_stall_minutes <= 1440, "lead_stall_minutes is 0 (off) to 1440");
+    ensure!(settings.defer_minutes <= 1440, "defer_minutes is 0 (off) to 1440");
     ensure!((1..=8).contains(&settings.tree_depth), "A tree goes 1 to 8 levels below its master");
     ensure!((1..=200).contains(&settings.tree_sessions), "A tree runs 1 to 200 sessions");
     // U48: the task branch's name template gives a valid branch for any task.
@@ -1035,7 +1036,7 @@ fn settings(team: &mut Team, input: &Value, actor: &Actor, events: &mut Vec<Even
 /// C4: the settings that decide who approves, how far a team may grow and
 /// what runs without the owner stay the owner's; the lead changes the rest.
 /// Spec 6.1 lets the lead set resume_after_limits too.
-pub(crate) const OWNER_SETTINGS: [&str; 23] = [
+pub(crate) const OWNER_SETTINGS: [&str; 24] = [
     "approval",
     "phase_approval",
     "max_members",
@@ -1049,6 +1050,8 @@ pub(crate) const OWNER_SETTINGS: [&str; 23] = [
     "remind_owner_permission_minutes",
     // Task 95: nor the owner's word that the lead stalled.
     "lead_stall_minutes",
+    // Task 97: nor when Zerus answers a prompt safely for the absent owner.
+    "defer_minutes",
     "work_ahead",
     // U48: a land stage may push, and a branch per task moves members' folders.
     "land_allowed",

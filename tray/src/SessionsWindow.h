@@ -622,6 +622,9 @@ private:
     class ModelServerSettings *m_modelServerSettings=nullptr;
     class QPushButton *m_modelServersNav=nullptr;
     int m_modelServersPageIndex=-1,m_modelServerSettingsSection=-1;
+    // Task 108: Settings > Build folders.
+    class DiskSettings *m_diskSettings=nullptr;
+    int m_diskSettingsSection=-1;
     class QPushButton *m_teamWaitingNav=nullptr;
     int m_teamWaitingPageIndex=-1;
     // U55: the same list as banners above the session's chat and Activity and

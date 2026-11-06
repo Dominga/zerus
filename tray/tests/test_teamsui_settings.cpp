@@ -13,6 +13,9 @@
 #include "TeamSettingsDialog.h"
 #include "IronRulesEditor.h"
 #include "TeamWorkspace.h"
+#include "DiskSettings.h"
+#include <QSpinBox>
+#include <QTemporaryDir>
 
 // U53 (#618): the account picker of a composer. Profiles as `hgs account ls`
 // lists them: two signed-in Claude accounts, a signed-out one and a Codex one.
@@ -80,6 +83,7 @@ QString cardStep(QWidget *root, const QString &id)
 class TestTeamsUiSettings : public QObject, public TeamsUiFixture {
     Q_OBJECT
 private slots:
+    void buildFoldersListDryRunAndCleanAfterRemove();
     void initTestCase()
     {
         setUpCase();
@@ -1037,6 +1041,79 @@ void TestTeamsUiSettings::teamDialogsDrawTheThemeNotTheSystem()
             dialog->close();
         }
     }
+}
+
+// Task 108: Settings > Build folders lists what Zerus holds per drive, team and
+// folder, runs a dry run at once and Clean now only after Remove; Cancel
+// sends nothing.
+void TestTeamsUiSettings::buildFoldersListDryRunAndCleanAfterRemove()
+{
+    QTemporaryDir dir;
+    const QString hgs = dir.filePath("hgs");
+    QVERIFY(FakeCli::install(hgs, R"PY(#!/usr/bin/env python3
+import json,sys
+a=sys.argv[1:]
+body=json.load(sys.stdin) if a[:1]==['team'] else {}
+open(__file__+'.calls','a').write(json.dumps({'args':a,'input':body})+'\n')
+GB=1024**3
+if a[:2]==['team','disk'] and body.get('action')=='list':
+ print(json.dumps({'policy':{'enabled':True,'unused_days':7,'free_gb':50,'free_percent':10},
+  'drives':[{'drive':'D:','free':12*GB,'total':900*GB,'threshold':90*GB,'low':True}],'held':31*GB,
+  'teams':[{'team':'t1','team_name':'Checkout','bytes':31*GB,'folders':[
+   {'path':'D:/zerus-build/core','kind':'cargo_target','origin':'hgs_run','owned':True,'owned_reason':'a Zerus run created it','state':'kept','size':30*GB,'last_used':1,'due':'unused for 9 days','exists':True},
+   {'path':'D:/repo/target','kind':'cargo_target','origin':'hgs_run','owned':False,'owned_reason':'it existed before Zerus used it','state':'kept','size':GB,'last_used':1,'exists':True}]}]}))
+elif a[:2]==['team','disk'] and body.get('action')=='clean':
+ print(json.dumps({'dry_run':body.get('dry_run'),'decisions':[{'path':'D:/zerus-build/core','team_name':'Checkout','reason':'unused for 9 days','action':'remove','detail':'','bytes':30*GB}]}))
+else:
+ print(json.dumps({'status':'ok'}))
+)PY"));
+    HgsClient client(FakeCli::program(hgs));
+    TeamController controller(&client);
+    DiskSettings page(&controller);
+    QStringList asked;
+    bool answer = false;
+    page.confirm = [&](const QString &name, const QString &, const QString &, const QString &action) { asked << name + "|" + action; return answer; };
+    page.resize(900, 700); page.show();
+    QTRY_VERIFY(page.findChild<QLabel *>("diskDrive"));
+    QCOMPARE(page.findChild<QLabel *>("diskDrive")->text(), QStringLiteral("D: 12.0 GB free of 900.0 GB, keeps 90.0 GB; low on space"));
+    QStringList states;
+    for (auto *state : page.findChildren<QLabel *>("diskFolderState")) states << state->text();
+    QCOMPARE(states, (QStringList{"The policy removes it: unused for 9 days", "Kept: not Zerus's (it existed before Zerus used it)"}));
+    QCOMPARE(page.findChild<QSpinBox *>("diskPolicyDays")->value(), 7);
+    const auto calls = [&](const QString &action) {
+        QList<QJsonObject> found;
+        QFile file(hgs + ".calls");
+        if (file.open(QIODevice::ReadOnly))
+            for (const auto &line : file.readAll().split('\n')) {
+                const auto input = QJsonDocument::fromJson(line).object()["input"].toObject();
+                if (input["action"].toString() == action) found << input;
+            }
+        return found;
+    };
+    // A dry run goes at once and removes nothing.
+    page.findChild<QPushButton *>("diskDryRun")->click();
+    QTRY_COMPARE(calls("clean").size(), 1);
+    QCOMPARE(calls("clean")[0]["dry_run"].toBool(), true);
+    QTRY_COMPARE(page.findChild<QLabel *>("diskSummary")->text(), QStringLiteral("Would free 30.0 GB in 1 folders"));
+    for (auto *label : page.findChildren<QLabel *>()) QVERIFY2(!label->text().contains(QStringLiteral(" · ")), qPrintable(label->text()));
+    // Clean now: Cancel sends nothing; Remove sends it as the owner.
+    page.findChild<QPushButton *>("diskCleanNow")->click();
+    QCOMPARE(asked, QStringList{"diskCleanConfirm|Remove"});
+    QTest::qWait(200);
+    QCOMPARE(calls("clean").size(), 1);
+    answer = true;
+    QTRY_VERIFY(page.findChild<QPushButton *>("diskCleanNow")->isEnabled());
+    page.findChild<QPushButton *>("diskCleanNow")->click();
+    QTRY_COMPARE(calls("clean").size(), 2);
+    QCOMPARE(calls("clean")[1]["dry_run"].toBool(), false);
+    QCOMPARE(calls("clean")[1]["by"].toString(), QStringLiteral("human"));
+    QCOMPARE(calls("clean")[1]["scope"].toString(), QStringLiteral("policy"));
+    // The policy as the owner set it.
+    QTRY_VERIFY(page.findChild<QPushButton *>("diskPolicySave")->isEnabled());
+    page.findChild<QSpinBox *>("diskPolicyDays")->setValue(3);
+    page.findChild<QPushButton *>("diskPolicySave")->click();
+    QTRY_COMPARE(calls("policy").size(), 1);
+    QCOMPARE(calls("policy")[0]["policy"].toObject()["unused_days"].toInt(), 3);
 }
 
 QTEST_MAIN(TestTeamsUiSettings)

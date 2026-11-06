@@ -2128,6 +2128,28 @@ one inbox item and `member_crashed`; pausing the team stops restarts, a member
 the team paused is never restarted, and a launch that fails records
 `restart_failed`.
 
+### The team store never makes a reader wait
+
+The teams live in one SQLite file, `teams/teams.sqlite3` under the state root.
+Since task 105 it runs in WAL mode: a reader (`hgs team list`, status, the
+desktop's polls, the watch) reads the last committed state while a writer works,
+and a writer never waits for readers. Before, in the rollback-journal mode, a
+writer's commit waited for the readers and new readers waited behind it, so a
+list could fail with "database is locked" after its 10 s wait; measured on a
+copy of a live store, a write of a 3.7 MB team waited up to 17.5 s.
+
+The first write open of an older store switches it (it waits 2 s for the other
+connections; a busy store is switched by a later open). The `-wal` and `-shm`
+files stay beside the store when the last connection closes, so a read-only
+sandboxed reader can still open it; on Windows they inherit the folder's Low
+integrity label like every file there. The log is checkpointed every 4000
+pages and kept at 64 MB at most. Where SQLite refuses WAL (a store on a network
+folder) the store stays in the rollback-journal mode. An older hgs reads a WAL
+store; its write open switches it back to the rollback journal when no other
+connection has it open, and this hgs's next write open switches it again.
+`hgs team list` reads every record before it parses any, so a read never holds
+the store while megabytes of JSON parse.
+
 ### A stalled lead tells the owner
 
 When the lead's decisions (a member's report, question or permission) have
@@ -2160,6 +2182,57 @@ round starts at most once an hour while the lead stays stalled. The record
 clears as soon as the lead works again, the decisions are taken or fall back
 under the threshold, the team stops running, or the setting is 0. The feed
 records `lead_stalled` (raised or a new round) and `lead_stall_cleared`.
+
+### The owner's question queue
+
+A native permission prompt or question that nobody answers does not freeze a
+team while the owner is away. When a request of a team's lead or member has
+waited `Settings.defer_minutes` (10 by default, 0 turns it off, at most 1440;
+only the owner changes it), the dispatcher answers it with the safe choice
+and queues it for the owner:
+
+- a permission gets its one-time Deny, never Allow and never a persistent
+  rule; one without a one-time Deny is left on the screen;
+- an agent's own question (Claude's AskUserQuestion, a Codex or Kimi question)
+  gets its recommended option (an option marked recommended, or whose label
+  says "(Recommended)"), else its first; an optional Codex question is skipped;
+- folder trust, updates, resumes, permission modes and a request only the
+  Terminal takes are queued but never answered.
+
+The answer goes through `hgs answer` with the exact run, conversation,
+question id and hash. It is reserved first, in the member's `deferred` list and
+in the queue (`teams/owner-queue.json` under the state root, at most 500
+entries, answered ones kept seven days), and neither reservation is undone: an
+answer whose delivery is unknown is recorded as `uncertain` and never sent
+again. After an answer that arrived, the session gets one guarded message:
+"The owner is away; this request is queued for them. Continue with work that
+does not need it, or do it yourself." The member's record keeps the answer
+`by: "owner queue"` and the feed records `request_deferred`.
+
+The queue's waiting entries are Waiting for you > Deferred: kind `deferred`,
+id `deferred/<id>`, action `answer_deferred`, with the request's exact text,
+its session, team and member, when it was asked and what Zerus did; the
+desktops notify each once. On the phone, a team's entries are
+`mobile_attention` items `{"question_id":"owner-deferred:<id>","question_hash",
+"kind":"owner_deferred","team","team_name","request","since"}` on its lead's
+`hgs ls --json` row (members' notifications are muted), an ordinary session's
+on its own row; the mobile connector keeps them beside its question cards.
+
+The owner answers with `{"id","decision":"allow"|"deny"|"answer","text",
+"by":"human"} | hgs team answer-deferred --json` (the desktops send the same).
+Zerus never replays the tool: the session gets one guarded message, "The owner
+now allows <request>: you may run it again.", "The owner denies <request>: do
+not run it; ...", or "The owner answers your question (<question>): <text>".
+A message refused before it reached the session may be answered again; one
+sent, or whose delivery is unknown, is never sent again. `{"limit":N} | hgs
+team deferred --json` lists the entries, newest first, and the watched
+sessions.
+
+An ordinary session is never deferred unless the owner turns it on:
+`{"session":NAME,"host":ALIAS,"minutes":N,"by":"human"} | hgs team
+defer-session --json` (0 turns it off; at most 100 sessions). The team worker
+then reads such a session while it asks, at most every 20 seconds, and keeps
+running for it. A session of a team follows its team's setting.
 
 ### The profile of the work: losses, spans and unknown
 
@@ -2659,6 +2732,37 @@ shown (`hgs terminal <session> --json` with `"action":"draft"`, then
 `"action":"submit_draft"` and its `draft_hash`; a replayed request ID returns
 its receipt and presses nothing). Your own message stays in its field. HGS
 never types into, edits or clears the draft.
+
+A delivery of Zerus's own can leave its paste behind: `hgs send` pasted the
+message, then its Enter did not go (an idle compaction, a banner or a dialog
+came first), so the composer shows the paste, for example
+`[Pasted text #17 +62 lines]`, and refuses every later message. Right after
+each paste `hgs send` reads the composer's draft; when its Enter fails, the
+receipt keeps `pasted_draft_hash` and the session record `unsent_paste`
+(`request_id`, `draft_hash`, `run_id`, `conversation_id`, `at`). The record
+forgets it when a later message finds the composer empty.
+`{"request_id","action":"submit_own_paste","expected_run_id",
+"expected_conversation_id"} | hgs terminal <session> --json` presses Enter only
+while the composer holds exactly that paste in the same run and conversation
+(its draft hash binds run, conversation, pane, process and draft text). It
+forgets the paste before the Enter goes, so it never presses twice, and a
+draft the person typed or changed never matches ("The Terminal draft is not a
+paste Zerus delivered; nothing was sent"). A finished paste marks its own
+delivery's receipt `submitted` with `finished_by`.
+
+In a team, a hand-out (or a stage hand-out) refused for a draft, dialog or
+unrecognized prompt first asks `submit_own_paste`. When the paste was Zerus's,
+it is finished (`own_paste_finished` in the feed) and the next tick hands the
+task out again; an uncertain Enter is never repeated (`own_paste_uncertain`).
+Anything else is counted in `member.input_block` (`since`, `at`, `count`,
+`reason`, `screen`, `raised`). From the third such refusal the lead's inbox and
+the owner's attention list hold one `input_blocked` item with the Terminal's
+last twelve lines (colors removed) and what to do: open the member's Terminal
+and submit or clear the draft, close any dialog and return to an empty prompt.
+Waiting for you lists it with action `open_terminal`; the member cards in Qt
+and Zerus Next show "Terminal refused N hand-outs" with hgs's reason. Zerus
+never submits that draft. The next delivered hand-out ends the episode
+(`input_unblocked`).
 Uncertain interruption is not repeated. Stop notices name the original session
 and computer even if you navigate away. If the turn has already ended or is
 waiting for input, no interruption is sent and no action is needed; Zerus refreshes
@@ -5076,6 +5180,60 @@ another command. Codex completion beyond the normal 8 MiB transcript window can
 be read incrementally up to 16 MiB per poll and cached privately. Completion needs
 the exact call ID in the verified conversation; absence of an event is not success.
 
+## Build folder cleanup
+
+Zerus removes the build folders it creates, automatically and only its own
+(task 108, owner 2026-11-06: a team filled two drives with about 50 GB of
+scratch cargo targets). hgs records each build folder a Zerus build uses in a
+bounded registry, `build-dirs.json` under the state root (at most 2000
+entries), with its team, task, member or session, a size estimate and its last
+use:
+
+- `hgs run`: cargo's `--target-dir` and `CARGO_TARGET_DIR`, and CMake's `-B`
+  and `--build` folders the command names (relative to its `cwd`; a folder
+  named through a variable is not guessed);
+- `hgs team run`: the template's `target` (beside each `manifest`) or
+  `.ci-build/gui`, recorded by the worker when it runs it;
+- the cargo targets and `.ci-build/*` CMake builds inside the member worktrees
+  and clones Zerus created (scanned at most hourly, three levels deep), and the
+  folders the last 200 `hgs run` records name.
+
+A recorded folder is Zerus's when a Zerus run created it, when it is inside a
+member folder Zerus created, or when an `hgs run` was told to use it outside
+any repository. A folder that existed inside a repository before Zerus used it
+is the person's: it is listed, never removed. Before each removal Zerus checks
+again that the folder is still a build output (a cargo target's
+`CACHEDIR.TAG`, or `CMakeCache.txt`, and no `.git`, `Cargo.toml`,
+`CMakeLists.txt` or `package.json`), that it is not a drive root, the home, the
+state folder or one of their parents, and that nothing uses it: no running
+`hgs run` names it or runs in it, no team run runs in its folder, cargo does not
+hold its `.cargo-lock`, and no file in it (two levels deep) was written in the
+last ten minutes. It is then renamed aside (Windows refuses that while a file
+in it is open; then nothing was removed) and deleted. A delete that fails after
+the rename leaves the folder in `review`: it is never tried again by itself.
+
+The policy is per computer, on by default: remove a recorded folder of Zerus's
+when its team is finished, stopped, archived or gone or its member removed,
+when it was unused for `unused_days` (7; its newest write counts as use), or
+oldest first while its drive's free space is under the larger of `free_gb`
+(50) and `free_percent` (10) of the drive. The team worker runs the pass on a
+thread of its own at most every ten minutes (measuring a few folders' sizes,
+each scan bounded to 200,000 entries or 3 s). A drive under its threshold is a
+Waiting-for-you item `disk/<drive>` (kind `disk_low`, action `open_disk`) with
+what Zerus's folders there hold.
+
+`hgs team disk --json` serves the Disk view and its actions:
+`{"action":"list","refresh":true?}` (the policy, the drives, the folders by
+team, what Zerus holds), `{"action":"clean","scope":"policy"|"all",
+"dry_run":true|false,"paths":[...],"by":"human"}` (a dry run decides and
+removes nothing; Clean now needs the owner and removes only folders of
+Zerus's that are not in use), `{"action":"policy","policy":{"enabled",
+"unused_days","free_gb","free_percent"},"by":"human"}` and
+`{"action":"forget","path","by":"human"}` for a folder in review the owner dealt
+with. Settings > Build folders in Qt and Zerus Next shows the policy, the
+drives, the folders per team with their state, a dry run and Clean now (with a
+confirmation, Cancel focused).
+
 ## Terminal, SSH and clipboard
 
 The built-in Terminal is a real PTY client attached to an existing tmux session,
@@ -6558,7 +6716,8 @@ client reads a team again with `hgs team status`, `inbox` and `events` when its
 revision moved instead of polling them. At most 1000 heads go out, the most
 recently changed first; `truncated` says more exist. A worker thread reads them
 with one indexed query and never writes. It reads again when a stat of the
-store or its rollback journal changes and at least every 30 s, at most once a
+store, its rollback journal or its write-ahead log changes and at least every
+30 s, at most once a
 second. The first rows go out as a paged `snapshot`, a later change as one
 `delta` of the changed rows and removed keys. A delta the client is too far
 behind to take becomes `gap` (`overflow`) and a fresh snapshot once it caught

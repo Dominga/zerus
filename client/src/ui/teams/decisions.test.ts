@@ -1,7 +1,7 @@
 import { describe, expect, it } from "vitest";
 import { decidedWaiting,
   ProposalCards, WaitingAnswer, WaitingNotices, acceptanceSummary, act, noticeToken, proposalCards, proposalKindLabel, toolOffer,
-  waitingActionLabel, waitingAge, waitingCount, waitingKindIcon, waitingKindLabel, approves, opensCard, type DecisionPort, type QuestionChoice,
+  waitingActionLabel, waitingAge, waitingCount, waitingKindIcon, waitingKindLabel, deferredRequest, splitDeferred, approves, opensCard, type DecisionPort, type QuestionChoice,
 } from "./decisions";
 import { choiceButtons, confirmButtons, createConfirmer } from "../../store/teamConfirm";
 import type { TeamAction, TeamCall, TeamConfirmation, TeamMemberView, TeamProposalView, TeamTaskView, TeamView, TeamWaitingItem } from "../../types";
@@ -403,6 +403,34 @@ describe("Waiting for you", () => {
     expect(f.sent).toHaveLength(1);
     expect(f.sent[0].action).toEqual({ kind: "add_to_phase", phase: 1, confirm: "add-1", decline: true });
     expect(answered).toEqual(["team-1/owner_word_asked/addition-add-1"]);
+  });
+
+  it("answers a deferred request with one message from its own card (task 97)", async () => {
+    const permission = item("ab12cd34ef56ab78", "deferred", "answer_deferred", "Deferred permission of Backend: Bash: cargo test --locked", NOW - 60,
+      { deferred: "ab12cd34ef56ab78", request: "permission", text: "Bash: cargo test --locked", session: "codex/x/dev",
+        outcome: "Zerus denied it for now", questions: [] }, "team-1", "Live");
+    expect(waitingKindLabel(permission)).toBe("Deferred");
+    expect(waitingKindIcon("deferred")).toBe("clock");
+    expect(opensCard(permission.action)).toBe(true);
+    expect(deferredRequest(permission)).toMatchObject({ id: "ab12cd34ef56ab78", permission: true, text: "Bash: cargo test --locked", outcome: "Zerus denied it for now" });
+    const f = fake(answerTeam({}));
+    const row = new WaitingAnswer(permission, f.port, "", () => {}, () => {});
+    await row.open();
+    expect(f.sent).toEqual([]);
+    await row.answerDeferred("allow");
+    expect(f.sent[0].action).toEqual({ kind: "answer_deferred", id: "ab12cd34ef56ab78", decision: "allow" });
+    // A question takes words; an empty answer sends nothing.
+    const question = item("cd34", "deferred", "answer_deferred", "Deferred question of solo", NOW - 30,
+      { deferred: "cd34", request: "question", text: "Which storage?", questions: [{ id: "q", question: "Which storage?", options: [{ id: "a", label: "SQLite" }] }] }, "", "claude/p/solo");
+    expect(deferredRequest(question).questions[0].options[0].label).toBe("SQLite");
+    const g = fake(answerTeam({}));
+    const asked = new WaitingAnswer(question, g.port, "", () => {}, () => {});
+    expect(await asked.answerDeferred("answer", "  ")).toBeUndefined();
+    await asked.answerDeferred("answer", "SQLite");
+    expect(g.sent.map((sent) => sent.action)).toEqual([{ kind: "answer_deferred", id: "cd34", decision: "answer", text: "SQLite" }]);
+    // Waiting for you lists them under Deferred.
+    const split = splitDeferred([question, item("1", "phase_draft", "approve_phase", "Phase 1", NOW)]);
+    expect([split.waiting.length, split.deferred.map((found) => found.id)]).toEqual([1, [question.id]]);
   });
 
   it("names a stalled lead and only opens its team (task 95)", () => {

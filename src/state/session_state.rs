@@ -45,6 +45,11 @@ pub(super) fn decorate(sessions: &mut [Value]) {
     let builds = super::builds::running(at);
     let observed = observed_ttls();
     let mut accounts = HashMap::new();
+    // Task 97: the owner queue's alerts for the phone, a team's on its lead's
+    // row; read once per listing.
+    let leads: Vec<(String, String, String)> =
+        waiting.iter().filter(|w| w.lead).map(|w| (w.team.clone(), String::new(), w.name.clone())).collect();
+    let deferred = teams::owner_queue::mobile_items(&leads);
     for session in sessions.iter_mut() {
         let team = waiting.iter().find(|w| {
             w.name == text(session, "name")
@@ -56,6 +61,10 @@ pub(super) fn decorate(sessions: &mut [Value]) {
         let ttl = accounts.entry(key).or_insert_with(|| cache_ttl(session, &observed)).clone();
         apply(session, ttl, team, at);
         if let Some(alert) = team.and_then(|team| team.alert.as_ref()) {
+            add_alert(session, alert);
+        }
+        let name = text(session, "name").to_owned();
+        for (_, _, alert) in deferred.iter().filter(|(host, row, _)| host.is_empty() && *row == name) {
             add_alert(session, alert);
         }
     }

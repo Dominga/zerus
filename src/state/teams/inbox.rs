@@ -552,6 +552,25 @@ fn all_items(team: &Team) -> Vec<Item> {
             detail: "The full run is the owner's call: ask the owner with this time, then record it with full-done once it ran.".into(),
         });
     }
+    // Task 98: a member whose composer holds a draft or dialog Zerus did not
+    // leave refuses every hand-out; after a few refusals the lead hears it once,
+    // with the screen's last lines and what to do.
+    for member in team.members.iter().filter(|member| member.input_block.as_ref().is_some_and(|block| block.raised)).filter(|_| active) {
+        let block = member.input_block.as_ref().unwrap();
+        let name = team.name_of(&member.id);
+        let terminal = member.session.as_ref().map(|session| session.name.clone()).unwrap_or_default();
+        items.push(Item {
+            subagents: Value::Null,
+            kind: "input_blocked",
+            key: format!("input_blocked:{}:{}", member.id, block.since),
+            task: None,
+            member: name.clone(),
+            since: block.since,
+            summary: summary(&format!("{name} refused {} hand-outs: {}", block.count, block.reason)),
+            command: String::new(),
+            detail: input_block_action(&terminal, &block.screen),
+        });
+    }
     // U52: a member whose session crashed too often this hour stays stopped
     // until the owner or the lead starts it again.
     for member in team.members.iter().filter(|member| member.id != team.lead && member.crash_told).filter(|_| active) {
@@ -1283,6 +1302,20 @@ fn phase_name(phase: &Phase) -> String {
     }
 }
 
+/// Task 98: what the lead or the owner does about a blocked composer, with
+/// the screen's last lines.
+pub(crate) fn input_block_action(terminal: &str, screen: &[String]) -> String {
+    let mut text = format!(
+        "Open {terminal}'s Terminal. Zerus never submits a draft it did not paste: submit it if it is a message the member \
+         should get, or clear it (Esc, or Ctrl+U), close any dialog and return to an empty prompt. The next hand-out then goes."
+    );
+    if !screen.is_empty() {
+        text += "\nLast lines:\n";
+        text += &screen.join("\n");
+    }
+    text
+}
+
 pub(crate) fn attention(team: &Team, now: f64) -> Vec<Value> {
     if !matches!(team.status, TeamStatus::Running | TeamStatus::Paused) {
         return Vec::new();
@@ -1381,6 +1414,20 @@ pub(crate) fn attention(team: &Team, now: f64) -> Vec<Value> {
                         lead.session.as_ref().map(|session| session.name.as_str()).unwrap_or_default(),
                         if team.settings.restart_crashed { "" } else { " (or turn on restart_crashed)" })}));
             }
+        }
+    }
+    // Task 98: a composer that keeps refusing hand-outs waits for the owner
+    // too: only a person decides what to do with a draft Zerus did not paste.
+    if team.status == TeamStatus::Running {
+        for member in &team.members {
+            let Some(block) = member.input_block.as_ref().filter(|block| block.raised) else { continue };
+            let terminal = member.session.as_ref().map(|session| session.name.clone()).unwrap_or_default();
+            out.push(json!({"kind":"input_blocked","member":team.role_of(&member.id),"member_id":member.id,"since":block.since,
+                "minutes":((now - block.since).max(0.0) / 60.0).round() as u64,"count":block.count,"reason":block.reason,
+                "screen":block.screen,"session":terminal,
+                "summary":format!("{}'s Terminal refused {} hand-outs: a draft or dialog Zerus did not leave. Open it and clear or submit it",
+                    team.name_of(&member.id), block.count),
+                "command":input_block_action(&terminal, &block.screen)}));
         }
     }
     // A request only the member's Terminal takes waits for the owner at once:

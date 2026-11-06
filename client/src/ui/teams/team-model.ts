@@ -82,6 +82,11 @@ export function memberStatus(team: TeamView, member: TeamMemberView, live: Membe
   if (current?.attempt_state === "unconfirmed") return make("unconfirmed", tr("Delivery unconfirmed"), tr("Unconfirmed"), "danger", task, true);
   if (member.phase === "no_report") return make("no_report", tr("No report"), tr("No report"), "warn", task, true, "message-square");
   if (member.phase === "asking") return make("asking", tr("Waiting for your answer"), tr("Answer"), "warn", task, true);
+  // Task 98: its Terminal refuses hand-outs (a draft, a dialog or an unknown prompt).
+  if ((member.input_refusals ?? 0) > 0) {
+    const reason = member.input_reason || tr("a draft or dialog");
+    return make("input_blocked", tr("Terminal refused %1 hand-outs: %2", member.input_refusals!, reason), tr("Blocked"), "warn", task, true, "terminal");
+  }
   if (member.stuck) {
     const minutes = member.minutes_without_progress;
     return make("stuck", minutes > 0 ? tr("No progress for %1 min", minutes) : tr("Stuck"), tr("Stuck"), "warn", task, true, "hourglass");

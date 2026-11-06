@@ -118,6 +118,12 @@ pub(crate) fn layers(tasks: &[Task]) -> BTreeMap<u32, u32> {
                 }
                 d = d.max(depth(tasks, ids, back, memo, dep.task) + 1);
             }
+            // Task #60: a follow-up sits at least in its origin's layer, as if
+            // it had the origin's dependencies, without depending on the
+            // origin. The memo's 0 for a task in progress ends an origin loop.
+            if let Some(origin) = task.origin.filter(|origin| *origin != id && ids.contains(origin)) {
+                d = d.max(depth(tasks, ids, back, memo, origin));
+            }
         }
         memo.insert(id, d);
         d
@@ -912,6 +918,17 @@ pub(crate) fn validate(team: &Team, offline: &BTreeSet<String>) -> Validation {
                     Some(task.id),
                     None,
                     format!("#{} {}: depends on missing #{}", task.id, task.title, dep.task),
+                ));
+            }
+        }
+        // Task #60: a follow-up's origin is a task of this team.
+        if let Some(origin) = task.origin {
+            if origin == task.id || team.task(origin).is_none() {
+                found.errors.push(finding(
+                    "origin",
+                    Some(task.id),
+                    None,
+                    format!("#{} {}: its origin #{} is not another task of the team", task.id, task.title, origin),
                 ));
             }
         }

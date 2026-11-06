@@ -319,6 +319,9 @@ struct Task {
     Hold hold;
     // U59: the free phase's integration-and-build task, a lead task like any.
     bool phaseBuild = false;
+    // Task #60: the task this follow-up was spawned from (0 for none); it
+    // never blocks, unlike deps.
+    int origin = 0;
     // C3: why the task waits and what unblocks it.
     struct Wait { QString for_, unblock; QStringList on; bool known = false; };
     Wait wait;

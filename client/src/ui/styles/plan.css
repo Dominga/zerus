@@ -128,6 +128,9 @@
 .pt-model { flex: none; max-width: 72px; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; color: var(--z-color-dim); }
 .pt-meta { color: var(--z-color-muted); }
 .pt-deps { margin-left: auto; color: var(--z-color-warn); white-space: nowrap; }
+/* Task #60: a follow-up's "spawned from" link; it never blocks, so it is muted. */
+.pt-origin { color: var(--z-color-text-3, inherit); white-space: nowrap; font-style: italic; }
+.pt-chip-origin { cursor: pointer; }
 .pt-waits { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
 .pt-muted { color: var(--z-color-dim); }
 

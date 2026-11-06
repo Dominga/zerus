@@ -379,6 +379,8 @@ fn parse_task(value: &Value) -> anyhow::Result<Task> {
     let mut seen = BTreeSet::new();
     task.deps.retain(|dep| seen.insert(dep.task));
     ensure!(task.deps.iter().all(|dep| dep.task != task.id), "{who}: field \"deps\": the task depends on itself");
+    // Task #60: a follow-up names the task it came from, never itself.
+    ensure!(task.origin.is_none_or(|origin| origin != task.id && origin > 0), "{who}: field \"origin\": a follow-up names another task as its origin");
     // U27: the lane the task is drawn in; its number and label are bounded and
     // it changes nothing about hand-out.
     if let Some(lane) = task.lane.as_mut() {
@@ -1247,7 +1249,7 @@ fn extend(team: &mut Team, input: &Value, actor: &Actor, offline: &BTreeSet<Stri
                 rejection.reworked_at = Some(now());
             }
         }
-        events.push(Event::new("phase_edited", json!({"by":by,"phase":n,"diff":{"added":ids}})));
+        events.push(Event::new("phase_edited", with_origins(json!({"by":by,"phase":n,"diff":{"added":ids}}), team, &ids)));
         return Ok(json!({"status":"edited","phase":n,"tasks":ids,"validation":validation,"renumbered":renumbered_json(&renumbered)}));
     }
     if let Some(n) = free_open {
@@ -1255,7 +1257,7 @@ fn extend(team: &mut Team, input: &Value, actor: &Actor, offline: &BTreeSet<Stri
         if let Some(at) = team.phases.iter().position(|phase| phase.n == n) {
             team.phases[at].tasks.extend(ids.iter().copied());
         }
-        events.push(Event::new("phase_edited", json!({"by":by,"phase":n,"diff":{"added":ids},"free":true})));
+        events.push(Event::new("phase_edited", with_origins(json!({"by":by,"phase":n,"diff":{"added":ids},"free":true}), team, &ids)));
         return Ok(json!({"status":"added","phase":n,"tasks":ids,"validation":validation,"renumbered":renumbered_json(&renumbered)}));
     }
     team.phases.push(Phase {
@@ -1286,7 +1288,7 @@ fn extend(team: &mut Team, input: &Value, actor: &Actor, offline: &BTreeSet<Stri
     });
     events.push(Event::new(
         "phase_added",
-        json!({"by":by,"phase":n,"title":title,"tasks":ids.len(),"barrier":barrier,"approval":approval}),
+        with_origins(json!({"by":by,"phase":n,"title":title,"tasks":ids.len(),"barrier":barrier,"approval":approval}), team, &ids),
     ));
     Ok(json!({"status":"added","phase":n,"tasks":ids,"approval":approval,"validation":validation,"renumbered":renumbered_json(&renumbered)}))
 }
@@ -1477,9 +1479,35 @@ fn renumber_new_tasks(team: &Team, tasks: &mut [Task]) -> anyhow::Result<BTreeMa
                 ),
             }
         }
+        // Task #60: an origin among the new tasks moves with them (#754); any
+        // other names a task of the plan.
+        if let Some(origin) = task.origin {
+            match numbers.get(&origin) {
+                Some(number) => task.origin = Some(*number),
+                None => ensure!(
+                    team.task(origin).is_some(),
+                    "Task #{} names #{} as its origin, which is neither in the plan nor among the new tasks",
+                    task.id,
+                    origin
+                ),
+            }
+        }
         task.id = numbers[&task.id];
     }
     Ok(numbers.into_iter().filter(|(old, new)| old != new).collect())
+}
+
+/// Task #60: the feed's record of the added tasks' origins ({"12": 7}), kept
+/// in the history beside the event; an event with no follow-up is unchanged.
+fn with_origins(mut payload: Value, team: &Team, ids: &[u32]) -> Value {
+    let origins: serde_json::Map<String, Value> = ids
+        .iter()
+        .filter_map(|id| team.task(*id).and_then(|task| task.origin).map(|origin| (id.to_string(), json!(origin))))
+        .collect();
+    if !origins.is_empty() {
+        payload["origins"] = Value::Object(origins);
+    }
+    payload
 }
 
 /// The changed numbers as the receipts name them: {"747": 760}.
@@ -1598,8 +1626,12 @@ fn add_to_phase(team: &mut Team, input: &Value, actor: &Actor, offline: &BTreeSe
     let health = plan::phase_health(team, n);
     events.push(Event::new(
         "phase_tasks_added",
-        json!({"by":by,"phase":n,"tasks":ids,"request":pending.request,"confirm":confirmation,
-            "critical_path":health.critical_path,"parallelism":health.parallelism}),
+        with_origins(
+            json!({"by":by,"phase":n,"tasks":ids,"request":pending.request,"confirm":confirmation,
+                "critical_path":health.critical_path,"parallelism":health.parallelism}),
+            team,
+            &ids,
+        ),
     ));
     Ok(json!({"status":"added","phase":n,"tasks":ids,"validation":validation,"renumbered":renumbered_json(&renumbered)}))
 }
@@ -1723,9 +1755,13 @@ fn decide_phase(team: &mut Team, input: &Value, actor: &Actor, approve: bool, of
             .filter_map(|id| team.task(*id).map(|task| json!({"id":id,"title":task.title})))
             .collect();
         team.tasks.retain(|task| !wanted.contains(&task.id));
-        // A surviving task cannot depend on a discarded one (F285).
+        // A surviving task cannot depend on a discarded one (F285), nor keep
+        // it as its origin (task #60).
         for task in &mut team.tasks {
             task.deps.retain(|dep| !wanted.contains(&dep.task));
+            if task.origin.is_some_and(|origin| wanted.contains(&origin)) {
+                task.origin = None;
+            }
         }
         events.push(Event::new(
             "phase_discarded",
@@ -2640,6 +2676,10 @@ fn renumber_drafts(team: &mut Team) -> Value {
                 dep.task = *new;
             }
         }
+        // Task #60: the follow-up's link follows its origin's new number.
+        if let Some(new) = task.origin.and_then(|origin| map.get(&origin)) {
+            task.origin = Some(*new);
+        }
     }
     // The phases stay in their display order; the renumbered drafts are the
     // last ones, so their new numbers follow it too.
@@ -2816,6 +2856,27 @@ fn edit_draft(team: &mut Team, input: &Value, actor: &Actor, offline: &BTreeSet<
                 changes.push(json!({"kind":"changed","task":id,"title":task.title,"field":"deps","from":old.join(", "),"to":new.join(", ")}));
             }
             fields.push("deps");
+        }
+        // Task #60: the follow-up's origin; null removes it. Validation below
+        // refuses a task the team does not have.
+        if let Some(value) = value.get("origin") {
+            let old = task.origin;
+            task.origin = match value {
+                Value::Null => None,
+                other => Some(
+                    other
+                        .as_u64()
+                        .and_then(|origin| u32::try_from(origin).ok())
+                        .filter(|origin| *origin > 0)
+                        .with_context(|| format!("Task #{id}: field \"origin\": a task number, or null to remove it"))?,
+                ),
+            };
+            ensure!(task.origin != Some(id), "Task #{id}: field \"origin\": a follow-up names another task as its origin");
+            if old != task.origin {
+                let name = |origin: Option<u32>| origin.map(|origin| format!("#{origin}")).unwrap_or_default();
+                changes.push(json!({"kind":"changed","task":id,"title":task.title,"field":"origin","from":name(old),"to":name(task.origin)}));
+            }
+            fields.push("origin");
         }
         if let Some(assignee) = assignee {
             if task.assignee != assignee {
@@ -4393,6 +4454,15 @@ fn finding(team: &mut Team, input: &Value, actor: &Actor, offline: &BTreeSet<Str
         "urgent" => {
             let mut quick = input.clone();
             quick["urgent"] = json!(true);
+            // Task #60: the fix of a finding is a follow-up of the task that
+            // caused it (else the one whose report filed it), unless it names
+            // its own origin.
+            let source = team.findings[at].task.or(Some(team.findings[at].from_task)).filter(|id| team.task(*id).is_some());
+            if let (Some(source), Some(tasks)) = (source, quick["tasks"].as_array_mut()) {
+                for task in tasks.iter_mut().filter(|task| task.is_object() && task.get("origin").is_none_or(Value::is_null)) {
+                    task["origin"] = json!(source);
+                }
+            }
             extend(team, &quick, actor, offline, events)?;
             "urgent"
         }
@@ -6281,6 +6351,10 @@ mod ops_phase_control;
 #[cfg(test)]
 #[path = "tests/ops_phase_modes.rs"]
 mod ops_phase_modes;
+
+#[cfg(test)]
+#[path = "tests/ops_origin.rs"]
+mod ops_origin;
 
 #[cfg(test)]
 #[path = "tests/ops_tasks.rs"]

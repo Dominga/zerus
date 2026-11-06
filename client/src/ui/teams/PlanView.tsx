@@ -5,7 +5,7 @@ import { tr } from "../../i18n";
 import type { PlanGraph, TeamView } from "./types";
 import type { TeamProfileView, TeamTestsView } from "../../types";
 import { BoardView, LayersView, PlanModeBar, ProfilePanel, TestsPanel, stageLabel } from "./plan-panels";
-import { stageChips, heatShare, type PlanMode } from "./planModes";
+import { spawnedFrom, stageChips, heatShare, type PlanMode } from "./planModes";
 import {
   CARD_H,
   ROW_H,
@@ -264,6 +264,11 @@ export function PlanView(props: PlanViewProps): JSX.Element {
             <span class="pt-meta">{stateText || attempt}</span>
           </Show>
           <span class="pt-grow" />
+          <Show when={spawnedFrom(placed.node, task)}>{(origin) => (
+            <span class="pt-origin" data-origin={origin()} title={tr("Spawned from #%1; it does not wait for it", origin())}>
+              {tr("from #%1", origin())}
+            </span>
+          )}</Show>
           <Show when={blocks.length > 0}>
             <span class="pt-deps" title={tr("Depends on tasks in other phases")}>
               ↤{blocks.map((id) => `#${id}`).join(" ")}
@@ -326,6 +331,10 @@ export function PlanView(props: PlanViewProps): JSX.Element {
           <span class="pt-chip">{short(task.status || "pending", 24)}</span>
           <span class="pt-chip">{tr("Phase %1", phase?.phase.n ?? task.phase)}</span>
           <span class="pt-chip">{task.assignee || tr("Unassigned")}</span>
+          <Show when={task.origin}>{(origin) => (
+            <button type="button" class="pt-chip pt-chip-origin" data-origin={origin()} title={tr("Open task %1", origin())}
+              onClick={() => open(origin())}>{tr("Spawned from #%1", origin())}</button>
+          )}</Show>
           <Show when={task.estimate_minutes > 0}>
             <span class="pt-chip">{tr("%1 min", task.estimate_minutes)}</span>
           </Show>

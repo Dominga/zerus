@@ -19,6 +19,8 @@ export interface GraphNode {
   layer: number;
   ready: boolean;
   in_cycle: boolean;
+  /** Task #60: the task it was spawned from, when the graph has it (a link, not an edge). */
+  origin?: number | null;
 }
 
 export interface GraphEdge {

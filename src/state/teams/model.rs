@@ -1511,6 +1511,12 @@ pub(crate) struct Task {
     pub criteria: Vec<String>,
     #[serde(default)]
     pub deps: Vec<Dependency>,
+    /// Task #60 (owner, 2026-11-06): the task this one was added for (a missed
+    /// item or a bug it produced), in the same team. Unlike `deps` it never
+    /// blocks or gates: the task is placed at least in its origin's layer and
+    /// carries the link. Absent on tasks without one and on older records.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub origin: Option<u32>,
     #[serde(default)]
     pub assignee: String,
     /// The lead or you chose this member: Zerus does not give the task to

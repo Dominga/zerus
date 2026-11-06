@@ -172,6 +172,14 @@ def write_json(path, data):
 
 # --- processes -----------------------------------------------------------------
 
+# The desktop service's own child runs the installed executable in this fixed,
+# authenticated role. The binary takes that role whenever the argument is
+# present (client/src-tauri/src/entry.rs), with no window, Dock tile or GUI
+# instance, so such a process is never a GUI copy (zerus-ov867). It ends with
+# its service; an opt-in update restarts that service from the new bundle.
+NOTIFICATION_HOST = '--desktop-notification-host'
+
+
 def gui_pids(installed):
     """This user's processes running the installed GUI (never one from another path)."""
     target = str(executable(installed))
@@ -179,7 +187,13 @@ def gui_pids(installed):
     if MAC:
         for line in run(['ps', '-x', '-o', 'pid=,comm=']).splitlines():
             pid, _, command = line.strip().partition(' ')
-            if command.strip() == target:
+            if command.strip() != target:
+                continue
+            try:
+                argv = run(['ps', '-o', 'args=', '-p', pid]).split()
+            except subprocess.CalledProcessError:
+                continue  # It has exited since the listing.
+            if NOTIFICATION_HOST not in argv[1:]:
                 pids.append(int(pid))
         return sorted(pids)
     for process in Path('/proc').iterdir():
@@ -189,11 +203,13 @@ def gui_pids(installed):
             if process.stat().st_uid != os.getuid() or (process / 'comm').read_text().strip() != 'hgs-tray':
                 continue
             exe = os.readlink(process / 'exe').removesuffix(' (deleted)')
-            argv = [part.decode(errors='replace') for part in (process / 'cmdline').read_bytes().split(b'\0')[:3]]
+            argv = [part.decode(errors='replace') for part in (process / 'cmdline').read_bytes().split(b'\0')]
         except OSError:
             continue
+        if NOTIFICATION_HOST in argv[1:]:
+            continue
         # A script started through its #! line has its path among the first arguments.
-        if exe == target or target in argv:
+        if exe == target or target in argv[:3]:
             pids.append(int(process.name))
     return sorted(pids)
 

@@ -39,7 +39,6 @@ fn census_checks_every_record_and_never_turns_a_truncated_tail_into_clear() {
         (0, 4, 337),
         (0, 4, 4096),
         (4, 4, u32::MAX as u64),
-        (32, 8, 1),
         (336 + 32, 8, 0),
         (336 + 80, 8, u32::MAX as u64 + 1),
         (672 + 80, 8, 40),
@@ -51,6 +50,28 @@ fn census_checks_every_record_and_never_turns_a_truncated_tail_into_clear() {
     assert!(census(&[row(0, 0, true), row(0, 0, false)].concat(), until()).is_err());
     assert!(census(&row(0, 0, false), until()).is_err());
     assert!(census(&bytes, Instant::now()).is_err());
+}
+#[test]
+fn idle_pseudo_process_birth_is_not_an_openable_process_identity() {
+    for idle_birth in [0, 1, 134_000_000_000_000_000, u64::MAX] {
+        let bytes = [row(0, idle_birth, true), row(40, 100, false)].concat();
+        let rows = checked_census(&bytes, until()).unwrap();
+        assert_eq!(rows.len(), 1);
+        assert_eq!(
+            rows[&40],
+            Process {
+                pid: 40,
+                created: 100
+            }
+        );
+        assert!(!rows.contains_key(&0));
+    }
+    for real_birth in [0, i64::MAX as u64 + 1, u64::MAX] {
+        let bytes = [row(0, 1, true), row(40, real_birth, false)].concat();
+        assert_eq!(checked_census(&bytes, until()), Err(CensusFault::Creation));
+    }
+    assert!(checked_census(&row(0, 1, false), until()).is_err());
+    assert!(checked_census(&[row(0, 1, true), row(0, 1, false)].concat(), until()).is_err());
 }
 #[test]
 fn only_a_next_header_needs_alignment_not_the_final_names_tail() {

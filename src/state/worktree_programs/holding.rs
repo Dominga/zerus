@@ -105,7 +105,7 @@ pub(super) fn run(args: &[String]) -> Result<i32> {
             "usage: hgs worktrees program-holder --json (private custody stream on stdin)".into(),
         );
     }
-    let config = crate::config::Config::load().map_err(failed)?;
+    let config = selected_config()?;
     serve(&config, io::stdin().as_raw_fd(), &mut io::stdout().lock())?;
     Ok(0)
 }

@@ -2902,6 +2902,15 @@ needed to verify and settle the operation, and their protected ancestors, are
 never signalled. Pause, native Stop, manual cleanup and background maintenance
 retain their existing scope.
 
+These native helpers resolve the existing configured session-state root once
+at command configuration load, including aliases selected through `HGS_STATE_DIR`,
+`XDG_STATE_HOME`, or a symlinked home or `~/.local`. All phase reads use that
+same physical root. The configuration identity is unchanged; registrations and
+their original argv keep their existing spelling. Journal descendants and the
+checkout walk still refuse symlinks. A missing, unreadable or non-directory
+state root is refused with its configured path; inspection does not create it
+or choose a fallback profile.
+
 The original Terminate UUID and exact successful archive receipt precede a
 separate, durably reserved program-stop UUID. Normal stop sends TERM with a
 15-second phase bound and never escalates automatically. If process metadata

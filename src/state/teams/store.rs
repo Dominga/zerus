@@ -13,6 +13,9 @@ use std::{
 
 /// Feed entries per page.
 pub(crate) const PAGE: i64 = 50;
+const STORE_PAGE_CAP: i64 = 262144;
+const ARCHIVED_TASK_WINDOW: usize = 1000;
+const ARCHIVED_PHASE_WINDOW: usize = 200;
 
 pub(crate) fn path() -> PathBuf {
     root().join("teams/teams.sqlite3")
@@ -124,7 +127,10 @@ fn commit(transaction: rusqlite::Transaction<'_>) -> anyhow::Result<()> {
 pub(crate) fn write_error(error: impl std::fmt::Display) -> anyhow::Error {
     let text = error.to_string();
     if text.to_ascii_lowercase().contains("database or disk is full") {
-        return anyhow::anyhow!("teams.sqlite3 is full (the store cap is 1 GiB / 262144 pages, or disk space is unavailable); no changes were saved. The existing team record remains readable.");
+        return anyhow::anyhow!(
+            "teams.sqlite3 is full (the store cap is 1 GiB / {STORE_PAGE_CAP} pages, or disk space \
+             is unavailable); no changes were saved. The existing team record remains readable."
+        );
     }
     if text.contains("readonly database") || text.contains("read-only database") {
         return anyhow::anyhow!(
@@ -194,8 +200,9 @@ impl Store {
         // memory; every such read is bounded by its LIMIT.
         db.pragma_update(None, "temp_store", "MEMORY")?;
         if write {
+            db.pragma_update(None, "max_page_count", STORE_PAGE_CAP)?;
             db.execute_batch(
-                "PRAGMA journal_mode=DELETE; PRAGMA max_page_count=262144;
+                "PRAGMA journal_mode=DELETE;
                 CREATE TABLE IF NOT EXISTS teams(id TEXT PRIMARY KEY,revision INTEGER NOT NULL,status TEXT NOT NULL,
                     updated REAL NOT NULL,payload TEXT NOT NULL);
                 CREATE INDEX IF NOT EXISTS teams_updated ON teams(status,updated);
@@ -203,7 +210,6 @@ impl Store {
                     kind TEXT NOT NULL,payload TEXT NOT NULL);
                 CREATE INDEX IF NOT EXISTS events_team ON events(team,seq);
                 CREATE INDEX IF NOT EXISTS events_team_kind_at ON events(team,kind,at);
-                CREATE INDEX IF NOT EXISTS events_team_phase_kind_at ON events(team,json_extract(payload,'$.phase'),kind,at);
                 CREATE TABLE IF NOT EXISTS team_task_archive(team TEXT NOT NULL,task INTEGER NOT NULL,
                     phase INTEGER NOT NULL,status TEXT NOT NULL,stub TEXT NOT NULL,payload TEXT NOT NULL,PRIMARY KEY(team,task));
                 CREATE INDEX IF NOT EXISTS team_task_archive_phase ON team_task_archive(team,phase,task);
@@ -562,39 +568,101 @@ fn archive_page(db: &Connection, sql: &str, args: impl rusqlite::Params, limit: 
 }
 
 /// Explicit edits of archived work restore only its phase, at most 500 tasks.
-fn restore_phase(db: &Connection, team: &mut Team, input: &Value) -> anyhow::Result<()> {
-    let task = input["task"].as_u64().and_then(|id| u32::try_from(id).ok()).or_else(||
-        (input["action"] == "reopen").then(|| team.findings.iter().find(|finding| finding.id == input["finding"].as_str().unwrap_or_default()).and_then(|finding| finding.task)).flatten());
-    if !has_archive(db)? { return Ok(()); }
-    let requested = input["phase"].as_u64().and_then(|n| u32::try_from(n).ok()).or_else(||
-        task.and_then(|id| team.task(id).filter(|task| task.archived.is_some()).map(|task| task.phase)));
+fn archived_phase_to_restore(db: &Connection, team: &Team, input: &Value) -> anyhow::Result<Option<u32>> {
+    let task = input["task"].as_u64().and_then(|id| u32::try_from(id).ok()).or_else(|| {
+        (input["action"] == "reopen")
+            .then(|| {
+                team.findings
+                    .iter()
+                    .find(|finding| finding.id == input["finding"].as_str().unwrap_or_default())
+                    .and_then(|finding| finding.task)
+            })
+            .flatten()
+    });
+    if !has_archive(db)? {
+        return Ok(None);
+    }
+    let requested = input["phase"]
+        .as_u64()
+        .and_then(|n| u32::try_from(n).ok())
+        .or_else(|| task.and_then(|id| team.task(id).filter(|task| task.archived.is_some()).map(|task| task.phase)));
     let phase = match requested {
         Some(n) => match team.phases.iter().find(|phase| phase.n == n) {
             Some(phase) => phase.archived.as_ref().map(|_| n),
-            None => db.query_row("SELECT phase FROM team_phase_archive WHERE team=?1 AND phase=?2",params![team.id,n],|row|row.get(0)).optional()?,
+            None => db
+                .query_row(
+                    "SELECT phase FROM team_phase_archive WHERE team=?1 AND phase=?2",
+                    params![team.id, n],
+                    |row| row.get(0),
+                )
+                .optional()?,
         },
         None => match task.filter(|id| team.task(*id).is_none()) {
-            Some(id) => db.query_row("SELECT phase FROM team_task_archive WHERE team=?1 AND task=?2",params![team.id,id],|row|row.get(0)).optional()?,
+            Some(id) => db
+                .query_row(
+                    "SELECT phase FROM team_task_archive WHERE team=?1 AND task=?2",
+                    params![team.id, id],
+                    |row| row.get(0),
+                )
+                .optional()?,
             None => None,
         },
     };
-    let Some(n) = phase else { return Ok(()) };
-    let bytes: i64 = db.query_row("SELECT COALESCE(sum(bytes),0) FROM (SELECT length(CAST(payload AS BLOB)) AS bytes FROM team_task_archive WHERE team=?1 AND phase=?2 LIMIT 501)",params![team.id,n],|row|row.get(0))?;
+    Ok(phase)
+}
+
+fn read_archived_phase_tasks(db: &Connection, team: &Team, n: u32) -> anyhow::Result<Vec<Task>> {
+    let bytes: i64 = db.query_row(
+        "SELECT COALESCE(sum(bytes),0) FROM (SELECT length(CAST(payload AS BLOB)) AS
+         bytes FROM team_task_archive WHERE team=?1 AND phase=?2 LIMIT 501)",
+        params![team.id, n],
+        |row| row.get(0),
+    )?;
     ensure!(bytes <= 8 * 1024 * 1024, "Archived phase exceeds the 8 MiB edit limit; read individual tasks instead");
-    let mut query = db.prepare("SELECT CASE WHEN length(CAST(payload AS BLOB))<=8388608 THEN payload ELSE NULL END FROM team_task_archive WHERE team=?1 AND phase=?2 ORDER BY task LIMIT 501")?;
-    let tasks: Vec<Task> = query.query_map(params![team.id,n], |row| row.get::<_,Option<String>>(0))?
-        .map(|row| Ok(serde_json::from_str(&row?.context("Archived task exceeds the 8 MiB edit limit")?)?)).collect::<anyhow::Result<_>>()?;
-    ensure!(tasks.len() + team.tasks.iter().filter(|task| task.phase != n && task.archived.is_none()).count() <= 500,
-        "Restoring this archived phase would exceed 500 live tasks");
-    if tasks.is_empty() { return Ok(()); }
-    let payload: Option<String> = db.query_row("SELECT CASE WHEN length(CAST(payload AS BLOB))<=8388608 THEN payload ELSE NULL END FROM team_phase_archive WHERE team=?1 AND phase=?2",params![team.id,n],|row|row.get(0))?;
+    let mut query = db.prepare(
+        "SELECT CASE WHEN length(CAST(payload AS BLOB))<=8388608 THEN payload ELSE NULL
+         END FROM team_task_archive WHERE team=?1 AND phase=?2 ORDER BY task LIMIT 501",
+    )?;
+    let tasks: Vec<Task> = query
+        .query_map(params![team.id, n], |row| row.get::<_, Option<String>>(0))?
+        .map(|row| Ok(serde_json::from_str(&row?.context("Archived task exceeds the 8 MiB edit limit")?)?))
+        .collect::<anyhow::Result<_>>()?;
+    ensure!(
+        tasks.len() + team.tasks.iter().filter(|task| task.phase != n && task.archived.is_none()).count() <= 500,
+        "Restoring this archived phase would exceed 500 live tasks"
+    );
+    Ok(tasks)
+}
+
+fn restore_phase(db: &Connection, team: &mut Team, input: &Value) -> anyhow::Result<()> {
+    let phase = archived_phase_to_restore(db, team, input)?;
+    let Some(n) = phase else { return Ok(()) };
+    let tasks = read_archived_phase_tasks(db, team, n)?;
+    if tasks.is_empty() {
+        return Ok(());
+    }
+    let payload: Option<String> = db.query_row(
+        "SELECT CASE WHEN length(CAST(payload AS BLOB))<=8388608 THEN payload ELSE NULL
+         END FROM team_phase_archive WHERE team=?1 AND phase=?2",
+        params![team.id, n],
+        |row| row.get(0),
+    )?;
     let payload = payload.context("Archived phase header exceeds the 8 MiB edit limit")?;
-    let header: String = db.query_row("SELECT header FROM team_phase_archive WHERE team=?1 AND phase=?2",params![team.id,n],|row|row.get(0))?;
+    let header: String =
+        db.query_row("SELECT header FROM team_phase_archive WHERE team=?1 AND phase=?2", params![team.id, n], |row| {
+            row.get(0)
+        })?;
     let header: Phase = serde_json::from_str(&header)?;
     let counts = header.archived.as_ref().context("Missing archived phase counts")?;
     let totals = &team.archive_totals;
-    ensure!(totals.phases > 0 && totals.tasks >= counts.tasks && totals.accepted >= counts.accepted
-        && totals.rejected >= counts.rejected && totals.cancelled >= counts.cancelled, "Invalid archived phase totals");
+    ensure!(
+        totals.phases > 0
+            && totals.tasks >= counts.tasks
+            && totals.accepted >= counts.accepted
+            && totals.rejected >= counts.rejected
+            && totals.cancelled >= counts.cancelled,
+        "Invalid archived phase totals"
+    );
     team.archive_totals.remove(counts);
     team.phases.retain(|phase| phase.n != n);
     team.phases.push(serde_json::from_str(&payload)?);
@@ -602,110 +670,220 @@ fn restore_phase(db: &Connection, team: &mut Team, input: &Value) -> anyhow::Res
     team.tasks.retain(|task| task.phase != n);
     team.tasks.extend(tasks);
     team.tasks.sort_by_key(|task| task.id);
-    db.execute("DELETE FROM team_task_archive WHERE team=?1 AND phase=?2",params![team.id,n])?;
-    db.execute("DELETE FROM team_phase_archive WHERE team=?1 AND phase=?2",params![team.id,n])?;
+    db.execute("DELETE FROM team_task_archive WHERE team=?1 AND phase=?2", params![team.id, n])?;
+    db.execute("DELETE FROM team_phase_archive WHERE team=?1 AND phase=?2", params![team.id, n])?;
     Ok(())
 }
 
 /// Resolve only referenced missing dependencies through the archive primary key.
 /// This one helper serves loads and mutations, including newly proposed deps.
 fn resolve_dependencies(db: &Connection, team: &mut Team, input: &Value) -> anyhow::Result<()> {
-    let mut ids: std::collections::BTreeSet<u32> = team.tasks.iter().filter(|task| task.archived.is_none())
-        .flat_map(|task| task.deps.iter().map(|dep| dep.task)).collect();
+    let mut ids: std::collections::BTreeSet<u32> = team
+        .tasks
+        .iter()
+        .filter(|task| task.archived.is_none())
+        .flat_map(|task| task.deps.iter().map(|dep| dep.task))
+        .collect();
     fn proposed(value: &Value, ids: &mut std::collections::BTreeSet<u32>) {
         if let Some(deps) = value.get("deps").and_then(Value::as_array) {
-            for dep in deps { if let Some(id) = dep.as_u64().or_else(|| dep["task"].as_u64()).and_then(|id| u32::try_from(id).ok()) { ids.insert(id); } }
+            for dep in deps {
+                if let Some(id) = dep.as_u64().or_else(|| dep["task"].as_u64()).and_then(|id| u32::try_from(id).ok()) {
+                    ids.insert(id);
+                }
+            }
         }
         match value {
-            Value::Object(values) => for value in values.values() { proposed(value, ids); },
-            Value::Array(values) => for value in values { proposed(value, ids); },
-            _ => {},
+            Value::Object(values) => {
+                for value in values.values() {
+                    proposed(value, ids);
+                }
+            }
+            Value::Array(values) => {
+                for value in values {
+                    proposed(value, ids);
+                }
+            }
+            _ => {}
         }
     }
     proposed(input, &mut ids);
-    if ids.iter().all(|id| team.task(*id).is_some()) { return Ok(()); }
-    if !has_archive(db)? { return Ok(()); }
+    if ids.iter().all(|id| team.task(*id).is_some()) {
+        return Ok(());
+    }
+    if !has_archive(db)? {
+        return Ok(());
+    }
     let mut query = db.prepare("SELECT stub FROM team_task_archive WHERE team=?1 AND task=?2")?;
     for id in ids {
-        if team.task(id).is_some() { continue; }
-        if let Some(stub) = query.query_row(params![team.id,id], |row| row.get::<_,String>(0)).optional()? {
-            team.archive_deps.insert(id,serde_json::from_str(&stub)?);
+        if team.task(id).is_some() {
+            continue;
+        }
+        if let Some(stub) = query.query_row(params![team.id, id], |row| row.get::<_, String>(0)).optional()? {
+            team.archive_deps.insert(id, serde_json::from_str(&stub)?);
         }
     }
     Ok(())
 }
 
-/// Archive and replace histories in the same transaction as the team write.
+/// Archive histories and replace the live metadata in the caller's transaction.
 fn archive_closed(transaction: &rusqlite::Transaction, team: &mut Team) -> anyhow::Result<()> {
+    let closed = closable_phases(team);
+    archive_tasks(transaction, team, &closed)?;
+    archive_headers(transaction, team, &closed)?;
+    apply_archive_windows(team);
+    Ok(())
+}
+
+fn closable_phases(team: &Team) -> std::collections::BTreeSet<u32> {
     let mut phase_closed = std::collections::BTreeMap::new();
     for task in &team.tasks {
         let state = phase_closed.entry(task.phase).or_insert((true, false));
-        state.0 &= task.status.finished();
+        state.0 &= task.status.finished()
+            && task.untested_merge.is_none()
+            && !task.merge.as_ref().is_some_and(|merge| matches!(merge.state.as_str(), "queued" | "testing"));
         state.1 |= task.archived.is_none();
     }
-    let closed: std::collections::BTreeSet<u32> = phase_closed.into_iter().filter_map(|(n, (closed, fresh))| {
-        let phase = team.phases.iter().find(|phase| phase.n == n);
-        let accepted = phase.map_or(n == 1 && team.status != super::model::TeamStatus::Planning, |phase|
-            phase.state == PhaseState::Done || phase.state == PhaseState::Approved && phase.acceptance.is_lead());
-        (closed && fresh && accepted && !(team.plan_mode == super::model::PlanMode::Free && super::ops::open_phase(team) == n)).then_some(n)
-    }).collect();
-    let summaries: Vec<(usize, ArchivedTask)> = team.tasks.iter().enumerate()
+    phase_closed
+        .into_iter()
+        .filter_map(|(n, (closed, fresh))| {
+            let phase = team.phases.iter().find(|phase| phase.n == n);
+            let accepted = phase.map_or(n == 1 && team.status != super::model::TeamStatus::Planning, |phase| {
+                phase.state == PhaseState::Done || phase.state == PhaseState::Approved && phase.acceptance.is_lead()
+            });
+            (closed
+                && fresh
+                && accepted
+                && !(team.plan_mode == super::model::PlanMode::Free && super::ops::open_phase(team) == n))
+                .then_some(n)
+        })
+        .collect()
+}
+
+fn archive_tasks(
+    transaction: &rusqlite::Transaction,
+    team: &mut Team,
+    closed: &std::collections::BTreeSet<u32>,
+) -> anyhow::Result<()> {
+    let summaries: Vec<(usize, ArchivedTask)> = team
+        .tasks
+        .iter()
+        .enumerate()
         .filter(|(_, task)| task.archived.is_none() && closed.contains(&task.phase))
-        .map(|(index, task)| (index, ArchivedTask {
-            accepted_at: task.attempts.last().and_then(|attempt| attempt.decided_at),
-            started_at: task.attempts.first().map(|attempt| attempt.sent_at),
-            merge_commit: task.merge.as_ref().map(|merge| merge.commit.clone()).unwrap_or_default(),
-            timing: {
-                let mut timing = super::timing::timing(team, task, now());
-                timing.as_object_mut().unwrap().remove("attempts");
-                timing
-            },
-        })).collect();
+        .map(|(index, task)| {
+            (
+                index,
+                ArchivedTask {
+                    accepted_at: task.attempts.last().and_then(|attempt| attempt.decided_at),
+                    started_at: task.attempts.first().map(|attempt| attempt.sent_at),
+                    merge_commit: task.merge.as_ref().map(|merge| merge.commit.clone()).unwrap_or_default(),
+                    timing: {
+                        let mut timing = super::timing::timing(team, task, now());
+                        timing.as_object_mut().unwrap().remove("attempts");
+                        timing
+                    },
+                },
+            )
+        })
+        .collect();
     for (index, summary) in summaries {
         let task = &mut team.tasks[index];
         let payload = serde_json::to_string(task)?;
-        let stub = Task { id: task.id, phase: task.phase, title: task.title.clone(), assignee: task.assignee.clone(),
-            status: task.status, archived: Some(summary), ..Default::default() };
-        transaction.execute("INSERT INTO team_task_archive(team,task,phase,status,stub,payload) VALUES(?1,?2,?3,?4,?5,?6) ON CONFLICT(team,task) DO UPDATE SET phase=excluded.phase,status=excluded.status,stub=excluded.stub,payload=excluded.payload",
-            params![team.id, task.id, task.phase, serde_json::to_value(task.status)?.as_str(), super::model::task_stub(&stub).to_string(),payload])?;
+        let stub = Task {
+            id: task.id,
+            phase: task.phase,
+            title: task.title.clone(),
+            assignee: task.assignee.clone(),
+            status: task.status,
+            archived: Some(summary),
+            ..Default::default()
+        };
+        transaction.execute(
+            "INSERT INTO team_task_archive(team,task,phase,status,stub,payload)
+             VALUES(?1,?2,?3,?4,?5,?6) ON CONFLICT(team,task) DO UPDATE SET
+             phase=excluded.phase,status=excluded.status,stub=excluded.stub,payload=excluded.payload",
+            params![
+                team.id,
+                task.id,
+                task.phase,
+                serde_json::to_value(task.status)?.as_str(),
+                super::model::task_stub(&stub).to_string(),
+                payload
+            ],
+        )?;
         *task = stub;
     }
-    for n in closed {
+    Ok(())
+}
+
+fn archive_headers(
+    transaction: &rusqlite::Transaction,
+    team: &mut Team,
+    closed: &std::collections::BTreeSet<u32>,
+) -> anyhow::Result<()> {
+    for &n in closed {
         if !team.phases.iter().any(|phase| phase.n == n) {
-            team.phases.push(Phase { n, title: format!("Phase {n}"), state: PhaseState::Approved, ..Default::default() });
+            team.phases.push(Phase {
+                n,
+                title: format!("Phase {n}"),
+                state: PhaseState::Approved,
+                ..Default::default()
+            });
         }
         let phase = team.phases.iter_mut().find(|phase| phase.n == n).unwrap();
         if phase.archived.is_none() {
             let original = serde_json::to_string(&phase)?;
             let tasks: Vec<_> = team.tasks.iter().filter(|task| task.phase == n).collect();
-            phase.archived = Some(ArchivedPhase { tasks: tasks.len(),
+            phase.archived = Some(ArchivedPhase {
+                tasks: tasks.len(),
                 accepted: tasks.iter().filter(|task| task.status == super::model::TaskStatus::Accepted).count(),
                 rejected: tasks.iter().filter(|task| task.status == super::model::TaskStatus::Rejected).count(),
                 cancelled: tasks.iter().filter(|task| task.status == super::model::TaskStatus::Cancelled).count(),
                 closed_at: if phase.acceptance.is_lead() {
                     tasks.iter().filter_map(|task| task.archived.as_ref()?.accepted_at).max_by(f64::total_cmp)
                 } else {
-                    transaction.query_row("SELECT at FROM events WHERE team=?1 AND json_extract(payload,'$.phase')=?2 AND kind='phase_owner_accepted' ORDER BY at DESC LIMIT 1",
-                        params![team.id,n], |row| row.get(0)).optional()?
+                    transaction
+                        .query_row(
+                            "SELECT at FROM events WHERE team=?1 AND json_extract(payload,'$.phase')=?2 AND
+                             kind='phase_owner_accepted' ORDER BY at DESC LIMIT 1",
+                            params![team.id, n],
+                            |row| row.get(0),
+                        )
+                        .optional()?
                 },
             });
             team.archive_totals.add(phase.archived.as_ref().unwrap());
-            transaction.execute("INSERT INTO team_phase_archive(team,phase,header,payload) VALUES(?1,?2,?3,?4) ON CONFLICT(team,phase) DO UPDATE SET header=excluded.header,payload=excluded.payload",
-                params![team.id,n,super::model::phase_stub(phase).to_string(),original])?;
+            transaction.execute(
+                "INSERT INTO team_phase_archive(team,phase,header,payload) VALUES(?1,?2,?3,?4) ON
+                 CONFLICT(team,phase) DO UPDATE SET
+                 header=excluded.header,payload=excluded.payload",
+                params![team.id, n, super::model::phase_stub(phase).to_string(), original],
+            )?;
         }
         phase.tasks.clear();
         phase.changes.clear();
     }
-    let mut archived: Vec<u32> = team.tasks.iter().filter(|task| task.archived.is_some()).map(|task| task.id).collect();
-    team.last_archived_task = team.last_archived_task.max(archived.iter().copied().max().unwrap_or(0));
-    archived.sort_unstable_by(|a,b| b.cmp(a));
-    let keep: std::collections::BTreeSet<u32> = archived.into_iter().take(1000).collect();
-    team.tasks.retain(|task| task.archived.is_none() || keep.contains(&task.id));
-    let mut phases: Vec<u32> = team.phases.iter().filter(|phase| phase.archived.is_some()).map(|phase| phase.n).collect();
-    phases.sort_unstable_by(|a,b| b.cmp(a));
-    let keep: std::collections::BTreeSet<u32> = phases.into_iter().take(200).collect();
-    team.phases.retain(|phase| phase.archived.is_none() || keep.contains(&phase.n));
     Ok(())
+}
+
+fn newest_ids(ids: impl Iterator<Item = u32>, limit: usize) -> std::collections::BTreeSet<u32> {
+    let mut ids: Vec<u32> = ids.collect();
+    ids.sort_unstable_by(|a, b| b.cmp(a));
+    ids.into_iter().take(limit).collect()
+}
+
+fn apply_archive_windows(team: &mut Team) {
+    let highest = team.tasks.iter().filter(|task| task.archived.is_some()).map(|task| task.id).max().unwrap_or(0);
+    team.last_archived_task = team.last_archived_task.max(highest);
+    let phases = newest_ids(
+        team.phases.iter().filter(|phase| phase.archived.is_some()).map(|phase| phase.n),
+        ARCHIVED_PHASE_WINDOW,
+    );
+    team.phases.retain(|phase| phase.archived.is_none() || phases.contains(&phase.n));
+    let tasks = newest_ids(
+        team.tasks.iter().filter(|task| task.archived.is_some() && phases.contains(&task.phase)).map(|task| task.id),
+        ARCHIVED_TASK_WINDOW,
+    );
+    team.tasks.retain(|task| task.archived.is_none() || tasks.contains(&task.id));
 }
 
 fn write(transaction: &rusqlite::Transaction, team: &Team) -> anyhow::Result<()> {

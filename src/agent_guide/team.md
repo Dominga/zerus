@@ -2,7 +2,7 @@ Work in an agent team (hgs guide team)
 
 A team: a lead and members on any agent, model or computer. The lead plans;
 Zerus hands ready tasks to free members and reports to the lead.
-Requests use canonical lowercase UUIDs; reuse one to retry.
+Requests use canonical lowercase UUIDs (uuidgen); reuse one to retry.
 
 Lead, in-session:
   {"request_id":"UUID","name":"Checkout","goal":"...","folder":"DIR"} |

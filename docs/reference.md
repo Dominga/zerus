@@ -1624,7 +1624,8 @@ detached checkout of the attempt's commits instead and frees it.
 The team store (`teams/teams.sqlite3`) archives a phase after all its tasks
 are accepted, rejected or cancelled and the phase is closed: a lead-accepted
 phase closes on its last task decision; an owner-accepted phase must reach
-`done`. The open phase of a free-mode team is retained until it closes.
+`done`. A phase with an untested merge range or a queued/testing merge entry
+stays live until its integration checks close. The open phase of a free-mode team is retained until it closes.
 Full task records, including attempts, reports, runs and questions, move to
 `team_task_archive` in the same transaction as their replacement in the live
 record. Original phase records are retained in `team_phase_archive`.
@@ -1634,7 +1635,8 @@ unarchived phases. Historical work consumes neither limit. The live record
 keeps the most recent 1,000 archived task stubs, with id, phase, title,
 assignee, final status, acceptance time, merge commit and frozen timing totals.
 This window bounds routine plan reads to hundreds of kilobytes of archived
-task metadata. The live record also keeps at most 200 archived phase headers,
+task metadata. A task stub leaves the live window when its phase header
+leaves, so no archived phase is presented as a recordless draft. The live record also keeps at most 200 archived phase headers,
 with counts, outcomes and closure time. Older headers and task lists are paged
 from the archive. Constant-size archive totals preserve the team's historical
 counts. Both windows use descending numeric IDs, so their membership is stable

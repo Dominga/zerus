@@ -1883,3 +1883,21 @@ fn a_warned_addition_expires_or_is_declined() {
         .to_string();
     assert!(error.contains("unknown or expired"), "{error}");
 }
+
+#[test]
+fn a_free_phase_never_reuses_an_archived_header() {
+    let mut team = running_team();
+    team.plan_mode = PlanMode::Free;
+    for task in &mut team.tasks {
+        task.status = TaskStatus::Accepted;
+        task.archived = Some(Default::default());
+    }
+    team.phases = vec![Phase { n: 1, state: PhaseState::Approved, archived: Some(Default::default()), ..Default::default() }];
+    assert_eq!(open_phase(&team), 2);
+    let added = extend(&mut team, &json!({"tasks":[{"id":3,"title":"Next","assignee":"dev"}]}),
+        &Actor::Human, &BTreeSet::new(), &mut Vec::new()).unwrap();
+    assert_eq!(added["phase"], 2);
+    assert!(team.phases.iter().any(|phase| phase.n == 2 && phase.archived.is_none()));
+    assert_eq!(open_phase(&team), 2);
+    assert!(team.phases[0].archived.is_some());
+}

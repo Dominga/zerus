@@ -105,6 +105,14 @@ fn a_hand_off_lists_at_most_twenty_dependencies() {
     assert!(text.contains("#22 Dep 22 (accepted)"), "{text}");
     assert!(!text.contains("#23 Dep 23 (accepted) by"), "{text}");
     assert!(text.contains("[5 more dependencies omitted]"), "{text}");
+    // Archive pointers and live reports share the same twenty dependency slots.
+    for task in team.tasks.iter_mut().filter(|task| task.id == 1 || task.id % 2 == 0) {
+        task.archived = Some(Default::default());
+    }
+    let text = dependencies_text(&team, &task, "");
+    assert_eq!(text.lines().filter(|line| line.starts_with('#')).count(), DEPENDENCY_LIMIT);
+    assert!(text.contains("[5 more dependencies omitted]"), "{text}");
+    assert!(!text.lines().any(|line| line.starts_with("#23 ")), "{text}");
 }
 
 #[test]

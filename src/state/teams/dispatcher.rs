@@ -1862,22 +1862,25 @@ fn dependency_folder(team: &Team, member_id: &str, local_host: &str) -> String {
 /// `deps` order, each report bounded to 2,000 characters and 6,000 in total,
 /// and at most 20 header lines.
 fn dependencies_text(team: &Team, task: &Task, local_host: &str) -> String {
-    let listed: Vec<(&Task, &Attempt)> = task
-        .deps
-        .iter()
-        .filter_map(|dep| team.task(dep.task))
-        .filter_map(|found| dependency_attempt(found).map(|attempt| (found, attempt)))
-        .collect();
+    let listed: Vec<(&Task, Option<&Attempt>)> = task
+        .deps.iter().filter_map(|dep| team.task(dep.task))
+        .filter_map(|found| {
+            if found.archived.is_some() { Some((found, None)) }
+            else { dependency_attempt(found).map(|attempt| (found, Some(attempt))) }
+        }).collect();
     let mut text = String::new();
-    for found in task.deps.iter().filter_map(|dep| team.task(dep.task)).filter(|task| task.archived.is_some()).take(DEPENDENCY_LIMIT) {
-        text += &format!("#{} {}: archived report: {} | hgs team status --json\n", found.id, found.title, json!({"team":team.id,"task":found.id}));
-    }
     let mut used = 0usize;
     for (index, (found, attempt)) in listed.iter().enumerate() {
         if index == DEPENDENCY_LIMIT {
             text += &format!("[{} more dependencies omitted]\n", listed.len() - index);
             break;
         }
+        if found.archived.is_some() {
+            text += &format!("#{} {}: archived report: {} | hgs team status --json\n",
+                found.id, found.title, json!({"team":team.id,"task":found.id}));
+            continue;
+        }
+        let Some(attempt) = attempt else { continue };
         let Some(report) = attempt.report.as_ref() else { continue };
         let status = serde_json::to_value(found.status).ok().and_then(|value| value.as_str().map(str::to_owned)).unwrap_or_default();
         text += &format!(

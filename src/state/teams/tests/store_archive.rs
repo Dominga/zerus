@@ -159,3 +159,59 @@ fn archive_full_database_refuses_without_losing_the_live_record() {
     store.mutate(None, &team.id, None, |_, _| Ok(json!({}))).unwrap();
     assert_eq!(store.load(&team.id).unwrap().unwrap().phases[0].archived.as_ref().unwrap().closed_at, Some(4.0));
 }
+
+#[test]
+fn archive_waits_until_merge_ranges_and_queue_entries_close() {
+    use crate::state::teams::{merge_queue, model::{MergeEntry, MergeRange}};
+    let dir = tempfile::tempdir().unwrap();
+    let mut store = Store::open_at(&dir.path().join("teams.sqlite3"), true).unwrap();
+    let mut team = legacy(50);
+    let range = MergeRange { task: 1, prev: "before".into(), merged: "after".into() };
+    team.tasks[0].untested_merge = Some(range.clone());
+    insert(&store, &team);
+    store.mutate(None, &team.id, None, |_, _| Ok(json!({}))).unwrap();
+    let live = store.load(&team.id).unwrap().unwrap();
+    assert!(live.tasks[0].archived.is_none());
+    assert_eq!(merge_queue::open_merge_ranges(&live), vec![range.clone()]);
+    store.mutate(None, &team.id, None, |team, _| {
+        merge_queue::close_merge_ranges(team, std::slice::from_ref(&range));
+        team.task_mut(1).unwrap().merge = Some(MergeEntry { state: "queued".into(), ..Default::default() });
+        Ok(json!({}))
+    }).unwrap();
+    assert!(store.load(&team.id).unwrap().unwrap().tasks[0].archived.is_none());
+    store.mutate(None, &team.id, None, |team, _| {
+        team.task_mut(1).unwrap().merge.as_mut().unwrap().state = "testing".into();
+        Ok(json!({}))
+    }).unwrap();
+    assert!(store.load(&team.id).unwrap().unwrap().tasks[0].archived.is_none());
+    store.mutate(None, &team.id, None, |team, _| {
+        team.task_mut(1).unwrap().merge = None;
+        Ok(json!({}))
+    }).unwrap();
+    assert!(store.load(&team.id).unwrap().unwrap().tasks[0].archived.is_some());
+    assert_eq!(store.task(&team.id, 1).unwrap()["attempts"], serde_json::to_value(&team.tasks[0].attempts).unwrap());
+}
+
+#[test]
+fn archive_small_phases_evict_stubs_together_with_their_headers() {
+    for per_phase in [1, 2] {
+        let dir = tempfile::tempdir().unwrap();
+        let mut store = Store::open_at(&dir.path().join("teams.sqlite3"), true).unwrap();
+        let mut team = legacy(0);
+        team.tasks = (1..=1200).map(|id| Task { id, phase: (id - 1) / per_phase + 1,
+            title: format!("Task {id}"), status: TaskStatus::Accepted, ..Default::default() }).collect();
+        team.phases = (1..=1200/per_phase).map(|n| Phase { n, state: PhaseState::Approved,
+            tasks: ((n-1)*per_phase+1..=n*per_phase).collect(), ..Default::default() }).collect();
+        insert(&store, &team);
+        store.mutate(None, &team.id, None, |_, _| Ok(json!({}))).unwrap();
+        let archived = store.load(&team.id).unwrap().unwrap();
+        assert_eq!(archived.phases.len(), ARCHIVED_PHASE_WINDOW);
+        assert_eq!(archived.tasks.len(), ARCHIVED_PHASE_WINDOW * per_phase as usize);
+        for phase in crate::state::teams::plan::phase_summary(&archived) {
+            assert_eq!(phase["state"], "done", "{phase}");
+            assert!(archived.phases.iter().any(|header| json!(header.n) == phase["n"]));
+        }
+        assert_eq!(archived.archive_totals.accepted, 1200);
+        assert_eq!(store.task(&team.id, 1).unwrap()["title"], "Task 1");
+    }
+}

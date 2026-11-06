@@ -1251,9 +1251,13 @@ fn extend(team: &mut Team, input: &Value, actor: &Actor, offline: &BTreeSet<Stri
         return Ok(json!({"status":"edited","phase":n,"tasks":ids,"validation":validation,"renumbered":renumbered_json(&renumbered)}));
     }
     if let Some(n) = free_open {
-        // U59: the open phase's record takes the new tasks; no phase is added.
+        // U59: reuse the live phase, or start a new one after archived history.
         if let Some(at) = team.phases.iter().position(|phase| phase.n == n) {
             team.phases[at].tasks.extend(ids.iter().copied());
+        } else if n > 1 {
+            team.phases.push(Phase { n, title: title.clone(), state: PhaseState::Approved,
+                approval: Approval::Auto, tasks: ids.clone(), added_by: by.clone(), added_at: now(),
+                ..Default::default() });
         }
         events.push(Event::new("phase_edited", json!({"by":by,"phase":n,"diff":{"added":ids},"free":true})));
         return Ok(json!({"status":"added","phase":n,"tasks":ids,"validation":validation,"renumbered":renumbered_json(&renumbered)}));
@@ -2374,15 +2378,23 @@ pub(crate) fn stuck_minutes(team: &Team) -> f64 {
     if minutes == 0 { 10.0 } else { f64::from(minutes) }
 }
 
-/// U59: the open phase of a free team: the latest approved phase, or phase 1
-/// (the approved initial plan) when no phase was extended yet.
+/// U59: the latest live approved phase, the implicit initial phase, or a new
+/// phase number after the archived history when no live phase remains.
 pub(crate) fn open_phase(team: &Team) -> u32 {
     team.phases
         .iter()
         .rev()
-        .find(|phase| phase.state == PhaseState::Approved)
+        .find(|phase| phase.state == PhaseState::Approved && phase.archived.is_none())
         .map(|phase| phase.n)
-        .unwrap_or(1)
+        .unwrap_or_else(|| {
+            if team.tasks.iter().any(|task| task.phase == 1 && task.archived.is_none()) {
+                return 1;
+            }
+            if team.archive_totals.phases == 0 && team.phases.iter().all(|phase| phase.archived.is_none()) {
+                return 1;
+            }
+            team.phases.iter().map(|phase| phase.n).max().map_or(1, |n| n.saturating_add(1))
+        })
 }
 
 /// The accepted phases (phase 1 included) whose tasks are all finished.
